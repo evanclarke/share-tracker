@@ -4,7 +4,7 @@ use axum::{
     http::StatusCode,
     routing::get,
 };
-use crate::decimal::parse_dec;
+use crate::infra::decimal::parse_dec;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
@@ -77,7 +77,7 @@ impl From<sqlx::Error> for UpsertError {
 }
 
 pub async fn db_upsert(pool: &SqlitePool, adj: &AmitAdjustment) -> Result<(), UpsertError> {
-    use crate::trade::TradeType;
+    use crate::entities::trade::TradeType;
 
     let trade_type: TradeType = sqlx::query_scalar("SELECT trade_type FROM trades WHERE id = ?")
         .bind(adj.trade_id)
@@ -216,7 +216,7 @@ async fn delete(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{amma, db, listing, trade};
+    use crate::{infra::db, entities::{amma, listing, trade}};
     use axum::{body::Body, http::Request};
     use chrono::NaiveDate;
     use http_body_util::BodyExt;

@@ -1,4 +1,4 @@
-use crate::decimal::parse_dec;
+use crate::infra::decimal::parse_dec;
 use axum::{Json, Router, extract::State, http::StatusCode, routing::post};
 use chrono::{Months, NaiveDate};
 use rust_decimal::Decimal;
@@ -57,7 +57,7 @@ pub async fn db_unrealised_gains(
             parse_dec("quantity_allocated", row.try_get("quantity_allocated")?)?;
     }
 
-    let cba_reduction = crate::amit_adjustment::db_cost_base_reductions(pool).await?;
+    let cba_reduction = crate::entities::amit_adjustment::db_cost_base_reductions(pool).await?;
 
     let mut listing_qty: HashMap<i64, Decimal> = HashMap::new();
     let mut listing_cost_base: HashMap<i64, Decimal> = HashMap::new();
@@ -145,7 +145,7 @@ async fn unrealised_gains_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{amma, amit_adjustment, db, listing, parcel_allocation, trade};
+    use crate::{infra::db, entities::{amma, amit_adjustment, listing, parcel_allocation, trade}};
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
     use tower::ServiceExt;

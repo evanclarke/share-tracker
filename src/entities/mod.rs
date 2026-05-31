@@ -1,0 +1,28 @@
+//! Domain entities: each module owns one table's model, CRUD endpoints, and
+//! write-time invariants. Add a new entity by dropping a file here and adding
+//! one `pub mod` line plus one `.merge` below — `main.rs` never changes.
+use axum::Router;
+use sqlx::SqlitePool;
+
+pub mod amit_adjustment;
+pub mod amma;
+pub mod exchange;
+pub mod income;
+pub mod listing;
+pub mod parcel_allocation;
+pub mod rba_fx_rate;
+pub mod sell;
+pub mod trade;
+
+/// Merge every entity's routes into a single router.
+pub fn router() -> Router<SqlitePool> {
+    exchange::router()
+        .merge(listing::router())
+        .merge(rba_fx_rate::router())
+        .merge(trade::router())
+        .merge(income::router())
+        .merge(amma::router())
+        .merge(parcel_allocation::router())
+        .merge(sell::router())
+        .merge(amit_adjustment::router())
+}

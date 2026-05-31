@@ -215,7 +215,7 @@ async fn delete(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{db, listing, trade};
+    use crate::{infra::db, entities::{listing, trade}};
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
     use rust_decimal::Decimal;

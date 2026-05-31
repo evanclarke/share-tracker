@@ -104,7 +104,7 @@ async fn sum_allocated(
 
 #[cfg(test)]
 pub async fn db_upsert(pool: &SqlitePool, allocation: &ParcelAllocation) -> Result<(), UpsertError> {
-    use crate::trade::TradeType;
+    use crate::entities::trade::TradeType;
 
     let sale_type: TradeType = sqlx::query_scalar("SELECT trade_type FROM trades WHERE id = ?")
         .bind(allocation.sale_trade_id)
@@ -188,7 +188,7 @@ async fn get_one(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{db, listing, trade};
+    use crate::{infra::db, entities::{listing, trade}};
     use axum::{body::Body, http::Request};
     use chrono::NaiveDate;
     use http_body_util::BodyExt;

@@ -9,7 +9,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 
-use crate::decimal::parse_dec;
+use crate::infra::decimal::parse_dec;
 
 /// Source of the official monthly foreign exchange rates used for AUD tax
 /// conversion: the RBA's F11 "Exchange Rates" CSV (the rates the ATO directs
@@ -243,7 +243,7 @@ async fn import(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db;
+    use crate::infra::db;
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
     use tower::ServiceExt;

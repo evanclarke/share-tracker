@@ -131,7 +131,7 @@ async fn delete(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db;
+    use crate::infra::db;
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
     use tower::ServiceExt;

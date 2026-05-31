@@ -1,4 +1,4 @@
-use crate::decimal::parse_dec;
+use crate::infra::decimal::parse_dec;
 use axum::{Json, Router, extract::State, http::StatusCode, routing::get};
 use chrono::{Datelike, NaiveDate};
 use rust_decimal::Decimal;
@@ -168,7 +168,7 @@ async fn tax_summary_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{amma, db, income, listing};
+    use crate::{infra::db, entities::{amma, income, listing}};
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
     use tower::ServiceExt;

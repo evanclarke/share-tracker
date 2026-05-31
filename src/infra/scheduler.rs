@@ -61,7 +61,7 @@ pub fn registry(pool: SqlitePool, db_path: String) -> JobRegistry {
             let pool = backup_pool.clone();
             let db_path = db_path.clone();
             Box::pin(async move {
-                crate::db::backup(&pool, &db_path).await.map_err(|e| e.to_string())
+                crate::infra::db::backup(&pool, &db_path).await.map_err(|e| e.to_string())
             })
         }),
     );
@@ -72,7 +72,7 @@ pub fn registry(pool: SqlitePool, db_path: String) -> JobRegistry {
         Arc::new(move || {
             let pool = fx_pool.clone();
             Box::pin(async move {
-                match crate::rba_fx_rate::run_import(&pool).await {
+                match crate::entities::rba_fx_rate::run_import(&pool).await {
                     Ok(s) => {
                         tracing::info!(
                             inserted = s.inserted,
@@ -222,7 +222,7 @@ pub fn router() -> Router<SqlitePool> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db;
+    use crate::infra::db;
     use axum::body::Body;
     use axum::http::Request;
     use chrono::TimeZone;
@@ -291,7 +291,7 @@ mod tests {
     async fn embedded_schedule_is_valid() {
         let (reg, _dir, _path) = test_registry().await;
         // Guards the committed schedule.cron: every referenced job must exist.
-        spawn(reg, include_str!("../schedule.cron")).unwrap();
+        spawn(reg, include_str!("../../schedule.cron")).unwrap();
     }
 
     #[tracing_test::traced_test]

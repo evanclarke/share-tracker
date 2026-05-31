@@ -10,7 +10,7 @@
 //! `PUT /sells/{id}` is an upsert: it replaces the Sell trade row and *all* of
 //! its parcel allocations with the submitted set.
 
-use crate::trade::{self, TradeType};
+use crate::entities::trade::{self, TradeType};
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -267,7 +267,7 @@ async fn delete(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{db, listing, trade};
+    use crate::{infra::db, entities::{listing, trade}};
     use axum::{body::Body, http::Request};
     use tower::ServiceExt;
 
