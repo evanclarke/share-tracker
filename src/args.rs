@@ -5,6 +5,8 @@ use clap::Parser;
 pub struct Args {
     #[arg(long, default_value = "share-tracker.db")]
     pub db: String,
+    #[arg(long, default_value_t = 3000)]
+    pub port: u16,
 }
 
 #[cfg(test)]

@@ -1,5 +1,6 @@
 mod args;
 mod db;
+mod exchange;
 mod logging;
 
 use args::Args;
@@ -12,13 +13,18 @@ async fn main() {
     let args = Args::parse();
 
     let pool = db::init(&args.db).await.expect("failed to open database");
-
     db::spawn_daily_backup(pool.clone(), args.db.clone());
 
-    tracing::info!("share-tracker started, db: {}", args.db);
-    // TODO: start axum server
+    let app = exchange::router().with_state(pool.clone());
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], args.port));
+    let listener = tokio::net::TcpListener::bind(addr).await.expect("failed to bind");
+    tracing::info!("share-tracker started, db: {}, port: {}", args.db, args.port);
 
-    shutdown_signal().await;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .expect("server error");
+
     tracing::info!("shutting down");
     pool.close().await;
 }

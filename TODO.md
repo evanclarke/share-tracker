@@ -14,11 +14,11 @@ Items are only marked done when a passing test exists for them.
 - [x] Tests: migrations apply cleanly on a fresh in-memory DB
 
 ## Reference Data — Exchange
-- [ ] Exchange model (MIC, name, country, currency, timezone, settlement period)
-- [ ] DB schema: `exchanges` table
-- [ ] Seed data for known exchanges (XASX, XNYS at minimum)
-- [ ] CRUD API endpoints for exchanges
-- [ ] Tests: insert, retrieve, upsert exchange
+- [x] Exchange model (MIC, name, country, currency, timezone, settlement period)
+- [x] DB schema: `exchanges` table
+- [x] Seed data for known exchanges (XASX, XNYS at minimum)
+- [x] CRUD API endpoints for exchanges
+- [x] Tests: insert, retrieve, upsert exchange
 
 ## Reference Data — Listing
 - [ ] Listing model (exchange FK, ticker, name, ISIN, security type, currency, AMIT flag)
