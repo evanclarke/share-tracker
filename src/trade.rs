@@ -5,24 +5,48 @@ use axum::{
     routing::get,
 };
 use chrono::NaiveDate;
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use sqlx::SqlitePool;
+use sqlx::{Row, SqlitePool};
 
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Trade {
     pub id: i64,
     pub trade_type: String,
     pub date: NaiveDate,
     pub settlement_date: NaiveDate,
     pub listing_id: i64,
-    pub average_price: f64,
-    pub quantity: f64,
+    pub average_price: Decimal,
+    pub quantity: Decimal,
     pub currency: String,
-    pub brokerage: f64,
-    pub gst_on_brokerage: f64,
+    pub brokerage: Decimal,
+    pub gst_on_brokerage: Decimal,
     pub brokerage_currency: String,
-    pub fx_rate: f64,
+    pub fx_rate: Decimal,
     pub contract_note_ref: Option<String>,
+}
+
+impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for Trade {
+    fn from_row(row: &'r sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
+        fn dec(s: String) -> Result<Decimal, sqlx::Error> {
+            s.parse().map_err(|e: rust_decimal::Error| sqlx::Error::Decode(Box::new(e)))
+        }
+        Ok(Trade {
+            id: row.try_get("id")?,
+            trade_type: row.try_get("trade_type")?,
+            date: row.try_get("date")?,
+            settlement_date: row.try_get("settlement_date")?,
+            listing_id: row.try_get("listing_id")?,
+            average_price: dec(row.try_get("average_price")?)?,
+            quantity: dec(row.try_get("quantity")?)?,
+            currency: row.try_get("currency")?,
+            brokerage: dec(row.try_get("brokerage")?)?,
+            gst_on_brokerage: dec(row.try_get("gst_on_brokerage")?)?,
+            brokerage_currency: row.try_get("brokerage_currency")?,
+            fx_rate: dec(row.try_get("fx_rate")?)?,
+            contract_note_ref: row.try_get("contract_note_ref")?,
+        })
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -32,13 +56,13 @@ pub struct TradeBody {
     #[serde(default)]
     pub settlement_date: Option<NaiveDate>,
     pub listing_id: i64,
-    pub average_price: f64,
-    pub quantity: f64,
+    pub average_price: Decimal,
+    pub quantity: Decimal,
     pub currency: String,
-    pub brokerage: f64,
-    pub gst_on_brokerage: f64,
+    pub brokerage: Decimal,
+    pub gst_on_brokerage: Decimal,
     pub brokerage_currency: String,
-    pub fx_rate: f64,
+    pub fx_rate: Decimal,
     #[serde(default)]
     pub contract_note_ref: Option<String>,
 }
@@ -95,13 +119,13 @@ pub async fn db_upsert(pool: &SqlitePool, trade: &Trade) -> Result<(), sqlx::Err
     .bind(trade.date)
     .bind(trade.settlement_date)
     .bind(trade.listing_id)
-    .bind(trade.average_price)
-    .bind(trade.quantity)
+    .bind(trade.average_price.to_string())
+    .bind(trade.quantity.to_string())
     .bind(&trade.currency)
-    .bind(trade.brokerage)
-    .bind(trade.gst_on_brokerage)
+    .bind(trade.brokerage.to_string())
+    .bind(trade.gst_on_brokerage.to_string())
     .bind(&trade.brokerage_currency)
-    .bind(trade.fx_rate)
+    .bind(trade.fx_rate.to_string())
     .bind(&trade.contract_note_ref)
     .execute(pool)
     .await?;
@@ -196,6 +220,7 @@ mod tests {
     use crate::{db, listing};
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
+    use rust_decimal::Decimal;
     use tower::ServiceExt;
 
     async fn test_pool() -> SqlitePool {
@@ -227,13 +252,13 @@ mod tests {
             date: NaiveDate::from_ymd_opt(2024, 1, 15).unwrap(),
             settlement_date: NaiveDate::from_ymd_opt(2024, 1, 17).unwrap(),
             listing_id: 1,
-            average_price: 100.0,
-            quantity: 10.0,
+            average_price: Decimal::from(100),
+            quantity: Decimal::from(10),
             currency: "AUD".to_string(),
-            brokerage: 9.95,
-            gst_on_brokerage: 0.995,
+            brokerage: "9.95".parse().unwrap(),
+            gst_on_brokerage: "0.995".parse().unwrap(),
             brokerage_currency: "AUD".to_string(),
-            fx_rate: 1.0,
+            fx_rate: Decimal::ONE,
             contract_note_ref: Some("CN001".to_string()),
         }
     }
@@ -247,8 +272,8 @@ mod tests {
         db_upsert(&pool, &buy_trade()).await.unwrap();
         let got = db_get(&pool, 1).await.unwrap().unwrap();
         assert_eq!(got.trade_type, "Buy");
-        assert_eq!(got.quantity, 10.0);
-        assert_eq!(got.average_price, 100.0);
+        assert_eq!(got.quantity, Decimal::from(10));
+        assert_eq!(got.average_price, Decimal::from(100));
         assert_eq!(got.settlement_date, NaiveDate::from_ymd_opt(2024, 1, 17).unwrap());
         assert_eq!(got.contract_note_ref, Some("CN001".to_string()));
     }
@@ -263,19 +288,19 @@ mod tests {
             date: NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(),
             settlement_date: NaiveDate::from_ymd_opt(2024, 6, 3).unwrap(),
             listing_id: 1,
-            average_price: 120.0,
-            quantity: 5.0,
+            average_price: Decimal::from(120),
+            quantity: Decimal::from(5),
             currency: "AUD".to_string(),
-            brokerage: 9.95,
-            gst_on_brokerage: 0.995,
+            brokerage: "9.95".parse().unwrap(),
+            gst_on_brokerage: "0.995".parse().unwrap(),
             brokerage_currency: "AUD".to_string(),
-            fx_rate: 1.0,
+            fx_rate: Decimal::ONE,
             contract_note_ref: None,
         };
         db_upsert(&pool, &trade).await.unwrap();
         let got = db_get(&pool, 2).await.unwrap().unwrap();
         assert_eq!(got.trade_type, "Sell");
-        assert_eq!(got.quantity, 5.0);
+        assert_eq!(got.quantity, Decimal::from(5));
     }
 
     #[tokio::test]
@@ -288,19 +313,19 @@ mod tests {
             date: NaiveDate::from_ymd_opt(2024, 3, 15).unwrap(),
             settlement_date: NaiveDate::from_ymd_opt(2024, 3, 15).unwrap(),
             listing_id: 1,
-            average_price: 95.0,
-            quantity: 2.0,
+            average_price: Decimal::from(95),
+            quantity: Decimal::from(2),
             currency: "AUD".to_string(),
-            brokerage: 0.0,
-            gst_on_brokerage: 0.0,
+            brokerage: Decimal::ZERO,
+            gst_on_brokerage: Decimal::ZERO,
             brokerage_currency: "AUD".to_string(),
-            fx_rate: 1.0,
+            fx_rate: Decimal::ONE,
             contract_note_ref: None,
         };
         db_upsert(&pool, &trade).await.unwrap();
         let got = db_get(&pool, 3).await.unwrap().unwrap();
         assert_eq!(got.trade_type, "DRP");
-        assert_eq!(got.quantity, 2.0);
+        assert_eq!(got.quantity, Decimal::from(2));
     }
 
     #[tokio::test]
@@ -410,7 +435,7 @@ mod tests {
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let t: Trade = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(t.trade_type, "Buy");
-        assert_eq!(t.quantity, 10.0);
+        assert_eq!(t.quantity, Decimal::from(10));
     }
 
     #[tokio::test]
@@ -458,5 +483,46 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn api_decimal_precision_round_trip() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        let body = serde_json::json!({
+            "trade_type": "Buy",
+            "date": "2024-01-15",
+            "listing_id": 1,
+            "average_price": "99.9999999999",
+            "quantity": "10.5",
+            "currency": "AUD",
+            "brokerage": "9.95",
+            "gst_on_brokerage": "0.995",
+            "brokerage_currency": "AUD",
+            "fx_rate": "1.0"
+        });
+        let resp = router()
+            .with_state(pool.clone())
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/trades/1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let resp = router()
+            .with_state(pool)
+            .oneshot(Request::builder().uri("/trades/1").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let t: Trade = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(t.average_price, "99.9999999999".parse::<Decimal>().unwrap());
+        assert_eq!(t.quantity, "10.5".parse::<Decimal>().unwrap());
+        assert_eq!(t.brokerage, "9.95".parse::<Decimal>().unwrap());
     }
 }

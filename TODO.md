@@ -12,7 +12,7 @@ Items are only marked done when a passing test exists for them.
 - [x] Tests: log output at INFO level; RUST_LOG override works
 - [x] Database migration system (sqlx migrate): migrations run on startup, applied once
 - [x] Tests: migrations apply cleanly on a fresh in-memory DB
-- [ ] Add rust_decimal dependency (with sqlx feature) for arbitrary-precision decimal arithmetic
+- [x] Add rust_decimal dependency (with sqlx feature) for arbitrary-precision decimal arithmetic
 
 ## Reference Data — Exchange
 - [x] Exchange model (MIC, name, country, currency, timezone, settlement period)
@@ -33,16 +33,16 @@ Items are only marked done when a passing test exists for them.
 - [x] Auto-populate settlement date from trade date + exchange settlement period (overridable)
 - [x] CRUD API endpoints for trades
 - [x] Tests: buy, sell, DRP trades; settlement date auto-population; override of settlement date
-- [ ] Refactor financial fields (average_price, quantity, brokerage, gst_on_brokerage, fx_rate) from f64 to Decimal
-- [ ] Tests: decimal precision preserved in API round-trip
+- [x] Refactor financial fields (average_price, quantity, brokerage, gst_on_brokerage, fx_rate) from f64 to Decimal
+- [x] Tests: decimal precision preserved in API round-trip
 
 ## Income Activity
 - [x] Income model (listing FK, date paid, ex date, franked amount, unfranked amount, foreign source income, foreign tax paid, TFN withholding tax, franking credits, LIC capital gain deduction, conduit foreign income, trust income flag, reinvestment trade FK)
 - [x] DB schema: `income` table
 - [x] CRUD API endpoints for income
 - [x] Tests: dividend income, trust distribution, DRP reinvestment linkage
-- [ ] Refactor financial fields (franked_amount, unfranked_amount, foreign_source_income, foreign_tax_paid, tfn_withholding_tax, franking_credits, lic_capital_gain_deduction, conduit_foreign_income) from f64 to Decimal
-- [ ] Tests: decimal precision preserved in API round-trip
+- [x] Refactor financial fields (franked_amount, unfranked_amount, foreign_source_income, foreign_tax_paid, tfn_withholding_tax, franking_credits, lic_capital_gain_deduction, conduit_foreign_income) from f64 to Decimal
+- [x] Tests: decimal precision preserved in API round-trip
 
 ## AMMA Statements
 - [ ] AMMA model (listing FK, tax year end date, units held, date received, australian interest, australian dividends unfranked, franked dividends, franking credits, net rent, foreign income, foreign tax credits, other income, CGT discount gains, CGT indexation gains, CGT other gains, capital losses applied, tax deferred amount, tax free amount, cost base adjustment per unit, TFN withholding tax)

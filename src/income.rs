@@ -5,25 +5,50 @@ use axum::{
     routing::get,
 };
 use chrono::NaiveDate;
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use sqlx::SqlitePool;
+use sqlx::{Row, SqlitePool};
 
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Income {
     pub id: i64,
     pub listing_id: i64,
     pub date_paid: NaiveDate,
     pub ex_date: Option<NaiveDate>,
-    pub franked_amount: f64,
-    pub unfranked_amount: f64,
-    pub foreign_source_income: f64,
-    pub foreign_tax_paid: f64,
-    pub tfn_withholding_tax: f64,
-    pub franking_credits: f64,
-    pub lic_capital_gain_deduction: f64,
-    pub conduit_foreign_income: f64,
+    pub franked_amount: Decimal,
+    pub unfranked_amount: Decimal,
+    pub foreign_source_income: Decimal,
+    pub foreign_tax_paid: Decimal,
+    pub tfn_withholding_tax: Decimal,
+    pub franking_credits: Decimal,
+    pub lic_capital_gain_deduction: Decimal,
+    pub conduit_foreign_income: Decimal,
     pub trust_income: bool,
     pub reinvestment_trade_id: Option<i64>,
+}
+
+impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for Income {
+    fn from_row(row: &'r sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
+        fn dec(s: String) -> Result<Decimal, sqlx::Error> {
+            s.parse().map_err(|e: rust_decimal::Error| sqlx::Error::Decode(Box::new(e)))
+        }
+        Ok(Income {
+            id: row.try_get("id")?,
+            listing_id: row.try_get("listing_id")?,
+            date_paid: row.try_get("date_paid")?,
+            ex_date: row.try_get("ex_date")?,
+            franked_amount: dec(row.try_get("franked_amount")?)?,
+            unfranked_amount: dec(row.try_get("unfranked_amount")?)?,
+            foreign_source_income: dec(row.try_get("foreign_source_income")?)?,
+            foreign_tax_paid: dec(row.try_get("foreign_tax_paid")?)?,
+            tfn_withholding_tax: dec(row.try_get("tfn_withholding_tax")?)?,
+            franking_credits: dec(row.try_get("franking_credits")?)?,
+            lic_capital_gain_deduction: dec(row.try_get("lic_capital_gain_deduction")?)?,
+            conduit_foreign_income: dec(row.try_get("conduit_foreign_income")?)?,
+            trust_income: row.try_get("trust_income")?,
+            reinvestment_trade_id: row.try_get("reinvestment_trade_id")?,
+        })
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -33,21 +58,21 @@ pub struct IncomeBody {
     #[serde(default)]
     pub ex_date: Option<NaiveDate>,
     #[serde(default)]
-    pub franked_amount: f64,
+    pub franked_amount: Decimal,
     #[serde(default)]
-    pub unfranked_amount: f64,
+    pub unfranked_amount: Decimal,
     #[serde(default)]
-    pub foreign_source_income: f64,
+    pub foreign_source_income: Decimal,
     #[serde(default)]
-    pub foreign_tax_paid: f64,
+    pub foreign_tax_paid: Decimal,
     #[serde(default)]
-    pub tfn_withholding_tax: f64,
+    pub tfn_withholding_tax: Decimal,
     #[serde(default)]
-    pub franking_credits: f64,
+    pub franking_credits: Decimal,
     #[serde(default)]
-    pub lic_capital_gain_deduction: f64,
+    pub lic_capital_gain_deduction: Decimal,
     #[serde(default)]
-    pub conduit_foreign_income: f64,
+    pub conduit_foreign_income: Decimal,
     #[serde(default)]
     pub trust_income: bool,
     #[serde(default)]
@@ -109,14 +134,14 @@ pub async fn db_upsert(pool: &SqlitePool, income: &Income) -> Result<(), sqlx::E
     .bind(income.listing_id)
     .bind(income.date_paid)
     .bind(income.ex_date)
-    .bind(income.franked_amount)
-    .bind(income.unfranked_amount)
-    .bind(income.foreign_source_income)
-    .bind(income.foreign_tax_paid)
-    .bind(income.tfn_withholding_tax)
-    .bind(income.franking_credits)
-    .bind(income.lic_capital_gain_deduction)
-    .bind(income.conduit_foreign_income)
+    .bind(income.franked_amount.to_string())
+    .bind(income.unfranked_amount.to_string())
+    .bind(income.foreign_source_income.to_string())
+    .bind(income.foreign_tax_paid.to_string())
+    .bind(income.tfn_withholding_tax.to_string())
+    .bind(income.franking_credits.to_string())
+    .bind(income.lic_capital_gain_deduction.to_string())
+    .bind(income.conduit_foreign_income.to_string())
     .bind(income.trust_income)
     .bind(income.reinvestment_trade_id)
     .execute(pool)
@@ -193,6 +218,7 @@ mod tests {
     use crate::{db, listing, trade};
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
+    use rust_decimal::Decimal;
     use tower::ServiceExt;
 
     async fn test_pool() -> SqlitePool {
@@ -224,13 +250,13 @@ mod tests {
             date: NaiveDate::from_ymd_opt(2024, 3, 15).unwrap(),
             settlement_date: NaiveDate::from_ymd_opt(2024, 3, 15).unwrap(),
             listing_id: 1,
-            average_price: 95.0,
-            quantity: 2.0,
+            average_price: Decimal::from(95),
+            quantity: Decimal::from(2),
             currency: "AUD".to_string(),
-            brokerage: 0.0,
-            gst_on_brokerage: 0.0,
+            brokerage: Decimal::ZERO,
+            gst_on_brokerage: Decimal::ZERO,
             brokerage_currency: "AUD".to_string(),
-            fx_rate: 1.0,
+            fx_rate: Decimal::ONE,
             contract_note_ref: None,
         };
         trade::db_upsert(pool, &t).await.unwrap();
@@ -243,14 +269,14 @@ mod tests {
             listing_id: 1,
             date_paid: NaiveDate::from_ymd_opt(2024, 3, 15).unwrap(),
             ex_date: Some(NaiveDate::from_ymd_opt(2024, 3, 1).unwrap()),
-            franked_amount: 70.0,
-            unfranked_amount: 30.0,
-            foreign_source_income: 0.0,
-            foreign_tax_paid: 0.0,
-            tfn_withholding_tax: 0.0,
-            franking_credits: 30.0,
-            lic_capital_gain_deduction: 0.0,
-            conduit_foreign_income: 0.0,
+            franked_amount: Decimal::from(70),
+            unfranked_amount: Decimal::from(30),
+            foreign_source_income: Decimal::ZERO,
+            foreign_tax_paid: Decimal::ZERO,
+            tfn_withholding_tax: Decimal::ZERO,
+            franking_credits: Decimal::from(30),
+            lic_capital_gain_deduction: Decimal::ZERO,
+            conduit_foreign_income: Decimal::ZERO,
             trust_income: false,
             reinvestment_trade_id: None,
         }
@@ -265,9 +291,9 @@ mod tests {
         db_upsert(&pool, &dividend_income()).await.unwrap();
         let got = db_get(&pool, 1).await.unwrap().unwrap();
         assert_eq!(got.listing_id, 1);
-        assert_eq!(got.franked_amount, 70.0);
-        assert_eq!(got.unfranked_amount, 30.0);
-        assert_eq!(got.franking_credits, 30.0);
+        assert_eq!(got.franked_amount, Decimal::from(70));
+        assert_eq!(got.unfranked_amount, Decimal::from(30));
+        assert_eq!(got.franking_credits, Decimal::from(30));
         assert_eq!(got.ex_date, Some(NaiveDate::from_ymd_opt(2024, 3, 1).unwrap()));
         assert!(!got.trust_income);
         assert!(got.reinvestment_trade_id.is_none());
@@ -282,23 +308,23 @@ mod tests {
             listing_id: 1,
             date_paid: NaiveDate::from_ymd_opt(2024, 6, 30).unwrap(),
             ex_date: None,
-            franked_amount: 0.0,
-            unfranked_amount: 50.0,
-            foreign_source_income: 10.0,
-            foreign_tax_paid: 1.5,
-            tfn_withholding_tax: 0.0,
-            franking_credits: 0.0,
-            lic_capital_gain_deduction: 5.0,
-            conduit_foreign_income: 3.0,
+            franked_amount: Decimal::ZERO,
+            unfranked_amount: Decimal::from(50),
+            foreign_source_income: Decimal::from(10),
+            foreign_tax_paid: "1.5".parse().unwrap(),
+            tfn_withholding_tax: Decimal::ZERO,
+            franking_credits: Decimal::ZERO,
+            lic_capital_gain_deduction: Decimal::from(5),
+            conduit_foreign_income: Decimal::from(3),
             trust_income: true,
             reinvestment_trade_id: None,
         };
         db_upsert(&pool, &dist).await.unwrap();
         let got = db_get(&pool, 2).await.unwrap().unwrap();
         assert!(got.trust_income);
-        assert_eq!(got.foreign_source_income, 10.0);
-        assert_eq!(got.conduit_foreign_income, 3.0);
-        assert_eq!(got.lic_capital_gain_deduction, 5.0);
+        assert_eq!(got.foreign_source_income, Decimal::from(10));
+        assert_eq!(got.conduit_foreign_income, Decimal::from(3));
+        assert_eq!(got.lic_capital_gain_deduction, Decimal::from(5));
     }
 
     #[tokio::test]
@@ -311,21 +337,21 @@ mod tests {
             listing_id: 1,
             date_paid: NaiveDate::from_ymd_opt(2024, 3, 15).unwrap(),
             ex_date: None,
-            franked_amount: 140.0,
-            unfranked_amount: 60.0,
-            foreign_source_income: 0.0,
-            foreign_tax_paid: 0.0,
-            tfn_withholding_tax: 0.0,
-            franking_credits: 60.0,
-            lic_capital_gain_deduction: 0.0,
-            conduit_foreign_income: 0.0,
+            franked_amount: Decimal::from(140),
+            unfranked_amount: Decimal::from(60),
+            foreign_source_income: Decimal::ZERO,
+            foreign_tax_paid: Decimal::ZERO,
+            tfn_withholding_tax: Decimal::ZERO,
+            franking_credits: Decimal::from(60),
+            lic_capital_gain_deduction: Decimal::ZERO,
+            conduit_foreign_income: Decimal::ZERO,
             trust_income: false,
             reinvestment_trade_id: Some(trade_id),
         };
         db_upsert(&pool, &inc).await.unwrap();
         let got = db_get(&pool, 3).await.unwrap().unwrap();
         assert_eq!(got.reinvestment_trade_id, Some(trade_id));
-        assert_eq!(got.franked_amount, 140.0);
+        assert_eq!(got.franked_amount, Decimal::from(140));
     }
 
     #[tokio::test]
@@ -362,7 +388,7 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
         let got = db_get(&pool, 1).await.unwrap().unwrap();
-        assert_eq!(got.franked_amount, 70.0);
+        assert_eq!(got.franked_amount, Decimal::from(70));
     }
 
     #[tokio::test]
@@ -426,5 +452,41 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn api_decimal_precision_round_trip() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        let body = serde_json::json!({
+            "listing_id": 1,
+            "date_paid": "2024-03-15",
+            "franked_amount": "70.123456789",
+            "unfranked_amount": "29.876543211",
+            "franking_credits": "30.052631578"
+        });
+        let resp = router()
+            .with_state(pool.clone())
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/income/1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let resp = router()
+            .with_state(pool)
+            .oneshot(Request::builder().uri("/income/1").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let inc: Income = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(inc.franked_amount, "70.123456789".parse::<Decimal>().unwrap());
+        assert_eq!(inc.unfranked_amount, "29.876543211".parse::<Decimal>().unwrap());
+        assert_eq!(inc.franking_credits, "30.052631578".parse::<Decimal>().unwrap());
     }
 }
