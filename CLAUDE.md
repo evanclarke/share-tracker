@@ -1,6 +1,19 @@
 # Rules
 - Only mark a TODO item done when a test exists and passes for it
 - Never delete a TODO item
+- Solo project: commit directly to `main`. Don't create feature branches for commits
+- `cargo build` and `cargo test` must both be warning-free before a task is done (a `pub` item only reached from `#[cfg(test)]` code warns in the non-test build — gate it `#[cfg(test)]` or remove it)
+- Implement a requirement fully: if the spec says "apply the 50% CGT discount", compute the discounted figure — don't stop at an eligibility flag/indicator. If only partially done, leave it unchecked in TODO with a note on what remains
+
+# Financial correctness
+- Money and quantities are always `Decimal`, never `f64`. New monetary columns are `TEXT`; migrations must preserve precision (never round-trip a value through a `REAL` column)
+- When reading a `TEXT` decimal column, propagate parse failures (map to `sqlx::Error::Decode`, as the `FromRow` `dec` helpers do). Never `.parse().unwrap_or(Decimal::ZERO)` — a silent zero corrupts financial output without failing
+- Reports take the Australian-tax view: cost base, proceeds, and income totals are in AUD. Convert every non-AUD amount to AUD using the record's `fx_rate` before aggregating or comparing — never mix currencies in one calculation
+- Market settlement (T+n) counts business days — skip weekends (and exchange holidays once modelled); never just add calendar days
+
+# Data integrity
+- Enforce data-model invariants at write time inside a transaction, not only in reports. A multi-row invariant (e.g. a Sell's parcel allocations must sum to its quantity) must be validated and committed atomically so a partial/invalid state can never be persisted; reject with `422` otherwise. If standalone child-entity writes could reintroduce a bad state, restrict them
+- Every field in the data model must be used by a calculation or endpoint, or carry a comment marking it informational-only. Don't leave stored fields silently unused
 
 # Project structure
 - `src/main.rs` — server startup: init pool, spawn backup, mount routers, graceful shutdown
