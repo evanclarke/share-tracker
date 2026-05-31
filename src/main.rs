@@ -1,6 +1,7 @@
 mod args;
 mod db;
 mod exchange;
+mod income;
 mod listing;
 mod logging;
 mod trade;
@@ -20,6 +21,7 @@ async fn main() {
     let app = exchange::router()
         .merge(listing::router())
         .merge(trade::router())
+        .merge(income::router())
         .with_state(pool.clone());
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], args.port));
     let listener = tokio::net::TcpListener::bind(addr).await.expect("failed to bind");
