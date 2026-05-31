@@ -97,6 +97,18 @@ Items are only marked done when a passing test exists for them.
 - [x] Validate purchase_trade_id references a trade of type Buy or DRP
 - [x] Tests: type constraint violations rejected
 
+## DRP (Dividend Reinvestment Plan)
+- [ ] DRP Enrolment model (listing FK, residual handling enum: CarryForward/PayOut) — `src/entities/drp_enrolment.rs`
+- [ ] DB schema: `drp_enrolments` table; UNIQUE on listing_id (at most one enrolment per holding); CHECK constraint on residual_handling enum; default CarryForward — migration
+- [ ] CRUD API endpoints for DRP enrolments
+- [ ] Tests: insert/retrieve enrolment; one-per-listing uniqueness enforced; residual_handling enum constraint enforced; FK to listing
+- [ ] Trade Activity: add residual_brought_forward, residual_carried_forward, residual_paid_out columns (DRP trades only) — Decimal stored as TEXT; migration preserves precision
+- [ ] Tests: residual fields round-trip with decimal precision preserved
+- [ ] DRP reinvestment operation: create a DRP trade from a distribution (Income Activity) + reinvestment price — reinvestable cash (excludes franking credits) + residual brought forward (latest prior DRP trade's carried-forward for the listing, else 0) = available; quantity = floor(available / price); cost = quantity × price; leftover → carried-forward or paid-out per the enrolment's residual handling
+- [ ] DRP reinvestment is atomic: creates the Trade (Type DRP, listing+currency+pay date from the distribution, quantity, average price = reinvestment price, residual fields) and sets the distribution's reinvestment_trade FK in one transaction
+- [ ] Validation: reject (422) reinvestment for a non-enrolled holding, or a distribution that already has a reinvestment trade (at most one per distribution)
+- [ ] Tests: carry-forward residual is picked up by the next reinvestment for the holding; pay-out records leftover as paid out (not carried); whole-share floor; reinvestable cash excludes franking credits; atomic trade-creation + distribution linkage; rolled back on failure; rejected when not enrolled / already reinvested
+
 ## Cost Base Adjustments
 - [x] AMIT cost base adjustment: apply AMMA `tax deferred` amounts to reduce cost base of affected parcels
 - [x] Tests: AMIT adjustment
@@ -136,6 +148,7 @@ Items are only marked done when a passing test exists for them.
 - [ ] Income entry and listing UI
 - [ ] AMMA statement entry and listing UI
 - [ ] Share parcel allocation UI
+- [ ] DRP enrolment management + reinvest-distribution UI
 - [ ] Portfolio overview UI
 - [ ] Gains/losses report UI
 - [ ] Tax summary UI

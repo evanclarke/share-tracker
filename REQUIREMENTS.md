@@ -10,6 +10,14 @@ and cost basis calculations are done with the Australian tax view in mind.
    - Income activity
    - AMMA statements
    - Share parcel allocation for sales
+   - DRP (Dividend Reinvestment Plan) enrolments
+ - DRP (Dividend Reinvestment Plan) handling
+   - Record which holdings are enrolled in a DRP
+   - For a distribution on an enrolled holding, generate the reinvestment Trade (Type DRP) from the
+     distribution's reinvestable cash and the reinvestment price, linked back to the distribution
+   - Track the residual cash left over when the reinvestable amount doesn't buy a whole number of
+     shares; per enrolment this is either carried forward to the next reinvestment for that holding
+     or treated as paid out
  - FX rate reference data
    - Weekly automated import of the ATO's published monthly foreign exchange rates
    - Manual trigger of the same import via an HTTP endpoint (for retries / missed runs)
@@ -97,6 +105,12 @@ The facts that are recorded by the user
     exists for the trade's currency and month; the ATO rate takes precedence once available. See
     Reference Data > FX Conversion)
   - Contract Note Reference
+  - Residual Brought Forward (DRP trades only - leftover cash carried in from the prior reinvestment
+    for this holding; 0 when none. See DRP > Reinvestment)
+  - Residual Carried Forward (DRP trades only - leftover cash from this reinvestment carried to the
+    next one; 0 for non-carry-forward enrolments)
+  - Residual Paid Out (DRP trades only - leftover cash paid out rather than carried; 0 for
+    carry-forward enrolments)
 - Income Activity
   - Listing
   - Date Paid
@@ -136,3 +150,32 @@ The facts that are recorded by the user
   - Sale Trade (FK to Trade Activity, Type: Sell)
   - Purchase Trade (FK to Trade Activity, Type: Buy or DRP)
   - Quantity Allocated
+
+## DRP (Dividend Reinvestment Plan)
+- DRP Enrolment
+  - Listing (FK, unique - at most one enrolment per holding; its presence means the holding is
+    enrolled for full reinvestment)
+  - Residual Handling (enum: CarryForward, PayOut - what to do with leftover cash that doesn't buy a
+    whole share; default CarryForward)
+  - Note: partial participation (only a portion of units reinvested) is out of scope for now -
+    enrolment is all-or-nothing
+
+### Reinvestment
+- Creating a DRP trade from a distribution is a single operation that, given a distribution (Income
+  Activity) on an enrolled holding and the reinvestment price per share:
+  - Reinvestable cash = the distribution's cash component (franking credits are not cash and are
+    excluded)
+  - Residual Brought Forward = the most recent prior DRP trade's Residual Carried Forward for the
+    same listing, or 0 if there is none
+  - Available = Reinvestable cash + Residual Brought Forward
+  - Quantity = floor(Available / reinvestment price) - whole shares only; the registry rounds down
+  - Cost = Quantity × reinvestment price
+  - Leftover = Available − Cost; if the enrolment's Residual Handling is CarryForward it becomes the
+    new trade's Residual Carried Forward (and is picked up by the next reinvestment), otherwise it is
+    recorded as Residual Paid Out
+- The operation is atomic: it creates the Trade Activity (Type DRP, Listing and Currency from the
+  distribution, Date = distribution pay date, Quantity, Average Price = reinvestment price, residual
+  fields as above) and sets the distribution's Reinvestment Trade FK to the new trade in one
+  transaction - a distribution may have at most one reinvestment trade
+- The current carried-forward residual for a holding is therefore derivable as the Residual Carried
+  Forward of its latest DRP trade (single source of truth - no separate running balance is stored)
