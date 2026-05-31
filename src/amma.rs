@@ -287,7 +287,7 @@ mod tests {
                 ticker: "VAF".to_string(),
                 name: "Vanguard Australian Fixed Interest ETF".to_string(),
                 isin: None,
-                security_type: "ETF".to_string(),
+                security_type: listing::SecurityType::ETF,
                 currency: "AUD".to_string(),
                 amit: true,
             },

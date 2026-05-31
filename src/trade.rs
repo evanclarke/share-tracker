@@ -9,10 +9,17 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, sqlx::Type)]
+pub enum TradeType {
+    Buy,
+    Sell,
+    DRP,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Trade {
     pub id: i64,
-    pub trade_type: String,
+    pub trade_type: TradeType,
     pub date: NaiveDate,
     pub settlement_date: NaiveDate,
     pub listing_id: i64,
@@ -33,7 +40,7 @@ impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for Trade {
         }
         Ok(Trade {
             id: row.try_get("id")?,
-            trade_type: row.try_get("trade_type")?,
+            trade_type: row.try_get::<TradeType, _>("trade_type")?,
             date: row.try_get("date")?,
             settlement_date: row.try_get("settlement_date")?,
             listing_id: row.try_get("listing_id")?,
@@ -51,7 +58,7 @@ impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for Trade {
 
 #[derive(Debug, Deserialize)]
 pub struct TradeBody {
-    pub trade_type: String,
+    pub trade_type: TradeType,
     pub date: NaiveDate,
     #[serde(default)]
     pub settlement_date: Option<NaiveDate>,
@@ -115,7 +122,7 @@ pub async fn db_upsert(pool: &SqlitePool, trade: &Trade) -> Result<(), sqlx::Err
              contract_note_ref  = excluded.contract_note_ref",
     )
     .bind(trade.id)
-    .bind(&trade.trade_type)
+    .bind(trade.trade_type)
     .bind(trade.date)
     .bind(trade.settlement_date)
     .bind(trade.listing_id)
@@ -236,7 +243,7 @@ mod tests {
                 ticker: "VAS".to_string(),
                 name: "Vanguard Australian Shares ETF".to_string(),
                 isin: None,
-                security_type: "ETF".to_string(),
+                security_type: listing::SecurityType::ETF,
                 currency: "AUD".to_string(),
                 amit: false,
             },
@@ -248,7 +255,7 @@ mod tests {
     fn buy_trade() -> Trade {
         Trade {
             id: 1,
-            trade_type: "Buy".to_string(),
+            trade_type: TradeType::Buy,
             date: NaiveDate::from_ymd_opt(2024, 1, 15).unwrap(),
             settlement_date: NaiveDate::from_ymd_opt(2024, 1, 17).unwrap(),
             listing_id: 1,
@@ -271,7 +278,7 @@ mod tests {
         insert_test_listing(&pool).await;
         db_upsert(&pool, &buy_trade()).await.unwrap();
         let got = db_get(&pool, 1).await.unwrap().unwrap();
-        assert_eq!(got.trade_type, "Buy");
+        assert_eq!(got.trade_type, TradeType::Buy);
         assert_eq!(got.quantity, Decimal::from(10));
         assert_eq!(got.average_price, Decimal::from(100));
         assert_eq!(got.settlement_date, NaiveDate::from_ymd_opt(2024, 1, 17).unwrap());
@@ -284,7 +291,7 @@ mod tests {
         insert_test_listing(&pool).await;
         let trade = Trade {
             id: 2,
-            trade_type: "Sell".to_string(),
+            trade_type: TradeType::Sell,
             date: NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(),
             settlement_date: NaiveDate::from_ymd_opt(2024, 6, 3).unwrap(),
             listing_id: 1,
@@ -299,7 +306,7 @@ mod tests {
         };
         db_upsert(&pool, &trade).await.unwrap();
         let got = db_get(&pool, 2).await.unwrap().unwrap();
-        assert_eq!(got.trade_type, "Sell");
+        assert_eq!(got.trade_type, TradeType::Sell);
         assert_eq!(got.quantity, Decimal::from(5));
     }
 
@@ -309,7 +316,7 @@ mod tests {
         insert_test_listing(&pool).await;
         let trade = Trade {
             id: 3,
-            trade_type: "DRP".to_string(),
+            trade_type: TradeType::DRP,
             date: NaiveDate::from_ymd_opt(2024, 3, 15).unwrap(),
             settlement_date: NaiveDate::from_ymd_opt(2024, 3, 15).unwrap(),
             listing_id: 1,
@@ -324,7 +331,7 @@ mod tests {
         };
         db_upsert(&pool, &trade).await.unwrap();
         let got = db_get(&pool, 3).await.unwrap().unwrap();
-        assert_eq!(got.trade_type, "DRP");
+        assert_eq!(got.trade_type, TradeType::DRP);
         assert_eq!(got.quantity, Decimal::from(2));
     }
 
@@ -418,7 +425,7 @@ mod tests {
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let trades: Vec<Trade> = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(trades.len(), 1);
-        assert_eq!(trades[0].trade_type, "Buy");
+        assert_eq!(trades[0].trade_type, TradeType::Buy);
     }
 
     #[tokio::test]
@@ -434,7 +441,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let t: Trade = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(t.trade_type, "Buy");
+        assert_eq!(t.trade_type, TradeType::Buy);
         assert_eq!(t.quantity, Decimal::from(10));
     }
 

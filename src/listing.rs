@@ -7,6 +7,14 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, sqlx::Type)]
+pub enum SecurityType {
+    Share,
+    ETF,
+    LIC,
+    Trust,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Listing {
     pub id: i64,
@@ -14,7 +22,7 @@ pub struct Listing {
     pub ticker: String,
     pub name: String,
     pub isin: Option<String>,
-    pub security_type: String,
+    pub security_type: SecurityType,
     pub currency: String,
     pub amit: bool,
 }
@@ -25,7 +33,7 @@ pub struct ListingBody {
     pub ticker: String,
     pub name: String,
     pub isin: Option<String>,
-    pub security_type: String,
+    pub security_type: SecurityType,
     pub currency: String,
     pub amit: bool,
 }
@@ -73,7 +81,7 @@ pub async fn db_upsert(pool: &SqlitePool, listing: &Listing) -> Result<(), sqlx:
     .bind(&listing.ticker)
     .bind(&listing.name)
     .bind(&listing.isin)
-    .bind(&listing.security_type)
+    .bind(listing.security_type)
     .bind(listing.currency.as_str())
     .bind(listing.amit)
     .execute(pool)
@@ -157,7 +165,7 @@ mod tests {
             ticker: "VAS".to_string(),
             name: "Vanguard Australian Shares ETF".to_string(),
             isin: Some("AU0000VASAU4".to_string()),
-            security_type: "ETF".to_string(),
+            security_type: SecurityType::ETF,
             currency: "AUD".to_string(),
             amit: true,
         }

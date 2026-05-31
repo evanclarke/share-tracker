@@ -234,7 +234,7 @@ mod tests {
                 ticker: "VAS".to_string(),
                 name: "Vanguard Australian Shares ETF".to_string(),
                 isin: None,
-                security_type: "ETF".to_string(),
+                security_type: listing::SecurityType::ETF,
                 currency: "AUD".to_string(),
                 amit: false,
             },
@@ -246,7 +246,7 @@ mod tests {
     async fn insert_test_trade(pool: &SqlitePool) -> i64 {
         let t = trade::Trade {
             id: 1,
-            trade_type: "DRP".to_string(),
+            trade_type: trade::TradeType::DRP,
             date: NaiveDate::from_ymd_opt(2024, 3, 15).unwrap(),
             settlement_date: NaiveDate::from_ymd_opt(2024, 3, 15).unwrap(),
             listing_id: 1,
