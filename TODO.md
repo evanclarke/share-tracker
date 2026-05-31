@@ -66,8 +66,8 @@ Items are only marked done when a passing test exists for them.
 - [x] Tests: type constraint violations rejected
 
 ## Cost Base Adjustments
-- [ ] AMIT cost base adjustment: apply AMMA `tax deferred` amounts to reduce cost base of affected parcels
-- [ ] Tests: AMIT adjustment
+- [x] AMIT cost base adjustment: apply AMMA `tax deferred` amounts to reduce cost base of affected parcels
+- [x] Tests: AMIT adjustment
 
 ## Reporting — Portfolio Overview
 - [ ] Current holdings: aggregate open parcels by listing (quantity, average cost base)
