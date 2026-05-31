@@ -65,6 +65,8 @@ pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<ParcelAllocatio
 #[derive(Debug)]
 pub enum UpsertError {
     Db(sqlx::Error),
+    SaleTradeNotSell,
+    PurchaseTradeNotBuyOrDrp,
     PurchaseQuantityExceeded,
     SaleQuantityExceeded,
 }
@@ -96,6 +98,24 @@ async fn sum_allocated(
 }
 
 pub async fn db_upsert(pool: &SqlitePool, allocation: &ParcelAllocation) -> Result<(), UpsertError> {
+    use crate::trade::TradeType;
+
+    let sale_type: TradeType = sqlx::query_scalar("SELECT trade_type FROM trades WHERE id = ?")
+        .bind(allocation.sale_trade_id)
+        .fetch_one(pool)
+        .await?;
+    if sale_type != TradeType::Sell {
+        return Err(UpsertError::SaleTradeNotSell);
+    }
+
+    let purchase_type: TradeType = sqlx::query_scalar("SELECT trade_type FROM trades WHERE id = ?")
+        .bind(allocation.purchase_trade_id)
+        .fetch_one(pool)
+        .await?;
+    if !matches!(purchase_type, TradeType::Buy | TradeType::DRP) {
+        return Err(UpsertError::PurchaseTradeNotBuyOrDrp);
+    }
+
     let purchase_qty: String = sqlx::query_scalar("SELECT quantity FROM trades WHERE id = ?")
         .bind(allocation.purchase_trade_id)
         .fetch_one(pool)
@@ -180,6 +200,8 @@ async fn upsert(
     };
     match db_upsert(&pool, &allocation).await {
         Ok(()) => Ok(StatusCode::NO_CONTENT),
+        Err(UpsertError::SaleTradeNotSell) => Err(StatusCode::UNPROCESSABLE_ENTITY),
+        Err(UpsertError::PurchaseTradeNotBuyOrDrp) => Err(StatusCode::UNPROCESSABLE_ENTITY),
         Err(UpsertError::PurchaseQuantityExceeded) => Err(StatusCode::UNPROCESSABLE_ENTITY),
         Err(UpsertError::SaleQuantityExceeded) => Err(StatusCode::UNPROCESSABLE_ENTITY),
         Err(UpsertError::Db(_)) => Err(StatusCode::INTERNAL_SERVER_ERROR),
@@ -241,6 +263,29 @@ mod tests {
                 currency: "AUD".to_string(),
                 brokerage: "9.95".parse().unwrap(),
                 gst_on_brokerage: "0.995".parse().unwrap(),
+                brokerage_currency: "AUD".to_string(),
+                fx_rate: Decimal::ONE,
+                contract_note_ref: None,
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    async fn insert_drp_trade(pool: &SqlitePool, id: i64, quantity: Decimal) {
+        trade::db_upsert(
+            pool,
+            &trade::Trade {
+                id,
+                trade_type: trade::TradeType::DRP,
+                date: NaiveDate::from_ymd_opt(2024, 3, 15).unwrap(),
+                settlement_date: NaiveDate::from_ymd_opt(2024, 3, 15).unwrap(),
+                listing_id: 1,
+                average_price: Decimal::from(95),
+                quantity,
+                currency: "AUD".to_string(),
+                brokerage: Decimal::ZERO,
+                gst_on_brokerage: Decimal::ZERO,
                 brokerage_currency: "AUD".to_string(),
                 fx_rate: Decimal::ONE,
                 contract_note_ref: None,
@@ -386,6 +431,59 @@ mod tests {
         .await
         .unwrap_err();
         assert!(matches!(err, UpsertError::SaleQuantityExceeded));
+    }
+
+    #[tokio::test]
+    async fn db_sale_trade_not_sell_rejected() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        insert_buy_trade(&pool, 1, Decimal::from(10)).await;
+        insert_buy_trade(&pool, 2, Decimal::from(10)).await;
+
+        let err = db_upsert(&pool, &ParcelAllocation {
+            id: 1,
+            sale_trade_id: 1, // Buy, not Sell
+            purchase_trade_id: 2,
+            quantity_allocated: Decimal::from(5),
+        })
+        .await
+        .unwrap_err();
+        assert!(matches!(err, UpsertError::SaleTradeNotSell));
+    }
+
+    #[tokio::test]
+    async fn db_purchase_trade_not_buy_or_drp_rejected() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        insert_sell_trade(&pool, 1, Decimal::from(10)).await;
+        insert_sell_trade(&pool, 2, Decimal::from(10)).await;
+
+        let err = db_upsert(&pool, &ParcelAllocation {
+            id: 1,
+            sale_trade_id: 1,
+            purchase_trade_id: 2, // Sell, not Buy/DRP
+            quantity_allocated: Decimal::from(5),
+        })
+        .await
+        .unwrap_err();
+        assert!(matches!(err, UpsertError::PurchaseTradeNotBuyOrDrp));
+    }
+
+    #[tokio::test]
+    async fn db_drp_trade_valid_as_purchase() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        insert_drp_trade(&pool, 1, Decimal::from(5)).await;
+        insert_sell_trade(&pool, 2, Decimal::from(5)).await;
+
+        db_upsert(&pool, &ParcelAllocation {
+            id: 1,
+            sale_trade_id: 2,
+            purchase_trade_id: 1,
+            quantity_allocated: Decimal::from(5),
+        })
+        .await
+        .unwrap();
     }
 
     // API-level tests

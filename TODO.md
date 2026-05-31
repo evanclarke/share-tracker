@@ -61,9 +61,9 @@ Items are only marked done when a passing test exists for them.
 - [x] Validate total allocations for a sale trade do not exceed sale quantity
 - [x] CRUD API endpoints for parcel allocations
 - [x] Tests: allocation creation, over-allocation rejection
-- [ ] Validate sale_trade_id references a trade of type Sell
-- [ ] Validate purchase_trade_id references a trade of type Buy or DRP
-- [ ] Tests: type constraint violations rejected
+- [x] Validate sale_trade_id references a trade of type Sell
+- [x] Validate purchase_trade_id references a trade of type Buy or DRP
+- [x] Tests: type constraint violations rejected
 
 ## Cost Base Adjustments
 - [ ] AMIT cost base adjustment: apply AMMA `tax deferred` amounts to reduce cost base of affected parcels
