@@ -53,6 +53,20 @@ Items are only marked done when a passing test exists for them.
 - [x] Non-blocking exchange-MIC validation report — `GET /reports/exchange_mic_validation` (`src/reports/mic_validation.rs`) classifies each curated exchange as `ok`/`expired`/`unknown` against the registry; never blocks writes
 - [x] Tests: import idempotent + reflects status changes on re-run; quoted/empty-cell/expiry parsing; malformed-feed/missing-column rejected; report classifies ok/expired/unknown and treats an empty registry as unknown (`import_inserts_all_rows_and_is_idempotent`, `import_reflects_status_changes_on_rerun`, `parse_registry_*`, `classifies_ok_expired_and_unknown`, `unknown_when_registry_empty`, plus API tests)
 
+## Reference Data — Currencies (ISO 4217 fiat + ISO 24165 digital tokens)
+- [ ] Currency model (kind enum Fiat/DigitalToken, code, numeric_code, name, short_name, minor_units, source enum Iso4217/Iso24165) — one table covering both fiat and digital tokens
+- [ ] DB schema: `currencies` table keyed by `code`; CHECK constraints on the kind and source enums; numeric_code nullable (fiat only); minor_units stored but commented informational-only (does not round stored amounts); migration
+- [ ] List/get API endpoints (`GET /currencies`, `GET /currencies/:code`, read-only over HTTP; writes come from the import)
+- [ ] Tests: insert/retrieve; kind/source enum constraints enforced; missing returns None/404
+
+## Currency Reference Import
+- [ ] ISO 4217 import logic: fetch the SIX Group "List One" XML (`https://www.six-group.com/dam/download/financial-information/data-center/iso-currrency/lists/list-one.xml`); parse alphabetic code, numeric code, entity/currency name and minor units, failing loudly on a malformed row; upsert as kind Fiat / source Iso4217 idempotently (`ON CONFLICT(code)` — no duplicates, unchanged rows untouched)
+- [ ] ISO 24165 import logic: fetch the DTIF registry JSON snapshot (download service `https://dtif.org/download-dti-data/`; REST API `https://dtif-api-docs.dtif.org/`); parse the DTI, short name, long name and decimals, failing loudly on a malformed record; upsert as kind DigitalToken / source Iso24165 idempotently
+- [ ] Monthly scheduled task runs both imports (alongside the MIC monthly job); logs imported count and next run time at INFO
+- [ ] HTTP endpoint to trigger the import manually (empty body → fetch from the live sources; non-empty body → import supplied content for retries/offline), sharing the same idempotent import logic
+- [ ] Currency-code validation: validate that currency codes recorded on trades, income and AMMA records are recognised codes in the `currencies` table (decide blocking write-time vs a non-blocking validation report, mirroring the exchange-MIC approach)
+- [ ] Tests: both imports idempotent (re-run stores no duplicates, leaves existing rows unchanged); parse fiat XML and DTI JSON; malformed feed rejected; manual-trigger endpoint invokes the import; unrecognised currency code flagged/rejected
+
 ## FX Conversion (ATO reference rate)
 - [x] Conversion helper: AUD = foreign / Rate, using the ATO FX Rate for the amount's currency and the month of the relevant date (e.g. trade date); AUD amounts pass through (rate = 1) — `infra::fx::to_aud` (looks up `rba_fx_rates` by (currency, month))
 - [x] Fall back to the trade's manual FX Rate override (same foreign-per-AUD convention) only when no ATO FX Rate exists for that (currency, month); the ATO rate takes precedence once available — `to_aud`'s `manual_override` param; ATO rate wins when present

@@ -23,6 +23,11 @@ and cost basis calculations are done with the Australian tax view in mind.
    - Manual trigger of the same import via an HTTP endpoint (for retries / missed runs)
    - AUD conversions use these rates, falling back to a per-trade FX rate only when no ATO rate
      exists yet for the trade's currency and month
+ - Currency reference data (fiat and digital tokens)
+   - Monthly automated import of the ISO 4217 fiat currency list and the ISO 24165 digital token
+     (DTI) registry into a single currencies reference table
+   - Manual trigger of the same import via an HTTP endpoint (for retries / missed runs)
+   - Validates that currency codes used on trades, income and AMMA records are recognised codes
  - Reporting
    - Current portfolio overview
    - Unrealised gains/losses
@@ -41,6 +46,10 @@ and cost basis calculations are done with the Australian tax view in mind.
    - The same fetch is exposed as an HTTP endpoint so it can be triggered manually (e.g. to retry
      after a failed or missed scheduled run); manual and scheduled runs share the same idempotent
      import logic
+   - Monthly scheduled task imports the currencies reference table from the ISO 4217 (SIX Group
+     List One) and ISO 24165 (DTIF registry) sources, storing new/changed currencies (idempotent -
+     re-importing must not create duplicates or alter unchanged rows); also exposed as an HTTP
+     endpoint for manual retries, sharing the same idempotent import logic
  - Web frontend for all features
  - Features will all have tests
  - Hosted on GitHub, with a hook to run tests when commits are pushed
@@ -74,6 +83,27 @@ and cost basis calculations are done with the Australian tax view in mind.
   - Month (the rate period - year and month, matching the ATO monthly rates table)
   - Rate (units of the foreign currency per 1 AUD, exactly as published by the ATO)
   - Unique per (Currency, Month)
+- Currency
+  - A single reference table of recognised currencies covering both fiat currencies and digital
+    tokens, used to validate the currency codes recorded on trades, income and AMMA records
+  - Kind (enum: Fiat, DigitalToken)
+  - Code (primary identifier): for Fiat, the ISO 4217 alphabetic code (e.g. AUD, USD); for
+    DigitalToken, the ISO 24165 Digital Token Identifier (DTI - a 9-character identifier)
+  - Numeric Code (ISO 4217 numeric code, fiat only - null for digital tokens)
+  - Name (currency/entity name for fiat, or the token's long name)
+  - Short Name (the token's short name / common ticker; optional for fiat)
+  - Minor Units (number of decimal places - ISO 4217 minor unit for fiat, or the token's decimals;
+    informational reference only, not used to round stored amounts, which remain arbitrary-precision
+    Decimal)
+  - Source (enum: Iso4217, Iso24165 - which feed the row came from)
+  - Sources, imported by the monthly scheduled task (idempotent - re-importing a period must not
+    create duplicates or alter unchanged rows):
+    - Fiat (ISO 4217): SIX Group, the official ISO 4217 Maintenance Agency (on behalf of the Swiss
+      Association for Standardization, SNV), free machine-readable "List One" XML
+      (https://www.six-group.com/dam/download/financial-information/data-center/iso-currrency/lists/list-one.xml)
+    - Digital tokens (ISO 24165): the Digital Token Identifier Foundation (DTIF), the ISO 24165
+      Registration Authority, free JSON registry snapshot which is itself refreshed monthly
+      (download service: https://dtif.org/download-dti-data/; REST API: https://dtif-api-docs.dtif.org/)
 
 ### FX Conversion
 - All reports take the Australian-tax view: every non-AUD amount is converted to AUD before it is
