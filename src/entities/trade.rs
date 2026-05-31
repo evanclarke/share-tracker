@@ -8,6 +8,7 @@ use chrono::{Datelike, NaiveDate};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
+use std::collections::HashSet;
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, sqlx::Type)]
 pub enum TradeType {
@@ -177,18 +178,26 @@ pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<bool, sqlx::Error> 
     Ok(result.rows_affected() > 0)
 }
 
-/// Advance `date` by `business_days` trading days, skipping Saturdays and Sundays.
+/// Advance `date` by `business_days` trading days, skipping Saturdays, Sundays
+/// and the exchange's public `holidays`.
 ///
 /// Market settlement is quoted as T+n *business* days (e.g. ASX T+2), so a Thursday
-/// trade settles the following Monday, not Saturday. Public holidays are not yet
-/// modelled, so a holiday-adjacent trade may settle one or more days early.
-pub(crate) fn add_business_days(date: NaiveDate, business_days: i64) -> NaiveDate {
+/// trade settles the following Monday, not Saturday — and a settlement that would
+/// land on a public holiday rolls forward to the next trading day. Pass the
+/// exchange's holiday set (see `exchange_holiday::exchange_holidays_for_listing`);
+/// an empty set degrades to weekend-only skipping.
+pub(crate) fn add_business_days(
+    date: NaiveDate,
+    business_days: i64,
+    holidays: &HashSet<NaiveDate>,
+) -> NaiveDate {
     use chrono::Weekday;
     let mut result = date;
     let mut remaining = business_days;
     while remaining > 0 {
         result += chrono::Duration::days(1);
-        if !matches!(result.weekday(), Weekday::Sat | Weekday::Sun) {
+        let is_weekend = matches!(result.weekday(), Weekday::Sat | Weekday::Sun);
+        if !is_weekend && !holidays.contains(&result) {
             remaining -= 1;
         }
     }
@@ -243,7 +252,11 @@ async fn upsert(
             let days = settlement_days_for_listing(&pool, body.listing_id)
                 .await
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-            add_business_days(body.date, days)
+            let holidays =
+                crate::entities::exchange_holiday::exchange_holidays_for_listing(&pool, body.listing_id)
+                    .await
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            add_business_days(body.date, days, &holidays)
         }
     };
     let trade = Trade {
@@ -287,6 +300,7 @@ mod tests {
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
     use rust_decimal::Decimal;
+    use std::collections::HashSet;
     use tower::ServiceExt;
 
     async fn test_pool() -> SqlitePool {
@@ -501,19 +515,78 @@ mod tests {
 
     #[test]
     fn add_business_days_skips_weekend() {
+        let none = HashSet::new();
         // 2024-01-18 is a Thursday; T+2 business days settles Monday 2024-01-22,
         // skipping Sat 2024-01-20 and Sun 2024-01-21.
         let thursday = NaiveDate::from_ymd_opt(2024, 1, 18).unwrap();
         assert_eq!(
-            add_business_days(thursday, 2),
+            add_business_days(thursday, 2, &none),
             NaiveDate::from_ymd_opt(2024, 1, 22).unwrap()
         );
         // 2024-01-15 is a Monday; T+2 stays within the week (Wednesday).
         let monday = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
         assert_eq!(
-            add_business_days(monday, 2),
+            add_business_days(monday, 2, &none),
             NaiveDate::from_ymd_opt(2024, 1, 17).unwrap()
         );
+    }
+
+    #[test]
+    fn add_business_days_skips_public_holidays() {
+        // Christmas Day (Wed) and Boxing Day (Thu) 2024 are public holidays.
+        let holidays: HashSet<NaiveDate> = [
+            NaiveDate::from_ymd_opt(2024, 12, 25).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 12, 26).unwrap(),
+        ]
+        .into_iter()
+        .collect();
+        // Tuesday 2024-12-24 + T+2: skip Wed 25 + Thu 26 (holidays), Fri 27 = 1,
+        // skip the weekend, Mon 30 = 2 → settles 2024-12-30.
+        let tuesday = NaiveDate::from_ymd_opt(2024, 12, 24).unwrap();
+        assert_eq!(
+            add_business_days(tuesday, 2, &holidays),
+            NaiveDate::from_ymd_opt(2024, 12, 30).unwrap()
+        );
+        // Without the holiday set it would settle on Boxing Day (Thu 26).
+        assert_eq!(
+            add_business_days(tuesday, 2, &HashSet::new()),
+            NaiveDate::from_ymd_opt(2024, 12, 26).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn api_settlement_date_skips_public_holiday() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await; // listing 1 trades on XASX
+        // XASX is closed Christmas (Wed 2024-12-25) and Boxing Day (Thu 2024-12-26);
+        // a Tuesday 2024-12-24 buy at T+2 settles Mon 2024-12-30, not Thu 2024-12-26.
+        let body = serde_json::json!({
+            "trade_type": "Buy",
+            "date": "2024-12-24",
+            "listing_id": 1,
+            "average_price": 100.0,
+            "quantity": 10.0,
+            "currency": "AUD",
+            "brokerage": 9.95,
+            "gst_on_brokerage": 0.995,
+            "brokerage_currency": "AUD",
+            "fx_rate": 1.0
+        });
+        let resp = router()
+            .with_state(pool.clone())
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/trades/1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let trade = db_get(&pool, 1).await.unwrap().unwrap();
+        assert_eq!(trade.settlement_date, NaiveDate::from_ymd_opt(2024, 12, 30).unwrap());
     }
 
     #[tokio::test]

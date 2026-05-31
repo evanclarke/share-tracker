@@ -58,6 +58,11 @@ exchanges
 ├── timezone     TEXT             IANA timezone string
 └── settlement_days INTEGER      T+N settlement (e.g. 2 for ASX)
 
+exchange_holidays             Full-closure non-trading days per exchange (settlement skips them)
+├── mic          TEXT FK→exchanges.mic   Part of PK
+├── holiday_date TEXT             'YYYY-MM-DD'; part of PK
+└── name         TEXT             Holiday name (informational)
+
 listings
 ├── id           INTEGER PK
 ├── exchange_mic TEXT FK→exchanges.mic
@@ -171,6 +176,7 @@ drp_enrolments               DRP enrolment per holding (presence = reinvest in f
 ### Relationships
 
 ```
+exchanges ──< exchange_holidays
 exchanges ──< listings ──< trades >──────────────< parcel_allocations
                                 \                         /
                                  └──────────────────────-/
@@ -205,6 +211,20 @@ All endpoints return JSON. Write endpoints accept `Content-Type: application/jso
 | `DELETE` | `/exchanges/:mic` | Delete an exchange |
 
 Seed data includes `XASX` (ASX, T+2) and `XNYS` (NYSE, T+2). `PUT` returns `422` if `currency` is not a recognised code in `currencies`.
+
+### Exchange holidays
+
+Full-closure non-trading days per exchange, keyed by `(mic, holiday_date)`. Settlement-date calculation skips these in addition to weekends (see [Trades](#trades)). Seeded from the published NYSE and ASX calendars for 2024–2027 (extend as later years are published).
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/exchange_holidays` | List all holidays (ordered by MIC, then date) |
+| `GET` | `/exchange_holidays/:mic` | List one exchange's holidays (ordered by date) |
+| `GET` | `/exchange_holidays/:mic/:date` | Get one holiday (`:date` is `YYYY-MM-DD`) |
+| `PUT` | `/exchange_holidays/:mic/:date` | Create or update a holiday (body: `{ "name": "..." }`) |
+| `DELETE` | `/exchange_holidays/:mic/:date` | Delete a holiday |
+
+`PUT` returns `422` if `:mic` is not a known exchange, and `400` if `:date` is not a valid `YYYY-MM-DD` date.
 
 ### Listings
 
@@ -273,7 +293,7 @@ Recurring maintenance jobs scheduled from the cron file (see [Scheduled maintena
 | `PUT` | `/trades/:id` | Create or update a trade |
 | `DELETE` | `/trades/:id` | Delete a trade |
 
-If `settlement_date` is omitted from the PUT body, it is auto-calculated by advancing `date` by `exchange.settlement_days` **business days** (weekends are skipped; public holidays are not yet modelled).
+If `settlement_date` is omitted from the PUT body, it is auto-calculated by advancing `date` by `exchange.settlement_days` **business days** — both weekends and the exchange's seeded public holidays (see [Exchange holidays](#exchange-holidays)) are skipped.
 
 `PUT /trades/:id` rejects `trade_type: "Sell"` with `422` — Sells must be created via `PUT /sells/:id` (see below) so they are always persisted with a full set of parcel allocations.
 
@@ -457,6 +477,7 @@ Validates each curated exchange's MIC against the `mic_registry` (the imported I
 | `200 OK` | Successful GET |
 | `201 Created` | DRP reinvestment trade created via `POST /income/:id/reinvest` |
 | `204 No Content` | Successful PUT or DELETE, or a job run via `POST /jobs/:name` |
+| `400 Bad Request` | Malformed path parameter (e.g. an `exchange_holidays` `:date` that is not `YYYY-MM-DD`) |
 | `404 Not Found` | Resource does not exist |
 | `405 Method Not Allowed` | Write attempted on a read-only path (e.g. `parcel_allocations`) |
 | `422 Unprocessable Entity` | Business rule or constraint violation (e.g. over-allocation, wrong trade type, under-allocated Sell, unparseable FX or MIC feed, or a write referencing an unrecognised currency / unknown exchange / listing) |

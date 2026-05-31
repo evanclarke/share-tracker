@@ -130,7 +130,10 @@ pub async fn db_upsert_sell(pool: &SqlitePool, id: i64, body: &SellBody) -> Resu
         Some(d) => d,
         None => {
             let days = trade::settlement_days_for_listing(pool, body.listing_id).await?;
-            trade::add_business_days(body.date, days)
+            let holidays =
+                crate::entities::exchange_holiday::exchange_holidays_for_listing(pool, body.listing_id)
+                    .await?;
+            trade::add_business_days(body.date, days, &holidays)
         }
     };
 

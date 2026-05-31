@@ -302,12 +302,15 @@ mod tests {
     #[tokio::test]
     async fn api_delete_existing_returns_no_content() {
         let pool = test_pool().await;
+        // Delete a fresh exchange with no dependents — the seeded XASX/XNYS now
+        // have child rows in exchange_holidays, so their delete is FK-blocked.
+        db_upsert(&pool, &xtest()).await.unwrap();
         let resp = router()
             .with_state(pool)
             .oneshot(
                 Request::builder()
                     .method("DELETE")
-                    .uri("/exchanges/XASX")
+                    .uri("/exchanges/XTES")
                     .body(Body::empty())
                     .unwrap(),
             )

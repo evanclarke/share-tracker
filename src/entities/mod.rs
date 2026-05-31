@@ -10,6 +10,7 @@ pub mod currencies;
 pub mod drp_enrolment;
 pub mod drp_reinvestment;
 pub mod exchange;
+pub mod exchange_holiday;
 pub mod income;
 pub mod listing;
 pub mod mic_registry;
@@ -21,6 +22,7 @@ pub mod trade;
 /// Merge every entity's routes into a single router.
 pub fn router() -> Router<SqlitePool> {
     exchange::router()
+        .merge(exchange_holiday::router())
         .merge(listing::router())
         .merge(currencies::router())
         .merge(mic_registry::router())
