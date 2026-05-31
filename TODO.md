@@ -82,10 +82,10 @@ Items are only marked done when a passing test exists for them.
 - [x] Tests: gain/loss calculation, discount eligibility
 
 ## Reporting — Realised Gains/Losses
-- [ ] Calculate capital gain/loss per sale using allocated parcels and adjusted cost bases
-- [ ] Apply CGT discount (50%) for parcels held > 12 months
-- [ ] API endpoint for realised gains/losses
-- [ ] Tests: specific parcel sale, CGT discount eligibility
+- [x] Calculate capital gain/loss per sale using allocated parcels and adjusted cost bases
+- [x] Apply CGT discount (50%) for parcels held > 12 months
+- [x] API endpoint for realised gains/losses
+- [x] Tests: specific parcel sale, CGT discount eligibility
 
 ## Reporting — Tax
 - [ ] Aggregate all assessable income components by tax year
