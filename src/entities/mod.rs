@@ -9,6 +9,7 @@ pub mod amma;
 pub mod exchange;
 pub mod income;
 pub mod listing;
+pub mod mic_registry;
 pub mod parcel_allocation;
 pub mod rba_fx_rate;
 pub mod sell;
@@ -18,6 +19,7 @@ pub mod trade;
 pub fn router() -> Router<SqlitePool> {
     exchange::router()
         .merge(listing::router())
+        .merge(mic_registry::router())
         .merge(rba_fx_rate::router())
         .merge(trade::router())
         .merge(income::router())

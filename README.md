@@ -13,6 +13,7 @@ A personal Australian share portfolio tracker with a REST JSON API. Records trad
 - **Realised gains report** — per-sale capital gain/loss and CGT-discount-eligible gain (parcels held strictly more than 12 months)
 - **Tax summary** — income aggregated by Australian financial year (July–June), combining dividends, trust distributions, and AMMA components
 - **FX rate import** — monthly RBA F11 foreign exchange rates (the rates the ATO directs taxpayers to use) fetched and stored as foreign-per-AUD, refreshed weekly and via a manual trigger, ready for AUD tax conversion
+- **MIC registry import** — the ISO 10383 Market Identifier Code list imported monthly (and via a manual trigger), used by a non-blocking report to flag curated exchanges whose MIC is unknown or expired
 
 ## Building and running
 
@@ -31,11 +32,12 @@ The database is created automatically on first run. Migrations are applied in or
 
 ### Scheduled maintenance
 
-Recurring maintenance jobs — the database backup and the RBA FX rate import — are scheduled from a cron file rather than hard-coded intervals. Each line is a 5-field Vixie cron expression (`min hour dom mon dow`) followed by a job name; `#` starts a comment. The built-in default is embedded in the binary (`schedule.cron`); pass `--schedule <path>` to use your own file instead:
+Recurring maintenance jobs — the database backup, the RBA FX rate import, and the ISO MIC registry import — are scheduled from a cron file rather than hard-coded intervals. Each line is a 5-field Vixie cron expression (`min hour dom mon dow`) followed by a job name; `#` starts a comment. The built-in default is embedded in the binary (`schedule.cron`); pass `--schedule <path>` to use your own file instead:
 
 ```
 0 0 * * *   backup          # daily at midnight
 0 2 * * 1   rba-fx-import   # weekly, Monday 02:00
+0 3 1 * *   mic-import      # monthly, 1st at 03:00 (ISO publishes monthly)
 ```
 
 A schedule line naming an unknown job is rejected at startup; a registered job with no schedule line is allowed but logged as a `WARN` (it will then only run via its endpoint). Jobs run only at their scheduled times (not at startup); after each run (and at startup) the next scheduled run is logged at INFO. The backup writes `<stem>-YYYY-MM-DD.db` beside the main database file (skipped if one already exists for the day). Any job can be run on demand with `POST /jobs/{name}` (see HTTP API).
@@ -68,6 +70,15 @@ rba_fx_rates                  RBA F11 monthly FX rates (the rate used for ATO co
 ├── currency     TEXT             ISO 4217 code (e.g. USD)
 ├── month        TEXT             'YYYY-MM'
 └── rate         TEXT (decimal)   Foreign units per 1 AUD; UNIQUE (currency, month)
+
+mic_registry                  ISO 10383 MIC reference list (validation only; not the operational exchange table)
+├── mic           TEXT PK          ISO 10383 Market Identifier Code (e.g. XASX)
+├── operating_mic TEXT             Parent operating MIC (== mic for operating entries)
+├── name          TEXT             Market name / institution description
+├── country_code  TEXT             ISO 3166 alpha-2 country code
+├── city          TEXT (nullable)
+├── status        TEXT             ISO STATUS: ACTIVE | UPDATED | EXPIRED
+└── expiry_date   TEXT (nullable)  'YYYY-MM-DD' when EXPIRED, else NULL
 
 trades
 ├── id                INTEGER PK
@@ -150,6 +161,8 @@ exchanges ──< listings ──< trades >────────────�
 
 `rba_fx_rates` is standalone reference data (no foreign keys); it is looked up by `(currency, month)`.
 
+`mic_registry` is standalone reference data (no foreign keys), keyed by `mic`. It is populated from the ISO 10383 list and used only to validate curated `exchanges` (see the [exchange MIC validation report](#exchange-mic-validation)); it is *not* the operational exchange table and carries no currency/timezone/settlement data.
+
 Decimal values are stored as TEXT to preserve arbitrary precision.
 
 ## HTTP API
@@ -188,6 +201,18 @@ Monthly foreign exchange rates from the RBA's F11 table, stored as foreign-curre
 
 `POST /rba_fx_rates/import` is idempotent: it inserts new `(currency, month)` rows and leaves existing rows unchanged (re-running creates no duplicates). With an **empty body** it fetches the live RBA F11 CSV; with a **non-empty body** it imports that supplied CSV (useful for retries when the RBA endpoint is unreachable). Returns `200 OK` with `{ "inserted": N, "skipped": M }`, `422` if the feed can't be parsed, or `502 Bad Gateway` if the RBA fetch fails. The same import also runs on the cron schedule as the `rba-fx-import` job (see Jobs).
 
+### MIC registry
+
+The ISO 10383 Market Identifier Code list, imported from the official ISO20022 `ISO10383_MIC.csv`. Reference data only — used to validate curated exchanges; rows are written only by the import, so the resource is read-only via `GET`.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/mic_registry` | List all MIC entries (ordered by MIC) |
+| `GET` | `/mic_registry/:mic` | Get one MIC entry |
+| `POST` | `/mic_registry/import` | Trigger an import (see below) |
+
+`POST /mic_registry/import` upserts every row in the feed in one transaction, tracking the latest ISO publication (a MIC's status/expiry can change), so re-running creates no duplicates and refreshes changed entries. With an **empty body** it fetches the live ISO CSV; with a **non-empty body** it imports that supplied CSV (useful for retries when ISO is unreachable). Returns `200 OK` with `{ "imported": N }`, `422` if the feed can't be parsed, or `502 Bad Gateway` if the ISO fetch fails. The same import also runs on the cron schedule as the `mic-import` job (see Jobs).
+
 ### Jobs
 
 Recurring maintenance jobs scheduled from the cron file (see [Scheduled maintenance](#scheduled-maintenance)). These endpoints inspect the registered jobs and trigger them on demand.
@@ -197,7 +222,7 @@ Recurring maintenance jobs scheduled from the cron file (see [Scheduled maintena
 | `GET` | `/jobs` | List registered job names (JSON array, sorted) |
 | `POST` | `/jobs/:name` | Run the named job now |
 
-`POST /jobs/:name` runs the job synchronously and returns `204 No Content` on success, `404 Not Found` if no job has that name, or `500 Internal Server Error` if the job fails. Registered jobs are `backup` and `rba-fx-import`.
+`POST /jobs/:name` runs the job synchronously and returns `204 No Content` on success, `404 Not Found` if no job has that name, or `500 Internal Server Error` if the job fails. Registered jobs are `backup`, `rba-fx-import`, and `mic-import`.
 
 ### Trades
 
@@ -341,6 +366,14 @@ GET /portfolio/tax-summary
 
 Returns one record per Australian financial year (identified by the calendar year of 30 June), sorted ascending. Aggregates dividend income by `date_paid` (July = next FY) and AMMA statements by `tax_year_end_date`. Response fields include all income and AMMA components as separate fields for direct transfer to a tax return.
 
+#### Exchange MIC validation
+
+```
+GET /reports/exchange_mic_validation
+```
+
+Validates each curated exchange's MIC against the `mic_registry` (the imported ISO 10383 list) — **non-blocking**: writes to `exchanges` are never rejected, this only surfaces MICs worth a second look. Returns one record per exchange (sorted by MIC) with fields: `mic`, `exchange_name`, `registry_status` (`ok` = active in the registry, `expired` = present but EXPIRED, `unknown` = no registry entry, i.e. a typo or the registry hasn't been imported yet), `iso_status` (raw ISO `ACTIVE`/`UPDATED`/`EXPIRED`, or null when unknown), and `expiry_date`. With an empty registry every exchange is `unknown`.
+
 ## Response codes
 
 | Code | Meaning |
@@ -349,9 +382,9 @@ Returns one record per Australian financial year (identified by the calendar yea
 | `204 No Content` | Successful PUT or DELETE, or a job run via `POST /jobs/:name` |
 | `404 Not Found` | Resource does not exist |
 | `405 Method Not Allowed` | Write attempted on a read-only path (e.g. `parcel_allocations`) |
-| `422 Unprocessable Entity` | Business rule violation (e.g. over-allocation, wrong trade type, under-allocated Sell, unparseable FX feed) |
+| `422 Unprocessable Entity` | Business rule violation (e.g. over-allocation, wrong trade type, under-allocated Sell, unparseable FX or MIC feed) |
 | `500 Internal Server Error` | Unexpected database error, or a job triggered via `POST /jobs/:name` failed |
-| `502 Bad Gateway` | Upstream fetch failed (e.g. RBA FX rate import could not reach the RBA) |
+| `502 Bad Gateway` | Upstream fetch failed (e.g. the RBA FX or ISO MIC import could not reach its source) |
 
 ## Tech stack
 

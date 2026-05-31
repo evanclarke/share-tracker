@@ -17,6 +17,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 reqwest = "0.13.4"
 croner = "3.0.1"
+csv = "1"
 
 [dev-dependencies]
 http-body-util = "0.1"

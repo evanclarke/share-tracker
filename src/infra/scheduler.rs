@@ -66,6 +66,23 @@ pub fn registry(pool: SqlitePool, db_path: String) -> JobRegistry {
         }),
     );
 
+    let mic_pool = pool.clone();
+    jobs.insert(
+        "mic-import".to_string(),
+        Arc::new(move || {
+            let pool = mic_pool.clone();
+            Box::pin(async move {
+                match crate::entities::mic_registry::run_import(&pool).await {
+                    Ok(s) => {
+                        tracing::info!(imported = s.imported, "MIC registry import complete");
+                        Ok(())
+                    }
+                    Err(e) => Err(format!("{e:?}")),
+                }
+            })
+        }),
+    );
+
     let fx_pool = pool.clone();
     jobs.insert(
         "rba-fx-import".to_string(),

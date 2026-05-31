@@ -4,3 +4,4 @@
 
 0 0 * * *   backup          # daily at midnight
 0 2 * * 1   rba-fx-import   # weekly, Monday 02:00
+0 3 1 * *   mic-import      # monthly, 1st at 03:00 (ISO publishes monthly)
