@@ -1,3 +1,4 @@
+use crate::decimal::parse_dec;
 use axum::{Json, Router, extract::State, http::StatusCode, routing::post};
 use chrono::{Months, NaiveDate};
 use rust_decimal::Decimal;
@@ -52,8 +53,8 @@ pub async fn db_unrealised_gains(
     let mut qty_sold: HashMap<i64, Decimal> = HashMap::new();
     for row in &alloc_rows {
         let tid: i64 = row.try_get("purchase_trade_id")?;
-        let s: String = row.try_get("quantity_allocated")?;
-        *qty_sold.entry(tid).or_insert(Decimal::ZERO) += s.parse().unwrap_or(Decimal::ZERO);
+        *qty_sold.entry(tid).or_insert(Decimal::ZERO) +=
+            parse_dec("quantity_allocated", row.try_get("quantity_allocated")?)?;
     }
 
     let amit_rows = sqlx::query(
@@ -67,14 +68,8 @@ pub async fn db_unrealised_gains(
     let mut cba_reduction: HashMap<i64, Decimal> = HashMap::new();
     for row in &amit_rows {
         let tid: i64 = row.try_get("trade_id")?;
-        let qty: Decimal = row
-            .try_get::<String, _>("quantity")?
-            .parse()
-            .unwrap_or(Decimal::ZERO);
-        let cba: Decimal = row
-            .try_get::<String, _>("cost_base_adjustment")?
-            .parse()
-            .unwrap_or(Decimal::ZERO);
+        let qty = parse_dec("quantity", row.try_get("quantity")?)?;
+        let cba = parse_dec("cost_base_adjustment", row.try_get("cost_base_adjustment")?)?;
         *cba_reduction.entry(tid).or_insert(Decimal::ZERO) += qty * cba;
     }
 
@@ -86,22 +81,10 @@ pub async fn db_unrealised_gains(
         let trade_id: i64 = row.try_get("id")?;
         let listing_id: i64 = row.try_get("listing_id")?;
         let trade_date: NaiveDate = row.try_get("date")?;
-        let qty: Decimal = row
-            .try_get::<String, _>("quantity")?
-            .parse()
-            .unwrap_or(Decimal::ZERO);
-        let price: Decimal = row
-            .try_get::<String, _>("average_price")?
-            .parse()
-            .unwrap_or(Decimal::ZERO);
-        let brok: Decimal = row
-            .try_get::<String, _>("brokerage")?
-            .parse()
-            .unwrap_or(Decimal::ZERO);
-        let gst: Decimal = row
-            .try_get::<String, _>("gst_on_brokerage")?
-            .parse()
-            .unwrap_or(Decimal::ZERO);
+        let qty = parse_dec("quantity", row.try_get("quantity")?)?;
+        let price = parse_dec("average_price", row.try_get("average_price")?)?;
+        let brok = parse_dec("brokerage", row.try_get("brokerage")?)?;
+        let gst = parse_dec("gst_on_brokerage", row.try_get("gst_on_brokerage")?)?;
 
         let sold = *qty_sold.get(&trade_id).unwrap_or(&Decimal::ZERO);
         let remaining = qty - sold;

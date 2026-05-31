@@ -1,3 +1,4 @@
+use crate::decimal::parse_dec;
 use axum::{Json, Router, extract::State, http::StatusCode, routing::post};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -49,8 +50,8 @@ pub async fn db_holdings(pool: &SqlitePool) -> Result<Vec<HoldingOverview>, sqlx
     let mut qty_sold: HashMap<i64, Decimal> = HashMap::new();
     for row in &alloc_rows {
         let tid: i64 = row.try_get("purchase_trade_id")?;
-        let s: String = row.try_get("quantity_allocated")?;
-        *qty_sold.entry(tid).or_insert(Decimal::ZERO) += s.parse().unwrap_or(Decimal::ZERO);
+        *qty_sold.entry(tid).or_insert(Decimal::ZERO) +=
+            parse_dec("quantity_allocated", row.try_get("quantity_allocated")?)?;
     }
 
     // total AMIT cost base reduction per purchase parcel
@@ -65,14 +66,8 @@ pub async fn db_holdings(pool: &SqlitePool) -> Result<Vec<HoldingOverview>, sqlx
     let mut cba_reduction: HashMap<i64, Decimal> = HashMap::new();
     for row in &amit_rows {
         let tid: i64 = row.try_get("trade_id")?;
-        let qty: Decimal = row
-            .try_get::<String, _>("quantity")?
-            .parse()
-            .unwrap_or(Decimal::ZERO);
-        let cba: Decimal = row
-            .try_get::<String, _>("cost_base_adjustment")?
-            .parse()
-            .unwrap_or(Decimal::ZERO);
+        let qty = parse_dec("quantity", row.try_get("quantity")?)?;
+        let cba = parse_dec("cost_base_adjustment", row.try_get("cost_base_adjustment")?)?;
         *cba_reduction.entry(tid).or_insert(Decimal::ZERO) += qty * cba;
     }
 
@@ -82,22 +77,10 @@ pub async fn db_holdings(pool: &SqlitePool) -> Result<Vec<HoldingOverview>, sqlx
     for row in &trade_rows {
         let trade_id: i64 = row.try_get("id")?;
         let listing_id: i64 = row.try_get("listing_id")?;
-        let qty: Decimal = row
-            .try_get::<String, _>("quantity")?
-            .parse()
-            .unwrap_or(Decimal::ZERO);
-        let price: Decimal = row
-            .try_get::<String, _>("average_price")?
-            .parse()
-            .unwrap_or(Decimal::ZERO);
-        let brok: Decimal = row
-            .try_get::<String, _>("brokerage")?
-            .parse()
-            .unwrap_or(Decimal::ZERO);
-        let gst: Decimal = row
-            .try_get::<String, _>("gst_on_brokerage")?
-            .parse()
-            .unwrap_or(Decimal::ZERO);
+        let qty = parse_dec("quantity", row.try_get("quantity")?)?;
+        let price = parse_dec("average_price", row.try_get("average_price")?)?;
+        let brok = parse_dec("brokerage", row.try_get("brokerage")?)?;
+        let gst = parse_dec("gst_on_brokerage", row.try_get("gst_on_brokerage")?)?;
 
         let sold = *qty_sold.get(&trade_id).unwrap_or(&Decimal::ZERO);
         let remaining = qty - sold;
@@ -279,6 +262,26 @@ mod tests {
         let pool = test_pool().await;
         let holdings = db_holdings(&pool).await.unwrap();
         assert!(holdings.is_empty());
+    }
+
+    #[tokio::test]
+    async fn db_malformed_decimal_is_an_error_not_zero() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "VAS").await;
+        // Inject a row with a non-numeric average_price directly, bypassing the typed upsert.
+        sqlx::query(
+            "INSERT INTO trades (id, trade_type, date, settlement_date, listing_id, \
+             average_price, quantity, currency, brokerage, gst_on_brokerage, \
+             brokerage_currency, fx_rate) \
+             VALUES (1, 'Buy', '2024-01-01', '2024-01-03', 1, \
+             'not-a-number', '100', 'AUD', '0', '0', 'AUD', '1')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // The malformed value must surface as an error rather than being read as zero.
+        assert!(db_holdings(&pool).await.is_err());
     }
 
     #[tokio::test]

@@ -4,7 +4,7 @@ use axum::{
     http::StatusCode,
     routing::get,
 };
-use chrono::NaiveDate;
+use chrono::{Datelike, NaiveDate};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
@@ -147,7 +147,28 @@ pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<bool, sqlx::Error> 
     Ok(result.rows_affected() > 0)
 }
 
-async fn settlement_days_for_listing(pool: &SqlitePool, listing_id: i64) -> Result<i64, sqlx::Error> {
+/// Advance `date` by `business_days` trading days, skipping Saturdays and Sundays.
+///
+/// Market settlement is quoted as T+n *business* days (e.g. ASX T+2), so a Thursday
+/// trade settles the following Monday, not Saturday. Public holidays are not yet
+/// modelled, so a holiday-adjacent trade may settle one or more days early.
+pub(crate) fn add_business_days(date: NaiveDate, business_days: i64) -> NaiveDate {
+    use chrono::Weekday;
+    let mut result = date;
+    let mut remaining = business_days;
+    while remaining > 0 {
+        result += chrono::Duration::days(1);
+        if !matches!(result.weekday(), Weekday::Sat | Weekday::Sun) {
+            remaining -= 1;
+        }
+    }
+    result
+}
+
+pub(crate) async fn settlement_days_for_listing(
+    pool: &SqlitePool,
+    listing_id: i64,
+) -> Result<i64, sqlx::Error> {
     sqlx::query_scalar(
         "SELECT e.settlement_days FROM listings l \
          JOIN exchanges e ON e.mic = l.exchange_mic \
@@ -181,13 +202,18 @@ async fn upsert(
     Path(id): Path<i64>,
     Json(body): Json<TradeBody>,
 ) -> Result<StatusCode, StatusCode> {
+    // Sells must be created via PUT /sells/{id} so they are persisted together
+    // with a full set of parcel allocations (no uncovered Sell can exist).
+    if body.trade_type == TradeType::Sell {
+        return Err(StatusCode::UNPROCESSABLE_ENTITY);
+    }
     let settlement_date = match body.settlement_date {
         Some(d) => d,
         None => {
             let days = settlement_days_for_listing(&pool, body.listing_id)
                 .await
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-            body.date + chrono::Duration::days(days)
+            add_business_days(body.date, days)
         }
     };
     let trade = Trade {
@@ -375,6 +401,89 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
         let trade = db_get(&pool, 1).await.unwrap().unwrap();
         assert_eq!(trade.settlement_date, NaiveDate::from_ymd_opt(2024, 1, 17).unwrap());
+    }
+
+    #[test]
+    fn add_business_days_skips_weekend() {
+        // 2024-01-18 is a Thursday; T+2 business days settles Monday 2024-01-22,
+        // skipping Sat 2024-01-20 and Sun 2024-01-21.
+        let thursday = NaiveDate::from_ymd_opt(2024, 1, 18).unwrap();
+        assert_eq!(
+            add_business_days(thursday, 2),
+            NaiveDate::from_ymd_opt(2024, 1, 22).unwrap()
+        );
+        // 2024-01-15 is a Monday; T+2 stays within the week (Wednesday).
+        let monday = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
+        assert_eq!(
+            add_business_days(monday, 2),
+            NaiveDate::from_ymd_opt(2024, 1, 17).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn api_settlement_date_auto_populated_skips_weekend() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        // Friday 2024-01-19 + T+2 business days = Tuesday 2024-01-23 (skips the weekend).
+        let body = serde_json::json!({
+            "trade_type": "Buy",
+            "date": "2024-01-19",
+            "listing_id": 1,
+            "average_price": 100.0,
+            "quantity": 10.0,
+            "currency": "AUD",
+            "brokerage": 9.95,
+            "gst_on_brokerage": 0.995,
+            "brokerage_currency": "AUD",
+            "fx_rate": 1.0
+        });
+        let resp = router()
+            .with_state(pool.clone())
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/trades/1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let trade = db_get(&pool, 1).await.unwrap().unwrap();
+        assert_eq!(trade.settlement_date, NaiveDate::from_ymd_opt(2024, 1, 23).unwrap());
+    }
+
+    #[tokio::test]
+    async fn api_put_sell_trade_is_rejected() {
+        // Sells must go through PUT /sells/{id}; the generic trade endpoint rejects them.
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        let body = serde_json::json!({
+            "trade_type": "Sell",
+            "date": "2024-01-15",
+            "listing_id": 1,
+            "average_price": 100.0,
+            "quantity": 10.0,
+            "currency": "AUD",
+            "brokerage": 9.95,
+            "gst_on_brokerage": 0.995,
+            "brokerage_currency": "AUD",
+            "fx_rate": 1.0
+        });
+        let resp = router()
+            .with_state(pool)
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/trades/1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     #[tokio::test]

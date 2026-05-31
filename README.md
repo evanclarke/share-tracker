@@ -164,7 +164,9 @@ Seed data includes `XASX` (ASX, T+2) and `XNYS` (NYSE, T+2).
 | `PUT` | `/trades/:id` | Create or update a trade |
 | `DELETE` | `/trades/:id` | Delete a trade |
 
-If `settlement_date` is omitted from the PUT body, it is auto-calculated as `date + exchange.settlement_days`.
+If `settlement_date` is omitted from the PUT body, it is auto-calculated by advancing `date` by `exchange.settlement_days` **business days** (weekends are skipped; public holidays are not yet modelled).
+
+`PUT /trades/:id` rejects `trade_type: "Sell"` with `422` — Sells must be created via `PUT /sells/:id` (see below) so they are always persisted with a full set of parcel allocations.
 
 ### Income
 
@@ -195,16 +197,55 @@ If `settlement_date` is omitted from the PUT body, it is auto-calculated as `dat
 
 Returns `422 Unprocessable Entity` if the referenced trade is not a Buy/DRP, the trade and AMMA statement reference different listings, or the quantity exceeds the trade quantity.
 
+### Sells
+
+```
+PUT /sells/:id
+```
+
+Creates or replaces a Sell trade **together with all of its parcel allocations** in a single transaction. This is the only write path for Sell trades and their allocations, which guarantees that a Sell can never be persisted under- or over-allocated.
+
+Request body — the Sell trade fields (no `trade_type`; it is always `Sell`) plus an `allocations` array:
+
+```json
+{
+  "date": "2024-06-03",
+  "settlement_date": "2024-06-05",
+  "listing_id": 1,
+  "average_price": "15.00",
+  "quantity": "100",
+  "currency": "AUD",
+  "brokerage": "9.95",
+  "gst_on_brokerage": "0.995",
+  "brokerage_currency": "AUD",
+  "fx_rate": "1",
+  "contract_note_ref": null,
+  "allocations": [
+    { "purchase_trade_id": 1, "quantity_allocated": "100" }
+  ]
+}
+```
+
+`settlement_date` is optional and auto-calculated as for trades. Re-`PUT`ting the same id replaces the Sell row and *all* of its allocations with the submitted set.
+
+Returns `204 No Content` on success, or `422 Unprocessable Entity` if the allocations do not sum exactly to `quantity`, a referenced purchase trade is missing or is not a Buy/DRP, or an allocation would over-allocate a purchase parcel. On any failure the whole transaction is rolled back — nothing is persisted.
+
+```
+DELETE /sells/:id
+```
+
+Deletes a Sell trade and all of its parcel allocations in one transaction, freeing the purchase parcels those allocations had consumed. Returns `204 No Content` on success, `404 Not Found` if no trade has that id, or `422 Unprocessable Entity` if the id refers to a trade that is not a Sell (use `DELETE /trades/:id` for Buy/DRP trades).
+
 ### Parcel allocations
+
+Parcel allocations are **read-only** over HTTP; they are created and replaced atomically with their Sell trade via `PUT /sells/:id`. Allowing standalone writes would let a Sell become under-covered (e.g. by deleting or shrinking an allocation).
 
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/parcel_allocations` | List all parcel allocations |
 | `GET` | `/parcel_allocations/:id` | Get one parcel allocation |
-| `PUT` | `/parcel_allocations/:id` | Create or update a parcel allocation |
-| `DELETE` | `/parcel_allocations/:id` | Delete a parcel allocation |
 
-Returns `422` if the sale trade is not a Sell, the purchase trade is not a Buy/DRP, or the allocation would exceed the trade's quantity (cumulatively across all allocations for that trade).
+`PUT` and `DELETE` on these paths return `405 Method Not Allowed`.
 
 ### Portfolio reports
 
@@ -263,7 +304,8 @@ Returns one record per Australian financial year (identified by the calendar yea
 | `200 OK` | Successful GET |
 | `204 No Content` | Successful PUT or DELETE |
 | `404 Not Found` | Resource does not exist |
-| `422 Unprocessable Entity` | Business rule violation (e.g. over-allocation, wrong trade type) |
+| `405 Method Not Allowed` | Write attempted on a read-only path (e.g. `parcel_allocations`) |
+| `422 Unprocessable Entity` | Business rule violation (e.g. over-allocation, wrong trade type, under-allocated Sell) |
 | `500 Internal Server Error` | Unexpected database error |
 
 ## Tech stack

@@ -1,3 +1,4 @@
+use crate::decimal::parse_dec;
 use axum::{Json, Router, extract::State, http::StatusCode, routing::get};
 use chrono::{Months, NaiveDate};
 use rust_decimal::Decimal;
@@ -87,22 +88,10 @@ pub async fn db_realised_gains(pool: &SqlitePool) -> Result<Vec<RealisedGainLoss
             SellInfo {
                 listing_id: row.try_get("listing_id")?,
                 date: row.try_get("date")?,
-                quantity: row
-                    .try_get::<String, _>("quantity")?
-                    .parse()
-                    .unwrap_or(Decimal::ZERO),
-                average_price: row
-                    .try_get::<String, _>("average_price")?
-                    .parse()
-                    .unwrap_or(Decimal::ZERO),
-                brokerage: row
-                    .try_get::<String, _>("brokerage")?
-                    .parse()
-                    .unwrap_or(Decimal::ZERO),
-                gst_on_brokerage: row
-                    .try_get::<String, _>("gst_on_brokerage")?
-                    .parse()
-                    .unwrap_or(Decimal::ZERO),
+                quantity: parse_dec("quantity", row.try_get("quantity")?)?,
+                average_price: parse_dec("average_price", row.try_get("average_price")?)?,
+                brokerage: parse_dec("brokerage", row.try_get("brokerage")?)?,
+                gst_on_brokerage: parse_dec("gst_on_brokerage", row.try_get("gst_on_brokerage")?)?,
             },
         );
     }
@@ -114,22 +103,10 @@ pub async fn db_realised_gains(pool: &SqlitePool) -> Result<Vec<RealisedGainLoss
             id,
             BuyInfo {
                 date: row.try_get("date")?,
-                quantity: row
-                    .try_get::<String, _>("quantity")?
-                    .parse()
-                    .unwrap_or(Decimal::ZERO),
-                average_price: row
-                    .try_get::<String, _>("average_price")?
-                    .parse()
-                    .unwrap_or(Decimal::ZERO),
-                brokerage: row
-                    .try_get::<String, _>("brokerage")?
-                    .parse()
-                    .unwrap_or(Decimal::ZERO),
-                gst_on_brokerage: row
-                    .try_get::<String, _>("gst_on_brokerage")?
-                    .parse()
-                    .unwrap_or(Decimal::ZERO),
+                quantity: parse_dec("quantity", row.try_get("quantity")?)?,
+                average_price: parse_dec("average_price", row.try_get("average_price")?)?,
+                brokerage: parse_dec("brokerage", row.try_get("brokerage")?)?,
+                gst_on_brokerage: parse_dec("gst_on_brokerage", row.try_get("gst_on_brokerage")?)?,
             },
         );
     }
@@ -137,14 +114,8 @@ pub async fn db_realised_gains(pool: &SqlitePool) -> Result<Vec<RealisedGainLoss
     let mut cba_reduction: HashMap<i64, Decimal> = HashMap::new();
     for row in &amit_rows {
         let tid: i64 = row.try_get("trade_id")?;
-        let qty: Decimal = row
-            .try_get::<String, _>("quantity")?
-            .parse()
-            .unwrap_or(Decimal::ZERO);
-        let cba: Decimal = row
-            .try_get::<String, _>("cost_base_adjustment")?
-            .parse()
-            .unwrap_or(Decimal::ZERO);
+        let qty = parse_dec("quantity", row.try_get("quantity")?)?;
+        let cba = parse_dec("cost_base_adjustment", row.try_get("cost_base_adjustment")?)?;
         *cba_reduction.entry(tid).or_insert(Decimal::ZERO) += qty * cba;
     }
 
@@ -155,10 +126,7 @@ pub async fn db_realised_gains(pool: &SqlitePool) -> Result<Vec<RealisedGainLoss
     for row in &alloc_rows {
         let sale_id: i64 = row.try_get("sale_trade_id")?;
         let buy_id: i64 = row.try_get("purchase_trade_id")?;
-        let qty_alloc: Decimal = row
-            .try_get::<String, _>("quantity_allocated")?
-            .parse()
-            .unwrap_or(Decimal::ZERO);
+        let qty_alloc = parse_dec("quantity_allocated", row.try_get("quantity_allocated")?)?;
 
         let Some(sale) = sell_map.get(&sale_id) else {
             continue;

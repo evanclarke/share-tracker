@@ -3,12 +3,14 @@ mod amit_adjustment;
 mod args;
 mod portfolio;
 mod db;
+mod decimal;
 mod exchange;
 mod income;
 mod listing;
 mod logging;
 mod parcel_allocation;
 mod realised_gains;
+mod sell;
 mod tax_summary;
 mod trade;
 mod unrealised_gains;
@@ -31,6 +33,7 @@ async fn main() {
         .merge(income::router())
         .merge(amma::router())
         .merge(parcel_allocation::router())
+        .merge(sell::router())
         .merge(amit_adjustment::router())
         .merge(portfolio::router())
         .merge(unrealised_gains::router())

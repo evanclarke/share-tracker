@@ -193,7 +193,10 @@ async fn upsert(
         Err(UpsertError::TradeNotBuyOrDrp) => Err(StatusCode::UNPROCESSABLE_ENTITY),
         Err(UpsertError::ListingMismatch) => Err(StatusCode::UNPROCESSABLE_ENTITY),
         Err(UpsertError::QuantityExceedsTrade) => Err(StatusCode::UNPROCESSABLE_ENTITY),
-        Err(UpsertError::Db(_)) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+        Err(UpsertError::Db(e)) => {
+            tracing::error!(error = %e, "AMIT adjustment upsert failed");
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
     }
 }
 

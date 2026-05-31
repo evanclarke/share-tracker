@@ -1,3 +1,4 @@
+use crate::decimal::parse_dec;
 use axum::{Json, Router, extract::State, http::StatusCode, routing::get};
 use chrono::{Datelike, NaiveDate};
 use rust_decimal::Decimal;
@@ -69,10 +70,6 @@ fn zero_summary(tax_year: i32) -> TaxYearSummary {
     }
 }
 
-fn parse_dec(s: String) -> Decimal {
-    s.parse().unwrap_or(Decimal::ZERO)
-}
-
 pub async fn db_tax_summary(pool: &SqlitePool) -> Result<Vec<TaxYearSummary>, sqlx::Error> {
     let income_rows = sqlx::query(
         "SELECT date_paid, franked_amount, unfranked_amount, foreign_source_income, \
@@ -102,13 +99,13 @@ pub async fn db_tax_summary(pool: &SqlitePool) -> Result<Vec<TaxYearSummary>, sq
             date_paid.year()
         };
 
-        let franked = parse_dec(row.try_get::<String, _>("franked_amount")?);
-        let unfranked = parse_dec(row.try_get::<String, _>("unfranked_amount")?);
-        let foreign_income = parse_dec(row.try_get::<String, _>("foreign_source_income")?);
-        let foreign_tax = parse_dec(row.try_get::<String, _>("foreign_tax_paid")?);
-        let tfn_wht = parse_dec(row.try_get::<String, _>("tfn_withholding_tax")?);
-        let fc = parse_dec(row.try_get::<String, _>("franking_credits")?);
-        let lic = parse_dec(row.try_get::<String, _>("lic_capital_gain_deduction")?);
+        let franked = parse_dec("franked_amount", row.try_get("franked_amount")?)?;
+        let unfranked = parse_dec("unfranked_amount", row.try_get("unfranked_amount")?)?;
+        let foreign_income = parse_dec("foreign_source_income", row.try_get("foreign_source_income")?)?;
+        let foreign_tax = parse_dec("foreign_tax_paid", row.try_get("foreign_tax_paid")?)?;
+        let tfn_wht = parse_dec("tfn_withholding_tax", row.try_get("tfn_withholding_tax")?)?;
+        let fc = parse_dec("franking_credits", row.try_get("franking_credits")?)?;
+        let lic = parse_dec("lic_capital_gain_deduction", row.try_get("lic_capital_gain_deduction")?)?;
 
         let s = map.entry(tax_year).or_insert_with(|| zero_summary(tax_year));
         s.dividends_assessable += franked + unfranked;
@@ -123,19 +120,20 @@ pub async fn db_tax_summary(pool: &SqlitePool) -> Result<Vec<TaxYearSummary>, sq
         let tax_year_end_date: NaiveDate = row.try_get("tax_year_end_date")?;
         let tax_year = tax_year_end_date.year();
 
-        let interest = parse_dec(row.try_get::<String, _>("australian_interest")?);
-        let div_unfranked = parse_dec(row.try_get::<String, _>("australian_dividends_unfranked")?);
-        let franked_div = parse_dec(row.try_get::<String, _>("franked_dividends")?);
-        let fc = parse_dec(row.try_get::<String, _>("franking_credits")?);
-        let rent = parse_dec(row.try_get::<String, _>("net_rent")?);
-        let foreign_inc = parse_dec(row.try_get::<String, _>("foreign_income")?);
-        let foreign_tax = parse_dec(row.try_get::<String, _>("foreign_tax_credits")?);
-        let other = parse_dec(row.try_get::<String, _>("other_income")?);
-        let cgt_disc = parse_dec(row.try_get::<String, _>("cgt_discount_gains")?);
-        let cgt_idx = parse_dec(row.try_get::<String, _>("cgt_indexation_gains")?);
-        let cgt_other = parse_dec(row.try_get::<String, _>("cgt_other_gains")?);
-        let cap_losses = parse_dec(row.try_get::<String, _>("capital_losses_applied")?);
-        let tfn_wht = parse_dec(row.try_get::<String, _>("tfn_withholding_tax")?);
+        let interest = parse_dec("australian_interest", row.try_get("australian_interest")?)?;
+        let div_unfranked =
+            parse_dec("australian_dividends_unfranked", row.try_get("australian_dividends_unfranked")?)?;
+        let franked_div = parse_dec("franked_dividends", row.try_get("franked_dividends")?)?;
+        let fc = parse_dec("franking_credits", row.try_get("franking_credits")?)?;
+        let rent = parse_dec("net_rent", row.try_get("net_rent")?)?;
+        let foreign_inc = parse_dec("foreign_income", row.try_get("foreign_income")?)?;
+        let foreign_tax = parse_dec("foreign_tax_credits", row.try_get("foreign_tax_credits")?)?;
+        let other = parse_dec("other_income", row.try_get("other_income")?)?;
+        let cgt_disc = parse_dec("cgt_discount_gains", row.try_get("cgt_discount_gains")?)?;
+        let cgt_idx = parse_dec("cgt_indexation_gains", row.try_get("cgt_indexation_gains")?)?;
+        let cgt_other = parse_dec("cgt_other_gains", row.try_get("cgt_other_gains")?)?;
+        let cap_losses = parse_dec("capital_losses_applied", row.try_get("capital_losses_applied")?)?;
+        let tfn_wht = parse_dec("tfn_withholding_tax", row.try_get("tfn_withholding_tax")?)?;
 
         let s = map.entry(tax_year).or_insert_with(|| zero_summary(tax_year));
         s.amma_australian_interest += interest;
