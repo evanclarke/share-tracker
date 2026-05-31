@@ -27,6 +27,7 @@ async fn main() {
 
     let pool = db::init(&args.db).await.expect("failed to open database");
     db::spawn_daily_backup(pool.clone(), args.db.clone());
+    ato_fx_rate::spawn_weekly_import(pool.clone());
 
     let app = exchange::router()
         .merge(listing::router())

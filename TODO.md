@@ -31,14 +31,14 @@ Items are only marked done when a passing test exists for them.
 ## Reference Data — ATO FX Rate
 - [x] ATO FX Rate model (currency ISO 4217 code, month, rate as foreign-currency-per-AUD) — `src/ato_fx_rate.rs`
 - [x] DB schema: `ato_fx_rates` table; rate stored as TEXT Decimal; UNIQUE on (currency, month) — migration `0010_ato_fx_rates.sql`
-- [x] List/get API endpoints for ATO FX rates (read-only over HTTP; writes come from the import). `db_upsert` is `#[cfg(test)]`-gated until the import (its sole caller) lands
+- [x] List/get API endpoints for ATO FX rates (read-only over HTTP; writes come from the import via `db_import_rate`)
 - [x] Tests: insert, retrieve; (currency, month) uniqueness enforced; rate decimal precision preserved in round-trip (`db_insert_and_retrieve`, `db_currency_month_uniqueness_enforced`, `db_decimal_precision_preserved_in_round_trip`, plus API tests)
 
 ## ATO FX Rate Import
-- [ ] Import logic: fetch the ATO's published monthly foreign exchange rates, parse, and upsert new (currency, month) rows idempotently (re-running must not create duplicates or alter existing rows)
-- [ ] Weekly scheduled task runs the import on a recurring interval (alongside the daily backup)
-- [ ] HTTP endpoint to trigger the import manually for retries / missed runs, sharing the same idempotent import logic
-- [ ] Tests: import is idempotent (re-run stores no duplicates, leaves existing rows unchanged); manual-trigger endpoint invokes the import
+- [x] Import logic: `run_import` fetches the ATO feed (`fetch_rates` via reqwest), `parse_rates` parses the `currency,YYYY-MM,rate` CSV (fails loudly on malformed rows), and `import_from_content`/`db_import_rate` upsert new (currency, month) rows via `ON CONFLICT DO NOTHING` so existing rows are never created twice or altered. NOTE: the live ATO source URL/format is assumed (normalised CSV at `ATO_FX_RATES_URL`); confirm against the real feed and adjust `parse_rates`/URL if it differs
+- [x] Weekly scheduled task runs the import on a recurring interval (alongside the daily backup) — `spawn_weekly_import` in main.rs, mirrors `spawn_daily_backup`
+- [x] HTTP endpoint to trigger the import manually for retries / missed runs, sharing the same idempotent import logic — `POST /ato_fx_rates/import` (empty body → fetch from ATO; non-empty body → import that feed, for retries/offline); both call `import_from_content`
+- [x] Tests: import is idempotent (re-run stores no duplicates, leaves existing rows unchanged); manual-trigger endpoint invokes the import (`import_is_idempotent`, `import_adds_only_new_rows_on_rerun`, `api_import_endpoint_invokes_import`, plus parse + malformed-feed tests)
 
 ## FX Conversion (ATO reference rate)
 - [ ] Conversion helper: AUD = foreign / Rate, using the ATO FX Rate for the amount's currency and the month of the relevant date (e.g. trade date); AUD amounts pass through (rate = 1)
