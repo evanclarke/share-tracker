@@ -8,6 +8,10 @@ Items are only marked done when a passing test exists for them.
 - [x] Database initialisation and connection pool
 - [x] Daily backup on startup (copy DB to `<file>-YYYY-MM-DD.db`)
 - [ ] GitHub Actions CI: run tests on push
+- [ ] Logging setup: tracing subscriber with INFO as default level, configurable via RUST_LOG
+- [ ] Tests: log output at INFO level; RUST_LOG override works
+- [ ] Database migration system (sqlx migrate): migrations run on startup, applied once
+- [ ] Tests: migrations apply cleanly on a fresh in-memory DB
 
 ## Reference Data — Exchange
 - [ ] Exchange model (MIC, name, country, currency, timezone, settlement period)

@@ -26,6 +26,9 @@ and cost basis calculations are done with the Australian tax view in mind.
  - Web frontend for all features
  - Features will all have tests
  - Hosted on GitHub, with a hook to run tests when commits are pushed
+ - Clear logging with INFO level the default
+ - Data model changes implemented in database via data migrations
+ - Database seeding with exchange details for ASX and NYSE
 
 # Data Model
 ## Reference Data
