@@ -19,7 +19,7 @@ and cost basis calculations are done with the Australian tax view in mind.
    - AMIT
    - CPI
 
-# Implementation Overview
+# Implementation Overview and Rules
  - Server process design, written in Rust, using SQLite as the storage
    - Database file can be specified on command line
    - Daily backups are created (named <file>-date.db)
@@ -29,6 +29,9 @@ and cost basis calculations are done with the Australian tax view in mind.
  - Clear logging with INFO level the default
  - Data model changes implemented in database via data migrations
  - Database seeding with exchange details for ASX and NYSE
+ - For financial values, always use a BigDecimal type as not to introduce errors due to inexact floats
+ - Database migrations must not drop data
+ - If a field will only contain a limited set of values, always create an enum and constraints in the database
 
 # Data Model
 ## Reference Data

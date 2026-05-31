@@ -8,6 +8,7 @@ Items are only marked done when a passing test exists for them.
 - [x] Database initialisation and connection pool
 - [x] Daily backup on startup (copy DB to `<file>-YYYY-MM-DD.db`)
 - [ ] GitHub Actions CI: run tests on push
+- [ ] CI: verify no migration contains DROP TABLE or DROP COLUMN statements
 - [x] Logging setup: tracing subscriber with INFO as default level, configurable via RUST_LOG
 - [x] Tests: log output at INFO level; RUST_LOG override works
 - [x] Database migration system (sqlx migrate): migrations run on startup, applied once
@@ -47,12 +48,15 @@ Items are only marked done when a passing test exists for them.
 ## AMMA Statements
 - [ ] AMMA model (listing FK, tax year end date, units held, date received, australian interest, australian dividends unfranked, franked dividends, franking credits, net rent, foreign income, foreign tax credits, other income, CGT discount gains, CGT indexation gains, CGT other gains, capital losses applied, tax deferred amount, tax free amount, cost base adjustment per unit, TFN withholding tax)
 - [ ] DB schema: `amma_statements` table
+- [ ] All financial fields use Decimal (not f64): australian_interest, australian_dividends, franked_dividends, franking_credits, net_rent, foreign_income, foreign_tax_credits, other_income, cgt_discount_gains, cgt_indexation_gains, cgt_other_gains, capital_losses_applied, tax_deferred_amount, tax_free_amount, cost_base_adjustment, tfn_withholding_tax
 - [ ] CRUD API endpoints for AMMA statements
 - [ ] Tests: insert and retrieve AMMA statement; cost base adjustment calculation
+- [ ] Tests: decimal precision preserved in API round-trip
 
 ## Share Parcel Allocation
 - [ ] Parcel allocation model (sale trade FK, purchase trade FK, quantity allocated)
 - [ ] DB schema: `parcel_allocations` table
+- [ ] quantity_allocated uses Decimal (not f64)
 - [ ] Validate quantity allocated does not exceed available quantity on purchase trade
 - [ ] Validate total allocations for a sale trade do not exceed sale quantity
 - [ ] CRUD API endpoints for parcel allocations
