@@ -17,7 +17,6 @@ and cost basis calculations are done with the Australian tax view in mind.
    - Tax
  - Cost base adjustments
    - AMIT
-   - CPI
 
 # Implementation Overview and Rules
  - Server process design, written in Rust, using SQLite as the storage

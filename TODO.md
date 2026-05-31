@@ -61,11 +61,13 @@ Items are only marked done when a passing test exists for them.
 - [x] Validate total allocations for a sale trade do not exceed sale quantity
 - [x] CRUD API endpoints for parcel allocations
 - [x] Tests: allocation creation, over-allocation rejection
+- [ ] Validate sale_trade_id references a trade of type Sell
+- [ ] Validate purchase_trade_id references a trade of type Buy or DRP
+- [ ] Tests: type constraint violations rejected
 
 ## Cost Base Adjustments
 - [ ] AMIT cost base adjustment: apply AMMA `tax deferred` amounts to reduce cost base of affected parcels
-- [ ] CPI indexation: apply CPI adjustment to cost base for assets acquired before 21 Sep 1999
-- [ ] Tests: AMIT adjustment, CPI adjustment
+- [ ] Tests: AMIT adjustment
 
 ## Reporting — Portfolio Overview
 - [ ] Current holdings: aggregate open parcels by listing (quantity, average cost base)
@@ -82,9 +84,8 @@ Items are only marked done when a passing test exists for them.
 ## Reporting — Realised Gains/Losses
 - [ ] Calculate capital gain/loss per sale using allocated parcels and adjusted cost bases
 - [ ] Apply CGT discount (50%) for parcels held > 12 months
-- [ ] Apply indexation for eligible parcels (pre-21 Sep 1999)
 - [ ] API endpoint for realised gains/losses
-- [ ] Tests: FIFO sale, specific parcel sale, discount vs indexation choice
+- [ ] Tests: specific parcel sale, CGT discount eligibility
 
 ## Reporting — Tax
 - [ ] Aggregate all assessable income components by tax year
