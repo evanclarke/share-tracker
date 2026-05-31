@@ -21,10 +21,10 @@ Items are only marked done when a passing test exists for them.
 - [x] Tests: insert, retrieve, upsert exchange
 
 ## Reference Data — Listing
-- [ ] Listing model (exchange FK, ticker, name, ISIN, security type, currency, AMIT flag)
-- [ ] DB schema: `listings` table
-- [ ] CRUD API endpoints for listings
-- [ ] Tests: insert, retrieve listing; FK constraint to exchange
+- [x] Listing model (exchange FK, ticker, name, ISIN, security type, currency, AMIT flag)
+- [x] DB schema: `listings` table
+- [x] CRUD API endpoints for listings
+- [x] Tests: insert, retrieve listing; FK constraint to exchange
 
 ## Trade Activity
 - [ ] Trade model (type, date, settlement date, listing FK, average price, quantity, currency, brokerage, GST on brokerage, brokerage currency, FX rate, contract note reference)
