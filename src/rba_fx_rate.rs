@@ -212,6 +212,12 @@ pub fn spawn_weekly_import(pool: SqlitePool) {
                 ),
                 Err(e) => tracing::warn!("RBA FX rate import failed: {e:?}"),
             }
+            let next_run = chrono::Local::now()
+                + chrono::Duration::from_std(IMPORT_INTERVAL).expect("import interval in range");
+            tracing::info!(
+                next_run = %next_run.format("%Y-%m-%d %H:%M:%S %Z"),
+                "next RBA FX rate import scheduled"
+            );
             tokio::time::sleep(IMPORT_INTERVAL).await;
         }
     });

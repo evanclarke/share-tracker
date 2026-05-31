@@ -4,6 +4,7 @@
 - Solo project: commit directly to `main`. Don't create feature branches for commits
 - `cargo build` and `cargo test` must both be warning-free before a task is done (a `pub` item only reached from `#[cfg(test)]` code warns in the non-test build — gate it `#[cfg(test)]` or remove it)
 - Implement a requirement fully: if the spec says "apply the 50% CGT discount", compute the discounted figure — don't stop at an eligibility flag/indicator. If only partially done, leave it unchecked in TODO with a note on what remains
+- Recurring background tasks (daily backup, weekly RBA FX import, future schedulers) must, after each run, log the next scheduled run time at INFO — mirror `db::spawn_daily_backup`'s `next backup scheduled` line — so the schedule is verifiable from logs without reading code
 
 # Financial correctness
 - Money and quantities are always `Decimal`, never `f64`. New monetary columns are `TEXT`; migrations must preserve precision (never round-trip a value through a `REAL` column)
