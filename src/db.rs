@@ -18,7 +18,9 @@ pub async fn init(db_path: &str) -> Result<SqlitePool, sqlx::Error> {
         opts = opts.journal_mode(SqliteJournalMode::Wal);
     }
 
-    SqlitePool::connect_with(opts).await
+    let pool = SqlitePool::connect_with(opts).await?;
+    sqlx::migrate!().run(&pool).await?;
+    Ok(pool)
 }
 
 pub fn backup_path(db_path: &str) -> String {
@@ -39,7 +41,7 @@ pub fn spawn_daily_backup(pool: SqlitePool, db_path: String) {
     tokio::spawn(async move {
         loop {
             if let Err(e) = backup(&pool, &db_path).await {
-                eprintln!("warning: backup failed: {e}");
+                tracing::warn!("backup failed: {e}");
             }
             let now = Local::now();
             let next_midnight = Local
@@ -85,6 +87,23 @@ mod tests {
         backup(&pool, &db_path).await.unwrap();
 
         assert!(Path::new(&backup_path(&db_path)).exists());
+    }
+
+    #[tokio::test]
+    async fn migrations_apply_on_fresh_db() {
+        let pool = init(":memory:").await.unwrap();
+        let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM _sqlx_migrations")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(count > 0);
+    }
+
+    #[tokio::test]
+    async fn migrations_are_idempotent() {
+        let pool = init(":memory:").await.unwrap();
+        // Running migrate again should be a no-op, not an error
+        sqlx::migrate!().run(&pool).await.unwrap();
     }
 
     #[tokio::test]

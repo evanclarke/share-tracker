@@ -1,22 +1,25 @@
 mod args;
 mod db;
+mod logging;
 
 use args::Args;
 use clap::Parser;
 
 #[tokio::main]
 async fn main() {
+    logging::init();
+
     let args = Args::parse();
 
     let pool = db::init(&args.db).await.expect("failed to open database");
 
     db::spawn_daily_backup(pool.clone(), args.db.clone());
 
-    println!("share-tracker started, db: {}", args.db);
+    tracing::info!("share-tracker started, db: {}", args.db);
     // TODO: start axum server
 
     shutdown_signal().await;
-    println!("shutting down");
+    tracing::info!("shutting down");
     pool.close().await;
 }
 
