@@ -258,6 +258,9 @@ mod tests {
             brokerage_currency: "AUD".to_string(),
             fx_rate: Decimal::ONE,
             contract_note_ref: None,
+            residual_brought_forward: Decimal::ZERO,
+            residual_carried_forward: Decimal::ZERO,
+            residual_paid_out: Decimal::ZERO,
         };
         trade::db_upsert(pool, &t).await.unwrap();
         t.id

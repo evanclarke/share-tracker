@@ -279,6 +279,9 @@ mod tests {
                 brokerage_currency: "AUD".to_string(),
                 fx_rate: Decimal::ONE,
                 contract_note_ref: None,
+                residual_brought_forward: Decimal::ZERO,
+                residual_carried_forward: Decimal::ZERO,
+                residual_paid_out: Decimal::ZERO,
             },
         )
         .await
@@ -309,6 +312,9 @@ mod tests {
                 brokerage_currency: "AUD".to_string(),
                 fx_rate: Decimal::ONE,
                 contract_note_ref: None,
+                residual_brought_forward: Decimal::ZERO,
+                residual_carried_forward: Decimal::ZERO,
+                residual_paid_out: Decimal::ZERO,
             },
         )
         .await
@@ -416,6 +422,9 @@ mod tests {
                 brokerage_currency: "AUD".to_string(),
                 fx_rate: Decimal::ONE,
                 contract_note_ref: None,
+                residual_brought_forward: Decimal::ZERO,
+                residual_carried_forward: Decimal::ZERO,
+                residual_paid_out: Decimal::ZERO,
             },
         )
         .await
@@ -436,6 +445,9 @@ mod tests {
                 brokerage_currency: "AUD".to_string(),
                 fx_rate: Decimal::ONE,
                 contract_note_ref: None,
+                residual_brought_forward: Decimal::ZERO,
+                residual_carried_forward: Decimal::ZERO,
+                residual_paid_out: Decimal::ZERO,
             },
         )
         .await
@@ -683,6 +695,9 @@ mod tests {
                 // A wrong manual override: the report must prefer the ATO rate.
                 fx_rate: "0.99".parse().unwrap(),
                 contract_note_ref: None,
+                residual_brought_forward: Decimal::ZERO,
+                residual_carried_forward: Decimal::ZERO,
+                residual_paid_out: Decimal::ZERO,
             },
         )
         .await

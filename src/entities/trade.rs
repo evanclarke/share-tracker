@@ -35,6 +35,14 @@ pub struct Trade {
     /// 1.0 for AUD trades.
     pub fx_rate: Decimal,
     pub contract_note_ref: Option<String>,
+    /// DRP reinvestment residual cash (DRP trades only; 0 for Buy/Sell). When a
+    /// distribution doesn't divide evenly into whole shares, the leftover is
+    /// carried forward to the next reinvestment or paid out. These are populated
+    /// by the reinvestment operation (see `entities::drp_reinvestment`); a
+    /// manually entered DRP trade leaves them 0.
+    pub residual_brought_forward: Decimal,
+    pub residual_carried_forward: Decimal,
+    pub residual_paid_out: Decimal,
 }
 
 impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for Trade {
@@ -56,6 +64,9 @@ impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for Trade {
             brokerage_currency: row.try_get("brokerage_currency")?,
             fx_rate: dec(row.try_get("fx_rate")?)?,
             contract_note_ref: row.try_get("contract_note_ref")?,
+            residual_brought_forward: dec(row.try_get("residual_brought_forward")?)?,
+            residual_carried_forward: dec(row.try_get("residual_carried_forward")?)?,
+            residual_paid_out: dec(row.try_get("residual_paid_out")?)?,
         })
     }
 }
@@ -76,6 +87,12 @@ pub struct TradeBody {
     pub fx_rate: Decimal,
     #[serde(default)]
     pub contract_note_ref: Option<String>,
+    #[serde(default)]
+    pub residual_brought_forward: Decimal,
+    #[serde(default)]
+    pub residual_carried_forward: Decimal,
+    #[serde(default)]
+    pub residual_paid_out: Decimal,
 }
 
 pub fn router() -> Router<SqlitePool> {
@@ -87,7 +104,8 @@ pub fn router() -> Router<SqlitePool> {
 pub async fn db_list(pool: &SqlitePool) -> Result<Vec<Trade>, sqlx::Error> {
     sqlx::query_as(
         "SELECT id, trade_type, date, settlement_date, listing_id, average_price, quantity, \
-         currency, brokerage, gst_on_brokerage, brokerage_currency, fx_rate, contract_note_ref \
+         currency, brokerage, gst_on_brokerage, brokerage_currency, fx_rate, contract_note_ref, \
+         residual_brought_forward, residual_carried_forward, residual_paid_out \
          FROM trades ORDER BY date, id",
     )
     .fetch_all(pool)
@@ -97,7 +115,8 @@ pub async fn db_list(pool: &SqlitePool) -> Result<Vec<Trade>, sqlx::Error> {
 pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<Trade>, sqlx::Error> {
     sqlx::query_as(
         "SELECT id, trade_type, date, settlement_date, listing_id, average_price, quantity, \
-         currency, brokerage, gst_on_brokerage, brokerage_currency, fx_rate, contract_note_ref \
+         currency, brokerage, gst_on_brokerage, brokerage_currency, fx_rate, contract_note_ref, \
+         residual_brought_forward, residual_carried_forward, residual_paid_out \
          FROM trades WHERE id = ?",
     )
     .bind(id)
@@ -109,21 +128,25 @@ pub async fn db_upsert(pool: &SqlitePool, trade: &Trade) -> Result<(), sqlx::Err
     sqlx::query(
         "INSERT INTO trades \
          (id, trade_type, date, settlement_date, listing_id, average_price, quantity, \
-          currency, brokerage, gst_on_brokerage, brokerage_currency, fx_rate, contract_note_ref) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+          currency, brokerage, gst_on_brokerage, brokerage_currency, fx_rate, contract_note_ref, \
+          residual_brought_forward, residual_carried_forward, residual_paid_out) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT(id) DO UPDATE SET \
-             trade_type         = excluded.trade_type, \
-             date               = excluded.date, \
-             settlement_date    = excluded.settlement_date, \
-             listing_id         = excluded.listing_id, \
-             average_price      = excluded.average_price, \
-             quantity           = excluded.quantity, \
-             currency           = excluded.currency, \
-             brokerage          = excluded.brokerage, \
-             gst_on_brokerage   = excluded.gst_on_brokerage, \
-             brokerage_currency = excluded.brokerage_currency, \
-             fx_rate            = excluded.fx_rate, \
-             contract_note_ref  = excluded.contract_note_ref",
+             trade_type               = excluded.trade_type, \
+             date                     = excluded.date, \
+             settlement_date          = excluded.settlement_date, \
+             listing_id               = excluded.listing_id, \
+             average_price            = excluded.average_price, \
+             quantity                 = excluded.quantity, \
+             currency                 = excluded.currency, \
+             brokerage                = excluded.brokerage, \
+             gst_on_brokerage         = excluded.gst_on_brokerage, \
+             brokerage_currency       = excluded.brokerage_currency, \
+             fx_rate                  = excluded.fx_rate, \
+             contract_note_ref        = excluded.contract_note_ref, \
+             residual_brought_forward = excluded.residual_brought_forward, \
+             residual_carried_forward = excluded.residual_carried_forward, \
+             residual_paid_out        = excluded.residual_paid_out",
     )
     .bind(trade.id)
     .bind(trade.trade_type)
@@ -138,6 +161,9 @@ pub async fn db_upsert(pool: &SqlitePool, trade: &Trade) -> Result<(), sqlx::Err
     .bind(&trade.brokerage_currency)
     .bind(trade.fx_rate.to_string())
     .bind(&trade.contract_note_ref)
+    .bind(trade.residual_brought_forward.to_string())
+    .bind(trade.residual_carried_forward.to_string())
+    .bind(trade.residual_paid_out.to_string())
     .execute(pool)
     .await?;
     Ok(())
@@ -234,6 +260,9 @@ async fn upsert(
         brokerage_currency: body.brokerage_currency,
         fx_rate: body.fx_rate,
         contract_note_ref: body.contract_note_ref,
+        residual_brought_forward: body.residual_brought_forward,
+        residual_carried_forward: body.residual_carried_forward,
+        residual_paid_out: body.residual_paid_out,
     };
     db_upsert(&pool, &trade)
         .await
@@ -297,6 +326,9 @@ mod tests {
             brokerage_currency: "AUD".to_string(),
             fx_rate: Decimal::ONE,
             contract_note_ref: Some("CN001".to_string()),
+            residual_brought_forward: Decimal::ZERO,
+            residual_carried_forward: Decimal::ZERO,
+            residual_paid_out: Decimal::ZERO,
         }
     }
 
@@ -333,6 +365,9 @@ mod tests {
             brokerage_currency: "AUD".to_string(),
             fx_rate: Decimal::ONE,
             contract_note_ref: None,
+            residual_brought_forward: Decimal::ZERO,
+            residual_carried_forward: Decimal::ZERO,
+            residual_paid_out: Decimal::ZERO,
         };
         db_upsert(&pool, &trade).await.unwrap();
         let got = db_get(&pool, 2).await.unwrap().unwrap();
@@ -358,11 +393,43 @@ mod tests {
             brokerage_currency: "AUD".to_string(),
             fx_rate: Decimal::ONE,
             contract_note_ref: None,
+            residual_brought_forward: Decimal::ZERO,
+            residual_carried_forward: Decimal::ZERO,
+            residual_paid_out: Decimal::ZERO,
         };
         db_upsert(&pool, &trade).await.unwrap();
         let got = db_get(&pool, 3).await.unwrap().unwrap();
         assert_eq!(got.trade_type, TradeType::DRP);
         assert_eq!(got.quantity, Decimal::from(2));
+    }
+
+    #[tokio::test]
+    async fn db_drp_residual_fields_round_trip_with_precision() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        let mut trade = buy_trade();
+        trade.id = 7;
+        trade.trade_type = TradeType::DRP;
+        trade.residual_brought_forward = "1.234567890".parse().unwrap();
+        trade.residual_carried_forward = "0.987654321".parse().unwrap();
+        trade.residual_paid_out = "2.500000001".parse().unwrap();
+        db_upsert(&pool, &trade).await.unwrap();
+        let got = db_get(&pool, 7).await.unwrap().unwrap();
+        assert_eq!(got.residual_brought_forward, "1.234567890".parse::<Decimal>().unwrap());
+        assert_eq!(got.residual_carried_forward, "0.987654321".parse::<Decimal>().unwrap());
+        assert_eq!(got.residual_paid_out, "2.500000001".parse::<Decimal>().unwrap());
+    }
+
+    #[tokio::test]
+    async fn db_non_drp_trade_defaults_residuals_to_zero() {
+        // A plain Buy carries zero residuals (residuals are a DRP-only concept).
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        db_upsert(&pool, &buy_trade()).await.unwrap();
+        let got = db_get(&pool, 1).await.unwrap().unwrap();
+        assert_eq!(got.residual_brought_forward, Decimal::ZERO);
+        assert_eq!(got.residual_carried_forward, Decimal::ZERO);
+        assert_eq!(got.residual_paid_out, Decimal::ZERO);
     }
 
     #[tokio::test]

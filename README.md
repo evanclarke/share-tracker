@@ -6,6 +6,7 @@ A personal Australian share portfolio tracker with a REST JSON API. Records trad
 
 - **Trade recording** — buys, sells, and dividend reinvestment plan (DRP) acquisitions, with automatic settlement date calculation per exchange
 - **Income recording** — dividends and trust distributions with full Australian tax component breakdown (franked/unfranked amounts, foreign source income, franking credits, conduit foreign income, TFN withholding, LIC capital gain deductions)
+- **DRP reinvestment** — enrol holdings in a Dividend Reinvestment Plan, then turn a distribution into a linked DRP trade; leftover cash that can't buy a whole share is carried forward to the next reinvestment or paid out, per the enrolment
 - **AMIT/AMMA support** — annual tax statements for Attribution Managed Investment Trusts (AMITs), with cost base adjustments applied per purchase parcel
 - **Parcel-level CGT** — explicit parcel allocations link sell trades to the parcels they came from; cost bases are pro-rated and AMIT-reduced at the parcel level
 - **Portfolio overview** — open holdings per security with total cost base and optional market value (supply current prices in the request body)
@@ -94,7 +95,10 @@ trades
 ├── gst_on_brokerage  TEXT (decimal)
 ├── brokerage_currency TEXT
 ├── fx_rate           TEXT (decimal)  Manual foreign-per-AUD override; fallback when no ATO rate exists (1.0 for AUD trades)
-└── contract_note_ref TEXT (nullable)
+├── contract_note_ref TEXT (nullable)
+├── residual_brought_forward TEXT (decimal)  DRP trades only: leftover cash carried in from the prior reinvestment (else 0)
+├── residual_carried_forward TEXT (decimal)  DRP trades only: leftover carried to the next reinvestment (else 0)
+└── residual_paid_out        TEXT (decimal)  DRP trades only: leftover paid out instead of carried (else 0)
 
 income
 ├── id                        INTEGER PK
@@ -146,6 +150,10 @@ parcel_allocations           Links sell parcels to the purchase parcels they con
 ├── sale_trade_id        INTEGER FK→trades.id  Must be Sell
 ├── purchase_trade_id    INTEGER FK→trades.id  Must be Buy or DRP
 └── quantity_allocated   TEXT (decimal)
+
+drp_enrolments               DRP enrolment per holding (presence = reinvest in full)
+├── listing_id           INTEGER PK, FK→listings.id  One enrolment per holding
+└── residual_handling    TEXT   CarryForward | PayOut  Leftover-cash policy (default CarryForward)
 ```
 
 ### Relationships
@@ -157,6 +165,7 @@ exchanges ──< listings ──< trades >────────────�
                        trades ──< amit_adjustments >──── amma_statements
                        listings ──< amma_statements
                        listings ──< income
+                       listings ──< drp_enrolments
                        trades (DRP) ──< income (reinvestment_trade_id)
 ```
 
@@ -246,6 +255,7 @@ If `settlement_date` is omitted from the PUT body, it is auto-calculated by adva
 | `GET` | `/income/:id` | Get one income record |
 | `PUT` | `/income/:id` | Create or update an income record |
 | `DELETE` | `/income/:id` | Delete an income record |
+| `POST` | `/income/:id/reinvest` | Create the DRP reinvestment trade for this distribution (see [DRP reinvestment](#drp-reinvestment)) |
 
 ### AMMA statements
 
@@ -266,6 +276,37 @@ If `settlement_date` is omitted from the PUT body, it is auto-calculated by adva
 | `DELETE` | `/amit_adjustments/:id` | Delete an AMIT adjustment |
 
 Returns `422 Unprocessable Entity` if the referenced trade is not a Buy/DRP, the trade and AMMA statement reference different listings, or the quantity exceeds the trade quantity.
+
+### DRP enrolments
+
+Records which holdings reinvest their distributions. Keyed by `listing_id` (one enrolment per holding); the path id is the listing id.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/drp_enrolments` | List all DRP enrolments |
+| `GET` | `/drp_enrolments/:listing_id` | Get one holding's enrolment |
+| `PUT` | `/drp_enrolments/:listing_id` | Enrol a holding (or update its residual handling) |
+| `DELETE` | `/drp_enrolments/:listing_id` | Remove an enrolment |
+
+```
+PUT /drp_enrolments/1
+{ "residual_handling": "CarryForward" }   // or "PayOut"; defaults to CarryForward if omitted
+```
+
+`residual_handling` decides what happens to leftover cash a reinvestment can't spend on whole shares: `CarryForward` adds it to the next reinvestment for the holding, `PayOut` records it as paid out. Returns `204 No Content`, or `422 Unprocessable Entity` if `listing_id` doesn't reference a listing.
+
+### DRP reinvestment
+
+```
+POST /income/:id/reinvest
+{ "reinvestment_price": "1.50", "fx_rate": "0.65", "date": "2024-03-31" }
+```
+
+Creates the DRP reinvestment trade for a distribution and links it back (`income.reinvestment_trade_id`) in one transaction. `fx_rate` (default 1) and `date` (default the distribution's `date_paid`) are optional.
+
+The reinvestable cash — `franked_amount + unfranked_amount + foreign_source_income − foreign_tax_paid − tfn_withholding_tax` (franking credits are notional and excluded) — plus the residual brought forward from the holding's most recent prior DRP trade is spent on whole shares at `reinvestment_price`. The leftover is carried forward or paid out per the enrolment's `residual_handling` and recorded on the new trade's residual columns.
+
+Returns `201 Created` with the created trade as JSON, `404 Not Found` if no income record has that id, or `422 Unprocessable Entity` if the holding isn't enrolled, the distribution was already reinvested, or `reinvestment_price` is not positive.
 
 ### Sells
 
@@ -384,6 +425,7 @@ Validates each curated exchange's MIC against the `mic_registry` (the imported I
 | Code | Meaning |
 |------|---------|
 | `200 OK` | Successful GET |
+| `201 Created` | DRP reinvestment trade created via `POST /income/:id/reinvest` |
 | `204 No Content` | Successful PUT or DELETE, or a job run via `POST /jobs/:name` |
 | `404 Not Found` | Resource does not exist |
 | `405 Method Not Allowed` | Write attempted on a read-only path (e.g. `parcel_allocations`) |

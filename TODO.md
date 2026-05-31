@@ -98,16 +98,16 @@ Items are only marked done when a passing test exists for them.
 - [x] Tests: type constraint violations rejected
 
 ## DRP (Dividend Reinvestment Plan)
-- [ ] DRP Enrolment model (listing FK, residual handling enum: CarryForward/PayOut) — `src/entities/drp_enrolment.rs`
-- [ ] DB schema: `drp_enrolments` table; UNIQUE on listing_id (at most one enrolment per holding); CHECK constraint on residual_handling enum; default CarryForward — migration
-- [ ] CRUD API endpoints for DRP enrolments
-- [ ] Tests: insert/retrieve enrolment; one-per-listing uniqueness enforced; residual_handling enum constraint enforced; FK to listing
-- [ ] Trade Activity: add residual_brought_forward, residual_carried_forward, residual_paid_out columns (DRP trades only) — Decimal stored as TEXT; migration preserves precision
-- [ ] Tests: residual fields round-trip with decimal precision preserved
-- [ ] DRP reinvestment operation: create a DRP trade from a distribution (Income Activity) + reinvestment price — reinvestable cash (excludes franking credits) + residual brought forward (latest prior DRP trade's carried-forward for the listing, else 0) = available; quantity = floor(available / price); cost = quantity × price; leftover → carried-forward or paid-out per the enrolment's residual handling
-- [ ] DRP reinvestment is atomic: creates the Trade (Type DRP, listing+currency+pay date from the distribution, quantity, average price = reinvestment price, residual fields) and sets the distribution's reinvestment_trade FK in one transaction
-- [ ] Validation: reject (422) reinvestment for a non-enrolled holding, or a distribution that already has a reinvestment trade (at most one per distribution)
-- [ ] Tests: carry-forward residual is picked up by the next reinvestment for the holding; pay-out records leftover as paid out (not carried); whole-share floor; reinvestable cash excludes franking credits; atomic trade-creation + distribution linkage; rolled back on failure; rejected when not enrolled / already reinvested
+- [x] DRP Enrolment model (listing FK, residual handling enum: CarryForward/PayOut) — `src/entities/drp_enrolment.rs`, struct `DrpEnrolment` keyed by `listing_id`, enum `ResidualHandling` (defaults CarryForward)
+- [x] DB schema: `drp_enrolments` table; `listing_id` PRIMARY KEY + FK→listings (at most one enrolment per holding); CHECK constraint on residual_handling enum; default CarryForward — migration `0013_drp_enrolments.sql`
+- [x] CRUD API endpoints for DRP enrolments — `/drp_enrolments` and `/drp_enrolments/:listing_id` (GET/PUT/DELETE); a bad listing FK on PUT → 422
+- [x] Tests: insert/retrieve enrolment; one-per-listing uniqueness enforced; residual_handling enum constraint enforced; FK to listing (`db_insert_and_retrieve`, `db_one_enrolment_per_listing_upsert_updates`, `db_residual_handling_enum_constraint_enforced`, `db_listing_fk_enforced`, plus API tests)
+- [x] Trade Activity: add residual_brought_forward, residual_carried_forward, residual_paid_out columns (DRP trades only) — Decimal stored as TEXT; migration `0012_trade_drp_residuals.sql` (ALTER TABLE ADD COLUMN, defaults '0', no data dropped)
+- [x] Tests: residual fields round-trip with decimal precision preserved (`trade::tests::db_drp_residual_fields_round_trip_with_precision`, `db_non_drp_trade_defaults_residuals_to_zero`)
+- [x] DRP reinvestment operation: create a DRP trade from a distribution (Income Activity) + reinvestment price — `src/entities/drp_reinvestment.rs` `db_reinvest`: reinvestable cash (`franked+unfranked+foreign_source−foreign_tax−tfn`, excludes franking credits) + residual brought forward (latest prior DRP trade's carried-forward for the listing, else 0) = available; quantity = floor(available / price); cost = quantity × price; leftover → carried-forward or paid-out per the enrolment's residual handling
+- [x] DRP reinvestment is atomic: `POST /income/:id/reinvest` creates the Trade (Type DRP, listing + currency + pay date from the distribution, quantity, average price = reinvestment price, residual fields) and sets the distribution's reinvestment_trade FK in one transaction; returns 201 with the trade
+- [x] Validation: reject (422) reinvestment for a non-enrolled holding, or a distribution that already has a reinvestment trade (at most one per distribution); also 422 on non-positive price, 404 on missing income
+- [x] Tests: carry-forward residual is picked up by the next reinvestment for the holding; pay-out records leftover as paid out (not carried); whole-share floor; reinvestable cash excludes franking credits; atomic trade-creation + distribution linkage; rolled back on failure; rejected when not enrolled / already reinvested (`drp_reinvestment::tests`: `carry_forward_buys_whole_shares_and_carries_leftover`, `carried_residual_is_picked_up_by_the_next_reinvestment`, `pay_out_records_leftover_as_paid_not_carried`, `franking_credits_are_excluded_from_reinvestable_cash`, `not_enrolled_is_rejected_and_nothing_persisted`, `already_reinvested_is_rejected`, `missing_income_is_not_found`, `non_positive_price_is_rejected`, plus API tests)
 
 ## Cost Base Adjustments
 - [x] AMIT cost base adjustment: apply AMMA `tax deferred` amounts to reduce cost base of affected parcels
