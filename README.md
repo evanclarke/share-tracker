@@ -1,0 +1,277 @@
+# share-tracker
+
+A personal Australian share portfolio tracker with a REST JSON API. Records trades, dividends, and trust distributions, then produces portfolio and tax reports aligned with Australian tax rules (CGT discount, franking credits, AMIT/AMMA).
+
+## Features
+
+- **Trade recording** — buys, sells, and dividend reinvestment plan (DRP) acquisitions, with automatic settlement date calculation per exchange
+- **Income recording** — dividends and trust distributions with full Australian tax component breakdown (franked/unfranked amounts, foreign source income, franking credits, conduit foreign income, TFN withholding, LIC capital gain deductions)
+- **AMIT/AMMA support** — annual tax statements for Attribution Managed Investment Trusts (AMITs), with cost base adjustments applied per purchase parcel
+- **Parcel-level CGT** — explicit parcel allocations link sell trades to the parcels they came from; cost bases are pro-rated and AMIT-reduced at the parcel level
+- **Portfolio overview** — open holdings per security with total cost base and optional market value (supply current prices in the request body)
+- **Unrealised gains report** — per-holding gain/loss and CGT-discount-eligible quantity as at a given date
+- **Realised gains report** — per-sale capital gain/loss and CGT-discount-eligible gain (parcels held strictly more than 12 months)
+- **Tax summary** — income aggregated by Australian financial year (July–June), combining dividends, trust distributions, and AMMA components
+
+## Building and running
+
+```bash
+cargo build --release
+./target/release/share-tracker [--db share-tracker.db] [--port 3000]
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--db` | `share-tracker.db` | SQLite database file path |
+| `--port` | `3000` | HTTP port to listen on |
+
+The database is created automatically on first run. Migrations are applied in order at startup. A daily backup is written to `<stem>-YYYY-MM-DD.db` beside the main file (skipped if one already exists for the day).
+
+Logging is controlled by the `RUST_LOG` environment variable (default: `info`).
+
+## Database schema
+
+```
+exchanges
+├── mic          TEXT PK          ISO 10383 Market Identifier Code (e.g. XASX)
+├── name         TEXT
+├── country      TEXT
+├── currency     TEXT             Default trading currency
+├── timezone     TEXT             IANA timezone string
+└── settlement_days INTEGER      T+N settlement (e.g. 2 for ASX)
+
+listings
+├── id           INTEGER PK
+├── exchange_mic TEXT FK→exchanges.mic
+├── ticker       TEXT
+├── name         TEXT
+├── isin         TEXT (nullable)
+├── security_type TEXT           Share | ETF | LIC | Trust
+├── currency     TEXT
+└── amit         BOOLEAN          True if the security is an AMIT
+
+trades
+├── id                INTEGER PK
+├── trade_type        TEXT         Buy | Sell | DRP
+├── date              DATE
+├── settlement_date   DATE
+├── listing_id        INTEGER FK→listings.id
+├── average_price     TEXT (decimal)
+├── quantity          TEXT (decimal)
+├── currency          TEXT
+├── brokerage         TEXT (decimal)
+├── gst_on_brokerage  TEXT (decimal)
+├── brokerage_currency TEXT
+├── fx_rate           TEXT (decimal)  1.0 for AUD trades
+└── contract_note_ref TEXT (nullable)
+
+income
+├── id                        INTEGER PK
+├── listing_id                INTEGER FK→listings.id
+├── date_paid                 DATE
+├── ex_date                   DATE (nullable)
+├── franked_amount            TEXT (decimal)
+├── unfranked_amount          TEXT (decimal)
+├── foreign_source_income     TEXT (decimal)
+├── foreign_tax_paid          TEXT (decimal)
+├── tfn_withholding_tax       TEXT (decimal)
+├── franking_credits          TEXT (decimal)
+├── lic_capital_gain_deduction TEXT (decimal)
+├── conduit_foreign_income    TEXT (decimal)  Excluded from assessable income
+├── trust_income              BOOLEAN
+└── reinvestment_trade_id     INTEGER FK→trades.id (nullable, for DRP linkage)
+
+amma_statements              Annual AMIT Member Annual (AMMA) statements
+├── id                              INTEGER PK
+├── listing_id                      INTEGER FK→listings.id
+├── tax_year_end_date               DATE         e.g. 2024-06-30 for FY2024
+├── units_held                      TEXT (decimal)
+├── date_received                   DATE
+├── australian_interest             TEXT (decimal)
+├── australian_dividends_unfranked  TEXT (decimal)
+├── franked_dividends               TEXT (decimal)
+├── franking_credits                TEXT (decimal)
+├── net_rent                        TEXT (decimal)
+├── foreign_income                  TEXT (decimal)
+├── foreign_tax_credits             TEXT (decimal)
+├── other_income                    TEXT (decimal)
+├── cgt_discount_gains              TEXT (decimal)
+├── cgt_indexation_gains            TEXT (decimal)
+├── cgt_other_gains                 TEXT (decimal)
+├── capital_losses_applied          TEXT (decimal)
+├── tax_deferred_amount             TEXT (decimal)
+├── tax_free_amount                 TEXT (decimal)
+├── cost_base_adjustment            TEXT (decimal)  Per-unit cost base reduction
+└── tfn_withholding_tax             TEXT (decimal)
+
+amit_adjustments             Links a purchase parcel to an AMMA statement
+├── id                   INTEGER PK
+├── amma_statement_id    INTEGER FK→amma_statements.id
+├── trade_id             INTEGER FK→trades.id  Must be Buy or DRP
+└── quantity             TEXT (decimal)       Units of the parcel covered by the adjustment
+
+parcel_allocations           Links sell parcels to the purchase parcels they consume
+├── id                   INTEGER PK
+├── sale_trade_id        INTEGER FK→trades.id  Must be Sell
+├── purchase_trade_id    INTEGER FK→trades.id  Must be Buy or DRP
+└── quantity_allocated   TEXT (decimal)
+```
+
+### Relationships
+
+```
+exchanges ──< listings ──< trades >──────────────< parcel_allocations
+                                \                         /
+                                 └──────────────────────-/
+                       trades ──< amit_adjustments >──── amma_statements
+                       listings ──< amma_statements
+                       listings ──< income
+                       trades (DRP) ──< income (reinvestment_trade_id)
+```
+
+Decimal values are stored as TEXT to preserve arbitrary precision.
+
+## HTTP API
+
+All endpoints return JSON. Write endpoints accept `Content-Type: application/json`.
+
+### Exchanges
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/exchanges` | List all exchanges |
+| `GET` | `/exchanges/:mic` | Get one exchange |
+| `PUT` | `/exchanges/:mic` | Create or update an exchange |
+| `DELETE` | `/exchanges/:mic` | Delete an exchange |
+
+Seed data includes `XASX` (ASX, T+2) and `XNYS` (NYSE, T+2).
+
+### Listings
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/listings` | List all listings |
+| `GET` | `/listings/:id` | Get one listing |
+| `PUT` | `/listings/:id` | Create or update a listing |
+| `DELETE` | `/listings/:id` | Delete a listing |
+
+### Trades
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/trades` | List all trades |
+| `GET` | `/trades/:id` | Get one trade |
+| `PUT` | `/trades/:id` | Create or update a trade |
+| `DELETE` | `/trades/:id` | Delete a trade |
+
+If `settlement_date` is omitted from the PUT body, it is auto-calculated as `date + exchange.settlement_days`.
+
+### Income
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/income` | List all income records |
+| `GET` | `/income/:id` | Get one income record |
+| `PUT` | `/income/:id` | Create or update an income record |
+| `DELETE` | `/income/:id` | Delete an income record |
+
+### AMMA statements
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/amma_statements` | List all AMMA statements |
+| `GET` | `/amma_statements/:id` | Get one AMMA statement |
+| `PUT` | `/amma_statements/:id` | Create or update an AMMA statement |
+| `DELETE` | `/amma_statements/:id` | Delete an AMMA statement |
+
+### AMIT adjustments
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/amit_adjustments` | List all AMIT adjustments |
+| `GET` | `/amit_adjustments/:id` | Get one AMIT adjustment |
+| `PUT` | `/amit_adjustments/:id` | Create or update an AMIT adjustment |
+| `DELETE` | `/amit_adjustments/:id` | Delete an AMIT adjustment |
+
+Returns `422 Unprocessable Entity` if the referenced trade is not a Buy/DRP, the trade and AMMA statement reference different listings, or the quantity exceeds the trade quantity.
+
+### Parcel allocations
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/parcel_allocations` | List all parcel allocations |
+| `GET` | `/parcel_allocations/:id` | Get one parcel allocation |
+| `PUT` | `/parcel_allocations/:id` | Create or update a parcel allocation |
+| `DELETE` | `/parcel_allocations/:id` | Delete a parcel allocation |
+
+Returns `422` if the sale trade is not a Sell, the purchase trade is not a Buy/DRP, or the allocation would exceed the trade's quantity (cumulatively across all allocations for that trade).
+
+### Portfolio reports
+
+#### Overview
+
+```
+POST /portfolio/overview
+```
+
+Returns open holdings per listing. Request body (optional):
+
+```json
+{ "prices": { "<listing_id>": "<price>" } }
+```
+
+Response fields per holding: `listing_id`, `quantity`, `avg_cost_base_per_unit`, `total_cost_base`, `current_price` (nullable), `market_value` (nullable).
+
+Cost base is calculated as `(price × quantity + brokerage + GST) − AMIT reductions`, pro-rated to remaining (unsold) units.
+
+#### Unrealised gains
+
+```
+POST /portfolio/unrealised-gains
+```
+
+Request body (all optional):
+
+```json
+{ "prices": { "<listing_id>": "<price>" }, "as_of_date": "YYYY-MM-DD" }
+```
+
+`as_of_date` defaults to today. Response fields per holding: `listing_id`, `quantity`, `total_cost_base`, `current_price`, `market_value`, `unrealised_gain_loss`, `cgt_discount_eligible_quantity` (units from parcels held strictly more than 12 months as at `as_of_date`).
+
+#### Realised gains
+
+```
+GET /portfolio/realised-gains
+```
+
+Returns one record per sale trade that has at least one parcel allocation. Response fields: `sale_trade_id`, `listing_id`, `sale_date`, `proceeds`, `cost_base`, `capital_gain_loss`, `discount_eligible_gain` (gain attributable to parcels held strictly more than 12 months; losses are excluded).
+
+Sorted by `sale_date` ascending.
+
+#### Tax summary
+
+```
+GET /portfolio/tax-summary
+```
+
+Returns one record per Australian financial year (identified by the calendar year of 30 June), sorted ascending. Aggregates dividend income by `date_paid` (July = next FY) and AMMA statements by `tax_year_end_date`. Response fields include all income and AMMA components as separate fields for direct transfer to a tax return.
+
+## Response codes
+
+| Code | Meaning |
+|------|---------|
+| `200 OK` | Successful GET |
+| `204 No Content` | Successful PUT or DELETE |
+| `404 Not Found` | Resource does not exist |
+| `422 Unprocessable Entity` | Business rule violation (e.g. over-allocation, wrong trade type) |
+| `500 Internal Server Error` | Unexpected database error |
+
+## Tech stack
+
+- **Rust** (edition 2024)
+- **axum 0.8** — HTTP framework
+- **sqlx 0.8** — async SQLite driver with compile-time migration support
+- **SQLite** with WAL journal mode and foreign key enforcement
+- **rust_decimal** — arbitrary-precision decimal arithmetic for all monetary values
+- **tokio** — async runtime
+- **chrono / chrono-tz** — date handling
