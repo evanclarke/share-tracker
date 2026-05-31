@@ -5,5 +5,6 @@ pub mod args;
 pub mod db;
 pub mod decimal;
 pub mod fx;
+pub mod http;
 pub mod logging;
 pub mod scheduler;

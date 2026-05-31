@@ -216,7 +216,7 @@ async fn upsert(
     db_upsert(&pool, &income)
         .await
         .map(|_| StatusCode::NO_CONTENT)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(|e| crate::infra::http::write_error_status(&e))
 }
 
 async fn delete(

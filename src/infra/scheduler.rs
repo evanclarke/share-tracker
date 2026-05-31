@@ -83,6 +83,23 @@ pub fn registry(pool: SqlitePool, db_path: String) -> JobRegistry {
         }),
     );
 
+    let currency_pool = pool.clone();
+    jobs.insert(
+        "currency-import".to_string(),
+        Arc::new(move || {
+            let pool = currency_pool.clone();
+            Box::pin(async move {
+                match crate::entities::currencies::run_import(&pool).await {
+                    Ok(s) => {
+                        tracing::info!(imported = s.imported, "currency import complete");
+                        Ok(())
+                    }
+                    Err(e) => Err(format!("{e:?}")),
+                }
+            })
+        }),
+    );
+
     let fx_pool = pool.clone();
     jobs.insert(
         "rba-fx-import".to_string(),

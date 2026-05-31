@@ -6,6 +6,7 @@ use sqlx::SqlitePool;
 
 pub mod amit_adjustment;
 pub mod amma;
+pub mod currencies;
 pub mod drp_enrolment;
 pub mod drp_reinvestment;
 pub mod exchange;
@@ -21,6 +22,7 @@ pub mod trade;
 pub fn router() -> Router<SqlitePool> {
     exchange::router()
         .merge(listing::router())
+        .merge(currencies::router())
         .merge(mic_registry::router())
         .merge(rba_fx_rate::router())
         .merge(trade::router())

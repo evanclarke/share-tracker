@@ -133,7 +133,7 @@ async fn upsert(
     db_upsert(&pool, &listing)
         .await
         .map(|_| StatusCode::NO_CONTENT)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(|e| crate::infra::http::write_error_status(&e))
 }
 
 async fn delete(
@@ -229,6 +229,23 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn db_fk_constraint_rejects_unknown_currency() {
+        let pool = test_pool().await;
+        // 'ZZZ' is not a recognised currency (no row in `currencies`).
+        let mut bad = xtest();
+        bad.currency = "ZZZ".to_string();
+        let err = db_upsert(&pool, &bad).await.unwrap_err();
+        assert!(
+            err.to_string().contains("FOREIGN KEY"),
+            "expected currency FK error, got: {err}"
+        );
+        // A seeded currency is accepted.
+        let mut ok = xtest();
+        ok.currency = "AUD".to_string();
+        db_upsert(&pool, &ok).await.unwrap();
+    }
+
     // API-level tests
 
     #[tokio::test]
@@ -299,6 +316,35 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
         assert!(db_get(&pool, 1).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn api_upsert_unknown_currency_returns_422() {
+        let pool = test_pool().await;
+        // 'ZZZ' has no row in `currencies`: the currency FK rejects the write, and
+        // the handler surfaces a constraint violation as 422, not 500.
+        let body = serde_json::json!({
+            "exchange_mic": "XASX",
+            "ticker": "VAS",
+            "name": "Vanguard Australian Shares ETF",
+            "isin": null,
+            "security_type": "ETF",
+            "currency": "ZZZ",
+            "amit": true
+        });
+        let resp = router()
+            .with_state(pool)
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/listings/1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     #[tokio::test]

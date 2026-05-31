@@ -34,12 +34,13 @@ The database is created automatically on first run. Migrations are applied in or
 
 ### Scheduled maintenance
 
-Recurring maintenance jobs — the database backup, the RBA FX rate import, and the ISO MIC registry import — are scheduled from a cron file rather than hard-coded intervals. Each line is a 5-field Vixie cron expression (`min hour dom mon dow`) followed by a job name; `#` starts a comment. The built-in default is embedded in the binary (`schedule.cron`); pass `--schedule <path>` to use your own file instead:
+Recurring maintenance jobs — the database backup, the RBA FX rate import, the ISO MIC registry import, and the currencies import — are scheduled from a cron file rather than hard-coded intervals. Each line is a 5-field Vixie cron expression (`min hour dom mon dow`) followed by a job name; `#` starts a comment. The built-in default is embedded in the binary (`schedule.cron`); pass `--schedule <path>` to use your own file instead:
 
 ```
 0 0 * * *   backup          # daily at midnight
 0 2 * * 1   rba-fx-import   # weekly, Monday 02:00
 0 3 1 * *   mic-import      # monthly, 1st at 03:00 (ISO publishes monthly)
+0 4 1 * *   currency-import # monthly, 1st at 04:00 (ISO 4217 + ISO 24165 / DTIF)
 ```
 
 A schedule line naming an unknown job is rejected at startup; a registered job with no schedule line is allowed but logged as a `WARN` (it will then only run via its endpoint). Jobs run only at their scheduled times (not at startup); after each run (and at startup) the next scheduled run is logged at INFO. The backup writes `<stem>-YYYY-MM-DD.db` beside the main database file (skipped if one already exists for the day). Any job can be run on demand with `POST /jobs/{name}` (see HTTP API).
@@ -53,7 +54,7 @@ exchanges
 ├── mic          TEXT PK          ISO 10383 Market Identifier Code (e.g. XASX)
 ├── name         TEXT
 ├── country      TEXT
-├── currency     TEXT             Default trading currency
+├── currency     TEXT FK→currencies.code   Default trading currency
 ├── timezone     TEXT             IANA timezone string
 └── settlement_days INTEGER      T+N settlement (e.g. 2 for ASX)
 
@@ -64,7 +65,7 @@ listings
 ├── name         TEXT
 ├── isin         TEXT (nullable)
 ├── security_type TEXT           Share | ETF | LIC | Trust
-├── currency     TEXT
+├── currency     TEXT FK→currencies.code
 └── amit         BOOLEAN          True if the security is an AMIT
 
 rba_fx_rates                  RBA F11 monthly FX rates (the rate used for ATO conversion)
@@ -82,6 +83,15 @@ mic_registry                  ISO 10383 MIC reference list (validation only; not
 ├── status        TEXT             ISO STATUS: ACTIVE | UPDATED | EXPIRED
 └── expiry_date   TEXT (nullable)  'YYYY-MM-DD' when EXPIRED, else NULL
 
+currencies                    Recognised currencies: fiat (ISO 4217) + digital tokens (ISO 24165)
+├── code          TEXT PK          ISO 4217 alpha code (fiat) or ISO 24165 DTI (token)
+├── kind          TEXT             Fiat | DigitalToken
+├── numeric_code  TEXT (nullable)  ISO 4217 numeric code (fiat only)
+├── name          TEXT             Currency name (fiat) or token long name
+├── short_name    TEXT (nullable)  Token short name / ticker
+├── minor_units   INTEGER (nullable)  ISO 4217 minor unit / token decimals; informational only
+└── source        TEXT             Iso4217 | Iso24165 (which feed the row came from)
+
 trades
 ├── id                INTEGER PK
 ├── trade_type        TEXT         Buy | Sell | DRP
@@ -90,10 +100,10 @@ trades
 ├── listing_id        INTEGER FK→listings.id
 ├── average_price     TEXT (decimal)
 ├── quantity          TEXT (decimal)
-├── currency          TEXT
+├── currency          TEXT FK→currencies.code
 ├── brokerage         TEXT (decimal)
 ├── gst_on_brokerage  TEXT (decimal)
-├── brokerage_currency TEXT
+├── brokerage_currency TEXT FK→currencies.code
 ├── fx_rate           TEXT (decimal)  Manual foreign-per-AUD override; fallback when no ATO rate exists (1.0 for AUD trades)
 ├── contract_note_ref TEXT (nullable)
 ├── residual_brought_forward TEXT (decimal)  DRP trades only: leftover cash carried in from the prior reinvestment (else 0)
@@ -115,7 +125,7 @@ income
 ├── conduit_foreign_income    TEXT (decimal)  Excluded from assessable income
 ├── trust_income              BOOLEAN
 ├── reinvestment_trade_id     INTEGER FK→trades.id (nullable, for DRP linkage)
-└── currency                  TEXT             ISO 4217; tax summary converts to AUD by date_paid month (default AUD)
+└── currency                  TEXT FK→currencies.code   ISO 4217; tax summary converts to AUD by date_paid month (default AUD)
 
 amma_statements              Annual AMIT Member Annual (AMMA) statements
 ├── id                              INTEGER PK
@@ -139,7 +149,7 @@ amma_statements              Annual AMIT Member Annual (AMMA) statements
 ├── tax_free_amount                 TEXT (decimal)
 ├── cost_base_adjustment            TEXT (decimal)  Per-unit cost base reduction
 ├── tfn_withholding_tax             TEXT (decimal)
-└── currency                        TEXT            ISO 4217; tax summary converts to AUD by tax_year_end_date month (default AUD)
+└── currency                        TEXT FK→currencies.code   ISO 4217; tax summary converts to AUD by tax_year_end_date month (default AUD)
 
 amit_adjustments             Links a purchase parcel to an AMMA statement
 ├── id                   INTEGER PK
@@ -169,11 +179,15 @@ exchanges ──< listings ──< trades >────────────�
                        listings ──< income
                        listings ──< drp_enrolments
                        trades (DRP) ──< income (reinvestment_trade_id)
+
+currencies ──< exchanges, listings, trades (currency + brokerage_currency), income, amma_statements
 ```
 
 `rba_fx_rates` is standalone reference data (no foreign keys); it is looked up by `(currency, month)`.
 
 `mic_registry` is standalone reference data (no foreign keys), keyed by `mic`. It is populated from the ISO 10383 list and used only to validate curated `exchanges` (see the [exchange MIC validation report](#exchange-mic-validation)); it is *not* the operational exchange table and carries no currency/timezone/settlement data.
+
+`currencies` is reference data keyed by `code` (it has no outgoing foreign keys). It is populated from the ISO 4217 (SIX Group) and ISO 24165 (DTIF) feeds and seeded with a baseline of common currencies (migration `0016`), and is the recognised list that **every** currency code in the model is foreign-keyed to: `exchanges.currency`, `listings.currency`, `trades.currency`, `trades.brokerage_currency`, `income.currency`, and `amma_statements.currency` all reference `currencies.code`, so an unrecognised currency is rejected at write time. `minor_units` is informational only — stored amounts remain arbitrary-precision Decimal and are never rounded to it.
 
 Decimal values are stored as TEXT to preserve arbitrary precision.
 
@@ -190,7 +204,7 @@ All endpoints return JSON. Write endpoints accept `Content-Type: application/jso
 | `PUT` | `/exchanges/:mic` | Create or update an exchange |
 | `DELETE` | `/exchanges/:mic` | Delete an exchange |
 
-Seed data includes `XASX` (ASX, T+2) and `XNYS` (NYSE, T+2).
+Seed data includes `XASX` (ASX, T+2) and `XNYS` (NYSE, T+2). `PUT` returns `422` if `currency` is not a recognised code in `currencies`.
 
 ### Listings
 
@@ -200,6 +214,8 @@ Seed data includes `XASX` (ASX, T+2) and `XNYS` (NYSE, T+2).
 | `GET` | `/listings/:id` | Get one listing |
 | `PUT` | `/listings/:id` | Create or update a listing |
 | `DELETE` | `/listings/:id` | Delete a listing |
+
+`PUT` returns `422` if `exchange_mic` is not a known exchange or `currency` is not a recognised code in `currencies`. The same currency check applies to the `currency` (and `brokerage_currency`) fields on trades, income, and AMMA writes.
 
 ### RBA FX rates
 
@@ -225,6 +241,18 @@ The ISO 10383 Market Identifier Code list, imported from the official ISO20022 `
 
 `POST /mic_registry/import` upserts every row in the feed in one transaction, tracking the latest ISO publication (a MIC's status/expiry can change), so re-running creates no duplicates and refreshes changed entries. With an **empty body** it fetches the live ISO CSV; with a **non-empty body** it imports that supplied CSV (useful for retries when ISO is unreachable). Returns `200 OK` with `{ "imported": N }`, `422` if the feed can't be parsed, or `502 Bad Gateway` if the ISO fetch fails. The same import also runs on the cron schedule as the `mic-import` job (see Jobs).
 
+### Currencies
+
+The recognised currencies list — fiat (ISO 4217) and digital tokens (ISO 24165) in one table. Rows are written only by the import, so the resource is read-only via `GET`.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/currencies` | List all currencies (ordered by code) |
+| `GET` | `/currencies/:code` | Get one currency |
+| `POST` | `/currencies/import` | Trigger an import (see below) |
+
+`POST /currencies/import` upserts every row from the feed in one transaction (idempotent — re-running creates no duplicates). The feed format is detected from its content: an **ISO 4217 XML** body (the SIX Group "List One") imports fiat currencies, an **ISO 24165 JSON** body (the DTIF registry snapshot) imports digital tokens. With an **empty body** it fetches the live sources: the ISO 4217 list (free), plus the ISO 24165 registry when the `DTI_REGISTRY_USER_ID` / `DTI_REGISTRY_PASSWORD` environment variables are set (the DTIF download requires Basic-auth credentials; the token fetch is skipped with a warning when they are absent, and fiat still imports). Returns `200 OK` with `{ "imported": N }`, `422` if the feed can't be parsed, or `502 Bad Gateway` if a fetch fails. The same import also runs on the cron schedule as the `currency-import` job (see Jobs).
+
 ### Jobs
 
 Recurring maintenance jobs scheduled from the cron file (see [Scheduled maintenance](#scheduled-maintenance)). These endpoints inspect the registered jobs and trigger them on demand.
@@ -234,7 +262,7 @@ Recurring maintenance jobs scheduled from the cron file (see [Scheduled maintena
 | `GET` | `/jobs` | List registered job names (JSON array, sorted) |
 | `POST` | `/jobs/:name` | Run the named job now |
 
-`POST /jobs/:name` runs the job synchronously and returns `204 No Content` on success, `404 Not Found` if no job has that name, or `500 Internal Server Error` if the job fails. Registered jobs are `backup`, `rba-fx-import`, and `mic-import`.
+`POST /jobs/:name` runs the job synchronously and returns `204 No Content` on success, `404 Not Found` if no job has that name, or `500 Internal Server Error` if the job fails. Registered jobs are `backup`, `rba-fx-import`, `mic-import`, and `currency-import`.
 
 ### Trades
 
@@ -431,7 +459,7 @@ Validates each curated exchange's MIC against the `mic_registry` (the imported I
 | `204 No Content` | Successful PUT or DELETE, or a job run via `POST /jobs/:name` |
 | `404 Not Found` | Resource does not exist |
 | `405 Method Not Allowed` | Write attempted on a read-only path (e.g. `parcel_allocations`) |
-| `422 Unprocessable Entity` | Business rule violation (e.g. over-allocation, wrong trade type, under-allocated Sell, unparseable FX or MIC feed) |
+| `422 Unprocessable Entity` | Business rule or constraint violation (e.g. over-allocation, wrong trade type, under-allocated Sell, unparseable FX or MIC feed, or a write referencing an unrecognised currency / unknown exchange / listing) |
 | `500 Internal Server Error` | Unexpected database error, or a job triggered via `POST /jobs/:name` failed |
 | `502 Bad Gateway` | Upstream fetch failed (e.g. the RBA FX or ISO MIC import could not reach its source) |
 

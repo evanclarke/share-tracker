@@ -267,7 +267,7 @@ async fn upsert(
     db_upsert(&pool, &trade)
         .await
         .map(|_| StatusCode::NO_CONTENT)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(|e| crate::infra::http::write_error_status(&e))
 }
 
 async fn delete(
@@ -345,6 +345,31 @@ mod tests {
         assert_eq!(got.average_price, Decimal::from(100));
         assert_eq!(got.settlement_date, NaiveDate::from_ymd_opt(2024, 1, 17).unwrap());
         assert_eq!(got.contract_note_ref, Some("CN001".to_string()));
+    }
+
+    #[tokio::test]
+    async fn db_unknown_currency_rejected_on_both_currency_columns() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+
+        // 'ZZZ' is not a recognised currency → each currency column's FK rejects it.
+        let mut bad_currency = buy_trade();
+        bad_currency.currency = "ZZZ".to_string();
+        let err = db_upsert(&pool, &bad_currency).await.unwrap_err();
+        assert!(err.to_string().contains("FOREIGN KEY"), "expected currency FK error, got: {err}");
+
+        let mut bad_brokerage = buy_trade();
+        bad_brokerage.brokerage_currency = "ZZZ".to_string();
+        let err = db_upsert(&pool, &bad_brokerage).await.unwrap_err();
+        assert!(
+            err.to_string().contains("FOREIGN KEY"),
+            "expected brokerage_currency FK error, got: {err}"
+        );
+
+        // A seeded digital-token code (BTC) is a recognised currency and is accepted.
+        let mut btc = buy_trade();
+        btc.currency = "BTC".to_string();
+        db_upsert(&pool, &btc).await.unwrap();
     }
 
     #[tokio::test]

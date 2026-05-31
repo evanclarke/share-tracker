@@ -5,3 +5,4 @@
 0 0 * * *   backup          # daily at midnight
 0 2 * * 1   rba-fx-import   # weekly, Monday 02:00
 0 3 1 * *   mic-import      # monthly, 1st at 03:00 (ISO publishes monthly)
+0 4 1 * *   currency-import # monthly, 1st at 04:00 (ISO 4217 + ISO 24165 / DTIF)

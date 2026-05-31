@@ -115,7 +115,7 @@ async fn upsert(
     db_upsert(&pool, &exchange)
         .await
         .map(|_| StatusCode::NO_CONTENT)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(|e| crate::infra::http::write_error_status(&e))
 }
 
 async fn delete(
@@ -145,7 +145,7 @@ mod tests {
             mic: "XTES".to_string(),
             name: "Test Exchange".to_string(),
             country: "Testland".to_string(),
-            currency: "TST".to_string(),
+            currency: "AUD".to_string(),
             timezone: "UTC".to_string(),
             settlement_days: 2,
         }
@@ -250,7 +250,7 @@ mod tests {
         let body = serde_json::json!({
             "name": "Test Exchange",
             "country": "Testland",
-            "currency": "TST",
+            "currency": "AUD",
             "timezone": "UTC",
             "settlement_days": 2
         });
@@ -277,7 +277,7 @@ mod tests {
         let body = serde_json::json!({
             "name": "Renamed Exchange",
             "country": "Testland",
-            "currency": "TST",
+            "currency": "AUD",
             "timezone": "UTC",
             "settlement_days": 3
         });
