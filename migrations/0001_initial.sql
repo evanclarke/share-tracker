@@ -1,1 +1,0 @@
--- Initial migration: establish baseline schema

@@ -1,49 +1,28 @@
--- Enforce that every currency code recorded in the model is a recognised currency
--- (i.e. exists in `currencies`). SQLite cannot add a foreign key to an existing
--- table, so each currency-bearing table is rebuilt via the rename pattern (rename
--- to _old, recreate with the FK, copy data, drop _old) — the same approach as
--- migration 0006. No data is dropped: every row is copied into the new table.
+-- Consolidated baseline schema.
 --
--- A RENAME rewrites the foreign-key references in *other* tables to point at the
--- renamed `_old` table, so the whole FK-connected cluster is rebuilt together and
--- the `_old` tables are dropped in child→parent order (a child's rows are removed
--- before the parent they reference). The three tables without a currency column
--- (parcel_allocations, amit_adjustments, drp_enrolments) are rebuilt too, only to
--- reset their references onto the new tables. Foreign keys stay enforced
--- throughout (sqlx runs the migration in a transaction, so toggling `foreign_keys`
--- here would be a no-op); the copy therefore checks each currency against
--- `currencies` as it goes.
+-- This squashes the original incremental migrations (0001-0017) into a single
+-- schema definition. The application was still pre-1.0 with little live data, so
+-- the historical step-by-step migrations (REAL->TEXT conversions, table rebuilds
+-- to add foreign keys, column additions) were collapsed into the final shape they
+-- produced. All monetary/quantity columns are TEXT (arbitrary-precision Decimal);
+-- no column is ever REAL, so the float-imprecision concerns of the old REAL->TEXT
+-- conversions cannot recur.
+--
+-- Tables are created parents-before-children so REFERENCES resolve cleanly.
 
--- Safety net: backfill any currency code present in existing data but not seeded in
--- 0016 (e.g. a database using currencies beyond the seeded set) so the FK-checked
--- copies below can never fail. Placeholder rows (name = code) are refined in place
--- by the next currency import.
-INSERT OR IGNORE INTO currencies (code, kind, name, source)
-    SELECT DISTINCT currency, 'Fiat', currency, 'Iso4217' FROM exchanges       WHERE currency IS NOT NULL;
-INSERT OR IGNORE INTO currencies (code, kind, name, source)
-    SELECT DISTINCT currency, 'Fiat', currency, 'Iso4217' FROM listings        WHERE currency IS NOT NULL;
-INSERT OR IGNORE INTO currencies (code, kind, name, source)
-    SELECT DISTINCT currency, 'Fiat', currency, 'Iso4217' FROM trades          WHERE currency IS NOT NULL;
-INSERT OR IGNORE INTO currencies (code, kind, name, source)
-    SELECT DISTINCT brokerage_currency, 'Fiat', brokerage_currency, 'Iso4217' FROM trades WHERE brokerage_currency IS NOT NULL;
-INSERT OR IGNORE INTO currencies (code, kind, name, source)
-    SELECT DISTINCT currency, 'Fiat', currency, 'Iso4217' FROM income          WHERE currency IS NOT NULL;
-INSERT OR IGNORE INTO currencies (code, kind, name, source)
-    SELECT DISTINCT currency, 'Fiat', currency, 'Iso4217' FROM amma_statements WHERE currency IS NOT NULL;
+-- Reference data: recognised currencies (ISO 4217 fiat + ISO 24165 digital tokens).
+-- Every currency code in the model is foreign-keyed to this table.
+CREATE TABLE currencies (
+    code         TEXT PRIMARY KEY,                                      -- ISO 4217 alpha code (fiat) or ISO 24165 DTI (token)
+    kind         TEXT NOT NULL CHECK (kind IN ('Fiat', 'DigitalToken')),
+    numeric_code TEXT,                                                  -- ISO 4217 numeric code (fiat only; NULL for tokens)
+    name         TEXT NOT NULL,                                         -- currency name (fiat) or token long name
+    short_name   TEXT,                                                  -- token short name / ticker (NULL when none)
+    minor_units  INTEGER,                                               -- ISO 4217 minor unit / token decimals; informational, NULL when N.A.
+    source       TEXT NOT NULL CHECK (source IN ('Iso4217', 'Iso24165'))
+);
 
--- Step 1: rename every table in the FK cluster out of the way.
-ALTER TABLE parcel_allocations RENAME TO parcel_allocations_old;
-ALTER TABLE amit_adjustments   RENAME TO amit_adjustments_old;
-ALTER TABLE drp_enrolments     RENAME TO drp_enrolments_old;
-ALTER TABLE income             RENAME TO income_old;
-ALTER TABLE amma_statements    RENAME TO amma_statements_old;
-ALTER TABLE trades             RENAME TO trades_old;
-ALTER TABLE listings           RENAME TO listings_old;
-ALTER TABLE exchanges          RENAME TO exchanges_old;
-
--- Step 2: create the new tables (parents before children so REFERENCES resolve).
--- The five currency-bearing tables gain `REFERENCES currencies(code)`; the rest are
--- recreated unchanged so their references bind to the new tables.
+-- Operational exchanges (the curated, settlement-aware list the app trades against).
 CREATE TABLE exchanges (
     mic             TEXT    PRIMARY KEY,
     name            TEXT    NOT NULL,
@@ -147,23 +126,24 @@ CREATE TABLE drp_enrolments (
         CHECK(residual_handling IN ('CarryForward', 'PayOut'))
 );
 
--- Step 3: copy data (parents before children so each FK-checked insert resolves).
-INSERT INTO exchanges          SELECT * FROM exchanges_old;
-INSERT INTO listings           SELECT * FROM listings_old;
-INSERT INTO trades             SELECT * FROM trades_old;
-INSERT INTO amma_statements    SELECT * FROM amma_statements_old;
-INSERT INTO income             SELECT * FROM income_old;
-INSERT INTO parcel_allocations SELECT * FROM parcel_allocations_old;
-INSERT INTO amit_adjustments   SELECT * FROM amit_adjustments_old;
-INSERT INTO drp_enrolments     SELECT * FROM drp_enrolments_old;
+-- Reference/import data with no outgoing foreign keys.
 
--- Step 4: drop the _old tables in child→parent order (each child's rows are gone
--- before the parent it referenced, so no foreign-key action is triggered).
-DROP TABLE parcel_allocations_old;
-DROP TABLE amit_adjustments_old;
-DROP TABLE drp_enrolments_old;
-DROP TABLE income_old;
-DROP TABLE amma_statements_old;
-DROP TABLE trades_old;
-DROP TABLE listings_old;
-DROP TABLE exchanges_old;
+-- ISO 10383 MIC registry (validation list; populated by the monthly import).
+CREATE TABLE mic_registry (
+    mic           TEXT PRIMARY KEY,           -- the MIC (ISO 10383), e.g. 'XASX'
+    operating_mic TEXT NOT NULL,              -- parent operating MIC (== mic for operating entries)
+    name          TEXT NOT NULL,              -- MARKET NAME-INSTITUTION DESCRIPTION
+    country_code  TEXT NOT NULL,              -- ISO 3166 alpha-2 country code
+    city          TEXT,                       -- city (nullable; some entries omit it)
+    status        TEXT NOT NULL,              -- ISO STATUS: ACTIVE | UPDATED | EXPIRED
+    expiry_date   TEXT                        -- ISO date 'YYYY-MM-DD' when EXPIRED, else NULL
+);
+
+-- RBA F11 monthly reference rates used for ATO AUD conversion (populated by import).
+CREATE TABLE rba_fx_rates (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    currency  TEXT NOT NULL,            -- ISO 4217 code, e.g. 'USD'
+    month     TEXT NOT NULL,            -- 'YYYY-MM'
+    rate      TEXT NOT NULL,            -- Decimal: foreign units per 1 AUD
+    UNIQUE (currency, month)
+);
