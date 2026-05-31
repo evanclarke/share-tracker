@@ -10,6 +10,11 @@ and cost basis calculations are done with the Australian tax view in mind.
    - Income activity
    - AMMA statements
    - Share parcel allocation for sales
+ - FX rate reference data
+   - Weekly automated import of the ATO's published monthly foreign exchange rates
+   - Manual trigger of the same import via an HTTP endpoint (for retries / missed runs)
+   - AUD conversions use these rates, falling back to a per-trade FX rate only when no ATO rate
+     exists yet for the trade's currency and month
  - Reporting
    - Current portfolio overview
    - Unrealised gains/losses
@@ -22,6 +27,12 @@ and cost basis calculations are done with the Australian tax view in mind.
  - Server process design, written in Rust, using SQLite as the storage
    - Database file can be specified on command line
    - Daily backups are created (named <file>-date.db)
+   - Weekly scheduled task fetches the ATO's published monthly foreign exchange rates and stores any
+     new periods (idempotent - re-fetching an already-stored month must not create duplicates or
+     alter existing rows)
+   - The same fetch is exposed as an HTTP endpoint so it can be triggered manually (e.g. to retry
+     after a failed or missed scheduled run); manual and scheduled runs share the same idempotent
+     import logic
  - Web frontend for all features
  - Features will all have tests
  - Hosted on GitHub, with a hook to run tests when commits are pushed
@@ -49,6 +60,25 @@ and cost basis calculations are done with the Australian tax view in mind.
   - Security Type (Share, ETF, LIC, Trust)
   - Currency (may differ from exchange default for cross-listed securities)
   - AMIT Flag (whether the security is subject to the AMIT regime and will have AMMA statements)
+- ATO FX Rate
+  - Source: the ATO's published monthly foreign exchange rates, imported by the weekly scheduled task
+  - Currency (ISO 4217 code of the foreign currency, e.g. USD)
+  - Month (the rate period - year and month, matching the ATO monthly rates table)
+  - Rate (units of the foreign currency per 1 AUD, exactly as published by the ATO)
+  - Unique per (Currency, Month)
+
+### FX Conversion
+- All reports take the Australian-tax view: every non-AUD amount is converted to AUD before it is
+  aggregated or compared
+- The rate used is the ATO FX Rate for the amount's currency and the month of the relevant date
+  (e.g. trade date for trades). AUD amounts need no conversion (rate = 1)
+- If no ATO FX Rate exists yet for that (currency, month), fall back to the trade's manual FX Rate
+  override (same foreign-per-AUD convention). The ATO rate always takes precedence once available -
+  the override is only consulted in its absence
+- The ATO publishes rates as foreign-per-AUD, so: AUD amount = foreign amount / Rate
+- If neither an ATO FX Rate nor a manual override is available for a required conversion, it must
+  fail loudly rather than silently substitute a default - it must not produce a zero or unconverted
+  figure
 
 ## Facts
 The facts that are recorded by the user
@@ -63,7 +93,9 @@ The facts that are recorded by the user
   - Brokerage
   - GST on Brokerage
   - Brokerage Currency
-  - FX Rate
+  - FX Rate (optional manual override, foreign-per-AUD - used as a fallback only when no ATO FX Rate
+    exists for the trade's currency and month; the ATO rate takes precedence once available. See
+    Reference Data > FX Conversion)
   - Contract Note Reference
 - Income Activity
   - Listing

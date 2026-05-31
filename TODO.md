@@ -28,6 +28,25 @@ Items are only marked done when a passing test exists for them.
 - [x] CRUD API endpoints for listings
 - [x] Tests: insert, retrieve listing; FK constraint to exchange
 
+## Reference Data — ATO FX Rate
+- [ ] ATO FX Rate model (currency ISO 4217 code, month, rate as foreign-currency-per-AUD)
+- [ ] DB schema: `ato_fx_rates` table; rate stored as TEXT Decimal; UNIQUE on (currency, month)
+- [ ] List/get API endpoints for ATO FX rates
+- [ ] Tests: insert, retrieve; (currency, month) uniqueness enforced; rate decimal precision preserved in round-trip
+
+## ATO FX Rate Import
+- [ ] Import logic: fetch the ATO's published monthly foreign exchange rates, parse, and upsert new (currency, month) rows idempotently (re-running must not create duplicates or alter existing rows)
+- [ ] Weekly scheduled task runs the import on a recurring interval (alongside the daily backup)
+- [ ] HTTP endpoint to trigger the import manually for retries / missed runs, sharing the same idempotent import logic
+- [ ] Tests: import is idempotent (re-run stores no duplicates, leaves existing rows unchanged); manual-trigger endpoint invokes the import
+
+## FX Conversion (ATO reference rate)
+- [ ] Conversion helper: AUD = foreign / Rate, using the ATO FX Rate for the amount's currency and the month of the relevant date (e.g. trade date); AUD amounts pass through (rate = 1)
+- [ ] Fall back to the trade's manual FX Rate override (same foreign-per-AUD convention) only when no ATO FX Rate exists for that (currency, month); the ATO rate takes precedence once available
+- [ ] Keep the trade FX Rate field as the optional manual override (no longer the primary source) — remains Decimal; document/comment it as a fallback so it isn't flagged as an unused field
+- [ ] Fail loudly when neither an ATO FX Rate nor a manual override is available for a required conversion — never substitute a zero/default or leave the amount unconverted
+- [ ] Tests: ATO rate used when present (takes precedence over the manual field); manual override used when ATO rate absent; neither present fails loudly
+
 ## Trade Activity
 - [x] Trade model (type, date, settlement date, listing FK, average price, quantity, currency, brokerage, GST on brokerage, brokerage currency, FX rate, contract note reference)
 - [x] DB schema: `trades` table
@@ -109,9 +128,10 @@ Items are only marked done when a passing test exists for them.
 - [ ] Tax summary UI
 
 ## Review Findings — Requirements Gaps
-- [ ] Apply trade `fx_rate` so cost base and proceeds are reported in AUD for non-AUD trades (portfolio, realised, unrealised reports currently compute in raw trade currency)
-- [ ] Apply `fx_rate` to income/AMMA foreign amounts so tax summary totals are in AUD
-- [ ] Tests: USD (XNYS) buy/sell produces AUD cost base and gain using fx_rate
+(FX source changed: conversion now uses the ATO FX Rate lookup, not a per-trade `fx_rate` — see the FX Conversion section.)
+- [ ] Convert cost base and proceeds to AUD for non-AUD trades via the ATO FX Rate lookup (portfolio, realised, unrealised reports currently compute in raw trade currency)
+- [ ] Convert income/AMMA foreign amounts to AUD via the ATO FX Rate lookup so tax summary totals are in AUD
+- [ ] Tests: USD (XNYS) buy/sell produces AUD cost base and gain using the ATO FX Rate
 
 ## Review Findings — Needs Clarification (resolve intended behaviour before implementing)
 - [ ] Confirm how the 50% CGT discount should be applied: reports currently expose only the gross eligible gain and never halve it, nor net losses against gains. Decide whether the tool should compute the discounted/assessable net capital gain or continue exposing components only
