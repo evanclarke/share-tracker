@@ -24,16 +24,16 @@ const IMPORT_INTERVAL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 /// An official monthly foreign exchange rate. `rate` is foreign currency units
 /// per 1 AUD (foreign-per-AUD), so AUD = foreign / rate.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AtoFxRate {
+pub struct RbaFxRate {
     pub id: i64,
     pub currency: String,
     pub month: String, // 'YYYY-MM'
     pub rate: Decimal,
 }
 
-impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for AtoFxRate {
+impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for RbaFxRate {
     fn from_row(row: &'r sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
-        Ok(AtoFxRate {
+        Ok(RbaFxRate {
             id: row.try_get("id")?,
             currency: row.try_get("currency")?,
             month: row.try_get("month")?,
@@ -66,20 +66,20 @@ pub struct ImportSummary {
 
 pub fn router() -> Router<SqlitePool> {
     Router::new()
-        .route("/ato_fx_rates", get(list))
-        .route("/ato_fx_rates/{id}", get(get_one))
+        .route("/rba_fx_rates", get(list))
+        .route("/rba_fx_rates/{id}", get(get_one))
         // Manual trigger for retries / missed runs. Read-only for clients otherwise.
-        .route("/ato_fx_rates/import", post(import))
+        .route("/rba_fx_rates/import", post(import))
 }
 
-pub async fn db_list(pool: &SqlitePool) -> Result<Vec<AtoFxRate>, sqlx::Error> {
-    sqlx::query_as("SELECT id, currency, month, rate FROM ato_fx_rates ORDER BY currency, month")
+pub async fn db_list(pool: &SqlitePool) -> Result<Vec<RbaFxRate>, sqlx::Error> {
+    sqlx::query_as("SELECT id, currency, month, rate FROM rba_fx_rates ORDER BY currency, month")
         .fetch_all(pool)
         .await
 }
 
-pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<AtoFxRate>, sqlx::Error> {
-    sqlx::query_as("SELECT id, currency, month, rate FROM ato_fx_rates WHERE id = ?")
+pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<RbaFxRate>, sqlx::Error> {
+    sqlx::query_as("SELECT id, currency, month, rate FROM rba_fx_rates WHERE id = ?")
         .bind(id)
         .fetch_optional(pool)
         .await
@@ -95,7 +95,7 @@ pub async fn db_import_rate(
     rate: Decimal,
 ) -> Result<bool, sqlx::Error> {
     let result = sqlx::query(
-        "INSERT INTO ato_fx_rates (currency, month, rate) VALUES (?, ?, ?) \
+        "INSERT INTO rba_fx_rates (currency, month, rate) VALUES (?, ?, ?) \
          ON CONFLICT(currency, month) DO NOTHING",
     )
     .bind(currency)
@@ -217,14 +217,14 @@ pub fn spawn_weekly_import(pool: SqlitePool) {
     });
 }
 
-async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<AtoFxRate>>, StatusCode> {
+async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<RbaFxRate>>, StatusCode> {
     db_list(&pool).await.map(Json).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 async fn get_one(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
-) -> Result<Json<AtoFxRate>, StatusCode> {
+) -> Result<Json<RbaFxRate>, StatusCode> {
     db_get(&pool, id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
@@ -397,12 +397,12 @@ mod tests {
         db_import_rate(&pool, "USD", "2024-01", "1.5".parse().unwrap()).await.unwrap();
         let resp = router()
             .with_state(pool)
-            .oneshot(Request::builder().uri("/ato_fx_rates").body(Body::empty()).unwrap())
+            .oneshot(Request::builder().uri("/rba_fx_rates").body(Body::empty()).unwrap())
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let rates: Vec<AtoFxRate> = serde_json::from_slice(&bytes).unwrap();
+        let rates: Vec<RbaFxRate> = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(rates.len(), 1);
         assert_eq!(rates[0].currency, "USD");
     }
@@ -415,13 +415,13 @@ mod tests {
         let resp = router()
             .with_state(pool)
             .oneshot(
-                Request::builder().uri(format!("/ato_fx_rates/{id}")).body(Body::empty()).unwrap(),
+                Request::builder().uri(format!("/rba_fx_rates/{id}")).body(Body::empty()).unwrap(),
             )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let rate: AtoFxRate = serde_json::from_slice(&bytes).unwrap();
+        let rate: RbaFxRate = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(rate.currency, "USD");
         assert_eq!(rate.rate, "1.5".parse::<Decimal>().unwrap());
     }
@@ -431,7 +431,7 @@ mod tests {
         let pool = test_pool().await;
         let resp = router()
             .with_state(pool)
-            .oneshot(Request::builder().uri("/ato_fx_rates/999").body(Body::empty()).unwrap())
+            .oneshot(Request::builder().uri("/rba_fx_rates/999").body(Body::empty()).unwrap())
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
@@ -445,7 +445,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/ato_fx_rates/import")
+                    .uri("/rba_fx_rates/import")
                     .body(Body::from(SAMPLE_CSV))
                     .unwrap(),
             )
@@ -466,7 +466,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/ato_fx_rates/import")
+                    .uri("/rba_fx_rates/import")
                     .body(Body::from("Title,A$1=USD\n29-Jan-2010,oops\n"))
                     .unwrap(),
             )

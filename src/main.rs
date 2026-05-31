@@ -1,7 +1,7 @@
 mod amma;
 mod amit_adjustment;
 mod args;
-mod ato_fx_rate;
+mod rba_fx_rate;
 mod portfolio;
 mod db;
 mod decimal;
@@ -27,11 +27,11 @@ async fn main() {
 
     let pool = db::init(&args.db).await.expect("failed to open database");
     db::spawn_daily_backup(pool.clone(), args.db.clone());
-    ato_fx_rate::spawn_weekly_import(pool.clone());
+    rba_fx_rate::spawn_weekly_import(pool.clone());
 
     let app = exchange::router()
         .merge(listing::router())
-        .merge(ato_fx_rate::router())
+        .merge(rba_fx_rate::router())
         .merge(trade::router())
         .merge(income::router())
         .merge(amma::router())
