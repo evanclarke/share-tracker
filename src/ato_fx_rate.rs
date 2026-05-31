@@ -4,6 +4,7 @@ use axum::{
     http::StatusCode,
     routing::{get, post},
 };
+use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
@@ -11,18 +12,17 @@ use std::time::Duration;
 
 use crate::decimal::parse_dec;
 
-/// Source of the ATO's published monthly foreign exchange rates. The import
-/// expects a CSV with one rate per line: `currency,YYYY-MM,rate`, where `rate`
-/// is foreign currency units per 1 AUD (foreign-per-AUD). A leading header row
-/// (first field `currency`, case-insensitive) and blank lines are ignored.
-const ATO_FX_RATES_URL: &str =
-    "https://data.gov.au/data/dataset/ato-foreign-exchange-rates/monthly-rates.csv";
+/// Source of the official monthly foreign exchange rates used for AUD tax
+/// conversion: the RBA's F11 "Exchange Rates" CSV (the rates the ATO directs
+/// taxpayers to use). Each currency column is headed `A$1=<code>` and holds
+/// foreign currency units per 1 AUD (foreign-per-AUD), so AUD = foreign / rate.
+const RBA_FX_RATES_URL: &str = "https://www.rba.gov.au/statistics/tables/csv/f11-data.csv";
 
 /// One week between scheduled imports.
 const IMPORT_INTERVAL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
-/// An ATO-published monthly foreign exchange rate. `rate` is foreign currency
-/// units per 1 AUD (foreign-per-AUD), so AUD = foreign / rate.
+/// An official monthly foreign exchange rate. `rate` is foreign currency units
+/// per 1 AUD (foreign-per-AUD), so AUD = foreign / rate.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AtoFxRate {
     pub id: i64,
@@ -46,7 +46,7 @@ impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for AtoFxRate {
 pub enum ImportError {
     /// Could not retrieve the published rates (network / HTTP error).
     Fetch(String),
-    /// A line in the feed was not well-formed `currency,YYYY-MM,rate`.
+    /// The feed was not the expected RBA F11 shape (missing header, bad rate).
     Parse(String),
     Db(sqlx::Error),
 }
@@ -106,38 +106,63 @@ pub async fn db_import_rate(
     Ok(result.rows_affected() > 0)
 }
 
-/// Parse the ATO CSV feed into `(currency, month, rate)` tuples. Fails loudly on a
-/// malformed data row rather than silently dropping it — a missing rate would later
-/// surface as a failed (un-substitutable) AUD conversion.
+/// Parse the RBA F11 "Exchange Rates" CSV into `(currency, month, rate)` tuples.
+///
+/// The file has a leading BOM, a `Title` row whose columns are `A$1=<code>` (and
+/// a non-currency trade-weighted-index column), several other metadata rows, then
+/// monthly data rows keyed by an end-of-month date (`DD-Mon-YYYY`). For each data
+/// row we emit one tuple per currency column that has a value; the month is the
+/// date's year-month. Fails loudly on a malformed rate rather than dropping it —
+/// a missing rate would later surface as an un-substitutable AUD conversion.
 pub fn parse_rates(content: &str) -> Result<Vec<(String, String, Decimal)>, ImportError> {
+    let content = content.strip_prefix('\u{feff}').unwrap_or(content);
+
+    // Currency code per column, aligned to fields[1..] (None for non-currency columns).
+    let mut currencies: Option<Vec<Option<String>>> = None;
     let mut out = Vec::new();
+
     for line in content.lines() {
-        let line = line.trim();
+        let line = line.trim_end();
         if line.is_empty() {
             continue;
         }
         let fields: Vec<&str> = line.split(',').map(str::trim).collect();
-        // Skip a header row.
-        if fields[0].eq_ignore_ascii_case("currency") {
+
+        if fields[0].eq_ignore_ascii_case("Title") {
+            currencies = Some(
+                fields[1..]
+                    .iter()
+                    .map(|h| h.strip_prefix("A$1=").map(|c| c.to_uppercase()))
+                    .collect(),
+            );
             continue;
         }
-        if fields.len() != 3 {
-            return Err(ImportError::Parse(format!(
-                "expected `currency,YYYY-MM,rate`, got {line:?}"
-            )));
+
+        // Data rows are keyed by an end-of-month date; every other metadata row
+        // (Description, Units, Source, …) fails this parse and is skipped.
+        let Ok(date) = NaiveDate::parse_from_str(fields[0], "%d-%b-%Y") else {
+            continue;
+        };
+        let currencies = currencies.as_ref().ok_or_else(|| {
+            ImportError::Parse("data row encountered before the Title header row".into())
+        })?;
+        let month = date.format("%Y-%m").to_string();
+
+        for (col, currency) in currencies.iter().enumerate() {
+            let Some(currency) = currency else { continue };
+            let Some(value) = fields.get(col + 1) else { continue };
+            if value.is_empty() {
+                continue;
+            }
+            let rate: Decimal = value.parse().map_err(|e| {
+                ImportError::Parse(format!("invalid {currency} rate {value:?} for {month}: {e}"))
+            })?;
+            out.push((currency.clone(), month.clone(), rate));
         }
-        let currency = fields[0].to_uppercase();
-        if currency.len() != 3 || !currency.chars().all(|c| c.is_ascii_alphabetic()) {
-            return Err(ImportError::Parse(format!("invalid ISO 4217 currency {:?}", fields[0])));
-        }
-        let month = fields[1];
-        if month.len() != 7 || month.as_bytes()[4] != b'-' {
-            return Err(ImportError::Parse(format!("invalid month {month:?}, expected YYYY-MM")));
-        }
-        let rate: Decimal = fields[2]
-            .parse()
-            .map_err(|e| ImportError::Parse(format!("invalid rate {:?}: {e}", fields[2])))?;
-        out.push((currency, month.to_string(), rate));
+    }
+
+    if currencies.is_none() {
+        return Err(ImportError::Parse("no `Title` header row found in feed".into()));
     }
     Ok(out)
 }
@@ -160,9 +185,9 @@ pub async fn import_from_content(
     Ok(summary)
 }
 
-/// Fetch the published rates from the ATO and import them.
+/// Fetch the published rates from the RBA and import them.
 pub async fn run_import(pool: &SqlitePool) -> Result<ImportSummary, ImportError> {
-    let content = fetch_rates(ATO_FX_RATES_URL).await?;
+    let content = fetch_rates(RBA_FX_RATES_URL).await?;
     import_from_content(pool, &content).await
 }
 
@@ -175,7 +200,7 @@ async fn fetch_rates(url: &str) -> Result<String, ImportError> {
     resp.text().await.map_err(|e| ImportError::Fetch(e.to_string()))
 }
 
-/// Run the ATO FX rate import now, then once a week, alongside the daily backup.
+/// Run the RBA FX rate import now, then once a week, alongside the daily backup.
 pub fn spawn_weekly_import(pool: SqlitePool) {
     tokio::spawn(async move {
         loop {
@@ -183,9 +208,9 @@ pub fn spawn_weekly_import(pool: SqlitePool) {
                 Ok(s) => tracing::info!(
                     inserted = s.inserted,
                     skipped = s.skipped,
-                    "ATO FX rate import complete"
+                    "RBA FX rate import complete"
                 ),
-                Err(e) => tracing::warn!("ATO FX rate import failed: {e:?}"),
+                Err(e) => tracing::warn!("RBA FX rate import failed: {e:?}"),
             }
             tokio::time::sleep(IMPORT_INTERVAL).await;
         }
@@ -208,8 +233,9 @@ async fn get_one(
 }
 
 /// Manually trigger the import. With a non-empty request body, imports that body
-/// (a downloaded feed — useful for retries when the ATO endpoint is unreachable);
-/// with an empty body, fetches from the ATO. Both share `import_from_content`.
+/// (a downloaded F11 CSV — useful for retries when the RBA endpoint is
+/// unreachable); with an empty body, fetches from the RBA. Both share
+/// `import_from_content`.
 async fn import(
     State(pool): State<SqlitePool>,
     body: String,
@@ -221,15 +247,15 @@ async fn import(
     };
     result.map(Json).map_err(|e| match e {
         ImportError::Parse(msg) => {
-            tracing::warn!(%msg, "ATO FX rate import rejected malformed feed");
+            tracing::warn!(%msg, "RBA FX rate import rejected malformed feed");
             StatusCode::UNPROCESSABLE_ENTITY
         }
         ImportError::Fetch(msg) => {
-            tracing::warn!(%msg, "ATO FX rate fetch failed");
+            tracing::warn!(%msg, "RBA FX rate fetch failed");
             StatusCode::BAD_GATEWAY
         }
         ImportError::Db(e) => {
-            tracing::error!(error = %e, "ATO FX rate import db error");
+            tracing::error!(error = %e, "RBA FX rate import db error");
             StatusCode::INTERNAL_SERVER_ERROR
         }
     })
@@ -247,7 +273,17 @@ mod tests {
         db::init(":memory:").await.unwrap()
     }
 
-    const SAMPLE_CSV: &str = "currency,month,rate\nUSD,2024-01,1.5\nUSD,2024-02,1.6\nGBP,2024-01,1.9\n";
+    /// A trimmed slice of the real RBA F11 layout: BOM, metadata rows, a Title row
+    /// with a non-currency Index column to skip, and two monthly data rows (the
+    /// first has an empty PHP cell to skip).
+    const SAMPLE_CSV: &str = "\u{feff}F11 EXCHANGE RATES\n\
+        Title,A$1=USD,Trade-weighted Index May 1970 = 100,A$1=GBP,A$1=PHP\n\
+        Description,AUD/USD,Index,AUD/GBP,AUD/PHP\n\
+        Units,USD,Index,GBP,PHP\n\
+        Series ID,FXRUSD,FXRTWI,FXRUKPS,FXRPHP\n\
+        \n\
+        29-Jan-2010,0.8909,69.2,0.5523,\n\
+        26-Feb-2010,0.8899,69.5,0.5826,40.10\n";
 
     // DB-level tests
 
@@ -293,28 +329,32 @@ mod tests {
     // Parsing tests
 
     #[tokio::test]
-    async fn parse_rates_parses_valid_csv_skipping_header_and_blanks() {
+    async fn parse_rates_parses_f11_skipping_index_and_empty_cells() {
         let parsed = parse_rates(SAMPLE_CSV).unwrap();
+        // Per row, per currency column with a value. The Index column is dropped,
+        // and Jan's empty PHP cell is skipped.
         assert_eq!(
             parsed,
             vec![
-                ("USD".to_string(), "2024-01".to_string(), "1.5".parse().unwrap()),
-                ("USD".to_string(), "2024-02".to_string(), "1.6".parse().unwrap()),
-                ("GBP".to_string(), "2024-01".to_string(), "1.9".parse().unwrap()),
+                ("USD".to_string(), "2010-01".to_string(), "0.8909".parse().unwrap()),
+                ("GBP".to_string(), "2010-01".to_string(), "0.5523".parse().unwrap()),
+                ("USD".to_string(), "2010-02".to_string(), "0.8899".parse().unwrap()),
+                ("GBP".to_string(), "2010-02".to_string(), "0.5826".parse().unwrap()),
+                ("PHP".to_string(), "2010-02".to_string(), "40.10".parse().unwrap()),
             ]
         );
     }
 
     #[tokio::test]
     async fn parse_rates_rejects_malformed_rate() {
-        let err = parse_rates("USD,2024-01,not-a-number").unwrap_err();
-        assert!(matches!(err, ImportError::Parse(_)));
+        let csv = "Title,A$1=USD\n29-Jan-2010,not-a-number\n";
+        assert!(matches!(parse_rates(csv).unwrap_err(), ImportError::Parse(_)));
     }
 
     #[tokio::test]
-    async fn parse_rates_rejects_bad_month() {
-        let err = parse_rates("USD,2024/01,1.5").unwrap_err();
-        assert!(matches!(err, ImportError::Parse(_)));
+    async fn parse_rates_errors_without_title_header() {
+        let csv = "F11 EXCHANGE RATES\nDescription,foo\n";
+        assert!(matches!(parse_rates(csv).unwrap_err(), ImportError::Parse(_)));
     }
 
     // Import idempotency
@@ -324,18 +364,18 @@ mod tests {
         let pool = test_pool().await;
 
         let first = import_from_content(&pool, SAMPLE_CSV).await.unwrap();
-        assert_eq!(first, ImportSummary { inserted: 3, skipped: 0 });
+        assert_eq!(first, ImportSummary { inserted: 5, skipped: 0 });
 
         // Re-running stores no duplicates and leaves existing rows unchanged, even
         // if the feed carries a different rate for an existing (currency, month).
-        let altered = "USD,2024-01,9.99\nUSD,2024-02,1.6\nGBP,2024-01,1.9\n";
-        let second = import_from_content(&pool, altered).await.unwrap();
-        assert_eq!(second, ImportSummary { inserted: 0, skipped: 3 });
+        let altered = SAMPLE_CSV.replace("0.8909", "9.9999");
+        let second = import_from_content(&pool, &altered).await.unwrap();
+        assert_eq!(second, ImportSummary { inserted: 0, skipped: 5 });
 
         let rows = db_list(&pool).await.unwrap();
-        assert_eq!(rows.len(), 3, "no duplicates created");
-        let usd_jan = rows.iter().find(|r| r.currency == "USD" && r.month == "2024-01").unwrap();
-        assert_eq!(usd_jan.rate, "1.5".parse::<Decimal>().unwrap(), "existing row unchanged");
+        assert_eq!(rows.len(), 5, "no duplicates created");
+        let usd_jan = rows.iter().find(|r| r.currency == "USD" && r.month == "2010-01").unwrap();
+        assert_eq!(usd_jan.rate, "0.8909".parse::<Decimal>().unwrap(), "existing row unchanged");
     }
 
     #[tokio::test]
@@ -343,10 +383,10 @@ mod tests {
         let pool = test_pool().await;
         import_from_content(&pool, SAMPLE_CSV).await.unwrap();
         // Feed now includes a new month alongside the existing rows.
-        let extended = format!("{SAMPLE_CSV}GBP,2024-02,1.95\n");
+        let extended = format!("{SAMPLE_CSV}31-Mar-2010,0.9159,71.7,0.6072,42.00\n");
         let summary = import_from_content(&pool, &extended).await.unwrap();
-        assert_eq!(summary, ImportSummary { inserted: 1, skipped: 3 });
-        assert_eq!(db_list(&pool).await.unwrap().len(), 4);
+        assert_eq!(summary, ImportSummary { inserted: 3, skipped: 5 });
+        assert_eq!(db_list(&pool).await.unwrap().len(), 8);
     }
 
     // API-level tests
@@ -414,8 +454,8 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let summary: ImportSummary = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(summary, ImportSummary { inserted: 3, skipped: 0 });
-        assert_eq!(db_list(&pool).await.unwrap().len(), 3);
+        assert_eq!(summary, ImportSummary { inserted: 5, skipped: 0 });
+        assert_eq!(db_list(&pool).await.unwrap().len(), 5);
     }
 
     #[tokio::test]
@@ -427,7 +467,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/ato_fx_rates/import")
-                    .body(Body::from("USD,2024-01,oops"))
+                    .body(Body::from("Title,A$1=USD\n29-Jan-2010,oops\n"))
                     .unwrap(),
             )
             .await
