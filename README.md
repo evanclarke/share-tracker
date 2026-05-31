@@ -18,15 +18,27 @@ A personal Australian share portfolio tracker with a REST JSON API. Records trad
 
 ```bash
 cargo build --release
-./target/release/share-tracker [--db share-tracker.db] [--port 3000]
+./target/release/share-tracker [--db share-tracker.db] [--port 3000] [--schedule schedule.cron]
 ```
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--db` | `share-tracker.db` | SQLite database file path |
 | `--port` | `3000` | HTTP port to listen on |
+| `--schedule` | built-in `schedule.cron` | Path to a cron file overriding the built-in maintenance schedule |
 
-The database is created automatically on first run. Migrations are applied in order at startup. A daily backup is written to `<stem>-YYYY-MM-DD.db` beside the main file (skipped if one already exists for the day). The RBA FX rate import also runs at startup and then weekly; each run logs the next scheduled time.
+The database is created automatically on first run. Migrations are applied in order at startup.
+
+### Scheduled maintenance
+
+Recurring maintenance jobs — the database backup and the RBA FX rate import — are scheduled from a cron file rather than hard-coded intervals. Each line is a 5-field Vixie cron expression (`min hour dom mon dow`) followed by a job name; `#` starts a comment. The built-in default is embedded in the binary (`schedule.cron`); pass `--schedule <path>` to use your own file instead:
+
+```
+0 0 * * *   backup          # daily at midnight
+0 2 * * 1   rba-fx-import   # weekly, Monday 02:00
+```
+
+A schedule line naming an unknown job is rejected at startup; a registered job with no schedule line is allowed but logged as a `WARN` (it will then only run via its endpoint). Jobs run only at their scheduled times (not at startup); after each run (and at startup) the next scheduled run is logged at INFO. The backup writes `<stem>-YYYY-MM-DD.db` beside the main database file (skipped if one already exists for the day). Any job can be run on demand with `POST /jobs/{name}` (see HTTP API).
 
 Logging is controlled by the `RUST_LOG` environment variable (default: `info`).
 
@@ -174,7 +186,18 @@ Monthly foreign exchange rates from the RBA's F11 table, stored as foreign-curre
 | `GET` | `/rba_fx_rates/:id` | Get one FX rate |
 | `POST` | `/rba_fx_rates/import` | Trigger an import (see below) |
 
-`POST /rba_fx_rates/import` is idempotent: it inserts new `(currency, month)` rows and leaves existing rows unchanged (re-running creates no duplicates). With an **empty body** it fetches the live RBA F11 CSV; with a **non-empty body** it imports that supplied CSV (useful for retries when the RBA endpoint is unreachable). Returns `200 OK` with `{ "inserted": N, "skipped": M }`, `422` if the feed can't be parsed, or `502 Bad Gateway` if the RBA fetch fails. The same import runs automatically at startup and weekly.
+`POST /rba_fx_rates/import` is idempotent: it inserts new `(currency, month)` rows and leaves existing rows unchanged (re-running creates no duplicates). With an **empty body** it fetches the live RBA F11 CSV; with a **non-empty body** it imports that supplied CSV (useful for retries when the RBA endpoint is unreachable). Returns `200 OK` with `{ "inserted": N, "skipped": M }`, `422` if the feed can't be parsed, or `502 Bad Gateway` if the RBA fetch fails. The same import also runs on the cron schedule as the `rba-fx-import` job (see Jobs).
+
+### Jobs
+
+Recurring maintenance jobs scheduled from the cron file (see [Scheduled maintenance](#scheduled-maintenance)). These endpoints inspect the registered jobs and trigger them on demand.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/jobs` | List registered job names (JSON array, sorted) |
+| `POST` | `/jobs/:name` | Run the named job now |
+
+`POST /jobs/:name` runs the job synchronously and returns `204 No Content` on success, `404 Not Found` if no job has that name, or `500 Internal Server Error` if the job fails. Registered jobs are `backup` and `rba-fx-import`.
 
 ### Trades
 
@@ -323,11 +346,11 @@ Returns one record per Australian financial year (identified by the calendar yea
 | Code | Meaning |
 |------|---------|
 | `200 OK` | Successful GET |
-| `204 No Content` | Successful PUT or DELETE |
+| `204 No Content` | Successful PUT or DELETE, or a job run via `POST /jobs/:name` |
 | `404 Not Found` | Resource does not exist |
 | `405 Method Not Allowed` | Write attempted on a read-only path (e.g. `parcel_allocations`) |
 | `422 Unprocessable Entity` | Business rule violation (e.g. over-allocation, wrong trade type, under-allocated Sell, unparseable FX feed) |
-| `500 Internal Server Error` | Unexpected database error |
+| `500 Internal Server Error` | Unexpected database error, or a job triggered via `POST /jobs/:name` failed |
 | `502 Bad Gateway` | Upstream fetch failed (e.g. RBA FX rate import could not reach the RBA) |
 
 ## Tech stack

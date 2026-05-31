@@ -11,12 +11,14 @@ mod listing;
 mod logging;
 mod parcel_allocation;
 mod realised_gains;
+mod scheduler;
 mod sell;
 mod tax_summary;
 mod trade;
 mod unrealised_gains;
 
 use args::Args;
+use axum::Extension;
 use clap::Parser;
 
 #[tokio::main]
@@ -26,8 +28,15 @@ async fn main() {
     let args = Args::parse();
 
     let pool = db::init(&args.db).await.expect("failed to open database");
-    db::spawn_daily_backup(pool.clone(), args.db.clone());
-    rba_fx_rate::spawn_weekly_import(pool.clone());
+
+    // Recurring maintenance jobs are scheduled from a cron file (see `schedule.cron`),
+    // not hard-coded durations. The built-in default is overridable with --schedule.
+    let schedule = match &args.schedule {
+        Some(path) => std::fs::read_to_string(path).expect("failed to read schedule file"),
+        None => include_str!("../schedule.cron").to_string(),
+    };
+    let registry = scheduler::registry(pool.clone(), args.db.clone());
+    scheduler::spawn(registry.clone(), &schedule).expect("invalid schedule");
 
     let app = exchange::router()
         .merge(listing::router())
@@ -42,7 +51,9 @@ async fn main() {
         .merge(unrealised_gains::router())
         .merge(realised_gains::router())
         .merge(tax_summary::router())
-        .with_state(pool.clone());
+        .merge(scheduler::router())
+        .with_state(pool.clone())
+        .layer(Extension(registry));
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], args.port));
     let listener = tokio::net::TcpListener::bind(addr).await.expect("failed to bind");
     tracing::info!("share-tracker started, db: {}, port: {}", args.db, args.port);

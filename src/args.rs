@@ -7,6 +7,9 @@ pub struct Args {
     pub db: String,
     #[arg(long, default_value_t = 3000)]
     pub port: u16,
+    /// Path to a cron schedule file overriding the built-in default (`schedule.cron`).
+    #[arg(long)]
+    pub schedule: Option<String>,
 }
 
 #[cfg(test)]
@@ -23,5 +26,17 @@ mod tests {
     fn custom_db_path() {
         let args = Args::parse_from(["share-tracker", "--db", "custom.db"]);
         assert_eq!(args.db, "custom.db");
+    }
+
+    #[test]
+    fn default_schedule_is_none() {
+        let args = Args::parse_from(["share-tracker"]);
+        assert_eq!(args.schedule, None);
+    }
+
+    #[test]
+    fn custom_schedule_path() {
+        let args = Args::parse_from(["share-tracker", "--schedule", "my.cron"]);
+        assert_eq!(args.schedule.as_deref(), Some("my.cron"));
     }
 }

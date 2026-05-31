@@ -1,4 +1,4 @@
-use chrono::{Local, TimeZone};
+use chrono::Local;
 use sqlx::{
     SqlitePool,
     sqlite::{SqliteConnectOptions, SqliteJournalMode},
@@ -65,31 +65,6 @@ pub async fn backup(pool: &SqlitePool, db_path: &str) -> Result<(), sqlx::Error>
         tracing::info!(path = dest, "backup complete");
     }
     Ok(())
-}
-
-pub fn spawn_daily_backup(pool: SqlitePool, db_path: String) {
-    tokio::spawn(async move {
-        loop {
-            if let Err(e) = backup(&pool, &db_path).await {
-                tracing::warn!("backup failed: {e}");
-            }
-            let now = Local::now();
-            let next_midnight = Local
-                .from_local_datetime(
-                    &(now + chrono::Duration::days(1))
-                        .date_naive()
-                        .and_hms_opt(0, 0, 0)
-                        .unwrap(),
-                )
-                .unwrap();
-            let secs = (next_midnight - now).num_seconds().max(1) as u64;
-            tracing::info!(
-                next_run = %next_midnight.format("%Y-%m-%d %H:%M:%S %Z"),
-                "next backup scheduled"
-            );
-            tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
-        }
-    });
 }
 
 #[cfg(test)]

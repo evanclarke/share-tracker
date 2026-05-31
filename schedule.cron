@@ -1,0 +1,6 @@
+# Maintenance task schedule — 5-field Vixie cron: min hour dom mon dow
+# Trigger any job immediately with: POST /jobs/<name>
+# Times are local server time. Override this file with --schedule <path>.
+
+0 0 * * *   backup          # daily at midnight
+0 2 * * 1   rba-fx-import   # weekly, Monday 02:00

@@ -8,7 +8,6 @@ use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
-use std::time::Duration;
 
 use crate::decimal::parse_dec;
 
@@ -17,9 +16,6 @@ use crate::decimal::parse_dec;
 /// taxpayers to use). Each currency column is headed `A$1=<code>` and holds
 /// foreign currency units per 1 AUD (foreign-per-AUD), so AUD = foreign / rate.
 const RBA_FX_RATES_URL: &str = "https://www.rba.gov.au/statistics/tables/csv/f11-data.csv";
-
-/// One week between scheduled imports.
-const IMPORT_INTERVAL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 /// An official monthly foreign exchange rate. `rate` is foreign currency units
 /// per 1 AUD (foreign-per-AUD), so AUD = foreign / rate.
@@ -198,29 +194,6 @@ async fn fetch_rates(url: &str) -> Result<String, ImportError> {
         .error_for_status()
         .map_err(|e| ImportError::Fetch(e.to_string()))?;
     resp.text().await.map_err(|e| ImportError::Fetch(e.to_string()))
-}
-
-/// Run the RBA FX rate import now, then once a week, alongside the daily backup.
-pub fn spawn_weekly_import(pool: SqlitePool) {
-    tokio::spawn(async move {
-        loop {
-            match run_import(&pool).await {
-                Ok(s) => tracing::info!(
-                    inserted = s.inserted,
-                    skipped = s.skipped,
-                    "RBA FX rate import complete"
-                ),
-                Err(e) => tracing::warn!("RBA FX rate import failed: {e:?}"),
-            }
-            let next_run = chrono::Local::now()
-                + chrono::Duration::from_std(IMPORT_INTERVAL).expect("import interval in range");
-            tracing::info!(
-                next_run = %next_run.format("%Y-%m-%d %H:%M:%S %Z"),
-                "next RBA FX rate import scheduled"
-            );
-            tokio::time::sleep(IMPORT_INTERVAL).await;
-        }
-    });
 }
 
 async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<RbaFxRate>>, StatusCode> {
