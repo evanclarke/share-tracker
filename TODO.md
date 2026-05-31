@@ -27,11 +27,11 @@ Items are only marked done when a passing test exists for them.
 - [x] Tests: insert, retrieve listing; FK constraint to exchange
 
 ## Trade Activity
-- [ ] Trade model (type, date, settlement date, listing FK, average price, quantity, currency, brokerage, GST on brokerage, brokerage currency, FX rate, contract note reference)
-- [ ] DB schema: `trades` table
-- [ ] Auto-populate settlement date from trade date + exchange settlement period (overridable)
-- [ ] CRUD API endpoints for trades
-- [ ] Tests: buy, sell, DRP trades; settlement date auto-population; override of settlement date
+- [x] Trade model (type, date, settlement date, listing FK, average price, quantity, currency, brokerage, GST on brokerage, brokerage currency, FX rate, contract note reference)
+- [x] DB schema: `trades` table
+- [x] Auto-populate settlement date from trade date + exchange settlement period (overridable)
+- [x] CRUD API endpoints for trades
+- [x] Tests: buy, sell, DRP trades; settlement date auto-population; override of settlement date
 
 ## Income Activity
 - [ ] Income model (listing FK, date paid, ex date, franked amount, unfranked amount, foreign source income, foreign tax paid, TFN withholding tax, franking credits, LIC capital gain deduction, conduit foreign income, trust income flag, reinvestment trade FK)
