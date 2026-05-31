@@ -107,3 +107,31 @@ Items are only marked done when a passing test exists for them.
 - [ ] Portfolio overview UI
 - [ ] Gains/losses report UI
 - [ ] Tax summary UI
+
+## Review Findings — Requirements Gaps
+- [ ] Apply trade `fx_rate` so cost base and proceeds are reported in AUD for non-AUD trades (portfolio, realised, unrealised reports currently compute in raw trade currency)
+- [ ] Apply `fx_rate` to income/AMMA foreign amounts so tax summary totals are in AUD
+- [ ] Tests: USD (XNYS) buy/sell produces AUD cost base and gain using fx_rate
+
+## Review Findings — Needs Clarification (resolve intended behaviour before implementing)
+- [ ] Confirm how the 50% CGT discount should be applied: reports currently expose only the gross eligible gain and never halve it, nor net losses against gains. Decide whether the tool should compute the discounted/assessable net capital gain or continue exposing components only
+- [ ] Apply the 50% CGT discount to eligible gains (currently only the gross eligible gain is exposed, never halved)
+- [ ] Net capital losses against gains and apply the discount to produce an assessable net capital gain
+- [ ] Tests: discounted net capital gain after offsetting losses
+- [ ] Confirm AMMA cost-base driver: the model annotates `tax_deferred_amount` as "reduces cost base", but calculations use the per-unit `cost_base_adjustment`; `tax_deferred_amount` and `tax_free_amount` are currently stored but unused. Decide which field(s) drive the adjustment
+- [ ] Resolve AMMA cost-base driver per the decision above and remove or wire up the now-redundant fields
+- [ ] Tests: cost base reflects the agreed AMMA field(s)
+
+## Review Findings — Feature Gaps
+- [ ] Net capital gain / overall tax-position report combining realised parcel gains, AMMA-attributed CGT gains, and AMMA capital losses applied
+- [x] Prevent an under-allocated Sell from being persisted: new atomic `PUT /sells/{id}` (src/sell.rs) inserts the Sell trade + all its parcel allocations in one transaction and rejects (422) unless allocations sum exactly to the sell quantity and every parcel is a valid, not-over-allocated Buy/DRP. To keep the invariant: `PUT /trades/{id}` now rejects `Sell` (422), and `parcel_allocations` is read-only over HTTP (PUT/DELETE removed; allocations are managed via /sells).
+- [x] Tests: Sell+allocations rejected when allocations don't sum to sell quantity (under and over), rejected on parcel over-allocation / non-Buy parcel, accepted and rolled-back-on-failure when valid; PUT /trades Sell → 422; parcel_allocations PUT/DELETE → 405 (src/sell.rs, src/trade.rs, src/parcel_allocation.rs)
+
+## Review Findings — Implementation Issues
+- [x] Settlement date should advance by business days, not calendar days (trade.rs `add_business_days` now skips weekends; public holidays still not modelled)
+- [x] Tests: settlement date skips weekends (`add_business_days_skips_weekend`, `api_settlement_date_auto_populated_skips_weekend`)
+- [ ] Model exchange public holidays so settlement dates skip them too
+- [ ] Avoid CAST(REAL AS TEXT) float imprecision for any rows written before migration 0006 (trades/income were created as REAL in 0004/0005)
+- [x] Surface malformed decimal values instead of silently coercing to zero via `.parse().unwrap_or(Decimal::ZERO)` in the report modules (shared `decimal::parse_dec` propagates a decode error; test `db_malformed_decimal_is_an_error_not_zero`)
+- [x] Remove dead-code warnings from unused `UpsertError::Db(sqlx::Error)` field in parcel_allocation.rs and amit_adjustment.rs (now logged via `tracing::error!`)
+- [ ] Remove remaining dead-code warning: `amit_adjustment::db_cost_base_reduction` is unused because the report modules each re-implement the same AMIT-reduction query inline (dedup opportunity)

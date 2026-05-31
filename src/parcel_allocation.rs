@@ -30,17 +30,16 @@ impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for ParcelAllocation {
     }
 }
 
-#[derive(Debug, Deserialize)]
-pub struct ParcelAllocationBody {
-    pub sale_trade_id: i64,
-    pub purchase_trade_id: i64,
-    pub quantity_allocated: Decimal,
-}
 
+/// Parcel allocations are read-only over HTTP. They are created and replaced
+/// atomically together with their Sell trade via `PUT /sells/{id}` (see
+/// `sell` module); allowing standalone writes here would let a Sell become
+/// under-covered (e.g. deleting or shrinking an allocation), breaking the
+/// invariant that every persisted Sell is fully allocated.
 pub fn router() -> Router<SqlitePool> {
     Router::new()
         .route("/parcel_allocations", get(list))
-        .route("/parcel_allocations/{id}", get(get_one).put(upsert).delete(delete))
+        .route("/parcel_allocations/{id}", get(get_one))
 }
 
 pub async fn db_list(pool: &SqlitePool) -> Result<Vec<ParcelAllocation>, sqlx::Error> {
@@ -62,21 +61,27 @@ pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<ParcelAllocatio
     .await
 }
 
+// The write path below is retained only as a test-fixture builder for the
+// report modules (and this module's own validation tests). Allocations are no
+// longer writable over HTTP — they are managed atomically via `PUT /sells/{id}`.
+#[cfg(test)]
 #[derive(Debug)]
 pub enum UpsertError {
-    Db(sqlx::Error),
+    Db,
     SaleTradeNotSell,
     PurchaseTradeNotBuyOrDrp,
     PurchaseQuantityExceeded,
     SaleQuantityExceeded,
 }
 
+#[cfg(test)]
 impl From<sqlx::Error> for UpsertError {
-    fn from(e: sqlx::Error) -> Self {
-        UpsertError::Db(e)
+    fn from(_: sqlx::Error) -> Self {
+        UpsertError::Db
     }
 }
 
+#[cfg(test)]
 async fn sum_allocated(
     pool: &SqlitePool,
     column: &str,
@@ -97,6 +102,7 @@ async fn sum_allocated(
     Ok(total)
 }
 
+#[cfg(test)]
 pub async fn db_upsert(pool: &SqlitePool, allocation: &ParcelAllocation) -> Result<(), UpsertError> {
     use crate::trade::TradeType;
 
@@ -122,7 +128,7 @@ pub async fn db_upsert(pool: &SqlitePool, allocation: &ParcelAllocation) -> Resu
         .await?;
     let purchase_qty: Decimal = purchase_qty
         .parse()
-        .map_err(|_| UpsertError::Db(sqlx::Error::Decode("invalid purchase quantity".into())))?;
+        .map_err(|_| UpsertError::Db)?;
 
     let already_purchase_allocated =
         sum_allocated(pool, "purchase_trade_id", allocation.purchase_trade_id, allocation.id).await?;
@@ -136,7 +142,7 @@ pub async fn db_upsert(pool: &SqlitePool, allocation: &ParcelAllocation) -> Resu
         .await?;
     let sale_qty: Decimal = sale_qty
         .parse()
-        .map_err(|_| UpsertError::Db(sqlx::Error::Decode("invalid sale quantity".into())))?;
+        .map_err(|_| UpsertError::Db)?;
 
     let already_sale_allocated =
         sum_allocated(pool, "sale_trade_id", allocation.sale_trade_id, allocation.id).await?;
@@ -161,14 +167,6 @@ pub async fn db_upsert(pool: &SqlitePool, allocation: &ParcelAllocation) -> Resu
     Ok(())
 }
 
-pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<bool, sqlx::Error> {
-    let result = sqlx::query("DELETE FROM parcel_allocations WHERE id = ?")
-        .bind(id)
-        .execute(pool)
-        .await?;
-    Ok(result.rows_affected() > 0)
-}
-
 async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<ParcelAllocation>>, StatusCode> {
     db_list(&pool)
         .await
@@ -185,37 +183,6 @@ async fn get_one(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .map(Json)
         .ok_or(StatusCode::NOT_FOUND)
-}
-
-async fn upsert(
-    State(pool): State<SqlitePool>,
-    Path(id): Path<i64>,
-    Json(body): Json<ParcelAllocationBody>,
-) -> Result<StatusCode, StatusCode> {
-    let allocation = ParcelAllocation {
-        id,
-        sale_trade_id: body.sale_trade_id,
-        purchase_trade_id: body.purchase_trade_id,
-        quantity_allocated: body.quantity_allocated,
-    };
-    match db_upsert(&pool, &allocation).await {
-        Ok(()) => Ok(StatusCode::NO_CONTENT),
-        Err(UpsertError::SaleTradeNotSell) => Err(StatusCode::UNPROCESSABLE_ENTITY),
-        Err(UpsertError::PurchaseTradeNotBuyOrDrp) => Err(StatusCode::UNPROCESSABLE_ENTITY),
-        Err(UpsertError::PurchaseQuantityExceeded) => Err(StatusCode::UNPROCESSABLE_ENTITY),
-        Err(UpsertError::SaleQuantityExceeded) => Err(StatusCode::UNPROCESSABLE_ENTITY),
-        Err(UpsertError::Db(_)) => Err(StatusCode::INTERNAL_SERVER_ERROR),
-    }
-}
-
-async fn delete(
-    State(pool): State<SqlitePool>,
-    Path(id): Path<i64>,
-) -> Result<StatusCode, StatusCode> {
-    db_delete(&pool, id)
-        .await
-        .map(|found| if found { StatusCode::NO_CONTENT } else { StatusCode::NOT_FOUND })
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 #[cfg(test)]
@@ -489,46 +456,13 @@ mod tests {
     // API-level tests
 
     #[tokio::test]
-    async fn api_allocation_creation() {
+    async fn api_put_allocation_route_is_not_allowed() {
+        // Allocations are read-only over HTTP; writes go through PUT /sells/{id}.
         let pool = test_pool().await;
-        insert_test_listing(&pool).await;
-        insert_buy_trade(&pool, 1, Decimal::from(10)).await;
-        insert_sell_trade(&pool, 2, Decimal::from(5)).await;
-
         let body = serde_json::json!({
             "sale_trade_id": 2,
             "purchase_trade_id": 1,
             "quantity_allocated": "5"
-        });
-        let resp = router()
-            .with_state(pool.clone())
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri("/parcel_allocations/1")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
-
-        let got = db_get(&pool, 1).await.unwrap().unwrap();
-        assert_eq!(got.quantity_allocated, Decimal::from(5));
-    }
-
-    #[tokio::test]
-    async fn api_over_allocation_returns_422() {
-        let pool = test_pool().await;
-        insert_test_listing(&pool).await;
-        insert_buy_trade(&pool, 1, Decimal::from(10)).await;
-        insert_sell_trade(&pool, 2, Decimal::from(5)).await;
-
-        let body = serde_json::json!({
-            "sale_trade_id": 2,
-            "purchase_trade_id": 1,
-            "quantity_allocated": "11"
         });
         let resp = router()
             .with_state(pool)
@@ -542,7 +476,24 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+    }
+
+    #[tokio::test]
+    async fn api_delete_allocation_route_is_not_allowed() {
+        let pool = test_pool().await;
+        let resp = router()
+            .with_state(pool)
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/parcel_allocations/1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
     }
 
     #[tokio::test]
@@ -584,75 +535,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn api_delete_existing_returns_no_content() {
-        let pool = test_pool().await;
-        insert_test_listing(&pool).await;
-        insert_buy_trade(&pool, 1, Decimal::from(10)).await;
-        insert_sell_trade(&pool, 2, Decimal::from(5)).await;
-        db_upsert(&pool, &ParcelAllocation {
-            id: 1,
-            sale_trade_id: 2,
-            purchase_trade_id: 1,
-            quantity_allocated: Decimal::from(5),
-        })
-        .await
-        .unwrap();
-
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .method("DELETE")
-                    .uri("/parcel_allocations/1")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
-    }
-
-    #[tokio::test]
-    async fn api_delete_missing_returns_404() {
-        let pool = test_pool().await;
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .method("DELETE")
-                    .uri("/parcel_allocations/999")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-    }
-
-    #[tokio::test]
     async fn api_decimal_precision_round_trip() {
         let pool = test_pool().await;
         insert_test_listing(&pool).await;
         insert_buy_trade(&pool, 1, "10.5".parse().unwrap()).await;
         insert_sell_trade(&pool, 2, "10.5".parse().unwrap()).await;
-
-        let body = serde_json::json!({
-            "sale_trade_id": 2,
-            "purchase_trade_id": 1,
-            "quantity_allocated": "10.5"
-        });
-        router()
-            .with_state(pool.clone())
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri("/parcel_allocations/1")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        db_upsert(&pool, &ParcelAllocation {
+            id: 1,
+            sale_trade_id: 2,
+            purchase_trade_id: 1,
+            quantity_allocated: "10.5".parse().unwrap(),
+        })
+        .await
+        .unwrap();
 
         let resp = router()
             .with_state(pool)
