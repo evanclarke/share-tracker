@@ -272,6 +272,7 @@ mod tests {
                 conduit_foreign_income: Decimal::ZERO,
                 trust_income: true,
                 reinvestment_trade_id: None,
+                currency: "AUD".to_string(),
             },
         )
         .await

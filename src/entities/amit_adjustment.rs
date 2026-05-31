@@ -321,6 +321,7 @@ mod tests {
                 tax_free_amount: Decimal::ZERO,
                 cost_base_adjustment: cost_base_adj,
                 tfn_withholding_tax: Decimal::ZERO,
+                currency: "AUD".to_string(),
             },
         )
         .await

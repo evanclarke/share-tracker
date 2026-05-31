@@ -32,6 +32,10 @@ pub struct AmmaStatement {
     pub tax_free_amount: Decimal,
     pub cost_base_adjustment: Decimal,
     pub tfn_withholding_tax: Decimal,
+    /// ISO 4217 currency the attributed amounts are denominated in. The tax summary
+    /// converts non-AUD amounts to AUD via the ATO rate for this currency and the
+    /// month of `tax_year_end_date` (see `infra::fx::to_aud`). Defaults to AUD.
+    pub currency: String,
 }
 
 impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for AmmaStatement {
@@ -61,6 +65,7 @@ impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for AmmaStatement {
             tax_free_amount: dec(row.try_get("tax_free_amount")?)?,
             cost_base_adjustment: dec(row.try_get("cost_base_adjustment")?)?,
             tfn_withholding_tax: dec(row.try_get("tfn_withholding_tax")?)?,
+            currency: row.try_get("currency")?,
         })
     }
 }
@@ -104,6 +109,12 @@ pub struct AmmaStatementBody {
     pub cost_base_adjustment: Decimal,
     #[serde(default)]
     pub tfn_withholding_tax: Decimal,
+    #[serde(default = "default_currency")]
+    pub currency: String,
+}
+
+fn default_currency() -> String {
+    "AUD".to_string()
 }
 
 pub fn router() -> Router<SqlitePool> {
@@ -118,7 +129,8 @@ pub async fn db_list(pool: &SqlitePool) -> Result<Vec<AmmaStatement>, sqlx::Erro
          australian_interest, australian_dividends_unfranked, franked_dividends, \
          franking_credits, net_rent, foreign_income, foreign_tax_credits, other_income, \
          cgt_discount_gains, cgt_indexation_gains, cgt_other_gains, capital_losses_applied, \
-         tax_deferred_amount, tax_free_amount, cost_base_adjustment, tfn_withholding_tax \
+         tax_deferred_amount, tax_free_amount, cost_base_adjustment, tfn_withholding_tax, \
+         currency \
          FROM amma_statements ORDER BY tax_year_end_date, id",
     )
     .fetch_all(pool)
@@ -131,7 +143,8 @@ pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<AmmaStatement>,
          australian_interest, australian_dividends_unfranked, franked_dividends, \
          franking_credits, net_rent, foreign_income, foreign_tax_credits, other_income, \
          cgt_discount_gains, cgt_indexation_gains, cgt_other_gains, capital_losses_applied, \
-         tax_deferred_amount, tax_free_amount, cost_base_adjustment, tfn_withholding_tax \
+         tax_deferred_amount, tax_free_amount, cost_base_adjustment, tfn_withholding_tax, \
+         currency \
          FROM amma_statements WHERE id = ?",
     )
     .bind(id)
@@ -146,8 +159,9 @@ pub async fn db_upsert(pool: &SqlitePool, stmt: &AmmaStatement) -> Result<(), sq
           australian_interest, australian_dividends_unfranked, franked_dividends, \
           franking_credits, net_rent, foreign_income, foreign_tax_credits, other_income, \
           cgt_discount_gains, cgt_indexation_gains, cgt_other_gains, capital_losses_applied, \
-          tax_deferred_amount, tax_free_amount, cost_base_adjustment, tfn_withholding_tax) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+          tax_deferred_amount, tax_free_amount, cost_base_adjustment, tfn_withholding_tax, \
+          currency) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT(id) DO UPDATE SET \
              listing_id                      = excluded.listing_id, \
              tax_year_end_date               = excluded.tax_year_end_date, \
@@ -168,7 +182,8 @@ pub async fn db_upsert(pool: &SqlitePool, stmt: &AmmaStatement) -> Result<(), sq
              tax_deferred_amount             = excluded.tax_deferred_amount, \
              tax_free_amount                 = excluded.tax_free_amount, \
              cost_base_adjustment            = excluded.cost_base_adjustment, \
-             tfn_withholding_tax             = excluded.tfn_withholding_tax",
+             tfn_withholding_tax             = excluded.tfn_withholding_tax, \
+             currency                        = excluded.currency",
     )
     .bind(stmt.id)
     .bind(stmt.listing_id)
@@ -191,6 +206,7 @@ pub async fn db_upsert(pool: &SqlitePool, stmt: &AmmaStatement) -> Result<(), sq
     .bind(stmt.tax_free_amount.to_string())
     .bind(stmt.cost_base_adjustment.to_string())
     .bind(stmt.tfn_withholding_tax.to_string())
+    .bind(&stmt.currency)
     .execute(pool)
     .await?;
     Ok(())
@@ -249,6 +265,7 @@ async fn upsert(
         tax_free_amount: body.tax_free_amount,
         cost_base_adjustment: body.cost_base_adjustment,
         tfn_withholding_tax: body.tfn_withholding_tax,
+        currency: body.currency,
     };
     db_upsert(&pool, &stmt)
         .await
@@ -319,6 +336,7 @@ mod tests {
             tax_free_amount: "1.10".parse().unwrap(),
             cost_base_adjustment: "0.0023".parse().unwrap(),
             tfn_withholding_tax: Decimal::ZERO,
+            currency: "AUD".to_string(),
         }
     }
 

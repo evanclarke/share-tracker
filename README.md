@@ -114,7 +114,8 @@ income
 ├── lic_capital_gain_deduction TEXT (decimal)
 ├── conduit_foreign_income    TEXT (decimal)  Excluded from assessable income
 ├── trust_income              BOOLEAN
-└── reinvestment_trade_id     INTEGER FK→trades.id (nullable, for DRP linkage)
+├── reinvestment_trade_id     INTEGER FK→trades.id (nullable, for DRP linkage)
+└── currency                  TEXT             ISO 4217; tax summary converts to AUD by date_paid month (default AUD)
 
 amma_statements              Annual AMIT Member Annual (AMMA) statements
 ├── id                              INTEGER PK
@@ -137,7 +138,8 @@ amma_statements              Annual AMIT Member Annual (AMMA) statements
 ├── tax_deferred_amount             TEXT (decimal)
 ├── tax_free_amount                 TEXT (decimal)
 ├── cost_base_adjustment            TEXT (decimal)  Per-unit cost base reduction
-└── tfn_withholding_tax             TEXT (decimal)
+├── tfn_withholding_tax             TEXT (decimal)
+└── currency                        TEXT            ISO 4217; tax summary converts to AUD by tax_year_end_date month (default AUD)
 
 amit_adjustments             Links a purchase parcel to an AMMA statement
 ├── id                   INTEGER PK
@@ -362,7 +364,7 @@ Parcel allocations are **read-only** over HTTP; they are created and replaced at
 
 #### FX conversion
 
-Reports take the Australian-tax view, so every non-AUD trade amount is converted to AUD before it is aggregated. The rate is the ATO reference rate — the RBA F11 monthly rate (foreign units per 1 AUD) for the amount's currency and the month of the relevant trade date — so `AUD = foreign / rate`. AUD amounts pass through unchanged. When no ATO rate has been imported for that `(currency, month)`, the trade's manual `fx_rate` is used as a fallback; the ATO rate takes precedence once available. If neither is available the report fails loudly (`500`) rather than leaving an amount unconverted. Cost base and proceeds in the portfolio, unrealised, and realised reports are converted this way; income and AMMA totals are not yet converted (they have no stored currency).
+Reports take the Australian-tax view, so every non-AUD trade amount is converted to AUD before it is aggregated. The rate is the ATO reference rate — the RBA F11 monthly rate (foreign units per 1 AUD) for the amount's currency and the month of the relevant trade date — so `AUD = foreign / rate`. AUD amounts pass through unchanged. When no ATO rate has been imported for that `(currency, month)`, the trade's manual `fx_rate` is used as a fallback; the ATO rate takes precedence once available. If neither is available the report fails loudly (`500`) rather than leaving an amount unconverted. Cost base and proceeds in the portfolio, unrealised, and realised reports are converted this way. Income and AMMA amounts are also converted in the tax summary, using each record's `currency` and the month of `date_paid` (income) or `tax_year_end_date` (AMMA); these records have no manual `fx_rate`, so a non-AUD amount with no ATO rate fails loudly (`500`) rather than being passed through unconverted.
 
 #### Overview
 
@@ -410,7 +412,7 @@ Sorted by `sale_date` ascending.
 GET /portfolio/tax-summary
 ```
 
-Returns one record per Australian financial year (identified by the calendar year of 30 June), sorted ascending. Aggregates dividend income by `date_paid` (July = next FY) and AMMA statements by `tax_year_end_date`. Response fields include all income and AMMA components as separate fields for direct transfer to a tax return.
+Returns one record per Australian financial year (identified by the calendar year of 30 June), sorted ascending. Aggregates dividend income by `date_paid` (July = next FY) and AMMA statements by `tax_year_end_date`. All amounts are converted to AUD via the ATO rate (see [FX conversion](#fx-conversion)) before aggregating, using each record's `currency` and the month of `date_paid` (income) or `tax_year_end_date` (AMMA). Response fields include all income and AMMA components as separate fields for direct transfer to a tax return.
 
 #### Exchange MIC validation
 

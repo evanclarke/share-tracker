@@ -25,6 +25,10 @@ pub struct Income {
     pub conduit_foreign_income: Decimal,
     pub trust_income: bool,
     pub reinvestment_trade_id: Option<i64>,
+    /// ISO 4217 currency the amounts are denominated in. The tax summary converts
+    /// non-AUD amounts to AUD via the ATO rate for this currency and the month of
+    /// `date_paid` (see `infra::fx::to_aud`). Defaults to AUD.
+    pub currency: String,
 }
 
 impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for Income {
@@ -47,6 +51,7 @@ impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for Income {
             conduit_foreign_income: dec(row.try_get("conduit_foreign_income")?)?,
             trust_income: row.try_get("trust_income")?,
             reinvestment_trade_id: row.try_get("reinvestment_trade_id")?,
+            currency: row.try_get("currency")?,
         })
     }
 }
@@ -77,6 +82,12 @@ pub struct IncomeBody {
     pub trust_income: bool,
     #[serde(default)]
     pub reinvestment_trade_id: Option<i64>,
+    #[serde(default = "default_currency")]
+    pub currency: String,
+}
+
+fn default_currency() -> String {
+    "AUD".to_string()
 }
 
 pub fn router() -> Router<SqlitePool> {
@@ -89,7 +100,8 @@ pub async fn db_list(pool: &SqlitePool) -> Result<Vec<Income>, sqlx::Error> {
     sqlx::query_as(
         "SELECT id, listing_id, date_paid, ex_date, franked_amount, unfranked_amount, \
          foreign_source_income, foreign_tax_paid, tfn_withholding_tax, franking_credits, \
-         lic_capital_gain_deduction, conduit_foreign_income, trust_income, reinvestment_trade_id \
+         lic_capital_gain_deduction, conduit_foreign_income, trust_income, reinvestment_trade_id, \
+         currency \
          FROM income ORDER BY date_paid, id",
     )
     .fetch_all(pool)
@@ -100,7 +112,8 @@ pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<Income>, sqlx::
     sqlx::query_as(
         "SELECT id, listing_id, date_paid, ex_date, franked_amount, unfranked_amount, \
          foreign_source_income, foreign_tax_paid, tfn_withholding_tax, franking_credits, \
-         lic_capital_gain_deduction, conduit_foreign_income, trust_income, reinvestment_trade_id \
+         lic_capital_gain_deduction, conduit_foreign_income, trust_income, reinvestment_trade_id, \
+         currency \
          FROM income WHERE id = ?",
     )
     .bind(id)
@@ -113,8 +126,9 @@ pub async fn db_upsert(pool: &SqlitePool, income: &Income) -> Result<(), sqlx::E
         "INSERT INTO income \
          (id, listing_id, date_paid, ex_date, franked_amount, unfranked_amount, \
           foreign_source_income, foreign_tax_paid, tfn_withholding_tax, franking_credits, \
-          lic_capital_gain_deduction, conduit_foreign_income, trust_income, reinvestment_trade_id) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+          lic_capital_gain_deduction, conduit_foreign_income, trust_income, reinvestment_trade_id, \
+          currency) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT(id) DO UPDATE SET \
              listing_id                 = excluded.listing_id, \
              date_paid                  = excluded.date_paid, \
@@ -128,7 +142,8 @@ pub async fn db_upsert(pool: &SqlitePool, income: &Income) -> Result<(), sqlx::E
              lic_capital_gain_deduction = excluded.lic_capital_gain_deduction, \
              conduit_foreign_income     = excluded.conduit_foreign_income, \
              trust_income               = excluded.trust_income, \
-             reinvestment_trade_id      = excluded.reinvestment_trade_id",
+             reinvestment_trade_id      = excluded.reinvestment_trade_id, \
+             currency                   = excluded.currency",
     )
     .bind(income.id)
     .bind(income.listing_id)
@@ -144,6 +159,7 @@ pub async fn db_upsert(pool: &SqlitePool, income: &Income) -> Result<(), sqlx::E
     .bind(income.conduit_foreign_income.to_string())
     .bind(income.trust_income)
     .bind(income.reinvestment_trade_id)
+    .bind(&income.currency)
     .execute(pool)
     .await?;
     Ok(())
@@ -195,6 +211,7 @@ async fn upsert(
         conduit_foreign_income: body.conduit_foreign_income,
         trust_income: body.trust_income,
         reinvestment_trade_id: body.reinvestment_trade_id,
+        currency: body.currency,
     };
     db_upsert(&pool, &income)
         .await
@@ -282,6 +299,7 @@ mod tests {
             conduit_foreign_income: Decimal::ZERO,
             trust_income: false,
             reinvestment_trade_id: None,
+            currency: "AUD".to_string(),
         }
     }
 
@@ -321,6 +339,7 @@ mod tests {
             conduit_foreign_income: Decimal::from(3),
             trust_income: true,
             reinvestment_trade_id: None,
+            currency: "AUD".to_string(),
         };
         db_upsert(&pool, &dist).await.unwrap();
         let got = db_get(&pool, 2).await.unwrap().unwrap();
@@ -350,6 +369,7 @@ mod tests {
             conduit_foreign_income: Decimal::ZERO,
             trust_income: false,
             reinvestment_trade_id: Some(trade_id),
+            currency: "AUD".to_string(),
         };
         db_upsert(&pool, &inc).await.unwrap();
         let got = db_get(&pool, 3).await.unwrap().unwrap();

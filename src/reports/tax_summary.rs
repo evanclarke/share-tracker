@@ -1,4 +1,5 @@
 use crate::infra::decimal::parse_dec;
+use crate::infra::fx::to_aud;
 use axum::{Json, Router, extract::State, http::StatusCode, routing::get};
 use chrono::{Datelike, NaiveDate};
 use rust_decimal::Decimal;
@@ -70,10 +71,26 @@ fn zero_summary(tax_year: i32) -> TaxYearSummary {
     }
 }
 
+/// Read a TEXT decimal column from `row` and convert it to AUD via the ATO rate
+/// for `currency` and the month of `date`. Income and AMMA records carry no manual
+/// fx override, so a non-AUD amount with no ATO rate fails loudly (the `FxError`
+/// surfaces as a decode error) rather than being passed through or zeroed.
+async fn aud_field(
+    pool: &SqlitePool,
+    row: &sqlx::sqlite::SqliteRow,
+    field: &str,
+    currency: &str,
+    date: NaiveDate,
+) -> Result<Decimal, sqlx::Error> {
+    let value = parse_dec(field, row.try_get(field)?)?;
+    Ok(to_aud(pool, value, currency, date, None).await?)
+}
+
 pub async fn db_tax_summary(pool: &SqlitePool) -> Result<Vec<TaxYearSummary>, sqlx::Error> {
     let income_rows = sqlx::query(
         "SELECT date_paid, franked_amount, unfranked_amount, foreign_source_income, \
-         foreign_tax_paid, tfn_withholding_tax, franking_credits, lic_capital_gain_deduction \
+         foreign_tax_paid, tfn_withholding_tax, franking_credits, lic_capital_gain_deduction, \
+         currency \
          FROM income",
     )
     .fetch_all(pool)
@@ -83,7 +100,7 @@ pub async fn db_tax_summary(pool: &SqlitePool) -> Result<Vec<TaxYearSummary>, sq
         "SELECT tax_year_end_date, australian_interest, australian_dividends_unfranked, \
          franked_dividends, franking_credits, net_rent, foreign_income, foreign_tax_credits, \
          other_income, cgt_discount_gains, cgt_indexation_gains, cgt_other_gains, \
-         capital_losses_applied, tfn_withholding_tax \
+         capital_losses_applied, tfn_withholding_tax, currency \
          FROM amma_statements",
     )
     .fetch_all(pool)
@@ -99,13 +116,18 @@ pub async fn db_tax_summary(pool: &SqlitePool) -> Result<Vec<TaxYearSummary>, sq
             date_paid.year()
         };
 
-        let franked = parse_dec("franked_amount", row.try_get("franked_amount")?)?;
-        let unfranked = parse_dec("unfranked_amount", row.try_get("unfranked_amount")?)?;
-        let foreign_income = parse_dec("foreign_source_income", row.try_get("foreign_source_income")?)?;
-        let foreign_tax = parse_dec("foreign_tax_paid", row.try_get("foreign_tax_paid")?)?;
-        let tfn_wht = parse_dec("tfn_withholding_tax", row.try_get("tfn_withholding_tax")?)?;
-        let fc = parse_dec("franking_credits", row.try_get("franking_credits")?)?;
-        let lic = parse_dec("lic_capital_gain_deduction", row.try_get("lic_capital_gain_deduction")?)?;
+        // Amounts are denominated in the record's currency; convert to AUD via the
+        // ATO rate for the month of date_paid before aggregating.
+        let currency: String = row.try_get("currency")?;
+        let franked = aud_field(pool, row, "franked_amount", &currency, date_paid).await?;
+        let unfranked = aud_field(pool, row, "unfranked_amount", &currency, date_paid).await?;
+        let foreign_income =
+            aud_field(pool, row, "foreign_source_income", &currency, date_paid).await?;
+        let foreign_tax = aud_field(pool, row, "foreign_tax_paid", &currency, date_paid).await?;
+        let tfn_wht = aud_field(pool, row, "tfn_withholding_tax", &currency, date_paid).await?;
+        let fc = aud_field(pool, row, "franking_credits", &currency, date_paid).await?;
+        let lic =
+            aud_field(pool, row, "lic_capital_gain_deduction", &currency, date_paid).await?;
 
         let s = map.entry(tax_year).or_insert_with(|| zero_summary(tax_year));
         s.dividends_assessable += franked + unfranked;
@@ -120,20 +142,24 @@ pub async fn db_tax_summary(pool: &SqlitePool) -> Result<Vec<TaxYearSummary>, sq
         let tax_year_end_date: NaiveDate = row.try_get("tax_year_end_date")?;
         let tax_year = tax_year_end_date.year();
 
-        let interest = parse_dec("australian_interest", row.try_get("australian_interest")?)?;
+        // Convert to AUD via the ATO rate for the month of tax_year_end_date (the
+        // statement's only period anchor) before aggregating.
+        let currency: String = row.try_get("currency")?;
+        let d = tax_year_end_date;
+        let interest = aud_field(pool, row, "australian_interest", &currency, d).await?;
         let div_unfranked =
-            parse_dec("australian_dividends_unfranked", row.try_get("australian_dividends_unfranked")?)?;
-        let franked_div = parse_dec("franked_dividends", row.try_get("franked_dividends")?)?;
-        let fc = parse_dec("franking_credits", row.try_get("franking_credits")?)?;
-        let rent = parse_dec("net_rent", row.try_get("net_rent")?)?;
-        let foreign_inc = parse_dec("foreign_income", row.try_get("foreign_income")?)?;
-        let foreign_tax = parse_dec("foreign_tax_credits", row.try_get("foreign_tax_credits")?)?;
-        let other = parse_dec("other_income", row.try_get("other_income")?)?;
-        let cgt_disc = parse_dec("cgt_discount_gains", row.try_get("cgt_discount_gains")?)?;
-        let cgt_idx = parse_dec("cgt_indexation_gains", row.try_get("cgt_indexation_gains")?)?;
-        let cgt_other = parse_dec("cgt_other_gains", row.try_get("cgt_other_gains")?)?;
-        let cap_losses = parse_dec("capital_losses_applied", row.try_get("capital_losses_applied")?)?;
-        let tfn_wht = parse_dec("tfn_withholding_tax", row.try_get("tfn_withholding_tax")?)?;
+            aud_field(pool, row, "australian_dividends_unfranked", &currency, d).await?;
+        let franked_div = aud_field(pool, row, "franked_dividends", &currency, d).await?;
+        let fc = aud_field(pool, row, "franking_credits", &currency, d).await?;
+        let rent = aud_field(pool, row, "net_rent", &currency, d).await?;
+        let foreign_inc = aud_field(pool, row, "foreign_income", &currency, d).await?;
+        let foreign_tax = aud_field(pool, row, "foreign_tax_credits", &currency, d).await?;
+        let other = aud_field(pool, row, "other_income", &currency, d).await?;
+        let cgt_disc = aud_field(pool, row, "cgt_discount_gains", &currency, d).await?;
+        let cgt_idx = aud_field(pool, row, "cgt_indexation_gains", &currency, d).await?;
+        let cgt_other = aud_field(pool, row, "cgt_other_gains", &currency, d).await?;
+        let cap_losses = aud_field(pool, row, "capital_losses_applied", &currency, d).await?;
+        let tfn_wht = aud_field(pool, row, "tfn_withholding_tax", &currency, d).await?;
 
         let s = map.entry(tax_year).or_insert_with(|| zero_summary(tax_year));
         s.amma_australian_interest += interest;
@@ -168,7 +194,7 @@ async fn tax_summary_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{infra::db, entities::{amma, income, listing}};
+    use crate::{infra::db, entities::{amma, income, listing, rba_fx_rate}};
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
     use tower::ServiceExt;
@@ -211,6 +237,7 @@ mod tests {
             conduit_foreign_income: Decimal::ZERO,
             trust_income: false,
             reinvestment_trade_id: None,
+            currency: "AUD".to_string(),
         }
     }
 
@@ -237,6 +264,7 @@ mod tests {
             tax_deferred_amount: Decimal::ZERO,
             tax_free_amount: Decimal::ZERO,
             tfn_withholding_tax: Decimal::ZERO,
+            currency: "AUD".to_string(),
         }
     }
 
@@ -422,6 +450,65 @@ mod tests {
         assert_eq!(s.tfn_withholding_tax, Decimal::from(7)); // 5 income + 2 amma
         assert_eq!(s.amma_australian_interest, Decimal::from(8));
         assert_eq!(s.amma_cgt_discount_gains, Decimal::from(100));
+    }
+
+    #[tokio::test]
+    async fn db_usd_income_converted_to_aud_via_ato_rate() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        // A$1 = 0.50 USD for Jan 2024 → AUD = USD / 0.50.
+        rba_fx_rate::db_import_rate(&pool, "USD", "2024-01", "0.50".parse().unwrap())
+            .await
+            .unwrap();
+        let mut inc = make_income(1, 1, NaiveDate::from_ymd_opt(2024, 1, 15).unwrap());
+        inc.currency = "USD".to_string();
+        inc.franked_amount = Decimal::from(70);
+        inc.unfranked_amount = Decimal::from(30);
+        inc.franking_credits = Decimal::from(30);
+        income::db_upsert(&pool, &inc).await.unwrap();
+
+        let result = db_tax_summary(&pool).await.unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].tax_year, 2024);
+        // (70 + 30) / 0.50 = 200 AUD; 30 / 0.50 = 60 AUD.
+        assert_eq!(result[0].dividends_assessable, Decimal::from(200));
+        assert_eq!(result[0].franking_credits, Decimal::from(60));
+    }
+
+    #[tokio::test]
+    async fn db_usd_amma_converted_to_aud_via_ato_rate() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        // Rate for the month of tax_year_end_date (June 2024).
+        rba_fx_rate::db_import_rate(&pool, "USD", "2024-06", "0.50".parse().unwrap())
+            .await
+            .unwrap();
+        let mut a = make_amma(1, 1, NaiveDate::from_ymd_opt(2024, 6, 30).unwrap());
+        a.currency = "USD".to_string();
+        a.foreign_income = Decimal::from(5);
+        a.foreign_tax_credits = Decimal::from(2);
+        a.cgt_discount_gains = Decimal::from(50);
+        amma::db_upsert(&pool, &a).await.unwrap();
+
+        let result = db_tax_summary(&pool).await.unwrap();
+        assert_eq!(result.len(), 1);
+        // 5 / 0.50 = 10; 2 / 0.50 = 4; 50 / 0.50 = 100.
+        assert_eq!(result[0].amma_foreign_income, Decimal::from(10));
+        assert_eq!(result[0].foreign_tax_offsets, Decimal::from(4));
+        assert_eq!(result[0].amma_cgt_discount_gains, Decimal::from(100));
+    }
+
+    #[tokio::test]
+    async fn db_non_aud_without_ato_rate_fails_loudly() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        // No USD rate imported for the month → conversion must fail, not zero/pass through.
+        let mut inc = make_income(1, 1, NaiveDate::from_ymd_opt(2024, 1, 15).unwrap());
+        inc.currency = "USD".to_string();
+        inc.unfranked_amount = Decimal::from(100);
+        income::db_upsert(&pool, &inc).await.unwrap();
+
+        assert!(db_tax_summary(&pool).await.is_err());
     }
 
     // API-level test

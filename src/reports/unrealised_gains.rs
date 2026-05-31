@@ -380,6 +380,7 @@ mod tests {
                 tax_deferred_amount: Decimal::ZERO,
                 tax_free_amount: Decimal::ZERO,
                 tfn_withholding_tax: Decimal::ZERO,
+                currency: "AUD".to_string(),
             },
         )
         .await
