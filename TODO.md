@@ -54,13 +54,13 @@ Items are only marked done when a passing test exists for them.
 - [x] Tests: decimal precision preserved in API round-trip
 
 ## Share Parcel Allocation
-- [ ] Parcel allocation model (sale trade FK, purchase trade FK, quantity allocated)
-- [ ] DB schema: `parcel_allocations` table
-- [ ] quantity_allocated uses Decimal (not f64)
-- [ ] Validate quantity allocated does not exceed available quantity on purchase trade
-- [ ] Validate total allocations for a sale trade do not exceed sale quantity
-- [ ] CRUD API endpoints for parcel allocations
-- [ ] Tests: allocation creation, over-allocation rejection
+- [x] Parcel allocation model (sale trade FK, purchase trade FK, quantity allocated)
+- [x] DB schema: `parcel_allocations` table
+- [x] quantity_allocated uses Decimal (not f64)
+- [x] Validate quantity allocated does not exceed available quantity on purchase trade
+- [x] Validate total allocations for a sale trade do not exceed sale quantity
+- [x] CRUD API endpoints for parcel allocations
+- [x] Tests: allocation creation, over-allocation rejection
 
 ## Cost Base Adjustments
 - [ ] AMIT cost base adjustment: apply AMMA `tax deferred` amounts to reduce cost base of affected parcels
