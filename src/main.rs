@@ -9,6 +9,7 @@ mod listing;
 mod logging;
 mod parcel_allocation;
 mod realised_gains;
+mod tax_summary;
 mod trade;
 mod unrealised_gains;
 
@@ -34,6 +35,7 @@ async fn main() {
         .merge(portfolio::router())
         .merge(unrealised_gains::router())
         .merge(realised_gains::router())
+        .merge(tax_summary::router())
         .with_state(pool.clone());
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], args.port));
     let listener = tokio::net::TcpListener::bind(addr).await.expect("failed to bind");

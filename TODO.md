@@ -88,13 +88,13 @@ Items are only marked done when a passing test exists for them.
 - [x] Tests: specific parcel sale, CGT discount eligibility
 
 ## Reporting — Tax
-- [ ] Aggregate all assessable income components by tax year
-- [ ] Aggregate franking credits, foreign tax offsets, TFN withholding tax by tax year
-- [ ] Include AMMA attributed income components in tax year totals
-- [ ] Include LIC capital gain deductions
-- [ ] Exclude conduit foreign income from assessable totals
-- [ ] API endpoint for tax summary by year
-- [ ] Tests: full-year tax summary with mixed income types
+- [x] Aggregate all assessable income components by tax year
+- [x] Aggregate franking credits, foreign tax offsets, TFN withholding tax by tax year
+- [x] Include AMMA attributed income components in tax year totals
+- [x] Include LIC capital gain deductions
+- [x] Exclude conduit foreign income from assessable totals
+- [x] API endpoint for tax summary by year
+- [x] Tests: full-year tax summary with mixed income types
 
 ## Web Frontend
 - [ ] Serve frontend from the Rust server (axum)
