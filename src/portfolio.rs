@@ -55,21 +55,7 @@ pub async fn db_holdings(pool: &SqlitePool) -> Result<Vec<HoldingOverview>, sqlx
     }
 
     // total AMIT cost base reduction per purchase parcel
-    let amit_rows = sqlx::query(
-        "SELECT aa.trade_id, aa.quantity, a.cost_base_adjustment \
-         FROM amit_adjustments aa \
-         JOIN amma_statements a ON a.id = aa.amma_statement_id",
-    )
-    .fetch_all(pool)
-    .await?;
-
-    let mut cba_reduction: HashMap<i64, Decimal> = HashMap::new();
-    for row in &amit_rows {
-        let tid: i64 = row.try_get("trade_id")?;
-        let qty = parse_dec("quantity", row.try_get("quantity")?)?;
-        let cba = parse_dec("cost_base_adjustment", row.try_get("cost_base_adjustment")?)?;
-        *cba_reduction.entry(tid).or_insert(Decimal::ZERO) += qty * cba;
-    }
+    let cba_reduction = crate::amit_adjustment::db_cost_base_reductions(pool).await?;
 
     let mut listing_qty: HashMap<i64, Decimal> = HashMap::new();
     let mut listing_cost_base: HashMap<i64, Decimal> = HashMap::new();

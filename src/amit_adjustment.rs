@@ -4,9 +4,11 @@ use axum::{
     http::StatusCode,
     routing::get,
 };
+use crate::decimal::parse_dec;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AmitAdjustment {
@@ -135,28 +137,29 @@ pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<bool, sqlx::Error> 
     Ok(result.rows_affected() > 0)
 }
 
-/// Returns the total cost base reduction for a purchase trade from all linked AMIT adjustments.
-/// reduction = sum(adjustment.quantity * amma.cost_base_adjustment) for each linked adjustment
-pub async fn db_cost_base_reduction(
+/// Returns the total AMIT cost base reduction per purchase trade, keyed by `trade_id`.
+/// reduction = sum(adjustment.quantity * amma.cost_base_adjustment) across all linked adjustments.
+/// Shared by the portfolio, realised, and unrealised reports to net AMIT tax-deferred
+/// amounts off the cost base of affected parcels.
+pub async fn db_cost_base_reductions(
     pool: &SqlitePool,
-    trade_id: i64,
-) -> Result<Decimal, sqlx::Error> {
-    let rows: Vec<(String, String)> = sqlx::query_as(
-        "SELECT aa.quantity, a.cost_base_adjustment \
+) -> Result<HashMap<i64, Decimal>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT aa.trade_id, aa.quantity, a.cost_base_adjustment \
          FROM amit_adjustments aa \
-         JOIN amma_statements a ON a.id = aa.amma_statement_id \
-         WHERE aa.trade_id = ?",
+         JOIN amma_statements a ON a.id = aa.amma_statement_id",
     )
-    .bind(trade_id)
     .fetch_all(pool)
     .await?;
 
-    let total = rows.into_iter().fold(Decimal::ZERO, |acc, (qty, cba)| {
-        let q: Decimal = qty.parse().unwrap_or(Decimal::ZERO);
-        let c: Decimal = cba.parse().unwrap_or(Decimal::ZERO);
-        acc + q * c
-    });
-    Ok(total)
+    let mut map: HashMap<i64, Decimal> = HashMap::new();
+    for row in &rows {
+        let tid: i64 = row.try_get("trade_id")?;
+        let qty = parse_dec("quantity", row.try_get("quantity")?)?;
+        let cba = parse_dec("cost_base_adjustment", row.try_get("cost_base_adjustment")?)?;
+        *map.entry(tid).or_insert(Decimal::ZERO) += qty * cba;
+    }
+    Ok(map)
 }
 
 async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<AmitAdjustment>>, StatusCode> {
@@ -401,9 +404,9 @@ mod tests {
             .await
             .unwrap();
 
-        let reduction = db_cost_base_reduction(&pool, 1).await.unwrap();
+        let reductions = db_cost_base_reductions(&pool).await.unwrap();
         // 100 * 0.05 + 80 * 0.03 = 5.00 + 2.40 = 7.40
-        assert_eq!(reduction, "7.40".parse::<Decimal>().unwrap());
+        assert_eq!(reductions.get(&1).copied(), Some("7.40".parse::<Decimal>().unwrap()));
     }
 
     // API-level tests

@@ -55,14 +55,6 @@ pub async fn db_realised_gains(pool: &SqlitePool) -> Result<Vec<RealisedGainLoss
         return Ok(vec![]);
     }
 
-    let amit_rows = sqlx::query(
-        "SELECT aa.trade_id, aa.quantity, a.cost_base_adjustment \
-         FROM amit_adjustments aa \
-         JOIN amma_statements a ON a.id = aa.amma_statement_id",
-    )
-    .fetch_all(pool)
-    .await?;
-
     struct SellInfo {
         listing_id: i64,
         date: NaiveDate,
@@ -111,13 +103,7 @@ pub async fn db_realised_gains(pool: &SqlitePool) -> Result<Vec<RealisedGainLoss
         );
     }
 
-    let mut cba_reduction: HashMap<i64, Decimal> = HashMap::new();
-    for row in &amit_rows {
-        let tid: i64 = row.try_get("trade_id")?;
-        let qty = parse_dec("quantity", row.try_get("quantity")?)?;
-        let cba = parse_dec("cost_base_adjustment", row.try_get("cost_base_adjustment")?)?;
-        *cba_reduction.entry(tid).or_insert(Decimal::ZERO) += qty * cba;
-    }
+    let cba_reduction = crate::amit_adjustment::db_cost_base_reductions(pool).await?;
 
     let mut sale_proceeds: HashMap<i64, Decimal> = HashMap::new();
     let mut sale_cost_base: HashMap<i64, Decimal> = HashMap::new();
