@@ -1,6 +1,7 @@
 mod amma;
 mod amit_adjustment;
 mod args;
+mod portfolio;
 mod db;
 mod exchange;
 mod income;
@@ -28,6 +29,7 @@ async fn main() {
         .merge(amma::router())
         .merge(parcel_allocation::router())
         .merge(amit_adjustment::router())
+        .merge(portfolio::router())
         .with_state(pool.clone());
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], args.port));
     let listener = tokio::net::TcpListener::bind(addr).await.expect("failed to bind");

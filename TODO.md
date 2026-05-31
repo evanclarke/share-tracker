@@ -70,10 +70,10 @@ Items are only marked done when a passing test exists for them.
 - [x] Tests: AMIT adjustment
 
 ## Reporting — Portfolio Overview
-- [ ] Current holdings: aggregate open parcels by listing (quantity, average cost base)
-- [ ] Accept current market prices as input to materialise portfolio value
-- [ ] API endpoint for portfolio overview
-- [ ] Tests: holdings aggregation after buys and sells
+- [x] Current holdings: aggregate open parcels by listing (quantity, average cost base)
+- [x] Accept current market prices as input to materialise portfolio value
+- [x] API endpoint for portfolio overview
+- [x] Tests: holdings aggregation after buys and sells
 
 ## Reporting — Unrealised Gains/Losses
 - [ ] Calculate unrealised gain/loss per holding (market value vs cost base)
