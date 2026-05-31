@@ -12,6 +12,7 @@ A personal Australian share portfolio tracker with a REST JSON API. Records trad
 - **Unrealised gains report** — per-holding gain/loss and CGT-discount-eligible quantity as at a given date
 - **Realised gains report** — per-sale capital gain/loss and CGT-discount-eligible gain (parcels held strictly more than 12 months)
 - **Tax summary** — income aggregated by Australian financial year (July–June), combining dividends, trust distributions, and AMMA components
+- **FX rate import** — monthly RBA F11 foreign exchange rates (the rates the ATO directs taxpayers to use) fetched and stored as foreign-per-AUD, refreshed weekly and via a manual trigger, ready for AUD tax conversion
 
 ## Building and running
 
@@ -25,7 +26,7 @@ cargo build --release
 | `--db` | `share-tracker.db` | SQLite database file path |
 | `--port` | `3000` | HTTP port to listen on |
 
-The database is created automatically on first run. Migrations are applied in order at startup. A daily backup is written to `<stem>-YYYY-MM-DD.db` beside the main file (skipped if one already exists for the day).
+The database is created automatically on first run. Migrations are applied in order at startup. A daily backup is written to `<stem>-YYYY-MM-DD.db` beside the main file (skipped if one already exists for the day). The RBA FX rate import also runs at startup and then weekly; each run logs the next scheduled time.
 
 Logging is controlled by the `RUST_LOG` environment variable (default: `info`).
 
@@ -49,6 +50,12 @@ listings
 ├── security_type TEXT           Share | ETF | LIC | Trust
 ├── currency     TEXT
 └── amit         BOOLEAN          True if the security is an AMIT
+
+rba_fx_rates                  RBA F11 monthly FX rates (the rate used for ATO conversion)
+├── id           INTEGER PK
+├── currency     TEXT             ISO 4217 code (e.g. USD)
+├── month        TEXT             'YYYY-MM'
+└── rate         TEXT (decimal)   Foreign units per 1 AUD; UNIQUE (currency, month)
 
 trades
 ├── id                INTEGER PK
@@ -129,6 +136,8 @@ exchanges ──< listings ──< trades >────────────�
                        trades (DRP) ──< income (reinvestment_trade_id)
 ```
 
+`rba_fx_rates` is standalone reference data (no foreign keys); it is looked up by `(currency, month)`.
+
 Decimal values are stored as TEXT to preserve arbitrary precision.
 
 ## HTTP API
@@ -154,6 +163,18 @@ Seed data includes `XASX` (ASX, T+2) and `XNYS` (NYSE, T+2).
 | `GET` | `/listings/:id` | Get one listing |
 | `PUT` | `/listings/:id` | Create or update a listing |
 | `DELETE` | `/listings/:id` | Delete a listing |
+
+### RBA FX rates
+
+Monthly foreign exchange rates from the RBA's F11 table, stored as foreign-currency units per 1 AUD (so `AUD = foreign / rate`). Rows are written only by the import, so the resource is read-only via `GET`.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/rba_fx_rates` | List all FX rates (ordered by currency, then month) |
+| `GET` | `/rba_fx_rates/:id` | Get one FX rate |
+| `POST` | `/rba_fx_rates/import` | Trigger an import (see below) |
+
+`POST /rba_fx_rates/import` is idempotent: it inserts new `(currency, month)` rows and leaves existing rows unchanged (re-running creates no duplicates). With an **empty body** it fetches the live RBA F11 CSV; with a **non-empty body** it imports that supplied CSV (useful for retries when the RBA endpoint is unreachable). Returns `200 OK` with `{ "inserted": N, "skipped": M }`, `422` if the feed can't be parsed, or `502 Bad Gateway` if the RBA fetch fails. The same import runs automatically at startup and weekly.
 
 ### Trades
 
@@ -305,8 +326,9 @@ Returns one record per Australian financial year (identified by the calendar yea
 | `204 No Content` | Successful PUT or DELETE |
 | `404 Not Found` | Resource does not exist |
 | `405 Method Not Allowed` | Write attempted on a read-only path (e.g. `parcel_allocations`) |
-| `422 Unprocessable Entity` | Business rule violation (e.g. over-allocation, wrong trade type, under-allocated Sell) |
+| `422 Unprocessable Entity` | Business rule violation (e.g. over-allocation, wrong trade type, under-allocated Sell, unparseable FX feed) |
 | `500 Internal Server Error` | Unexpected database error |
+| `502 Bad Gateway` | Upstream fetch failed (e.g. RBA FX rate import could not reach the RBA) |
 
 ## Tech stack
 
@@ -316,4 +338,5 @@ Returns one record per Australian financial year (identified by the calendar yea
 - **SQLite** with WAL journal mode and foreign key enforcement
 - **rust_decimal** — arbitrary-precision decimal arithmetic for all monetary values
 - **tokio** — async runtime
+- **reqwest** — HTTP client for fetching the RBA F11 FX rate CSV
 - **chrono / chrono-tz** — date handling
