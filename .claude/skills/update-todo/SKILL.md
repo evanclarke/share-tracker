@@ -1,5 +1,7 @@
-Use Case: Project TODO Updating
-Trigger: User updates REQUIREMENTS.md and asks to update TODO.md
+---
+name: update-todo
+description: Project TODO updating - use when user updates REQUIREMENTS.md and asks to update TODO.md
+---
 Steps:
 1. Analyse the REQUIREMENTS.md file and cross reference it with the TODO.md
 2. If new requirements are found, break them down into appropriate items and add to the TODO.md
