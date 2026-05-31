@@ -9,6 +9,7 @@ mod listing;
 mod logging;
 mod parcel_allocation;
 mod trade;
+mod unrealised_gains;
 
 use args::Args;
 use clap::Parser;
@@ -30,6 +31,7 @@ async fn main() {
         .merge(parcel_allocation::router())
         .merge(amit_adjustment::router())
         .merge(portfolio::router())
+        .merge(unrealised_gains::router())
         .with_state(pool.clone());
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], args.port));
     let listener = tokio::net::TcpListener::bind(addr).await.expect("failed to bind");

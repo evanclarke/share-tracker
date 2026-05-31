@@ -76,10 +76,10 @@ Items are only marked done when a passing test exists for them.
 - [x] Tests: holdings aggregation after buys and sells
 
 ## Reporting — Unrealised Gains/Losses
-- [ ] Calculate unrealised gain/loss per holding (market value vs cost base)
-- [ ] Apply 50% CGT discount indicator for parcels held > 12 months
-- [ ] API endpoint for unrealised gains/losses
-- [ ] Tests: gain/loss calculation, discount eligibility
+- [x] Calculate unrealised gain/loss per holding (market value vs cost base)
+- [x] Apply 50% CGT discount indicator for parcels held > 12 months
+- [x] API endpoint for unrealised gains/losses
+- [x] Tests: gain/loss calculation, discount eligibility
 
 ## Reporting — Realised Gains/Losses
 - [ ] Calculate capital gain/loss per sale using allocated parcels and adjusted cost bases
