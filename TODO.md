@@ -3,10 +3,10 @@
 Items are only marked done when a passing test exists for them.
 
 ## Infrastructure
-- [ ] Add dependencies: sqlx (SQLite, tokio, chrono), tokio, chrono, chrono-tz, clap, serde, serde_json, axum (web server)
-- [ ] CLI arg parsing (`--db <path>`, default: `share-tracker.db`)
-- [ ] Database initialisation and connection pool
-- [ ] Daily backup on startup (copy DB to `<file>-YYYY-MM-DD.db`)
+- [x] Add dependencies: sqlx (SQLite, tokio, chrono), tokio, chrono, chrono-tz, clap, serde, serde_json, axum (web server)
+- [x] CLI arg parsing (`--db <path>`, default: `share-tracker.db`)
+- [x] Database initialisation and connection pool
+- [x] Daily backup on startup (copy DB to `<file>-YYYY-MM-DD.db`)
 - [ ] GitHub Actions CI: run tests on push
 
 ## Reference Data — Exchange
