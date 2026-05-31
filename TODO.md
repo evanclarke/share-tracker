@@ -29,10 +29,10 @@ Items are only marked done when a passing test exists for them.
 - [x] Tests: insert, retrieve listing; FK constraint to exchange
 
 ## Reference Data — ATO FX Rate
-- [ ] ATO FX Rate model (currency ISO 4217 code, month, rate as foreign-currency-per-AUD)
-- [ ] DB schema: `ato_fx_rates` table; rate stored as TEXT Decimal; UNIQUE on (currency, month)
-- [ ] List/get API endpoints for ATO FX rates
-- [ ] Tests: insert, retrieve; (currency, month) uniqueness enforced; rate decimal precision preserved in round-trip
+- [x] ATO FX Rate model (currency ISO 4217 code, month, rate as foreign-currency-per-AUD) — `src/ato_fx_rate.rs`
+- [x] DB schema: `ato_fx_rates` table; rate stored as TEXT Decimal; UNIQUE on (currency, month) — migration `0010_ato_fx_rates.sql`
+- [x] List/get API endpoints for ATO FX rates (read-only over HTTP; writes come from the import). `db_upsert` is `#[cfg(test)]`-gated until the import (its sole caller) lands
+- [x] Tests: insert, retrieve; (currency, month) uniqueness enforced; rate decimal precision preserved in round-trip (`db_insert_and_retrieve`, `db_currency_month_uniqueness_enforced`, `db_decimal_precision_preserved_in_round_trip`, plus API tests)
 
 ## ATO FX Rate Import
 - [ ] Import logic: fetch the ATO's published monthly foreign exchange rates, parse, and upsert new (currency, month) rows idempotently (re-running must not create duplicates or alter existing rows)

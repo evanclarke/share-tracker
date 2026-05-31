@@ -1,6 +1,7 @@
 mod amma;
 mod amit_adjustment;
 mod args;
+mod ato_fx_rate;
 mod portfolio;
 mod db;
 mod decimal;
@@ -29,6 +30,7 @@ async fn main() {
 
     let app = exchange::router()
         .merge(listing::router())
+        .merge(ato_fx_rate::router())
         .merge(trade::router())
         .merge(income::router())
         .merge(amma::router())
