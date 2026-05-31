@@ -11,11 +11,13 @@ pub struct RealisedGainLoss {
     pub sale_trade_id: i64,
     pub listing_id: i64,
     pub sale_date: NaiveDate,
-    /// Net proceeds from the allocated portion (sale price × qty − pro-rated brokerage).
+    /// Net proceeds from the allocated portion (sale price × qty − pro-rated
+    /// brokerage), converted to AUD at the sale's ATO FX rate.
     pub proceeds: Decimal,
-    /// Adjusted cost base of the sold parcels (AMIT-reduced, pro-rated to allocated qty).
+    /// Adjusted cost base of the sold parcels (AMIT-reduced, pro-rated to allocated
+    /// qty), converted to AUD at the purchase's ATO FX rate.
     pub cost_base: Decimal,
-    /// proceeds − cost_base (positive = gain, negative = loss).
+    /// proceeds − cost_base in AUD (positive = gain, negative = loss).
     pub capital_gain_loss: Decimal,
     /// Portion of the capital gain from parcels held strictly more than 12 months
     /// (eligible for the 50% CGT discount). Always ≥ 0; losses are excluded.
@@ -28,7 +30,8 @@ pub fn router() -> Router<SqlitePool> {
 
 pub async fn db_realised_gains(pool: &SqlitePool) -> Result<Vec<RealisedGainLoss>, sqlx::Error> {
     let sell_rows = sqlx::query(
-        "SELECT id, listing_id, date, quantity, average_price, brokerage, gst_on_brokerage \
+        "SELECT id, listing_id, date, quantity, average_price, brokerage, gst_on_brokerage, \
+         currency, fx_rate \
          FROM trades WHERE trade_type = 'Sell'",
     )
     .fetch_all(pool)
@@ -39,7 +42,8 @@ pub async fn db_realised_gains(pool: &SqlitePool) -> Result<Vec<RealisedGainLoss
     }
 
     let buy_rows = sqlx::query(
-        "SELECT id, date, quantity, average_price, brokerage, gst_on_brokerage \
+        "SELECT id, date, quantity, average_price, brokerage, gst_on_brokerage, \
+         currency, fx_rate \
          FROM trades WHERE trade_type IN ('Buy', 'DRP')",
     )
     .fetch_all(pool)
@@ -55,6 +59,11 @@ pub async fn db_realised_gains(pool: &SqlitePool) -> Result<Vec<RealisedGainLoss
         return Ok(vec![]);
     }
 
+    // Each trade carries its own currency, trade date, and manual `fx_rate`
+    // fallback so its amounts can be converted to AUD via the ATO reference rate
+    // (see `infra::fx`). Proceeds and cost base are converted independently — a
+    // buy and the sell that closes it may settle in different months at different
+    // rates — so totals are never aggregated across mixed currencies.
     struct SellInfo {
         listing_id: i64,
         date: NaiveDate,
@@ -62,6 +71,8 @@ pub async fn db_realised_gains(pool: &SqlitePool) -> Result<Vec<RealisedGainLoss
         average_price: Decimal,
         brokerage: Decimal,
         gst_on_brokerage: Decimal,
+        currency: String,
+        fx_rate: Decimal,
     }
 
     struct BuyInfo {
@@ -70,6 +81,8 @@ pub async fn db_realised_gains(pool: &SqlitePool) -> Result<Vec<RealisedGainLoss
         average_price: Decimal,
         brokerage: Decimal,
         gst_on_brokerage: Decimal,
+        currency: String,
+        fx_rate: Decimal,
     }
 
     let mut sell_map: HashMap<i64, SellInfo> = HashMap::new();
@@ -84,6 +97,8 @@ pub async fn db_realised_gains(pool: &SqlitePool) -> Result<Vec<RealisedGainLoss
                 average_price: parse_dec("average_price", row.try_get("average_price")?)?,
                 brokerage: parse_dec("brokerage", row.try_get("brokerage")?)?,
                 gst_on_brokerage: parse_dec("gst_on_brokerage", row.try_get("gst_on_brokerage")?)?,
+                currency: row.try_get("currency")?,
+                fx_rate: parse_dec("fx_rate", row.try_get("fx_rate")?)?,
             },
         );
     }
@@ -99,6 +114,8 @@ pub async fn db_realised_gains(pool: &SqlitePool) -> Result<Vec<RealisedGainLoss
                 average_price: parse_dec("average_price", row.try_get("average_price")?)?,
                 brokerage: parse_dec("brokerage", row.try_get("brokerage")?)?,
                 gst_on_brokerage: parse_dec("gst_on_brokerage", row.try_get("gst_on_brokerage")?)?,
+                currency: row.try_get("currency")?,
+                fx_rate: parse_dec("fx_rate", row.try_get("fx_rate")?)?,
             },
         );
     }
@@ -128,6 +145,16 @@ pub async fn db_realised_gains(pool: &SqlitePool) -> Result<Vec<RealisedGainLoss
         } else {
             Decimal::ZERO
         };
+        // Convert to AUD at the sale's rate (ATO rate for the sale month, else the
+        // sale's manual fx_rate) before aggregating.
+        let alloc_proceeds = crate::infra::fx::to_aud(
+            pool,
+            alloc_proceeds,
+            &sale.currency,
+            sale.date,
+            Some(sale.fx_rate),
+        )
+        .await?;
 
         // Cost base for allocated portion of purchase parcel (AMIT-reduced, pro-rated)
         let buy_initial_cost =
@@ -139,6 +166,16 @@ pub async fn db_realised_gains(pool: &SqlitePool) -> Result<Vec<RealisedGainLoss
         } else {
             Decimal::ZERO
         };
+        // Convert to AUD at the purchase's rate (ATO rate for the buy month, else
+        // the buy's manual fx_rate).
+        let alloc_cost = crate::infra::fx::to_aud(
+            pool,
+            alloc_cost,
+            &buy.currency,
+            buy.date,
+            Some(buy.fx_rate),
+        )
+        .await?;
 
         let alloc_gain = alloc_proceeds - alloc_cost;
 
@@ -191,7 +228,7 @@ async fn realised_gains_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{infra::db, entities::{amma, amit_adjustment, listing, parcel_allocation, trade}};
+    use crate::{infra::db, entities::{amma, amit_adjustment, listing, parcel_allocation, rba_fx_rate, trade}};
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
     use tower::ServiceExt;
@@ -599,5 +636,105 @@ mod tests {
         assert_eq!(result[0].capital_gain_loss, Decimal::from(500));
         // held > 12 months
         assert_eq!(result[0].discount_eligible_gain, Decimal::from(500));
+    }
+
+    // FX conversion
+
+    async fn insert_usd_listing(pool: &SqlitePool, id: i64, ticker: &str) {
+        listing::db_upsert(
+            pool,
+            &listing::Listing {
+                id,
+                exchange_mic: "XNYS".to_string(),
+                ticker: ticker.to_string(),
+                name: ticker.to_string(),
+                isin: None,
+                security_type: listing::SecurityType::Share,
+                currency: "USD".to_string(),
+                amit: false,
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    async fn insert_usd_trade(
+        pool: &SqlitePool,
+        id: i64,
+        trade_type: trade::TradeType,
+        date: NaiveDate,
+        qty: Decimal,
+        price: Decimal,
+    ) {
+        trade::db_upsert(
+            pool,
+            &trade::Trade {
+                id,
+                trade_type,
+                date,
+                settlement_date: date + chrono::Duration::days(2),
+                listing_id: 1,
+                average_price: price,
+                quantity: qty,
+                currency: "USD".to_string(),
+                brokerage: Decimal::ZERO,
+                gst_on_brokerage: Decimal::ZERO,
+                brokerage_currency: "USD".to_string(),
+                // A wrong manual override: the report must prefer the ATO rate.
+                fx_rate: "0.99".parse().unwrap(),
+                contract_note_ref: None,
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn db_usd_buy_sell_produces_aud_cost_base_and_gain_via_ato_rate() {
+        let pool = test_pool().await;
+        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
+        let sell_date = NaiveDate::from_ymd_opt(2025, 6, 1).unwrap();
+        insert_usd_listing(&pool, 1, "AAPL").await;
+        // ATO RBA rates (foreign-per-AUD): A$1 = 0.50 USD in Jan-2024, 0.60 in Jun-2025.
+        rba_fx_rate::db_import_rate(&pool, "USD", "2024-01", "0.50".parse().unwrap())
+            .await
+            .unwrap();
+        rba_fx_rate::db_import_rate(&pool, "USD", "2025-06", "0.60".parse().unwrap())
+            .await
+            .unwrap();
+
+        // Buy 100 @ US$10 (US$1000), sell 100 @ US$15 (US$1500), zero brokerage.
+        insert_usd_trade(&pool, 1, trade::TradeType::Buy, buy_date, Decimal::from(100), Decimal::from(10)).await;
+        insert_usd_trade(&pool, 2, trade::TradeType::Sell, sell_date, Decimal::from(100), Decimal::from(15)).await;
+        allocate(&pool, 1, 2, 1, Decimal::from(100)).await;
+
+        let result = db_realised_gains(&pool).await.unwrap();
+        assert_eq!(result.len(), 1);
+        // cost = US$1000 / 0.50 = A$2000 (ATO rate, not the 0.99 override)
+        assert_eq!(result[0].cost_base, Decimal::from(2000));
+        // proceeds = US$1500 / 0.60 = A$2500
+        assert_eq!(result[0].proceeds, Decimal::from(2500));
+        // gain = 2500 - 2000 = A$500
+        assert_eq!(result[0].capital_gain_loss, Decimal::from(500));
+        // held > 12 months → fully discount-eligible (in AUD)
+        assert_eq!(result[0].discount_eligible_gain, Decimal::from(500));
+    }
+
+    #[tokio::test]
+    async fn db_usd_falls_back_to_manual_fx_rate_when_no_ato_rate() {
+        let pool = test_pool().await;
+        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
+        let sell_date = NaiveDate::from_ymd_opt(2025, 6, 1).unwrap();
+        insert_usd_listing(&pool, 1, "AAPL").await;
+        // No ATO rates imported → both trades fall back to their 0.99 manual override.
+        insert_usd_trade(&pool, 1, trade::TradeType::Buy, buy_date, Decimal::from(100), Decimal::from(10)).await;
+        insert_usd_trade(&pool, 2, trade::TradeType::Sell, sell_date, Decimal::from(100), Decimal::from(15)).await;
+        allocate(&pool, 1, 2, 1, Decimal::from(100)).await;
+
+        let result = db_realised_gains(&pool).await.unwrap();
+        assert_eq!(result.len(), 1);
+        // cost = US$1000 / 0.99, proceeds = US$1500 / 0.99
+        assert_eq!(result[0].cost_base, Decimal::from(1000) / "0.99".parse::<Decimal>().unwrap());
+        assert_eq!(result[0].proceeds, Decimal::from(1500) / "0.99".parse::<Decimal>().unwrap());
     }
 }

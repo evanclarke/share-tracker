@@ -6,6 +6,9 @@ use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 use std::collections::HashMap;
 
+/// Cost base is in AUD (each parcel converted via the ATO FX rate). The supplied
+/// `current_price` is taken as AUD too, so `market_value` and
+/// `unrealised_gain_loss` are AUD.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UnrealisedGain {
     pub listing_id: i64,
@@ -20,6 +23,8 @@ pub struct UnrealisedGain {
 
 #[derive(Debug, Default, Deserialize)]
 pub struct UnrealisedGainsRequest {
+    /// Current price per unit by listing id, expected in AUD so it lines up with
+    /// the AUD-denominated cost base.
     #[serde(default)]
     pub prices: HashMap<i64, Decimal>,
     #[serde(default)]
@@ -35,7 +40,8 @@ pub async fn db_unrealised_gains(
     as_of_date: NaiveDate,
 ) -> Result<Vec<UnrealisedGain>, sqlx::Error> {
     let trade_rows = sqlx::query(
-        "SELECT id, listing_id, date, quantity, average_price, brokerage, gst_on_brokerage \
+        "SELECT id, listing_id, date, quantity, average_price, brokerage, gst_on_brokerage, \
+         currency, fx_rate \
          FROM trades WHERE trade_type IN ('Buy', 'DRP')",
     )
     .fetch_all(pool)
@@ -71,6 +77,8 @@ pub async fn db_unrealised_gains(
         let price = parse_dec("average_price", row.try_get("average_price")?)?;
         let brok = parse_dec("brokerage", row.try_get("brokerage")?)?;
         let gst = parse_dec("gst_on_brokerage", row.try_get("gst_on_brokerage")?)?;
+        let currency: String = row.try_get("currency")?;
+        let fx_rate = parse_dec("fx_rate", row.try_get("fx_rate")?)?;
 
         let sold = *qty_sold.get(&trade_id).unwrap_or(&Decimal::ZERO);
         let remaining = qty - sold;
@@ -83,6 +91,16 @@ pub async fn db_unrealised_gains(
         let net_cost = initial_cost - amit;
         let remaining_cost =
             if qty > Decimal::ZERO { net_cost * remaining / qty } else { Decimal::ZERO };
+        // Convert the parcel's cost base to AUD (ATO rate for the buy month, else
+        // the trade's manual fx_rate) so the holding's cost base is AUD.
+        let remaining_cost = crate::infra::fx::to_aud(
+            pool,
+            remaining_cost,
+            &currency,
+            trade_date,
+            Some(fx_rate),
+        )
+        .await?;
 
         *listing_qty.entry(listing_id).or_insert(Decimal::ZERO) += remaining;
         *listing_cost_base.entry(listing_id).or_insert(Decimal::ZERO) += remaining_cost;

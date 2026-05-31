@@ -1,10 +1,13 @@
 use crate::infra::decimal::parse_dec;
 use axum::{Json, Router, extract::State, http::StatusCode, routing::post};
+use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 use std::collections::HashMap;
 
+/// Cost base figures are in AUD (each parcel converted via the ATO FX rate). The
+/// supplied `current_price` is taken as AUD too, so `market_value` is AUD.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HoldingOverview {
     pub listing_id: i64,
@@ -17,6 +20,8 @@ pub struct HoldingOverview {
 
 #[derive(Debug, Default, Deserialize)]
 pub struct OverviewRequest {
+    /// Current price per unit by listing id, expected in AUD so it lines up with
+    /// the AUD-denominated cost base.
     #[serde(default)]
     pub prices: HashMap<i64, Decimal>,
 }
@@ -31,7 +36,8 @@ pub fn router() -> Router<SqlitePool> {
 /// Cost base is pro-rated to remaining units and reduced by any AMIT adjustments.
 pub async fn db_holdings(pool: &SqlitePool) -> Result<Vec<HoldingOverview>, sqlx::Error> {
     let trade_rows = sqlx::query(
-        "SELECT id, listing_id, quantity, average_price, brokerage, gst_on_brokerage \
+        "SELECT id, listing_id, date, quantity, average_price, brokerage, gst_on_brokerage, \
+         currency, fx_rate \
          FROM trades WHERE trade_type IN ('Buy', 'DRP')",
     )
     .fetch_all(pool)
@@ -63,10 +69,13 @@ pub async fn db_holdings(pool: &SqlitePool) -> Result<Vec<HoldingOverview>, sqlx
     for row in &trade_rows {
         let trade_id: i64 = row.try_get("id")?;
         let listing_id: i64 = row.try_get("listing_id")?;
+        let trade_date: NaiveDate = row.try_get("date")?;
         let qty = parse_dec("quantity", row.try_get("quantity")?)?;
         let price = parse_dec("average_price", row.try_get("average_price")?)?;
         let brok = parse_dec("brokerage", row.try_get("brokerage")?)?;
         let gst = parse_dec("gst_on_brokerage", row.try_get("gst_on_brokerage")?)?;
+        let currency: String = row.try_get("currency")?;
+        let fx_rate = parse_dec("fx_rate", row.try_get("fx_rate")?)?;
 
         let sold = *qty_sold.get(&trade_id).unwrap_or(&Decimal::ZERO);
         let remaining = qty - sold;
@@ -79,6 +88,11 @@ pub async fn db_holdings(pool: &SqlitePool) -> Result<Vec<HoldingOverview>, sqlx
         let net_cost = initial_cost - amit;
         // pro-rate cost base to remaining units
         let remaining_cost = if qty > Decimal::ZERO { net_cost * remaining / qty } else { Decimal::ZERO };
+        // Convert the parcel's cost base to AUD (ATO rate for the buy month, else
+        // the trade's manual fx_rate) so holdings aggregate in AUD.
+        let remaining_cost =
+            crate::infra::fx::to_aud(pool, remaining_cost, &currency, trade_date, Some(fx_rate))
+                .await?;
 
         *listing_qty.entry(listing_id).or_insert(Decimal::ZERO) += remaining;
         *listing_cost_base.entry(listing_id).or_insert(Decimal::ZERO) += remaining_cost;

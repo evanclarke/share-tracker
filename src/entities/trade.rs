@@ -29,6 +29,10 @@ pub struct Trade {
     pub brokerage: Decimal,
     pub gst_on_brokerage: Decimal,
     pub brokerage_currency: String,
+    /// Manual foreign-per-AUD override (same convention as the ATO rate: AUD =
+    /// foreign / fx_rate). Reports prefer the ATO RBA rate for the trade's month
+    /// and fall back to this field only when no ATO rate exists (see `infra::fx`).
+    /// 1.0 for AUD trades.
     pub fx_rate: Decimal,
     pub contract_note_ref: Option<String>,
 }

@@ -26,6 +26,7 @@ Modules are grouped into three folders; `main.rs`, `app.rs`, and the migrations 
   - `infra/args.rs` — CLI args: `--db` (default `share-tracker.db`), `--port` (default 3000), `--schedule`
   - `infra/logging.rs` — tracing subscriber init; reads `RUST_LOG`, defaults to `info`
   - `infra/decimal.rs` — `parse_dec` and `FromRow` decimal helpers
+  - `infra/fx.rs` — `to_aud` AUD conversion via the ATO/RBA reference rate (per-trade `fx_rate` fallback); reports use it to convert non-AUD cost base/proceeds
   - `infra/scheduler.rs` — maintenance-job registry, cron parsing/spawn, inspection routes
 - `src/entities/<entity>.rs` — one file per domain entity, CRUD + write-time invariants (see pattern below). `entities::router()` (in `entities/mod.rs`) merges them all
 - `src/reports/<report>.rs` — read-only AUD aggregations (portfolio, realised/unrealised gains, tax summary). `reports::router()` (in `reports/mod.rs`) merges them all

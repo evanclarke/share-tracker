@@ -12,7 +12,8 @@ A personal Australian share portfolio tracker with a REST JSON API. Records trad
 - **Unrealised gains report** — per-holding gain/loss and CGT-discount-eligible quantity as at a given date
 - **Realised gains report** — per-sale capital gain/loss and CGT-discount-eligible gain (parcels held strictly more than 12 months)
 - **Tax summary** — income aggregated by Australian financial year (July–June), combining dividends, trust distributions, and AMMA components
-- **FX rate import** — monthly RBA F11 foreign exchange rates (the rates the ATO directs taxpayers to use) fetched and stored as foreign-per-AUD, refreshed weekly and via a manual trigger, ready for AUD tax conversion
+- **FX rate import** — monthly RBA F11 foreign exchange rates (the rates the ATO directs taxpayers to use) fetched and stored as foreign-per-AUD, refreshed weekly and via a manual trigger
+- **AUD conversion** — cost base and proceeds in the portfolio, unrealised, and realised reports are converted to AUD at the ATO reference rate (with a per-trade manual `fx_rate` fallback); see [FX conversion](#fx-conversion)
 - **MIC registry import** — the ISO 10383 Market Identifier Code list imported monthly (and via a manual trigger), used by a non-blocking report to flag curated exchanges whose MIC is unknown or expired
 
 ## Building and running
@@ -92,7 +93,7 @@ trades
 ├── brokerage         TEXT (decimal)
 ├── gst_on_brokerage  TEXT (decimal)
 ├── brokerage_currency TEXT
-├── fx_rate           TEXT (decimal)  1.0 for AUD trades
+├── fx_rate           TEXT (decimal)  Manual foreign-per-AUD override; fallback when no ATO rate exists (1.0 for AUD trades)
 └── contract_note_ref TEXT (nullable)
 
 income
@@ -318,6 +319,10 @@ Parcel allocations are **read-only** over HTTP; they are created and replaced at
 
 ### Portfolio reports
 
+#### FX conversion
+
+Reports take the Australian-tax view, so every non-AUD trade amount is converted to AUD before it is aggregated. The rate is the ATO reference rate — the RBA F11 monthly rate (foreign units per 1 AUD) for the amount's currency and the month of the relevant trade date — so `AUD = foreign / rate`. AUD amounts pass through unchanged. When no ATO rate has been imported for that `(currency, month)`, the trade's manual `fx_rate` is used as a fallback; the ATO rate takes precedence once available. If neither is available the report fails loudly (`500`) rather than leaving an amount unconverted. Cost base and proceeds in the portfolio, unrealised, and realised reports are converted this way; income and AMMA totals are not yet converted (they have no stored currency).
+
 #### Overview
 
 ```
@@ -332,7 +337,7 @@ Returns open holdings per listing. Request body (optional):
 
 Response fields per holding: `listing_id`, `quantity`, `avg_cost_base_per_unit`, `total_cost_base`, `current_price` (nullable), `market_value` (nullable).
 
-Cost base is calculated as `(price × quantity + brokerage + GST) − AMIT reductions`, pro-rated to remaining (unsold) units.
+Cost base is calculated as `(price × quantity + brokerage + GST) − AMIT reductions`, pro-rated to remaining (unsold) units, then converted to AUD (see [FX conversion](#fx-conversion)). Supplied prices are expected in AUD, so `market_value` is AUD.
 
 #### Unrealised gains
 
@@ -346,7 +351,7 @@ Request body (all optional):
 { "prices": { "<listing_id>": "<price>" }, "as_of_date": "YYYY-MM-DD" }
 ```
 
-`as_of_date` defaults to today. Response fields per holding: `listing_id`, `quantity`, `total_cost_base`, `current_price`, `market_value`, `unrealised_gain_loss`, `cgt_discount_eligible_quantity` (units from parcels held strictly more than 12 months as at `as_of_date`).
+`as_of_date` defaults to today. Response fields per holding: `listing_id`, `quantity`, `total_cost_base`, `current_price`, `market_value`, `unrealised_gain_loss`, `cgt_discount_eligible_quantity` (units from parcels held strictly more than 12 months as at `as_of_date`). `total_cost_base` is in AUD (see [FX conversion](#fx-conversion)); supplied prices are expected in AUD, so `market_value` and `unrealised_gain_loss` are AUD.
 
 #### Realised gains
 
@@ -354,7 +359,7 @@ Request body (all optional):
 GET /portfolio/realised-gains
 ```
 
-Returns one record per sale trade that has at least one parcel allocation. Response fields: `sale_trade_id`, `listing_id`, `sale_date`, `proceeds`, `cost_base`, `capital_gain_loss`, `discount_eligible_gain` (gain attributable to parcels held strictly more than 12 months; losses are excluded).
+Returns one record per sale trade that has at least one parcel allocation. Response fields: `sale_trade_id`, `listing_id`, `sale_date`, `proceeds`, `cost_base`, `capital_gain_loss`, `discount_eligible_gain` (gain attributable to parcels held strictly more than 12 months; losses are excluded). `proceeds`, `cost_base`, and `capital_gain_loss` are in AUD: proceeds are converted at the sale's FX rate and cost base at the purchase's FX rate (see [FX conversion](#fx-conversion)).
 
 Sorted by `sale_date` ascending.
 
