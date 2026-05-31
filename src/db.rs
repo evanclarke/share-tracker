@@ -19,7 +19,33 @@ pub async fn init(db_path: &str) -> Result<SqlitePool, sqlx::Error> {
     }
 
     let pool = SqlitePool::connect_with(opts).await?;
+
+    let applied_before: Vec<i64> =
+        sqlx::query_scalar("SELECT version FROM _sqlx_migrations WHERE success = TRUE")
+            .fetch_all(&pool)
+            .await
+            .unwrap_or_default();
+
     sqlx::migrate!().run(&pool).await?;
+
+    let applied_after: Vec<(i64, String)> = sqlx::query_as(
+        "SELECT version, description FROM _sqlx_migrations WHERE success = TRUE ORDER BY version",
+    )
+    .fetch_all(&pool)
+    .await?;
+
+    let new_count = applied_after
+        .iter()
+        .filter(|(v, _)| !applied_before.contains(v))
+        .inspect(|(version, description)| {
+            tracing::info!(version, description, "migration applied");
+        })
+        .count();
+
+    if new_count == 0 {
+        tracing::debug!("no new migrations");
+    }
+
     Ok(pool)
 }
 
@@ -31,8 +57,12 @@ pub fn backup_path(db_path: &str) -> String {
 
 pub async fn backup(pool: &SqlitePool, db_path: &str) -> Result<(), sqlx::Error> {
     let dest = backup_path(db_path);
-    if !Path::new(&dest).exists() {
+    if Path::new(&dest).exists() {
+        tracing::debug!(path = dest, "backup already exists, skipping");
+    } else {
+        tracing::info!(path = dest, "starting backup");
         sqlx::query("VACUUM INTO ?").bind(&dest).execute(pool).await?;
+        tracing::info!(path = dest, "backup complete");
     }
     Ok(())
 }
@@ -53,6 +83,10 @@ pub fn spawn_daily_backup(pool: SqlitePool, db_path: String) {
                 )
                 .unwrap();
             let secs = (next_midnight - now).num_seconds().max(1) as u64;
+            tracing::info!(
+                next_run = %next_midnight.format("%Y-%m-%d %H:%M:%S %Z"),
+                "next backup scheduled"
+            );
             tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
         }
     });
