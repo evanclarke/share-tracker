@@ -140,6 +140,54 @@ mod tests {
         sqlx::migrate!().run(&pool).await.unwrap();
     }
 
+    #[test]
+    fn migrations_do_not_drop_tables_or_columns() {
+        let migrations_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+        let entries = std::fs::read_dir(&migrations_dir)
+            .expect("migrations dir should exist")
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().map_or(false, |x| x == "sql"));
+
+        for entry in entries {
+            let path = entry.path();
+            let sql = std::fs::read_to_string(&path)
+                .unwrap_or_else(|_| panic!("could not read {}", path.display()));
+
+            for line in sql.lines() {
+                let trimmed = line.trim();
+                if trimmed.starts_with("--") {
+                    continue;
+                }
+                let upper = trimmed.to_uppercase();
+
+                assert!(
+                    !upper.contains("DROP COLUMN"),
+                    "{} contains DROP COLUMN: {}",
+                    path.display(),
+                    trimmed
+                );
+
+                if let Some(rest) = upper.strip_prefix("DROP TABLE") {
+                    let after = rest.trim();
+                    let table = after
+                        .strip_prefix("IF EXISTS")
+                        .unwrap_or(after)
+                        .trim()
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or("")
+                        .trim_end_matches(';');
+                    assert!(
+                        table.ends_with("_OLD"),
+                        "{}: DROP TABLE is only allowed on _old tables (rename pattern); got '{}'",
+                        path.display(),
+                        table.to_lowercase()
+                    );
+                }
+            }
+        }
+    }
+
     #[tokio::test]
     async fn backup_does_not_overwrite_existing() {
         let dir = tempfile::tempdir().unwrap();

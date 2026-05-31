@@ -7,8 +7,8 @@ Items are only marked done when a passing test exists for them.
 - [x] CLI arg parsing (`--db <path>`, default: `share-tracker.db`)
 - [x] Database initialisation and connection pool
 - [x] Daily backup on startup (copy DB to `<file>-YYYY-MM-DD.db`)
-- [ ] GitHub Actions CI: run tests on push
-- [ ] CI: verify no migration contains DROP TABLE or DROP COLUMN statements
+- [x] GitHub Actions CI: run tests on push
+- [x] CI: verify no migration contains DROP TABLE or DROP COLUMN statements
 - [x] Logging setup: tracing subscriber with INFO as default level, configurable via RUST_LOG
 - [x] Tests: log output at INFO level; RUST_LOG override works
 - [x] Database migration system (sqlx migrate): migrations run on startup, applied once

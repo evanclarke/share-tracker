@@ -1,9 +1,13 @@
 -- Convert REAL columns to TEXT for arbitrary-precision decimal storage.
--- SQLite does not support ALTER COLUMN, so we use the create/copy/drop/rename pattern.
--- income references trades, so we handle it first in both directions.
+-- Uses rename pattern: rename originals to _old, create with correct schema,
+-- copy data with CAST, drop _old tables.
 
--- Step 1: create new tables with TEXT decimal columns
-CREATE TABLE trades_new (
+-- Step 1: rename originals out of the way (income first since it references trades)
+ALTER TABLE income RENAME TO income_old;
+ALTER TABLE trades RENAME TO trades_old;
+
+-- Step 2: create new tables with TEXT decimal columns
+CREATE TABLE trades (
     id                  INTEGER PRIMARY KEY,
     trade_type          TEXT    NOT NULL CHECK(trade_type IN ('Buy', 'Sell', 'DRP')),
     date                TEXT    NOT NULL,
@@ -19,7 +23,7 @@ CREATE TABLE trades_new (
     contract_note_ref   TEXT
 );
 
-CREATE TABLE income_new (
+CREATE TABLE income (
     id                          INTEGER PRIMARY KEY,
     listing_id                  INTEGER NOT NULL REFERENCES listings(id),
     date_paid                   TEXT    NOT NULL,
@@ -33,11 +37,11 @@ CREATE TABLE income_new (
     lic_capital_gain_deduction  TEXT    NOT NULL DEFAULT '0',
     conduit_foreign_income      TEXT    NOT NULL DEFAULT '0',
     trust_income                INTEGER NOT NULL DEFAULT 0,
-    reinvestment_trade_id       INTEGER REFERENCES trades_new(id)
+    reinvestment_trade_id       INTEGER REFERENCES trades(id)
 );
 
--- Step 2: copy existing data, casting REAL columns to TEXT
-INSERT INTO trades_new
+-- Step 3: copy data, casting REAL columns to TEXT
+INSERT INTO trades
 SELECT
     id,
     trade_type,
@@ -52,30 +56,26 @@ SELECT
     brokerage_currency,
     CAST(fx_rate          AS TEXT),
     contract_note_ref
-FROM trades;
+FROM trades_old;
 
-INSERT INTO income_new
+INSERT INTO income
 SELECT
     id,
     listing_id,
     date_paid,
     ex_date,
-    CAST(franked_amount           AS TEXT),
-    CAST(unfranked_amount         AS TEXT),
-    CAST(foreign_source_income    AS TEXT),
-    CAST(foreign_tax_paid         AS TEXT),
-    CAST(tfn_withholding_tax      AS TEXT),
-    CAST(franking_credits         AS TEXT),
+    CAST(franked_amount             AS TEXT),
+    CAST(unfranked_amount           AS TEXT),
+    CAST(foreign_source_income      AS TEXT),
+    CAST(foreign_tax_paid           AS TEXT),
+    CAST(tfn_withholding_tax        AS TEXT),
+    CAST(franking_credits           AS TEXT),
     CAST(lic_capital_gain_deduction AS TEXT),
-    CAST(conduit_foreign_income   AS TEXT),
+    CAST(conduit_foreign_income     AS TEXT),
     trust_income,
     reinvestment_trade_id
-FROM income;
+FROM income_old;
 
--- Step 3: drop old tables (income first due to FK reference)
-DROP TABLE income;
-DROP TABLE trades;
-
--- Step 4: rename new tables into place
-ALTER TABLE trades_new RENAME TO trades;
-ALTER TABLE income_new RENAME TO income;
+-- Step 4: drop _old tables (income_old first due to its FK into trades)
+DROP TABLE income_old;
+DROP TABLE trades_old;
