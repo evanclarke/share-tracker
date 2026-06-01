@@ -416,6 +416,56 @@ mod tests {
         assert_eq!(reductions.get(&1).copied(), Some("7.40".parse::<Decimal>().unwrap()));
     }
 
+    /// The cost base adjustment is driven solely by `cost_base_adjustment` (the per-unit
+    /// AMIT cost base net amount), per ATO guidance (docs/amit-cost-base-adjustments.md).
+    /// `tax_deferred_amount` and `tax_free_amount` are informational-only and must NOT
+    /// affect the reduction, even when large.
+    #[tokio::test]
+    async fn db_cost_base_reduction_ignores_tax_deferred_and_tax_free() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool, 1, "XASX", "VAF").await;
+        insert_buy_trade(&pool, 1, 1, Decimal::from(100)).await;
+
+        // AMMA with cost_base_adjustment 0.05/unit but huge tax-deferred / tax-free lines.
+        amma::db_upsert(
+            &pool,
+            &amma::AmmaStatement {
+                id: 1,
+                listing_id: 1,
+                tax_year_end_date: NaiveDate::from_ymd_opt(2024, 6, 30).unwrap(),
+                units_held: Decimal::from(100),
+                date_received: NaiveDate::from_ymd_opt(2024, 8, 15).unwrap(),
+                australian_interest: Decimal::ZERO,
+                australian_dividends_unfranked: Decimal::ZERO,
+                franked_dividends: Decimal::ZERO,
+                franking_credits: Decimal::ZERO,
+                net_rent: Decimal::ZERO,
+                foreign_income: Decimal::ZERO,
+                foreign_tax_credits: Decimal::ZERO,
+                other_income: Decimal::ZERO,
+                cgt_discount_gains: Decimal::ZERO,
+                cgt_indexation_gains: Decimal::ZERO,
+                cgt_other_gains: Decimal::ZERO,
+                capital_losses_applied: Decimal::ZERO,
+                tax_deferred_amount: "999.99".parse().unwrap(),
+                tax_free_amount: "888.88".parse().unwrap(),
+                cost_base_adjustment: "0.05".parse().unwrap(),
+                tfn_withholding_tax: Decimal::ZERO,
+                currency: "AUD".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+
+        db_upsert(&pool, &AmitAdjustment { id: 1, amma_statement_id: 1, trade_id: 1, quantity: Decimal::from(100) })
+            .await
+            .unwrap();
+
+        let reductions = db_cost_base_reductions(&pool).await.unwrap();
+        // 100 * 0.05 = 5.00 — the tax-deferred/tax-free amounts are NOT added in.
+        assert_eq!(reductions.get(&1).copied(), Some("5.00".parse::<Decimal>().unwrap()));
+    }
+
     // API-level tests
 
     #[tokio::test]

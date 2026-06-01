@@ -28,8 +28,20 @@ pub struct AmmaStatement {
     pub cgt_indexation_gains: Decimal,
     pub cgt_other_gains: Decimal,
     pub capital_losses_applied: Decimal,
+    /// Informational only. Tax-deferred amounts are a reported AMMA statement line, but
+    /// they do NOT directly drive the member's cost base adjustment — the ATO's annual
+    /// AMIT cost base net amount (`cost_base_adjustment` below) already reflects them.
+    /// See `docs/amit-cost-base-adjustments.md`. Not consumed by any calculation.
     pub tax_deferred_amount: Decimal,
+    /// Informational only. As with `tax_deferred_amount`, tax-free amounts are reported
+    /// on the statement but are not a direct cost-base driver; they are broadly reflected
+    /// in `cost_base_adjustment`. See `docs/amit-cost-base-adjustments.md`.
     pub tax_free_amount: Decimal,
+    /// The AMIT cost base net amount **per unit** for the year — the sole driver of the
+    /// cost base adjustment applied to affected parcels (see
+    /// `amit_adjustment::db_cost_base_reductions`). A positive value reduces the cost base;
+    /// a negative value increases it (upward adjustments are permitted under the AMIT
+    /// regime). See `docs/amit-cost-base-adjustments.md`.
     pub cost_base_adjustment: Decimal,
     pub tfn_withholding_tax: Decimal,
     /// ISO 4217 currency the attributed amounts are denominated in. The tax summary

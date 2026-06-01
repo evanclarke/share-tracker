@@ -151,9 +151,9 @@ amma_statements              Annual AMIT Member Annual (AMMA) statements
 ├── cgt_indexation_gains            TEXT (decimal)
 ├── cgt_other_gains                 TEXT (decimal)
 ├── capital_losses_applied          TEXT (decimal)
-├── tax_deferred_amount             TEXT (decimal)
-├── tax_free_amount                 TEXT (decimal)
-├── cost_base_adjustment            TEXT (decimal)  Per-unit cost base reduction
+├── tax_deferred_amount             TEXT (decimal)  Informational only — not a cost-base driver (reflected in cost_base_adjustment)
+├── tax_free_amount                 TEXT (decimal)  Informational only — not a cost-base driver (reflected in cost_base_adjustment)
+├── cost_base_adjustment            TEXT (decimal)  Per-unit AMIT cost base net amount; sole cost-base driver (+ reduces, − increases)
 ├── tfn_withholding_tax             TEXT (decimal)
 └── currency                        TEXT FK→currencies.code   ISO 4217; tax summary converts to AUD by tax_year_end_date month (default AUD)
 
