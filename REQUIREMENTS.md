@@ -28,6 +28,14 @@ and cost basis calculations are done with the Australian tax view in mind.
      (DTI) registry into a single currencies reference table
    - Manual trigger of the same import via an HTTP endpoint (for retries / missed runs)
    - Validates that currency codes used on trades, income and AMMA records are recognised codes
+ - Document attachments
+   - Attach supporting documents (e.g. a trade confirmation / contract note PDF, a dividend
+     statement, an AMMA statement scan) to a Trade, Income, or AMMA Statement record
+   - File contents are stored inside the database (as a BLOB), not on the filesystem, so the
+     existing weekly DB backup captures the documents too - no separate file store to back up
+   - Upload, download (original filename + content type preserved), list, and delete attachments;
+     an activity may have many attachments, each attachment belongs to exactly one activity
+   - Removing an activity removes its attachments in the same transaction (no orphaned blobs)
  - Reporting
    - Current portfolio overview
    - Unrealised gains/losses
@@ -61,6 +69,14 @@ and cost basis calculations are done with the Australian tax view in mind.
  - If a field will only contain a limited set of values, always create an enum and constraints in the database
  - Jobs that are scheduled will log an info when started and finished
  - Tables in the Web UI should be filterable and sortable
+ - Document attachment contents are stored as a SQLite BLOB column (binary, not a TEXT/Decimal
+   column); only the content payload is binary - all metadata stays in typed columns. A SHA-256
+   checksum of the content is computed and stored on upload for integrity verification
+ - Accepted attachment content types are restricted to a defined allowlist (proposed: application/pdf,
+   image/png, image/jpeg) enforced by a database enum/constraint; an unsupported type is rejected
+   with 422
+ - A per-file maximum upload size is enforced (proposed: 25 MB); an oversized upload is rejected
+   (proposed: 413 Payload Too Large)
 
 # Data Model
 ## Reference Data
@@ -182,6 +198,29 @@ The facts that are recorded by the user
   - Sale Trade (FK to Trade Activity, Type: Sell)
   - Purchase Trade (FK to Trade Activity, Type: Buy or DRP)
   - Quantity Allocated
+- Attachment (a supporting document for one activity)
+  - Owner: exactly one of Trade (FK), Income (FK), or AMMA Statement (FK) - the other two are null.
+    Modelled as three nullable FK columns with a database CHECK that exactly one is set (rather than
+    a polymorphic type+id pair, so referential integrity to the owning activity is enforced by a
+    real foreign key). Deleting the owning activity deletes its attachments (ON DELETE CASCADE)
+  - Filename (the original upload filename, preserved for download)
+  - Content Type (enum: the accepted MIME allowlist - e.g. application/pdf, image/png, image/jpeg)
+  - Byte Size (size of the stored content in bytes; informational, for display)
+  - Checksum (SHA-256 of the content, hex; for integrity verification and duplicate detection)
+  - Uploaded At (timestamp the attachment was stored)
+  - Content (the file bytes, stored as a BLOB)
+
+### Attachment API
+- Distinct from the JSON CRUD convention because the payload is binary:
+  - Upload via multipart/form-data (the file plus the target activity), returning 201 with the
+    created attachment's metadata
+  - List/get return metadata only (id, owner, filename, content type, size, checksum, uploaded at) -
+    never the blob - so listings stay light and route through the shared filterable table
+  - A dedicated content endpoint streams the raw bytes with the stored Content-Type and a
+    Content-Disposition filename for download
+  - Delete removes the attachment (204, or 404 if unknown)
+  - Attachments for a given activity are listable by that activity (e.g. filtered by trade/income/
+    AMMA id) so the Web UI can show and manage them from the activity's view
 
 ## DRP (Dividend Reinvestment Plan)
 - DRP Enrolment
