@@ -7,6 +7,11 @@ Items are only marked done when a passing test exists for them.
 - [x] CLI arg parsing (`--db <path>`, default: `share-tracker.db`)
 - [x] Database initialisation and connection pool
 - [x] Daily backup on startup (copy DB to `<file>-YYYY-MM-DD.db`)
+- [ ] Switch the backup job from daily to weekly cadence (REQUIREMENTS now specifies *weekly* backups) — change `schedule.cron`'s `backup` entry from `0 0 * * *` (daily) to a weekly expression (e.g. `0 0 * * 0`); on-demand `POST /jobs/backup` is unaffected
+- [ ] Backup filename includes time as well as date — `<file>-date-time.db` (e.g. `<file>-YYYY-MM-DD-HHMMSS.db`), was date-only `<file>-YYYY-MM-DD.db`; update `db::backup_path`'s format. The skip-if-exists guard becomes effectively per-run with a time component, so confirm a fresh weekly backup is written rather than skipped
+- [ ] Tests: backup filename carries the date-time component (not date only); weekly `backup` schedule entry parses and is the cadence used
+- [ ] Scheduled jobs log an INFO when started and an INFO when finished (REQUIREMENTS: "Jobs that are scheduled will log an info when started and finished") — wrap each run in `scheduler::spawn`'s loop (and the manual `POST /jobs/{name}` trigger) with uniform `job started` / `job finished` INFO lines so *every* job (backup, rba-fx-import, mic-import, currency-import) logs both, not just the ones that emit their own completion line today
+- [ ] Tests: a scheduled/triggered job emits both a started and a finished INFO log
 - [x] GitHub Actions CI: run tests on push
 - [x] CI: verify no migration contains DROP TABLE or DROP COLUMN statements
 - [x] Logging setup: tracing subscriber with INFO as default level, configurable via RUST_LOG
@@ -171,6 +176,8 @@ A no-build-step single-page app (plain HTML/CSS/JS) embedded in the binary with 
 - [x] Gains/losses report UI — `/portfolio/unrealised-gains` (price + as-of-date form), `/portfolio/realised-gains`, and `/portfolio/net-capital-gain` report views (`gains_report_ui_present`)
 - [x] Tax summary UI — `/portfolio/tax-summary` report view (`tax_summary_ui_present`)
 - Also wired into the SPA (no separate TODO item): read-only views for currencies / MIC registry / RBA FX rates / parcel allocations, the AMIT adjustments CRUD view, exchange holidays CRUD, the exchange MIC validation report, and a Maintenance → Jobs view that lists and triggers the scheduled jobs on demand via `GET /jobs` + `POST /jobs/:name` (`jobs_ui_present`).
+- [ ] Web UI tables are filterable and sortable (REQUIREMENTS: "Tables in the Web UI should be filterable and sortable") — add a text filter and click-to-sort columns (asc/desc) to the generic config-driven table renderer in `app.js`, so it applies to every entity list view and report table without per-entity code (no parallel data path)
+- [ ] Tests: the filter input and sortable-column handlers are present in the served `app.js` bundle (per the no-browser-harness convention — assert the controls/behaviour appear in the shipped bundle)
 
 ## Review Findings — Requirements Gaps
 (FX source changed: conversion now uses the ATO FX Rate lookup, not a per-trade `fx_rate` — see the FX Conversion section.)

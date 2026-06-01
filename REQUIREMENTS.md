@@ -39,7 +39,7 @@ and cost basis calculations are done with the Australian tax view in mind.
 # Implementation Overview and Rules
  - Server process design, written in Rust, using SQLite as the storage
    - Database file can be specified on command line
-   - Daily backups are created (named <file>-date.db)
+   - Weekly backups are created (named <file>-date-time.db)
    - Weekly scheduled task fetches the ATO's published monthly foreign exchange rates and stores any
      new periods (idempotent - re-fetching an already-stored month must not create duplicates or
      alter existing rows)
@@ -59,6 +59,8 @@ and cost basis calculations are done with the Australian tax view in mind.
  - For financial values, always use a BigDecimal type as not to introduce errors due to inexact floats
  - Database migrations must not drop data
  - If a field will only contain a limited set of values, always create an enum and constraints in the database
+ - Jobs that are scheduled will log an info when started and finished
+ - Tables in the Web UI should be filterable and sortable
 
 # Data Model
 ## Reference Data
