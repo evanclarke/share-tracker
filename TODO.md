@@ -221,3 +221,92 @@ A no-build-step single-page app (plain HTML/CSS/JS) embedded in the binary with 
 - [x] Surface malformed decimal values instead of silently coercing to zero via `.parse().unwrap_or(Decimal::ZERO)` in the report modules (shared `decimal::parse_dec` propagates a decode error; test `db_malformed_decimal_is_an_error_not_zero`)
 - [x] Remove dead-code warnings from unused `UpsertError::Db(sqlx::Error)` field in parcel_allocation.rs and amit_adjustment.rs (now logged via `tracing::error!`)
 - [x] Remove remaining dead-code warning: replaced the unused per-trade `amit_adjustment::db_cost_base_reduction` with a shared bulk `db_cost_base_reductions` (returns `HashMap<trade_id, Decimal>`); portfolio/realised/unrealised reports now call it instead of each re-implementing the AMIT-reduction query inline. Also fixes the silent `.parse().unwrap_or(Decimal::ZERO)` (now propagates via `parse_dec`). Test `db_cost_base_reduction_calculation` exercises the bulk helper.
+
+## Capital-loss carry-forward across years
+(REQUIREMENTS "Planned Enhancements — Capital-loss carry-forward across years". Net capital losses carry forward indefinitely and apply before the discount, per `docs/cgt-using-capital-losses.md`. Today `net-capital-gain` computes the current year's `capital_loss_carried_forward` but never consumes a prior year's carried-forward loss in a later year, so post-loss years are overstated.)
+- [ ] Chain carried-forward losses across the year series in `/portfolio/net-capital-gain`: an unused net capital loss from one year is applied in the next year that has gains (non-discountable gains first, then discount-eligible, then halve the remainder)
+- [ ] Add an enterable opening carried-forward capital loss (losses from before the first year in the system), stored as a recognised data-model value (not derived) and used as the starting balance — DB schema + migration (no data dropped) + write path
+- [ ] Tests: an earlier-year loss reduces a later year's net capital gain; a loss fully absorbing later gains leaves zero assessable and carries the remainder forward; an entered opening loss balance is applied
+- [ ] README sync: net-capital-gain report description (cross-year carry + opening balance), schema/endpoint for the opening loss balance
+
+## Reduced cost base and the five cost-base elements
+(REQUIREMENTS "Planned Enhancements — Reduced cost base and the five cost-base elements", `docs/cgt-cost-base.md`.)
+- [ ] NEEDS CLARIFICATION: decide whether to model the ATO reduced cost base (for losses — excludes element 3, no indexation) as distinct from the cost base, or document the single-cost-base behaviour as a known limitation
+- [ ] NEEDS CLARIFICATION: decide whether to capture cost-base elements beyond acquisition (1) and incidental/brokerage (2) — element 3 (ownership costs), 4 (capital improvements), 5 (title/defence costs)
+- [ ] If elements 3–5 in scope: model per-parcel additional cost-base costs (DB schema + migration) and include them in cost base (excluding element 3 from the reduced cost base) in the portfolio/unrealised/realised/net-capital-gain reports
+- [ ] Tests: additional cost-base costs flow into the cost base; element 3 is excluded from the reduced cost base used for losses
+- [ ] README sync: cost-base composition in the report descriptions + any new schema
+
+## Taxpayer entity type and CGT discount rate
+(REQUIREMENTS "Planned Enhancements — Taxpayer entity type and CGT discount rate". Discount is currently hard-wired to the individual 50% rate.)
+- [ ] NEEDS CLARIFICATION: decide whether to introduce a taxpayer-entity concept (Individual, SMSF/complying super, Company, Trust/Partnership) driving the CGT discount rate (50% / 33⅓% / 0% / 50%) and the LIC deduction rate (`docs/lic-capital-gain-deduction.md`)
+- [ ] If entity type in scope: model it (DB schema + migration), drive the discount and LIC-deduction rates from it in `/portfolio/net-capital-gain` and the tax summary
+- [ ] If not yet modelled: state the individual-resident 50% assumption explicitly in the report output and README
+- [ ] Tests: discount/LIC rates vary correctly by entity type (or: the individual-resident assumption is surfaced)
+
+## Franking-credit entitlement rules
+(REQUIREMENTS "Planned Enhancements — Franking-credit entitlement rules". `ex_date` is already captured and is the input the at-risk holding-period test needs.)
+- [ ] Apply the 45-day holding-period rule (90 days for preference shares) to decide whether a dividend's franking credits are claimable
+- [ ] Apply the $5,000 small-shareholder exemption (franking offsets up to $5,000/year claimable without the holding-period rule)
+- [ ] Tax summary reflects only claimable franking credits (or clearly flags credits at risk of disallowance), not all attached credits
+- [ ] Tests: a dividend held under 45 days has its franking credits excluded; the small-shareholder exemption restores credits below the $5,000 threshold
+- [ ] README sync: tax summary franking-credit treatment
+
+## Foreign income tax offset (FITO) cap
+(REQUIREMENTS "Planned Enhancements — Foreign income tax offset (FITO) cap", `docs/mytax-managed-funds.md`. Tax summary currently sums foreign tax with no cap.)
+- [ ] Apply the FITO limit: offsets above $1,000/year capped unless the full offset-limit calculation supports more
+- [ ] Tests: foreign tax under $1,000 passes through; above $1,000 is limited to the computed cap
+- [ ] README sync: tax summary FITO treatment
+
+## Corporate actions / additional CGT events
+(REQUIREMENTS "Planned Enhancements — Corporate actions / additional CGT events". Only A1 and E10 are modelled today.)
+- [ ] NEEDS CLARIFICATION: decide scope and data model for recording corporate actions per holding/parcel
+- [ ] Share split / consolidation: adjust quantity and per-unit cost base, preserving total cost base and the original acquisition date for the discount
+- [ ] Bonus shares: new parcels with apportioned cost base
+- [ ] Rights issues: new parcels with their cost-base treatment
+- [ ] Return of capital (non-AMIT, CGT event G1): reduce cost base, distinct from the AMIT tax-deferred amount
+- [ ] Off-market share buy-back: split into capital and dividend components
+- [ ] Merger / takeover / demerger incl. scrip-for-scrip rollover: parcel substitution carrying the original cost base and acquisition date
+- [ ] Security identity continuity across a ticker/name change, so a renamed listing's parcels are not orphaned
+- [ ] Tests: each modelled action produces the correct adjusted parcels, cost base, and preserved acquisition date
+- [ ] README sync: new entities/endpoints and their schema + relationships
+
+## Accounts / ownership dimension
+(REQUIREMENTS "Planned Enhancements — Accounts / ownership dimension". Everything is one flat portfolio today.)
+- [ ] NEEDS CLARIFICATION: decide whether to introduce an account/owner entity (Individual, Joint, SMSF, Family Trust) partitioning all holdings and reports per taxpayer
+- [ ] If in scope: model the account entity (DB schema + migration); add an account FK to trades, income, AMMA statements, DRP enrolments; allow every report to be produced per account (FX/AUD rules unchanged within each)
+- [ ] Tests: gains and tax summaries are partitioned correctly across two accounts
+- [ ] README sync: account entity + per-account report parameters
+
+## Buy-trade edit/delete integrity (symmetric with Sells)
+(REQUIREMENTS "Planned Enhancements — Buy-trade edit/delete integrity". The Sell path enforces a write-time invariant; the Buy path does not.)
+- [ ] Reject deleting a Buy/DRP trade referenced by a parcel allocation or AMIT adjustment with a clear `422` (or `409`) instead of surfacing the SQLite FK error as `500`
+- [ ] Reject `PUT /trades/:id` editing a Buy/DRP when the new quantity falls below the quantity already allocated out of it or covered by AMIT adjustments (`422`)
+- [ ] Tests: delete of a consumed Buy rejected; edit shrinking a partly-sold Buy rejected; an unconsumed Buy still edits/deletes freely
+- [ ] README sync: response-code/behaviour notes on the Trades endpoints
+
+## Open-parcel cost-base inventory report
+(REQUIREMENTS "Planned Enhancements — Open-parcel cost-base inventory report". Portfolio overview only aggregates per listing.)
+- [ ] New report listing every open (unsold) parcel: listing, acquisition date, original cost base, cumulative AMIT reductions to date, remaining quantity, remaining adjusted cost base (AUD)
+- [ ] Web UI view for the open-parcel inventory report (routed through the shared filterable table)
+- [ ] Tests: open parcels listed with correct remaining quantity and adjusted cost base after partial sells and AMIT adjustments
+- [ ] README sync: new report endpoint + web-frontend mention
+
+## Tax-return export
+(REQUIREMENTS "Planned Enhancements — Tax-return export". Reports are JSON/HTML only.)
+- [ ] Export the tax summary and net-capital-gain reports to a downloadable, tax-return-ready format (CSV at minimum)
+- [ ] Web UI export action on those report views
+- [ ] Tests: the export endpoint returns the report rows in the chosen format with the expected columns
+- [ ] README sync: export endpoints + response content types
+
+## Performance / return metrics
+(REQUIREMENTS "Planned Enhancements — Performance / return metrics".)
+- [ ] NEEDS CLARIFICATION: decide whether to report investment performance (total return, money-weighted return/IRR, income/dividend yield per holding and overall)
+- [ ] If in scope: implement the chosen performance report(s) + Web UI view
+- [ ] Tests: performance metrics computed correctly over a known trade/income history
+
+## Settlement-holiday coverage alerting
+(REQUIREMENTS "Planned Enhancements — Settlement-holiday coverage alerting". Holidays are seeded only 2024–2027; settlement silently degrades to weekends-only beyond that.)
+- [ ] Surface (warn/flag) when a trade's date or computed settlement window falls outside the seeded holiday coverage for its exchange, rather than silently using an incomplete calendar
+- [ ] Tests: a trade dated beyond the seeded holiday range is flagged
+- [ ] README sync: note the coverage-alert behaviour on the Trades / Exchange holidays sections

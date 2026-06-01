@@ -250,3 +250,123 @@ The facts that are recorded by the user
   transaction - a distribution may have at most one reinvestment trade
 - The current carried-forward residual for a holding is therefore derivable as the Residual Carried
   Forward of its latest DRP trade (single source of truth - no separate running balance is stored)
+
+# Planned Enhancements (from business-analyst gap analysis, 2026-06-01)
+The following requirements were identified by a gap analysis of the implemented system against the
+needs of a real Australian investor and the ATO guidance mirrored in `docs/`. They extend the spec
+above; items flagged "Scope decision" need an intended-behaviour decision before implementation.
+
+## Capital-loss carry-forward across years
+- Net capital losses carry forward indefinitely and must be applied against later years' capital
+  gains before the discount, per `docs/cgt-using-capital-losses.md`. The net-capital-gain report
+  currently computes the current year's `capital_loss_carried_forward` but never consumes a prior
+  year's carried-forward loss in a subsequent year, so every post-loss year's assessable gain is
+  overstated
+- The report must carry an unused net capital loss forward and apply it (non-discountable gains
+  first, then discount-eligible, then halve the remainder) in the next year that has gains, chaining
+  across the full year series it already produces
+- An opening carried-forward capital loss (losses incurred before the first year recorded in the
+  system) must be enterable so a user migrating mid-history is not forced to re-enter pre-system
+  loss years. Stored as a recognised data-model value (not derived), used as the starting balance
+- Tests: a loss in an earlier year reduces a later year's net capital gain; a loss fully absorbing
+  later gains leaves zero assessable and carries the remainder on; an opening loss balance is applied
+
+## Reduced cost base and the five cost-base elements
+- Scope decision: whether to model the ATO reduced cost base (used to work out a capital *loss* -
+  excludes the third element, no indexation; see `docs/cgt-cost-base.md`) as distinct from the cost
+  base, or to document the single-cost-base behaviour as a known limitation. Today cost base equals
+  reduced cost base because only elements 1-2 are captured, so the distinction is invisible until
+  element-3 costs become recordable (below)
+- Scope decision: whether to capture cost-base elements beyond acquisition (element 1) and
+  incidental/brokerage (element 2) - i.e. element 3 (ownership costs such as interest and holding
+  fees), element 4 (capital improvements) and element 5 (title/defence costs). If in scope, a parcel
+  must be able to carry these costs and reports must include them in the cost base (and exclude
+  element 3 from the reduced cost base)
+
+## Taxpayer entity type and CGT discount rate
+- Scope decision: introduce a taxpayer-entity concept (Individual, SMSF/complying super, Company,
+  Trust/Partnership) driving the CGT discount rate (50% individual/trust, 33⅓% super, 0% company)
+  and the LIC capital gain deduction rate (`docs/lic-capital-gain-deduction.md`: 50% individuals/
+  trusts, 33⅓% super/life). The discount is currently hard-wired to the individual 50% rate
+- Until/unless entity type is modelled, the individual-resident assumption must be stated explicitly
+  in the report output and README rather than left implicit
+
+## Franking-credit entitlement rules
+- Apply the 45-day holding-period rule (90 days for preference shares) to determine whether franking
+  credits attached to a dividend are claimable; the `ex_date` already captured on income is the
+  input the at-risk holding-period test needs
+- Apply the $5,000 small-shareholder exemption (franking offsets up to $5,000 in a year are claimable
+  without meeting the holding-period rule)
+- The tax summary must reflect only claimable franking credits (or clearly flag credits at risk of
+  disallowance), rather than summing all attached credits as if always claimable
+- Tests: a dividend held under 45 days has its franking credits excluded; the small-shareholder
+  exemption restores credits below the $5,000 threshold
+
+## Foreign income tax offset (FITO) cap
+- Apply the FITO limit: foreign income tax offsets above $1,000 in a year are capped unless the full
+  offset-limit calculation supports a higher amount (`docs/mytax-managed-funds.md`). The tax summary
+  currently sums `foreign_tax_paid` / `foreign_tax_credits` with no cap, which can overstate the
+  claimable offset
+- Tests: foreign tax under $1,000 passes through; above $1,000 is limited to the computed cap
+
+## Corporate actions / additional CGT events
+Only CGT event A1 (disposal) and E10 (AMIT excess) are modelled. A multi-year holder routinely
+encounters corporate actions that change parcels or cost base and are currently unrepresentable.
+- Scope decision and data model for recording, per holding/parcel:
+  - Share split / consolidation (adjust quantity and per-unit cost base, preserving total cost base
+    and the original acquisition date for the discount)
+  - Bonus shares (new parcels with apportioned cost base)
+  - Rights issues (new parcels with their cost-base treatment)
+  - Return of capital, non-AMIT - CGT event G1 (reduces cost base; distinct from the AMIT
+    tax-deferred amount already modelled, which it must not be conflated with)
+  - Off-market share buy-back (split into capital and dividend components)
+  - Merger / takeover / demerger, including scrip-for-scrip rollover relief (parcel substitution
+    carrying the original cost base and acquisition date)
+- Security identity continuity across a ticker or name change, so a renamed listing is recognised as
+  the same security and its parcels are not orphaned
+- Tests: each modelled corporate action produces the correct adjusted parcels, cost base, and
+  preserved acquisition date for discount eligibility
+
+## Accounts / ownership dimension
+- Scope decision: introduce an account/owner entity (e.g. Individual, Joint, SMSF, Family Trust) so
+  holdings, trades, income, and all reports can be partitioned per taxpayer. Each account is a
+  separate CGT taxpayer; this also determines the applicable discount rate (see taxpayer entity type)
+- If in scope: trades, income, AMMA statements and DRP enrolments carry an account FK, and every
+  report can be produced per account (and the FX/AUD rules continue to apply within each)
+- Tests: gains and tax summaries are partitioned correctly across two accounts
+
+## Buy-trade edit/delete integrity (symmetric with Sells)
+- Deleting a Buy/DRP trade that is referenced by a parcel allocation or an AMIT adjustment must be
+  rejected with a clear `422` (or `409`), not surface the SQLite foreign-key error as a `500`
+- Editing a Buy/DRP trade via `PUT /trades/:id` must be rejected with `422` when the new quantity
+  would fall below the quantity already allocated out of it (via parcel allocations) or already
+  covered by AMIT adjustments, so a parcel can never be silently shrunk below its committed use -
+  mirroring the write-time invariant the Sell path already enforces
+- Tests: delete of a consumed Buy rejected; edit shrinking a partly-sold Buy rejected; an unconsumed
+  Buy still edits/deletes freely
+
+## Open-parcel cost-base inventory report
+- A report listing every open (unsold) parcel with: listing, acquisition date, original cost base,
+  cumulative AMIT cost-base reductions to date, remaining quantity, and remaining adjusted cost base
+  in AUD. This is the schedule a user reconciles against a broker statement and the input to a sell
+  decision; the existing portfolio overview only aggregates per listing
+- Tests: open parcels listed with correct remaining quantity and adjusted cost base after partial
+  sells and AMIT adjustments
+
+## Tax-return export
+- Export the tax summary and net-capital-gain reports to a downloadable, tax-return-ready format
+  (CSV at minimum; a printable form is a plus), since the stated purpose is direct transfer to a tax
+  return. Reports are currently JSON/HTML only and the last-mile is manual
+- Tests: export endpoint returns the report rows in the chosen format with the expected columns
+
+## Performance / return metrics
+- Scope decision: report investment performance (not tax) - total return, money-weighted return
+  (IRR), and income/dividend yield per holding and overall - to round out the "tracker" role beyond
+  the CGT engine
+
+## Settlement-holiday coverage alerting
+- The exchange-holiday calendar is seeded only for 2024-2027; settlement auto-population silently
+  degrades to weekends-only for trade dates beyond the seeded range. A trade whose date (or computed
+  settlement window) falls outside the seeded holiday coverage for its exchange must be surfaced
+  (warning/flag) rather than silently using an incomplete calendar
+- Tests: a trade dated beyond the seeded holiday range is flagged
