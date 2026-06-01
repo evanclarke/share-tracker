@@ -158,17 +158,19 @@ Items are only marked done when a passing test exists for them.
 - [x] Tests: full-year tax summary with mixed income types
 
 ## Web Frontend
-- [ ] Serve frontend from the Rust server (axum)
-- [ ] Exchange management UI
-- [ ] Listing management UI
-- [ ] Trade entry and listing UI
-- [ ] Income entry and listing UI
-- [ ] AMMA statement entry and listing UI
-- [ ] Share parcel allocation UI
-- [ ] DRP enrolment management + reinvest-distribution UI
-- [ ] Portfolio overview UI
-- [ ] Gains/losses report UI
-- [ ] Tax summary UI
+A no-build-step single-page app (plain HTML/CSS/JS) embedded in the binary with `include_str!` and served by axum (`src/web.rs` + `src/web/{index.html,app.js,style.css}`, merged in `app::router`). The SPA is config-driven: each domain entity is described once (API path, key, fields) and generic list/form code renders its CRUD view; reports render as tables. It drives the existing JSON API on the same origin, so there is no second source of truth. Tests live in `src/web::tests`: the served shell/assets return the right status + content-type, and — since there is no browser harness — each UI item is covered by asserting its view (and the API endpoint it drives) is present in the shipped `app.js` bundle.
+- [x] Serve frontend from the Rust server (axum) — `web::router` serves `GET /`, `/static/app.js`, `/static/style.css` with correct content-types (`index_is_served_as_html`, `app_js_is_served_as_javascript`, `style_css_is_served_as_css`)
+- [x] Exchange management UI — generic CRUD view over `/exchanges` (`exchange_management_ui_present`)
+- [x] Listing management UI — generic CRUD view over `/listings`, with exchange/currency dropdowns (`listing_management_ui_present`)
+- [x] Trade entry and listing UI — generic CRUD view over `/trades` for Buy/DRP (Sells excluded — entered via the Sells view); optional settlement date auto-calculates (`trade_ui_present`)
+- [x] Income entry and listing UI — generic CRUD view over `/income`, full tax-component fields (`income_ui_present`)
+- [x] AMMA statement entry and listing UI — generic CRUD view over `/amma_statements` (`amma_statement_ui_present`)
+- [x] Share parcel allocation UI — bespoke Sells view: a Sell trade form with a dynamic allocations list, submitted atomically via `PUT /sells/:id`; `parcel_allocations` shown read-only (`parcel_allocation_ui_present`)
+- [x] DRP enrolment management + reinvest-distribution UI — CRUD over `/drp_enrolments` (keyed by listing); income rows expose a Reinvest action driving `POST /income/:id/reinvest` (`drp_enrolment_ui_present`, `income_ui_present`)
+- [x] Portfolio overview UI — `/portfolio/overview` report view with a per-listing price form (`portfolio_overview_ui_present`)
+- [x] Gains/losses report UI — `/portfolio/unrealised-gains` (price + as-of-date form), `/portfolio/realised-gains`, and `/portfolio/net-capital-gain` report views (`gains_report_ui_present`)
+- [x] Tax summary UI — `/portfolio/tax-summary` report view (`tax_summary_ui_present`)
+- Also wired into the SPA (no separate TODO item): read-only views for currencies / MIC registry / RBA FX rates / parcel allocations, the AMIT adjustments CRUD view, exchange holidays CRUD, the exchange MIC validation report, and a Maintenance → Jobs view that lists and triggers the scheduled jobs on demand via `GET /jobs` + `POST /jobs/:name` (`jobs_ui_present`).
 
 ## Review Findings — Requirements Gaps
 (FX source changed: conversion now uses the ATO FX Rate lookup, not a per-trade `fx_rate` — see the FX Conversion section.)

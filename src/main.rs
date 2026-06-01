@@ -2,6 +2,7 @@ mod app;
 mod entities;
 mod infra;
 mod reports;
+mod web;
 
 use clap::Parser;
 use infra::args::Args;
@@ -25,9 +26,10 @@ async fn main() {
     scheduler::spawn(registry.clone(), &schedule).expect("invalid schedule");
 
     let app = app::router(pool.clone(), registry);
-    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], args.port));
+    let ip: std::net::IpAddr = args.host.parse().expect("invalid --host address");
+    let addr = std::net::SocketAddr::new(ip, args.port);
     let listener = tokio::net::TcpListener::bind(addr).await.expect("failed to bind");
-    tracing::info!("share-tracker started, db: {}, port: {}", args.db, args.port);
+    tracing::info!("share-tracker started, db: {}, listening on: http://{}", args.db, addr);
 
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())

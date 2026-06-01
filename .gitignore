@@ -1,3 +1,9 @@
 /target
 /.idea
 /.claude/*.local.*
+
+# Runtime SQLite database and dated backups
+/share-tracker.db
+/share-tracker.db-shm
+/share-tracker.db-wal
+/share-tracker-*.db

@@ -17,19 +17,23 @@ A personal Australian share portfolio tracker with a REST JSON API. Records trad
 - **FX rate import** — monthly RBA F11 foreign exchange rates (the rates the ATO directs taxpayers to use) fetched and stored as foreign-per-AUD, refreshed weekly and via a manual trigger
 - **AUD conversion** — cost base and proceeds in the portfolio, unrealised, and realised reports are converted to AUD at the ATO reference rate (with a per-trade manual `fx_rate` fallback); see [FX conversion](#fx-conversion)
 - **MIC registry import** — the ISO 10383 Market Identifier Code list imported monthly (and via a manual trigger), used by a non-blocking report to flag curated exchanges whose MIC is unknown or expired
+- **Web UI** — a built-in browser frontend (no build step, served from the same binary) with CRUD screens for every entity, atomic Sell + parcel-allocation entry, DRP reinvestment, and a view for each report; see [Web frontend](#web-frontend)
 
 ## Building and running
 
 ```bash
 cargo build --release
-./target/release/share-tracker [--db share-tracker.db] [--port 3000] [--schedule schedule.cron]
+./target/release/share-tracker [--db share-tracker.db] [--host 0.0.0.0] [--port 3000] [--schedule schedule.cron]
 ```
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--db` | `share-tracker.db` | SQLite database file path |
+| `--host` | `0.0.0.0` | IP address to bind. `0.0.0.0` listens on all interfaces (reachable from other machines); use `127.0.0.1` to restrict to localhost |
 | `--port` | `3000` | HTTP port to listen on |
 | `--schedule` | built-in `schedule.cron` | Path to a cron file overriding the built-in maintenance schedule |
+
+> **Note:** the default `--host 0.0.0.0` makes the server reachable from other machines on the network, and it has no authentication. Run it only on trusted networks, or pass `--host 127.0.0.1` to keep it local.
 
 The database is created automatically on first run. Migrations are applied in order at startup.
 
@@ -200,7 +204,19 @@ Decimal values are stored as TEXT to preserve arbitrary precision.
 
 ## HTTP API
 
-All endpoints return JSON. Write endpoints accept `Content-Type: application/json`.
+All data endpoints return JSON. Write endpoints accept `Content-Type: application/json`.
+
+### Web frontend
+
+The server also hosts a built-in web UI — a no-build-step single-page app (plain HTML/CSS/JS) embedded in the binary and served from the same origin as the API:
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/` | The SPA shell (HTML) |
+| `GET` | `/static/app.js` | The app bundle (JavaScript) |
+| `GET` | `/static/style.css` | Stylesheet (CSS) |
+
+Open `http://localhost:<port>/` in a browser. The app is hash-routed (`#/e/<entity>`, `#/sells`, `#/jobs`, `#/r/<report>`) and drives the JSON API below — it provides CRUD screens for every entity (exchanges, listings, trades, income, AMMA statements, AMIT adjustments, DRP enrolments, exchange holidays), a dedicated Sell screen that captures parcel allocations atomically, a DRP reinvest action on income rows, read-only views of the import-managed reference tables (currencies, MIC registry, RBA FX rates, parcel allocations), a Maintenance → Jobs screen that lists the scheduled jobs and runs any of them on demand (`POST /jobs/:name`), and a view for each report (portfolio overview, unrealised/realised gains, net capital gain, tax summary, exchange MIC validation).
 
 ### Exchanges
 
