@@ -124,6 +124,17 @@ pub fn registry(pool: SqlitePool, db_path: String) -> JobRegistry {
     Arc::new(jobs)
 }
 
+/// Run a single job once, bracketing it with an INFO `job started` line and an
+/// INFO `job finished` line (the latter carries `ok` = whether it succeeded).
+/// Both the scheduled loop and the manual trigger go through here so every job
+/// logs start and finish uniformly, regardless of any per-job logging it does.
+async fn run_job(name: &str, job: &Job) -> Result<(), String> {
+    tracing::info!(job = %name, "job started");
+    let result = job().await;
+    tracing::info!(job = %name, ok = result.is_ok(), "job finished");
+    result
+}
+
 /// Parse a cron schedule file into `(cron, job_name)` entries. Lines are
 /// `<min> <hour> <dom> <mon> <dow> <job-name>`; `#` starts a comment and blank
 /// lines are ignored.
@@ -200,7 +211,7 @@ pub fn spawn(registry: JobRegistry, schedule: &str) -> Result<(), ScheduleError>
                     "next run scheduled"
                 );
                 tokio::time::sleep(delay).await;
-                if let Err(e) = job().await {
+                if let Err(e) = run_job(&name, &job).await {
                     tracing::warn!(job = %name, "job failed: {e}");
                 }
             }
@@ -236,7 +247,7 @@ async fn trigger(
 ) -> StatusCode {
     match registry.get(&name) {
         None => StatusCode::NOT_FOUND,
-        Some(job) => match job().await {
+        Some(job) => match run_job(&name, job).await {
             Ok(()) => StatusCode::NO_CONTENT,
             Err(e) => {
                 tracing::warn!(job = %name, "manual job trigger failed: {e}");
@@ -261,7 +272,6 @@ mod tests {
     use axum::http::Request;
     use chrono::TimeZone;
     use http_body_util::BodyExt;
-    use std::path::Path as FsPath;
     use tower::ServiceExt;
 
     async fn test_registry() -> (JobRegistry, tempfile::TempDir, String) {
@@ -378,7 +388,55 @@ mod tests {
             .unwrap();
 
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
-        assert!(FsPath::new(&db::backup_path(&db_path)).exists());
+        // The backup job derives its own timestamped name (`t-YYYY-MM-DD-HHMMSS.db`),
+        // so re-deriving the path here could land in a later second and miss it.
+        // Assert instead that a backup file for this DB was written to the dir.
+        let made_backup = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .any(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                name.starts_with("t-") && name.ends_with(".db")
+            });
+        assert!(made_backup, "expected a timestamped backup file beside t.db");
+    }
+
+    #[tracing_test::traced_test]
+    #[tokio::test]
+    async fn run_job_logs_started_and_finished() {
+        // The scheduled loop runs each job via run_job, so this covers the
+        // scheduled path: a job must be bracketed by INFO start/finish lines.
+        let (reg, _dir, _path) = test_registry().await;
+        let job = reg.get("backup").unwrap();
+        run_job("backup", job).await.unwrap();
+        assert!(logs_contain("job started"));
+        assert!(logs_contain("job finished"));
+    }
+
+    #[tracing_test::traced_test]
+    #[tokio::test]
+    async fn triggered_job_logs_started_and_finished() {
+        // The manual POST /jobs/{name} path also goes through run_job.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("t.db").to_string_lossy().to_string();
+        let pool = db::init(&db_path).await.unwrap();
+        let reg = registry(pool.clone(), db_path);
+        let app = router().with_state(pool).layer(Extension(reg));
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/jobs/backup")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert!(logs_contain("job started"));
+        assert!(logs_contain("job finished"));
     }
 
     #[tokio::test]
