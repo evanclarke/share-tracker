@@ -176,6 +176,19 @@ parcel_allocations           Links sell parcels to the purchase parcels they con
 drp_enrolments               DRP enrolment per holding (presence = reinvest in full)
 ├── listing_id           INTEGER PK, FK→listings.id  One enrolment per holding
 └── residual_handling    TEXT   CarryForward | PayOut  Leftover-cash policy (default CarryForward)
+
+attachments                  Supporting documents for an activity; bytes stored in the DB (captured by the weekly backup)
+├── id                INTEGER PK
+├── trade_id          INTEGER FK→trades.id (nullable, ON DELETE CASCADE)            Owner (exactly one of the three is set)
+├── income_id         INTEGER FK→income.id (nullable, ON DELETE CASCADE)            Owner (exactly one of the three is set)
+├── amma_statement_id INTEGER FK→amma_statements.id (nullable, ON DELETE CASCADE)   Owner (exactly one of the three is set)
+├── filename          TEXT             Original upload filename, preserved for download
+├── content_type      TEXT             application/pdf | image/png | image/jpeg (allowlist, CHECK-enforced)
+├── byte_size         INTEGER          Size of content in bytes (informational)
+├── checksum          TEXT             SHA-256 of content, hex (integrity / duplicate detection)
+├── uploaded_at       TEXT             RFC 3339 timestamp the attachment was stored
+└── content           BLOB             The file bytes
+                       CHECK: exactly one of trade_id / income_id / amma_statement_id is non-null
 ```
 
 ### Relationships
@@ -190,9 +203,12 @@ exchanges ──< listings ──< trades >────────────�
                        listings ──< income
                        listings ──< drp_enrolments
                        trades (DRP) ──< income (reinvestment_trade_id)
+                       trades, income, amma_statements ──< attachments (exactly one owner; ON DELETE CASCADE)
 
 currencies ──< exchanges, listings, trades (currency + brokerage_currency), income, amma_statements
 ```
+
+Each `attachments` row belongs to exactly one activity via one of three nullable foreign keys (`trade_id` / `income_id` / `amma_statement_id`), with a `CHECK` enforcing that exactly one is set — a real foreign key keeps referential integrity to the owning row, and `ON DELETE CASCADE` removes an activity's attachments when it is deleted. File contents live in the `content` BLOB so the weekly DB backup captures the documents with no separate file store.
 
 `rba_fx_rates` is standalone reference data (no foreign keys); it is looked up by `(currency, month)`.
 
@@ -216,7 +232,7 @@ The server also hosts a built-in web UI — a no-build-step single-page app (pla
 | `GET` | `/static/app.js` | The app bundle (JavaScript) |
 | `GET` | `/static/style.css` | Stylesheet (CSS) |
 
-Open `http://localhost:<port>/` in a browser. The app is hash-routed (`#/e/<entity>`, `#/sells`, `#/jobs`, `#/r/<report>`) and drives the JSON API below — it provides CRUD screens for every entity (exchanges, listings, trades, income, AMMA statements, AMIT adjustments, DRP enrolments, exchange holidays), a dedicated Sell screen that captures parcel allocations atomically, a DRP reinvest action on income rows, read-only views of the import-managed reference tables (currencies, MIC registry, RBA FX rates, parcel allocations), a Maintenance → Jobs screen that lists the scheduled jobs and runs any of them on demand (`POST /jobs/:name`), and a view for each report (portfolio overview, unrealised/realised gains, net capital gain, tax summary, exchange MIC validation).
+Open `http://localhost:<port>/` in a browser. The app is hash-routed (`#/e/<entity>`, `#/sells`, `#/jobs`, `#/attachments/<owner>/<id>`, `#/r/<report>`) and drives the JSON API below — it provides CRUD screens for every entity (exchanges, listings, trades, income, AMMA statements, AMIT adjustments, DRP enrolments, exchange holidays), a dedicated Sell screen that captures parcel allocations atomically, a DRP reinvest action on income rows, an Attachments action on each trade/income/AMMA row that uploads, lists, downloads, and deletes its documents, read-only views of the import-managed reference tables (currencies, MIC registry, RBA FX rates, parcel allocations), a Maintenance → Jobs screen that lists the scheduled jobs and runs any of them on demand (`POST /jobs/:name`), and a view for each report (portfolio overview, unrealised/realised gains, net capital gain, tax summary, exchange MIC validation).
 
 ### Exchanges
 
@@ -343,6 +359,20 @@ If `settlement_date` is omitted from the PUT body, it is auto-calculated by adva
 | `DELETE` | `/amit_adjustments/:id` | Delete an AMIT adjustment |
 
 Returns `422 Unprocessable Entity` if the referenced trade is not a Buy/DRP, the trade and AMMA statement reference different listings, or the quantity exceeds the trade quantity.
+
+### Attachments
+
+Supporting documents (a trade confirmation / contract note PDF, a dividend statement, an AMMA statement scan) attached to exactly one activity — a Trade, an Income record, or an AMMA Statement. The file bytes are stored in the database (a BLOB), so the weekly DB backup captures the documents with no separate file store. Because the payload is binary, these endpoints depart from the JSON-CRUD convention used elsewhere: upload is `multipart/form-data`, list/get return metadata only, and a dedicated endpoint streams the raw content.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/attachments` | List attachment metadata (never the blob); filter by owner with `?trade_id=`, `?income_id=`, or `?amma_statement_id=` |
+| `GET` | `/attachments/:id` | Get one attachment's metadata |
+| `GET` | `/attachments/:id/content` | Download the raw file bytes (stored `Content-Type` + `Content-Disposition` filename) |
+| `POST` | `/attachments` | Upload a file (`multipart/form-data`) |
+| `DELETE` | `/attachments/:id` | Delete one attachment |
+
+`POST /attachments` takes a `multipart/form-data` body with the file in a `file` part and **exactly one** owner field — `trade_id`, `income_id`, or `amma_statement_id`. The server computes `byte_size` and the SHA-256 `checksum`, and returns `201 Created` with the stored metadata as JSON. It returns `422 Unprocessable Entity` if no owner or more than one owner is given, the owner id doesn't reference an existing activity, the `file` part is missing, or its content type is outside the allowlist (`application/pdf`, `image/png`, `image/jpeg`); and `413 Payload Too Large` if the file exceeds 25 MB. Deleting the owning Trade / Income / AMMA Statement removes its attachments automatically (`ON DELETE CASCADE`).
 
 ### DRP enrolments
 
@@ -511,12 +541,13 @@ Validates each curated exchange's MIC against the `mic_registry` (the imported I
 | Code | Meaning |
 |------|---------|
 | `200 OK` | Successful GET |
-| `201 Created` | DRP reinvestment trade created via `POST /income/:id/reinvest` |
+| `201 Created` | DRP reinvestment trade created via `POST /income/:id/reinvest`, or an attachment uploaded via `POST /attachments` |
 | `204 No Content` | Successful PUT or DELETE, or a job run via `POST /jobs/:name` |
 | `400 Bad Request` | Malformed path parameter (e.g. an `exchange_holidays` `:date` that is not `YYYY-MM-DD`) |
 | `404 Not Found` | Resource does not exist |
 | `405 Method Not Allowed` | Write attempted on a read-only path (e.g. `parcel_allocations`) |
-| `422 Unprocessable Entity` | Business rule or constraint violation (e.g. over-allocation, wrong trade type, under-allocated Sell, unparseable FX or MIC feed, or a write referencing an unrecognised currency / unknown exchange / listing) |
+| `413 Payload Too Large` | Uploaded attachment exceeds the 25 MB per-file limit |
+| `422 Unprocessable Entity` | Business rule or constraint violation (e.g. over-allocation, wrong trade type, under-allocated Sell, unparseable FX or MIC feed, a write referencing an unrecognised currency / unknown exchange / listing, or an attachment upload with no/multiple owners or an unsupported content type) |
 | `500 Internal Server Error` | Unexpected database error, or a job triggered via `POST /jobs/:name` failed |
 | `502 Bad Gateway` | Upstream fetch failed (e.g. the RBA FX or ISO MIC import could not reach its source) |
 

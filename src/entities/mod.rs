@@ -6,6 +6,7 @@ use sqlx::SqlitePool;
 
 pub mod amit_adjustment;
 pub mod amma;
+pub mod attachment;
 pub mod currencies;
 pub mod drp_enrolment;
 pub mod drp_reinvestment;
@@ -35,4 +36,5 @@ pub fn router() -> Router<SqlitePool> {
         .merge(amit_adjustment::router())
         .merge(drp_enrolment::router())
         .merge(drp_reinvestment::router())
+        .merge(attachment::router())
 }

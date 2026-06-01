@@ -184,6 +184,7 @@
       ],
       columns: ['id', 'trade_type', 'date', 'settlement_date', 'listing_id', 'average_price', 'quantity', 'currency', 'brokerage', 'fx_rate'],
       listFilter: function (row) { return row.trade_type !== 'Sell'; },
+      attachOwner: 'trade_id',
     },
     {
       slug: 'sells', title: 'Sells', group: 'Activity', api: '/sells', custom: 'sells',
@@ -212,6 +213,7 @@
       rowActions: function (row) {
         return row.reinvestment_trade_id == null ? [{ label: 'Reinvest', href: '#/reinvest/' + row.id }] : [];
       },
+      attachOwner: 'income_id',
     },
     {
       slug: 'amma_statements', title: 'AMMA Statements', group: 'Activity', api: '/amma_statements',
@@ -241,6 +243,7 @@
         fk('currency', 'Currency', 'currencies', { required: true, encode: 'string', default: 'AUD' }),
       ],
       columns: ['id', 'listing_id', 'tax_year_end_date', 'units_held', 'cost_base_adjustment', 'currency'],
+      attachOwner: 'amma_statement_id',
     },
     {
       slug: 'amit_adjustments', title: 'AMIT Adjustments', group: 'Activity', api: '/amit_adjustments',
@@ -452,6 +455,10 @@
         (entity.rowActions ? entity.rowActions(row) : []).forEach(function (a) {
           td.appendChild(el('a', { href: a.href }, el('button', { class: 'link small' }, a.label)));
         });
+        if (entity.attachOwner) {
+          td.appendChild(el('a', { href: '#/attachments/' + entity.attachOwner + '/' + row.id },
+            el('button', { class: 'link small' }, 'Attachments')));
+        }
         td.appendChild(el('a', { href: '#/e/' + entity.slug + '/edit/' + keyPath },
           el('button', { class: 'link small' }, 'Edit')));
         td.appendChild(el('button', {
@@ -735,6 +742,82 @@
     ]));
   }
 
+  // ---- document attachments ---------------------------------------------
+  // Reached from a Trade / Income / AMMA row's "Attachments" action. Lists the
+  // activity's attachments (metadata only — never the blob), uploads a new file
+  // via multipart/form-data (POST /attachments), and links each row to its
+  // download (GET /attachments/:id/content). The owner field name (trade_id /
+  // income_id / amma_statement_id) is carried in the route.
+  const ATTACH_OWNER_LABEL = {
+    trade_id: 'trade', income_id: 'income', amma_statement_id: 'AMMA statement',
+  };
+
+  async function viewAttachments(ownerField, ownerId) {
+    const rows = await api('GET', '/attachments?' + ownerField + '=' + encodeURIComponent(ownerId));
+    const cols = ['id', 'filename', 'content_type', 'byte_size', 'checksum', 'uploaded_at'];
+
+    const container = el('div');
+    function refresh() { viewAttachments(ownerField, ownerId); }
+
+    let table;
+    if (rows.length === 0) {
+      table = el('div', { class: 'empty' }, 'No attachments yet.');
+    } else {
+      table = filterableTable(rows, cols, {
+        actions: function (row) {
+          return el('td', { class: 'actions' }, [
+            el('a', { href: '/attachments/' + row.id + '/content', target: '_blank' },
+              el('button', { class: 'link small' }, 'Download')),
+            el('button', {
+              class: 'link small danger',
+              onclick: async function () {
+                if (!confirm('Delete this attachment?')) return;
+                try { await api('DELETE', '/attachments/' + row.id); toast('Deleted.'); refresh(); }
+                catch (e) { toast(e.message, true); }
+              },
+            }, 'Delete'),
+          ]);
+        },
+      });
+    }
+
+    // Upload form: a single file input posted as multipart/form-data. The
+    // browser sets the multipart boundary and the part's Content-Type; the
+    // server validates it against the allowlist (pdf/png/jpeg) and the 25 MB cap.
+    const fileInput = el('input', { type: 'file', name: 'file', required: true, accept: '.pdf,.png,.jpg,.jpeg' });
+    const uploadForm = el('form', { class: 'card' }, [
+      el('div', { class: 'field' }, [el('label', null, 'Add a file'), fileInput]),
+      el('p', { class: 'hint' }, 'Accepted: PDF, PNG, JPEG. Max 25 MB. Stored in the database.'),
+      el('div', { class: 'form-actions' }, [el('button', { type: 'submit', class: 'primary' }, 'Upload')]),
+    ]);
+    uploadForm.addEventListener('submit', async function (ev) {
+      ev.preventDefault();
+      if (!fileInput.files || fileInput.files.length === 0) { toast('Choose a file first.', true); return; }
+      try {
+        const fd = new FormData();
+        fd.append(ownerField, String(ownerId));
+        fd.append('file', fileInput.files[0]);
+        const res = await fetch('/attachments', { method: 'POST', body: fd });
+        if (!res.ok) {
+          let detail = '';
+          try { detail = (await res.text()).trim(); } catch (e) { /* ignore */ }
+          throw new Error('HTTP ' + res.status + (detail ? ': ' + detail : ''));
+        }
+        toast('Uploaded.');
+        refresh();
+      } catch (e) {
+        toast(e.message, true);
+      }
+    });
+
+    container.appendChild(el('h2', null, 'Attachments'));
+    container.appendChild(el('p', { class: 'view-desc' },
+      'Files attached to ' + (ATTACH_OWNER_LABEL[ownerField] || 'activity') + ' #' + ownerId + '. Stored in the database.'));
+    container.appendChild(uploadForm);
+    container.appendChild(table);
+    setMain(container);
+  }
+
   // ---- maintenance jobs -------------------------------------------------
   const JOB_DESC = {
     'backup': 'Copy the database to a dated backup file beside it (skipped if today\'s already exists).',
@@ -862,6 +945,7 @@
         return await viewSellsList();
       }
       if (parts[0] === 'reinvest') return await viewReinvest(parts[1]);
+      if (parts[0] === 'attachments') return await viewAttachments(parts[1], parts[2]);
       if (parts[0] === 'jobs') return await viewJobs();
       if (parts[0] === 'r') {
         const report = reportBySlug[parts[1]];

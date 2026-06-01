@@ -178,6 +178,16 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn attachments_ui_present() {
+        let js = app_js_body().await;
+        // The attachments view lists/uploads/downloads via the /attachments API,
+        // reached from the Trade/Income/AMMA row "Attachments" action.
+        assert!(js.contains("viewAttachments"));
+        assert!(js.contains("/attachments"));
+        assert!(js.contains("attachOwner"));
+    }
+
+    #[tokio::test]
     async fn jobs_ui_present() {
         let js = app_js_body().await;
         // The maintenance view lists and triggers jobs via the /jobs endpoints.

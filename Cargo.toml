@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-axum = "0.8"
+axum = { version = "0.8", features = ["multipart"] }
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = { version = "0.10", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
@@ -19,6 +19,7 @@ reqwest = "0.13.4"
 croner = "3.0.1"
 csv = "1"
 quick-xml = "0.37"
+sha2 = "0.10"
 
 [dev-dependencies]
 http-body-util = "0.1"
