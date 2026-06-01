@@ -8,6 +8,7 @@
 - Keep `README.md` in sync when the data model or HTTP API changes: a new/changed table or column updates the Database schema (and Relationships) section; a new/changed/removed endpoint, status code, or request/response shape updates the HTTP API and Response codes sections. README updates are part of the same task, not a follow-up
 
 # Financial correctness
+- ATO reference guidance is mirrored in `docs/` (CGT calculation, the 50% discount and loss-netting order, cost base, AMIT/AMMA cost-base adjustments incl. CGT event E10, LIC deduction, managed-fund income components). Read `docs/OVERVIEW.md` first — it indexes each file and maps it to the relevant calculation. Consult these before implementing or changing any tax rule; the live ATO site (ato.gov.au) is authoritative if a doc looks stale
 - Money and quantities are always `Decimal`, never `f64`. New monetary columns are `TEXT`; migrations must preserve precision (never round-trip a value through a `REAL` column)
 - When reading a `TEXT` decimal column, propagate parse failures (map to `sqlx::Error::Decode`, as the `FromRow` `dec` helpers do). Never `.parse().unwrap_or(Decimal::ZERO)` — a silent zero corrupts financial output without failing
 - Reports take the Australian-tax view: cost base, proceeds, and income totals are in AUD. Convert every non-AUD amount to AUD using the record's `fx_rate` before aggregating or comparing — never mix currencies in one calculation
