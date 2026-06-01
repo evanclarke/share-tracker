@@ -183,4 +183,15 @@ mod tests {
         // The maintenance view lists and triggers jobs via the /jobs endpoints.
         assert!(js.contains("/jobs"));
     }
+
+    #[tokio::test]
+    async fn tables_are_filterable_and_sortable() {
+        let js = app_js_body().await;
+        // Every entity list and report table renders through the shared
+        // filterableTable, which adds a text filter input and click-to-sort
+        // column headers. Assert those controls ship in the bundle.
+        assert!(js.contains("filterableTable"));
+        assert!(js.contains("table-filter"));
+        assert!(js.contains("sortable"));
+    }
 }

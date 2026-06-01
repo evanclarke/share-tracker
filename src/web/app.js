@@ -310,22 +310,100 @@
   }
 
   // ---- generic table ----------------------------------------------------
+  // Every data table in the app — entity lists, the Sells list, and report
+  // tables — goes through this one renderer so they are uniformly filterable
+  // (a text box that substring-matches across the data columns) and sortable
+  // (click a column header to toggle ascending/descending). `opts.actions`, if
+  // given, renders a trailing non-sortable, non-filtered Actions cell per row;
+  // `opts.statusField` renders that column as a status badge.
+  function filterableTable(rows, cols, opts) {
+    opts = opts || {};
+    const statusField = opts.statusField;
+    const actions = opts.actions;
+    // A column is numeric if any row has a numeric value there — used for
+    // right-alignment and numeric (not lexicographic) sorting.
+    const numeric = {};
+    cols.forEach(function (c) { numeric[c] = rows.some(function (r) { return looksNumeric(r[c]); }); });
+
+    let sortCol = null;
+    let sortDir = 1; // 1 = ascending, -1 = descending
+    let filterText = '';
+
+    const container = el('div');
+    const filterInput = el('input', {
+      type: 'search', class: 'table-filter', placeholder: 'Filter…',
+      oninput: function () { filterText = this.value.toLowerCase(); renderBody(); },
+    });
+    container.appendChild(el('div', { class: 'table-tools' }, filterInput));
+
+    const headCells = cols.map(function (c) {
+      const indicator = el('span', { class: 'sort-ind' }, '');
+      const th = el('th', { class: (numeric[c] ? 'num ' : '') + 'sortable' }, [c, indicator]);
+      th._col = c;
+      th._ind = indicator;
+      th.addEventListener('click', function () {
+        if (sortCol === c) sortDir = -sortDir; else { sortCol = c; sortDir = 1; }
+        headCells.forEach(function (h) {
+          h._ind.textContent = h._col === sortCol ? (sortDir === 1 ? ' ▲' : ' ▼') : '';
+        });
+        renderBody();
+      });
+      return th;
+    });
+    if (actions) headCells.push(el('th', null, 'Actions'));
+
+    const tbody = el('tbody');
+    container.appendChild(el('table', null, [el('thead', null, el('tr', null, headCells)), tbody]));
+
+    function visibleRows() {
+      let out = rows;
+      if (filterText) {
+        out = out.filter(function (row) {
+          return cols.some(function (c) { return cellText(row[c]).toLowerCase().indexOf(filterText) !== -1; });
+        });
+      }
+      if (sortCol != null) {
+        out = out.slice().sort(function (a, b) {
+          const av = a[sortCol], bv = b[sortCol];
+          let cmp;
+          if (numeric[sortCol] && looksNumeric(av) && looksNumeric(bv)) cmp = Number(av) - Number(bv);
+          else cmp = cellText(av).localeCompare(cellText(bv));
+          return cmp * sortDir;
+        });
+      }
+      return out;
+    }
+
+    function renderBody() {
+      tbody.innerHTML = '';
+      const vr = visibleRows();
+      if (vr.length === 0) {
+        const span = cols.length + (actions ? 1 : 0);
+        tbody.appendChild(el('tr', null, el('td', { colspan: span, class: 'empty' },
+          filterText ? 'No matching records.' : 'No records.')));
+        return;
+      }
+      vr.forEach(function (row) {
+        const tds = cols.map(function (c) {
+          const v = row[c];
+          if (statusField && c === statusField) {
+            return el('td', null, el('span', { class: 'badge ' + cellText(v) }, cellText(v)));
+          }
+          return el('td', { class: numeric[c] ? 'num' : null }, cellText(v));
+        });
+        if (actions) tds.push(actions(row) || el('td'));
+        tbody.appendChild(el('tr', null, tds));
+      });
+    }
+
+    renderBody();
+    return container;
+  }
+
+  // Report tables: read-only, no actions column.
   function dataTable(rows, columns, statusField) {
     if (!rows || rows.length === 0) return el('div', { class: 'empty' }, 'No records.');
-    const cols = columns || Object.keys(rows[0]);
-    const thead = el('tr', null, cols.map(function (c) {
-      return el('th', { class: looksNumeric(rows[0][c]) ? 'num' : null }, c);
-    }));
-    const body = rows.map(function (row) {
-      return el('tr', null, cols.map(function (c) {
-        const v = row[c];
-        if (statusField && c === statusField) {
-          return el('td', null, el('span', { class: 'badge ' + cellText(v) }, cellText(v)));
-        }
-        return el('td', { class: looksNumeric(v) ? 'num' : null }, cellText(v));
-      }));
-    });
-    return el('table', null, [el('thead', null, thead), el('tbody', null, body)]);
+    return filterableTable(rows, columns || Object.keys(rows[0]), { statusField: statusField });
   }
 
   // ---- entity list view -------------------------------------------------
@@ -350,31 +428,21 @@
     if (rows.length === 0) {
       table = el('div', { class: 'empty' }, 'No records yet.');
     } else {
-      const allCols = entity.readonly ? cols : cols.concat(['']);
-      const thead = el('tr', null, allCols.map(function (c) {
-        return el('th', { class: looksNumeric(rows[0][c]) ? 'num' : null }, c === '' ? 'Actions' : c);
-      }));
-      const body = rows.map(function (row) {
-        const tds = cols.map(function (c) {
-          return el('td', { class: looksNumeric(row[c]) ? 'num' : null }, cellText(row[c]));
+      const actions = entity.readonly ? null : function (row) {
+        const keyPath = entity.keyFields.map(function (kf) { return row[kf.name]; }).join('/');
+        const td = el('td', { class: 'actions' });
+        (entity.rowActions ? entity.rowActions(row) : []).forEach(function (a) {
+          td.appendChild(el('a', { href: a.href }, el('button', { class: 'link small' }, a.label)));
         });
-        if (!entity.readonly) {
-          const keyPath = entity.keyFields.map(function (kf) { return row[kf.name]; }).join('/');
-          const actions = el('td', { class: 'actions' });
-          (entity.rowActions ? entity.rowActions(row) : []).forEach(function (a) {
-            actions.appendChild(el('a', { href: a.href }, el('button', { class: 'link small' }, a.label)));
-          });
-          actions.appendChild(el('a', { href: '#/e/' + entity.slug + '/edit/' + keyPath },
-            el('button', { class: 'link small' }, 'Edit')));
-          actions.appendChild(el('button', {
-            class: 'link small danger',
-            onclick: function () { deleteEntity(entity, keyPath, row); },
-          }, 'Delete'));
-          tds.push(actions);
-        }
-        return el('tr', null, tds);
-      });
-      table = el('table', null, [el('thead', null, thead), el('tbody', null, body)]);
+        td.appendChild(el('a', { href: '#/e/' + entity.slug + '/edit/' + keyPath },
+          el('button', { class: 'link small' }, 'Edit')));
+        td.appendChild(el('button', {
+          class: 'link small danger',
+          onclick: function () { deleteEntity(entity, keyPath, row); },
+        }, 'Delete'));
+        return td;
+      };
+      table = filterableTable(rows, cols, { actions: actions });
     }
 
     setMain(el('div', null, [header, toolbar, table]));
@@ -517,24 +585,21 @@
     if (sells.length === 0) {
       table = el('div', { class: 'empty' }, 'No sell trades yet.');
     } else {
-      const thead = el('tr', null, cols.map(function (c) { return el('th', { class: looksNumeric(sells[0][c]) ? 'num' : null }, c); }).concat([el('th', null, 'Actions')]));
-      const body = sells.map(function (row) {
-        const tds = cols.map(function (c) { return el('td', { class: looksNumeric(row[c]) ? 'num' : null }, cellText(row[c])); });
-        const actions = el('td', { class: 'actions' }, [
-          el('a', { href: '#/sells/edit/' + row.id }, el('button', { class: 'link small' }, 'Edit')),
-          el('button', {
-            class: 'link small danger',
-            onclick: async function () {
-              if (!confirm('Delete this Sell and its allocations?')) return;
-              try { await api('DELETE', '/sells/' + row.id); toast('Deleted.'); viewSellsList(); }
-              catch (e) { toast(e.message, true); }
-            },
-          }, 'Delete'),
-        ]);
-        tds.push(actions);
-        return el('tr', null, tds);
+      table = filterableTable(sells, cols, {
+        actions: function (row) {
+          return el('td', { class: 'actions' }, [
+            el('a', { href: '#/sells/edit/' + row.id }, el('button', { class: 'link small' }, 'Edit')),
+            el('button', {
+              class: 'link small danger',
+              onclick: async function () {
+                if (!confirm('Delete this Sell and its allocations?')) return;
+                try { await api('DELETE', '/sells/' + row.id); toast('Deleted.'); viewSellsList(); }
+                catch (e) { toast(e.message, true); }
+              },
+            }, 'Delete'),
+          ]);
+        },
       });
-      table = el('table', null, [el('thead', null, thead), el('tbody', null, body)]);
     }
     setMain(el('div', null, [
       el('h2', null, 'Sells'),

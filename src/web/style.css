@@ -79,6 +79,11 @@ th { background: #f0f2f5; font-weight: 600; position: sticky; top: 0; }
 tbody tr:hover { background: #f7f9fc; }
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 td.actions { white-space: nowrap; }
+th.sortable { cursor: pointer; user-select: none; }
+th.sortable:hover { background: #e7eaef; }
+.sort-ind { color: var(--muted); font-size: 11px; }
+.table-tools { margin-bottom: 10px; }
+.table-filter { width: 240px; max-width: 100%; }
 
 .card {
   background: var(--panel);
