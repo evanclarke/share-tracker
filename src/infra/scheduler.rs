@@ -328,6 +328,19 @@ mod tests {
         spawn(reg, include_str!("../../schedule.cron")).unwrap();
     }
 
+    #[test]
+    fn backup_is_scheduled_weekly() {
+        // REQUIREMENTS specifies weekly backups: the committed schedule's backup
+        // entry must parse and fire exactly 7 days apart.
+        let entries = parse(include_str!("../../schedule.cron")).unwrap();
+        let (cron, _) =
+            entries.iter().find(|(_, name)| name == "backup").expect("backup must be scheduled");
+        let from = Local.with_ymd_and_hms(2026, 6, 1, 12, 0, 0).unwrap();
+        let first = cron.find_next_occurrence(&from, false).unwrap();
+        let second = cron.find_next_occurrence(&first, false).unwrap();
+        assert_eq!(second - first, chrono::Duration::days(7));
+    }
+
     #[tracing_test::traced_test]
     #[tokio::test]
     async fn spawn_warns_about_job_with_no_schedule_entry() {

@@ -42,13 +42,13 @@ The database is created automatically on first run. Migrations are applied in or
 Recurring maintenance jobs — the database backup, the RBA FX rate import, the ISO MIC registry import, and the currencies import — are scheduled from a cron file rather than hard-coded intervals. Each line is a 5-field Vixie cron expression (`min hour dom mon dow`) followed by a job name; `#` starts a comment. The built-in default is embedded in the binary (`schedule.cron`); pass `--schedule <path>` to use your own file instead:
 
 ```
-0 0 * * *   backup          # daily at midnight
+0 0 * * 0   backup          # weekly, Sunday 00:00
 0 2 * * 1   rba-fx-import   # weekly, Monday 02:00
 0 3 1 * *   mic-import      # monthly, 1st at 03:00 (ISO publishes monthly)
 0 4 1 * *   currency-import # monthly, 1st at 04:00 (ISO 4217 + ISO 24165 / DTIF)
 ```
 
-A schedule line naming an unknown job is rejected at startup; a registered job with no schedule line is allowed but logged as a `WARN` (it will then only run via its endpoint). Jobs run only at their scheduled times (not at startup); after each run (and at startup) the next scheduled run is logged at INFO. The backup writes `<stem>-YYYY-MM-DD.db` beside the main database file (skipped if one already exists for the day). Any job can be run on demand with `POST /jobs/{name}` (see HTTP API).
+A schedule line naming an unknown job is rejected at startup; a registered job with no schedule line is allowed but logged as a `WARN` (it will then only run via its endpoint). Jobs run only at their scheduled times (not at startup); after each run (and at startup) the next scheduled run is logged at INFO. The backup writes `<stem>-YYYY-MM-DD-HHMMSS.db` beside the main database file (the date-time component keeps each weekly run distinct; skipped only if a file with that exact name already exists). Any job can be run on demand with `POST /jobs/{name}` (see HTTP API).
 
 Logging is controlled by the `RUST_LOG` environment variable (default: `info`).
 

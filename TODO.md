@@ -7,9 +7,9 @@ Items are only marked done when a passing test exists for them.
 - [x] CLI arg parsing (`--db <path>`, default: `share-tracker.db`)
 - [x] Database initialisation and connection pool
 - [x] Daily backup on startup (copy DB to `<file>-YYYY-MM-DD.db`)
-- [ ] Switch the backup job from daily to weekly cadence (REQUIREMENTS now specifies *weekly* backups) — change `schedule.cron`'s `backup` entry from `0 0 * * *` (daily) to a weekly expression (e.g. `0 0 * * 0`); on-demand `POST /jobs/backup` is unaffected
-- [ ] Backup filename includes time as well as date — `<file>-date-time.db` (e.g. `<file>-YYYY-MM-DD-HHMMSS.db`), was date-only `<file>-YYYY-MM-DD.db`; update `db::backup_path`'s format. The skip-if-exists guard becomes effectively per-run with a time component, so confirm a fresh weekly backup is written rather than skipped
-- [ ] Tests: backup filename carries the date-time component (not date only); weekly `backup` schedule entry parses and is the cadence used
+- [x] Switch the backup job from daily to weekly cadence (REQUIREMENTS now specifies *weekly* backups) — `schedule.cron`'s `backup` entry changed from `0 0 * * *` (daily) to `0 0 * * 0` (weekly, Sunday 00:00); on-demand `POST /jobs/backup` is unaffected
+- [x] Backup filename includes time as well as date — `db::backup_path` now formats `<file>-YYYY-MM-DD-HHMMSS.db` (via `backup_path_at`), was date-only `<file>-YYYY-MM-DD.db`. The time-to-the-second component keeps each weekly run distinct; the skip-if-exists guard (`backup_to`) now only collides for two runs in the same second
+- [x] Tests: backup filename carries the date-time component (`db::tests::backup_path_includes_date_and_time`); weekly `backup` schedule entry parses and fires 7 days apart (`scheduler::tests::backup_is_scheduled_weekly`)
 - [ ] Scheduled jobs log an INFO when started and an INFO when finished (REQUIREMENTS: "Jobs that are scheduled will log an info when started and finished") — wrap each run in `scheduler::spawn`'s loop (and the manual `POST /jobs/{name}` trigger) with uniform `job started` / `job finished` INFO lines so *every* job (backup, rba-fx-import, mic-import, currency-import) logs both, not just the ones that emit their own completion line today
 - [ ] Tests: a scheduled/triggered job emits both a started and a finished INFO log
 - [x] GitHub Actions CI: run tests on push

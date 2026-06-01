@@ -1,4 +1,4 @@
-use chrono::Local;
+use chrono::{DateTime, Local};
 use sqlx::{
     SqlitePool,
     sqlite::{SqliteConnectOptions, SqliteJournalMode},
@@ -49,19 +49,32 @@ pub async fn init(db_path: &str) -> Result<SqlitePool, sqlx::Error> {
     Ok(pool)
 }
 
+/// Destination filename for a backup taken now: `<file>-YYYY-MM-DD-HHMMSS.db`.
+/// The time component (down to the second) keeps each weekly backup distinct —
+/// the backup job runs weekly, so a date-only name would collide across runs.
 pub fn backup_path(db_path: &str) -> String {
-    let date = Local::now().format("%Y-%m-%d");
+    backup_path_at(db_path, Local::now())
+}
+
+fn backup_path_at(db_path: &str, at: DateTime<Local>) -> String {
+    let ts = at.format("%Y-%m-%d-%H%M%S");
     let stem = db_path.strip_suffix(".db").unwrap_or(db_path);
-    format!("{stem}-{date}.db")
+    format!("{stem}-{ts}.db")
 }
 
 pub async fn backup(pool: &SqlitePool, db_path: &str) -> Result<(), sqlx::Error> {
-    let dest = backup_path(db_path);
-    if Path::new(&dest).exists() {
+    backup_to(pool, &backup_path(db_path)).await
+}
+
+/// Write a backup to a specific destination, skipping if it already exists. With
+/// a per-second timestamped name a collision only happens for two runs in the
+/// same second, so in practice each weekly run writes a fresh file.
+async fn backup_to(pool: &SqlitePool, dest: &str) -> Result<(), sqlx::Error> {
+    if Path::new(dest).exists() {
         tracing::debug!(path = dest, "backup already exists, skipping");
     } else {
         tracing::info!(path = dest, "starting backup");
-        sqlx::query("VACUUM INTO ?").bind(&dest).execute(pool).await?;
+        sqlx::query("VACUUM INTO ?").bind(dest).execute(pool).await?;
         tracing::info!(path = dest, "backup complete");
     }
     Ok(())
@@ -93,9 +106,25 @@ mod tests {
         let db_path = dir.path().join("test.db").to_string_lossy().to_string();
         let pool = init(&db_path).await.unwrap();
 
-        backup(&pool, &db_path).await.unwrap();
+        // Capture the destination before backing up: `backup` computes its own
+        // timestamp internally, so re-deriving the path afterwards could land in
+        // a later second and miss the file. Drive `backup_to` with the same dest.
+        let dest = backup_path(&db_path);
+        backup_to(&pool, &dest).await.unwrap();
 
-        assert!(Path::new(&backup_path(&db_path)).exists());
+        assert!(Path::new(&dest).exists());
+    }
+
+    #[test]
+    fn backup_path_includes_date_and_time() {
+        use chrono::TimeZone;
+        let at = Local.with_ymd_and_hms(2026, 6, 1, 14, 30, 5).unwrap();
+        // Date-only naming (`-2026-06-01.db`) would collide across weekly runs;
+        // the filename must carry the time component down to the second.
+        assert_eq!(
+            backup_path_at("share-tracker.db", at),
+            "share-tracker-2026-06-01-143005.db"
+        );
     }
 
     #[tokio::test]
@@ -208,11 +237,14 @@ mod tests {
         let db_path = dir.path().join("test.db").to_string_lossy().to_string();
         let pool = init(&db_path).await.unwrap();
 
-        backup(&pool, &db_path).await.unwrap();
-        let mtime1 = std::fs::metadata(backup_path(&db_path)).unwrap().modified().unwrap();
+        // Fixed destination so this exercises the skip-if-exists guard directly
+        // rather than depending on two `backup` calls landing in the same second.
+        let dest = backup_path(&db_path);
+        backup_to(&pool, &dest).await.unwrap();
+        let mtime1 = std::fs::metadata(&dest).unwrap().modified().unwrap();
 
-        backup(&pool, &db_path).await.unwrap();
-        let mtime2 = std::fs::metadata(backup_path(&db_path)).unwrap().modified().unwrap();
+        backup_to(&pool, &dest).await.unwrap();
+        let mtime2 = std::fs::metadata(&dest).unwrap().modified().unwrap();
 
         assert_eq!(mtime1, mtime2);
     }
