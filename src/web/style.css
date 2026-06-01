@@ -82,8 +82,8 @@ td.actions { white-space: nowrap; }
 th.sortable { cursor: pointer; user-select: none; }
 th.sortable:hover { background: #e7eaef; }
 .sort-ind { color: var(--muted); font-size: 11px; }
-.table-tools { margin-bottom: 10px; }
-.table-filter { width: 240px; max-width: 100%; }
+.filter-row th { position: static; background: #f7f9fc; padding: 4px 6px; font-weight: 400; }
+.table-filter { width: 100%; box-sizing: border-box; padding: 3px 6px; font-size: 12px; }
 
 .card {
   background: var(--panel);

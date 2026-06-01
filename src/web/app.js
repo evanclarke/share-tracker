@@ -312,10 +312,12 @@
   // ---- generic table ----------------------------------------------------
   // Every data table in the app — entity lists, the Sells list, and report
   // tables — goes through this one renderer so they are uniformly filterable
-  // (a text box that substring-matches across the data columns) and sortable
-  // (click a column header to toggle ascending/descending). `opts.actions`, if
-  // given, renders a trailing non-sortable, non-filtered Actions cell per row;
-  // `opts.statusField` renders that column as a status badge.
+  // and sortable. Each column has its own filter input (substring match on that
+  // column's text); the filters AND together, so you can e.g. filter currency
+  // to "USD" and date to "2024" at once. Click a column header to sort it
+  // (toggling ascending/descending). `opts.actions`, if given, renders a
+  // trailing non-sortable, non-filtered Actions cell per row; `opts.statusField`
+  // renders that column as a status badge.
   function filterableTable(rows, cols, opts) {
     opts = opts || {};
     const statusField = opts.statusField;
@@ -327,15 +329,11 @@
 
     let sortCol = null;
     let sortDir = 1; // 1 = ascending, -1 = descending
-    let filterText = '';
+    const filters = {}; // column → lowercased substring; absent/empty = no filter
 
     const container = el('div');
-    const filterInput = el('input', {
-      type: 'search', class: 'table-filter', placeholder: 'Filter…',
-      oninput: function () { filterText = this.value.toLowerCase(); renderBody(); },
-    });
-    container.appendChild(el('div', { class: 'table-tools' }, filterInput));
 
+    // Header row: click-to-sort column titles.
     const headCells = cols.map(function (c) {
       const indicator = el('span', { class: 'sort-ind' }, '');
       const th = el('th', { class: (numeric[c] ? 'num ' : '') + 'sortable' }, [c, indicator]);
@@ -352,14 +350,33 @@
     });
     if (actions) headCells.push(el('th', null, 'Actions'));
 
+    // Filter row: one input per column, AND-combined.
+    const filterCells = cols.map(function (c) {
+      const input = el('input', {
+        type: 'search', class: 'table-filter', placeholder: 'Filter ' + c + '…',
+        oninput: function () {
+          const v = this.value.trim().toLowerCase();
+          if (v === '') delete filters[c]; else filters[c] = v;
+          renderBody();
+        },
+      });
+      return el('th', { class: 'filter-cell' }, input);
+    });
+    if (actions) filterCells.push(el('th', { class: 'filter-cell' }));
+
     const tbody = el('tbody');
-    container.appendChild(el('table', null, [el('thead', null, el('tr', null, headCells)), tbody]));
+    const thead = el('thead', null, [
+      el('tr', null, headCells),
+      el('tr', { class: 'filter-row' }, filterCells),
+    ]);
+    container.appendChild(el('table', null, [thead, tbody]));
 
     function visibleRows() {
       let out = rows;
-      if (filterText) {
+      const active = Object.keys(filters);
+      if (active.length) {
         out = out.filter(function (row) {
-          return cols.some(function (c) { return cellText(row[c]).toLowerCase().indexOf(filterText) !== -1; });
+          return active.every(function (c) { return cellText(row[c]).toLowerCase().indexOf(filters[c]) !== -1; });
         });
       }
       if (sortCol != null) {
@@ -379,8 +396,9 @@
       const vr = visibleRows();
       if (vr.length === 0) {
         const span = cols.length + (actions ? 1 : 0);
+        const filtered = Object.keys(filters).length > 0;
         tbody.appendChild(el('tr', null, el('td', { colspan: span, class: 'empty' },
-          filterText ? 'No matching records.' : 'No records.')));
+          filtered ? 'No matching records.' : 'No records.')));
         return;
       }
       vr.forEach(function (row) {

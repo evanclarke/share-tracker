@@ -188,10 +188,12 @@ mod tests {
     async fn tables_are_filterable_and_sortable() {
         let js = app_js_body().await;
         // Every entity list and report table renders through the shared
-        // filterableTable, which adds a text filter input and click-to-sort
-        // column headers. Assert those controls ship in the bundle.
+        // filterableTable, which adds a per-column filter row (inputs AND
+        // together) and click-to-sort column headers. Assert those controls
+        // ship in the bundle.
         assert!(js.contains("filterableTable"));
         assert!(js.contains("table-filter"));
+        assert!(js.contains("filter-row"));
         assert!(js.contains("sortable"));
     }
 }
