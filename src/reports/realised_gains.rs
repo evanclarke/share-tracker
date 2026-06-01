@@ -22,7 +22,16 @@ pub struct RealisedGainLoss {
     /// Portion of the capital gain from parcels held strictly more than 12 months
     /// (eligible for the 50% CGT discount). Always ≥ 0; losses are excluded.
     pub discount_eligible_gain: Decimal,
+    /// Gross positive gains from parcels held 12 months or less — the "other"
+    /// (non-discountable) method. Always ≥ 0; losses are excluded.
+    pub non_discountable_gain: Decimal,
+    /// Total capital losses from this sale's allocations (those whose proceeds fell
+    /// below their cost base), as a positive amount. Always ≥ 0.
+    pub capital_loss: Decimal,
 }
+
+// Per-sale identity: capital_gain_loss == discount_eligible_gain
+//                                       + non_discountable_gain − capital_loss.
 
 pub fn router() -> Router<SqlitePool> {
     Router::new().route("/portfolio/realised-gains", get(realised_gains_handler))
@@ -125,6 +134,8 @@ pub async fn db_realised_gains(pool: &SqlitePool) -> Result<Vec<RealisedGainLoss
     let mut sale_proceeds: HashMap<i64, Decimal> = HashMap::new();
     let mut sale_cost_base: HashMap<i64, Decimal> = HashMap::new();
     let mut sale_discount_gain: HashMap<i64, Decimal> = HashMap::new();
+    let mut sale_non_discount_gain: HashMap<i64, Decimal> = HashMap::new();
+    let mut sale_loss: HashMap<i64, Decimal> = HashMap::new();
 
     for row in &alloc_rows {
         let sale_id: i64 = row.try_get("sale_trade_id")?;
@@ -182,9 +193,19 @@ pub async fn db_realised_gains(pool: &SqlitePool) -> Result<Vec<RealisedGainLoss
         *sale_proceeds.entry(sale_id).or_insert(Decimal::ZERO) += alloc_proceeds;
         *sale_cost_base.entry(sale_id).or_insert(Decimal::ZERO) += alloc_cost;
 
-        // CGT discount applies only to gains from parcels held strictly > 12 months
-        if sale.date > buy.date + Months::new(12) && alloc_gain > Decimal::ZERO {
-            *sale_discount_gain.entry(sale_id).or_insert(Decimal::ZERO) += alloc_gain;
+        // Classify each allocation's gain/loss for CGT: a gain from a parcel held
+        // strictly > 12 months is discount-eligible; a gain from a parcel held ≤ 12
+        // months is non-discountable ("other" method); a negative result is a
+        // capital loss (recorded as a positive amount). The net-capital-gain report
+        // nets these buckets across sales and AMMA gains.
+        if alloc_gain > Decimal::ZERO {
+            if sale.date > buy.date + Months::new(12) {
+                *sale_discount_gain.entry(sale_id).or_insert(Decimal::ZERO) += alloc_gain;
+            } else {
+                *sale_non_discount_gain.entry(sale_id).or_insert(Decimal::ZERO) += alloc_gain;
+            }
+        } else if alloc_gain < Decimal::ZERO {
+            *sale_loss.entry(sale_id).or_insert(Decimal::ZERO) += -alloc_gain;
         }
     }
 
@@ -196,6 +217,9 @@ pub async fn db_realised_gains(pool: &SqlitePool) -> Result<Vec<RealisedGainLoss
             let cost_base = sale_cost_base[&sale_id];
             let discount_gain =
                 sale_discount_gain.get(&sale_id).copied().unwrap_or(Decimal::ZERO);
+            let non_discount_gain =
+                sale_non_discount_gain.get(&sale_id).copied().unwrap_or(Decimal::ZERO);
+            let loss = sale_loss.get(&sale_id).copied().unwrap_or(Decimal::ZERO);
             Some(RealisedGainLoss {
                 sale_trade_id: sale_id,
                 listing_id: sale.listing_id,
@@ -204,6 +228,8 @@ pub async fn db_realised_gains(pool: &SqlitePool) -> Result<Vec<RealisedGainLoss
                 cost_base,
                 capital_gain_loss: proceeds - cost_base,
                 discount_eligible_gain: discount_gain,
+                non_discountable_gain: non_discount_gain,
+                capital_loss: loss,
             })
         })
         .collect();
@@ -394,6 +420,9 @@ mod tests {
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].capital_gain_loss, Decimal::from(-500));
         assert_eq!(result[0].discount_eligible_gain, Decimal::ZERO);
+        // The loss is captured as a positive capital_loss; no gain buckets.
+        assert_eq!(result[0].non_discountable_gain, Decimal::ZERO);
+        assert_eq!(result[0].capital_loss, Decimal::from(500));
     }
 
     #[tokio::test]
@@ -534,6 +563,15 @@ mod tests {
         assert_eq!(result[0].cost_base, Decimal::from(1500));
         assert_eq!(result[0].capital_gain_loss, Decimal::from(750));
         assert_eq!(result[0].discount_eligible_gain, Decimal::from(500));
+        // The new (≤12mo) parcel's $250 gain is non-discountable; no losses.
+        assert_eq!(result[0].non_discountable_gain, Decimal::from(250));
+        assert_eq!(result[0].capital_loss, Decimal::ZERO);
+        // Identity: capital_gain_loss == discount_eligible + non_discountable − loss.
+        assert_eq!(
+            result[0].capital_gain_loss,
+            result[0].discount_eligible_gain + result[0].non_discountable_gain
+                - result[0].capital_loss
+        );
     }
 
     #[tokio::test]

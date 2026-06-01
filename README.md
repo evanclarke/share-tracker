@@ -11,7 +11,8 @@ A personal Australian share portfolio tracker with a REST JSON API. Records trad
 - **Parcel-level CGT** — explicit parcel allocations link sell trades to the parcels they came from; cost bases are pro-rated and AMIT-reduced at the parcel level
 - **Portfolio overview** — open holdings per security with total cost base and optional market value (supply current prices in the request body)
 - **Unrealised gains report** — per-holding gain/loss and CGT-discount-eligible quantity as at a given date
-- **Realised gains report** — per-sale capital gain/loss and CGT-discount-eligible gain (parcels held strictly more than 12 months)
+- **Realised gains report** — per-sale capital gain/loss split into discount-eligible (parcels held strictly more than 12 months), non-discountable, and loss buckets
+- **Net capital gain report** — the overall CGT position per financial year: combines realised parcel gains with AMMA-attributed CGT gains and capital losses, applies losses ATO-optimally (non-discountable gains first), and applies the 50% discount to produce the assessable net capital gain
 - **Tax summary** — income aggregated by Australian financial year (July–June), combining dividends, trust distributions, and AMMA components
 - **FX rate import** — monthly RBA F11 foreign exchange rates (the rates the ATO directs taxpayers to use) fetched and stored as foreign-per-AUD, refreshed weekly and via a manual trigger
 - **AUD conversion** — cost base and proceeds in the portfolio, unrealised, and realised reports are converted to AUD at the ATO reference rate (with a per-trade manual `fx_rate` fallback); see [FX conversion](#fx-conversion)
@@ -450,9 +451,26 @@ Request body (all optional):
 GET /portfolio/realised-gains
 ```
 
-Returns one record per sale trade that has at least one parcel allocation. Response fields: `sale_trade_id`, `listing_id`, `sale_date`, `proceeds`, `cost_base`, `capital_gain_loss`, `discount_eligible_gain` (gain attributable to parcels held strictly more than 12 months; losses are excluded). `proceeds`, `cost_base`, and `capital_gain_loss` are in AUD: proceeds are converted at the sale's FX rate and cost base at the purchase's FX rate (see [FX conversion](#fx-conversion)).
+Returns one record per sale trade that has at least one parcel allocation. Response fields: `sale_trade_id`, `listing_id`, `sale_date`, `proceeds`, `cost_base`, `capital_gain_loss`, `discount_eligible_gain` (gross gain from parcels held strictly more than 12 months), `non_discountable_gain` (gross gain from parcels held 12 months or less — the "other" method), and `capital_loss` (total losses from allocations sold below cost, as a positive amount). The three buckets satisfy `capital_gain_loss == discount_eligible_gain + non_discountable_gain − capital_loss`. `proceeds`, `cost_base`, and `capital_gain_loss` are in AUD: proceeds are converted at the sale's FX rate and cost base at the purchase's FX rate (see [FX conversion](#fx-conversion)).
 
 Sorted by `sale_date` ascending.
+
+#### Net capital gain
+
+```
+GET /portfolio/net-capital-gain
+```
+
+Returns one record per Australian financial year (identified by the calendar year of 30 June), sorted ascending — the overall CGT position combining realised parcel gains with the CGT components attributed on AMMA statements. Realised gains are attributed by the sale's tax year (July = next FY); AMMA components by `tax_year_end_date`.
+
+The assessable net capital gain is computed the ATO way:
+
+1. Total the year's gross capital gains, split into **discount-eligible** (realised parcels held > 12 months + AMMA discount-method gains grossed up ×2 — the AMMA `cgt_discount_gains` value is the already-halved "discounted capital gain", so doubling it restores the gross gain) and **non-discountable** (realised parcels held ≤ 12 months + AMMA indexation-method and other-method gains, neither of which gets the discount).
+2. Total the year's capital losses (realised losses + AMMA `capital_losses_applied`).
+3. Apply losses against non-discountable gains first, then discount-eligible gains (taxpayer-favourable: the 50% discount falls on the largest possible remaining gain).
+4. **Net capital gain** = remaining non-discountable gain + 50% of the remaining discount-eligible gain. Unused losses are carried forward.
+
+Response fields: `tax_year`, `discount_eligible_gains`, `other_gains`, `capital_losses` (all gross), `net_discount_eligible_gain` and `net_other_gain` (after losses), `cgt_discount` (the 50% reduction applied = `net_discount_eligible_gain / 2`), `net_capital_gain`, and `capital_loss_carried_forward`. All amounts are AUD (AMMA amounts converted via the ATO rate for the month of `tax_year_end_date`, so a non-AUD amount with no rate fails loudly with `500`; see [FX conversion](#fx-conversion)). Prior-year carried-forward losses are not modelled, so `capital_loss_carried_forward` reflects only the current year's excess.
 
 #### Tax summary
 

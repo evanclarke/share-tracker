@@ -5,6 +5,7 @@ use axum::Router;
 use sqlx::SqlitePool;
 
 pub mod mic_validation;
+pub mod net_capital_gain;
 pub mod portfolio;
 pub mod realised_gains;
 pub mod tax_summary;
@@ -15,6 +16,7 @@ pub fn router() -> Router<SqlitePool> {
     portfolio::router()
         .merge(unrealised_gains::router())
         .merge(realised_gains::router())
+        .merge(net_capital_gain::router())
         .merge(tax_summary::router())
         .merge(mic_validation::router())
 }
