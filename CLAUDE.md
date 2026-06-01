@@ -4,7 +4,7 @@
 - Solo project: commit directly to `main`. Don't create feature branches for commits
 - `cargo build` and `cargo test` must both be warning-free before a task is done (a `pub` item only reached from `#[cfg(test)]` code warns in the non-test build — gate it `#[cfg(test)]` or remove it)
 - Implement a requirement fully: if the spec says "apply the 50% CGT discount", compute the discounted figure — don't stop at an eligibility flag/indicator. If only partially done, leave it unchecked in TODO with a note on what remains
-- Recurring background tasks (daily backup, weekly RBA FX import, future schedulers) must, after each run, log the next scheduled run time at INFO — mirror `db::spawn_daily_backup`'s `next backup scheduled` line — so the schedule is verifiable from logs without reading code
+- Recurring background tasks (weekly backup, weekly RBA FX import, monthly imports, future jobs) run via the cron scheduler in `infra/scheduler.rs`: register the work in `registry()` and add a line to `schedule.cron`. The scheduler logs the next scheduled run time at INFO after every run (and at startup) — its `next run scheduled` line — so the schedule is verifiable from logs without reading code
 - Keep `README.md` in sync when the data model or HTTP API changes: a new/changed table or column updates the Database schema (and Relationships) section; a new/changed/removed endpoint, status code, or request/response shape updates the HTTP API and Response codes sections. README updates are part of the same task, not a follow-up
 
 # Financial correctness
@@ -23,7 +23,7 @@ Modules are grouped into three folders; `main.rs`, `app.rs`, and the migrations 
 - `src/main.rs` — server startup: init pool, build registry, spawn scheduler, serve, graceful shutdown
 - `src/app.rs` — `app::router(pool, registry)` assembles entity + report + scheduler routers (testable without `main`)
 - `src/infra/` — cross-cutting infrastructure (`mod.rs` re-exports each):
-  - `infra/db.rs` — pool init (runs migrations), daily backup
+  - `infra/db.rs` — pool init (runs migrations), weekly DB backup (`backup`/`backup_path`)
   - `infra/args.rs` — CLI args: `--db` (default `share-tracker.db`), `--port` (default 3000), `--schedule`
   - `infra/logging.rs` — tracing subscriber init; reads `RUST_LOG`, defaults to `info`
   - `infra/decimal.rs` — `parse_dec` and `FromRow` decimal helpers
