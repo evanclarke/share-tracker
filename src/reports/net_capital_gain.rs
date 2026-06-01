@@ -25,7 +25,7 @@
 use crate::infra::decimal::parse_dec;
 use crate::infra::fx::to_aud;
 use axum::{Json, Router, extract::State, http::StatusCode, routing::get};
-use chrono::{Datelike, NaiveDate};
+use chrono::{Datelike, Months, NaiveDate};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
@@ -56,6 +56,11 @@ pub struct NetCapitalGainYear {
     pub net_capital_gain: Decimal,
     /// Capital losses left unused after offsetting all gains, carried forward.
     pub capital_loss_carried_forward: Decimal,
+    /// Informational: gross CGT event E10 gains included in this year (the excess of
+    /// AMIT cost base reductions over a parcel's cost base). Already counted within
+    /// `discount_eligible_gains` / `other_gains` above per the holding period at the
+    /// statement's year end; surfaced separately for transparency.
+    pub cgt_event_e10_gain: Decimal,
 }
 
 pub fn router() -> Router<SqlitePool> {
@@ -68,6 +73,8 @@ struct GrossBuckets {
     discount_eligible: Decimal,
     other: Decimal,
     losses: Decimal,
+    /// Gross CGT event E10 gains folded into the buckets above (informational).
+    e10: Decimal,
 }
 
 /// Australian tax year for a dividend/sale date: July–December fall in the next FY.
@@ -91,6 +98,69 @@ async fn aud_field(
 ) -> Result<Decimal, sqlx::Error> {
     let value = parse_dec(field, row.try_get(field)?)?;
     Ok(to_aud(pool, value, currency, date, None).await?)
+}
+
+/// CGT event E10 gains: when the cumulative AMIT cost base reductions applied to a
+/// parcel exceed its cost base, the cost base is floored at nil and the excess is a
+/// capital gain in the income year the reducing AMMA statement applies to (see
+/// `docs/amit-cost-base-adjustments.md`).
+///
+/// Returns `(tax_year, gross_gain_aud, discount_eligible)` for each AMMA statement
+/// that pushes a parcel's cost base below nil. Adjustments are walked per parcel in
+/// tax-year order, so the gain falls in the year the cost base is first exhausted —
+/// and in every later year, since the cost base stays at nil (a later negative
+/// adjustment, i.e. a cost base increase, restores it first). The excess is computed
+/// in the parcel's native currency and converted to AUD at the parcel's buy-month ATO
+/// rate (matching how the cost base itself is converted in the realised report), then
+/// classified as discount-eligible when the units were held more than 12 months as at
+/// the statement's `tax_year_end_date`.
+async fn e10_gains(pool: &SqlitePool) -> Result<Vec<(i32, Decimal, bool)>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT aa.trade_id, aa.quantity AS adj_qty, \
+                t.date AS trade_date, t.quantity AS trade_qty, t.average_price, \
+                t.brokerage, t.gst_on_brokerage, t.currency AS trade_currency, t.fx_rate, \
+                a.cost_base_adjustment, a.tax_year_end_date \
+         FROM amit_adjustments aa \
+         JOIN trades t ON t.id = aa.trade_id \
+         JOIN amma_statements a ON a.id = aa.amma_statement_id \
+         ORDER BY aa.trade_id, a.tax_year_end_date, a.id",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < rows.len() {
+        let trade_id: i64 = rows[i].try_get("trade_id")?;
+        // Parcel cost base in native currency (the trade columns repeat per row).
+        let trade_qty = parse_dec("trade_qty", rows[i].try_get("trade_qty")?)?;
+        let price = parse_dec("average_price", rows[i].try_get("average_price")?)?;
+        let brok = parse_dec("brokerage", rows[i].try_get("brokerage")?)?;
+        let gst = parse_dec("gst_on_brokerage", rows[i].try_get("gst_on_brokerage")?)?;
+        let trade_date: NaiveDate = rows[i].try_get("trade_date")?;
+        let currency: String = rows[i].try_get("trade_currency")?;
+        let fx_rate = parse_dec("fx_rate", rows[i].try_get("fx_rate")?)?;
+        let mut remaining = price * trade_qty + brok + gst;
+
+        while i < rows.len() && rows[i].try_get::<i64, _>("trade_id")? == trade_id {
+            let adj_qty = parse_dec("adj_qty", rows[i].try_get("adj_qty")?)?;
+            let cba = parse_dec("cost_base_adjustment", rows[i].try_get("cost_base_adjustment")?)?;
+            let year_end: NaiveDate = rows[i].try_get("tax_year_end_date")?;
+            let reduction = adj_qty * cba;
+            if reduction > remaining {
+                let excess = reduction - remaining;
+                let excess_aud =
+                    to_aud(pool, excess, &currency, trade_date, Some(fx_rate)).await?;
+                let discount_eligible = year_end > trade_date + Months::new(12);
+                out.push((year_end.year(), excess_aud, discount_eligible));
+                remaining = Decimal::ZERO;
+            } else {
+                remaining -= reduction;
+            }
+            i += 1;
+        }
+    }
+    Ok(out)
 }
 
 pub async fn db_net_capital_gain(pool: &SqlitePool) -> Result<Vec<NetCapitalGainYear>, sqlx::Error> {
@@ -132,6 +202,20 @@ pub async fn db_net_capital_gain(pool: &SqlitePool) -> Result<Vec<NetCapitalGain
         b.losses += losses;
     }
 
+    // CGT event E10 gains — excess AMIT cost base reductions over a parcel's cost
+    // base — are ordinary capital gains: they enter the buckets (discount-eligible or
+    // not, per the holding period at year end), so losses can offset them and the
+    // discount applies to the eligible portion.
+    for (tax_year, amount, discount_eligible) in e10_gains(pool).await? {
+        let b = buckets.entry(tax_year).or_default();
+        if discount_eligible {
+            b.discount_eligible += amount;
+        } else {
+            b.other += amount;
+        }
+        b.e10 += amount;
+    }
+
     let two = Decimal::from(2);
     let mut result: Vec<NetCapitalGainYear> = buckets
         .into_iter()
@@ -157,6 +241,7 @@ pub async fn db_net_capital_gain(pool: &SqlitePool) -> Result<Vec<NetCapitalGain
                 cgt_discount,
                 net_capital_gain: net_other + cgt_discount,
                 capital_loss_carried_forward: carried_forward,
+                cgt_event_e10_gain: b.e10,
             }
         })
         .collect();
@@ -177,7 +262,7 @@ async fn net_capital_gain_handler(
 mod tests {
     use super::*;
     use crate::{
-        entities::{amma, listing, parcel_allocation, rba_fx_rate, trade},
+        entities::{amit_adjustment, amma, listing, parcel_allocation, rba_fx_rate, trade},
         infra::db,
     };
     use axum::{body::Body, http::Request};
@@ -248,6 +333,20 @@ mod tests {
                 sale_trade_id: sale_id,
                 purchase_trade_id: buy_id,
                 quantity_allocated: qty,
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    async fn link_adjustment(pool: &SqlitePool, id: i64, amma_id: i64, trade_id: i64, qty: Decimal) {
+        amit_adjustment::db_upsert(
+            pool,
+            &amit_adjustment::AmitAdjustment {
+                id,
+                amma_statement_id: amma_id,
+                trade_id,
+                quantity: qty,
             },
         )
         .await
@@ -503,6 +602,82 @@ mod tests {
         assert_eq!(r.len(), 2);
         assert_eq!(r[0].tax_year, 2024);
         assert_eq!(r[1].tax_year, 2025);
+    }
+
+    #[tokio::test]
+    async fn db_e10_excess_reduction_becomes_capital_gain() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "VAF").await;
+        // Buy 100 @ $1 → cost base $100; held ~6 months at the 30 Jun 2024 year end.
+        insert_trade(&pool, 1, trade::TradeType::Buy, 1,
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(), Decimal::from(100), Decimal::from(1)).await;
+        // AMMA reduces cost base by $1.50/unit × 100 = $150 → $50 excess over the $100 base.
+        let mut a = make_amma(1, 1, NaiveDate::from_ymd_opt(2024, 6, 30).unwrap());
+        a.cost_base_adjustment = "1.50".parse().unwrap();
+        amma::db_upsert(&pool, &a).await.unwrap();
+        link_adjustment(&pool, 1, 1, 1, Decimal::from(100)).await;
+
+        let r = db_net_capital_gain(&pool).await.unwrap();
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].tax_year, 2024);
+        assert_eq!(r[0].cgt_event_e10_gain, Decimal::from(50));
+        // Held ≤ 12 months as at the year end → non-discountable; fully assessable.
+        assert_eq!(r[0].other_gains, Decimal::from(50));
+        assert_eq!(r[0].discount_eligible_gains, Decimal::ZERO);
+        assert_eq!(r[0].net_capital_gain, Decimal::from(50));
+    }
+
+    #[tokio::test]
+    async fn db_e10_gain_discount_eligible_when_held_over_12_months() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "VAF").await;
+        // Bought Jan 2023 → held > 12 months at the 30 Jun 2024 year end.
+        insert_trade(&pool, 1, trade::TradeType::Buy, 1,
+            NaiveDate::from_ymd_opt(2023, 1, 1).unwrap(), Decimal::from(100), Decimal::from(1)).await;
+        let mut a = make_amma(1, 1, NaiveDate::from_ymd_opt(2024, 6, 30).unwrap());
+        a.cost_base_adjustment = "1.50".parse().unwrap();
+        amma::db_upsert(&pool, &a).await.unwrap();
+        link_adjustment(&pool, 1, 1, 1, Decimal::from(100)).await;
+
+        let r = db_net_capital_gain(&pool).await.unwrap();
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].cgt_event_e10_gain, Decimal::from(50));
+        // Discount-eligible → halved.
+        assert_eq!(r[0].discount_eligible_gains, Decimal::from(50));
+        assert_eq!(r[0].other_gains, Decimal::ZERO);
+        assert_eq!(r[0].cgt_discount, Decimal::from(25));
+        assert_eq!(r[0].net_capital_gain, Decimal::from(25));
+    }
+
+    #[tokio::test]
+    async fn db_e10_accumulates_across_years_fires_when_cost_base_exhausted() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "VAF").await;
+        // Buy 100 @ $1 → cost base $100, bought Jan 2024.
+        insert_trade(&pool, 1, trade::TradeType::Buy, 1,
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(), Decimal::from(100), Decimal::from(1)).await;
+        // FY2024: reduce $0.60/unit × 100 = $60 → cost base $40 remaining, no excess.
+        let mut a1 = make_amma(1, 1, NaiveDate::from_ymd_opt(2024, 6, 30).unwrap());
+        a1.cost_base_adjustment = "0.60".parse().unwrap();
+        amma::db_upsert(&pool, &a1).await.unwrap();
+        link_adjustment(&pool, 1, 1, 1, Decimal::from(100)).await;
+        // FY2025: reduce $0.70/unit × 100 = $70 > $40 remaining → $30 excess (E10) in FY2025.
+        let mut a2 = make_amma(2, 1, NaiveDate::from_ymd_opt(2025, 6, 30).unwrap());
+        a2.cost_base_adjustment = "0.70".parse().unwrap();
+        amma::db_upsert(&pool, &a2).await.unwrap();
+        link_adjustment(&pool, 2, 2, 1, Decimal::from(100)).await;
+
+        let r = db_net_capital_gain(&pool).await.unwrap();
+        // Both AMMA statements create a year bucket; only FY2025 carries the E10 gain.
+        assert_eq!(r.len(), 2);
+        assert_eq!(r[0].tax_year, 2024);
+        assert_eq!(r[0].cgt_event_e10_gain, Decimal::ZERO);
+        assert_eq!(r[0].net_capital_gain, Decimal::ZERO);
+        assert_eq!(r[1].tax_year, 2025);
+        assert_eq!(r[1].cgt_event_e10_gain, Decimal::from(30));
+        // Held > 12 months at the FY2025 year end → discount-eligible → $30/2 = $15.
+        assert_eq!(r[1].discount_eligible_gains, Decimal::from(30));
+        assert_eq!(r[1].net_capital_gain, Decimal::from(15));
     }
 
     #[tokio::test]

@@ -88,7 +88,10 @@ pub async fn db_unrealised_gains(
 
         let initial_cost = price * qty + brok + gst;
         let amit = *cba_reduction.get(&trade_id).unwrap_or(&Decimal::ZERO);
-        let net_cost = initial_cost - amit;
+        // CGT event E10: an AMIT cost base reduction can only take the cost base to
+        // nil, never negative (the excess is a capital gain in the net-capital-gain
+        // report).
+        let net_cost = (initial_cost - amit).max(Decimal::ZERO);
         let remaining_cost =
             if qty > Decimal::ZERO { net_cost * remaining / qty } else { Decimal::ZERO };
         // Convert the parcel's cost base to AUD (ATO rate for the buy month, else

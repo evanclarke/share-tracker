@@ -85,7 +85,10 @@ pub async fn db_holdings(pool: &SqlitePool) -> Result<Vec<HoldingOverview>, sqlx
 
         let initial_cost = price * qty + brok + gst;
         let amit = *cba_reduction.get(&trade_id).unwrap_or(&Decimal::ZERO);
-        let net_cost = initial_cost - amit;
+        // CGT event E10: an AMIT cost base reduction can only take the cost base to
+        // nil, never negative. Any excess is a capital gain reported by the
+        // net-capital-gain report, not a negative cost base here.
+        let net_cost = (initial_cost - amit).max(Decimal::ZERO);
         // pro-rate cost base to remaining units
         let remaining_cost = if qty > Decimal::ZERO { net_cost * remaining / qty } else { Decimal::ZERO };
         // Convert the parcel's cost base to AUD (ATO rate for the buy month, else
@@ -360,6 +363,35 @@ mod tests {
         // initial = 1010.945, AMIT = 100 * 0.05 = 5.00, net = 1005.945
         assert_eq!(h.total_cost_base, "1005.945".parse::<Decimal>().unwrap());
         assert_eq!(h.avg_cost_base_per_unit, "10.05945".parse::<Decimal>().unwrap());
+    }
+
+    #[tokio::test]
+    async fn db_amit_reduction_capped_at_nil_cost_base() {
+        // CGT event E10: a reduction larger than the parcel's cost base floors the
+        // cost base at nil rather than going negative (the excess is a capital gain
+        // surfaced by the net-capital-gain report).
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "VAF").await;
+        // initial cost = 1*100 + 9.95 + 0.995 = 110.945
+        insert_buy(&pool, 1, 1, Decimal::from(100), Decimal::from(1)).await;
+        // reduction = 100 * 1.50 = 150 > 110.945 → cost base floored at 0
+        amma::db_upsert(&pool, &make_amma(1, 1, "1.50".parse().unwrap())).await.unwrap();
+        amit_adjustment::db_upsert(
+            &pool,
+            &amit_adjustment::AmitAdjustment {
+                id: 1,
+                amma_statement_id: 1,
+                trade_id: 1,
+                quantity: Decimal::from(100),
+            },
+        )
+        .await
+        .unwrap();
+
+        let holdings = db_holdings(&pool).await.unwrap();
+        assert_eq!(holdings.len(), 1);
+        assert_eq!(holdings[0].total_cost_base, Decimal::ZERO);
+        assert_eq!(holdings[0].avg_cost_base_per_unit, Decimal::ZERO);
     }
 
     #[tokio::test]

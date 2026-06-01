@@ -171,7 +171,11 @@ pub async fn db_realised_gains(pool: &SqlitePool) -> Result<Vec<RealisedGainLoss
         let buy_initial_cost =
             buy.average_price * buy.quantity + buy.brokerage + buy.gst_on_brokerage;
         let amit = *cba_reduction.get(&buy_id).unwrap_or(&Decimal::ZERO);
-        let buy_net_cost = buy_initial_cost - amit;
+        // CGT event E10: an AMIT cost base reduction can only take the cost base to
+        // nil, never negative. Any excess is reported as a capital gain by the
+        // net-capital-gain report (see `e10_gains`), so a sale of an exhausted parcel
+        // uses a nil cost base here rather than a negative one.
+        let buy_net_cost = (buy_initial_cost - amit).max(Decimal::ZERO);
         let alloc_cost = if buy.quantity > Decimal::ZERO {
             buy_net_cost * qty_alloc / buy.quantity
         } else {
