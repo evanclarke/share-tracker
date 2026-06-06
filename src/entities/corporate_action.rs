@@ -52,8 +52,24 @@
 //! trades cannot be edited or deleted (delete the exercise trades first).
 //! Selling or letting the rights themselves lapse is not modelled.
 //!
+//! **BuyBack** — an off-market share buy-back (see `docs/share-buy-backs.md`):
+//! the company offers to buy back shares directly from holders. The action
+//! records the offer terms: on/after the buy-back `date`, each unit bought
+//! back is paid `buyback_price` in `currency`, of which `buyback_dividend` is
+//! an assessable franked dividend carrying `buyback_franking_credit` (both 0
+//! for a listed-company buy-back announced after 7:30 pm AEDT 25 Oct 2022 —
+//! no dividend component), and `buyback_market_value` is the per-unit market
+//! value had the buy-back not been proposed (capital proceeds can't be less
+//! than it; `None` when the price is at or above market value). Recording the
+//! action changes nothing by itself; participating (`POST
+//! /corporate_actions/:id/participate`, `entities::buyback_participation`)
+//! atomically creates the Sell trade — per-unit price = capital proceeds per
+//! unit = `max(price, market value) − dividend` — with its parcel
+//! allocations, plus the dividend-component income row when there is one.
+//! An action referenced by participation trades is frozen against edits.
+//!
 //! `ActionKind` is the extension point for future corporate actions
-//! (buy-backs, mergers, ...), each widening the enum and its CHECK.
+//! (mergers, demergers, ...), each widening the enum and its CHECK.
 
 use crate::infra::decimal::parse_dec;
 use crate::infra::http::write_error_status;
@@ -106,6 +122,22 @@ pub enum ActionKind {
         exercise_price: Decimal,
         currency: String,
     },
+    BuyBack {
+        /// Per-unit buy-back price in `currency` (positive).
+        buyback_price: Decimal,
+        /// Per-unit dividend component of the price (non-negative, ≤ the
+        /// price; 0 for a listed-company buy-back announced after
+        /// 25 Oct 2022). Assessable income, excluded from capital proceeds.
+        buyback_dividend: Decimal,
+        /// Per-unit franking credit attached to the dividend component
+        /// (non-negative; 0 when there is no dividend component).
+        buyback_franking_credit: Decimal,
+        /// Per-unit market value had the buy-back not been proposed
+        /// (positive). Capital proceeds can't be less than it; `None` when
+        /// the buy-back price is at or above market value (the price is used).
+        buyback_market_value: Option<Decimal>,
+        currency: String,
+    },
 }
 
 impl ActionKind {
@@ -116,6 +148,7 @@ impl ActionKind {
             ActionKind::ShareSplit { .. } => "ShareSplit",
             ActionKind::BonusIssue { .. } => "BonusIssue",
             ActionKind::RightsIssue { .. } => "RightsIssue",
+            ActionKind::BuyBack { .. } => "BuyBack",
         }
     }
 }
@@ -142,6 +175,15 @@ fn req_dec(row: &sqlx::sqlite::SqliteRow, column: &str) -> Result<Decimal, sqlx:
     parse_dec(column, row.try_get(column)?)
 }
 
+/// An optional `TEXT` decimal column: NULL is `None`, an unparsable value is
+/// a Decode error.
+fn opt_dec(row: &sqlx::sqlite::SqliteRow, column: &str) -> Result<Option<Decimal>, sqlx::Error> {
+    match row.try_get::<Option<String>, _>(column)? {
+        Some(s) => parse_dec(column, s).map(Some),
+        None => Ok(None),
+    }
+}
+
 fn kind_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<ActionKind, sqlx::Error> {
     match row.try_get::<String, _>("action_type")?.as_str() {
         "ReturnOfCapital" => Ok(ActionKind::ReturnOfCapital {
@@ -160,6 +202,13 @@ fn kind_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<ActionKind, sqlx::Erro
             rights_units: req_dec(row, "rights_units")?,
             rights_held_units: req_dec(row, "rights_held_units")?,
             exercise_price: req_dec(row, "exercise_price")?,
+            currency: row.try_get("currency")?,
+        }),
+        "BuyBack" => Ok(ActionKind::BuyBack {
+            buyback_price: req_dec(row, "buyback_price")?,
+            buyback_dividend: req_dec(row, "buyback_dividend")?,
+            buyback_franking_credit: req_dec(row, "buyback_franking_credit")?,
+            buyback_market_value: opt_dec(row, "buyback_market_value")?,
             currency: row.try_get("currency")?,
         }),
         other => Err(sqlx::Error::Decode(
@@ -188,6 +237,7 @@ enum ActionType {
     ShareSplit,
     BonusIssue,
     RightsIssue,
+    BuyBack,
 }
 
 #[derive(Debug, Deserialize)]
@@ -213,6 +263,14 @@ pub struct CorporateActionBody {
     rights_held_units: Option<Decimal>,
     #[serde(default)]
     exercise_price: Option<Decimal>,
+    #[serde(default)]
+    buyback_price: Option<Decimal>,
+    #[serde(default)]
+    buyback_dividend: Option<Decimal>,
+    #[serde(default)]
+    buyback_franking_credit: Option<Decimal>,
+    #[serde(default)]
+    buyback_market_value: Option<Decimal>,
 }
 
 impl CorporateActionBody {
@@ -220,11 +278,15 @@ impl CorporateActionBody {
     /// CHECKs, plus positivity): ReturnOfCapital needs a positive payment and
     /// a currency; ShareSplit a positive conversion ratio; BonusIssue a
     /// positive bonus ratio; RightsIssue a positive entitlement ratio,
-    /// exercise price, and a currency — each with every other type's fields
-    /// absent (`None` otherwise; `currency` is shared by ReturnOfCapital and
-    /// RightsIssue but forbidden for the ratio-only types). A zero/negative
-    /// payment would silently *increase* cost bases; a zero/negative ratio
-    /// would zero out or invert holdings or entitlements.
+    /// exercise price, and a currency; BuyBack a positive per-unit price and
+    /// a currency (dividend/franking-credit components default to 0; the
+    /// dividend may not exceed the price — it is part of it — and a credit
+    /// needs a dividend to attach to; market value, when given, is positive)
+    /// — each with every other type's fields absent (`None` otherwise;
+    /// `currency` is shared by ReturnOfCapital, RightsIssue, and BuyBack but
+    /// forbidden for the ratio-only types). A zero/negative payment would
+    /// silently *increase* cost bases; a zero/negative ratio would zero out
+    /// or invert holdings or entitlements.
     fn kind(self) -> Option<ActionKind> {
         let payment = self.amount_per_unit.is_some();
         let split = self.split_new_units.is_some() || self.split_old_units.is_some();
@@ -232,16 +294,20 @@ impl CorporateActionBody {
         let rights = self.rights_units.is_some()
             || self.rights_held_units.is_some()
             || self.exercise_price.is_some();
+        let buyback = self.buyback_price.is_some()
+            || self.buyback_dividend.is_some()
+            || self.buyback_franking_credit.is_some()
+            || self.buyback_market_value.is_some();
         let positive = |d: Option<Decimal>| d.filter(|v| *v > Decimal::ZERO);
         match self.action_type {
-            ActionType::ReturnOfCapital if !split && !bonus && !rights => {
+            ActionType::ReturnOfCapital if !split && !bonus && !rights && !buyback => {
                 Some(ActionKind::ReturnOfCapital {
                     amount_per_unit: positive(self.amount_per_unit)?,
                     currency: self.currency?,
                 })
             }
             ActionType::ShareSplit
-                if !payment && !bonus && !rights && self.currency.is_none() =>
+                if !payment && !bonus && !rights && !buyback && self.currency.is_none() =>
             {
                 Some(ActionKind::ShareSplit {
                     split_new_units: positive(self.split_new_units)?,
@@ -249,18 +315,44 @@ impl CorporateActionBody {
                 })
             }
             ActionType::BonusIssue
-                if !payment && !split && !rights && self.currency.is_none() =>
+                if !payment && !split && !rights && !buyback && self.currency.is_none() =>
             {
                 Some(ActionKind::BonusIssue {
                     bonus_units: positive(self.bonus_units)?,
                     bonus_held_units: positive(self.bonus_held_units)?,
                 })
             }
-            ActionType::RightsIssue if !payment && !split && !bonus => {
+            ActionType::RightsIssue if !payment && !split && !bonus && !buyback => {
                 Some(ActionKind::RightsIssue {
                     rights_units: positive(self.rights_units)?,
                     rights_held_units: positive(self.rights_held_units)?,
                     exercise_price: positive(self.exercise_price)?,
+                    currency: self.currency?,
+                })
+            }
+            ActionType::BuyBack if !payment && !split && !bonus && !rights => {
+                let buyback_price = positive(self.buyback_price)?;
+                let buyback_dividend = self.buyback_dividend.unwrap_or(Decimal::ZERO);
+                if buyback_dividend < Decimal::ZERO || buyback_dividend > buyback_price {
+                    return None;
+                }
+                let buyback_franking_credit =
+                    self.buyback_franking_credit.unwrap_or(Decimal::ZERO);
+                if buyback_franking_credit < Decimal::ZERO
+                    || (buyback_franking_credit > Decimal::ZERO
+                        && buyback_dividend == Decimal::ZERO)
+                {
+                    return None;
+                }
+                let buyback_market_value = match self.buyback_market_value {
+                    Some(mv) => Some(positive(Some(mv))?),
+                    None => None,
+                };
+                Some(ActionKind::BuyBack {
+                    buyback_price,
+                    buyback_dividend,
+                    buyback_franking_credit,
+                    buyback_market_value,
                     currency: self.currency?,
                 })
             }
@@ -277,7 +369,9 @@ pub fn router() -> Router<SqlitePool> {
 
 const COLUMNS: &str = "id, action_type, listing_id, date, amount_per_unit, currency, \
                        split_new_units, split_old_units, bonus_units, bonus_held_units, \
-                       rights_units, rights_held_units, exercise_price";
+                       rights_units, rights_held_units, exercise_price, \
+                       buyback_price, buyback_dividend, buyback_franking_credit, \
+                       buyback_market_value";
 
 pub async fn db_list(pool: &SqlitePool) -> Result<Vec<CorporateAction>, sqlx::Error> {
     sqlx::query_as(&format!("SELECT {COLUMNS} FROM corporate_actions ORDER BY id"))
@@ -304,11 +398,12 @@ where
 #[derive(Debug)]
 pub enum WriteError {
     Db(sqlx::Error),
-    /// The action is referenced by rights-exercise trades
-    /// (`trades.rights_action_id`): editing it would retroactively change the
-    /// entitlement those exercises were validated against. Delete the
-    /// exercise trades first. Mapped to `422`.
-    ReferencedByExercise,
+    /// The action is referenced by rights-exercise or buy-back participation
+    /// trades (`trades.rights_action_id` / `trades.buyback_action_id`):
+    /// editing it would retroactively change the terms those trades were
+    /// created and validated against. Delete the referencing trades first.
+    /// Mapped to `422`.
+    ReferencedByTrade,
 }
 
 impl From<sqlx::Error> for WriteError {
@@ -331,6 +426,10 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
         rights_units: Option<String>,
         rights_held_units: Option<String>,
         exercise_price: Option<String>,
+        buyback_price: Option<String>,
+        buyback_dividend: Option<String>,
+        buyback_franking_credit: Option<String>,
+        buyback_market_value: Option<String>,
     }
     let mut c = Cols::default();
     match &action.kind {
@@ -352,28 +451,45 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
             c.exercise_price = Some(exercise_price.to_string());
             c.currency = Some(currency.clone());
         }
+        ActionKind::BuyBack {
+            buyback_price,
+            buyback_dividend,
+            buyback_franking_credit,
+            buyback_market_value,
+            currency,
+        } => {
+            c.buyback_price = Some(buyback_price.to_string());
+            c.buyback_dividend = Some(buyback_dividend.to_string());
+            c.buyback_franking_credit = Some(buyback_franking_credit.to_string());
+            c.buyback_market_value = buyback_market_value.map(|v| v.to_string());
+            c.currency = Some(currency.clone());
+        }
     }
 
     let mut tx = pool.begin().await?;
 
-    // An action that exercise trades were validated against is frozen: editing
-    // its terms (or re-typing it) would invalidate those past entitlement
-    // checks. Checked and written in one transaction.
-    let referenced: bool =
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM trades WHERE rights_action_id = ?)")
-            .bind(action.id)
-            .fetch_one(&mut *tx)
-            .await?;
+    // An action that exercise or participation trades were validated against
+    // is frozen: editing its terms (or re-typing it) would invalidate the
+    // checks those trades were created under. Checked and written in one
+    // transaction.
+    let referenced: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM trades \
+                       WHERE rights_action_id = ?1 OR buyback_action_id = ?1)",
+    )
+    .bind(action.id)
+    .fetch_one(&mut *tx)
+    .await?;
     if referenced {
-        return Err(WriteError::ReferencedByExercise);
+        return Err(WriteError::ReferencedByTrade);
     }
 
     sqlx::query(
         "INSERT INTO corporate_actions \
          (id, action_type, listing_id, date, amount_per_unit, currency, \
           split_new_units, split_old_units, bonus_units, bonus_held_units, \
-          rights_units, rights_held_units, exercise_price) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+          rights_units, rights_held_units, exercise_price, \
+          buyback_price, buyback_dividend, buyback_franking_credit, buyback_market_value) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT(id) DO UPDATE SET \
              action_type       = excluded.action_type, \
              listing_id        = excluded.listing_id, \
@@ -386,7 +502,11 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
              bonus_held_units  = excluded.bonus_held_units, \
              rights_units      = excluded.rights_units, \
              rights_held_units = excluded.rights_held_units, \
-             exercise_price    = excluded.exercise_price",
+             exercise_price    = excluded.exercise_price, \
+             buyback_price           = excluded.buyback_price, \
+             buyback_dividend        = excluded.buyback_dividend, \
+             buyback_franking_credit = excluded.buyback_franking_credit, \
+             buyback_market_value    = excluded.buyback_market_value",
     )
     .bind(action.id)
     .bind(action.kind.type_str())
@@ -401,6 +521,10 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
     .bind(c.rights_units)
     .bind(c.rights_held_units)
     .bind(c.exercise_price)
+    .bind(c.buyback_price)
+    .bind(c.buyback_dividend)
+    .bind(c.buyback_franking_credit)
+    .bind(c.buyback_market_value)
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -663,8 +787,8 @@ async fn upsert(
         .map_err(|e| match e {
             // Unknown listing/currency FK or enum CHECK violation → 422.
             WriteError::Db(err) => write_error_status(&err),
-            // Frozen while rights-exercise trades reference it → 422.
-            WriteError::ReferencedByExercise => StatusCode::UNPROCESSABLE_ENTITY,
+            // Frozen while exercise/participation trades reference it → 422.
+            WriteError::ReferencedByTrade => StatusCode::UNPROCESSABLE_ENTITY,
         })
 }
 
@@ -768,6 +892,29 @@ mod tests {
         }
     }
 
+    fn buyback(
+        id: i64,
+        listing_id: i64,
+        date: NaiveDate,
+        price: &str,
+        dividend: &str,
+        credit: &str,
+        market_value: Option<&str>,
+    ) -> CorporateAction {
+        CorporateAction {
+            id,
+            listing_id,
+            date,
+            kind: ActionKind::BuyBack {
+                buyback_price: price.parse().unwrap(),
+                buyback_dividend: dividend.parse().unwrap(),
+                buyback_franking_credit: credit.parse().unwrap(),
+                buyback_market_value: market_value.map(|v| v.parse().unwrap()),
+                currency: "AUD".to_string(),
+            },
+        }
+    }
+
     fn split_event(date: NaiveDate, new: &str, old: &str) -> SplitEvent {
         SplitEvent { date, new_units: new.parse().unwrap(), old_units: old.parse().unwrap() }
     }
@@ -849,6 +996,51 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn db_insert_and_retrieve_buy_back_preserves_terms() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BBK").await;
+        // Sub-cent per-unit components must round-trip exactly.
+        db_upsert(&pool, &buyback(1, 1, d(2024, 11, 30), "9.60", "1.405", "0.605", Some("10.20")))
+            .await
+            .unwrap();
+
+        let got = db_get(&pool, 1).await.unwrap().unwrap();
+        assert_eq!(
+            got.kind,
+            ActionKind::BuyBack {
+                buyback_price: "9.60".parse().unwrap(),
+                buyback_dividend: "1.405".parse().unwrap(),
+                buyback_franking_credit: "0.605".parse().unwrap(),
+                buyback_market_value: Some("10.20".parse().unwrap()),
+                currency: "AUD".to_string(),
+            }
+        );
+
+        // The market value is optional: absent round-trips as None.
+        db_upsert(&pool, &buyback(2, 1, d(2024, 12, 31), "5.00", "0", "0", None)).await.unwrap();
+        let got = db_get(&pool, 2).await.unwrap().unwrap();
+        assert!(matches!(
+            got.kind,
+            ActionKind::BuyBack { buyback_market_value: None, .. }
+        ));
+    }
+
+    /// A BuyBack never appears in the split-event or return-of-capital
+    /// streams — recording one changes no existing parcel.
+    #[tokio::test]
+    async fn db_buy_back_is_not_a_split_or_payment_event() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BBK").await;
+        db_upsert(&pool, &buyback(1, 1, d(2024, 11, 30), "9.60", "1.40", "0.60", Some("10.20")))
+            .await
+            .unwrap();
+
+        assert!(db_share_split_events(&pool).await.unwrap().is_empty());
+        assert!(db_splits_for_listing(&pool, 1).await.unwrap().is_empty());
+        assert!(db_return_of_capital_events(&pool).await.unwrap().is_empty());
+    }
+
     /// A RightsIssue never appears in the split-event or return-of-capital
     /// streams — recording one changes no existing parcel.
     #[tokio::test]
@@ -899,9 +1091,17 @@ mod tests {
             ("ReturnOfCapital", "split_new_units = '2', split_old_units = '1'"),
             // …a BonusIssue carrying a split ratio…
             ("BonusIssue", "split_new_units = '2', split_old_units = '1'"),
-            // …and a RightsIssue carrying a payment or a split ratio.
+            // …a RightsIssue carrying a payment or a split ratio…
             ("RightsIssue", "amount_per_unit = '0.50'"),
             ("RightsIssue", "split_new_units = '2', split_old_units = '1'"),
+            // …a BuyBack carrying a payment, a split ratio, or rights terms…
+            ("BuyBack", "amount_per_unit = '0.50'"),
+            ("BuyBack", "split_new_units = '2', split_old_units = '1'"),
+            ("BuyBack", "rights_units = '1', rights_held_units = '4', exercise_price = '1.80'"),
+            // …and the other types carrying buy-back terms.
+            ("ShareSplit", "buyback_price = '9.60', buyback_dividend = '0', buyback_franking_credit = '0'"),
+            ("ReturnOfCapital", "buyback_price = '9.60', buyback_dividend = '0', buyback_franking_credit = '0'"),
+            ("RightsIssue", "buyback_market_value = '10.20'"),
         ] {
             let (base_cols, base_vals) = match action_type {
                 "ShareSplit" => ("split_new_units, split_old_units", "'2', '1'"),
@@ -909,6 +1109,10 @@ mod tests {
                 "RightsIssue" => (
                     "rights_units, rights_held_units, exercise_price, currency",
                     "'1', '4', '1.80', 'AUD'",
+                ),
+                "BuyBack" => (
+                    "buyback_price, buyback_dividend, buyback_franking_credit, currency",
+                    "'9.60', '1.40', '0.60', 'AUD'",
                 ),
                 _ => ("bonus_units, bonus_held_units", "'1', '10'"),
             };
@@ -1328,6 +1532,134 @@ mod tests {
             serde_json::json!({
                 "action_type": "BonusIssue", "listing_id": 1, "date": "2024-11-30",
                 "bonus_units": "1", "bonus_held_units": "10", "currency": "AUD",
+            }),
+        ] {
+            api_put_expecting(&pool, body, StatusCode::UNPROCESSABLE_ENTITY).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn api_buy_back_round_trip() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BBK").await;
+        api_put_expecting(
+            &pool,
+            serde_json::json!({
+                "action_type": "BuyBack",
+                "listing_id": 1,
+                "date": "2024-11-30",
+                "buyback_price": "9.60",
+                "buyback_dividend": "1.40",
+                "buyback_franking_credit": "0.60",
+                "buyback_market_value": "10.20",
+                "currency": "AUD",
+            }),
+            StatusCode::NO_CONTENT,
+        )
+        .await;
+        let got = db_get(&pool, 1).await.unwrap().unwrap();
+        assert_eq!(
+            got.kind,
+            ActionKind::BuyBack {
+                buyback_price: "9.60".parse().unwrap(),
+                buyback_dividend: "1.40".parse().unwrap(),
+                buyback_franking_credit: "0.60".parse().unwrap(),
+                buyback_market_value: Some("10.20".parse().unwrap()),
+                currency: "AUD".to_string(),
+            }
+        );
+
+        // The no-dividend (listed post-Oct-2022) shape: dividend/credit
+        // default to 0 and the market value may be omitted.
+        api_put_expecting(
+            &pool,
+            serde_json::json!({
+                "action_type": "BuyBack",
+                "listing_id": 1,
+                "date": "2024-12-31",
+                "buyback_price": "5.00",
+                "currency": "AUD",
+            }),
+            StatusCode::NO_CONTENT,
+        )
+        .await;
+        let got = db_get(&pool, 1).await.unwrap().unwrap();
+        assert_eq!(
+            got.kind,
+            ActionKind::BuyBack {
+                buyback_price: "5.00".parse().unwrap(),
+                buyback_dividend: Decimal::ZERO,
+                buyback_franking_credit: Decimal::ZERO,
+                buyback_market_value: None,
+                currency: "AUD".to_string(),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn api_invalid_buy_back_payloads_return_422() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BBK").await;
+        // Missing/non-positive price, a missing currency, a dividend
+        // exceeding the price (it is a component of it), a negative
+        // dividend, a credit without a dividend to attach to, a negative
+        // credit, a non-positive market value, stray cross-type fields —
+        // and the other types carrying buy-back fields.
+        for body in [
+            serde_json::json!({
+                "action_type": "BuyBack", "listing_id": 1, "date": "2024-11-30",
+                "currency": "AUD",
+            }),
+            serde_json::json!({
+                "action_type": "BuyBack", "listing_id": 1, "date": "2024-11-30",
+                "buyback_price": "0", "currency": "AUD",
+            }),
+            serde_json::json!({
+                "action_type": "BuyBack", "listing_id": 1, "date": "2024-11-30",
+                "buyback_price": "9.60",
+            }),
+            serde_json::json!({
+                "action_type": "BuyBack", "listing_id": 1, "date": "2024-11-30",
+                "buyback_price": "9.60", "buyback_dividend": "9.61", "currency": "AUD",
+            }),
+            serde_json::json!({
+                "action_type": "BuyBack", "listing_id": 1, "date": "2024-11-30",
+                "buyback_price": "9.60", "buyback_dividend": "-1.40", "currency": "AUD",
+            }),
+            serde_json::json!({
+                "action_type": "BuyBack", "listing_id": 1, "date": "2024-11-30",
+                "buyback_price": "9.60", "buyback_franking_credit": "0.60", "currency": "AUD",
+            }),
+            serde_json::json!({
+                "action_type": "BuyBack", "listing_id": 1, "date": "2024-11-30",
+                "buyback_price": "9.60", "buyback_dividend": "1.40",
+                "buyback_franking_credit": "-0.60", "currency": "AUD",
+            }),
+            serde_json::json!({
+                "action_type": "BuyBack", "listing_id": 1, "date": "2024-11-30",
+                "buyback_price": "9.60", "buyback_market_value": "0", "currency": "AUD",
+            }),
+            serde_json::json!({
+                "action_type": "BuyBack", "listing_id": 1, "date": "2024-11-30",
+                "buyback_price": "9.60", "currency": "AUD",
+                "split_new_units": "2", "split_old_units": "1",
+            }),
+            serde_json::json!({
+                "action_type": "BuyBack", "listing_id": 1, "date": "2024-11-30",
+                "buyback_price": "9.60", "currency": "AUD", "amount_per_unit": "0.50",
+            }),
+            serde_json::json!({
+                "action_type": "ShareSplit", "listing_id": 1, "date": "2024-11-30",
+                "split_new_units": "2", "split_old_units": "1", "buyback_price": "9.60",
+            }),
+            serde_json::json!({
+                "action_type": "ReturnOfCapital", "listing_id": 1, "date": "2024-11-30",
+                "amount_per_unit": "0.50", "currency": "AUD", "buyback_dividend": "1.40",
+            }),
+            serde_json::json!({
+                "action_type": "RightsIssue", "listing_id": 1, "date": "2024-11-30",
+                "rights_units": "1", "rights_held_units": "4", "exercise_price": "1.80",
+                "currency": "AUD", "buyback_market_value": "10.20",
             }),
         ] {
             api_put_expecting(&pool, body, StatusCode::UNPROCESSABLE_ENTITY).await;

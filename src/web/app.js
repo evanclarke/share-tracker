@@ -276,14 +276,14 @@
     },
     {
       slug: 'corporate_actions', title: 'Corporate Actions', group: 'Activity', api: '/corporate_actions',
-      desc: 'Return-of-capital payments (CGT event G1): the per-unit amount reduces the cost base of parcels held on the payment date; any excess over a parcel’s cost base is a capital gain in the Net Capital Gain report. Share splits/consolidations (TD 2000/10): on the conversion date every “old units” become “new units” (2-for-1 split: new 2, old 1; 1-for-10 consolidation: new 1, old 10) — no CGT event, the parcels keep their total cost base and original acquisition date. Bonus issues (non-assessable): on the issue date every “held units” receive “bonus units” extra units (1-for-10 issue: bonus 1, held 10) — no CGT event, the cost base is apportioned over original + bonus shares and the acquisition date is preserved; bonus shares chosen in lieu of a dividend are a DRP trade, not entered here. Rights issues: units held before the record date earn “rights units” per “held units” at the exercise price (1-for-4 issue: rights 1, held 4) — recording the issue changes nothing; use the row’s Exercise action to create the new Buy parcel (acquired at the exercise date, cost base = exercise payment + any amount paid for the rights). Fill only the chosen action type’s fields and leave the other types’ fields blank.',
+      desc: 'Return-of-capital payments (CGT event G1): the per-unit amount reduces the cost base of parcels held on the payment date; any excess over a parcel’s cost base is a capital gain in the Net Capital Gain report. Share splits/consolidations (TD 2000/10): on the conversion date every “old units” become “new units” (2-for-1 split: new 2, old 1; 1-for-10 consolidation: new 1, old 10) — no CGT event, the parcels keep their total cost base and original acquisition date. Bonus issues (non-assessable): on the issue date every “held units” receive “bonus units” extra units (1-for-10 issue: bonus 1, held 10) — no CGT event, the cost base is apportioned over original + bonus shares and the acquisition date is preserved; bonus shares chosen in lieu of a dividend are a DRP trade, not entered here. Rights issues: units held before the record date earn “rights units” per “held units” at the exercise price (1-for-4 issue: rights 1, held 4) — recording the issue changes nothing; use the row’s Exercise action to create the new Buy parcel (acquired at the exercise date, cost base = exercise payment + any amount paid for the rights). Off-market buy-backs: record the per-unit buy-back price, the dividend component of that price and its franking credit (both 0 for a listed-company buy-back announced after 25 Oct 2022), and the market value had the buy-back not been proposed (blank if the price is at or above it); recording changes nothing — use the row’s Participate action to sell units into the buy-back, which creates the Sell at the capital proceeds (max(price, market value) − dividend) plus the dividend income row. Fill only the chosen action type’s fields and leave the other types’ fields blank.',
       keyFields: [int('id', 'ID', { auto: true })],
       fields: [
-        sel('action_type', 'Action type', ['ReturnOfCapital', 'ShareSplit', 'BonusIssue', 'RightsIssue'], { required: true }),
+        sel('action_type', 'Action type', ['ReturnOfCapital', 'ShareSplit', 'BonusIssue', 'RightsIssue', 'BuyBack'], { required: true }),
         fk('listing_id', 'Listing', 'listings', { required: true }),
-        dt('date', 'Payment / conversion / issue / record date', { required: true }),
+        dt('date', 'Payment / conversion / issue / record / buy-back date', { required: true }),
         dec('amount_per_unit', 'Amount per unit', { optional: true, default: '', hint: 'ReturnOfCapital only.' }),
-        fk('currency', 'Currency', 'currencies', { optional: true, encode: 'string', default: '', hint: 'ReturnOfCapital and RightsIssue only.' }),
+        fk('currency', 'Currency', 'currencies', { optional: true, encode: 'string', default: '', hint: 'ReturnOfCapital, RightsIssue, and BuyBack only.' }),
         dec('split_new_units', 'Split: new units', { optional: true, default: '', hint: 'ShareSplit only.' }),
         dec('split_old_units', 'Split: old units', { optional: true, default: '', hint: 'ShareSplit only.' }),
         dec('bonus_units', 'Bonus: units issued', { optional: true, default: '', hint: 'BonusIssue only.' }),
@@ -291,10 +291,16 @@
         dec('rights_units', 'Rights: new units', { optional: true, default: '', hint: 'RightsIssue only.' }),
         dec('rights_held_units', 'Rights: per units held', { optional: true, default: '', hint: 'RightsIssue only.' }),
         dec('exercise_price', 'Rights: exercise price per unit', { optional: true, default: '', hint: 'RightsIssue only.' }),
+        dec('buyback_price', 'Buy-back: price per unit', { optional: true, default: '', hint: 'BuyBack only.' }),
+        dec('buyback_dividend', 'Buy-back: dividend per unit', { optional: true, default: '', hint: 'BuyBack only; 0 (or blank) when the price has no dividend component.' }),
+        dec('buyback_franking_credit', 'Buy-back: franking credit per unit', { optional: true, default: '', hint: 'BuyBack only; needs a dividend.' }),
+        dec('buyback_market_value', 'Buy-back: market value per unit', { optional: true, default: '', hint: 'BuyBack only; had the buy-back not been proposed. Blank if the price is at or above it.' }),
       ],
-      columns: ['id', 'action_type', 'listing_id', 'date', 'amount_per_unit', 'currency', 'split_new_units', 'split_old_units', 'bonus_units', 'bonus_held_units', 'rights_units', 'rights_held_units', 'exercise_price'],
+      columns: ['id', 'action_type', 'listing_id', 'date', 'amount_per_unit', 'currency', 'split_new_units', 'split_old_units', 'bonus_units', 'bonus_held_units', 'rights_units', 'rights_held_units', 'exercise_price', 'buyback_price', 'buyback_dividend', 'buyback_franking_credit', 'buyback_market_value'],
       rowActions: function (row) {
-        return row.action_type === 'RightsIssue' ? [{ label: 'Exercise', href: '#/exercise/' + row.id }] : [];
+        if (row.action_type === 'RightsIssue') return [{ label: 'Exercise', href: '#/exercise/' + row.id }];
+        if (row.action_type === 'BuyBack') return [{ label: 'Participate', href: '#/participate/' + row.id }];
+        return [];
       },
     },
     {
@@ -822,6 +828,77 @@
     ]));
   }
 
+  // ---- buy-back participation --------------------------------------------
+  // Reached from a BuyBack corporate action row's "Participate" action. Sells
+  // units into the buy-back via POST /corporate_actions/:id/participate, which
+  // atomically creates the Sell at the capital proceeds per unit
+  // (max(price, market value) − dividend) with the chosen parcel allocations,
+  // plus the dividend-component income row when the price carries one.
+  async function viewParticipate(actionId) {
+    setActiveNav('corporate_actions');
+    const action = await api('GET', '/corporate_actions/' + actionId);
+    const form = el('form');
+    const fields = [
+      dt('date', 'Participation date', { required: true, hint: 'The CGT event (acceptance) date; on or after the buy-back date (' + action.date + '). Also the dividend component’s pay date.' }),
+      dec('units', 'Units sold into the buy-back', { required: true, default: '' }),
+      dec('fx_rate', 'FX rate', { default: '1', hint: 'Optional; defaults to 1.' }),
+    ];
+    for (const f of fields) form.appendChild(await buildFieldInput(f, null, false));
+
+    // Parcel allocations, the same shape as the Sells form.
+    const parcelOptions = await loadOptions('buyParcels');
+    const allocList = el('div');
+    function addAllocRow() {
+      const purchaseSel = el('select', { name: 'alloc_purchase' });
+      parcelOptions.forEach(function (o) { purchaseSel.appendChild(el('option', { value: o.value }, o.label)); });
+      const qtyInput = el('input', { type: 'text', inputmode: 'decimal', name: 'alloc_qty', value: '' });
+      const row = el('div', { class: 'alloc-row' }, [
+        el('div', { class: 'field' }, [el('label', null, 'Purchase parcel'), purchaseSel]),
+        el('div', { class: 'field' }, [el('label', null, 'Quantity allocated'), qtyInput]),
+        el('button', { type: 'button', class: 'small danger', onclick: function () { allocList.removeChild(row); } }, 'Remove'),
+      ]);
+      allocList.appendChild(row);
+    }
+    addAllocRow();
+    form.appendChild(el('div', null, [
+      el('h3', null, 'Parcel allocations'),
+      el('p', { class: 'hint' }, 'Allocations must sum exactly to the units sold. Each parcel must be a Buy/DRP with enough remaining units.'),
+      allocList,
+      el('button', { type: 'button', class: 'small', onclick: function () { addAllocRow(); } }, '+ Add allocation'),
+    ]));
+
+    form.appendChild(el('div', { class: 'form-actions' }, [
+      el('button', { type: 'submit', class: 'primary' }, 'Participate'),
+      el('a', { href: '#/e/corporate_actions' }, el('button', { type: 'button' }, 'Cancel')),
+    ]));
+    form.addEventListener('submit', async function (ev) {
+      ev.preventDefault();
+      try {
+        const body = { date: readFieldValue(fields[0], form), units: readFieldValue(fields[1], form) };
+        const fxr = readFieldValue(fields[2], form);
+        if (fxr != null) body.fx_rate = fxr;
+        const allocs = [];
+        allocList.querySelectorAll('.alloc-row').forEach(function (r) {
+          const pid = r.querySelector('[name="alloc_purchase"]').value;
+          const qty = (r.querySelector('[name="alloc_qty"]').value || '').trim();
+          if (pid !== '' && qty !== '') allocs.push({ purchase_trade_id: Number(pid), quantity_allocated: qty });
+        });
+        body.allocations = allocs;
+        const result = await api('POST', '/corporate_actions/' + actionId + '/participate', body);
+        const tradeId = result && result.trade ? result.trade.id : '?';
+        toast('Sold into the buy-back as trade #' + tradeId + (result && result.income ? ' with dividend income #' + result.income.id : '') + '.');
+        location.hash = '#/e/corporate_actions';
+      } catch (e) {
+        toast(e.message, true);
+      }
+    });
+    setMain(el('div', null, [
+      el('h2', null, 'Participate in buy-back #' + actionId),
+      el('p', { class: 'view-desc' }, 'Creates a Sell trade for listing ' + action.listing_id + ' at the capital proceeds per unit — max(price ' + action.buyback_price + ', market value ' + (action.buyback_market_value || action.buyback_price) + ') − dividend ' + action.buyback_dividend + ' ' + action.currency + ' — plus the dividend-component income row when there is one.'),
+      el('div', { class: 'card' }, form),
+    ]));
+  }
+
   // ---- document attachments ---------------------------------------------
   // Reached from a Trade / Income / AMMA row's "Attachments" action. Lists the
   // activity's attachments (metadata only — never the blob), uploads a new file
@@ -1034,6 +1111,7 @@
       }
       if (parts[0] === 'reinvest') return await viewReinvest(parts[1]);
       if (parts[0] === 'exercise') return await viewExercise(parts[1]);
+      if (parts[0] === 'participate') return await viewParticipate(parts[1]);
       if (parts[0] === 'attachments') return await viewAttachments(parts[1], parts[2]);
       if (parts[0] === 'jobs') return await viewJobs();
       if (parts[0] === 'r') {

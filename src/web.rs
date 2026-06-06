@@ -245,7 +245,8 @@ mod tests {
         let js = app_js_body().await;
         // The Corporate Actions view records return-of-capital payments (CGT
         // event G1), share splits/consolidations (TD 2000/10), non-assessable
-        // bonus issues, and rights issues against a listing.
+        // bonus issues, rights issues, and off-market buy-backs against a
+        // listing.
         assert!(js.contains("/corporate_actions"));
         assert!(js.contains("ReturnOfCapital"));
         assert!(js.contains("amount_per_unit"));
@@ -263,6 +264,14 @@ mod tests {
         assert!(js.contains("viewExercise"));
         assert!(js.contains("/exercise"));
         assert!(js.contains("rights_cost"));
+        assert!(js.contains("BuyBack"));
+        assert!(js.contains("buyback_price"));
+        assert!(js.contains("buyback_dividend"));
+        assert!(js.contains("buyback_franking_credit"));
+        assert!(js.contains("buyback_market_value"));
+        // A BuyBack row's Participate action drives the participate endpoint.
+        assert!(js.contains("viewParticipate"));
+        assert!(js.contains("/participate"));
     }
 
     #[tokio::test]

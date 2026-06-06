@@ -373,6 +373,7 @@ mod tests {
                 residual_carried_forward: Decimal::ZERO,
                 residual_paid_out: Decimal::ZERO,
                 rights_action_id: None,
+                buyback_action_id: None,
             },
         )
         .await
@@ -396,6 +397,7 @@ mod tests {
             trust_income: false,
             reinvestment_trade_id: None,
             currency: "AUD".to_string(),
+            buyback_trade_id: None,
         }
     }
 

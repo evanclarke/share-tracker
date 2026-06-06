@@ -278,6 +278,7 @@ mod tests {
                 residual_carried_forward: Decimal::ZERO,
                 residual_paid_out: Decimal::ZERO,
                 rights_action_id: None,
+                buyback_action_id: None,
             },
         )
         .await
@@ -585,7 +586,7 @@ mod tests {
 
         let action = corporate_action::db_get(&pool, 10).await.unwrap().unwrap();
         let err = corporate_action::db_upsert(&pool, &action).await;
-        assert!(matches!(err, Err(corporate_action::WriteError::ReferencedByExercise)));
+        assert!(matches!(err, Err(corporate_action::WriteError::ReferencedByTrade)));
         let err = corporate_action::db_delete(&pool, 10).await;
         assert!(err.is_err(), "the trades.rights_action_id FK must block the delete");
 

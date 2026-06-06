@@ -29,6 +29,13 @@ pub struct Income {
     /// non-AUD amounts to AUD via the ATO rate for this currency and the month of
     /// `date_paid` (see `infra::fx::to_aud`). Defaults to AUD.
     pub currency: String,
+    /// Provenance link from a buy-back dividend-component row to the buy-back
+    /// Sell trade it was created with (`None` for every other row). Set only
+    /// by `POST /corporate_actions/:id/participate`
+    /// (`entities::buyback_participation`). A row carrying it is managed by
+    /// the participation: `PUT`/`DELETE /income` reject it (`422`), and it is
+    /// removed together with the Sell by `DELETE /sells/:id`.
+    pub buyback_trade_id: Option<i64>,
 }
 
 impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for Income {
@@ -52,6 +59,7 @@ impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for Income {
             trust_income: row.try_get("trust_income")?,
             reinvestment_trade_id: row.try_get("reinvestment_trade_id")?,
             currency: row.try_get("currency")?,
+            buyback_trade_id: row.try_get("buyback_trade_id")?,
         })
     }
 }
@@ -101,7 +109,7 @@ pub async fn db_list(pool: &SqlitePool) -> Result<Vec<Income>, sqlx::Error> {
         "SELECT id, listing_id, date_paid, ex_date, franked_amount, unfranked_amount, \
          foreign_source_income, foreign_tax_paid, tfn_withholding_tax, franking_credits, \
          lic_capital_gain_deduction, conduit_foreign_income, trust_income, reinvestment_trade_id, \
-         currency \
+         currency, buyback_trade_id \
          FROM income ORDER BY date_paid, id",
     )
     .fetch_all(pool)
@@ -113,7 +121,7 @@ pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<Income>, sqlx::
         "SELECT id, listing_id, date_paid, ex_date, franked_amount, unfranked_amount, \
          foreign_source_income, foreign_tax_paid, tfn_withholding_tax, franking_credits, \
          lic_capital_gain_deduction, conduit_foreign_income, trust_income, reinvestment_trade_id, \
-         currency \
+         currency, buyback_trade_id \
          FROM income WHERE id = ?",
     )
     .bind(id)
@@ -121,7 +129,38 @@ pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<Income>, sqlx::
     .await
 }
 
-pub async fn db_upsert(pool: &SqlitePool, income: &Income) -> Result<(), sqlx::Error> {
+#[derive(Debug)]
+pub enum UpsertError {
+    Db(sqlx::Error),
+    /// The existing row is a buy-back dividend component (`buyback_trade_id`
+    /// set): its figures derive from the buy-back's terms, so free-form edits
+    /// are rejected. Delete the buy-back Sell via `DELETE /sells/:id` (which
+    /// removes this row too) and re-participate instead. Mapped to `422`.
+    BuyBackIncome,
+}
+
+impl From<sqlx::Error> for UpsertError {
+    fn from(e: sqlx::Error) -> Self {
+        UpsertError::Db(e)
+    }
+}
+
+pub async fn db_upsert(pool: &SqlitePool, income: &Income) -> Result<(), UpsertError> {
+    let mut tx = pool.begin().await?;
+
+    // A buy-back dividend-component row is immutable here: it was created
+    // from its action's terms by the participation operation. (The INSERT
+    // below never sets buyback_trade_id, so a normal row can't become one
+    // either.)
+    let existing_buyback: Option<Option<i64>> =
+        sqlx::query_scalar("SELECT buyback_trade_id FROM income WHERE id = ?")
+            .bind(income.id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    if existing_buyback.flatten().is_some() {
+        return Err(UpsertError::BuyBackIncome);
+    }
+
     sqlx::query(
         "INSERT INTO income \
          (id, listing_id, date_paid, ex_date, franked_amount, unfranked_amount, \
@@ -160,17 +199,44 @@ pub async fn db_upsert(pool: &SqlitePool, income: &Income) -> Result<(), sqlx::E
     .bind(income.trust_income)
     .bind(income.reinvestment_trade_id)
     .bind(&income.currency)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(())
 }
 
-pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<bool, sqlx::Error> {
-    let result = sqlx::query("DELETE FROM income WHERE id = ?")
+/// Outcome of a delete request, so the handler can map to the right status.
+#[derive(Debug, PartialEq)]
+pub enum DeleteOutcome {
+    Deleted,
+    NotFound,
+    /// The row is a buy-back dividend component (`buyback_trade_id` set) —
+    /// deleting it alone would leave the buy-back Sell without its dividend
+    /// side. Delete the Sell via `DELETE /sells/:id` instead (which removes
+    /// this row too). Mapped to `422`.
+    BuyBackIncome,
+}
+
+pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<DeleteOutcome, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+
+    let buyback: Option<Option<i64>> =
+        sqlx::query_scalar("SELECT buyback_trade_id FROM income WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    match buyback {
+        None => return Ok(DeleteOutcome::NotFound),
+        Some(Some(_)) => return Ok(DeleteOutcome::BuyBackIncome),
+        Some(None) => {}
+    }
+
+    sqlx::query("DELETE FROM income WHERE id = ?")
         .bind(id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
-    Ok(result.rows_affected() > 0)
+    tx.commit().await?;
+    Ok(DeleteOutcome::Deleted)
 }
 
 async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<Income>>, StatusCode> {
@@ -212,21 +278,29 @@ async fn upsert(
         trust_income: body.trust_income,
         reinvestment_trade_id: body.reinvestment_trade_id,
         currency: body.currency,
+        buyback_trade_id: None,
     };
     db_upsert(&pool, &income)
         .await
         .map(|_| StatusCode::NO_CONTENT)
-        .map_err(|e| crate::infra::http::write_error_status(&e))
+        .map_err(|e| match e {
+            UpsertError::Db(err) => crate::infra::http::write_error_status(&err),
+            // Managed by the buy-back participation → 422.
+            UpsertError::BuyBackIncome => StatusCode::UNPROCESSABLE_ENTITY,
+        })
 }
 
 async fn delete(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
 ) -> Result<StatusCode, StatusCode> {
-    db_delete(&pool, id)
-        .await
-        .map(|found| if found { StatusCode::NO_CONTENT } else { StatusCode::NOT_FOUND })
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+    match db_delete(&pool, id).await {
+        Ok(DeleteOutcome::Deleted) => Ok(StatusCode::NO_CONTENT),
+        Ok(DeleteOutcome::NotFound) => Err(StatusCode::NOT_FOUND),
+        // Managed by the buy-back participation → 422.
+        Ok(DeleteOutcome::BuyBackIncome) => Err(StatusCode::UNPROCESSABLE_ENTITY),
+        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
 }
 
 #[cfg(test)]
@@ -280,6 +354,7 @@ mod tests {
             residual_carried_forward: Decimal::ZERO,
             residual_paid_out: Decimal::ZERO,
             rights_action_id: None,
+            buyback_action_id: None,
         };
         trade::db_upsert(pool, &t).await.unwrap();
         t.id
@@ -302,6 +377,7 @@ mod tests {
             trust_income: false,
             reinvestment_trade_id: None,
             currency: "AUD".to_string(),
+            buyback_trade_id: None,
         }
     }
 
@@ -342,6 +418,7 @@ mod tests {
             trust_income: true,
             reinvestment_trade_id: None,
             currency: "AUD".to_string(),
+            buyback_trade_id: None,
         };
         db_upsert(&pool, &dist).await.unwrap();
         let got = db_get(&pool, 2).await.unwrap().unwrap();
@@ -372,6 +449,7 @@ mod tests {
             trust_income: false,
             reinvestment_trade_id: Some(trade_id),
             currency: "AUD".to_string(),
+            buyback_trade_id: None,
         };
         db_upsert(&pool, &inc).await.unwrap();
         let got = db_get(&pool, 3).await.unwrap().unwrap();

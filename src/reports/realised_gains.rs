@@ -344,6 +344,7 @@ mod tests {
                 residual_carried_forward: Decimal::ZERO,
                 residual_paid_out: Decimal::ZERO,
                 rights_action_id: None,
+                buyback_action_id: None,
             },
         )
         .await
@@ -378,6 +379,7 @@ mod tests {
                 residual_carried_forward: Decimal::ZERO,
                 residual_paid_out: Decimal::ZERO,
                 rights_action_id: None,
+                buyback_action_id: None,
             },
         )
         .await
@@ -492,6 +494,7 @@ mod tests {
                 residual_carried_forward: Decimal::ZERO,
                 residual_paid_out: Decimal::ZERO,
                 rights_action_id: None,
+                buyback_action_id: None,
             },
         )
         .await
@@ -516,6 +519,7 @@ mod tests {
                 residual_carried_forward: Decimal::ZERO,
                 residual_paid_out: Decimal::ZERO,
                 rights_action_id: None,
+                buyback_action_id: None,
             },
         )
         .await
@@ -1000,6 +1004,7 @@ mod tests {
                 residual_carried_forward: Decimal::ZERO,
                 residual_paid_out: Decimal::ZERO,
                 rights_action_id: None,
+                buyback_action_id: None,
             },
         )
         .await

@@ -58,6 +58,13 @@ pub enum SellError {
     PurchaseTradeNotBuyOrDrp,
     /// Allocating these parcels would exceed a purchase parcel's quantity.
     PurchaseQuantityExceeded,
+    /// The existing trade is a buy-back participation Sell
+    /// (`buyback_action_id` set): its figures derive from the buy-back's
+    /// terms and it carries a linked dividend-component income row, so
+    /// free-form edits are rejected. Delete it (`DELETE /sells/:id`, which
+    /// also removes the income row) and re-participate instead (see
+    /// `entities::buyback_participation`).
+    BuyBackSell,
 }
 
 impl From<sqlx::Error> for SellError {
@@ -81,7 +88,10 @@ pub enum DeleteOutcome {
 }
 
 /// Delete a Sell trade and all of its parcel allocations in one transaction,
-/// freeing the purchase parcels those allocations consumed.
+/// freeing the purchase parcels those allocations consumed. A buy-back
+/// participation Sell takes its linked dividend-component income row
+/// (`income.buyback_trade_id`) with it, so the capital and dividend sides of
+/// the participation are always created and removed together.
 pub async fn db_delete_sell(pool: &SqlitePool, id: i64) -> Result<DeleteOutcome, sqlx::Error> {
     let mut tx = pool.begin().await?;
 
@@ -96,6 +106,10 @@ pub async fn db_delete_sell(pool: &SqlitePool, id: i64) -> Result<DeleteOutcome,
         Some(_) => {}
     }
 
+    sqlx::query("DELETE FROM income WHERE buyback_trade_id = ?")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
     sqlx::query("DELETE FROM parcel_allocations WHERE sale_trade_id = ?")
         .bind(id)
         .execute(&mut *tx)
@@ -112,18 +126,9 @@ pub async fn db_delete_sell(pool: &SqlitePool, id: i64) -> Result<DeleteOutcome,
 /// Create or replace a Sell trade together with its full set of parcel
 /// allocations, atomically. Returns an error (mapped to 422) unless the
 /// allocations sum exactly to the sell quantity and every parcel is a valid,
-/// not-over-allocated Buy/DRP.
+/// not-over-allocated Buy/DRP. A buy-back participation Sell is immutable
+/// here — delete it via `DELETE /sells/:id` and re-participate instead.
 pub async fn db_upsert_sell(pool: &SqlitePool, id: i64, body: &SellBody) -> Result<(), SellError> {
-    // Allocations must account for the whole sale — no more, no less.
-    let allocated: Decimal = body
-        .allocations
-        .iter()
-        .map(|a| a.quantity_allocated)
-        .sum();
-    if allocated != body.quantity {
-        return Err(SellError::AllocationMismatch);
-    }
-
     // Reference data (exchanges/listings) is not touched here, so resolving the
     // settlement date outside the write transaction is a consistent read.
     let settlement_date = match body.settlement_date {
@@ -141,12 +146,55 @@ pub async fn db_upsert_sell(pool: &SqlitePool, id: i64, body: &SellBody) -> Resu
 
     let mut tx = pool.begin().await?;
 
+    // A buy-back participation Sell is immutable here: its figures derive
+    // from the buy-back's terms and it carries a linked income row. (The
+    // upsert below never sets buyback_action_id, so a normal Sell can't
+    // become one either.)
+    let existing_buyback: Option<Option<i64>> =
+        sqlx::query_scalar("SELECT buyback_action_id FROM trades WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    if existing_buyback.flatten().is_some() {
+        return Err(SellError::BuyBackSell);
+    }
+
+    upsert_sell_in_tx(&mut tx, id, body, settlement_date, None).await?;
+
+    tx.commit().await?;
+    Ok(())
+}
+
+/// The transactional core of a Sell upsert: write the Sell trade row and
+/// replace its full allocation set, validating every write-time invariant,
+/// on the caller's transaction. Shared by `db_upsert_sell` and the buy-back
+/// participation (`entities::buyback_participation`), which writes the Sell
+/// and the dividend-component income row in one transaction and stamps the
+/// trade with its `buyback_action_id` provenance.
+pub(crate) async fn upsert_sell_in_tx(
+    tx: &mut sqlx::SqliteConnection,
+    id: i64,
+    body: &SellBody,
+    settlement_date: NaiveDate,
+    buyback_action_id: Option<i64>,
+) -> Result<(), SellError> {
+    // Allocations must account for the whole sale — no more, no less.
+    let allocated: Decimal = body
+        .allocations
+        .iter()
+        .map(|a| a.quantity_allocated)
+        .sum();
+    if allocated != body.quantity {
+        return Err(SellError::AllocationMismatch);
+    }
+
     // Upsert the Sell trade row.
     sqlx::query(
         "INSERT INTO trades \
          (id, trade_type, date, settlement_date, listing_id, average_price, quantity, \
-          currency, brokerage, gst_on_brokerage, brokerage_currency, fx_rate, contract_note_ref) \
-         VALUES (?, 'Sell', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+          currency, brokerage, gst_on_brokerage, brokerage_currency, fx_rate, contract_note_ref, \
+          buyback_action_id) \
+         VALUES (?, 'Sell', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT(id) DO UPDATE SET \
              trade_type         = 'Sell', \
              date               = excluded.date, \
@@ -159,7 +207,8 @@ pub async fn db_upsert_sell(pool: &SqlitePool, id: i64, body: &SellBody) -> Resu
              gst_on_brokerage   = excluded.gst_on_brokerage, \
              brokerage_currency = excluded.brokerage_currency, \
              fx_rate            = excluded.fx_rate, \
-             contract_note_ref  = excluded.contract_note_ref",
+             contract_note_ref  = excluded.contract_note_ref, \
+             buyback_action_id  = excluded.buyback_action_id",
     )
     .bind(id)
     .bind(body.date)
@@ -173,6 +222,7 @@ pub async fn db_upsert_sell(pool: &SqlitePool, id: i64, body: &SellBody) -> Resu
     .bind(&body.brokerage_currency)
     .bind(body.fx_rate.to_string())
     .bind(&body.contract_note_ref)
+    .bind(buyback_action_id)
     .execute(&mut *tx)
     .await?;
 
@@ -252,7 +302,6 @@ pub async fn db_upsert_sell(pool: &SqlitePool, id: i64, body: &SellBody) -> Resu
         }
     }
 
-    tx.commit().await?;
     Ok(())
 }
 
@@ -267,6 +316,7 @@ async fn upsert(
         Err(SellError::PurchaseParcelMissing) => Err(StatusCode::UNPROCESSABLE_ENTITY),
         Err(SellError::PurchaseTradeNotBuyOrDrp) => Err(StatusCode::UNPROCESSABLE_ENTITY),
         Err(SellError::PurchaseQuantityExceeded) => Err(StatusCode::UNPROCESSABLE_ENTITY),
+        Err(SellError::BuyBackSell) => Err(StatusCode::UNPROCESSABLE_ENTITY),
         Err(SellError::Db(e)) => {
             tracing::error!(error = %e, "sell upsert failed");
             Err(StatusCode::INTERNAL_SERVER_ERROR)
@@ -340,6 +390,7 @@ mod tests {
                 residual_carried_forward: Decimal::ZERO,
                 residual_paid_out: Decimal::ZERO,
                 rights_action_id: None,
+                buyback_action_id: None,
             },
         )
         .await

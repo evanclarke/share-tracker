@@ -340,6 +340,7 @@ mod tests {
                 trust_income: true,
                 reinvestment_trade_id: None,
                 currency: "AUD".to_string(),
+                buyback_trade_id: None,
             },
         )
         .await

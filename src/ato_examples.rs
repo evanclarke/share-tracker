@@ -843,6 +843,93 @@ async fn rights_issues_example_40_shanti_rights_exercised() {
     assert!(years.iter().all(|y| y.net_capital_gain == Decimal::ZERO));
 }
 
+/// `docs/share-buy-backs.md` (QC 66049) — "Example: off-market buy-back".
+///
+/// > Ranjini bought 10,000 shares in a company that was not a listed public
+/// > company at a cost of $6 per share, including brokerage. A few years
+/// > later, the company wrote to its shareholders offering to buy back 10% of
+/// > their shares for $9.60 each. The buy-back price included a franked
+/// > dividend of $1.40 per share, with each dividend to carry a franking
+/// > credit of $0.60. Ranjini applied to participate in the buy-back to sell
+/// > 1,000 of her shares. … The market value of the company's shares at the
+/// > time of the buy-back, assuming the buy-back had not been proposed, was
+/// > $10.20. …
+/// > Market value of shares: $10.20 × 1,000 = $10,200
+/// > Dividend: $1.40 × 1,000 = $1,400
+/// > Capital proceeds: $10,200 − $1,400 = $8,800
+/// > Cost base: $6.00 × 1,000 = $6,000
+/// > Capital gain (before applying any discount) is $8,800 − $6,000 = $2,800
+/// > Ranjini must report her capital gain as well as her dividend of $1,400
+/// > and franking credit of $600 in her tax return.
+#[tokio::test]
+async fn share_buy_backs_example_ranjini_off_market_buy_back() {
+    let pool = test_pool().await;
+    put_listing(&pool, 1, "RNJ").await;
+    // 10,000 shares at $6 each including brokerage, a few years earlier.
+    put_buy(&pool, 1, 1, "2021-01-15", "10000", "6", "0").await;
+    // The buy-back offer terms, recorded as a corporate action: $9.60 price
+    // including a $1.40 franked dividend ($0.60 credit); market value had the
+    // buy-back not been proposed $10.20.
+    api_put(
+        &pool,
+        "/corporate_actions/1",
+        json!({
+            "action_type": "BuyBack",
+            "listing_id": 1,
+            "date": "2024-11-30",
+            "buyback_price": "9.60",
+            "buyback_dividend": "1.40",
+            "buyback_franking_credit": "0.60",
+            "buyback_market_value": "10.20",
+            "currency": "AUD",
+        }),
+    )
+    .await;
+    // Ranjini sells 1,000 shares into the buy-back.
+    let participation: Value = api_post(
+        &pool,
+        "/corporate_actions/1/participate",
+        json!({
+            "date": "2024-11-30",
+            "units": "1000",
+            "allocations": [ { "purchase_trade_id": 1, "quantity_allocated": "1000" } ],
+        }),
+        StatusCode::CREATED,
+    )
+    .await;
+    // Capital proceeds per share use the market value (the buy-back price is
+    // less than it), excluding the dividend: $10.20 − $1.40 = $8.80.
+    assert_eq!(participation["trade"]["average_price"], "8.80");
+
+    // Capital proceeds $8,800 − cost base $6,000 = $2,800 capital gain
+    // (before applying any discount; held > 12 months so it is eligible).
+    let gains: Vec<RealisedGainLoss> = api_get(&pool, "/portfolio/realised-gains").await;
+    assert_eq!(gains.len(), 1);
+    assert_eq!(gains[0].proceeds, dec("8800.00"), "capital proceeds: $10,200 − $1,400");
+    assert_eq!(gains[0].cost_base, dec("6000.00"), "cost base: $6.00 × 1,000");
+    assert_eq!(
+        gains[0].capital_gain_loss,
+        dec("2800.00"),
+        "capital gain before any discount: $8,800 − $6,000"
+    );
+    assert_eq!(gains[0].discount_eligible_gain, dec("2800.00"));
+
+    // The dividend of $1,400 and franking credit of $600 are reported as
+    // income in the same return (paid Nov 2024 → FY2025).
+    let years: Vec<TaxYearSummary> = api_get(&pool, "/portfolio/tax-summary").await;
+    assert_eq!(years.len(), 1);
+    assert_eq!(years[0].tax_year, 2025);
+    assert_eq!(years[0].dividends_assessable, dec("1400.00"), "dividend: $1.40 × 1,000");
+    assert_eq!(years[0].franking_credits, dec("600.00"), "franking credit: $0.60 × 1,000");
+
+    // Her remaining holding: 9,000 shares at the untouched $6 cost base.
+    let holdings: Vec<HoldingOverview> =
+        api_post(&pool, "/portfolio/overview", json!({}), StatusCode::OK).await;
+    assert_eq!(holdings.len(), 1);
+    assert_eq!(holdings[0].quantity, dec("9000"));
+    assert_eq!(holdings[0].total_cost_base, dec("54000.00"));
+}
+
 /// `docs/lic-capital-gain-deduction.md` — "Example: Resident individual".
 ///
 /// > Ben, an Australian resident, is a shareholder in XYZ Ltd, a LIC. On

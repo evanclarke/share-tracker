@@ -53,6 +53,15 @@ pub struct Trade {
     /// instead), and the action it references cannot be edited or deleted
     /// while the trade exists.
     pub rights_action_id: Option<i64>,
+    /// Provenance link from a buy-back participation Sell back to its
+    /// `BuyBack` corporate action (`None` for every other trade). Set only by
+    /// `POST /corporate_actions/:id/participate`
+    /// (`entities::buyback_participation`). A trade carrying it is rejected
+    /// by `PUT /sells` (delete it — which also removes the linked
+    /// dividend-component income row — and re-participate instead), and the
+    /// action it references cannot be edited or deleted while the trade
+    /// exists.
+    pub buyback_action_id: Option<i64>,
 }
 
 impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for Trade {
@@ -78,6 +87,7 @@ impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for Trade {
             residual_carried_forward: dec(row.try_get("residual_carried_forward")?)?,
             residual_paid_out: dec(row.try_get("residual_paid_out")?)?,
             rights_action_id: row.try_get("rights_action_id")?,
+            buyback_action_id: row.try_get("buyback_action_id")?,
         })
     }
 }
@@ -116,7 +126,8 @@ pub async fn db_list(pool: &SqlitePool) -> Result<Vec<Trade>, sqlx::Error> {
     sqlx::query_as(
         "SELECT id, trade_type, date, settlement_date, listing_id, average_price, quantity, \
          currency, brokerage, gst_on_brokerage, brokerage_currency, fx_rate, contract_note_ref, \
-         residual_brought_forward, residual_carried_forward, residual_paid_out, rights_action_id \
+         residual_brought_forward, residual_carried_forward, residual_paid_out, rights_action_id, \
+         buyback_action_id \
          FROM trades ORDER BY date, id",
     )
     .fetch_all(pool)
@@ -127,7 +138,8 @@ pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<Trade>, sqlx::E
     sqlx::query_as(
         "SELECT id, trade_type, date, settlement_date, listing_id, average_price, quantity, \
          currency, brokerage, gst_on_brokerage, brokerage_currency, fx_rate, contract_note_ref, \
-         residual_brought_forward, residual_carried_forward, residual_paid_out, rights_action_id \
+         residual_brought_forward, residual_carried_forward, residual_paid_out, rights_action_id, \
+         buyback_action_id \
          FROM trades WHERE id = ?",
     )
     .bind(id)
@@ -151,6 +163,12 @@ pub enum UpsertError {
     /// free-form edit could exceed. Delete it and re-exercise instead (see
     /// `entities::rights_exercise`).
     RightsExerciseTrade,
+    /// The existing trade is a buy-back participation Sell
+    /// (`buyback_action_id` set): its figures derive from the buy-back's
+    /// terms and it carries a linked dividend-component income row. Delete it
+    /// via `DELETE /sells` and re-participate instead (see
+    /// `entities::buyback_participation`).
+    BuyBackTrade,
 }
 
 impl From<sqlx::Error> for UpsertError {
@@ -167,17 +185,24 @@ impl From<sqlx::Error> for UpsertError {
 pub async fn db_upsert(pool: &SqlitePool, trade: &Trade) -> Result<(), UpsertError> {
     let mut tx = pool.begin().await?;
 
-    // A rights-exercise trade is immutable here: it was created against its
-    // rights issue's entitlement cap, which an edit could silently exceed.
-    // (The INSERT below never sets rights_action_id, so a normal trade can't
-    // become one either.)
-    let existing_rights_action: Option<Option<i64>> =
-        sqlx::query_scalar("SELECT rights_action_id FROM trades WHERE id = ?")
-            .bind(trade.id)
-            .fetch_optional(&mut *tx)
-            .await?;
-    if existing_rights_action.flatten().is_some() {
-        return Err(UpsertError::RightsExerciseTrade);
+    // A rights-exercise or buy-back participation trade is immutable here: it
+    // was created against its action's terms (entitlement cap / dividend-
+    // capital split), which an edit could silently break. (The INSERT below
+    // never sets either provenance column, so a normal trade can't become one
+    // either.)
+    let existing_action: Option<(Option<i64>, Option<i64>)> = sqlx::query_as(
+        "SELECT rights_action_id, buyback_action_id FROM trades WHERE id = ?",
+    )
+    .bind(trade.id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if let Some((rights, buyback)) = existing_action {
+        if rights.is_some() {
+            return Err(UpsertError::RightsExerciseTrade);
+        }
+        if buyback.is_some() {
+            return Err(UpsertError::BuyBackTrade);
+        }
     }
 
     // Sum is computed in Decimal (the column is TEXT; SQL SUM would coerce to
@@ -293,7 +318,8 @@ pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<DeleteOutcome, sqlx
         "SELECT EXISTS(SELECT 1 FROM parcel_allocations \
                        WHERE purchase_trade_id = ?1 OR sale_trade_id = ?1) \
              OR EXISTS(SELECT 1 FROM amit_adjustments WHERE trade_id = ?1) \
-             OR EXISTS(SELECT 1 FROM income WHERE reinvestment_trade_id = ?1)",
+             OR EXISTS(SELECT 1 FROM income \
+                       WHERE reinvestment_trade_id = ?1 OR buyback_trade_id = ?1)",
     )
     .bind(id)
     .fetch_one(&mut *tx)
@@ -434,6 +460,7 @@ async fn upsert(
         residual_carried_forward: body.residual_carried_forward,
         residual_paid_out: body.residual_paid_out,
         rights_action_id: None,
+        buyback_action_id: None,
     };
     db_upsert(&pool, &trade)
         .await
@@ -442,7 +469,8 @@ async fn upsert(
             UpsertError::Db(err) => crate::infra::http::write_error_status(&err),
             UpsertError::QuantityBelowAllocated
             | UpsertError::QuantityBelowAmitAdjustment
-            | UpsertError::RightsExerciseTrade => StatusCode::UNPROCESSABLE_ENTITY,
+            | UpsertError::RightsExerciseTrade
+            | UpsertError::BuyBackTrade => StatusCode::UNPROCESSABLE_ENTITY,
         })
 }
 
@@ -510,6 +538,7 @@ mod tests {
             residual_carried_forward: Decimal::ZERO,
             residual_paid_out: Decimal::ZERO,
             rights_action_id: None,
+            buyback_action_id: None,
         }
     }
 
@@ -658,6 +687,7 @@ mod tests {
             residual_carried_forward: Decimal::ZERO,
             residual_paid_out: Decimal::ZERO,
             rights_action_id: None,
+            buyback_action_id: None,
         };
         db_upsert(&pool, &trade).await.unwrap();
         let got = db_get(&pool, 2).await.unwrap().unwrap();
@@ -687,6 +717,7 @@ mod tests {
             residual_carried_forward: Decimal::ZERO,
             residual_paid_out: Decimal::ZERO,
             rights_action_id: None,
+            buyback_action_id: None,
         };
         db_upsert(&pool, &trade).await.unwrap();
         let got = db_get(&pool, 3).await.unwrap().unwrap();
