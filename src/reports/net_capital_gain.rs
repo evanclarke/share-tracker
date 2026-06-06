@@ -157,7 +157,8 @@ async fn aud_field(
 async fn e10_gains(pool: &SqlitePool) -> Result<Vec<(i32, Decimal, bool)>, sqlx::Error> {
     let rows = sqlx::query(
         "SELECT aa.trade_id, aa.quantity AS adj_qty, \
-                t.date AS trade_date, t.quantity AS trade_qty, t.average_price, \
+                t.date AS trade_date, t.deemed_acquisition_date, \
+                t.quantity AS trade_qty, t.average_price, \
                 t.brokerage, t.gst_on_brokerage, t.currency AS trade_currency, t.fx_rate, \
                 a.cost_base_adjustment, a.tax_year_end_date \
          FROM amit_adjustments aa \
@@ -178,6 +179,10 @@ async fn e10_gains(pool: &SqlitePool) -> Result<Vec<(i32, Decimal, bool)>, sqlx:
         let brok = parse_dec("brokerage", rows[i].try_get("brokerage")?)?;
         let gst = parse_dec("gst_on_brokerage", rows[i].try_get("gst_on_brokerage")?)?;
         let trade_date: NaiveDate = rows[i].try_get("trade_date")?;
+        // A scrip-for-scrip replacement parcel's discount clock and AUD
+        // translation month run from its deemed (carried) acquisition date.
+        let deemed: Option<NaiveDate> = rows[i].try_get("deemed_acquisition_date")?;
+        let acquired = deemed.unwrap_or(trade_date);
         let currency: String = rows[i].try_get("trade_currency")?;
         let fx_rate = parse_dec("fx_rate", rows[i].try_get("fx_rate")?)?;
         let mut remaining = price * trade_qty + brok + gst;
@@ -190,8 +195,8 @@ async fn e10_gains(pool: &SqlitePool) -> Result<Vec<(i32, Decimal, bool)>, sqlx:
             if reduction > remaining {
                 let excess = reduction - remaining;
                 let excess_aud =
-                    to_aud(pool, excess, &currency, trade_date, Some(fx_rate)).await?;
-                let discount_eligible = year_end > trade_date + Months::new(12);
+                    to_aud(pool, excess, &currency, acquired, Some(fx_rate)).await?;
+                let discount_eligible = year_end > acquired + Months::new(12);
                 out.push((year_end.year(), excess_aud, discount_eligible));
                 remaining = Decimal::ZERO;
             } else {
@@ -224,7 +229,8 @@ async fn g1_gains(pool: &SqlitePool) -> Result<Vec<(i32, Decimal, bool)>, sqlx::
     let rows = sqlx::query(
         "SELECT ca.date AS action_date, ca.amount_per_unit, ca.currency AS action_currency, \
                 ca.listing_id, \
-                t.id AS trade_id, t.date AS trade_date, t.quantity AS trade_qty, \
+                t.id AS trade_id, t.date AS trade_date, t.deemed_acquisition_date, \
+                t.quantity AS trade_qty, \
                 t.average_price, t.brokerage, t.gst_on_brokerage, \
                 t.currency AS trade_currency \
          FROM corporate_actions ca \
@@ -273,6 +279,11 @@ async fn g1_gains(pool: &SqlitePool) -> Result<Vec<(i32, Decimal, bool)>, sqlx::
         let brok = parse_dec("brokerage", rows[i].try_get("brokerage")?)?;
         let gst = parse_dec("gst_on_brokerage", rows[i].try_get("gst_on_brokerage")?)?;
         let trade_date: NaiveDate = rows[i].try_get("trade_date")?;
+        // A scrip-for-scrip replacement parcel's discount clock runs from its
+        // deemed (carried) acquisition date; split/payment applicability
+        // stays on the actual trade date.
+        let deemed: Option<NaiveDate> = rows[i].try_get("deemed_acquisition_date")?;
+        let acquired = deemed.unwrap_or(trade_date);
         let trade_currency: String = rows[i].try_get("trade_currency")?;
         let listing_id: i64 = rows[i].try_get("listing_id")?;
         let splits = split_events.get(&listing_id).map_or(&[][..], |v| v);
@@ -328,7 +339,7 @@ async fn g1_gains(pool: &SqlitePool) -> Result<Vec<(i32, Decimal, bool)>, sqlx::
                     let gain = excess * held / trade_qty;
                     let gain_aud =
                         to_aud(pool, gain, &action_currency, action_date, None).await?;
-                    let discount_eligible = action_date > trade_date + Months::new(12);
+                    let discount_eligible = action_date > acquired + Months::new(12);
                     out.push((tax_year_for(action_date), gain_aud, discount_eligible));
                 }
                 remaining = Decimal::ZERO;
@@ -538,6 +549,8 @@ mod tests {
                 residual_paid_out: Decimal::ZERO,
                 rights_action_id: None,
                 buyback_action_id: None,
+                scrip_action_id: None,
+                deemed_acquisition_date: None,
             },
         )
         .await
@@ -1290,5 +1303,70 @@ mod tests {
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let csv = String::from_utf8(bytes.to_vec()).unwrap();
         assert_eq!(csv, CSV_HEADER.join(",") + "\n");
+    }
+
+    /// A scrip-for-scrip rollover produces no net capital gain in the
+    /// exchange year (the gain is disregarded), and a later sale of the
+    /// replacement parcel is taxed on the carried cost base with the
+    /// combined-period discount.
+    #[tokio::test]
+    async fn db_scrip_rollover_disregards_the_exchange_and_taxes_the_later_sale() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "OLD").await;
+        insert_listing(&pool, 2, "NEW").await;
+        // FY2021: buy 1,000 @ $1.50 = $1,500.
+        insert_trade(
+            &pool,
+            1,
+            trade::TradeType::Buy,
+            1,
+            NaiveDate::from_ymd_opt(2020, 10, 1).unwrap(),
+            Decimal::from(1000),
+            "1.50".parse().unwrap(),
+        )
+        .await;
+        // FY2025: 2-for-1 takeover with rollover.
+        corporate_action::db_upsert(
+            &pool,
+            &corporate_action::CorporateAction {
+                id: 10,
+                listing_id: 1,
+                date: NaiveDate::from_ymd_opt(2024, 7, 1).unwrap(),
+                kind: corporate_action::ActionKind::ScripForScrip {
+                    scrip_listing_id: 2,
+                    scrip_new_units: Decimal::from(2),
+                    scrip_old_units: Decimal::ONE,
+                },
+            },
+        )
+        .await
+        .unwrap();
+        let ex = crate::entities::scrip_exchange::db_exchange(&pool, 10).await.unwrap();
+
+        // The exchange alone: no tax year reports any gain or loss.
+        let years = db_net_capital_gain(&pool).await.unwrap();
+        assert!(years.is_empty(), "the rollover is disregarded: {years:?}");
+
+        // FY2025 sale of the replacement: 2,000 units @ $1.00 = $2,000
+        // proceeds − $1,500 carried cost base = $500, halved via the
+        // combined-period discount → $250 net capital gain.
+        insert_trade(
+            &pool,
+            50,
+            trade::TradeType::Sell,
+            2,
+            NaiveDate::from_ymd_opt(2024, 10, 1).unwrap(),
+            Decimal::from(2000),
+            Decimal::ONE,
+        )
+        .await;
+        allocate(&pool, 1, 50, ex.replacements[0].id, Decimal::from(2000)).await;
+
+        let years = db_net_capital_gain(&pool).await.unwrap();
+        assert_eq!(years.len(), 1);
+        assert_eq!(years[0].tax_year, 2025);
+        assert_eq!(years[0].discount_eligible_gains, Decimal::from(500));
+        assert_eq!(years[0].cgt_discount, Decimal::from(250));
+        assert_eq!(years[0].net_capital_gain, Decimal::from(250));
     }
 }

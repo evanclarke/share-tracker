@@ -32,6 +32,16 @@
 //!   reproduced below; its pre-CGT half (rights over the 1 June 1985 shares,
 //!   whose cost base includes the rights' market value) turns on pre-CGT
 //!   originals, which are not modelled.
+//! - `docs/takeovers-and-scrip-for-scrip.md` Examples 26–28 (Desiree,
+//!   Gunther, Stephanie) — none matches the modelled case (the full-rollover,
+//!   single-replacement-class exchange, TODO "Corporate actions",
+//!   ScripForScrip): Example 26 is a takeover *without* rollover (an ordinary
+//!   market-value disposal, enterable as a manual Sell + Buy), Example 27 is
+//!   a partial rollover with a cash component, and Example 28 exchanges into
+//!   *two* replacement share classes (ordinary + preference) with the cost
+//!   base apportioned by market value. The modelled mechanics — gain
+//!   disregarded, cost base carried, combined holding period — are covered by
+//!   `scrip_exchange`/report unit tests instead.
 //! - `docs/amma-statement-guidance-notes.md` running example ("In our example,
 //!   this is $155") — the underlying Part C component table is not included in
 //!   the mirrored copy, so the example is not reproducible from the doc alone.

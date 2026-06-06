@@ -272,6 +272,13 @@ mod tests {
         // A BuyBack row's Participate action drives the participate endpoint.
         assert!(js.contains("viewParticipate"));
         assert!(js.contains("/participate"));
+        assert!(js.contains("ScripForScrip"));
+        assert!(js.contains("scrip_listing_id"));
+        assert!(js.contains("scrip_new_units"));
+        assert!(js.contains("scrip_old_units"));
+        // A ScripForScrip row's Exchange action drives the exchange endpoint.
+        assert!(js.contains("viewScripExchange"));
+        assert!(js.contains("/exchange"));
     }
 
     #[tokio::test]

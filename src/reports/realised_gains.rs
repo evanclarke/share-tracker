@@ -38,10 +38,15 @@ pub fn router() -> Router<SqlitePool> {
 }
 
 pub async fn db_realised_gains(pool: &SqlitePool) -> Result<Vec<RealisedGainLoss>, sqlx::Error> {
+    // A scrip-for-scrip exchange closing Sell (scrip_action_id set) is not a
+    // realised gain or loss: the rollover disregards the gain on the original
+    // shares (docs/takeovers-and-scrip-for-scrip.md), and its zero proceeds
+    // must never surface as a capital loss. Its allocations are skipped with
+    // it (the sale id is absent from sell_map).
     let sell_rows = sqlx::query(
         "SELECT id, listing_id, date, quantity, average_price, brokerage, gst_on_brokerage, \
          currency, fx_rate \
-         FROM trades WHERE trade_type = 'Sell'",
+         FROM trades WHERE trade_type = 'Sell' AND scrip_action_id IS NULL",
     )
     .fetch_all(pool)
     .await?;
@@ -52,7 +57,7 @@ pub async fn db_realised_gains(pool: &SqlitePool) -> Result<Vec<RealisedGainLoss
 
     let buy_rows = sqlx::query(
         "SELECT id, listing_id, date, quantity, average_price, brokerage, gst_on_brokerage, \
-         currency, fx_rate \
+         currency, fx_rate, deemed_acquisition_date \
          FROM trades WHERE trade_type IN ('Buy', 'DRP')",
     )
     .fetch_all(pool)
@@ -87,6 +92,13 @@ pub async fn db_realised_gains(pool: &SqlitePool) -> Result<Vec<RealisedGainLoss
     struct BuyInfo {
         listing_id: i64,
         date: NaiveDate,
+        /// The CGT acquisition date: a scrip-for-scrip replacement parcel
+        /// carries the consumed parcel's acquisition date (the rollover's
+        /// combined holding period), every other parcel its own trade date.
+        /// Drives the 12-month discount clock and the AUD translation month
+        /// of the cost base; split/return-of-capital applicability stays on
+        /// the actual `date`.
+        acquired: NaiveDate,
         quantity: Decimal,
         average_price: Decimal,
         brokerage: Decimal,
@@ -116,11 +128,14 @@ pub async fn db_realised_gains(pool: &SqlitePool) -> Result<Vec<RealisedGainLoss
     let mut buy_map: HashMap<i64, BuyInfo> = HashMap::new();
     for row in &buy_rows {
         let id: i64 = row.try_get("id")?;
+        let date: NaiveDate = row.try_get("date")?;
+        let deemed: Option<NaiveDate> = row.try_get("deemed_acquisition_date")?;
         buy_map.insert(
             id,
             BuyInfo {
                 listing_id: row.try_get("listing_id")?,
-                date: row.try_get("date")?,
+                date,
+                acquired: deemed.unwrap_or(date),
                 quantity: parse_dec("quantity", row.try_get("quantity")?)?,
                 average_price: parse_dec("average_price", row.try_get("average_price")?)?,
                 brokerage: parse_dec("brokerage", row.try_get("brokerage")?)?,
@@ -211,13 +226,15 @@ pub async fn db_realised_gains(pool: &SqlitePool) -> Result<Vec<RealisedGainLoss
         } else {
             Decimal::ZERO
         };
-        // Convert to AUD at the purchase's rate (ATO rate for the buy month, else
-        // the buy's manual fx_rate).
+        // Convert to AUD at the acquisition's rate (ATO rate for the
+        // acquisition month, else the buy's manual fx_rate). A scrip-for-scrip
+        // replacement parcel converts at its deemed acquisition month — the
+        // rollover carries the original AUD cost base over.
         let alloc_cost = crate::infra::fx::to_aud(
             pool,
             alloc_cost,
             &buy.currency,
-            buy.date,
+            buy.acquired,
             Some(buy.fx_rate),
         )
         .await?;
@@ -228,12 +245,13 @@ pub async fn db_realised_gains(pool: &SqlitePool) -> Result<Vec<RealisedGainLoss
         *sale_cost_base.entry(sale_id).or_insert(Decimal::ZERO) += alloc_cost;
 
         // Classify each allocation's gain/loss for CGT: a gain from a parcel held
-        // strictly > 12 months is discount-eligible; a gain from a parcel held ≤ 12
-        // months is non-discountable ("other" method); a negative result is a
-        // capital loss (recorded as a positive amount). The net-capital-gain report
-        // nets these buckets across sales and AMMA gains.
+        // strictly > 12 months — from the (possibly deemed) acquisition date — is
+        // discount-eligible; a gain from a parcel held ≤ 12 months is
+        // non-discountable ("other" method); a negative result is a capital loss
+        // (recorded as a positive amount). The net-capital-gain report nets these
+        // buckets across sales and AMMA gains.
         if alloc_gain > Decimal::ZERO {
-            if sale.date > buy.date + Months::new(12) {
+            if sale.date > buy.acquired + Months::new(12) {
                 *sale_discount_gain.entry(sale_id).or_insert(Decimal::ZERO) += alloc_gain;
             } else {
                 *sale_non_discount_gain.entry(sale_id).or_insert(Decimal::ZERO) += alloc_gain;
@@ -345,6 +363,8 @@ mod tests {
                 residual_paid_out: Decimal::ZERO,
                 rights_action_id: None,
                 buyback_action_id: None,
+                scrip_action_id: None,
+                deemed_acquisition_date: None,
             },
         )
         .await
@@ -380,6 +400,8 @@ mod tests {
                 residual_paid_out: Decimal::ZERO,
                 rights_action_id: None,
                 buyback_action_id: None,
+                scrip_action_id: None,
+                deemed_acquisition_date: None,
             },
         )
         .await
@@ -495,6 +517,8 @@ mod tests {
                 residual_paid_out: Decimal::ZERO,
                 rights_action_id: None,
                 buyback_action_id: None,
+                scrip_action_id: None,
+                deemed_acquisition_date: None,
             },
         )
         .await
@@ -520,6 +544,8 @@ mod tests {
                 residual_paid_out: Decimal::ZERO,
                 rights_action_id: None,
                 buyback_action_id: None,
+                scrip_action_id: None,
+                deemed_acquisition_date: None,
             },
         )
         .await
@@ -1032,6 +1058,8 @@ mod tests {
                 residual_paid_out: Decimal::ZERO,
                 rights_action_id: None,
                 buyback_action_id: None,
+                scrip_action_id: None,
+                deemed_acquisition_date: None,
             },
         )
         .await
@@ -1085,5 +1113,179 @@ mod tests {
         // cost = US$1000 / 0.99, proceeds = US$1500 / 0.99
         assert_eq!(result[0].cost_base, Decimal::from(1000) / "0.99".parse::<Decimal>().unwrap());
         assert_eq!(result[0].proceeds, Decimal::from(1500) / "0.99".parse::<Decimal>().unwrap());
+    }
+
+    /// Take over listing `from` with listing `to`, 2 new units per 1 old, on
+    /// `date`, and run the exchange. Returns the created group.
+    async fn exchange_two_for_one(
+        pool: &SqlitePool,
+        action_id: i64,
+        from: i64,
+        to: i64,
+        date: NaiveDate,
+    ) -> crate::entities::scrip_exchange::Exchange {
+        corporate_action::db_upsert(
+            pool,
+            &corporate_action::CorporateAction {
+                id: action_id,
+                listing_id: from,
+                date,
+                kind: corporate_action::ActionKind::ScripForScrip {
+                    scrip_listing_id: to,
+                    scrip_new_units: Decimal::from(2),
+                    scrip_old_units: Decimal::ONE,
+                },
+            },
+        )
+        .await
+        .unwrap();
+        crate::entities::scrip_exchange::db_exchange(pool, action_id).await.unwrap()
+    }
+
+    /// The scrip-for-scrip rollover disregards the gain on the exchanged
+    /// shares: the closing Sell never appears as a realised gain or loss —
+    /// despite its zero proceeds — and the exchange year reports nothing.
+    #[tokio::test]
+    async fn db_scrip_exchange_closing_sell_is_excluded() {
+        let pool = test_pool().await;
+        let buy_date = NaiveDate::from_ymd_opt(2020, 10, 1).unwrap();
+        insert_listing(&pool, 1, "OLD").await;
+        insert_listing(&pool, 2, "NEW").await;
+        insert_buy(&pool, 1, 1, buy_date, Decimal::from(1000), "1.50".parse().unwrap()).await;
+        exchange_two_for_one(&pool, 10, 1, 2, NaiveDate::from_ymd_opt(2024, 7, 1).unwrap())
+            .await;
+
+        let result = db_realised_gains(&pool).await.unwrap();
+        assert!(result.is_empty(), "the rollover disposal is not a realised gain/loss");
+    }
+
+    /// A later sale of the replacement parcel uses the carried cost base and
+    /// the combined holding period: bought Oct 2020, exchanged Jul 2024, sold
+    /// Oct 2024 — under 12 months after the exchange but over 12 months from
+    /// the original acquisition, so the gain is discount-eligible.
+    #[tokio::test]
+    async fn db_sale_of_replacement_parcel_uses_carried_cost_base_and_combined_period() {
+        let pool = test_pool().await;
+        let buy_date = NaiveDate::from_ymd_opt(2020, 10, 1).unwrap();
+        let sell_date = NaiveDate::from_ymd_opt(2024, 10, 1).unwrap();
+        insert_listing(&pool, 1, "OLD").await;
+        insert_listing(&pool, 2, "NEW").await;
+        // 1,000 @ $1.50 = $1,500 cost base.
+        insert_buy(&pool, 1, 1, buy_date, Decimal::from(1000), "1.50".parse().unwrap()).await;
+        let ex = exchange_two_for_one(
+            &pool,
+            10,
+            1,
+            2,
+            NaiveDate::from_ymd_opt(2024, 7, 1).unwrap(),
+        )
+        .await;
+
+        // Sell all 2,000 replacement units at $1.00 → $2,000 proceeds.
+        insert_sell(&pool, 50, 2, sell_date, Decimal::from(2000), Decimal::ONE).await;
+        allocate(&pool, 1, 50, ex.replacements[0].id, Decimal::from(2000)).await;
+
+        let result = db_realised_gains(&pool).await.unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].sale_trade_id, 50);
+        // Carried cost base, not the exchange-date figure.
+        assert_eq!(result[0].cost_base, Decimal::from(1500));
+        assert_eq!(result[0].capital_gain_loss, Decimal::from(500));
+        // Combined period Oct 2020 → Oct 2024 exceeds 12 months.
+        assert_eq!(result[0].discount_eligible_gain, Decimal::from(500));
+        assert_eq!(result[0].non_discountable_gain, Decimal::ZERO);
+    }
+
+    /// The combined period is what counts: a parcel bought under 12 months
+    /// before the sale stays non-discountable even though the exchange sits
+    /// in between.
+    #[tokio::test]
+    async fn db_replacement_sale_within_combined_12_months_is_not_discounted() {
+        let pool = test_pool().await;
+        let buy_date = NaiveDate::from_ymd_opt(2024, 2, 1).unwrap();
+        let sell_date = NaiveDate::from_ymd_opt(2024, 12, 1).unwrap();
+        insert_listing(&pool, 1, "OLD").await;
+        insert_listing(&pool, 2, "NEW").await;
+        insert_buy(&pool, 1, 1, buy_date, Decimal::from(1000), "1.50".parse().unwrap()).await;
+        let ex = exchange_two_for_one(
+            &pool,
+            10,
+            1,
+            2,
+            NaiveDate::from_ymd_opt(2024, 7, 1).unwrap(),
+        )
+        .await;
+
+        insert_sell(&pool, 50, 2, sell_date, Decimal::from(2000), Decimal::ONE).await;
+        allocate(&pool, 1, 50, ex.replacements[0].id, Decimal::from(2000)).await;
+
+        let result = db_realised_gains(&pool).await.unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].discount_eligible_gain, Decimal::ZERO);
+        assert_eq!(result[0].non_discountable_gain, Decimal::from(500));
+    }
+
+    /// A non-AUD replacement parcel's carried cost base converts at the
+    /// *original* acquisition month's ATO rate (the rollover carries the AUD
+    /// cost base over), not at the exchange month's.
+    #[tokio::test]
+    async fn db_usd_replacement_cost_base_converts_at_the_original_buy_month() {
+        let pool = test_pool().await;
+        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
+        let sell_date = NaiveDate::from_ymd_opt(2025, 6, 1).unwrap();
+        insert_usd_listing(&pool, 1, "OLDQ").await;
+        insert_usd_listing(&pool, 2, "NEWQ").await;
+        // US$0.50/A$ in the buy month, 0.80 at the exchange, 0.60 at the sale.
+        for (month, rate) in [("2024-01", "0.50"), ("2024-07", "0.80"), ("2025-06", "0.60")] {
+            rba_fx_rate::db_import_rate(&pool, "USD", month, rate.parse().unwrap())
+                .await
+                .unwrap();
+        }
+        // US$10 × 100 = US$1,000 cost base = A$2,000 at the buy month.
+        insert_usd_trade(&pool, 1, trade::TradeType::Buy, buy_date, Decimal::from(100), Decimal::from(10)).await;
+        let ex = exchange_two_for_one(
+            &pool,
+            10,
+            1,
+            2,
+            NaiveDate::from_ymd_opt(2024, 7, 1).unwrap(),
+        )
+        .await;
+
+        // Sell the 200 replacement units for US$7.50 each = US$1,500 = A$2,500.
+        trade::db_upsert(
+            &pool,
+            &trade::Trade {
+                id: 50,
+                trade_type: trade::TradeType::Sell,
+                date: sell_date,
+                settlement_date: sell_date + chrono::Duration::days(2),
+                listing_id: 2,
+                average_price: "7.50".parse().unwrap(),
+                quantity: Decimal::from(200),
+                currency: "USD".to_string(),
+                brokerage: Decimal::ZERO,
+                gst_on_brokerage: Decimal::ZERO,
+                brokerage_currency: "USD".to_string(),
+                fx_rate: "0.99".parse().unwrap(),
+                contract_note_ref: None,
+                residual_brought_forward: Decimal::ZERO,
+                residual_carried_forward: Decimal::ZERO,
+                residual_paid_out: Decimal::ZERO,
+                rights_action_id: None,
+                buyback_action_id: None,
+                scrip_action_id: None,
+                deemed_acquisition_date: None,
+            },
+        )
+        .await
+        .unwrap();
+        allocate(&pool, 1, 50, ex.replacements[0].id, Decimal::from(200)).await;
+
+        let result = db_realised_gains(&pool).await.unwrap();
+        assert_eq!(result.len(), 1);
+        // A$2,000 at the Jan-2024 rate — not US$1,000 / 0.80 = A$1,250.
+        assert_eq!(result[0].cost_base, Decimal::from(2000));
+        assert_eq!(result[0].proceeds, Decimal::from(2500));
     }
 }

@@ -21,6 +21,7 @@ pub mod mic_registry;
 pub mod parcel_allocation;
 pub mod rba_fx_rate;
 pub mod rights_exercise;
+pub mod scrip_exchange;
 pub mod sell;
 pub mod trade;
 
@@ -43,6 +44,7 @@ pub fn router() -> Router<SqlitePool> {
         .merge(corporate_action::router())
         .merge(rights_exercise::router())
         .merge(buyback_participation::router())
+        .merge(scrip_exchange::router())
         .merge(drp_reinvestment::router())
         .merge(attachment::router())
 }

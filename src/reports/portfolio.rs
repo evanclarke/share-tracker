@@ -43,7 +43,7 @@ pub fn router() -> Router<SqlitePool> {
 pub async fn db_holdings(pool: &SqlitePool) -> Result<Vec<HoldingOverview>, sqlx::Error> {
     let trade_rows = sqlx::query(
         "SELECT id, listing_id, date, quantity, average_price, brokerage, gst_on_brokerage, \
-         currency, fx_rate \
+         currency, fx_rate, deemed_acquisition_date \
          FROM trades WHERE trade_type IN ('Buy', 'DRP')",
     )
     .fetch_all(pool)
@@ -128,10 +128,14 @@ pub async fn db_holdings(pool: &SqlitePool) -> Result<Vec<HoldingOverview>, sqlx
         } else {
             Decimal::ZERO
         };
-        // Convert the parcel's cost base to AUD (ATO rate for the buy month, else
-        // the trade's manual fx_rate) so holdings aggregate in AUD.
+        // Convert the parcel's cost base to AUD (ATO rate for the acquisition
+        // month, else the trade's manual fx_rate) so holdings aggregate in
+        // AUD. A scrip-for-scrip replacement parcel converts at its deemed
+        // acquisition month — the rollover carries the AUD cost base over.
+        let deemed: Option<NaiveDate> = row.try_get("deemed_acquisition_date")?;
+        let acquired = deemed.unwrap_or(trade_date);
         let remaining_cost =
-            crate::infra::fx::to_aud(pool, remaining_cost, &currency, trade_date, Some(fx_rate))
+            crate::infra::fx::to_aud(pool, remaining_cost, &currency, acquired, Some(fx_rate))
                 .await?;
 
         // The holding's quantity is reported in current units — after every
@@ -237,6 +241,8 @@ mod tests {
                 residual_paid_out: Decimal::ZERO,
                 rights_action_id: None,
                 buyback_action_id: None,
+                scrip_action_id: None,
+                deemed_acquisition_date: None,
             },
         )
         .await
@@ -265,6 +271,8 @@ mod tests {
                 residual_paid_out: Decimal::ZERO,
                 rights_action_id: None,
                 buyback_action_id: None,
+                scrip_action_id: None,
+                deemed_acquisition_date: None,
             },
         )
         .await
@@ -762,5 +770,40 @@ mod tests {
         let holdings: Vec<HoldingOverview> = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(holdings.len(), 1);
         assert!(holdings[0].market_value.is_none());
+    }
+
+    /// A scrip-for-scrip exchange moves the holding to the replacement
+    /// listing: the original listing drops out of the overview and the
+    /// replacement appears with the ratio-scaled quantity and the unchanged
+    /// total cost base (per-unit average scales inversely).
+    #[tokio::test]
+    async fn db_scrip_exchange_moves_holding_to_replacement_listing() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "OLD").await;
+        insert_listing(&pool, 2, "NEW").await;
+        // 100 @ $10 + $9.95 + $0.995 = $1,010.945 cost base.
+        insert_buy(&pool, 1, 1, Decimal::from(100), Decimal::from(10)).await;
+        corporate_action::db_upsert(
+            &pool,
+            &corporate_action::CorporateAction {
+                id: 10,
+                listing_id: 1,
+                date: NaiveDate::from_ymd_opt(2024, 7, 1).unwrap(),
+                kind: corporate_action::ActionKind::ScripForScrip {
+                    scrip_listing_id: 2,
+                    scrip_new_units: Decimal::from(2),
+                    scrip_old_units: Decimal::ONE,
+                },
+            },
+        )
+        .await
+        .unwrap();
+        crate::entities::scrip_exchange::db_exchange(&pool, 10).await.unwrap();
+
+        let holdings = db_holdings(&pool).await.unwrap();
+        assert_eq!(holdings.len(), 1);
+        assert_eq!(holdings[0].listing_id, 2);
+        assert_eq!(holdings[0].quantity, Decimal::from(200));
+        assert_eq!(holdings[0].total_cost_base, "1010.945".parse::<Decimal>().unwrap());
     }
 }

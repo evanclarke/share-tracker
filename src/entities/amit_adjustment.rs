@@ -145,16 +145,21 @@ pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<bool, sqlx::Error> 
 /// Returns the total AMIT cost base reduction per purchase trade, keyed by `trade_id`.
 /// reduction = sum(adjustment.quantity * amma.cost_base_adjustment) across all linked adjustments.
 /// Shared by the portfolio, realised, and unrealised reports to net AMIT tax-deferred
-/// amounts off the cost base of affected parcels.
-pub async fn db_cost_base_reductions(
-    pool: &SqlitePool,
-) -> Result<HashMap<i64, Decimal>, sqlx::Error> {
+/// amounts off the cost base of affected parcels. Generic over the executor so the
+/// scrip-for-scrip exchange (`entities::scrip_exchange`) can compute carried cost
+/// bases inside its own transaction.
+pub async fn db_cost_base_reductions<'e, E>(
+    executor: E,
+) -> Result<HashMap<i64, Decimal>, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
     let rows = sqlx::query(
         "SELECT aa.trade_id, aa.quantity, a.cost_base_adjustment \
          FROM amit_adjustments aa \
          JOIN amma_statements a ON a.id = aa.amma_statement_id",
     )
-    .fetch_all(pool)
+    .fetch_all(executor)
     .await?;
 
     let mut map: HashMap<i64, Decimal> = HashMap::new();
@@ -272,6 +277,8 @@ mod tests {
                 residual_paid_out: Decimal::ZERO,
                 rights_action_id: None,
                 buyback_action_id: None,
+                scrip_action_id: None,
+                deemed_acquisition_date: None,
             },
         )
         .await
@@ -300,6 +307,8 @@ mod tests {
                 residual_paid_out: Decimal::ZERO,
                 rights_action_id: None,
                 buyback_action_id: None,
+                scrip_action_id: None,
+                deemed_acquisition_date: None,
             },
         )
         .await

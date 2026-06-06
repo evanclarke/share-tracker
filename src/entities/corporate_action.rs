@@ -68,8 +68,23 @@
 //! allocations, plus the dividend-component income row when there is one.
 //! An action referenced by participation trades is frozen against edits.
 //!
+//! **ScripForScrip** — a takeover or merger completed as an all-scrip
+//! exchange with scrip-for-scrip rollover (Subdiv 124-M; see
+//! `docs/takeovers-and-scrip-for-scrip.md`): on the exchange `date` every
+//! `scrip_old_units` units of the original (target) listing become
+//! `scrip_new_units` units of `scrip_listing_id` (the replacement listing).
+//! Recording the action changes nothing by itself; exchanging (`POST
+//! /corporate_actions/:id/exchange`, `entities::scrip_exchange`) atomically
+//! creates a closing Sell on the original listing consuming every open
+//! parcel — excluded from the realised-gains and net-capital-gain reports,
+//! because the rollover disregards the capital gain — plus one replacement
+//! Buy per consumed parcel carrying the parcel's remaining reduced cost base
+//! and (as `trades.deemed_acquisition_date`) its acquisition date, the
+//! rollover's combined-holding-period rule for the 12-month CGT discount.
+//! An action referenced by exchange trades is frozen against edits.
+//!
 //! `ActionKind` is the extension point for future corporate actions
-//! (mergers, demergers, ...), each widening the enum and its CHECK.
+//! (demergers, ...), each widening the enum and its CHECK.
 
 use crate::infra::decimal::parse_dec;
 use crate::infra::http::write_error_status;
@@ -138,6 +153,16 @@ pub enum ActionKind {
         buyback_market_value: Option<Decimal>,
         currency: String,
     },
+    ScripForScrip {
+        /// The replacement listing the original holding converts into (must
+        /// differ from the action's own `listing_id`).
+        scrip_listing_id: i64,
+        /// Every `scrip_old_units` units of the original listing held at the
+        /// exchange date become `scrip_new_units` units of the replacement
+        /// listing (both positive).
+        scrip_new_units: Decimal,
+        scrip_old_units: Decimal,
+    },
 }
 
 impl ActionKind {
@@ -149,6 +174,7 @@ impl ActionKind {
             ActionKind::BonusIssue { .. } => "BonusIssue",
             ActionKind::RightsIssue { .. } => "RightsIssue",
             ActionKind::BuyBack { .. } => "BuyBack",
+            ActionKind::ScripForScrip { .. } => "ScripForScrip",
         }
     }
 }
@@ -164,6 +190,8 @@ pub struct CorporateAction {
     /// receive bonus units (a trade dated on the issue date is ex-bonus).
     /// RightsIssue: record date — units held before it earn the entitlement
     /// (a trade dated on it is ex-rights); exercises are dated on/after it.
+    /// ScripForScrip: exchange date — every parcel still open on it is
+    /// exchanged; the closing Sell and replacement Buys are dated on it.
     pub date: NaiveDate,
     #[serde(flatten)]
     pub kind: ActionKind,
@@ -211,6 +239,11 @@ fn kind_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<ActionKind, sqlx::Erro
             buyback_market_value: opt_dec(row, "buyback_market_value")?,
             currency: row.try_get("currency")?,
         }),
+        "ScripForScrip" => Ok(ActionKind::ScripForScrip {
+            scrip_listing_id: row.try_get("scrip_listing_id")?,
+            scrip_new_units: req_dec(row, "scrip_new_units")?,
+            scrip_old_units: req_dec(row, "scrip_old_units")?,
+        }),
         other => Err(sqlx::Error::Decode(
             format!("unknown corporate action_type {other}").into(),
         )),
@@ -238,6 +271,7 @@ enum ActionType {
     BonusIssue,
     RightsIssue,
     BuyBack,
+    ScripForScrip,
 }
 
 #[derive(Debug, Deserialize)]
@@ -271,6 +305,12 @@ pub struct CorporateActionBody {
     buyback_franking_credit: Option<Decimal>,
     #[serde(default)]
     buyback_market_value: Option<Decimal>,
+    #[serde(default)]
+    scrip_listing_id: Option<i64>,
+    #[serde(default)]
+    scrip_new_units: Option<Decimal>,
+    #[serde(default)]
+    scrip_old_units: Option<Decimal>,
 }
 
 impl CorporateActionBody {
@@ -286,7 +326,10 @@ impl CorporateActionBody {
     /// `currency` is shared by ReturnOfCapital, RightsIssue, and BuyBack but
     /// forbidden for the ratio-only types). A zero/negative payment would
     /// silently *increase* cost bases; a zero/negative ratio would zero out
-    /// or invert holdings or entitlements.
+    /// or invert holdings or entitlements. ScripForScrip needs a positive
+    /// exchange ratio and a replacement listing different from the original —
+    /// exchanging a listing into itself would consume its parcels and
+    /// recreate them in place.
     fn kind(self) -> Option<ActionKind> {
         let payment = self.amount_per_unit.is_some();
         let split = self.split_new_units.is_some() || self.split_old_units.is_some();
@@ -298,16 +341,20 @@ impl CorporateActionBody {
             || self.buyback_dividend.is_some()
             || self.buyback_franking_credit.is_some()
             || self.buyback_market_value.is_some();
+        let scrip = self.scrip_listing_id.is_some()
+            || self.scrip_new_units.is_some()
+            || self.scrip_old_units.is_some();
         let positive = |d: Option<Decimal>| d.filter(|v| *v > Decimal::ZERO);
         match self.action_type {
-            ActionType::ReturnOfCapital if !split && !bonus && !rights && !buyback => {
+            ActionType::ReturnOfCapital if !split && !bonus && !rights && !buyback && !scrip => {
                 Some(ActionKind::ReturnOfCapital {
                     amount_per_unit: positive(self.amount_per_unit)?,
                     currency: self.currency?,
                 })
             }
             ActionType::ShareSplit
-                if !payment && !bonus && !rights && !buyback && self.currency.is_none() =>
+                if !payment && !bonus && !rights && !buyback && !scrip
+                    && self.currency.is_none() =>
             {
                 Some(ActionKind::ShareSplit {
                     split_new_units: positive(self.split_new_units)?,
@@ -315,14 +362,15 @@ impl CorporateActionBody {
                 })
             }
             ActionType::BonusIssue
-                if !payment && !split && !rights && !buyback && self.currency.is_none() =>
+                if !payment && !split && !rights && !buyback && !scrip
+                    && self.currency.is_none() =>
             {
                 Some(ActionKind::BonusIssue {
                     bonus_units: positive(self.bonus_units)?,
                     bonus_held_units: positive(self.bonus_held_units)?,
                 })
             }
-            ActionType::RightsIssue if !payment && !split && !bonus && !buyback => {
+            ActionType::RightsIssue if !payment && !split && !bonus && !buyback && !scrip => {
                 Some(ActionKind::RightsIssue {
                     rights_units: positive(self.rights_units)?,
                     rights_held_units: positive(self.rights_held_units)?,
@@ -330,7 +378,19 @@ impl CorporateActionBody {
                     currency: self.currency?,
                 })
             }
-            ActionType::BuyBack if !payment && !split && !bonus && !rights => {
+            ActionType::ScripForScrip
+                if !payment && !split && !bonus && !rights && !buyback
+                    && self.currency.is_none() =>
+            {
+                let scrip_listing_id =
+                    self.scrip_listing_id.filter(|&l| l != self.listing_id)?;
+                Some(ActionKind::ScripForScrip {
+                    scrip_listing_id,
+                    scrip_new_units: positive(self.scrip_new_units)?,
+                    scrip_old_units: positive(self.scrip_old_units)?,
+                })
+            }
+            ActionType::BuyBack if !payment && !split && !bonus && !rights && !scrip => {
                 let buyback_price = positive(self.buyback_price)?;
                 let buyback_dividend = self.buyback_dividend.unwrap_or(Decimal::ZERO);
                 if buyback_dividend < Decimal::ZERO || buyback_dividend > buyback_price {
@@ -371,7 +431,8 @@ const COLUMNS: &str = "id, action_type, listing_id, date, amount_per_unit, curre
                        split_new_units, split_old_units, bonus_units, bonus_held_units, \
                        rights_units, rights_held_units, exercise_price, \
                        buyback_price, buyback_dividend, buyback_franking_credit, \
-                       buyback_market_value";
+                       buyback_market_value, scrip_listing_id, scrip_new_units, \
+                       scrip_old_units";
 
 pub async fn db_list(pool: &SqlitePool) -> Result<Vec<CorporateAction>, sqlx::Error> {
     sqlx::query_as(&format!("SELECT {COLUMNS} FROM corporate_actions ORDER BY id"))
@@ -398,11 +459,12 @@ where
 #[derive(Debug)]
 pub enum WriteError {
     Db(sqlx::Error),
-    /// The action is referenced by rights-exercise or buy-back participation
-    /// trades (`trades.rights_action_id` / `trades.buyback_action_id`):
-    /// editing it would retroactively change the terms those trades were
-    /// created and validated against. Delete the referencing trades first.
-    /// Mapped to `422`.
+    /// The action is referenced by rights-exercise, buy-back participation,
+    /// or scrip-for-scrip exchange trades (`trades.rights_action_id` /
+    /// `trades.buyback_action_id` / `trades.scrip_action_id`): editing it
+    /// would retroactively change the terms those trades were created and
+    /// validated against. Delete the referencing trades first. Mapped to
+    /// `422`.
     ReferencedByTrade,
 }
 
@@ -430,6 +492,9 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
         buyback_dividend: Option<String>,
         buyback_franking_credit: Option<String>,
         buyback_market_value: Option<String>,
+        scrip_listing_id: Option<i64>,
+        scrip_new_units: Option<String>,
+        scrip_old_units: Option<String>,
     }
     let mut c = Cols::default();
     match &action.kind {
@@ -464,6 +529,11 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
             c.buyback_market_value = buyback_market_value.map(|v| v.to_string());
             c.currency = Some(currency.clone());
         }
+        ActionKind::ScripForScrip { scrip_listing_id, scrip_new_units, scrip_old_units } => {
+            c.scrip_listing_id = Some(*scrip_listing_id);
+            c.scrip_new_units = Some(scrip_new_units.to_string());
+            c.scrip_old_units = Some(scrip_old_units.to_string());
+        }
     }
 
     let mut tx = pool.begin().await?;
@@ -474,7 +544,8 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
     // transaction.
     let referenced: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM trades \
-                       WHERE rights_action_id = ?1 OR buyback_action_id = ?1)",
+                       WHERE rights_action_id = ?1 OR buyback_action_id = ?1 \
+                          OR scrip_action_id = ?1)",
     )
     .bind(action.id)
     .fetch_one(&mut *tx)
@@ -488,8 +559,9 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
          (id, action_type, listing_id, date, amount_per_unit, currency, \
           split_new_units, split_old_units, bonus_units, bonus_held_units, \
           rights_units, rights_held_units, exercise_price, \
-          buyback_price, buyback_dividend, buyback_franking_credit, buyback_market_value) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+          buyback_price, buyback_dividend, buyback_franking_credit, buyback_market_value, \
+          scrip_listing_id, scrip_new_units, scrip_old_units) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT(id) DO UPDATE SET \
              action_type       = excluded.action_type, \
              listing_id        = excluded.listing_id, \
@@ -506,7 +578,10 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
              buyback_price           = excluded.buyback_price, \
              buyback_dividend        = excluded.buyback_dividend, \
              buyback_franking_credit = excluded.buyback_franking_credit, \
-             buyback_market_value    = excluded.buyback_market_value",
+             buyback_market_value    = excluded.buyback_market_value, \
+             scrip_listing_id  = excluded.scrip_listing_id, \
+             scrip_new_units   = excluded.scrip_new_units, \
+             scrip_old_units   = excluded.scrip_old_units",
     )
     .bind(action.id)
     .bind(action.kind.type_str())
@@ -525,15 +600,19 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
     .bind(c.buyback_dividend)
     .bind(c.buyback_franking_credit)
     .bind(c.buyback_market_value)
+    .bind(c.scrip_listing_id)
+    .bind(c.scrip_new_units)
+    .bind(c.scrip_old_units)
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
     Ok(())
 }
 
-/// Delete an action. An action referenced by rights-exercise trades is
-/// protected by the `trades.rights_action_id` foreign key — the violation
-/// surfaces as a database error the handler maps to `422`.
+/// Delete an action. An action referenced by rights-exercise, buy-back
+/// participation, or scrip-for-scrip exchange trades is protected by the
+/// corresponding `trades.*_action_id` foreign key — the violation surfaces
+/// as a database error the handler maps to `422`.
 pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<bool, sqlx::Error> {
     let result = sqlx::query("DELETE FROM corporate_actions WHERE id = ?")
         .bind(id)
@@ -915,6 +994,26 @@ mod tests {
         }
     }
 
+    fn scrip(
+        id: i64,
+        listing_id: i64,
+        scrip_listing_id: i64,
+        date: NaiveDate,
+        new: &str,
+        old: &str,
+    ) -> CorporateAction {
+        CorporateAction {
+            id,
+            listing_id,
+            date,
+            kind: ActionKind::ScripForScrip {
+                scrip_listing_id,
+                scrip_new_units: new.parse().unwrap(),
+                scrip_old_units: old.parse().unwrap(),
+            },
+        }
+    }
+
     fn split_event(date: NaiveDate, new: &str, old: &str) -> SplitEvent {
         SplitEvent { date, new_units: new.parse().unwrap(), old_units: old.parse().unwrap() }
     }
@@ -1026,6 +1125,58 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn db_insert_and_retrieve_scrip_for_scrip_preserves_terms() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "OLD").await;
+        insert_listing(&pool, 2, "NEW").await;
+        // An uneven exchange ratio (e.g. 3 new shares per 7 old) must
+        // round-trip exactly.
+        db_upsert(&pool, &scrip(1, 1, 2, d(2024, 11, 30), "3", "7")).await.unwrap();
+
+        let got = db_get(&pool, 1).await.unwrap().unwrap();
+        assert_eq!(got.listing_id, 1);
+        assert_eq!(
+            got.kind,
+            ActionKind::ScripForScrip {
+                scrip_listing_id: 2,
+                scrip_new_units: Decimal::from(3),
+                scrip_old_units: Decimal::from(7),
+            }
+        );
+    }
+
+    /// A ScripForScrip never appears in the split-event or return-of-capital
+    /// streams — recording one changes no existing parcel (the exchange
+    /// operation does the substitution).
+    #[tokio::test]
+    async fn db_scrip_for_scrip_is_not_a_split_or_payment_event() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "OLD").await;
+        insert_listing(&pool, 2, "NEW").await;
+        db_upsert(&pool, &scrip(1, 1, 2, d(2024, 11, 30), "2", "1")).await.unwrap();
+
+        assert!(db_share_split_events(&pool).await.unwrap().is_empty());
+        assert!(db_splits_for_listing(&pool, 1).await.unwrap().is_empty());
+        assert!(db_return_of_capital_events(&pool).await.unwrap().is_empty());
+    }
+
+    /// The CHECK rejects an exchange of a listing into itself even on a raw
+    /// SQL write — the body validation is the first line of defence.
+    #[tokio::test]
+    async fn db_check_rejects_self_exchange() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "OLD").await;
+        let result = sqlx::query(
+            "INSERT INTO corporate_actions \
+             (id, action_type, listing_id, date, scrip_listing_id, scrip_new_units, scrip_old_units) \
+             VALUES (1, 'ScripForScrip', 1, '2024-11-30', 1, '2', '1')",
+        )
+        .execute(&pool)
+        .await;
+        assert!(result.is_err(), "scrip_listing_id == listing_id should violate the CHECK");
+    }
+
     /// A BuyBack never appears in the split-event or return-of-capital
     /// streams — recording one changes no existing parcel.
     #[tokio::test]
@@ -1081,6 +1232,7 @@ mod tests {
     async fn db_check_rejects_mixed_payloads() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "RAP").await;
+        insert_listing(&pool, 2, "NEW").await;
         // (action_type, the stray columns the CHECK must reject for it)
         for (action_type, stray_cols) in [
             // A ShareSplit carrying a payment, a bonus ratio, or rights terms…
@@ -1098,10 +1250,18 @@ mod tests {
             ("BuyBack", "amount_per_unit = '0.50'"),
             ("BuyBack", "split_new_units = '2', split_old_units = '1'"),
             ("BuyBack", "rights_units = '1', rights_held_units = '4', exercise_price = '1.80'"),
-            // …and the other types carrying buy-back terms.
+            // …the other types carrying buy-back terms…
             ("ShareSplit", "buyback_price = '9.60', buyback_dividend = '0', buyback_franking_credit = '0'"),
             ("ReturnOfCapital", "buyback_price = '9.60', buyback_dividend = '0', buyback_franking_credit = '0'"),
             ("RightsIssue", "buyback_market_value = '10.20'"),
+            // …a ScripForScrip carrying a payment, a split ratio, or buy-back
+            // terms…
+            ("ScripForScrip", "amount_per_unit = '0.50', currency = 'AUD'"),
+            ("ScripForScrip", "split_new_units = '2', split_old_units = '1'"),
+            ("ScripForScrip", "buyback_price = '9.60', buyback_dividend = '0', buyback_franking_credit = '0'"),
+            // …and the other types carrying scrip terms.
+            ("ShareSplit", "scrip_listing_id = 2, scrip_new_units = '2', scrip_old_units = '1'"),
+            ("BuyBack", "scrip_listing_id = 2, scrip_new_units = '2', scrip_old_units = '1'"),
         ] {
             let (base_cols, base_vals) = match action_type {
                 "ShareSplit" => ("split_new_units, split_old_units", "'2', '1'"),
@@ -1113,6 +1273,10 @@ mod tests {
                 "BuyBack" => (
                     "buyback_price, buyback_dividend, buyback_franking_credit, currency",
                     "'9.60', '1.40', '0.60', 'AUD'",
+                ),
+                "ScripForScrip" => (
+                    "scrip_listing_id, scrip_new_units, scrip_old_units",
+                    "2, '2', '1'",
                 ),
                 _ => ("bonus_units, bonus_held_units", "'1', '10'"),
             };
@@ -1698,6 +1862,92 @@ mod tests {
                 "action_type": "ShareSplit", "listing_id": 1, "date": "2024-11-30",
                 "split_new_units": "2", "split_old_units": "1",
                 "bonus_units": "1", "bonus_held_units": "10",
+            }),
+        ] {
+            api_put_expecting(&pool, body, StatusCode::UNPROCESSABLE_ENTITY).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn api_scrip_for_scrip_round_trip() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "OLD").await;
+        insert_listing(&pool, 2, "NEW").await;
+        api_put_expecting(
+            &pool,
+            serde_json::json!({
+                "action_type": "ScripForScrip",
+                "listing_id": 1,
+                "date": "2024-11-30",
+                "scrip_listing_id": 2,
+                "scrip_new_units": "2",
+                "scrip_old_units": "1",
+            }),
+            StatusCode::NO_CONTENT,
+        )
+        .await;
+        let got = db_get(&pool, 1).await.unwrap().unwrap();
+        assert_eq!(
+            got.kind,
+            ActionKind::ScripForScrip {
+                scrip_listing_id: 2,
+                scrip_new_units: Decimal::from(2),
+                scrip_old_units: Decimal::ONE,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn api_invalid_scrip_for_scrip_payloads_return_422() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "OLD").await;
+        insert_listing(&pool, 2, "NEW").await;
+        // Missing terms, a non-positive ratio, the same listing on both
+        // sides, an unknown replacement listing, a stray currency, stray
+        // cross-type fields — and the other types carrying scrip fields.
+        for body in [
+            serde_json::json!({
+                "action_type": "ScripForScrip", "listing_id": 1, "date": "2024-11-30",
+            }),
+            serde_json::json!({
+                "action_type": "ScripForScrip", "listing_id": 1, "date": "2024-11-30",
+                "scrip_listing_id": 2, "scrip_new_units": "0", "scrip_old_units": "1",
+            }),
+            serde_json::json!({
+                "action_type": "ScripForScrip", "listing_id": 1, "date": "2024-11-30",
+                "scrip_listing_id": 2, "scrip_new_units": "2", "scrip_old_units": "-1",
+            }),
+            serde_json::json!({
+                "action_type": "ScripForScrip", "listing_id": 1, "date": "2024-11-30",
+                "scrip_listing_id": 1, "scrip_new_units": "2", "scrip_old_units": "1",
+            }),
+            serde_json::json!({
+                "action_type": "ScripForScrip", "listing_id": 1, "date": "2024-11-30",
+                "scrip_listing_id": 999, "scrip_new_units": "2", "scrip_old_units": "1",
+            }),
+            serde_json::json!({
+                "action_type": "ScripForScrip", "listing_id": 1, "date": "2024-11-30",
+                "scrip_listing_id": 2, "scrip_new_units": "2", "scrip_old_units": "1",
+                "currency": "AUD",
+            }),
+            serde_json::json!({
+                "action_type": "ScripForScrip", "listing_id": 1, "date": "2024-11-30",
+                "scrip_listing_id": 2, "scrip_new_units": "2", "scrip_old_units": "1",
+                "amount_per_unit": "0.50",
+            }),
+            serde_json::json!({
+                "action_type": "ScripForScrip", "listing_id": 1, "date": "2024-11-30",
+                "scrip_listing_id": 2, "scrip_new_units": "2", "scrip_old_units": "1",
+                "split_new_units": "2", "split_old_units": "1",
+            }),
+            serde_json::json!({
+                "action_type": "ShareSplit", "listing_id": 1, "date": "2024-11-30",
+                "split_new_units": "2", "split_old_units": "1",
+                "scrip_listing_id": 2, "scrip_new_units": "2", "scrip_old_units": "1",
+            }),
+            serde_json::json!({
+                "action_type": "BuyBack", "listing_id": 1, "date": "2024-11-30",
+                "buyback_price": "9.60", "currency": "AUD", "scrip_listing_id": 2,
             }),
         ] {
             api_put_expecting(&pool, body, StatusCode::UNPROCESSABLE_ENTITY).await;

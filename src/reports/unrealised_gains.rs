@@ -41,7 +41,7 @@ pub async fn db_unrealised_gains(
 ) -> Result<Vec<UnrealisedGain>, sqlx::Error> {
     let trade_rows = sqlx::query(
         "SELECT id, listing_id, date, quantity, average_price, brokerage, gst_on_brokerage, \
-         currency, fx_rate \
+         currency, fx_rate, deemed_acquisition_date \
          FROM trades WHERE trade_type IN ('Buy', 'DRP')",
     )
     .fetch_all(pool)
@@ -89,6 +89,11 @@ pub async fn db_unrealised_gains(
         let gst = parse_dec("gst_on_brokerage", row.try_get("gst_on_brokerage")?)?;
         let currency: String = row.try_get("currency")?;
         let fx_rate = parse_dec("fx_rate", row.try_get("fx_rate")?)?;
+        // A scrip-for-scrip replacement parcel carries the consumed parcel's
+        // acquisition date: it drives the discount clock and the AUD
+        // translation month; split/ROC applicability stays on the trade date.
+        let deemed: Option<NaiveDate> = row.try_get("deemed_acquisition_date")?;
+        let acquired = deemed.unwrap_or(trade_date);
 
         let splits = split_events.get(&listing_id).map_or(&[][..], |v| v);
         // Internal cost-base arithmetic stays in the parcel's as-acquired units;
@@ -124,13 +129,14 @@ pub async fn db_unrealised_gains(
         } else {
             Decimal::ZERO
         };
-        // Convert the parcel's cost base to AUD (ATO rate for the buy month, else
-        // the trade's manual fx_rate) so the holding's cost base is AUD.
+        // Convert the parcel's cost base to AUD (ATO rate for the acquisition
+        // month, else the trade's manual fx_rate) so the holding's cost base
+        // is AUD.
         let remaining_cost = crate::infra::fx::to_aud(
             pool,
             remaining_cost,
             &currency,
-            trade_date,
+            acquired,
             Some(fx_rate),
         )
         .await?;
@@ -148,8 +154,10 @@ pub async fn db_unrealised_gains(
 
         // CGT discount: parcel held strictly more than 12 months. A split does
         // not restart the clock — the converted shares keep the original
-        // acquisition date (TD 2000/10).
-        if as_of_date > trade_date + Months::new(12) {
+        // acquisition date (TD 2000/10) — and a scrip-for-scrip replacement
+        // parcel counts the combined holding period from its deemed
+        // acquisition date.
+        if as_of_date > acquired + Months::new(12) {
             *listing_cgt_eligible_qty.entry(listing_id).or_insert(Decimal::ZERO) +=
                 remaining_as_of;
         }
@@ -264,6 +272,8 @@ mod tests {
                 residual_paid_out: Decimal::ZERO,
                 rights_action_id: None,
                 buyback_action_id: None,
+                scrip_action_id: None,
+                deemed_acquisition_date: None,
             },
         )
         .await
@@ -292,6 +302,8 @@ mod tests {
                 residual_paid_out: Decimal::ZERO,
                 rights_action_id: None,
                 buyback_action_id: None,
+                scrip_action_id: None,
+                deemed_acquisition_date: None,
             },
         )
         .await
@@ -643,5 +655,49 @@ mod tests {
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let gains: Vec<UnrealisedGain> = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(gains[0].cgt_discount_eligible_quantity, Decimal::from(100));
+    }
+
+    /// A scrip-for-scrip replacement parcel's discount clock runs from its
+    /// deemed (carried) acquisition date — the rollover's combined holding
+    /// period — not from the exchange date.
+    #[tokio::test]
+    async fn db_scrip_replacement_discount_counts_the_combined_period() {
+        let pool = test_pool().await;
+        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        insert_listing(&pool, 1, "OLD").await;
+        insert_listing(&pool, 2, "NEW").await;
+        insert_buy(&pool, 1, 1, buy_date, Decimal::from(100), Decimal::from(10)).await;
+        corporate_action::db_upsert(
+            &pool,
+            &corporate_action::CorporateAction {
+                id: 10,
+                listing_id: 1,
+                date: NaiveDate::from_ymd_opt(2024, 7, 1).unwrap(),
+                kind: corporate_action::ActionKind::ScripForScrip {
+                    scrip_listing_id: 2,
+                    scrip_new_units: Decimal::from(2),
+                    scrip_old_units: Decimal::ONE,
+                },
+            },
+        )
+        .await
+        .unwrap();
+        crate::entities::scrip_exchange::db_exchange(&pool, 10).await.unwrap();
+
+        // 2025-02-01: over 12 months after the original buy, under 12 months
+        // after the exchange — eligible via the combined period.
+        let gains = db_unrealised_gains(&pool, NaiveDate::from_ymd_opt(2025, 2, 1).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(gains.len(), 1);
+        assert_eq!(gains[0].listing_id, 2);
+        assert_eq!(gains[0].quantity, Decimal::from(200));
+        assert_eq!(gains[0].cgt_discount_eligible_quantity, Decimal::from(200));
+
+        // 2024-12-01: under 12 months even from the original buy — not yet.
+        let gains = db_unrealised_gains(&pool, NaiveDate::from_ymd_opt(2024, 12, 1).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(gains[0].cgt_discount_eligible_quantity, Decimal::ZERO);
     }
 }

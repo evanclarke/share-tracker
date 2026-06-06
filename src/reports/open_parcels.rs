@@ -17,6 +17,9 @@ pub struct OpenParcel {
     pub ticker: String,
     /// Original acquisition date — preserved across share splits/consolidations
     /// (TD 2000/10), so the 12-month discount clock keeps running from here.
+    /// A scrip-for-scrip replacement parcel reports the consumed parcel's
+    /// acquisition date (its `deemed_acquisition_date` — the rollover's
+    /// combined holding period), not the exchange date.
     pub acquisition_date: NaiveDate,
     /// Units as originally transacted (pre-split basis where a split followed).
     pub original_quantity: Decimal,
@@ -50,7 +53,7 @@ pub fn router() -> Router<SqlitePool> {
 pub async fn db_open_parcels(pool: &SqlitePool) -> Result<Vec<OpenParcel>, sqlx::Error> {
     let trade_rows = sqlx::query(
         "SELECT t.id, t.listing_id, l.ticker, t.date, t.quantity, t.average_price, \
-         t.brokerage, t.gst_on_brokerage, t.currency, t.fx_rate \
+         t.brokerage, t.gst_on_brokerage, t.currency, t.fx_rate, t.deemed_acquisition_date \
          FROM trades t JOIN listings l ON l.id = t.listing_id \
          WHERE t.trade_type IN ('Buy', 'DRP')",
     )
@@ -97,6 +100,12 @@ pub async fn db_open_parcels(pool: &SqlitePool) -> Result<Vec<OpenParcel>, sqlx:
         let gst = parse_dec("gst_on_brokerage", row.try_get("gst_on_brokerage")?)?;
         let currency: String = row.try_get("currency")?;
         let fx_rate = parse_dec("fx_rate", row.try_get("fx_rate")?)?;
+        // A scrip-for-scrip replacement parcel carries the consumed parcel's
+        // acquisition date: it drives the reported acquisition date and the
+        // AUD translation month (the rollover carries the AUD cost base
+        // over); split/ROC applicability stays on the actual trade date.
+        let deemed: Option<NaiveDate> = row.try_get("deemed_acquisition_date")?;
+        let acquired = deemed.unwrap_or(trade_date);
 
         let splits = split_events.get(&listing_id).map_or(&[][..], |v| v);
         // Internal cost-base arithmetic stays in the parcel's as-acquired units;
@@ -134,17 +143,18 @@ pub async fn db_open_parcels(pool: &SqlitePool) -> Result<Vec<OpenParcel>, sqlx:
             Decimal::ZERO
         };
 
-        // Convert each figure to AUD at the parcel's buy-month ATO rate (the
-        // trade's manual fx_rate as fallback) so the schedule is uniformly AUD.
+        // Convert each figure to AUD at the parcel's acquisition-month ATO
+        // rate (the trade's manual fx_rate as fallback) so the schedule is
+        // uniformly AUD.
         let original_cost_base =
-            crate::infra::fx::to_aud(pool, initial_cost, &currency, trade_date, Some(fx_rate))
+            crate::infra::fx::to_aud(pool, initial_cost, &currency, acquired, Some(fx_rate))
                 .await?;
         let amit_cost_base_reduction =
-            crate::infra::fx::to_aud(pool, amit, &currency, trade_date, Some(fx_rate)).await?;
+            crate::infra::fx::to_aud(pool, amit, &currency, acquired, Some(fx_rate)).await?;
         let return_of_capital_reduction =
-            crate::infra::fx::to_aud(pool, roc, &currency, trade_date, Some(fx_rate)).await?;
+            crate::infra::fx::to_aud(pool, roc, &currency, acquired, Some(fx_rate)).await?;
         let remaining_cost_base =
-            crate::infra::fx::to_aud(pool, remaining_cost, &currency, trade_date, Some(fx_rate))
+            crate::infra::fx::to_aud(pool, remaining_cost, &currency, acquired, Some(fx_rate))
                 .await?;
 
         // The remaining quantity is reported in current units — after every
@@ -158,7 +168,7 @@ pub async fn db_open_parcels(pool: &SqlitePool) -> Result<Vec<OpenParcel>, sqlx:
             trade_id,
             listing_id,
             ticker,
-            acquisition_date: trade_date,
+            acquisition_date: acquired,
             original_quantity: qty,
             remaining_quantity: remaining_now,
             original_cost_base,
@@ -259,6 +269,8 @@ mod tests {
                 residual_paid_out: Decimal::ZERO,
                 rights_action_id: None,
                 buyback_action_id: None,
+                scrip_action_id: None,
+                deemed_acquisition_date: None,
             },
         )
         .await
@@ -287,6 +299,8 @@ mod tests {
                 residual_paid_out: Decimal::ZERO,
                 rights_action_id: None,
                 buyback_action_id: None,
+                scrip_action_id: None,
+                deemed_acquisition_date: None,
             },
         )
         .await
@@ -697,5 +711,54 @@ mod tests {
             parcels[0].remaining_cost_base,
             "606.567".parse::<Decimal>().unwrap()
         );
+    }
+
+    /// A scrip-for-scrip replacement parcel is an ordinary open parcel, but
+    /// reports the consumed parcel's acquisition date (the rollover's
+    /// combined holding period) and its carried cost base — and a non-AUD
+    /// carried cost base converts at the *original* buy month's ATO rate, so
+    /// the AUD figure is unchanged by the exchange.
+    #[tokio::test]
+    async fn db_scrip_replacement_parcel_reports_carried_date_and_cost_base() {
+        let pool = test_pool().await;
+        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 10).unwrap();
+        insert_listing(&pool, 1, "OLD").await;
+        insert_listing(&pool, 2, "NEW").await;
+        // A$1 = 0.50 USD in the buy month, 0.80 in the exchange month.
+        for (month, rate) in [("2024-01", "0.50"), ("2024-07", "0.80")] {
+            crate::entities::rba_fx_rate::db_import_rate(&pool, "USD", month, rate.parse().unwrap())
+                .await
+                .unwrap();
+        }
+        // US$10 × 100 + US$9.95 + US$0.995 = US$1,010.945 = A$2,021.89.
+        insert_buy_ccy(&pool, 1, 1, buy_date, Decimal::from(100), Decimal::from(10), "USD")
+            .await;
+        corporate_action::db_upsert(
+            &pool,
+            &corporate_action::CorporateAction {
+                id: 10,
+                listing_id: 1,
+                date: NaiveDate::from_ymd_opt(2024, 7, 1).unwrap(),
+                kind: corporate_action::ActionKind::ScripForScrip {
+                    scrip_listing_id: 2,
+                    scrip_new_units: Decimal::from(2),
+                    scrip_old_units: Decimal::ONE,
+                },
+            },
+        )
+        .await
+        .unwrap();
+        crate::entities::scrip_exchange::db_exchange(&pool, 10).await.unwrap();
+
+        let parcels = db_open_parcels(&pool).await.unwrap();
+        // The original parcel is fully consumed; only the replacement is open.
+        assert_eq!(parcels.len(), 1);
+        let p = &parcels[0];
+        assert_eq!(p.listing_id, 2);
+        assert_eq!(p.acquisition_date, buy_date);
+        assert_eq!(p.remaining_quantity, Decimal::from(200));
+        // A$2,021.89 at the Jan-2024 rate — not US$1,010.945 / 0.80.
+        assert_eq!(p.original_cost_base, "2021.890".parse::<Decimal>().unwrap());
+        assert_eq!(p.remaining_cost_base, "2021.890".parse::<Decimal>().unwrap());
     }
 }
