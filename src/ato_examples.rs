@@ -4,26 +4,46 @@
 //! HTTP API (the full `app::router` — no `db_*` shortcuts), reads the result
 //! back through the report endpoints, and asserts the figures the ATO states.
 //!
-//! Worked examples in the docs that are NOT reproduced here, and why:
+//! Examples whose feature is NOT implemented yet are still encoded below as
+//! `#[ignore]`d tests expressing the intended behaviour — each `#[ignore]`
+//! message and the TODO section it cites point at each other. Remove the
+//! `#[ignore]` when the feature lands (adjusting any speculative entry API to
+//! the real one).
+//!
+//! Worked examples in the docs that are NOT reproduced here at all, and why:
 //! - `docs/cgt-cost-base.md` "Example: effect of capital works deduction on
 //!   reduced cost base" and "Example: recouped expenditure" — both need the
 //!   reduced cost base and cost-base elements 3–5, which are not modelled yet
 //!   (TODO "Reduced cost base and the five cost-base elements", NEEDS
-//!   CLARIFICATION).
+//!   CLARIFICATION). What the asserted outcome looks like depends on that
+//!   clarification, so no meaningful ignored test can be written yet.
 //! - `docs/lic-capital-gain-deduction.md` "Example: Beneficiary of a trust or
 //!   partner in partnership" — needs partnership/trust taxpayer entities,
 //!   which are not modelled (TODO "Taxpayer entity type and CGT discount
 //!   rate", NEEDS CLARIFICATION).
+//! - `docs/you-and-your-shares-dividends.md` "Example 7: substantially
+//!   identical shares" (Jessica) — needs the 45-day rule's last-in-first-out
+//!   parcel identification on top of the holding-period rule itself; covered
+//!   by the same TODO section as Matthew's Example 6 below.
 //! - `docs/amma-statement-guidance-notes.md` running example ("In our example,
 //!   this is $155") — the underlying Part C component table is not included in
 //!   the mirrored copy, so the example is not reproducible from the doc alone.
+//! - "Guide to foreign income tax offset rules 2025" Example 16 (Anna,
+//!   ato.gov.au law view SAV/FOROFFSET/00004) — the FITO offset-limit
+//!   calculation compares personal income-tax liabilities with and without the
+//!   foreign income (employment income, deductions, Medicare levy), which is
+//!   outside this system's data model; the TODO "Foreign income tax offset
+//!   (FITO) cap" item covers only the $1,000 de-minimis cap this system can
+//!   apply from its own data.
 //!
 //! The ATO examples use real property (land, an investment property); the data
 //! model records every asset as a listing traded in units, so each property is
 //! entered as 1 unit at the property's price with the incidental costs as
 //! brokerage. The CGT arithmetic the examples demonstrate is identical.
 
+use crate::entities::trade::{Trade, TradeType};
 use crate::reports::net_capital_gain::NetCapitalGainYear;
+use crate::reports::portfolio::HoldingOverview;
 use crate::reports::realised_gains::RealisedGainLoss;
 use crate::reports::tax_summary::TaxYearSummary;
 use crate::{app, infra::db, infra::scheduler};
@@ -58,6 +78,30 @@ async fn api_put(pool: &SqlitePool, path: &str, body: Value) {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NO_CONTENT, "PUT {path} failed");
+}
+
+/// POST a JSON body (action/report endpoints) and deserialize the JSON response,
+/// requiring the given success status.
+async fn api_post<T: serde::de::DeserializeOwned>(
+    pool: &SqlitePool,
+    path: &str,
+    body: Value,
+    expect: StatusCode,
+) -> T {
+    let resp = router(pool)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(path)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), expect, "POST {path} failed");
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    serde_json::from_slice(&bytes).unwrap()
 }
 
 /// GET a report endpoint and deserialize the JSON response.
@@ -252,6 +296,256 @@ async fn cgt_how_to_calculate_example_multiple_assets() {
     assert_eq!(y.cgt_discount, dec("32750"), "step 7: $65,500 × 50% = $32,750");
     assert_eq!(y.net_capital_gain, dec("32750"), "step 8: net capital gain of $32,750");
     assert_eq!(y.capital_loss_carried_forward, Decimal::ZERO);
+}
+
+/// `docs/cgt-dividend-reinvestment-plans.md` — "Example: dividend reinvestment plans".
+///
+/// > Natalie owns 1,440 shares in a company. In November 2024, the company
+/// > declared a dividend of 25 cents per share. Natalie was offered the choice of:
+/// > - taking the dividend as a cash payment of $360 (1,440 × 25 cents)
+/// > - reinvesting the dividend to acquire 45 more shares at $8 per share ($360 ÷ $8).
+/// > Natalie decided to participate in the dividend reinvestment plan and
+/// > received 45 new shares on 20 December 2024. This means:
+/// > - she must declare the $360 dividend as assessable dividend income in her
+/// >   2024–25 tax return
+/// > - for CGT purposes, she acquired the 45 new shares for $360 on 20 December 2024.
+#[tokio::test]
+async fn drp_example_natalie_reinvested_dividend() {
+    let pool = test_pool().await;
+    put_listing(&pool, 1, "NTLE").await;
+    // Enrol the holding in the DRP, then record the $360 distribution.
+    api_put(&pool, "/drp_enrolments/1", json!({ "residual_handling": "CarryForward" })).await;
+    api_put(
+        &pool,
+        "/income/1",
+        json!({
+            "listing_id": 1,
+            "date_paid": "2024-12-20",
+            "unfranked_amount": "360",
+            "currency": "AUD",
+        }),
+    )
+    .await;
+
+    // Reinvest at $8 per share: $360 ÷ $8 = 45 new shares acquired for $360.
+    let trade: Trade = api_post(
+        &pool,
+        "/income/1/reinvest",
+        json!({ "reinvestment_price": "8" }),
+        StatusCode::CREATED,
+    )
+    .await;
+    assert_eq!(trade.trade_type, TradeType::DRP);
+    assert_eq!(trade.quantity, dec("45"), "45 new shares");
+    assert_eq!(trade.average_price, dec("8"), "at $8 per share");
+    assert_eq!(trade.date.to_string(), "2024-12-20", "received on 20 December 2024");
+
+    // For CGT purposes the 45 shares were acquired for $360.
+    let holdings: Vec<HoldingOverview> =
+        api_post(&pool, "/portfolio/overview", json!({}), StatusCode::OK).await;
+    assert_eq!(holdings.len(), 1);
+    assert_eq!(holdings[0].quantity, dec("45"));
+    assert_eq!(holdings[0].total_cost_base, dec("360"), "acquired the 45 new shares for $360");
+
+    // The $360 dividend is assessable income in her 2024–25 tax return.
+    let years: Vec<TaxYearSummary> = api_get(&pool, "/portfolio/tax-summary").await;
+    assert_eq!(years.len(), 1);
+    assert_eq!(years[0].tax_year, 2025); // paid Dec 2024 → 2024–25
+    assert_eq!(years[0].dividends_assessable, dec("360"), "declares the $360 dividend");
+}
+
+/// `docs/cgt-keeping-records-shares.md` — "Example: identifying when shares or
+/// units were acquired".
+///
+/// > Boris is an investor. He:
+/// > - bought 1,000 shares in a company in 2023 for $5 each
+/// > - bought 3,000 shares in the same company in 2024 for $10 each
+/// > - sold 1,500 of the shares in 2025 for $8 each.
+/// > He decides to sell 1,500 of the shares he bought in 2024 in order to claim
+/// > a capital loss in the 2025 income year. As a result, Boris will still have:
+/// > - 1,000 shares with an acquisition cost of $5
+/// > - 1,500 shares with an acquisition cost of $10.
+///
+/// Specific parcel identification is exactly what `PUT /sells` parcel
+/// allocations record: the sale is allocated against the 2024 parcel, producing
+/// the (8 − 10) × 1,500 = $3,000 capital loss and leaving the 2023 parcel intact.
+#[tokio::test]
+async fn keeping_records_example_boris_identifying_shares_sold() {
+    let pool = test_pool().await;
+    put_listing(&pool, 1, "BORI").await;
+    put_buy(&pool, 1, 1, "2023-05-15", "1000", "5", "0").await;
+    put_buy(&pool, 2, 1, "2024-05-15", "3000", "10", "0").await;
+    // Sell 1,500 in 2025 for $8, nominating the 2024 parcel (trade 2).
+    put_sell(&pool, 3, 1, "2025-05-15", "1500", "8", "0", 2).await;
+
+    // The nominated parcel makes it a $3,000 capital loss in the 2025 income year.
+    let sales: Vec<RealisedGainLoss> = api_get(&pool, "/portfolio/realised-gains").await;
+    assert_eq!(sales.len(), 1);
+    assert_eq!(sales[0].cost_base, dec("15000"), "1,500 of the $10 (2024) shares");
+    assert_eq!(sales[0].proceeds, dec("12000"), "1,500 × $8");
+    assert_eq!(sales[0].capital_gain_loss, dec("-3000"), "the claimed capital loss");
+    assert_eq!(sales[0].capital_loss, dec("3000"));
+    let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net-capital-gain").await;
+    assert_eq!(years[0].tax_year, 2025, "loss claimed in the 2025 income year");
+    assert_eq!(years[0].capital_losses, dec("3000"));
+
+    // Boris still has 1,000 × $5 + 1,500 × $10 = 2,500 shares costing $20,000.
+    let holdings: Vec<HoldingOverview> =
+        api_post(&pool, "/portfolio/overview", json!({}), StatusCode::OK).await;
+    assert_eq!(holdings.len(), 1);
+    assert_eq!(holdings[0].quantity, dec("2500"));
+    assert_eq!(holdings[0].total_cost_base, dec("20000"));
+}
+
+/// `docs/you-and-your-shares-dividends.md` — "Example 1: payment of dividends" /
+/// "Example 2: assessable dividend income" (You and your shares 2025).
+///
+/// > On 15 February 2025, an Australian resident company Coals Tyer Ltd pays
+/// > John, a resident individual, a fully franked dividend of $700 and an
+/// > unfranked dividend of $200. John's assessable income for 2024–25 in
+/// > respect of the dividend is: unfranked $200 + franked $700 + franking
+/// > credit $300 = total assessable dividend income $1,200.
+#[tokio::test]
+async fn you_and_your_shares_examples_1_2_john_assessable_dividend_income() {
+    let pool = test_pool().await;
+    put_listing(&pool, 1, "CTYL").await;
+    api_put(
+        &pool,
+        "/income/1",
+        json!({
+            "listing_id": 1,
+            "date_paid": "2025-02-15",
+            "franked_amount": "700",
+            "unfranked_amount": "200",
+            "franking_credits": "300",
+            "currency": "AUD",
+        }),
+    )
+    .await;
+
+    let years: Vec<TaxYearSummary> = api_get(&pool, "/portfolio/tax-summary").await;
+    assert_eq!(years.len(), 1);
+    let y = &years[0];
+    assert_eq!(y.tax_year, 2025); // paid Feb 2025 → 2024–25
+    assert_eq!(y.dividends_assessable, dec("900"), "unfranked $200 + franked $700");
+    assert_eq!(y.franking_credits, dec("300"), "franking credit $300");
+    assert_eq!(
+        y.dividends_assessable + y.franking_credits,
+        dec("1200"),
+        "total assessable dividend income $1,200 (the franking-credit gross-up)"
+    );
+}
+
+/// `docs/you-and-your-shares-dividends.md` — "Example 6: franking credits
+/// entitlement greater than $5,000" (You and your shares 2025).
+///
+/// > Matthew acquires a single parcel of shares on 1 March 2025. On 8 April
+/// > 2025 Matthew receives fully franked dividends of $13,066 (which had
+/// > franking credits attached of $5,600) for 2024–25. On 10 April 2025
+/// > Matthew sells that parcel of shares. Because he hadn't held the shares
+/// > for at least 45 days and didn't qualify for the small shareholder
+/// > exemption, he fails the holding period test and can't obtain the benefit
+/// > of the franking credits. Matthew shows a dividend of $13,066 as a franked
+/// > amount in his tax return but doesn't show the amount of franking credits.
+///
+/// Blocked: the 45-day holding-period rule and $5,000 small-shareholder
+/// exemption are not implemented (TODO "Franking-credit entitlement rules").
+/// Today the tax summary reports all attached credits, so this test would see
+/// $5,600 instead of $0. Un-ignore it when the rule lands.
+#[tokio::test]
+#[ignore = "blocked on TODO 'Franking-credit entitlement rules': 45-day holding period rule not implemented"]
+async fn you_and_your_shares_example_6_matthew_holding_period_rule() {
+    let pool = test_pool().await;
+    put_listing(&pool, 1, "MTHW").await;
+    // Acquired 1 March 2025; ex-dividend in March; sold 10 April 2025 — held
+    // at risk well under the required 45 days.
+    put_buy(&pool, 1, 1, "2025-03-01", "1000", "50", "0").await;
+    api_put(
+        &pool,
+        "/income/1",
+        json!({
+            "listing_id": 1,
+            "date_paid": "2025-04-08",
+            "ex_date": "2025-03-14",
+            "franked_amount": "13066",
+            "franking_credits": "5600",
+            "currency": "AUD",
+        }),
+    )
+    .await;
+    put_sell(&pool, 2, 1, "2025-04-10", "1000", "50", "0", 1).await;
+
+    let years: Vec<TaxYearSummary> = api_get(&pool, "/portfolio/tax-summary").await;
+    assert_eq!(years.len(), 1);
+    let y = &years[0];
+    assert_eq!(y.tax_year, 2025);
+    // He still shows the $13,066 franked amount as income…
+    assert_eq!(y.dividends_assessable, dec("13066"), "shows the dividend as a franked amount");
+    // …but has no entitlement to any part of the $5,600 franking credits
+    // (credits > $5,000, so the small-shareholder exemption can't restore them).
+    assert_eq!(
+        y.franking_credits,
+        Decimal::ZERO,
+        "no entitlement to the $5,600 franking credits — held under 45 days"
+    );
+}
+
+/// `docs/cgt-non-assessable-payments.md` — "Example 45: Non-assessable payments"
+/// (Guide to capital gains tax; CGT event G1).
+///
+/// > Rob bought 1,500 shares in RAP Ltd on 1 July 1994 for $5 each, including
+/// > brokerage and stamp duty. On 30 November 2007, as part of a
+/// > shareholder-approved scheme for the reduction of RAP Ltd's share capital,
+/// > he received a non-assessable payment of 50 cents per share. As the amount
+/// > of the payment is not more than the cost base, he reduces the cost base of
+/// > each share at 30 November 2007 by the amount of the payment to $4.50
+/// > ($5.00 – 50 cents).
+///
+/// Blocked: a company return of capital (CGT event G1) is not modelled (TODO
+/// "Corporate actions / additional CGT events" — "Return of capital (non-AMIT,
+/// CGT event G1)"). The `PUT /corporate_actions/1` entry below is a sketch of
+/// the intended API — adjust it to the real shape when the feature lands, then
+/// un-ignore.
+#[tokio::test]
+#[ignore = "blocked on TODO 'Corporate actions / additional CGT events': return of capital (CGT event G1) not implemented"]
+async fn cgt_non_assessable_payments_example_45_rob_return_of_capital() {
+    let pool = test_pool().await;
+    put_listing(&pool, 1, "RAP").await;
+    put_buy(&pool, 1, 1, "1994-07-01", "1500", "5", "0").await;
+    // Speculative entry API for the G1 return of capital — to be replaced with
+    // the real corporate-actions endpoint when implemented.
+    api_put(
+        &pool,
+        "/corporate_actions/1",
+        json!({
+            "action_type": "ReturnOfCapital",
+            "listing_id": 1,
+            "date": "2007-11-30",
+            "amount_per_unit": "0.50",
+            "currency": "AUD",
+        }),
+    )
+    .await;
+
+    // Cost base reduced to $4.50 per share: 1,500 × $4.50 = $6,750.
+    let holdings: Vec<HoldingOverview> =
+        api_post(&pool, "/portfolio/overview", json!({}), StatusCode::OK).await;
+    assert_eq!(holdings.len(), 1);
+    assert_eq!(holdings[0].quantity, dec("1500"));
+    assert_eq!(
+        holdings[0].total_cost_base,
+        dec("6750"),
+        "cost base reduced to $4.50 ($5.00 − 50 cents) per share"
+    );
+    assert_eq!(holdings[0].avg_cost_base_per_unit, dec("4.50"));
+
+    // The payment is within the cost base, so no capital gain arises (a G1
+    // payment can never create a capital loss either).
+    let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net-capital-gain").await;
+    assert!(
+        years.iter().all(|y| y.net_capital_gain == Decimal::ZERO),
+        "payment not more than cost base → no capital gain"
+    );
 }
 
 /// `docs/lic-capital-gain-deduction.md` — "Example: Resident individual".

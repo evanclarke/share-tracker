@@ -1,6 +1,7 @@
 # ATO Reference Documentation — Overview
 
-Local copies of Australian Taxation Office (ATO) guidance, retrieved **2026-06-01**, to
+Local copies of Australian Taxation Office (ATO) guidance, retrieved **2026-06-01**
+(worked-example pages marked otherwise were retrieved 2026-06-06), to
 support correct implementation of the capital-gains, AMIT/AMMA, and income-attribution
 calculations in this project. Each file carries its source URL and retrieval date in a
 header block. **The live ATO site (ato.gov.au) is authoritative** — these copies are a
@@ -18,6 +19,10 @@ implementation — see "How this maps to open TODO items" at the end.
 | [`cgt-discount.md`](cgt-discount.md) | The 50% CGT discount for Australian-resident individuals: the **12-month ownership** rule (acquisition to CGT event, exclusive of both days), what qualifies, and that the discount is applied **after** losses. |
 | [`cgt-using-capital-losses.md`](cgt-using-capital-losses.md) | Order of offsetting: subtract capital losses **before** the discount; you choose which gains to apply losses to, and applying them to **non-discountable gains first** minimises tax. Current-year vs carried-forward losses; net capital losses carry forward indefinitely and can't offset ordinary income. |
 | [`cgt-cost-base.md`](cgt-cost-base.md) | The **five elements** of the cost base, the **reduced cost base** (used when there's a loss; no indexation; different third element), and what each element includes. Worked reduced-cost-base example. |
+| [`cgt-dividend-reinvestment-plans.md`](cgt-dividend-reinvestment-plans.md) | DRP tax treatment: the dividend is assessable income and the new shares are acquired for the dividend amount on the reinvestment date. Worked example (Natalie) — reproduced in `src/ato_examples.rs`. |
+| [`cgt-keeping-records-shares.md`](cgt-keeping-records-shares.md) | Parcels bought at different times are **separate CGT assets**; the seller chooses which parcel a sale comes from (specific identification). Worked example (Boris) — reproduced in `src/ato_examples.rs`. |
+| [`cgt-non-assessable-payments.md`](cgt-non-assessable-payments.md) | Return of capital: **CGT event G1** (company) reduces the cost base, with any excess over cost base a capital gain; E4/E10 for trusts. Worked example (Rob). G1 is **not yet modelled** — see TODO "Corporate actions / additional CGT events". |
+| [`you-and-your-shares-dividends.md`](you-and-your-shares-dividends.md) | Dividend assessable income (franked + unfranked + franking-credit gross-up; worked example, John — reproduced in `src/ato_examples.rs`) and the **45-day holding period rule** + **$5,000 small-shareholder exemption** for franking-credit entitlement (worked examples, Matthew and Jessica). The entitlement rules are **not yet modelled** — see TODO "Franking-credit entitlement rules". |
 
 ## AMIT / AMMA — attribution and cost-base adjustments
 

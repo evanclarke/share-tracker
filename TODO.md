@@ -231,8 +231,15 @@ A no-build-step single-page app (plain HTML/CSS/JS) embedded in the binary with 
 - [x] `docs/cgt-how-to-calculate.md` "Example: working out CGT for a single asset" (Rhi's property: $530,000 all-in costs vs $600,000 → $70,000 gain, $35,000 net) — `ato_examples::cgt_how_to_calculate_example_single_asset`
 - [x] `docs/cgt-how-to-calculate.md` "Example: working out CGT for multiple assets" (adds the $4,500 share loss: losses before the discount → $65,500 → $32,750 net) — `ato_examples::cgt_how_to_calculate_example_multiple_assets`
 - [x] `docs/lic-capital-gain-deduction.md` "Example: Resident individual" (Ben: $70 franked, $30 credit, $25 LIC deduction in the FY2025 tax summary) — `ato_examples::lic_capital_gain_deduction_example_resident_individual`
-- [ ] `docs/cgt-cost-base.md` worked examples (capital works deduction on reduced cost base; recouped expenditure) — blocked on the "Reduced cost base and the five cost-base elements" section below (NEEDS CLARIFICATION)
+- [x] `docs/cgt-dividend-reinvestment-plans.md` "Example: dividend reinvestment plans" (Natalie: $360 dividend reinvested at $8 → 45 new shares acquired for $360 on 20 Dec 2024; the $360 stays assessable in FY2025) — `ato_examples::drp_example_natalie_reinvested_dividend`, driving DRP enrolment + `POST /income/:id/reinvest` + overview + tax summary
+- [x] `docs/cgt-keeping-records-shares.md` "Example: identifying when shares or units were acquired" (Boris nominates the 2024 $10 parcel for his 1,500-share sale at $8 → $3,000 capital loss in FY2025, keeping 1,000 @ $5 + 1,500 @ $10 = $20,000 cost base) — `ato_examples::keeping_records_example_boris_identifying_shares_sold`, driving specific parcel allocation via `PUT /sells`
+- [x] `docs/you-and-your-shares-dividends.md` Examples 1–2 (John: $700 franked + $200 unfranked + $300 credit → $1,200 total assessable dividend income in FY2025) — `ato_examples::you_and_your_shares_examples_1_2_john_assessable_dividend_income`
+- [ ] `docs/you-and-your-shares-dividends.md` "Example 6" (Matthew: held < 45 days, credits > $5,000 → the $5,600 franking credits are denied) — test written and `#[ignore]`d (`ato_examples::you_and_your_shares_example_6_matthew_holding_period_rule`); blocked on the "Franking-credit entitlement rules" section below — un-ignore when implemented
+- [ ] `docs/cgt-non-assessable-payments.md` "Example 45" (Rob: 50c/share return of capital reduces the cost base to $4.50/share, no capital gain) — test written and `#[ignore]`d with a speculative entry API (`ato_examples::cgt_non_assessable_payments_example_45_rob_return_of_capital`); blocked on the "Corporate actions" section below (CGT event G1) — adjust the entry API and un-ignore when implemented
+- [ ] `docs/cgt-cost-base.md` worked examples (capital works deduction on reduced cost base; recouped expenditure) — blocked on the "Reduced cost base and the five cost-base elements" section below (NEEDS CLARIFICATION; the asserted outcome depends on the clarification, so no ignored test is written yet)
 - [ ] `docs/lic-capital-gain-deduction.md` "Example: Beneficiary of a trust or partner in partnership" — blocked on the "Taxpayer entity type" section below (partnerships/trusts not modelled, NEEDS CLARIFICATION)
+- [ ] `docs/you-and-your-shares-dividends.md` "Example 7" (Jessica: last-in-first-out identification for the 45-day rule) — blocked on the "Franking-credit entitlement rules" section below; add alongside Matthew's test when the LIFO identification is modelled
+- [ ] "Guide to foreign income tax offset rules 2025" Example 16 (Anna: $3,400 foreign tax limited to a $2,321 offset) — not reproducible in this system: the offset-limit calculation needs the taxpayer's full income-tax position (employment income, deductions, Medicare levy), which is outside the data model. The FITO section below covers only the $1,000 de-minimis cap computable from this system's data
 
 ## Capital-loss carry-forward across years
 (REQUIREMENTS "Planned Enhancements — Capital-loss carry-forward across years". Net capital losses carry forward indefinitely and apply before the discount, per `docs/cgt-using-capital-losses.md`. Today `net-capital-gain` computes the current year's `capital_loss_carried_forward` but never consumes a prior year's carried-forward loss in a later year, so post-loss years are overstated.)
@@ -257,7 +264,7 @@ A no-build-step single-page app (plain HTML/CSS/JS) embedded in the binary with 
 - [ ] Tests: discount/LIC rates vary correctly by entity type (or: the individual-resident assumption is surfaced)
 
 ## Franking-credit entitlement rules
-(REQUIREMENTS "Planned Enhancements — Franking-credit entitlement rules". `ex_date` is already captured and is the input the at-risk holding-period test needs.)
+(REQUIREMENTS "Planned Enhancements — Franking-credit entitlement rules". `ex_date` is already captured and is the input the at-risk holding-period test needs. ATO worked example mirrored in `docs/you-and-your-shares-dividends.md`; an acceptance test for it is already written and `#[ignore]`d — `ato_examples::you_and_your_shares_example_6_matthew_holding_period_rule` — un-ignore it as part of implementing this section. Jessica's Example 7 (LIFO identification) should get a test alongside it.)
 - [ ] Apply the 45-day holding-period rule (90 days for preference shares) to decide whether a dividend's franking credits are claimable
 - [ ] Apply the $5,000 small-shareholder exemption (franking offsets up to $5,000/year claimable without the holding-period rule)
 - [ ] Tax summary reflects only claimable franking credits (or clearly flags credits at risk of disallowance), not all attached credits
@@ -276,7 +283,7 @@ A no-build-step single-page app (plain HTML/CSS/JS) embedded in the binary with 
 - [ ] Share split / consolidation: adjust quantity and per-unit cost base, preserving total cost base and the original acquisition date for the discount
 - [ ] Bonus shares: new parcels with apportioned cost base
 - [ ] Rights issues: new parcels with their cost-base treatment
-- [ ] Return of capital (non-AMIT, CGT event G1): reduce cost base, distinct from the AMIT tax-deferred amount
+- [ ] Return of capital (non-AMIT, CGT event G1): reduce cost base, distinct from the AMIT tax-deferred amount — ATO worked example mirrored in `docs/cgt-non-assessable-payments.md` (Rob, Example 45); an acceptance test is already written and `#[ignore]`d with a speculative entry API (`ato_examples::cgt_non_assessable_payments_example_45_rob_return_of_capital`) — adjust its entry call to the real endpoint and un-ignore as part of implementing this
 - [ ] Off-market share buy-back: split into capital and dividend components
 - [ ] Merger / takeover / demerger incl. scrip-for-scrip rollover: parcel substitution carrying the original cost base and acquisition date
 - [ ] Security identity continuity across a ticker/name change, so a renamed listing's parcels are not orphaned
