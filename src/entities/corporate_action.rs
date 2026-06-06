@@ -37,7 +37,7 @@
 //! issue date is ex-bonus. (Bonus shares chosen *in lieu of a dividend* are
 //! assessed as a dividend — entered as a DRP trade, not as this action.)
 //!
-//! `ActionType` is the extension point for future corporate actions (rights
+//! `ActionKind` is the extension point for future corporate actions (rights
 //! issues, buy-backs, ...), each widening the enum and its CHECK.
 
 use crate::infra::decimal::parse_dec;
@@ -54,17 +54,49 @@ use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 use std::collections::HashMap;
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, sqlx::Type)]
-pub enum ActionType {
-    ReturnOfCapital,
-    ShareSplit,
-    BonusIssue,
+/// The per-type payload of a corporate action. Each variant carries exactly
+/// the fields its action type needs, so a mixed or partial payload (the
+/// states the table CHECKs reject) is unrepresentable once constructed.
+/// Internally tagged on `action_type` and flattened into [`CorporateAction`],
+/// so the JSON wire shape stays flat: the tag plus the variant's own fields.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "action_type")]
+pub enum ActionKind {
+    ReturnOfCapital {
+        /// Per-unit payment amount in `currency` (positive).
+        amount_per_unit: Decimal,
+        currency: String,
+    },
+    ShareSplit {
+        /// Every `split_old_units` existing units become `split_new_units`
+        /// units on the conversion date (both positive; a consolidation has
+        /// new < old).
+        split_new_units: Decimal,
+        split_old_units: Decimal,
+    },
+    BonusIssue {
+        /// Every `bonus_held_units` units held receive `bonus_units`
+        /// additional units on the issue date (both positive; a 1-for-10
+        /// bonus issue is bonus_units=1 / bonus_held_units=10).
+        bonus_units: Decimal,
+        bonus_held_units: Decimal,
+    },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+impl ActionKind {
+    /// The `action_type` column value (the serde tag).
+    fn type_str(&self) -> &'static str {
+        match self {
+            ActionKind::ReturnOfCapital { .. } => "ReturnOfCapital",
+            ActionKind::ShareSplit { .. } => "ShareSplit",
+            ActionKind::BonusIssue { .. } => "BonusIssue",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CorporateAction {
     pub id: i64,
-    pub action_type: ActionType,
     pub listing_id: i64,
     /// ReturnOfCapital: payment date — parcels acquired on/before it are
     /// affected. ShareSplit: conversion date — parcels acquired before it are
@@ -72,94 +104,102 @@ pub struct CorporateAction {
     /// post-split units). BonusIssue: issue date — parcels acquired before it
     /// receive bonus units (a trade dated on the issue date is ex-bonus).
     pub date: NaiveDate,
-    /// ReturnOfCapital only: per-unit payment amount in `currency` (positive).
-    pub amount_per_unit: Option<Decimal>,
-    /// ReturnOfCapital only: currency of `amount_per_unit`.
-    pub currency: Option<String>,
-    /// ShareSplit only: every `split_old_units` existing units become
-    /// `split_new_units` units on the conversion date (both positive; a
-    /// consolidation has new < old).
-    pub split_new_units: Option<Decimal>,
-    /// ShareSplit only: see `split_new_units`.
-    pub split_old_units: Option<Decimal>,
-    /// BonusIssue only: every `bonus_held_units` units held receive
-    /// `bonus_units` additional units on the issue date (both positive; a
-    /// 1-for-10 bonus issue is bonus_units=1 / bonus_held_units=10).
-    pub bonus_units: Option<Decimal>,
-    /// BonusIssue only: see `bonus_units`.
-    pub bonus_held_units: Option<Decimal>,
+    #[serde(flatten)]
+    pub kind: ActionKind,
 }
 
-fn opt_dec(row: &sqlx::sqlite::SqliteRow, column: &str) -> Result<Option<Decimal>, sqlx::Error> {
-    row.try_get::<Option<String>, _>(column)?
-        .map(|s| parse_dec(column, s))
-        .transpose()
+/// A required `TEXT` decimal column: NULL or an unparsable value is a Decode
+/// error — the table CHECKs guarantee the column is set for the row's type.
+fn req_dec(row: &sqlx::sqlite::SqliteRow, column: &str) -> Result<Decimal, sqlx::Error> {
+    parse_dec(column, row.try_get(column)?)
+}
+
+fn kind_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<ActionKind, sqlx::Error> {
+    match row.try_get::<String, _>("action_type")?.as_str() {
+        "ReturnOfCapital" => Ok(ActionKind::ReturnOfCapital {
+            amount_per_unit: req_dec(row, "amount_per_unit")?,
+            currency: row.try_get("currency")?,
+        }),
+        "ShareSplit" => Ok(ActionKind::ShareSplit {
+            split_new_units: req_dec(row, "split_new_units")?,
+            split_old_units: req_dec(row, "split_old_units")?,
+        }),
+        "BonusIssue" => Ok(ActionKind::BonusIssue {
+            bonus_units: req_dec(row, "bonus_units")?,
+            bonus_held_units: req_dec(row, "bonus_held_units")?,
+        }),
+        other => Err(sqlx::Error::Decode(
+            format!("unknown corporate action_type {other}").into(),
+        )),
+    }
 }
 
 impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for CorporateAction {
     fn from_row(row: &'r sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
         Ok(CorporateAction {
             id: row.try_get("id")?,
-            action_type: row.try_get("action_type")?,
             listing_id: row.try_get("listing_id")?,
             date: row.try_get("date")?,
-            amount_per_unit: opt_dec(row, "amount_per_unit")?,
-            currency: row.try_get("currency")?,
-            split_new_units: opt_dec(row, "split_new_units")?,
-            split_old_units: opt_dec(row, "split_old_units")?,
-            bonus_units: opt_dec(row, "bonus_units")?,
-            bonus_held_units: opt_dec(row, "bonus_held_units")?,
+            kind: kind_from_row(row)?,
         })
     }
 }
 
+/// The PUT body's `action_type` tag. Deserialized separately from the
+/// payload fields (unlike [`ActionKind`]) so a stray cross-type field is
+/// *rejected*, not silently dropped as serde's tagged-enum decoding would.
+#[derive(Debug, Clone, Copy, Deserialize)]
+enum ActionType {
+    ReturnOfCapital,
+    ShareSplit,
+    BonusIssue,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct CorporateActionBody {
-    pub action_type: ActionType,
+    action_type: ActionType,
     pub listing_id: i64,
     pub date: NaiveDate,
     #[serde(default)]
-    pub amount_per_unit: Option<Decimal>,
+    amount_per_unit: Option<Decimal>,
     #[serde(default)]
-    pub currency: Option<String>,
+    currency: Option<String>,
     #[serde(default)]
-    pub split_new_units: Option<Decimal>,
+    split_new_units: Option<Decimal>,
     #[serde(default)]
-    pub split_old_units: Option<Decimal>,
+    split_old_units: Option<Decimal>,
     #[serde(default)]
-    pub bonus_units: Option<Decimal>,
+    bonus_units: Option<Decimal>,
     #[serde(default)]
-    pub bonus_held_units: Option<Decimal>,
+    bonus_held_units: Option<Decimal>,
 }
 
-/// Each action type carries exactly its own payload (mirrors the table
-/// CHECKs, plus positivity): ReturnOfCapital needs a positive payment and a
-/// currency; ShareSplit a positive conversion ratio; BonusIssue a positive
-/// bonus ratio — each with every other type's fields absent. A zero/negative
-/// payment would silently *increase* cost bases; a zero/negative ratio would
-/// zero out or invert holdings.
-fn body_is_valid(body: &CorporateActionBody) -> bool {
-    let payment = body.amount_per_unit.is_some() || body.currency.is_some();
-    let split = body.split_new_units.is_some() || body.split_old_units.is_some();
-    let bonus = body.bonus_units.is_some() || body.bonus_held_units.is_some();
-    match body.action_type {
-        ActionType::ReturnOfCapital => {
-            body.amount_per_unit.is_some_and(|a| a > Decimal::ZERO)
-                && body.currency.is_some()
-                && !split
-                && !bonus
-        }
-        ActionType::ShareSplit => {
-            body.split_new_units.is_some_and(|n| n > Decimal::ZERO)
-                && body.split_old_units.is_some_and(|o| o > Decimal::ZERO)
-                && !payment
-                && !bonus
-        }
-        ActionType::BonusIssue => {
-            body.bonus_units.is_some_and(|b| b > Decimal::ZERO)
-                && body.bonus_held_units.is_some_and(|h| h > Decimal::ZERO)
-                && !payment
-                && !split
+impl CorporateActionBody {
+    /// Each action type carries exactly its own payload (mirrors the table
+    /// CHECKs, plus positivity): ReturnOfCapital needs a positive payment and
+    /// a currency; ShareSplit a positive conversion ratio; BonusIssue a
+    /// positive bonus ratio — each with every other type's fields absent
+    /// (`None` otherwise). A zero/negative payment would silently *increase*
+    /// cost bases; a zero/negative ratio would zero out or invert holdings.
+    fn kind(self) -> Option<ActionKind> {
+        let payment = self.amount_per_unit.is_some() || self.currency.is_some();
+        let split = self.split_new_units.is_some() || self.split_old_units.is_some();
+        let bonus = self.bonus_units.is_some() || self.bonus_held_units.is_some();
+        let positive = |d: Option<Decimal>| d.filter(|v| *v > Decimal::ZERO);
+        match self.action_type {
+            ActionType::ReturnOfCapital if !split && !bonus => Some(ActionKind::ReturnOfCapital {
+                amount_per_unit: positive(self.amount_per_unit)?,
+                currency: self.currency?,
+            }),
+            ActionType::ShareSplit if !payment && !bonus => Some(ActionKind::ShareSplit {
+                split_new_units: positive(self.split_new_units)?,
+                split_old_units: positive(self.split_old_units)?,
+            }),
+            ActionType::BonusIssue if !payment && !split => Some(ActionKind::BonusIssue {
+                bonus_units: positive(self.bonus_units)?,
+                bonus_held_units: positive(self.bonus_held_units)?,
+            }),
+            _ => None,
         }
     }
 }
@@ -187,6 +227,26 @@ pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<CorporateAction
 }
 
 pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<(), sqlx::Error> {
+    // Spread the variant's payload over the per-type column pairs; the other
+    // types' columns are NULL (the table CHECKs require exactly this shape).
+    let roc_kind = match &action.kind {
+        ActionKind::ReturnOfCapital { amount_per_unit, currency } => {
+            Some((amount_per_unit, currency.as_str()))
+        }
+        _ => None,
+    };
+    let split_kind = match &action.kind {
+        ActionKind::ShareSplit { split_new_units, split_old_units } => {
+            Some((split_new_units, split_old_units))
+        }
+        _ => None,
+    };
+    let bonus_kind = match &action.kind {
+        ActionKind::BonusIssue { bonus_units, bonus_held_units } => {
+            Some((bonus_units, bonus_held_units))
+        }
+        _ => None,
+    };
     sqlx::query(
         "INSERT INTO corporate_actions \
          (id, action_type, listing_id, date, amount_per_unit, currency, \
@@ -204,15 +264,15 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
              bonus_held_units = excluded.bonus_held_units",
     )
     .bind(action.id)
-    .bind(action.action_type)
+    .bind(action.kind.type_str())
     .bind(action.listing_id)
     .bind(action.date)
-    .bind(action.amount_per_unit.map(|d| d.to_string()))
-    .bind(&action.currency)
-    .bind(action.split_new_units.map(|d| d.to_string()))
-    .bind(action.split_old_units.map(|d| d.to_string()))
-    .bind(action.bonus_units.map(|d| d.to_string()))
-    .bind(action.bonus_held_units.map(|d| d.to_string()))
+    .bind(roc_kind.map(|(amount, _)| amount.to_string()))
+    .bind(roc_kind.map(|(_, currency)| currency))
+    .bind(split_kind.map(|(new, _)| new.to_string()))
+    .bind(split_kind.map(|(_, old)| old.to_string()))
+    .bind(bonus_kind.map(|(units, _)| units.to_string()))
+    .bind(bonus_kind.map(|(_, held)| held.to_string()))
     .execute(pool)
     .await?;
     Ok(())
@@ -276,8 +336,8 @@ pub struct SplitEvent {
 
 fn split_event_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<SplitEvent, sqlx::Error> {
     let date = row.try_get("date")?;
-    match row.try_get::<ActionType, _>("action_type")? {
-        ActionType::BonusIssue => {
+    match row.try_get::<String, _>("action_type")?.as_str() {
+        "BonusIssue" => {
             let bonus = parse_dec("bonus_units", row.try_get("bonus_units")?)?;
             let held = parse_dec("bonus_held_units", row.try_get("bonus_held_units")?)?;
             Ok(SplitEvent { date, new_units: held + bonus, old_units: held })
@@ -462,21 +522,9 @@ async fn upsert(
     Path(id): Path<i64>,
     Json(body): Json<CorporateActionBody>,
 ) -> Result<StatusCode, StatusCode> {
-    if !body_is_valid(&body) {
-        return Err(StatusCode::UNPROCESSABLE_ENTITY);
-    }
-    let action = CorporateAction {
-        id,
-        action_type: body.action_type,
-        listing_id: body.listing_id,
-        date: body.date,
-        amount_per_unit: body.amount_per_unit,
-        currency: body.currency,
-        split_new_units: body.split_new_units,
-        split_old_units: body.split_old_units,
-        bonus_units: body.bonus_units,
-        bonus_held_units: body.bonus_held_units,
-    };
+    let (listing_id, date) = (body.listing_id, body.date);
+    let kind = body.kind().ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
+    let action = CorporateAction { id, listing_id, date, kind };
     db_upsert(&pool, &action)
         .await
         .map(|_| StatusCode::NO_CONTENT)
@@ -528,45 +576,36 @@ mod tests {
     fn roc(id: i64, listing_id: i64, date: NaiveDate, amount: &str) -> CorporateAction {
         CorporateAction {
             id,
-            action_type: ActionType::ReturnOfCapital,
             listing_id,
             date,
-            amount_per_unit: Some(amount.parse().unwrap()),
-            currency: Some("AUD".to_string()),
-            split_new_units: None,
-            split_old_units: None,
-            bonus_units: None,
-            bonus_held_units: None,
+            kind: ActionKind::ReturnOfCapital {
+                amount_per_unit: amount.parse().unwrap(),
+                currency: "AUD".to_string(),
+            },
         }
     }
 
     fn split(id: i64, listing_id: i64, date: NaiveDate, new: &str, old: &str) -> CorporateAction {
         CorporateAction {
             id,
-            action_type: ActionType::ShareSplit,
             listing_id,
             date,
-            amount_per_unit: None,
-            currency: None,
-            split_new_units: Some(new.parse().unwrap()),
-            split_old_units: Some(old.parse().unwrap()),
-            bonus_units: None,
-            bonus_held_units: None,
+            kind: ActionKind::ShareSplit {
+                split_new_units: new.parse().unwrap(),
+                split_old_units: old.parse().unwrap(),
+            },
         }
     }
 
     fn bonus(id: i64, listing_id: i64, date: NaiveDate, units: &str, held: &str) -> CorporateAction {
         CorporateAction {
             id,
-            action_type: ActionType::BonusIssue,
             listing_id,
             date,
-            amount_per_unit: None,
-            currency: None,
-            split_new_units: None,
-            split_old_units: None,
-            bonus_units: Some(units.parse().unwrap()),
-            bonus_held_units: Some(held.parse().unwrap()),
+            kind: ActionKind::BonusIssue {
+                bonus_units: units.parse().unwrap(),
+                bonus_held_units: held.parse().unwrap(),
+            },
         }
     }
 
@@ -587,13 +626,15 @@ mod tests {
         db_upsert(&pool, &roc(1, 1, d(2024, 11, 30), "0.505")).await.unwrap();
 
         let got = db_get(&pool, 1).await.unwrap().unwrap();
-        assert_eq!(got.action_type, ActionType::ReturnOfCapital);
         assert_eq!(got.listing_id, 1);
         assert_eq!(got.date, d(2024, 11, 30));
-        assert_eq!(got.amount_per_unit, Some("0.505".parse::<Decimal>().unwrap()));
-        assert_eq!(got.currency.as_deref(), Some("AUD"));
-        assert_eq!(got.split_new_units, None);
-        assert_eq!(got.split_old_units, None);
+        assert_eq!(
+            got.kind,
+            ActionKind::ReturnOfCapital {
+                amount_per_unit: "0.505".parse().unwrap(),
+                currency: "AUD".to_string(),
+            }
+        );
     }
 
     #[tokio::test]
@@ -604,11 +645,13 @@ mod tests {
         db_upsert(&pool, &split(1, 1, d(2024, 11, 30), "7", "2")).await.unwrap();
 
         let got = db_get(&pool, 1).await.unwrap().unwrap();
-        assert_eq!(got.action_type, ActionType::ShareSplit);
-        assert_eq!(got.split_new_units, Some(Decimal::from(7)));
-        assert_eq!(got.split_old_units, Some(Decimal::from(2)));
-        assert_eq!(got.amount_per_unit, None);
-        assert_eq!(got.currency, None);
+        assert_eq!(
+            got.kind,
+            ActionKind::ShareSplit {
+                split_new_units: Decimal::from(7),
+                split_old_units: Decimal::from(2),
+            }
+        );
     }
 
     #[tokio::test]
@@ -619,13 +662,13 @@ mod tests {
         db_upsert(&pool, &bonus(1, 1, d(2024, 11, 30), "3", "7")).await.unwrap();
 
         let got = db_get(&pool, 1).await.unwrap().unwrap();
-        assert_eq!(got.action_type, ActionType::BonusIssue);
-        assert_eq!(got.bonus_units, Some(Decimal::from(3)));
-        assert_eq!(got.bonus_held_units, Some(Decimal::from(7)));
-        assert_eq!(got.amount_per_unit, None);
-        assert_eq!(got.currency, None);
-        assert_eq!(got.split_new_units, None);
-        assert_eq!(got.split_old_units, None);
+        assert_eq!(
+            got.kind,
+            ActionKind::BonusIssue {
+                bonus_units: Decimal::from(3),
+                bonus_held_units: Decimal::from(7),
+            }
+        );
     }
 
     #[tokio::test]
@@ -638,7 +681,7 @@ mod tests {
         let all = db_list(&pool).await.unwrap();
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].date, d(2024, 12, 31));
-        assert_eq!(all[0].amount_per_unit, Some("0.75".parse::<Decimal>().unwrap()));
+        assert_eq!(all[0].kind, roc(1, 1, d(2024, 12, 31), "0.75").kind);
     }
 
     #[tokio::test]
@@ -648,33 +691,44 @@ mod tests {
         assert!(err.is_err(), "unknown listing FK should be rejected");
     }
 
+    /// Mixed payloads are unrepresentable in [`ActionKind`], so a raw SQL
+    /// write is the only path that could produce one — the per-type table
+    /// CHECKs are the last line of defence and must still reject it.
     #[tokio::test]
     async fn db_check_rejects_mixed_payloads() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "RAP").await;
-        // A ShareSplit carrying a payment (or a ReturnOfCapital carrying a
-        // ratio) violates the per-type CHECK even when written directly.
-        let mut bad_split = split(1, 1, d(2024, 11, 30), "2", "1");
-        bad_split.amount_per_unit = Some("0.50".parse().unwrap());
-        bad_split.currency = Some("AUD".to_string());
-        assert!(db_upsert(&pool, &bad_split).await.is_err());
-
-        let mut bad_roc = roc(1, 1, d(2024, 11, 30), "0.50");
-        bad_roc.split_new_units = Some(Decimal::from(2));
-        bad_roc.split_old_units = Some(Decimal::ONE);
-        assert!(db_upsert(&pool, &bad_roc).await.is_err());
-
-        // …and a BonusIssue carrying a split ratio, or a ShareSplit carrying a
-        // bonus ratio.
-        let mut bad_bonus = bonus(1, 1, d(2024, 11, 30), "1", "10");
-        bad_bonus.split_new_units = Some(Decimal::from(2));
-        bad_bonus.split_old_units = Some(Decimal::ONE);
-        assert!(db_upsert(&pool, &bad_bonus).await.is_err());
-
-        let mut split_with_bonus = split(1, 1, d(2024, 11, 30), "2", "1");
-        split_with_bonus.bonus_units = Some(Decimal::ONE);
-        split_with_bonus.bonus_held_units = Some(Decimal::from(10));
-        assert!(db_upsert(&pool, &split_with_bonus).await.is_err());
+        // (action_type, the stray columns the CHECK must reject for it)
+        for (action_type, stray_cols) in [
+            // A ShareSplit carrying a payment, or a bonus ratio…
+            ("ShareSplit", "amount_per_unit = '0.50', currency = 'AUD'"),
+            ("ShareSplit", "bonus_units = '1', bonus_held_units = '10'"),
+            // …a ReturnOfCapital carrying a split ratio…
+            ("ReturnOfCapital", "split_new_units = '2', split_old_units = '1'"),
+            // …and a BonusIssue carrying a split ratio.
+            ("BonusIssue", "split_new_units = '2', split_old_units = '1'"),
+        ] {
+            let (base_cols, base_vals) = match action_type {
+                "ShareSplit" => ("split_new_units, split_old_units", "'2', '1'"),
+                "ReturnOfCapital" => ("amount_per_unit, currency", "'0.50', 'AUD'"),
+                _ => ("bonus_units, bonus_held_units", "'1', '10'"),
+            };
+            // Insert a valid row, then try to smuggle the stray columns in.
+            sqlx::query(&format!(
+                "INSERT INTO corporate_actions (id, action_type, listing_id, date, {base_cols}) \
+                 VALUES (1, '{action_type}', 1, '2024-11-30', {base_vals})"
+            ))
+            .execute(&pool)
+            .await
+            .unwrap();
+            let result = sqlx::query(&format!(
+                "UPDATE corporate_actions SET {stray_cols} WHERE id = 1"
+            ))
+            .execute(&pool)
+            .await;
+            assert!(result.is_err(), "{action_type} + {stray_cols} should violate the CHECK");
+            sqlx::query("DELETE FROM corporate_actions").execute(&pool).await.unwrap();
+        }
     }
 
     #[tokio::test]
@@ -901,7 +955,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let got: CorporateAction = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(got.amount_per_unit, Some("0.50".parse::<Decimal>().unwrap()));
+        assert_eq!(got.kind, roc(1, 1, d(2024, 11, 30), "0.50").kind);
 
         let resp = router()
             .with_state(pool.clone())
@@ -961,9 +1015,13 @@ mod tests {
         )
         .await;
         let got = db_get(&pool, 1).await.unwrap().unwrap();
-        assert_eq!(got.action_type, ActionType::ShareSplit);
-        assert_eq!(got.split_new_units, Some(Decimal::from(2)));
-        assert_eq!(got.split_old_units, Some(Decimal::ONE));
+        assert_eq!(
+            got.kind,
+            ActionKind::ShareSplit {
+                split_new_units: Decimal::from(2),
+                split_old_units: Decimal::ONE,
+            }
+        );
     }
 
     #[tokio::test]
@@ -983,9 +1041,13 @@ mod tests {
         )
         .await;
         let got = db_get(&pool, 1).await.unwrap().unwrap();
-        assert_eq!(got.action_type, ActionType::BonusIssue);
-        assert_eq!(got.bonus_units, Some(Decimal::ONE));
-        assert_eq!(got.bonus_held_units, Some(Decimal::from(10)));
+        assert_eq!(
+            got.kind,
+            ActionKind::BonusIssue {
+                bonus_units: Decimal::ONE,
+                bonus_held_units: Decimal::from(10),
+            }
+        );
     }
 
     #[tokio::test]

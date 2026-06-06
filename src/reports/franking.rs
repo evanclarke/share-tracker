@@ -277,15 +277,12 @@ mod tests {
             &pool,
             &crate::entities::corporate_action::CorporateAction {
                 id: 1,
-                action_type: crate::entities::corporate_action::ActionType::ShareSplit,
                 listing_id: 1,
                 date: d("2025-01-10"),
-                amount_per_unit: None,
-                currency: None,
-                split_new_units: Some(Decimal::from(2)),
-                split_old_units: Some(Decimal::ONE),
-                bonus_units: None,
-                bonus_held_units: None,
+                kind: crate::entities::corporate_action::ActionKind::ShareSplit {
+                    split_new_units: Decimal::from(2),
+                    split_old_units: Decimal::ONE,
+                },
             },
         )
         .await
@@ -304,15 +301,12 @@ mod tests {
             &pool,
             &crate::entities::corporate_action::CorporateAction {
                 id: 2,
-                action_type: crate::entities::corporate_action::ActionType::ShareSplit,
                 listing_id: 2,
                 date: d("2025-03-10"),
-                amount_per_unit: None,
-                currency: None,
-                split_new_units: Some(Decimal::from(2)),
-                split_old_units: Some(Decimal::ONE),
-                bonus_units: None,
-                bonus_held_units: None,
+                kind: crate::entities::corporate_action::ActionKind::ShareSplit {
+                    split_new_units: Decimal::from(2),
+                    split_old_units: Decimal::ONE,
+                },
             },
         )
         .await

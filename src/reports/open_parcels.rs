@@ -514,15 +514,12 @@ mod tests {
             pool,
             &corporate_action::CorporateAction {
                 id,
-                action_type: corporate_action::ActionType::ReturnOfCapital,
                 listing_id,
                 date,
-                amount_per_unit: Some(amount.parse().unwrap()),
-                currency: Some("AUD".to_string()),
-                split_new_units: None,
-                split_old_units: None,
-                bonus_units: None,
-                bonus_held_units: None,
+                kind: corporate_action::ActionKind::ReturnOfCapital {
+                    amount_per_unit: amount.parse().unwrap(),
+                    currency: "AUD".to_string(),
+                },
             },
         )
         .await
@@ -541,15 +538,12 @@ mod tests {
             pool,
             &corporate_action::CorporateAction {
                 id,
-                action_type: corporate_action::ActionType::ShareSplit,
                 listing_id,
                 date,
-                amount_per_unit: None,
-                currency: None,
-                split_new_units: Some(new.parse().unwrap()),
-                split_old_units: Some(old.parse().unwrap()),
-                bonus_units: None,
-                bonus_held_units: None,
+                kind: corporate_action::ActionKind::ShareSplit {
+                    split_new_units: new.parse().unwrap(),
+                    split_old_units: old.parse().unwrap(),
+                },
             },
         )
         .await

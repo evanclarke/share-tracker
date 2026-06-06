@@ -470,15 +470,12 @@ mod tests {
             &pool,
             &corporate_action::CorporateAction {
                 id: 1,
-                action_type: corporate_action::ActionType::ReturnOfCapital,
                 listing_id: 1,
                 date: NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(),
-                amount_per_unit: Some("0.50".parse().unwrap()),
-                currency: Some("AUD".to_string()),
-                split_new_units: None,
-                split_old_units: None,
-                bonus_units: None,
-                bonus_held_units: None,
+                kind: corporate_action::ActionKind::ReturnOfCapital {
+                    amount_per_unit: "0.50".parse().unwrap(),
+                    currency: "AUD".to_string(),
+                },
             },
         )
         .await
@@ -507,15 +504,12 @@ mod tests {
             &pool,
             &corporate_action::CorporateAction {
                 id: 1,
-                action_type: corporate_action::ActionType::ShareSplit,
                 listing_id: 1,
                 date: NaiveDate::from_ymd_opt(2024, 7, 1).unwrap(),
-                amount_per_unit: None,
-                currency: None,
-                split_new_units: Some(Decimal::from(2)),
-                split_old_units: Some(Decimal::ONE),
-                bonus_units: None,
-                bonus_held_units: None,
+                kind: corporate_action::ActionKind::ShareSplit {
+                    split_new_units: Decimal::from(2),
+                    split_old_units: Decimal::ONE,
+                },
             },
         )
         .await
