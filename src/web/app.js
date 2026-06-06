@@ -276,20 +276,26 @@
     },
     {
       slug: 'corporate_actions', title: 'Corporate Actions', group: 'Activity', api: '/corporate_actions',
-      desc: 'Return-of-capital payments (CGT event G1): the per-unit amount reduces the cost base of parcels held on the payment date; any excess over a parcel’s cost base is a capital gain in the Net Capital Gain report. Share splits/consolidations (TD 2000/10): on the conversion date every “old units” become “new units” (2-for-1 split: new 2, old 1; 1-for-10 consolidation: new 1, old 10) — no CGT event, the parcels keep their total cost base and original acquisition date. Bonus issues (non-assessable): on the issue date every “held units” receive “bonus units” extra units (1-for-10 issue: bonus 1, held 10) — no CGT event, the cost base is apportioned over original + bonus shares and the acquisition date is preserved; bonus shares chosen in lieu of a dividend are a DRP trade, not entered here. Fill only the chosen action type’s fields and leave the other types’ fields blank.',
+      desc: 'Return-of-capital payments (CGT event G1): the per-unit amount reduces the cost base of parcels held on the payment date; any excess over a parcel’s cost base is a capital gain in the Net Capital Gain report. Share splits/consolidations (TD 2000/10): on the conversion date every “old units” become “new units” (2-for-1 split: new 2, old 1; 1-for-10 consolidation: new 1, old 10) — no CGT event, the parcels keep their total cost base and original acquisition date. Bonus issues (non-assessable): on the issue date every “held units” receive “bonus units” extra units (1-for-10 issue: bonus 1, held 10) — no CGT event, the cost base is apportioned over original + bonus shares and the acquisition date is preserved; bonus shares chosen in lieu of a dividend are a DRP trade, not entered here. Rights issues: units held before the record date earn “rights units” per “held units” at the exercise price (1-for-4 issue: rights 1, held 4) — recording the issue changes nothing; use the row’s Exercise action to create the new Buy parcel (acquired at the exercise date, cost base = exercise payment + any amount paid for the rights). Fill only the chosen action type’s fields and leave the other types’ fields blank.',
       keyFields: [int('id', 'ID', { auto: true })],
       fields: [
-        sel('action_type', 'Action type', ['ReturnOfCapital', 'ShareSplit', 'BonusIssue'], { required: true }),
+        sel('action_type', 'Action type', ['ReturnOfCapital', 'ShareSplit', 'BonusIssue', 'RightsIssue'], { required: true }),
         fk('listing_id', 'Listing', 'listings', { required: true }),
-        dt('date', 'Payment / conversion / issue date', { required: true }),
+        dt('date', 'Payment / conversion / issue / record date', { required: true }),
         dec('amount_per_unit', 'Amount per unit', { optional: true, default: '', hint: 'ReturnOfCapital only.' }),
-        fk('currency', 'Currency', 'currencies', { optional: true, encode: 'string', default: '', hint: 'ReturnOfCapital only.' }),
+        fk('currency', 'Currency', 'currencies', { optional: true, encode: 'string', default: '', hint: 'ReturnOfCapital and RightsIssue only.' }),
         dec('split_new_units', 'Split: new units', { optional: true, default: '', hint: 'ShareSplit only.' }),
         dec('split_old_units', 'Split: old units', { optional: true, default: '', hint: 'ShareSplit only.' }),
         dec('bonus_units', 'Bonus: units issued', { optional: true, default: '', hint: 'BonusIssue only.' }),
         dec('bonus_held_units', 'Bonus: per units held', { optional: true, default: '', hint: 'BonusIssue only.' }),
+        dec('rights_units', 'Rights: new units', { optional: true, default: '', hint: 'RightsIssue only.' }),
+        dec('rights_held_units', 'Rights: per units held', { optional: true, default: '', hint: 'RightsIssue only.' }),
+        dec('exercise_price', 'Rights: exercise price per unit', { optional: true, default: '', hint: 'RightsIssue only.' }),
       ],
-      columns: ['id', 'action_type', 'listing_id', 'date', 'amount_per_unit', 'currency', 'split_new_units', 'split_old_units', 'bonus_units', 'bonus_held_units'],
+      columns: ['id', 'action_type', 'listing_id', 'date', 'amount_per_unit', 'currency', 'split_new_units', 'split_old_units', 'bonus_units', 'bonus_held_units', 'rights_units', 'rights_held_units', 'exercise_price'],
+      rowActions: function (row) {
+        return row.action_type === 'RightsIssue' ? [{ label: 'Exercise', href: '#/exercise/' + row.id }] : [];
+      },
     },
     {
       slug: 'cgt_settings', title: 'CGT Settings', group: 'Activity', api: '/cgt_settings',
@@ -774,6 +780,48 @@
     ]));
   }
 
+  // ---- rights exercise ----------------------------------------------------
+  // Reached from a RightsIssue corporate action row's "Exercise" action.
+  // Creates the new Buy parcel (acquired at the exercise date) via
+  // POST /corporate_actions/:id/exercise; the server caps cumulative
+  // exercised units at the holding's entitlement.
+  async function viewExercise(actionId) {
+    setActiveNav('corporate_actions');
+    const action = await api('GET', '/corporate_actions/' + actionId);
+    const form = el('form');
+    const fields = [
+      dt('date', 'Exercise date', { required: true, hint: 'The new parcel’s acquisition date; on or after the record date (' + action.date + ').' }),
+      dec('units', 'Units acquired', { required: true, default: '' }),
+      dec('rights_cost', 'Amount paid for the rights', { default: '0', hint: 'Total, in ' + action.currency + '. 0 for rights issued free.' }),
+      dec('fx_rate', 'FX rate', { default: '1', hint: 'Optional; defaults to 1.' }),
+    ];
+    for (const f of fields) form.appendChild(await buildFieldInput(f, null, false));
+    form.appendChild(el('div', { class: 'form-actions' }, [
+      el('button', { type: 'submit', class: 'primary' }, 'Exercise'),
+      el('a', { href: '#/e/corporate_actions' }, el('button', { type: 'button' }, 'Cancel')),
+    ]));
+    form.addEventListener('submit', async function (ev) {
+      ev.preventDefault();
+      try {
+        const body = { date: readFieldValue(fields[0], form), units: readFieldValue(fields[1], form) };
+        const rc = readFieldValue(fields[2], form);
+        const fxr = readFieldValue(fields[3], form);
+        if (rc != null) body.rights_cost = rc;
+        if (fxr != null) body.fx_rate = fxr;
+        const trade = await api('POST', '/corporate_actions/' + actionId + '/exercise', body);
+        toast('Exercised into trade #' + (trade ? trade.id : '?') + '.');
+        location.hash = '#/e/corporate_actions';
+      } catch (e) {
+        toast(e.message, true);
+      }
+    });
+    setMain(el('div', null, [
+      el('h2', null, 'Exercise rights issue #' + actionId),
+      el('p', { class: 'view-desc' }, 'Creates a Buy trade for listing ' + action.listing_id + ' at the exercise price (' + action.exercise_price + ' ' + action.currency + ' per unit): ' + action.rights_units + ' new unit(s) per ' + action.rights_held_units + ' held at the record date.'),
+      el('div', { class: 'card' }, form),
+    ]));
+  }
+
   // ---- document attachments ---------------------------------------------
   // Reached from a Trade / Income / AMMA row's "Attachments" action. Lists the
   // activity's attachments (metadata only — never the blob), uploads a new file
@@ -985,6 +1033,7 @@
         return await viewSellsList();
       }
       if (parts[0] === 'reinvest') return await viewReinvest(parts[1]);
+      if (parts[0] === 'exercise') return await viewExercise(parts[1]);
       if (parts[0] === 'attachments') return await viewAttachments(parts[1], parts[2]);
       if (parts[0] === 'jobs') return await viewJobs();
       if (parts[0] === 'r') {

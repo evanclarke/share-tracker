@@ -25,6 +25,13 @@
 //!   partly paid bonus shares and call payments (and pre-CGT original
 //!   shares), which are not modelled; Example 35's post-CGT parcel is
 //!   reproduced below.
+//! - `docs/rights-issues.md` Example 39 (Shanti, sale of rights) — selling
+//!   the rights themselves (a capital gain whose deemed acquisition date is
+//!   inherited from the original shares) is not modelled; only exercising is
+//!   (TODO "Corporate actions", RightsIssue). Example 40's post-CGT half is
+//!   reproduced below; its pre-CGT half (rights over the 1 June 1985 shares,
+//!   whose cost base includes the rights' market value) turns on pre-CGT
+//!   originals, which are not modelled.
 //! - `docs/amma-statement-guidance-notes.md` running example ("In our example,
 //!   this is $155") — the underlying Part C component table is not included in
 //!   the mirrored copy, so the example is not reproducible from the doc alone.
@@ -764,6 +771,74 @@ async fn bonus_shares_example_35_chris_fully_paid_bonus_shares() {
     );
 
     // The bonus issue itself is no CGT event.
+    let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net-capital-gain").await;
+    assert!(years.iter().all(|y| y.net_capital_gain == Decimal::ZERO));
+}
+
+/// `docs/rights-issues.md` (Guide to CGT, QC 64895) — "Example 40: Rights
+/// exercised" (building on Example 39's facts).
+///
+/// > Shanti owns 2,000 shares in ZAC Ltd. She bought 1,000 shares on
+/// > 1 June 1985 and 1,000 shares on 1 December 1996. On 1 July 1998, ZAC Ltd
+/// > granted each of its shareholders one right for each four shares owned to
+/// > acquire shares in the company for $1.80 each. […] She therefore
+/// > exercised all 500 rights on 1 August 1998 […] There are no CGT
+/// > consequences arising from the exercise of the rights. However, the 500
+/// > shares Shanti acquired on 1 August 1998 when she exercised the rights
+/// > are subject to CGT and are acquired at the time of the exercise. When
+/// > Shanti exercised the rights issued for the shares she bought on
+/// > 1 December 1996, the cost base of the 250 shares she acquired is the
+/// > amount she paid to exercise each right ($1.80 for each share).
+///
+/// The pre-CGT half (the rights over the 1 June 1985 shares, whose cost base
+/// includes the rights' 20-cent market value) turns on pre-CGT originals,
+/// which are not modelled — so this test enters only the post-CGT 1,000-share
+/// parcel and asserts the figures the ATO states for it: 250 new shares
+/// acquired 1 August 1998 at a $450 cost base ($1.80 each), and no CGT event
+/// from the exercise.
+#[tokio::test]
+async fn rights_issues_example_40_shanti_rights_exercised() {
+    let pool = test_pool().await;
+    put_listing(&pool, 1, "ZAC").await;
+    put_buy(&pool, 1, 1, "1996-12-01", "1000", "2", "0").await;
+    // One right per four shares owned, exercise price $1.80, record 1 July 1998.
+    api_put(
+        &pool,
+        "/corporate_actions/1",
+        json!({
+            "action_type": "RightsIssue",
+            "listing_id": 1,
+            "date": "1998-07-01",
+            "rights_units": "1",
+            "rights_held_units": "4",
+            "exercise_price": "1.80",
+            "currency": "AUD",
+        }),
+    )
+    .await;
+    // Shanti exercises the 250 rights her post-CGT shares earned, on 1 Aug 1998.
+    let trade: Trade = api_post(
+        &pool,
+        "/corporate_actions/1/exercise",
+        json!({ "date": "1998-08-01", "units": "250" }),
+        StatusCode::CREATED,
+    )
+    .await;
+    assert_eq!(trade.trade_type, TradeType::Buy);
+    assert_eq!(trade.quantity, dec("250"));
+    assert_eq!(trade.average_price, dec("1.80"));
+
+    // The 250 shares are a new parcel acquired at the time of exercise, with
+    // a cost base of the amount paid to exercise: 250 × $1.80 = $450.
+    let parcels: Vec<crate::reports::open_parcels::OpenParcel> =
+        api_get(&pool, "/portfolio/open-parcels").await;
+    assert_eq!(parcels.len(), 2);
+    assert_eq!(parcels[0].remaining_quantity, dec("1000"), "original parcel untouched");
+    assert_eq!(parcels[1].acquisition_date.to_string(), "1998-08-01");
+    assert_eq!(parcels[1].remaining_quantity, dec("250"));
+    assert_eq!(parcels[1].remaining_cost_base, dec("450"), "$1.80 for each share");
+
+    // "There are no CGT consequences arising from the exercise of the rights."
     let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net-capital-gain").await;
     assert!(years.iter().all(|y| y.net_capital_gain == Decimal::ZERO));
 }

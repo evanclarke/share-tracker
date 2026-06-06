@@ -45,6 +45,14 @@ pub struct Trade {
     pub residual_brought_forward: Decimal,
     pub residual_carried_forward: Decimal,
     pub residual_paid_out: Decimal,
+    /// Provenance link from a rights-exercise Buy back to its `RightsIssue`
+    /// corporate action (`None` for every other trade). Set only by
+    /// `POST /corporate_actions/:id/exercise` (`entities::rights_exercise`),
+    /// which uses it to cap cumulative exercised units at the entitlement; a
+    /// trade carrying it is rejected by `PUT /trades` (delete and re-exercise
+    /// instead), and the action it references cannot be edited or deleted
+    /// while the trade exists.
+    pub rights_action_id: Option<i64>,
 }
 
 impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for Trade {
@@ -69,6 +77,7 @@ impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for Trade {
             residual_brought_forward: dec(row.try_get("residual_brought_forward")?)?,
             residual_carried_forward: dec(row.try_get("residual_carried_forward")?)?,
             residual_paid_out: dec(row.try_get("residual_paid_out")?)?,
+            rights_action_id: row.try_get("rights_action_id")?,
         })
     }
 }
@@ -107,7 +116,7 @@ pub async fn db_list(pool: &SqlitePool) -> Result<Vec<Trade>, sqlx::Error> {
     sqlx::query_as(
         "SELECT id, trade_type, date, settlement_date, listing_id, average_price, quantity, \
          currency, brokerage, gst_on_brokerage, brokerage_currency, fx_rate, contract_note_ref, \
-         residual_brought_forward, residual_carried_forward, residual_paid_out \
+         residual_brought_forward, residual_carried_forward, residual_paid_out, rights_action_id \
          FROM trades ORDER BY date, id",
     )
     .fetch_all(pool)
@@ -118,7 +127,7 @@ pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<Trade>, sqlx::E
     sqlx::query_as(
         "SELECT id, trade_type, date, settlement_date, listing_id, average_price, quantity, \
          currency, brokerage, gst_on_brokerage, brokerage_currency, fx_rate, contract_note_ref, \
-         residual_brought_forward, residual_carried_forward, residual_paid_out \
+         residual_brought_forward, residual_carried_forward, residual_paid_out, rights_action_id \
          FROM trades WHERE id = ?",
     )
     .bind(id)
@@ -137,6 +146,11 @@ pub enum UpsertError {
     /// quantity, breaking that adjustment's `quantity <= trade.quantity`
     /// invariant (see `amit_adjustment::db_upsert`).
     QuantityBelowAmitAdjustment,
+    /// The existing trade is a rights exercise (`rights_action_id` set): its
+    /// figures were validated against the rights issue's entitlement, which a
+    /// free-form edit could exceed. Delete it and re-exercise instead (see
+    /// `entities::rights_exercise`).
+    RightsExerciseTrade,
 }
 
 impl From<sqlx::Error> for UpsertError {
@@ -152,6 +166,19 @@ impl From<sqlx::Error> for UpsertError {
 /// covered quantity.
 pub async fn db_upsert(pool: &SqlitePool, trade: &Trade) -> Result<(), UpsertError> {
     let mut tx = pool.begin().await?;
+
+    // A rights-exercise trade is immutable here: it was created against its
+    // rights issue's entitlement cap, which an edit could silently exceed.
+    // (The INSERT below never sets rights_action_id, so a normal trade can't
+    // become one either.)
+    let existing_rights_action: Option<Option<i64>> =
+        sqlx::query_scalar("SELECT rights_action_id FROM trades WHERE id = ?")
+            .bind(trade.id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    if existing_rights_action.flatten().is_some() {
+        return Err(UpsertError::RightsExerciseTrade);
+    }
 
     // Sum is computed in Decimal (the column is TEXT; SQL SUM would coerce to
     // float). For a new id both dependant sets are empty, so the checks pass.
@@ -406,15 +433,16 @@ async fn upsert(
         residual_brought_forward: body.residual_brought_forward,
         residual_carried_forward: body.residual_carried_forward,
         residual_paid_out: body.residual_paid_out,
+        rights_action_id: None,
     };
     db_upsert(&pool, &trade)
         .await
         .map(|_| StatusCode::NO_CONTENT)
         .map_err(|e| match e {
             UpsertError::Db(err) => crate::infra::http::write_error_status(&err),
-            UpsertError::QuantityBelowAllocated | UpsertError::QuantityBelowAmitAdjustment => {
-                StatusCode::UNPROCESSABLE_ENTITY
-            }
+            UpsertError::QuantityBelowAllocated
+            | UpsertError::QuantityBelowAmitAdjustment
+            | UpsertError::RightsExerciseTrade => StatusCode::UNPROCESSABLE_ENTITY,
         })
 }
 
@@ -481,6 +509,7 @@ mod tests {
             residual_brought_forward: Decimal::ZERO,
             residual_carried_forward: Decimal::ZERO,
             residual_paid_out: Decimal::ZERO,
+            rights_action_id: None,
         }
     }
 
@@ -628,6 +657,7 @@ mod tests {
             residual_brought_forward: Decimal::ZERO,
             residual_carried_forward: Decimal::ZERO,
             residual_paid_out: Decimal::ZERO,
+            rights_action_id: None,
         };
         db_upsert(&pool, &trade).await.unwrap();
         let got = db_get(&pool, 2).await.unwrap().unwrap();
@@ -656,6 +686,7 @@ mod tests {
             residual_brought_forward: Decimal::ZERO,
             residual_carried_forward: Decimal::ZERO,
             residual_paid_out: Decimal::ZERO,
+            rights_action_id: None,
         };
         db_upsert(&pool, &trade).await.unwrap();
         let got = db_get(&pool, 3).await.unwrap().unwrap();

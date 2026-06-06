@@ -244,8 +244,8 @@ mod tests {
     async fn corporate_actions_ui_present() {
         let js = app_js_body().await;
         // The Corporate Actions view records return-of-capital payments (CGT
-        // event G1), share splits/consolidations (TD 2000/10), and
-        // non-assessable bonus issues against a listing.
+        // event G1), share splits/consolidations (TD 2000/10), non-assessable
+        // bonus issues, and rights issues against a listing.
         assert!(js.contains("/corporate_actions"));
         assert!(js.contains("ReturnOfCapital"));
         assert!(js.contains("amount_per_unit"));
@@ -255,6 +255,14 @@ mod tests {
         assert!(js.contains("BonusIssue"));
         assert!(js.contains("bonus_units"));
         assert!(js.contains("bonus_held_units"));
+        assert!(js.contains("RightsIssue"));
+        assert!(js.contains("rights_units"));
+        assert!(js.contains("rights_held_units"));
+        assert!(js.contains("exercise_price"));
+        // A RightsIssue row's Exercise action drives the exercise endpoint.
+        assert!(js.contains("viewExercise"));
+        assert!(js.contains("/exercise"));
+        assert!(js.contains("rights_cost"));
     }
 
     #[tokio::test]

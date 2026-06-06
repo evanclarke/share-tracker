@@ -12,6 +12,7 @@ A personal Australian share portfolio tracker with a REST JSON API. Records trad
 - **Return of capital (CGT event G1)** — record a company's non-assessable payment as a corporate action; the per-unit amount reduces the cost base of every parcel held on the payment date across all reports, and a payment in excess of a parcel's cost base becomes a capital gain in the net capital gain report (the cost base floors at nil — G1 never produces a loss)
 - **Share splits and consolidations (TD 2000/10)** — record a conversion of a listing's shares into a larger or smaller number as a corporate action; no CGT event arises: parcels keep their total cost base and original acquisition date (the 12-month discount clock keeps running) while quantities and per-unit cost bases are re-based across the conversion in every report and in the Sell/trade capacity checks (a post-split sale allocates post-split units against pre-split parcels)
 - **Bonus issues (non-assessable)** — record a bonus share issue as a corporate action; the ATO apportions each parcel's cost base over the original + bonus shares and the bonus shares take the original acquisition date, so the issue is the same no-CGT-event quantity re-base as a split: parcels grow by `bonus/held` per unit with their total cost base and acquisition date untouched (bonus shares received *in lieu of a dividend* are assessed as a dividend and entered as a DRP trade instead)
+- **Rights issues** — record a rights issue (free rights to acquire new shares at a set price) as a corporate action, then exercise it: the exercise creates a new Buy parcel **acquired on the exercise date** (the 12-month discount clock runs from exercise, not from the rights or the original shares) with a cost base of the exercise payment plus any amount paid to acquire the rights; cumulative exercised units are capped at the entitlement the holding earned at the record date (selling or lapsing the rights themselves is not modelled; see `docs/rights-issues.md`)
 - **Portfolio overview** — open holdings per security with total cost base and optional market value (supply current prices in the request body)
 - **Unrealised gains report** — per-holding gain/loss and CGT-discount-eligible quantity as at a given date
 - **Realised gains report** — per-sale capital gain/loss split into discount-eligible (parcels held strictly more than 12 months), non-discountable, and loss buckets
@@ -124,7 +125,8 @@ trades
 ├── contract_note_ref TEXT (nullable)
 ├── residual_brought_forward TEXT (decimal)  DRP trades only: leftover cash carried in from the prior reinvestment (else 0)
 ├── residual_carried_forward TEXT (decimal)  DRP trades only: leftover carried to the next reinvestment (else 0)
-└── residual_paid_out        TEXT (decimal)  DRP trades only: leftover paid out instead of carried, incl. the trailing residual refunded at DRP unenrolment (else 0)
+├── residual_paid_out        TEXT (decimal)  DRP trades only: leftover paid out instead of carried, incl. the trailing residual refunded at DRP unenrolment (else 0)
+└── rights_action_id  INTEGER FK→corporate_actions.id (nullable)  Rights-exercise Buys only: the RightsIssue action exercised, set by POST /corporate_actions/:id/exercise (caps cumulative exercised units at the entitlement; the trade is immutable via PUT /trades and blocks editing/deleting the action)
 
 income
 ├── id                        INTEGER PK
@@ -192,17 +194,20 @@ cgt_settings                 Singleton CGT settings row (CHECK id = 1)
 ├── id                   INTEGER PK  Always 1 (CHECK-enforced singleton)
 └── opening_capital_loss TEXT (decimal)  Net capital loss carried forward from before the first recorded year (AUD, non-negative); starting balance for the net-capital-gain loss chain
 
-corporate_actions            Corporate actions per listing (company returns of capital — CGT event G1 — share splits/consolidations — TD 2000/10 — and non-assessable bonus issues)
-├── id               INTEGER PK
-├── action_type      TEXT   ReturnOfCapital | ShareSplit | BonusIssue (CHECK-enforced enum; the extension point for future actions). Per-type CHECKs tie each payload below to its type
-├── listing_id       INTEGER FK→listings.id
-├── date             TEXT   ReturnOfCapital: payment date — parcels acquired on/before it and still held then are affected. ShareSplit: conversion date — parcels acquired before it are converted (a trade dated on it is already in post-split units). BonusIssue: issue date — parcels acquired before it receive bonus units (a trade dated on it is ex-bonus)
-├── amount_per_unit  TEXT (decimal, nullable)  ReturnOfCapital only: per-unit non-assessable payment (positive); reduces affected parcels' cost bases
-├── currency         TEXT FK→currencies.code (nullable)  ReturnOfCapital only: must match the affected trades' currency (reports fail loudly on a mismatch)
-├── split_new_units  TEXT (decimal, nullable)  ShareSplit only: every split_old_units existing units become split_new_units units (both positive; a consolidation has new < old)
-├── split_old_units  TEXT (decimal, nullable)  ShareSplit only: see split_new_units
-├── bonus_units      TEXT (decimal, nullable)  BonusIssue only: every bonus_held_units units held receive bonus_units additional units (both positive; a 1-for-10 issue is bonus_units=1 / bonus_held_units=10)
-└── bonus_held_units TEXT (decimal, nullable)  BonusIssue only: see bonus_units
+corporate_actions            Corporate actions per listing (company returns of capital — CGT event G1 — share splits/consolidations — TD 2000/10 — non-assessable bonus issues, and rights issues)
+├── id                INTEGER PK
+├── action_type       TEXT   ReturnOfCapital | ShareSplit | BonusIssue | RightsIssue (CHECK-enforced enum; the extension point for future actions). Per-type CHECKs tie each payload below to its type
+├── listing_id        INTEGER FK→listings.id
+├── date              TEXT   ReturnOfCapital: payment date — parcels acquired on/before it and still held then are affected. ShareSplit: conversion date — parcels acquired before it are converted (a trade dated on it is already in post-split units). BonusIssue: issue date — parcels acquired before it receive bonus units (a trade dated on it is ex-bonus). RightsIssue: record date — units held before it earn the entitlement (a trade dated on it is ex-rights)
+├── amount_per_unit   TEXT (decimal, nullable)  ReturnOfCapital only: per-unit non-assessable payment (positive); reduces affected parcels' cost bases
+├── currency          TEXT FK→currencies.code (nullable)  ReturnOfCapital: must match the affected trades' currency (reports fail loudly on a mismatch). RightsIssue: the exercise price's currency
+├── split_new_units   TEXT (decimal, nullable)  ShareSplit only: every split_old_units existing units become split_new_units units (both positive; a consolidation has new < old)
+├── split_old_units   TEXT (decimal, nullable)  ShareSplit only: see split_new_units
+├── bonus_units       TEXT (decimal, nullable)  BonusIssue only: every bonus_held_units units held receive bonus_units additional units (both positive; a 1-for-10 issue is bonus_units=1 / bonus_held_units=10)
+├── bonus_held_units  TEXT (decimal, nullable)  BonusIssue only: see bonus_units
+├── rights_units      TEXT (decimal, nullable)  RightsIssue only: every rights_held_units units held at the record date entitle the holder to rights_units new units (both positive; a 1-for-4 issue is rights_units=1 / rights_held_units=4)
+├── rights_held_units TEXT (decimal, nullable)  RightsIssue only: see rights_units
+└── exercise_price    TEXT (decimal, nullable)  RightsIssue only: per-new-unit price paid on exercise, in currency (positive)
 
 attachments                  Supporting documents for an activity; bytes stored in the DB (captured by the weekly backup)
 ├── id                INTEGER PK
@@ -238,6 +243,7 @@ exchanges ──< listings ──< trades >────────────�
                        listings ──< drp_enrolments
                        listings ──< corporate_actions
                        trades (DRP) ──< income (reinvestment_trade_id)
+                       corporate_actions (RightsIssue) ──< trades (rights_action_id)
                        trades, income, amma_statements ──< attachments (exactly one owner; ON DELETE CASCADE)
 
 currencies ──< exchanges, listings, trades (currency + brokerage_currency), income, amma_statements, corporate_actions
@@ -267,7 +273,7 @@ The server also hosts a built-in web UI — a no-build-step single-page app (pla
 | `GET` | `/static/app.js` | The app bundle (JavaScript) |
 | `GET` | `/static/style.css` | Stylesheet (CSS) |
 
-Open `http://localhost:<port>/` in a browser. The app is hash-routed (`#/e/<entity>`, `#/sells`, `#/jobs`, `#/attachments/<owner>/<id>`, `#/r/<report>`) and drives the JSON API below — it provides CRUD screens for every entity (exchanges, listings, trades, income, AMMA statements, AMIT adjustments, DRP enrolments, exchange holidays, CGT settings, corporate actions), a dedicated Sell screen that captures parcel allocations atomically, a DRP reinvest action on income rows, an Attachments action on each trade/income/AMMA row that uploads, lists, downloads, and deletes its documents, read-only views of the import-managed reference tables (currencies, MIC registry, RBA FX rates, parcel allocations), a Maintenance → Jobs screen that lists the scheduled jobs with each one's last run (when it finished, whether it succeeded, and any error) and runs any of them on demand (`POST /jobs/:name`), and a view for each report (portfolio overview, open parcels, unrealised/realised gains, net capital gain, tax summary, exchange MIC validation, settlement holiday coverage). The net capital gain and tax summary report views carry an **Export CSV** action that downloads the report via its `/export` endpoint.
+Open `http://localhost:<port>/` in a browser. The app is hash-routed (`#/e/<entity>`, `#/sells`, `#/jobs`, `#/attachments/<owner>/<id>`, `#/r/<report>`) and drives the JSON API below — it provides CRUD screens for every entity (exchanges, listings, trades, income, AMMA statements, AMIT adjustments, DRP enrolments, exchange holidays, CGT settings, corporate actions), a dedicated Sell screen that captures parcel allocations atomically, a DRP reinvest action on income rows, an Exercise action on RightsIssue corporate-action rows (`POST /corporate_actions/:id/exercise`), an Attachments action on each trade/income/AMMA row that uploads, lists, downloads, and deletes its documents, read-only views of the import-managed reference tables (currencies, MIC registry, RBA FX rates, parcel allocations), a Maintenance → Jobs screen that lists the scheduled jobs with each one's last run (when it finished, whether it succeeded, and any error) and runs any of them on demand (`POST /jobs/:name`), and a view for each report (portfolio overview, open parcels, unrealised/realised gains, net capital gain, tax summary, exchange MIC validation, settlement holiday coverage). The net capital gain and tax summary report views carry an **Export CSV** action that downloads the report via its `/export` endpoint.
 
 ### Exchanges
 
@@ -373,6 +379,7 @@ Buy/DRP trades carry the same write-time integrity as Sells (validated atomicall
 
 - `DELETE /trades/:id` returns `422` if the trade is still referenced — as the purchase parcel of a Sell's allocation, by an AMIT adjustment, or as a distribution's reinvestment trade — instead of surfacing the FK error as `500`. Remove the dependants first (e.g. delete the Sell via `DELETE /sells/:id`).
 - `PUT /trades/:id` returns `422` if the edit would shrink the trade's `quantity` below what its dependants rely on: the total already allocated out to Sells (each allocation re-based to the parcel's as-acquired units across any [share splits/consolidations or bonus issues](#corporate-actions)), or any linked AMIT adjustment's covered quantity (AMIT adjustment quantities are expressed in the parcel's as-acquired units).
+- `PUT /trades/:id` returns `422` if the existing trade is a rights exercise (`rights_action_id` set): its figures were validated against the rights issue's entitlement, which a free-form edit could exceed. Delete it (`DELETE /trades/:id`, which frees the entitlement) and re-exercise instead — see [Corporate actions](#corporate-actions).
 
 An unreferenced trade edits and deletes freely.
 
@@ -463,11 +470,12 @@ Returns `204 No Content`, or `422 Unprocessable Entity` if the amount is negativ
 
 ### Corporate actions
 
-Corporate actions recorded against a listing. Three action types are modelled:
+Corporate actions recorded against a listing. Four action types are modelled:
 
 - `ReturnOfCapital` — a non-assessable payment from a company (a shareholder-approved return of share capital, CGT event G1; see `docs/cgt-non-assessable-payments.md`). The per-unit payment reduces the cost base of every parcel of the listing held on the payment date (units sold before the payment were not held for it and are unaffected) in the [portfolio](#overview), [open parcels](#open-parcels), [unrealised](#unrealised-gains), and [realised](#realised-gains) reports. Where cumulative payments exceed a parcel's per-unit cost base, the cost base floors at nil and the excess is a capital gain in the payment's income year — G1 never produces a capital loss — reported by the [net capital gain report](#net-capital-gain).
 - `ShareSplit` — a share split or consolidation (TD 2000/10; see `docs/share-splits-and-consolidations.md`): on the conversion `date`, every `split_old_units` units of the listing become `split_new_units` units (a 2-for-1 split is new=2/old=1; a 1-for-10 consolidation is new=1/old=10). **No CGT event happens**: the converted parcels keep their total cost base and their original acquisition date (the 12-month discount clock keeps running) — only the unit count, and so the per-unit cost base, changes. Trade rows keep the quantities as originally transacted; the reports and the Sell/trade write-time capacity checks re-base quantities between unit bases (a trade dated on or after the conversion date is already in post-split units, so after a 2-for-1 split a 100-share parcel covers a 200-share sale). Open-holdings reports show quantities in current units (the unrealised report in the units of its `as_of_date`); a `ReturnOfCapital` payment after a split is per post-split unit. A consolidation that doesn't divide a holding evenly keeps the exact fractional quantity (company rounding / cash-in-lieu arrangements are not modelled). AMIT adjustment quantities remain expressed in the parcel's as-acquired units.
 - `BonusIssue` — a non-assessable bonus share issue (the general post-1 July 1998 case; see `docs/bonus-shares.md`): on the issue `date`, every `bonus_held_units` units held receive `bonus_units` additional units (a 1-for-10 issue is bonus=1/held=10). **No CGT event happens**: the ATO apportions each parcel's cost base over the original + bonus shares and the bonus shares take the original acquisition date — the same quantity re-base as a `ShareSplit` with new = held + bonus and old = held, and the reports and write-time checks treat it identically (a trade dated on or after the issue date is ex-bonus and receives nothing). Bonus shares received **in lieu of a dividend** (a bonus share plan) are assessed as a dividend — enter those as a distribution plus a DRP reinvestment trade (the new parcel is acquired at the issue date with the dividend as its cost base), not as this action. Partly paid bonus shares and call payments are not modelled.
+- `RightsIssue` — rights to acquire new shares, issued free to existing holders (see `docs/rights-issues.md`): on the record `date`, every `rights_held_units` units held entitle the holder to acquire `rights_units` new units at `exercise_price` per unit in `currency` (a 1-for-4 issue is rights=1/held=4; a trade dated on or after the record date is ex-rights). Recording the action changes nothing by itself — the rights' market value is non-assessable non-exempt income on issue. Exercising it (`POST /corporate_actions/:id/exercise`, below) creates the new parcel. Selling or letting the rights themselves lapse (a CGT event on the rights, whose deemed acquisition date is inherited from the original shares), pre-CGT originals, and retail premiums (entered as unfranked dividend income) are not modelled.
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -475,6 +483,7 @@ Corporate actions recorded against a listing. Three action types are modelled:
 | `GET` | `/corporate_actions/:id` | Get one corporate action |
 | `PUT` | `/corporate_actions/:id` | Create or update a corporate action |
 | `DELETE` | `/corporate_actions/:id` | Delete a corporate action |
+| `POST` | `/corporate_actions/:id/exercise` | Exercise a `RightsIssue` into a new Buy parcel |
 
 ```
 PUT /corporate_actions/1
@@ -503,9 +512,38 @@ PUT /corporate_actions/3
   "bonus_units": "1",
   "bonus_held_units": "10"
 }
+
+PUT /corporate_actions/4
+{
+  "action_type": "RightsIssue",
+  "listing_id": 1,
+  "date": "2025-10-01",
+  "rights_units": "1",
+  "rights_held_units": "4",
+  "exercise_price": "1.80",
+  "currency": "AUD"
+}
 ```
 
-Each action type carries exactly its own payload: a `ReturnOfCapital` has `amount_per_unit` + `currency`, a `ShareSplit` has `split_new_units` + `split_old_units`, a `BonusIssue` has `bonus_units` + `bonus_held_units` — the other types' columns are null in the table (enforced by CHECKs and the PUT handler), and GET responses omit them, returning only the action's own fields. Returns `204 No Content`, or `422 Unprocessable Entity` when `amount_per_unit` is not positive, a split or bonus ratio is missing or not positive, the payload mixes the per-type fields, the listing or currency is unknown, or the action type is unrecognised. A payment's `currency` must match the affected trades' currency — the reports never net amounts across currencies and fail loudly (`500`) on a mismatch.
+Each action type carries exactly its own payload: a `ReturnOfCapital` has `amount_per_unit` + `currency`, a `ShareSplit` has `split_new_units` + `split_old_units`, a `BonusIssue` has `bonus_units` + `bonus_held_units`, a `RightsIssue` has `rights_units` + `rights_held_units` + `exercise_price` + `currency` — the other types' columns are null in the table (enforced by CHECKs and the PUT handler), and GET responses omit them, returning only the action's own fields. Returns `204 No Content`, or `422 Unprocessable Entity` when `amount_per_unit` is not positive, a split/bonus/rights ratio or `exercise_price` is missing or not positive, the payload mixes the per-type fields, the listing or currency is unknown, or the action type is unrecognised. A payment's `currency` must match the affected trades' currency — the reports never net amounts across currencies and fail loudly (`500`) on a mismatch.
+
+#### Exercising a rights issue
+
+```
+POST /corporate_actions/4/exercise
+{
+  "date": "2025-11-01",
+  "units": "250",
+  "rights_cost": "0",
+  "fx_rate": "1"
+}
+```
+
+Exercising rights is no CGT event (`docs/rights-issues.md`): the endpoint atomically creates a Buy trade — the new parcel — dated the exercise `date` (the parcel's acquisition date, so **the 12-month CGT discount clock runs from exercise**, not from the rights or the original shares; the company allots the shares, so the settlement date is the exercise date too). The parcel's cost base is the amount paid to exercise (`units × exercise_price`, carried as the trade's quantity × average price) plus `rights_cost` — the total paid to acquire the exercised rights, 0 (the default) for rights issued free — carried on the trade's `brokerage` column (both are components of the single cost base every report computes). `fx_rate` is the optional manual foreign-per-AUD fallback (defaults to 1).
+
+Cumulative exercised units are capped at the entitlement: units held when the record date arrived (trades dated before the action's `date`, re-based to record-date units across any splits/consolidations) × `rights_units / rights_held_units`, with a fractional entitlement rounded **up** to a whole unit (registry practice). The created trade carries `rights_action_id` linking it to the action; to keep the cap honest the trade is immutable via `PUT /trades` (delete it — which frees the entitlement — and re-exercise instead), and the action itself returns `422` on `PUT`/`DELETE` while exercise trades reference it.
+
+Returns `201 Created` with the created trade as JSON, `404 Not Found` if no corporate action has that id, or `422 Unprocessable Entity` if the action is not a `RightsIssue`, `units` is not positive, `rights_cost` is negative, the exercise date precedes the record date, or the exercise would exceed the remaining entitlement.
 
 ### DRP reinvestment
 
@@ -694,13 +732,13 @@ Flags every trade whose `[date, settlement_date]` window is not fully inside its
 | Code | Meaning |
 |------|---------|
 | `200 OK` | Successful GET (JSON; the report `/export` endpoints return `text/csv`, an attachment content download returns its stored content type) |
-| `201 Created` | DRP reinvestment trade created via `POST /income/:id/reinvest`, or an attachment uploaded via `POST /attachments` |
+| `201 Created` | DRP reinvestment trade created via `POST /income/:id/reinvest`, a rights-exercise trade created via `POST /corporate_actions/:id/exercise`, or an attachment uploaded via `POST /attachments` |
 | `204 No Content` | Successful PUT or DELETE, or a job run via `POST /jobs/:name` |
 | `400 Bad Request` | Malformed path parameter (e.g. an `exchange_holidays` `:date` that is not `YYYY-MM-DD`) |
 | `404 Not Found` | Resource does not exist |
 | `405 Method Not Allowed` | Write attempted on a read-only path (e.g. `parcel_allocations`) |
 | `413 Payload Too Large` | Uploaded attachment exceeds the 25 MB per-file limit |
-| `422 Unprocessable Entity` | Business rule or constraint violation (e.g. over-allocation, wrong trade type, under-allocated Sell, deleting or shrinking a Buy/DRP that a parcel allocation, AMIT adjustment, or reinvestment link still relies on, unparseable FX or MIC feed, a write referencing an unrecognised currency / unknown exchange / listing, an attachment upload with no/multiple owners or an unsupported content type, a negative / non-singleton `cgt_settings` opening capital loss, an overlapping or empty DRP enrolment period, reinvesting a distribution no enrolment period covers, or a corporate action with a non-positive `amount_per_unit`, a missing/non-positive split or bonus ratio, a payload mixing the per-type fields, or an unrecognised `action_type`) |
+| `422 Unprocessable Entity` | Business rule or constraint violation (e.g. over-allocation, wrong trade type, under-allocated Sell, deleting or shrinking a Buy/DRP that a parcel allocation, AMIT adjustment, or reinvestment link still relies on, unparseable FX or MIC feed, a write referencing an unrecognised currency / unknown exchange / listing, an attachment upload with no/multiple owners or an unsupported content type, a negative / non-singleton `cgt_settings` opening capital loss, an overlapping or empty DRP enrolment period, reinvesting a distribution no enrolment period covers, or a corporate action with a non-positive `amount_per_unit`, a missing/non-positive split/bonus/rights ratio or exercise price, a payload mixing the per-type fields, or an unrecognised `action_type`; a rights exercise that is not against a RightsIssue, has non-positive units or a negative rights cost, is dated before the record date, or exceeds the remaining entitlement; editing a rights-exercise trade, or editing/deleting a RightsIssue that exercise trades still reference) |
 | `500 Internal Server Error` | Unexpected database error, or a job triggered via `POST /jobs/:name` failed |
 | `502 Bad Gateway` | Upstream fetch failed (e.g. the RBA FX or ISO MIC import could not reach its source) |
 

@@ -279,6 +279,7 @@ mod tests {
             residual_brought_forward: Decimal::ZERO,
             residual_carried_forward: Decimal::ZERO,
             residual_paid_out: Decimal::ZERO,
+            rights_action_id: None,
         };
         trade::db_upsert(pool, &t).await.unwrap();
         t.id

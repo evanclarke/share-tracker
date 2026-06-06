@@ -37,8 +37,23 @@
 //! issue date is ex-bonus. (Bonus shares chosen *in lieu of a dividend* are
 //! assessed as a dividend — entered as a DRP trade, not as this action.)
 //!
-//! `ActionKind` is the extension point for future corporate actions (rights
-//! issues, buy-backs, ...), each widening the enum and its CHECK.
+//! **RightsIssue** — rights to acquire new shares, issued free to existing
+//! holders (the dominant retail case; see `docs/rights-issues.md`): on the
+//! record `date` every `rights_held_units` units held entitle the holder to
+//! acquire `rights_units` new units at `exercise_price` per unit in
+//! `currency` (a trade dated on the record date is ex-rights). Recording the
+//! action changes nothing by itself — free rights are non-assessable
+//! non-exempt income on issue. Exercising it (`POST
+//! /corporate_actions/:id/exercise`, `entities::rights_exercise`) creates a
+//! new Buy parcel dated the exercise date — no CGT event, the 12-month
+//! discount clock runs from exercise — whose cost base is the amount paid to
+//! exercise plus any amount paid to acquire the rights. Cumulative exercised
+//! units are capped at the entitlement, so an action referenced by exercise
+//! trades cannot be edited or deleted (delete the exercise trades first).
+//! Selling or letting the rights themselves lapse is not modelled.
+//!
+//! `ActionKind` is the extension point for future corporate actions
+//! (buy-backs, mergers, ...), each widening the enum and its CHECK.
 
 use crate::infra::decimal::parse_dec;
 use crate::infra::http::write_error_status;
@@ -81,6 +96,16 @@ pub enum ActionKind {
         bonus_units: Decimal,
         bonus_held_units: Decimal,
     },
+    RightsIssue {
+        /// Every `rights_held_units` units held at the record date entitle
+        /// the holder to acquire `rights_units` new units (both positive; a
+        /// 1-for-4 rights issue is rights_units=1 / rights_held_units=4).
+        rights_units: Decimal,
+        rights_held_units: Decimal,
+        /// Per-new-unit price paid on exercise, in `currency` (positive).
+        exercise_price: Decimal,
+        currency: String,
+    },
 }
 
 impl ActionKind {
@@ -90,6 +115,7 @@ impl ActionKind {
             ActionKind::ReturnOfCapital { .. } => "ReturnOfCapital",
             ActionKind::ShareSplit { .. } => "ShareSplit",
             ActionKind::BonusIssue { .. } => "BonusIssue",
+            ActionKind::RightsIssue { .. } => "RightsIssue",
         }
     }
 }
@@ -103,6 +129,8 @@ pub struct CorporateAction {
     /// converted (a trade dated on the conversion date is already in
     /// post-split units). BonusIssue: issue date — parcels acquired before it
     /// receive bonus units (a trade dated on the issue date is ex-bonus).
+    /// RightsIssue: record date — units held before it earn the entitlement
+    /// (a trade dated on it is ex-rights); exercises are dated on/after it.
     pub date: NaiveDate,
     #[serde(flatten)]
     pub kind: ActionKind,
@@ -127,6 +155,12 @@ fn kind_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<ActionKind, sqlx::Erro
         "BonusIssue" => Ok(ActionKind::BonusIssue {
             bonus_units: req_dec(row, "bonus_units")?,
             bonus_held_units: req_dec(row, "bonus_held_units")?,
+        }),
+        "RightsIssue" => Ok(ActionKind::RightsIssue {
+            rights_units: req_dec(row, "rights_units")?,
+            rights_held_units: req_dec(row, "rights_held_units")?,
+            exercise_price: req_dec(row, "exercise_price")?,
+            currency: row.try_get("currency")?,
         }),
         other => Err(sqlx::Error::Decode(
             format!("unknown corporate action_type {other}").into(),
@@ -153,6 +187,7 @@ enum ActionType {
     ReturnOfCapital,
     ShareSplit,
     BonusIssue,
+    RightsIssue,
 }
 
 #[derive(Debug, Deserialize)]
@@ -172,33 +207,63 @@ pub struct CorporateActionBody {
     bonus_units: Option<Decimal>,
     #[serde(default)]
     bonus_held_units: Option<Decimal>,
+    #[serde(default)]
+    rights_units: Option<Decimal>,
+    #[serde(default)]
+    rights_held_units: Option<Decimal>,
+    #[serde(default)]
+    exercise_price: Option<Decimal>,
 }
 
 impl CorporateActionBody {
     /// Each action type carries exactly its own payload (mirrors the table
     /// CHECKs, plus positivity): ReturnOfCapital needs a positive payment and
     /// a currency; ShareSplit a positive conversion ratio; BonusIssue a
-    /// positive bonus ratio — each with every other type's fields absent
-    /// (`None` otherwise). A zero/negative payment would silently *increase*
-    /// cost bases; a zero/negative ratio would zero out or invert holdings.
+    /// positive bonus ratio; RightsIssue a positive entitlement ratio,
+    /// exercise price, and a currency — each with every other type's fields
+    /// absent (`None` otherwise; `currency` is shared by ReturnOfCapital and
+    /// RightsIssue but forbidden for the ratio-only types). A zero/negative
+    /// payment would silently *increase* cost bases; a zero/negative ratio
+    /// would zero out or invert holdings or entitlements.
     fn kind(self) -> Option<ActionKind> {
-        let payment = self.amount_per_unit.is_some() || self.currency.is_some();
+        let payment = self.amount_per_unit.is_some();
         let split = self.split_new_units.is_some() || self.split_old_units.is_some();
         let bonus = self.bonus_units.is_some() || self.bonus_held_units.is_some();
+        let rights = self.rights_units.is_some()
+            || self.rights_held_units.is_some()
+            || self.exercise_price.is_some();
         let positive = |d: Option<Decimal>| d.filter(|v| *v > Decimal::ZERO);
         match self.action_type {
-            ActionType::ReturnOfCapital if !split && !bonus => Some(ActionKind::ReturnOfCapital {
-                amount_per_unit: positive(self.amount_per_unit)?,
-                currency: self.currency?,
-            }),
-            ActionType::ShareSplit if !payment && !bonus => Some(ActionKind::ShareSplit {
-                split_new_units: positive(self.split_new_units)?,
-                split_old_units: positive(self.split_old_units)?,
-            }),
-            ActionType::BonusIssue if !payment && !split => Some(ActionKind::BonusIssue {
-                bonus_units: positive(self.bonus_units)?,
-                bonus_held_units: positive(self.bonus_held_units)?,
-            }),
+            ActionType::ReturnOfCapital if !split && !bonus && !rights => {
+                Some(ActionKind::ReturnOfCapital {
+                    amount_per_unit: positive(self.amount_per_unit)?,
+                    currency: self.currency?,
+                })
+            }
+            ActionType::ShareSplit
+                if !payment && !bonus && !rights && self.currency.is_none() =>
+            {
+                Some(ActionKind::ShareSplit {
+                    split_new_units: positive(self.split_new_units)?,
+                    split_old_units: positive(self.split_old_units)?,
+                })
+            }
+            ActionType::BonusIssue
+                if !payment && !split && !rights && self.currency.is_none() =>
+            {
+                Some(ActionKind::BonusIssue {
+                    bonus_units: positive(self.bonus_units)?,
+                    bonus_held_units: positive(self.bonus_held_units)?,
+                })
+            }
+            ActionType::RightsIssue if !payment && !split && !bonus => {
+                Some(ActionKind::RightsIssue {
+                    rights_units: positive(self.rights_units)?,
+                    rights_held_units: positive(self.rights_held_units)?,
+                    exercise_price: positive(self.exercise_price)?,
+                    currency: self.currency?,
+                })
+            }
             _ => None,
         }
     }
@@ -211,7 +276,8 @@ pub fn router() -> Router<SqlitePool> {
 }
 
 const COLUMNS: &str = "id, action_type, listing_id, date, amount_per_unit, currency, \
-                       split_new_units, split_old_units, bonus_units, bonus_held_units";
+                       split_new_units, split_old_units, bonus_units, bonus_held_units, \
+                       rights_units, rights_held_units, exercise_price";
 
 pub async fn db_list(pool: &SqlitePool) -> Result<Vec<CorporateAction>, sqlx::Error> {
     sqlx::query_as(&format!("SELECT {COLUMNS} FROM corporate_actions ORDER BY id"))
@@ -220,64 +286,130 @@ pub async fn db_list(pool: &SqlitePool) -> Result<Vec<CorporateAction>, sqlx::Er
 }
 
 pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<CorporateAction>, sqlx::Error> {
+    db_get_tx(pool, id).await
+}
+
+/// [`db_get`] generic over the executor, so an operation (the rights
+/// exercise) can load the action inside its own transaction.
+pub async fn db_get_tx<'e, E>(executor: E, id: i64) -> Result<Option<CorporateAction>, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
     sqlx::query_as(&format!("SELECT {COLUMNS} FROM corporate_actions WHERE id = ?"))
         .bind(id)
-        .fetch_optional(pool)
+        .fetch_optional(executor)
         .await
 }
 
-pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<(), sqlx::Error> {
-    // Spread the variant's payload over the per-type column pairs; the other
+#[derive(Debug)]
+pub enum WriteError {
+    Db(sqlx::Error),
+    /// The action is referenced by rights-exercise trades
+    /// (`trades.rights_action_id`): editing it would retroactively change the
+    /// entitlement those exercises were validated against. Delete the
+    /// exercise trades first. Mapped to `422`.
+    ReferencedByExercise,
+}
+
+impl From<sqlx::Error> for WriteError {
+    fn from(e: sqlx::Error) -> Self {
+        WriteError::Db(e)
+    }
+}
+
+pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<(), WriteError> {
+    // Spread the variant's payload over the per-type columns; the other
     // types' columns are NULL (the table CHECKs require exactly this shape).
-    let roc_kind = match &action.kind {
+    #[derive(Default)]
+    struct Cols {
+        amount_per_unit: Option<String>,
+        currency: Option<String>,
+        split_new_units: Option<String>,
+        split_old_units: Option<String>,
+        bonus_units: Option<String>,
+        bonus_held_units: Option<String>,
+        rights_units: Option<String>,
+        rights_held_units: Option<String>,
+        exercise_price: Option<String>,
+    }
+    let mut c = Cols::default();
+    match &action.kind {
         ActionKind::ReturnOfCapital { amount_per_unit, currency } => {
-            Some((amount_per_unit, currency.as_str()))
+            c.amount_per_unit = Some(amount_per_unit.to_string());
+            c.currency = Some(currency.clone());
         }
-        _ => None,
-    };
-    let split_kind = match &action.kind {
         ActionKind::ShareSplit { split_new_units, split_old_units } => {
-            Some((split_new_units, split_old_units))
+            c.split_new_units = Some(split_new_units.to_string());
+            c.split_old_units = Some(split_old_units.to_string());
         }
-        _ => None,
-    };
-    let bonus_kind = match &action.kind {
         ActionKind::BonusIssue { bonus_units, bonus_held_units } => {
-            Some((bonus_units, bonus_held_units))
+            c.bonus_units = Some(bonus_units.to_string());
+            c.bonus_held_units = Some(bonus_held_units.to_string());
         }
-        _ => None,
-    };
+        ActionKind::RightsIssue { rights_units, rights_held_units, exercise_price, currency } => {
+            c.rights_units = Some(rights_units.to_string());
+            c.rights_held_units = Some(rights_held_units.to_string());
+            c.exercise_price = Some(exercise_price.to_string());
+            c.currency = Some(currency.clone());
+        }
+    }
+
+    let mut tx = pool.begin().await?;
+
+    // An action that exercise trades were validated against is frozen: editing
+    // its terms (or re-typing it) would invalidate those past entitlement
+    // checks. Checked and written in one transaction.
+    let referenced: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM trades WHERE rights_action_id = ?)")
+            .bind(action.id)
+            .fetch_one(&mut *tx)
+            .await?;
+    if referenced {
+        return Err(WriteError::ReferencedByExercise);
+    }
+
     sqlx::query(
         "INSERT INTO corporate_actions \
          (id, action_type, listing_id, date, amount_per_unit, currency, \
-          split_new_units, split_old_units, bonus_units, bonus_held_units) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+          split_new_units, split_old_units, bonus_units, bonus_held_units, \
+          rights_units, rights_held_units, exercise_price) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT(id) DO UPDATE SET \
-             action_type      = excluded.action_type, \
-             listing_id       = excluded.listing_id, \
-             date             = excluded.date, \
-             amount_per_unit  = excluded.amount_per_unit, \
-             currency         = excluded.currency, \
-             split_new_units  = excluded.split_new_units, \
-             split_old_units  = excluded.split_old_units, \
-             bonus_units      = excluded.bonus_units, \
-             bonus_held_units = excluded.bonus_held_units",
+             action_type       = excluded.action_type, \
+             listing_id        = excluded.listing_id, \
+             date              = excluded.date, \
+             amount_per_unit   = excluded.amount_per_unit, \
+             currency          = excluded.currency, \
+             split_new_units   = excluded.split_new_units, \
+             split_old_units   = excluded.split_old_units, \
+             bonus_units       = excluded.bonus_units, \
+             bonus_held_units  = excluded.bonus_held_units, \
+             rights_units      = excluded.rights_units, \
+             rights_held_units = excluded.rights_held_units, \
+             exercise_price    = excluded.exercise_price",
     )
     .bind(action.id)
     .bind(action.kind.type_str())
     .bind(action.listing_id)
     .bind(action.date)
-    .bind(roc_kind.map(|(amount, _)| amount.to_string()))
-    .bind(roc_kind.map(|(_, currency)| currency))
-    .bind(split_kind.map(|(new, _)| new.to_string()))
-    .bind(split_kind.map(|(_, old)| old.to_string()))
-    .bind(bonus_kind.map(|(units, _)| units.to_string()))
-    .bind(bonus_kind.map(|(_, held)| held.to_string()))
-    .execute(pool)
+    .bind(c.amount_per_unit)
+    .bind(c.currency)
+    .bind(c.split_new_units)
+    .bind(c.split_old_units)
+    .bind(c.bonus_units)
+    .bind(c.bonus_held_units)
+    .bind(c.rights_units)
+    .bind(c.rights_held_units)
+    .bind(c.exercise_price)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(())
 }
 
+/// Delete an action. An action referenced by rights-exercise trades is
+/// protected by the `trades.rights_action_id` foreign key — the violation
+/// surfaces as a database error the handler maps to `422`.
 pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<bool, sqlx::Error> {
     let result = sqlx::query("DELETE FROM corporate_actions WHERE id = ?")
         .bind(id)
@@ -528,8 +660,12 @@ async fn upsert(
     db_upsert(&pool, &action)
         .await
         .map(|_| StatusCode::NO_CONTENT)
-        // Unknown listing/currency FK or enum CHECK violation → 422.
-        .map_err(|e| write_error_status(&e))
+        .map_err(|e| match e {
+            // Unknown listing/currency FK or enum CHECK violation → 422.
+            WriteError::Db(err) => write_error_status(&err),
+            // Frozen while rights-exercise trades reference it → 422.
+            WriteError::ReferencedByExercise => StatusCode::UNPROCESSABLE_ENTITY,
+        })
 }
 
 async fn delete(
@@ -539,7 +675,9 @@ async fn delete(
     db_delete(&pool, id)
         .await
         .map(|found| if found { StatusCode::NO_CONTENT } else { StatusCode::NOT_FOUND })
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        // Deleting an action still referenced by rights-exercise trades
+        // violates the trades.rights_action_id FK → 422 (delete those first).
+        .map_err(|e| write_error_status(&e))
 }
 
 #[cfg(test)]
@@ -609,6 +747,27 @@ mod tests {
         }
     }
 
+    fn rights(
+        id: i64,
+        listing_id: i64,
+        date: NaiveDate,
+        units: &str,
+        held: &str,
+        price: &str,
+    ) -> CorporateAction {
+        CorporateAction {
+            id,
+            listing_id,
+            date,
+            kind: ActionKind::RightsIssue {
+                rights_units: units.parse().unwrap(),
+                rights_held_units: held.parse().unwrap(),
+                exercise_price: price.parse().unwrap(),
+                currency: "AUD".to_string(),
+            },
+        }
+    }
+
     fn split_event(date: NaiveDate, new: &str, old: &str) -> SplitEvent {
         SplitEvent { date, new_units: new.parse().unwrap(), old_units: old.parse().unwrap() }
     }
@@ -672,6 +831,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn db_insert_and_retrieve_rights_issue_preserves_terms() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "RTS").await;
+        // An uneven ratio and a sub-cent price must round-trip exactly.
+        db_upsert(&pool, &rights(1, 1, d(2024, 11, 30), "3", "7", "1.805")).await.unwrap();
+
+        let got = db_get(&pool, 1).await.unwrap().unwrap();
+        assert_eq!(
+            got.kind,
+            ActionKind::RightsIssue {
+                rights_units: Decimal::from(3),
+                rights_held_units: Decimal::from(7),
+                exercise_price: "1.805".parse().unwrap(),
+                currency: "AUD".to_string(),
+            }
+        );
+    }
+
+    /// A RightsIssue never appears in the split-event or return-of-capital
+    /// streams — recording one changes no existing parcel.
+    #[tokio::test]
+    async fn db_rights_issue_is_not_a_split_or_payment_event() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "RTS").await;
+        db_upsert(&pool, &rights(1, 1, d(2024, 11, 30), "1", "4", "1.80")).await.unwrap();
+
+        assert!(db_share_split_events(&pool).await.unwrap().is_empty());
+        assert!(db_splits_for_listing(&pool, 1).await.unwrap().is_empty());
+        assert!(db_return_of_capital_events(&pool).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn db_upsert_updates_existing() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "RAP").await;
@@ -700,17 +891,25 @@ mod tests {
         insert_listing(&pool, 1, "RAP").await;
         // (action_type, the stray columns the CHECK must reject for it)
         for (action_type, stray_cols) in [
-            // A ShareSplit carrying a payment, or a bonus ratio…
+            // A ShareSplit carrying a payment, a bonus ratio, or rights terms…
             ("ShareSplit", "amount_per_unit = '0.50', currency = 'AUD'"),
             ("ShareSplit", "bonus_units = '1', bonus_held_units = '10'"),
+            ("ShareSplit", "rights_units = '1', rights_held_units = '4', exercise_price = '1.80'"),
             // …a ReturnOfCapital carrying a split ratio…
             ("ReturnOfCapital", "split_new_units = '2', split_old_units = '1'"),
-            // …and a BonusIssue carrying a split ratio.
+            // …a BonusIssue carrying a split ratio…
             ("BonusIssue", "split_new_units = '2', split_old_units = '1'"),
+            // …and a RightsIssue carrying a payment or a split ratio.
+            ("RightsIssue", "amount_per_unit = '0.50'"),
+            ("RightsIssue", "split_new_units = '2', split_old_units = '1'"),
         ] {
             let (base_cols, base_vals) = match action_type {
                 "ShareSplit" => ("split_new_units, split_old_units", "'2', '1'"),
                 "ReturnOfCapital" => ("amount_per_unit, currency", "'0.50', 'AUD'"),
+                "RightsIssue" => (
+                    "rights_units, rights_held_units, exercise_price, currency",
+                    "'1', '4', '1.80', 'AUD'",
+                ),
                 _ => ("bonus_units, bonus_held_units", "'1', '10'"),
             };
             // Insert a valid row, then try to smuggle the stray columns in.
@@ -1051,6 +1250,91 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn api_rights_issue_round_trip() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "RTS").await;
+        api_put_expecting(
+            &pool,
+            serde_json::json!({
+                "action_type": "RightsIssue",
+                "listing_id": 1,
+                "date": "2024-11-30",
+                "rights_units": "1",
+                "rights_held_units": "4",
+                "exercise_price": "1.80",
+                "currency": "AUD",
+            }),
+            StatusCode::NO_CONTENT,
+        )
+        .await;
+        let got = db_get(&pool, 1).await.unwrap().unwrap();
+        assert_eq!(
+            got.kind,
+            ActionKind::RightsIssue {
+                rights_units: Decimal::ONE,
+                rights_held_units: Decimal::from(4),
+                exercise_price: "1.80".parse().unwrap(),
+                currency: "AUD".to_string(),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn api_invalid_rights_issue_payloads_return_422() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "RTS").await;
+        // Missing terms, a missing currency, non-positive ratio/price, a
+        // stray payment amount, a stray split ratio — and the ratio-only
+        // types carrying rights fields or a currency.
+        for body in [
+            serde_json::json!({
+                "action_type": "RightsIssue", "listing_id": 1, "date": "2024-11-30",
+            }),
+            serde_json::json!({
+                "action_type": "RightsIssue", "listing_id": 1, "date": "2024-11-30",
+                "rights_units": "1", "rights_held_units": "4", "exercise_price": "1.80",
+            }),
+            serde_json::json!({
+                "action_type": "RightsIssue", "listing_id": 1, "date": "2024-11-30",
+                "rights_units": "0", "rights_held_units": "4", "exercise_price": "1.80",
+                "currency": "AUD",
+            }),
+            serde_json::json!({
+                "action_type": "RightsIssue", "listing_id": 1, "date": "2024-11-30",
+                "rights_units": "1", "rights_held_units": "-4", "exercise_price": "1.80",
+                "currency": "AUD",
+            }),
+            serde_json::json!({
+                "action_type": "RightsIssue", "listing_id": 1, "date": "2024-11-30",
+                "rights_units": "1", "rights_held_units": "4", "exercise_price": "0",
+                "currency": "AUD",
+            }),
+            serde_json::json!({
+                "action_type": "RightsIssue", "listing_id": 1, "date": "2024-11-30",
+                "rights_units": "1", "rights_held_units": "4", "exercise_price": "1.80",
+                "currency": "AUD", "amount_per_unit": "0.50",
+            }),
+            serde_json::json!({
+                "action_type": "RightsIssue", "listing_id": 1, "date": "2024-11-30",
+                "rights_units": "1", "rights_held_units": "4", "exercise_price": "1.80",
+                "currency": "AUD", "split_new_units": "2", "split_old_units": "1",
+            }),
+            serde_json::json!({
+                "action_type": "ShareSplit", "listing_id": 1, "date": "2024-11-30",
+                "split_new_units": "2", "split_old_units": "1",
+                "rights_units": "1", "rights_held_units": "4", "exercise_price": "1.80",
+                "currency": "AUD",
+            }),
+            serde_json::json!({
+                "action_type": "BonusIssue", "listing_id": 1, "date": "2024-11-30",
+                "bonus_units": "1", "bonus_held_units": "10", "currency": "AUD",
+            }),
+        ] {
+            api_put_expecting(&pool, body, StatusCode::UNPROCESSABLE_ENTITY).await;
+        }
+    }
+
+    #[tokio::test]
     async fn api_invalid_bonus_issue_payloads_return_422() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "BON").await;
@@ -1184,7 +1468,7 @@ mod tests {
         api_put_expecting(
             &pool,
             serde_json::json!({
-                "action_type": "RightsIssue",
+                "action_type": "Merger",
                 "listing_id": 1,
                 "date": "2024-11-30",
                 "amount_per_unit": "0.50",
