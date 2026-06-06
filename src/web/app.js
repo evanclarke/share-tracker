@@ -269,6 +269,13 @@
       columns: ['listing_id', 'residual_handling'],
     },
     {
+      slug: 'cgt_settings', title: 'CGT Settings', group: 'Activity', api: '/cgt_settings',
+      desc: 'Opening carried-forward capital loss (pre-system loss years), applied as the starting balance in the Net Capital Gain report.',
+      keyFields: [int('id', 'ID', { required: true, default: '1', hint: 'Singleton — always 1.' })],
+      fields: [dec('opening_capital_loss', 'Opening capital loss carried forward', { required: true })],
+      columns: ['id', 'opening_capital_loss'],
+    },
+    {
       slug: 'jobs', title: 'Jobs', group: 'Maintenance', api: '/jobs', custom: 'jobs',
       desc: 'Run scheduled maintenance jobs (backup, reference-data imports) on demand.',
     },

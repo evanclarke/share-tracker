@@ -11,16 +11,17 @@
 //!     - non-discountable gains (realised parcels held ≤ 12 months, plus AMMA
 //!       indexation-method and other-method gains, neither of which gets the 50%
 //!       discount).
-//!  2. Total the year's capital losses (realised losses + AMMA capital losses
-//!     applied).
+//!  2. Total the year's capital losses: realised losses + AMMA capital losses
+//!     applied, plus the net capital loss brought forward from earlier years
+//!     (losses carry forward indefinitely, per `docs/cgt-using-capital-losses.md`).
+//!     The chain starts from the entered opening carried-forward loss in
+//!     `cgt_settings` (losses from before the first year in the system).
 //!  3. Apply losses against gains in the taxpayer-favourable order — non-discountable
 //!     gains first, then discount-eligible gains — so the 50% discount falls on the
 //!     largest possible remaining gain.
 //!  4. Net capital gain = remaining non-discountable gain + 50% of the remaining
-//!     discount-eligible gain. Any unused loss is carried forward.
-//!
-//! Prior-year carried-forward capital losses are not modelled (there is no store for
-//! them), so `capital_loss_carried_forward` reflects only the current year's excess.
+//!     discount-eligible gain. Any unused loss is carried forward into the next
+//!     year in the series.
 
 use crate::infra::decimal::parse_dec;
 use crate::infra::fx::to_aud;
@@ -41,9 +42,13 @@ pub struct NetCapitalGainYear {
     /// Gross non-discountable capital gains (realised parcels held ≤ 12 months +
     /// AMMA indexation-method + AMMA other-method gains).
     pub other_gains: Decimal,
-    /// Total capital losses available this year (realised losses + AMMA capital
-    /// losses applied), as a positive amount.
+    /// Capital losses arising this year (realised losses + AMMA capital losses
+    /// applied), as a positive amount. Excludes the brought-forward balance.
     pub capital_losses: Decimal,
+    /// Net capital loss brought forward from earlier years (unused losses chained
+    /// from prior years in the series, seeded by the `cgt_settings` opening
+    /// carried-forward loss), as a positive amount. Also offsets this year's gains.
+    pub capital_loss_brought_forward: Decimal,
     /// Discount-eligible gain remaining after capital losses are applied (gross,
     /// before the 50% discount).
     pub net_discount_eligible_gain: Decimal,
@@ -54,7 +59,9 @@ pub struct NetCapitalGainYear {
     pub cgt_discount: Decimal,
     /// Assessable net capital gain = net_other_gain + net_discount_eligible_gain / 2.
     pub net_capital_gain: Decimal,
-    /// Capital losses left unused after offsetting all gains, carried forward.
+    /// Capital losses left unused after offsetting all gains (from both this
+    /// year's losses and the brought-forward balance), carried forward into the
+    /// next year in the series.
     pub capital_loss_carried_forward: Decimal,
     /// Informational: gross CGT event E10 gains included in this year (the excess of
     /// AMIT cost base reductions over a parcel's cost base). Already counted within
@@ -216,36 +223,49 @@ pub async fn db_net_capital_gain(pool: &SqlitePool) -> Result<Vec<NetCapitalGain
         b.e10 += amount;
     }
 
+    // Walk the years in order, chaining unused net capital losses forward: a
+    // year's leftover loss becomes the next year's brought-forward balance (losses
+    // carry forward indefinitely). The chain starts from the entered opening
+    // carried-forward loss (pre-system loss years) in `cgt_settings`.
+    let mut years: Vec<(i32, GrossBuckets)> = buckets.into_iter().collect();
+    years.sort_by_key(|(tax_year, _)| *tax_year);
+
     let two = Decimal::from(2);
-    let mut result: Vec<NetCapitalGainYear> = buckets
+    let mut brought_forward =
+        crate::entities::cgt_settings::db_opening_capital_loss(pool).await?;
+    let result = years
         .into_iter()
         .map(|(tax_year, b)| {
-            // Apply losses to non-discountable gains first, then to discount-eligible
+            // Apply losses (this year's + brought forward — both offset gains before
+            // the discount) to non-discountable gains first, then to discount-eligible
             // gains (taxpayer-favourable: the discount falls on the largest remainder).
-            let loss_to_other = b.other.min(b.losses);
+            let available_losses = b.losses + brought_forward;
+            let loss_to_other = b.other.min(available_losses);
             let net_other = b.other - loss_to_other;
-            let remaining_loss = b.losses - loss_to_other;
+            let remaining_loss = available_losses - loss_to_other;
 
             let loss_to_discount = b.discount_eligible.min(remaining_loss);
             let net_discount = b.discount_eligible - loss_to_discount;
             let carried_forward = remaining_loss - loss_to_discount;
 
             let cgt_discount = net_discount / two;
-            NetCapitalGainYear {
+            let year = NetCapitalGainYear {
                 tax_year,
                 discount_eligible_gains: b.discount_eligible,
                 other_gains: b.other,
                 capital_losses: b.losses,
+                capital_loss_brought_forward: brought_forward,
                 net_discount_eligible_gain: net_discount,
                 net_other_gain: net_other,
                 cgt_discount,
                 net_capital_gain: net_other + cgt_discount,
                 capital_loss_carried_forward: carried_forward,
                 cgt_event_e10_gain: b.e10,
-            }
+            };
+            brought_forward = carried_forward;
+            year
         })
         .collect();
-    result.sort_by_key(|s| s.tax_year);
     Ok(result)
 }
 
@@ -262,7 +282,7 @@ async fn net_capital_gain_handler(
 mod tests {
     use super::*;
     use crate::{
-        entities::{amit_adjustment, amma, listing, parcel_allocation, rba_fx_rate, trade},
+        entities::{amit_adjustment, amma, cgt_settings, listing, parcel_allocation, rba_fx_rate, trade},
         infra::db,
     };
     use axum::{body::Body, http::Request};
@@ -493,6 +513,138 @@ mod tests {
         assert_eq!(y.net_discount_eligible_gain, Decimal::ZERO);
         assert_eq!(y.net_capital_gain, Decimal::ZERO);
         assert_eq!(y.capital_loss_carried_forward, Decimal::from(200));
+    }
+
+    #[tokio::test]
+    async fn db_earlier_year_loss_reduces_later_year_gain() {
+        let pool = test_pool().await;
+        // FY2024: capital loss 300, no gains → carried forward 300.
+        // FY2026: non-discountable gain 500 → brought-forward 300 applied → NCG 200.
+        insert_listing(&pool, 1, "VAS").await;
+        // Loss of 300: buy 100 @ $10 (Jul 2023), sell 100 @ $7 (Jun 2024).
+        insert_trade(&pool, 1, trade::TradeType::Buy, 1,
+            NaiveDate::from_ymd_opt(2023, 7, 1).unwrap(), Decimal::from(100), Decimal::from(10)).await;
+        insert_trade(&pool, 2, trade::TradeType::Sell, 1,
+            NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(), Decimal::from(100), Decimal::from(7)).await;
+        allocate(&pool, 1, 2, 1, Decimal::from(100)).await;
+        // Gain of 500 two FYs later (≤12mo → non-discountable): buy Mar 2026, sell Jun 2026.
+        insert_trade(&pool, 3, trade::TradeType::Buy, 1,
+            NaiveDate::from_ymd_opt(2026, 3, 1).unwrap(), Decimal::from(100), Decimal::from(10)).await;
+        insert_trade(&pool, 4, trade::TradeType::Sell, 1,
+            NaiveDate::from_ymd_opt(2026, 6, 1).unwrap(), Decimal::from(100), Decimal::from(15)).await;
+        allocate(&pool, 2, 4, 3, Decimal::from(100)).await;
+
+        let r = db_net_capital_gain(&pool).await.unwrap();
+        assert_eq!(r.len(), 2);
+        // FY2024: the loss year.
+        assert_eq!(r[0].tax_year, 2024);
+        assert_eq!(r[0].capital_losses, Decimal::from(300));
+        assert_eq!(r[0].capital_loss_brought_forward, Decimal::ZERO);
+        assert_eq!(r[0].net_capital_gain, Decimal::ZERO);
+        assert_eq!(r[0].capital_loss_carried_forward, Decimal::from(300));
+        // FY2026: the chained loss offsets the gain before the discount.
+        assert_eq!(r[1].tax_year, 2026);
+        assert_eq!(r[1].capital_loss_brought_forward, Decimal::from(300));
+        assert_eq!(r[1].capital_losses, Decimal::ZERO);
+        assert_eq!(r[1].other_gains, Decimal::from(500));
+        assert_eq!(r[1].net_other_gain, Decimal::from(200));
+        assert_eq!(r[1].net_capital_gain, Decimal::from(200));
+        assert_eq!(r[1].capital_loss_carried_forward, Decimal::ZERO);
+    }
+
+    #[tokio::test]
+    async fn db_loss_absorbing_later_gains_leaves_zero_and_carries_remainder() {
+        let pool = test_pool().await;
+        // FY2024: capital loss 1000. FY2025: discount-eligible gain 500.
+        // Brought-forward 1000 absorbs the full gain → NCG 0, 500 carried on.
+        insert_listing(&pool, 1, "VAS").await;
+        insert_trade(&pool, 1, trade::TradeType::Buy, 1,
+            NaiveDate::from_ymd_opt(2023, 7, 1).unwrap(), Decimal::from(100), Decimal::from(20)).await;
+        insert_trade(&pool, 2, trade::TradeType::Sell, 1,
+            NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(), Decimal::from(100), Decimal::from(10)).await;
+        allocate(&pool, 1, 2, 1, Decimal::from(100)).await;
+        // Discount-eligible gain 500: buy Jan 2024, sell Jun 2025 (>12mo).
+        insert_trade(&pool, 3, trade::TradeType::Buy, 1,
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(), Decimal::from(100), Decimal::from(10)).await;
+        insert_trade(&pool, 4, trade::TradeType::Sell, 1,
+            NaiveDate::from_ymd_opt(2025, 6, 1).unwrap(), Decimal::from(100), Decimal::from(15)).await;
+        allocate(&pool, 2, 4, 3, Decimal::from(100)).await;
+
+        let r = db_net_capital_gain(&pool).await.unwrap();
+        assert_eq!(r.len(), 2);
+        assert_eq!(r[0].capital_loss_carried_forward, Decimal::from(1000));
+        assert_eq!(r[1].tax_year, 2025);
+        assert_eq!(r[1].capital_loss_brought_forward, Decimal::from(1000));
+        assert_eq!(r[1].discount_eligible_gains, Decimal::from(500));
+        assert_eq!(r[1].net_discount_eligible_gain, Decimal::ZERO);
+        assert_eq!(r[1].cgt_discount, Decimal::ZERO);
+        assert_eq!(r[1].net_capital_gain, Decimal::ZERO);
+        assert_eq!(r[1].capital_loss_carried_forward, Decimal::from(500));
+    }
+
+    #[tokio::test]
+    async fn db_opening_capital_loss_is_applied_as_starting_balance() {
+        let pool = test_pool().await;
+        // Entered opening carried-forward loss of 400 (pre-system years), then a
+        // FY2025 discount-eligible gain of 500 → 100 remains, halved → NCG 50.
+        cgt_settings::db_upsert(
+            &pool,
+            &cgt_settings::CgtSettings { id: 1, opening_capital_loss: Decimal::from(400) },
+        )
+        .await
+        .unwrap();
+        insert_listing(&pool, 1, "VAS").await;
+        insert_trade(&pool, 1, trade::TradeType::Buy, 1,
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(), Decimal::from(100), Decimal::from(10)).await;
+        insert_trade(&pool, 2, trade::TradeType::Sell, 1,
+            NaiveDate::from_ymd_opt(2025, 6, 1).unwrap(), Decimal::from(100), Decimal::from(15)).await;
+        allocate(&pool, 1, 2, 1, Decimal::from(100)).await;
+
+        let r = db_net_capital_gain(&pool).await.unwrap();
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].tax_year, 2025);
+        assert_eq!(r[0].capital_loss_brought_forward, Decimal::from(400));
+        assert_eq!(r[0].discount_eligible_gains, Decimal::from(500));
+        assert_eq!(r[0].net_discount_eligible_gain, Decimal::from(100));
+        assert_eq!(r[0].cgt_discount, Decimal::from(50));
+        assert_eq!(r[0].net_capital_gain, Decimal::from(50));
+        assert_eq!(r[0].capital_loss_carried_forward, Decimal::ZERO);
+    }
+
+    #[tokio::test]
+    async fn db_opening_loss_chains_through_a_loss_year_in_order() {
+        let pool = test_pool().await;
+        // Opening 100 + FY2024 loss 300 = 400 carried into FY2025's gain of 500
+        // (≤12mo, non-discountable) → NCG 100.
+        cgt_settings::db_upsert(
+            &pool,
+            &cgt_settings::CgtSettings { id: 1, opening_capital_loss: Decimal::from(100) },
+        )
+        .await
+        .unwrap();
+        insert_listing(&pool, 1, "VAS").await;
+        // FY2024 loss of 300.
+        insert_trade(&pool, 1, trade::TradeType::Buy, 1,
+            NaiveDate::from_ymd_opt(2023, 7, 1).unwrap(), Decimal::from(100), Decimal::from(10)).await;
+        insert_trade(&pool, 2, trade::TradeType::Sell, 1,
+            NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(), Decimal::from(100), Decimal::from(7)).await;
+        allocate(&pool, 1, 2, 1, Decimal::from(100)).await;
+        // FY2025 non-discountable gain of 500.
+        insert_trade(&pool, 3, trade::TradeType::Buy, 1,
+            NaiveDate::from_ymd_opt(2025, 3, 1).unwrap(), Decimal::from(100), Decimal::from(10)).await;
+        insert_trade(&pool, 4, trade::TradeType::Sell, 1,
+            NaiveDate::from_ymd_opt(2025, 6, 1).unwrap(), Decimal::from(100), Decimal::from(15)).await;
+        allocate(&pool, 2, 4, 3, Decimal::from(100)).await;
+
+        let r = db_net_capital_gain(&pool).await.unwrap();
+        assert_eq!(r.len(), 2);
+        assert_eq!(r[0].tax_year, 2024);
+        assert_eq!(r[0].capital_loss_brought_forward, Decimal::from(100));
+        assert_eq!(r[0].capital_loss_carried_forward, Decimal::from(400));
+        assert_eq!(r[1].tax_year, 2025);
+        assert_eq!(r[1].capital_loss_brought_forward, Decimal::from(400));
+        assert_eq!(r[1].net_capital_gain, Decimal::from(100));
+        assert_eq!(r[1].capital_loss_carried_forward, Decimal::ZERO);
     }
 
     #[tokio::test]

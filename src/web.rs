@@ -200,6 +200,15 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cgt_settings_ui_present() {
+        let js = app_js_body().await;
+        // The CGT Settings view edits the opening carried-forward capital loss
+        // consumed by the net-capital-gain report.
+        assert!(js.contains("/cgt_settings"));
+        assert!(js.contains("opening_capital_loss"));
+    }
+
+    #[tokio::test]
     async fn tables_are_filterable_and_sortable() {
         let js = app_js_body().await;
         // Every entity list and report table renders through the shared
