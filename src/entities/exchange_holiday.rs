@@ -198,6 +198,7 @@ mod tests {
                 security_type: listing::SecurityType::ETF,
                 currency: if mic == "XNYS" { "USD" } else { "AUD" }.to_string(),
                 amit: false,
+                preference: false,
             },
         )
         .await

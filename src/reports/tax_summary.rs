@@ -1,5 +1,6 @@
 use crate::infra::decimal::parse_dec;
 use crate::infra::fx::to_aud;
+use crate::reports::franking;
 use axum::{Json, Router, extract::State, http::StatusCode, routing::get};
 use chrono::{Datelike, NaiveDate};
 use rust_decimal::Decimal;
@@ -37,8 +38,15 @@ pub struct TaxYearSummary {
     pub amma_cgt_other_gains: Decimal,
     /// AMMA capital losses applied.
     pub amma_capital_losses_applied: Decimal,
-    /// Total franking credits (income + AMMA).
+    /// Claimable franking credits (income + AMMA). Credits attached to a
+    /// dividend whose shares fail the 45-day at-risk holding-period rule (90
+    /// days for preference shares) are excluded, unless the small-shareholder
+    /// exemption applies — total attached credits in the year below A$5,000
+    /// (see `reports::franking`).
     pub franking_credits: Decimal,
+    /// Franking credits attached but denied by the holding-period rule (the
+    /// amount excluded from `franking_credits`).
+    pub franking_credits_denied: Decimal,
     /// Total foreign tax offsets (income foreign_tax_paid + AMMA foreign_tax_credits).
     pub foreign_tax_offsets: Decimal,
     /// Total TFN withholding tax (income + AMMA).
@@ -66,6 +74,7 @@ fn zero_summary(tax_year: i32) -> TaxYearSummary {
         amma_cgt_other_gains: Decimal::ZERO,
         amma_capital_losses_applied: Decimal::ZERO,
         franking_credits: Decimal::ZERO,
+        franking_credits_denied: Decimal::ZERO,
         foreign_tax_offsets: Decimal::ZERO,
         tfn_withholding_tax: Decimal::ZERO,
     }
@@ -88,9 +97,9 @@ async fn aud_field(
 
 pub async fn db_tax_summary(pool: &SqlitePool) -> Result<Vec<TaxYearSummary>, sqlx::Error> {
     let income_rows = sqlx::query(
-        "SELECT date_paid, franked_amount, unfranked_amount, foreign_source_income, \
-         foreign_tax_paid, tfn_withholding_tax, franking_credits, lic_capital_gain_deduction, \
-         currency \
+        "SELECT listing_id, date_paid, ex_date, franked_amount, unfranked_amount, \
+         foreign_source_income, foreign_tax_paid, tfn_withholding_tax, franking_credits, \
+         lic_capital_gain_deduction, currency \
          FROM income",
     )
     .fetch_all(pool)
@@ -107,6 +116,20 @@ pub async fn db_tax_summary(pool: &SqlitePool) -> Result<Vec<TaxYearSummary>, sq
     .await?;
 
     let mut map: HashMap<i32, TaxYearSummary> = HashMap::new();
+
+    // Per-dividend candidates for the franking holding-period rule, and the
+    // year's total attached credits (income + AMMA, AUD) for the
+    // small-shareholder exemption test.
+    struct FrankedDividend {
+        tax_year: i32,
+        listing_id: i64,
+        /// Ex-dividend date; falls back to the payment date when not recorded
+        /// (a dividend is never paid before its shares go ex-dividend).
+        ex_date: NaiveDate,
+        credits_aud: Decimal,
+    }
+    let mut franked_dividends: Vec<FrankedDividend> = Vec::new();
+    let mut attached_credits_by_year: HashMap<i32, Decimal> = HashMap::new();
 
     for row in &income_rows {
         let date_paid: NaiveDate = row.try_get("date_paid")?;
@@ -128,6 +151,17 @@ pub async fn db_tax_summary(pool: &SqlitePool) -> Result<Vec<TaxYearSummary>, sq
         let fc = aud_field(pool, row, "franking_credits", &currency, date_paid).await?;
         let lic =
             aud_field(pool, row, "lic_capital_gain_deduction", &currency, date_paid).await?;
+
+        if fc > Decimal::ZERO {
+            let ex_date: Option<NaiveDate> = row.try_get("ex_date")?;
+            franked_dividends.push(FrankedDividend {
+                tax_year,
+                listing_id: row.try_get("listing_id")?,
+                ex_date: ex_date.unwrap_or(date_paid),
+                credits_aud: fc,
+            });
+            *attached_credits_by_year.entry(tax_year).or_default() += fc;
+        }
 
         let s = map.entry(tax_year).or_insert_with(|| zero_summary(tax_year));
         s.dividends_assessable += franked + unfranked;
@@ -175,6 +209,29 @@ pub async fn db_tax_summary(pool: &SqlitePool) -> Result<Vec<TaxYearSummary>, sq
         s.franking_credits += fc;
         s.foreign_tax_offsets += foreign_tax;
         s.tfn_withholding_tax += tfn_wht;
+        // AMMA credits count toward the small-shareholder threshold but are
+        // never themselves denied: the holding-period rule needs a
+        // per-distribution ex-date, which an annual AMMA statement doesn't
+        // carry.
+        *attached_credits_by_year.entry(tax_year).or_default() += fc;
+    }
+
+    // Franking-credit entitlement (docs/you-and-your-shares-dividends.md): in a
+    // year with A$5,000 or more of attached credits the small-shareholder
+    // exemption doesn't apply, so each dividend's shares must pass the at-risk
+    // holding-period test; the credits on units that fail it are denied.
+    for div in &franked_dividends {
+        let attached = attached_credits_by_year[&div.tax_year];
+        if attached < franking::small_shareholder_threshold_aud() {
+            continue;
+        }
+        let test = franking::holding_period_test(pool, div.listing_id, div.ex_date).await?;
+        let denied = test.denied(div.credits_aud);
+        if denied > Decimal::ZERO {
+            let s = map.get_mut(&div.tax_year).expect("year inserted with the income row");
+            s.franking_credits -= denied;
+            s.franking_credits_denied += denied;
+        }
     }
 
     let mut result: Vec<TaxYearSummary> = map.into_values().collect();
@@ -194,7 +251,7 @@ async fn tax_summary_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{infra::db, entities::{amma, income, listing, rba_fx_rate}};
+    use crate::{infra::db, entities::{amma, income, listing, rba_fx_rate, trade}};
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
     use tower::ServiceExt;
@@ -215,6 +272,40 @@ mod tests {
                 security_type: listing::SecurityType::ETF,
                 currency: "AUD".to_string(),
                 amit: false,
+                preference: false,
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    async fn insert_trade(
+        pool: &SqlitePool,
+        id: i64,
+        listing_id: i64,
+        trade_type: trade::TradeType,
+        date: NaiveDate,
+        qty: i64,
+    ) {
+        trade::db_upsert(
+            pool,
+            &trade::Trade {
+                id,
+                trade_type,
+                date,
+                settlement_date: date + chrono::Duration::days(2),
+                listing_id,
+                average_price: Decimal::ONE,
+                quantity: Decimal::from(qty),
+                currency: "AUD".to_string(),
+                brokerage: Decimal::ZERO,
+                gst_on_brokerage: Decimal::ZERO,
+                brokerage_currency: "AUD".to_string(),
+                fx_rate: Decimal::ONE,
+                contract_note_ref: None,
+                residual_brought_forward: Decimal::ZERO,
+                residual_carried_forward: Decimal::ZERO,
+                residual_paid_out: Decimal::ZERO,
             },
         )
         .await
@@ -509,6 +600,128 @@ mod tests {
         income::db_upsert(&pool, &inc).await.unwrap();
 
         assert!(db_tax_summary(&pool).await.is_err());
+    }
+
+    // Franking-credit entitlement (45-day holding-period rule + small-shareholder
+    // exemption — docs/you-and-your-shares-dividends.md, reports::franking).
+
+    /// Matthew-shaped facts: credits over $5,000 and the parcel held at risk
+    /// under 45 days, so the credits are denied but the dividend stays assessable.
+    #[tokio::test]
+    async fn db_franking_credits_denied_when_held_under_45_days() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        insert_trade(&pool, 1, 1, trade::TradeType::Buy, NaiveDate::from_ymd_opt(2025, 3, 1).unwrap(), 1000).await;
+        insert_trade(&pool, 2, 1, trade::TradeType::Sell, NaiveDate::from_ymd_opt(2025, 4, 10).unwrap(), 1000).await;
+        let mut inc = make_income(1, 1, NaiveDate::from_ymd_opt(2025, 4, 8).unwrap());
+        inc.ex_date = Some(NaiveDate::from_ymd_opt(2025, 3, 14).unwrap());
+        inc.franked_amount = Decimal::from(13066);
+        inc.franking_credits = Decimal::from(5600);
+        income::db_upsert(&pool, &inc).await.unwrap();
+
+        let result = db_tax_summary(&pool).await.unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].tax_year, 2025);
+        assert_eq!(result[0].dividends_assessable, Decimal::from(13066));
+        assert_eq!(result[0].franking_credits, Decimal::ZERO);
+        assert_eq!(result[0].franking_credits_denied, Decimal::from(5600));
+    }
+
+    /// Same short holding, but total attached credits under $5,000: the
+    /// small-shareholder exemption keeps them claimable.
+    #[tokio::test]
+    async fn db_small_shareholder_exemption_keeps_credits_below_5000() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        insert_trade(&pool, 1, 1, trade::TradeType::Buy, NaiveDate::from_ymd_opt(2025, 3, 1).unwrap(), 1000).await;
+        insert_trade(&pool, 2, 1, trade::TradeType::Sell, NaiveDate::from_ymd_opt(2025, 4, 10).unwrap(), 1000).await;
+        let mut inc = make_income(1, 1, NaiveDate::from_ymd_opt(2025, 4, 8).unwrap());
+        inc.ex_date = Some(NaiveDate::from_ymd_opt(2025, 3, 14).unwrap());
+        inc.franked_amount = Decimal::from(7000);
+        inc.franking_credits = Decimal::from(3000);
+        income::db_upsert(&pool, &inc).await.unwrap();
+
+        let result = db_tax_summary(&pool).await.unwrap();
+        assert_eq!(result[0].franking_credits, Decimal::from(3000));
+        assert_eq!(result[0].franking_credits_denied, Decimal::ZERO);
+    }
+
+    /// The exemption needs the year's credits to be *below* $5,000 — exactly
+    /// $5,000 is not exempt.
+    #[tokio::test]
+    async fn db_exactly_5000_attached_credits_is_not_exempt() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        insert_trade(&pool, 1, 1, trade::TradeType::Buy, NaiveDate::from_ymd_opt(2025, 3, 1).unwrap(), 1000).await;
+        insert_trade(&pool, 2, 1, trade::TradeType::Sell, NaiveDate::from_ymd_opt(2025, 4, 10).unwrap(), 1000).await;
+        let mut inc = make_income(1, 1, NaiveDate::from_ymd_opt(2025, 4, 8).unwrap());
+        inc.ex_date = Some(NaiveDate::from_ymd_opt(2025, 3, 14).unwrap());
+        inc.franking_credits = Decimal::from(5000);
+        income::db_upsert(&pool, &inc).await.unwrap();
+
+        let result = db_tax_summary(&pool).await.unwrap();
+        assert_eq!(result[0].franking_credits, Decimal::ZERO);
+        assert_eq!(result[0].franking_credits_denied, Decimal::from(5000));
+    }
+
+    /// AMMA-attributed credits push the year over the $5,000 threshold (so a
+    /// short-held dividend's credits are denied) but are never denied themselves.
+    #[tokio::test]
+    async fn db_amma_credits_count_toward_small_shareholder_threshold() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        insert_listing(&pool, 2).await;
+        insert_trade(&pool, 1, 1, trade::TradeType::Buy, NaiveDate::from_ymd_opt(2025, 3, 1).unwrap(), 1000).await;
+        insert_trade(&pool, 2, 1, trade::TradeType::Sell, NaiveDate::from_ymd_opt(2025, 4, 10).unwrap(), 1000).await;
+        // $3,000 income credits alone would be exempt…
+        let mut inc = make_income(1, 1, NaiveDate::from_ymd_opt(2025, 4, 8).unwrap());
+        inc.ex_date = Some(NaiveDate::from_ymd_opt(2025, 3, 14).unwrap());
+        inc.franking_credits = Decimal::from(3000);
+        income::db_upsert(&pool, &inc).await.unwrap();
+        // …but $2,500 AMMA credits take the year's total to $5,500.
+        let mut a = make_amma(1, 2, NaiveDate::from_ymd_opt(2025, 6, 30).unwrap());
+        a.franking_credits = Decimal::from(2500);
+        amma::db_upsert(&pool, &a).await.unwrap();
+
+        let result = db_tax_summary(&pool).await.unwrap();
+        assert_eq!(result.len(), 1);
+        // The income credits are denied; the AMMA credits remain claimable.
+        assert_eq!(result[0].franking_credits, Decimal::from(2500));
+        assert_eq!(result[0].franking_credits_denied, Decimal::from(3000));
+    }
+
+    /// Without a recorded ex-date the test anchors on the payment date.
+    #[tokio::test]
+    async fn db_missing_ex_date_falls_back_to_date_paid() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        insert_trade(&pool, 1, 1, trade::TradeType::Buy, NaiveDate::from_ymd_opt(2025, 4, 1).unwrap(), 1000).await;
+        insert_trade(&pool, 2, 1, trade::TradeType::Sell, NaiveDate::from_ymd_opt(2025, 4, 20).unwrap(), 1000).await;
+        let mut inc = make_income(1, 1, NaiveDate::from_ymd_opt(2025, 4, 8).unwrap());
+        inc.ex_date = None;
+        inc.franking_credits = Decimal::from(6000);
+        income::db_upsert(&pool, &inc).await.unwrap();
+
+        let result = db_tax_summary(&pool).await.unwrap();
+        assert_eq!(result[0].franking_credits, Decimal::ZERO);
+        assert_eq!(result[0].franking_credits_denied, Decimal::from(6000));
+    }
+
+    /// A long-held parcel's credits are untouched by the rule even in a
+    /// non-exempt year.
+    #[tokio::test]
+    async fn db_long_held_parcel_keeps_credits_in_non_exempt_year() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        insert_trade(&pool, 1, 1, trade::TradeType::Buy, NaiveDate::from_ymd_opt(2023, 1, 10).unwrap(), 1000).await;
+        let mut inc = make_income(1, 1, NaiveDate::from_ymd_opt(2025, 4, 8).unwrap());
+        inc.ex_date = Some(NaiveDate::from_ymd_opt(2025, 3, 14).unwrap());
+        inc.franking_credits = Decimal::from(6000);
+        income::db_upsert(&pool, &inc).await.unwrap();
+
+        let result = db_tax_summary(&pool).await.unwrap();
+        assert_eq!(result[0].franking_credits, Decimal::from(6000));
+        assert_eq!(result[0].franking_credits_denied, Decimal::ZERO);
     }
 
     // API-level test

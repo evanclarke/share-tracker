@@ -187,6 +187,7 @@ mod tests {
                 security_type: listing::SecurityType::ETF,
                 currency: "AUD".to_string(),
                 amit: false,
+                preference: false,
             },
         )
         .await

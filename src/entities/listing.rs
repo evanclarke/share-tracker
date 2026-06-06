@@ -25,6 +25,9 @@ pub struct Listing {
     pub security_type: SecurityType,
     pub currency: String,
     pub amit: bool,
+    /// Preference share: the franking-credit holding-period rule requires 90
+    /// at-risk days instead of 45 (see `reports::franking`).
+    pub preference: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -36,6 +39,8 @@ pub struct ListingBody {
     pub security_type: SecurityType,
     pub currency: String,
     pub amit: bool,
+    #[serde(default)]
+    pub preference: bool,
 }
 
 pub fn router() -> Router<SqlitePool> {
@@ -46,7 +51,7 @@ pub fn router() -> Router<SqlitePool> {
 
 pub async fn db_list(pool: &SqlitePool) -> Result<Vec<Listing>, sqlx::Error> {
     sqlx::query_as(
-        "SELECT id, exchange_mic, ticker, name, isin, security_type, currency, amit \
+        "SELECT id, exchange_mic, ticker, name, isin, security_type, currency, amit, preference \
          FROM listings ORDER BY exchange_mic, ticker",
     )
     .fetch_all(pool)
@@ -55,7 +60,7 @@ pub async fn db_list(pool: &SqlitePool) -> Result<Vec<Listing>, sqlx::Error> {
 
 pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<Listing>, sqlx::Error> {
     sqlx::query_as(
-        "SELECT id, exchange_mic, ticker, name, isin, security_type, currency, amit \
+        "SELECT id, exchange_mic, ticker, name, isin, security_type, currency, amit, preference \
          FROM listings WHERE id = ?",
     )
     .bind(id)
@@ -65,8 +70,8 @@ pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<Listing>, sqlx:
 
 pub async fn db_upsert(pool: &SqlitePool, listing: &Listing) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "INSERT INTO listings (id, exchange_mic, ticker, name, isin, security_type, currency, amit) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
+        "INSERT INTO listings (id, exchange_mic, ticker, name, isin, security_type, currency, amit, preference) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT(id) DO UPDATE SET \
              exchange_mic  = excluded.exchange_mic, \
              ticker        = excluded.ticker, \
@@ -74,7 +79,8 @@ pub async fn db_upsert(pool: &SqlitePool, listing: &Listing) -> Result<(), sqlx:
              isin          = excluded.isin, \
              security_type = excluded.security_type, \
              currency      = excluded.currency, \
-             amit          = excluded.amit",
+             amit          = excluded.amit, \
+             preference    = excluded.preference",
     )
     .bind(listing.id)
     .bind(&listing.exchange_mic)
@@ -84,6 +90,7 @@ pub async fn db_upsert(pool: &SqlitePool, listing: &Listing) -> Result<(), sqlx:
     .bind(listing.security_type)
     .bind(listing.currency.as_str())
     .bind(listing.amit)
+    .bind(listing.preference)
     .execute(pool)
     .await?;
     Ok(())
@@ -129,6 +136,7 @@ async fn upsert(
         security_type: body.security_type,
         currency: body.currency,
         amit: body.amit,
+        preference: body.preference,
     };
     db_upsert(&pool, &listing)
         .await
@@ -168,6 +176,7 @@ mod tests {
             security_type: SecurityType::ETF,
             currency: "AUD".to_string(),
             amit: true,
+            preference: false,
         }
     }
 
@@ -201,6 +210,19 @@ mod tests {
         let got = db_get(&pool, 1).await.unwrap().unwrap();
         assert_eq!(got.name, "Updated ETF");
         assert!(!got.amit);
+    }
+
+    #[tokio::test]
+    async fn db_preference_flag_round_trips_and_defaults_false() {
+        let pool = test_pool().await;
+        // Default: an ordinary listing is not a preference share.
+        db_upsert(&pool, &xtest()).await.unwrap();
+        assert!(!db_get(&pool, 1).await.unwrap().unwrap().preference);
+        // The flag persists when set.
+        let mut pref = xtest();
+        pref.preference = true;
+        db_upsert(&pool, &pref).await.unwrap();
+        assert!(db_get(&pool, 1).await.unwrap().unwrap().preference);
     }
 
     #[tokio::test]

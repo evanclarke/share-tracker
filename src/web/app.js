@@ -146,8 +146,9 @@
         sel('security_type', 'Security type', ['Share', 'ETF', 'LIC', 'Trust'], { required: true }),
         fk('currency', 'Currency', 'currencies', { required: true, encode: 'string' }),
         bool('amit', 'AMIT'),
+        bool('preference', 'Preference share (90-day franking holding period)'),
       ],
-      columns: ['id', 'exchange_mic', 'ticker', 'name', 'isin', 'security_type', 'currency', 'amit'],
+      columns: ['id', 'exchange_mic', 'ticker', 'name', 'isin', 'security_type', 'currency', 'amit', 'preference'],
     },
     {
       slug: 'currencies', title: 'Currencies', group: 'Reference data', api: '/currencies', readonly: true,

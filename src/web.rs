@@ -121,6 +121,8 @@ mod tests {
     async fn listing_management_ui_present() {
         let js = app_js_body().await;
         assert!(js.contains("/listings"));
+        // The preference-share flag (90-day franking holding period) is editable.
+        assert!(js.contains("preference"));
     }
 
     #[tokio::test]

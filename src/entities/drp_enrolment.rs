@@ -147,6 +147,7 @@ mod tests {
                 security_type: listing::SecurityType::Share,
                 currency: "AUD".to_string(),
                 amit: false,
+                preference: false,
             },
         )
         .await

@@ -4,6 +4,7 @@
 use axum::Router;
 use sqlx::SqlitePool;
 
+pub mod franking;
 pub mod mic_validation;
 pub mod net_capital_gain;
 pub mod portfolio;

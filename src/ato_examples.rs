@@ -21,10 +21,6 @@
 //!   partner in partnership" — needs partnership/trust taxpayer entities,
 //!   which are not modelled (TODO "Taxpayer entity type and CGT discount
 //!   rate", NEEDS CLARIFICATION).
-//! - `docs/you-and-your-shares-dividends.md` "Example 7: substantially
-//!   identical shares" (Jessica) — needs the 45-day rule's last-in-first-out
-//!   parcel identification on top of the holding-period rule itself; covered
-//!   by the same TODO section as Matthew's Example 6 below.
 //! - `docs/amma-statement-guidance-notes.md` running example ("In our example,
 //!   this is $155") — the underlying Part C component table is not included in
 //!   the mirrored copy, so the example is not reproducible from the doc alone.
@@ -448,12 +444,9 @@ async fn you_and_your_shares_examples_1_2_john_assessable_dividend_income() {
 /// > of the franking credits. Matthew shows a dividend of $13,066 as a franked
 /// > amount in his tax return but doesn't show the amount of franking credits.
 ///
-/// Blocked: the 45-day holding-period rule and $5,000 small-shareholder
-/// exemption are not implemented (TODO "Franking-credit entitlement rules").
-/// Today the tax summary reports all attached credits, so this test would see
-/// $5,600 instead of $0. Un-ignore it when the rule lands.
+/// The 45-day holding-period rule and the $5,000 small-shareholder exemption
+/// are implemented in `reports::franking`, applied by the tax summary.
 #[tokio::test]
-#[ignore = "blocked on TODO 'Franking-credit entitlement rules': 45-day holding period rule not implemented"]
 async fn you_and_your_shares_example_6_matthew_holding_period_rule() {
     let pool = test_pool().await;
     put_listing(&pool, 1, "MTHW").await;
@@ -487,6 +480,70 @@ async fn you_and_your_shares_example_6_matthew_holding_period_rule() {
         y.franking_credits,
         Decimal::ZERO,
         "no entitlement to the $5,600 franking credits — held under 45 days"
+    );
+    assert_eq!(
+        y.franking_credits_denied,
+        dec("5600"),
+        "the denied credits are surfaced, not silently dropped"
+    );
+}
+
+/// `docs/you-and-your-shares-dividends.md` — "Example 7: substantially
+/// identical shares" (You and your shares 2025).
+///
+/// > Jessica holds 10,000 shares in Mimosa Pty Ltd for 12 months. She
+/// > purchases an extra 4,000 shares in Mimosa Pty Ltd 10 days before they
+/// > became ex-dividend and then sells 4,000 shares 20 days after Mimosa Pty
+/// > Ltd shares became ex-dividend. Her total franking credit entitlement for
+/// > the income year is more than $5,000. The shares she sells are deemed to
+/// > have been held for less than 45 days, based on the last-in first-out
+/// > method. Jessica can't claim the franking credits on the 4,000 shares sold.
+///
+/// The doc fixes only the share counts, so the dividend carries $7,000 of
+/// credits (> $5,000): 4,000 of the 14,000 entitled shares fail the test, so
+/// $2,000 is denied and $5,000 remains claimable. The sale's CGT parcel
+/// allocation deliberately nominates the *old* parcel — the holding-period
+/// rule must use LIFO identification regardless of the CGT choice.
+#[tokio::test]
+async fn you_and_your_shares_example_7_jessica_lifo_identification() {
+    let pool = test_pool().await;
+    put_listing(&pool, 1, "MIM").await;
+    // 10,000 shares held 12 months before the ex-date…
+    put_buy(&pool, 1, 1, "2024-03-14", "10000", "5", "0").await;
+    // …plus 4,000 bought 10 days before the shares went ex-dividend (14 Mar 2025).
+    put_buy(&pool, 2, 1, "2025-03-04", "4000", "8", "0").await;
+    api_put(
+        &pool,
+        "/income/1",
+        json!({
+            "listing_id": 1,
+            "date_paid": "2025-04-08",
+            "ex_date": "2025-03-14",
+            "franked_amount": "16334",
+            "franking_credits": "7000",
+            "currency": "AUD",
+        }),
+    )
+    .await;
+    // 4,000 sold 20 days after the ex-date, CGT-allocated from the old parcel.
+    put_sell(&pool, 3, 1, "2025-04-03", "4000", "8", "0", 1).await;
+
+    let years: Vec<TaxYearSummary> = api_get(&pool, "/portfolio/tax-summary").await;
+    assert_eq!(years.len(), 1);
+    let y = &years[0];
+    assert_eq!(y.tax_year, 2025);
+    assert_eq!(y.dividends_assessable, dec("16334"));
+    // LIFO deems the 4,000 sold to be the recently bought parcel (held < 45
+    // days at risk): their 4/14 share of the credits is denied.
+    assert_eq!(
+        y.franking_credits_denied,
+        dec("2000"),
+        "can't claim the credits on the 4,000 shares sold (LIFO)"
+    );
+    assert_eq!(
+        y.franking_credits,
+        dec("5000"),
+        "credits on the long-held 10,000 shares remain claimable"
     );
 }
 

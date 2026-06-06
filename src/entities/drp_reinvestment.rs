@@ -237,6 +237,7 @@ mod tests {
                 security_type: listing::SecurityType::Trust,
                 currency: currency.to_string(),
                 amit: false,
+                preference: false,
             },
         )
         .await
