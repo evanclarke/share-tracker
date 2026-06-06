@@ -273,9 +273,9 @@ A no-build-step single-page app (plain HTML/CSS/JS) embedded in the binary with 
 
 ## Foreign income tax offset (FITO) cap
 (REQUIREMENTS "Planned Enhancements — Foreign income tax offset (FITO) cap", `docs/mytax-managed-funds.md`. Tax summary currently sums foreign tax with no cap.)
-- [ ] Apply the FITO limit: offsets above $1,000/year capped unless the full offset-limit calculation supports more
-- [ ] Tests: foreign tax under $1,000 passes through; above $1,000 is limited to the computed cap
-- [ ] README sync: tax summary FITO treatment
+- [x] Apply the FITO limit: offsets above $1,000/year capped unless the full offset-limit calculation supports more — per `docs/fito-limit.md` (Guide to FITO rules 2025, mirrored 2026-06-06): up to A$1,000/year of foreign tax is claimable with no offset-limit calculation; above that the limit calculation needs the taxpayer's full income-tax position (employment income, deductions, Medicare levy — outside this data model, per the Example 16 note in the ATO worked-example section). The tax summary therefore caps `foreign_tax_offsets` (income `foreign_tax_paid` + AMMA `foreign_tax_credits`, AUD, per year) at the A$1,000 de-minimis and surfaces the amount above it in the new `foreign_tax_offset_excess` response field — claimable only where the user's own offset-limit calculation supports more. The SPA tax-summary table picks up the new field automatically (report columns derive from response keys)
+- [x] Tests: foreign tax under $1,000 passes through; above $1,000 is limited to the computed cap — `tax_summary::tests::db_foreign_tax_under_1000_passes_through`, `db_foreign_tax_exactly_1000_is_not_capped` ("up to $1,000" is uncapped), `db_foreign_tax_above_1000_is_capped_with_excess_surfaced` (Anna-shaped A$3,400 → 1,000 + 2,400 excess), `db_fito_cap_combines_income_and_amma_per_year` (income + AMMA combine before the test; each year capped independently)
+- [x] README sync: tax summary FITO treatment — Features bullet + a FITO-cap paragraph in the Tax summary report section (`foreign_tax_offsets` semantics + `foreign_tax_offset_excess`); `docs/fito-limit.md` indexed in `docs/OVERVIEW.md`
 
 ## Corporate actions / additional CGT events
 (REQUIREMENTS "Planned Enhancements — Corporate actions / additional CGT events". Only A1 and E10 are modelled today.)

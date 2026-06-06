@@ -47,8 +47,16 @@ pub struct TaxYearSummary {
     /// Franking credits attached but denied by the holding-period rule (the
     /// amount excluded from `franking_credits`).
     pub franking_credits_denied: Decimal,
-    /// Total foreign tax offsets (income foreign_tax_paid + AMMA foreign_tax_credits).
+    /// Claimable foreign income tax offset (income foreign_tax_paid + AMMA
+    /// foreign_tax_credits), capped at the A$1,000 FITO de-minimis: above that
+    /// the ATO requires the offset-limit calculation, which needs the
+    /// taxpayer's full income-tax position and is outside this system's data
+    /// (see `docs/fito-limit.md`).
     pub foreign_tax_offsets: Decimal,
+    /// Foreign tax paid above the A$1,000 de-minimis (the amount excluded from
+    /// `foreign_tax_offsets`). Claimable only to the extent the taxpayer's own
+    /// offset-limit calculation supports it.
+    pub foreign_tax_offset_excess: Decimal,
     /// Total TFN withholding tax (income + AMMA).
     pub tfn_withholding_tax: Decimal,
 }
@@ -76,8 +84,15 @@ fn zero_summary(tax_year: i32) -> TaxYearSummary {
         franking_credits: Decimal::ZERO,
         franking_credits_denied: Decimal::ZERO,
         foreign_tax_offsets: Decimal::ZERO,
+        foreign_tax_offset_excess: Decimal::ZERO,
         tfn_withholding_tax: Decimal::ZERO,
     }
+}
+
+/// FITO de-minimis (docs/fito-limit.md): up to A$1,000 of foreign income tax
+/// paid in a year is claimable without working out the offset limit.
+fn fito_de_minimis_aud() -> Decimal {
+    Decimal::from(1000)
 }
 
 /// Read a TEXT decimal column from `row` and convert it to AUD via the ATO rate
@@ -231,6 +246,17 @@ pub async fn db_tax_summary(pool: &SqlitePool) -> Result<Vec<TaxYearSummary>, sq
             let s = map.get_mut(&div.tax_year).expect("year inserted with the income row");
             s.franking_credits -= denied;
             s.franking_credits_denied += denied;
+        }
+    }
+
+    // FITO de-minimis (docs/fito-limit.md): a year's foreign tax offset over
+    // A$1,000 needs the offset-limit calculation, which is outside this
+    // system's data — cap the claimable offset and surface the excess.
+    for s in map.values_mut() {
+        let limit = fito_de_minimis_aud();
+        if s.foreign_tax_offsets > limit {
+            s.foreign_tax_offset_excess = s.foreign_tax_offsets - limit;
+            s.foreign_tax_offsets = limit;
         }
     }
 
@@ -722,6 +748,86 @@ mod tests {
         let result = db_tax_summary(&pool).await.unwrap();
         assert_eq!(result[0].franking_credits, Decimal::from(6000));
         assert_eq!(result[0].franking_credits_denied, Decimal::ZERO);
+    }
+
+    // FITO de-minimis cap (docs/fito-limit.md): up to A$1,000 of foreign tax
+    // is claimable as-is; above that the offset-limit calculation is required,
+    // so the claimable offset is capped and the excess surfaced.
+
+    #[tokio::test]
+    async fn db_foreign_tax_under_1000_passes_through() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        let mut inc = make_income(1, 1, NaiveDate::from_ymd_opt(2024, 3, 15).unwrap());
+        inc.foreign_source_income = Decimal::from(3000);
+        inc.foreign_tax_paid = Decimal::from(999);
+        income::db_upsert(&pool, &inc).await.unwrap();
+
+        let result = db_tax_summary(&pool).await.unwrap();
+        assert_eq!(result[0].foreign_tax_offsets, Decimal::from(999));
+        assert_eq!(result[0].foreign_tax_offset_excess, Decimal::ZERO);
+    }
+
+    /// "Up to $1,000" is claimable without the limit calculation — exactly
+    /// $1,000 is not capped.
+    #[tokio::test]
+    async fn db_foreign_tax_exactly_1000_is_not_capped() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        let mut inc = make_income(1, 1, NaiveDate::from_ymd_opt(2024, 3, 15).unwrap());
+        inc.foreign_tax_paid = Decimal::from(1000);
+        income::db_upsert(&pool, &inc).await.unwrap();
+
+        let result = db_tax_summary(&pool).await.unwrap();
+        assert_eq!(result[0].foreign_tax_offsets, Decimal::from(1000));
+        assert_eq!(result[0].foreign_tax_offset_excess, Decimal::ZERO);
+    }
+
+    #[tokio::test]
+    async fn db_foreign_tax_above_1000_is_capped_with_excess_surfaced() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        // Anna-shaped total (docs/fito-limit.md Example 16 pays A$3,400 foreign
+        // tax; her computed limit is outside this system's data, so only the
+        // A$1,000 de-minimis is claimable here).
+        let mut inc = make_income(1, 1, NaiveDate::from_ymd_opt(2025, 3, 15).unwrap());
+        inc.foreign_source_income = Decimal::from(12000);
+        inc.foreign_tax_paid = Decimal::from(3400);
+        income::db_upsert(&pool, &inc).await.unwrap();
+
+        let result = db_tax_summary(&pool).await.unwrap();
+        assert_eq!(result[0].foreign_tax_offsets, Decimal::from(1000));
+        assert_eq!(result[0].foreign_tax_offset_excess, Decimal::from(2400));
+    }
+
+    /// The cap is a per-year total across sources: income foreign_tax_paid and
+    /// AMMA foreign_tax_credits combine before the A$1,000 test, and each year
+    /// is capped independently.
+    #[tokio::test]
+    async fn db_fito_cap_combines_income_and_amma_per_year() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        insert_listing(&pool, 2).await;
+        // FY2024: 600 (income) + 700 (AMMA) = 1300 → capped at 1000, excess 300.
+        let mut inc = make_income(1, 1, NaiveDate::from_ymd_opt(2024, 3, 15).unwrap());
+        inc.foreign_tax_paid = Decimal::from(600);
+        income::db_upsert(&pool, &inc).await.unwrap();
+        let mut a = make_amma(1, 2, NaiveDate::from_ymd_opt(2024, 6, 30).unwrap());
+        a.foreign_tax_credits = Decimal::from(700);
+        amma::db_upsert(&pool, &a).await.unwrap();
+        // FY2025: 400 alone → under the cap, untouched.
+        let mut inc2 = make_income(2, 1, NaiveDate::from_ymd_opt(2024, 9, 15).unwrap());
+        inc2.foreign_tax_paid = Decimal::from(400);
+        income::db_upsert(&pool, &inc2).await.unwrap();
+
+        let result = db_tax_summary(&pool).await.unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].tax_year, 2024);
+        assert_eq!(result[0].foreign_tax_offsets, Decimal::from(1000));
+        assert_eq!(result[0].foreign_tax_offset_excess, Decimal::from(300));
+        assert_eq!(result[1].tax_year, 2025);
+        assert_eq!(result[1].foreign_tax_offsets, Decimal::from(400));
+        assert_eq!(result[1].foreign_tax_offset_excess, Decimal::ZERO);
     }
 
     // API-level test
