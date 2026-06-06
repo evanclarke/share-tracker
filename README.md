@@ -244,7 +244,7 @@ The server also hosts a built-in web UI — a no-build-step single-page app (pla
 | `GET` | `/static/app.js` | The app bundle (JavaScript) |
 | `GET` | `/static/style.css` | Stylesheet (CSS) |
 
-Open `http://localhost:<port>/` in a browser. The app is hash-routed (`#/e/<entity>`, `#/sells`, `#/jobs`, `#/attachments/<owner>/<id>`, `#/r/<report>`) and drives the JSON API below — it provides CRUD screens for every entity (exchanges, listings, trades, income, AMMA statements, AMIT adjustments, DRP enrolments, exchange holidays, CGT settings), a dedicated Sell screen that captures parcel allocations atomically, a DRP reinvest action on income rows, an Attachments action on each trade/income/AMMA row that uploads, lists, downloads, and deletes its documents, read-only views of the import-managed reference tables (currencies, MIC registry, RBA FX rates, parcel allocations), a Maintenance → Jobs screen that lists the scheduled jobs with each one's last run (when it finished, whether it succeeded, and any error) and runs any of them on demand (`POST /jobs/:name`), and a view for each report (portfolio overview, unrealised/realised gains, net capital gain, tax summary, exchange MIC validation).
+Open `http://localhost:<port>/` in a browser. The app is hash-routed (`#/e/<entity>`, `#/sells`, `#/jobs`, `#/attachments/<owner>/<id>`, `#/r/<report>`) and drives the JSON API below — it provides CRUD screens for every entity (exchanges, listings, trades, income, AMMA statements, AMIT adjustments, DRP enrolments, exchange holidays, CGT settings), a dedicated Sell screen that captures parcel allocations atomically, a DRP reinvest action on income rows, an Attachments action on each trade/income/AMMA row that uploads, lists, downloads, and deletes its documents, read-only views of the import-managed reference tables (currencies, MIC registry, RBA FX rates, parcel allocations), a Maintenance → Jobs screen that lists the scheduled jobs with each one's last run (when it finished, whether it succeeded, and any error) and runs any of them on demand (`POST /jobs/:name`), and a view for each report (portfolio overview, open parcels, unrealised/realised gains, net capital gain, tax summary, exchange MIC validation).
 
 ### Exchanges
 
@@ -515,6 +515,16 @@ Returns open holdings per listing. Request body (optional):
 Response fields per holding: `listing_id`, `quantity`, `avg_cost_base_per_unit`, `total_cost_base`, `current_price` (nullable), `market_value` (nullable).
 
 Cost base is calculated as `(price × quantity + brokerage + GST) − AMIT reductions`, pro-rated to remaining (unsold) units, then converted to AUD (see [FX conversion](#fx-conversion)). Supplied prices are expected in AUD, so `market_value` is AUD.
+
+#### Open parcels
+
+```
+GET /portfolio/open-parcels
+```
+
+Returns every open parcel — a Buy/DRP trade whose quantity is not fully consumed by parcel allocations — the per-parcel cost-base schedule to reconcile against a broker statement and the input to a sell decision (the [overview](#overview) aggregates the same parcels per listing). Response fields per parcel: `trade_id`, `listing_id`, `ticker`, `acquisition_date`, `original_quantity`, `remaining_quantity` (units not yet allocated to a Sell), `original_cost_base` (price × quantity + brokerage + GST for the whole parcel), `amit_cost_base_reduction` (cumulative AMIT reductions to date — the full amount, even where CGT event E10 has floored the cost base), and `remaining_cost_base` (`max(original − AMIT, 0)` pro-rated to the remaining units). All monetary fields are AUD, converted at the parcel's buy-month rate (see [FX conversion](#fx-conversion)).
+
+Sorted by `listing_id`, then `acquisition_date`, then `trade_id`.
 
 #### Unrealised gains
 

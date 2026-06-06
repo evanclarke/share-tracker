@@ -306,10 +306,10 @@ A no-build-step single-page app (plain HTML/CSS/JS) embedded in the binary with 
 
 ## Open-parcel cost-base inventory report
 (REQUIREMENTS "Planned Enhancements — Open-parcel cost-base inventory report". Portfolio overview only aggregates per listing.)
-- [ ] New report listing every open (unsold) parcel: listing, acquisition date, original cost base, cumulative AMIT reductions to date, remaining quantity, remaining adjusted cost base (AUD)
-- [ ] Web UI view for the open-parcel inventory report (routed through the shared filterable table)
-- [ ] Tests: open parcels listed with correct remaining quantity and adjusted cost base after partial sells and AMIT adjustments
-- [ ] README sync: new report endpoint + web-frontend mention
+- [x] New report listing every open (unsold) parcel: listing, acquisition date, original cost base, cumulative AMIT reductions to date, remaining quantity, remaining adjusted cost base (AUD) — `GET /portfolio/open-parcels` (`src/reports/open_parcels.rs`): one row per Buy/DRP trade not fully consumed by parcel allocations, with `trade_id`, `listing_id`, `ticker`, `acquisition_date`, `original_quantity`, `remaining_quantity`, `original_cost_base`, `amit_cost_base_reduction` (full cumulative reduction, even past the E10 floor), `remaining_cost_base` (`max(original − AMIT, 0)` pro-rated to remaining units); all money AUD at the parcel's buy-month rate via `infra::fx::to_aud`; sorted by listing, acquisition date, trade id
+- [x] Web UI view for the open-parcel inventory report (routed through the shared filterable table) — `REPORTS` entry `open-parcels` in `app.js`; GET reports render through `dataTable` → `filterableTable` (`web::tests::open_parcels_report_ui_present`)
+- [x] Tests: open parcels listed with correct remaining quantity and adjusted cost base after partial sells and AMIT adjustments — `open_parcels::tests`: `db_open_parcel_listed_with_original_figures`, `db_partial_sell_pro_rates_remaining_cost_base`, `db_fully_sold_parcel_excluded`, `db_amit_reduction_reported_and_netted_off`, `db_e10_floors_remaining_cost_base_at_nil`, `db_non_aud_parcel_converted_to_aud`, `db_sorted_by_listing_then_acquisition_date`, `api_get_open_parcels`
+- [x] README sync: new report endpoint + web-frontend mention — "Open parcels" subsection under Portfolio reports; report list in the Web frontend section
 
 ## Tax-return export
 (REQUIREMENTS "Planned Enhancements — Tax-return export". Reports are JSON/HTML only.)

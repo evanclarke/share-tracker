@@ -166,6 +166,14 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn open_parcels_report_ui_present() {
+        let js = app_js_body().await;
+        // The Open Parcels report view drives GET /portfolio/open-parcels and
+        // renders through the shared filterable table like every report.
+        assert!(js.contains("/portfolio/open-parcels"));
+    }
+
+    #[tokio::test]
     async fn gains_report_ui_present() {
         let js = app_js_body().await;
         assert!(js.contains("/portfolio/unrealised-gains"));

@@ -7,6 +7,7 @@ use sqlx::SqlitePool;
 pub mod franking;
 pub mod mic_validation;
 pub mod net_capital_gain;
+pub mod open_parcels;
 pub mod portfolio;
 pub mod realised_gains;
 pub mod tax_summary;
@@ -15,6 +16,7 @@ pub mod unrealised_gains;
 /// Merge every report's routes into a single router.
 pub fn router() -> Router<SqlitePool> {
     portfolio::router()
+        .merge(open_parcels::router())
         .merge(unrealised_gains::router())
         .merge(realised_gains::router())
         .merge(net_capital_gain::router())

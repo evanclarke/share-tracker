@@ -284,6 +284,7 @@
 
   const REPORTS = [
     { slug: 'overview', title: 'Portfolio Overview', api: '/portfolio/overview', method: 'POST', prices: true, desc: 'Open holdings per listing, with optional market value.' },
+    { slug: 'open-parcels', title: 'Open Parcels', api: '/portfolio/open-parcels', method: 'GET', desc: 'Every open parcel: acquisition date, original cost base, AMIT reductions, remaining quantity and adjusted cost base (AUD).' },
     { slug: 'unrealised-gains', title: 'Unrealised Gains', api: '/portfolio/unrealised-gains', method: 'POST', prices: true, asOfDate: true, desc: 'Per-holding unrealised gain/loss vs cost base.' },
     { slug: 'realised-gains', title: 'Realised Gains', api: '/portfolio/realised-gains', method: 'GET', desc: 'Per-sale capital gain/loss split into CGT buckets.' },
     { slug: 'net-capital-gain', title: 'Net Capital Gain', api: '/portfolio/net-capital-gain', method: 'GET', desc: 'Assessable net capital gain per financial year.' },
