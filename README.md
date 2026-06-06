@@ -11,6 +11,7 @@ A personal Australian share portfolio tracker with a REST JSON API. Records trad
 - **Parcel-level CGT** — explicit parcel allocations link sell trades to the parcels they came from; cost bases are pro-rated and AMIT-reduced at the parcel level
 - **Return of capital (CGT event G1)** — record a company's non-assessable payment as a corporate action; the per-unit amount reduces the cost base of every parcel held on the payment date across all reports, and a payment in excess of a parcel's cost base becomes a capital gain in the net capital gain report (the cost base floors at nil — G1 never produces a loss)
 - **Share splits and consolidations (TD 2000/10)** — record a conversion of a listing's shares into a larger or smaller number as a corporate action; no CGT event arises: parcels keep their total cost base and original acquisition date (the 12-month discount clock keeps running) while quantities and per-unit cost bases are re-based across the conversion in every report and in the Sell/trade capacity checks (a post-split sale allocates post-split units against pre-split parcels)
+- **Bonus issues (non-assessable)** — record a bonus share issue as a corporate action; the ATO apportions each parcel's cost base over the original + bonus shares and the bonus shares take the original acquisition date, so the issue is the same no-CGT-event quantity re-base as a split: parcels grow by `bonus/held` per unit with their total cost base and acquisition date untouched (bonus shares received *in lieu of a dividend* are assessed as a dividend and entered as a DRP trade instead)
 - **Portfolio overview** — open holdings per security with total cost base and optional market value (supply current prices in the request body)
 - **Unrealised gains report** — per-holding gain/loss and CGT-discount-eligible quantity as at a given date
 - **Realised gains report** — per-sale capital gain/loss split into discount-eligible (parcels held strictly more than 12 months), non-discountable, and loss buckets
@@ -191,15 +192,17 @@ cgt_settings                 Singleton CGT settings row (CHECK id = 1)
 ├── id                   INTEGER PK  Always 1 (CHECK-enforced singleton)
 └── opening_capital_loss TEXT (decimal)  Net capital loss carried forward from before the first recorded year (AUD, non-negative); starting balance for the net-capital-gain loss chain
 
-corporate_actions            Corporate actions per listing (company returns of capital — CGT event G1 — and share splits/consolidations, TD 2000/10)
-├── id              INTEGER PK
-├── action_type     TEXT   ReturnOfCapital | ShareSplit (CHECK-enforced enum; the extension point for future actions). Per-type CHECKs tie each payload below to its type
-├── listing_id      INTEGER FK→listings.id
-├── date            TEXT   ReturnOfCapital: payment date — parcels acquired on/before it and still held then are affected. ShareSplit: conversion date — parcels acquired before it are converted (a trade dated on it is already in post-split units)
-├── amount_per_unit TEXT (decimal, nullable)  ReturnOfCapital only: per-unit non-assessable payment (positive); reduces affected parcels' cost bases
-├── currency        TEXT FK→currencies.code (nullable)  ReturnOfCapital only: must match the affected trades' currency (reports fail loudly on a mismatch)
-├── split_new_units TEXT (decimal, nullable)  ShareSplit only: every split_old_units existing units become split_new_units units (both positive; a consolidation has new < old)
-└── split_old_units TEXT (decimal, nullable)  ShareSplit only: see split_new_units
+corporate_actions            Corporate actions per listing (company returns of capital — CGT event G1 — share splits/consolidations — TD 2000/10 — and non-assessable bonus issues)
+├── id               INTEGER PK
+├── action_type      TEXT   ReturnOfCapital | ShareSplit | BonusIssue (CHECK-enforced enum; the extension point for future actions). Per-type CHECKs tie each payload below to its type
+├── listing_id       INTEGER FK→listings.id
+├── date             TEXT   ReturnOfCapital: payment date — parcels acquired on/before it and still held then are affected. ShareSplit: conversion date — parcels acquired before it are converted (a trade dated on it is already in post-split units). BonusIssue: issue date — parcels acquired before it receive bonus units (a trade dated on it is ex-bonus)
+├── amount_per_unit  TEXT (decimal, nullable)  ReturnOfCapital only: per-unit non-assessable payment (positive); reduces affected parcels' cost bases
+├── currency         TEXT FK→currencies.code (nullable)  ReturnOfCapital only: must match the affected trades' currency (reports fail loudly on a mismatch)
+├── split_new_units  TEXT (decimal, nullable)  ShareSplit only: every split_old_units existing units become split_new_units units (both positive; a consolidation has new < old)
+├── split_old_units  TEXT (decimal, nullable)  ShareSplit only: see split_new_units
+├── bonus_units      TEXT (decimal, nullable)  BonusIssue only: every bonus_held_units units held receive bonus_units additional units (both positive; a 1-for-10 issue is bonus_units=1 / bonus_held_units=10)
+└── bonus_held_units TEXT (decimal, nullable)  BonusIssue only: see bonus_units
 
 attachments                  Supporting documents for an activity; bytes stored in the DB (captured by the weekly backup)
 ├── id                INTEGER PK
@@ -369,7 +372,7 @@ If `settlement_date` is omitted from the PUT body, it is auto-calculated by adva
 Buy/DRP trades carry the same write-time integrity as Sells (validated atomically in a transaction):
 
 - `DELETE /trades/:id` returns `422` if the trade is still referenced — as the purchase parcel of a Sell's allocation, by an AMIT adjustment, or as a distribution's reinvestment trade — instead of surfacing the FK error as `500`. Remove the dependants first (e.g. delete the Sell via `DELETE /sells/:id`).
-- `PUT /trades/:id` returns `422` if the edit would shrink the trade's `quantity` below what its dependants rely on: the total already allocated out to Sells (each allocation re-based to the parcel's as-acquired units across any [share splits/consolidations](#corporate-actions)), or any linked AMIT adjustment's covered quantity (AMIT adjustment quantities are expressed in the parcel's as-acquired units).
+- `PUT /trades/:id` returns `422` if the edit would shrink the trade's `quantity` below what its dependants rely on: the total already allocated out to Sells (each allocation re-based to the parcel's as-acquired units across any [share splits/consolidations or bonus issues](#corporate-actions)), or any linked AMIT adjustment's covered quantity (AMIT adjustment quantities are expressed in the parcel's as-acquired units).
 
 An unreferenced trade edits and deletes freely.
 
@@ -460,10 +463,11 @@ Returns `204 No Content`, or `422 Unprocessable Entity` if the amount is negativ
 
 ### Corporate actions
 
-Corporate actions recorded against a listing. Two action types are modelled:
+Corporate actions recorded against a listing. Three action types are modelled:
 
 - `ReturnOfCapital` — a non-assessable payment from a company (a shareholder-approved return of share capital, CGT event G1; see `docs/cgt-non-assessable-payments.md`). The per-unit payment reduces the cost base of every parcel of the listing held on the payment date (units sold before the payment were not held for it and are unaffected) in the [portfolio](#overview), [open parcels](#open-parcels), [unrealised](#unrealised-gains), and [realised](#realised-gains) reports. Where cumulative payments exceed a parcel's per-unit cost base, the cost base floors at nil and the excess is a capital gain in the payment's income year — G1 never produces a capital loss — reported by the [net capital gain report](#net-capital-gain).
 - `ShareSplit` — a share split or consolidation (TD 2000/10; see `docs/share-splits-and-consolidations.md`): on the conversion `date`, every `split_old_units` units of the listing become `split_new_units` units (a 2-for-1 split is new=2/old=1; a 1-for-10 consolidation is new=1/old=10). **No CGT event happens**: the converted parcels keep their total cost base and their original acquisition date (the 12-month discount clock keeps running) — only the unit count, and so the per-unit cost base, changes. Trade rows keep the quantities as originally transacted; the reports and the Sell/trade write-time capacity checks re-base quantities between unit bases (a trade dated on or after the conversion date is already in post-split units, so after a 2-for-1 split a 100-share parcel covers a 200-share sale). Open-holdings reports show quantities in current units (the unrealised report in the units of its `as_of_date`); a `ReturnOfCapital` payment after a split is per post-split unit. A consolidation that doesn't divide a holding evenly keeps the exact fractional quantity (company rounding / cash-in-lieu arrangements are not modelled). AMIT adjustment quantities remain expressed in the parcel's as-acquired units.
+- `BonusIssue` — a non-assessable bonus share issue (the general post-1 July 1998 case; see `docs/bonus-shares.md`): on the issue `date`, every `bonus_held_units` units held receive `bonus_units` additional units (a 1-for-10 issue is bonus=1/held=10). **No CGT event happens**: the ATO apportions each parcel's cost base over the original + bonus shares and the bonus shares take the original acquisition date — the same quantity re-base as a `ShareSplit` with new = held + bonus and old = held, and the reports and write-time checks treat it identically (a trade dated on or after the issue date is ex-bonus and receives nothing). Bonus shares received **in lieu of a dividend** (a bonus share plan) are assessed as a dividend — enter those as a distribution plus a DRP reinvestment trade (the new parcel is acquired at the issue date with the dividend as its cost base), not as this action. Partly paid bonus shares and call payments are not modelled.
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -490,9 +494,18 @@ PUT /corporate_actions/2
   "split_new_units": "2",
   "split_old_units": "1"
 }
+
+PUT /corporate_actions/3
+{
+  "action_type": "BonusIssue",
+  "listing_id": 1,
+  "date": "2025-09-01",
+  "bonus_units": "1",
+  "bonus_held_units": "10"
+}
 ```
 
-Each action type carries exactly its own payload: a `ReturnOfCapital` has `amount_per_unit` + `currency` (the split columns null), a `ShareSplit` has `split_new_units` + `split_old_units` (the payment columns null) — enforced by table CHECKs and the PUT handler. Returns `204 No Content`, or `422 Unprocessable Entity` when `amount_per_unit` is not positive, a split ratio is missing or not positive, the payload mixes the two types, the listing or currency is unknown, or the action type is unrecognised. A payment's `currency` must match the affected trades' currency — the reports never net amounts across currencies and fail loudly (`500`) on a mismatch.
+Each action type carries exactly its own payload: a `ReturnOfCapital` has `amount_per_unit` + `currency`, a `ShareSplit` has `split_new_units` + `split_old_units`, a `BonusIssue` has `bonus_units` + `bonus_held_units` — each with the other types' columns null, enforced by table CHECKs and the PUT handler. Returns `204 No Content`, or `422 Unprocessable Entity` when `amount_per_unit` is not positive, a split or bonus ratio is missing or not positive, the payload mixes the per-type fields, the listing or currency is unknown, or the action type is unrecognised. A payment's `currency` must match the affected trades' currency — the reports never net amounts across currencies and fail loudly (`500`) on a mismatch.
 
 ### DRP reinvestment
 
@@ -540,7 +553,7 @@ Request body — the Sell trade fields (no `trade_type`; it is always `Sell`) pl
 
 `settlement_date` is optional and auto-calculated as for trades. Re-`PUT`ting the same id replaces the Sell row and *all* of its allocations with the submitted set.
 
-Returns `204 No Content` on success, or `422 Unprocessable Entity` if the allocations do not sum exactly to `quantity`, a referenced purchase trade is missing or is not a Buy/DRP, or an allocation would over-allocate a purchase parcel. On any failure the whole transaction is rolled back — nothing is persisted. Allocation quantities are in the sale date's unit basis: the over-allocation check re-bases them across any [share splits/consolidations](#corporate-actions) between the purchase and the sale, so after a 2-for-1 split a 100-share parcel covers a 200-share sale.
+Returns `204 No Content` on success, or `422 Unprocessable Entity` if the allocations do not sum exactly to `quantity`, a referenced purchase trade is missing or is not a Buy/DRP, or an allocation would over-allocate a purchase parcel. On any failure the whole transaction is rolled back — nothing is persisted. Allocation quantities are in the sale date's unit basis: the over-allocation check re-bases them across any [share splits/consolidations or bonus issues](#corporate-actions) between the purchase and the sale, so after a 2-for-1 split a 100-share parcel covers a 200-share sale.
 
 ```
 DELETE /sells/:id
@@ -579,7 +592,7 @@ Returns open holdings per listing. Request body (optional):
 
 Response fields per holding: `listing_id`, `quantity`, `avg_cost_base_per_unit`, `total_cost_base`, `current_price` (nullable), `market_value` (nullable).
 
-Cost base is calculated as `(price × quantity + brokerage + GST) − AMIT reductions`, pro-rated to remaining (unsold) units, less [return-of-capital](#corporate-actions) payments received on those units — flooring at nil (CGT events E10 and G1) — then converted to AUD (see [FX conversion](#fx-conversion)). Supplied prices are expected in AUD, so `market_value` is AUD. The unrealised-gains report computes its cost base the same way. `quantity` is in *current* units — re-based across any [share splits/consolidations](#corporate-actions) — so it lines up with a current market price; split conversions never change the cost base totals.
+Cost base is calculated as `(price × quantity + brokerage + GST) − AMIT reductions`, pro-rated to remaining (unsold) units, less [return-of-capital](#corporate-actions) payments received on those units — flooring at nil (CGT events E10 and G1) — then converted to AUD (see [FX conversion](#fx-conversion)). Supplied prices are expected in AUD, so `market_value` is AUD. The unrealised-gains report computes its cost base the same way. `quantity` is in *current* units — re-based across any [share splits/consolidations or bonus issues](#corporate-actions) — so it lines up with a current market price; the re-basing never changes the cost base totals.
 
 #### Open parcels
 
@@ -587,7 +600,7 @@ Cost base is calculated as `(price × quantity + brokerage + GST) − AMIT reduc
 GET /portfolio/open-parcels
 ```
 
-Returns every open parcel — a Buy/DRP trade whose quantity is not fully consumed by parcel allocations — the per-parcel cost-base schedule to reconcile against a broker statement and the input to a sell decision (the [overview](#overview) aggregates the same parcels per listing). Response fields per parcel: `trade_id`, `listing_id`, `ticker`, `acquisition_date`, `original_quantity`, `remaining_quantity` (units not yet allocated to a Sell), `original_cost_base` (price × quantity + brokerage + GST for the whole parcel), `amit_cost_base_reduction` (cumulative AMIT reductions to date — the full amount, even where CGT event E10 has floored the cost base), `return_of_capital_reduction` (cumulative [return-of-capital](#corporate-actions) payments received on the remaining units since acquisition — likewise the full amount, even where CGT event G1 has floored the cost base), and `remaining_cost_base` (`max(original − AMIT, 0)` pro-rated to the remaining units, less the return-of-capital payments on those units, floored at nil). All monetary fields are AUD, converted at the parcel's buy-month rate (see [FX conversion](#fx-conversion)). `remaining_quantity` is in *current* units — re-based across any [share splits/consolidations](#corporate-actions) so it reconciles with a broker statement — while `original_quantity` stays as transacted; `acquisition_date` is preserved across a split (TD 2000/10).
+Returns every open parcel — a Buy/DRP trade whose quantity is not fully consumed by parcel allocations — the per-parcel cost-base schedule to reconcile against a broker statement and the input to a sell decision (the [overview](#overview) aggregates the same parcels per listing). Response fields per parcel: `trade_id`, `listing_id`, `ticker`, `acquisition_date`, `original_quantity`, `remaining_quantity` (units not yet allocated to a Sell), `original_cost_base` (price × quantity + brokerage + GST for the whole parcel), `amit_cost_base_reduction` (cumulative AMIT reductions to date — the full amount, even where CGT event E10 has floored the cost base), `return_of_capital_reduction` (cumulative [return-of-capital](#corporate-actions) payments received on the remaining units since acquisition — likewise the full amount, even where CGT event G1 has floored the cost base), and `remaining_cost_base` (`max(original − AMIT, 0)` pro-rated to the remaining units, less the return-of-capital payments on those units, floored at nil). All monetary fields are AUD, converted at the parcel's buy-month rate (see [FX conversion](#fx-conversion)). `remaining_quantity` is in *current* units — re-based across any [share splits/consolidations or bonus issues](#corporate-actions) so it reconciles with a broker statement — while `original_quantity` stays as transacted; `acquisition_date` is preserved across a split or bonus issue (TD 2000/10; `docs/bonus-shares.md`).
 
 Sorted by `listing_id`, then `acquisition_date`, then `trade_id`.
 
@@ -603,7 +616,7 @@ Request body (all optional):
 { "prices": { "<listing_id>": "<price>" }, "as_of_date": "YYYY-MM-DD" }
 ```
 
-`as_of_date` defaults to today. Response fields per holding: `listing_id`, `quantity`, `total_cost_base`, `current_price`, `market_value`, `unrealised_gain_loss`, `cgt_discount_eligible_quantity` (units from parcels held strictly more than 12 months as at `as_of_date`). `total_cost_base` is in AUD (see [FX conversion](#fx-conversion)); supplied prices are expected in AUD, so `market_value` and `unrealised_gain_loss` are AUD. Quantities are in the unit basis of `as_of_date` — re-based across any [share splits/consolidations](#corporate-actions) up to that date — and a split does not restart the 12-month discount clock (the converted shares keep the original acquisition date, TD 2000/10).
+`as_of_date` defaults to today. Response fields per holding: `listing_id`, `quantity`, `total_cost_base`, `current_price`, `market_value`, `unrealised_gain_loss`, `cgt_discount_eligible_quantity` (units from parcels held strictly more than 12 months as at `as_of_date`). `total_cost_base` is in AUD (see [FX conversion](#fx-conversion)); supplied prices are expected in AUD, so `market_value` and `unrealised_gain_loss` are AUD. Quantities are in the unit basis of `as_of_date` — re-based across any [share splits/consolidations or bonus issues](#corporate-actions) up to that date — and neither a split nor a bonus issue restarts the 12-month discount clock (the converted/bonus shares keep the original acquisition date; TD 2000/10, `docs/bonus-shares.md`).
 
 #### Realised gains
 
@@ -611,7 +624,7 @@ Request body (all optional):
 GET /portfolio/realised-gains
 ```
 
-Returns one record per sale trade that has at least one parcel allocation. Response fields: `sale_trade_id`, `listing_id`, `sale_date`, `proceeds`, `cost_base`, `capital_gain_loss`, `discount_eligible_gain` (gross gain from parcels held strictly more than 12 months), `non_discountable_gain` (gross gain from parcels held 12 months or less — the "other" method), and `capital_loss` (total losses from allocations sold below cost, as a positive amount). The three buckets satisfy `capital_gain_loss == discount_eligible_gain + non_discountable_gain − capital_loss`. `proceeds`, `cost_base`, and `capital_gain_loss` are in AUD: proceeds are converted at the sale's FX rate and cost base at the purchase's FX rate (see [FX conversion](#fx-conversion)). The cost base of the sold units is reduced by [return-of-capital](#corporate-actions) payments received while they were held — from acquisition up to the sale date — flooring at nil; payments after the sale don't touch them. An allocation's quantity is in the sale date's unit basis: a [share split/consolidation](#corporate-actions) between purchase and sale re-bases it back to as-acquired units for the cost-base pro-rating, and the discount holding period still runs from the original acquisition date (TD 2000/10).
+Returns one record per sale trade that has at least one parcel allocation. Response fields: `sale_trade_id`, `listing_id`, `sale_date`, `proceeds`, `cost_base`, `capital_gain_loss`, `discount_eligible_gain` (gross gain from parcels held strictly more than 12 months), `non_discountable_gain` (gross gain from parcels held 12 months or less — the "other" method), and `capital_loss` (total losses from allocations sold below cost, as a positive amount). The three buckets satisfy `capital_gain_loss == discount_eligible_gain + non_discountable_gain − capital_loss`. `proceeds`, `cost_base`, and `capital_gain_loss` are in AUD: proceeds are converted at the sale's FX rate and cost base at the purchase's FX rate (see [FX conversion](#fx-conversion)). The cost base of the sold units is reduced by [return-of-capital](#corporate-actions) payments received while they were held — from acquisition up to the sale date — flooring at nil; payments after the sale don't touch them. An allocation's quantity is in the sale date's unit basis: a [share split/consolidation or bonus issue](#corporate-actions) between purchase and sale re-bases it back to as-acquired units for the cost-base pro-rating, and the discount holding period still runs from the original acquisition date (TD 2000/10; `docs/bonus-shares.md`).
 
 Sorted by `sale_date` ascending.
 
@@ -687,7 +700,7 @@ Flags every trade whose `[date, settlement_date]` window is not fully inside its
 | `404 Not Found` | Resource does not exist |
 | `405 Method Not Allowed` | Write attempted on a read-only path (e.g. `parcel_allocations`) |
 | `413 Payload Too Large` | Uploaded attachment exceeds the 25 MB per-file limit |
-| `422 Unprocessable Entity` | Business rule or constraint violation (e.g. over-allocation, wrong trade type, under-allocated Sell, deleting or shrinking a Buy/DRP that a parcel allocation, AMIT adjustment, or reinvestment link still relies on, unparseable FX or MIC feed, a write referencing an unrecognised currency / unknown exchange / listing, an attachment upload with no/multiple owners or an unsupported content type, a negative / non-singleton `cgt_settings` opening capital loss, an overlapping or empty DRP enrolment period, reinvesting a distribution no enrolment period covers, or a corporate action with a non-positive `amount_per_unit`, a missing/non-positive split ratio, a payload mixing the per-type fields, or an unrecognised `action_type`) |
+| `422 Unprocessable Entity` | Business rule or constraint violation (e.g. over-allocation, wrong trade type, under-allocated Sell, deleting or shrinking a Buy/DRP that a parcel allocation, AMIT adjustment, or reinvestment link still relies on, unparseable FX or MIC feed, a write referencing an unrecognised currency / unknown exchange / listing, an attachment upload with no/multiple owners or an unsupported content type, a negative / non-singleton `cgt_settings` opening capital loss, an overlapping or empty DRP enrolment period, reinvesting a distribution no enrolment period covers, or a corporate action with a non-positive `amount_per_unit`, a missing/non-positive split or bonus ratio, a payload mixing the per-type fields, or an unrecognised `action_type`) |
 | `500 Internal Server Error` | Unexpected database error, or a job triggered via `POST /jobs/:name` failed |
 | `502 Bad Gateway` | Upstream fetch failed (e.g. the RBA FX or ISO MIC import could not reach its source) |
 

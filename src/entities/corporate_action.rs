@@ -1,6 +1,6 @@
 //! Corporate actions recorded against a listing.
 //!
-//! Two action types are modelled so far:
+//! Three action types are modelled so far:
 //!
 //! **ReturnOfCapital** — a non-assessable payment from a company (a
 //! shareholder-approved return of share capital, CGT event G1; see
@@ -25,8 +25,20 @@
 //! [`split_ratio`] / [`split_adjusted_quantity`] / [`as_acquired_quantity`].
 //! A trade dated on the conversion date is already in post-split units.
 //!
-//! `ActionType` is the extension point for future corporate actions (bonus
-//! shares, rights issues, ...), each widening the enum and its CHECK.
+//! **BonusIssue** — a non-assessable bonus share issue (the general
+//! post-1 July 1998 case; see `docs/bonus-shares.md`): on the issue date
+//! every `bonus_held_units` units held receive `bonus_units` additional
+//! units. The ATO apportions the parcel's cost base over original + bonus
+//! shares and the bonus shares take the original acquisition date — exactly
+//! the quantity re-base `(held + bonus) / held` with total cost base and
+//! acquisition date preserved, so a BonusIssue folds into the split-event
+//! stream as its equivalent split (new = held + bonus, old = held) and every
+//! report and write-time check inherits the treatment. A trade dated on the
+//! issue date is ex-bonus. (Bonus shares chosen *in lieu of a dividend* are
+//! assessed as a dividend — entered as a DRP trade, not as this action.)
+//!
+//! `ActionType` is the extension point for future corporate actions (rights
+//! issues, buy-backs, ...), each widening the enum and its CHECK.
 
 use crate::infra::decimal::parse_dec;
 use crate::infra::http::write_error_status;
@@ -46,6 +58,7 @@ use std::collections::HashMap;
 pub enum ActionType {
     ReturnOfCapital,
     ShareSplit,
+    BonusIssue,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,7 +69,8 @@ pub struct CorporateAction {
     /// ReturnOfCapital: payment date — parcels acquired on/before it are
     /// affected. ShareSplit: conversion date — parcels acquired before it are
     /// converted (a trade dated on the conversion date is already in
-    /// post-split units).
+    /// post-split units). BonusIssue: issue date — parcels acquired before it
+    /// receive bonus units (a trade dated on the issue date is ex-bonus).
     pub date: NaiveDate,
     /// ReturnOfCapital only: per-unit payment amount in `currency` (positive).
     pub amount_per_unit: Option<Decimal>,
@@ -68,6 +82,12 @@ pub struct CorporateAction {
     pub split_new_units: Option<Decimal>,
     /// ShareSplit only: see `split_new_units`.
     pub split_old_units: Option<Decimal>,
+    /// BonusIssue only: every `bonus_held_units` units held receive
+    /// `bonus_units` additional units on the issue date (both positive; a
+    /// 1-for-10 bonus issue is bonus_units=1 / bonus_held_units=10).
+    pub bonus_units: Option<Decimal>,
+    /// BonusIssue only: see `bonus_units`.
+    pub bonus_held_units: Option<Decimal>,
 }
 
 fn opt_dec(row: &sqlx::sqlite::SqliteRow, column: &str) -> Result<Option<Decimal>, sqlx::Error> {
@@ -87,6 +107,8 @@ impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for CorporateAction {
             currency: row.try_get("currency")?,
             split_new_units: opt_dec(row, "split_new_units")?,
             split_old_units: opt_dec(row, "split_old_units")?,
+            bonus_units: opt_dec(row, "bonus_units")?,
+            bonus_held_units: opt_dec(row, "bonus_held_units")?,
         })
     }
 }
@@ -104,26 +126,40 @@ pub struct CorporateActionBody {
     pub split_new_units: Option<Decimal>,
     #[serde(default)]
     pub split_old_units: Option<Decimal>,
+    #[serde(default)]
+    pub bonus_units: Option<Decimal>,
+    #[serde(default)]
+    pub bonus_held_units: Option<Decimal>,
 }
 
 /// Each action type carries exactly its own payload (mirrors the table
 /// CHECKs, plus positivity): ReturnOfCapital needs a positive payment and a
-/// currency with no split ratio; ShareSplit needs a positive ratio with no
-/// payment. A zero/negative payment would silently *increase* cost bases; a
-/// zero/negative ratio would zero out or invert holdings.
+/// currency; ShareSplit a positive conversion ratio; BonusIssue a positive
+/// bonus ratio — each with every other type's fields absent. A zero/negative
+/// payment would silently *increase* cost bases; a zero/negative ratio would
+/// zero out or invert holdings.
 fn body_is_valid(body: &CorporateActionBody) -> bool {
+    let payment = body.amount_per_unit.is_some() || body.currency.is_some();
+    let split = body.split_new_units.is_some() || body.split_old_units.is_some();
+    let bonus = body.bonus_units.is_some() || body.bonus_held_units.is_some();
     match body.action_type {
         ActionType::ReturnOfCapital => {
             body.amount_per_unit.is_some_and(|a| a > Decimal::ZERO)
                 && body.currency.is_some()
-                && body.split_new_units.is_none()
-                && body.split_old_units.is_none()
+                && !split
+                && !bonus
         }
         ActionType::ShareSplit => {
             body.split_new_units.is_some_and(|n| n > Decimal::ZERO)
                 && body.split_old_units.is_some_and(|o| o > Decimal::ZERO)
-                && body.amount_per_unit.is_none()
-                && body.currency.is_none()
+                && !payment
+                && !bonus
+        }
+        ActionType::BonusIssue => {
+            body.bonus_units.is_some_and(|b| b > Decimal::ZERO)
+                && body.bonus_held_units.is_some_and(|h| h > Decimal::ZERO)
+                && !payment
+                && !split
         }
     }
 }
@@ -135,7 +171,7 @@ pub fn router() -> Router<SqlitePool> {
 }
 
 const COLUMNS: &str = "id, action_type, listing_id, date, amount_per_unit, currency, \
-                       split_new_units, split_old_units";
+                       split_new_units, split_old_units, bonus_units, bonus_held_units";
 
 pub async fn db_list(pool: &SqlitePool) -> Result<Vec<CorporateAction>, sqlx::Error> {
     sqlx::query_as(&format!("SELECT {COLUMNS} FROM corporate_actions ORDER BY id"))
@@ -154,16 +190,18 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
     sqlx::query(
         "INSERT INTO corporate_actions \
          (id, action_type, listing_id, date, amount_per_unit, currency, \
-          split_new_units, split_old_units) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
+          split_new_units, split_old_units, bonus_units, bonus_held_units) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT(id) DO UPDATE SET \
-             action_type     = excluded.action_type, \
-             listing_id      = excluded.listing_id, \
-             date            = excluded.date, \
-             amount_per_unit = excluded.amount_per_unit, \
-             currency        = excluded.currency, \
-             split_new_units = excluded.split_new_units, \
-             split_old_units = excluded.split_old_units",
+             action_type      = excluded.action_type, \
+             listing_id       = excluded.listing_id, \
+             date             = excluded.date, \
+             amount_per_unit  = excluded.amount_per_unit, \
+             currency         = excluded.currency, \
+             split_new_units  = excluded.split_new_units, \
+             split_old_units  = excluded.split_old_units, \
+             bonus_units      = excluded.bonus_units, \
+             bonus_held_units = excluded.bonus_held_units",
     )
     .bind(action.id)
     .bind(action.action_type)
@@ -173,6 +211,8 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
     .bind(&action.currency)
     .bind(action.split_new_units.map(|d| d.to_string()))
     .bind(action.split_old_units.map(|d| d.to_string()))
+    .bind(action.bonus_units.map(|d| d.to_string()))
+    .bind(action.bonus_held_units.map(|d| d.to_string()))
     .execute(pool)
     .await?;
     Ok(())
@@ -220,8 +260,13 @@ pub async fn db_return_of_capital_events(
     Ok(map)
 }
 
-/// A share split/consolidation (TD 2000/10), as consumed by quantity
-/// re-basing: on `date`, every `old_units` existing units become `new_units`.
+/// A quantity re-basing event, as consumed by the reports and write-time
+/// checks: on `date`, every `old_units` existing units become `new_units`.
+/// A ShareSplit (TD 2000/10) is stored as its ratio directly; a
+/// non-assessable BonusIssue (`docs/bonus-shares.md`) is its equivalent
+/// split — every `bonus_held_units` units become `bonus_held_units +
+/// bonus_units` units — because both preserve the parcel's total cost base
+/// and acquisition date while scaling the unit count.
 #[derive(Debug, Clone)]
 pub struct SplitEvent {
     pub date: NaiveDate,
@@ -230,22 +275,32 @@ pub struct SplitEvent {
 }
 
 fn split_event_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<SplitEvent, sqlx::Error> {
-    Ok(SplitEvent {
-        date: row.try_get("date")?,
-        new_units: parse_dec("split_new_units", row.try_get("split_new_units")?)?,
-        old_units: parse_dec("split_old_units", row.try_get("split_old_units")?)?,
-    })
+    let date = row.try_get("date")?;
+    match row.try_get::<ActionType, _>("action_type")? {
+        ActionType::BonusIssue => {
+            let bonus = parse_dec("bonus_units", row.try_get("bonus_units")?)?;
+            let held = parse_dec("bonus_held_units", row.try_get("bonus_held_units")?)?;
+            Ok(SplitEvent { date, new_units: held + bonus, old_units: held })
+        }
+        _ => Ok(SplitEvent {
+            date,
+            new_units: parse_dec("split_new_units", row.try_get("split_new_units")?)?,
+            old_units: parse_dec("split_old_units", row.try_get("split_old_units")?)?,
+        }),
+    }
 }
 
-/// All ShareSplit actions keyed by listing, each list sorted by conversion
-/// date (then id). The reports use these to re-base parcel quantities between
-/// unit bases.
+/// All quantity re-basing actions (ShareSplit + BonusIssue, each expressed as
+/// its equivalent split) keyed by listing, each list sorted by event date
+/// (then id). The reports use these to re-base parcel quantities between unit
+/// bases.
 pub async fn db_share_split_events(
     pool: &SqlitePool,
 ) -> Result<HashMap<i64, Vec<SplitEvent>>, sqlx::Error> {
     let rows = sqlx::query(
-        "SELECT listing_id, date, split_new_units, split_old_units FROM corporate_actions \
-         WHERE action_type = 'ShareSplit' ORDER BY listing_id, date, id",
+        "SELECT listing_id, action_type, date, split_new_units, split_old_units, \
+                bonus_units, bonus_held_units FROM corporate_actions \
+         WHERE action_type IN ('ShareSplit', 'BonusIssue') ORDER BY listing_id, date, id",
     )
     .fetch_all(pool)
     .await?;
@@ -258,9 +313,9 @@ pub async fn db_share_split_events(
     Ok(map)
 }
 
-/// The ShareSplit actions for one listing, sorted by conversion date (then
-/// id). Generic over the executor so write-time validators (sells/trades) can
-/// run it inside their transaction.
+/// The quantity re-basing actions (ShareSplit + BonusIssue) for one listing,
+/// sorted by event date (then id). Generic over the executor so write-time
+/// validators (sells/trades) can run it inside their transaction.
 pub async fn db_splits_for_listing<'e, E>(
     executor: E,
     listing_id: i64,
@@ -269,8 +324,10 @@ where
     E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
 {
     let rows = sqlx::query(
-        "SELECT date, split_new_units, split_old_units FROM corporate_actions \
-         WHERE action_type = 'ShareSplit' AND listing_id = ? ORDER BY date, id",
+        "SELECT action_type, date, split_new_units, split_old_units, \
+                bonus_units, bonus_held_units FROM corporate_actions \
+         WHERE action_type IN ('ShareSplit', 'BonusIssue') AND listing_id = ? \
+         ORDER BY date, id",
     )
     .bind(listing_id)
     .fetch_all(executor)
@@ -417,6 +474,8 @@ async fn upsert(
         currency: body.currency,
         split_new_units: body.split_new_units,
         split_old_units: body.split_old_units,
+        bonus_units: body.bonus_units,
+        bonus_held_units: body.bonus_held_units,
     };
     db_upsert(&pool, &action)
         .await
@@ -476,6 +535,8 @@ mod tests {
             currency: Some("AUD".to_string()),
             split_new_units: None,
             split_old_units: None,
+            bonus_units: None,
+            bonus_held_units: None,
         }
     }
 
@@ -489,6 +550,23 @@ mod tests {
             currency: None,
             split_new_units: Some(new.parse().unwrap()),
             split_old_units: Some(old.parse().unwrap()),
+            bonus_units: None,
+            bonus_held_units: None,
+        }
+    }
+
+    fn bonus(id: i64, listing_id: i64, date: NaiveDate, units: &str, held: &str) -> CorporateAction {
+        CorporateAction {
+            id,
+            action_type: ActionType::BonusIssue,
+            listing_id,
+            date,
+            amount_per_unit: None,
+            currency: None,
+            split_new_units: None,
+            split_old_units: None,
+            bonus_units: Some(units.parse().unwrap()),
+            bonus_held_units: Some(held.parse().unwrap()),
         }
     }
 
@@ -534,6 +612,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn db_insert_and_retrieve_bonus_issue_preserves_ratio() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BON").await;
+        // An uneven ratio (e.g. 3 bonus shares per 7 held) must round-trip exactly.
+        db_upsert(&pool, &bonus(1, 1, d(2024, 11, 30), "3", "7")).await.unwrap();
+
+        let got = db_get(&pool, 1).await.unwrap().unwrap();
+        assert_eq!(got.action_type, ActionType::BonusIssue);
+        assert_eq!(got.bonus_units, Some(Decimal::from(3)));
+        assert_eq!(got.bonus_held_units, Some(Decimal::from(7)));
+        assert_eq!(got.amount_per_unit, None);
+        assert_eq!(got.currency, None);
+        assert_eq!(got.split_new_units, None);
+        assert_eq!(got.split_old_units, None);
+    }
+
+    #[tokio::test]
     async fn db_upsert_updates_existing() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "RAP").await;
@@ -568,6 +663,18 @@ mod tests {
         bad_roc.split_new_units = Some(Decimal::from(2));
         bad_roc.split_old_units = Some(Decimal::ONE);
         assert!(db_upsert(&pool, &bad_roc).await.is_err());
+
+        // …and a BonusIssue carrying a split ratio, or a ShareSplit carrying a
+        // bonus ratio.
+        let mut bad_bonus = bonus(1, 1, d(2024, 11, 30), "1", "10");
+        bad_bonus.split_new_units = Some(Decimal::from(2));
+        bad_bonus.split_old_units = Some(Decimal::ONE);
+        assert!(db_upsert(&pool, &bad_bonus).await.is_err());
+
+        let mut split_with_bonus = split(1, 1, d(2024, 11, 30), "2", "1");
+        split_with_bonus.bonus_units = Some(Decimal::ONE);
+        split_with_bonus.bonus_held_units = Some(Decimal::from(10));
+        assert!(db_upsert(&pool, &split_with_bonus).await.is_err());
     }
 
     #[tokio::test]
@@ -612,6 +719,33 @@ mod tests {
         let for_listing = db_splits_for_listing(&pool, 1).await.unwrap();
         assert_eq!(for_listing.len(), 2);
         assert_eq!(for_listing[0].date, d(2024, 11, 30));
+    }
+
+    /// A BonusIssue is folded into the split-event stream as its equivalent
+    /// split: every `bonus_held_units` units become `bonus_held_units +
+    /// bonus_units` units (a 1-for-10 bonus issue re-bases 11-for-10).
+    #[tokio::test]
+    async fn db_split_events_include_bonus_issues_as_equivalent_splits() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BON").await;
+        db_upsert(&pool, &bonus(1, 1, d(2025, 3, 1), "1", "10")).await.unwrap();
+        // A real split on the same listing interleaves in date order…
+        db_upsert(&pool, &split(2, 1, d(2024, 11, 30), "2", "1")).await.unwrap();
+        // …and a ReturnOfCapital never appears as a re-basing event.
+        db_upsert(&pool, &roc(3, 1, d(2024, 6, 1), "0.50")).await.unwrap();
+
+        let events = db_share_split_events(&pool).await.unwrap();
+        let l1 = &events[&1];
+        assert_eq!(l1.len(), 2);
+        assert_eq!(l1[0].date, d(2024, 11, 30));
+        assert_eq!((l1[0].new_units, l1[0].old_units), (Decimal::from(2), Decimal::ONE));
+        assert_eq!(l1[1].date, d(2025, 3, 1));
+        assert_eq!((l1[1].new_units, l1[1].old_units), (Decimal::from(11), Decimal::from(10)));
+
+        let for_listing = db_splits_for_listing(&pool, 1).await.unwrap();
+        assert_eq!(for_listing.len(), 2);
+        assert_eq!(for_listing[1].new_units, Decimal::from(11));
+        assert_eq!(for_listing[1].old_units, Decimal::from(10));
     }
 
     #[test]
@@ -833,6 +967,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn api_bonus_issue_round_trip() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BON").await;
+        api_put_expecting(
+            &pool,
+            serde_json::json!({
+                "action_type": "BonusIssue",
+                "listing_id": 1,
+                "date": "2024-11-30",
+                "bonus_units": "1",
+                "bonus_held_units": "10",
+            }),
+            StatusCode::NO_CONTENT,
+        )
+        .await;
+        let got = db_get(&pool, 1).await.unwrap().unwrap();
+        assert_eq!(got.action_type, ActionType::BonusIssue);
+        assert_eq!(got.bonus_units, Some(Decimal::ONE));
+        assert_eq!(got.bonus_held_units, Some(Decimal::from(10)));
+    }
+
+    #[tokio::test]
+    async fn api_invalid_bonus_issue_payloads_return_422() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BON").await;
+        // Missing ratio, non-positive ratio, a stray payment field, a stray
+        // split ratio — and a ShareSplit carrying a bonus ratio.
+        for body in [
+            serde_json::json!({
+                "action_type": "BonusIssue", "listing_id": 1, "date": "2024-11-30",
+            }),
+            serde_json::json!({
+                "action_type": "BonusIssue", "listing_id": 1, "date": "2024-11-30",
+                "bonus_units": "0", "bonus_held_units": "10",
+            }),
+            serde_json::json!({
+                "action_type": "BonusIssue", "listing_id": 1, "date": "2024-11-30",
+                "bonus_units": "1", "bonus_held_units": "-10",
+            }),
+            serde_json::json!({
+                "action_type": "BonusIssue", "listing_id": 1, "date": "2024-11-30",
+                "bonus_units": "1", "bonus_held_units": "10",
+                "amount_per_unit": "0.50", "currency": "AUD",
+            }),
+            serde_json::json!({
+                "action_type": "BonusIssue", "listing_id": 1, "date": "2024-11-30",
+                "bonus_units": "1", "bonus_held_units": "10",
+                "split_new_units": "2", "split_old_units": "1",
+            }),
+            serde_json::json!({
+                "action_type": "ShareSplit", "listing_id": 1, "date": "2024-11-30",
+                "split_new_units": "2", "split_old_units": "1",
+                "bonus_units": "1", "bonus_held_units": "10",
+            }),
+        ] {
+            api_put_expecting(&pool, body, StatusCode::UNPROCESSABLE_ENTITY).await;
+        }
+    }
+
+    #[tokio::test]
     async fn api_non_positive_amount_returns_422() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "RAP").await;
@@ -928,7 +1122,7 @@ mod tests {
         api_put_expecting(
             &pool,
             serde_json::json!({
-                "action_type": "BonusShares",
+                "action_type": "RightsIssue",
                 "listing_id": 1,
                 "date": "2024-11-30",
                 "amount_per_unit": "0.50",

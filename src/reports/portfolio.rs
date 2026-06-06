@@ -483,6 +483,8 @@ mod tests {
                 currency: Some("AUD".to_string()),
                 split_new_units: None,
                 split_old_units: None,
+                bonus_units: None,
+                bonus_held_units: None,
             },
         )
         .await
@@ -508,6 +510,8 @@ mod tests {
                 currency: None,
                 split_new_units: Some(new.parse().unwrap()),
                 split_old_units: Some(old.parse().unwrap()),
+                bonus_units: None,
+                bonus_held_units: None,
             },
         )
         .await
@@ -533,6 +537,46 @@ mod tests {
         assert_eq!(h.total_cost_base, "1010.945".parse::<Decimal>().unwrap());
         // per-unit cost base halves: 1010.945 / 200
         assert_eq!(h.avg_cost_base_per_unit, "5.054725".parse::<Decimal>().unwrap());
+    }
+
+    /// A non-assessable bonus issue (`docs/bonus-shares.md`) adds the bonus
+    /// units and apportions the unchanged cost base over original + bonus
+    /// shares — the same re-base as its equivalent split.
+    #[tokio::test]
+    async fn db_bonus_issue_adds_units_and_apportions_cost_base() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BON").await;
+        // Buy 100 @ $10 on 2024-01-01 → cost base 1010.945 (incl. brokerage).
+        insert_buy(&pool, 1, 1, Decimal::from(100), Decimal::from(10)).await;
+        // 1-for-10 bonus issue after acquisition: 100 held → 10 bonus units.
+        corporate_action::db_upsert(
+            &pool,
+            &corporate_action::CorporateAction {
+                id: 1,
+                action_type: corporate_action::ActionType::BonusIssue,
+                listing_id: 1,
+                date: NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(),
+                amount_per_unit: None,
+                currency: None,
+                split_new_units: None,
+                split_old_units: None,
+                bonus_units: Some(Decimal::ONE),
+                bonus_held_units: Some(Decimal::from(10)),
+            },
+        )
+        .await
+        .unwrap();
+
+        let holdings = db_holdings(&pool).await.unwrap();
+        assert_eq!(holdings.len(), 1);
+        let h = &holdings[0];
+        assert_eq!(h.quantity, Decimal::from(110));
+        assert_eq!(h.total_cost_base, "1010.945".parse::<Decimal>().unwrap());
+        // per-unit cost base apportioned over 110 units: 1010.945 / 110
+        assert_eq!(
+            h.avg_cost_base_per_unit,
+            "1010.945".parse::<Decimal>().unwrap() / Decimal::from(110)
+        );
     }
 
     /// A consolidation is the same action with new < old (TD 2000/10 Example 2).

@@ -1041,6 +1041,8 @@ mod tests {
                 currency: Some("AUD".to_string()),
                 split_new_units: None,
                 split_old_units: None,
+                bonus_units: None,
+                bonus_held_units: None,
             },
         )
         .await
@@ -1066,6 +1068,8 @@ mod tests {
                 currency: None,
                 split_new_units: Some(new.parse().unwrap()),
                 split_old_units: Some(old.parse().unwrap()),
+                bonus_units: None,
+                bonus_held_units: None,
             },
         )
         .await

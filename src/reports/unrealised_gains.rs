@@ -477,6 +477,8 @@ mod tests {
                 currency: Some("AUD".to_string()),
                 split_new_units: None,
                 split_old_units: None,
+                bonus_units: None,
+                bonus_held_units: None,
             },
         )
         .await
@@ -512,6 +514,8 @@ mod tests {
                 currency: None,
                 split_new_units: Some(Decimal::from(2)),
                 split_old_units: Some(Decimal::ONE),
+                bonus_units: None,
+                bonus_held_units: None,
             },
         )
         .await

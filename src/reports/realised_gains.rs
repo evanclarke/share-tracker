@@ -738,6 +738,8 @@ mod tests {
                 currency: Some("AUD".to_string()),
                 split_new_units: None,
                 split_old_units: None,
+                bonus_units: None,
+                bonus_held_units: None,
             },
         )
         .await
@@ -765,6 +767,8 @@ mod tests {
                 currency: None,
                 split_new_units: Some(new.parse().unwrap()),
                 split_old_units: Some(old.parse().unwrap()),
+                bonus_units: None,
+                bonus_held_units: None,
             },
         )
         .await
@@ -813,6 +817,52 @@ mod tests {
         assert_eq!(result[0].cost_base, Decimal::from(400));
         // proceeds 80 × 6 = 480 → gain 80
         assert_eq!(result[0].capital_gain_loss, Decimal::from(80));
+    }
+
+    /// A non-assessable bonus issue (`docs/bonus-shares.md`) apportions the
+    /// parcel's cost base over original + bonus shares, and the bonus shares
+    /// keep the original acquisition date — so a partial post-bonus sale
+    /// pro-rates the unchanged cost base and the 12-month discount clock runs
+    /// from the original buy, not the issue date.
+    #[tokio::test]
+    async fn db_post_bonus_issue_sale_apportions_cost_base_and_keeps_discount() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BON").await;
+        insert_buy(&pool, 1, 1, NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            Decimal::from(100), Decimal::from(10)).await;
+        // 1-for-10 bonus issue 16 months later: 100 → 110 units.
+        corporate_action::db_upsert(
+            &pool,
+            &corporate_action::CorporateAction {
+                id: 1,
+                action_type: corporate_action::ActionType::BonusIssue,
+                listing_id: 1,
+                date: NaiveDate::from_ymd_opt(2025, 5, 1).unwrap(),
+                amount_per_unit: None,
+                currency: None,
+                split_new_units: None,
+                split_old_units: None,
+                bonus_units: Some(Decimal::ONE),
+                bonus_held_units: Some(Decimal::from(10)),
+            },
+        )
+        .await
+        .unwrap();
+        // Sell 55 of the 110 post-bonus units (= 50 as-acquired) two months
+        // after the issue, 18 months after the original buy.
+        insert_sell(&pool, 2, 1, NaiveDate::from_ymd_opt(2025, 7, 1).unwrap(),
+            Decimal::from(55), Decimal::from(12)).await;
+        allocate(&pool, 1, 2, 1, Decimal::from(55)).await;
+
+        let result = db_realised_gains(&pool).await.unwrap();
+        assert_eq!(result.len(), 1);
+        // cost base = 1000 × (55 post-bonus = 50 as-acquired) / 100 = 500
+        assert_eq!(result[0].cost_base, Decimal::from(500));
+        // proceeds 55 × 12 = 660 → gain 160, discount-eligible from the
+        // original 2024-01-01 acquisition (not the 2025 issue date).
+        assert_eq!(result[0].capital_gain_loss, Decimal::from(160));
+        assert_eq!(result[0].discount_eligible_gain, Decimal::from(160));
+        assert_eq!(result[0].non_discountable_gain, Decimal::ZERO);
     }
 
     /// The converted shares keep the original acquisition date (TD 2000/10), so

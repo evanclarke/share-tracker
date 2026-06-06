@@ -21,6 +21,10 @@
 //!   partner in partnership" — needs partnership/trust taxpayer entities,
 //!   which are not modelled (TODO "Taxpayer entity type and CGT discount
 //!   rate", NEEDS CLARIFICATION).
+//! - `docs/bonus-shares.md` Examples 36–37 (Klaus, Mark) — both turn on
+//!   partly paid bonus shares and call payments (and pre-CGT original
+//!   shares), which are not modelled; Example 35's post-CGT parcel is
+//!   reproduced below.
 //! - `docs/amma-statement-guidance-notes.md` running example ("In our example,
 //!   this is $155") — the underlying Part C component table is not included in
 //!   the mirrored copy, so the example is not reproducible from the doc alone.
@@ -699,6 +703,67 @@ async fn td_2000_10_example_2_john_share_consolidation() {
         "total cost base unchanged: 1,500 × $2.00"
     );
 
+    let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net-capital-gain").await;
+    assert!(years.iter().all(|y| y.net_capital_gain == Decimal::ZERO));
+}
+
+/// `docs/bonus-shares.md` — "Example 35: Fully paid bonus shares".
+///
+/// > Chris bought 100 shares in MAC Ltd for $1 each on 1 June 1985. He bought
+/// > 300 more shares for $1 each on 27 May 1986. On 15 November 1986, MAC Ltd
+/// > issued Chris with 400 bonus shares from its capital profits reserve,
+/// > fully paid to $1. […] no part of the value of the bonus shares was
+/// > assessed as a dividend.
+/// >
+/// > The acquisition date of the other 300 bonus shares is 27 May 1986. Their
+/// > cost base is worked out by spreading the cost of the 300 shares Chris
+/// > bought on that date over both those original shares and the remaining
+/// > 300 bonus shares. As the 300 original shares cost $300, the cost base of
+/// > each share will now be 50 cents.
+///
+/// The 400 bonus shares on 400 held are a 1-for-1 issue applied per parcel.
+/// The ATO treats the first parcel (1 June 1985) as pre-CGT and exempt; the
+/// pre-CGT exemption is not modelled here, so this test asserts only the
+/// figures the ATO states for the post-CGT parcel — 600 shares, unchanged
+/// $300 cost base (50 cents each), acquisition date still 27 May 1986 — plus
+/// that the issue itself is no CGT event.
+#[tokio::test]
+async fn bonus_shares_example_35_chris_fully_paid_bonus_shares() {
+    let pool = test_pool().await;
+    put_listing(&pool, 1, "MAC").await;
+    put_buy(&pool, 1, 1, "1985-06-01", "100", "1", "0").await;
+    put_buy(&pool, 2, 1, "1986-05-27", "300", "1", "0").await;
+    // The 1-for-1 bonus issue from the capital profits reserve.
+    api_put(
+        &pool,
+        "/corporate_actions/1",
+        json!({
+            "action_type": "BonusIssue",
+            "listing_id": 1,
+            "date": "1986-11-15",
+            "bonus_units": "1",
+            "bonus_held_units": "1",
+        }),
+    )
+    .await;
+
+    let parcels: Vec<crate::reports::open_parcels::OpenParcel> =
+        api_get(&pool, "/portfolio/open-parcels").await;
+    assert_eq!(parcels.len(), 2);
+    // 100 → 200 shares, acquisition date preserved (the ATO's pre-CGT
+    // exemption for this parcel is out of scope).
+    assert_eq!(parcels[0].remaining_quantity, dec("200"));
+    assert_eq!(parcels[0].acquisition_date.to_string(), "1985-06-01");
+    // 300 → 600 shares at 50 cents: the $300 cost base is unchanged.
+    assert_eq!(parcels[1].remaining_quantity, dec("600"));
+    assert_eq!(parcels[1].acquisition_date.to_string(), "1986-05-27");
+    assert_eq!(
+        parcels[1].remaining_cost_base,
+        dec("300"),
+        "total cost base unchanged: 600 × $0.50"
+    );
+
+    // The bonus issue itself is no CGT event.
     let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net-capital-gain").await;
     assert!(years.iter().all(|y| y.net_capital_gain == Decimal::ZERO));
 }
