@@ -155,15 +155,27 @@ pub async fn db_upsert(pool: &SqlitePool, trade: &Trade) -> Result<(), UpsertErr
 
     // Sum is computed in Decimal (the column is TEXT; SQL SUM would coerce to
     // float). For a new id both dependant sets are empty, so the checks pass.
-    let allocated: Vec<String> = sqlx::query_scalar(
-        "SELECT quantity_allocated FROM parcel_allocations WHERE purchase_trade_id = ?",
+    // Each allocation is in its own sale date's unit basis while the trade's
+    // quantity is as-acquired, so allocations are re-based back across any
+    // share splits/consolidations (TD 2000/10) before comparing.
+    let splits =
+        crate::entities::corporate_action::db_splits_for_listing(&mut *tx, trade.listing_id)
+            .await?;
+    let allocated = sqlx::query(
+        "SELECT pa.quantity_allocated, s.date AS sale_date \
+         FROM parcel_allocations pa JOIN trades s ON s.id = pa.sale_trade_id \
+         WHERE pa.purchase_trade_id = ?",
     )
     .bind(trade.id)
     .fetch_all(&mut *tx)
     .await?;
     let mut allocated_total = Decimal::ZERO;
-    for q in allocated {
-        allocated_total += parse_dec("quantity_allocated", q)?;
+    for row in &allocated {
+        let qty = parse_dec("quantity_allocated", row.try_get("quantity_allocated")?)?;
+        let sale_date: chrono::NaiveDate = row.try_get("sale_date")?;
+        allocated_total += crate::entities::corporate_action::as_acquired_quantity(
+            qty, &splits, trade.date, sale_date,
+        );
     }
     if trade.quantity < allocated_total {
         return Err(UpsertError::QuantityBelowAllocated);
@@ -749,6 +761,49 @@ mod tests {
         assert_eq!(db_get(&pool, 1).await.unwrap().unwrap().quantity, Decimal::from(10));
 
         // …but shrinking exactly to the allocated quantity is fine.
+        let mut exact = buy_trade();
+        exact.quantity = Decimal::from(5);
+        db_upsert(&pool, &exact).await.unwrap();
+        assert_eq!(db_get(&pool, 1).await.unwrap().unwrap().quantity, Decimal::from(5));
+    }
+
+    /// With a 2-for-1 split (TD 2000/10) between the buy and the sale, the
+    /// sale's allocation is in post-split units: a 10-unit parcel that had 10
+    /// post-split units (= 5 as-acquired) sold out of it can still shrink to
+    /// 5, but not 4.
+    #[tokio::test]
+    async fn db_shrink_check_rebases_post_split_allocations() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        db_upsert(&pool, &buy_trade()).await.unwrap(); // qty 10, 2024-01-15
+        crate::entities::corporate_action::db_upsert(
+            &pool,
+            &crate::entities::corporate_action::CorporateAction {
+                id: 1,
+                action_type: crate::entities::corporate_action::ActionType::ShareSplit,
+                listing_id: 1,
+                date: NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(),
+                amount_per_unit: None,
+                currency: None,
+                split_new_units: Some(Decimal::from(2)),
+                split_old_units: Some(Decimal::ONE),
+            },
+        )
+        .await
+        .unwrap();
+        // Sell 10 post-split units (= 5 as-acquired) on 2024-06-01.
+        insert_sell_consuming(&pool, 2, 1, Decimal::from(10)).await;
+
+        // 4 < the 5 as-acquired units allocated out → refused…
+        let mut shrunk = buy_trade();
+        shrunk.quantity = Decimal::from(4);
+        let err = db_upsert(&pool, &shrunk).await.unwrap_err();
+        assert!(
+            matches!(err, UpsertError::QuantityBelowAllocated),
+            "expected QuantityBelowAllocated, got: {err:?}"
+        );
+
+        // …but exactly the 5 as-acquired units is fine.
         let mut exact = buy_trade();
         exact.quantity = Decimal::from(5);
         db_upsert(&pool, &exact).await.unwrap();

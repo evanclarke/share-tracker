@@ -20,7 +20,7 @@ use axum::{
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::Deserialize;
-use sqlx::SqlitePool;
+use sqlx::{Row, SqlitePool};
 
 #[derive(Debug, Deserialize)]
 pub struct AllocationInput {
@@ -184,18 +184,25 @@ pub async fn db_upsert_sell(pool: &SqlitePool, id: i64, body: &SellBody) -> Resu
 
     for alloc in &body.allocations {
         // Purchase parcel must exist and be a Buy/DRP.
-        let purchase_type: Option<TradeType> =
-            sqlx::query_scalar("SELECT trade_type FROM trades WHERE id = ?")
-                .bind(alloc.purchase_trade_id)
-                .fetch_optional(&mut *tx)
-                .await?;
-        match purchase_type {
-            None => return Err(SellError::PurchaseParcelMissing),
-            Some(t) if !matches!(t, TradeType::Buy | TradeType::DRP) => {
-                return Err(SellError::PurchaseTradeNotBuyOrDrp);
-            }
-            Some(_) => {}
+        let purchase_row = sqlx::query(
+            "SELECT trade_type, date, listing_id, quantity FROM trades WHERE id = ?",
+        )
+        .bind(alloc.purchase_trade_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(purchase_row) = purchase_row else {
+            return Err(SellError::PurchaseParcelMissing);
+        };
+        let purchase_type: TradeType = purchase_row.try_get("trade_type")?;
+        if !matches!(purchase_type, TradeType::Buy | TradeType::DRP) {
+            return Err(SellError::PurchaseTradeNotBuyOrDrp);
         }
+        let purchase_date: NaiveDate = purchase_row.try_get("date")?;
+        let purchase_listing: i64 = purchase_row.try_get("listing_id")?;
+        let purchase_qty: Decimal = purchase_row
+            .try_get::<String, _>("quantity")?
+            .parse()
+            .map_err(|_| SellError::Db(sqlx::Error::Decode("invalid purchase quantity".into())))?;
 
         sqlx::query(
             "INSERT INTO parcel_allocations (sale_trade_id, purchase_trade_id, quantity_allocated) \
@@ -208,25 +215,38 @@ pub async fn db_upsert_sell(pool: &SqlitePool, id: i64, body: &SellBody) -> Resu
         .await?;
 
         // After inserting, the total allocated against this parcel (across all
-        // sales) must not exceed the parcel's quantity.
-        let purchase_qty: String = sqlx::query_scalar("SELECT quantity FROM trades WHERE id = ?")
-            .bind(alloc.purchase_trade_id)
-            .fetch_one(&mut *tx)
-            .await?;
-        let purchase_qty: Decimal = purchase_qty
-            .parse()
-            .map_err(|_| SellError::Db(sqlx::Error::Decode("invalid purchase quantity".into())))?;
-
-        let rows: Vec<String> = sqlx::query_scalar(
-            "SELECT quantity_allocated FROM parcel_allocations WHERE purchase_trade_id = ?",
+        // sales) must not exceed the parcel's quantity. The parcel's quantity
+        // is in as-acquired units while each allocation is in its own sale
+        // date's units, so allocations are re-based back across any share
+        // splits/consolidations (TD 2000/10) before comparing — e.g. after a
+        // 2-for-1 split a 100-share parcel covers a 200-share sale.
+        let splits =
+            crate::entities::corporate_action::db_splits_for_listing(&mut *tx, purchase_listing)
+                .await?;
+        let rows = sqlx::query(
+            "SELECT pa.quantity_allocated, s.date AS sale_date \
+             FROM parcel_allocations pa JOIN trades s ON s.id = pa.sale_trade_id \
+             WHERE pa.purchase_trade_id = ?",
         )
         .bind(alloc.purchase_trade_id)
         .fetch_all(&mut *tx)
         .await?;
-        let total: Decimal = rows
-            .into_iter()
-            .filter_map(|s| s.parse::<Decimal>().ok())
-            .sum();
+        let mut total = Decimal::ZERO;
+        for row in &rows {
+            let qty: Decimal = row
+                .try_get::<String, _>("quantity_allocated")?
+                .parse()
+                .map_err(|_| {
+                    SellError::Db(sqlx::Error::Decode("invalid allocated quantity".into()))
+                })?;
+            let sale_date: NaiveDate = row.try_get("sale_date")?;
+            total += crate::entities::corporate_action::as_acquired_quantity(
+                qty,
+                &splits,
+                purchase_date,
+                sale_date,
+            );
+        }
         if total > purchase_qty {
             return Err(SellError::PurchaseQuantityExceeded);
         }
@@ -443,6 +463,54 @@ mod tests {
         );
         let err = db_upsert_sell(&pool, 4, &body).await.unwrap_err();
         assert!(matches!(err, SellError::PurchaseTradeNotBuyOrDrp));
+    }
+
+    async fn apply_split(pool: &SqlitePool, id: i64, listing_id: i64, date: NaiveDate) {
+        use crate::entities::corporate_action;
+        corporate_action::db_upsert(
+            pool,
+            &corporate_action::CorporateAction {
+                id,
+                action_type: corporate_action::ActionType::ShareSplit,
+                listing_id,
+                date,
+                amount_per_unit: None,
+                currency: None,
+                split_new_units: Some(Decimal::from(2)),
+                split_old_units: Some(Decimal::ONE),
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    /// After a 2-for-1 split (TD 2000/10) a 100-share parcel covers a 200-share
+    /// post-split sale: the allocation is in sale-date units and is re-based
+    /// back to as-acquired units for the capacity check.
+    #[tokio::test]
+    async fn db_post_split_sell_allocates_against_pre_split_parcel() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        insert_buy(&pool, 1, 1, Decimal::from(100)).await; // 2024-01-01
+        apply_split(&pool, 1, 1, NaiveDate::from_ymd_opt(2024, 3, 1).unwrap()).await;
+
+        // One more post-split unit than the parcel converts to is rejected
+        // (and rolled back)…
+        let body = sell_body(
+            Decimal::from(201),
+            vec![AllocationInput { purchase_trade_id: 1, quantity_allocated: Decimal::from(201) }],
+        );
+        let err = db_upsert_sell(&pool, 2, &body).await.unwrap_err();
+        assert!(matches!(err, SellError::PurchaseQuantityExceeded));
+        assert!(!trade_exists(&pool, 2).await);
+
+        // …while selling exactly the 200 post-split units succeeds.
+        let body = sell_body(
+            Decimal::from(200),
+            vec![AllocationInput { purchase_trade_id: 1, quantity_allocated: Decimal::from(200) }],
+        );
+        db_upsert_sell(&pool, 2, &body).await.unwrap();
+        assert!(trade_exists(&pool, 2).await);
     }
 
     #[tokio::test]

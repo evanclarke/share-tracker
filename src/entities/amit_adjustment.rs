@@ -15,6 +15,11 @@ pub struct AmitAdjustment {
     pub id: i64,
     pub amma_statement_id: i64,
     pub trade_id: i64,
+    /// Units of the parcel covered by the statement's per-unit adjustment,
+    /// expressed in the parcel's *as-acquired* units (the same basis as
+    /// `trade.quantity`, which caps it). If a share split/consolidation
+    /// intervened before the statement, enter as-acquired units and scale the
+    /// statement's per-unit figure accordingly.
     pub quantity: Decimal,
 }
 

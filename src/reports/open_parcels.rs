@@ -15,9 +15,14 @@ pub struct OpenParcel {
     pub trade_id: i64,
     pub listing_id: i64,
     pub ticker: String,
+    /// Original acquisition date — preserved across share splits/consolidations
+    /// (TD 2000/10), so the 12-month discount clock keeps running from here.
     pub acquisition_date: NaiveDate,
+    /// Units as originally transacted (pre-split basis where a split followed).
     pub original_quantity: Decimal,
-    /// Units not yet allocated to a Sell.
+    /// Units not yet allocated to a Sell, in *current* units — after every
+    /// recorded share split/consolidation — so it reconciles with a broker
+    /// statement.
     pub remaining_quantity: Decimal,
     /// Whole-parcel cost base as acquired (price × qty + brokerage + GST), AUD.
     pub original_cost_base: Decimal,
@@ -56,21 +61,29 @@ pub async fn db_open_parcels(pool: &SqlitePool) -> Result<Vec<OpenParcel>, sqlx:
         return Ok(vec![]);
     }
 
-    let alloc_rows =
-        sqlx::query("SELECT purchase_trade_id, quantity_allocated FROM parcel_allocations")
-            .fetch_all(pool)
-            .await?;
+    // units sold per purchase parcel, with each sale's date so the allocated
+    // quantity (in sale-date units) can be re-based across splits
+    let alloc_rows = sqlx::query(
+        "SELECT pa.purchase_trade_id, pa.quantity_allocated, s.date AS sale_date \
+         FROM parcel_allocations pa JOIN trades s ON s.id = pa.sale_trade_id",
+    )
+    .fetch_all(pool)
+    .await?;
 
-    let mut qty_sold: HashMap<i64, Decimal> = HashMap::new();
+    let mut qty_sold: HashMap<i64, Vec<(NaiveDate, Decimal)>> = HashMap::new();
     for row in &alloc_rows {
         let tid: i64 = row.try_get("purchase_trade_id")?;
-        *qty_sold.entry(tid).or_insert(Decimal::ZERO) +=
-            parse_dec("quantity_allocated", row.try_get("quantity_allocated")?)?;
+        qty_sold.entry(tid).or_default().push((
+            row.try_get("sale_date")?,
+            parse_dec("quantity_allocated", row.try_get("quantity_allocated")?)?,
+        ));
     }
 
     let cba_reduction = crate::entities::amit_adjustment::db_cost_base_reductions(pool).await?;
     let roc_events =
         crate::entities::corporate_action::db_return_of_capital_events(pool).await?;
+    // share splits/consolidations per listing (quantity re-basing)
+    let split_events = crate::entities::corporate_action::db_share_split_events(pool).await?;
 
     let mut parcels = Vec::new();
     for row in &trade_rows {
@@ -85,7 +98,14 @@ pub async fn db_open_parcels(pool: &SqlitePool) -> Result<Vec<OpenParcel>, sqlx:
         let currency: String = row.try_get("currency")?;
         let fx_rate = parse_dec("fx_rate", row.try_get("fx_rate")?)?;
 
-        let sold = *qty_sold.get(&trade_id).unwrap_or(&Decimal::ZERO);
+        let splits = split_events.get(&listing_id).map_or(&[][..], |v| v);
+        // Internal cost-base arithmetic stays in the parcel's as-acquired units;
+        // each sale's allocated quantity is re-based back across any splits.
+        let sold = crate::entities::corporate_action::sold_in_acquired_units(
+            qty_sold.get(&trade_id).map_or(&[][..], |v| v),
+            splits,
+            trade_date,
+        );
         let remaining = qty - sold;
         if remaining <= Decimal::ZERO {
             continue;
@@ -102,6 +122,7 @@ pub async fn db_open_parcels(pool: &SqlitePool) -> Result<Vec<OpenParcel>, sqlx:
         // capital gain in the net-capital-gain report).
         let roc_per_unit = crate::entities::corporate_action::per_unit_reduction(
             roc_events.get(&listing_id).map_or(&[][..], |v| v),
+            splits,
             &currency,
             trade_date,
             None,
@@ -126,13 +147,20 @@ pub async fn db_open_parcels(pool: &SqlitePool) -> Result<Vec<OpenParcel>, sqlx:
             crate::infra::fx::to_aud(pool, remaining_cost, &currency, trade_date, Some(fx_rate))
                 .await?;
 
+        // The remaining quantity is reported in current units — after every
+        // recorded split/consolidation — so it reconciles with a broker
+        // statement; `original_quantity` stays as transacted.
+        let remaining_now = crate::entities::corporate_action::split_adjusted_quantity(
+            remaining, splits, trade_date, None,
+        );
+
         parcels.push(OpenParcel {
             trade_id,
             listing_id,
             ticker,
             acquisition_date: trade_date,
             original_quantity: qty,
-            remaining_quantity: remaining,
+            remaining_quantity: remaining_now,
             original_cost_base,
             amit_cost_base_reduction,
             return_of_capital_reduction,
@@ -489,12 +517,83 @@ mod tests {
                 action_type: corporate_action::ActionType::ReturnOfCapital,
                 listing_id,
                 date,
-                amount_per_unit: amount.parse().unwrap(),
-                currency: "AUD".to_string(),
+                amount_per_unit: Some(amount.parse().unwrap()),
+                currency: Some("AUD".to_string()),
+                split_new_units: None,
+                split_old_units: None,
             },
         )
         .await
         .unwrap();
+    }
+
+    async fn apply_split(
+        pool: &SqlitePool,
+        id: i64,
+        listing_id: i64,
+        date: NaiveDate,
+        new: &str,
+        old: &str,
+    ) {
+        corporate_action::db_upsert(
+            pool,
+            &corporate_action::CorporateAction {
+                id,
+                action_type: corporate_action::ActionType::ShareSplit,
+                listing_id,
+                date,
+                amount_per_unit: None,
+                currency: None,
+                split_new_units: Some(new.parse().unwrap()),
+                split_old_units: Some(old.parse().unwrap()),
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    /// TD 2000/10 (`docs/share-splits-and-consolidations.md`): the split parcel
+    /// keeps its acquisition date and total cost base; the remaining quantity
+    /// is reported in post-split units while original_quantity stays as
+    /// transacted.
+    #[tokio::test]
+    async fn db_share_split_rebases_remaining_quantity_and_preserves_cost_base() {
+        let pool = test_pool().await;
+        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        insert_listing(&pool, 1, "SPL").await;
+        insert_buy(&pool, 1, 1, buy_date, Decimal::from(100), Decimal::from(10)).await;
+        apply_split(&pool, 1, 1, NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(), "2", "1").await;
+        // Sell 80 post-split units (= 40 as-acquired) after the split.
+        insert_sell(&pool, 2, 1, Decimal::from(80)).await; // sale dated 2025-06-01
+        allocate(&pool, 1, 2, 1, Decimal::from(80)).await;
+
+        let parcels = db_open_parcels(&pool).await.unwrap();
+        assert_eq!(parcels.len(), 1);
+        let p = &parcels[0];
+        assert_eq!(p.acquisition_date, buy_date);
+        assert_eq!(p.original_quantity, Decimal::from(100));
+        // 200 post-split − 80 sold = 120 in current units.
+        assert_eq!(p.remaining_quantity, Decimal::from(120));
+        assert_eq!(p.original_cost_base, "1010.945".parse::<Decimal>().unwrap());
+        // 60 of the 100 as-acquired units remain: 1010.945 × 60/100.
+        assert_eq!(p.remaining_cost_base, "606.567".parse::<Decimal>().unwrap());
+    }
+
+    /// A consolidation that doesn't divide the holding evenly keeps the exact
+    /// fractional quantity (rounding/cash-in-lieu arrangements aren't modelled).
+    #[tokio::test]
+    async fn db_consolidation_rebases_remaining_quantity() {
+        let pool = test_pool().await;
+        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        insert_listing(&pool, 1, "CON").await;
+        insert_buy(&pool, 1, 1, buy_date, Decimal::from(150), Decimal::from(10)).await;
+        // 1-for-10 consolidation → 15 units.
+        apply_split(&pool, 1, 1, NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(), "1", "10").await;
+
+        let parcels = db_open_parcels(&pool).await.unwrap();
+        assert_eq!(parcels[0].remaining_quantity, Decimal::from(15));
+        // Total cost base untouched: 10 × 150 + 9.95 + 0.995.
+        assert_eq!(parcels[0].remaining_cost_base, "1510.945".parse::<Decimal>().unwrap());
     }
 
     /// A return of capital (CGT event G1) is reported per parcel and netted off

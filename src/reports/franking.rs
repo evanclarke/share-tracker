@@ -78,6 +78,14 @@ pub async fn holding_period_test(
     .fetch_all(pool)
     .await?;
 
+    // Each trade's quantity is in its own day's unit basis; a share
+    // split/consolidation (TD 2000/10) between trades would make them
+    // incomparable, so every quantity is normalised to the basis at the end of
+    // the qualification window. The entitled/disqualified ratio (all the
+    // caller uses) is basis-invariant.
+    let splits =
+        crate::entities::corporate_action::db_splits_for_listing(pool, listing_id).await?;
+
     struct Parcel {
         acquired: NaiveDate,
         qty: Decimal,
@@ -92,6 +100,12 @@ pub async fn holding_period_test(
         let trade_type: String = row.try_get("trade_type")?;
         let date: NaiveDate = row.try_get("date")?;
         let qty = parse_dec("quantity", row.try_get("quantity")?)?;
+        let qty = crate::entities::corporate_action::split_adjusted_quantity(
+            qty,
+            &splits,
+            date,
+            Some(window_end),
+        );
 
         // Everything still held immediately before the first trade on or after
         // the ex-date is entitled to the dividend (acquiring on or after the
@@ -245,6 +259,64 @@ mod tests {
         insert_trade(&pool, 4, 2, trade::TradeType::Sell, d("2025-04-15"), 100).await;
         let t = holding_period_test(&pool, 2, d("2025-03-02")).await.unwrap();
         assert_eq!(t.disqualified_units, Decimal::from(100));
+    }
+
+    /// A share split between the buy and the ex-date (TD 2000/10) re-bases the
+    /// pre-split parcel so post-split sales compare in the same units; the
+    /// original acquisition date keeps counting at-risk days.
+    #[tokio::test]
+    async fn db_split_between_buy_and_ex_date_compares_in_one_basis() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, false).await;
+        // 100 bought long before the ex-date; a 2-for-1 split, then 200
+        // post-split units sold 20 days after the ex-date. The whole holding
+        // is entitled (200 post-split) and fully qualified — the at-risk clock
+        // runs from the 2024 acquisition, not the split.
+        insert_trade(&pool, 1, 1, trade::TradeType::Buy, d("2024-03-14"), 100).await;
+        crate::entities::corporate_action::db_upsert(
+            &pool,
+            &crate::entities::corporate_action::CorporateAction {
+                id: 1,
+                action_type: crate::entities::corporate_action::ActionType::ShareSplit,
+                listing_id: 1,
+                date: d("2025-01-10"),
+                amount_per_unit: None,
+                currency: None,
+                split_new_units: Some(Decimal::from(2)),
+                split_old_units: Some(Decimal::ONE),
+            },
+        )
+        .await
+        .unwrap();
+        insert_trade(&pool, 2, 1, trade::TradeType::Sell, d("2025-04-03"), 200).await;
+        let t = holding_period_test(&pool, 1, d("2025-03-14")).await.unwrap();
+        assert_eq!(t.entitled_units, Decimal::from(200));
+        // Held since 2024 → well over 45 at-risk days: nothing disqualified.
+        assert_eq!(t.disqualified_units, Decimal::ZERO);
+
+        // The same sale against a parcel bought 10 days before the ex-date
+        // (post-split basis) is disqualified — proving the basis lines up.
+        insert_listing(&pool, 2, false).await;
+        insert_trade(&pool, 3, 2, trade::TradeType::Buy, d("2025-03-04"), 100).await;
+        crate::entities::corporate_action::db_upsert(
+            &pool,
+            &crate::entities::corporate_action::CorporateAction {
+                id: 2,
+                action_type: crate::entities::corporate_action::ActionType::ShareSplit,
+                listing_id: 2,
+                date: d("2025-03-10"),
+                amount_per_unit: None,
+                currency: None,
+                split_new_units: Some(Decimal::from(2)),
+                split_old_units: Some(Decimal::ONE),
+            },
+        )
+        .await
+        .unwrap();
+        insert_trade(&pool, 4, 2, trade::TradeType::Sell, d("2025-04-03"), 200).await;
+        let t = holding_period_test(&pool, 2, d("2025-03-14")).await.unwrap();
+        assert_eq!(t.entitled_units, Decimal::from(200));
+        assert_eq!(t.disqualified_units, Decimal::from(200));
     }
 
     #[tokio::test]

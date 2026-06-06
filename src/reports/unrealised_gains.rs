@@ -51,21 +51,29 @@ pub async fn db_unrealised_gains(
         return Ok(vec![]);
     }
 
-    let alloc_rows =
-        sqlx::query("SELECT purchase_trade_id, quantity_allocated FROM parcel_allocations")
-            .fetch_all(pool)
-            .await?;
+    // units sold per purchase parcel, with each sale's date so the allocated
+    // quantity (in sale-date units) can be re-based across splits
+    let alloc_rows = sqlx::query(
+        "SELECT pa.purchase_trade_id, pa.quantity_allocated, s.date AS sale_date \
+         FROM parcel_allocations pa JOIN trades s ON s.id = pa.sale_trade_id",
+    )
+    .fetch_all(pool)
+    .await?;
 
-    let mut qty_sold: HashMap<i64, Decimal> = HashMap::new();
+    let mut qty_sold: HashMap<i64, Vec<(NaiveDate, Decimal)>> = HashMap::new();
     for row in &alloc_rows {
         let tid: i64 = row.try_get("purchase_trade_id")?;
-        *qty_sold.entry(tid).or_insert(Decimal::ZERO) +=
-            parse_dec("quantity_allocated", row.try_get("quantity_allocated")?)?;
+        qty_sold.entry(tid).or_default().push((
+            row.try_get("sale_date")?,
+            parse_dec("quantity_allocated", row.try_get("quantity_allocated")?)?,
+        ));
     }
 
     let cba_reduction = crate::entities::amit_adjustment::db_cost_base_reductions(pool).await?;
     let roc_events =
         crate::entities::corporate_action::db_return_of_capital_events(pool).await?;
+    // share splits/consolidations per listing (quantity re-basing)
+    let split_events = crate::entities::corporate_action::db_share_split_events(pool).await?;
 
     let mut listing_qty: HashMap<i64, Decimal> = HashMap::new();
     let mut listing_cost_base: HashMap<i64, Decimal> = HashMap::new();
@@ -82,7 +90,14 @@ pub async fn db_unrealised_gains(
         let currency: String = row.try_get("currency")?;
         let fx_rate = parse_dec("fx_rate", row.try_get("fx_rate")?)?;
 
-        let sold = *qty_sold.get(&trade_id).unwrap_or(&Decimal::ZERO);
+        let splits = split_events.get(&listing_id).map_or(&[][..], |v| v);
+        // Internal cost-base arithmetic stays in the parcel's as-acquired units;
+        // each sale's allocated quantity is re-based back across any splits.
+        let sold = crate::entities::corporate_action::sold_in_acquired_units(
+            qty_sold.get(&trade_id).map_or(&[][..], |v| v),
+            splits,
+            trade_date,
+        );
         let remaining = qty - sold;
         if remaining <= Decimal::ZERO {
             continue;
@@ -99,6 +114,7 @@ pub async fn db_unrealised_gains(
         // gain in the net-capital-gain report).
         let roc_per_unit = crate::entities::corporate_action::per_unit_reduction(
             roc_events.get(&listing_id).map_or(&[][..], |v| v),
+            splits,
             &currency,
             trade_date,
             None,
@@ -119,12 +135,23 @@ pub async fn db_unrealised_gains(
         )
         .await?;
 
-        *listing_qty.entry(listing_id).or_insert(Decimal::ZERO) += remaining;
+        // Quantities are reported in the unit basis of `as_of_date` (splits up
+        // to that date applied) so they line up with a price as of that date.
+        let remaining_as_of = crate::entities::corporate_action::split_adjusted_quantity(
+            remaining,
+            splits,
+            trade_date,
+            Some(as_of_date),
+        );
+        *listing_qty.entry(listing_id).or_insert(Decimal::ZERO) += remaining_as_of;
         *listing_cost_base.entry(listing_id).or_insert(Decimal::ZERO) += remaining_cost;
 
-        // CGT discount: parcel held strictly more than 12 months
+        // CGT discount: parcel held strictly more than 12 months. A split does
+        // not restart the clock — the converted shares keep the original
+        // acquisition date (TD 2000/10).
         if as_of_date > trade_date + Months::new(12) {
-            *listing_cgt_eligible_qty.entry(listing_id).or_insert(Decimal::ZERO) += remaining;
+            *listing_cgt_eligible_qty.entry(listing_id).or_insert(Decimal::ZERO) +=
+                remaining_as_of;
         }
     }
 
@@ -446,8 +473,10 @@ mod tests {
                 action_type: corporate_action::ActionType::ReturnOfCapital,
                 listing_id: 1,
                 date: NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(),
-                amount_per_unit: "0.50".parse().unwrap(),
-                currency: "AUD".to_string(),
+                amount_per_unit: Some("0.50".parse().unwrap()),
+                currency: Some("AUD".to_string()),
+                split_new_units: None,
+                split_old_units: None,
             },
         )
         .await
@@ -460,6 +489,48 @@ mod tests {
         assert_eq!(gains.len(), 1);
         // 1010.945 − 100 × 0.50 = 960.945
         assert_eq!(gains[0].total_cost_base, "960.945".parse::<Decimal>().unwrap());
+    }
+
+    /// TD 2000/10: the converted shares keep the original acquisition date, so
+    /// a split inside the last 12 months does not reset discount eligibility,
+    /// and the as-of quantity reflects the split.
+    #[tokio::test]
+    async fn db_share_split_adjusts_quantity_and_keeps_acquisition_date() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "SPL").await;
+        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        insert_buy(&pool, 1, 1, buy_date, Decimal::from(100), Decimal::from(10)).await;
+        // 2-for-1 split six months in — within the 12-month window.
+        corporate_action::db_upsert(
+            &pool,
+            &corporate_action::CorporateAction {
+                id: 1,
+                action_type: corporate_action::ActionType::ShareSplit,
+                listing_id: 1,
+                date: NaiveDate::from_ymd_opt(2024, 7, 1).unwrap(),
+                amount_per_unit: None,
+                currency: None,
+                split_new_units: Some(Decimal::from(2)),
+                split_old_units: Some(Decimal::ONE),
+            },
+        )
+        .await
+        .unwrap();
+
+        // 13 months after the original acquisition: eligible despite the split.
+        let as_of = NaiveDate::from_ymd_opt(2025, 2, 1).unwrap();
+        let gains = db_unrealised_gains(&pool, as_of).await.unwrap();
+        assert_eq!(gains.len(), 1);
+        assert_eq!(gains[0].quantity, Decimal::from(200));
+        // Total cost base unchanged by the split.
+        assert_eq!(gains[0].total_cost_base, "1010.945".parse::<Decimal>().unwrap());
+        // All 200 post-split units carry the 2024-01-01 acquisition date.
+        assert_eq!(gains[0].cgt_discount_eligible_quantity, Decimal::from(200));
+
+        // As of a date before the split, the quantity is still pre-split.
+        let before = NaiveDate::from_ymd_opt(2024, 6, 1).unwrap();
+        let gains = db_unrealised_gains(&pool, before).await.unwrap();
+        assert_eq!(gains[0].quantity, Decimal::from(100));
     }
 
     // API-level tests

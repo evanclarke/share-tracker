@@ -244,10 +244,14 @@ mod tests {
     async fn corporate_actions_ui_present() {
         let js = app_js_body().await;
         // The Corporate Actions view records return-of-capital payments (CGT
-        // event G1) against a listing.
+        // event G1) and share splits/consolidations (TD 2000/10) against a
+        // listing.
         assert!(js.contains("/corporate_actions"));
         assert!(js.contains("ReturnOfCapital"));
         assert!(js.contains("amount_per_unit"));
+        assert!(js.contains("ShareSplit"));
+        assert!(js.contains("split_new_units"));
+        assert!(js.contains("split_old_units"));
     }
 
     #[tokio::test]

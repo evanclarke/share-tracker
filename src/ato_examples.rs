@@ -604,6 +604,105 @@ async fn cgt_non_assessable_payments_example_45_rob_return_of_capital() {
     );
 }
 
+/// `docs/share-splits-and-consolidations.md` (TD 2000/10) — "Example 1".
+///
+/// > XYZ Ltd … converts its share capital into 200,000 ordinary shares on
+/// > 1 July 1992. … John acquired 2,000 ordinary shares in XYZ Ltd in
+/// > September 1984 and 3,000 ordinary shares in XYZ Ltd on 30 April 1988.
+/// > Before the conversion, the shares John acquired in 1988 had a cost base
+/// > of $1.00 each. … John, however, now has 4,000 ordinary shares with an
+/// > acquisition date before 20 September 1985, and 6,000 ordinary shares
+/// > with a cost base of $0.50 each with an acquisition date on 30 April 1988.
+///
+/// (The pre-CGT exemption for the 1984 parcel is not modelled — the assertion
+/// on that parcel covers the quantity conversion and preserved acquisition
+/// date the determination states.)
+#[tokio::test]
+async fn td_2000_10_example_1_john_share_split() {
+    let pool = test_pool().await;
+    put_listing(&pool, 1, "XYZ").await;
+    put_buy(&pool, 1, 1, "1984-09-15", "2000", "1", "0").await;
+    put_buy(&pool, 2, 1, "1988-04-30", "3000", "1", "0").await;
+    // The 2-for-1 conversion (100,000 → 200,000 shares), as a corporate action.
+    api_put(
+        &pool,
+        "/corporate_actions/1",
+        json!({
+            "action_type": "ShareSplit",
+            "listing_id": 1,
+            "date": "1992-07-01",
+            "split_new_units": "2",
+            "split_old_units": "1",
+        }),
+    )
+    .await;
+
+    let parcels: Vec<crate::reports::open_parcels::OpenParcel> =
+        api_get(&pool, "/portfolio/open-parcels").await;
+    assert_eq!(parcels.len(), 2);
+    // 2,000 → 4,000 shares, acquisition date still September 1984.
+    assert_eq!(parcels[0].remaining_quantity, dec("4000"));
+    assert_eq!(parcels[0].acquisition_date.to_string(), "1984-09-15");
+    // 3,000 → 6,000 shares with a cost base of $0.50 each, still 30 April 1988.
+    assert_eq!(parcels[1].remaining_quantity, dec("6000"));
+    assert_eq!(parcels[1].acquisition_date.to_string(), "1988-04-30");
+    assert_eq!(
+        parcels[1].remaining_cost_base,
+        dec("3000"),
+        "total cost base unchanged: 6,000 × $0.50"
+    );
+
+    // No CGT event happens: the conversion itself creates no capital gain.
+    let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net-capital-gain").await;
+    assert!(years.iter().all(|y| y.net_capital_gain == Decimal::ZERO));
+}
+
+/// `docs/share-splits-and-consolidations.md` (TD 2000/10) — "Example 2".
+///
+/// > If XYZ Ltd in Example 1 decides instead to convert its original share
+/// > capital into 50,000 ordinary shares, and all the other facts remain
+/// > unchanged, no CGT event happens to John's original shares. In this case,
+/// > John would now have 1,000 ordinary shares with an acquisition date before
+/// > 20 September 1985, and 1,500 ordinary shares with a cost base of $2.00
+/// > each with an acquisition date on 30 April 1988.
+#[tokio::test]
+async fn td_2000_10_example_2_john_share_consolidation() {
+    let pool = test_pool().await;
+    put_listing(&pool, 1, "XYZ").await;
+    put_buy(&pool, 1, 1, "1984-09-15", "2000", "1", "0").await;
+    put_buy(&pool, 2, 1, "1988-04-30", "3000", "1", "0").await;
+    // The 1-for-2 consolidation (100,000 → 50,000 shares).
+    api_put(
+        &pool,
+        "/corporate_actions/1",
+        json!({
+            "action_type": "ShareSplit",
+            "listing_id": 1,
+            "date": "1992-07-01",
+            "split_new_units": "1",
+            "split_old_units": "2",
+        }),
+    )
+    .await;
+
+    let parcels: Vec<crate::reports::open_parcels::OpenParcel> =
+        api_get(&pool, "/portfolio/open-parcels").await;
+    assert_eq!(parcels.len(), 2);
+    // 2,000 → 1,000 shares, acquisition date preserved.
+    assert_eq!(parcels[0].remaining_quantity, dec("1000"));
+    assert_eq!(parcels[0].acquisition_date.to_string(), "1984-09-15");
+    // 3,000 → 1,500 shares with a cost base of $2.00 each.
+    assert_eq!(parcels[1].remaining_quantity, dec("1500"));
+    assert_eq!(
+        parcels[1].remaining_cost_base,
+        dec("3000"),
+        "total cost base unchanged: 1,500 × $2.00"
+    );
+
+    let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net-capital-gain").await;
+    assert!(years.iter().all(|y| y.net_capital_gain == Decimal::ZERO));
+}
+
 /// `docs/lic-capital-gain-deduction.md` — "Example: Resident individual".
 ///
 /// > Ben, an Australian resident, is a shareholder in XYZ Ltd, a LIC. On

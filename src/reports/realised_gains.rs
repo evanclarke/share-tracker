@@ -134,6 +134,8 @@ pub async fn db_realised_gains(pool: &SqlitePool) -> Result<Vec<RealisedGainLoss
     let cba_reduction = crate::entities::amit_adjustment::db_cost_base_reductions(pool).await?;
     let roc_events =
         crate::entities::corporate_action::db_return_of_capital_events(pool).await?;
+    // share splits/consolidations per listing (quantity re-basing)
+    let split_events = crate::entities::corporate_action::db_share_split_events(pool).await?;
 
     let mut sale_proceeds: HashMap<i64, Decimal> = HashMap::new();
     let mut sale_cost_base: HashMap<i64, Decimal> = HashMap::new();
@@ -171,6 +173,16 @@ pub async fn db_realised_gains(pool: &SqlitePool) -> Result<Vec<RealisedGainLoss
         )
         .await?;
 
+        // The allocated quantity is in the *sale date's* unit basis; the
+        // purchase parcel's quantity and per-unit cost are as transacted. A
+        // share split/consolidation between them (TD 2000/10) re-bases the
+        // allocation back to as-acquired units so the cost-base pro-rating
+        // spreads the unchanged total over the converted unit count.
+        let splits = split_events.get(&buy.listing_id).map_or(&[][..], |v| v);
+        let qty_alloc_acquired = crate::entities::corporate_action::as_acquired_quantity(
+            qty_alloc, splits, buy.date, sale.date,
+        );
+
         // Cost base for allocated portion of purchase parcel (AMIT-reduced, pro-rated)
         let buy_initial_cost =
             buy.average_price * buy.quantity + buy.brokerage + buy.gst_on_brokerage;
@@ -187,12 +199,14 @@ pub async fn db_realised_gains(pool: &SqlitePool) -> Result<Vec<RealisedGainLoss
         // units: they were no longer held.
         let roc_per_unit = crate::entities::corporate_action::per_unit_reduction(
             roc_events.get(&buy.listing_id).map_or(&[][..], |v| v),
+            splits,
             &buy.currency,
             buy.date,
             Some(sale.date),
         )?;
         let alloc_cost = if buy.quantity > Decimal::ZERO {
-            (buy_net_cost * qty_alloc / buy.quantity - roc_per_unit * qty_alloc)
+            (buy_net_cost * qty_alloc_acquired / buy.quantity
+                - roc_per_unit * qty_alloc_acquired)
                 .max(Decimal::ZERO)
         } else {
             Decimal::ZERO
@@ -720,12 +734,131 @@ mod tests {
                 action_type: corporate_action::ActionType::ReturnOfCapital,
                 listing_id,
                 date,
-                amount_per_unit: amount.parse().unwrap(),
-                currency: "AUD".to_string(),
+                amount_per_unit: Some(amount.parse().unwrap()),
+                currency: Some("AUD".to_string()),
+                split_new_units: None,
+                split_old_units: None,
             },
         )
         .await
         .unwrap();
+    }
+
+    // Share splits / consolidations (TD 2000/10)
+
+    async fn apply_split(
+        pool: &SqlitePool,
+        id: i64,
+        listing_id: i64,
+        date: NaiveDate,
+        new: &str,
+        old: &str,
+    ) {
+        corporate_action::db_upsert(
+            pool,
+            &corporate_action::CorporateAction {
+                id,
+                action_type: corporate_action::ActionType::ShareSplit,
+                listing_id,
+                date,
+                amount_per_unit: None,
+                currency: None,
+                split_new_units: Some(new.parse().unwrap()),
+                split_old_units: Some(old.parse().unwrap()),
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    /// TD 2000/10 (`docs/share-splits-and-consolidations.md`): selling the whole
+    /// post-split holding realises the parcel's full, unchanged cost base —
+    /// the split itself is no CGT event and creates no gain.
+    #[tokio::test]
+    async fn db_post_split_sale_uses_unchanged_total_cost_base() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "SPL").await;
+        // Buy 100 @ $10 (2024-01-01) → cost base 1000 (zero brokerage helper).
+        insert_buy(&pool, 1, 1, NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            Decimal::from(100), Decimal::from(10)).await;
+        // 2-for-1 split, then sell all 200 post-split units @ $6.
+        apply_split(&pool, 1, 1, NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(), "2", "1").await;
+        insert_sell(&pool, 2, 1, NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(),
+            Decimal::from(200), Decimal::from(6)).await;
+        allocate(&pool, 1, 2, 1, Decimal::from(200)).await;
+
+        let result = db_realised_gains(&pool).await.unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].proceeds, Decimal::from(1200));
+        assert_eq!(result[0].cost_base, Decimal::from(1000));
+        assert_eq!(result[0].capital_gain_loss, Decimal::from(200));
+    }
+
+    /// A partial post-split sale pro-rates the cost base over the converted
+    /// unit count: 80 of 200 post-split units carry 40% of the parcel's cost.
+    #[tokio::test]
+    async fn db_partial_post_split_sale_pro_rates_cost_base() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "SPL").await;
+        insert_buy(&pool, 1, 1, NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            Decimal::from(100), Decimal::from(10)).await;
+        apply_split(&pool, 1, 1, NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(), "2", "1").await;
+        insert_sell(&pool, 2, 1, NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(),
+            Decimal::from(80), Decimal::from(6)).await;
+        allocate(&pool, 1, 2, 1, Decimal::from(80)).await;
+
+        let result = db_realised_gains(&pool).await.unwrap();
+        assert_eq!(result.len(), 1);
+        // cost base = 1000 × (80 post-split = 40 as-acquired) / 100 = 400
+        assert_eq!(result[0].cost_base, Decimal::from(400));
+        // proceeds 80 × 6 = 480 → gain 80
+        assert_eq!(result[0].capital_gain_loss, Decimal::from(80));
+    }
+
+    /// The converted shares keep the original acquisition date (TD 2000/10), so
+    /// the 12-month discount clock runs from the original buy, not the split.
+    #[tokio::test]
+    async fn db_split_preserves_acquisition_date_for_discount() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "SPL").await;
+        // Held 18 months from the original buy; the split happened 2 months
+        // before the sale.
+        insert_buy(&pool, 1, 1, NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            Decimal::from(100), Decimal::from(10)).await;
+        apply_split(&pool, 1, 1, NaiveDate::from_ymd_opt(2025, 5, 1).unwrap(), "2", "1").await;
+        insert_sell(&pool, 2, 1, NaiveDate::from_ymd_opt(2025, 7, 1).unwrap(),
+            Decimal::from(200), Decimal::from(8)).await;
+        allocate(&pool, 1, 2, 1, Decimal::from(200)).await;
+
+        let result = db_realised_gains(&pool).await.unwrap();
+        assert_eq!(result.len(), 1);
+        // gain = 1600 − 1000 = 600, all discount-eligible.
+        assert_eq!(result[0].capital_gain_loss, Decimal::from(600));
+        assert_eq!(result[0].discount_eligible_gain, Decimal::from(600));
+        assert_eq!(result[0].non_discountable_gain, Decimal::ZERO);
+    }
+
+    /// A return of capital received between a split and the sale is per
+    /// post-split unit: the sold units' cost base drops by payment × post-split
+    /// quantity.
+    #[tokio::test]
+    async fn db_return_of_capital_after_split_reduces_sold_cost_base() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "SPL").await;
+        insert_buy(&pool, 1, 1, NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            Decimal::from(100), Decimal::from(10)).await;
+        apply_split(&pool, 1, 1, NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(), "2", "1").await;
+        // 25c per post-split unit while all 200 are held.
+        apply_roc(&pool, 2, 1, NaiveDate::from_ymd_opt(2024, 4, 1).unwrap(), "0.25").await;
+        insert_sell(&pool, 2, 1, NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(),
+            Decimal::from(200), Decimal::from(6)).await;
+        allocate(&pool, 1, 2, 1, Decimal::from(200)).await;
+
+        let result = db_realised_gains(&pool).await.unwrap();
+        assert_eq!(result.len(), 1);
+        // cost base = 1000 − 200 × 0.25 = 950
+        assert_eq!(result[0].cost_base, Decimal::from(950));
+        assert_eq!(result[0].capital_gain_loss, Decimal::from(250));
     }
 
     /// A return of capital received while the sold units were held reduces their

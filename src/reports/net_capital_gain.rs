@@ -223,6 +223,7 @@ async fn e10_gains(pool: &SqlitePool) -> Result<Vec<(i32, Decimal, bool)>, sqlx:
 async fn g1_gains(pool: &SqlitePool) -> Result<Vec<(i32, Decimal, bool)>, sqlx::Error> {
     let rows = sqlx::query(
         "SELECT ca.date AS action_date, ca.amount_per_unit, ca.currency AS action_currency, \
+                ca.listing_id, \
                 t.id AS trade_id, t.date AS trade_date, t.quantity AS trade_qty, \
                 t.average_price, t.brokerage, t.gst_on_brokerage, \
                 t.currency AS trade_currency \
@@ -239,6 +240,12 @@ async fn g1_gains(pool: &SqlitePool) -> Result<Vec<(i32, Decimal, bool)>, sqlx::
     if rows.is_empty() {
         return Ok(vec![]);
     }
+
+    // Share splits/consolidations per listing: a payment after a split is per
+    // *post-split* unit, so its whole-parcel equivalent scales by the split
+    // ratio between acquisition and the payment date (TD 2000/10); sold units
+    // are re-based back to as-acquired units the same way.
+    let split_events = crate::entities::corporate_action::db_share_split_events(pool).await?;
 
     // Units sold out of each parcel, with the sale date — a unit sold before a
     // payment was not held for it.
@@ -267,6 +274,8 @@ async fn g1_gains(pool: &SqlitePool) -> Result<Vec<(i32, Decimal, bool)>, sqlx::
         let gst = parse_dec("gst_on_brokerage", rows[i].try_get("gst_on_brokerage")?)?;
         let trade_date: NaiveDate = rows[i].try_get("trade_date")?;
         let trade_currency: String = rows[i].try_get("trade_currency")?;
+        let listing_id: i64 = rows[i].try_get("listing_id")?;
+        let splits = split_events.get(&listing_id).map_or(&[][..], |v| v);
         // Whole-parcel remaining cost base: remaining ÷ quantity is the per-unit
         // figure the payment is compared against, kept un-divided for precision.
         let mut remaining = price * trade_qty + brok + gst;
@@ -284,11 +293,23 @@ async fn g1_gains(pool: &SqlitePool) -> Result<Vec<(i32, Decimal, bool)>, sqlx::
                     .into(),
                 ));
             }
-            // Whole-parcel equivalent of the per-unit payment.
-            let payment = amount_pu * trade_qty;
+            // Whole-parcel equivalent of the per-unit payment. The payment is
+            // per unit *at the payment date*: a split between acquisition and
+            // the payment multiplies the units receiving it.
+            let (new, old) = crate::entities::corporate_action::split_ratio(
+                splits,
+                trade_date,
+                Some(action_date),
+            );
+            let payment = if new == old {
+                amount_pu * trade_qty
+            } else {
+                amount_pu * trade_qty * new / old
+            };
             if payment > remaining {
                 let excess = payment - remaining;
-                // Only the units still held at the payment date received it.
+                // Only the units still held at the payment date received it
+                // (sold units re-based back to as-acquired units).
                 let held = trade_qty
                     - sold
                         .get(&trade_id)
@@ -296,7 +317,11 @@ async fn g1_gains(pool: &SqlitePool) -> Result<Vec<(i32, Decimal, bool)>, sqlx::
                             sales
                                 .iter()
                                 .filter(|(d, _)| *d < action_date)
-                                .map(|(_, q)| *q)
+                                .map(|&(d, q)| {
+                                    crate::entities::corporate_action::as_acquired_quantity(
+                                        q, splits, trade_date, d,
+                                    )
+                                })
                                 .sum()
                         });
                 if held > Decimal::ZERO && trade_qty > Decimal::ZERO {
@@ -1012,12 +1037,61 @@ mod tests {
                 action_type: corporate_action::ActionType::ReturnOfCapital,
                 listing_id,
                 date,
-                amount_per_unit: amount.parse().unwrap(),
-                currency: "AUD".to_string(),
+                amount_per_unit: Some(amount.parse().unwrap()),
+                currency: Some("AUD".to_string()),
+                split_new_units: None,
+                split_old_units: None,
             },
         )
         .await
         .unwrap();
+    }
+
+    async fn apply_split(
+        pool: &SqlitePool,
+        id: i64,
+        listing_id: i64,
+        date: NaiveDate,
+        new: &str,
+        old: &str,
+    ) {
+        corporate_action::db_upsert(
+            pool,
+            &corporate_action::CorporateAction {
+                id,
+                action_type: corporate_action::ActionType::ShareSplit,
+                listing_id,
+                date,
+                amount_per_unit: None,
+                currency: None,
+                split_new_units: Some(new.parse().unwrap()),
+                split_old_units: Some(old.parse().unwrap()),
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    /// A payment after a 2-for-1 split is per *post-split* unit, so the parcel
+    /// receives it on twice the units; the G1 excess reflects that (TD 2000/10
+    /// re-basing in `docs/share-splits-and-consolidations.md`).
+    #[tokio::test]
+    async fn db_g1_payment_after_split_scales_to_post_split_units() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "SPL").await;
+        // Buy 100 @ $1 → cost base $100 (Jan 2024); 2-for-1 split in March.
+        insert_trade(&pool, 1, trade::TradeType::Buy, 1,
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(), Decimal::from(100), Decimal::from(1)).await;
+        apply_split(&pool, 1, 1, NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(), "2", "1").await;
+        // 75c per post-split unit × 200 units = $150 → $50 excess over the
+        // unchanged $100 cost base.
+        apply_roc(&pool, 2, 1, NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(), "0.75").await;
+
+        let r = db_net_capital_gain(&pool).await.unwrap();
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].tax_year, 2024);
+        assert_eq!(r[0].cgt_event_g1_gain, Decimal::from(50));
+        assert_eq!(r[0].net_capital_gain, Decimal::from(50));
     }
 
     /// CGT event G1: a return-of-capital payment exceeding the parcel's cost

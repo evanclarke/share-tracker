@@ -104,35 +104,69 @@ async fn sum_allocated(
 
 #[cfg(test)]
 pub async fn db_upsert(pool: &SqlitePool, allocation: &ParcelAllocation) -> Result<(), UpsertError> {
+    use crate::entities::corporate_action;
     use crate::entities::trade::TradeType;
+    use chrono::NaiveDate;
 
-    let sale_type: TradeType = sqlx::query_scalar("SELECT trade_type FROM trades WHERE id = ?")
+    let sale_row = sqlx::query("SELECT trade_type, date, quantity FROM trades WHERE id = ?")
         .bind(allocation.sale_trade_id)
         .fetch_one(pool)
         .await?;
+    let sale_type: TradeType = sale_row.try_get("trade_type")?;
     if sale_type != TradeType::Sell {
         return Err(UpsertError::SaleTradeNotSell);
     }
+    let sale_date: NaiveDate = sale_row.try_get("date")?;
 
-    let purchase_type: TradeType = sqlx::query_scalar("SELECT trade_type FROM trades WHERE id = ?")
-        .bind(allocation.purchase_trade_id)
-        .fetch_one(pool)
-        .await?;
+    let purchase_row =
+        sqlx::query("SELECT trade_type, date, listing_id, quantity FROM trades WHERE id = ?")
+            .bind(allocation.purchase_trade_id)
+            .fetch_one(pool)
+            .await?;
+    let purchase_type: TradeType = purchase_row.try_get("trade_type")?;
     if !matches!(purchase_type, TradeType::Buy | TradeType::DRP) {
         return Err(UpsertError::PurchaseTradeNotBuyOrDrp);
     }
-
-    let purchase_qty: String = sqlx::query_scalar("SELECT quantity FROM trades WHERE id = ?")
-        .bind(allocation.purchase_trade_id)
-        .fetch_one(pool)
-        .await?;
-    let purchase_qty: Decimal = purchase_qty
+    let purchase_date: NaiveDate = purchase_row.try_get("date")?;
+    let purchase_listing: i64 = purchase_row.try_get("listing_id")?;
+    let purchase_qty: Decimal = purchase_row
+        .try_get::<String, _>("quantity")?
         .parse()
         .map_err(|_| UpsertError::Db)?;
 
-    let already_purchase_allocated =
-        sum_allocated(pool, "purchase_trade_id", allocation.purchase_trade_id, allocation.id).await?;
-    if already_purchase_allocated + allocation.quantity_allocated > purchase_qty {
+    // The parcel's quantity is in as-acquired units while the allocation is in
+    // sale-date units: re-base across any share splits/consolidations between
+    // them (TD 2000/10). Mirrors the live `PUT /sells` path's check.
+    let splits = corporate_action::db_splits_for_listing(pool, purchase_listing).await?;
+    let alloc_acquired = corporate_action::as_acquired_quantity(
+        allocation.quantity_allocated,
+        &splits,
+        purchase_date,
+        sale_date,
+    );
+
+    let already_purchase_allocated = {
+        let rows = sqlx::query(
+            "SELECT pa.quantity_allocated, s.date AS sale_date \
+             FROM parcel_allocations pa JOIN trades s ON s.id = pa.sale_trade_id \
+             WHERE pa.purchase_trade_id = ? AND pa.id != ?",
+        )
+        .bind(allocation.purchase_trade_id)
+        .bind(allocation.id)
+        .fetch_all(pool)
+        .await?;
+        let mut total = Decimal::ZERO;
+        for row in &rows {
+            let qty: Decimal = row
+                .try_get::<String, _>("quantity_allocated")?
+                .parse()
+                .map_err(|_| UpsertError::Db)?;
+            let d: NaiveDate = row.try_get("sale_date")?;
+            total += corporate_action::as_acquired_quantity(qty, &splits, purchase_date, d);
+        }
+        total
+    };
+    if already_purchase_allocated + alloc_acquired > purchase_qty {
         return Err(UpsertError::PurchaseQuantityExceeded);
     }
 
