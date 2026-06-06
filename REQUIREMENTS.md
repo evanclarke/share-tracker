@@ -68,6 +68,9 @@ and cost basis calculations are done with the Australian tax view in mind.
  - Database migrations must not drop data
  - If a field will only contain a limited set of values, always create an enum and constraints in the database
  - Jobs that are scheduled will log an info when started and finished
+ - Each scheduled/on-demand job records its last run — when it started and finished, whether it
+   succeeded, and the error text if it failed — persisted across restarts (one record per job, the
+   latest run), and the Jobs web UI surfaces it alongside the run-now action
  - Tables in the Web UI should be filterable and sortable
  - Document attachment contents are stored as a SQLite BLOB column (binary, not a TEXT/Decimal
    column); only the content payload is binary - all metadata stays in typed columns. A SHA-256

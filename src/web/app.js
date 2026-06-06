@@ -828,40 +828,42 @@
 
   async function viewJobs() {
     setActiveNav('jobs');
-    const names = await api('GET', '/jobs');
-    const rows = names.map(function (name) {
-      const status = el('span', { class: 'hint' }, '');
-      const btn = el('button', { class: 'small primary' }, 'Run now');
-      btn.addEventListener('click', async function () {
-        const orig = btn.textContent;
-        btn.disabled = true;
-        btn.textContent = 'Running…';
-        status.textContent = '';
-        try {
-          await api('POST', '/jobs/' + name);
-          status.textContent = 'Completed.';
-          toast("Job '" + name + "' completed.");
-        } catch (e) {
-          status.textContent = 'Failed.';
-          toast(e.message, true);
-        } finally {
-          btn.disabled = false;
-          btn.textContent = orig;
-        }
-      });
-      return el('tr', null, [
-        el('td', null, name),
-        el('td', null, JOB_DESC[name] || ''),
-        el('td', { class: 'actions' }, [btn, ' ', status]),
-      ]);
+    // GET /jobs returns each registered job with its last run (started/finished
+    // timestamps, success flag, error text), or nulls if it has never run.
+    const jobs = await api('GET', '/jobs');
+    const rows = jobs.map(function (j) {
+      return {
+        job: j.name,
+        description: JOB_DESC[j.name] || '',
+        last_run: j.last_finished_at || '',
+        status: j.last_started_at == null ? 'never' : (j.last_success ? 'ok' : 'failed'),
+        error: j.last_error || '',
+      };
     });
-    const table = el('table', null, [
-      el('thead', null, el('tr', null, [el('th', null, 'Job'), el('th', null, 'Description'), el('th', null, 'Action')])),
-      el('tbody', null, rows),
-    ]);
+    const cols = ['job', 'description', 'last_run', 'status', 'error'];
+    const table = filterableTable(rows, cols, {
+      statusField: 'status',
+      actions: function (row) {
+        const btn = el('button', { class: 'small primary' }, 'Run now');
+        btn.addEventListener('click', async function () {
+          btn.disabled = true;
+          btn.textContent = 'Running…';
+          try {
+            await api('POST', '/jobs/' + row.job);
+            toast("Job '" + row.job + "' completed.");
+          } catch (e) {
+            toast(e.message, true);
+          } finally {
+            // Reload so the table reflects the freshly recorded last run.
+            viewJobs();
+          }
+        });
+        return el('td', { class: 'actions' }, btn);
+      },
+    });
     setMain(el('div', null, [
       el('h2', null, 'Jobs'),
-      el('p', { class: 'view-desc' }, 'Trigger scheduled maintenance jobs on demand. Each also runs automatically on its cron schedule; running here is for retries or missed runs.'),
+      el('p', { class: 'view-desc' }, 'Trigger scheduled maintenance jobs on demand, and see when each last ran (and any error). Each also runs automatically on its cron schedule; running here is for retries or missed runs.'),
       table,
     ]));
   }

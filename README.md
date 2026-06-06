@@ -189,6 +189,13 @@ attachments                  Supporting documents for an activity; bytes stored 
 ├── uploaded_at       TEXT             RFC 3339 timestamp the attachment was stored
 └── content           BLOB             The file bytes
                        CHECK: exactly one of trade_id / income_id / amma_statement_id is non-null
+
+job_runs                     Last run of each scheduled/on-demand maintenance job (one row per job, upserted each run)
+├── name        TEXT PK          Registry job name (e.g. backup, rba-fx-import)
+├── started_at  TEXT             RFC 3339 timestamp the run began
+├── finished_at TEXT             RFC 3339 timestamp the run ended
+├── success     INTEGER          1 if the run succeeded, 0 if it failed
+└── error       TEXT (nullable)  Human-readable error when success = 0, else NULL
 ```
 
 ### Relationships
@@ -210,7 +217,7 @@ currencies ──< exchanges, listings, trades (currency + brokerage_currency), 
 
 Each `attachments` row belongs to exactly one activity via one of three nullable foreign keys (`trade_id` / `income_id` / `amma_statement_id`), with a `CHECK` enforcing that exactly one is set — a real foreign key keeps referential integrity to the owning row, and `ON DELETE CASCADE` removes an activity's attachments when it is deleted. File contents live in the `content` BLOB so the weekly DB backup captures the documents with no separate file store.
 
-`rba_fx_rates` is standalone reference data (no foreign keys); it is looked up by `(currency, month)`.
+`rba_fx_rates` is standalone reference data (no foreign keys); it is looked up by `(currency, month)`. `job_runs` is likewise standalone: it is keyed by the in-code job name (not a foreign key), and each scheduled or manual run upserts the job's row so only its last run is kept.
 
 `mic_registry` is standalone reference data (no foreign keys), keyed by `mic`. It is populated from the ISO 10383 list and used only to validate curated `exchanges` (see the [exchange MIC validation report](#exchange-mic-validation)); it is *not* the operational exchange table and carries no currency/timezone/settlement data.
 
@@ -232,7 +239,7 @@ The server also hosts a built-in web UI — a no-build-step single-page app (pla
 | `GET` | `/static/app.js` | The app bundle (JavaScript) |
 | `GET` | `/static/style.css` | Stylesheet (CSS) |
 
-Open `http://localhost:<port>/` in a browser. The app is hash-routed (`#/e/<entity>`, `#/sells`, `#/jobs`, `#/attachments/<owner>/<id>`, `#/r/<report>`) and drives the JSON API below — it provides CRUD screens for every entity (exchanges, listings, trades, income, AMMA statements, AMIT adjustments, DRP enrolments, exchange holidays), a dedicated Sell screen that captures parcel allocations atomically, a DRP reinvest action on income rows, an Attachments action on each trade/income/AMMA row that uploads, lists, downloads, and deletes its documents, read-only views of the import-managed reference tables (currencies, MIC registry, RBA FX rates, parcel allocations), a Maintenance → Jobs screen that lists the scheduled jobs and runs any of them on demand (`POST /jobs/:name`), and a view for each report (portfolio overview, unrealised/realised gains, net capital gain, tax summary, exchange MIC validation).
+Open `http://localhost:<port>/` in a browser. The app is hash-routed (`#/e/<entity>`, `#/sells`, `#/jobs`, `#/attachments/<owner>/<id>`, `#/r/<report>`) and drives the JSON API below — it provides CRUD screens for every entity (exchanges, listings, trades, income, AMMA statements, AMIT adjustments, DRP enrolments, exchange holidays), a dedicated Sell screen that captures parcel allocations atomically, a DRP reinvest action on income rows, an Attachments action on each trade/income/AMMA row that uploads, lists, downloads, and deletes its documents, read-only views of the import-managed reference tables (currencies, MIC registry, RBA FX rates, parcel allocations), a Maintenance → Jobs screen that lists the scheduled jobs with each one's last run (when it finished, whether it succeeded, and any error) and runs any of them on demand (`POST /jobs/:name`), and a view for each report (portfolio overview, unrealised/realised gains, net capital gain, tax summary, exchange MIC validation).
 
 ### Exchanges
 
@@ -312,10 +319,12 @@ Recurring maintenance jobs scheduled from the cron file (see [Scheduled maintena
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/jobs` | List registered job names (JSON array, sorted) |
+| `GET` | `/jobs` | List registered jobs (sorted) with each one's last run |
 | `POST` | `/jobs/:name` | Run the named job now |
 
-`POST /jobs/:name` runs the job synchronously and returns `204 No Content` on success, `404 Not Found` if no job has that name, or `500 Internal Server Error` if the job fails. Registered jobs are `backup`, `rba-fx-import`, `mic-import`, and `currency-import`.
+`GET /jobs` returns a JSON array (sorted by job name); each element is `{ "name", "last_started_at", "last_finished_at", "last_success", "last_error" }`. The four `last_*` fields are `null` for a job that has never run; otherwise they carry the RFC 3339 start/finish timestamps, a boolean success flag, and the error text (`null` on success) of the job's most recent run. Every run — scheduled or manual — upserts the job's `job_runs` row, so this reflects the latest run only.
+
+`POST /jobs/:name` runs the job synchronously and returns `204 No Content` on success, `404 Not Found` if no job has that name, or `500 Internal Server Error` if the job fails. Either way the run is recorded (see `GET /jobs`). Registered jobs are `backup`, `rba-fx-import`, `mic-import`, and `currency-import`.
 
 ### Trades
 

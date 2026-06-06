@@ -192,6 +192,11 @@ mod tests {
         let js = app_js_body().await;
         // The maintenance view lists and triggers jobs via the /jobs endpoints.
         assert!(js.contains("/jobs"));
+        // It also surfaces each job's last run (success/error) from the GET /jobs
+        // fields, rendered through the shared filterable table.
+        assert!(js.contains("last_finished_at"));
+        assert!(js.contains("last_success"));
+        assert!(js.contains("last_error"));
     }
 
     #[tokio::test]

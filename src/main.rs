@@ -23,7 +23,7 @@ async fn main() {
         None => include_str!("../schedule.cron").to_string(),
     };
     let registry = scheduler::registry(pool.clone(), args.db.clone());
-    scheduler::spawn(registry.clone(), &schedule).expect("invalid schedule");
+    scheduler::spawn(registry.clone(), pool.clone(), &schedule).expect("invalid schedule");
 
     let app = app::router(pool.clone(), registry);
     let ip: std::net::IpAddr = args.host.parse().expect("invalid --host address");

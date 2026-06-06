@@ -10,9 +10,15 @@
 //! Each spawned task logs the next scheduled run at INFO after every run (and at
 //! startup), so the live schedule is verifiable from logs without reading code.
 
-use axum::{Extension, Json, Router, extract::Path, http::StatusCode, routing::{get, post}};
+use axum::{
+    Extension, Json, Router,
+    extract::{Path, State},
+    http::StatusCode,
+    routing::{get, post},
+};
 use chrono::{DateTime, Local};
 use croner::Cron;
+use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use std::{collections::HashMap, future::Future, pin::Pin, str::FromStr, sync::Arc, time::Duration};
 
@@ -24,6 +30,67 @@ type Job = Arc<dyn Fn() -> JobFuture + Send + Sync>;
 /// Job-name → work. Shared between the spawned schedule tasks and the HTTP
 /// trigger handler (injected as an axum `Extension`).
 pub type JobRegistry = Arc<HashMap<String, Job>>;
+
+/// A job's last run, surfaced by `GET /jobs` and the Jobs UI. Every registered
+/// job appears in the list; the `last_*` fields are `None` until the job has run
+/// at least once (no `job_runs` row yet).
+#[derive(Debug, Serialize, Deserialize)]
+pub struct JobStatus {
+    pub name: String,
+    pub last_started_at: Option<String>,
+    pub last_finished_at: Option<String>,
+    pub last_success: Option<bool>,
+    pub last_error: Option<String>,
+}
+
+/// One persisted run record from `job_runs` (the last run of a single job).
+#[derive(sqlx::FromRow)]
+struct JobRun {
+    name: String,
+    started_at: String,
+    finished_at: String,
+    success: bool,
+    error: Option<String>,
+}
+
+/// Upsert the last-run record for `name`. One row per job (keyed by name), so a
+/// new run overwrites the previous record rather than accumulating history.
+async fn db_record_run(
+    pool: &SqlitePool,
+    name: &str,
+    started_at: &str,
+    finished_at: &str,
+    success: bool,
+    error: Option<&str>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO job_runs (name, started_at, finished_at, success, error) \
+         VALUES (?, ?, ?, ?, ?) \
+         ON CONFLICT(name) DO UPDATE SET \
+             started_at = excluded.started_at, \
+             finished_at = excluded.finished_at, \
+             success = excluded.success, \
+             error = excluded.error",
+    )
+    .bind(name)
+    .bind(started_at)
+    .bind(finished_at)
+    .bind(success)
+    .bind(error)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Load every job's last run, keyed by job name.
+async fn db_last_runs(pool: &SqlitePool) -> Result<HashMap<String, JobRun>, sqlx::Error> {
+    let rows = sqlx::query_as::<_, JobRun>(
+        "SELECT name, started_at, finished_at, success, error FROM job_runs",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(|r| (r.name.clone(), r)).collect())
+}
 
 /// Why a schedule file was rejected. Carries the 1-based line number so a bad
 /// `schedule.cron` is easy to fix.
@@ -127,11 +194,23 @@ pub fn registry(pool: SqlitePool, db_path: String) -> JobRegistry {
 /// Run a single job once, bracketing it with an INFO `job started` line and an
 /// INFO `job finished` line (the latter carries `ok` = whether it succeeded).
 /// Both the scheduled loop and the manual trigger go through here so every job
-/// logs start and finish uniformly, regardless of any per-job logging it does.
-async fn run_job(name: &str, job: &Job) -> Result<(), String> {
+/// logs start and finish uniformly, regardless of any per-job logging it does,
+/// and so every run persists its last-run record (timestamps, success, error)
+/// to `job_runs` for the Jobs UI. A failure to record the run is logged but does
+/// not change the job's own result.
+async fn run_job(pool: &SqlitePool, name: &str, job: &Job) -> Result<(), String> {
+    let started_at = chrono::Utc::now().to_rfc3339();
     tracing::info!(job = %name, "job started");
     let result = job().await;
+    let finished_at = chrono::Utc::now().to_rfc3339();
     tracing::info!(job = %name, ok = result.is_ok(), "job finished");
+
+    let error = result.as_ref().err().map(String::as_str);
+    if let Err(e) =
+        db_record_run(pool, name, &started_at, &finished_at, result.is_ok(), error).await
+    {
+        tracing::warn!(job = %name, "failed to record job run: {e}");
+    }
     result
 }
 
@@ -172,7 +251,7 @@ fn parse(schedule: &str) -> Result<Vec<(Cron, String)>, ScheduleError> {
 /// Parse the schedule, validate every entry against the registry, and spawn one
 /// background task per entry. Returns an error (without spawning anything) if
 /// the schedule is malformed or names an unregistered job.
-pub fn spawn(registry: JobRegistry, schedule: &str) -> Result<(), ScheduleError> {
+pub fn spawn(registry: JobRegistry, pool: SqlitePool, schedule: &str) -> Result<(), ScheduleError> {
     let entries = parse(schedule)?;
 
     // Validate all names up front so a bad file fails fast at startup rather
@@ -196,6 +275,7 @@ pub fn spawn(registry: JobRegistry, schedule: &str) -> Result<(), ScheduleError>
 
     for (cron, name) in entries {
         let job = registry[&name].clone();
+        let pool = pool.clone();
         tokio::spawn(async move {
             loop {
                 let (next, delay) = match next_run(&cron, Local::now()) {
@@ -211,7 +291,7 @@ pub fn spawn(registry: JobRegistry, schedule: &str) -> Result<(), ScheduleError>
                     "next run scheduled"
                 );
                 tokio::time::sleep(delay).await;
-                if let Err(e) = run_job(&name, &job).await {
+                if let Err(e) = run_job(&pool, &name, &job).await {
                     tracing::warn!(job = %name, "job failed: {e}");
                 }
             }
@@ -235,19 +315,49 @@ fn next_run(cron: &Cron, now: DateTime<Local>) -> Option<(DateTime<Local>, Durat
     Some((next, delay))
 }
 
-async fn list(Extension(registry): Extension<JobRegistry>) -> Json<Vec<String>> {
+/// List every registered job (sorted) with its last run. Jobs that have never
+/// run carry `None` in the `last_*` fields.
+async fn list(
+    State(pool): State<SqlitePool>,
+    Extension(registry): Extension<JobRegistry>,
+) -> Result<Json<Vec<JobStatus>>, StatusCode> {
+    let mut last = db_last_runs(&pool).await.map_err(|e| {
+        tracing::error!("failed to load job runs: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
     let mut names: Vec<String> = registry.keys().cloned().collect();
     names.sort();
-    Json(names)
+    let statuses = names
+        .into_iter()
+        .map(|name| match last.remove(&name) {
+            Some(run) => JobStatus {
+                name,
+                last_started_at: Some(run.started_at),
+                last_finished_at: Some(run.finished_at),
+                last_success: Some(run.success),
+                last_error: run.error,
+            },
+            None => JobStatus {
+                name,
+                last_started_at: None,
+                last_finished_at: None,
+                last_success: None,
+                last_error: None,
+            },
+        })
+        .collect();
+    Ok(Json(statuses))
 }
 
 async fn trigger(
+    State(pool): State<SqlitePool>,
     Extension(registry): Extension<JobRegistry>,
     Path(name): Path<String>,
 ) -> StatusCode {
     match registry.get(&name) {
         None => StatusCode::NOT_FOUND,
-        Some(job) => match run_job(&name, job).await {
+        Some(job) => match run_job(&pool, &name, job).await {
             Ok(()) => StatusCode::NO_CONTENT,
             Err(e) => {
                 tracing::warn!(job = %name, "manual job trigger failed: {e}");
@@ -274,11 +384,11 @@ mod tests {
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
-    async fn test_registry() -> (JobRegistry, tempfile::TempDir, String) {
+    async fn test_registry() -> (JobRegistry, SqlitePool, tempfile::TempDir, String) {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db").to_string_lossy().to_string();
         let pool = db::init(&db_path).await.unwrap();
-        (registry(pool, db_path.clone()), dir, db_path)
+        (registry(pool.clone(), db_path.clone()), pool, dir, db_path)
     }
 
     #[test]
@@ -333,9 +443,9 @@ mod tests {
 
     #[tokio::test]
     async fn embedded_schedule_is_valid() {
-        let (reg, _dir, _path) = test_registry().await;
+        let (reg, pool, _dir, _path) = test_registry().await;
         // Guards the committed schedule.cron: every referenced job must exist.
-        spawn(reg, include_str!("../../schedule.cron")).unwrap();
+        spawn(reg, pool, include_str!("../../schedule.cron")).unwrap();
     }
 
     #[test]
@@ -355,16 +465,16 @@ mod tests {
     #[tokio::test]
     async fn spawn_warns_about_job_with_no_schedule_entry() {
         // Registry has `backup` and `rba-fx-import`; schedule only mentions backup.
-        let (reg, _dir, _path) = test_registry().await;
-        spawn(reg, "0 0 * * *   backup\n").unwrap();
+        let (reg, pool, _dir, _path) = test_registry().await;
+        spawn(reg, pool, "0 0 * * *   backup\n").unwrap();
         assert!(logs_contain("registered job has no schedule entry"));
         assert!(logs_contain("rba-fx-import"));
     }
 
     #[tokio::test]
     async fn spawn_rejects_unknown_job() {
-        let (reg, _dir, _path) = test_registry().await;
-        let err = spawn(reg, "0 0 * * *   no-such-job\n").unwrap_err();
+        let (reg, pool, _dir, _path) = test_registry().await;
+        let err = spawn(reg, pool, "0 0 * * *   no-such-job\n").unwrap_err();
         assert!(matches!(err, ScheduleError::UnknownJob { .. }));
     }
 
@@ -406,9 +516,9 @@ mod tests {
     async fn run_job_logs_started_and_finished() {
         // The scheduled loop runs each job via run_job, so this covers the
         // scheduled path: a job must be bracketed by INFO start/finish lines.
-        let (reg, _dir, _path) = test_registry().await;
+        let (reg, pool, _dir, _path) = test_registry().await;
         let job = reg.get("backup").unwrap();
-        run_job("backup", job).await.unwrap();
+        run_job(&pool, "backup", job).await.unwrap();
         assert!(logs_contain("job started"));
         assert!(logs_contain("job finished"));
     }
@@ -476,8 +586,59 @@ mod tests {
 
         assert_eq!(resp.status(), StatusCode::OK);
         let body = resp.into_body().collect().await.unwrap().to_bytes();
-        let names: Vec<String> = serde_json::from_slice(&body).unwrap();
-        assert!(names.contains(&"backup".to_string()));
-        assert!(names.contains(&"rba-fx-import".to_string()));
+        let statuses: Vec<JobStatus> = serde_json::from_slice(&body).unwrap();
+        let names: Vec<&str> = statuses.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"backup"));
+        assert!(names.contains(&"rba-fx-import"));
+        // A job that has never run reports no last-run details.
+        let backup = statuses.iter().find(|s| s.name == "backup").unwrap();
+        assert!(backup.last_started_at.is_none());
+        assert!(backup.last_success.is_none());
+    }
+
+    #[tokio::test]
+    async fn run_job_records_successful_last_run() {
+        // After a successful run, GET /jobs surfaces the recorded last run with
+        // success = true and no error.
+        let (reg, pool, _dir, _path) = test_registry().await;
+        let job = reg.get("backup").unwrap();
+        run_job(&pool, "backup", job).await.unwrap();
+
+        let app = router().with_state(pool).layer(Extension(reg));
+        let resp = app
+            .oneshot(Request::builder().uri("/jobs").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let statuses: Vec<JobStatus> = serde_json::from_slice(&body).unwrap();
+        let backup = statuses.iter().find(|s| s.name == "backup").unwrap();
+        assert!(backup.last_started_at.is_some());
+        assert!(backup.last_finished_at.is_some());
+        assert_eq!(backup.last_success, Some(true));
+        assert!(backup.last_error.is_none());
+    }
+
+    #[tokio::test]
+    async fn record_run_persists_failure_with_error() {
+        // A failed run stores success = 0 and the error text; a later success for
+        // the same job overwrites it (one row per job).
+        let (_reg, pool, _dir, _path) = test_registry().await;
+        db_record_run(&pool, "backup", "2026-06-01T00:00:00Z", "2026-06-01T00:00:01Z", false, Some("boom"))
+            .await
+            .unwrap();
+        let runs = db_last_runs(&pool).await.unwrap();
+        let run = runs.get("backup").unwrap();
+        assert!(!run.success);
+        assert_eq!(run.error.as_deref(), Some("boom"));
+
+        db_record_run(&pool, "backup", "2026-06-02T00:00:00Z", "2026-06-02T00:00:01Z", true, None)
+            .await
+            .unwrap();
+        let runs = db_last_runs(&pool).await.unwrap();
+        let run = runs.get("backup").unwrap();
+        assert!(run.success);
+        assert!(run.error.is_none());
+        assert_eq!(run.started_at, "2026-06-02T00:00:00Z");
     }
 }
