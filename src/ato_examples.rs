@@ -564,19 +564,12 @@ async fn you_and_your_shares_example_7_jessica_lifo_identification() {
 /// > each share at 30 November 2007 by the amount of the payment to $4.50
 /// > ($5.00 – 50 cents).
 ///
-/// Blocked: a company return of capital (CGT event G1) is not modelled (TODO
-/// "Corporate actions / additional CGT events" — "Return of capital (non-AMIT,
-/// CGT event G1)"). The `PUT /corporate_actions/1` entry below is a sketch of
-/// the intended API — adjust it to the real shape when the feature lands, then
-/// un-ignore.
 #[tokio::test]
-#[ignore = "blocked on TODO 'Corporate actions / additional CGT events': return of capital (CGT event G1) not implemented"]
 async fn cgt_non_assessable_payments_example_45_rob_return_of_capital() {
     let pool = test_pool().await;
     put_listing(&pool, 1, "RAP").await;
     put_buy(&pool, 1, 1, "1994-07-01", "1500", "5", "0").await;
-    // Speculative entry API for the G1 return of capital — to be replaced with
-    // the real corporate-actions endpoint when implemented.
+    // The G1 return of capital, recorded as a corporate action.
     api_put(
         &pool,
         "/corporate_actions/1",

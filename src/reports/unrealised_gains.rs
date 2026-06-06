@@ -64,6 +64,8 @@ pub async fn db_unrealised_gains(
     }
 
     let cba_reduction = crate::entities::amit_adjustment::db_cost_base_reductions(pool).await?;
+    let roc_events =
+        crate::entities::corporate_action::db_return_of_capital_events(pool).await?;
 
     let mut listing_qty: HashMap<i64, Decimal> = HashMap::new();
     let mut listing_cost_base: HashMap<i64, Decimal> = HashMap::new();
@@ -92,8 +94,20 @@ pub async fn db_unrealised_gains(
         // nil, never negative (the excess is a capital gain in the net-capital-gain
         // report).
         let net_cost = (initial_cost - amit).max(Decimal::ZERO);
-        let remaining_cost =
-            if qty > Decimal::ZERO { net_cost * remaining / qty } else { Decimal::ZERO };
+        // Return-of-capital payments (CGT event G1) received on the remaining
+        // units also reduce cost base, flooring at nil (the excess is a capital
+        // gain in the net-capital-gain report).
+        let roc_per_unit = crate::entities::corporate_action::per_unit_reduction(
+            roc_events.get(&listing_id).map_or(&[][..], |v| v),
+            &currency,
+            trade_date,
+            None,
+        )?;
+        let remaining_cost = if qty > Decimal::ZERO {
+            (net_cost * remaining / qty - roc_per_unit * remaining).max(Decimal::ZERO)
+        } else {
+            Decimal::ZERO
+        };
         // Convert the parcel's cost base to AUD (ATO rate for the buy month, else
         // the trade's manual fx_rate) so the holding's cost base is AUD.
         let remaining_cost = crate::infra::fx::to_aud(
@@ -166,7 +180,7 @@ async fn unrealised_gains_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{infra::db, entities::{amma, amit_adjustment, listing, parcel_allocation, trade}};
+    use crate::{infra::db, entities::{amma, amit_adjustment, corporate_action, listing, parcel_allocation, trade}};
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
     use tower::ServiceExt;
@@ -405,6 +419,47 @@ mod tests {
         assert_eq!(gains.len(), 1);
         // initial = 1010.945, AMIT = 100 * 0.05 = 5.00, net = 1005.945
         assert_eq!(gains[0].total_cost_base, "1005.945".parse::<Decimal>().unwrap());
+    }
+
+    /// A return of capital (CGT event G1) reduces the holding's cost base by the
+    /// per-unit payment for units held on the payment date, so the unrealised
+    /// gain grows by the same amount (`docs/cgt-non-assessable-payments.md`).
+    #[tokio::test]
+    async fn db_return_of_capital_reduces_cost_base() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "RAP").await;
+        // Buy 100 @ $10 on 2024-01-01 → cost base 1010.945 (incl. brokerage).
+        insert_buy(
+            &pool,
+            1,
+            1,
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
+        // 50c/unit return of capital while all 100 units are held.
+        corporate_action::db_upsert(
+            &pool,
+            &corporate_action::CorporateAction {
+                id: 1,
+                action_type: corporate_action::ActionType::ReturnOfCapital,
+                listing_id: 1,
+                date: NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(),
+                amount_per_unit: "0.50".parse().unwrap(),
+                currency: "AUD".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let gains =
+            db_unrealised_gains(&pool, NaiveDate::from_ymd_opt(2024, 6, 1).unwrap())
+                .await
+                .unwrap();
+        assert_eq!(gains.len(), 1);
+        // 1010.945 − 100 × 0.50 = 960.945
+        assert_eq!(gains[0].total_cost_base, "960.945".parse::<Decimal>().unwrap());
     }
 
     // API-level tests

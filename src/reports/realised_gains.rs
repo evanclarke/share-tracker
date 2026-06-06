@@ -51,7 +51,7 @@ pub async fn db_realised_gains(pool: &SqlitePool) -> Result<Vec<RealisedGainLoss
     }
 
     let buy_rows = sqlx::query(
-        "SELECT id, date, quantity, average_price, brokerage, gst_on_brokerage, \
+        "SELECT id, listing_id, date, quantity, average_price, brokerage, gst_on_brokerage, \
          currency, fx_rate \
          FROM trades WHERE trade_type IN ('Buy', 'DRP')",
     )
@@ -85,6 +85,7 @@ pub async fn db_realised_gains(pool: &SqlitePool) -> Result<Vec<RealisedGainLoss
     }
 
     struct BuyInfo {
+        listing_id: i64,
         date: NaiveDate,
         quantity: Decimal,
         average_price: Decimal,
@@ -118,6 +119,7 @@ pub async fn db_realised_gains(pool: &SqlitePool) -> Result<Vec<RealisedGainLoss
         buy_map.insert(
             id,
             BuyInfo {
+                listing_id: row.try_get("listing_id")?,
                 date: row.try_get("date")?,
                 quantity: parse_dec("quantity", row.try_get("quantity")?)?,
                 average_price: parse_dec("average_price", row.try_get("average_price")?)?,
@@ -130,6 +132,8 @@ pub async fn db_realised_gains(pool: &SqlitePool) -> Result<Vec<RealisedGainLoss
     }
 
     let cba_reduction = crate::entities::amit_adjustment::db_cost_base_reductions(pool).await?;
+    let roc_events =
+        crate::entities::corporate_action::db_return_of_capital_events(pool).await?;
 
     let mut sale_proceeds: HashMap<i64, Decimal> = HashMap::new();
     let mut sale_cost_base: HashMap<i64, Decimal> = HashMap::new();
@@ -176,8 +180,20 @@ pub async fn db_realised_gains(pool: &SqlitePool) -> Result<Vec<RealisedGainLoss
         // net-capital-gain report (see `e10_gains`), so a sale of an exhausted parcel
         // uses a nil cost base here rather than a negative one.
         let buy_net_cost = (buy_initial_cost - amit).max(Decimal::ZERO);
+        // Return-of-capital payments (CGT event G1) received while the sold
+        // units were held — from acquisition up to the sale date — reduce their
+        // cost base, flooring at nil (the excess is a capital gain in the
+        // net-capital-gain report). Payments after the sale don't touch these
+        // units: they were no longer held.
+        let roc_per_unit = crate::entities::corporate_action::per_unit_reduction(
+            roc_events.get(&buy.listing_id).map_or(&[][..], |v| v),
+            &buy.currency,
+            buy.date,
+            Some(sale.date),
+        )?;
         let alloc_cost = if buy.quantity > Decimal::ZERO {
-            buy_net_cost * qty_alloc / buy.quantity
+            (buy_net_cost * qty_alloc / buy.quantity - roc_per_unit * qty_alloc)
+                .max(Decimal::ZERO)
         } else {
             Decimal::ZERO
         };
@@ -258,7 +274,7 @@ async fn realised_gains_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{infra::db, entities::{amma, amit_adjustment, listing, parcel_allocation, rba_fx_rate, trade}};
+    use crate::{infra::db, entities::{amma, amit_adjustment, corporate_action, listing, parcel_allocation, rba_fx_rate, trade}};
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
     use tower::ServiceExt;
@@ -692,6 +708,68 @@ mod tests {
         assert_eq!(result[0].capital_gain_loss, Decimal::from(500));
         // held > 12 months
         assert_eq!(result[0].discount_eligible_gain, Decimal::from(500));
+    }
+
+    // Return of capital (CGT event G1)
+
+    async fn apply_roc(pool: &SqlitePool, id: i64, listing_id: i64, date: NaiveDate, amount: &str) {
+        corporate_action::db_upsert(
+            pool,
+            &corporate_action::CorporateAction {
+                id,
+                action_type: corporate_action::ActionType::ReturnOfCapital,
+                listing_id,
+                date,
+                amount_per_unit: amount.parse().unwrap(),
+                currency: "AUD".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    /// A return of capital received while the sold units were held reduces their
+    /// cost base, so the realised gain grows by the per-unit payment × quantity
+    /// (`docs/cgt-non-assessable-payments.md`).
+    #[tokio::test]
+    async fn db_return_of_capital_during_holding_reduces_cost_base() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "RAP").await;
+        // Buy 100 @ $10 (2024-01-01), 50c/unit payment (2024-03-01),
+        // sell 100 @ $12 (2024-06-01). Zero brokerage in these helpers.
+        insert_buy(&pool, 1, 1, NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            Decimal::from(100), Decimal::from(10)).await;
+        apply_roc(&pool, 1, 1, NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(), "0.50").await;
+        insert_sell(&pool, 2, 1, NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(),
+            Decimal::from(100), Decimal::from(12)).await;
+        allocate(&pool, 1, 2, 1, Decimal::from(100)).await;
+
+        let result = db_realised_gains(&pool).await.unwrap();
+        assert_eq!(result.len(), 1);
+        // cost base = 1000 − 100 × 0.50 = 950
+        assert_eq!(result[0].cost_base, Decimal::from(950));
+        // gain = 1200 − 950 = 250
+        assert_eq!(result[0].capital_gain_loss, Decimal::from(250));
+    }
+
+    /// A payment made after the units were sold doesn't touch them: they were no
+    /// longer held when it was received.
+    #[tokio::test]
+    async fn db_return_of_capital_after_sale_does_not_affect_cost_base() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "RAP").await;
+        insert_buy(&pool, 1, 1, NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            Decimal::from(100), Decimal::from(10)).await;
+        insert_sell(&pool, 2, 1, NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(),
+            Decimal::from(100), Decimal::from(12)).await;
+        allocate(&pool, 1, 2, 1, Decimal::from(100)).await;
+        // Payment after the sale.
+        apply_roc(&pool, 1, 1, NaiveDate::from_ymd_opt(2024, 7, 1).unwrap(), "0.50").await;
+
+        let result = db_realised_gains(&pool).await.unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].cost_base, Decimal::from(1000));
+        assert_eq!(result[0].capital_gain_loss, Decimal::from(200));
     }
 
     // FX conversion

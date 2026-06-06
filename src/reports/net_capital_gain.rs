@@ -71,6 +71,11 @@ pub struct NetCapitalGainYear {
     /// `discount_eligible_gains` / `other_gains` above per the holding period at the
     /// statement's year end; surfaced separately for transparency.
     pub cgt_event_e10_gain: Decimal,
+    /// Informational: gross CGT event G1 gains included in this year (the excess of
+    /// a company's return-of-capital payments over a parcel's cost base). Already
+    /// counted within `discount_eligible_gains` / `other_gains` above per the
+    /// holding period at the payment date; surfaced separately for transparency.
+    pub cgt_event_g1_gain: Decimal,
 }
 
 pub fn router() -> Router<SqlitePool> {
@@ -97,6 +102,7 @@ const CSV_HEADER: &[&str] = &[
     "net_capital_gain",
     "capital_loss_carried_forward",
     "cgt_event_e10_gain",
+    "cgt_event_g1_gain",
 ];
 
 /// Gross gains and losses accumulated for one tax year before netting.
@@ -107,6 +113,8 @@ struct GrossBuckets {
     losses: Decimal,
     /// Gross CGT event E10 gains folded into the buckets above (informational).
     e10: Decimal,
+    /// Gross CGT event G1 gains folded into the buckets above (informational).
+    g1: Decimal,
 }
 
 /// Australian tax year for a dividend/sale date: July–December fall in the next FY.
@@ -195,6 +203,119 @@ async fn e10_gains(pool: &SqlitePool) -> Result<Vec<(i32, Decimal, bool)>, sqlx:
     Ok(out)
 }
 
+/// CGT event G1 gains: when a company's non-assessable (return-of-capital)
+/// payments exceed a parcel's per-unit cost base, the cost base is floored at nil
+/// and the excess is a capital gain in the payment's income year — G1 can never
+/// produce a capital loss (see `docs/cgt-non-assessable-payments.md`).
+///
+/// Returns `(tax_year, gross_gain_aud, discount_eligible)` for each payment that
+/// pushes a parcel's per-unit cost base below nil. Payments are walked per parcel
+/// in date order on a per-unit basis (the ATO compares the payment against the
+/// cost base *of the shares* at the payment time), tracked here as whole-parcel
+/// totals so no division precedes the final pro-rating. The gain covers only the
+/// units still held at the payment date (units sold earlier were not held for
+/// it); it is converted to AUD at the payment month's ATO rate (no manual
+/// fallback — a non-AUD payment with no rate fails loudly) and classified
+/// discount-eligible when the units were held more than 12 months at the payment
+/// date. Independent of the AMIT E10 walk above: E10 applies to trust units, G1
+/// to company shares, so the two reduction chains never share a parcel in
+/// practice.
+async fn g1_gains(pool: &SqlitePool) -> Result<Vec<(i32, Decimal, bool)>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT ca.date AS action_date, ca.amount_per_unit, ca.currency AS action_currency, \
+                t.id AS trade_id, t.date AS trade_date, t.quantity AS trade_qty, \
+                t.average_price, t.brokerage, t.gst_on_brokerage, \
+                t.currency AS trade_currency \
+         FROM corporate_actions ca \
+         JOIN trades t ON t.listing_id = ca.listing_id \
+                      AND t.trade_type IN ('Buy', 'DRP') \
+                      AND t.date <= ca.date \
+         WHERE ca.action_type = 'ReturnOfCapital' \
+         ORDER BY t.id, ca.date, ca.id",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    if rows.is_empty() {
+        return Ok(vec![]);
+    }
+
+    // Units sold out of each parcel, with the sale date — a unit sold before a
+    // payment was not held for it.
+    let alloc_rows = sqlx::query(
+        "SELECT pa.purchase_trade_id, pa.quantity_allocated, s.date AS sale_date \
+         FROM parcel_allocations pa JOIN trades s ON s.id = pa.sale_trade_id",
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut sold: HashMap<i64, Vec<(NaiveDate, Decimal)>> = HashMap::new();
+    for row in &alloc_rows {
+        let tid: i64 = row.try_get("purchase_trade_id")?;
+        let qty = parse_dec("quantity_allocated", row.try_get("quantity_allocated")?)?;
+        let sale_date: NaiveDate = row.try_get("sale_date")?;
+        sold.entry(tid).or_default().push((sale_date, qty));
+    }
+
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < rows.len() {
+        let trade_id: i64 = rows[i].try_get("trade_id")?;
+        // Parcel cost base in native currency (the trade columns repeat per row).
+        let trade_qty = parse_dec("trade_qty", rows[i].try_get("trade_qty")?)?;
+        let price = parse_dec("average_price", rows[i].try_get("average_price")?)?;
+        let brok = parse_dec("brokerage", rows[i].try_get("brokerage")?)?;
+        let gst = parse_dec("gst_on_brokerage", rows[i].try_get("gst_on_brokerage")?)?;
+        let trade_date: NaiveDate = rows[i].try_get("trade_date")?;
+        let trade_currency: String = rows[i].try_get("trade_currency")?;
+        // Whole-parcel remaining cost base: remaining ÷ quantity is the per-unit
+        // figure the payment is compared against, kept un-divided for precision.
+        let mut remaining = price * trade_qty + brok + gst;
+
+        while i < rows.len() && rows[i].try_get::<i64, _>("trade_id")? == trade_id {
+            let action_date: NaiveDate = rows[i].try_get("action_date")?;
+            let amount_pu = parse_dec("amount_per_unit", rows[i].try_get("amount_per_unit")?)?;
+            let action_currency: String = rows[i].try_get("action_currency")?;
+            if action_currency != trade_currency {
+                return Err(sqlx::Error::Decode(
+                    format!(
+                        "return-of-capital currency {action_currency} differs from the \
+                         parcel's currency {trade_currency}"
+                    )
+                    .into(),
+                ));
+            }
+            // Whole-parcel equivalent of the per-unit payment.
+            let payment = amount_pu * trade_qty;
+            if payment > remaining {
+                let excess = payment - remaining;
+                // Only the units still held at the payment date received it.
+                let held = trade_qty
+                    - sold
+                        .get(&trade_id)
+                        .map_or(Decimal::ZERO, |sales| {
+                            sales
+                                .iter()
+                                .filter(|(d, _)| *d < action_date)
+                                .map(|(_, q)| *q)
+                                .sum()
+                        });
+                if held > Decimal::ZERO && trade_qty > Decimal::ZERO {
+                    let gain = excess * held / trade_qty;
+                    let gain_aud =
+                        to_aud(pool, gain, &action_currency, action_date, None).await?;
+                    let discount_eligible = action_date > trade_date + Months::new(12);
+                    out.push((tax_year_for(action_date), gain_aud, discount_eligible));
+                }
+                remaining = Decimal::ZERO;
+            } else {
+                remaining -= payment;
+            }
+            i += 1;
+        }
+    }
+    Ok(out)
+}
+
 pub async fn db_net_capital_gain(pool: &SqlitePool) -> Result<Vec<NetCapitalGainYear>, sqlx::Error> {
     let mut buckets: HashMap<i32, GrossBuckets> = HashMap::new();
 
@@ -248,6 +369,19 @@ pub async fn db_net_capital_gain(pool: &SqlitePool) -> Result<Vec<NetCapitalGain
         b.e10 += amount;
     }
 
+    // CGT event G1 gains — return-of-capital payments in excess of a parcel's
+    // cost base — are likewise ordinary capital gains entering the buckets
+    // (discount-eligible or not, per the holding period at the payment date).
+    for (tax_year, amount, discount_eligible) in g1_gains(pool).await? {
+        let b = buckets.entry(tax_year).or_default();
+        if discount_eligible {
+            b.discount_eligible += amount;
+        } else {
+            b.other += amount;
+        }
+        b.g1 += amount;
+    }
+
     // Walk the years in order, chaining unused net capital losses forward: a
     // year's leftover loss becomes the next year's brought-forward balance (losses
     // carry forward indefinitely). The chain starts from the entered opening
@@ -286,6 +420,7 @@ pub async fn db_net_capital_gain(pool: &SqlitePool) -> Result<Vec<NetCapitalGain
                 net_capital_gain: net_other + cgt_discount,
                 capital_loss_carried_forward: carried_forward,
                 cgt_event_e10_gain: b.e10,
+                cgt_event_g1_gain: b.g1,
             };
             brought_forward = carried_forward;
             year
@@ -318,7 +453,7 @@ async fn net_capital_gain_export_handler(
 mod tests {
     use super::*;
     use crate::{
-        entities::{amit_adjustment, amma, cgt_settings, listing, parcel_allocation, rba_fx_rate, trade},
+        entities::{amit_adjustment, amma, cgt_settings, corporate_action, listing, parcel_allocation, rba_fx_rate, trade},
         infra::db,
     };
     use axum::{body::Body, http::Request};
@@ -867,6 +1002,127 @@ mod tests {
         // Held > 12 months at the FY2025 year end → discount-eligible → $30/2 = $15.
         assert_eq!(r[1].discount_eligible_gains, Decimal::from(30));
         assert_eq!(r[1].net_capital_gain, Decimal::from(15));
+    }
+
+    async fn apply_roc(pool: &SqlitePool, id: i64, listing_id: i64, date: NaiveDate, amount: &str) {
+        corporate_action::db_upsert(
+            pool,
+            &corporate_action::CorporateAction {
+                id,
+                action_type: corporate_action::ActionType::ReturnOfCapital,
+                listing_id,
+                date,
+                amount_per_unit: amount.parse().unwrap(),
+                currency: "AUD".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    /// CGT event G1: a return-of-capital payment exceeding the parcel's cost
+    /// base produces a capital gain equal to the excess, in the payment's income
+    /// year (`docs/cgt-non-assessable-payments.md`).
+    #[tokio::test]
+    async fn db_g1_excess_payment_becomes_capital_gain() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "RAP").await;
+        // Buy 100 @ $1 → cost base $100; held ~5 months at the payment date.
+        insert_trade(&pool, 1, trade::TradeType::Buy, 1,
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(), Decimal::from(100), Decimal::from(1)).await;
+        // $1.50/unit × 100 = $150 payment → $50 excess over the $100 cost base.
+        apply_roc(&pool, 1, 1, NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(), "1.50").await;
+
+        let r = db_net_capital_gain(&pool).await.unwrap();
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].tax_year, 2024);
+        assert_eq!(r[0].cgt_event_g1_gain, Decimal::from(50));
+        // Held ≤ 12 months at the payment date → non-discountable; fully assessable.
+        assert_eq!(r[0].other_gains, Decimal::from(50));
+        assert_eq!(r[0].discount_eligible_gains, Decimal::ZERO);
+        assert_eq!(r[0].net_capital_gain, Decimal::from(50));
+    }
+
+    /// A payment within the cost base produces no gain at all (and G1 can never
+    /// produce a capital loss) — Rob's Example 45 shape.
+    #[tokio::test]
+    async fn db_g1_payment_within_cost_base_produces_no_gain() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "RAP").await;
+        insert_trade(&pool, 1, trade::TradeType::Buy, 1,
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(), Decimal::from(1500), Decimal::from(5)).await;
+        apply_roc(&pool, 1, 1, NaiveDate::from_ymd_opt(2024, 11, 30).unwrap(), "0.50").await;
+
+        let r = db_net_capital_gain(&pool).await.unwrap();
+        assert!(
+            r.iter().all(|y| y.net_capital_gain == Decimal::ZERO
+                && y.cgt_event_g1_gain == Decimal::ZERO
+                && y.capital_losses == Decimal::ZERO),
+            "payment not more than cost base → no gain, and never a loss"
+        );
+    }
+
+    #[tokio::test]
+    async fn db_g1_gain_discount_eligible_when_held_over_12_months() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "RAP").await;
+        // Bought Jan 2023 → held > 12 months at the Jun 2024 payment date.
+        insert_trade(&pool, 1, trade::TradeType::Buy, 1,
+            NaiveDate::from_ymd_opt(2023, 1, 1).unwrap(), Decimal::from(100), Decimal::from(1)).await;
+        apply_roc(&pool, 1, 1, NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(), "1.50").await;
+
+        let r = db_net_capital_gain(&pool).await.unwrap();
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].cgt_event_g1_gain, Decimal::from(50));
+        // Discount-eligible → halved.
+        assert_eq!(r[0].discount_eligible_gains, Decimal::from(50));
+        assert_eq!(r[0].other_gains, Decimal::ZERO);
+        assert_eq!(r[0].cgt_discount, Decimal::from(25));
+        assert_eq!(r[0].net_capital_gain, Decimal::from(25));
+    }
+
+    #[tokio::test]
+    async fn db_g1_accumulates_across_payments_fires_when_cost_base_exhausted() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "RAP").await;
+        // Buy 100 @ $1 → cost base $100, bought Jan 2024.
+        insert_trade(&pool, 1, trade::TradeType::Buy, 1,
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(), Decimal::from(100), Decimal::from(1)).await;
+        // FY2024: 60c/unit × 100 = $60 → $40 cost base remains, no excess.
+        apply_roc(&pool, 1, 1, NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(), "0.60").await;
+        // FY2025: 70c/unit × 100 = $70 > $40 remaining → $30 excess (G1) in FY2025.
+        apply_roc(&pool, 2, 1, NaiveDate::from_ymd_opt(2025, 6, 1).unwrap(), "0.70").await;
+
+        let r = db_net_capital_gain(&pool).await.unwrap();
+        // Only FY2025 carries a gain (FY2024's payment stayed within cost base).
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].tax_year, 2025);
+        assert_eq!(r[0].cgt_event_g1_gain, Decimal::from(30));
+        // Held > 12 months at the second payment → discount-eligible → $30/2 = $15.
+        assert_eq!(r[0].discount_eligible_gains, Decimal::from(30));
+        assert_eq!(r[0].net_capital_gain, Decimal::from(15));
+    }
+
+    /// Only units still held at the payment date received it: a parcel partly
+    /// sold before the payment realises only the held share of the excess.
+    #[tokio::test]
+    async fn db_g1_gain_scales_to_units_held_at_payment() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "RAP").await;
+        // Buy 100 @ $1 (Jan 2024); sell 40 @ $1 (Mar 2024, no gain); then a
+        // $1.50/unit payment lands on the 60 still held.
+        insert_trade(&pool, 1, trade::TradeType::Buy, 1,
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(), Decimal::from(100), Decimal::from(1)).await;
+        insert_trade(&pool, 2, trade::TradeType::Sell, 1,
+            NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(), Decimal::from(40), Decimal::from(1)).await;
+        allocate(&pool, 1, 2, 1, Decimal::from(40)).await;
+        apply_roc(&pool, 1, 1, NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(), "1.50").await;
+
+        let r = db_net_capital_gain(&pool).await.unwrap();
+        assert_eq!(r.len(), 1);
+        // Per-unit excess 50c × 60 held units = $30 (not the whole-parcel $50).
+        assert_eq!(r[0].cgt_event_g1_gain, Decimal::from(30));
+        assert_eq!(r[0].net_capital_gain, Decimal::from(30));
     }
 
     #[tokio::test]

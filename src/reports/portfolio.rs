@@ -33,7 +33,8 @@ pub fn router() -> Router<SqlitePool> {
 /// Returns open holdings per listing: quantity, cost base, and optional market value.
 ///
 /// "Open" quantity for a parcel = trade.quantity − sum of parcel_allocations where purchase_trade_id = trade.id.
-/// Cost base is pro-rated to remaining units and reduced by any AMIT adjustments.
+/// Cost base is pro-rated to remaining units and reduced by any AMIT adjustments
+/// and return-of-capital payments (CGT event G1) received since acquisition.
 pub async fn db_holdings(pool: &SqlitePool) -> Result<Vec<HoldingOverview>, sqlx::Error> {
     let trade_rows = sqlx::query(
         "SELECT id, listing_id, date, quantity, average_price, brokerage, gst_on_brokerage, \
@@ -62,6 +63,9 @@ pub async fn db_holdings(pool: &SqlitePool) -> Result<Vec<HoldingOverview>, sqlx
 
     // total AMIT cost base reduction per purchase parcel
     let cba_reduction = crate::entities::amit_adjustment::db_cost_base_reductions(pool).await?;
+    // return-of-capital payments (CGT event G1) per listing
+    let roc_events =
+        crate::entities::corporate_action::db_return_of_capital_events(pool).await?;
 
     let mut listing_qty: HashMap<i64, Decimal> = HashMap::new();
     let mut listing_cost_base: HashMap<i64, Decimal> = HashMap::new();
@@ -89,8 +93,21 @@ pub async fn db_holdings(pool: &SqlitePool) -> Result<Vec<HoldingOverview>, sqlx
         // nil, never negative. Any excess is a capital gain reported by the
         // net-capital-gain report, not a negative cost base here.
         let net_cost = (initial_cost - amit).max(Decimal::ZERO);
-        // pro-rate cost base to remaining units
-        let remaining_cost = if qty > Decimal::ZERO { net_cost * remaining / qty } else { Decimal::ZERO };
+        // pro-rate cost base to remaining units, then net off the return-of-capital
+        // payments received on those units (CGT event G1 also floors at nil — the
+        // excess is a capital gain in the net-capital-gain report, never a
+        // negative cost base here)
+        let roc_per_unit = crate::entities::corporate_action::per_unit_reduction(
+            roc_events.get(&listing_id).map_or(&[][..], |v| v),
+            &currency,
+            trade_date,
+            None,
+        )?;
+        let remaining_cost = if qty > Decimal::ZERO {
+            (net_cost * remaining / qty - roc_per_unit * remaining).max(Decimal::ZERO)
+        } else {
+            Decimal::ZERO
+        };
         // Convert the parcel's cost base to AUD (ATO rate for the buy month, else
         // the trade's manual fx_rate) so holdings aggregate in AUD.
         let remaining_cost =
@@ -144,7 +161,7 @@ async fn overview(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{infra::db, entities::{amma, amit_adjustment, listing, parcel_allocation, trade}};
+    use crate::{infra::db, entities::{amma, amit_adjustment, corporate_action, listing, parcel_allocation, trade}};
     use axum::{body::Body, http::Request};
     use chrono::NaiveDate;
     use http_body_util::BodyExt;
@@ -427,6 +444,66 @@ mod tests {
         // parcel 2: 12*50  + 9.95 + 0.995 = 610.945
         // total = 1621.890
         assert_eq!(h.total_cost_base, "1621.890".parse::<Decimal>().unwrap());
+    }
+
+    async fn apply_roc(pool: &SqlitePool, id: i64, listing_id: i64, date: NaiveDate, amount: &str) {
+        corporate_action::db_upsert(
+            pool,
+            &corporate_action::CorporateAction {
+                id,
+                action_type: corporate_action::ActionType::ReturnOfCapital,
+                listing_id,
+                date,
+                amount_per_unit: amount.parse().unwrap(),
+                currency: "AUD".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    /// A return of capital (CGT event G1) reduces the holding's cost base by the
+    /// per-unit payment for units held on the payment date
+    /// (`docs/cgt-non-assessable-payments.md`).
+    #[tokio::test]
+    async fn db_return_of_capital_reduces_cost_base() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "RAP").await;
+        // Buy 100 @ $10 on 2024-01-01 → cost base 1010.945 (incl. brokerage).
+        insert_buy(&pool, 1, 1, Decimal::from(100), Decimal::from(10)).await;
+        // 50c/unit return of capital while all 100 units are held.
+        apply_roc(&pool, 1, 1, NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(), "0.50").await;
+
+        let holdings = db_holdings(&pool).await.unwrap();
+        assert_eq!(holdings.len(), 1);
+        // 1010.945 − 100 × 0.50 = 960.945
+        assert_eq!(holdings[0].total_cost_base, "960.945".parse::<Decimal>().unwrap());
+    }
+
+    #[tokio::test]
+    async fn db_return_of_capital_before_acquisition_does_not_apply() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "RAP").await;
+        // Payment made before this parcel was acquired (2024-01-01): unaffected.
+        apply_roc(&pool, 1, 1, NaiveDate::from_ymd_opt(2023, 11, 30).unwrap(), "0.50").await;
+        insert_buy(&pool, 1, 1, Decimal::from(100), Decimal::from(10)).await;
+
+        let holdings = db_holdings(&pool).await.unwrap();
+        assert_eq!(holdings[0].total_cost_base, "1010.945".parse::<Decimal>().unwrap());
+    }
+
+    /// G1 can never push the cost base below nil: the excess over cost base is a
+    /// capital gain in the net-capital-gain report, not a negative cost base here.
+    #[tokio::test]
+    async fn db_return_of_capital_floors_cost_base_at_nil() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "RAP").await;
+        insert_buy(&pool, 1, 1, Decimal::from(100), Decimal::from(10)).await;
+        // $11/unit × 100 = 1100 exceeds the 1010.945 cost base.
+        apply_roc(&pool, 1, 1, NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(), "11").await;
+
+        let holdings = db_holdings(&pool).await.unwrap();
+        assert_eq!(holdings[0].total_cost_base, Decimal::ZERO);
     }
 
     // API-level tests

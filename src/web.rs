@@ -241,6 +241,16 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn corporate_actions_ui_present() {
+        let js = app_js_body().await;
+        // The Corporate Actions view records return-of-capital payments (CGT
+        // event G1) against a listing.
+        assert!(js.contains("/corporate_actions"));
+        assert!(js.contains("ReturnOfCapital"));
+        assert!(js.contains("amount_per_unit"));
+    }
+
+    #[tokio::test]
     async fn tables_are_filterable_and_sortable() {
         let js = app_js_body().await;
         // Every entity list and report table renders through the shared

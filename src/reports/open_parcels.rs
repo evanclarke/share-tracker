@@ -24,8 +24,13 @@ pub struct OpenParcel {
     /// Cumulative AMIT cost-base reductions applied to the parcel to date, AUD
     /// (the full reduction, even where CGT event E10 has floored the cost base).
     pub amit_cost_base_reduction: Decimal,
+    /// Cumulative return-of-capital payments (CGT event G1) received on the
+    /// remaining units since acquisition, AUD (the full amount, even where the
+    /// cost base has been floored at nil).
+    pub return_of_capital_reduction: Decimal,
     /// Adjusted cost base of the remaining units, AUD: max(original − AMIT, 0)
-    /// pro-rated to the remaining quantity (CGT event E10 floors at nil).
+    /// pro-rated to the remaining quantity, less return-of-capital payments on
+    /// those units (CGT events E10 and G1 both floor the cost base at nil).
     pub remaining_cost_base: Decimal,
 }
 
@@ -64,6 +69,8 @@ pub async fn db_open_parcels(pool: &SqlitePool) -> Result<Vec<OpenParcel>, sqlx:
     }
 
     let cba_reduction = crate::entities::amit_adjustment::db_cost_base_reductions(pool).await?;
+    let roc_events =
+        crate::entities::corporate_action::db_return_of_capital_events(pool).await?;
 
     let mut parcels = Vec::new();
     for row in &trade_rows {
@@ -90,8 +97,21 @@ pub async fn db_open_parcels(pool: &SqlitePool) -> Result<Vec<OpenParcel>, sqlx:
         // to nil, never negative (the excess is a capital gain in the
         // net-capital-gain report).
         let net_cost = (initial_cost - amit).max(Decimal::ZERO);
-        let remaining_cost =
-            if qty > Decimal::ZERO { net_cost * remaining / qty } else { Decimal::ZERO };
+        // Return-of-capital payments (CGT event G1) received on the remaining
+        // units since acquisition; the cost base floors at nil (the excess is a
+        // capital gain in the net-capital-gain report).
+        let roc_per_unit = crate::entities::corporate_action::per_unit_reduction(
+            roc_events.get(&listing_id).map_or(&[][..], |v| v),
+            &currency,
+            trade_date,
+            None,
+        )?;
+        let roc = roc_per_unit * remaining;
+        let remaining_cost = if qty > Decimal::ZERO {
+            (net_cost * remaining / qty - roc).max(Decimal::ZERO)
+        } else {
+            Decimal::ZERO
+        };
 
         // Convert each figure to AUD at the parcel's buy-month ATO rate (the
         // trade's manual fx_rate as fallback) so the schedule is uniformly AUD.
@@ -100,6 +120,8 @@ pub async fn db_open_parcels(pool: &SqlitePool) -> Result<Vec<OpenParcel>, sqlx:
                 .await?;
         let amit_cost_base_reduction =
             crate::infra::fx::to_aud(pool, amit, &currency, trade_date, Some(fx_rate)).await?;
+        let return_of_capital_reduction =
+            crate::infra::fx::to_aud(pool, roc, &currency, trade_date, Some(fx_rate)).await?;
         let remaining_cost_base =
             crate::infra::fx::to_aud(pool, remaining_cost, &currency, trade_date, Some(fx_rate))
                 .await?;
@@ -113,6 +135,7 @@ pub async fn db_open_parcels(pool: &SqlitePool) -> Result<Vec<OpenParcel>, sqlx:
             remaining_quantity: remaining,
             original_cost_base,
             amit_cost_base_reduction,
+            return_of_capital_reduction,
             remaining_cost_base,
         });
     }
@@ -137,7 +160,7 @@ async fn open_parcels_handler(
 mod tests {
     use super::*;
     use crate::{
-        entities::{amit_adjustment, amma, listing, parcel_allocation, trade},
+        entities::{amit_adjustment, amma, corporate_action, listing, parcel_allocation, trade},
         infra::db,
     };
     use axum::{body::Body, http::Request};
@@ -456,6 +479,65 @@ mod tests {
         let order: Vec<(i64, NaiveDate)> =
             parcels.iter().map(|p| (p.listing_id, p.acquisition_date)).collect();
         assert_eq!(order, vec![(1, d1), (1, d2), (2, d1)]);
+    }
+
+    async fn apply_roc(pool: &SqlitePool, id: i64, listing_id: i64, date: NaiveDate, amount: &str) {
+        corporate_action::db_upsert(
+            pool,
+            &corporate_action::CorporateAction {
+                id,
+                action_type: corporate_action::ActionType::ReturnOfCapital,
+                listing_id,
+                date,
+                amount_per_unit: amount.parse().unwrap(),
+                currency: "AUD".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    /// A return of capital (CGT event G1) is reported per parcel and netted off
+    /// the remaining cost base for the units still held
+    /// (`docs/cgt-non-assessable-payments.md`).
+    #[tokio::test]
+    async fn db_return_of_capital_reduction_reported_and_netted_off() {
+        let pool = test_pool().await;
+        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        insert_listing(&pool, 1, "RAP").await;
+        insert_buy(&pool, 1, 1, buy_date, Decimal::from(100), Decimal::from(10)).await;
+        // Sell 40 first, then a 50c/unit payment on the 60 still held.
+        insert_sell(&pool, 2, 1, Decimal::from(40)).await; // sale dated 2025-06-01
+        allocate(&pool, 1, 2, 1, Decimal::from(40)).await;
+        apply_roc(&pool, 1, 1, NaiveDate::from_ymd_opt(2025, 7, 1).unwrap(), "0.50").await;
+
+        let parcels = db_open_parcels(&pool).await.unwrap();
+        assert_eq!(parcels.len(), 1);
+        let p = &parcels[0];
+        assert_eq!(p.remaining_quantity, Decimal::from(60));
+        // The payment lands only on the 60 remaining units: 60 × 0.50 = 30.
+        assert_eq!(p.return_of_capital_reduction, Decimal::from(30));
+        // remaining = 1010.945 × 60/100 − 30 = 606.567 − 30 = 576.567
+        assert_eq!(p.remaining_cost_base, "576.567".parse::<Decimal>().unwrap());
+    }
+
+    /// G1 floors the remaining cost base at nil — the excess is a capital gain
+    /// in the net-capital-gain report, never a negative cost base here.
+    #[tokio::test]
+    async fn db_return_of_capital_floors_remaining_cost_base_at_nil() {
+        let pool = test_pool().await;
+        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        insert_listing(&pool, 1, "RAP").await;
+        insert_buy(&pool, 1, 1, buy_date, Decimal::from(100), Decimal::from(10)).await;
+        // $11/unit × 100 = 1100 exceeds the 1010.945 cost base.
+        apply_roc(&pool, 1, 1, NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(), "11").await;
+
+        let parcels = db_open_parcels(&pool).await.unwrap();
+        assert_eq!(parcels.len(), 1);
+        // The full payment is still reported…
+        assert_eq!(parcels[0].return_of_capital_reduction, Decimal::from(1100));
+        // …but the remaining cost base is floored at nil.
+        assert_eq!(parcels[0].remaining_cost_base, Decimal::ZERO);
     }
 
     // API-level tests

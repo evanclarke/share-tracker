@@ -9,6 +9,7 @@ A personal Australian share portfolio tracker with a REST JSON API. Records trad
 - **DRP reinvestment** — enrol holdings in a Dividend Reinvestment Plan over dated enrolment periods (enrol, unenrol, re-enrol), then turn a distribution into a linked DRP trade; reinvestability is checked as at the distribution's ex date, and leftover cash that can't buy a whole share is carried forward to the next reinvestment in the period or paid out, per the period — unenrolling pays out the trailing carried residual
 - **AMIT/AMMA support** — annual tax statements for Attribution Managed Investment Trusts (AMITs), with cost base adjustments applied per purchase parcel
 - **Parcel-level CGT** — explicit parcel allocations link sell trades to the parcels they came from; cost bases are pro-rated and AMIT-reduced at the parcel level
+- **Return of capital (CGT event G1)** — record a company's non-assessable payment as a corporate action; the per-unit amount reduces the cost base of every parcel held on the payment date across all reports, and a payment in excess of a parcel's cost base becomes a capital gain in the net capital gain report (the cost base floors at nil — G1 never produces a loss)
 - **Portfolio overview** — open holdings per security with total cost base and optional market value (supply current prices in the request body)
 - **Unrealised gains report** — per-holding gain/loss and CGT-discount-eligible quantity as at a given date
 - **Realised gains report** — per-sale capital gain/loss split into discount-eligible (parcels held strictly more than 12 months), non-discountable, and loss buckets
@@ -189,6 +190,14 @@ cgt_settings                 Singleton CGT settings row (CHECK id = 1)
 ├── id                   INTEGER PK  Always 1 (CHECK-enforced singleton)
 └── opening_capital_loss TEXT (decimal)  Net capital loss carried forward from before the first recorded year (AUD, non-negative); starting balance for the net-capital-gain loss chain
 
+corporate_actions            Corporate actions per listing (currently: company returns of capital, CGT event G1)
+├── id              INTEGER PK
+├── action_type     TEXT   ReturnOfCapital (CHECK-enforced enum; the extension point for future actions)
+├── listing_id      INTEGER FK→listings.id
+├── date            TEXT   Payment date — parcels acquired on/before this date and still held then are affected
+├── amount_per_unit TEXT (decimal)  Per-unit non-assessable payment (positive); reduces affected parcels' cost bases
+└── currency        TEXT FK→currencies.code   Must match the affected trades' currency (reports fail loudly on a mismatch)
+
 attachments                  Supporting documents for an activity; bytes stored in the DB (captured by the weekly backup)
 ├── id                INTEGER PK
 ├── trade_id          INTEGER FK→trades.id (nullable, ON DELETE CASCADE)            Owner (exactly one of the three is set)
@@ -221,10 +230,11 @@ exchanges ──< listings ──< trades >────────────�
                        listings ──< amma_statements
                        listings ──< income
                        listings ──< drp_enrolments
+                       listings ──< corporate_actions
                        trades (DRP) ──< income (reinvestment_trade_id)
                        trades, income, amma_statements ──< attachments (exactly one owner; ON DELETE CASCADE)
 
-currencies ──< exchanges, listings, trades (currency + brokerage_currency), income, amma_statements
+currencies ──< exchanges, listings, trades (currency + brokerage_currency), income, amma_statements, corporate_actions
 ```
 
 Each `attachments` row belongs to exactly one activity via one of three nullable foreign keys (`trade_id` / `income_id` / `amma_statement_id`), with a `CHECK` enforcing that exactly one is set — a real foreign key keeps referential integrity to the owning row, and `ON DELETE CASCADE` removes an activity's attachments when it is deleted. File contents live in the `content` BLOB so the weekly DB backup captures the documents with no separate file store.
@@ -233,7 +243,7 @@ Each `attachments` row belongs to exactly one activity via one of three nullable
 
 `mic_registry` is standalone reference data (no foreign keys), keyed by `mic`. It is populated from the ISO 10383 list and used only to validate curated `exchanges` (see the [exchange MIC validation report](#exchange-mic-validation)); it is *not* the operational exchange table and carries no currency/timezone/settlement data.
 
-`currencies` is reference data keyed by `code` (it has no outgoing foreign keys). It is populated from the ISO 4217 (SIX Group) and ISO 24165 (DTIF) feeds and seeded with a baseline of common currencies (the seed migration), and is the recognised list that **every** currency code in the model is foreign-keyed to: `exchanges.currency`, `listings.currency`, `trades.currency`, `trades.brokerage_currency`, `income.currency`, and `amma_statements.currency` all reference `currencies.code`, so an unrecognised currency is rejected at write time. `minor_units` is informational only — stored amounts remain arbitrary-precision Decimal and are never rounded to it.
+`currencies` is reference data keyed by `code` (it has no outgoing foreign keys). It is populated from the ISO 4217 (SIX Group) and ISO 24165 (DTIF) feeds and seeded with a baseline of common currencies (the seed migration), and is the recognised list that **every** currency code in the model is foreign-keyed to: `exchanges.currency`, `listings.currency`, `trades.currency`, `trades.brokerage_currency`, `income.currency`, `amma_statements.currency`, and `corporate_actions.currency` all reference `currencies.code`, so an unrecognised currency is rejected at write time. `minor_units` is informational only — stored amounts remain arbitrary-precision Decimal and are never rounded to it.
 
 Decimal values are stored as TEXT to preserve arbitrary precision.
 
@@ -251,7 +261,7 @@ The server also hosts a built-in web UI — a no-build-step single-page app (pla
 | `GET` | `/static/app.js` | The app bundle (JavaScript) |
 | `GET` | `/static/style.css` | Stylesheet (CSS) |
 
-Open `http://localhost:<port>/` in a browser. The app is hash-routed (`#/e/<entity>`, `#/sells`, `#/jobs`, `#/attachments/<owner>/<id>`, `#/r/<report>`) and drives the JSON API below — it provides CRUD screens for every entity (exchanges, listings, trades, income, AMMA statements, AMIT adjustments, DRP enrolments, exchange holidays, CGT settings), a dedicated Sell screen that captures parcel allocations atomically, a DRP reinvest action on income rows, an Attachments action on each trade/income/AMMA row that uploads, lists, downloads, and deletes its documents, read-only views of the import-managed reference tables (currencies, MIC registry, RBA FX rates, parcel allocations), a Maintenance → Jobs screen that lists the scheduled jobs with each one's last run (when it finished, whether it succeeded, and any error) and runs any of them on demand (`POST /jobs/:name`), and a view for each report (portfolio overview, open parcels, unrealised/realised gains, net capital gain, tax summary, exchange MIC validation, settlement holiday coverage). The net capital gain and tax summary report views carry an **Export CSV** action that downloads the report via its `/export` endpoint.
+Open `http://localhost:<port>/` in a browser. The app is hash-routed (`#/e/<entity>`, `#/sells`, `#/jobs`, `#/attachments/<owner>/<id>`, `#/r/<report>`) and drives the JSON API below — it provides CRUD screens for every entity (exchanges, listings, trades, income, AMMA statements, AMIT adjustments, DRP enrolments, exchange holidays, CGT settings, corporate actions), a dedicated Sell screen that captures parcel allocations atomically, a DRP reinvest action on income rows, an Attachments action on each trade/income/AMMA row that uploads, lists, downloads, and deletes its documents, read-only views of the import-managed reference tables (currencies, MIC registry, RBA FX rates, parcel allocations), a Maintenance → Jobs screen that lists the scheduled jobs with each one's last run (when it finished, whether it succeeded, and any error) and runs any of them on demand (`POST /jobs/:name`), and a view for each report (portfolio overview, open parcels, unrealised/realised gains, net capital gain, tax summary, exchange MIC validation, settlement holiday coverage). The net capital gain and tax summary report views carry an **Export CSV** action that downloads the report via its `/export` endpoint.
 
 ### Exchanges
 
@@ -445,6 +455,30 @@ PUT /cgt_settings/1
 
 Returns `204 No Content`, or `422 Unprocessable Entity` if the amount is negative or the id is not `1` (the table CHECKs the singleton).
 
+### Corporate actions
+
+Corporate actions recorded against a listing. One action type is modelled so far: `ReturnOfCapital` — a non-assessable payment from a company (a shareholder-approved return of share capital, CGT event G1; see `docs/cgt-non-assessable-payments.md`). The per-unit payment reduces the cost base of every parcel of the listing held on the payment date (units sold before the payment were not held for it and are unaffected) in the [portfolio](#overview), [open parcels](#open-parcels), [unrealised](#unrealised-gains), and [realised](#realised-gains) reports. Where cumulative payments exceed a parcel's per-unit cost base, the cost base floors at nil and the excess is a capital gain in the payment's income year — G1 never produces a capital loss — reported by the [net capital gain report](#net-capital-gain).
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/corporate_actions` | List corporate actions |
+| `GET` | `/corporate_actions/:id` | Get one corporate action |
+| `PUT` | `/corporate_actions/:id` | Create or update a corporate action |
+| `DELETE` | `/corporate_actions/:id` | Delete a corporate action |
+
+```
+PUT /corporate_actions/1
+{
+  "action_type": "ReturnOfCapital",
+  "listing_id": 1,
+  "date": "2024-11-30",
+  "amount_per_unit": "0.50",
+  "currency": "AUD"
+}
+```
+
+Returns `204 No Content`, or `422 Unprocessable Entity` when `amount_per_unit` is not positive, the listing or currency is unknown, or the action type is unrecognised. The action's `currency` must match the affected trades' currency — the reports never net amounts across currencies and fail loudly (`500`) on a mismatch.
+
 ### DRP reinvestment
 
 ```
@@ -530,7 +564,7 @@ Returns open holdings per listing. Request body (optional):
 
 Response fields per holding: `listing_id`, `quantity`, `avg_cost_base_per_unit`, `total_cost_base`, `current_price` (nullable), `market_value` (nullable).
 
-Cost base is calculated as `(price × quantity + brokerage + GST) − AMIT reductions`, pro-rated to remaining (unsold) units, then converted to AUD (see [FX conversion](#fx-conversion)). Supplied prices are expected in AUD, so `market_value` is AUD.
+Cost base is calculated as `(price × quantity + brokerage + GST) − AMIT reductions`, pro-rated to remaining (unsold) units, less [return-of-capital](#corporate-actions) payments received on those units — flooring at nil (CGT events E10 and G1) — then converted to AUD (see [FX conversion](#fx-conversion)). Supplied prices are expected in AUD, so `market_value` is AUD. The unrealised-gains report computes its cost base the same way.
 
 #### Open parcels
 
@@ -538,7 +572,7 @@ Cost base is calculated as `(price × quantity + brokerage + GST) − AMIT reduc
 GET /portfolio/open-parcels
 ```
 
-Returns every open parcel — a Buy/DRP trade whose quantity is not fully consumed by parcel allocations — the per-parcel cost-base schedule to reconcile against a broker statement and the input to a sell decision (the [overview](#overview) aggregates the same parcels per listing). Response fields per parcel: `trade_id`, `listing_id`, `ticker`, `acquisition_date`, `original_quantity`, `remaining_quantity` (units not yet allocated to a Sell), `original_cost_base` (price × quantity + brokerage + GST for the whole parcel), `amit_cost_base_reduction` (cumulative AMIT reductions to date — the full amount, even where CGT event E10 has floored the cost base), and `remaining_cost_base` (`max(original − AMIT, 0)` pro-rated to the remaining units). All monetary fields are AUD, converted at the parcel's buy-month rate (see [FX conversion](#fx-conversion)).
+Returns every open parcel — a Buy/DRP trade whose quantity is not fully consumed by parcel allocations — the per-parcel cost-base schedule to reconcile against a broker statement and the input to a sell decision (the [overview](#overview) aggregates the same parcels per listing). Response fields per parcel: `trade_id`, `listing_id`, `ticker`, `acquisition_date`, `original_quantity`, `remaining_quantity` (units not yet allocated to a Sell), `original_cost_base` (price × quantity + brokerage + GST for the whole parcel), `amit_cost_base_reduction` (cumulative AMIT reductions to date — the full amount, even where CGT event E10 has floored the cost base), `return_of_capital_reduction` (cumulative [return-of-capital](#corporate-actions) payments received on the remaining units since acquisition — likewise the full amount, even where CGT event G1 has floored the cost base), and `remaining_cost_base` (`max(original − AMIT, 0)` pro-rated to the remaining units, less the return-of-capital payments on those units, floored at nil). All monetary fields are AUD, converted at the parcel's buy-month rate (see [FX conversion](#fx-conversion)).
 
 Sorted by `listing_id`, then `acquisition_date`, then `trade_id`.
 
@@ -562,7 +596,7 @@ Request body (all optional):
 GET /portfolio/realised-gains
 ```
 
-Returns one record per sale trade that has at least one parcel allocation. Response fields: `sale_trade_id`, `listing_id`, `sale_date`, `proceeds`, `cost_base`, `capital_gain_loss`, `discount_eligible_gain` (gross gain from parcels held strictly more than 12 months), `non_discountable_gain` (gross gain from parcels held 12 months or less — the "other" method), and `capital_loss` (total losses from allocations sold below cost, as a positive amount). The three buckets satisfy `capital_gain_loss == discount_eligible_gain + non_discountable_gain − capital_loss`. `proceeds`, `cost_base`, and `capital_gain_loss` are in AUD: proceeds are converted at the sale's FX rate and cost base at the purchase's FX rate (see [FX conversion](#fx-conversion)).
+Returns one record per sale trade that has at least one parcel allocation. Response fields: `sale_trade_id`, `listing_id`, `sale_date`, `proceeds`, `cost_base`, `capital_gain_loss`, `discount_eligible_gain` (gross gain from parcels held strictly more than 12 months), `non_discountable_gain` (gross gain from parcels held 12 months or less — the "other" method), and `capital_loss` (total losses from allocations sold below cost, as a positive amount). The three buckets satisfy `capital_gain_loss == discount_eligible_gain + non_discountable_gain − capital_loss`. `proceeds`, `cost_base`, and `capital_gain_loss` are in AUD: proceeds are converted at the sale's FX rate and cost base at the purchase's FX rate (see [FX conversion](#fx-conversion)). The cost base of the sold units is reduced by [return-of-capital](#corporate-actions) payments received while they were held — from acquisition up to the sale date — flooring at nil; payments after the sale don't touch them.
 
 Sorted by `sale_date` ascending.
 
@@ -576,14 +610,16 @@ Returns one record per Australian financial year (identified by the calendar yea
 
 The assessable net capital gain is computed the ATO way:
 
-1. Total the year's gross capital gains, split into **discount-eligible** (realised parcels held > 12 months + AMMA discount-method gains grossed up ×2 — the AMMA `cgt_discount_gains` value is the already-halved "discounted capital gain", so doubling it restores the gross gain + any **CGT event E10** gain held > 12 months at year end) and **non-discountable** (realised parcels held ≤ 12 months + AMMA indexation-method and other-method gains, neither of which gets the discount + any CGT event E10 gain held ≤ 12 months).
+1. Total the year's gross capital gains, split into **discount-eligible** (realised parcels held > 12 months + AMMA discount-method gains grossed up ×2 — the AMMA `cgt_discount_gains` value is the already-halved "discounted capital gain", so doubling it restores the gross gain + any **CGT event E10/G1** gain whose parcel was held > 12 months at the event date) and **non-discountable** (realised parcels held ≤ 12 months + AMMA indexation-method and other-method gains, neither of which gets the discount + any CGT event E10/G1 gain held ≤ 12 months).
 2. Total the year's capital losses: realised losses + AMMA `capital_losses_applied`, **plus the net capital loss brought forward from earlier years** — unused losses chain across the year series indefinitely (per the ATO), starting from the entered [opening carried-forward loss](#cgt-settings) (losses from before the first recorded year).
 3. Apply losses against non-discountable gains first, then discount-eligible gains (taxpayer-favourable: the 50% discount falls on the largest possible remaining gain). Losses always apply before the discount.
 4. **Net capital gain** = remaining non-discountable gain + 50% of the remaining discount-eligible gain. Unused losses are carried forward into the next year in the series.
 
 **CGT event E10**: when the cumulative AMIT cost base reductions (`amit_adjustments` × the AMMA per-unit `cost_base_adjustment`) on a parcel exceed its cost base, the cost base is floored at nil (in the portfolio, unrealised, and realised reports) and the excess is a capital gain in the income year the reducing AMMA statement applies to — added to the gain buckets above (discount-eligible vs not, per the holding period as at the statement's `tax_year_end_date`). The excess is converted to AUD at the parcel's buy-month rate. See `docs/amit-cost-base-adjustments.md`.
 
-Response fields: `tax_year`, `discount_eligible_gains`, `other_gains`, `capital_losses` (all gross; `capital_losses` is only the losses arising that year), `capital_loss_brought_forward` (unused losses chained from earlier years, seeded by the `cgt_settings` opening balance), `net_discount_eligible_gain` and `net_other_gain` (after losses), `cgt_discount` (the 50% reduction applied = `net_discount_eligible_gain / 2`), `net_capital_gain`, `capital_loss_carried_forward` (losses left unused after offsetting all gains — the next year's brought-forward balance), and `cgt_event_e10_gain` (informational: gross E10 gains already included in the gain buckets). All amounts are AUD (AMMA amounts converted via the ATO rate for the month of `tax_year_end_date`, so a non-AUD amount with no rate fails loudly with `500`; see [FX conversion](#fx-conversion)).
+**CGT event G1**: when a company's cumulative [return-of-capital](#corporate-actions) payments exceed a parcel's per-unit cost base, the cost base is floored at nil and the excess is a capital gain in the payment's income year — covering only the units still held at the payment date, and never producing a capital loss. The gain is added to the gain buckets above (discount-eligible vs not, per the holding period as at the payment date) and converted to AUD at the payment month's ATO rate (no manual fallback: a non-AUD payment with no rate fails loudly with `500`). See `docs/cgt-non-assessable-payments.md`.
+
+Response fields: `tax_year`, `discount_eligible_gains`, `other_gains`, `capital_losses` (all gross; `capital_losses` is only the losses arising that year), `capital_loss_brought_forward` (unused losses chained from earlier years, seeded by the `cgt_settings` opening balance), `net_discount_eligible_gain` and `net_other_gain` (after losses), `cgt_discount` (the 50% reduction applied = `net_discount_eligible_gain / 2`), `net_capital_gain`, `capital_loss_carried_forward` (losses left unused after offsetting all gains — the next year's brought-forward balance), `cgt_event_e10_gain`, and `cgt_event_g1_gain` (informational: gross E10/G1 gains already included in the gain buckets). All amounts are AUD (AMMA amounts converted via the ATO rate for the month of `tax_year_end_date`, so a non-AUD amount with no rate fails loudly with `500`; see [FX conversion](#fx-conversion)).
 
 ```
 GET /portfolio/net-capital-gain/export
@@ -636,7 +672,7 @@ Flags every trade whose `[date, settlement_date]` window is not fully inside its
 | `404 Not Found` | Resource does not exist |
 | `405 Method Not Allowed` | Write attempted on a read-only path (e.g. `parcel_allocations`) |
 | `413 Payload Too Large` | Uploaded attachment exceeds the 25 MB per-file limit |
-| `422 Unprocessable Entity` | Business rule or constraint violation (e.g. over-allocation, wrong trade type, under-allocated Sell, deleting or shrinking a Buy/DRP that a parcel allocation, AMIT adjustment, or reinvestment link still relies on, unparseable FX or MIC feed, a write referencing an unrecognised currency / unknown exchange / listing, an attachment upload with no/multiple owners or an unsupported content type, a negative / non-singleton `cgt_settings` opening capital loss, an overlapping or empty DRP enrolment period, or reinvesting a distribution no enrolment period covers) |
+| `422 Unprocessable Entity` | Business rule or constraint violation (e.g. over-allocation, wrong trade type, under-allocated Sell, deleting or shrinking a Buy/DRP that a parcel allocation, AMIT adjustment, or reinvestment link still relies on, unparseable FX or MIC feed, a write referencing an unrecognised currency / unknown exchange / listing, an attachment upload with no/multiple owners or an unsupported content type, a negative / non-singleton `cgt_settings` opening capital loss, an overlapping or empty DRP enrolment period, reinvesting a distribution no enrolment period covers, or a corporate action with a non-positive `amount_per_unit` or unrecognised `action_type`) |
 | `500 Internal Server Error` | Unexpected database error, or a job triggered via `POST /jobs/:name` failed |
 | `502 Bad Gateway` | Upstream fetch failed (e.g. the RBA FX or ISO MIC import could not reach its source) |
 

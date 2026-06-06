@@ -30,4 +30,9 @@ If the unit or interest is not in an AMIT, the CGT event is E4, and if the unit 
 
 > Project note: the AMIT (E10) case is modelled — see `amit-cost-base-adjustments.md` and the
 > AMIT adjustment / net-capital-gain implementation. The **company return of capital (G1)**
-> case is *not* yet modelled — see TODO "Corporate actions / additional CGT events".
+> case is modelled as a `ReturnOfCapital` corporate action (`src/entities/corporate_action.rs`):
+> it reduces the cost base of parcels held on the payment date in the portfolio/open-parcels/
+> unrealised/realised reports, and the excess over a parcel's cost base is a G1 capital gain in
+> the net-capital-gain report (`g1_gains`). The non-AMIT unit-trust case (**E4**) is not
+> distinguished from G1 — both reduce cost base and gain on the excess; the E4 timing nuance
+> (adjustment at sale based on the income year's payments) is not separately modelled.

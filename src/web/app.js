@@ -275,6 +275,19 @@
       columns: ['id', 'listing_id', 'enrolment_date', 'unenrolment_date', 'residual_handling'],
     },
     {
+      slug: 'corporate_actions', title: 'Corporate Actions', group: 'Activity', api: '/corporate_actions',
+      desc: 'Return-of-capital payments (CGT event G1): the per-unit amount reduces the cost base of parcels held on the payment date; any excess over a parcel’s cost base is a capital gain in the Net Capital Gain report.',
+      keyFields: [int('id', 'ID', { auto: true })],
+      fields: [
+        sel('action_type', 'Action type', ['ReturnOfCapital'], { required: true }),
+        fk('listing_id', 'Listing', 'listings', { required: true }),
+        dt('date', 'Payment date', { required: true }),
+        dec('amount_per_unit', 'Amount per unit', { required: true, default: '' }),
+        fk('currency', 'Currency', 'currencies', { required: true, encode: 'string', default: 'AUD' }),
+      ],
+      columns: ['id', 'action_type', 'listing_id', 'date', 'amount_per_unit', 'currency'],
+    },
+    {
       slug: 'cgt_settings', title: 'CGT Settings', group: 'Activity', api: '/cgt_settings',
       desc: 'Opening carried-forward capital loss (pre-system loss years), applied as the starting balance in the Net Capital Gain report.',
       keyFields: [int('id', 'ID', { required: true, default: '1', hint: 'Singleton — always 1.' })],
@@ -289,7 +302,7 @@
 
   const REPORTS = [
     { slug: 'overview', title: 'Portfolio Overview', api: '/portfolio/overview', method: 'POST', prices: true, desc: 'Open holdings per listing, with optional market value.' },
-    { slug: 'open-parcels', title: 'Open Parcels', api: '/portfolio/open-parcels', method: 'GET', desc: 'Every open parcel: acquisition date, original cost base, AMIT reductions, remaining quantity and adjusted cost base (AUD).' },
+    { slug: 'open-parcels', title: 'Open Parcels', api: '/portfolio/open-parcels', method: 'GET', desc: 'Every open parcel: acquisition date, original cost base, AMIT and return-of-capital reductions, remaining quantity and adjusted cost base (AUD).' },
     { slug: 'unrealised-gains', title: 'Unrealised Gains', api: '/portfolio/unrealised-gains', method: 'POST', prices: true, asOfDate: true, desc: 'Per-holding unrealised gain/loss vs cost base.' },
     { slug: 'realised-gains', title: 'Realised Gains', api: '/portfolio/realised-gains', method: 'GET', desc: 'Per-sale capital gain/loss split into CGT buckets.' },
     { slug: 'net-capital-gain', title: 'Net Capital Gain', api: '/portfolio/net-capital-gain', method: 'GET', export: true, desc: 'Assessable net capital gain per financial year.' },
