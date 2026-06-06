@@ -584,6 +584,16 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(n, 0);
+
+        // The holding is back to its pre-participation state (a withdrawn or
+        // failed buy-back leaves no trace): the full 10,000 units at the
+        // original cost base, and the parcel's capacity is freed so a fresh
+        // participation for the same units succeeds.
+        let holdings = crate::reports::portfolio::db_holdings(&pool).await.unwrap();
+        assert_eq!(holdings.len(), 1);
+        assert_eq!(holdings[0].quantity, dec("10000"));
+        assert_eq!(holdings[0].total_cost_base, dec("60000.00"));
+        db_participate(&pool, 10, &body(d(2024, 7, 11), "1000", 1)).await.unwrap();
     }
 
     /// The action the participations were created against is frozen while
