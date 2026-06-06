@@ -287,8 +287,8 @@
     { slug: 'open-parcels', title: 'Open Parcels', api: '/portfolio/open-parcels', method: 'GET', desc: 'Every open parcel: acquisition date, original cost base, AMIT reductions, remaining quantity and adjusted cost base (AUD).' },
     { slug: 'unrealised-gains', title: 'Unrealised Gains', api: '/portfolio/unrealised-gains', method: 'POST', prices: true, asOfDate: true, desc: 'Per-holding unrealised gain/loss vs cost base.' },
     { slug: 'realised-gains', title: 'Realised Gains', api: '/portfolio/realised-gains', method: 'GET', desc: 'Per-sale capital gain/loss split into CGT buckets.' },
-    { slug: 'net-capital-gain', title: 'Net Capital Gain', api: '/portfolio/net-capital-gain', method: 'GET', desc: 'Assessable net capital gain per financial year.' },
-    { slug: 'tax-summary', title: 'Tax Summary', api: '/portfolio/tax-summary', method: 'GET', desc: 'Income aggregated by Australian financial year.' },
+    { slug: 'net-capital-gain', title: 'Net Capital Gain', api: '/portfolio/net-capital-gain', method: 'GET', export: true, desc: 'Assessable net capital gain per financial year.' },
+    { slug: 'tax-summary', title: 'Tax Summary', api: '/portfolio/tax-summary', method: 'GET', export: true, desc: 'Income aggregated by Australian financial year.' },
     { slug: 'exchange-mic-validation', title: 'Exchange MIC Validation', api: '/reports/exchange_mic_validation', method: 'GET', statusField: 'registry_status', desc: 'Curated exchanges checked against the ISO MIC registry.' },
   ];
 
@@ -884,6 +884,12 @@
       el('h2', null, report.title),
       el('p', { class: 'view-desc' }, report.desc),
     ]);
+    // Tax-return-ready CSV download: reports flagged `export` serve the same
+    // rows as CSV from `<api>/export` (Content-Disposition makes it a download).
+    if (report.export) {
+      header.appendChild(el('p', null,
+        el('a', { href: report.api + '/export', class: 'export-link' }, 'Export CSV')));
+    }
     const result = el('div');
 
     function render(rows) {

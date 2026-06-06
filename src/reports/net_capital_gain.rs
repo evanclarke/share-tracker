@@ -25,7 +25,10 @@
 
 use crate::infra::decimal::parse_dec;
 use crate::infra::fx::to_aud;
-use axum::{Json, Router, extract::State, http::StatusCode, routing::get};
+use crate::reports::export;
+use axum::{
+    Json, Router, extract::State, http::StatusCode, response::Response, routing::get,
+};
 use chrono::{Datelike, Months, NaiveDate};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -71,8 +74,30 @@ pub struct NetCapitalGainYear {
 }
 
 pub fn router() -> Router<SqlitePool> {
-    Router::new().route("/portfolio/net-capital-gain", get(net_capital_gain_handler))
+    Router::new()
+        .route("/portfolio/net-capital-gain", get(net_capital_gain_handler))
+        .route(
+            "/portfolio/net-capital-gain/export",
+            get(net_capital_gain_export_handler),
+        )
 }
+
+/// CSV export columns — `NetCapitalGainYear`'s fields in declaration order. The
+/// csv writer rejects a record whose length differs from this header (see
+/// `reports::export`), so a drift between the two fails loudly.
+const CSV_HEADER: &[&str] = &[
+    "tax_year",
+    "discount_eligible_gains",
+    "other_gains",
+    "capital_losses",
+    "capital_loss_brought_forward",
+    "net_discount_eligible_gain",
+    "net_other_gain",
+    "cgt_discount",
+    "net_capital_gain",
+    "capital_loss_carried_forward",
+    "cgt_event_e10_gain",
+];
 
 /// Gross gains and losses accumulated for one tax year before netting.
 #[derive(Default)]
@@ -275,6 +300,17 @@ async fn net_capital_gain_handler(
     db_net_capital_gain(&pool)
         .await
         .map(Json)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+/// The same per-year rows as the JSON report, as a downloadable tax-return-ready CSV.
+async fn net_capital_gain_export_handler(
+    State(pool): State<SqlitePool>,
+) -> Result<Response, StatusCode> {
+    let rows = db_net_capital_gain(&pool)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    export::csv_response("net-capital-gain.csv", CSV_HEADER, &rows)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
@@ -859,5 +895,70 @@ mod tests {
         let result: Vec<NetCapitalGainYear> = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].net_capital_gain, Decimal::from(250));
+    }
+
+    #[tokio::test]
+    async fn api_export_returns_csv_with_expected_columns() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "VAS").await;
+        // Held > 12 months: $500 gross gain → discounted to a $250 net capital gain.
+        insert_trade(&pool, 1, trade::TradeType::Buy, 1,
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(), Decimal::from(100), Decimal::from(10)).await;
+        insert_trade(&pool, 2, trade::TradeType::Sell, 1,
+            NaiveDate::from_ymd_opt(2025, 6, 1).unwrap(), Decimal::from(100), Decimal::from(15)).await;
+        allocate(&pool, 1, 2, 1, Decimal::from(100)).await;
+
+        let resp = router()
+            .with_state(pool)
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/portfolio/net-capital-gain/export")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers().get(axum::http::header::CONTENT_TYPE).unwrap(),
+            "text/csv; charset=utf-8"
+        );
+        assert_eq!(
+            resp.headers().get(axum::http::header::CONTENT_DISPOSITION).unwrap(),
+            "attachment; filename=\"net-capital-gain.csv\""
+        );
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let csv = String::from_utf8(bytes.to_vec()).unwrap();
+        let mut lines = csv.lines();
+        // Header names every NetCapitalGainYear field, in declaration order.
+        assert_eq!(lines.next().unwrap(), CSV_HEADER.join(","));
+        let fields: Vec<&str> = lines.next().unwrap().split(',').collect();
+        assert_eq!(fields.len(), CSV_HEADER.len());
+        assert_eq!(fields[0], "2025"); // tax_year
+        assert_eq!(fields[1].parse::<Decimal>().unwrap(), Decimal::from(500)); // discount_eligible_gains
+        assert_eq!(fields[7].parse::<Decimal>().unwrap(), Decimal::from(250)); // cgt_discount
+        assert_eq!(fields[8].parse::<Decimal>().unwrap(), Decimal::from(250)); // net_capital_gain
+        assert_eq!(lines.next(), None);
+    }
+
+    #[tokio::test]
+    async fn api_export_of_empty_report_still_returns_header() {
+        let pool = test_pool().await;
+        let resp = router()
+            .with_state(pool)
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/portfolio/net-capital-gain/export")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let csv = String::from_utf8(bytes.to_vec()).unwrap();
+        assert_eq!(csv, CSV_HEADER.join(",") + "\n");
     }
 }

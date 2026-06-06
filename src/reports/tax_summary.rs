@@ -1,7 +1,9 @@
 use crate::infra::decimal::parse_dec;
 use crate::infra::fx::to_aud;
-use crate::reports::franking;
-use axum::{Json, Router, extract::State, http::StatusCode, routing::get};
+use crate::reports::{export, franking};
+use axum::{
+    Json, Router, extract::State, http::StatusCode, response::Response, routing::get,
+};
 use chrono::{Datelike, NaiveDate};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -62,8 +64,35 @@ pub struct TaxYearSummary {
 }
 
 pub fn router() -> Router<SqlitePool> {
-    Router::new().route("/portfolio/tax-summary", get(tax_summary_handler))
+    Router::new()
+        .route("/portfolio/tax-summary", get(tax_summary_handler))
+        .route("/portfolio/tax-summary/export", get(tax_summary_export_handler))
 }
+
+/// CSV export columns — `TaxYearSummary`'s fields in declaration order. The csv
+/// writer rejects a record whose length differs from this header (see
+/// `reports::export`), so a drift between the two fails loudly.
+const CSV_HEADER: &[&str] = &[
+    "tax_year",
+    "dividends_assessable",
+    "foreign_source_income",
+    "lic_capital_gain_deduction",
+    "amma_australian_interest",
+    "amma_dividends_unfranked",
+    "amma_franked_dividends",
+    "amma_net_rent",
+    "amma_foreign_income",
+    "amma_other_income",
+    "amma_cgt_discount_gains",
+    "amma_cgt_indexation_gains",
+    "amma_cgt_other_gains",
+    "amma_capital_losses_applied",
+    "franking_credits",
+    "franking_credits_denied",
+    "foreign_tax_offsets",
+    "foreign_tax_offset_excess",
+    "tfn_withholding_tax",
+];
 
 fn zero_summary(tax_year: i32) -> TaxYearSummary {
     TaxYearSummary {
@@ -271,6 +300,17 @@ async fn tax_summary_handler(
     db_tax_summary(&pool)
         .await
         .map(Json)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+/// The same per-year rows as the JSON report, as a downloadable tax-return-ready CSV.
+async fn tax_summary_export_handler(
+    State(pool): State<SqlitePool>,
+) -> Result<Response, StatusCode> {
+    let rows = db_tax_summary(&pool)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    export::csv_response("tax-summary.csv", CSV_HEADER, &rows)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
@@ -860,5 +900,67 @@ mod tests {
         assert_eq!(result[0].tax_year, 2024);
         assert_eq!(result[0].dividends_assessable, Decimal::from(100));
         assert_eq!(result[0].franking_credits, Decimal::from(30));
+    }
+
+    #[tokio::test]
+    async fn api_export_returns_csv_with_expected_columns() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        let mut inc = make_income(1, 1, NaiveDate::from_ymd_opt(2024, 3, 15).unwrap());
+        inc.franked_amount = Decimal::from(70);
+        inc.unfranked_amount = Decimal::from(30);
+        inc.franking_credits = "30.50".parse().unwrap();
+        income::db_upsert(&pool, &inc).await.unwrap();
+
+        let resp = router()
+            .with_state(pool)
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/portfolio/tax-summary/export")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers().get(axum::http::header::CONTENT_TYPE).unwrap(),
+            "text/csv; charset=utf-8"
+        );
+        assert_eq!(
+            resp.headers().get(axum::http::header::CONTENT_DISPOSITION).unwrap(),
+            "attachment; filename=\"tax-summary.csv\""
+        );
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let csv = String::from_utf8(bytes.to_vec()).unwrap();
+        let mut lines = csv.lines();
+        // Header names every TaxYearSummary field, in declaration order.
+        assert_eq!(lines.next().unwrap(), CSV_HEADER.join(","));
+        // One record per tax year, decimal figures rendered exactly.
+        let row = lines.next().unwrap();
+        assert!(row.starts_with("2024,100,"));
+        assert!(row.contains(",30.50,")); // franking_credits keeps its precision
+        assert_eq!(lines.next(), None);
+    }
+
+    #[tokio::test]
+    async fn api_export_of_empty_report_still_returns_header() {
+        let pool = test_pool().await;
+        let resp = router()
+            .with_state(pool)
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/portfolio/tax-summary/export")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let csv = String::from_utf8(bytes.to_vec()).unwrap();
+        assert_eq!(csv, CSV_HEADER.join(",") + "\n");
     }
 }

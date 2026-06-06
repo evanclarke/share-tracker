@@ -188,6 +188,16 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn report_export_ui_present() {
+        let js = app_js_body().await;
+        // The tax-summary and net-capital-gain report views carry an Export CSV
+        // action linking to the report's `<api>/export` download endpoint.
+        assert!(js.contains("export: true"));
+        assert!(js.contains("'/export'"));
+        assert!(js.contains("Export CSV"));
+    }
+
+    #[tokio::test]
     async fn attachments_ui_present() {
         let js = app_js_body().await;
         // The attachments view lists/uploads/downloads via the /attachments API,

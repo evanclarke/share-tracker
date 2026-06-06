@@ -14,6 +14,7 @@ A personal Australian share portfolio tracker with a REST JSON API. Records trad
 - **Realised gains report** — per-sale capital gain/loss split into discount-eligible (parcels held strictly more than 12 months), non-discountable, and loss buckets
 - **Net capital gain report** — the overall CGT position per financial year: combines realised parcel gains with AMMA-attributed CGT gains and capital losses, applies losses ATO-optimally (non-discountable gains first), carries unused net capital losses forward across years (seeded by an enterable opening carried-forward loss), and applies the 50% discount to produce the assessable net capital gain
 - **Tax summary** — income aggregated by Australian financial year (July–June), combining dividends, trust distributions, and AMMA components; franking credits are reported as claimable only, applying the 45-day at-risk holding-period rule (90 days for preference shares, LIFO share identification) with the A$5,000 small-shareholder exemption; the foreign income tax offset is capped at the A$1,000 FITO de-minimis, with the excess surfaced separately
+- **Tax-return CSV export** — the tax summary and net capital gain reports download as tax-return-ready CSV (`GET <report>/export`), one record per financial year with the same columns as the JSON response
 - **FX rate import** — monthly RBA F11 foreign exchange rates (the rates the ATO directs taxpayers to use) fetched and stored as foreign-per-AUD, refreshed weekly and via a manual trigger
 - **AUD conversion** — cost base and proceeds in the portfolio, unrealised, and realised reports are converted to AUD at the ATO reference rate (with a per-trade manual `fx_rate` fallback); see [FX conversion](#fx-conversion)
 - **MIC registry import** — the ISO 10383 Market Identifier Code list imported monthly (and via a manual trigger), used by a non-blocking report to flag curated exchanges whose MIC is unknown or expired
@@ -244,7 +245,7 @@ The server also hosts a built-in web UI — a no-build-step single-page app (pla
 | `GET` | `/static/app.js` | The app bundle (JavaScript) |
 | `GET` | `/static/style.css` | Stylesheet (CSS) |
 
-Open `http://localhost:<port>/` in a browser. The app is hash-routed (`#/e/<entity>`, `#/sells`, `#/jobs`, `#/attachments/<owner>/<id>`, `#/r/<report>`) and drives the JSON API below — it provides CRUD screens for every entity (exchanges, listings, trades, income, AMMA statements, AMIT adjustments, DRP enrolments, exchange holidays, CGT settings), a dedicated Sell screen that captures parcel allocations atomically, a DRP reinvest action on income rows, an Attachments action on each trade/income/AMMA row that uploads, lists, downloads, and deletes its documents, read-only views of the import-managed reference tables (currencies, MIC registry, RBA FX rates, parcel allocations), a Maintenance → Jobs screen that lists the scheduled jobs with each one's last run (when it finished, whether it succeeded, and any error) and runs any of them on demand (`POST /jobs/:name`), and a view for each report (portfolio overview, open parcels, unrealised/realised gains, net capital gain, tax summary, exchange MIC validation).
+Open `http://localhost:<port>/` in a browser. The app is hash-routed (`#/e/<entity>`, `#/sells`, `#/jobs`, `#/attachments/<owner>/<id>`, `#/r/<report>`) and drives the JSON API below — it provides CRUD screens for every entity (exchanges, listings, trades, income, AMMA statements, AMIT adjustments, DRP enrolments, exchange holidays, CGT settings), a dedicated Sell screen that captures parcel allocations atomically, a DRP reinvest action on income rows, an Attachments action on each trade/income/AMMA row that uploads, lists, downloads, and deletes its documents, read-only views of the import-managed reference tables (currencies, MIC registry, RBA FX rates, parcel allocations), a Maintenance → Jobs screen that lists the scheduled jobs with each one's last run (when it finished, whether it succeeded, and any error) and runs any of them on demand (`POST /jobs/:name`), and a view for each report (portfolio overview, open parcels, unrealised/realised gains, net capital gain, tax summary, exchange MIC validation). The net capital gain and tax summary report views carry an **Export CSV** action that downloads the report via its `/export` endpoint.
 
 ### Exchanges
 
@@ -569,6 +570,12 @@ The assessable net capital gain is computed the ATO way:
 
 Response fields: `tax_year`, `discount_eligible_gains`, `other_gains`, `capital_losses` (all gross; `capital_losses` is only the losses arising that year), `capital_loss_brought_forward` (unused losses chained from earlier years, seeded by the `cgt_settings` opening balance), `net_discount_eligible_gain` and `net_other_gain` (after losses), `cgt_discount` (the 50% reduction applied = `net_discount_eligible_gain / 2`), `net_capital_gain`, `capital_loss_carried_forward` (losses left unused after offsetting all gains — the next year's brought-forward balance), and `cgt_event_e10_gain` (informational: gross E10 gains already included in the gain buckets). All amounts are AUD (AMMA amounts converted via the ATO rate for the month of `tax_year_end_date`, so a non-AUD amount with no rate fails loudly with `500`; see [FX conversion](#fx-conversion)).
 
+```
+GET /portfolio/net-capital-gain/export
+```
+
+The same per-year records as a downloadable tax-return-ready CSV (`Content-Type: text/csv; charset=utf-8`, `Content-Disposition: attachment; filename="net-capital-gain.csv"`): a header row naming the columns (the response fields above, in that order), then one record per financial year. An empty report still returns the header row.
+
 #### Tax summary
 
 ```
@@ -580,6 +587,12 @@ Returns one record per Australian financial year (identified by the calendar yea
 **Franking-credit entitlement** (the at-risk holding-period rule, `docs/you-and-your-shares-dividends.md`): `franking_credits` reports only *claimable* credits. In a year whose total attached credits (income + AMMA) reach A$5,000, each dividend's shares must have been held at risk for at least 45 days — 90 for a listing flagged `preference` — not counting the acquisition or disposal day; which shares were sold is identified **last-in first-out** (as the ATO mandates for this rule), regardless of the CGT parcel allocation chosen on the sale. Credits on entitled units that fail the test are reported in `franking_credits_denied` and excluded from `franking_credits`. Below A$5,000 the small-shareholder exemption applies and nothing is denied. The test anchors on the income record's `ex_date` (falling back to `date_paid` when absent); AMMA-attributed credits count toward the threshold but are never themselves denied (an annual AMMA statement carries no per-distribution ex-date).
 
 **Foreign income tax offset (FITO) cap** (`docs/fito-limit.md`): `foreign_tax_offsets` (income `foreign_tax_paid` + AMMA `foreign_tax_credits`, in AUD) reports the offset claimable without the ATO's offset-limit calculation — up to the A$1,000 de-minimis per year. A year's foreign tax above A$1,000 is reported in `foreign_tax_offset_excess` and excluded from `foreign_tax_offsets`: the limit calculation needs the taxpayer's full income-tax position (employment income, deductions, Medicare levy), which is outside this system's data, so the excess is claimable only to the extent the taxpayer's own offset-limit calculation supports it.
+
+```
+GET /portfolio/tax-summary/export
+```
+
+The same per-year records as a downloadable tax-return-ready CSV (`Content-Type: text/csv; charset=utf-8`, `Content-Disposition: attachment; filename="tax-summary.csv"`): a header row naming the columns (the response fields, in field order, from `tax_year` through `tfn_withholding_tax`), then one record per financial year. An empty report still returns the header row.
 
 #### Exchange MIC validation
 
@@ -593,7 +606,7 @@ Validates each curated exchange's MIC against the `mic_registry` (the imported I
 
 | Code | Meaning |
 |------|---------|
-| `200 OK` | Successful GET |
+| `200 OK` | Successful GET (JSON; the report `/export` endpoints return `text/csv`, an attachment content download returns its stored content type) |
 | `201 Created` | DRP reinvestment trade created via `POST /income/:id/reinvest`, or an attachment uploaded via `POST /attachments` |
 | `204 No Content` | Successful PUT or DELETE, or a job run via `POST /jobs/:name` |
 | `400 Bad Request` | Malformed path parameter (e.g. an `exchange_holidays` `:date` that is not `YYYY-MM-DD`) |

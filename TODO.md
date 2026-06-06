@@ -313,10 +313,10 @@ A no-build-step single-page app (plain HTML/CSS/JS) embedded in the binary with 
 
 ## Tax-return export
 (REQUIREMENTS "Planned Enhancements — Tax-return export". Reports are JSON/HTML only.)
-- [ ] Export the tax summary and net-capital-gain reports to a downloadable, tax-return-ready format (CSV at minimum)
-- [ ] Web UI export action on those report views
-- [ ] Tests: the export endpoint returns the report rows in the chosen format with the expected columns
-- [ ] README sync: export endpoints + response content types
+- [x] Export the tax summary and net-capital-gain reports to a downloadable, tax-return-ready format (CSV at minimum) — `GET /portfolio/tax-summary/export` and `GET /portfolio/net-capital-gain/export` (registered in each report's router) serve the same per-year rows as CSV via the shared `reports::export::csv_response` helper (`text/csv; charset=utf-8` + `Content-Disposition: attachment; filename="<report>.csv"`): an explicit header record naming the report's fields in declaration order, then one record per financial year (Decimal fields keep their precision — rust_decimal serializes as plain decimal strings). The csv writer is not `flexible`, so a header/struct drift fails the request loudly instead of shipping misaligned columns; an empty report still exports the header row
+- [x] Web UI export action on those report views — `export: true` on the two `REPORTS` entries; `viewReport` renders an "Export CSV" link to `<api>/export` (the Content-Disposition makes the browser download it), styled as a button (`a.export-link`)
+- [x] Tests: the export endpoint returns the report rows in the chosen format with the expected columns — `tax_summary::tests::api_export_returns_csv_with_expected_columns` / `api_export_of_empty_report_still_returns_header` and the same pair in `net_capital_gain::tests` (status, content-type, attachment filename, header line == the report's column list, per-year record figures incl. decimal precision); `reports::export::tests` (header+rows rendering, empty-report header row, header/struct drift is an error); `web::tests::report_export_ui_present` (export flag, `/export` link path, and the action label ship in the bundle)
+- [x] README sync: export endpoints + response content types — export endpoint blocks under the Tax summary and Net capital gain report sections, a Tax-return CSV export Features bullet, the Export CSV action in the Web frontend section, and the `200 OK` Response codes row notes the `text/csv` content type
 
 ## Performance / return metrics
 (REQUIREMENTS "Planned Enhancements — Performance / return metrics".)
