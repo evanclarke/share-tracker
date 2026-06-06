@@ -22,6 +22,7 @@
 Modules are grouped into three folders; `main.rs`, `app.rs`, and the migrations live at the `src` root.
 - `src/main.rs` — server startup: init pool, build registry, spawn scheduler, serve, graceful shutdown
 - `src/app.rs` — `app::router(pool, registry)` assembles entity + report + scheduler routers (testable without `main`)
+- `src/ato_examples.rs` — `#[cfg(test)]`-only acceptance tests reproducing the worked examples in the ATO docs (`docs/`): each test cites its doc + example, enters the facts purely via the HTTP API (full `app::router`), and asserts the ATO's stated figures. Add a test here when a new feature makes another doc example representable
 - `src/infra/` — cross-cutting infrastructure (`mod.rs` re-exports each):
   - `infra/db.rs` — pool init (runs migrations), weekly DB backup (`backup`/`backup_path`)
   - `infra/args.rs` — CLI args: `--db` (default `share-tracker.db`), `--port` (default 3000), `--schedule`
