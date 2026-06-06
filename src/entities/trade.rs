@@ -297,6 +297,29 @@ pub(crate) fn add_business_days(
     result
 }
 
+/// Warn when an auto-computed settlement window falls outside the seeded
+/// holiday coverage for the listing's exchange: `add_business_days` silently
+/// degrades to weekend-only skipping there, so the date may be wrong if the
+/// exchange observes a holiday in the window. Non-blocking — the write
+/// proceeds; the settlement-holiday-coverage report
+/// (`GET /reports/settlement_holiday_coverage`) flags the persisted trades.
+pub(crate) fn warn_if_outside_holiday_coverage(
+    trade_id: i64,
+    date: NaiveDate,
+    settlement_date: NaiveDate,
+    holidays: &HashSet<NaiveDate>,
+) {
+    use crate::entities::exchange_holiday::{coverage_span, window_outside_coverage};
+    if window_outside_coverage(date, settlement_date, coverage_span(holidays)) {
+        tracing::warn!(
+            trade_id,
+            %date,
+            %settlement_date,
+            "settlement window outside seeded exchange-holiday coverage; computed skipping weekends only"
+        );
+    }
+}
+
 pub(crate) async fn settlement_days_for_listing(
     pool: &SqlitePool,
     listing_id: i64,
@@ -349,7 +372,9 @@ async fn upsert(
                 crate::entities::exchange_holiday::exchange_holidays_for_listing(&pool, body.listing_id)
                     .await
                     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-            add_business_days(body.date, days, &holidays)
+            let settlement = add_business_days(body.date, days, &holidays);
+            warn_if_outside_holiday_coverage(id, body.date, settlement, &holidays);
+            settlement
         }
     };
     let trade = Trade {
@@ -803,6 +828,76 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
         let trade = db_get(&pool, 1).await.unwrap().unwrap();
         assert_eq!(trade.settlement_date, NaiveDate::from_ymd_opt(2024, 1, 17).unwrap());
+    }
+
+    #[tracing_test::traced_test]
+    #[tokio::test]
+    async fn api_settlement_beyond_holiday_coverage_logs_warning() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        // XASX holidays are seeded 2024–2027 only: a 2030 trade's settlement is
+        // computed skipping weekends only, so the auto-population warns rather
+        // than silently using the incomplete calendar.
+        let body = serde_json::json!({
+            "trade_type": "Buy",
+            "date": "2030-06-03",
+            "listing_id": 1,
+            "average_price": 100.0,
+            "quantity": 10.0,
+            "currency": "AUD",
+            "brokerage": 0.0,
+            "gst_on_brokerage": 0.0,
+            "brokerage_currency": "AUD",
+            "fx_rate": 1.0
+        });
+        let resp = router()
+            .with_state(pool.clone())
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/trades/1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // Non-blocking: the write succeeds, the warning surfaces the gap.
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert!(logs_contain("settlement window outside seeded exchange-holiday coverage"));
+    }
+
+    #[tracing_test::traced_test]
+    #[tokio::test]
+    async fn api_settlement_inside_holiday_coverage_does_not_warn() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        let body = serde_json::json!({
+            "trade_type": "Buy",
+            "date": "2024-01-15",
+            "listing_id": 1,
+            "average_price": 100.0,
+            "quantity": 10.0,
+            "currency": "AUD",
+            "brokerage": 0.0,
+            "gst_on_brokerage": 0.0,
+            "brokerage_currency": "AUD",
+            "fx_rate": 1.0
+        });
+        let resp = router()
+            .with_state(pool.clone())
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/trades/1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert!(!logs_contain("settlement window outside seeded exchange-holiday coverage"));
     }
 
     #[test]

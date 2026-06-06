@@ -1,6 +1,6 @@
 //! Read-only reports over the entity tables: AUD-denominated aggregations
 //! (portfolio, realised/unrealised gains, tax summary) plus reference-data
-//! validation (exchange MIC validation). No writes.
+//! validation (exchange MIC validation, settlement-holiday coverage). No writes.
 use axum::Router;
 use sqlx::SqlitePool;
 
@@ -11,6 +11,7 @@ pub mod net_capital_gain;
 pub mod open_parcels;
 pub mod portfolio;
 pub mod realised_gains;
+pub mod settlement_coverage;
 pub mod tax_summary;
 pub mod unrealised_gains;
 
@@ -23,4 +24,5 @@ pub fn router() -> Router<SqlitePool> {
         .merge(net_capital_gain::router())
         .merge(tax_summary::router())
         .merge(mic_validation::router())
+        .merge(settlement_coverage::router())
 }

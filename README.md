@@ -18,6 +18,7 @@ A personal Australian share portfolio tracker with a REST JSON API. Records trad
 - **FX rate import** — monthly RBA F11 foreign exchange rates (the rates the ATO directs taxpayers to use) fetched and stored as foreign-per-AUD, refreshed weekly and via a manual trigger
 - **AUD conversion** — cost base and proceeds in the portfolio, unrealised, and realised reports are converted to AUD at the ATO reference rate (with a per-trade manual `fx_rate` fallback); see [FX conversion](#fx-conversion)
 - **MIC registry import** — the ISO 10383 Market Identifier Code list imported monthly (and via a manual trigger), used by a non-blocking report to flag curated exchanges whose MIC is unknown or expired
+- **Settlement-holiday coverage alerting** — exchange holiday calendars are seeded for a finite range of years; auto-calculating a settlement date outside that range logs a warning, and a non-blocking report flags every trade whose settlement window falls outside its exchange's seeded coverage (see [Settlement holiday coverage](#settlement-holiday-coverage))
 - **Web UI** — a built-in browser frontend (no build step, served from the same binary) with CRUD screens for every entity, atomic Sell + parcel-allocation entry, DRP reinvestment, and a view for each report; see [Web frontend](#web-frontend)
 
 ## Building and running
@@ -250,7 +251,7 @@ The server also hosts a built-in web UI — a no-build-step single-page app (pla
 | `GET` | `/static/app.js` | The app bundle (JavaScript) |
 | `GET` | `/static/style.css` | Stylesheet (CSS) |
 
-Open `http://localhost:<port>/` in a browser. The app is hash-routed (`#/e/<entity>`, `#/sells`, `#/jobs`, `#/attachments/<owner>/<id>`, `#/r/<report>`) and drives the JSON API below — it provides CRUD screens for every entity (exchanges, listings, trades, income, AMMA statements, AMIT adjustments, DRP enrolments, exchange holidays, CGT settings), a dedicated Sell screen that captures parcel allocations atomically, a DRP reinvest action on income rows, an Attachments action on each trade/income/AMMA row that uploads, lists, downloads, and deletes its documents, read-only views of the import-managed reference tables (currencies, MIC registry, RBA FX rates, parcel allocations), a Maintenance → Jobs screen that lists the scheduled jobs with each one's last run (when it finished, whether it succeeded, and any error) and runs any of them on demand (`POST /jobs/:name`), and a view for each report (portfolio overview, open parcels, unrealised/realised gains, net capital gain, tax summary, exchange MIC validation). The net capital gain and tax summary report views carry an **Export CSV** action that downloads the report via its `/export` endpoint.
+Open `http://localhost:<port>/` in a browser. The app is hash-routed (`#/e/<entity>`, `#/sells`, `#/jobs`, `#/attachments/<owner>/<id>`, `#/r/<report>`) and drives the JSON API below — it provides CRUD screens for every entity (exchanges, listings, trades, income, AMMA statements, AMIT adjustments, DRP enrolments, exchange holidays, CGT settings), a dedicated Sell screen that captures parcel allocations atomically, a DRP reinvest action on income rows, an Attachments action on each trade/income/AMMA row that uploads, lists, downloads, and deletes its documents, read-only views of the import-managed reference tables (currencies, MIC registry, RBA FX rates, parcel allocations), a Maintenance → Jobs screen that lists the scheduled jobs with each one's last run (when it finished, whether it succeeded, and any error) and runs any of them on demand (`POST /jobs/:name`), and a view for each report (portfolio overview, open parcels, unrealised/realised gains, net capital gain, tax summary, exchange MIC validation, settlement holiday coverage). The net capital gain and tax summary report views carry an **Export CSV** action that downloads the report via its `/export` endpoint.
 
 ### Exchanges
 
@@ -266,6 +267,8 @@ Seed data includes `XASX` (ASX, T+2) and `XNYS` (NYSE, T+2). `PUT` returns `422`
 ### Exchange holidays
 
 Full-closure non-trading days per exchange, keyed by `(mic, holiday_date)`. Settlement-date calculation skips these in addition to weekends (see [Trades](#trades)). Seeded from the published NYSE and ASX calendars for 2024–2027 (extend as later years are published).
+
+Coverage is finite: an exchange's calendar is considered to cover the whole calendar years spanned by its seeded holidays (1 Jan of the earliest holiday's year to 31 Dec of the latest's). Outside that span, settlement calculation degrades to weekend-only skipping — this is never an error, but it is surfaced rather than silent: the write logs a `WARN` and the [Settlement holiday coverage](#settlement-holiday-coverage) report flags the affected trades until the missing years are entered.
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -346,7 +349,7 @@ Recurring maintenance jobs scheduled from the cron file (see [Scheduled maintena
 | `PUT` | `/trades/:id` | Create or update a trade |
 | `DELETE` | `/trades/:id` | Delete a trade |
 
-If `settlement_date` is omitted from the PUT body, it is auto-calculated by advancing `date` by `exchange.settlement_days` **business days** — both weekends and the exchange's seeded public holidays (see [Exchange holidays](#exchange-holidays)) are skipped.
+If `settlement_date` is omitted from the PUT body, it is auto-calculated by advancing `date` by `exchange.settlement_days` **business days** — both weekends and the exchange's seeded public holidays (see [Exchange holidays](#exchange-holidays)) are skipped. If the trade's settlement window falls outside the exchange's seeded holiday coverage, the calculation skips weekends only; the write still succeeds but logs a `WARN`, and the trade is flagged by the [Settlement holiday coverage](#settlement-holiday-coverage) report (the same applies to Sells entered via `PUT /sells/:id`).
 
 `PUT /trades/:id` rejects `trade_type: "Sell"` with `422` — Sells must be created via `PUT /sells/:id` (see below) so they are always persisted with a full set of parcel allocations.
 
@@ -613,6 +616,14 @@ GET /reports/exchange_mic_validation
 ```
 
 Validates each curated exchange's MIC against the `mic_registry` (the imported ISO 10383 list) — **non-blocking**: writes to `exchanges` are never rejected, this only surfaces MICs worth a second look. Returns one record per exchange (sorted by MIC) with fields: `mic`, `exchange_name`, `registry_status` (`ok` = active in the registry, `expired` = present but EXPIRED, `unknown` = no registry entry, i.e. a typo or the registry hasn't been imported yet), `iso_status` (raw ISO `ACTIVE`/`UPDATED`/`EXPIRED`, or null when unknown), and `expiry_date`. With an empty registry every exchange is `unknown`.
+
+#### Settlement holiday coverage
+
+```
+GET /reports/settlement_holiday_coverage
+```
+
+Flags every trade whose `[date, settlement_date]` window is not fully inside its exchange's seeded holiday coverage (see [Exchange holidays](#exchange-holidays)) — **non-blocking**: trade writes are never rejected, this only surfaces settlement dates that may have been computed against an incomplete calendar (weekend-only skipping). Returns one record per affected trade (sorted by ticker, then date, then trade id) with fields: `trade_id`, `listing_id`, `ticker`, `mic`, `trade_type`, `date`, `settlement_date`, `coverage_status` (`outside_holiday_coverage` = the window extends beyond the seeded years, `no_holiday_coverage` = the exchange has no seeded holidays at all), and the exchange's coverage span `coverage_start`/`coverage_end` (1 Jan of the earliest seeded holiday's year to 31 Dec of the latest's; null when there is no coverage). Trades fully inside coverage are omitted — an empty report means every settlement window was computed against a complete calendar. Entering the missing holiday years clears the corresponding alerts.
 
 ## Response codes
 

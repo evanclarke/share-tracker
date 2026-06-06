@@ -100,6 +100,43 @@ pub async fn db_delete(
     Ok(result.rows_affected() > 0)
 }
 
+/// The calendar-year span a seeded holiday set covers: a published calendar
+/// covers its whole year, so coverage runs from 1 Jan of the earliest seeded
+/// holiday's year to 31 Dec of the latest's. `None` when no holidays are seeded
+/// (the exchange has no coverage at all).
+pub(crate) fn coverage_span(holidays: &HashSet<NaiveDate>) -> Option<(NaiveDate, NaiveDate)> {
+    let earliest = holidays.iter().min()?;
+    let latest = holidays.iter().max()?;
+    Some(coverage_span_for(*earliest, *latest))
+}
+
+/// The coverage span implied by the earliest and latest seeded holiday dates
+/// (see [`coverage_span`]); shared with the settlement-holiday-coverage report,
+/// which reads the bounds via SQL `MIN`/`MAX`.
+pub(crate) fn coverage_span_for(earliest: NaiveDate, latest: NaiveDate) -> (NaiveDate, NaiveDate) {
+    use chrono::Datelike;
+    (
+        NaiveDate::from_ymd_opt(earliest.year(), 1, 1).unwrap(),
+        NaiveDate::from_ymd_opt(latest.year(), 12, 31).unwrap(),
+    )
+}
+
+/// Whether any day of the `[start, end]` window falls outside the coverage
+/// span. A `None` span (no seeded holidays) covers nothing, so any window is
+/// outside it. Used to warn/flag when a settlement window is computed against
+/// an incomplete holiday calendar rather than silently degrading to
+/// weekend-only skipping.
+pub(crate) fn window_outside_coverage(
+    start: NaiveDate,
+    end: NaiveDate,
+    span: Option<(NaiveDate, NaiveDate)>,
+) -> bool {
+    match span {
+        None => true,
+        Some((covered_from, covered_to)) => start < covered_from || end > covered_to,
+    }
+}
+
 /// The set of public-holiday dates for the exchange a listing trades on. Used by
 /// settlement-date calculation so a settlement never lands on a non-trading day.
 pub(crate) async fn exchange_holidays_for_listing(
@@ -203,6 +240,31 @@ mod tests {
         )
         .await
         .unwrap();
+    }
+
+    // Coverage-span helpers
+
+    #[test]
+    fn coverage_span_spans_whole_calendar_years() {
+        let holidays: HashSet<NaiveDate> =
+            [ymd(2024, 4, 25), ymd(2026, 12, 25), ymd(2025, 1, 1)].into_iter().collect();
+        // A published calendar covers its whole year, not just its listed days.
+        assert_eq!(coverage_span(&holidays), Some((ymd(2024, 1, 1), ymd(2026, 12, 31))));
+        assert_eq!(coverage_span(&HashSet::new()), None);
+    }
+
+    #[test]
+    fn window_outside_coverage_checks_both_ends_and_no_coverage() {
+        let span = Some((ymd(2024, 1, 1), ymd(2027, 12, 31)));
+        // Fully inside.
+        assert!(!window_outside_coverage(ymd(2024, 1, 2), ymd(2024, 1, 4), span));
+        // The whole span is covered, boundaries included.
+        assert!(!window_outside_coverage(ymd(2024, 1, 1), ymd(2027, 12, 31), span));
+        // Starts before coverage / ends after coverage (straddling counts).
+        assert!(window_outside_coverage(ymd(2023, 12, 29), ymd(2024, 1, 2), span));
+        assert!(window_outside_coverage(ymd(2027, 12, 30), ymd(2028, 1, 4), span));
+        // No seeded holidays covers nothing.
+        assert!(window_outside_coverage(ymd(2024, 1, 2), ymd(2024, 1, 4), None));
     }
 
     // DB-level tests

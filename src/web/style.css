@@ -132,6 +132,8 @@ input[type=checkbox] { width: auto; }
 .badge.failed { background: #fdecea; color: var(--danger); }
 .badge.unknown { background: #fdf3e0; color: var(--warn); }
 .badge.never { background: #eceff1; color: var(--muted); }
+.badge.outside_holiday_coverage { background: #fdf3e0; color: var(--warn); }
+.badge.no_holiday_coverage { background: #fdecea; color: var(--danger); }
 
 #toast {
   position: fixed;

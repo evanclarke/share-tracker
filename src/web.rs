@@ -177,6 +177,15 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn settlement_coverage_report_ui_present() {
+        let js = app_js_body().await;
+        // The Settlement Holiday Coverage report view drives
+        // GET /reports/settlement_holiday_coverage and badges its status field.
+        assert!(js.contains("/reports/settlement_holiday_coverage"));
+        assert!(js.contains("coverage_status"));
+    }
+
+    #[tokio::test]
     async fn gains_report_ui_present() {
         let js = app_js_body().await;
         assert!(js.contains("/portfolio/unrealised-gains"));
