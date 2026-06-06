@@ -6,7 +6,7 @@ A personal Australian share portfolio tracker with a REST JSON API. Records trad
 
 - **Trade recording** — buys, sells, and dividend reinvestment plan (DRP) acquisitions, with automatic settlement date calculation per exchange
 - **Income recording** — dividends and trust distributions with full Australian tax component breakdown (franked/unfranked amounts, foreign source income, franking credits, conduit foreign income, TFN withholding, LIC capital gain deductions)
-- **DRP reinvestment** — enrol holdings in a Dividend Reinvestment Plan, then turn a distribution into a linked DRP trade; leftover cash that can't buy a whole share is carried forward to the next reinvestment or paid out, per the enrolment
+- **DRP reinvestment** — enrol holdings in a Dividend Reinvestment Plan over dated enrolment periods (enrol, unenrol, re-enrol), then turn a distribution into a linked DRP trade; reinvestability is checked as at the distribution's ex date, and leftover cash that can't buy a whole share is carried forward to the next reinvestment in the period or paid out, per the period — unenrolling pays out the trailing carried residual
 - **AMIT/AMMA support** — annual tax statements for Attribution Managed Investment Trusts (AMITs), with cost base adjustments applied per purchase parcel
 - **Parcel-level CGT** — explicit parcel allocations link sell trades to the parcels they came from; cost bases are pro-rated and AMIT-reduced at the parcel level
 - **Portfolio overview** — open holdings per security with total cost base and optional market value (supply current prices in the request body)
@@ -120,7 +120,7 @@ trades
 ├── contract_note_ref TEXT (nullable)
 ├── residual_brought_forward TEXT (decimal)  DRP trades only: leftover cash carried in from the prior reinvestment (else 0)
 ├── residual_carried_forward TEXT (decimal)  DRP trades only: leftover carried to the next reinvestment (else 0)
-└── residual_paid_out        TEXT (decimal)  DRP trades only: leftover paid out instead of carried (else 0)
+└── residual_paid_out        TEXT (decimal)  DRP trades only: leftover paid out instead of carried, incl. the trailing residual refunded at DRP unenrolment (else 0)
 
 income
 ├── id                        INTEGER PK
@@ -175,9 +175,14 @@ parcel_allocations           Links sell parcels to the purchase parcels they con
 ├── purchase_trade_id    INTEGER FK→trades.id  Must be Buy or DRP
 └── quantity_allocated   TEXT (decimal)
 
-drp_enrolments               DRP enrolment per holding (presence = reinvest in full)
-├── listing_id           INTEGER PK, FK→listings.id  One enrolment per holding
-└── residual_handling    TEXT   CarryForward | PayOut  Leftover-cash policy (default CarryForward)
+drp_enrolments               Dated DRP enrolment periods per holding (a holding can enrol, unenrol, and re-enrol)
+├── id                   INTEGER PK
+├── listing_id           INTEGER FK→listings.id
+├── enrolment_date       TEXT   First day of the period (inclusive)
+├── unenrolment_date     TEXT (nullable)  Day the unenrolment takes effect (exclusive); NULL = open-ended (currently enrolled)
+└── residual_handling    TEXT   CarryForward | PayOut  Leftover-cash policy for the period (default CarryForward)
+                         CHECK: unenrolment_date (when set) is after enrolment_date
+                         Write-time invariant: a listing's periods must not overlap (so at most one is open)
 
 cgt_settings                 Singleton CGT settings row (CHECK id = 1)
 ├── id                   INTEGER PK  Always 1 (CHECK-enforced singleton)
@@ -398,21 +403,26 @@ Supporting documents (a trade confirmation / contract note PDF, a dividend state
 
 ### DRP enrolments
 
-Records which holdings reinvest their distributions. Keyed by `listing_id` (one enrolment per holding); the path id is the listing id.
+Records when each holding reinvests its distributions, as **dated enrolment periods**: `enrolment_date` (inclusive) to `unenrolment_date` (exclusive; omitted = open-ended, i.e. currently enrolled). A holding can start unenrolled, enrol, unenrol, and re-enrol — one row per period, each with its own residual handling.
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/drp_enrolments` | List all DRP enrolments |
-| `GET` | `/drp_enrolments/:listing_id` | Get one holding's enrolment |
-| `PUT` | `/drp_enrolments/:listing_id` | Enrol a holding (or update its residual handling) |
-| `DELETE` | `/drp_enrolments/:listing_id` | Remove an enrolment |
+| `GET` | `/drp_enrolments` | List all enrolment periods |
+| `GET` | `/drp_enrolments/:id` | Get one enrolment period |
+| `PUT` | `/drp_enrolments/:id` | Create or update an enrolment period |
+| `DELETE` | `/drp_enrolments/:id` | Remove an enrolment period |
 
 ```
 PUT /drp_enrolments/1
-{ "residual_handling": "CarryForward" }   // or "PayOut"; defaults to CarryForward if omitted
+{ "listing_id": 1, "enrolment_date": "2024-01-01", "unenrolment_date": "2025-01-01",
+  "residual_handling": "CarryForward" }   // or "PayOut"; defaults to CarryForward if omitted
 ```
 
-`residual_handling` decides what happens to leftover cash a reinvestment can't spend on whole shares: `CarryForward` adds it to the next reinvestment for the holding, `PayOut` records it as paid out. Returns `204 No Content`, or `422 Unprocessable Entity` if `listing_id` doesn't reference a listing.
+`residual_handling` decides what happens to leftover cash a reinvestment can't spend on whole shares: `CarryForward` adds it to the next reinvestment in the period, `PayOut` records it as paid out.
+
+A listing's periods must not overlap, and at most one may be open at a time — validated atomically at write time (touching periods, where one ends the day the next starts, are allowed). Closing a period (unenrolling) settles its trailing residual: the leftover the period's last reinvestment carried forward is moved to `residual_paid_out` on that DRP trade in the same transaction, since the registry refunds it at termination; it is **not** picked up after a re-enrolment.
+
+Returns `204 No Content`, or `422 Unprocessable Entity` if `listing_id` doesn't reference a listing, the period overlaps another period for the listing (or would be a second open period), or `unenrolment_date` is not after `enrolment_date`.
 
 ### CGT settings
 
@@ -441,9 +451,11 @@ POST /income/:id/reinvest
 
 Creates the DRP reinvestment trade for a distribution and links it back (`income.reinvestment_trade_id`) in one transaction. `fx_rate` (default 1) and `date` (default the distribution's `date_paid`) are optional.
 
-The reinvestable cash — `franked_amount + unfranked_amount + foreign_source_income − foreign_tax_paid − tfn_withholding_tax` (franking credits are notional and excluded) — plus the residual brought forward from the holding's most recent prior DRP trade is spent on whole shares at `reinvestment_price`. The leftover is carried forward or paid out per the enrolment's `residual_handling` and recorded on the new trade's residual columns.
+Reinvestability is decided as at the distribution's **ex date** (registry practice: DRP participation is fixed at the record date), falling back to `date_paid` when no ex date is recorded. That date must fall inside one of the holding's [enrolment periods](#drp-enrolments) — a distribution dated before enrolment, or in a gap between unenrolment and re-enrolment, is rejected — and the matching period's `residual_handling` applies.
 
-Returns `201 Created` with the created trade as JSON, `404 Not Found` if no income record has that id, or `422 Unprocessable Entity` if the holding isn't enrolled, the distribution was already reinvested, or `reinvestment_price` is not positive.
+The reinvestable cash — `franked_amount + unfranked_amount + foreign_source_income − foreign_tax_paid − tfn_withholding_tax` (franking credits are notional and excluded) — plus the residual brought forward from the holding's most recent prior DRP trade *within the same enrolment period* is spent on whole shares at `reinvestment_price`. The leftover is carried forward or paid out per the period's `residual_handling` and recorded on the new trade's residual columns. The carried-forward chain never crosses periods: a period's trailing residual is paid out at unenrolment.
+
+Returns `201 Created` with the created trade as JSON, `404 Not Found` if no income record has that id, or `422 Unprocessable Entity` if no enrolment period covers the distribution's ex date (or pay date when no ex date is recorded), the distribution was already reinvested, or `reinvestment_price` is not positive.
 
 ### Sells
 
@@ -613,7 +625,7 @@ Validates each curated exchange's MIC against the `mic_registry` (the imported I
 | `404 Not Found` | Resource does not exist |
 | `405 Method Not Allowed` | Write attempted on a read-only path (e.g. `parcel_allocations`) |
 | `413 Payload Too Large` | Uploaded attachment exceeds the 25 MB per-file limit |
-| `422 Unprocessable Entity` | Business rule or constraint violation (e.g. over-allocation, wrong trade type, under-allocated Sell, deleting or shrinking a Buy/DRP that a parcel allocation, AMIT adjustment, or reinvestment link still relies on, unparseable FX or MIC feed, a write referencing an unrecognised currency / unknown exchange / listing, an attachment upload with no/multiple owners or an unsupported content type, or a negative / non-singleton `cgt_settings` opening capital loss) |
+| `422 Unprocessable Entity` | Business rule or constraint violation (e.g. over-allocation, wrong trade type, under-allocated Sell, deleting or shrinking a Buy/DRP that a parcel allocation, AMIT adjustment, or reinvestment link still relies on, unparseable FX or MIC feed, a write referencing an unrecognised currency / unknown exchange / listing, an attachment upload with no/multiple owners or an unsupported content type, a negative / non-singleton `cgt_settings` opening capital loss, an overlapping or empty DRP enrolment period, or reinvesting a distribution no enrolment period covers) |
 | `500 Internal Server Error` | Unexpected database error, or a job triggered via `POST /jobs/:name` failed |
 | `502 Bad Gateway` | Upstream fetch failed (e.g. the RBA FX or ISO MIC import could not reach its source) |
 

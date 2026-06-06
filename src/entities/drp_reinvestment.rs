@@ -5,12 +5,22 @@
 //! links it back to the distribution (`income.reinvestment_trade_id`) in one
 //! transaction. The reinvestable cash plus any residual brought forward from
 //! the holding's previous reinvestment is spent on whole shares; the leftover
-//! is carried forward or paid out per the enrolment's residual handling.
+//! is carried forward or paid out per the enrolment period's residual handling.
+//!
+//! Enrolment is checked as at the distribution's ex date (registry practice:
+//! DRP participation is fixed at the record date), falling back to the pay
+//! date when no ex date is recorded. That date must fall inside one of the
+//! holding's enrolment periods (`entities::drp_enrolment`) — a distribution
+//! dated before enrolment, or in a gap between unenrolment and re-enrolment,
+//! is rejected — and the matching period's residual handling applies.
 //!
 //! The carried-forward residual is *not* stored as a separate running balance:
 //! it lives on each DRP trade (`residual_carried_forward`), and "brought
 //! forward" for the next reinvestment is read back from the most recent prior
-//! DRP trade for the holding. That single source of truth can't drift.
+//! DRP trade *within the same enrolment period*. That single source of truth
+//! can't drift, and the chain never crosses periods — a period's trailing
+//! residual is paid out at unenrolment (see `drp_enrolment::db_upsert`), not
+//! picked up after re-enrolment.
 //!
 //! A distribution may be reinvested at most once — re-posting is rejected
 //! rather than creating a second trade.
@@ -49,7 +59,9 @@ pub enum ReinvestError {
     Db(sqlx::Error),
     /// No income row with that id.
     IncomeNotFound,
-    /// The holding is not enrolled in a DRP.
+    /// No enrolment period covers the distribution's ex date (or pay date when
+    /// no ex date is recorded): never enrolled, dated before enrolment, or in a
+    /// gap between unenrolment and re-enrolment.
     NotEnrolled,
     /// The distribution already has a reinvestment trade.
     AlreadyReinvested,
@@ -93,8 +105,9 @@ pub async fn db_reinvest(
 
     // Load the distribution and its cash components.
     let income = sqlx::query(
-        "SELECT listing_id, date_paid, reinvestment_trade_id, franked_amount, unfranked_amount, \
-         foreign_source_income, foreign_tax_paid, tfn_withholding_tax FROM income WHERE id = ?",
+        "SELECT listing_id, date_paid, ex_date, reinvestment_trade_id, franked_amount, \
+         unfranked_amount, foreign_source_income, foreign_tax_paid, tfn_withholding_tax \
+         FROM income WHERE id = ?",
     )
     .bind(income_id)
     .fetch_optional(&mut *tx)
@@ -111,16 +124,30 @@ pub async fn db_reinvest(
 
     let listing_id: i64 = income.try_get("listing_id")?;
     let date_paid: NaiveDate = income.try_get("date_paid")?;
+    let ex_date: Option<NaiveDate> = income.try_get("ex_date")?;
     let cash = reinvestable_cash(&income)?;
 
-    // Must be enrolled, and the enrolment decides what happens to the leftover.
-    let handling: Option<ResidualHandling> =
-        sqlx::query_scalar("SELECT residual_handling FROM drp_enrolments WHERE listing_id = ?")
-            .bind(listing_id)
-            .fetch_optional(&mut *tx)
-            .await?;
-    let handling = match handling {
-        Some(h) => h,
+    // Reinvestability is decided as at the ex date (DRP participation is fixed
+    // at the record date), falling back to the pay date when not recorded.
+    let entitlement_date = ex_date.unwrap_or(date_paid);
+
+    // That date must fall inside an enrolment period — half-open
+    // [enrolment_date, unenrolment_date), open-ended when NULL — and the
+    // matching period decides what happens to the leftover. No match means the
+    // holding wasn't enrolled when the distribution went ex (never enrolled,
+    // before enrolment, or in an unenrolment gap).
+    let matched: Option<(ResidualHandling, NaiveDate, Option<NaiveDate>)> = sqlx::query_as(
+        "SELECT residual_handling, enrolment_date, unenrolment_date FROM drp_enrolments \
+         WHERE listing_id = ? AND enrolment_date <= ? \
+           AND (unenrolment_date IS NULL OR ? < unenrolment_date)",
+    )
+    .bind(listing_id)
+    .bind(entitlement_date)
+    .bind(entitlement_date)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let (handling, period_start, period_end) = match matched {
+        Some(p) => p,
         None => return Err(ReinvestError::NotEnrolled),
     };
 
@@ -130,12 +157,20 @@ pub async fn db_reinvest(
         .fetch_one(&mut *tx)
         .await?;
 
-    // Residual brought forward = the most recent prior DRP trade's carried-forward.
+    // Residual brought forward = the most recent prior DRP trade's
+    // carried-forward, *within the same enrolment period*: an earlier period's
+    // trailing residual was paid out at its unenrolment, so the chain never
+    // crosses a period boundary.
     let prior_cf: Option<String> = sqlx::query_scalar(
         "SELECT residual_carried_forward FROM trades \
-         WHERE listing_id = ? AND trade_type = 'DRP' ORDER BY date DESC, id DESC LIMIT 1",
+         WHERE listing_id = ? AND trade_type = 'DRP' AND date >= ? \
+           AND (? IS NULL OR date < ?) \
+         ORDER BY date DESC, id DESC LIMIT 1",
     )
     .bind(listing_id)
+    .bind(period_start)
+    .bind(period_end)
+    .bind(period_end)
     .fetch_optional(&mut *tx)
     .await?;
     let residual_bf = match prior_cf {
@@ -244,25 +279,56 @@ mod tests {
         .unwrap();
     }
 
-    async fn enrol(pool: &SqlitePool, listing_id: i64, handling: ResidualHandling) {
+    /// Create an enrolment period `[from, to)`; `to = None` = open-ended.
+    async fn enrol_period(
+        pool: &SqlitePool,
+        id: i64,
+        listing_id: i64,
+        from: &str,
+        to: Option<&str>,
+        handling: ResidualHandling,
+    ) {
         drp_enrolment::db_upsert(
             pool,
-            &drp_enrolment::DrpEnrolment { listing_id, residual_handling: handling },
+            &drp_enrolment::DrpEnrolment {
+                id,
+                listing_id,
+                enrolment_date: from.parse().unwrap(),
+                unenrolment_date: to.map(|d| d.parse().unwrap()),
+                residual_handling: handling,
+            },
         )
         .await
         .unwrap();
     }
 
+    /// Enrol open-ended from 2024-01-01, covering the default distribution date.
+    async fn enrol(pool: &SqlitePool, listing_id: i64, handling: ResidualHandling) {
+        enrol_period(pool, listing_id, listing_id, "2024-01-01", None, handling).await;
+    }
+
     /// Insert a distribution paying `cash` as unfranked cash (the simplest cash
     /// component), with `franking` notional franking credits that must be ignored.
     async fn insert_distribution(pool: &SqlitePool, id: i64, listing_id: i64, cash: Decimal, franking: Decimal) {
+        insert_distribution_dated(pool, id, listing_id, "2024-03-31", None, cash, franking).await;
+    }
+
+    async fn insert_distribution_dated(
+        pool: &SqlitePool,
+        id: i64,
+        listing_id: i64,
+        date_paid: &str,
+        ex_date: Option<&str>,
+        cash: Decimal,
+        franking: Decimal,
+    ) {
         income::db_upsert(
             pool,
             &income::Income {
                 id,
                 listing_id,
-                date_paid: NaiveDate::from_ymd_opt(2024, 3, 31).unwrap(),
-                ex_date: None,
+                date_paid: date_paid.parse().unwrap(),
+                ex_date: ex_date.map(|d| d.parse().unwrap()),
                 franked_amount: Decimal::ZERO,
                 unfranked_amount: cash,
                 foreign_source_income: Decimal::ZERO,
@@ -407,6 +473,91 @@ mod tests {
         insert_distribution(&pool, 1, 1, Decimal::from(100), Decimal::ZERO).await;
         let err = db_reinvest(&pool, 1, &body("0")).await.unwrap_err();
         assert!(matches!(err, ReinvestError::NonPositivePrice));
+    }
+
+    #[tokio::test]
+    async fn distribution_before_enrolment_is_rejected() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AUD").await;
+        // Enrolled only from June 2024; the distribution went ex in March.
+        enrol_period(&pool, 1, 1, "2024-06-01", None, ResidualHandling::CarryForward).await;
+        insert_distribution(&pool, 1, 1, Decimal::from(100), Decimal::ZERO).await; // 2024-03-31
+        let err = db_reinvest(&pool, 1, &body("9")).await.unwrap_err();
+        assert!(matches!(err, ReinvestError::NotEnrolled));
+    }
+
+    #[tokio::test]
+    async fn distribution_in_unenrolment_gap_is_rejected() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AUD").await;
+        // Enrolled through 2023, re-enrolled from 2025 — 2024 is a gap.
+        enrol_period(&pool, 1, 1, "2023-01-01", Some("2024-01-01"), ResidualHandling::CarryForward).await;
+        enrol_period(&pool, 2, 1, "2025-01-01", None, ResidualHandling::CarryForward).await;
+        insert_distribution(&pool, 1, 1, Decimal::from(100), Decimal::ZERO).await; // 2024-03-31
+        let err = db_reinvest(&pool, 1, &body("9")).await.unwrap_err();
+        assert!(matches!(err, ReinvestError::NotEnrolled));
+    }
+
+    #[tokio::test]
+    async fn re_enrolment_after_unenrolment_uses_the_new_periods_handling() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AUD").await;
+        enrol_period(&pool, 1, 1, "2023-01-01", Some("2024-01-01"), ResidualHandling::CarryForward).await;
+        enrol_period(&pool, 2, 1, "2025-01-01", None, ResidualHandling::PayOut).await;
+        // A distribution inside the re-enrolment period reinvests, and its
+        // leftover follows the *new* period's PayOut, not the old CarryForward.
+        insert_distribution_dated(&pool, 1, 1, "2025-03-31", None, Decimal::from(100), Decimal::ZERO)
+            .await;
+        let trade = db_reinvest(&pool, 1, &body("9")).await.unwrap();
+        assert_eq!(trade.quantity, Decimal::from(11));
+        assert_eq!(trade.residual_paid_out, Decimal::ONE);
+        assert_eq!(trade.residual_carried_forward, Decimal::ZERO);
+    }
+
+    #[tokio::test]
+    async fn reinvestability_is_decided_by_ex_date_not_pay_date() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AUD").await;
+        enrol_period(&pool, 1, 1, "2024-01-01", Some("2024-04-01"), ResidualHandling::CarryForward).await;
+
+        // Ex inside the period, paid after the unenrolment took effect → the
+        // participation was fixed at the ex date, so it still reinvests.
+        insert_distribution_dated(&pool, 1, 1, "2024-04-10", Some("2024-03-15"), Decimal::from(100), Decimal::ZERO)
+            .await;
+        let trade = db_reinvest(&pool, 1, &body("9")).await.unwrap();
+        assert_eq!(trade.quantity, Decimal::from(11));
+
+        // Ex before the period, paid inside it → was not enrolled at ex → rejected.
+        insert_distribution_dated(&pool, 2, 1, "2024-02-01", Some("2023-12-15"), Decimal::from(100), Decimal::ZERO)
+            .await;
+        let err = db_reinvest(&pool, 2, &body("9")).await.unwrap_err();
+        assert!(matches!(err, ReinvestError::NotEnrolled));
+    }
+
+    #[tokio::test]
+    async fn carried_residual_does_not_cross_an_unenrolment() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AUD").await;
+        enrol(&pool, 1, ResidualHandling::CarryForward).await; // open from 2024-01-01
+
+        // First reinvestment carries $1 forward.
+        insert_distribution(&pool, 1, 1, Decimal::from(100), Decimal::ZERO).await;
+        let first = db_reinvest(&pool, 1, &body("9")).await.unwrap();
+        assert_eq!(first.residual_carried_forward, Decimal::ONE);
+
+        // Unenrol (close the period): the trailing $1 is paid out...
+        enrol_period(&pool, 1, 1, "2024-01-01", Some("2024-06-01"), ResidualHandling::CarryForward).await;
+        let settled = trade::db_get(&pool, first.id).await.unwrap().unwrap();
+        assert_eq!(settled.residual_carried_forward, Decimal::ZERO);
+        assert_eq!(settled.residual_paid_out, Decimal::ONE);
+
+        // ...so a reinvestment in the re-enrolment period brings nothing forward.
+        enrol_period(&pool, 2, 1, "2025-01-01", None, ResidualHandling::CarryForward).await;
+        insert_distribution_dated(&pool, 2, 1, "2025-03-31", None, Decimal::from(8), Decimal::ZERO)
+            .await;
+        let next = db_reinvest(&pool, 2, &body("9")).await.unwrap();
+        assert_eq!(next.residual_brought_forward, Decimal::ZERO);
+        assert_eq!(next.quantity, Decimal::ZERO); // 8 < 9, no whole share
     }
 
     #[tokio::test]

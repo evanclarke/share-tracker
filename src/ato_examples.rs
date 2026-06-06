@@ -309,8 +309,14 @@ async fn cgt_how_to_calculate_example_multiple_assets() {
 async fn drp_example_natalie_reinvested_dividend() {
     let pool = test_pool().await;
     put_listing(&pool, 1, "NTLE").await;
-    // Enrol the holding in the DRP, then record the $360 distribution.
-    api_put(&pool, "/drp_enrolments/1", json!({ "residual_handling": "CarryForward" })).await;
+    // Enrol the holding in the DRP (an open-ended enrolment period covering the
+    // distribution), then record the $360 distribution.
+    api_put(
+        &pool,
+        "/drp_enrolments/1",
+        json!({ "listing_id": 1, "enrolment_date": "2024-01-01", "residual_handling": "CarryForward" }),
+    )
+    .await;
     api_put(
         &pool,
         "/income/1",

@@ -264,10 +264,15 @@
     },
     {
       slug: 'drp_enrolments', title: 'DRP Enrolments', group: 'Activity', api: '/drp_enrolments',
-      desc: 'Holdings that reinvest their distributions in full.',
-      keyFields: [fk('listing_id', 'Listing', 'listings', { required: true, encode: 'int' })],
-      fields: [sel('residual_handling', 'Residual handling', ['CarryForward', 'PayOut'], { required: true })],
-      columns: ['listing_id', 'residual_handling'],
+      desc: 'Dated DRP enrolment periods per holding (blank unenrolment date = currently enrolled). Periods must not overlap; unenrolling pays out the trailing carried residual.',
+      keyFields: [int('id', 'ID', { auto: true })],
+      fields: [
+        fk('listing_id', 'Listing', 'listings', { required: true }),
+        dt('enrolment_date', 'Enrolment date', { required: true }),
+        dt('unenrolment_date', 'Unenrolment date', { optional: true, hint: 'Leave blank while enrolled. Distributions with an ex date on or after this no longer reinvest.' }),
+        sel('residual_handling', 'Residual handling', ['CarryForward', 'PayOut'], { required: true }),
+      ],
+      columns: ['id', 'listing_id', 'enrolment_date', 'unenrolment_date', 'residual_handling'],
     },
     {
       slug: 'cgt_settings', title: 'CGT Settings', group: 'Activity', api: '/cgt_settings',

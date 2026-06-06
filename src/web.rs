@@ -157,6 +157,9 @@ mod tests {
     async fn drp_enrolment_ui_present() {
         let js = app_js_body().await;
         assert!(js.contains("/drp_enrolments"));
+        // The period model: enrol/unenrol/re-enrol via dated periods.
+        assert!(js.contains("enrolment_date"));
+        assert!(js.contains("unenrolment_date"));
     }
 
     #[tokio::test]
