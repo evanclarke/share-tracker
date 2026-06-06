@@ -324,6 +324,19 @@ A no-build-step single-page app (plain HTML/CSS/JS) embedded in the binary with 
 - [ ] If in scope: implement the chosen performance report(s) + Web UI view
 - [ ] Tests: performance metrics computed correctly over a known trade/income history
 
+## DRP enrolment and unenrolment over time
+(REQUIREMENTS "Planned Enhancements — DRP enrolment and unenrolment over time", added 2026-06-06. The current single unique enrolment row per listing — presence means "enrolled" — cannot represent a holding that starts unenrolled, enrols, unenrols, and re-enrols.)
+- [ ] NEEDS CLARIFICATION: which date determines a distribution's reinvestability — the ex/record date (matches registry practice) or the pay date
+- [ ] NEEDS CLARIFICATION: what happens to a carried-forward residual at unenrolment — paid out when the enrolment ends, or left dormant and picked up by the first reinvestment after re-enrolment
+- [ ] Model enrolment as dated periods per listing: enrolment date + optional unenrolment date (open-ended = currently enrolled), Residual Handling per period (a re-enrolment may choose differently) — DB schema + migration; existing `drp_enrolments` rows migrate to an open-ended period preserving their Residual Handling (no data dropped; CI forbids DROP TABLE/COLUMN, so rebuild via the rename pattern if the table shape changes)
+- [ ] Write-time invariants, validated atomically in a transaction: periods for a listing must not overlap, and at most one may be open at a time — violations rejected with `422`
+- [ ] CRUD API endpoints for enrolment periods (entity-module pattern), replacing/extending the current keyed-by-listing `/drp_enrolments` API
+- [ ] Reinvestment checks enrolment as at the relevant date (per the clarification above): a distribution dated before enrolment or in a gap between unenrolment and re-enrolment is rejected (`422`); one dated inside a period reinvests using that period's Residual Handling
+- [ ] Apply the residual-at-unenrolment decision (per the clarification above) to the carried-forward chain in the reinvestment operation
+- [ ] Web UI: update the DRP enrolment `ENTITIES` config for the period model (enrol/unenrol/re-enrol from the SPA)
+- [ ] Tests: distribution before enrolment rejected; distribution in an unenrolment gap rejected; distribution inside a period reinvests; re-enrolment after unenrolment works; overlapping or doubly-open periods rejected with `422`; existing enrolments migrate to open-ended periods
+- [ ] README sync: `drp_enrolments` period schema (+ Relationships), enrolment-period endpoints, reinvestment behaviour/response codes
+
 ## Settlement-holiday coverage alerting
 (REQUIREMENTS "Planned Enhancements — Settlement-holiday coverage alerting". Holidays are seeded only 2024–2027; settlement silently degrades to weekends-only beyond that.)
 - [ ] Surface (warn/flag) when a trade's date or computed settlement window falls outside the seeded holiday coverage for its exchange, rather than silently using an incomplete calendar

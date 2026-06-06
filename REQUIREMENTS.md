@@ -367,6 +367,25 @@ encounters corporate actions that change parcels or cost base and are currently 
   (IRR), and income/dividend yield per holding and overall - to round out the "tracker" role beyond
   the CGT engine
 
+## DRP enrolment and unenrolment over time (added 2026-06-06)
+- A holding's DRP participation changes over the life of the holding: it may start out not enrolled,
+  enrol, later unenrol, and re-enrol again. The current model (a single unique enrolment row per
+  listing whose presence means "enrolled") cannot represent this history
+- Model enrolment as dated periods per listing: each period has an enrolment date and an optional
+  unenrolment date (open-ended = currently enrolled). Periods for a listing must not overlap, and at
+  most one may be open at a time - enforced at write time
+- Whether a distribution is reinvestable is determined by the holding's enrolment status as at the
+  relevant date, not by the mere existence of an enrolment. Scope decision: which date the test uses
+  (the distribution's ex/record date matches registry practice; pay date is the simpler fallback)
+- Residual Handling remains a property of each enrolment period (a holding could re-enrol with a
+  different choice)
+- Scope decision: what happens to a carried-forward residual at unenrolment - paid out when the
+  enrolment ends, or left dormant and picked up again by the first reinvestment after re-enrolment
+- Existing single-row enrolments migrate to an open-ended period preserving their Residual Handling
+- Tests: a distribution dated before enrolment, or in a gap between unenrolment and re-enrolment, is
+  rejected for reinvestment; one dated inside an enrolment period reinvests; re-enrolment after
+  unenrolment works; overlapping or doubly-open periods are rejected with `422`
+
 ## Settlement-holiday coverage alerting
 - The exchange-holiday calendar is seeded only for 2024-2027; settlement auto-population silently
   degrades to weekends-only for trade dates beyond the seeded range. A trade whose date (or computed
