@@ -551,6 +551,33 @@ mod tests {
         assert_eq!(result[0].discount_eligible_gain, Decimal::from(500));
     }
 
+    /// Security identity continuity across a ticker/name change: a rename is an
+    /// in-place edit to the listing (same id), so a sale entered after the
+    /// rename still allocates against the pre-rename parcel — original cost
+    /// base, and the 12-month discount clock keeps running from the original
+    /// acquisition date.
+    #[tokio::test]
+    async fn db_sale_after_ticker_rename_keeps_cost_base_and_discount_clock() {
+        let pool = test_pool().await;
+        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let sell_date = NaiveDate::from_ymd_opt(2025, 1, 2).unwrap(); // strictly > 12 months
+        insert_listing(&pool, 1, "OLD").await;
+        insert_buy(&pool, 1, 1, buy_date, Decimal::from(100), Decimal::from(10)).await;
+        // The security is renamed before the sale: same listing id, new ticker + name.
+        insert_listing(&pool, 1, "NEW").await;
+        insert_sell(&pool, 2, 1, sell_date, Decimal::from(100), Decimal::from(15)).await;
+        allocate(&pool, 1, 2, 1, Decimal::from(100)).await;
+
+        let result = db_realised_gains(&pool).await.unwrap();
+        assert_eq!(result.len(), 1);
+        // Cost base from the pre-rename buy: 100 × $10 = $1,000; proceeds $1,500.
+        assert_eq!(result[0].listing_id, 1);
+        assert_eq!(result[0].cost_base, Decimal::from(1000));
+        assert_eq!(result[0].capital_gain_loss, Decimal::from(500));
+        // Held > 12 months from the original acquisition date → discount-eligible.
+        assert_eq!(result[0].discount_eligible_gain, Decimal::from(500));
+    }
+
     #[tokio::test]
     async fn db_cgt_not_eligible_exactly_12_months() {
         let pool = test_pool().await;

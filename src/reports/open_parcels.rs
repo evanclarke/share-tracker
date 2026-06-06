@@ -390,6 +390,30 @@ mod tests {
         assert_eq!(p.remaining_cost_base, "1010.945".parse::<Decimal>().unwrap());
     }
 
+    /// Security identity continuity across a ticker/name change: a rename is an
+    /// in-place edit to the listing (`PUT /listings/:id` with the same id), so
+    /// every parcel stays attached — same listing id, new ticker, unchanged
+    /// acquisition date and cost base. Nothing is keyed by ticker.
+    #[tokio::test]
+    async fn db_ticker_rename_keeps_parcels_attached_to_the_listing() {
+        let pool = test_pool().await;
+        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        insert_listing(&pool, 1, "OLD").await;
+        insert_buy(&pool, 1, 1, buy_date, Decimal::from(100), Decimal::from(10)).await;
+
+        // The security is renamed: same listing id, new ticker + name.
+        insert_listing(&pool, 1, "NEW").await;
+
+        let parcels = db_open_parcels(&pool).await.unwrap();
+        assert_eq!(parcels.len(), 1);
+        let p = &parcels[0];
+        assert_eq!(p.listing_id, 1);
+        assert_eq!(p.ticker, "NEW");
+        assert_eq!(p.acquisition_date, buy_date);
+        assert_eq!(p.remaining_quantity, Decimal::from(100));
+        assert_eq!(p.remaining_cost_base, "1010.945".parse::<Decimal>().unwrap());
+    }
+
     #[tokio::test]
     async fn db_partial_sell_pro_rates_remaining_cost_base() {
         let pool = test_pool().await;

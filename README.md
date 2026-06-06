@@ -322,6 +322,8 @@ Coverage is finite: an exchange's calendar is considered to cover the whole cale
 
 `PUT` returns `422` if `exchange_mic` is not a known exchange or `currency` is not a recognised code in `currencies`. The same currency check applies to the `currency` (and `brokerage_currency`) fields on trades, income, and AMMA writes.
 
+**Ticker or name changes:** a renamed security is the *same* security — record the change by editing the existing listing in place (`PUT /listings/:id` with the same id, new `ticker`/`name`). The listing's `id` is the identity everything references (trades, income, AMMA statements, DRP enrolments, corporate actions), and nothing is keyed by ticker, so the full history — parcels, cost bases, and acquisition dates (the 12-month discount clock) — stays attached across the rename. Don't create a new listing for a renamed security: that would start a second, unrelated history. (A relisting under a new entity via merger/takeover is a different event — a CGT parcel substitution — not a rename.)
+
 ### RBA FX rates
 
 Monthly foreign exchange rates from the RBA's F11 table, stored as foreign-currency units per 1 AUD (so `AUD = foreign / rate`). Rows are written only by the import, so the resource is read-only via `GET`.
