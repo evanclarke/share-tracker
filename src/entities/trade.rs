@@ -5,6 +5,7 @@ use axum::{
     routing::get,
 };
 use chrono::{Datelike, NaiveDate};
+use crate::infra::decimal::parse_dec;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
@@ -125,7 +126,60 @@ pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<Trade>, sqlx::E
     .await
 }
 
-pub async fn db_upsert(pool: &SqlitePool, trade: &Trade) -> Result<(), sqlx::Error> {
+#[derive(Debug)]
+pub enum UpsertError {
+    Db(sqlx::Error),
+    /// The new quantity falls below the total already allocated out of this
+    /// parcel by Sell allocations — accepting it would leave those allocations
+    /// drawing on units the parcel no longer has.
+    QuantityBelowAllocated,
+    /// The new quantity falls below a linked AMIT adjustment's covered
+    /// quantity, breaking that adjustment's `quantity <= trade.quantity`
+    /// invariant (see `amit_adjustment::db_upsert`).
+    QuantityBelowAmitAdjustment,
+}
+
+impl From<sqlx::Error> for UpsertError {
+    fn from(e: sqlx::Error) -> Self {
+        UpsertError::Db(e)
+    }
+}
+
+/// Create or update a trade. Validated and written in one transaction
+/// (symmetric with the Sell-side invariants in `sell::db_upsert_sell`): an
+/// edit may not shrink a Buy/DRP's quantity below what its dependants rely on
+/// — the quantity already allocated to Sells, or any linked AMIT adjustment's
+/// covered quantity.
+pub async fn db_upsert(pool: &SqlitePool, trade: &Trade) -> Result<(), UpsertError> {
+    let mut tx = pool.begin().await?;
+
+    // Sum is computed in Decimal (the column is TEXT; SQL SUM would coerce to
+    // float). For a new id both dependant sets are empty, so the checks pass.
+    let allocated: Vec<String> = sqlx::query_scalar(
+        "SELECT quantity_allocated FROM parcel_allocations WHERE purchase_trade_id = ?",
+    )
+    .bind(trade.id)
+    .fetch_all(&mut *tx)
+    .await?;
+    let mut allocated_total = Decimal::ZERO;
+    for q in allocated {
+        allocated_total += parse_dec("quantity_allocated", q)?;
+    }
+    if trade.quantity < allocated_total {
+        return Err(UpsertError::QuantityBelowAllocated);
+    }
+
+    let amit_quantities: Vec<String> =
+        sqlx::query_scalar("SELECT quantity FROM amit_adjustments WHERE trade_id = ?")
+            .bind(trade.id)
+            .fetch_all(&mut *tx)
+            .await?;
+    for q in amit_quantities {
+        if trade.quantity < parse_dec("quantity", q)? {
+            return Err(UpsertError::QuantityBelowAmitAdjustment);
+        }
+    }
+
     sqlx::query(
         "INSERT INTO trades \
          (id, trade_type, date, settlement_date, listing_id, average_price, quantity, \
@@ -165,17 +219,56 @@ pub async fn db_upsert(pool: &SqlitePool, trade: &Trade) -> Result<(), sqlx::Err
     .bind(trade.residual_brought_forward.to_string())
     .bind(trade.residual_carried_forward.to_string())
     .bind(trade.residual_paid_out.to_string())
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(())
 }
 
-pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<bool, sqlx::Error> {
-    let result = sqlx::query("DELETE FROM trades WHERE id = ?")
+/// Outcome of a delete request, so the handler can map to the right status.
+#[derive(Debug, PartialEq)]
+pub enum DeleteOutcome {
+    Deleted,
+    NotFound,
+    /// The trade is still referenced — as the purchase parcel of a Sell's
+    /// allocation (or a Sell with allocations), by an AMIT adjustment, or as a
+    /// distribution's reinvestment trade. Deleting it would orphan those
+    /// dependants, so the request is refused (mapped to 422) rather than
+    /// surfacing the SQLite FK error as a 500. Remove the dependants first
+    /// (e.g. delete the Sell via `DELETE /sells/:id`).
+    Referenced,
+}
+
+pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<DeleteOutcome, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+
+    let exists: Option<i64> = sqlx::query_scalar("SELECT id FROM trades WHERE id = ?")
         .bind(id)
-        .execute(pool)
+        .fetch_optional(&mut *tx)
         .await?;
-    Ok(result.rows_affected() > 0)
+    if exists.is_none() {
+        return Ok(DeleteOutcome::NotFound);
+    }
+
+    let referenced: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM parcel_allocations \
+                       WHERE purchase_trade_id = ?1 OR sale_trade_id = ?1) \
+             OR EXISTS(SELECT 1 FROM amit_adjustments WHERE trade_id = ?1) \
+             OR EXISTS(SELECT 1 FROM income WHERE reinvestment_trade_id = ?1)",
+    )
+    .bind(id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if referenced {
+        return Ok(DeleteOutcome::Referenced);
+    }
+
+    sqlx::query("DELETE FROM trades WHERE id = ?")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(DeleteOutcome::Deleted)
 }
 
 /// Advance `date` by `business_days` trading days, skipping Saturdays, Sundays
@@ -280,17 +373,24 @@ async fn upsert(
     db_upsert(&pool, &trade)
         .await
         .map(|_| StatusCode::NO_CONTENT)
-        .map_err(|e| crate::infra::http::write_error_status(&e))
+        .map_err(|e| match e {
+            UpsertError::Db(err) => crate::infra::http::write_error_status(&err),
+            UpsertError::QuantityBelowAllocated | UpsertError::QuantityBelowAmitAdjustment => {
+                StatusCode::UNPROCESSABLE_ENTITY
+            }
+        })
 }
 
 async fn delete(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
 ) -> Result<StatusCode, StatusCode> {
-    db_delete(&pool, id)
-        .await
-        .map(|found| if found { StatusCode::NO_CONTENT } else { StatusCode::NOT_FOUND })
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+    match db_delete(&pool, id).await {
+        Ok(DeleteOutcome::Deleted) => Ok(StatusCode::NO_CONTENT),
+        Ok(DeleteOutcome::NotFound) => Err(StatusCode::NOT_FOUND),
+        Ok(DeleteOutcome::Referenced) => Err(StatusCode::UNPROCESSABLE_ENTITY),
+        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
 }
 
 #[cfg(test)]
@@ -347,6 +447,81 @@ mod tests {
         }
     }
 
+    /// Sell `qty` units out of the Buy parcel `buy_id` (listing 1), via the
+    /// atomic Sell + allocation path.
+    async fn insert_sell_consuming(pool: &SqlitePool, sell_id: i64, buy_id: i64, qty: Decimal) {
+        use crate::entities::sell;
+        sell::db_upsert_sell(
+            pool,
+            sell_id,
+            &sell::SellBody {
+                date: NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(),
+                settlement_date: Some(NaiveDate::from_ymd_opt(2024, 6, 3).unwrap()),
+                listing_id: 1,
+                average_price: Decimal::from(120),
+                quantity: qty,
+                currency: "AUD".to_string(),
+                brokerage: Decimal::ZERO,
+                gst_on_brokerage: Decimal::ZERO,
+                brokerage_currency: "AUD".to_string(),
+                fx_rate: Decimal::ONE,
+                contract_note_ref: None,
+                allocations: vec![sell::AllocationInput {
+                    purchase_trade_id: buy_id,
+                    quantity_allocated: qty,
+                }],
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    /// Link an AMIT adjustment covering `qty` units of trade `trade_id`
+    /// (listing 1), creating the AMMA statement it hangs off.
+    async fn insert_amit_adjustment_covering(pool: &SqlitePool, trade_id: i64, qty: Decimal) {
+        use crate::entities::{amit_adjustment, amma};
+        amma::db_upsert(
+            pool,
+            &amma::AmmaStatement {
+                id: 1,
+                listing_id: 1,
+                tax_year_end_date: NaiveDate::from_ymd_opt(2024, 6, 30).unwrap(),
+                units_held: qty,
+                date_received: NaiveDate::from_ymd_opt(2024, 8, 15).unwrap(),
+                australian_interest: Decimal::ZERO,
+                australian_dividends_unfranked: Decimal::ZERO,
+                franked_dividends: Decimal::ZERO,
+                franking_credits: Decimal::ZERO,
+                net_rent: Decimal::ZERO,
+                foreign_income: Decimal::ZERO,
+                foreign_tax_credits: Decimal::ZERO,
+                other_income: Decimal::ZERO,
+                cgt_discount_gains: Decimal::ZERO,
+                cgt_indexation_gains: Decimal::ZERO,
+                cgt_other_gains: Decimal::ZERO,
+                capital_losses_applied: Decimal::ZERO,
+                tax_deferred_amount: Decimal::ZERO,
+                tax_free_amount: Decimal::ZERO,
+                cost_base_adjustment: "0.05".parse().unwrap(),
+                tfn_withholding_tax: Decimal::ZERO,
+                currency: "AUD".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        amit_adjustment::db_upsert(
+            pool,
+            &amit_adjustment::AmitAdjustment {
+                id: 1,
+                amma_statement_id: 1,
+                trade_id,
+                quantity: qty,
+            },
+        )
+        .await
+        .unwrap();
+    }
+
     // DB-level tests
 
     #[tokio::test]
@@ -367,18 +542,26 @@ mod tests {
         let pool = test_pool().await;
         insert_test_listing(&pool).await;
 
+        fn assert_fk_error(err: UpsertError, column: &str) {
+            match err {
+                UpsertError::Db(e) => assert!(
+                    e.to_string().contains("FOREIGN KEY"),
+                    "expected {column} FK error, got: {e}"
+                ),
+                other => panic!("expected {column} FK error, got: {other:?}"),
+            }
+        }
+
         // 'ZZZ' is not a recognised currency → each currency column's FK rejects it.
         let mut bad_currency = buy_trade();
         bad_currency.currency = "ZZZ".to_string();
-        let err = db_upsert(&pool, &bad_currency).await.unwrap_err();
-        assert!(err.to_string().contains("FOREIGN KEY"), "expected currency FK error, got: {err}");
+        assert_fk_error(db_upsert(&pool, &bad_currency).await.unwrap_err(), "currency");
 
         let mut bad_brokerage = buy_trade();
         bad_brokerage.brokerage_currency = "ZZZ".to_string();
-        let err = db_upsert(&pool, &bad_brokerage).await.unwrap_err();
-        assert!(
-            err.to_string().contains("FOREIGN KEY"),
-            "expected brokerage_currency FK error, got: {err}"
+        assert_fk_error(
+            db_upsert(&pool, &bad_brokerage).await.unwrap_err(),
+            "brokerage_currency",
         );
 
         // A seeded digital-token code (BTC) is a recognised currency and is accepted.
@@ -476,6 +659,114 @@ mod tests {
     async fn db_get_missing_returns_none() {
         let pool = test_pool().await;
         assert!(db_get(&pool, 999).await.unwrap().is_none());
+    }
+
+    // Buy-trade edit/delete integrity (symmetric with the Sell-side invariants)
+
+    #[tokio::test]
+    async fn db_delete_buy_consumed_by_allocation_is_refused() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        db_upsert(&pool, &buy_trade()).await.unwrap();
+        insert_sell_consuming(&pool, 2, 1, Decimal::from(5)).await;
+
+        assert_eq!(db_delete(&pool, 1).await.unwrap(), DeleteOutcome::Referenced);
+        assert!(db_get(&pool, 1).await.unwrap().is_some(), "consumed buy must remain");
+    }
+
+    #[tokio::test]
+    async fn db_delete_buy_covered_by_amit_adjustment_is_refused() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        db_upsert(&pool, &buy_trade()).await.unwrap();
+        insert_amit_adjustment_covering(&pool, 1, Decimal::from(10)).await;
+
+        assert_eq!(db_delete(&pool, 1).await.unwrap(), DeleteOutcome::Referenced);
+        assert!(db_get(&pool, 1).await.unwrap().is_some(), "covered buy must remain");
+    }
+
+    #[tokio::test]
+    async fn db_delete_drp_linked_to_income_reinvestment_is_refused() {
+        // A DRP trade recorded as a distribution's reinvestment is referenced by
+        // income.reinvestment_trade_id — deleting it would orphan that link.
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        let mut drp = buy_trade();
+        drp.trade_type = TradeType::DRP;
+        db_upsert(&pool, &drp).await.unwrap();
+        sqlx::query(
+            "INSERT INTO income (id, listing_id, date_paid, reinvestment_trade_id) \
+             VALUES (1, 1, '2024-03-15', 1)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        assert_eq!(db_delete(&pool, 1).await.unwrap(), DeleteOutcome::Referenced);
+        assert!(db_get(&pool, 1).await.unwrap().is_some(), "reinvestment trade must remain");
+    }
+
+    #[tokio::test]
+    async fn db_shrink_buy_below_allocated_quantity_is_refused() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        db_upsert(&pool, &buy_trade()).await.unwrap(); // qty 10
+        insert_sell_consuming(&pool, 2, 1, Decimal::from(5)).await;
+
+        // Shrinking below the 5 already allocated out is refused…
+        let mut shrunk = buy_trade();
+        shrunk.quantity = Decimal::from(4);
+        let err = db_upsert(&pool, &shrunk).await.unwrap_err();
+        assert!(
+            matches!(err, UpsertError::QuantityBelowAllocated),
+            "expected QuantityBelowAllocated, got: {err:?}"
+        );
+        assert_eq!(db_get(&pool, 1).await.unwrap().unwrap().quantity, Decimal::from(10));
+
+        // …but shrinking exactly to the allocated quantity is fine.
+        let mut exact = buy_trade();
+        exact.quantity = Decimal::from(5);
+        db_upsert(&pool, &exact).await.unwrap();
+        assert_eq!(db_get(&pool, 1).await.unwrap().unwrap().quantity, Decimal::from(5));
+    }
+
+    #[tokio::test]
+    async fn db_shrink_buy_below_amit_adjustment_quantity_is_refused() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        db_upsert(&pool, &buy_trade()).await.unwrap(); // qty 10
+        insert_amit_adjustment_covering(&pool, 1, Decimal::from(8)).await;
+
+        // Shrinking below the adjustment's 8 covered units is refused…
+        let mut shrunk = buy_trade();
+        shrunk.quantity = Decimal::from(7);
+        let err = db_upsert(&pool, &shrunk).await.unwrap_err();
+        assert!(
+            matches!(err, UpsertError::QuantityBelowAmitAdjustment),
+            "expected QuantityBelowAmitAdjustment, got: {err:?}"
+        );
+        assert_eq!(db_get(&pool, 1).await.unwrap().unwrap().quantity, Decimal::from(10));
+
+        // …but shrinking exactly to the covered quantity is fine.
+        let mut exact = buy_trade();
+        exact.quantity = Decimal::from(8);
+        db_upsert(&pool, &exact).await.unwrap();
+        assert_eq!(db_get(&pool, 1).await.unwrap().unwrap().quantity, Decimal::from(8));
+    }
+
+    #[tokio::test]
+    async fn db_unconsumed_buy_still_edits_and_deletes_freely() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        db_upsert(&pool, &buy_trade()).await.unwrap(); // qty 10
+
+        let mut shrunk = buy_trade();
+        shrunk.quantity = Decimal::ONE;
+        db_upsert(&pool, &shrunk).await.unwrap();
+        assert_eq!(db_get(&pool, 1).await.unwrap().unwrap().quantity, Decimal::ONE);
+
+        assert_eq!(db_delete(&pool, 1).await.unwrap(), DeleteOutcome::Deleted);
+        assert!(db_get(&pool, 1).await.unwrap().is_none());
     }
 
     // API-level tests
@@ -769,6 +1060,66 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn api_delete_consumed_buy_returns_422() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        db_upsert(&pool, &buy_trade()).await.unwrap();
+        insert_sell_consuming(&pool, 2, 1, Decimal::from(5)).await;
+
+        let resp = router()
+            .with_state(pool.clone())
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/trades/1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(db_get(&pool, 1).await.unwrap().is_some(), "consumed buy must remain");
+    }
+
+    #[tokio::test]
+    async fn api_shrink_partly_sold_buy_returns_422() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        db_upsert(&pool, &buy_trade()).await.unwrap(); // qty 10
+        insert_sell_consuming(&pool, 2, 1, Decimal::from(5)).await;
+
+        // Editing the Buy down to 4 would leave the Sell's 5-unit allocation
+        // drawing on units the parcel no longer has.
+        let body = serde_json::json!({
+            "trade_type": "Buy",
+            "date": "2024-01-15",
+            "settlement_date": "2024-01-17",
+            "listing_id": 1,
+            "average_price": "100",
+            "quantity": "4",
+            "currency": "AUD",
+            "brokerage": "9.95",
+            "gst_on_brokerage": "0.995",
+            "brokerage_currency": "AUD",
+            "fx_rate": "1"
+        });
+        let resp = router()
+            .with_state(pool.clone())
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/trades/1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(db_get(&pool, 1).await.unwrap().unwrap().quantity, Decimal::from(10));
     }
 
     #[tokio::test]

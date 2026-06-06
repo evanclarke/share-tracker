@@ -344,6 +344,13 @@ If `settlement_date` is omitted from the PUT body, it is auto-calculated by adva
 
 `PUT /trades/:id` rejects `trade_type: "Sell"` with `422` — Sells must be created via `PUT /sells/:id` (see below) so they are always persisted with a full set of parcel allocations.
 
+Buy/DRP trades carry the same write-time integrity as Sells (validated atomically in a transaction):
+
+- `DELETE /trades/:id` returns `422` if the trade is still referenced — as the purchase parcel of a Sell's allocation, by an AMIT adjustment, or as a distribution's reinvestment trade — instead of surfacing the FK error as `500`. Remove the dependants first (e.g. delete the Sell via `DELETE /sells/:id`).
+- `PUT /trades/:id` returns `422` if the edit would shrink the trade's `quantity` below what its dependants rely on: the total already allocated out to Sells, or any linked AMIT adjustment's covered quantity.
+
+An unreferenced trade edits and deletes freely.
+
 ### Income
 
 | Method | Path | Description |
@@ -583,7 +590,7 @@ Validates each curated exchange's MIC against the `mic_registry` (the imported I
 | `404 Not Found` | Resource does not exist |
 | `405 Method Not Allowed` | Write attempted on a read-only path (e.g. `parcel_allocations`) |
 | `413 Payload Too Large` | Uploaded attachment exceeds the 25 MB per-file limit |
-| `422 Unprocessable Entity` | Business rule or constraint violation (e.g. over-allocation, wrong trade type, under-allocated Sell, unparseable FX or MIC feed, a write referencing an unrecognised currency / unknown exchange / listing, an attachment upload with no/multiple owners or an unsupported content type, or a negative / non-singleton `cgt_settings` opening capital loss) |
+| `422 Unprocessable Entity` | Business rule or constraint violation (e.g. over-allocation, wrong trade type, under-allocated Sell, deleting or shrinking a Buy/DRP that a parcel allocation, AMIT adjustment, or reinvestment link still relies on, unparseable FX or MIC feed, a write referencing an unrecognised currency / unknown exchange / listing, an attachment upload with no/multiple owners or an unsupported content type, or a negative / non-singleton `cgt_settings` opening capital loss) |
 | `500 Internal Server Error` | Unexpected database error, or a job triggered via `POST /jobs/:name` failed |
 | `502 Bad Gateway` | Upstream fetch failed (e.g. the RBA FX or ISO MIC import could not reach its source) |
 
