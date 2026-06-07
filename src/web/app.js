@@ -5,9 +5,11 @@
 // No build step, no framework: a small config-driven engine renders a CRUD view
 // for every domain entity and a table view for every report, all driving the
 // existing JSON API on the same origin. Each entity is described once (its API
-// path, key, and fields); generic list/form code does the rest. Sells (which
-// must be written atomically with their parcel allocations) and DRP reinvestment
-// are the two flows with bespoke views.
+// path, key, and fields); generic list/form code does the rest. Post-record
+// actions (DRP reinvestment, rights exercise, buy-back participation, scrip
+// exchange, demerger) are likewise described once in ACTIONS and rendered by
+// the generic viewAction. Sells and Transfers (written atomically with their
+// parcel allocations) are the two flows with bespoke views.
 //
 (function () {
   // ---- tiny DOM helpers -------------------------------------------------
@@ -293,33 +295,56 @@
     },
     {
       slug: 'corporate_actions', title: 'Corporate Actions', group: 'Activity', api: '/corporate_actions',
-      desc: 'Return-of-capital payments (CGT event G1): the per-unit amount reduces the cost base of parcels held on the payment date; any excess over a parcel’s cost base is a capital gain in the Net Capital Gain report. Share splits/consolidations (TD 2000/10): on the conversion date every “old units” become “new units” (2-for-1 split: new 2, old 1; 1-for-10 consolidation: new 1, old 10) — no CGT event, the parcels keep their total cost base and original acquisition date. Bonus issues (non-assessable): on the issue date every “held units” receive “bonus units” extra units (1-for-10 issue: bonus 1, held 10) — no CGT event, the cost base is apportioned over original + bonus shares and the acquisition date is preserved; bonus shares chosen in lieu of a dividend are a DRP trade, not entered here. Rights issues: units held before the record date earn “rights units” per “held units” at the exercise price (1-for-4 issue: rights 1, held 4) — recording the issue changes nothing; use the row’s Exercise action to create the new Buy parcel (acquired at the exercise date, cost base = exercise payment + any amount paid for the rights). Off-market buy-backs: record the per-unit buy-back price, the dividend component of that price and its franking credit (both 0 for a listed-company buy-back announced after 25 Oct 2022), and the market value had the buy-back not been proposed (blank if the price is at or above it); recording changes nothing — use the row’s Participate action to sell units into the buy-back, which creates the Sell at the capital proceeds (max(price, market value) − dividend) plus the dividend income row. Scrip-for-scrip takeovers (all-scrip, with rollover): on the exchange date every “old units” of this listing become “new units” of the replacement listing (1-for-1 merger: new 1, old 1) — recording changes nothing; use the row’s Exchange action to substitute every open parcel: the capital gain is disregarded and each replacement parcel carries the consumed parcel’s remaining cost base and acquisition date (the combined period counts toward the 12-month discount). Demergers (eligible, rollover chosen): on the demerger date every “held units” of this (head) listing receive “new units” of the demerged listing (BHP Steel’s 1-for-5: new 1, held 5), and the advised percentage of each parcel’s cost base moves to the new interests — recording changes nothing; use the row’s Demerge action to apportion every open parcel: any gain is disregarded, the head parcels keep the rest of the cost base and their acquisition dates, and the new parcels’ 12-month discount clock runs from the original acquisition. Fill only the chosen action type’s fields and leave the other types’ fields blank.',
+      desc: 'Capital events against a listing: return of capital, share splits/consolidations, bonus issues, rights issues, off-market buy-backs, scrip-for-scrip takeovers, and demergers. The form shows only the chosen action type’s fields; rights issues, buy-backs, scrip-for-scrip takeovers, and demergers are executed after recording via the row’s Exercise / Participate / Exchange / Demerge action.',
       keyFields: [int('id', 'ID', { auto: true })],
       fields: [
         sel('action_type', 'Action type', ['ReturnOfCapital', 'ShareSplit', 'BonusIssue', 'RightsIssue', 'BuyBack', 'ScripForScrip', 'Demerger'], { required: true }),
         fk('listing_id', 'Listing', 'listings', { required: true }),
         dt('date', 'Payment / conversion / issue / record / buy-back / exchange / demerger date', { required: true }),
-        dec('amount_per_unit', 'Amount per unit', { optional: true, default: '', hint: 'ReturnOfCapital only.' }),
-        fk('currency', 'Currency', 'currencies', { optional: true, encode: 'string', default: '', hint: 'ReturnOfCapital, RightsIssue, and BuyBack only.' }),
-        dec('split_new_units', 'Split: new units', { optional: true, default: '', hint: 'ShareSplit only.' }),
-        dec('split_old_units', 'Split: old units', { optional: true, default: '', hint: 'ShareSplit only.' }),
-        dec('bonus_units', 'Bonus: units issued', { optional: true, default: '', hint: 'BonusIssue only.' }),
-        dec('bonus_held_units', 'Bonus: per units held', { optional: true, default: '', hint: 'BonusIssue only.' }),
-        dec('rights_units', 'Rights: new units', { optional: true, default: '', hint: 'RightsIssue only.' }),
-        dec('rights_held_units', 'Rights: per units held', { optional: true, default: '', hint: 'RightsIssue only.' }),
-        dec('exercise_price', 'Rights: exercise price per unit', { optional: true, default: '', hint: 'RightsIssue only.' }),
-        dec('buyback_price', 'Buy-back: price per unit', { optional: true, default: '', hint: 'BuyBack only.' }),
-        dec('buyback_dividend', 'Buy-back: dividend per unit', { optional: true, default: '', hint: 'BuyBack only; 0 (or blank) when the price has no dividend component.' }),
-        dec('buyback_franking_credit', 'Buy-back: franking credit per unit', { optional: true, default: '', hint: 'BuyBack only; needs a dividend.' }),
-        dec('buyback_market_value', 'Buy-back: market value per unit', { optional: true, default: '', hint: 'BuyBack only; had the buy-back not been proposed. Blank if the price is at or above it.' }),
-        fk('scrip_listing_id', 'Scrip: replacement listing', 'listings', { optional: true, default: '', hint: 'ScripForScrip only; must differ from the listing being taken over.' }),
-        dec('scrip_new_units', 'Scrip: new units', { optional: true, default: '', hint: 'ScripForScrip only.' }),
-        dec('scrip_old_units', 'Scrip: per old units', { optional: true, default: '', hint: 'ScripForScrip only.' }),
-        fk('demerger_listing_id', 'Demerger: demerged listing', 'listings', { optional: true, default: '', hint: 'Demerger only; must differ from the head listing.' }),
-        dec('demerger_new_units', 'Demerger: new units', { optional: true, default: '', hint: 'Demerger only.' }),
-        dec('demerger_held_units', 'Demerger: per units held', { optional: true, default: '', hint: 'Demerger only.' }),
-        dec('demerger_cost_base_pct', 'Demerger: cost base % to demerged entity', { optional: true, default: '', hint: 'Demerger only; the head-entity-advised percentage (0–100 exclusive), e.g. 5.063.' }),
+        dec('amount_per_unit', 'Amount per unit', { optional: true, default: '' }),
+        fk('currency', 'Currency', 'currencies', { optional: true, encode: 'string', default: '', hint: 'Currency of the per-unit amount(s).' }),
+        dec('split_new_units', 'Split: new units', { optional: true, default: '' }),
+        dec('split_old_units', 'Split: old units', { optional: true, default: '' }),
+        dec('bonus_units', 'Bonus: units issued', { optional: true, default: '' }),
+        dec('bonus_held_units', 'Bonus: per units held', { optional: true, default: '' }),
+        dec('rights_units', 'Rights: new units', { optional: true, default: '' }),
+        dec('rights_held_units', 'Rights: per units held', { optional: true, default: '' }),
+        dec('exercise_price', 'Rights: exercise price per unit', { optional: true, default: '' }),
+        dec('buyback_price', 'Buy-back: price per unit', { optional: true, default: '' }),
+        dec('buyback_dividend', 'Buy-back: dividend per unit', { optional: true, default: '', hint: '0 (or blank) when the price has no dividend component.' }),
+        dec('buyback_franking_credit', 'Buy-back: franking credit per unit', { optional: true, default: '', hint: 'Needs a dividend.' }),
+        dec('buyback_market_value', 'Buy-back: market value per unit', { optional: true, default: '', hint: 'Had the buy-back not been proposed. Blank if the price is at or above it.' }),
+        fk('scrip_listing_id', 'Scrip: replacement listing', 'listings', { optional: true, default: '', hint: 'Must differ from the listing being taken over.' }),
+        dec('scrip_new_units', 'Scrip: new units', { optional: true, default: '' }),
+        dec('scrip_old_units', 'Scrip: per old units', { optional: true, default: '' }),
+        fk('demerger_listing_id', 'Demerger: demerged listing', 'listings', { optional: true, default: '', hint: 'Must differ from the head listing.' }),
+        dec('demerger_new_units', 'Demerger: new units', { optional: true, default: '' }),
+        dec('demerger_held_units', 'Demerger: per units held', { optional: true, default: '' }),
+        dec('demerger_cost_base_pct', 'Demerger: cost base % to demerged entity', { optional: true, default: '', hint: 'The head-entity-advised percentage (0–100 exclusive), e.g. 5.063.' }),
       ],
+      // The form renders only the selected action_type's field group (plus the
+      // common fields above that appear in no group); the unchosen groups'
+      // fields submit as null, exactly as their blank inputs used to. The
+      // matching typeDescs entry scopes the form's description to the type.
+      typeField: 'action_type',
+      fieldGroups: {
+        ReturnOfCapital: ['amount_per_unit', 'currency'],
+        ShareSplit: ['split_new_units', 'split_old_units'],
+        BonusIssue: ['bonus_units', 'bonus_held_units'],
+        RightsIssue: ['rights_units', 'rights_held_units', 'exercise_price', 'currency'],
+        BuyBack: ['buyback_price', 'buyback_dividend', 'buyback_franking_credit', 'buyback_market_value', 'currency'],
+        ScripForScrip: ['scrip_listing_id', 'scrip_new_units', 'scrip_old_units'],
+        Demerger: ['demerger_listing_id', 'demerger_new_units', 'demerger_held_units', 'demerger_cost_base_pct'],
+      },
+      typeDescs: {
+        ReturnOfCapital: 'Return-of-capital payment (CGT event G1): the per-unit amount reduces the cost base of parcels held on the payment date; any excess over a parcel’s cost base is a capital gain in the Net Capital Gain report.',
+        ShareSplit: 'Share split/consolidation (TD 2000/10): on the conversion date every “old units” become “new units” (2-for-1 split: new 2, old 1; 1-for-10 consolidation: new 1, old 10) — no CGT event, the parcels keep their total cost base and original acquisition date.',
+        BonusIssue: 'Bonus issue (non-assessable): on the issue date every “held units” receive “bonus units” extra units (1-for-10 issue: bonus 1, held 10) — no CGT event, the cost base is apportioned over original + bonus shares and the acquisition date is preserved; bonus shares chosen in lieu of a dividend are a DRP trade, not entered here.',
+        RightsIssue: 'Rights issue: units held before the record date earn “rights units” per “held units” at the exercise price (1-for-4 issue: rights 1, held 4) — recording the issue changes nothing; use the row’s Exercise action to create the new Buy parcel (acquired at the exercise date, cost base = exercise payment + any amount paid for the rights).',
+        BuyBack: 'Off-market buy-back: record the per-unit buy-back price, the dividend component of that price and its franking credit (both 0 for a listed-company buy-back announced after 25 Oct 2022), and the market value had the buy-back not been proposed (blank if the price is at or above it); recording changes nothing — use the row’s Participate action to sell units into the buy-back, which creates the Sell at the capital proceeds (max(price, market value) − dividend) plus the dividend income row.',
+        ScripForScrip: 'Scrip-for-scrip takeover (all-scrip, with rollover): on the exchange date every “old units” of this listing become “new units” of the replacement listing (1-for-1 merger: new 1, old 1) — recording changes nothing; use the row’s Exchange action to substitute every open parcel: the capital gain is disregarded and each replacement parcel carries the consumed parcel’s remaining cost base and acquisition date (the combined period counts toward the 12-month discount).',
+        Demerger: 'Demerger (eligible, rollover chosen): on the demerger date every “held units” of this (head) listing receive “new units” of the demerged listing (BHP Steel’s 1-for-5: new 1, held 5), and the advised percentage of each parcel’s cost base moves to the new interests — recording changes nothing; use the row’s Demerge action to apportion every open parcel: any gain is disregarded, the head parcels keep the rest of the cost base and their acquisition dates, and the new parcels’ 12-month discount clock runs from the original acquisition.',
+      },
       columns: ['id', 'action_type', 'listing_id', 'date', 'amount_per_unit', 'currency', 'split_new_units', 'split_old_units', 'bonus_units', 'bonus_held_units', 'rights_units', 'rights_held_units', 'exercise_price', 'buyback_price', 'buyback_dividend', 'buyback_franking_credit', 'buyback_market_value', 'scrip_listing_id', 'scrip_new_units', 'scrip_old_units', 'demerger_listing_id', 'demerger_new_units', 'demerger_held_units', 'demerger_cost_base_pct'],
       rowActions: function (row) {
         if (row.action_type === 'RightsIssue') return [{ label: 'Exercise', href: '#/exercise/' + row.id }];
@@ -354,10 +379,109 @@
     { slug: 'settlement-holiday-coverage', title: 'Settlement Holiday Coverage', api: '/reports/settlement_holiday_coverage', method: 'GET', statusField: 'coverage_status', desc: 'Trades whose settlement window falls outside the seeded exchange-holiday calendars (settlement may have skipped weekends only).' },
   ];
 
+  // ---- post-action configuration -----------------------------------------
+  // Follow-up actions reached from an owning row (a distribution's Reinvest, a
+  // corporate action's Exercise / Participate / Exchange / Demerge). Each is
+  // one config entry — owner fetch, fields, optional parcel allocations, POST
+  // endpoint, texts — rendered by the generic viewAction, mirroring how
+  // ENTITIES drives viewEntityForm. The confirm-only actions (scrip exchange,
+  // demerge) are the degenerate config with `fields: []`.
+  const ACTIONS = [
+    // DRP reinvestment: creates a DRP trade and links it to the distribution.
+    {
+      slug: 'reinvest', nav: 'income', ownerApi: '/income', cancel: '#/e/income', submit: 'Reinvest',
+      post: function (id) { return '/income/' + id + '/reinvest'; },
+      title: function (id) { return 'Reinvest distribution #' + id; },
+      desc: function (income) { return 'Creates a DRP trade for listing ' + income.listing_id + ' and links it back to this distribution. The holding must be DRP-enrolled.'; },
+      fields: function (income) {
+        return [
+          dec('reinvestment_price', 'Reinvestment price', { required: true, default: '' }),
+          dec('fx_rate', 'FX rate', { default: '1', hint: 'Optional; defaults to 1.' }),
+          dt('date', 'Trade date', { optional: true, hint: 'Optional; defaults to the distribution pay date (' + income.date_paid + ').' }),
+        ];
+      },
+      toast: function (trade) { return 'Reinvested into trade #' + (trade ? trade.id : '?') + '.'; },
+    },
+    // Rights exercise: creates the new Buy parcel (acquired at the exercise
+    // date); the server caps cumulative exercised units at the entitlement.
+    {
+      slug: 'exercise', nav: 'corporate_actions', ownerApi: '/corporate_actions', cancel: '#/e/corporate_actions', submit: 'Exercise',
+      post: function (id) { return '/corporate_actions/' + id + '/exercise'; },
+      title: function (id) { return 'Exercise rights issue #' + id; },
+      desc: function (a) { return 'Creates a Buy trade for listing ' + a.listing_id + ' at the exercise price (' + a.exercise_price + ' ' + a.currency + ' per unit): ' + a.rights_units + ' new unit(s) per ' + a.rights_held_units + ' held at the record date.'; },
+      fields: function (a) {
+        return [
+          dt('date', 'Exercise date', { required: true, hint: 'The new parcel’s acquisition date; on or after the record date (' + a.date + ').' }),
+          dec('units', 'Units acquired', { required: true, default: '' }),
+          dec('rights_cost', 'Amount paid for the rights', { default: '0', hint: 'Total, in ' + a.currency + '. 0 for rights issued free.' }),
+          dec('fx_rate', 'FX rate', { default: '1', hint: 'Optional; defaults to 1.' }),
+          fk('holding_account_id', 'Holding account', 'holdingAccounts', { required: true, default: '1', hint: 'Where the exercised parcel lands.' }),
+        ];
+      },
+      toast: function (trade) { return 'Exercised into trade #' + (trade ? trade.id : '?') + '.'; },
+    },
+    // Buy-back participation: atomically creates the Sell at the capital
+    // proceeds per unit (max(price, market value) − dividend) with the chosen
+    // parcel allocations, plus the dividend-component income row if any.
+    {
+      slug: 'participate', nav: 'corporate_actions', ownerApi: '/corporate_actions', cancel: '#/e/corporate_actions', submit: 'Participate',
+      post: function (id) { return '/corporate_actions/' + id + '/participate'; },
+      title: function (id) { return 'Participate in buy-back #' + id; },
+      desc: function (a) { return 'Creates a Sell trade for listing ' + a.listing_id + ' at the capital proceeds per unit — max(price ' + a.buyback_price + ', market value ' + (a.buyback_market_value || a.buyback_price) + ') − dividend ' + a.buyback_dividend + ' ' + a.currency + ' — plus the dividend-component income row when there is one.'; },
+      fields: function (a) {
+        return [
+          dt('date', 'Participation date', { required: true, hint: 'The CGT event (acceptance) date; on or after the buy-back date (' + a.date + '). Also the dividend component’s pay date.' }),
+          dec('units', 'Units sold into the buy-back', { required: true, default: '' }),
+          dec('fx_rate', 'FX rate', { default: '1', hint: 'Optional; defaults to 1.' }),
+          fk('holding_account_id', 'Holding account', 'holdingAccounts', { required: true, default: '1', hint: 'The participating account: allocations may only consume its parcels.' }),
+        ];
+      },
+      allocations: { hint: 'Allocations must sum exactly to the units sold. Each parcel must be a Buy/DRP with enough remaining units.' },
+      toast: function (r) {
+        const tradeId = r && r.trade ? r.trade.id : '?';
+        return 'Sold into the buy-back as trade #' + tradeId + (r && r.income ? ' with dividend income #' + r.income.id : '') + '.';
+      },
+    },
+    // Scrip-for-scrip exchange (confirm-only): POST takes no parameters — the
+    // action's terms and the holdings at its date determine everything. It
+    // atomically closes every open parcel of the original listing (the
+    // rollover disregards the gain) and creates the replacement parcels
+    // carrying each consumed parcel's remaining cost base and acquisition date.
+    {
+      slug: 'scrip-exchange', nav: 'corporate_actions', ownerApi: '/corporate_actions', cancel: '#/e/corporate_actions', submit: 'Exchange',
+      post: function (id) { return '/corporate_actions/' + id + '/exchange'; },
+      title: function (id) { return 'Exchange scrip-for-scrip takeover #' + id; },
+      desc: function (a) { return 'Substitutes every open parcel of listing ' + a.listing_id + ' held at ' + a.date + ' with ' + a.scrip_new_units + ' unit(s) of listing ' + a.scrip_listing_id + ' per ' + a.scrip_old_units + ' held. The rollover disregards the capital gain; each replacement parcel carries its consumed parcel’s remaining cost base and acquisition date (the combined holding period counts toward the 12-month discount). Undo by deleting the closing Sell from the Sells view.'; },
+      fields: [],
+      toast: function (r) {
+        const n = r && r.replacements ? r.replacements.length : 0;
+        return 'Exchanged into ' + n + ' replacement parcel(s) via closing sell #' + (r && r.sell ? r.sell.id : '?') + '.';
+      },
+    },
+    // Demerger (confirm-only): POST takes no parameters. It atomically closes
+    // every open parcel of the head listing (the rollover disregards any gain)
+    // and recreates each as a head replacement parcel plus a demerged-entity
+    // parcel splitting the cost base by the advised percentage, both keeping
+    // the consumed parcel's acquisition date.
+    {
+      slug: 'demerge', nav: 'corporate_actions', ownerApi: '/corporate_actions', cancel: '#/e/corporate_actions', submit: 'Demerge',
+      post: function (id) { return '/corporate_actions/' + id + '/demerge'; },
+      title: function (id) { return 'Demerge #' + id; },
+      desc: function (a) { return 'Apportions every open parcel of head listing ' + a.listing_id + ' held at ' + a.date + ': ' + a.demerger_cost_base_pct + '% of each parcel’s cost base moves to ' + a.demerger_new_units + ' unit(s) of demerged listing ' + a.demerger_listing_id + ' per ' + a.demerger_held_units + ' held; the head parcels keep the rest. Any gain is disregarded and both sides keep the original acquisition date (the 12-month discount clock). Undo by deleting the closing Sell from the Sells view.'; },
+      fields: [],
+      toast: function (r) {
+        const n = r && r.demerged_replacements ? r.demerged_replacements.length : 0;
+        return 'Demerged ' + n + ' parcel(s) via closing sell #' + (r && r.sell ? r.sell.id : '?') + '.';
+      },
+    },
+  ];
+
   const entityBySlug = {};
   ENTITIES.forEach(function (e) { entityBySlug[e.slug] = e; });
   const reportBySlug = {};
   REPORTS.forEach(function (r) { reportBySlug[r.slug] = r; });
+  const actionBySlug = {};
+  ACTIONS.forEach(function (a) { actionBySlug[a.slug] = a; });
 
   // ---- navigation -------------------------------------------------------
   function buildNav() {
@@ -603,10 +727,65 @@
     return raw;
   }
 
+  // ---- allocation editor --------------------------------------------------
+  // Shared parcel-allocation row builder used by the Sell form, the Transfer
+  // form, and the buy-back Participate action: a list of (purchase-parcel
+  // select, decimal quantity) rows with add/remove buttons. Returns the
+  // section element to append to the form and a `read()` harvesting the rows
+  // as [{ purchase_trade_id, quantity_allocated }] (blank rows skipped). The
+  // three callers differ only in labels and hint text.
+  function allocationEditor(parcelOptions, existingAllocs, labels) {
+    labels = Object.assign({
+      heading: 'Parcel allocations',
+      parcelLabel: 'Purchase parcel',
+      qtyLabel: 'Quantity allocated',
+      addLabel: '+ Add allocation',
+    }, labels);
+    const list = el('div');
+    function addRow(alloc) {
+      const purchaseSel = el('select', { name: 'alloc_purchase' });
+      parcelOptions.forEach(function (o) { purchaseSel.appendChild(el('option', { value: o.value }, o.label)); });
+      if (alloc) purchaseSel.value = String(alloc.purchase_trade_id);
+      const qtyInput = el('input', { type: 'text', inputmode: 'decimal', name: 'alloc_qty', value: alloc ? String(alloc.quantity_allocated) : '' });
+      const row = el('div', { class: 'alloc-row' }, [
+        el('div', { class: 'field' }, [el('label', null, labels.parcelLabel), purchaseSel]),
+        el('div', { class: 'field' }, [el('label', null, labels.qtyLabel), qtyInput]),
+        el('button', { type: 'button', class: 'small danger', onclick: function () { list.removeChild(row); } }, 'Remove'),
+      ]);
+      list.appendChild(row);
+    }
+    if (existingAllocs && existingAllocs.length) existingAllocs.forEach(addRow); else addRow(null);
+    const section = el('div', null, [
+      el('h3', null, labels.heading),
+      el('p', { class: 'hint' }, labels.hint),
+      list,
+      el('button', { type: 'button', class: 'small', onclick: function () { addRow(null); } }, labels.addLabel),
+    ]);
+    function read() {
+      const allocs = [];
+      list.querySelectorAll('.alloc-row').forEach(function (r) {
+        const pid = r.querySelector('[name="alloc_purchase"]').value;
+        const qty = (r.querySelector('[name="alloc_qty"]').value || '').trim();
+        if (pid !== '' && qty !== '') allocs.push({ purchase_trade_id: Number(pid), quantity_allocated: qty });
+      });
+      return allocs;
+    }
+    return { section: section, read: read };
+  }
+
   async function viewEntityForm(entity, keyParts) {
     setActiveNav(entity.slug);
     const editing = keyParts != null;
     const existing = editing ? await api('GET', entity.api + '/' + keyParts.join('/')) : null;
+
+    // Per-type field grouping: an entity with `fieldGroups` (keyed by the
+    // `typeField` select's value) renders only the chosen type's group after
+    // the common fields (those in no group); the group re-renders on type
+    // change and the matching `typeDescs` entry scopes the description.
+    const grouped = {};
+    Object.keys(entity.fieldGroups || {}).forEach(function (t) {
+      entity.fieldGroups[t].forEach(function (n) { grouped[n] = true; });
+    });
 
     const form = el('form');
     // Key fields: editable on create (unless auto), disabled on edit.
@@ -616,8 +795,30 @@
       form.appendChild(await buildFieldInput(kf, val, editing));
     }
     for (const f of entity.fields) {
+      if (grouped[f.name]) continue;
       const val = existing ? existing[f.name] : null;
       form.appendChild(await buildFieldInput(f, val, false));
+    }
+
+    if (entity.fieldGroups) {
+      const fieldByName = {};
+      entity.fields.forEach(function (f) { fieldByName[f.name] = f; });
+      const typeDesc = el('p', { class: 'hint' });
+      const typeSection = el('div');
+      form.appendChild(typeDesc);
+      form.appendChild(typeSection);
+      const typeSel = form.querySelector('[name="' + entity.typeField + '"]');
+      async function renderTypeFields() {
+        const t = typeSel.value;
+        typeDesc.textContent = (entity.typeDescs && entity.typeDescs[t])
+          || (t ? '' : 'Choose an action type above to see its fields.');
+        typeSection.innerHTML = '';
+        for (const n of entity.fieldGroups[t] || []) {
+          typeSection.appendChild(await buildFieldInput(fieldByName[n], existing ? existing[n] : null, false));
+        }
+      }
+      typeSel.addEventListener('change', renderTypeFields);
+      await renderTypeFields();
     }
 
     const actions = el('div', { class: 'form-actions' });
@@ -639,7 +840,11 @@
           }
         }
         const body = {};
-        entity.fields.forEach(function (f) { body[f.name] = readFieldValue(f, form); });
+        entity.fields.forEach(function (f) {
+          // A field whose type group is not selected has no input; it submits
+          // as null, exactly as its blank input used to.
+          body[f.name] = form.querySelector('[name="' + f.name + '"]') ? readFieldValue(f, form) : null;
+        });
         await api('PUT', entity.api + '/' + keyVals.join('/'), body);
         toast('Saved.');
         location.hash = '#/e/' + entity.slug;
@@ -719,49 +924,24 @@
       form.appendChild(await buildFieldInput(f, existing ? existing[f.name] : null, false));
     }
 
-    // Allocations builder.
-    const parcelOptions = await loadOptions('buyParcels');
-    const allocList = el('div');
-    function addAllocRow(alloc) {
-      const purchaseSel = el('select', { name: 'alloc_purchase' });
-      parcelOptions.forEach(function (o) { purchaseSel.appendChild(el('option', { value: o.value }, o.label)); });
-      if (alloc) purchaseSel.value = String(alloc.purchase_trade_id);
-      const qtyInput = el('input', { type: 'text', inputmode: 'decimal', name: 'alloc_qty', value: alloc ? String(alloc.quantity_allocated) : '' });
-      const row = el('div', { class: 'alloc-row' }, [
-        el('div', { class: 'field' }, [el('label', null, 'Purchase parcel'), purchaseSel]),
-        el('div', { class: 'field' }, [el('label', null, 'Quantity allocated'), qtyInput]),
-        el('button', { type: 'button', class: 'small danger', onclick: function () { allocList.removeChild(row); } }, 'Remove'),
-      ]);
-      allocList.appendChild(row);
-    }
-    if (existingAllocs.length) existingAllocs.forEach(addAllocRow); else addAllocRow(null);
-
-    const allocSection = el('div', null, [
-      el('h3', null, 'Parcel allocations'),
-      el('p', { class: 'hint' }, 'Allocations must sum exactly to the sell quantity. Each parcel must be a Buy/DRP with enough remaining units.'),
-      allocList,
-      el('button', { type: 'button', class: 'small', onclick: function () { addAllocRow(null); } }, '+ Add allocation'),
-    ]);
+    // Allocations: the shared editor, pre-filled with the existing rows.
+    const allocEditor = allocationEditor(await loadOptions('buyParcels'), existingAllocs, {
+      hint: 'Allocations must sum exactly to the sell quantity. Each parcel must be a Buy/DRP with enough remaining units.',
+    });
 
     const actions = el('div', { class: 'form-actions' }, [
       el('button', { type: 'submit', class: 'primary' }, editing ? 'Save Sell' : 'Create Sell'),
       el('a', { href: '#/sells' }, el('button', { type: 'button' }, 'Cancel')),
     ]);
 
-    form.appendChild(allocSection);
+    form.appendChild(allocEditor.section);
     form.appendChild(actions);
     form.addEventListener('submit', async function (ev) {
       ev.preventDefault();
       try {
         const body = {};
         SELL_FIELDS.forEach(function (f) { body[f.name] = readFieldValue(f, form); });
-        const allocs = [];
-        allocList.querySelectorAll('.alloc-row').forEach(function (r) {
-          const pid = r.querySelector('[name="alloc_purchase"]').value;
-          const qty = (r.querySelector('[name="alloc_qty"]').value || '').trim();
-          if (pid !== '' && qty !== '') allocs.push({ purchase_trade_id: Number(pid), quantity_allocated: qty });
-        });
-        body.allocations = allocs;
+        body.allocations = allocEditor.read();
         const sellId = editing ? Number(id) : await nextId('/trades');
         await api('PUT', '/sells/' + sellId, body);
         toast('Sell saved.');
@@ -829,28 +1009,16 @@
     ];
     for (const f of fields) form.appendChild(await buildFieldInput(f, null, false));
 
-    // The parcels to move — the same shape as a Sell's allocations; partial
-    // parcels allowed.
-    const parcelOptions = await loadOptions('buyParcels');
-    const allocList = el('div');
-    function addAllocRow() {
-      const purchaseSel = el('select', { name: 'alloc_purchase' });
-      parcelOptions.forEach(function (o) { purchaseSel.appendChild(el('option', { value: o.value }, o.label)); });
-      const qtyInput = el('input', { type: 'text', inputmode: 'decimal', name: 'alloc_qty', value: '' });
-      const row = el('div', { class: 'alloc-row' }, [
-        el('div', { class: 'field' }, [el('label', null, 'Parcel to move'), purchaseSel]),
-        el('div', { class: 'field' }, [el('label', null, 'Units to move'), qtyInput]),
-        el('button', { type: 'button', class: 'small danger', onclick: function () { allocList.removeChild(row); } }, 'Remove'),
-      ]);
-      allocList.appendChild(row);
-    }
-    addAllocRow();
-    form.appendChild(el('div', null, [
-      el('h3', null, 'Parcels to move'),
-      el('p', { class: 'hint' }, 'Each parcel must be a Buy/DRP of the chosen listing held in the source account, with enough remaining units. Moved units keep their cost base and acquisition date.'),
-      allocList,
-      el('button', { type: 'button', class: 'small', onclick: function () { addAllocRow(); } }, '+ Add parcel'),
-    ]));
+    // The parcels to move — the same shape as a Sell's allocations (the shared
+    // editor); partial parcels allowed.
+    const allocEditor = allocationEditor(await loadOptions('buyParcels'), null, {
+      heading: 'Parcels to move',
+      hint: 'Each parcel must be a Buy/DRP of the chosen listing held in the source account, with enough remaining units. Moved units keep their cost base and acquisition date.',
+      parcelLabel: 'Parcel to move',
+      qtyLabel: 'Units to move',
+      addLabel: '+ Add parcel',
+    });
+    form.appendChild(allocEditor.section);
 
     form.appendChild(el('div', { class: 'form-actions' }, [
       el('button', { type: 'submit', class: 'primary' }, 'Transfer'),
@@ -861,13 +1029,7 @@
       try {
         const body = {};
         fields.forEach(function (f) { body[f.name] = readFieldValue(f, form); });
-        const allocs = [];
-        allocList.querySelectorAll('.alloc-row').forEach(function (r) {
-          const pid = r.querySelector('[name="alloc_purchase"]').value;
-          const qty = (r.querySelector('[name="alloc_qty"]').value || '').trim();
-          if (pid !== '' && qty !== '') allocs.push({ purchase_trade_id: Number(pid), quantity_allocated: qty });
-        });
-        body.allocations = allocs;
+        body.allocations = allocEditor.read();
         const result = await api('PUT', '/transfers/' + await nextId('/transfers'), body);
         const n = result && result.transfer_ins ? result.transfer_ins.length : 0;
         toast('Transferred ' + n + ' parcel(s) via transfer-out sell #' + (result && result.sell ? result.sell.id : '?') + '.');
@@ -883,223 +1045,49 @@
     ]));
   }
 
-  // ---- DRP reinvestment -------------------------------------------------
-  async function viewReinvest(incomeId) {
-    setActiveNav('income');
-    const income = await api('GET', '/income/' + incomeId);
+  // ---- generic post-action view ------------------------------------------
+  // Renders one ACTIONS entry: fetch the owning record, render the action's
+  // fields (and the shared allocation editor when it takes parcel
+  // allocations), POST the body to the action endpoint, toast the result, and
+  // return to the owner's list. Null field values are omitted so server-side
+  // defaults apply; the no-field confirm-only actions POST without a body.
+  async function viewAction(action, id) {
+    setActiveNav(action.nav);
+    const owner = await api('GET', action.ownerApi + '/' + id);
+    const fields = typeof action.fields === 'function' ? action.fields(owner) : action.fields;
     const form = el('form');
-    const fields = [
-      dec('reinvestment_price', 'Reinvestment price', { required: true, default: '' }),
-      dec('fx_rate', 'FX rate', { default: '1', hint: 'Optional; defaults to 1.' }),
-      dt('date', 'Trade date', { optional: true, hint: 'Optional; defaults to the distribution pay date (' + income.date_paid + ').' }),
-    ];
     for (const f of fields) form.appendChild(await buildFieldInput(f, null, false));
-    form.appendChild(el('div', { class: 'form-actions' }, [
-      el('button', { type: 'submit', class: 'primary' }, 'Reinvest'),
-      el('a', { href: '#/e/income' }, el('button', { type: 'button' }, 'Cancel')),
-    ]));
-    form.addEventListener('submit', async function (ev) {
-      ev.preventDefault();
-      try {
-        const body = { reinvestment_price: readFieldValue(fields[0], form) };
-        const fxr = readFieldValue(fields[1], form);
-        const d = readFieldValue(fields[2], form);
-        if (fxr != null) body.fx_rate = fxr;
-        if (d != null) body.date = d;
-        const trade = await api('POST', '/income/' + incomeId + '/reinvest', body);
-        toast('Reinvested into trade #' + (trade ? trade.id : '?') + '.');
-        location.hash = '#/e/income';
-      } catch (e) {
-        toast(e.message, true);
-      }
-    });
-    setMain(el('div', null, [
-      el('h2', null, 'Reinvest distribution #' + incomeId),
-      el('p', { class: 'view-desc' }, 'Creates a DRP trade for listing ' + income.listing_id + ' and links it back to this distribution. The holding must be DRP-enrolled.'),
-      el('div', { class: 'card' }, form),
-    ]));
-  }
-
-  // ---- rights exercise ----------------------------------------------------
-  // Reached from a RightsIssue corporate action row's "Exercise" action.
-  // Creates the new Buy parcel (acquired at the exercise date) via
-  // POST /corporate_actions/:id/exercise; the server caps cumulative
-  // exercised units at the holding's entitlement.
-  async function viewExercise(actionId) {
-    setActiveNav('corporate_actions');
-    const action = await api('GET', '/corporate_actions/' + actionId);
-    const form = el('form');
-    const fields = [
-      dt('date', 'Exercise date', { required: true, hint: 'The new parcel’s acquisition date; on or after the record date (' + action.date + ').' }),
-      dec('units', 'Units acquired', { required: true, default: '' }),
-      dec('rights_cost', 'Amount paid for the rights', { default: '0', hint: 'Total, in ' + action.currency + '. 0 for rights issued free.' }),
-      dec('fx_rate', 'FX rate', { default: '1', hint: 'Optional; defaults to 1.' }),
-      fk('holding_account_id', 'Holding account', 'holdingAccounts', { required: true, default: '1', hint: 'Where the exercised parcel lands.' }),
-    ];
-    for (const f of fields) form.appendChild(await buildFieldInput(f, null, false));
-    form.appendChild(el('div', { class: 'form-actions' }, [
-      el('button', { type: 'submit', class: 'primary' }, 'Exercise'),
-      el('a', { href: '#/e/corporate_actions' }, el('button', { type: 'button' }, 'Cancel')),
-    ]));
-    form.addEventListener('submit', async function (ev) {
-      ev.preventDefault();
-      try {
-        const body = { date: readFieldValue(fields[0], form), units: readFieldValue(fields[1], form) };
-        const rc = readFieldValue(fields[2], form);
-        const fxr = readFieldValue(fields[3], form);
-        if (rc != null) body.rights_cost = rc;
-        if (fxr != null) body.fx_rate = fxr;
-        body.holding_account_id = readFieldValue(fields[4], form);
-        const trade = await api('POST', '/corporate_actions/' + actionId + '/exercise', body);
-        toast('Exercised into trade #' + (trade ? trade.id : '?') + '.');
-        location.hash = '#/e/corporate_actions';
-      } catch (e) {
-        toast(e.message, true);
-      }
-    });
-    setMain(el('div', null, [
-      el('h2', null, 'Exercise rights issue #' + actionId),
-      el('p', { class: 'view-desc' }, 'Creates a Buy trade for listing ' + action.listing_id + ' at the exercise price (' + action.exercise_price + ' ' + action.currency + ' per unit): ' + action.rights_units + ' new unit(s) per ' + action.rights_held_units + ' held at the record date.'),
-      el('div', { class: 'card' }, form),
-    ]));
-  }
-
-  // ---- buy-back participation --------------------------------------------
-  // Reached from a BuyBack corporate action row's "Participate" action. Sells
-  // units into the buy-back via POST /corporate_actions/:id/participate, which
-  // atomically creates the Sell at the capital proceeds per unit
-  // (max(price, market value) − dividend) with the chosen parcel allocations,
-  // plus the dividend-component income row when the price carries one.
-  async function viewParticipate(actionId) {
-    setActiveNav('corporate_actions');
-    const action = await api('GET', '/corporate_actions/' + actionId);
-    const form = el('form');
-    const fields = [
-      dt('date', 'Participation date', { required: true, hint: 'The CGT event (acceptance) date; on or after the buy-back date (' + action.date + '). Also the dividend component’s pay date.' }),
-      dec('units', 'Units sold into the buy-back', { required: true, default: '' }),
-      dec('fx_rate', 'FX rate', { default: '1', hint: 'Optional; defaults to 1.' }),
-      fk('holding_account_id', 'Holding account', 'holdingAccounts', { required: true, default: '1', hint: 'The participating account: allocations may only consume its parcels.' }),
-    ];
-    for (const f of fields) form.appendChild(await buildFieldInput(f, null, false));
-
-    // Parcel allocations, the same shape as the Sells form.
-    const parcelOptions = await loadOptions('buyParcels');
-    const allocList = el('div');
-    function addAllocRow() {
-      const purchaseSel = el('select', { name: 'alloc_purchase' });
-      parcelOptions.forEach(function (o) { purchaseSel.appendChild(el('option', { value: o.value }, o.label)); });
-      const qtyInput = el('input', { type: 'text', inputmode: 'decimal', name: 'alloc_qty', value: '' });
-      const row = el('div', { class: 'alloc-row' }, [
-        el('div', { class: 'field' }, [el('label', null, 'Purchase parcel'), purchaseSel]),
-        el('div', { class: 'field' }, [el('label', null, 'Quantity allocated'), qtyInput]),
-        el('button', { type: 'button', class: 'small danger', onclick: function () { allocList.removeChild(row); } }, 'Remove'),
-      ]);
-      allocList.appendChild(row);
+    let allocEditor = null;
+    if (action.allocations) {
+      allocEditor = allocationEditor(await loadOptions('buyParcels'), null, action.allocations);
+      form.appendChild(allocEditor.section);
     }
-    addAllocRow();
-    form.appendChild(el('div', null, [
-      el('h3', null, 'Parcel allocations'),
-      el('p', { class: 'hint' }, 'Allocations must sum exactly to the units sold. Each parcel must be a Buy/DRP with enough remaining units.'),
-      allocList,
-      el('button', { type: 'button', class: 'small', onclick: function () { addAllocRow(); } }, '+ Add allocation'),
-    ]));
-
     form.appendChild(el('div', { class: 'form-actions' }, [
-      el('button', { type: 'submit', class: 'primary' }, 'Participate'),
-      el('a', { href: '#/e/corporate_actions' }, el('button', { type: 'button' }, 'Cancel')),
+      el('button', { type: 'submit', class: 'primary' }, action.submit),
+      el('a', { href: action.cancel }, el('button', { type: 'button' }, 'Cancel')),
     ]));
     form.addEventListener('submit', async function (ev) {
       ev.preventDefault();
       try {
-        const body = { date: readFieldValue(fields[0], form), units: readFieldValue(fields[1], form) };
-        const fxr = readFieldValue(fields[2], form);
-        if (fxr != null) body.fx_rate = fxr;
-        body.holding_account_id = readFieldValue(fields[3], form);
-        const allocs = [];
-        allocList.querySelectorAll('.alloc-row').forEach(function (r) {
-          const pid = r.querySelector('[name="alloc_purchase"]').value;
-          const qty = (r.querySelector('[name="alloc_qty"]').value || '').trim();
-          if (pid !== '' && qty !== '') allocs.push({ purchase_trade_id: Number(pid), quantity_allocated: qty });
-        });
-        body.allocations = allocs;
-        const result = await api('POST', '/corporate_actions/' + actionId + '/participate', body);
-        const tradeId = result && result.trade ? result.trade.id : '?';
-        toast('Sold into the buy-back as trade #' + tradeId + (result && result.income ? ' with dividend income #' + result.income.id : '') + '.');
-        location.hash = '#/e/corporate_actions';
+        let body;
+        if (fields.length || allocEditor) {
+          body = {};
+          fields.forEach(function (f) {
+            const v = readFieldValue(f, form);
+            if (v != null) body[f.name] = v;
+          });
+          if (allocEditor) body.allocations = allocEditor.read();
+        }
+        const result = await api('POST', action.post(id), body);
+        toast(action.toast(result));
+        location.hash = action.cancel;
       } catch (e) {
         toast(e.message, true);
       }
     });
     setMain(el('div', null, [
-      el('h2', null, 'Participate in buy-back #' + actionId),
-      el('p', { class: 'view-desc' }, 'Creates a Sell trade for listing ' + action.listing_id + ' at the capital proceeds per unit — max(price ' + action.buyback_price + ', market value ' + (action.buyback_market_value || action.buyback_price) + ') − dividend ' + action.buyback_dividend + ' ' + action.currency + ' — plus the dividend-component income row when there is one.'),
-      el('div', { class: 'card' }, form),
-    ]));
-  }
-
-  // ---- scrip-for-scrip exchange -------------------------------------------
-  // Reached from a ScripForScrip corporate action row's "Exchange" action.
-  // POST /corporate_actions/:id/exchange takes no parameters: the action's
-  // terms and the holdings at its date determine everything. It atomically
-  // closes every open parcel of the original listing (the rollover disregards
-  // the gain) and creates the replacement parcels carrying each consumed
-  // parcel's remaining cost base and acquisition date.
-  async function viewScripExchange(actionId) {
-    setActiveNav('corporate_actions');
-    const action = await api('GET', '/corporate_actions/' + actionId);
-    const form = el('form');
-    form.appendChild(el('div', { class: 'form-actions' }, [
-      el('button', { type: 'submit', class: 'primary' }, 'Exchange'),
-      el('a', { href: '#/e/corporate_actions' }, el('button', { type: 'button' }, 'Cancel')),
-    ]));
-    form.addEventListener('submit', async function (ev) {
-      ev.preventDefault();
-      try {
-        const result = await api('POST', '/corporate_actions/' + actionId + '/exchange');
-        const n = result && result.replacements ? result.replacements.length : 0;
-        toast('Exchanged into ' + n + ' replacement parcel(s) via closing sell #' + (result && result.sell ? result.sell.id : '?') + '.');
-        location.hash = '#/e/corporate_actions';
-      } catch (e) {
-        toast(e.message, true);
-      }
-    });
-    setMain(el('div', null, [
-      el('h2', null, 'Exchange scrip-for-scrip takeover #' + actionId),
-      el('p', { class: 'view-desc' }, 'Substitutes every open parcel of listing ' + action.listing_id + ' held at ' + action.date + ' with ' + action.scrip_new_units + ' unit(s) of listing ' + action.scrip_listing_id + ' per ' + action.scrip_old_units + ' held. The rollover disregards the capital gain; each replacement parcel carries its consumed parcel’s remaining cost base and acquisition date (the combined holding period counts toward the 12-month discount). Undo by deleting the closing Sell from the Sells view.'),
-      el('div', { class: 'card' }, form),
-    ]));
-  }
-
-  // ---- demerger ------------------------------------------------------------
-  // Reached from a Demerger corporate action row's "Demerge" action.
-  // POST /corporate_actions/:id/demerge takes no parameters: the action's
-  // terms and the holdings at its date determine everything. It atomically
-  // closes every open parcel of the head listing (the rollover disregards any
-  // gain) and recreates each as a head replacement parcel plus a
-  // demerged-entity parcel splitting the cost base by the advised percentage,
-  // both keeping the consumed parcel's acquisition date.
-  async function viewDemerge(actionId) {
-    setActiveNav('corporate_actions');
-    const action = await api('GET', '/corporate_actions/' + actionId);
-    const form = el('form');
-    form.appendChild(el('div', { class: 'form-actions' }, [
-      el('button', { type: 'submit', class: 'primary' }, 'Demerge'),
-      el('a', { href: '#/e/corporate_actions' }, el('button', { type: 'button' }, 'Cancel')),
-    ]));
-    form.addEventListener('submit', async function (ev) {
-      ev.preventDefault();
-      try {
-        const result = await api('POST', '/corporate_actions/' + actionId + '/demerge');
-        const n = result && result.demerged_replacements ? result.demerged_replacements.length : 0;
-        toast('Demerged ' + n + ' parcel(s) via closing sell #' + (result && result.sell ? result.sell.id : '?') + '.');
-        location.hash = '#/e/corporate_actions';
-      } catch (e) {
-        toast(e.message, true);
-      }
-    });
-    setMain(el('div', null, [
-      el('h2', null, 'Demerge #' + actionId),
-      el('p', { class: 'view-desc' }, 'Apportions every open parcel of head listing ' + action.listing_id + ' held at ' + action.date + ': ' + action.demerger_cost_base_pct + '% of each parcel’s cost base moves to ' + action.demerger_new_units + ' unit(s) of demerged listing ' + action.demerger_listing_id + ' per ' + action.demerger_held_units + ' held; the head parcels keep the rest. Any gain is disregarded and both sides keep the original acquisition date (the 12-month discount clock). Undo by deleting the closing Sell from the Sells view.'),
+      el('h2', null, action.title(id)),
+      el('p', { class: 'view-desc' }, action.desc(owner)),
       el('div', { class: 'card' }, form),
     ]));
   }
@@ -1318,11 +1306,7 @@
         if (parts[1] === 'new') return await viewTransferForm();
         return await viewTransfersList();
       }
-      if (parts[0] === 'reinvest') return await viewReinvest(parts[1]);
-      if (parts[0] === 'exercise') return await viewExercise(parts[1]);
-      if (parts[0] === 'participate') return await viewParticipate(parts[1]);
-      if (parts[0] === 'scrip-exchange') return await viewScripExchange(parts[1]);
-      if (parts[0] === 'demerge') return await viewDemerge(parts[1]);
+      if (actionBySlug[parts[0]]) return await viewAction(actionBySlug[parts[0]], parts[1]);
       if (parts[0] === 'attachments') return await viewAttachments(parts[1], parts[2]);
       if (parts[0] === 'jobs') return await viewJobs();
       if (parts[0] === 'r') {

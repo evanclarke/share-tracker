@@ -155,6 +155,11 @@ mod tests {
         // Allocations are entered as part of a Sell (PUT /sells/:id).
         assert!(js.contains("/sells"));
         assert!(js.contains("allocations"));
+        // The allocation rows are built by the shared allocationEditor helper,
+        // driven by the Sell form, the Transfer form, and the buy-back
+        // Participate action: one definition plus three call sites.
+        assert!(js.contains("function allocationEditor"));
+        assert_eq!(js.matches("allocationEditor(").count(), 4);
     }
 
     #[tokio::test]
@@ -295,8 +300,9 @@ mod tests {
         assert!(js.contains("rights_units"));
         assert!(js.contains("rights_held_units"));
         assert!(js.contains("exercise_price"));
-        // A RightsIssue row's Exercise action drives the exercise endpoint.
-        assert!(js.contains("viewExercise"));
+        // A RightsIssue row's Exercise action drives the exercise endpoint
+        // (a config-driven ACTIONS entry rendered by viewAction).
+        assert!(js.contains("#/exercise/"));
         assert!(js.contains("/exercise"));
         assert!(js.contains("rights_cost"));
         assert!(js.contains("BuyBack"));
@@ -305,14 +311,14 @@ mod tests {
         assert!(js.contains("buyback_franking_credit"));
         assert!(js.contains("buyback_market_value"));
         // A BuyBack row's Participate action drives the participate endpoint.
-        assert!(js.contains("viewParticipate"));
+        assert!(js.contains("#/participate/"));
         assert!(js.contains("/participate"));
         assert!(js.contains("ScripForScrip"));
         assert!(js.contains("scrip_listing_id"));
         assert!(js.contains("scrip_new_units"));
         assert!(js.contains("scrip_old_units"));
         // A ScripForScrip row's Exchange action drives the exchange endpoint.
-        assert!(js.contains("viewScripExchange"));
+        assert!(js.contains("#/scrip-exchange/"));
         assert!(js.contains("/exchange"));
         assert!(js.contains("Demerger"));
         assert!(js.contains("demerger_listing_id"));
@@ -320,8 +326,62 @@ mod tests {
         assert!(js.contains("demerger_held_units"));
         assert!(js.contains("demerger_cost_base_pct"));
         // A Demerger row's Demerge action drives the demerge endpoint.
-        assert!(js.contains("viewDemerge"));
+        assert!(js.contains("#/demerge/"));
         assert!(js.contains("/demerge"));
+    }
+
+    #[tokio::test]
+    async fn post_actions_are_config_driven() {
+        let js = app_js_body().await;
+        // The five post-record action forms (DRP reinvest, rights exercise,
+        // buy-back participate, scrip exchange, demerge) are entries in the
+        // ACTIONS config rendered by the one generic viewAction, mirroring how
+        // ENTITIES drives viewEntityForm.
+        assert!(js.contains("const ACTIONS"));
+        assert!(js.contains("function viewAction"));
+        for slug in [
+            "'reinvest'",
+            "'exercise'",
+            "'participate'",
+            "'scrip-exchange'",
+            "'demerge'",
+        ] {
+            assert!(js.contains(slug), "missing action slug {slug}");
+        }
+        // Each action's POST endpoint ships in the bundle.
+        for endpoint in [
+            "/reinvest'",
+            "/exercise'",
+            "/participate'",
+            "/exchange'",
+            "/demerge'",
+        ] {
+            assert!(js.contains(endpoint), "missing action endpoint {endpoint}");
+        }
+    }
+
+    #[tokio::test]
+    async fn corporate_action_form_is_split_by_type() {
+        let js = app_js_body().await;
+        // The corporate-actions form shows only the chosen action_type's
+        // fields: a per-type field-group map (plus a per-type description) on
+        // the entity config, re-rendered on type change by the generic entity
+        // form. Unchosen types' fields submit as null, as their blank inputs
+        // used to.
+        assert!(js.contains("typeField: 'action_type'"));
+        assert!(js.contains("fieldGroups"));
+        assert!(js.contains("typeDescs"));
+        for group in [
+            "ReturnOfCapital: [",
+            "ShareSplit: [",
+            "BonusIssue: [",
+            "RightsIssue: [",
+            "BuyBack: [",
+            "ScripForScrip: [",
+            "Demerger: [",
+        ] {
+            assert!(js.contains(group), "missing field group {group}");
+        }
     }
 
     #[tokio::test]
