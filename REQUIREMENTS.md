@@ -69,3 +69,58 @@ Out of scope (record as Known limitations):
   value at receipt; can be entered manually (income row + Buy at the receipt-date market value),
   a linked operation is deferred
 - **Chain splits/forks, wrapping, and the personal-use-asset exemption** — not modelled
+
+## Daily closing prices and scheduled report snapshots
+
+Closing prices for every listing currently held are collected automatically at the end of each
+exchange's trading day and kept as a price history. Once the day's last close is in, the
+price-dependent reports are run against the stored prices and their results stored as a daily
+snapshot series — viewable and graphable over time. Recording a back-dated fact invalidates the
+affected snapshots so they can be regenerated against the new facts.
+
+- Closing-price collection
+  - For each listing with a non-zero holding, fetch the closing price after that listing's
+    exchange closes for the day (per-exchange timing via the cron scheduler in
+    `infra/scheduler.rs` + `schedule.cron`). Only trading days: skip weekends and the exchange's
+    seeded holidays — a non-trading day has no price row, it is not an error
+  - Exchange-less (Crypto) listings trade continuously: collect one daily reference price at a
+    fixed cut-off (convention defined at implementation, e.g. UTC midnight). This supersedes the
+    earlier "no crypto price feed" limitation for *stored history*; report requests with
+    explicitly supplied prices keep working unchanged
+  - Prices are stored in the listing's quote currency (TEXT Decimal) with provenance: source,
+    fetch timestamp, and a status. A failed fetch is recorded as an errored row for that
+    (listing, day) — never silently missing — and can be re-run on demand for just that
+    day/listing (manual trigger endpoint)
+  - One price per (listing, date), enforced by constraint; a re-run replaces the errored row
+  - The price source is a pluggable fetcher (trait) so providers can be swapped; the concrete
+    provider(s) — and their key handling and rate limits — are chosen and documented at
+    implementation time
+- Price history
+  - The history is viewable: an endpoint listing stored prices (filterable by listing and date
+    range, including errored rows) and a web UI screen via the existing `filterableTable`
+- Backfill
+  - Price history can be backfilled on demand for a listing and date range — e.g. after importing
+    an old trade, backfill from the trade date to today. Backfill fetches only trading days and
+    skips dates already stored successfully
+- Scheduled report snapshots
+  - After the last relevant exchange close of the day, run the price-dependent reports (portfolio
+    overview / valuation, unrealised gains, performance) using that day's stored closing prices —
+    converted to AUD per the existing FX rules, since stored prices are in the listing's quote
+    currency — and store the results as that date's snapshot
+  - Snapshots are viewable (endpoint + UI) and graphable in the web UI as time series (e.g.
+    market value and unrealised gain over time), without introducing a build step
+  - Where prices have been backfilled, snapshots for those past dates can be generated on demand
+    too
+- Staleness and regeneration
+  - Adding, changing, or deleting any back-dated fact (trade, corporate action, income,
+    transfer, …) marks every stored snapshot on or after that date as out of date. Stale
+    snapshots are visibly flagged wherever they are shown, and can be regenerated on demand —
+    regeneration re-runs the report with the stored prices and the new facts, replacing the
+    stale result
+  - A snapshot is missing-vs-stale distinguishable: a day whose prices failed to fetch has no
+    trustworthy snapshot and shows as such until the price re-run succeeds
+
+Out of scope (record as Known limitations):
+- **Intraday prices** — only one closing/reference price per listing per day is stored
+- **Automatic backfill triggered by entering a back-dated trade** — backfill is on demand; a
+  back-dated fact flags snapshots stale but does not itself fetch missing past prices
