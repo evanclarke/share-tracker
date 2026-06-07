@@ -127,6 +127,35 @@
     }
   }
 
+  // Human-readable labels for foreign-key id columns in list tables: the
+  // stored id keeps driving the API (and edit-form selects), but tables show
+  // the referenced row's natural name (e.g. "XNYS:ICE", "CHESS Personal").
+  // Only sources with a natural short name are mapped — currency codes are
+  // already readable, and trade/statement ids have no name to show.
+  const TABLE_LABEL_SOURCES = {
+    listings: { api: '/listings', label: function (l) { return (l.exchange_mic || 'Crypto') + ':' + l.ticker; } },
+    holdingAccounts: { api: '/holding_accounts', label: function (a) { return a.name; } },
+  };
+
+  // specs: { columnName: sourceName, … } → { columnName: { id → label } },
+  // fetching each distinct source once per render so the names stay fresh.
+  async function fkLabelMaps(specs) {
+    const bySource = {};
+    const out = {};
+    for (const col of Object.keys(specs)) {
+      const sourceName = specs[col];
+      const src = TABLE_LABEL_SOURCES[sourceName];
+      if (!src) continue;
+      if (!bySource[sourceName]) {
+        const map = {};
+        (await api('GET', src.api)).forEach(function (r) { map[r.id] = src.label(r); });
+        bySource[sourceName] = map;
+      }
+      out[col] = bySource[sourceName];
+    }
+    return out;
+  }
+
   // ---- field constructors ----------------------------------------------
   function field(name, label, type, extra) { return Object.assign({ name: name, label: label, type: type }, extra || {}); }
   const txt = function (n, l, x) { return field(n, l, 'text', x); };
@@ -558,15 +587,24 @@
   // to "USD" and date to "2024" at once. Click a column header to sort it
   // (toggling ascending/descending). `opts.actions`, if given, renders a
   // trailing non-sortable, non-filtered Actions cell per row; `opts.statusField`
-  // renders that column as a status badge.
+  // renders that column as a status badge; `opts.labels` ({col: {id → label}},
+  // from fkLabelMaps) shows the label instead of the raw foreign-key id —
+  // filtering and sorting follow the label, and the id moves to the tooltip.
   function filterableTable(rows, cols, opts) {
     opts = opts || {};
     const statusField = opts.statusField;
     const actions = opts.actions;
+    const labels = opts.labels || {};
+    function displayText(row, c) {
+      const map = labels[c];
+      if (map && row[c] != null && map[row[c]] !== undefined) return map[row[c]];
+      return cellText(row[c]);
+    }
     // A column is numeric if any row has a numeric value there — used for
-    // right-alignment and numeric (not lexicographic) sorting.
+    // right-alignment and numeric (not lexicographic) sorting. A labelled
+    // foreign-key column displays names, so it is never numeric.
     const numeric = {};
-    cols.forEach(function (c) { numeric[c] = rows.some(function (r) { return looksNumeric(r[c]); }); });
+    cols.forEach(function (c) { numeric[c] = !labels[c] && rows.some(function (r) { return looksNumeric(r[c]); }); });
 
     let sortCol = null;
     let sortDir = 1; // 1 = ascending, -1 = descending
@@ -617,7 +655,7 @@
       const active = Object.keys(filters);
       if (active.length) {
         out = out.filter(function (row) {
-          return active.every(function (c) { return cellText(row[c]).toLowerCase().indexOf(filters[c]) !== -1; });
+          return active.every(function (c) { return displayText(row, c).toLowerCase().indexOf(filters[c]) !== -1; });
         });
       }
       if (sortCol != null) {
@@ -625,7 +663,7 @@
           const av = a[sortCol], bv = b[sortCol];
           let cmp;
           if (numeric[sortCol] && looksNumeric(av) && looksNumeric(bv)) cmp = Number(av) - Number(bv);
-          else cmp = cellText(av).localeCompare(cellText(bv));
+          else cmp = displayText(a, sortCol).localeCompare(displayText(b, sortCol));
           return cmp * sortDir;
         });
       }
@@ -651,7 +689,10 @@
           if (isTimestamp(v)) {
             return el('td', { title: utcTooltip(v) }, cellText(v));
           }
-          return el('td', { class: numeric[c] ? 'num' : null }, cellText(v));
+          const text = displayText(row, c);
+          // A labelled fk cell keeps its raw id reachable on the tooltip.
+          const idTip = labels[c] && text !== cellText(v) ? 'id ' + cellText(v) : null;
+          return el('td', { class: numeric[c] ? 'num' : null, title: idTip }, text);
         });
         if (actions) tds.push(actions(row) || el('td'));
         tbody.appendChild(el('tr', null, tds));
@@ -690,6 +731,12 @@
     if (rows.length === 0) {
       table = el('div', { class: 'empty' }, 'No records yet.');
     } else {
+      // Foreign-key columns render the referenced row's name, not the raw id.
+      const labelSpecs = {};
+      (entity.fields || []).forEach(function (f) {
+        if (f.source && cols.indexOf(f.name) !== -1) labelSpecs[f.name] = f.source;
+      });
+      const labels = await fkLabelMaps(labelSpecs);
       const actions = entity.readonly ? null : function (row) {
         const keyPath = entity.keyFields.map(function (kf) { return row[kf.name]; }).join('/');
         const td = el('td', { class: 'actions' });
@@ -708,7 +755,7 @@
         }, 'Delete'));
         return td;
       };
-      table = filterableTable(rows, cols, { actions: actions });
+      table = filterableTable(rows, cols, { actions: actions, labels: labels });
     }
 
     setMain(el('div', null, [header, toolbar, table]));
@@ -999,6 +1046,7 @@
       table = el('div', { class: 'empty' }, 'No sell trades yet.');
     } else {
       table = filterableTable(sells, cols, {
+        labels: await fkLabelMaps({ listing_id: 'listings', holding_account_id: 'holdingAccounts' }),
         actions: function (row) {
           return el('td', { class: 'actions' }, [
             el('a', { href: '#/sells/edit/' + row.id }, el('button', { class: 'link small' }, 'Edit')),
@@ -1089,6 +1137,7 @@
       table = el('div', { class: 'empty' }, 'No transfers yet.');
     } else {
       table = filterableTable(rows, cols, {
+        labels: await fkLabelMaps({ listing_id: 'listings', from_account_id: 'holdingAccounts', to_account_id: 'holdingAccounts' }),
         actions: function (row) {
           return el('td', { class: 'actions' }, [
             el('button', {
@@ -1216,7 +1265,8 @@
 
   async function viewAttachments(ownerField, ownerId) {
     const rows = await api('GET', '/attachments?' + ownerField + '=' + encodeURIComponent(ownerId));
-    const cols = ['id', 'filename', 'content_type', 'byte_size', 'checksum', 'uploaded_at'];
+    // checksum is stored integrity metadata, not user-facing — not a column here.
+    const cols = ['id', 'filename', 'content_type', 'byte_size', 'uploaded_at'];
 
     const container = el('div');
     function refresh() { viewAttachments(ownerField, ownerId); }

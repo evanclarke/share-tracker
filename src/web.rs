@@ -199,6 +199,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fk_columns_render_names_not_ids() {
+        let js = app_js_body().await;
+        // List tables resolve foreign-key id columns to the referenced row's
+        // natural name via the shared label maps…
+        assert!(js.contains("fkLabelMaps"));
+        assert!(js.contains("TABLE_LABEL_SOURCES"));
+        // …a listing shows as MIC:TICKER (Crypto listings have no MIC)…
+        assert!(js.contains("(l.exchange_mic || 'Crypto') + ':' + l.ticker"));
+        // …and a holding account shows by its name.
+        assert!(js.contains("return a.name;"));
+        // The generic entity list derives the maps from each entity's fk
+        // fields, and the bespoke Sells/Transfers lists pass theirs explicitly.
+        assert!(js.contains("labelSpecs[f.name] = f.source"));
+        assert!(js.contains("{ listing_id: 'listings', holding_account_id: 'holdingAccounts' }"));
+        assert!(js.contains(
+            "{ listing_id: 'listings', from_account_id: 'holdingAccounts', to_account_id: 'holdingAccounts' }"
+        ));
+        // The raw id stays reachable on the cell tooltip.
+        assert!(js.contains("'id ' + cellText(v)"));
+    }
+
+    #[tokio::test]
     async fn gst_inclusive_brokerage_and_statement_total_ui_present() {
         let js = app_js_body().await;
         // The GST-included checkbox ships on both the trades (Buy/DRP) and
@@ -342,6 +364,8 @@ mod tests {
         assert!(js.contains("viewAttachments"));
         assert!(js.contains("/attachments"));
         assert!(js.contains("attachOwner"));
+        // The checksum is stored integrity metadata, not a user-facing column.
+        assert!(!js.contains("'checksum'"));
     }
 
     #[tokio::test]
