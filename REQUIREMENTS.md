@@ -218,3 +218,75 @@ Out of scope (record as Known limitations):
   30% rate printed on typical statements; 25% base-rate-entity dividends and partially franked
   payments are entered via the advanced fields
 - **Statement parsing/import** — figures are still keyed in manually from the statement
+
+## No raw foreign keys shown in the web UI (2026-06-07)
+
+Everywhere the web UI presents a reference to another entity, it shows a useful name, never a bare
+foreign-key id. List tables were largely fixed already; this requirement extends the rule to every
+surface and makes it an audited invariant rather than a per-screen fix.
+
+- Audit every web surface for raw ids standing in for an entity: entity list tables, report
+  tables, form `<select>` option labels, read-only/derived fields on forms, post-record action
+  dialogues (reinvest, exercise, participate, scrip, demerge, transfer) and their parcel/option
+  labels, confirmation prompts, and toast messages (e.g. "Reinvested into trade #12")
+- Naming convention per referenced entity:
+  - Listing → ticker (plus name where space allows)
+  - Holding account → account name
+  - Trade/parcel → a human description (side, quantity, ticker, date) — a parcel or trade id
+    alone is meaningless to the user
+  - Other entities (corporate actions, transfers, …) → their most recognisable label
+- An id may appear *alongside* the name where it helps cross-referencing, but never instead of it
+- Toasts that today report only a created row's id should name what was created (e.g. the
+  reinvestment Buy's ticker, quantity, and date), with the id as secondary detail
+- Verified the existing way: UI tests assert the rendering path in the served bundle; where a
+  lookup map is built for a table/select, a test covers it
+
+## Currency rounding in lists and reports; precision where it matters (2026-06-07)
+
+Displayed money is rounded to the currency's minor unit; stored and computed money keeps full
+precision. Today some screens show raw decimal strings (e.g. a franking credit of
+`1181.7000000000`), and the rule for which figures legitimately carry sub-cent precision is
+implicit.
+
+- Display rounding (presentation only)
+  - Every monetary amount shown in a list table or report table is formatted to 2 decimal places
+    (the minor unit of AUD and the other supported currencies), with thousands grouping if cheap
+    to add
+  - Aggregation always happens at full precision; rounding is applied only at the formatting
+    step, never to intermediate values (consistent with the existing Decimal-only rule)
+  - The JSON API keeps returning full-precision strings — rounding lives in the web layer's
+    formatters, so API consumers and cross-checks are unaffected
+- Sub-cent precision is deliberate, not accidental, for per-unit rates:
+  - Trade price per share/unit, income `amount_per_security` (e.g. VDHG's 0.89891492), DRP
+    reinvestment price, FX rates, and crypto quantities/prices keep their entered precision in
+    storage and display — these are not "money shown to the user" but rates, and rounding them
+    breaks reconciliation against statements
+  - Derived per-unit figures a report may show (e.g. average cost per share) display with enough
+    precision to be useful (at least 4 decimal places), not cent-rounded
+- Quantities are unaffected: they display at their natural precision (whole shares stay whole,
+  token fractions keep their places)
+- The distinction (amounts round, rates don't) is documented once (README or docs/API.md) so new
+  screens follow it
+
+## Useful error messages in the web UI (2026-06-07)
+
+A rejected write must tell the user *why*. Today most handlers return a bare status code, so the
+UI toast reads just "HTTP 422" — e.g. reinvesting a distribution for an account not enrolled in
+the DRP gives no hint that enrolment is the problem. The toast plumbing already displays the
+response body when present (`api()` appends it), so the work is server-side.
+
+- Every 4xx response that a user action can trigger carries a short, human-readable, plain-text
+  body explaining the rejection — the existing per-share cross-check 422 detail is the model
+- Audit every handler returning a bare `StatusCode` for 422/409/404-with-a-cause and attach the
+  reason: which invariant failed, with the actual values involved (e.g. "allocations sum to 95
+  but the sell quantity is 100", "account 'Broker' is not DRP-enrolled for VDHG —
+  enrol it on the holding-accounts screen first")
+- Messages name entities by name/ticker, not by foreign-key id (per the no-raw-ids requirement)
+- 404s from a stale UI (row deleted elsewhere) say what wasn't found; plain "not found" body is
+  acceptable where there is nothing more to say
+- 5xx responses stay generic — internal details belong in the server log, not the toast
+- The error-body convention (plain text, when present, what it contains) is documented in
+  `docs/API.md`'s Response codes section; each endpoint's 422 causes are listed where they are
+  non-obvious
+- Tests assert the body text (or a distinctive fragment of it) for each validated rejection, not
+  just the status code
