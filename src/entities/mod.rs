@@ -9,6 +9,7 @@ pub mod amma;
 pub mod attachment;
 pub mod buyback_participation;
 pub mod cgt_settings;
+pub mod closing_price;
 pub mod corporate_action;
 pub mod currencies;
 pub mod demerger;
@@ -45,6 +46,7 @@ pub fn router() -> Router<SqlitePool> {
         .merge(amit_adjustment::router())
         .merge(drp_enrolment::router())
         .merge(cgt_settings::router())
+        .merge(closing_price::router())
         .merge(corporate_action::router())
         .merge(rights_exercise::router())
         .merge(buyback_participation::router())

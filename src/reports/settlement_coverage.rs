@@ -235,6 +235,7 @@ mod tests {
                 currency: "AUD".to_string(),
                 timezone: "Europe/London".to_string(),
                 settlement_days: 2,
+                close_time: "16:00".to_string(),
             },
         )
         .await

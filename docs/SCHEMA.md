@@ -9,7 +9,8 @@ exchanges
 ├── country      TEXT
 ├── currency     TEXT FK→currencies.code   Default trading currency
 ├── timezone     TEXT             IANA timezone string
-└── settlement_days INTEGER      T+N settlement (e.g. 2 for ASX)
+├── settlement_days INTEGER      T+N settlement (e.g. 2 for ASX)
+└── close_time   TEXT             'HH:MM' local end of the regular session; a day's closing price is only collected after it (default 16:00)
 
 exchange_holidays             Full-closure non-trading days per exchange (settlement skips them)
 ├── mic          TEXT FK→exchanges.mic   Part of PK
@@ -197,6 +198,15 @@ attachments                  Supporting documents for an activity; bytes stored 
 └── content           BLOB             The file bytes
                        CHECK: exactly one of trade_id / income_id / amma_statement_id is non-null
 
+closing_prices               Daily closing-price history per listing (collected by the price-import job; see API.md Closing prices)
+├── listing_id  INTEGER FK→listings.id   Part of PK
+├── price_date  TEXT             'YYYY-MM-DD'; part of PK — the trading day in the exchange's timezone (for Crypto: the UTC date whose daily candle completes at 00:00 UTC at its end). One row per (listing, date)
+├── price       TEXT (decimal, nullable)  Closing price in the listing's quote currency (never AUD-converted; reports convert at read time). NULL exactly when status = error (CHECK)
+├── source      TEXT             Provider that produced the row (e.g. yahoo)
+├── fetched_at  TEXT             RFC 3339 UTC timestamp of the fetch
+├── status      TEXT             ok | error (CHECK-enforced enum)
+└── error       TEXT (nullable)  Failure detail; NULL exactly when status = ok (CHECK). A failed fetch is stored, never silently missing, and a re-run replaces it
+
 job_runs                     Last run of each scheduled/on-demand maintenance job (one row per job, upserted each run)
 ├── name        TEXT PK          Registry job name (e.g. backup, rba-fx-import)
 ├── started_at  TEXT             RFC 3339 timestamp the run began
@@ -230,6 +240,7 @@ exchanges ──< listings ──< trades >────────────�
                        corporate_actions (Demerger) >── listings (demerger_listing_id)
                        trades (buy-back Sell) ──< income (buyback_trade_id)
                        trades, income, amma_statements ──< attachments (exactly one owner; ON DELETE CASCADE)
+                       listings ──< closing_prices (one row per listing per trading day)
 
 currencies ──< exchanges, listings, trades (currency + brokerage_currency), income, amma_statements, corporate_actions
 ```

@@ -16,6 +16,10 @@ tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 reqwest = "0.13.4"
+# Closing-price fetcher (Yahoo Finance, unofficial API). Maintains the
+# cookie/crumb workarounds for us; NOTE: its build.rs needs `protoc` on the
+# build machine (brew install protobuf / apt protobuf-compiler — see ci.yml).
+yfinance-rs = "0.8"
 croner = "3.0.1"
 csv = "1"
 quick-xml = "0.37"

@@ -115,6 +115,24 @@ mod tests {
     async fn exchange_management_ui_present() {
         let js = app_js_body().await;
         assert!(js.contains("/exchanges"));
+        // The session close time (gates same-day closing-price collection) is
+        // editable alongside the other exchange fields.
+        assert!(js.contains("close_time"));
+    }
+
+    #[tokio::test]
+    async fn closing_prices_ui_present() {
+        let js = app_js_body().await;
+        // The price-history screen lists stored prices (incl. errored rows)
+        // through the shared filterableTable…
+        assert!(js.contains("viewClosingPrices"));
+        assert!(js.contains("/closing_prices"));
+        // …with the per-row re-fetch action and the backfill form driving the
+        // two on-demand endpoints.
+        assert!(js.contains("/closing_prices/fetch"));
+        assert!(js.contains("/closing_prices/backfill"));
+        // The price-import job is described in the Jobs view.
+        assert!(js.contains("price-import"));
     }
 
     #[tokio::test]

@@ -6,3 +6,11 @@
 0 2 * * 1   rba-fx-import   # weekly, Monday 02:00
 0 3 1 * *   mic-import      # monthly, 1st at 03:00 (ISO publishes monthly)
 0 4 1 * *   currency-import # monthly, 1st at 04:00 (ISO 4217 + ISO 24165 / DTIF)
+
+# Closing prices, twice daily: each run stores the latest complete trading day
+# per held listing and skips days already stored ok, so the two runs cover the
+# different market closes between them (assuming a Sydney server clock):
+# 17:30 catches the 16:00 ASX close; 11:30 catches the prior NYSE close
+# (06:00-08:00 Sydney) and the crypto UTC-midnight cut-off (10:00-11:00 Sydney).
+30 17 * * 1-5  price-import # weekdays, after the ASX close
+30 11 * * *    price-import # daily, after the NYSE close + crypto UTC cut-off

@@ -167,6 +167,25 @@ pub fn registry(pool: SqlitePool, db_path: String) -> JobRegistry {
         }),
     );
 
+    let price_pool = pool.clone();
+    let price_fetcher =
+        std::sync::Arc::new(crate::entities::closing_price::YahooFetcher::default());
+    jobs.insert(
+        "price-import".to_string(),
+        Arc::new(move || {
+            let pool = price_pool.clone();
+            let fetcher = price_fetcher.clone();
+            Box::pin(async move {
+                crate::entities::closing_price::run_collection(
+                    &pool,
+                    fetcher.as_ref(),
+                    chrono::Utc::now(),
+                )
+                .await
+            })
+        }),
+    );
+
     let fx_pool = pool.clone();
     jobs.insert(
         "rba-fx-import".to_string(),

@@ -15,6 +15,10 @@ pub struct Exchange {
     pub currency: String,
     pub timezone: String,
     pub settlement_days: i64,
+    /// Local-time end of the regular trading session (`HH:MM`, in `timezone`).
+    /// The price-import job only collects a day's closing price once this time
+    /// has passed in the exchange's timezone.
+    pub close_time: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -24,6 +28,12 @@ pub struct ExchangeBody {
     pub currency: String,
     pub timezone: String,
     pub settlement_days: i64,
+    #[serde(default = "default_close_time")]
+    pub close_time: String,
+}
+
+fn default_close_time() -> String {
+    "16:00".to_string()
 }
 
 pub fn router() -> Router<SqlitePool> {
@@ -34,7 +44,7 @@ pub fn router() -> Router<SqlitePool> {
 
 pub async fn db_list(pool: &SqlitePool) -> Result<Vec<Exchange>, sqlx::Error> {
     sqlx::query_as(
-        "SELECT mic, name, country, currency, timezone, settlement_days \
+        "SELECT mic, name, country, currency, timezone, settlement_days, close_time \
          FROM exchanges ORDER BY mic",
     )
     .fetch_all(pool)
@@ -43,7 +53,7 @@ pub async fn db_list(pool: &SqlitePool) -> Result<Vec<Exchange>, sqlx::Error> {
 
 pub async fn db_get(pool: &SqlitePool, mic: &str) -> Result<Option<Exchange>, sqlx::Error> {
     sqlx::query_as(
-        "SELECT mic, name, country, currency, timezone, settlement_days \
+        "SELECT mic, name, country, currency, timezone, settlement_days, close_time \
          FROM exchanges WHERE mic = ?",
     )
     .bind(mic)
@@ -53,14 +63,15 @@ pub async fn db_get(pool: &SqlitePool, mic: &str) -> Result<Option<Exchange>, sq
 
 pub async fn db_upsert(pool: &SqlitePool, exchange: &Exchange) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "INSERT INTO exchanges (mic, name, country, currency, timezone, settlement_days) \
-         VALUES (?, ?, ?, ?, ?, ?) \
+        "INSERT INTO exchanges (mic, name, country, currency, timezone, settlement_days, close_time) \
+         VALUES (?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT(mic) DO UPDATE SET \
              name = excluded.name, \
              country = excluded.country, \
              currency = excluded.currency, \
              timezone = excluded.timezone, \
-             settlement_days = excluded.settlement_days",
+             settlement_days = excluded.settlement_days, \
+             close_time = excluded.close_time",
     )
     .bind(&exchange.mic)
     .bind(&exchange.name)
@@ -68,6 +79,7 @@ pub async fn db_upsert(pool: &SqlitePool, exchange: &Exchange) -> Result<(), sql
     .bind(&exchange.currency)
     .bind(&exchange.timezone)
     .bind(exchange.settlement_days)
+    .bind(&exchange.close_time)
     .execute(pool)
     .await?;
     Ok(())
@@ -111,6 +123,7 @@ async fn upsert(
         currency: body.currency,
         timezone: body.timezone,
         settlement_days: body.settlement_days,
+        close_time: body.close_time,
     };
     db_upsert(&pool, &exchange)
         .await
@@ -148,6 +161,7 @@ mod tests {
             currency: "AUD".to_string(),
             timezone: "UTC".to_string(),
             settlement_days: 2,
+            close_time: "16:00".to_string(),
         }
     }
 

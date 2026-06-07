@@ -128,8 +128,9 @@
         fk('currency', 'Default currency', 'currencies', { required: true, encode: 'string' }),
         txt('timezone', 'Timezone', { required: true, default: 'Australia/Sydney' }),
         int('settlement_days', 'Settlement days (T+N)', { required: true, default: '2' }),
+        txt('close_time', 'Close time (HH:MM local)', { required: true, default: '16:00', hint: 'End of the regular session in the exchange timezone; closing prices are only collected after this.' }),
       ],
-      columns: ['mic', 'name', 'country', 'currency', 'timezone', 'settlement_days'],
+      columns: ['mic', 'name', 'country', 'currency', 'timezone', 'settlement_days', 'close_time'],
     },
     {
       slug: 'exchange_holidays', title: 'Exchange Holidays', group: 'Reference data', api: '/exchange_holidays',
@@ -170,6 +171,10 @@
       slug: 'mic_registry', title: 'MIC Registry', group: 'Reference data', api: '/mic_registry', readonly: true,
       desc: 'ISO 10383 Market Identifier Codes (import-managed).',
       columns: ['mic', 'operating_mic', 'name', 'country_code', 'city', 'status', 'expiry_date'],
+    },
+    {
+      slug: 'closing_prices', title: 'Closing Prices', group: 'Reference data', api: '/closing_prices', custom: 'prices',
+      desc: 'Stored daily closing prices per held listing, collected by the price-import job.',
     },
     {
       slug: 'rba_fx_rates', title: 'RBA FX Rates', group: 'Reference data', api: '/rba_fx_rates', readonly: true,
@@ -1213,6 +1218,7 @@
     'rba-fx-import': 'Fetch the RBA F11 monthly FX rates and import any new months.',
     'mic-import': 'Fetch and refresh the ISO 10383 MIC registry.',
     'currency-import': 'Fetch ISO 4217 fiat and ISO 24165 token currencies.',
+    'price-import': 'Store the latest complete trading day\'s closing price for every held listing (skips days already stored).',
   };
 
   async function viewJobs() {
@@ -1253,6 +1259,93 @@
     setMain(el('div', null, [
       el('h2', null, 'Jobs'),
       el('p', { class: 'view-desc' }, 'Trigger scheduled maintenance jobs on demand, and see when each last ran (and any error). Each also runs automatically on its cron schedule; running here is for retries or missed runs.'),
+      table,
+    ]));
+  }
+
+  // ---- closing prices -----------------------------------------------------
+  // Stored daily closing prices (incl. errored fetches) with the two on-demand
+  // actions: re-fetch one (listing, day) — typically to replace an errored row
+  // — and backfill a listing over a date range. Collection otherwise runs on
+  // the price-import job's schedule.
+  async function viewClosingPrices() {
+    setActiveNav('closing_prices');
+    const listings = await api('GET', '/listings');
+    const byId = {};
+    listings.forEach(function (l) { byId[l.id] = l; });
+    const prices = await api('GET', '/closing_prices');
+    const rows = prices.map(function (p) {
+      const l = byId[p.listing_id];
+      return {
+        listing: p.listing_id + (l ? ': ' + l.ticker : ''),
+        date: p.price_date,
+        price: p.price == null ? '' : p.price,
+        currency: l ? l.currency : '',
+        source: p.source,
+        status: p.status,
+        error: p.error || '',
+        fetched_at: p.fetched_at,
+        _listing_id: p.listing_id,
+      };
+    });
+    const cols = ['listing', 'date', 'price', 'currency', 'source', 'status', 'error', 'fetched_at'];
+    const table = filterableTable(rows, cols, {
+      statusField: 'status',
+      actions: function (row) {
+        const btn = el('button', { class: 'small' }, 'Re-fetch');
+        btn.addEventListener('click', async function () {
+          btn.disabled = true;
+          btn.textContent = 'Fetching…';
+          try {
+            const stored = await api('POST', '/closing_prices/fetch',
+              { listing_id: row._listing_id, price_date: row.date });
+            if (stored.status === 'ok') toast('Stored ' + stored.price + ' for ' + row.date + '.');
+            else toast('Fetch failed again: ' + stored.error, true);
+          } catch (e) {
+            toast(e.message, true);
+          }
+          viewClosingPrices();
+        });
+        return el('td', { class: 'actions' }, btn);
+      },
+    });
+
+    // Backfill a listing's history over a date range (e.g. after importing an
+    // old trade): trading days only, days already stored ok are skipped.
+    const backfillForm = el('form', { class: 'card' });
+    backfillForm.appendChild(el('h3', null, 'Backfill'));
+    const listingSel = el('select', null, listings.map(function (l) {
+      return el('option', { value: l.id }, l.id + ': ' + l.ticker + ' (' + (l.exchange_mic || 'Crypto') + ')');
+    }));
+    const fromInp = el('input', { type: 'date', required: true });
+    const toInp = el('input', { type: 'date', required: true });
+    backfillForm.appendChild(el('div', { class: 'field' }, [el('label', null, 'Listing'), listingSel]));
+    backfillForm.appendChild(el('div', { class: 'field' }, [el('label', null, 'From'), fromInp]));
+    backfillForm.appendChild(el('div', { class: 'field' }, [el('label', null, 'To'), toInp]));
+    backfillForm.appendChild(el('div', { class: 'form-actions' }, [
+      el('button', { type: 'submit', class: 'primary' }, 'Backfill'),
+    ]));
+    backfillForm.addEventListener('submit', async function (ev) {
+      ev.preventDefault();
+      try {
+        const s = await api('POST', '/closing_prices/backfill', {
+          listing_id: Number(listingSel.value), from: fromInp.value, to: toInp.value,
+        });
+        toast('Backfill: ' + s.fetched_ok + ' fetched, ' + s.already_stored + ' already stored, '
+          + s.errored + ' errored (' + s.trading_days + ' trading days).', s.errored > 0);
+        viewClosingPrices();
+      } catch (e) {
+        toast(e.message, true);
+      }
+    });
+
+    setMain(el('div', null, [
+      el('h2', null, 'Closing Prices'),
+      el('p', { class: 'view-desc' },
+        'Daily closing prices per held listing, in the listing\'s quote currency, collected by the '
+        + 'price-import job after each exchange\'s close (crypto at the UTC-midnight cut-off). '
+        + 'A failed fetch shows as an errored row — re-fetch it here once the provider recovers.'),
+      backfillForm,
       table,
     ]));
   }
@@ -1348,6 +1441,7 @@
       if (actionBySlug[parts[0]]) return await viewAction(actionBySlug[parts[0]], parts[1]);
       if (parts[0] === 'attachments') return await viewAttachments(parts[1], parts[2]);
       if (parts[0] === 'jobs') return await viewJobs();
+      if (parts[0] === 'prices') return await viewClosingPrices();
       if (parts[0] === 'r') {
         const report = reportBySlug[parts[1]];
         if (!report) throw new Error('Unknown report');
