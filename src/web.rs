@@ -201,40 +201,78 @@ mod tests {
     #[tokio::test]
     async fn fk_columns_render_names_not_ids() {
         let js = app_js_body().await;
-        // List tables resolve foreign-key id columns to the referenced row's
-        // natural name via the shared label maps…
+        // Foreign-key id columns resolve to the referenced row's natural name
+        // by *column name* (FK_COLUMN_SOURCES → fkLabelMaps), the one path
+        // shared by the generic entity lists and the report tables…
         assert!(js.contains("fkLabelMaps"));
         assert!(js.contains("TABLE_LABEL_SOURCES"));
+        assert!(js.contains("FK_COLUMN_SOURCES"));
+        assert!(js.contains("columnLabelMaps"));
         // …a listing shows as MIC:TICKER (Crypto listings have no MIC)…
         assert!(js.contains("(l.exchange_mic || 'Crypto') + ':' + l.ticker"));
-        // …and a holding account shows by its name.
+        // …a holding account shows by its name…
         assert!(js.contains("return a.name;"));
-        // The generic entity list derives the maps from each entity's fk
-        // fields, and the bespoke Sells/Transfers lists pass theirs explicitly.
-        assert!(js.contains("labelSpecs[f.name] = f.source"));
-        assert!(js.contains("{ listing_id: 'listings', holding_account_id: 'holdingAccounts' }"));
-        assert!(js.contains(
-            "{ listing_id: 'listings', from_account_id: 'holdingAccounts', to_account_id: 'holdingAccounts' }"
-        ));
+        // …and a trade (an id alone is meaningless) shows side/quantity/
+        // listing/date via the shared describeTrade.
+        assert!(js.contains("function describeTrade("));
+        assert!(js.contains("t.trade_type + ' ' + t.quantity + ' ' + listingName(t.listing_id) + ' on ' + t.date"));
+        // The trade/amma id columns are mapped by name — so income's
+        // reinvestment_trade_id, the parcel-allocation sale/purchase trade ids,
+        // and the amit-adjustment statement/trade ids all render names with no
+        // per-entity field config.
+        assert!(js.contains("reinvestment_trade_id: 'trades'"));
+        assert!(js.contains("sale_trade_id: 'trades', purchase_trade_id: 'trades'"));
+        assert!(js.contains("amma_statement_id: 'amma'"));
+        // The generic entity list and the report tables both go through it.
+        assert!(js.contains("const labels = await columnLabelMaps(cols);"));
+        assert!(js.contains("labels: await columnLabelMaps(cols)"));
         // The raw id stays reachable on the cell tooltip.
         assert!(js.contains("'id ' + cellText(v)"));
         // The post-record action pages (Reinvest / Exercise / Participate /
-        // Exchange / Demerge) name the listings in their descriptions too:
-        // every desc takes the resolver, and the scrip/demerger targets use it.
+        // Exchange / Demerge) name the listings in their titles and
+        // descriptions; the scrip/demerger targets use the resolver.
+        assert!(js.contains("action.title(id, owner, listingName)"));
         assert!(js.contains("action.desc(owner, listingName)"));
         assert!(!js.contains("'Creates a DRP trade for listing '"));
         assert!(js.contains("listing(a.scrip_listing_id)"));
         assert!(js.contains("listing(a.demerger_listing_id)"));
         // The allocation-editor parcel options and the AMMA-statement options
-        // name the listing too (via the shared resolver) — no raw-id wording
-        // is left anywhere in the bundle's labels or prose.
+        // name the listing too (via the shared resolver).
         assert!(js.contains("listingNamer"));
         assert!(js.contains("listing(t.listing_id)"));
         assert!(js.contains("listing(a.listing_id)"));
         // …and the old raw-id label wording is gone (the "listing N" string
-        // survives only as listingNamer's unknown-id fallback).
+        // survives only as the unknown-id fallback).
         assert!(!js.contains("(listing '"));
         assert!(!js.contains(": listing '"));
+    }
+
+    #[tokio::test]
+    async fn toasts_and_attachments_name_what_was_created_not_just_an_id() {
+        let js = app_js_body().await;
+        // Toasts that used to report only a created row's id now name what was
+        // created (ticker/quantity/date via describeTrade), with the id as
+        // secondary detail — across the action pages and the income form's
+        // chained DRP reinvest.
+        assert!(js.contains("'Reinvested into ' + describeTrade(trade, listing)"));
+        assert!(js.contains("'Exercised into ' + describeTrade(trade, listing)"));
+        assert!(js.contains("'Sold into the buy-back: ' + describeTrade(t, listing)"));
+        assert!(js.contains("'Saved and reinvested into ' + describeTrade(trade, listingName)"));
+        // The buy-back's dividend income and the scrip/demerger closing sells
+        // are named by their listing too, not a bare id.
+        assert!(js.contains("dividend income for ' + listing(r.income.listing_id)"));
+        assert!(js.contains("'Exchanged ' + listing(a.listing_id) + ' into '"));
+        assert!(js.contains("'Demerged ' + listing(a.listing_id) + ' into '"));
+        // The transfer toast names the listing and both accounts (the
+        // transfer-out sell id is only secondary detail).
+        assert!(js.contains("'Transferred ' + n + ' parcel(s) of ' + listingName(body.listing_id)"));
+        // The bare "trade #N" toast/heading wording is gone.
+        assert!(!js.contains("'Reinvested into trade #'"));
+        assert!(!js.contains("'Exercised into trade #'"));
+        // The attachments view names the owning activity, not "trade #5".
+        assert!(js.contains("const ATTACH_OWNER ="));
+        assert!(js.contains("describeTrade(o, listing)"));
+        assert!(!js.contains("ATTACH_OWNER_LABEL"));
     }
 
     #[tokio::test]

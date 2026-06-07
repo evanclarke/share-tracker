@@ -131,40 +131,89 @@
     }
   }
 
-  // Human-readable labels for foreign-key id columns in list tables: the
-  // stored id keeps driving the API (and edit-form selects), but tables show
-  // the referenced row's natural name (e.g. "XNYS:ICE", "CHESS Personal").
-  // Only sources with a natural short name are mapped — currency codes are
-  // already readable, and trade/statement ids have no name to show.
+  // A trade named for prose, table cells, option labels, and toasts: side,
+  // quantity, listing (MIC:TICKER), and date — an id alone is meaningless.
+  // `listingName` resolves the trade's listing; pass listingNamer's resolver.
+  function describeTrade(t, listingName) {
+    if (!t) return '?';
+    return t.trade_type + ' ' + t.quantity + ' ' + listingName(t.listing_id) + ' on ' + t.date;
+  }
+
+  // Human-readable labels for foreign-key id columns: the stored id keeps
+  // driving the API (and edit-form selects), but tables/prose show the
+  // referenced row's natural name (e.g. "XNYS:ICE", "CHESS Personal",
+  // "DRP 45 XASX:VDHG on 2024-12-20"). Some sources' labels embed another
+  // (a trade names its listing), so `needs` lists the sources to build first
+  // and the label fn receives the already-built maps to consult.
   const TABLE_LABEL_SOURCES = {
     listings: { api: '/listings', label: function (l) { return (l.exchange_mic || 'Crypto') + ':' + l.ticker; } },
     holdingAccounts: { api: '/holding_accounts', label: function (a) { return a.name; } },
+    trades: {
+      api: '/trades', needs: ['listings'],
+      label: function (t, maps) { return describeTrade(t, listingNameFromMap(maps.listings)); },
+    },
+    amma: {
+      api: '/amma_statements', needs: ['listings'],
+      label: function (a, maps) { return listingNameFromMap(maps.listings)(a.listing_id) + ' FY' + a.tax_year_end_date; },
+    },
   };
 
-  // specs: { columnName: sourceName, … } → { columnName: { id → label } },
-  // fetching each distinct source once per render so the names stay fresh.
+  // Which source names each foreign-key id column. Drives table-cell naming
+  // for both the generic entity lists and the report tables — column names are
+  // shared across the JSON API, so a new id column inherits naming by name
+  // alone. (currency/exchange_mic columns are already readable codes, so they
+  // are deliberately absent.)
+  const FK_COLUMN_SOURCES = {
+    listing_id: 'listings', scrip_listing_id: 'listings', demerger_listing_id: 'listings',
+    holding_account_id: 'holdingAccounts', account_id: 'holdingAccounts',
+    from_account_id: 'holdingAccounts', to_account_id: 'holdingAccounts',
+    trade_id: 'trades', sale_trade_id: 'trades', purchase_trade_id: 'trades',
+    reinvestment_trade_id: 'trades',
+    amma_statement_id: 'amma',
+  };
+
+  // id → "MIC:TICKER" resolver over a prebuilt listings map; unknown/null id
+  // falls back to the raw "listing N" wording.
+  function listingNameFromMap(map) {
+    return function (lid) { return (map && map[lid]) || ('listing ' + lid); };
+  }
+
+  // specs: { columnName: sourceName, … } → { columnName: { id → label } }.
+  // Each distinct source is fetched once per render (so names stay fresh) and
+  // built in dependency order, so a label fn can consult the maps it `needs`.
   async function fkLabelMaps(specs) {
-    const bySource = {};
+    const sourceMaps = {};
+    async function build(sourceName) {
+      if (sourceMaps[sourceName]) return sourceMaps[sourceName];
+      const src = TABLE_LABEL_SOURCES[sourceName];
+      if (!src) return null;
+      for (const dep of src.needs || []) await build(dep);
+      const map = {};
+      (await api('GET', src.api)).forEach(function (r) { map[r.id] = src.label(r, sourceMaps); });
+      sourceMaps[sourceName] = map;
+      return map;
+    }
     const out = {};
     for (const col of Object.keys(specs)) {
-      const sourceName = specs[col];
-      const src = TABLE_LABEL_SOURCES[sourceName];
-      if (!src) continue;
-      if (!bySource[sourceName]) {
-        const map = {};
-        (await api('GET', src.api)).forEach(function (r) { map[r.id] = src.label(r); });
-        bySource[sourceName] = map;
-      }
-      out[col] = bySource[sourceName];
+      const m = await build(specs[col]);
+      if (m) out[col] = m;
     }
     return out;
+  }
+
+  // Label maps for whichever of `cols` are foreign-key id columns (per
+  // FK_COLUMN_SOURCES) — the shared path for the report tables and the generic
+  // entity list, so every id column renders its referenced row's name.
+  async function columnLabelMaps(cols) {
+    const specs = {};
+    cols.forEach(function (c) { if (FK_COLUMN_SOURCES[c]) specs[c] = FK_COLUMN_SOURCES[c]; });
+    return fkLabelMaps(specs);
   }
 
   // id → "MIC:TICKER" resolver for prose and option labels; an unknown/null
   // id falls back to the raw "listing N" wording.
   async function listingNamer() {
-    const map = (await fkLabelMaps({ listing_id: 'listings' })).listing_id;
-    return function (lid) { return map[lid] || ('listing ' + lid); };
+    return listingNameFromMap((await fkLabelMaps({ listing_id: 'listings' })).listing_id);
   }
 
   // ---- field constructors ----------------------------------------------
@@ -477,7 +526,7 @@
     {
       slug: 'reinvest', nav: 'income', ownerApi: '/income', cancel: '#/e/income', submit: 'Reinvest',
       post: function (id) { return '/income/' + id + '/reinvest'; },
-      title: function (id) { return 'Reinvest distribution #' + id; },
+      title: function (id, owner, listing) { return 'Reinvest ' + listing(owner.listing_id) + ' distribution #' + id; },
       desc: function (income, listing) { return 'Creates a DRP trade for ' + listing(income.listing_id) + ' and links it back to this distribution. The holding must be DRP-enrolled.'; },
       fields: function (income) {
         return [
@@ -486,14 +535,14 @@
           dt('date', 'Trade date', { optional: true, hint: 'Optional; defaults to the distribution pay date (' + income.date_paid + ').' }),
         ];
       },
-      toast: function (trade) { return 'Reinvested into trade #' + (trade ? trade.id : '?') + '.'; },
+      toast: function (trade, listing) { return trade ? 'Reinvested into ' + describeTrade(trade, listing) + ' (trade #' + trade.id + ').' : 'Reinvested.'; },
     },
     // Rights exercise: creates the new Buy parcel (acquired at the exercise
     // date); the server caps cumulative exercised units at the entitlement.
     {
       slug: 'exercise', nav: 'corporate_actions', ownerApi: '/corporate_actions', cancel: '#/e/corporate_actions', submit: 'Exercise',
       post: function (id) { return '/corporate_actions/' + id + '/exercise'; },
-      title: function (id) { return 'Exercise rights issue #' + id; },
+      title: function (id, owner, listing) { return 'Exercise ' + listing(owner.listing_id) + ' rights issue #' + id; },
       desc: function (a, listing) { return 'Creates a Buy trade for ' + listing(a.listing_id) + ' at the exercise price (' + a.exercise_price + ' ' + a.currency + ' per unit): ' + a.rights_units + ' new unit(s) per ' + a.rights_held_units + ' held at the record date.'; },
       fields: function (a) {
         return [
@@ -504,7 +553,7 @@
           fk('holding_account_id', 'Holding account', 'holdingAccounts', { required: true, default: '1', hint: 'Where the exercised parcel lands.' }),
         ];
       },
-      toast: function (trade) { return 'Exercised into trade #' + (trade ? trade.id : '?') + '.'; },
+      toast: function (trade, listing) { return trade ? 'Exercised into ' + describeTrade(trade, listing) + ' (trade #' + trade.id + ').' : 'Exercised.'; },
     },
     // Buy-back participation: atomically creates the Sell at the capital
     // proceeds per unit (max(price, market value) − dividend) with the chosen
@@ -512,7 +561,7 @@
     {
       slug: 'participate', nav: 'corporate_actions', ownerApi: '/corporate_actions', cancel: '#/e/corporate_actions', submit: 'Participate',
       post: function (id) { return '/corporate_actions/' + id + '/participate'; },
-      title: function (id) { return 'Participate in buy-back #' + id; },
+      title: function (id, owner, listing) { return 'Participate in ' + listing(owner.listing_id) + ' buy-back #' + id; },
       desc: function (a, listing) { return 'Creates a Sell trade for ' + listing(a.listing_id) + ' at the capital proceeds per unit — max(price ' + a.buyback_price + ', market value ' + (a.buyback_market_value || a.buyback_price) + ') − dividend ' + a.buyback_dividend + ' ' + a.currency + ' — plus the dividend-component income row when there is one.'; },
       fields: function (a) {
         return [
@@ -523,9 +572,10 @@
         ];
       },
       allocations: { hint: 'Allocations must sum exactly to the units sold. Each parcel must be a Buy/DRP with enough remaining units.' },
-      toast: function (r) {
-        const tradeId = r && r.trade ? r.trade.id : '?';
-        return 'Sold into the buy-back as trade #' + tradeId + (r && r.income ? ' with dividend income #' + r.income.id : '') + '.';
+      toast: function (r, listing) {
+        const t = r && r.trade;
+        return 'Sold into the buy-back: ' + describeTrade(t, listing) + (t ? ' (trade #' + t.id + ')' : '')
+          + (r && r.income ? ', plus dividend income for ' + listing(r.income.listing_id) + ' (income #' + r.income.id + ')' : '') + '.';
       },
     },
     // Scrip-for-scrip exchange (confirm-only): POST takes no parameters — the
@@ -536,12 +586,13 @@
     {
       slug: 'scrip-exchange', nav: 'corporate_actions', ownerApi: '/corporate_actions', cancel: '#/e/corporate_actions', submit: 'Exchange',
       post: function (id) { return '/corporate_actions/' + id + '/exchange'; },
-      title: function (id) { return 'Exchange scrip-for-scrip takeover #' + id; },
+      title: function (id, owner, listing) { return 'Exchange ' + listing(owner.listing_id) + ' scrip-for-scrip takeover #' + id; },
       desc: function (a, listing) { return 'Substitutes every open parcel of ' + listing(a.listing_id) + ' held at ' + a.date + ' with ' + a.scrip_new_units + ' unit(s) of ' + listing(a.scrip_listing_id) + ' per ' + a.scrip_old_units + ' held. The rollover disregards the capital gain; each replacement parcel carries its consumed parcel’s remaining cost base and acquisition date (the combined holding period counts toward the 12-month discount). Undo by deleting the closing Sell from the Sells view.'; },
       fields: [],
-      toast: function (r) {
+      toast: function (r, listing, a) {
         const n = r && r.replacements ? r.replacements.length : 0;
-        return 'Exchanged into ' + n + ' replacement parcel(s) via closing sell #' + (r && r.sell ? r.sell.id : '?') + '.';
+        return 'Exchanged ' + listing(a.listing_id) + ' into ' + n + ' parcel(s) of ' + listing(a.scrip_listing_id)
+          + ' (closing sell #' + (r && r.sell ? r.sell.id : '?') + ').';
       },
     },
     // Demerger (confirm-only): POST takes no parameters. It atomically closes
@@ -552,12 +603,13 @@
     {
       slug: 'demerge', nav: 'corporate_actions', ownerApi: '/corporate_actions', cancel: '#/e/corporate_actions', submit: 'Demerge',
       post: function (id) { return '/corporate_actions/' + id + '/demerge'; },
-      title: function (id) { return 'Demerge #' + id; },
+      title: function (id, owner, listing) { return 'Demerge ' + listing(owner.listing_id) + ' #' + id; },
       desc: function (a, listing) { return 'Apportions every open parcel of head listing ' + listing(a.listing_id) + ' held at ' + a.date + ': ' + a.demerger_cost_base_pct + '% of each parcel’s cost base moves to ' + a.demerger_new_units + ' unit(s) of demerged listing ' + listing(a.demerger_listing_id) + ' per ' + a.demerger_held_units + ' held; the head parcels keep the rest. Any gain is disregarded and both sides keep the original acquisition date (the 12-month discount clock). Undo by deleting the closing Sell from the Sells view.'; },
       fields: [],
-      toast: function (r) {
+      toast: function (r, listing, a) {
         const n = r && r.demerged_replacements ? r.demerged_replacements.length : 0;
-        return 'Demerged ' + n + ' parcel(s) via closing sell #' + (r && r.sell ? r.sell.id : '?') + '.';
+        return 'Demerged ' + listing(a.listing_id) + ' into ' + n + ' parcel(s) of ' + listing(a.demerger_listing_id)
+          + ' (closing sell #' + (r && r.sell ? r.sell.id : '?') + ').';
       },
     },
   ];
@@ -717,10 +769,12 @@
     return container;
   }
 
-  // Report tables: read-only, no actions column.
-  function dataTable(rows, columns, statusField) {
+  // Report tables: read-only, no actions column. Foreign-key id columns render
+  // the referenced row's name (per FK_COLUMN_SOURCES), same as the entity lists.
+  async function dataTable(rows, columns, statusField) {
     if (!rows || rows.length === 0) return el('div', { class: 'empty' }, 'No records.');
-    return filterableTable(rows, columns || Object.keys(rows[0]), { statusField: statusField });
+    const cols = columns || Object.keys(rows[0]);
+    return filterableTable(rows, cols, { statusField: statusField, labels: await columnLabelMaps(cols) });
   }
 
   // ---- entity list view -------------------------------------------------
@@ -745,12 +799,10 @@
     if (rows.length === 0) {
       table = el('div', { class: 'empty' }, 'No records yet.');
     } else {
-      // Foreign-key columns render the referenced row's name, not the raw id.
-      const labelSpecs = {};
-      (entity.fields || []).forEach(function (f) {
-        if (f.source && cols.indexOf(f.name) !== -1) labelSpecs[f.name] = f.source;
-      });
-      const labels = await fkLabelMaps(labelSpecs);
+      // Foreign-key id columns render the referenced row's name, not the raw
+      // id — resolved by column name, so a column with no editable field
+      // (e.g. income's reinvestment_trade_id) is named too.
+      const labels = await columnLabelMaps(cols);
       const actions = entity.readonly ? null : function (row) {
         const keyPath = entity.keyFields.map(function (kf) { return row[kf.name]; }).join('/');
         const td = el('td', { class: 'actions' });
@@ -1069,7 +1121,8 @@
         if (drpFxInput.value.trim() !== '') body.fx_rate = drpFxInput.value.trim();
         try {
           const trade = await api('POST', '/income/' + id + '/reinvest', body);
-          return 'Saved and reinvested into trade #' + (trade ? trade.id : '?') + '.';
+          const listingName = await listingNamer();
+          return trade ? 'Saved and reinvested into ' + describeTrade(trade, listingName) + ' (trade #' + trade.id + ').' : 'Saved and reinvested.';
         } catch (e) {
           toast('Income saved, but the reinvestment failed — ' + e.message + '. Retry from the row’s Reinvest action.', true);
           return '';
@@ -1277,7 +1330,7 @@
       table = el('div', { class: 'empty' }, 'No sell trades yet.');
     } else {
       table = filterableTable(sells, cols, {
-        labels: await fkLabelMaps({ listing_id: 'listings', holding_account_id: 'holdingAccounts' }),
+        labels: await columnLabelMaps(cols),
         actions: function (row) {
           return el('td', { class: 'actions' }, [
             el('a', { href: '#/sells/edit/' + row.id }, el('button', { class: 'link small' }, 'Edit')),
@@ -1368,7 +1421,7 @@
       table = el('div', { class: 'empty' }, 'No transfers yet.');
     } else {
       table = filterableTable(rows, cols, {
-        labels: await fkLabelMaps({ listing_id: 'listings', from_account_id: 'holdingAccounts', to_account_id: 'holdingAccounts' }),
+        labels: await columnLabelMaps(cols),
         actions: function (row) {
           return el('td', { class: 'actions' }, [
             el('button', {
@@ -1424,7 +1477,12 @@
         body.allocations = allocEditor.read();
         const result = await api('PUT', '/transfers/' + await nextId('/transfers'), body);
         const n = result && result.transfer_ins ? result.transfer_ins.length : 0;
-        toast('Transferred ' + n + ' parcel(s) via transfer-out sell #' + (result && result.sell ? result.sell.id : '?') + '.');
+        const listingName = await listingNamer();
+        const acct = (await fkLabelMaps({ a: 'holdingAccounts' })).a || {};
+        const acctName = function (id) { return acct[id] || ('account ' + id); };
+        toast('Transferred ' + n + ' parcel(s) of ' + listingName(body.listing_id)
+          + ' from ' + acctName(body.from_account_id) + ' to ' + acctName(body.to_account_id)
+          + ' (transfer-out sell #' + (result && result.sell ? result.sell.id : '?') + ').');
         location.hash = '#/transfers';
       } catch (e) {
         toast(e.message, true);
@@ -1474,14 +1532,14 @@
           if (allocEditor) body.allocations = allocEditor.read();
         }
         const result = await api('POST', action.post(id), body);
-        toast(action.toast(result));
+        toast(action.toast(result, listingName, owner));
         location.hash = action.cancel;
       } catch (e) {
         toast(e.message, true);
       }
     });
     setMain(el('div', null, [
-      el('h2', null, action.title(id)),
+      el('h2', null, action.title(id, owner, listingName)),
       el('p', { class: 'view-desc' }, action.desc(owner, listingName)),
       el('div', { class: 'card' }, form),
     ]));
@@ -1493,12 +1551,24 @@
   // via multipart/form-data (POST /attachments), and links each row to its
   // download (GET /attachments/:id/content). The owner field name (trade_id /
   // income_id / amma_statement_id) is carried in the route.
-  const ATTACH_OWNER_LABEL = {
-    trade_id: 'trade', income_id: 'income', amma_statement_id: 'AMMA statement',
+  const ATTACH_OWNER = {
+    trade_id: { noun: 'trade', api: '/trades', name: function (o, listing) { return describeTrade(o, listing); } },
+    income_id: { noun: 'distribution', api: '/income', name: function (o, listing) { return listing(o.listing_id) + ' on ' + o.date_paid; } },
+    amma_statement_id: { noun: 'AMMA statement', api: '/amma_statements', name: function (o, listing) { return listing(o.listing_id) + ' FY' + o.tax_year_end_date; } },
   };
 
   async function viewAttachments(ownerField, ownerId) {
     const rows = await api('GET', '/attachments?' + ownerField + '=' + encodeURIComponent(ownerId));
+    // Name the owning activity (e.g. "DRP 45 XASX:VDHG on 2024-12-20"), not a
+    // bare "trade #5"; the id stays as secondary detail.
+    const ownerSpec = ATTACH_OWNER[ownerField];
+    let ownerName = (ownerSpec ? ownerSpec.noun : 'activity') + ' #' + ownerId;
+    if (ownerSpec) {
+      try {
+        const owner = await api('GET', ownerSpec.api + '/' + ownerId);
+        ownerName = ownerSpec.noun + ' ' + ownerSpec.name(owner, await listingNamer()) + ' (#' + ownerId + ')';
+      } catch (e) { /* fall back to the noun + id wording */ }
+    }
     // checksum is stored integrity metadata, not user-facing — not a column here.
     const cols = ['id', 'filename', 'content_type', 'byte_size', 'uploaded_at'];
 
@@ -1558,7 +1628,7 @@
 
     container.appendChild(el('h2', null, 'Attachments'));
     container.appendChild(el('p', { class: 'view-desc' },
-      'Files attached to ' + (ATTACH_OWNER_LABEL[ownerField] || 'activity') + ' #' + ownerId + '. Stored in the database.'));
+      'Files attached to ' + ownerName + '. Stored in the database.'));
     container.appendChild(uploadForm);
     container.appendChild(table);
     setMain(container);
@@ -1630,7 +1700,7 @@
     const rows = prices.map(function (p) {
       const l = byId[p.listing_id];
       return {
-        listing: p.listing_id + (l ? ': ' + l.ticker : ''),
+        listing: l ? ((l.exchange_mic || 'Crypto') + ':' + l.ticker) : ('listing ' + p.listing_id),
         date: p.price_date,
         price: p.price == null ? '' : p.price,
         currency: l ? l.currency : '',
@@ -1861,7 +1931,7 @@
       header.appendChild(el('p', { class: 'hint warn' },
         'Stale: a back-dated fact was recorded after this snapshot was generated. The rows below are the stored (pre-fact) result — regenerate from the Snapshots view.'));
     }
-    setMain(el('div', null, [header, dataTable(snap.rows)]));
+    setMain(el('div', null, [header, await dataTable(snap.rows)]));
   }
 
   // ---- reports ----------------------------------------------------------
@@ -1879,13 +1949,13 @@
     }
     const result = el('div');
 
-    function render(rows) {
+    async function render(rows) {
       result.innerHTML = '';
-      result.appendChild(dataTable(rows, null, report.statusField));
+      result.appendChild(await dataTable(rows, null, report.statusField));
     }
 
     if (report.method === 'GET') {
-      render(await api('GET', report.api));
+      await render(await api('GET', report.api));
       setMain(el('div', null, [header, result]));
       return;
     }
@@ -1922,7 +1992,7 @@
           const d = (priceForm.querySelector('[name="as_of_date"]').value || '').trim();
           if (d !== '') body.as_of_date = d;
         }
-        render(await api('POST', report.api, body));
+        await render(await api('POST', report.api, body));
       } catch (e) {
         toast(e.message, true);
       }
