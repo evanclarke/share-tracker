@@ -76,6 +76,11 @@ pub struct NetCapitalGainYear {
     /// counted within `discount_eligible_gains` / `other_gains` above per the
     /// holding period at the payment date; surfaced separately for transparency.
     pub cgt_event_g1_gain: Decimal,
+    /// Informational: the taxpayer assumption behind the hard-wired rates
+    /// (always [`crate::reports::TAXPAYER_BASIS`]) — the 50% discount applied
+    /// here is the Australian-resident-individual rate; other entity types are
+    /// not modelled.
+    pub taxpayer_basis: String,
 }
 
 pub fn router() -> Router<SqlitePool> {
@@ -103,6 +108,7 @@ const CSV_HEADER: &[&str] = &[
     "capital_loss_carried_forward",
     "cgt_event_e10_gain",
     "cgt_event_g1_gain",
+    "taxpayer_basis",
 ];
 
 /// Gross gains and losses accumulated for one tax year before netting.
@@ -457,6 +463,7 @@ pub async fn db_net_capital_gain(pool: &SqlitePool) -> Result<Vec<NetCapitalGain
                 capital_loss_carried_forward: carried_forward,
                 cgt_event_e10_gain: b.e10,
                 cgt_event_g1_gain: b.g1,
+                taxpayer_basis: crate::reports::TAXPAYER_BASIS.to_string(),
             };
             brought_forward = carried_forward;
             year
@@ -643,6 +650,28 @@ mod tests {
         // Net capital gain = 500 × 50% = 250.
         assert_eq!(r[0].net_capital_gain, Decimal::from(250));
         assert_eq!(r[0].capital_loss_carried_forward, Decimal::ZERO);
+    }
+
+    /// The 50% rate is the Australian-resident-individual rate (other entity
+    /// types are not modelled — scope decision 2026-06-07); every row states
+    /// that assumption explicitly instead of leaving it implicit.
+    #[tokio::test]
+    async fn db_rows_state_the_individual_resident_basis() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "VAS").await;
+        insert_trade(&pool, 1, trade::TradeType::Buy, 1,
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(), Decimal::from(100), Decimal::from(10)).await;
+        insert_trade(&pool, 2, trade::TradeType::Sell, 1,
+            NaiveDate::from_ymd_opt(2025, 6, 1).unwrap(), Decimal::from(100), Decimal::from(15)).await;
+        allocate(&pool, 1, 2, 1, Decimal::from(100)).await;
+
+        let r = db_net_capital_gain(&pool).await.unwrap();
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].taxpayer_basis, crate::reports::TAXPAYER_BASIS);
+        // The assumption ships in the CSV export too (CSV_HEADER names it); a
+        // comma in the text would split it across CSV fields.
+        assert!(CSV_HEADER.contains(&"taxpayer_basis"));
+        assert!(!crate::reports::TAXPAYER_BASIS.contains(','));
     }
 
     #[tokio::test]

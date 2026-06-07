@@ -223,6 +223,14 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn performance_report_ui_present() {
+        let js = app_js_body().await;
+        // The Performance report view drives POST /portfolio/performance with
+        // the shared price + as-of-date form.
+        assert!(js.contains("/portfolio/performance"));
+    }
+
+    #[tokio::test]
     async fn report_export_ui_present() {
         let js = app_js_body().await;
         // The tax-summary and net-capital-gain report views carry an Export CSV

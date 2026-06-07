@@ -61,6 +61,11 @@ pub struct TaxYearSummary {
     pub foreign_tax_offset_excess: Decimal,
     /// Total TFN withholding tax (income + AMMA).
     pub tfn_withholding_tax: Decimal,
+    /// Informational: the taxpayer assumption behind the hard-wired rates
+    /// (always [`crate::reports::TAXPAYER_BASIS`]) — the LIC capital gain
+    /// deduction passed through here is the Australian-resident-individual 50%
+    /// figure from the income record; other entity types are not modelled.
+    pub taxpayer_basis: String,
 }
 
 pub fn router() -> Router<SqlitePool> {
@@ -92,6 +97,7 @@ const CSV_HEADER: &[&str] = &[
     "foreign_tax_offsets",
     "foreign_tax_offset_excess",
     "tfn_withholding_tax",
+    "taxpayer_basis",
 ];
 
 fn zero_summary(tax_year: i32) -> TaxYearSummary {
@@ -115,6 +121,7 @@ fn zero_summary(tax_year: i32) -> TaxYearSummary {
         foreign_tax_offsets: Decimal::ZERO,
         foreign_tax_offset_excess: Decimal::ZERO,
         tfn_withholding_tax: Decimal::ZERO,
+        taxpayer_basis: crate::reports::TAXPAYER_BASIS.to_string(),
     }
 }
 
@@ -460,6 +467,25 @@ mod tests {
         assert_eq!(result[0].tax_year, 2024);
         assert_eq!(result[0].dividends_assessable, Decimal::from(100));
         assert_eq!(result[0].franking_credits, Decimal::from(30));
+    }
+
+    /// The LIC deduction (and the discount in the companion net-capital-gain
+    /// report) is the Australian-resident-individual 50% rate; every row states
+    /// that assumption explicitly (scope decision 2026-06-07: entity types are
+    /// not modelled).
+    #[tokio::test]
+    async fn db_rows_state_the_individual_resident_basis() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        let mut inc = make_income(1, 1, NaiveDate::from_ymd_opt(2024, 1, 15).unwrap());
+        inc.franked_amount = Decimal::from(70);
+        income::db_upsert(&pool, &inc).await.unwrap();
+
+        let result = db_tax_summary(&pool).await.unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].taxpayer_basis, crate::reports::TAXPAYER_BASIS);
+        // The assumption ships in the CSV export too (CSV_HEADER names it).
+        assert!(CSV_HEADER.contains(&"taxpayer_basis"));
     }
 
     #[tokio::test]
