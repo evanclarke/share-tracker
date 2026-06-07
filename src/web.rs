@@ -225,6 +225,16 @@ mod tests {
         assert!(!js.contains("'Creates a DRP trade for listing '"));
         assert!(js.contains("listing(a.scrip_listing_id)"));
         assert!(js.contains("listing(a.demerger_listing_id)"));
+        // The allocation-editor parcel options and the AMMA-statement options
+        // name the listing too (via the shared resolver) — no raw-id wording
+        // is left anywhere in the bundle's labels or prose.
+        assert!(js.contains("listingNamer"));
+        assert!(js.contains("listing(t.listing_id)"));
+        assert!(js.contains("listing(a.listing_id)"));
+        // …and the old raw-id label wording is gone (the "listing N" string
+        // survives only as listingNamer's unknown-id fallback).
+        assert!(!js.contains("(listing '"));
+        assert!(!js.contains(": listing '"));
     }
 
     #[tokio::test]

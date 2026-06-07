@@ -117,11 +117,15 @@
         return (await api('GET', '/listings')).map(function (l) { return { value: l.id, label: l.id + ': ' + l.ticker + ' (' + (l.exchange_mic || 'Crypto') + ')' }; });
       case 'holdingAccounts':
         return (await api('GET', '/holding_accounts')).map(function (a) { return { value: a.id, label: a.id + ': ' + a.name }; });
-      case 'amma':
-        return (await api('GET', '/amma_statements')).map(function (a) { return { value: a.id, label: a.id + ': listing ' + a.listing_id + ' FY' + a.tax_year_end_date }; });
-      case 'buyParcels':
+      case 'amma': {
+        const listing = await listingNamer();
+        return (await api('GET', '/amma_statements')).map(function (a) { return { value: a.id, label: a.id + ': ' + listing(a.listing_id) + ' FY' + a.tax_year_end_date }; });
+      }
+      case 'buyParcels': {
+        const listing = await listingNamer();
         return (await api('GET', '/trades')).filter(function (t) { return t.trade_type !== 'Sell'; })
-          .map(function (t) { return { value: t.id, label: t.id + ': ' + t.trade_type + ' ' + t.quantity + ' (listing ' + t.listing_id + ', ' + t.date + ')' }; });
+          .map(function (t) { return { value: t.id, label: t.id + ': ' + t.trade_type + ' ' + t.quantity + ' (' + listing(t.listing_id) + ', ' + t.date + ')' }; });
+      }
       default:
         return [];
     }
@@ -154,6 +158,13 @@
       out[col] = bySource[sourceName];
     }
     return out;
+  }
+
+  // id → "MIC:TICKER" resolver for prose and option labels; an unknown/null
+  // id falls back to the raw "listing N" wording.
+  async function listingNamer() {
+    const map = (await fkLabelMaps({ listing_id: 'listings' })).listing_id;
+    return function (lid) { return map[lid] || ('listing ' + lid); };
   }
 
   // ---- field constructors ----------------------------------------------
@@ -1217,8 +1228,7 @@
     const owner = await api('GET', action.ownerApi + '/' + id);
     // Action descriptions name the listings they touch rather than printing
     // raw ids; unknown/null ids fall back to the old "listing N" wording.
-    const listingLabels = (await fkLabelMaps({ listing_id: 'listings' })).listing_id;
-    const listingName = function (lid) { return listingLabels[lid] || ('listing ' + lid); };
+    const listingName = await listingNamer();
     const fields = typeof action.fields === 'function' ? action.fields(owner) : action.fields;
     const form = el('form');
     for (const f of fields) form.appendChild(await buildFieldInput(f, null, false));
