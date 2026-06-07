@@ -166,6 +166,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn timestamps_render_local_with_utc_tooltip() {
+        let js = app_js_body().await;
+        // RFC 3339 UTC server timestamps (fetched_at, generated_at,
+        // uploaded_at, job last-run) are detected by the shared cell renderer…
+        assert!(js.contains("isTimestamp"));
+        // …displayed in the user's timezone…
+        assert!(js.contains("fmtLocalTimestamp"));
+        // …with the UTC instant on the cell's hover tooltip (title attr).
+        assert!(js.contains("utcTooltip"));
+        assert!(js.contains("title: utcTooltip(v)"));
+        // The snapshot-detail "Generated …" line gets the same treatment.
+        assert!(js.contains("title: utcTooltip(snap.generated_at)"));
+    }
+
+    #[tokio::test]
     async fn listing_management_ui_present() {
         let js = app_js_body().await;
         assert!(js.contains("/listings"));

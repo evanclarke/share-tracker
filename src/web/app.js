@@ -54,9 +54,30 @@
     return typeof v !== 'boolean' && v != null && v !== '' && /^-?\d+(\.\d+)?$/.test(String(v));
   }
 
+  // Server timestamps (fetched_at, generated_at, uploaded_at, job last-run)
+  // arrive as RFC 3339 UTC strings. Display them in the user's timezone, with
+  // the UTC instant available on hover (utcTooltip → the cell's title attr).
+  // Date-only fields (price_date, trade dates) don't match and pass through.
+  const TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})$/;
+  function isTimestamp(v) {
+    return typeof v === 'string' && TIMESTAMP_RE.test(v);
+  }
+  function pad2(n) { return (n < 10 ? '0' : '') + n; }
+  function fmtLocalTimestamp(v) {
+    const d = new Date(v);
+    return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate())
+      + ' ' + pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ':' + pad2(d.getSeconds());
+  }
+  function utcTooltip(v) {
+    const d = new Date(v);
+    return d.getUTCFullYear() + '-' + pad2(d.getUTCMonth() + 1) + '-' + pad2(d.getUTCDate())
+      + ' ' + pad2(d.getUTCHours()) + ':' + pad2(d.getUTCMinutes()) + ':' + pad2(d.getUTCSeconds()) + ' UTC';
+  }
+
   function cellText(v) {
     if (v == null) return '';
     if (typeof v === 'boolean') return v ? 'yes' : 'no';
+    if (isTimestamp(v)) return fmtLocalTimestamp(v);
     return String(v);
   }
 
@@ -623,6 +644,9 @@
           const v = row[c];
           if (statusField && c === statusField) {
             return el('td', null, el('span', { class: 'badge ' + cellText(v) }, cellText(v)));
+          }
+          if (isTimestamp(v)) {
+            return el('td', { title: utcTooltip(v) }, cellText(v));
           }
           return el('td', { class: numeric[c] ? 'num' : null }, cellText(v));
         });
@@ -1502,7 +1526,8 @@
     const snap = await api('GET', '/report_snapshots/' + report + '/' + date);
     const header = el('div', null, [
       el('h2', null, 'Snapshot: ' + report + ' @ ' + date),
-      el('p', { class: 'view-desc' }, 'Generated ' + snap.generated_at + '. '),
+      el('p', { class: 'view-desc', title: utcTooltip(snap.generated_at) },
+        'Generated ' + cellText(snap.generated_at) + '. '),
       el('p', null, el('a', { href: '#/r/snapshots' }, '← All snapshots')),
     ]);
     if (snap.stale) {
