@@ -162,3 +162,59 @@ statement/contract note.
   - The Buy and Sell forms gain the GST-included checkbox (when ticked the GST field is hidden
     and the brokerage field is labelled as GST-inclusive) and the optional statement-total field
   - The trades and Sells lists show the statement total so it can be eyeballed against statements
+
+## Simpler income entry, per-share cross-check, and combined income + DRP form (2026-06-07)
+
+Entering a dividend/distribution from a registry statement (e.g. a Computershare payment advice
+or DRP advice) is made faster: the common cases need only the figures printed on the statement,
+the rarer tax components are tucked behind an advanced toggle, and a distribution that was
+reinvested under a DRP is entered in the same form as the income itself.
+
+- Simple-first income form (web UI only; the income API and its component model are unchanged)
+  - The income form opens in a simple mode showing: listing, date paid, the payment amount, and a
+    franking selector — **Fully franked (30%)** / **Unfranked** / **Trust distribution**
+  - Fully franked: the amount is submitted as `franked_amount` and the franking credit is
+    auto-computed as amount × 30/70 rounded to the cent (PLS example: $2,757.30 → $1,181.70).
+    Unfranked: the amount is `unfranked_amount`. Trust distribution: the amount is
+    `unfranked_amount` with `trust_income` set (component breakdown arrives later via the AMMA
+    statement for AMIT funds)
+  - An "advanced" toggle reveals the full existing field set (ex date, the individual
+    franked/unfranked/credit amounts, foreign income and tax, TFN withholding, LIC deduction,
+    conduit foreign income, currency, holding account). Partially franked dividends and
+    non-30% corporate tax rates (e.g. 25% base-rate entities) are entered via advanced mode —
+    the selector covers only the common statement cases
+  - Editing an existing row opens in advanced mode whenever any advanced-only field holds a
+    non-default value (so nothing is hidden); otherwise it opens simple with the selector
+    reflecting the stored shape
+- Per-share cross-check (server-side, like the trades statement-total check)
+  - Income gains two optional columns: `amount_per_security` and `securities_held` (TEXT
+    decimals, nullable). They must be supplied together — one without the other is rejected
+    with 422
+  - When supplied, the write is validated inside the write transaction: amount_per_security ×
+    securities_held, rounded to the cent (half away from zero), must equal the gross cash
+    components `franked_amount + unfranked_amount + foreign_source_income` (franking credits are
+    notional and TFN withholding is deducted from, not part of, the gross). Mismatch → 422.
+    Both statements reconcile: 0.14 × 19,695 = $2,757.30 (PLS); 0.89891492 × 866 = $778.46
+    (VDHG, cent-rounded)
+  - The stored values are validation/cross-reference only — no report uses them (informational
+    columns, mirroring `trades.statement_total`)
+  - The web form exposes both fields in simple mode (they are printed prominently on statements)
+    and shows the computed product as a hint against the entered amount
+- Combined income + DRP entry (web UI; chains the two existing API calls)
+  - When the income being entered has no reinvestment yet, the form offers a "Reinvested under
+    DRP" tick; ticking it reveals the reinvestment fields of the existing Reinvest action
+    (reinvestment price, optional trade date defaulting to the pay date, FX rate)
+  - Submit saves the income (`PUT /income/{id}`) and then posts the existing
+    `POST /income/{id}/reinvest`. If the reinvest step fails (e.g. not DRP-enrolled), the saved
+    income row stands, the error is shown, and the row's existing Reinvest action remains the
+    fallback — no new endpoint, no change to reinvestment semantics (whole units + residual are
+    still computed server-side; the VDHG advice reconciles: $778.46 at $52.0017 → 14 units =
+    $728.02, residual $50.44 carried forward)
+- Docs: the new columns update `docs/SCHEMA.md`; the new 422 validations update `docs/API.md`;
+  the simpler entry flow is a user-visible feature for the README
+
+Out of scope (record as Known limitations):
+- **Auto-computing franking credits at non-30% corporate tax rates** — the selector assumes the
+  30% rate printed on typical statements; 25% base-rate-entity dividends and partially franked
+  payments are entered via the advanced fields
+- **Statement parsing/import** — figures are still keyed in manually from the statement

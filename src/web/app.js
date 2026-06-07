@@ -278,11 +278,13 @@
     },
     {
       slug: 'income', title: 'Income', group: 'Activity', api: '/income',
-      desc: 'Dividends and trust distributions with a full tax-component breakdown.',
+      desc: 'Dividends and trust distributions. The form captures what the payment advice prints — amount, franking treatment, the per-share figures — and the advanced toggle reveals the full tax-component breakdown; a DRP statement’s reinvestment can be entered in the same form.',
       keyFields: [int('id', 'ID', { auto: true })],
       fields: [
         fk('listing_id', 'Listing', 'listings', { required: true }),
         dt('date_paid', 'Date paid', { required: true }),
+        dec('amount_per_security', 'Amount per security', { optional: true, default: '', hint: 'Optional cross-check from the statement, supplied together with securities held: their product must equal the gross amount. Rejected if it does not reconcile.' }),
+        dec('securities_held', 'Securities held', { optional: true, default: '' }),
         dt('ex_date', 'Ex date', { optional: true }),
         dec('franked_amount', 'Franked amount'),
         dec('unfranked_amount', 'Unfranked amount'),
@@ -296,6 +298,7 @@
         fk('currency', 'Currency', 'currencies', { required: true, encode: 'string', default: 'AUD' }),
         fk('holding_account_id', 'Holding account', 'holdingAccounts', { required: true, default: '1', hint: 'The account the distribution was paid to — decides whose DRP enrolment applies.' }),
       ],
+      wireForm: wireIncomeEntry,
       columns: ['id', 'listing_id', 'date_paid', 'franked_amount', 'unfranked_amount', 'franking_credits', 'currency', 'holding_account_id', 'reinvestment_trade_id'],
       rowActions: function (row) {
         return row.reinvestment_trade_id == null ? [{ label: 'Reinvest', href: '#/reinvest/' + row.id }] : [];
@@ -864,6 +867,217 @@
     apply();
   }
 
+  // ---- income simple-entry wiring -----------------------------------------
+  // Exact decimal-string arithmetic for the non-negative money figures the
+  // income form computes client-side (float would drift). decParts parses
+  // "123.45" → { units: 12345n, dp: 2 } (null for a non-decimal); the
+  // divisions round to the cent, half away from zero, matching statements.
+  function decParts(s) {
+    s = String(s).trim();
+    if (!/^\d+(\.\d+)?$/.test(s)) return null;
+    const i = s.indexOf('.');
+    return { units: BigInt(s.replace('.', '')), dp: i < 0 ? 0 : s.length - i - 1 };
+  }
+  function divToCents(num, den) {
+    const cents = ((num * 200n + den) / (den * 2n)).toString().padStart(3, '0');
+    return cents.slice(0, -2) + '.' + cents.slice(-2);
+  }
+  // a × b rounded to the cent, as "x.xx" (null if either is not a decimal).
+  function mulToCents(a, b) {
+    const pa = decParts(a), pb = decParts(b);
+    if (!pa || !pb) return null;
+    return divToCents(pa.units * pb.units, 10n ** BigInt(pa.dp + pb.dp));
+  }
+  // The franking credit on a fully franked amount at the 30% corporate rate:
+  // amount × 30/70, cent-rounded (PLS example: 2757.30 → 1181.70).
+  function frankingCreditFor(amount) {
+    const p = decParts(amount);
+    if (!p) return null;
+    return divToCents(p.units * 3n, 7n * 10n ** BigInt(p.dp));
+  }
+  // Numeric decimal-string equality (1181.7 matches 1181.70).
+  function decEq(a, b) {
+    const pa = decParts(a), pb = decParts(b);
+    if (!pa || !pb) return false;
+    const scale = BigInt(Math.max(pa.dp, pb.dp));
+    return pa.units * 10n ** (scale - BigInt(pa.dp)) === pb.units * 10n ** (scale - BigInt(pb.dp));
+  }
+
+  // The tax components a registry payment advice doesn't print (or that the
+  // simple franking selector derives): hidden until the advanced toggle.
+  const INCOME_ADVANCED_FIELDS = [
+    'ex_date', 'franked_amount', 'unfranked_amount', 'foreign_source_income',
+    'foreign_tax_paid', 'tfn_withholding_tax', 'franking_credits',
+    'lic_capital_gain_deduction', 'conduit_foreign_income', 'trust_income',
+    'currency', 'holding_account_id',
+  ];
+
+  // Classify a stored row for the simple form: which franking-selector mode
+  // re-presents it losslessly, and the single amount to show. Returns null
+  // when only the advanced fields can represent it (the form then opens
+  // advanced so nothing is hidden) — any advanced-only field off its
+  // default, a partially franked split, or franking credits that aren't the
+  // derived amount × 30/70.
+  function incomeSimpleShape(existing) {
+    if (!existing) return { mode: 'Unfranked', amount: '' };
+    const nz = function (v) { return v != null && !decEq(String(v), '0'); };
+    if (existing.ex_date != null || nz(existing.foreign_source_income) || nz(existing.foreign_tax_paid)
+      || nz(existing.tfn_withholding_tax) || nz(existing.lic_capital_gain_deduction)
+      || nz(existing.conduit_foreign_income) || existing.currency !== 'AUD'
+      || existing.holding_account_id !== 1) return null;
+    const franked = nz(existing.franked_amount), credits = nz(existing.franking_credits);
+    if (!franked && !credits) {
+      return { mode: existing.trust_income ? 'Trust' : 'Unfranked', amount: String(existing.unfranked_amount) };
+    }
+    if (franked && !existing.trust_income && !nz(existing.unfranked_amount)
+      && decEq(String(existing.franking_credits), frankingCreditFor(String(existing.franked_amount)) || '')) {
+      return { mode: 'FullyFranked', amount: String(existing.franked_amount) };
+    }
+    return null;
+  }
+
+  // The income form's simple-first behaviour: a payment-amount input plus a
+  // franking selector stand in for the component fields (mapped onto the
+  // body at submit), the per-share pair shows its computed product as a
+  // live hint, and a "Reinvested under DRP" tick chains the existing
+  // POST /income/:id/reinvest after the save (a reinvest failure leaves the
+  // saved income standing — the row's Reinvest action is the retry path).
+  function wireIncomeEntry(form, existing) {
+    const shape = incomeSimpleShape(existing);
+
+    // Advanced toggle, at the top of the form.
+    const advFlag = el('input', { id: 'f_simple_advanced', name: 'simple_advanced', type: 'checkbox' });
+    advFlag.checked = shape == null;
+    form.insertBefore(
+      el('div', { class: 'field' }, [el('label', { for: 'f_simple_advanced' }, 'Show advanced fields'), advFlag]),
+      form.firstChild
+    );
+
+    // Simple section: amount + franking selector, between the date and the
+    // per-share pair.
+    const amountInput = el('input', { id: 'f_simple_amount', name: 'simple_amount', type: 'text' });
+    amountInput.setAttribute('inputmode', 'decimal');
+    const frankSel = el('select', { id: 'f_simple_franking', name: 'simple_franking' });
+    [
+      { value: 'Unfranked', label: 'Unfranked' },
+      { value: 'FullyFranked', label: 'Fully franked (30%)' },
+      { value: 'Trust', label: 'Trust distribution' },
+    ].forEach(function (o) { frankSel.appendChild(el('option', { value: o.value }, o.label)); });
+    if (shape) { amountInput.value = shape.amount; frankSel.value = shape.mode; }
+    const frankHint = el('div', { class: 'hint' });
+    const simpleSection = el('div', null, [
+      el('div', { class: 'field' }, [el('label', { for: 'f_simple_amount' }, 'Amount'), amountInput,
+        el('div', { class: 'hint' }, 'The statement’s gross payment in AUD.')]),
+      el('div', { class: 'field' }, [el('label', { for: 'f_simple_franking' }, 'Franking'), frankSel, frankHint]),
+    ]);
+    const apsWrap = form.querySelector('[name="amount_per_security"]').closest('.field');
+    form.insertBefore(simpleSection, apsWrap);
+
+    function updateFrankHint() {
+      const credit = frankSel.value === 'FullyFranked' ? frankingCreditFor(amountInput.value) : null;
+      frankHint.textContent = frankSel.value === 'FullyFranked'
+        ? 'Franking credits of ' + (credit || 'amount × 30/70') + ' will be recorded (amount × 30/70). Partially franked or non-30%-rate dividends: use the advanced fields.'
+        : (frankSel.value === 'Trust' ? 'Recorded as unfranked trust income; the component breakdown arrives with the AMMA statement for AMIT funds.' : '');
+    }
+    amountInput.addEventListener('input', updateFrankHint);
+    frankSel.addEventListener('change', updateFrankHint);
+    updateFrankHint();
+
+    // Live product hint for the per-share cross-check pair.
+    const apsInput = form.querySelector('[name="amount_per_security"]');
+    const heldInput = form.querySelector('[name="securities_held"]');
+    const productHint = el('div', { class: 'hint' });
+    heldInput.closest('.field').appendChild(productHint);
+    function grossEntered() {
+      if (!advFlag.checked) return amountInput.value.trim();
+      const f = form.querySelector('[name="franked_amount"]').value.trim() || '0';
+      const u = form.querySelector('[name="unfranked_amount"]').value.trim() || '0';
+      const fo = form.querySelector('[name="foreign_source_income"]').value.trim() || '0';
+      if (!decParts(f) || !decParts(u) || !decParts(fo)) return '';
+      return addDecimalStrings(addDecimalStrings(f, u), fo);
+    }
+    function updateProductHint() {
+      const aps = apsInput.value.trim(), held = heldInput.value.trim();
+      const product = aps && held ? mulToCents(aps, held) : null;
+      if (!product) { productHint.textContent = ''; productHint.className = 'hint'; return; }
+      const gross = grossEntered();
+      const matches = gross !== '' && decParts(gross) != null && decEq(product, gross);
+      productHint.textContent = aps + ' × ' + held + ' = ' + product
+        + (matches ? ' — matches the gross amount.' : ' — does not match the gross amount entered.');
+      productHint.className = matches ? 'hint' : 'hint warn';
+    }
+    form.addEventListener('input', updateProductHint);
+    updateProductHint();
+
+    // DRP tick: only for a distribution not yet reinvested.
+    let drpFlag = null, priceInput = null, drpDateInput = null, drpFxInput = null;
+    if (!existing || existing.reinvestment_trade_id == null) {
+      drpFlag = el('input', { id: 'f_simple_drp', name: 'simple_drp', type: 'checkbox' });
+      priceInput = el('input', { id: 'f_drp_price', name: 'drp_price', type: 'text' });
+      priceInput.setAttribute('inputmode', 'decimal');
+      drpDateInput = el('input', { id: 'f_drp_date', name: 'drp_date', type: 'date' });
+      drpFxInput = el('input', { id: 'f_drp_fx', name: 'drp_fx', type: 'text', value: '1' });
+      drpFxInput.setAttribute('inputmode', 'decimal');
+      const drpFields = el('div', null, [
+        el('div', { class: 'field' }, [el('label', { for: 'f_drp_price' }, 'Reinvestment price *'), priceInput,
+          el('div', { class: 'hint' }, 'Per-unit DRP price from the statement; whole units and the carried residual are computed server-side.')]),
+        el('div', { class: 'field' }, [el('label', { for: 'f_drp_date' }, 'Reinvestment trade date'), drpDateInput,
+          el('div', { class: 'hint' }, 'Optional; defaults to the pay date.')]),
+        el('div', { class: 'field' }, [el('label', { for: 'f_drp_fx' }, 'Reinvestment FX rate'), drpFxInput]),
+      ]);
+      form.appendChild(el('div', { class: 'field' }, [el('label', { for: 'f_simple_drp' }, 'Reinvested under DRP'), drpFlag,
+        el('div', { class: 'hint' }, 'Creates the linked DRP trade after saving (the holding must be DRP-enrolled).')]));
+      form.appendChild(drpFields);
+      function applyDrp() {
+        drpFields.style.display = drpFlag.checked ? '' : 'none';
+        priceInput.required = drpFlag.checked;
+      }
+      drpFlag.addEventListener('change', applyDrp);
+      applyDrp();
+    }
+
+    function applyMode() {
+      const adv = advFlag.checked;
+      simpleSection.style.display = adv ? 'none' : '';
+      amountInput.required = !adv;
+      INCOME_ADVANCED_FIELDS.forEach(function (n) {
+        const inp = form.querySelector('[name="' + n + '"]');
+        if (inp) inp.closest('.field').style.display = adv ? '' : 'none';
+      });
+      updateProductHint();
+    }
+    advFlag.addEventListener('change', applyMode);
+    applyMode();
+
+    return {
+      // Simple mode maps the amount through the franking selector onto the
+      // component fields; advanced mode submits the fields as entered.
+      transformBody: function (body) {
+        if (advFlag.checked) return;
+        const amount = amountInput.value.trim();
+        if (!decParts(amount)) throw new Error('Amount must be a decimal number.');
+        const mode = frankSel.value;
+        body.franked_amount = mode === 'FullyFranked' ? amount : '0';
+        body.unfranked_amount = mode === 'FullyFranked' ? '0' : amount;
+        body.franking_credits = mode === 'FullyFranked' ? frankingCreditFor(amount) : '0';
+        body.trust_income = mode === 'Trust';
+      },
+      afterSave: async function (id) {
+        if (!drpFlag || !drpFlag.checked) return null;
+        const body = { reinvestment_price: priceInput.value.trim() };
+        if (drpDateInput.value) body.date = drpDateInput.value;
+        if (drpFxInput.value.trim() !== '') body.fx_rate = drpFxInput.value.trim();
+        try {
+          const trade = await api('POST', '/income/' + id + '/reinvest', body);
+          return 'Saved and reinvested into trade #' + (trade ? trade.id : '?') + '.';
+        } catch (e) {
+          toast('Income saved, but the reinvestment failed — ' + e.message + '. Retry from the row’s Reinvest action.', true);
+          return '';
+        }
+      },
+    };
+  }
+
   // ---- allocation editor --------------------------------------------------
   // Shared parcel-allocation row builder used by the Sell form, the Transfer
   // form, and the buy-back Participate action: a list of (purchase-parcel
@@ -985,8 +1199,12 @@
     }
 
     // Entity-specific form behaviour beyond what the field configs express
-    // (e.g. the trades form's GST-inclusive brokerage toggle).
-    if (entity.wireForm) entity.wireForm(form, existing);
+    // (e.g. the trades form's GST-inclusive brokerage toggle). A hook may
+    // return submit-time extensions: transformBody(body) maps UI-only
+    // controls onto the entity body before the PUT, and afterSave(idPath)
+    // chains a follow-up call, returning the success toast text (null = the
+    // default 'Saved.', '' = it already toasted, e.g. its own failure).
+    const wired = entity.wireForm ? entity.wireForm(form, existing) : null;
 
     const actions = el('div', { class: 'form-actions' });
     actions.appendChild(el('button', { type: 'submit', class: 'primary' }, editing ? 'Save' : 'Create'));
@@ -1012,8 +1230,10 @@
           // as null, exactly as its blank input used to.
           body[f.name] = form.querySelector('[name="' + f.name + '"]') ? readFieldValue(f, form) : null;
         });
+        if (wired && wired.transformBody) wired.transformBody(body);
         await api('PUT', entity.api + '/' + keyVals.join('/'), body);
-        toast('Saved.');
+        const msg = wired && wired.afterSave ? await wired.afterSave(keyVals.join('/')) : null;
+        if (msg !== '') toast(msg || 'Saved.');
         location.hash = '#/e/' + entity.slug;
       } catch (e) {
         toast(e.message, true);

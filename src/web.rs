@@ -268,6 +268,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn income_simple_entry_ui_present() {
+        let js = app_js_body().await;
+        // The income form opens simple-first: a payment amount + franking
+        // selector mapped onto the component body at submit, with the full
+        // tax-component field set behind an advanced toggle.
+        assert!(js.contains("wireIncomeEntry"));
+        assert!(js.contains("simple_amount"));
+        assert!(js.contains("simple_franking"));
+        assert!(js.contains("Fully franked (30%)"));
+        assert!(js.contains("Trust distribution"));
+        assert!(js.contains("Show advanced fields"));
+        assert!(js.contains("INCOME_ADVANCED_FIELDS"));
+        // Fully franked auto-computes the credit at amount × 30/70 with exact
+        // BigInt decimal arithmetic (money — no float drift).
+        assert!(js.contains("frankingCreditFor"));
+        assert!(js.contains("* 3n"));
+        // The per-share cross-check pair ships with a live computed-product
+        // hint, driving the server-side 422 validation.
+        assert!(js.contains("amount_per_security"));
+        assert!(js.contains("securities_held"));
+        assert!(js.contains("mulToCents"));
+        // The DRP tick chains the existing reinvest POST after the save and
+        // keeps the income on a reinvest failure.
+        assert!(js.contains("Reinvested under DRP"));
+        assert!(js.contains("'/income/' + id + '/reinvest'"));
+        assert!(js.contains("reinvestment_price"));
+        assert!(js.contains("Retry from the row’s Reinvest action"));
+        // The generic form honours the wireForm hook's submit extensions.
+        assert!(js.contains("transformBody"));
+        assert!(js.contains("afterSave"));
+    }
+
+    #[tokio::test]
     async fn amma_statement_ui_present() {
         let js = app_js_body().await;
         assert!(js.contains("/amma_statements"));

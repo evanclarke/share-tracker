@@ -611,6 +611,8 @@ mod tests {
                 currency: "AUD".to_string(),
                 buyback_trade_id: None,
                 holding_account_id: 1,
+                amount_per_security: None,
+                securities_held: None,
             },
         )
         .await

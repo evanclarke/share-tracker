@@ -357,6 +357,8 @@ mod tests {
                 reinvestment_trade_id: None,
                 currency: "AUD".to_string(),
                 buyback_trade_id: None,
+                amount_per_security: None,
+                securities_held: None,
             },
         )
         .await
@@ -433,6 +435,8 @@ mod tests {
                 reinvestment_trade_id: None,
                 currency: "AUD".to_string(),
                 buyback_trade_id: None,
+                amount_per_security: None,
+                securities_held: None,
             },
         )
         .await
