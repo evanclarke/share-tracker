@@ -1,6 +1,8 @@
 //! Read-only reports over the entity tables: AUD-denominated aggregations
 //! (portfolio, realised/unrealised gains, tax summary) plus reference-data
-//! validation (exchange MIC validation, settlement-holiday coverage). No writes.
+//! validation (exchange MIC validation, settlement-holiday coverage). The one
+//! exception to "no writes" is `snapshot`, which persists the price-dependent
+//! reports' daily results to `report_snapshots`.
 use axum::Router;
 use sqlx::SqlitePool;
 
@@ -21,6 +23,7 @@ pub mod performance;
 pub mod portfolio;
 pub mod realised_gains;
 pub mod settlement_coverage;
+pub mod snapshot;
 pub mod tax_summary;
 pub mod unrealised_gains;
 
@@ -35,4 +38,5 @@ pub fn router() -> Router<SqlitePool> {
         .merge(tax_summary::router())
         .merge(mic_validation::router())
         .merge(settlement_coverage::router())
+        .merge(snapshot::router())
 }

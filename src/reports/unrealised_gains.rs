@@ -38,6 +38,10 @@ pub fn router() -> Router<SqlitePool> {
     Router::new().route("/portfolio/unrealised-gains", post(unrealised_gains_handler))
 }
 
+/// The report is the position *as at* `as_of_date`: trades, sales, corporate
+/// actions, and AMIT adjustments (by their statement's year end) dated after it
+/// are excluded, so a snapshot generated for a past day reflects what was held
+/// then even when later facts have since been recorded.
 pub async fn db_unrealised_gains(
     pool: &SqlitePool,
     as_of_date: NaiveDate,
@@ -45,8 +49,9 @@ pub async fn db_unrealised_gains(
     let trade_rows = sqlx::query(
         "SELECT id, listing_id, holding_account_id, date, quantity, average_price, brokerage, \
          gst_on_brokerage, currency, fx_rate, deemed_acquisition_date \
-         FROM trades WHERE trade_type IN ('Buy', 'DRP')",
+         FROM trades WHERE trade_type IN ('Buy', 'DRP') AND date <= ?",
     )
+    .bind(as_of_date)
     .fetch_all(pool)
     .await?;
 
@@ -58,8 +63,10 @@ pub async fn db_unrealised_gains(
     // quantity (in sale-date units) can be re-based across splits
     let alloc_rows = sqlx::query(
         "SELECT pa.purchase_trade_id, pa.quantity_allocated, s.date AS sale_date \
-         FROM parcel_allocations pa JOIN trades s ON s.id = pa.sale_trade_id",
+         FROM parcel_allocations pa JOIN trades s ON s.id = pa.sale_trade_id \
+         WHERE s.date <= ?",
     )
+    .bind(as_of_date)
     .fetch_all(pool)
     .await?;
 
@@ -72,7 +79,9 @@ pub async fn db_unrealised_gains(
         ));
     }
 
-    let cba_reduction = crate::entities::amit_adjustment::db_cost_base_reductions(pool).await?;
+    let cba_reduction =
+        crate::entities::amit_adjustment::db_cost_base_reductions_up_to(pool, Some(as_of_date))
+            .await?;
     let roc_events =
         crate::entities::corporate_action::db_return_of_capital_events(pool).await?;
     // share splits/consolidations per listing (quantity re-basing)
@@ -126,7 +135,7 @@ pub async fn db_unrealised_gains(
             splits,
             &currency,
             trade_date,
-            None,
+            Some(as_of_date),
         )?;
         let remaining_cost = if qty > Decimal::ZERO {
             (net_cost * remaining / qty - roc_per_unit * remaining).max(Decimal::ZERO)
@@ -667,6 +676,35 @@ mod tests {
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let gains: Vec<UnrealisedGain> = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(gains[0].cgt_discount_eligible_quantity, Decimal::from(100));
+    }
+
+    /// The report is the position *as at* `as_of_date`: a parcel bought and a
+    /// sale recorded with later dates are excluded, so a past-date snapshot
+    /// regenerated after new facts were entered still shows that day's actual
+    /// position.
+    #[tokio::test]
+    async fn db_facts_dated_after_as_of_are_excluded() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "VAS").await;
+        insert_buy(&pool, 1, 1, NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(), Decimal::from(100), Decimal::from(10)).await;
+        insert_buy(&pool, 2, 1, NaiveDate::from_ymd_opt(2025, 1, 10).unwrap(), Decimal::from(50), Decimal::from(12)).await;
+        // Sell 40 of the first parcel on 2025-06-01 (the helper's sale date).
+        insert_sell(&pool, 3, 1, Decimal::from(40)).await;
+        allocate(&pool, 1, 3, 1, Decimal::from(40)).await;
+
+        // As at mid-2024 neither the second parcel nor the sale exists.
+        let gains = db_unrealised_gains(&pool, NaiveDate::from_ymd_opt(2024, 6, 1).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(gains.len(), 1);
+        assert_eq!(gains[0].quantity, Decimal::from(100));
+        assert_eq!(gains[0].total_cost_base, "1010.945".parse::<Decimal>().unwrap());
+
+        // As at mid-2025 both later facts count: 100 + 50 − 40 = 110.
+        let gains = db_unrealised_gains(&pool, NaiveDate::from_ymd_opt(2025, 7, 1).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(gains[0].quantity, Decimal::from(110));
     }
 
     /// A scrip-for-scrip replacement parcel's discount clock runs from its

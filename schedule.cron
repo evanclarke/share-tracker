@@ -14,3 +14,10 @@
 # (06:00-08:00 Sydney) and the crypto UTC-midnight cut-off (10:00-11:00 Sydney).
 30 17 * * 1-5  price-import # weekdays, after the ASX close
 30 11 * * *    price-import # daily, after the NYSE close + crypto UTC cut-off
+
+# Report snapshots, daily after the 11:30 price import: stores the
+# price-dependent reports for the latest date every held listing can be
+# valued at with final prices (typically yesterday once the prior NYSE close
+# and crypto UTC cut-off are in). Skips a date already stored fresh;
+# regenerates it when flagged stale.
+0 12 * * *     report-snapshot

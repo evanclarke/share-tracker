@@ -31,7 +31,8 @@ A personal Australian share portfolio tracker with a REST JSON API. Records trad
 - **MIC registry import** — the ISO 10383 Market Identifier Code list imported monthly (and via a manual trigger), used by a non-blocking report to flag curated exchanges whose MIC is unknown or expired
 - **Daily closing prices** — every held listing's closing price is collected after its exchange's close (crypto at the UTC-midnight cut-off) and stored as history in the listing's quote currency, via a pluggable fetcher backed by Yahoo Finance; failed fetches are stored as errored rows and re-runnable, and history is backfillable over a date range on demand (see [Closing prices](docs/API.md#closing-prices))
 - **Settlement-holiday coverage alerting** — exchange holiday calendars are seeded for a finite range of years; auto-calculating a settlement date outside that range logs a warning, and a non-blocking report flags every trade whose settlement window falls outside its exchange's seeded coverage (see [Settlement holiday coverage](docs/API.md#settlement-holiday-coverage))
-- **Web UI** — a built-in browser frontend (no build step, served from the same binary) with CRUD screens for every entity, atomic Sell + parcel-allocation entry, holding-account transfers, DRP reinvestment, a closing-price history screen with re-fetch and backfill actions, and a view for each report; see [Web frontend](docs/API.md#web-frontend)
+- **Daily report snapshots** — once the day's last close is in, the price-dependent reports (portfolio overview, unrealised gains, performance) are run against the stored closing prices (AUD-converted) and persisted as a daily series, viewable and graphable over time; recording a back-dated fact marks the affected snapshots stale — atomically, via database triggers — until regenerated on demand, and past dates whose prices have been backfilled are generable on demand too (see [Report snapshots](docs/API.md#report-snapshots))
+- **Web UI** — a built-in browser frontend (no build step, served from the same binary) with CRUD screens for every entity, atomic Sell + parcel-allocation entry, holding-account transfers, DRP reinvestment, a closing-price history screen with re-fetch and backfill actions, a snapshots screen with an inline-SVG time-series graph and generate/regenerate actions, and a view for each report; see [Web frontend](docs/API.md#web-frontend)
 
 ## Building and running
 
@@ -53,7 +54,7 @@ The database is created automatically on first run. Migrations are applied in or
 
 ### Scheduled maintenance
 
-Recurring maintenance jobs — the database backup, the RBA FX rate import, the ISO MIC registry import, the currencies import, and the closing-price collection — are scheduled from a cron file rather than hard-coded intervals. Each line is a 5-field Vixie cron expression (`min hour dom mon dow`) followed by a job name; `#` starts a comment. The built-in default is embedded in the binary (`schedule.cron`); pass `--schedule <path>` to use your own file instead:
+Recurring maintenance jobs — the database backup, the RBA FX rate import, the ISO MIC registry import, the currencies import, the closing-price collection, and the daily report snapshot — are scheduled from a cron file rather than hard-coded intervals. Each line is a 5-field Vixie cron expression (`min hour dom mon dow`) followed by a job name; `#` starts a comment. The built-in default is embedded in the binary (`schedule.cron`); pass `--schedule <path>` to use your own file instead:
 
 ```
 0 0 * * 0   backup          # weekly, Sunday 00:00
@@ -62,6 +63,7 @@ Recurring maintenance jobs — the database backup, the RBA FX rate import, the 
 0 4 1 * *   currency-import # monthly, 1st at 04:00 (ISO 4217 + ISO 24165 / DTIF)
 30 17 * * 1-5  price-import # weekdays, after the ASX close
 30 11 * * *    price-import # daily, after the NYSE close + crypto UTC cut-off
+0 12 * * *     report-snapshot # daily, once the day's last close has been imported
 ```
 
 A schedule line naming an unknown job is rejected at startup; a registered job with no schedule line is allowed but logged as a `WARN` (it will then only run via its endpoint). Jobs run only at their scheduled times (not at startup); after each run (and at startup) the next scheduled run is logged at INFO. The backup writes `<stem>-YYYY-MM-DD-HHMMSS.db` beside the main database file (the date-time component keeps each weekly run distinct; skipped only if a file with that exact name already exists). Any job can be run on demand with `POST /jobs/{name}` (see the [HTTP API](docs/API.md#jobs)).

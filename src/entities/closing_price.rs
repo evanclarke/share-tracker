@@ -135,6 +135,21 @@ impl Market {
             && !self.holidays.contains(&date)
     }
 
+    /// The market's nearest trading day at or before `date` (the day whose
+    /// closing price values a holding on `date`). `None` only if no trading
+    /// day exists in the year before `date` (a calendar misconfiguration,
+    /// e.g. every day seeded as a holiday).
+    pub fn latest_trading_day_on_or_before(&self, date: NaiveDate) -> Option<NaiveDate> {
+        let mut candidate = date;
+        for _ in 0..366 {
+            if self.is_trading_day(candidate) {
+                return Some(candidate);
+            }
+            candidate -= Duration::days(1);
+        }
+        None
+    }
+
     /// The most recent trading day whose closing price is final at `now`.
     ///
     /// Exchange-listed: the current date in the exchange's timezone if its
@@ -148,7 +163,7 @@ impl Market {
         &self,
         now: DateTime<Utc>,
     ) -> Result<Option<NaiveDate>, String> {
-        let mut candidate = match &self.exchange {
+        let candidate = match &self.exchange {
             None => now.date_naive() - Duration::days(1),
             Some(ex) => {
                 let close = NaiveTime::parse_from_str(&ex.close_time, "%H:%M").map_err(|_| {
@@ -162,13 +177,7 @@ impl Market {
                 }
             }
         };
-        for _ in 0..366 {
-            if self.is_trading_day(candidate) {
-                return Ok(Some(candidate));
-            }
-            candidate -= Duration::days(1);
-        }
-        Ok(None)
+        Ok(self.latest_trading_day_on_or_before(candidate))
     }
 }
 
@@ -401,11 +410,21 @@ async fn db_store(pool: &SqlitePool, row: &ClosingPrice) -> Result<(), sqlx::Err
 /// Listings with a non-zero holding: total Buy/DRP quantity minus the units
 /// consumed by parcel allocations (in as-acquired units — splits only rescale,
 /// so they can't change whether the result is positive). Decimal arithmetic in
-/// Rust, never float SUM in SQL.
-pub async fn db_held_listing_ids(pool: &SqlitePool) -> Result<Vec<i64>, sqlx::Error> {
+/// Rust, never float SUM in SQL. With `as_of` the holding is taken as at that
+/// date — trades and sales dated after it don't count (snapshot generation for
+/// a past date values what was held then, not what is held now).
+pub async fn db_held_listing_ids(
+    pool: &SqlitePool,
+    as_of: Option<NaiveDate>,
+) -> Result<Vec<i64>, sqlx::Error> {
+    // ISO dates compare as strings, so a far-future literal is "no cutoff"
+    // (NaiveDate::MAX would render with a leading '+' and sort before digits).
+    let cutoff = as_of.unwrap_or_else(|| NaiveDate::from_ymd_opt(9999, 12, 31).unwrap());
     let buys = sqlx::query(
-        "SELECT id, listing_id, quantity FROM trades WHERE trade_type IN ('Buy', 'DRP')",
+        "SELECT id, listing_id, quantity FROM trades \
+         WHERE trade_type IN ('Buy', 'DRP') AND date <= ?",
     )
+    .bind(cutoff)
     .fetch_all(pool)
     .await?;
     let mut listing_of: HashMap<i64, i64> = HashMap::new();
@@ -418,10 +437,14 @@ pub async fn db_held_listing_ids(pool: &SqlitePool) -> Result<Vec<i64>, sqlx::Er
         *held.entry(listing_id).or_default() += qty;
     }
 
-    let allocs =
-        sqlx::query("SELECT purchase_trade_id, quantity_allocated FROM parcel_allocations")
-            .fetch_all(pool)
-            .await?;
+    let allocs = sqlx::query(
+        "SELECT pa.purchase_trade_id, pa.quantity_allocated \
+         FROM parcel_allocations pa JOIN trades s ON s.id = pa.sale_trade_id \
+         WHERE s.date <= ?",
+    )
+    .bind(cutoff)
+    .fetch_all(pool)
+    .await?;
     for row in &allocs {
         let trade_id: i64 = row.try_get("purchase_trade_id")?;
         let qty = parse_dec("quantity_allocated", row.try_get("quantity_allocated")?)?;
@@ -513,7 +536,7 @@ pub async fn run_collection(
     fetcher: &dyn PriceFetcher,
     now: DateTime<Utc>,
 ) -> Result<(), String> {
-    let ids = db_held_listing_ids(pool).await.map_err(|e| e.to_string())?;
+    let ids = db_held_listing_ids(pool, None).await.map_err(|e| e.to_string())?;
 
     let (mut stored, mut skipped) = (0, 0);
     let mut failures: Vec<String> = Vec::new();
@@ -998,7 +1021,11 @@ mod tests {
         insert_buy(&pool, 2, 2, "50").await;
         sell_everything(&pool, 3, 2, 2, "50").await;
 
-        assert_eq!(db_held_listing_ids(&pool).await.unwrap(), vec![1]);
+        assert_eq!(db_held_listing_ids(&pool, None).await.unwrap(), vec![1]);
+        // As at a date before the sale, the sold listing still counts; before
+        // any buys, nothing does.
+        assert_eq!(db_held_listing_ids(&pool, Some(ymd(2024, 5, 31))).await.unwrap(), vec![1, 2]);
+        assert!(db_held_listing_ids(&pool, Some(ymd(2024, 1, 1))).await.unwrap().is_empty());
     }
 
     // --- scheduled collection ---

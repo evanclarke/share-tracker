@@ -186,6 +186,17 @@ pub fn registry(pool: SqlitePool, db_path: String) -> JobRegistry {
         }),
     );
 
+    let snapshot_pool = pool.clone();
+    jobs.insert(
+        "report-snapshot".to_string(),
+        Arc::new(move || {
+            let pool = snapshot_pool.clone();
+            Box::pin(async move {
+                crate::reports::snapshot::run_snapshot_job(&pool, chrono::Utc::now()).await
+            })
+        }),
+    );
+
     let fx_pool = pool.clone();
     jobs.insert(
         "rba-fx-import".to_string(),

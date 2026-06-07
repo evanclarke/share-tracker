@@ -149,3 +149,19 @@ input[type=checkbox] { width: auto; }
   z-index: 10;
 }
 #toast.error { background: var(--danger); }
+
+/* Snapshot time-series chart (built as inline SVG, no chart library). */
+.series-chart { width: 100%; max-width: 900px; height: auto; }
+.series-chart .grid { stroke: #e3e7eb; stroke-width: 1; }
+.series-chart .axis { fill: var(--muted); font-size: 11px; }
+.series-chart polyline.line-mv { stroke: var(--accent); stroke-width: 2; }
+.series-chart polyline.line-ug { stroke: var(--ok); stroke-width: 2; }
+.series-chart circle.line-mv { fill: var(--accent); }
+.series-chart circle.line-ug { fill: var(--ok); }
+.series-chart circle.stale { fill: #ffffff; stroke-width: 2; }
+.series-chart circle.line-mv.stale { stroke: var(--accent); }
+.series-chart circle.line-ug.stale { stroke: var(--ok); }
+.legend-mv { color: var(--accent); }
+.legend-ug { color: var(--ok); }
+.badge.stale { background: #fdf3e0; color: var(--warn); }
+.hint.warn { color: var(--warn); }

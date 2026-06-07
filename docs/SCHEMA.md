@@ -207,6 +207,13 @@ closing_prices               Daily closing-price history per listing (collected 
 ├── status      TEXT             ok | error (CHECK-enforced enum)
 └── error       TEXT (nullable)  Failure detail; NULL exactly when status = ok (CHECK). A failed fetch is stored, never silently missing, and a re-run replaces it
 
+report_snapshots             Stored daily results of the price-dependent reports (written by the report-snapshot job or on demand; see API.md Report snapshots)
+├── report        TEXT             portfolio_overview | unrealised_gains | performance (CHECK-enforced enum); part of PK
+├── snapshot_date TEXT             'YYYY-MM-DD'; part of PK — one stored result per (report, date)
+├── generated_at  TEXT             RFC 3339 UTC timestamp of the run that produced the stored result
+├── stale         INTEGER          0 | 1 (CHECK): 1 = a back-dated fact was recorded after generation, set by the staleness triggers (below) in the same transaction as the fact; cleared by regeneration
+└── rows_json     TEXT             The report's response rows as JSON; money values inside are Decimal strings (the API's serialisation), kept in TEXT — never a REAL/float
+
 job_runs                     Last run of each scheduled/on-demand maintenance job (one row per job, upserted each run)
 ├── name        TEXT PK          Registry job name (e.g. backup, rba-fx-import)
 ├── started_at  TEXT             RFC 3339 timestamp the run began
@@ -241,11 +248,15 @@ exchanges ──< listings ──< trades >────────────�
                        trades (buy-back Sell) ──< income (buyback_trade_id)
                        trades, income, amma_statements ──< attachments (exactly one owner; ON DELETE CASCADE)
                        listings ──< closing_prices (one row per listing per trading day)
+                       trades, parcel_allocations, income, amma_statements, amit_adjustments,
+                       corporate_actions, closing_prices ──> report_snapshots.stale (staleness triggers)
 
 currencies ──< exchanges, listings, trades (currency + brokerage_currency), income, amma_statements, corporate_actions
 ```
 
 Each `attachments` row belongs to exactly one activity via one of three nullable foreign keys (`trade_id` / `income_id` / `amma_statement_id`), with a `CHECK` enforcing that exactly one is set — a real foreign key keeps referential integrity to the owning row, and `ON DELETE CASCADE` removes an activity's attachments when it is deleted. File contents live in the `content` BLOB so the weekly DB backup captures the documents with no separate file store.
+
+`report_snapshots` has no foreign keys of its own (`report` is an in-code enum, the rows are a JSON payload), but every dated fact table writes to it through **staleness triggers** (migration 0019): inserting, updating, or deleting a row in `trades`, `parcel_allocations` (dated by its sale trade), `income` (by `date_paid`), `amma_statements` / `amit_adjustments` (by the statement's `tax_year_end_date`), or `corporate_actions` sets `stale = 1` on every snapshot dated on or after the fact — an update from the earlier of the old and new dates — atomically with the fact write, so no write path (entity CRUD, Sells, transfers, corporate-action operations, DRP reinvestment) can bypass the invalidation. Revising a stored ok closing price (or erroring it out) likewise stales snapshots from its date, since they were valued at it.
 
 `rba_fx_rates` is standalone reference data (no foreign keys); it is looked up by `(currency, month)`. `job_runs` is likewise standalone: it is keyed by the in-code job name (not a foreign key), and each scheduled or manual run upserts the job's row so only its last run is kept. `cgt_settings` is also standalone: a singleton row (`CHECK (id = 1)`) holding the entered opening carried-forward capital loss consumed by the [net capital gain report](API.md#net-capital-gain).
 

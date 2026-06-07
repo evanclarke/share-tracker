@@ -604,7 +604,7 @@ mod tests {
         // failed buy-back leaves no trace): the full 10,000 units at the
         // original cost base, and the parcel's capacity is freed so a fresh
         // participation for the same units succeeds.
-        let holdings = crate::reports::portfolio::db_holdings(&pool).await.unwrap();
+        let holdings = crate::reports::portfolio::db_holdings(&pool, None).await.unwrap();
         assert_eq!(holdings.len(), 1);
         assert_eq!(holdings[0].quantity, dec("10000"));
         assert_eq!(holdings[0].total_cost_base, dec("60000.00"));

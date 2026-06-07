@@ -163,11 +163,28 @@ pub async fn db_cost_base_reductions<'e, E>(
 where
     E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
 {
+    db_cost_base_reductions_up_to(executor, None).await
+}
+
+/// [`db_cost_base_reductions`] bounded to statements for years ending on or
+/// before `up_to`: an adjustment arises at its statement's year end, so a
+/// report valued as at an earlier date (a snapshot of a past day) must not
+/// include it. `None` = no bound.
+pub async fn db_cost_base_reductions_up_to<'e, E>(
+    executor: E,
+    up_to: Option<chrono::NaiveDate>,
+) -> Result<HashMap<i64, Decimal>, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
+    let cutoff = up_to.unwrap_or_else(|| chrono::NaiveDate::from_ymd_opt(9999, 12, 31).unwrap());
     let rows = sqlx::query(
         "SELECT aa.trade_id, aa.quantity, a.cost_base_adjustment \
          FROM amit_adjustments aa \
-         JOIN amma_statements a ON a.id = aa.amma_statement_id",
+         JOIN amma_statements a ON a.id = aa.amma_statement_id \
+         WHERE a.tax_year_end_date <= ?",
     )
+    .bind(cutoff)
     .fetch_all(executor)
     .await?;
 

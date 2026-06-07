@@ -46,12 +46,24 @@ pub fn router() -> Router<SqlitePool> {
 /// (TD 2000/10 — only the per-unit figure scales).
 /// Cost base is pro-rated to remaining units and reduced by any AMIT adjustments
 /// and return-of-capital payments (CGT event G1) received since acquisition.
-pub async fn db_holdings(pool: &SqlitePool) -> Result<Vec<HoldingOverview>, sqlx::Error> {
+///
+/// With `as_of` the holdings are taken as at that date: trades, sales,
+/// corporate actions, and AMIT adjustments (by their statement's year end)
+/// dated after it are excluded, and quantities are in that date's unit basis —
+/// snapshot generation values a past day's actual position. `None` is the live
+/// view (every recorded fact, current units).
+pub async fn db_holdings(
+    pool: &SqlitePool,
+    as_of: Option<NaiveDate>,
+) -> Result<Vec<HoldingOverview>, sqlx::Error> {
+    // ISO dates compare as strings, so a far-future literal is "no cutoff".
+    let cutoff = as_of.unwrap_or_else(|| NaiveDate::from_ymd_opt(9999, 12, 31).unwrap());
     let trade_rows = sqlx::query(
         "SELECT id, listing_id, holding_account_id, date, quantity, average_price, brokerage, \
          gst_on_brokerage, currency, fx_rate, deemed_acquisition_date \
-         FROM trades WHERE trade_type IN ('Buy', 'DRP')",
+         FROM trades WHERE trade_type IN ('Buy', 'DRP') AND date <= ?",
     )
+    .bind(cutoff)
     .fetch_all(pool)
     .await?;
 
@@ -63,8 +75,10 @@ pub async fn db_holdings(pool: &SqlitePool) -> Result<Vec<HoldingOverview>, sqlx
     // quantity (in sale-date units) can be re-based across splits
     let alloc_rows = sqlx::query(
         "SELECT pa.purchase_trade_id, pa.quantity_allocated, s.date AS sale_date \
-         FROM parcel_allocations pa JOIN trades s ON s.id = pa.sale_trade_id",
+         FROM parcel_allocations pa JOIN trades s ON s.id = pa.sale_trade_id \
+         WHERE s.date <= ?",
     )
+    .bind(cutoff)
     .fetch_all(pool)
     .await?;
 
@@ -77,8 +91,10 @@ pub async fn db_holdings(pool: &SqlitePool) -> Result<Vec<HoldingOverview>, sqlx
         ));
     }
 
-    // total AMIT cost base reduction per purchase parcel
-    let cba_reduction = crate::entities::amit_adjustment::db_cost_base_reductions(pool).await?;
+    // total AMIT cost base reduction per purchase parcel (statements for
+    // years ending after `as_of` excluded)
+    let cba_reduction =
+        crate::entities::amit_adjustment::db_cost_base_reductions_up_to(pool, as_of).await?;
     // return-of-capital payments (CGT event G1) per listing
     let roc_events =
         crate::entities::corporate_action::db_return_of_capital_events(pool).await?;
@@ -128,7 +144,7 @@ pub async fn db_holdings(pool: &SqlitePool) -> Result<Vec<HoldingOverview>, sqlx
             splits,
             &currency,
             trade_date,
-            None,
+            as_of,
         )?;
         let remaining_cost = if qty > Decimal::ZERO {
             (net_cost * remaining / qty - roc_per_unit * remaining).max(Decimal::ZERO)
@@ -145,10 +161,11 @@ pub async fn db_holdings(pool: &SqlitePool) -> Result<Vec<HoldingOverview>, sqlx
             crate::infra::fx::to_aud(pool, remaining_cost, &currency, acquired, Some(fx_rate))
                 .await?;
 
-        // The holding's quantity is reported in current units — after every
-        // recorded split/consolidation — so market value uses today's price.
+        // The holding's quantity is reported in the unit basis of `as_of`
+        // (live view: current units, after every recorded split) so market
+        // value lines up with a price as of that date.
         let remaining_now = crate::entities::corporate_action::split_adjusted_quantity(
-            remaining, splits, trade_date, None,
+            remaining, splits, trade_date, as_of,
         );
         *holding_qty.entry((listing_id, account_id)).or_insert(Decimal::ZERO) += remaining_now;
         *holding_cost_base.entry((listing_id, account_id)).or_insert(Decimal::ZERO) +=
@@ -185,7 +202,7 @@ async fn overview(
     body: Option<Json<OverviewRequest>>,
 ) -> Result<Json<Vec<HoldingOverview>>, StatusCode> {
     let prices = body.map(|Json(req)| req.prices).unwrap_or_default();
-    let mut holdings = db_holdings(&pool)
+    let mut holdings = db_holdings(&pool, None)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -344,7 +361,7 @@ mod tests {
     #[tokio::test]
     async fn db_no_trades_returns_empty() {
         let pool = test_pool().await;
-        let holdings = db_holdings(&pool).await.unwrap();
+        let holdings = db_holdings(&pool, None).await.unwrap();
         assert!(holdings.is_empty());
     }
 
@@ -365,7 +382,7 @@ mod tests {
         .unwrap();
 
         // The malformed value must surface as an error rather than being read as zero.
-        assert!(db_holdings(&pool).await.is_err());
+        assert!(db_holdings(&pool, None).await.is_err());
     }
 
     #[tokio::test]
@@ -374,7 +391,7 @@ mod tests {
         insert_listing(&pool, 1, "VAS").await;
         insert_buy(&pool, 1, 1, Decimal::from(100), Decimal::from(10)).await;
 
-        let holdings = db_holdings(&pool).await.unwrap();
+        let holdings = db_holdings(&pool, None).await.unwrap();
         assert_eq!(holdings.len(), 1);
         let h = &holdings[0];
         assert_eq!(h.listing_id, 1);
@@ -392,7 +409,7 @@ mod tests {
         insert_sell(&pool, 2, 1, Decimal::from(40)).await;
         allocate(&pool, 1, 2, 1, Decimal::from(40)).await;
 
-        let holdings = db_holdings(&pool).await.unwrap();
+        let holdings = db_holdings(&pool, None).await.unwrap();
         assert_eq!(holdings.len(), 1);
         let h = &holdings[0];
         assert_eq!(h.quantity, Decimal::from(60));
@@ -409,7 +426,7 @@ mod tests {
         insert_sell(&pool, 2, 1, Decimal::from(100)).await;
         allocate(&pool, 1, 2, 1, Decimal::from(100)).await;
 
-        let holdings = db_holdings(&pool).await.unwrap();
+        let holdings = db_holdings(&pool, None).await.unwrap();
         assert!(holdings.is_empty());
     }
 
@@ -431,7 +448,7 @@ mod tests {
         .await
         .unwrap();
 
-        let holdings = db_holdings(&pool).await.unwrap();
+        let holdings = db_holdings(&pool, None).await.unwrap();
         assert_eq!(holdings.len(), 1);
         let h = &holdings[0];
         // initial = 1010.945, AMIT = 100 * 0.05 = 5.00, net = 1005.945
@@ -462,7 +479,7 @@ mod tests {
         .await
         .unwrap();
 
-        let holdings = db_holdings(&pool).await.unwrap();
+        let holdings = db_holdings(&pool, None).await.unwrap();
         assert_eq!(holdings.len(), 1);
         assert_eq!(holdings[0].total_cost_base, Decimal::ZERO);
         assert_eq!(holdings[0].avg_cost_base_per_unit, Decimal::ZERO);
@@ -476,7 +493,7 @@ mod tests {
         insert_buy(&pool, 1, 1, Decimal::from(50), Decimal::from(10)).await;
         insert_buy(&pool, 2, 2, Decimal::from(200), Decimal::from(5)).await;
 
-        let holdings = db_holdings(&pool).await.unwrap();
+        let holdings = db_holdings(&pool, None).await.unwrap();
         assert_eq!(holdings.len(), 2);
         assert_eq!(holdings[0].listing_id, 1);
         assert_eq!(holdings[0].quantity, Decimal::from(50));
@@ -492,7 +509,7 @@ mod tests {
         insert_buy(&pool, 1, 1, Decimal::from(100), Decimal::from(10)).await;
         insert_buy(&pool, 2, 1, Decimal::from(50), Decimal::from(12)).await;
 
-        let holdings = db_holdings(&pool).await.unwrap();
+        let holdings = db_holdings(&pool, None).await.unwrap();
         assert_eq!(holdings.len(), 1);
         let h = &holdings[0];
         assert_eq!(h.quantity, Decimal::from(150));
@@ -555,7 +572,7 @@ mod tests {
         // 2-for-1 split after acquisition.
         apply_split(&pool, 1, 1, NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(), "2", "1").await;
 
-        let holdings = db_holdings(&pool).await.unwrap();
+        let holdings = db_holdings(&pool, None).await.unwrap();
         assert_eq!(holdings.len(), 1);
         let h = &holdings[0];
         assert_eq!(h.quantity, Decimal::from(200));
@@ -589,7 +606,7 @@ mod tests {
         .await
         .unwrap();
 
-        let holdings = db_holdings(&pool).await.unwrap();
+        let holdings = db_holdings(&pool, None).await.unwrap();
         assert_eq!(holdings.len(), 1);
         let h = &holdings[0];
         assert_eq!(h.quantity, Decimal::from(110));
@@ -610,7 +627,7 @@ mod tests {
         // 1-for-10 consolidation.
         apply_split(&pool, 1, 1, NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(), "1", "10").await;
 
-        let holdings = db_holdings(&pool).await.unwrap();
+        let holdings = db_holdings(&pool, None).await.unwrap();
         assert_eq!(holdings[0].quantity, Decimal::from(10));
         assert_eq!(holdings[0].total_cost_base, "1010.945".parse::<Decimal>().unwrap());
     }
@@ -627,7 +644,7 @@ mod tests {
         insert_sell(&pool, 2, 1, Decimal::from(80)).await;
         allocate(&pool, 1, 2, 1, Decimal::from(80)).await;
 
-        let holdings = db_holdings(&pool).await.unwrap();
+        let holdings = db_holdings(&pool, None).await.unwrap();
         assert_eq!(holdings.len(), 1);
         // 200 post-split − 80 sold = 120 held now.
         assert_eq!(holdings[0].quantity, Decimal::from(120));
@@ -644,7 +661,7 @@ mod tests {
         apply_split(&pool, 1, 1, NaiveDate::from_ymd_opt(2023, 6, 1).unwrap(), "2", "1").await;
         insert_buy(&pool, 1, 1, Decimal::from(100), Decimal::from(10)).await; // 2024-01-01
 
-        let holdings = db_holdings(&pool).await.unwrap();
+        let holdings = db_holdings(&pool, None).await.unwrap();
         assert_eq!(holdings[0].quantity, Decimal::from(100));
     }
 
@@ -659,7 +676,7 @@ mod tests {
         // 25c/unit on the 200 post-split units → 50.00 off the cost base.
         apply_roc(&pool, 2, 1, NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(), "0.25").await;
 
-        let holdings = db_holdings(&pool).await.unwrap();
+        let holdings = db_holdings(&pool, None).await.unwrap();
         // 1010.945 − 200 × 0.25 = 960.945
         assert_eq!(holdings[0].total_cost_base, "960.945".parse::<Decimal>().unwrap());
     }
@@ -676,7 +693,7 @@ mod tests {
         // 50c/unit return of capital while all 100 units are held.
         apply_roc(&pool, 1, 1, NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(), "0.50").await;
 
-        let holdings = db_holdings(&pool).await.unwrap();
+        let holdings = db_holdings(&pool, None).await.unwrap();
         assert_eq!(holdings.len(), 1);
         // 1010.945 − 100 × 0.50 = 960.945
         assert_eq!(holdings[0].total_cost_base, "960.945".parse::<Decimal>().unwrap());
@@ -690,7 +707,7 @@ mod tests {
         apply_roc(&pool, 1, 1, NaiveDate::from_ymd_opt(2023, 11, 30).unwrap(), "0.50").await;
         insert_buy(&pool, 1, 1, Decimal::from(100), Decimal::from(10)).await;
 
-        let holdings = db_holdings(&pool).await.unwrap();
+        let holdings = db_holdings(&pool, None).await.unwrap();
         assert_eq!(holdings[0].total_cost_base, "1010.945".parse::<Decimal>().unwrap());
     }
 
@@ -704,8 +721,26 @@ mod tests {
         // $11/unit × 100 = 1100 exceeds the 1010.945 cost base.
         apply_roc(&pool, 1, 1, NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(), "11").await;
 
-        let holdings = db_holdings(&pool).await.unwrap();
+        let holdings = db_holdings(&pool, None).await.unwrap();
         assert_eq!(holdings[0].total_cost_base, Decimal::ZERO);
+    }
+
+    /// With `as_of` the overview is the position at that date: later sales
+    /// (and purchases) are excluded; `None` is the live view.
+    #[tokio::test]
+    async fn db_holdings_as_of_a_past_date_excludes_later_facts() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "VAS").await;
+        insert_buy(&pool, 1, 1, Decimal::from(100), Decimal::from(10)).await; // 2024-01-01
+        insert_sell(&pool, 2, 1, Decimal::from(40)).await; // 2024-06-01
+        allocate(&pool, 1, 2, 1, Decimal::from(40)).await;
+
+        let live = db_holdings(&pool, None).await.unwrap();
+        assert_eq!(live[0].quantity, Decimal::from(60));
+        let as_at = db_holdings(&pool, Some(NaiveDate::from_ymd_opt(2024, 3, 1).unwrap()))
+            .await
+            .unwrap();
+        assert_eq!(as_at[0].quantity, Decimal::from(100), "the June sale hasn't happened yet");
     }
 
     // API-level tests
@@ -814,7 +849,7 @@ mod tests {
             .await
             .unwrap();
 
-        let holdings = db_holdings(&pool).await.unwrap();
+        let holdings = db_holdings(&pool, None).await.unwrap();
         assert_eq!(holdings.len(), 2);
         assert_eq!((holdings[0].listing_id, holdings[0].holding_account_id), (1, 1));
         assert_eq!(holdings[0].quantity, Decimal::from(100));
@@ -852,7 +887,7 @@ mod tests {
         .unwrap();
         crate::entities::scrip_exchange::db_exchange(&pool, 10).await.unwrap();
 
-        let holdings = db_holdings(&pool).await.unwrap();
+        let holdings = db_holdings(&pool, None).await.unwrap();
         assert_eq!(holdings.len(), 1);
         assert_eq!(holdings[0].listing_id, 2);
         assert_eq!(holdings[0].quantity, Decimal::from(200));
@@ -888,7 +923,7 @@ mod tests {
         .unwrap();
         crate::entities::demerger::db_demerge(&pool, 10).await.unwrap();
 
-        let mut holdings = db_holdings(&pool).await.unwrap();
+        let mut holdings = db_holdings(&pool, None).await.unwrap();
         holdings.sort_by_key(|h| h.listing_id);
         assert_eq!(holdings.len(), 2);
         assert_eq!(holdings[0].listing_id, 1);

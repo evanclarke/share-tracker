@@ -395,6 +395,7 @@
     { slug: 'tax-summary', title: 'Tax Summary', api: '/portfolio/tax-summary', method: 'GET', export: true, desc: 'Income aggregated by Australian financial year.' },
     { slug: 'exchange-mic-validation', title: 'Exchange MIC Validation', api: '/reports/exchange_mic_validation', method: 'GET', statusField: 'registry_status', desc: 'Curated exchanges checked against the ISO MIC registry.' },
     { slug: 'settlement-holiday-coverage', title: 'Settlement Holiday Coverage', api: '/reports/settlement_holiday_coverage', method: 'GET', statusField: 'coverage_status', desc: 'Trades whose settlement window falls outside the seeded exchange-holiday calendars (settlement may have skipped weekends only).' },
+    { slug: 'snapshots', title: 'Snapshots', custom: 'snapshots', api: '/report_snapshots', desc: 'Stored daily results of the price-dependent reports (portfolio overview, unrealised gains, performance), valued at the stored closing prices, with a time-series graph. A back-dated fact marks affected snapshots stale; regenerate them here.' },
   ];
 
   // ---- post-action configuration -----------------------------------------
@@ -1219,6 +1220,7 @@
     'mic-import': 'Fetch and refresh the ISO 10383 MIC registry.',
     'currency-import': 'Fetch ISO 4217 fiat and ISO 24165 token currencies.',
     'price-import': 'Store the latest complete trading day\'s closing price for every held listing (skips days already stored).',
+    'report-snapshot': 'Store the price-dependent reports\' results for the latest date the whole portfolio can be valued at with final prices (skips a date already stored fresh).',
   };
 
   async function viewJobs() {
@@ -1350,6 +1352,166 @@
     ]));
   }
 
+  // ---- report snapshots ---------------------------------------------------
+  // Stored daily results of the price-dependent reports plus the time-series
+  // graph. The SVG is built directly (no build step, no chart library): two
+  // polylines — market value and unrealised gain — over the snapshot dates,
+  // with stale snapshots' points hollow.
+  function svgEl(tag, attrs) {
+    const n = document.createElementNS('http://www.w3.org/2000/svg', tag);
+    if (attrs) for (const k in attrs) { if (attrs[k] != null) n.setAttribute(k, attrs[k]); }
+    return n;
+  }
+
+  function seriesChart(points) {
+    if (!points || points.length < 2) {
+      return el('p', { class: 'hint' }, 'The graph appears once two or more daily snapshots are stored.');
+    }
+    const W = 860, H = 280, padL = 84, padR = 16, padT = 12, padB = 30;
+    const xs = points.map(function (p) { return new Date(p.snapshot_date + 'T00:00:00Z').getTime(); });
+    let yMin = 0, yMax = 1;
+    points.forEach(function (p) {
+      [Number(p.market_value), Number(p.unrealised_gain), 0].forEach(function (v) {
+        if (v < yMin) yMin = v;
+        if (v > yMax) yMax = v;
+      });
+    });
+    const xMin = xs[0], xMax = xs[xs.length - 1];
+    const x = function (t) { return padL + (t - xMin) / (xMax - xMin || 1) * (W - padL - padR); };
+    const y = function (v) { return H - padB - (v - yMin) / (yMax - yMin) * (H - padT - padB); };
+    const chart = svgEl('svg', { viewBox: '0 0 ' + W + ' ' + H, class: 'series-chart', role: 'img' });
+    // Horizontal gridlines with AUD labels.
+    for (let i = 0; i <= 4; i++) {
+      const v = yMin + (yMax - yMin) * i / 4;
+      chart.appendChild(svgEl('line', { x1: padL, x2: W - padR, y1: y(v), y2: y(v), class: 'grid' }));
+      const label = svgEl('text', { x: padL - 6, y: y(v) + 4, 'text-anchor': 'end', class: 'axis' });
+      label.textContent = Math.round(v).toLocaleString();
+      chart.appendChild(label);
+    }
+    // First and last snapshot dates on the x axis.
+    [0, points.length - 1].forEach(function (i) {
+      const label = svgEl('text', {
+        x: x(xs[i]), y: H - 8, 'text-anchor': i === 0 ? 'start' : 'end', class: 'axis',
+      });
+      label.textContent = points[i].snapshot_date;
+      chart.appendChild(label);
+    });
+    // One line + point markers per series; a stale snapshot's point is hollow.
+    [['market_value', 'line-mv'], ['unrealised_gain', 'line-ug']].forEach(function (s) {
+      const field = s[0], klass = s[1];
+      const path = points.map(function (p, i) { return x(xs[i]) + ',' + y(Number(p[field])); }).join(' ');
+      chart.appendChild(svgEl('polyline', { points: path, class: klass, fill: 'none' }));
+      points.forEach(function (p, i) {
+        const dot = svgEl('circle', {
+          cx: x(xs[i]), cy: y(Number(p[field])), r: 3,
+          class: klass + (p.stale ? ' stale' : ''),
+        });
+        const tip = svgEl('title');
+        tip.textContent = p.snapshot_date + ': ' + p[field] + (p.stale ? ' (stale)' : '');
+        dot.appendChild(tip);
+        chart.appendChild(dot);
+      });
+    });
+    return el('div', null, [
+      chart,
+      el('p', { class: 'hint' }, [
+        el('span', { class: 'legend-mv' }, '— market value'),
+        ' ',
+        el('span', { class: 'legend-ug' }, '— unrealised gain'),
+        ' (AUD; hollow points are stale snapshots)',
+      ]),
+    ]);
+  }
+
+  async function viewSnapshots() {
+    setActiveNav('r:snapshots');
+    const series = await api('GET', '/report_snapshots/series');
+    const metas = await api('GET', '/report_snapshots');
+
+    // On-demand generation: a past date whose prices have been backfilled, a
+    // stale date after recording a back-dated fact, or (date blank) the
+    // latest date the whole portfolio can be valued at.
+    const genForm = el('form', { class: 'card' });
+    const dateInp = el('input', { type: 'date' });
+    genForm.appendChild(el('h3', null, 'Generate / regenerate'));
+    genForm.appendChild(el('div', { class: 'field' }, [el('label', null, 'Snapshot date'), dateInp]));
+    genForm.appendChild(el('p', { class: 'hint' },
+      'Blank = the latest date with final prices for every held listing. Every held listing needs an ok stored closing price on (or walked back to) the date — backfill prices first for past dates.'));
+    genForm.appendChild(el('div', { class: 'form-actions' }, [
+      el('button', { type: 'submit', class: 'primary' }, 'Generate'),
+    ]));
+    genForm.addEventListener('submit', async function (ev) {
+      ev.preventDefault();
+      try {
+        const body = dateInp.value ? { date: dateInp.value } : {};
+        const stored = await api('POST', '/report_snapshots/generate', body);
+        toast('Stored ' + stored.length + ' snapshot(s) for ' + stored[0].snapshot_date + '.');
+        viewSnapshots();
+      } catch (e) {
+        toast(e.message, true);
+      }
+    });
+
+    const rows = metas.slice().reverse().map(function (m) {
+      return {
+        date: m.snapshot_date,
+        report: m.report,
+        generated_at: m.generated_at,
+        status: m.stale ? 'stale' : 'ok',
+      };
+    });
+    const table = filterableTable(rows, ['date', 'report', 'generated_at', 'status'], {
+      statusField: 'status',
+      actions: function (row) {
+        const view = el('a', { href: '#/r/snapshots/' + row.report + '/' + row.date }, 'View');
+        const regen = el('button', { class: 'small' }, 'Regenerate');
+        regen.addEventListener('click', async function () {
+          regen.disabled = true;
+          regen.textContent = 'Generating…';
+          try {
+            await api('POST', '/report_snapshots/generate', { date: row.date });
+            toast('Regenerated ' + row.date + '.');
+          } catch (e) {
+            toast(e.message, true);
+          }
+          viewSnapshots();
+        });
+        return el('td', { class: 'actions' }, [view, ' ', regen]);
+      },
+    });
+
+    setMain(el('div', null, [
+      el('h2', null, 'Snapshots'),
+      el('p', { class: 'view-desc' },
+        'Daily stored results of the price-dependent reports, valued at the stored closing prices '
+        + '(AUD-converted), written by the report-snapshot job after the day\'s last close. '
+        + 'A back-dated fact marks every snapshot dated on or after it stale — the stored result '
+        + 'keeps showing, flagged, until regenerated. A day whose price fetches failed has no '
+        + 'snapshot at all until the price re-run succeeds.'),
+      el('div', { class: 'card' }, [
+        el('h3', null, 'Market value and unrealised gain over time'),
+        seriesChart(series),
+      ]),
+      genForm,
+      table,
+    ]));
+  }
+
+  async function viewSnapshotDetail(report, date) {
+    setActiveNav('r:snapshots');
+    const snap = await api('GET', '/report_snapshots/' + report + '/' + date);
+    const header = el('div', null, [
+      el('h2', null, 'Snapshot: ' + report + ' @ ' + date),
+      el('p', { class: 'view-desc' }, 'Generated ' + snap.generated_at + '. '),
+      el('p', null, el('a', { href: '#/r/snapshots' }, '← All snapshots')),
+    ]);
+    if (snap.stale) {
+      header.appendChild(el('p', { class: 'hint warn' },
+        'Stale: a back-dated fact was recorded after this snapshot was generated. The rows below are the stored (pre-fact) result — regenerate from the Snapshots view.'));
+    }
+    setMain(el('div', null, [header, dataTable(snap.rows)]));
+  }
+
   // ---- reports ----------------------------------------------------------
   async function viewReport(report) {
     setActiveNav('r:' + report.slug);
@@ -1445,6 +1607,10 @@
       if (parts[0] === 'r') {
         const report = reportBySlug[parts[1]];
         if (!report) throw new Error('Unknown report');
+        if (report.custom === 'snapshots') {
+          if (parts[2] && parts[3]) return await viewSnapshotDetail(parts[2], parts[3]);
+          return await viewSnapshots();
+        }
         return await viewReport(report);
       }
       throw new Error('Not found');
