@@ -371,6 +371,17 @@ mod tests {
         assert!(js.contains("typeField: 'action_type'"));
         assert!(js.contains("fieldGroups"));
         assert!(js.contains("typeDescs"));
+        // The common date field's label is scoped per type too.
+        assert!(js.contains("typeLabels"));
+        assert!(js.contains("Payment date"));
+        assert!(js.contains("Demerger date"));
+        // Values typed into a group survive flipping the type away and back...
+        assert!(js.contains("const draft"));
+        // ...a stale async render can't clobber a newer selection...
+        assert!(js.contains("renderSeq"));
+        // ...and editing a row to a different type warns that the saved
+        // type's fields clear on save.
+        assert!(js.contains("clears the saved"));
         for group in [
             "ReturnOfCapital: [",
             "ShareSplit: [",

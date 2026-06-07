@@ -300,7 +300,7 @@
       fields: [
         sel('action_type', 'Action type', ['ReturnOfCapital', 'ShareSplit', 'BonusIssue', 'RightsIssue', 'BuyBack', 'ScripForScrip', 'Demerger'], { required: true }),
         fk('listing_id', 'Listing', 'listings', { required: true }),
-        dt('date', 'Payment / conversion / issue / record / buy-back / exchange / demerger date', { required: true }),
+        dt('date', 'Date', { required: true }),
         dec('amount_per_unit', 'Amount per unit', { optional: true, default: '' }),
         fk('currency', 'Currency', 'currencies', { optional: true, encode: 'string', default: '', hint: 'Currency of the per-unit amount(s).' }),
         dec('split_new_units', 'Split: new units', { optional: true, default: '' }),
@@ -344,6 +344,19 @@
         BuyBack: 'Off-market buy-back: record the per-unit buy-back price, the dividend component of that price and its franking credit (both 0 for a listed-company buy-back announced after 25 Oct 2022), and the market value had the buy-back not been proposed (blank if the price is at or above it); recording changes nothing — use the row’s Participate action to sell units into the buy-back, which creates the Sell at the capital proceeds (max(price, market value) − dividend) plus the dividend income row.',
         ScripForScrip: 'Scrip-for-scrip takeover (all-scrip, with rollover): on the exchange date every “old units” of this listing become “new units” of the replacement listing (1-for-1 merger: new 1, old 1) — recording changes nothing; use the row’s Exchange action to substitute every open parcel: the capital gain is disregarded and each replacement parcel carries the consumed parcel’s remaining cost base and acquisition date (the combined period counts toward the 12-month discount).',
         Demerger: 'Demerger (eligible, rollover chosen): on the demerger date every “held units” of this (head) listing receive “new units” of the demerged listing (BHP Steel’s 1-for-5: new 1, held 5), and the advised percentage of each parcel’s cost base moves to the new interests — recording changes nothing; use the row’s Demerge action to apportion every open parcel: any gain is disregarded, the head parcels keep the rest of the cost base and their acquisition dates, and the new parcels’ 12-month discount clock runs from the original acquisition.',
+      },
+      // Per-type label for the common date field (generic 'Date' until a type
+      // is chosen).
+      typeLabels: {
+        date: {
+          ReturnOfCapital: 'Payment date',
+          ShareSplit: 'Conversion date',
+          BonusIssue: 'Issue date',
+          RightsIssue: 'Record date',
+          BuyBack: 'Buy-back date',
+          ScripForScrip: 'Exchange date',
+          Demerger: 'Demerger date',
+        },
       },
       columns: ['id', 'action_type', 'listing_id', 'date', 'amount_per_unit', 'currency', 'split_new_units', 'split_old_units', 'bonus_units', 'bonus_held_units', 'rights_units', 'rights_held_units', 'exercise_price', 'buyback_price', 'buyback_dividend', 'buyback_franking_credit', 'buyback_market_value', 'scrip_listing_id', 'scrip_new_units', 'scrip_old_units', 'demerger_listing_id', 'demerger_new_units', 'demerger_held_units', 'demerger_cost_base_pct'],
       rowActions: function (row) {
@@ -804,18 +817,44 @@
       const fieldByName = {};
       entity.fields.forEach(function (f) { fieldByName[f.name] = f; });
       const typeDesc = el('p', { class: 'hint' });
+      const typeWarn = el('p', { class: 'hint warn' });
       const typeSection = el('div');
       form.appendChild(typeDesc);
+      form.appendChild(typeWarn);
       form.appendChild(typeSection);
       const typeSel = form.querySelector('[name="' + entity.typeField + '"]');
+      // Values typed into a group survive flipping the type away and back:
+      // each re-render first harvests the outgoing inputs into `draft`, which
+      // wins over the stored row when the group renders again.
+      const draft = {};
+      // Renders are async (fk fields fetch their options); the sequence number
+      // makes a stale render abandon itself instead of appending its fields
+      // after a newer selection's.
+      let renderSeq = 0;
       async function renderTypeFields() {
+        typeSection.querySelectorAll('[name]').forEach(function (inp) {
+          draft[inp.name] = inp.type === 'checkbox' ? inp.checked : inp.value;
+        });
         const t = typeSel.value;
         typeDesc.textContent = (entity.typeDescs && entity.typeDescs[t])
           || (t ? '' : 'Choose an action type above to see its fields.');
-        typeSection.innerHTML = '';
+        typeWarn.textContent = editing && t && t !== existing[entity.typeField]
+          ? 'Saving as ' + t + ' clears the saved ' + existing[entity.typeField] + ' fields.'
+          : '';
+        // Common fields with a per-type label (e.g. the date) take it here.
+        Object.keys(entity.typeLabels || {}).forEach(function (n) {
+          const label = entity.typeLabels[n][t] || fieldByName[n].label;
+          form.querySelector('label[for="f_' + n + '"]').textContent = label + (fieldByName[n].required ? ' *' : '');
+        });
+        const seq = ++renderSeq;
+        const inputs = [];
         for (const n of entity.fieldGroups[t] || []) {
-          typeSection.appendChild(await buildFieldInput(fieldByName[n], existing ? existing[n] : null, false));
+          const val = draft[n] !== undefined ? draft[n] : (existing ? existing[n] : null);
+          inputs.push(await buildFieldInput(fieldByName[n], val, false));
         }
+        if (seq !== renderSeq) return; // a newer selection rendered meanwhile
+        typeSection.innerHTML = '';
+        inputs.forEach(function (node) { typeSection.appendChild(node); });
       }
       typeSel.addEventListener('change', renderTypeFields);
       await renderTypeFields();

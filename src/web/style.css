@@ -109,6 +109,7 @@ th.sortable:hover { background: #e7eaef; }
 form .field { margin-bottom: 12px; display: flex; flex-direction: column; gap: 4px; }
 form label { font-weight: 600; font-size: 13px; }
 form .hint { color: var(--muted); font-weight: 400; font-size: 12px; }
+form .hint.warn { color: var(--warn); }
 input, select, textarea {
   font: inherit;
   padding: 6px 8px;
