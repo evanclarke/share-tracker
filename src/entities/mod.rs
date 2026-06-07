@@ -11,6 +11,7 @@ pub mod buyback_participation;
 pub mod cgt_settings;
 pub mod corporate_action;
 pub mod currencies;
+pub mod demerger;
 pub mod drp_enrolment;
 pub mod drp_reinvestment;
 pub mod exchange;
@@ -45,6 +46,7 @@ pub fn router() -> Router<SqlitePool> {
         .merge(rights_exercise::router())
         .merge(buyback_participation::router())
         .merge(scrip_exchange::router())
+        .merge(demerger::router())
         .merge(drp_reinvestment::router())
         .merge(attachment::router())
 }

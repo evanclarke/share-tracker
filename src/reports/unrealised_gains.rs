@@ -273,6 +273,7 @@ mod tests {
                 rights_action_id: None,
                 buyback_action_id: None,
                 scrip_action_id: None,
+                demerger_action_id: None,
                 deemed_acquisition_date: None,
             },
         )
@@ -303,6 +304,7 @@ mod tests {
                 rights_action_id: None,
                 buyback_action_id: None,
                 scrip_action_id: None,
+                demerger_action_id: None,
                 deemed_acquisition_date: None,
             },
         )

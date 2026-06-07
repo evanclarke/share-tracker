@@ -38,15 +38,17 @@ pub fn router() -> Router<SqlitePool> {
 }
 
 pub async fn db_realised_gains(pool: &SqlitePool) -> Result<Vec<RealisedGainLoss>, sqlx::Error> {
-    // A scrip-for-scrip exchange closing Sell (scrip_action_id set) is not a
-    // realised gain or loss: the rollover disregards the gain on the original
-    // shares (docs/takeovers-and-scrip-for-scrip.md), and its zero proceeds
-    // must never surface as a capital loss. Its allocations are skipped with
-    // it (the sale id is absent from sell_map).
+    // A scrip-for-scrip exchange or demerger closing Sell (scrip_action_id /
+    // demerger_action_id set) is not a realised gain or loss: the rollover
+    // disregards the gain on the original shares
+    // (docs/takeovers-and-scrip-for-scrip.md, docs/demergers.md), and its
+    // zero proceeds must never surface as a capital loss. Its allocations are
+    // skipped with it (the sale id is absent from sell_map).
     let sell_rows = sqlx::query(
         "SELECT id, listing_id, date, quantity, average_price, brokerage, gst_on_brokerage, \
          currency, fx_rate \
-         FROM trades WHERE trade_type = 'Sell' AND scrip_action_id IS NULL",
+         FROM trades WHERE trade_type = 'Sell' \
+           AND scrip_action_id IS NULL AND demerger_action_id IS NULL",
     )
     .fetch_all(pool)
     .await?;
@@ -364,6 +366,7 @@ mod tests {
                 rights_action_id: None,
                 buyback_action_id: None,
                 scrip_action_id: None,
+                demerger_action_id: None,
                 deemed_acquisition_date: None,
             },
         )
@@ -401,6 +404,7 @@ mod tests {
                 rights_action_id: None,
                 buyback_action_id: None,
                 scrip_action_id: None,
+                demerger_action_id: None,
                 deemed_acquisition_date: None,
             },
         )
@@ -518,6 +522,7 @@ mod tests {
                 rights_action_id: None,
                 buyback_action_id: None,
                 scrip_action_id: None,
+                demerger_action_id: None,
                 deemed_acquisition_date: None,
             },
         )
@@ -545,6 +550,7 @@ mod tests {
                 rights_action_id: None,
                 buyback_action_id: None,
                 scrip_action_id: None,
+                demerger_action_id: None,
                 deemed_acquisition_date: None,
             },
         )
@@ -1059,6 +1065,7 @@ mod tests {
                 rights_action_id: None,
                 buyback_action_id: None,
                 scrip_action_id: None,
+                demerger_action_id: None,
                 deemed_acquisition_date: None,
             },
         )
@@ -1275,6 +1282,7 @@ mod tests {
                 rights_action_id: None,
                 buyback_action_id: None,
                 scrip_action_id: None,
+                demerger_action_id: None,
                 deemed_acquisition_date: None,
             },
         )
@@ -1287,5 +1295,98 @@ mod tests {
         // A$2,000 at the Jan-2024 rate — not US$1,000 / 0.80 = A$1,250.
         assert_eq!(result[0].cost_base, Decimal::from(2000));
         assert_eq!(result[0].proceeds, Decimal::from(2500));
+    }
+
+    /// Demerge listing `to` out of listing `from` (1 new unit per 5 held,
+    /// 20% of the cost base to the demerged entity) on `date`.
+    async fn demerge_one_for_five(
+        pool: &SqlitePool,
+        action_id: i64,
+        from: i64,
+        to: i64,
+        date: NaiveDate,
+    ) -> crate::entities::demerger::Demerge {
+        corporate_action::db_upsert(
+            pool,
+            &corporate_action::CorporateAction {
+                id: action_id,
+                listing_id: from,
+                date,
+                kind: corporate_action::ActionKind::Demerger {
+                    demerger_listing_id: to,
+                    demerger_new_units: Decimal::ONE,
+                    demerger_held_units: Decimal::from(5),
+                    demerger_cost_base_pct: Decimal::from(20),
+                },
+            },
+        )
+        .await
+        .unwrap();
+        crate::entities::demerger::db_demerge(pool, action_id).await.unwrap()
+    }
+
+    /// The demerger rollover disregards any gain or loss under the demerger:
+    /// the closing Sell never appears as a realised gain or loss — despite
+    /// its zero proceeds — and the demerger year reports nothing.
+    #[tokio::test]
+    async fn db_demerger_closing_sell_is_excluded() {
+        let pool = test_pool().await;
+        let buy_date = NaiveDate::from_ymd_opt(2020, 10, 1).unwrap();
+        insert_listing(&pool, 1, "HEAD").await;
+        insert_listing(&pool, 2, "DEM").await;
+        insert_buy(&pool, 1, 1, buy_date, Decimal::from(1000), "1.50".parse().unwrap()).await;
+        demerge_one_for_five(&pool, 10, 1, 2, NaiveDate::from_ymd_opt(2024, 7, 1).unwrap())
+            .await;
+
+        let result = db_realised_gains(&pool).await.unwrap();
+        assert!(result.is_empty(), "the rollover apportionment is not a realised gain/loss");
+    }
+
+    /// Later sales on both sides of the demerger use the apportioned cost
+    /// bases and the combined holding period: bought Oct 2020, demerged
+    /// Jul 2024, sold Oct 2024 — under 12 months after the demerger but over
+    /// 12 months from the original acquisition, so both gains are
+    /// discount-eligible (the ATO's Example 32 rule for the new interests;
+    /// the head interests' acquisition dates never changed).
+    #[tokio::test]
+    async fn db_post_demerger_sales_use_apportioned_cost_bases_and_combined_period() {
+        let pool = test_pool().await;
+        let buy_date = NaiveDate::from_ymd_opt(2020, 10, 1).unwrap();
+        let sell_date = NaiveDate::from_ymd_opt(2024, 10, 1).unwrap();
+        insert_listing(&pool, 1, "HEAD").await;
+        insert_listing(&pool, 2, "DEM").await;
+        // 1,000 @ $1.50 = $1,500 cost base → head $1,200 + demerged $300.
+        insert_buy(&pool, 1, 1, buy_date, Decimal::from(1000), "1.50".parse().unwrap()).await;
+        let dm = demerge_one_for_five(
+            &pool,
+            10,
+            1,
+            2,
+            NaiveDate::from_ymd_opt(2024, 7, 1).unwrap(),
+        )
+        .await;
+
+        // Sell the 1,000 head units at $2.00 and the 200 demerged units at
+        // $3.00.
+        insert_sell(&pool, 50, 1, sell_date, Decimal::from(1000), Decimal::from(2)).await;
+        allocate(&pool, 1, 50, dm.head_replacements[0].id, Decimal::from(1000)).await;
+        insert_sell(&pool, 51, 2, sell_date, Decimal::from(200), Decimal::from(3)).await;
+        allocate(&pool, 2, 51, dm.demerged_replacements[0].id, Decimal::from(200)).await;
+
+        let mut result = db_realised_gains(&pool).await.unwrap();
+        result.sort_by_key(|r| r.sale_trade_id);
+        assert_eq!(result.len(), 2);
+        // Head: $2,000 − $1,200 = $800, discount-eligible from Oct 2020.
+        assert_eq!(result[0].sale_trade_id, 50);
+        assert_eq!(result[0].cost_base, Decimal::from(1200));
+        assert_eq!(result[0].capital_gain_loss, Decimal::from(800));
+        assert_eq!(result[0].discount_eligible_gain, Decimal::from(800));
+        assert_eq!(result[0].non_discountable_gain, Decimal::ZERO);
+        // Demerged: $600 − $300 = $300, also discount-eligible from Oct 2020.
+        assert_eq!(result[1].sale_trade_id, 51);
+        assert_eq!(result[1].cost_base, Decimal::from(300));
+        assert_eq!(result[1].capital_gain_loss, Decimal::from(300));
+        assert_eq!(result[1].discount_eligible_gain, Decimal::from(300));
+        assert_eq!(result[1].non_discountable_gain, Decimal::ZERO);
     }
 }

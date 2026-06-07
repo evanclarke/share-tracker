@@ -279,6 +279,14 @@ mod tests {
         // A ScripForScrip row's Exchange action drives the exchange endpoint.
         assert!(js.contains("viewScripExchange"));
         assert!(js.contains("/exchange"));
+        assert!(js.contains("Demerger"));
+        assert!(js.contains("demerger_listing_id"));
+        assert!(js.contains("demerger_new_units"));
+        assert!(js.contains("demerger_held_units"));
+        assert!(js.contains("demerger_cost_base_pct"));
+        // A Demerger row's Demerge action drives the demerge endpoint.
+        assert!(js.contains("viewDemerge"));
+        assert!(js.contains("/demerge"));
     }
 
     #[tokio::test]

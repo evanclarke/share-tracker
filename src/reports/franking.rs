@@ -69,9 +69,20 @@ pub async fn holding_period_test(
     // trades beyond it cannot affect entitlement.
     let window_end = ex_date + Duration::days(required_days);
 
+    // A demerger never disposes of the head shares — the closing Sell and
+    // head replacement Buys (demerger-group trades on the action's own head
+    // listing) are a modelling artifact, so they are excluded here: the
+    // original acquisition parcels stay in the stack with their at-risk days
+    // running, and a dividend going ex shortly after the demerger is not
+    // spuriously disqualified. The demerged-entity Buys (group trades on the
+    // *other* listing) are included — they are the only record of those
+    // holdings.
     let rows = sqlx::query(
-        "SELECT trade_type, date, quantity FROM trades \
-         WHERE listing_id = ? AND date <= ? ORDER BY date, id",
+        "SELECT t.trade_type, t.date, t.quantity FROM trades t \
+         LEFT JOIN corporate_actions ca ON ca.id = t.demerger_action_id \
+         WHERE t.listing_id = ? AND t.date <= ? \
+           AND (t.demerger_action_id IS NULL OR ca.listing_id <> t.listing_id) \
+         ORDER BY t.date, t.id",
     )
     .bind(listing_id)
     .bind(window_end)
@@ -211,6 +222,7 @@ mod tests {
                 rights_action_id: None,
                 buyback_action_id: None,
                 scrip_action_id: None,
+                demerger_action_id: None,
                 deemed_acquisition_date: None,
             },
         )
@@ -397,6 +409,49 @@ mod tests {
         let t = holding_period_test(&pool, 1, d("2025-03-14")).await.unwrap();
         assert_eq!(t.entitled_units, Decimal::from(110));
         assert_eq!(t.disqualified_units, Decimal::from(10));
+    }
+
+    /// A demerger never disposes of the head shares: the demerge's closing
+    /// Sell and head replacement Buys are excluded from the walk, so a
+    /// dividend going ex shortly before the demerger is not spuriously
+    /// disqualified — the original parcel's at-risk days keep running. The
+    /// demerged-entity Buys are included: they are the only record of those
+    /// holdings.
+    #[tokio::test]
+    async fn db_demerger_artifact_trades_keep_at_risk_days_running() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, false).await;
+        insert_listing(&pool, 2, false).await;
+        // Bought 1 Mar, ex-dividend 14 Mar, demerger 1 Apr — inside the
+        // qualification window with only 30 at-risk days at the demerge.
+        insert_trade(&pool, 1, 1, trade::TradeType::Buy, d("2025-03-01"), 1000).await;
+        crate::entities::corporate_action::db_upsert(
+            &pool,
+            &crate::entities::corporate_action::CorporateAction {
+                id: 10,
+                listing_id: 1,
+                date: d("2025-04-01"),
+                kind: crate::entities::corporate_action::ActionKind::Demerger {
+                    demerger_listing_id: 2,
+                    demerger_new_units: Decimal::ONE,
+                    demerger_held_units: Decimal::from(5),
+                    demerger_cost_base_pct: "5.063".parse().unwrap(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+        crate::entities::demerger::db_demerge(&pool, 10).await.unwrap();
+
+        // The head shares were never disposed of: nothing is disqualified.
+        let t = holding_period_test(&pool, 1, d("2025-03-14")).await.unwrap();
+        assert_eq!(t.entitled_units, Decimal::from(1000));
+        assert_eq!(t.disqualified_units, Decimal::ZERO);
+
+        // The demerged listing's walk sees the demerged-entity parcel.
+        let t = holding_period_test(&pool, 2, d("2025-05-10")).await.unwrap();
+        assert_eq!(t.entitled_units, Decimal::from(200));
+        assert_eq!(t.disqualified_units, Decimal::ZERO);
     }
 
     #[test]

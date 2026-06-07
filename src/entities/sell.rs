@@ -71,6 +71,12 @@ pub enum SellError {
     /// (`DELETE /sells/:id`, which also removes the replacement Buys) and
     /// re-exchange instead (see `entities::scrip_exchange`).
     ScripExchangeSell,
+    /// The existing trade is a demerger closing Sell (`demerger_action_id`
+    /// set): it consumes exactly the parcels the demerger apportioned, so
+    /// free-form edits are rejected. Delete it (`DELETE /sells/:id`, which
+    /// also removes the head and demerged-entity Buys) and re-demerge
+    /// instead (see `entities::demerger`).
+    DemergerSell,
 }
 
 impl From<sqlx::Error> for SellError {
@@ -91,10 +97,10 @@ pub enum DeleteOutcome {
     /// The id refers to a trade that is not a Sell — deletion is refused so a
     /// Buy/DRP parcel can't be removed through the sells endpoint.
     NotASell,
-    /// The Sell is a scrip-for-scrip exchange closing Sell whose replacement
-    /// Buys are themselves consumed by later allocations or AMIT adjustments
-    /// — deleting the group would orphan those dependants. Remove them first
-    /// (mapped to 422).
+    /// The Sell is a scrip-for-scrip exchange or demerger closing Sell whose
+    /// replacement Buys are themselves consumed by later allocations or AMIT
+    /// adjustments — deleting the group would orphan those dependants. Remove
+    /// them first (mapped to 422).
     ReplacementReferenced,
 }
 
@@ -103,38 +109,42 @@ pub enum DeleteOutcome {
 /// participation Sell takes its linked dividend-component income row
 /// (`income.buyback_trade_id`) with it, so the capital and dividend sides of
 /// the participation are always created and removed together. A
-/// scrip-for-scrip exchange closing Sell takes the exchange's replacement
-/// Buys (`trades.scrip_action_id`) with it — the group substitutes the same
-/// parcels, so it only ever exists as a whole — unless a replacement Buy is
-/// itself consumed by later allocations or AMIT adjustments (refused; remove
-/// those dependants first).
+/// scrip-for-scrip exchange or demerger closing Sell takes its group's
+/// replacement Buys (`trades.scrip_action_id` / `trades.demerger_action_id`)
+/// with it — the group substitutes the same parcels, so it only ever exists
+/// as a whole — unless a replacement Buy is itself consumed by later
+/// allocations or AMIT adjustments (refused; remove those dependants first).
 pub async fn db_delete_sell(pool: &SqlitePool, id: i64) -> Result<DeleteOutcome, sqlx::Error> {
     let mut tx = pool.begin().await?;
 
-    let row: Option<(TradeType, Option<i64>)> =
-        sqlx::query_as("SELECT trade_type, scrip_action_id FROM trades WHERE id = ?")
-            .bind(id)
-            .fetch_optional(&mut *tx)
-            .await?;
-    let scrip_action = match row {
+    let row: Option<(TradeType, Option<i64>, Option<i64>)> = sqlx::query_as(
+        "SELECT trade_type, scrip_action_id, demerger_action_id FROM trades WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let (scrip_action, demerger_action) = match row {
         None => return Ok(DeleteOutcome::NotFound),
-        Some((t, _)) if t != TradeType::Sell => return Ok(DeleteOutcome::NotASell),
-        Some((_, scrip_action)) => scrip_action,
+        Some((t, _, _)) if t != TradeType::Sell => return Ok(DeleteOutcome::NotASell),
+        Some((_, scrip_action, demerger_action)) => (scrip_action, demerger_action),
     };
 
-    if let Some(action_id) = scrip_action {
+    let group = scrip_action
+        .map(|a| ("scrip_action_id", a))
+        .or(demerger_action.map(|a| ("demerger_action_id", a)));
+    if let Some((column, action_id)) = group {
         // The replacement Buys go with the closing Sell — but not while
         // anything still draws on them.
-        let replacement_referenced: bool = sqlx::query_scalar(
+        let replacement_referenced: bool = sqlx::query_scalar(&format!(
             "SELECT EXISTS(\
                  SELECT 1 FROM trades t \
-                 WHERE t.scrip_action_id = ?1 AND t.id <> ?2 \
+                 WHERE t.{column} = ?1 AND t.id <> ?2 \
                    AND (EXISTS(SELECT 1 FROM parcel_allocations \
                                WHERE purchase_trade_id = t.id OR sale_trade_id = t.id) \
                      OR EXISTS(SELECT 1 FROM amit_adjustments WHERE trade_id = t.id) \
                      OR EXISTS(SELECT 1 FROM income \
                                WHERE reinvestment_trade_id = t.id OR buyback_trade_id = t.id)))",
-        )
+        ))
         .bind(action_id)
         .bind(id)
         .fetch_one(&mut *tx)
@@ -142,7 +152,7 @@ pub async fn db_delete_sell(pool: &SqlitePool, id: i64) -> Result<DeleteOutcome,
         if replacement_referenced {
             return Ok(DeleteOutcome::ReplacementReferenced);
         }
-        sqlx::query("DELETE FROM trades WHERE scrip_action_id = ? AND id <> ?")
+        sqlx::query(&format!("DELETE FROM trades WHERE {column} = ? AND id <> ?"))
             .bind(action_id)
             .bind(id)
             .execute(&mut *tx)
@@ -189,26 +199,30 @@ pub async fn db_upsert_sell(pool: &SqlitePool, id: i64, body: &SellBody) -> Resu
 
     let mut tx = pool.begin().await?;
 
-    // A buy-back participation or scrip-for-scrip exchange Sell is immutable
-    // here: its figures derive from its action's terms (and it carries linked
-    // rows — a dividend income row, or the exchange's replacement Buys). The
-    // upsert below never sets either provenance column, so a normal Sell
-    // can't become one either.
-    let existing: Option<(Option<i64>, Option<i64>)> =
-        sqlx::query_as("SELECT buyback_action_id, scrip_action_id FROM trades WHERE id = ?")
-            .bind(id)
-            .fetch_optional(&mut *tx)
-            .await?;
-    if let Some((buyback, scrip)) = existing {
+    // A buy-back participation, scrip-for-scrip exchange, or demerger Sell is
+    // immutable here: its figures derive from its action's terms (and it
+    // carries linked rows — a dividend income row, or the group's replacement
+    // Buys). The upsert below never sets any provenance column, so a normal
+    // Sell can't become one either.
+    let existing: Option<(Option<i64>, Option<i64>, Option<i64>)> = sqlx::query_as(
+        "SELECT buyback_action_id, scrip_action_id, demerger_action_id FROM trades WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if let Some((buyback, scrip, demerger)) = existing {
         if buyback.is_some() {
             return Err(SellError::BuyBackSell);
         }
         if scrip.is_some() {
             return Err(SellError::ScripExchangeSell);
         }
+        if demerger.is_some() {
+            return Err(SellError::DemergerSell);
+        }
     }
 
-    upsert_sell_in_tx(&mut tx, id, body, settlement_date, None, None).await?;
+    upsert_sell_in_tx(&mut tx, id, body, settlement_date, None, None, None).await?;
 
     tx.commit().await?;
     Ok(())
@@ -219,9 +233,10 @@ pub async fn db_upsert_sell(pool: &SqlitePool, id: i64, body: &SellBody) -> Resu
 /// on the caller's transaction. Shared by `db_upsert_sell`, the buy-back
 /// participation (`entities::buyback_participation`) — which writes the Sell
 /// and the dividend-component income row in one transaction and stamps the
-/// trade with its `buyback_action_id` provenance — and the scrip-for-scrip
+/// trade with its `buyback_action_id` provenance — the scrip-for-scrip
 /// exchange (`entities::scrip_exchange`), which stamps its closing Sell with
-/// `scrip_action_id`.
+/// `scrip_action_id`, and the demerger (`entities::demerger`), which stamps
+/// its closing Sell with `demerger_action_id`.
 pub(crate) async fn upsert_sell_in_tx(
     tx: &mut sqlx::SqliteConnection,
     id: i64,
@@ -229,6 +244,7 @@ pub(crate) async fn upsert_sell_in_tx(
     settlement_date: NaiveDate,
     buyback_action_id: Option<i64>,
     scrip_action_id: Option<i64>,
+    demerger_action_id: Option<i64>,
 ) -> Result<(), SellError> {
     // Allocations must account for the whole sale — no more, no less.
     let allocated: Decimal = body
@@ -245,8 +261,8 @@ pub(crate) async fn upsert_sell_in_tx(
         "INSERT INTO trades \
          (id, trade_type, date, settlement_date, listing_id, average_price, quantity, \
           currency, brokerage, gst_on_brokerage, brokerage_currency, fx_rate, contract_note_ref, \
-          buyback_action_id, scrip_action_id) \
-         VALUES (?, 'Sell', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+          buyback_action_id, scrip_action_id, demerger_action_id) \
+         VALUES (?, 'Sell', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT(id) DO UPDATE SET \
              trade_type         = 'Sell', \
              date               = excluded.date, \
@@ -261,7 +277,8 @@ pub(crate) async fn upsert_sell_in_tx(
              fx_rate            = excluded.fx_rate, \
              contract_note_ref  = excluded.contract_note_ref, \
              buyback_action_id  = excluded.buyback_action_id, \
-             scrip_action_id    = excluded.scrip_action_id",
+             scrip_action_id    = excluded.scrip_action_id, \
+             demerger_action_id = excluded.demerger_action_id",
     )
     .bind(id)
     .bind(body.date)
@@ -277,6 +294,7 @@ pub(crate) async fn upsert_sell_in_tx(
     .bind(&body.contract_note_ref)
     .bind(buyback_action_id)
     .bind(scrip_action_id)
+    .bind(demerger_action_id)
     .execute(&mut *tx)
     .await?;
 
@@ -372,6 +390,7 @@ async fn upsert(
         Err(SellError::PurchaseQuantityExceeded) => Err(StatusCode::UNPROCESSABLE_ENTITY),
         Err(SellError::BuyBackSell) => Err(StatusCode::UNPROCESSABLE_ENTITY),
         Err(SellError::ScripExchangeSell) => Err(StatusCode::UNPROCESSABLE_ENTITY),
+        Err(SellError::DemergerSell) => Err(StatusCode::UNPROCESSABLE_ENTITY),
         Err(SellError::Db(e)) => {
             tracing::error!(error = %e, "sell upsert failed");
             Err(StatusCode::INTERNAL_SERVER_ERROR)
@@ -448,6 +467,7 @@ mod tests {
                 rights_action_id: None,
                 buyback_action_id: None,
                 scrip_action_id: None,
+                demerger_action_id: None,
                 deemed_acquisition_date: None,
             },
         )

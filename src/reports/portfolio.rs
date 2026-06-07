@@ -242,6 +242,7 @@ mod tests {
                 rights_action_id: None,
                 buyback_action_id: None,
                 scrip_action_id: None,
+                demerger_action_id: None,
                 deemed_acquisition_date: None,
             },
         )
@@ -272,6 +273,7 @@ mod tests {
                 rights_action_id: None,
                 buyback_action_id: None,
                 scrip_action_id: None,
+                demerger_action_id: None,
                 deemed_acquisition_date: None,
             },
         )
@@ -805,5 +807,47 @@ mod tests {
         assert_eq!(holdings[0].listing_id, 2);
         assert_eq!(holdings[0].quantity, Decimal::from(200));
         assert_eq!(holdings[0].total_cost_base, "1010.945".parse::<Decimal>().unwrap());
+    }
+
+    /// A demerger splits the holding across both listings: the head listing
+    /// keeps its units with the head share of the cost base, the demerged
+    /// listing appears with the entitlement units and the rest — total cost
+    /// base across the two unchanged.
+    #[tokio::test]
+    async fn db_demerger_splits_holding_across_listings() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "HEAD").await;
+        insert_listing(&pool, 2, "DEM").await;
+        // 100 @ $10 + $9.95 + $0.995 = $1,010.945 cost base.
+        insert_buy(&pool, 1, 1, Decimal::from(100), Decimal::from(10)).await;
+        corporate_action::db_upsert(
+            &pool,
+            &corporate_action::CorporateAction {
+                id: 10,
+                listing_id: 1,
+                date: NaiveDate::from_ymd_opt(2024, 7, 1).unwrap(),
+                kind: corporate_action::ActionKind::Demerger {
+                    demerger_listing_id: 2,
+                    demerger_new_units: Decimal::ONE,
+                    demerger_held_units: Decimal::from(5),
+                    demerger_cost_base_pct: Decimal::from(20),
+                },
+            },
+        )
+        .await
+        .unwrap();
+        crate::entities::demerger::db_demerge(&pool, 10).await.unwrap();
+
+        let mut holdings = db_holdings(&pool).await.unwrap();
+        holdings.sort_by_key(|h| h.listing_id);
+        assert_eq!(holdings.len(), 2);
+        assert_eq!(holdings[0].listing_id, 1);
+        assert_eq!(holdings[0].quantity, Decimal::from(100));
+        // 80% of $1,010.945 = $808.756.
+        assert_eq!(holdings[0].total_cost_base, "808.756".parse::<Decimal>().unwrap());
+        assert_eq!(holdings[1].listing_id, 2);
+        assert_eq!(holdings[1].quantity, Decimal::from(20));
+        // 20% of $1,010.945 = $202.189.
+        assert_eq!(holdings[1].total_cost_base, "202.189".parse::<Decimal>().unwrap());
     }
 }

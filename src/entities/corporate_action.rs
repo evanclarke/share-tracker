@@ -83,8 +83,26 @@
 //! rollover's combined-holding-period rule for the 12-month CGT discount.
 //! An action referenced by exchange trades is frozen against edits.
 //!
-//! `ActionKind` is the extension point for future corporate actions
-//! (demergers, ...), each widening the enum and its CHECK.
+//! **Demerger** — an eligible demerger with the Div 125 rollover chosen (see
+//! `docs/demergers.md`): on the demerger `date` every `demerger_held_units`
+//! units held in the head entity (the action's own `listing_id`) receive
+//! `demerger_new_units` units of `demerger_listing_id` (the demerged
+//! entity's listing), and `demerger_cost_base_pct` percent of each parcel's
+//! cost base is apportioned to the new interests (the head-entity-advised
+//! percentage; the head parcels keep the rest). Recording the action changes
+//! nothing by itself; demerging (`POST /corporate_actions/:id/demerge`,
+//! `entities::demerger`) atomically closes every open head parcel with a
+//! zero-proceeds Sell — excluded from the realised-gains and net-capital-gain
+//! reports, because the rollover disregards any gain — and recreates it as a
+//! head replacement Buy plus a demerged-entity Buy splitting the parcel's
+//! remaining reduced cost base by the percentage, both carrying the parcel's
+//! acquisition date as `trades.deemed_acquisition_date` (the head dates are
+//! unchanged by law; the new interests' 12-month discount clock runs from the
+//! original acquisition). An action referenced by demerge trades is frozen
+//! against edits.
+//!
+//! `ActionKind` is the extension point for future corporate actions, each
+//! widening the enum and its CHECK.
 
 use crate::infra::decimal::parse_dec;
 use crate::infra::http::write_error_status;
@@ -163,6 +181,22 @@ pub enum ActionKind {
         scrip_new_units: Decimal,
         scrip_old_units: Decimal,
     },
+    Demerger {
+        /// The demerged entity's listing (must differ from the action's own
+        /// `listing_id`, the head entity).
+        demerger_listing_id: i64,
+        /// Every `demerger_held_units` units of the head entity held at the
+        /// demerger date receive `demerger_new_units` units of the demerged
+        /// entity (both positive; BHP Billiton's 1-for-5 demerger of BHP
+        /// Steel is new=1 / held=5).
+        demerger_new_units: Decimal,
+        demerger_held_units: Decimal,
+        /// Percentage of each parcel's cost base apportioned to the new
+        /// interests in the demerged entity (0 < pct < 100; the
+        /// head-entity-advised step 2 percentage — e.g. 5.063 for BHP
+        /// Steel). The head parcels keep the remaining `100 − pct` percent.
+        demerger_cost_base_pct: Decimal,
+    },
 }
 
 impl ActionKind {
@@ -175,6 +209,7 @@ impl ActionKind {
             ActionKind::RightsIssue { .. } => "RightsIssue",
             ActionKind::BuyBack { .. } => "BuyBack",
             ActionKind::ScripForScrip { .. } => "ScripForScrip",
+            ActionKind::Demerger { .. } => "Demerger",
         }
     }
 }
@@ -192,6 +227,9 @@ pub struct CorporateAction {
     /// (a trade dated on it is ex-rights); exercises are dated on/after it.
     /// ScripForScrip: exchange date — every parcel still open on it is
     /// exchanged; the closing Sell and replacement Buys are dated on it.
+    /// Demerger: demerger date — every head parcel still open on it
+    /// participates; the closing Sell and the head/demerged Buys are dated
+    /// on it.
     pub date: NaiveDate,
     #[serde(flatten)]
     pub kind: ActionKind,
@@ -244,6 +282,12 @@ fn kind_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<ActionKind, sqlx::Erro
             scrip_new_units: req_dec(row, "scrip_new_units")?,
             scrip_old_units: req_dec(row, "scrip_old_units")?,
         }),
+        "Demerger" => Ok(ActionKind::Demerger {
+            demerger_listing_id: row.try_get("demerger_listing_id")?,
+            demerger_new_units: req_dec(row, "demerger_new_units")?,
+            demerger_held_units: req_dec(row, "demerger_held_units")?,
+            demerger_cost_base_pct: req_dec(row, "demerger_cost_base_pct")?,
+        }),
         other => Err(sqlx::Error::Decode(
             format!("unknown corporate action_type {other}").into(),
         )),
@@ -272,6 +316,7 @@ enum ActionType {
     RightsIssue,
     BuyBack,
     ScripForScrip,
+    Demerger,
 }
 
 #[derive(Debug, Deserialize)]
@@ -311,6 +356,14 @@ pub struct CorporateActionBody {
     scrip_new_units: Option<Decimal>,
     #[serde(default)]
     scrip_old_units: Option<Decimal>,
+    #[serde(default)]
+    demerger_listing_id: Option<i64>,
+    #[serde(default)]
+    demerger_new_units: Option<Decimal>,
+    #[serde(default)]
+    demerger_held_units: Option<Decimal>,
+    #[serde(default)]
+    demerger_cost_base_pct: Option<Decimal>,
 }
 
 impl CorporateActionBody {
@@ -329,7 +382,10 @@ impl CorporateActionBody {
     /// or invert holdings or entitlements. ScripForScrip needs a positive
     /// exchange ratio and a replacement listing different from the original —
     /// exchanging a listing into itself would consume its parcels and
-    /// recreate them in place.
+    /// recreate them in place. Demerger needs a positive entitlement ratio, a
+    /// demerged listing different from the head, and a cost-base percentage
+    /// strictly between 0 and 100 — 0 or 100 would zero out one side's cost
+    /// base entirely, and anything outside would make one side negative.
     fn kind(self) -> Option<ActionKind> {
         let payment = self.amount_per_unit.is_some();
         let split = self.split_new_units.is_some() || self.split_old_units.is_some();
@@ -344,16 +400,22 @@ impl CorporateActionBody {
         let scrip = self.scrip_listing_id.is_some()
             || self.scrip_new_units.is_some()
             || self.scrip_old_units.is_some();
+        let demerger = self.demerger_listing_id.is_some()
+            || self.demerger_new_units.is_some()
+            || self.demerger_held_units.is_some()
+            || self.demerger_cost_base_pct.is_some();
         let positive = |d: Option<Decimal>| d.filter(|v| *v > Decimal::ZERO);
         match self.action_type {
-            ActionType::ReturnOfCapital if !split && !bonus && !rights && !buyback && !scrip => {
+            ActionType::ReturnOfCapital
+                if !split && !bonus && !rights && !buyback && !scrip && !demerger =>
+            {
                 Some(ActionKind::ReturnOfCapital {
                     amount_per_unit: positive(self.amount_per_unit)?,
                     currency: self.currency?,
                 })
             }
             ActionType::ShareSplit
-                if !payment && !bonus && !rights && !buyback && !scrip
+                if !payment && !bonus && !rights && !buyback && !scrip && !demerger
                     && self.currency.is_none() =>
             {
                 Some(ActionKind::ShareSplit {
@@ -362,7 +424,7 @@ impl CorporateActionBody {
                 })
             }
             ActionType::BonusIssue
-                if !payment && !split && !rights && !buyback && !scrip
+                if !payment && !split && !rights && !buyback && !scrip && !demerger
                     && self.currency.is_none() =>
             {
                 Some(ActionKind::BonusIssue {
@@ -370,7 +432,9 @@ impl CorporateActionBody {
                     bonus_held_units: positive(self.bonus_held_units)?,
                 })
             }
-            ActionType::RightsIssue if !payment && !split && !bonus && !buyback && !scrip => {
+            ActionType::RightsIssue
+                if !payment && !split && !bonus && !buyback && !scrip && !demerger =>
+            {
                 Some(ActionKind::RightsIssue {
                     rights_units: positive(self.rights_units)?,
                     rights_held_units: positive(self.rights_held_units)?,
@@ -379,7 +443,7 @@ impl CorporateActionBody {
                 })
             }
             ActionType::ScripForScrip
-                if !payment && !split && !bonus && !rights && !buyback
+                if !payment && !split && !bonus && !rights && !buyback && !demerger
                     && self.currency.is_none() =>
             {
                 let scrip_listing_id =
@@ -390,7 +454,25 @@ impl CorporateActionBody {
                     scrip_old_units: positive(self.scrip_old_units)?,
                 })
             }
-            ActionType::BuyBack if !payment && !split && !bonus && !rights && !scrip => {
+            ActionType::Demerger
+                if !payment && !split && !bonus && !rights && !buyback && !scrip
+                    && self.currency.is_none() =>
+            {
+                let demerger_listing_id =
+                    self.demerger_listing_id.filter(|&l| l != self.listing_id)?;
+                let demerger_cost_base_pct = self
+                    .demerger_cost_base_pct
+                    .filter(|p| *p > Decimal::ZERO && *p < Decimal::ONE_HUNDRED)?;
+                Some(ActionKind::Demerger {
+                    demerger_listing_id,
+                    demerger_new_units: positive(self.demerger_new_units)?,
+                    demerger_held_units: positive(self.demerger_held_units)?,
+                    demerger_cost_base_pct,
+                })
+            }
+            ActionType::BuyBack
+                if !payment && !split && !bonus && !rights && !scrip && !demerger =>
+            {
                 let buyback_price = positive(self.buyback_price)?;
                 let buyback_dividend = self.buyback_dividend.unwrap_or(Decimal::ZERO);
                 if buyback_dividend < Decimal::ZERO || buyback_dividend > buyback_price {
@@ -432,7 +514,8 @@ const COLUMNS: &str = "id, action_type, listing_id, date, amount_per_unit, curre
                        rights_units, rights_held_units, exercise_price, \
                        buyback_price, buyback_dividend, buyback_franking_credit, \
                        buyback_market_value, scrip_listing_id, scrip_new_units, \
-                       scrip_old_units";
+                       scrip_old_units, demerger_listing_id, demerger_new_units, \
+                       demerger_held_units, demerger_cost_base_pct";
 
 pub async fn db_list(pool: &SqlitePool) -> Result<Vec<CorporateAction>, sqlx::Error> {
     sqlx::query_as(&format!("SELECT {COLUMNS} FROM corporate_actions ORDER BY id"))
@@ -460,11 +543,11 @@ where
 pub enum WriteError {
     Db(sqlx::Error),
     /// The action is referenced by rights-exercise, buy-back participation,
-    /// or scrip-for-scrip exchange trades (`trades.rights_action_id` /
-    /// `trades.buyback_action_id` / `trades.scrip_action_id`): editing it
-    /// would retroactively change the terms those trades were created and
-    /// validated against. Delete the referencing trades first. Mapped to
-    /// `422`.
+    /// scrip-for-scrip exchange, or demerger trades (`trades.rights_action_id`
+    /// / `trades.buyback_action_id` / `trades.scrip_action_id` /
+    /// `trades.demerger_action_id`): editing it would retroactively change
+    /// the terms those trades were created and validated against. Delete the
+    /// referencing trades first. Mapped to `422`.
     ReferencedByTrade,
 }
 
@@ -495,6 +578,10 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
         scrip_listing_id: Option<i64>,
         scrip_new_units: Option<String>,
         scrip_old_units: Option<String>,
+        demerger_listing_id: Option<i64>,
+        demerger_new_units: Option<String>,
+        demerger_held_units: Option<String>,
+        demerger_cost_base_pct: Option<String>,
     }
     let mut c = Cols::default();
     match &action.kind {
@@ -534,18 +621,29 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
             c.scrip_new_units = Some(scrip_new_units.to_string());
             c.scrip_old_units = Some(scrip_old_units.to_string());
         }
+        ActionKind::Demerger {
+            demerger_listing_id,
+            demerger_new_units,
+            demerger_held_units,
+            demerger_cost_base_pct,
+        } => {
+            c.demerger_listing_id = Some(*demerger_listing_id);
+            c.demerger_new_units = Some(demerger_new_units.to_string());
+            c.demerger_held_units = Some(demerger_held_units.to_string());
+            c.demerger_cost_base_pct = Some(demerger_cost_base_pct.to_string());
+        }
     }
 
     let mut tx = pool.begin().await?;
 
-    // An action that exercise or participation trades were validated against
-    // is frozen: editing its terms (or re-typing it) would invalidate the
-    // checks those trades were created under. Checked and written in one
-    // transaction.
+    // An action that exercise, participation, exchange, or demerge trades
+    // were validated against is frozen: editing its terms (or re-typing it)
+    // would invalidate the checks those trades were created under. Checked
+    // and written in one transaction.
     let referenced: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM trades \
                        WHERE rights_action_id = ?1 OR buyback_action_id = ?1 \
-                          OR scrip_action_id = ?1)",
+                          OR scrip_action_id = ?1 OR demerger_action_id = ?1)",
     )
     .bind(action.id)
     .fetch_one(&mut *tx)
@@ -560,8 +658,10 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
           split_new_units, split_old_units, bonus_units, bonus_held_units, \
           rights_units, rights_held_units, exercise_price, \
           buyback_price, buyback_dividend, buyback_franking_credit, buyback_market_value, \
-          scrip_listing_id, scrip_new_units, scrip_old_units) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+          scrip_listing_id, scrip_new_units, scrip_old_units, \
+          demerger_listing_id, demerger_new_units, demerger_held_units, \
+          demerger_cost_base_pct) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT(id) DO UPDATE SET \
              action_type       = excluded.action_type, \
              listing_id        = excluded.listing_id, \
@@ -581,7 +681,11 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
              buyback_market_value    = excluded.buyback_market_value, \
              scrip_listing_id  = excluded.scrip_listing_id, \
              scrip_new_units   = excluded.scrip_new_units, \
-             scrip_old_units   = excluded.scrip_old_units",
+             scrip_old_units   = excluded.scrip_old_units, \
+             demerger_listing_id    = excluded.demerger_listing_id, \
+             demerger_new_units     = excluded.demerger_new_units, \
+             demerger_held_units    = excluded.demerger_held_units, \
+             demerger_cost_base_pct = excluded.demerger_cost_base_pct",
     )
     .bind(action.id)
     .bind(action.kind.type_str())
@@ -603,6 +707,10 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
     .bind(c.scrip_listing_id)
     .bind(c.scrip_new_units)
     .bind(c.scrip_old_units)
+    .bind(c.demerger_listing_id)
+    .bind(c.demerger_new_units)
+    .bind(c.demerger_held_units)
+    .bind(c.demerger_cost_base_pct)
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -610,9 +718,9 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
 }
 
 /// Delete an action. An action referenced by rights-exercise, buy-back
-/// participation, or scrip-for-scrip exchange trades is protected by the
-/// corresponding `trades.*_action_id` foreign key — the violation surfaces
-/// as a database error the handler maps to `422`.
+/// participation, scrip-for-scrip exchange, or demerger trades is protected
+/// by the corresponding `trades.*_action_id` foreign key — the violation
+/// surfaces as a database error the handler maps to `422`.
 pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<bool, sqlx::Error> {
     let result = sqlx::query("DELETE FROM corporate_actions WHERE id = ?")
         .bind(id)
@@ -1014,6 +1122,28 @@ mod tests {
         }
     }
 
+    fn demerger(
+        id: i64,
+        listing_id: i64,
+        demerger_listing_id: i64,
+        date: NaiveDate,
+        new: &str,
+        held: &str,
+        pct: &str,
+    ) -> CorporateAction {
+        CorporateAction {
+            id,
+            listing_id,
+            date,
+            kind: ActionKind::Demerger {
+                demerger_listing_id,
+                demerger_new_units: new.parse().unwrap(),
+                demerger_held_units: held.parse().unwrap(),
+                demerger_cost_base_pct: pct.parse().unwrap(),
+            },
+        }
+    }
+
     fn split_event(date: NaiveDate, new: &str, old: &str) -> SplitEvent {
         SplitEvent { date, new_units: new.parse().unwrap(), old_units: old.parse().unwrap() }
     }
@@ -1146,6 +1276,60 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn db_insert_and_retrieve_demerger_preserves_terms() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "HEAD").await;
+        insert_listing(&pool, 2, "DEM").await;
+        // An uneven ratio and a sub-unit percentage (BHP Steel's 5.063%) must
+        // round-trip exactly.
+        db_upsert(&pool, &demerger(1, 1, 2, d(2024, 11, 30), "1", "5", "5.063")).await.unwrap();
+
+        let got = db_get(&pool, 1).await.unwrap().unwrap();
+        assert_eq!(got.listing_id, 1);
+        assert_eq!(
+            got.kind,
+            ActionKind::Demerger {
+                demerger_listing_id: 2,
+                demerger_new_units: Decimal::ONE,
+                demerger_held_units: Decimal::from(5),
+                demerger_cost_base_pct: "5.063".parse().unwrap(),
+            }
+        );
+    }
+
+    /// A Demerger never appears in the split-event or return-of-capital
+    /// streams — recording one changes no existing parcel (the demerge
+    /// operation does the apportionment).
+    #[tokio::test]
+    async fn db_demerger_is_not_a_split_or_payment_event() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "HEAD").await;
+        insert_listing(&pool, 2, "DEM").await;
+        db_upsert(&pool, &demerger(1, 1, 2, d(2024, 11, 30), "1", "5", "5.063")).await.unwrap();
+
+        assert!(db_share_split_events(&pool).await.unwrap().is_empty());
+        assert!(db_splits_for_listing(&pool, 1).await.unwrap().is_empty());
+        assert!(db_return_of_capital_events(&pool).await.unwrap().is_empty());
+    }
+
+    /// The CHECK rejects a demerger of a listing into itself even on a raw
+    /// SQL write — the body validation is the first line of defence.
+    #[tokio::test]
+    async fn db_check_rejects_self_demerger() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "HEAD").await;
+        let result = sqlx::query(
+            "INSERT INTO corporate_actions \
+             (id, action_type, listing_id, date, demerger_listing_id, demerger_new_units, \
+              demerger_held_units, demerger_cost_base_pct) \
+             VALUES (1, 'Demerger', 1, '2024-11-30', 1, '1', '5', '5.063')",
+        )
+        .execute(&pool)
+        .await;
+        assert!(result.is_err(), "demerger_listing_id == listing_id should violate the CHECK");
+    }
+
     /// A ScripForScrip never appears in the split-event or return-of-capital
     /// streams — recording one changes no existing parcel (the exchange
     /// operation does the substitution).
@@ -1259,9 +1443,16 @@ mod tests {
             ("ScripForScrip", "amount_per_unit = '0.50', currency = 'AUD'"),
             ("ScripForScrip", "split_new_units = '2', split_old_units = '1'"),
             ("ScripForScrip", "buyback_price = '9.60', buyback_dividend = '0', buyback_franking_credit = '0'"),
-            // …and the other types carrying scrip terms.
+            // …and the other types carrying scrip terms…
             ("ShareSplit", "scrip_listing_id = 2, scrip_new_units = '2', scrip_old_units = '1'"),
             ("BuyBack", "scrip_listing_id = 2, scrip_new_units = '2', scrip_old_units = '1'"),
+            // …a Demerger carrying a payment, a split ratio, or scrip terms…
+            ("Demerger", "amount_per_unit = '0.50', currency = 'AUD'"),
+            ("Demerger", "split_new_units = '2', split_old_units = '1'"),
+            ("Demerger", "scrip_listing_id = 2, scrip_new_units = '2', scrip_old_units = '1'"),
+            // …and the other types carrying demerger terms.
+            ("ShareSplit", "demerger_listing_id = 2, demerger_new_units = '1', demerger_held_units = '5', demerger_cost_base_pct = '5.063'"),
+            ("ScripForScrip", "demerger_listing_id = 2, demerger_new_units = '1', demerger_held_units = '5', demerger_cost_base_pct = '5.063'"),
         ] {
             let (base_cols, base_vals) = match action_type {
                 "ShareSplit" => ("split_new_units, split_old_units", "'2', '1'"),
@@ -1277,6 +1468,11 @@ mod tests {
                 "ScripForScrip" => (
                     "scrip_listing_id, scrip_new_units, scrip_old_units",
                     "2, '2', '1'",
+                ),
+                "Demerger" => (
+                    "demerger_listing_id, demerger_new_units, demerger_held_units, \
+                     demerger_cost_base_pct",
+                    "2, '1', '5', '5.063'",
                 ),
                 _ => ("bonus_units, bonus_held_units", "'1', '10'"),
             };
@@ -1948,6 +2144,119 @@ mod tests {
             serde_json::json!({
                 "action_type": "BuyBack", "listing_id": 1, "date": "2024-11-30",
                 "buyback_price": "9.60", "currency": "AUD", "scrip_listing_id": 2,
+            }),
+        ] {
+            api_put_expecting(&pool, body, StatusCode::UNPROCESSABLE_ENTITY).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn api_demerger_round_trip() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "HEAD").await;
+        insert_listing(&pool, 2, "DEM").await;
+        api_put_expecting(
+            &pool,
+            serde_json::json!({
+                "action_type": "Demerger",
+                "listing_id": 1,
+                "date": "2024-11-30",
+                "demerger_listing_id": 2,
+                "demerger_new_units": "1",
+                "demerger_held_units": "5",
+                "demerger_cost_base_pct": "5.063",
+            }),
+            StatusCode::NO_CONTENT,
+        )
+        .await;
+        let got = db_get(&pool, 1).await.unwrap().unwrap();
+        assert_eq!(
+            got.kind,
+            ActionKind::Demerger {
+                demerger_listing_id: 2,
+                demerger_new_units: Decimal::ONE,
+                demerger_held_units: Decimal::from(5),
+                demerger_cost_base_pct: "5.063".parse().unwrap(),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn api_invalid_demerger_payloads_return_422() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "HEAD").await;
+        insert_listing(&pool, 2, "DEM").await;
+        // Missing terms, a non-positive ratio, a percentage at/outside the
+        // (0, 100) bounds, the same listing on both sides, an unknown
+        // demerged listing, a stray currency, stray cross-type fields — and
+        // the other types carrying demerger fields.
+        for body in [
+            serde_json::json!({
+                "action_type": "Demerger", "listing_id": 1, "date": "2024-11-30",
+            }),
+            serde_json::json!({
+                "action_type": "Demerger", "listing_id": 1, "date": "2024-11-30",
+                "demerger_listing_id": 2, "demerger_new_units": "0",
+                "demerger_held_units": "5", "demerger_cost_base_pct": "5.063",
+            }),
+            serde_json::json!({
+                "action_type": "Demerger", "listing_id": 1, "date": "2024-11-30",
+                "demerger_listing_id": 2, "demerger_new_units": "1",
+                "demerger_held_units": "-5", "demerger_cost_base_pct": "5.063",
+            }),
+            serde_json::json!({
+                "action_type": "Demerger", "listing_id": 1, "date": "2024-11-30",
+                "demerger_listing_id": 2, "demerger_new_units": "1",
+                "demerger_held_units": "5", "demerger_cost_base_pct": "0",
+            }),
+            serde_json::json!({
+                "action_type": "Demerger", "listing_id": 1, "date": "2024-11-30",
+                "demerger_listing_id": 2, "demerger_new_units": "1",
+                "demerger_held_units": "5", "demerger_cost_base_pct": "100",
+            }),
+            serde_json::json!({
+                "action_type": "Demerger", "listing_id": 1, "date": "2024-11-30",
+                "demerger_listing_id": 2, "demerger_new_units": "1",
+                "demerger_held_units": "5", "demerger_cost_base_pct": "-5.063",
+            }),
+            serde_json::json!({
+                "action_type": "Demerger", "listing_id": 1, "date": "2024-11-30",
+                "demerger_listing_id": 1, "demerger_new_units": "1",
+                "demerger_held_units": "5", "demerger_cost_base_pct": "5.063",
+            }),
+            serde_json::json!({
+                "action_type": "Demerger", "listing_id": 1, "date": "2024-11-30",
+                "demerger_listing_id": 999, "demerger_new_units": "1",
+                "demerger_held_units": "5", "demerger_cost_base_pct": "5.063",
+            }),
+            serde_json::json!({
+                "action_type": "Demerger", "listing_id": 1, "date": "2024-11-30",
+                "demerger_listing_id": 2, "demerger_new_units": "1",
+                "demerger_held_units": "5", "demerger_cost_base_pct": "5.063",
+                "currency": "AUD",
+            }),
+            serde_json::json!({
+                "action_type": "Demerger", "listing_id": 1, "date": "2024-11-30",
+                "demerger_listing_id": 2, "demerger_new_units": "1",
+                "demerger_held_units": "5", "demerger_cost_base_pct": "5.063",
+                "split_new_units": "2", "split_old_units": "1",
+            }),
+            serde_json::json!({
+                "action_type": "Demerger", "listing_id": 1, "date": "2024-11-30",
+                "demerger_listing_id": 2, "demerger_new_units": "1",
+                "demerger_held_units": "5", "demerger_cost_base_pct": "5.063",
+                "scrip_listing_id": 2, "scrip_new_units": "2", "scrip_old_units": "1",
+            }),
+            serde_json::json!({
+                "action_type": "ShareSplit", "listing_id": 1, "date": "2024-11-30",
+                "split_new_units": "2", "split_old_units": "1",
+                "demerger_listing_id": 2, "demerger_new_units": "1",
+                "demerger_held_units": "5", "demerger_cost_base_pct": "5.063",
+            }),
+            serde_json::json!({
+                "action_type": "ScripForScrip", "listing_id": 1, "date": "2024-11-30",
+                "scrip_listing_id": 2, "scrip_new_units": "2", "scrip_old_units": "1",
+                "demerger_cost_base_pct": "5.063",
             }),
         ] {
             api_put_expecting(&pool, body, StatusCode::UNPROCESSABLE_ENTITY).await;

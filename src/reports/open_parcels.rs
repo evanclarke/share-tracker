@@ -270,6 +270,7 @@ mod tests {
                 rights_action_id: None,
                 buyback_action_id: None,
                 scrip_action_id: None,
+                demerger_action_id: None,
                 deemed_acquisition_date: None,
             },
         )
@@ -300,6 +301,7 @@ mod tests {
                 rights_action_id: None,
                 buyback_action_id: None,
                 scrip_action_id: None,
+                demerger_action_id: None,
                 deemed_acquisition_date: None,
             },
         )
@@ -760,5 +762,54 @@ mod tests {
         // A$2,021.89 at the Jan-2024 rate — not US$1,010.945 / 0.80.
         assert_eq!(p.original_cost_base, "2021.890".parse::<Decimal>().unwrap());
         assert_eq!(p.remaining_cost_base, "2021.890".parse::<Decimal>().unwrap());
+    }
+
+    /// Demerger head and demerged parcels are ordinary open parcels, each
+    /// reporting the consumed parcel's acquisition date (the head dates are
+    /// unchanged by law; the new interests' discount clock runs from the
+    /// original acquisition) and its share of the apportioned cost base.
+    #[tokio::test]
+    async fn db_demerger_parcels_report_carried_date_and_apportioned_cost_base() {
+        let pool = test_pool().await;
+        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 10).unwrap();
+        insert_listing(&pool, 1, "HEAD").await;
+        insert_listing(&pool, 2, "DEM").await;
+        // 100 @ $10 + $9.95 + $0.995 = $1,010.945 cost base.
+        insert_buy(&pool, 1, 1, buy_date, Decimal::from(100), Decimal::from(10)).await;
+        corporate_action::db_upsert(
+            &pool,
+            &corporate_action::CorporateAction {
+                id: 10,
+                listing_id: 1,
+                date: NaiveDate::from_ymd_opt(2024, 7, 1).unwrap(),
+                kind: corporate_action::ActionKind::Demerger {
+                    demerger_listing_id: 2,
+                    demerger_new_units: Decimal::ONE,
+                    demerger_held_units: Decimal::from(5),
+                    demerger_cost_base_pct: Decimal::from(20),
+                },
+            },
+        )
+        .await
+        .unwrap();
+        crate::entities::demerger::db_demerge(&pool, 10).await.unwrap();
+
+        let mut parcels = db_open_parcels(&pool).await.unwrap();
+        // The original parcel is fully consumed; both replacement legs are
+        // open and keep the original acquisition date.
+        parcels.sort_by_key(|p| p.listing_id);
+        assert_eq!(parcels.len(), 2);
+        let head = &parcels[0];
+        assert_eq!(head.listing_id, 1);
+        assert_eq!(head.acquisition_date, buy_date);
+        assert_eq!(head.remaining_quantity, Decimal::from(100));
+        // 80% of $1,010.945 = $808.756.
+        assert_eq!(head.remaining_cost_base, "808.756".parse::<Decimal>().unwrap());
+        let demerged = &parcels[1];
+        assert_eq!(demerged.listing_id, 2);
+        assert_eq!(demerged.acquisition_date, buy_date);
+        assert_eq!(demerged.remaining_quantity, Decimal::from(20));
+        // 20% of $1,010.945 = $202.189.
+        assert_eq!(demerged.remaining_cost_base, "202.189".parse::<Decimal>().unwrap());
     }
 }

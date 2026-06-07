@@ -72,15 +72,25 @@ pub struct Trade {
     /// the whole group; and the action cannot be edited or deleted while any
     /// exists.
     pub scrip_action_id: Option<i64>,
+    /// Provenance link from a demerger trade — the closing Sell on the head
+    /// listing, a head replacement Buy, or a demerged-entity Buy — back to
+    /// its `Demerger` corporate action (`None` for every other trade). Set
+    /// only by `POST /corporate_actions/:id/demerge` (`entities::demerger`).
+    /// The trades carrying one action id form the demerger group: each is
+    /// rejected by `PUT /sells` and `PUT`/`DELETE /trades`; `DELETE /sells`
+    /// on the closing Sell removes the whole group; and the action cannot be
+    /// edited or deleted while any exists.
+    pub demerger_action_id: Option<i64>,
     /// The CGT acquisition date deemed for this parcel when it differs from
-    /// `date`: set only on scrip-for-scrip replacement Buys, carrying the
-    /// consumed parcel's acquisition date (the rollover counts the combined
-    /// holding period — see `docs/takeovers-and-scrip-for-scrip.md`). Drives
-    /// the 12-month discount clock and the AUD translation month of the cost
-    /// base in the reports; split/return-of-capital applicability stays on
-    /// the actual `date` (the replacement shares only exist in the
-    /// replacement listing from the exchange on). `None` = the trade's own
-    /// date.
+    /// `date`: set only on scrip-for-scrip replacement Buys and demerger
+    /// head/demerged Buys, carrying the consumed parcel's acquisition date
+    /// (the rollovers count the combined holding period — see
+    /// `docs/takeovers-and-scrip-for-scrip.md` and `docs/demergers.md`).
+    /// Drives the 12-month discount clock and the AUD translation month of
+    /// the cost base in the reports; split/return-of-capital applicability
+    /// stays on the actual `date` (the replacement shares only exist in
+    /// their listing from the exchange/demerger on). `None` = the trade's
+    /// own date.
     pub deemed_acquisition_date: Option<NaiveDate>,
 }
 
@@ -109,6 +119,7 @@ impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for Trade {
             rights_action_id: row.try_get("rights_action_id")?,
             buyback_action_id: row.try_get("buyback_action_id")?,
             scrip_action_id: row.try_get("scrip_action_id")?,
+            demerger_action_id: row.try_get("demerger_action_id")?,
             deemed_acquisition_date: row.try_get("deemed_acquisition_date")?,
         })
     }
@@ -149,7 +160,7 @@ pub async fn db_list(pool: &SqlitePool) -> Result<Vec<Trade>, sqlx::Error> {
         "SELECT id, trade_type, date, settlement_date, listing_id, average_price, quantity, \
          currency, brokerage, gst_on_brokerage, brokerage_currency, fx_rate, contract_note_ref, \
          residual_brought_forward, residual_carried_forward, residual_paid_out, rights_action_id, \
-         buyback_action_id, scrip_action_id, deemed_acquisition_date \
+         buyback_action_id, scrip_action_id, demerger_action_id, deemed_acquisition_date \
          FROM trades ORDER BY date, id",
     )
     .fetch_all(pool)
@@ -161,7 +172,7 @@ pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<Trade>, sqlx::E
         "SELECT id, trade_type, date, settlement_date, listing_id, average_price, quantity, \
          currency, brokerage, gst_on_brokerage, brokerage_currency, fx_rate, contract_note_ref, \
          residual_brought_forward, residual_carried_forward, residual_paid_out, rights_action_id, \
-         buyback_action_id, scrip_action_id, deemed_acquisition_date \
+         buyback_action_id, scrip_action_id, demerger_action_id, deemed_acquisition_date \
          FROM trades WHERE id = ?",
     )
     .bind(id)
@@ -197,6 +208,12 @@ pub enum UpsertError {
     /// Delete the group via `DELETE /sells` on the closing Sell and
     /// re-exchange instead (see `entities::scrip_exchange`).
     ScripExchangeTrade,
+    /// The existing trade belongs to a demerger group (`demerger_action_id`
+    /// set): its figures carry the rollover's apportioned cost base and
+    /// deemed acquisition date, which a free-form edit would corrupt. Delete
+    /// the group via `DELETE /sells` on the closing Sell and re-demerge
+    /// instead (see `entities::demerger`).
+    DemergerTrade,
 }
 
 impl From<sqlx::Error> for UpsertError {
@@ -213,19 +230,21 @@ impl From<sqlx::Error> for UpsertError {
 pub async fn db_upsert(pool: &SqlitePool, trade: &Trade) -> Result<(), UpsertError> {
     let mut tx = pool.begin().await?;
 
-    // A rights-exercise, buy-back participation, or scrip-for-scrip exchange
-    // trade is immutable here: it was created against its action's terms
-    // (entitlement cap / dividend-capital split / carried cost base and
-    // deemed acquisition date), which an edit could silently break. (The
-    // INSERT below never sets any provenance column, so a normal trade can't
-    // become one either.)
-    let existing_action: Option<(Option<i64>, Option<i64>, Option<i64>)> = sqlx::query_as(
-        "SELECT rights_action_id, buyback_action_id, scrip_action_id FROM trades WHERE id = ?",
-    )
-    .bind(trade.id)
-    .fetch_optional(&mut *tx)
-    .await?;
-    if let Some((rights, buyback, scrip)) = existing_action {
+    // A rights-exercise, buy-back participation, scrip-for-scrip exchange,
+    // or demerger trade is immutable here: it was created against its
+    // action's terms (entitlement cap / dividend-capital split / carried
+    // cost base and deemed acquisition date), which an edit could silently
+    // break. (The INSERT below never sets any provenance column, so a normal
+    // trade can't become one either.)
+    let existing_action: Option<(Option<i64>, Option<i64>, Option<i64>, Option<i64>)> =
+        sqlx::query_as(
+            "SELECT rights_action_id, buyback_action_id, scrip_action_id, demerger_action_id \
+             FROM trades WHERE id = ?",
+        )
+        .bind(trade.id)
+        .fetch_optional(&mut *tx)
+        .await?;
+    if let Some((rights, buyback, scrip, demerger)) = existing_action {
         if rights.is_some() {
             return Err(UpsertError::RightsExerciseTrade);
         }
@@ -234,6 +253,9 @@ pub async fn db_upsert(pool: &SqlitePool, trade: &Trade) -> Result<(), UpsertErr
         }
         if scrip.is_some() {
             return Err(UpsertError::ScripExchangeTrade);
+        }
+        if demerger.is_some() {
+            return Err(UpsertError::DemergerTrade);
         }
     }
 
@@ -329,7 +351,7 @@ pub enum DeleteOutcome {
     /// The trade is still referenced — as the purchase parcel of a Sell's
     /// allocation (or a Sell with allocations), by an AMIT adjustment, or as a
     /// distribution's reinvestment trade — or it belongs to a scrip-for-scrip
-    /// exchange group, which is only ever deleted as a whole (via
+    /// exchange or demerger group, which is only ever deleted as a whole (via
     /// `DELETE /sells` on the group's closing Sell). Deleting it would orphan
     /// those dependants or break the rollover's parcel substitution, so the
     /// request is refused (mapped to 422) rather than surfacing the SQLite FK
@@ -341,18 +363,20 @@ pub enum DeleteOutcome {
 pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<DeleteOutcome, sqlx::Error> {
     let mut tx = pool.begin().await?;
 
-    let exists: Option<Option<i64>> =
-        sqlx::query_scalar("SELECT scrip_action_id FROM trades WHERE id = ?")
-            .bind(id)
-            .fetch_optional(&mut *tx)
-            .await?;
-    let Some(scrip_action) = exists else {
+    let exists: Option<(Option<i64>, Option<i64>)> = sqlx::query_as(
+        "SELECT scrip_action_id, demerger_action_id FROM trades WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some((scrip_action, demerger_action)) = exists else {
         return Ok(DeleteOutcome::NotFound);
     };
-    // A scrip-for-scrip exchange trade is never deleted individually — the
-    // group's closing Sell and replacement Buys substitute the same parcels,
-    // so they are removed as a whole via DELETE /sells on the closing Sell.
-    if scrip_action.is_some() {
+    // A scrip-for-scrip exchange or demerger trade is never deleted
+    // individually — the group's closing Sell and replacement Buys substitute
+    // the same parcels, so they are removed as a whole via DELETE /sells on
+    // the closing Sell.
+    if scrip_action.is_some() || demerger_action.is_some() {
         return Ok(DeleteOutcome::Referenced);
     }
 
@@ -504,6 +528,7 @@ async fn upsert(
         rights_action_id: None,
         buyback_action_id: None,
         scrip_action_id: None,
+        demerger_action_id: None,
         deemed_acquisition_date: None,
     };
     db_upsert(&pool, &trade)
@@ -515,7 +540,8 @@ async fn upsert(
             | UpsertError::QuantityBelowAmitAdjustment
             | UpsertError::RightsExerciseTrade
             | UpsertError::BuyBackTrade
-            | UpsertError::ScripExchangeTrade => StatusCode::UNPROCESSABLE_ENTITY,
+            | UpsertError::ScripExchangeTrade
+            | UpsertError::DemergerTrade => StatusCode::UNPROCESSABLE_ENTITY,
         })
 }
 
@@ -585,6 +611,7 @@ mod tests {
             rights_action_id: None,
             buyback_action_id: None,
             scrip_action_id: None,
+            demerger_action_id: None,
             deemed_acquisition_date: None,
         }
     }
@@ -736,6 +763,7 @@ mod tests {
             rights_action_id: None,
             buyback_action_id: None,
             scrip_action_id: None,
+            demerger_action_id: None,
             deemed_acquisition_date: None,
         };
         db_upsert(&pool, &trade).await.unwrap();
@@ -768,6 +796,7 @@ mod tests {
             rights_action_id: None,
             buyback_action_id: None,
             scrip_action_id: None,
+            demerger_action_id: None,
             deemed_acquisition_date: None,
         };
         db_upsert(&pool, &trade).await.unwrap();

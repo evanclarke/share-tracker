@@ -276,12 +276,12 @@
     },
     {
       slug: 'corporate_actions', title: 'Corporate Actions', group: 'Activity', api: '/corporate_actions',
-      desc: 'Return-of-capital payments (CGT event G1): the per-unit amount reduces the cost base of parcels held on the payment date; any excess over a parcel’s cost base is a capital gain in the Net Capital Gain report. Share splits/consolidations (TD 2000/10): on the conversion date every “old units” become “new units” (2-for-1 split: new 2, old 1; 1-for-10 consolidation: new 1, old 10) — no CGT event, the parcels keep their total cost base and original acquisition date. Bonus issues (non-assessable): on the issue date every “held units” receive “bonus units” extra units (1-for-10 issue: bonus 1, held 10) — no CGT event, the cost base is apportioned over original + bonus shares and the acquisition date is preserved; bonus shares chosen in lieu of a dividend are a DRP trade, not entered here. Rights issues: units held before the record date earn “rights units” per “held units” at the exercise price (1-for-4 issue: rights 1, held 4) — recording the issue changes nothing; use the row’s Exercise action to create the new Buy parcel (acquired at the exercise date, cost base = exercise payment + any amount paid for the rights). Off-market buy-backs: record the per-unit buy-back price, the dividend component of that price and its franking credit (both 0 for a listed-company buy-back announced after 25 Oct 2022), and the market value had the buy-back not been proposed (blank if the price is at or above it); recording changes nothing — use the row’s Participate action to sell units into the buy-back, which creates the Sell at the capital proceeds (max(price, market value) − dividend) plus the dividend income row. Scrip-for-scrip takeovers (all-scrip, with rollover): on the exchange date every “old units” of this listing become “new units” of the replacement listing (1-for-1 merger: new 1, old 1) — recording changes nothing; use the row’s Exchange action to substitute every open parcel: the capital gain is disregarded and each replacement parcel carries the consumed parcel’s remaining cost base and acquisition date (the combined period counts toward the 12-month discount). Fill only the chosen action type’s fields and leave the other types’ fields blank.',
+      desc: 'Return-of-capital payments (CGT event G1): the per-unit amount reduces the cost base of parcels held on the payment date; any excess over a parcel’s cost base is a capital gain in the Net Capital Gain report. Share splits/consolidations (TD 2000/10): on the conversion date every “old units” become “new units” (2-for-1 split: new 2, old 1; 1-for-10 consolidation: new 1, old 10) — no CGT event, the parcels keep their total cost base and original acquisition date. Bonus issues (non-assessable): on the issue date every “held units” receive “bonus units” extra units (1-for-10 issue: bonus 1, held 10) — no CGT event, the cost base is apportioned over original + bonus shares and the acquisition date is preserved; bonus shares chosen in lieu of a dividend are a DRP trade, not entered here. Rights issues: units held before the record date earn “rights units” per “held units” at the exercise price (1-for-4 issue: rights 1, held 4) — recording the issue changes nothing; use the row’s Exercise action to create the new Buy parcel (acquired at the exercise date, cost base = exercise payment + any amount paid for the rights). Off-market buy-backs: record the per-unit buy-back price, the dividend component of that price and its franking credit (both 0 for a listed-company buy-back announced after 25 Oct 2022), and the market value had the buy-back not been proposed (blank if the price is at or above it); recording changes nothing — use the row’s Participate action to sell units into the buy-back, which creates the Sell at the capital proceeds (max(price, market value) − dividend) plus the dividend income row. Scrip-for-scrip takeovers (all-scrip, with rollover): on the exchange date every “old units” of this listing become “new units” of the replacement listing (1-for-1 merger: new 1, old 1) — recording changes nothing; use the row’s Exchange action to substitute every open parcel: the capital gain is disregarded and each replacement parcel carries the consumed parcel’s remaining cost base and acquisition date (the combined period counts toward the 12-month discount). Demergers (eligible, rollover chosen): on the demerger date every “held units” of this (head) listing receive “new units” of the demerged listing (BHP Steel’s 1-for-5: new 1, held 5), and the advised percentage of each parcel’s cost base moves to the new interests — recording changes nothing; use the row’s Demerge action to apportion every open parcel: any gain is disregarded, the head parcels keep the rest of the cost base and their acquisition dates, and the new parcels’ 12-month discount clock runs from the original acquisition. Fill only the chosen action type’s fields and leave the other types’ fields blank.',
       keyFields: [int('id', 'ID', { auto: true })],
       fields: [
-        sel('action_type', 'Action type', ['ReturnOfCapital', 'ShareSplit', 'BonusIssue', 'RightsIssue', 'BuyBack', 'ScripForScrip'], { required: true }),
+        sel('action_type', 'Action type', ['ReturnOfCapital', 'ShareSplit', 'BonusIssue', 'RightsIssue', 'BuyBack', 'ScripForScrip', 'Demerger'], { required: true }),
         fk('listing_id', 'Listing', 'listings', { required: true }),
-        dt('date', 'Payment / conversion / issue / record / buy-back / exchange date', { required: true }),
+        dt('date', 'Payment / conversion / issue / record / buy-back / exchange / demerger date', { required: true }),
         dec('amount_per_unit', 'Amount per unit', { optional: true, default: '', hint: 'ReturnOfCapital only.' }),
         fk('currency', 'Currency', 'currencies', { optional: true, encode: 'string', default: '', hint: 'ReturnOfCapital, RightsIssue, and BuyBack only.' }),
         dec('split_new_units', 'Split: new units', { optional: true, default: '', hint: 'ShareSplit only.' }),
@@ -298,12 +298,17 @@
         fk('scrip_listing_id', 'Scrip: replacement listing', 'listings', { optional: true, default: '', hint: 'ScripForScrip only; must differ from the listing being taken over.' }),
         dec('scrip_new_units', 'Scrip: new units', { optional: true, default: '', hint: 'ScripForScrip only.' }),
         dec('scrip_old_units', 'Scrip: per old units', { optional: true, default: '', hint: 'ScripForScrip only.' }),
+        fk('demerger_listing_id', 'Demerger: demerged listing', 'listings', { optional: true, default: '', hint: 'Demerger only; must differ from the head listing.' }),
+        dec('demerger_new_units', 'Demerger: new units', { optional: true, default: '', hint: 'Demerger only.' }),
+        dec('demerger_held_units', 'Demerger: per units held', { optional: true, default: '', hint: 'Demerger only.' }),
+        dec('demerger_cost_base_pct', 'Demerger: cost base % to demerged entity', { optional: true, default: '', hint: 'Demerger only; the head-entity-advised percentage (0–100 exclusive), e.g. 5.063.' }),
       ],
-      columns: ['id', 'action_type', 'listing_id', 'date', 'amount_per_unit', 'currency', 'split_new_units', 'split_old_units', 'bonus_units', 'bonus_held_units', 'rights_units', 'rights_held_units', 'exercise_price', 'buyback_price', 'buyback_dividend', 'buyback_franking_credit', 'buyback_market_value', 'scrip_listing_id', 'scrip_new_units', 'scrip_old_units'],
+      columns: ['id', 'action_type', 'listing_id', 'date', 'amount_per_unit', 'currency', 'split_new_units', 'split_old_units', 'bonus_units', 'bonus_held_units', 'rights_units', 'rights_held_units', 'exercise_price', 'buyback_price', 'buyback_dividend', 'buyback_franking_credit', 'buyback_market_value', 'scrip_listing_id', 'scrip_new_units', 'scrip_old_units', 'demerger_listing_id', 'demerger_new_units', 'demerger_held_units', 'demerger_cost_base_pct'],
       rowActions: function (row) {
         if (row.action_type === 'RightsIssue') return [{ label: 'Exercise', href: '#/exercise/' + row.id }];
         if (row.action_type === 'BuyBack') return [{ label: 'Participate', href: '#/participate/' + row.id }];
         if (row.action_type === 'ScripForScrip') return [{ label: 'Exchange', href: '#/scrip-exchange/' + row.id }];
+        if (row.action_type === 'Demerger') return [{ label: 'Demerge', href: '#/demerge/' + row.id }];
         return [];
       },
     },
@@ -936,6 +941,40 @@
     ]));
   }
 
+  // ---- demerger ------------------------------------------------------------
+  // Reached from a Demerger corporate action row's "Demerge" action.
+  // POST /corporate_actions/:id/demerge takes no parameters: the action's
+  // terms and the holdings at its date determine everything. It atomically
+  // closes every open parcel of the head listing (the rollover disregards any
+  // gain) and recreates each as a head replacement parcel plus a
+  // demerged-entity parcel splitting the cost base by the advised percentage,
+  // both keeping the consumed parcel's acquisition date.
+  async function viewDemerge(actionId) {
+    setActiveNav('corporate_actions');
+    const action = await api('GET', '/corporate_actions/' + actionId);
+    const form = el('form');
+    form.appendChild(el('div', { class: 'form-actions' }, [
+      el('button', { type: 'submit', class: 'primary' }, 'Demerge'),
+      el('a', { href: '#/e/corporate_actions' }, el('button', { type: 'button' }, 'Cancel')),
+    ]));
+    form.addEventListener('submit', async function (ev) {
+      ev.preventDefault();
+      try {
+        const result = await api('POST', '/corporate_actions/' + actionId + '/demerge');
+        const n = result && result.demerged_replacements ? result.demerged_replacements.length : 0;
+        toast('Demerged ' + n + ' parcel(s) via closing sell #' + (result && result.sell ? result.sell.id : '?') + '.');
+        location.hash = '#/e/corporate_actions';
+      } catch (e) {
+        toast(e.message, true);
+      }
+    });
+    setMain(el('div', null, [
+      el('h2', null, 'Demerge #' + actionId),
+      el('p', { class: 'view-desc' }, 'Apportions every open parcel of head listing ' + action.listing_id + ' held at ' + action.date + ': ' + action.demerger_cost_base_pct + '% of each parcel’s cost base moves to ' + action.demerger_new_units + ' unit(s) of demerged listing ' + action.demerger_listing_id + ' per ' + action.demerger_held_units + ' held; the head parcels keep the rest. Any gain is disregarded and both sides keep the original acquisition date (the 12-month discount clock). Undo by deleting the closing Sell from the Sells view.'),
+      el('div', { class: 'card' }, form),
+    ]));
+  }
+
   // ---- document attachments ---------------------------------------------
   // Reached from a Trade / Income / AMMA row's "Attachments" action. Lists the
   // activity's attachments (metadata only — never the blob), uploads a new file
@@ -1150,6 +1189,7 @@
       if (parts[0] === 'exercise') return await viewExercise(parts[1]);
       if (parts[0] === 'participate') return await viewParticipate(parts[1]);
       if (parts[0] === 'scrip-exchange') return await viewScripExchange(parts[1]);
+      if (parts[0] === 'demerge') return await viewDemerge(parts[1]);
       if (parts[0] === 'attachments') return await viewAttachments(parts[1], parts[2]);
       if (parts[0] === 'jobs') return await viewJobs();
       if (parts[0] === 'r') {

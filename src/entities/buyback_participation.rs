@@ -178,7 +178,7 @@ pub async fn db_participate(
             })
             .collect(),
     };
-    sell::upsert_sell_in_tx(&mut tx, sell_id, &sell_body, body.date, Some(action_id), None)
+    sell::upsert_sell_in_tx(&mut tx, sell_id, &sell_body, body.date, Some(action_id), None, None)
         .await?;
 
     // The dividend component: assessable franked income on the participation
@@ -313,6 +313,7 @@ mod tests {
                 rights_action_id: None,
                 buyback_action_id: None,
                 scrip_action_id: None,
+                demerger_action_id: None,
                 deemed_acquisition_date: None,
             },
         )

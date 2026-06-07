@@ -550,6 +550,7 @@ mod tests {
                 rights_action_id: None,
                 buyback_action_id: None,
                 scrip_action_id: None,
+                demerger_action_id: None,
                 deemed_acquisition_date: None,
             },
         )
@@ -1368,5 +1369,83 @@ mod tests {
         assert_eq!(years[0].discount_eligible_gains, Decimal::from(500));
         assert_eq!(years[0].cgt_discount, Decimal::from(250));
         assert_eq!(years[0].net_capital_gain, Decimal::from(250));
+    }
+
+    /// The demerger rollover (Div 125): the apportionment reports nothing in
+    /// the demerger year (any gain is disregarded), and later sales on both
+    /// sides are taxed on the apportioned cost bases with the
+    /// combined-period discount.
+    #[tokio::test]
+    async fn db_demerger_rollover_disregards_the_demerge_and_taxes_the_later_sales() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "HEAD").await;
+        insert_listing(&pool, 2, "DEM").await;
+        // FY2021: buy 1,000 @ $1.50 = $1,500.
+        insert_trade(
+            &pool,
+            1,
+            trade::TradeType::Buy,
+            1,
+            NaiveDate::from_ymd_opt(2020, 10, 1).unwrap(),
+            Decimal::from(1000),
+            "1.50".parse().unwrap(),
+        )
+        .await;
+        // FY2025: 1-for-5 demerger with rollover, 20% of cost base demerged.
+        corporate_action::db_upsert(
+            &pool,
+            &corporate_action::CorporateAction {
+                id: 10,
+                listing_id: 1,
+                date: NaiveDate::from_ymd_opt(2024, 7, 1).unwrap(),
+                kind: corporate_action::ActionKind::Demerger {
+                    demerger_listing_id: 2,
+                    demerger_new_units: Decimal::ONE,
+                    demerger_held_units: Decimal::from(5),
+                    demerger_cost_base_pct: Decimal::from(20),
+                },
+            },
+        )
+        .await
+        .unwrap();
+        let dm = crate::entities::demerger::db_demerge(&pool, 10).await.unwrap();
+
+        // The demerge alone: no tax year reports any gain or loss.
+        let years = db_net_capital_gain(&pool).await.unwrap();
+        assert!(years.is_empty(), "the rollover is disregarded: {years:?}");
+
+        // FY2025 sales of both sides: 1,000 head units @ $2.00 = $2,000 −
+        // $1,200 head cost base = $800; 200 demerged units @ $3.00 = $600 −
+        // $300 = $300. Both held since Oct 2020 (combined period) → $1,100
+        // halved → $550 net capital gain.
+        insert_trade(
+            &pool,
+            50,
+            trade::TradeType::Sell,
+            1,
+            NaiveDate::from_ymd_opt(2024, 10, 1).unwrap(),
+            Decimal::from(1000),
+            Decimal::from(2),
+        )
+        .await;
+        allocate(&pool, 1, 50, dm.head_replacements[0].id, Decimal::from(1000)).await;
+        insert_trade(
+            &pool,
+            51,
+            trade::TradeType::Sell,
+            2,
+            NaiveDate::from_ymd_opt(2024, 10, 1).unwrap(),
+            Decimal::from(200),
+            Decimal::from(3),
+        )
+        .await;
+        allocate(&pool, 2, 51, dm.demerged_replacements[0].id, Decimal::from(200)).await;
+
+        let years = db_net_capital_gain(&pool).await.unwrap();
+        assert_eq!(years.len(), 1);
+        assert_eq!(years[0].tax_year, 2025);
+        assert_eq!(years[0].discount_eligible_gains, Decimal::from(1100));
+        assert_eq!(years[0].cgt_discount, Decimal::from(550));
+        assert_eq!(years[0].net_capital_gain, Decimal::from(550));
     }
 }

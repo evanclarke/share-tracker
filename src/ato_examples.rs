@@ -42,6 +42,11 @@
 //!   base apportioned by market value. The modelled mechanics — gain
 //!   disregarded, cost base carried, combined holding period — are covered by
 //!   `scrip_exchange`/report unit tests instead.
+//! - `docs/demergers.md` Examples 31 and 33 (Anita's pre-CGT shares) — both
+//!   turn on pre-CGT original interests (and Example 31's no-rollover arm on
+//!   the ordinary cost-base rules for the new interests), which are not
+//!   modelled; Example 30's all-post-CGT apportionment and Example 32's
+//!   discount-clock rule are reproduced below.
 //! - `docs/amma-statement-guidance-notes.md` running example ("In our example,
 //!   this is $155") — the underlying Part C component table is not included in
 //!   the mirrored copy, so the example is not reproducible from the doc alone.
@@ -981,4 +986,85 @@ async fn lic_capital_gain_deduction_example_resident_individual() {
         dec("25"),
         "Dividend deductions: $25 (50% deduction for LIC capital gain)"
     );
+}
+
+/// `docs/demergers.md` (QC 64895) — "Example 30: No pre-CGT interests" and
+/// "Example 32: Using the discount method after a demerger (1)".
+///
+/// > Under the BHP Billiton Ltd demerger of BHP Steel Ltd, shareholders
+/// > received one BHP Steel share for every five BHP Billiton shares they
+/// > owned at the date of the demerger. Anita owned 280 BHP Billiton shares
+/// > (all post-CGT) with a cost base of $2,500 immediately before the
+/// > demerger. Under the demerger, Anita received 56 BHP Steel shares.
+/// > BHP Billiton advised shareholders to apportion 94.937% of the total
+/// > cost base to BHP Billiton shares and 5.063% to BHP Steel shares:
+/// > (a) BHP Billiton: 94.937% × $2,500 = $2,373.43
+/// > (b) BHP Steel: 5.063% × $2,500 = $126.58
+///
+/// (The ATO presents cent-rounded figures; the exact apportionment is
+/// $2,373.425 and $126.575, summing to the $2,500 step 1 amount — this
+/// system never rounds.) Example 32 dates the facts: the demerger happened on
+/// 22 July 2002 and the shares were acquired on 15 August 2001, and the BHP
+/// Steel shares can use the discount method only when disposed of after
+/// 15 August 2002 — more than 12 months after the date the corresponding
+/// BHP Billiton shares were acquired, not the demerger date.
+#[tokio::test]
+async fn demergers_examples_30_32_anita_bhp_billiton_demerger() {
+    let pool = test_pool().await;
+    put_listing(&pool, 1, "BHP").await;
+    put_listing(&pool, 2, "BSL").await;
+    // 280 shares with a $2,500 total cost base (280 × $8.50 + $120 costs).
+    put_buy(&pool, 1, 1, "2001-08-15", "280", "8.50", "120").await;
+    api_put(
+        &pool,
+        "/corporate_actions/1",
+        json!({
+            "action_type": "Demerger",
+            "listing_id": 1,
+            "date": "2002-07-22",
+            "demerger_listing_id": 2,
+            "demerger_new_units": "1",
+            "demerger_held_units": "5",
+            "demerger_cost_base_pct": "5.063",
+        }),
+    )
+    .await;
+    let demerge: Value =
+        api_post(&pool, "/corporate_actions/1/demerge", json!({}), StatusCode::CREATED).await;
+    let demerged_buy_id = demerge["demerged_replacements"][0]["id"].as_i64().unwrap();
+
+    // Step 2: 94.937% of $2,500 stays with the 280 BHP Billiton shares and
+    // 5.063% goes to the 56 BHP Steel shares; both keep the 15 Aug 2001
+    // acquisition date (steps 3–4 divide these by 280 and 56 — the ATO's
+    // $8.48 and $2.26 are those quotients rounded to the cent).
+    let mut parcels: Vec<crate::reports::open_parcels::OpenParcel> =
+        api_get(&pool, "/portfolio/open-parcels").await;
+    parcels.sort_by_key(|p| p.listing_id);
+    assert_eq!(parcels.len(), 2);
+    assert_eq!(parcels[0].ticker, "BHP");
+    assert_eq!(parcels[0].remaining_quantity, dec("280"));
+    assert_eq!(parcels[0].remaining_cost_base, dec("2373.425"), "ATO: $2,373.43");
+    assert_eq!(parcels[0].acquisition_date.to_string(), "2001-08-15");
+    assert_eq!(parcels[1].ticker, "BSL");
+    assert_eq!(parcels[1].remaining_quantity, dec("56"));
+    assert_eq!(parcels[1].remaining_cost_base, dec("126.575"), "ATO: $126.58");
+    assert_eq!(parcels[1].acquisition_date.to_string(), "2001-08-15");
+
+    // The demerger itself: no CGT consequences (the rollover disregards any
+    // gain made under the demerger).
+    let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net-capital-gain").await;
+    assert!(years.is_empty(), "the demerger is not a CGT event: {years:?}");
+
+    // Example 32: dispose of the BHP Steel shares after 15 August 2002 —
+    // under 12 months after the demerger but over 12 months after the BHP
+    // Billiton shares were acquired — and the discount method applies.
+    put_sell(&pool, 100, 2, "2002-09-01", "56", "5", "0", demerged_buy_id).await;
+    let gains: Vec<RealisedGainLoss> = api_get(&pool, "/portfolio/realised-gains").await;
+    assert_eq!(gains.len(), 1);
+    // 56 × $5 = $280 proceeds − $126.575 cost base = $153.425, all
+    // discount-eligible.
+    assert_eq!(gains[0].cost_base, dec("126.575"));
+    assert_eq!(gains[0].capital_gain_loss, dec("153.425"));
+    assert_eq!(gains[0].discount_eligible_gain, dec("153.425"));
+    assert_eq!(gains[0].non_discountable_gain, Decimal::ZERO);
 }
