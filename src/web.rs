@@ -218,6 +218,13 @@ mod tests {
         ));
         // The raw id stays reachable on the cell tooltip.
         assert!(js.contains("'id ' + cellText(v)"));
+        // The post-record action pages (Reinvest / Exercise / Participate /
+        // Exchange / Demerge) name the listings in their descriptions too:
+        // every desc takes the resolver, and the scrip/demerger targets use it.
+        assert!(js.contains("action.desc(owner, listingName)"));
+        assert!(!js.contains("'Creates a DRP trade for listing '"));
+        assert!(js.contains("listing(a.scrip_listing_id)"));
+        assert!(js.contains("listing(a.demerger_listing_id)"));
     }
 
     #[tokio::test]

@@ -464,7 +464,7 @@
       slug: 'reinvest', nav: 'income', ownerApi: '/income', cancel: '#/e/income', submit: 'Reinvest',
       post: function (id) { return '/income/' + id + '/reinvest'; },
       title: function (id) { return 'Reinvest distribution #' + id; },
-      desc: function (income) { return 'Creates a DRP trade for listing ' + income.listing_id + ' and links it back to this distribution. The holding must be DRP-enrolled.'; },
+      desc: function (income, listing) { return 'Creates a DRP trade for ' + listing(income.listing_id) + ' and links it back to this distribution. The holding must be DRP-enrolled.'; },
       fields: function (income) {
         return [
           dec('reinvestment_price', 'Reinvestment price', { required: true, default: '' }),
@@ -480,7 +480,7 @@
       slug: 'exercise', nav: 'corporate_actions', ownerApi: '/corporate_actions', cancel: '#/e/corporate_actions', submit: 'Exercise',
       post: function (id) { return '/corporate_actions/' + id + '/exercise'; },
       title: function (id) { return 'Exercise rights issue #' + id; },
-      desc: function (a) { return 'Creates a Buy trade for listing ' + a.listing_id + ' at the exercise price (' + a.exercise_price + ' ' + a.currency + ' per unit): ' + a.rights_units + ' new unit(s) per ' + a.rights_held_units + ' held at the record date.'; },
+      desc: function (a, listing) { return 'Creates a Buy trade for ' + listing(a.listing_id) + ' at the exercise price (' + a.exercise_price + ' ' + a.currency + ' per unit): ' + a.rights_units + ' new unit(s) per ' + a.rights_held_units + ' held at the record date.'; },
       fields: function (a) {
         return [
           dt('date', 'Exercise date', { required: true, hint: 'The new parcel’s acquisition date; on or after the record date (' + a.date + ').' }),
@@ -499,7 +499,7 @@
       slug: 'participate', nav: 'corporate_actions', ownerApi: '/corporate_actions', cancel: '#/e/corporate_actions', submit: 'Participate',
       post: function (id) { return '/corporate_actions/' + id + '/participate'; },
       title: function (id) { return 'Participate in buy-back #' + id; },
-      desc: function (a) { return 'Creates a Sell trade for listing ' + a.listing_id + ' at the capital proceeds per unit — max(price ' + a.buyback_price + ', market value ' + (a.buyback_market_value || a.buyback_price) + ') − dividend ' + a.buyback_dividend + ' ' + a.currency + ' — plus the dividend-component income row when there is one.'; },
+      desc: function (a, listing) { return 'Creates a Sell trade for ' + listing(a.listing_id) + ' at the capital proceeds per unit — max(price ' + a.buyback_price + ', market value ' + (a.buyback_market_value || a.buyback_price) + ') − dividend ' + a.buyback_dividend + ' ' + a.currency + ' — plus the dividend-component income row when there is one.'; },
       fields: function (a) {
         return [
           dt('date', 'Participation date', { required: true, hint: 'The CGT event (acceptance) date; on or after the buy-back date (' + a.date + '). Also the dividend component’s pay date.' }),
@@ -523,7 +523,7 @@
       slug: 'scrip-exchange', nav: 'corporate_actions', ownerApi: '/corporate_actions', cancel: '#/e/corporate_actions', submit: 'Exchange',
       post: function (id) { return '/corporate_actions/' + id + '/exchange'; },
       title: function (id) { return 'Exchange scrip-for-scrip takeover #' + id; },
-      desc: function (a) { return 'Substitutes every open parcel of listing ' + a.listing_id + ' held at ' + a.date + ' with ' + a.scrip_new_units + ' unit(s) of listing ' + a.scrip_listing_id + ' per ' + a.scrip_old_units + ' held. The rollover disregards the capital gain; each replacement parcel carries its consumed parcel’s remaining cost base and acquisition date (the combined holding period counts toward the 12-month discount). Undo by deleting the closing Sell from the Sells view.'; },
+      desc: function (a, listing) { return 'Substitutes every open parcel of ' + listing(a.listing_id) + ' held at ' + a.date + ' with ' + a.scrip_new_units + ' unit(s) of ' + listing(a.scrip_listing_id) + ' per ' + a.scrip_old_units + ' held. The rollover disregards the capital gain; each replacement parcel carries its consumed parcel’s remaining cost base and acquisition date (the combined holding period counts toward the 12-month discount). Undo by deleting the closing Sell from the Sells view.'; },
       fields: [],
       toast: function (r) {
         const n = r && r.replacements ? r.replacements.length : 0;
@@ -539,7 +539,7 @@
       slug: 'demerge', nav: 'corporate_actions', ownerApi: '/corporate_actions', cancel: '#/e/corporate_actions', submit: 'Demerge',
       post: function (id) { return '/corporate_actions/' + id + '/demerge'; },
       title: function (id) { return 'Demerge #' + id; },
-      desc: function (a) { return 'Apportions every open parcel of head listing ' + a.listing_id + ' held at ' + a.date + ': ' + a.demerger_cost_base_pct + '% of each parcel’s cost base moves to ' + a.demerger_new_units + ' unit(s) of demerged listing ' + a.demerger_listing_id + ' per ' + a.demerger_held_units + ' held; the head parcels keep the rest. Any gain is disregarded and both sides keep the original acquisition date (the 12-month discount clock). Undo by deleting the closing Sell from the Sells view.'; },
+      desc: function (a, listing) { return 'Apportions every open parcel of head listing ' + listing(a.listing_id) + ' held at ' + a.date + ': ' + a.demerger_cost_base_pct + '% of each parcel’s cost base moves to ' + a.demerger_new_units + ' unit(s) of demerged listing ' + listing(a.demerger_listing_id) + ' per ' + a.demerger_held_units + ' held; the head parcels keep the rest. Any gain is disregarded and both sides keep the original acquisition date (the 12-month discount clock). Undo by deleting the closing Sell from the Sells view.'; },
       fields: [],
       toast: function (r) {
         const n = r && r.demerged_replacements ? r.demerged_replacements.length : 0;
@@ -1215,6 +1215,10 @@
   async function viewAction(action, id) {
     setActiveNav(action.nav);
     const owner = await api('GET', action.ownerApi + '/' + id);
+    // Action descriptions name the listings they touch rather than printing
+    // raw ids; unknown/null ids fall back to the old "listing N" wording.
+    const listingLabels = (await fkLabelMaps({ listing_id: 'listings' })).listing_id;
+    const listingName = function (lid) { return listingLabels[lid] || ('listing ' + lid); };
     const fields = typeof action.fields === 'function' ? action.fields(owner) : action.fields;
     const form = el('form');
     for (const f of fields) form.appendChild(await buildFieldInput(f, null, false));
@@ -1248,7 +1252,7 @@
     });
     setMain(el('div', null, [
       el('h2', null, action.title(id)),
-      el('p', { class: 'view-desc' }, action.desc(owner)),
+      el('p', { class: 'view-desc' }, action.desc(owner, listingName)),
       el('div', { class: 'card' }, form),
     ]));
   }
