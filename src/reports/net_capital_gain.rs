@@ -13,7 +13,7 @@
 //!       discount).
 //!  2. Total the year's capital losses: realised losses + AMMA capital losses
 //!     applied, plus the net capital loss brought forward from earlier years
-//!     (losses carry forward indefinitely, per `docs/cgt-using-capital-losses.md`).
+//!     (losses carry forward indefinitely, per `docs/ato/cgt-using-capital-losses.md`).
 //!     The chain starts from the entered opening carried-forward loss in
 //!     `cgt_settings` (losses from before the first year in the system).
 //!  3. Apply losses against gains in the taxpayer-favourable order — non-discountable
@@ -149,7 +149,7 @@ async fn aud_field(
 /// CGT event E10 gains: when the cumulative AMIT cost base reductions applied to a
 /// parcel exceed its cost base, the cost base is floored at nil and the excess is a
 /// capital gain in the income year the reducing AMMA statement applies to (see
-/// `docs/amit-cost-base-adjustments.md`).
+/// `docs/ato/amit-cost-base-adjustments.md`).
 ///
 /// Returns `(tax_year, gross_gain_aud, discount_eligible)` for each AMMA statement
 /// that pushes a parcel's cost base below nil. Adjustments are walked per parcel in
@@ -217,7 +217,7 @@ async fn e10_gains(pool: &SqlitePool) -> Result<Vec<(i32, Decimal, bool)>, sqlx:
 /// CGT event G1 gains: when a company's non-assessable (return-of-capital)
 /// payments exceed a parcel's per-unit cost base, the cost base is floored at nil
 /// and the excess is a capital gain in the payment's income year — G1 can never
-/// produce a capital loss (see `docs/cgt-non-assessable-payments.md`).
+/// produce a capital loss (see `docs/ato/cgt-non-assessable-payments.md`).
 ///
 /// Returns `(tax_year, gross_gain_aud, discount_eligible)` for each payment that
 /// pushes a parcel's per-unit cost base below nil. Payments are walked per parcel
@@ -1120,7 +1120,7 @@ mod tests {
 
     /// A payment after a 2-for-1 split is per *post-split* unit, so the parcel
     /// receives it on twice the units; the G1 excess reflects that (TD 2000/10
-    /// re-basing in `docs/share-splits-and-consolidations.md`).
+    /// re-basing in `docs/ato/share-splits-and-consolidations.md`).
     #[tokio::test]
     async fn db_g1_payment_after_split_scales_to_post_split_units() {
         let pool = test_pool().await;
@@ -1142,7 +1142,7 @@ mod tests {
 
     /// CGT event G1: a return-of-capital payment exceeding the parcel's cost
     /// base produces a capital gain equal to the excess, in the payment's income
-    /// year (`docs/cgt-non-assessable-payments.md`).
+    /// year (`docs/ato/cgt-non-assessable-payments.md`).
     #[tokio::test]
     async fn db_g1_excess_payment_becomes_capital_gain() {
         let pool = test_pool().await;

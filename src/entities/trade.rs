@@ -85,7 +85,7 @@ pub struct Trade {
     /// `date`: set only on scrip-for-scrip replacement Buys and demerger
     /// head/demerged Buys, carrying the consumed parcel's acquisition date
     /// (the rollovers count the combined holding period — see
-    /// `docs/takeovers-and-scrip-for-scrip.md` and `docs/demergers.md`).
+    /// `docs/ato/takeovers-and-scrip-for-scrip.md` and `docs/ato/demergers.md`).
     /// Drives the 12-month discount clock and the AUD translation month of
     /// the cost base in the reports; split/return-of-capital applicability
     /// stays on the actual `date` (the replacement shares only exist in

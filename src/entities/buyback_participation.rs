@@ -1,6 +1,6 @@
 //! Atomic buy-back participation: sell units into a `BuyBack` corporate
 //! action, splitting the buy-back price into its capital and dividend
-//! components (see `docs/share-buy-backs.md`, QC 66049).
+//! components (see `docs/ato/share-buy-backs.md`, QC 66049).
 //!
 //! Selling shares back to the company is an ordinary CGT disposal, so the
 //! participation creates a regular Sell trade with the caller's parcel
@@ -25,7 +25,7 @@
 //! income row is rejected by `PUT`/`DELETE /income`; and the action itself
 //! is frozen against edits and deletes while participations reference it.
 //!
-//! Out of scope (documented in `docs/share-buy-backs.md`): the further
+//! Out of scope (documented in `docs/ato/share-buy-backs.md`): the further
 //! adjustments where the participating shareholder is itself a company, and
 //! shares held on revenue account.
 
@@ -330,7 +330,7 @@ mod tests {
         .unwrap();
     }
 
-    /// Ranjini-shaped terms (docs/share-buy-backs.md): $9.60 price including
+    /// Ranjini-shaped terms (docs/ato/share-buy-backs.md): $9.60 price including
     /// a $1.40 franked dividend with a $0.60 credit; market value had the
     /// buy-back not been proposed $10.20.
     async fn insert_buyback(pool: &SqlitePool, id: i64, date: NaiveDate) {

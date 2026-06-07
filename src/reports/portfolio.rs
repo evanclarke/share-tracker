@@ -543,7 +543,7 @@ mod tests {
         .unwrap();
     }
 
-    /// TD 2000/10 (`docs/share-splits-and-consolidations.md`): a share split
+    /// TD 2000/10 (`docs/ato/share-splits-and-consolidations.md`): a share split
     /// multiplies the unit count and leaves the total cost base unchanged, so
     /// the per-unit cost base scales down proportionately.
     #[tokio::test]
@@ -564,7 +564,7 @@ mod tests {
         assert_eq!(h.avg_cost_base_per_unit, "5.054725".parse::<Decimal>().unwrap());
     }
 
-    /// A non-assessable bonus issue (`docs/bonus-shares.md`) adds the bonus
+    /// A non-assessable bonus issue (`docs/ato/bonus-shares.md`) adds the bonus
     /// units and apportions the unchanged cost base over original + bonus
     /// shares — the same re-base as its equivalent split.
     #[tokio::test]
@@ -666,7 +666,7 @@ mod tests {
 
     /// A return of capital (CGT event G1) reduces the holding's cost base by the
     /// per-unit payment for units held on the payment date
-    /// (`docs/cgt-non-assessable-payments.md`).
+    /// (`docs/ato/cgt-non-assessable-payments.md`).
     #[tokio::test]
     async fn db_return_of_capital_reduces_cost_base() {
         let pool = test_pool().await;

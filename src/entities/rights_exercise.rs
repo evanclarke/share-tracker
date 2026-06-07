@@ -1,5 +1,5 @@
 //! Atomic rights exercise: turn a `RightsIssue` corporate action into a new
-//! Buy parcel (see `docs/rights-issues.md`).
+//! Buy parcel (see `docs/ato/rights-issues.md`).
 //!
 //! Exercising rights is no CGT event. The shares acquired are a new parcel
 //! **acquired on the exercise date** — the 12-month CGT discount clock runs
@@ -23,7 +23,7 @@
 //! re-exercise instead) and the action itself is frozen while exercise
 //! trades reference it.
 //!
-//! Out of scope (documented in `docs/rights-issues.md`): selling or lapsing
+//! Out of scope (documented in `docs/ato/rights-issues.md`): selling or lapsing
 //! the rights themselves, pre-CGT originals, and retail premiums (entered as
 //! unfranked dividend income).
 
@@ -611,7 +611,7 @@ mod tests {
     }
 
     /// The 12-month discount clock runs from the exercise date, not from the
-    /// original shares or the rights (docs/rights-issues.md): a sale more
+    /// original shares or the rights (docs/ato/rights-issues.md): a sale more
     /// than 12 months after the original buy but within 12 months of the
     /// exercise is non-discountable.
     #[tokio::test]

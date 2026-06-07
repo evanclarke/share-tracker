@@ -1,6 +1,6 @@
 //! Atomic demerger: apportion every open parcel of a `Demerger` action's
 //! head-entity listing between the head entity and the demerged entity,
-//! applying the rollover (Div 125; see `docs/demergers.md`).
+//! applying the rollover (Div 125; see `docs/ato/demergers.md`).
 //!
 //! Under an eligible demerger with rollover chosen, any capital gain or loss
 //! is disregarded, the cost base of each original parcel is spread over the
@@ -47,7 +47,7 @@
 //! franking-credit 45-day walk (`reports::franking`) — the original parcels
 //! keep their at-risk days running there.
 //!
-//! Out of scope (documented in `docs/demergers.md`): demergers without
+//! Out of scope (documented in `docs/ato/demergers.md`): demergers without
 //! rollover, pre-CGT original interests, assessable demerger dividends or
 //! separate capital returns, and registry cash-in-lieu of fractional
 //! entitlements (the demerge keeps exact fractional unit counts).

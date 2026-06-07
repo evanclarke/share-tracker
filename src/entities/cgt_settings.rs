@@ -5,7 +5,7 @@
 //! user migrating mid-history doesn't have to re-enter pre-system loss years.
 //! The net-capital-gain report uses it as the starting brought-forward balance
 //! when chaining unused losses across its year series (losses carry forward
-//! indefinitely, per `docs/cgt-using-capital-losses.md`). Absent row = zero.
+//! indefinitely, per `docs/ato/cgt-using-capital-losses.md`). Absent row = zero.
 
 use crate::infra::decimal::parse_dec;
 use crate::infra::http::write_error_status;

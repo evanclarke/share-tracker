@@ -4,7 +4,7 @@
 //!
 //! **ReturnOfCapital** — a non-assessable payment from a company (a
 //! shareholder-approved return of share capital, CGT event G1; see
-//! `docs/cgt-non-assessable-payments.md`). The per-unit payment reduces the
+//! `docs/ato/cgt-non-assessable-payments.md`). The per-unit payment reduces the
 //! cost base of every parcel of the listing held on the payment date (units
 //! sold before the payment were not held for it, so they are unaffected).
 //! Where cumulative payments exceed a parcel's per-unit cost base, the cost
@@ -15,7 +15,7 @@
 //! trust units, not company shares.
 //!
 //! **ShareSplit** — a share split or consolidation (TD 2000/10; see
-//! `docs/share-splits-and-consolidations.md`): on the conversion date every
+//! `docs/ato/share-splits-and-consolidations.md`): on the conversion date every
 //! `split_old_units` units become `split_new_units` units (a 2-for-1 split is
 //! new=2/old=1; a 1-for-10 consolidation is new=1/old=10). No CGT event
 //! happens: the converted parcel keeps its total cost base and its original
@@ -26,7 +26,7 @@
 //! A trade dated on the conversion date is already in post-split units.
 //!
 //! **BonusIssue** — a non-assessable bonus share issue (the general
-//! post-1 July 1998 case; see `docs/bonus-shares.md`): on the issue date
+//! post-1 July 1998 case; see `docs/ato/bonus-shares.md`): on the issue date
 //! every `bonus_held_units` units held receive `bonus_units` additional
 //! units. The ATO apportions the parcel's cost base over original + bonus
 //! shares and the bonus shares take the original acquisition date — exactly
@@ -38,7 +38,7 @@
 //! assessed as a dividend — entered as a DRP trade, not as this action.)
 //!
 //! **RightsIssue** — rights to acquire new shares, issued free to existing
-//! holders (the dominant retail case; see `docs/rights-issues.md`): on the
+//! holders (the dominant retail case; see `docs/ato/rights-issues.md`): on the
 //! record `date` every `rights_held_units` units held entitle the holder to
 //! acquire `rights_units` new units at `exercise_price` per unit in
 //! `currency` (a trade dated on the record date is ex-rights). Recording the
@@ -52,7 +52,7 @@
 //! trades cannot be edited or deleted (delete the exercise trades first).
 //! Selling or letting the rights themselves lapse is not modelled.
 //!
-//! **BuyBack** — an off-market share buy-back (see `docs/share-buy-backs.md`):
+//! **BuyBack** — an off-market share buy-back (see `docs/ato/share-buy-backs.md`):
 //! the company offers to buy back shares directly from holders. The action
 //! records the offer terms: on/after the buy-back `date`, each unit bought
 //! back is paid `buyback_price` in `currency`, of which `buyback_dividend` is
@@ -70,7 +70,7 @@
 //!
 //! **ScripForScrip** — a takeover or merger completed as an all-scrip
 //! exchange with scrip-for-scrip rollover (Subdiv 124-M; see
-//! `docs/takeovers-and-scrip-for-scrip.md`): on the exchange `date` every
+//! `docs/ato/takeovers-and-scrip-for-scrip.md`): on the exchange `date` every
 //! `scrip_old_units` units of the original (target) listing become
 //! `scrip_new_units` units of `scrip_listing_id` (the replacement listing).
 //! Recording the action changes nothing by itself; exchanging (`POST
@@ -84,7 +84,7 @@
 //! An action referenced by exchange trades is frozen against edits.
 //!
 //! **Demerger** — an eligible demerger with the Div 125 rollover chosen (see
-//! `docs/demergers.md`): on the demerger `date` every `demerger_held_units`
+//! `docs/ato/demergers.md`): on the demerger `date` every `demerger_held_units`
 //! units held in the head entity (the action's own `listing_id`) receive
 //! `demerger_new_units` units of `demerger_listing_id` (the demerged
 //! entity's listing), and `demerger_cost_base_pct` percent of each parcel's
@@ -766,7 +766,7 @@ pub async fn db_return_of_capital_events(
 /// A quantity re-basing event, as consumed by the reports and write-time
 /// checks: on `date`, every `old_units` existing units become `new_units`.
 /// A ShareSplit (TD 2000/10) is stored as its ratio directly; a
-/// non-assessable BonusIssue (`docs/bonus-shares.md`) is its equivalent
+/// non-assessable BonusIssue (`docs/ato/bonus-shares.md`) is its equivalent
 /// split — every `bonus_held_units` units become `bonus_held_units +
 /// bonus_units` units — because both preserve the parcel's total cost base
 /// and acquisition date while scaling the unit count.

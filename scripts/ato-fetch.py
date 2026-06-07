@@ -3,7 +3,7 @@
 
 ato.gov.au returns 403 to non-browser clients (including Claude's WebFetch
 tool), so this script fetches with curl using a browser User-Agent and strips
-the HTML down to readable text. Use it when mirroring ATO guidance into docs/
+the HTML down to readable text. Use it when mirroring ATO guidance into docs/ato/
 or checking whether a mirrored doc has gone stale.
 
 Usage:

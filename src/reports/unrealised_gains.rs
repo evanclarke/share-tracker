@@ -478,7 +478,7 @@ mod tests {
 
     /// A return of capital (CGT event G1) reduces the holding's cost base by the
     /// per-unit payment for units held on the payment date, so the unrealised
-    /// gain grows by the same amount (`docs/cgt-non-assessable-payments.md`).
+    /// gain grows by the same amount (`docs/ato/cgt-non-assessable-payments.md`).
     #[tokio::test]
     async fn db_return_of_capital_reduces_cost_base() {
         let pool = test_pool().await;

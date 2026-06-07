@@ -1,0 +1,245 @@
+# Database schema
+
+The SQLite schema behind [share-tracker](../README.md). The HTTP endpoints over these tables are documented in [API.md](API.md).
+
+```
+exchanges
+├── mic          TEXT PK          ISO 10383 Market Identifier Code (e.g. XASX)
+├── name         TEXT
+├── country      TEXT
+├── currency     TEXT FK→currencies.code   Default trading currency
+├── timezone     TEXT             IANA timezone string
+└── settlement_days INTEGER      T+N settlement (e.g. 2 for ASX)
+
+exchange_holidays             Full-closure non-trading days per exchange (settlement skips them)
+├── mic          TEXT FK→exchanges.mic   Part of PK
+├── holiday_date TEXT             'YYYY-MM-DD'; part of PK
+└── name         TEXT             Holiday name (informational)
+
+listings
+├── id           INTEGER PK
+├── exchange_mic TEXT FK→exchanges.mic
+├── ticker       TEXT
+├── name         TEXT
+├── isin         TEXT (nullable)
+├── security_type TEXT           Share | ETF | LIC | Trust
+├── currency     TEXT FK→currencies.code
+├── amit         BOOLEAN          True if the security is an AMIT
+└── preference   BOOLEAN          Preference share: franking credits need 90 (not 45) at-risk days
+
+rba_fx_rates                  RBA F11 monthly FX rates (the rate used for ATO conversion)
+├── id           INTEGER PK
+├── currency     TEXT             ISO 4217 code (e.g. USD)
+├── month        TEXT             'YYYY-MM'
+└── rate         TEXT (decimal)   Foreign units per 1 AUD; UNIQUE (currency, month)
+
+mic_registry                  ISO 10383 MIC reference list (validation only; not the operational exchange table)
+├── mic           TEXT PK          ISO 10383 Market Identifier Code (e.g. XASX)
+├── operating_mic TEXT             Parent operating MIC (== mic for operating entries)
+├── name          TEXT             Market name / institution description
+├── country_code  TEXT             ISO 3166 alpha-2 country code
+├── city          TEXT (nullable)
+├── status        TEXT             ISO STATUS: ACTIVE | UPDATED | EXPIRED
+└── expiry_date   TEXT (nullable)  'YYYY-MM-DD' when EXPIRED, else NULL
+
+currencies                    Recognised currencies: fiat (ISO 4217) + digital tokens (ISO 24165)
+├── code          TEXT PK          ISO 4217 alpha code (fiat) or ISO 24165 DTI (token)
+├── kind          TEXT             Fiat | DigitalToken
+├── numeric_code  TEXT (nullable)  ISO 4217 numeric code (fiat only)
+├── name          TEXT             Currency name (fiat) or token long name
+├── short_name    TEXT (nullable)  Token short name / ticker
+├── minor_units   INTEGER (nullable)  ISO 4217 minor unit / token decimals; informational only
+└── source        TEXT             Iso4217 | Iso24165 (which feed the row came from)
+
+holding_accounts             Custody/location accounts within the one taxpayer (e.g. employer share plan vs personal broker)
+├── id           INTEGER PK       Account 1 ('Default') is seeded; writes that omit an account fall back to it
+└── name         TEXT UNIQUE
+
+transfers                    Moves of a listing between two holding accounts of the same owner (not a CGT event)
+├── id              INTEGER PK
+├── listing_id      INTEGER FK→listings.id
+├── date            TEXT          The transfer-out Sell and transfer-in Buys are dated on it
+├── from_account_id INTEGER FK→holding_accounts.id
+└── to_account_id   INTEGER FK→holding_accounts.id   CHECK: differs from from_account_id
+                    The per-parcel quantities live on the transfer-out Sell's parcel_allocations rows
+
+trades
+├── id                INTEGER PK
+├── trade_type        TEXT         Buy | Sell | DRP
+├── date              DATE
+├── settlement_date   DATE
+├── listing_id        INTEGER FK→listings.id
+├── average_price     TEXT (decimal)
+├── quantity          TEXT (decimal)
+├── currency          TEXT FK→currencies.code
+├── brokerage         TEXT (decimal)
+├── gst_on_brokerage  TEXT (decimal)
+├── brokerage_currency TEXT FK→currencies.code
+├── fx_rate           TEXT (decimal)  Manual foreign-per-AUD override; fallback when no ATO rate exists (1.0 for AUD trades)
+├── contract_note_ref TEXT (nullable)
+├── residual_brought_forward TEXT (decimal)  DRP trades only: leftover cash carried in from the prior reinvestment (else 0)
+├── residual_carried_forward TEXT (decimal)  DRP trades only: leftover carried to the next reinvestment (else 0)
+├── residual_paid_out        TEXT (decimal)  DRP trades only: leftover paid out instead of carried, incl. the trailing residual refunded at DRP unenrolment (else 0)
+├── rights_action_id  INTEGER FK→corporate_actions.id (nullable)  Rights-exercise Buys only: the RightsIssue action exercised, set by POST /corporate_actions/:id/exercise (caps cumulative exercised units at the entitlement; the trade is immutable via PUT /trades and blocks editing/deleting the action)
+├── buyback_action_id INTEGER FK→corporate_actions.id (nullable)  Buy-back participation Sells only: the BuyBack action sold into, set by POST /corporate_actions/:id/participate (the trade is immutable via PUT /sells, carries a linked dividend income row removed with it by DELETE /sells, and blocks editing/deleting the action)
+├── scrip_action_id   INTEGER FK→corporate_actions.id (nullable)  Scrip-for-scrip exchange trades only (the closing Sell + every replacement Buy): the ScripForScrip action exchanged, set by POST /corporate_actions/:id/exchange. The trades carrying one action id form the exchange group: each is immutable via PUT /sells and PUT/DELETE /trades, DELETE /sells on the closing Sell removes the whole group, and the action is frozen while any exists
+├── demerger_action_id INTEGER FK→corporate_actions.id (nullable)  Demerger trades only (the closing Sell + every head replacement and demerged-entity Buy): the Demerger action demerged, set by POST /corporate_actions/:id/demerge. Same group rules as scrip_action_id: each trade is immutable via PUT /sells and PUT/DELETE /trades, DELETE /sells on the closing Sell removes the whole group, and the action is frozen while any exists
+├── deemed_acquisition_date TEXT (nullable)  Scrip-for-scrip replacement, demerger head/demerged, and transfer-in Buys only: the consumed parcel's acquisition date, carried by the rollover/transfer (the combined holding period; an own-account transfer is not a disposal at all). Drives the 12-month CGT discount clock and the AUD translation month of the cost base in the reports; split/return-of-capital applicability stays on the actual trade date. NULL = the trade's own date
+├── holding_account_id INTEGER FK→holding_accounts.id  The account the trade sits in (defaults to the seeded default account when omitted from a write)
+└── transfer_id       INTEGER FK→transfers.id (nullable)  Transfer trades only (the transfer-out Sell + every transfer-in Buy): the transfer that created them, set by PUT /transfers/:id. The trades carrying one transfer id form the transfer group: each is immutable via PUT /sells, PUT/DELETE /trades, and DELETE /sells; DELETE /transfers/:id removes the whole group (with the transfer record), restoring the pre-transfer holding
+
+income
+├── id                        INTEGER PK
+├── listing_id                INTEGER FK→listings.id
+├── date_paid                 DATE
+├── ex_date                   DATE (nullable)
+├── franked_amount            TEXT (decimal)
+├── unfranked_amount          TEXT (decimal)
+├── foreign_source_income     TEXT (decimal)
+├── foreign_tax_paid          TEXT (decimal)
+├── tfn_withholding_tax       TEXT (decimal)
+├── franking_credits          TEXT (decimal)
+├── lic_capital_gain_deduction TEXT (decimal)
+├── conduit_foreign_income    TEXT (decimal)  Excluded from assessable income
+├── trust_income              BOOLEAN
+├── reinvestment_trade_id     INTEGER FK→trades.id (nullable, for DRP linkage)
+├── currency                  TEXT FK→currencies.code   ISO 4217; tax summary converts to AUD by date_paid month (default AUD)
+├── buyback_trade_id          INTEGER FK→trades.id (nullable)  Buy-back dividend components only: the participation Sell this row was created with (the row is managed by the participation — PUT/DELETE /income reject it; DELETE /sells on the Sell removes it)
+└── holding_account_id        INTEGER FK→holding_accounts.id  The account the distribution was paid to — decides whose DRP enrolment applies and where a reinvestment trade lands (defaults to the seeded default account)
+
+amma_statements              Annual AMIT Member Annual (AMMA) statements
+├── id                              INTEGER PK
+├── listing_id                      INTEGER FK→listings.id
+├── tax_year_end_date               DATE         e.g. 2024-06-30 for FY2024
+├── units_held                      TEXT (decimal)
+├── date_received                   DATE
+├── australian_interest             TEXT (decimal)
+├── australian_dividends_unfranked  TEXT (decimal)
+├── franked_dividends               TEXT (decimal)
+├── franking_credits                TEXT (decimal)
+├── net_rent                        TEXT (decimal)
+├── foreign_income                  TEXT (decimal)
+├── foreign_tax_credits             TEXT (decimal)
+├── other_income                    TEXT (decimal)
+├── cgt_discount_gains              TEXT (decimal)
+├── cgt_indexation_gains            TEXT (decimal)
+├── cgt_other_gains                 TEXT (decimal)
+├── capital_losses_applied          TEXT (decimal)
+├── tax_deferred_amount             TEXT (decimal)  Informational only — not a cost-base driver (reflected in cost_base_adjustment)
+├── tax_free_amount                 TEXT (decimal)  Informational only — not a cost-base driver (reflected in cost_base_adjustment)
+├── cost_base_adjustment            TEXT (decimal)  Per-unit AMIT cost base net amount; sole cost-base driver (+ reduces, − increases)
+├── tfn_withholding_tax             TEXT (decimal)
+├── currency                        TEXT FK→currencies.code   ISO 4217; tax summary converts to AUD by tax_year_end_date month (default AUD)
+└── holding_account_id              INTEGER FK→holding_accounts.id  The account the statement covers — a registry issues one AMMA statement per holder account (defaults to the seeded default account)
+
+amit_adjustments             Links a purchase parcel to an AMMA statement
+├── id                   INTEGER PK
+├── amma_statement_id    INTEGER FK→amma_statements.id
+├── trade_id             INTEGER FK→trades.id  Must be Buy or DRP
+└── quantity             TEXT (decimal)       Units of the parcel covered by the adjustment
+
+parcel_allocations           Links sell parcels to the purchase parcels they consume
+├── id                   INTEGER PK
+├── sale_trade_id        INTEGER FK→trades.id  Must be Sell
+├── purchase_trade_id    INTEGER FK→trades.id  Must be Buy or DRP
+└── quantity_allocated   TEXT (decimal)
+
+drp_enrolments               Dated DRP enrolment periods per (listing, holding account) — a holding can enrol, unenrol, and re-enrol, and the same listing may be enrolled in one account and not another
+├── id                   INTEGER PK
+├── listing_id           INTEGER FK→listings.id
+├── holding_account_id   INTEGER FK→holding_accounts.id  The account the enrolment applies to (defaults to the seeded default account)
+├── enrolment_date       TEXT   First day of the period (inclusive)
+├── unenrolment_date     TEXT (nullable)  Day the unenrolment takes effect (exclusive); NULL = open-ended (currently enrolled)
+└── residual_handling    TEXT   CarryForward | PayOut  Leftover-cash policy for the period (default CarryForward)
+                         CHECK: unenrolment_date (when set) is after enrolment_date
+                         Write-time invariant: a (listing, holding account)'s periods must not overlap (so at most one is open per account)
+
+cgt_settings                 Singleton CGT settings row (CHECK id = 1)
+├── id                   INTEGER PK  Always 1 (CHECK-enforced singleton)
+└── opening_capital_loss TEXT (decimal)  Net capital loss carried forward from before the first recorded year (AUD, non-negative); starting balance for the net-capital-gain loss chain
+
+corporate_actions            Corporate actions per listing (company returns of capital — CGT event G1 — share splits/consolidations — TD 2000/10 — non-assessable bonus issues, rights issues, off-market buy-backs, scrip-for-scrip takeovers, and demergers)
+├── id                INTEGER PK
+├── action_type       TEXT   ReturnOfCapital | ShareSplit | BonusIssue | RightsIssue | BuyBack | ScripForScrip | Demerger (CHECK-enforced enum; the extension point for future actions). Per-type CHECKs tie each payload below to its type
+├── listing_id        INTEGER FK→listings.id
+├── date              TEXT   ReturnOfCapital: payment date — parcels acquired on/before it and still held then are affected. ShareSplit: conversion date — parcels acquired before it are converted (a trade dated on it is already in post-split units). BonusIssue: issue date — parcels acquired before it receive bonus units (a trade dated on it is ex-bonus). RightsIssue: record date — units held before it earn the entitlement (a trade dated on it is ex-rights). BuyBack: the buy-back date — participations are dated on/after it. ScripForScrip: the exchange date — every parcel still open on it is exchanged; the closing Sell and replacement Buys are dated on it. Demerger: the demerger date — every head parcel still open on it participates; the closing Sell and the head/demerged Buys are dated on it
+├── amount_per_unit   TEXT (decimal, nullable)  ReturnOfCapital only: per-unit non-assessable payment (positive); reduces affected parcels' cost bases
+├── currency          TEXT FK→currencies.code (nullable)  ReturnOfCapital: must match the affected trades' currency (reports fail loudly on a mismatch). RightsIssue: the exercise price's currency. BuyBack: the buy-back price's currency
+├── split_new_units   TEXT (decimal, nullable)  ShareSplit only: every split_old_units existing units become split_new_units units (both positive; a consolidation has new < old)
+├── split_old_units   TEXT (decimal, nullable)  ShareSplit only: see split_new_units
+├── bonus_units       TEXT (decimal, nullable)  BonusIssue only: every bonus_held_units units held receive bonus_units additional units (both positive; a 1-for-10 issue is bonus_units=1 / bonus_held_units=10)
+├── bonus_held_units  TEXT (decimal, nullable)  BonusIssue only: see bonus_units
+├── rights_units      TEXT (decimal, nullable)  RightsIssue only: every rights_held_units units held at the record date entitle the holder to rights_units new units (both positive; a 1-for-4 issue is rights_units=1 / rights_held_units=4)
+├── rights_held_units TEXT (decimal, nullable)  RightsIssue only: see rights_units
+├── exercise_price    TEXT (decimal, nullable)  RightsIssue only: per-new-unit price paid on exercise, in currency (positive)
+├── buyback_price           TEXT (decimal, nullable)  BuyBack only: per-unit buy-back price in currency (positive)
+├── buyback_dividend        TEXT (decimal, nullable)  BuyBack only: per-unit dividend component of the price (non-negative, ≤ the price; 0 for a listed-company buy-back announced after 25 Oct 2022); assessable income, excluded from capital proceeds
+├── buyback_franking_credit TEXT (decimal, nullable)  BuyBack only: per-unit franking credit attached to the dividend component (non-negative; 0 when there is no dividend)
+├── buyback_market_value    TEXT (decimal, nullable)  BuyBack only: per-unit market value had the buy-back not been proposed (positive); capital proceeds can't be less than it. NULL when the price is at or above market value (the price is used)
+├── scrip_listing_id  INTEGER FK→listings.id (nullable)  ScripForScrip only: the replacement listing the original holding converts into (CHECK: differs from listing_id)
+├── scrip_new_units   TEXT (decimal, nullable)  ScripForScrip only: every scrip_old_units units of listing_id held at the exchange date become scrip_new_units units of scrip_listing_id (both positive)
+├── scrip_old_units   TEXT (decimal, nullable)  ScripForScrip only: see scrip_new_units
+├── demerger_listing_id INTEGER FK→listings.id (nullable)  Demerger only: the demerged entity's listing (CHECK: differs from listing_id, the head entity)
+├── demerger_new_units  TEXT (decimal, nullable)  Demerger only: every demerger_held_units units of listing_id held at the demerger date receive demerger_new_units units of demerger_listing_id (both positive)
+├── demerger_held_units TEXT (decimal, nullable)  Demerger only: see demerger_new_units
+└── demerger_cost_base_pct TEXT (decimal, nullable)  Demerger only: the percentage of each parcel's cost base apportioned to the new interests in the demerged entity (the head-entity-advised step 2 percentage, 0 < pct < 100); the head parcels keep the rest
+
+attachments                  Supporting documents for an activity; bytes stored in the DB (captured by the weekly backup)
+├── id                INTEGER PK
+├── trade_id          INTEGER FK→trades.id (nullable, ON DELETE CASCADE)            Owner (exactly one of the three is set)
+├── income_id         INTEGER FK→income.id (nullable, ON DELETE CASCADE)            Owner (exactly one of the three is set)
+├── amma_statement_id INTEGER FK→amma_statements.id (nullable, ON DELETE CASCADE)   Owner (exactly one of the three is set)
+├── filename          TEXT             Original upload filename, preserved for download
+├── content_type      TEXT             application/pdf | image/png | image/jpeg (allowlist, CHECK-enforced)
+├── byte_size         INTEGER          Size of content in bytes (informational)
+├── checksum          TEXT             SHA-256 of content, hex (integrity / duplicate detection)
+├── uploaded_at       TEXT             RFC 3339 timestamp the attachment was stored
+└── content           BLOB             The file bytes
+                       CHECK: exactly one of trade_id / income_id / amma_statement_id is non-null
+
+job_runs                     Last run of each scheduled/on-demand maintenance job (one row per job, upserted each run)
+├── name        TEXT PK          Registry job name (e.g. backup, rba-fx-import)
+├── started_at  TEXT             RFC 3339 timestamp the run began
+├── finished_at TEXT             RFC 3339 timestamp the run ended
+├── success     INTEGER          1 if the run succeeded, 0 if it failed
+└── error       TEXT (nullable)  Human-readable error when success = 0, else NULL
+```
+
+## Relationships
+
+```
+exchanges ──< exchange_holidays
+exchanges ──< listings ──< trades >──────────────< parcel_allocations
+                                \                         /
+                                 └──────────────────────-/
+                       trades ──< amit_adjustments >──── amma_statements
+                       listings ──< amma_statements
+                       listings ──< income
+                       listings ──< drp_enrolments
+                       listings ──< corporate_actions
+                       listings ──< transfers
+                       holding_accounts ──< trades, income, amma_statements, drp_enrolments
+                       holding_accounts ──< transfers (from_account_id + to_account_id)
+                       transfers ──< trades (transfer_id)
+                       trades (DRP) ──< income (reinvestment_trade_id)
+                       corporate_actions (RightsIssue) ──< trades (rights_action_id)
+                       corporate_actions (BuyBack) ──< trades (buyback_action_id)
+                       corporate_actions (ScripForScrip) ──< trades (scrip_action_id)
+                       corporate_actions (ScripForScrip) >── listings (scrip_listing_id)
+                       corporate_actions (Demerger) ──< trades (demerger_action_id)
+                       corporate_actions (Demerger) >── listings (demerger_listing_id)
+                       trades (buy-back Sell) ──< income (buyback_trade_id)
+                       trades, income, amma_statements ──< attachments (exactly one owner; ON DELETE CASCADE)
+
+currencies ──< exchanges, listings, trades (currency + brokerage_currency), income, amma_statements, corporate_actions
+```
+
+Each `attachments` row belongs to exactly one activity via one of three nullable foreign keys (`trade_id` / `income_id` / `amma_statement_id`), with a `CHECK` enforcing that exactly one is set — a real foreign key keeps referential integrity to the owning row, and `ON DELETE CASCADE` removes an activity's attachments when it is deleted. File contents live in the `content` BLOB so the weekly DB backup captures the documents with no separate file store.
+
+`rba_fx_rates` is standalone reference data (no foreign keys); it is looked up by `(currency, month)`. `job_runs` is likewise standalone: it is keyed by the in-code job name (not a foreign key), and each scheduled or manual run upserts the job's row so only its last run is kept. `cgt_settings` is also standalone: a singleton row (`CHECK (id = 1)`) holding the entered opening carried-forward capital loss consumed by the [net capital gain report](API.md#net-capital-gain).
+
+`mic_registry` is standalone reference data (no foreign keys), keyed by `mic`. It is populated from the ISO 10383 list and used only to validate curated `exchanges` (see the [exchange MIC validation report](API.md#exchange-mic-validation)); it is *not* the operational exchange table and carries no currency/timezone/settlement data.
+
+`currencies` is reference data keyed by `code` (it has no outgoing foreign keys). It is populated from the ISO 4217 (SIX Group) and ISO 24165 (DTIF) feeds and seeded with a baseline of common currencies (the seed migration), and is the recognised list that **every** currency code in the model is foreign-keyed to: `exchanges.currency`, `listings.currency`, `trades.currency`, `trades.brokerage_currency`, `income.currency`, `amma_statements.currency`, and `corporate_actions.currency` all reference `currencies.code`, so an unrecognised currency is rejected at write time. `minor_units` is informational only — stored amounts remain arbitrary-precision Decimal and are never rounded to it.
+
+Decimal values are stored as TEXT to preserve arbitrary precision.

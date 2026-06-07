@@ -604,7 +604,7 @@ mod tests {
         .unwrap();
     }
 
-    /// TD 2000/10 (`docs/share-splits-and-consolidations.md`): the split parcel
+    /// TD 2000/10 (`docs/ato/share-splits-and-consolidations.md`): the split parcel
     /// keeps its acquisition date and total cost base; the remaining quantity
     /// is reported in post-split units while original_quantity stays as
     /// transacted.
@@ -650,7 +650,7 @@ mod tests {
 
     /// A return of capital (CGT event G1) is reported per parcel and netted off
     /// the remaining cost base for the units still held
-    /// (`docs/cgt-non-assessable-payments.md`).
+    /// (`docs/ato/cgt-non-assessable-payments.md`).
     #[tokio::test]
     async fn db_return_of_capital_reduction_reported_and_netted_off() {
         let pool = test_pool().await;

@@ -53,7 +53,7 @@ pub struct TaxYearSummary {
     /// foreign_tax_credits), capped at the A$1,000 FITO de-minimis: above that
     /// the ATO requires the offset-limit calculation, which needs the
     /// taxpayer's full income-tax position and is outside this system's data
-    /// (see `docs/fito-limit.md`).
+    /// (see `docs/ato/fito-limit.md`).
     pub foreign_tax_offsets: Decimal,
     /// Foreign tax paid above the A$1,000 de-minimis (the amount excluded from
     /// `foreign_tax_offsets`). Claimable only to the extent the taxpayer's own
@@ -125,7 +125,7 @@ fn zero_summary(tax_year: i32) -> TaxYearSummary {
     }
 }
 
-/// FITO de-minimis (docs/fito-limit.md): up to A$1,000 of foreign income tax
+/// FITO de-minimis (docs/ato/fito-limit.md): up to A$1,000 of foreign income tax
 /// paid in a year is claimable without working out the offset limit.
 fn fito_de_minimis_aud() -> Decimal {
     Decimal::from(1000)
@@ -267,7 +267,7 @@ pub async fn db_tax_summary(pool: &SqlitePool) -> Result<Vec<TaxYearSummary>, sq
         *attached_credits_by_year.entry(tax_year).or_default() += fc;
     }
 
-    // Franking-credit entitlement (docs/you-and-your-shares-dividends.md): in a
+    // Franking-credit entitlement (docs/ato/you-and-your-shares-dividends.md): in a
     // year with A$5,000 or more of attached credits the small-shareholder
     // exemption doesn't apply, so each dividend's shares must pass the at-risk
     // holding-period test; the credits on units that fail it are denied.
@@ -285,7 +285,7 @@ pub async fn db_tax_summary(pool: &SqlitePool) -> Result<Vec<TaxYearSummary>, sq
         }
     }
 
-    // FITO de-minimis (docs/fito-limit.md): a year's foreign tax offset over
+    // FITO de-minimis (docs/ato/fito-limit.md): a year's foreign tax offset over
     // A$1,000 needs the offset-limit calculation, which is outside this
     // system's data — cap the claimable offset and surface the excess.
     for s in map.values_mut() {
@@ -705,7 +705,7 @@ mod tests {
     }
 
     // Franking-credit entitlement (45-day holding-period rule + small-shareholder
-    // exemption — docs/you-and-your-shares-dividends.md, reports::franking).
+    // exemption — docs/ato/you-and-your-shares-dividends.md, reports::franking).
 
     /// Matthew-shaped facts: credits over $5,000 and the parcel held at risk
     /// under 45 days, so the credits are denied but the dividend stays assessable.
@@ -826,7 +826,7 @@ mod tests {
         assert_eq!(result[0].franking_credits_denied, Decimal::ZERO);
     }
 
-    // FITO de-minimis cap (docs/fito-limit.md): up to A$1,000 of foreign tax
+    // FITO de-minimis cap (docs/ato/fito-limit.md): up to A$1,000 of foreign tax
     // is claimable as-is; above that the offset-limit calculation is required,
     // so the claimable offset is capped and the excess surfaced.
 
@@ -863,7 +863,7 @@ mod tests {
     async fn db_foreign_tax_above_1000_is_capped_with_excess_surfaced() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        // Anna-shaped total (docs/fito-limit.md Example 16 pays A$3,400 foreign
+        // Anna-shaped total (docs/ato/fito-limit.md Example 16 pays A$3,400 foreign
         // tax; her computed limit is outside this system's data, so only the
         // A$1,000 de-minimis is claimable here).
         let mut inc = make_income(1, 1, NaiveDate::from_ymd_opt(2025, 3, 15).unwrap());

@@ -6,7 +6,7 @@
 //! (or 90) days after the shares go ex-dividend. Where parcels were acquired
 //! at different times the ATO mandates **last-in first-out** identification of
 //! which shares were sold — regardless of the specific parcel allocation
-//! chosen for CGT. See `docs/you-and-your-shares-dividends.md` (Examples 6–7).
+//! chosen for CGT. See `docs/ato/you-and-your-shares-dividends.md` (Examples 6–7).
 //!
 //! The tax summary uses [`holding_period_test`] to work out, per dividend, how
 //! many entitled units fail the test and denies the proportional share of the

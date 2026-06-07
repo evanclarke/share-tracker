@@ -495,7 +495,7 @@ mod tests {
     }
 
     /// The cost base adjustment is driven solely by `cost_base_adjustment` (the per-unit
-    /// AMIT cost base net amount), per ATO guidance (docs/amit-cost-base-adjustments.md).
+    /// AMIT cost base net amount), per ATO guidance (docs/ato/amit-cost-base-adjustments.md).
     /// `tax_deferred_amount` and `tax_free_amount` are informational-only and must NOT
     /// affect the reduction, even when large.
     #[tokio::test]

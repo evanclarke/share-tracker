@@ -44,7 +44,7 @@ pub async fn db_realised_gains(pool: &SqlitePool) -> Result<Vec<RealisedGainLoss
     // A scrip-for-scrip exchange or demerger closing Sell (scrip_action_id /
     // demerger_action_id set) is not a realised gain or loss: the rollover
     // disregards the gain on the original shares
-    // (docs/takeovers-and-scrip-for-scrip.md, docs/demergers.md), and its
+    // (docs/ato/takeovers-and-scrip-for-scrip.md, docs/ato/demergers.md), and its
     // zero proceeds must never surface as a capital loss. A holding-account
     // transfer-out Sell (transfer_id set) is not even a disposal — the same
     // beneficial owner holds the shares before and after, so it is no CGT
@@ -854,7 +854,7 @@ mod tests {
         .unwrap();
     }
 
-    /// TD 2000/10 (`docs/share-splits-and-consolidations.md`): selling the whole
+    /// TD 2000/10 (`docs/ato/share-splits-and-consolidations.md`): selling the whole
     /// post-split holding realises the parcel's full, unchanged cost base —
     /// the split itself is no CGT event and creates no gain.
     #[tokio::test]
@@ -898,7 +898,7 @@ mod tests {
         assert_eq!(result[0].capital_gain_loss, Decimal::from(80));
     }
 
-    /// A non-assessable bonus issue (`docs/bonus-shares.md`) apportions the
+    /// A non-assessable bonus issue (`docs/ato/bonus-shares.md`) apportions the
     /// parcel's cost base over original + bonus shares, and the bonus shares
     /// keep the original acquisition date — so a partial post-bonus sale
     /// pro-rates the unchanged cost base and the 12-month discount clock runs
@@ -989,7 +989,7 @@ mod tests {
 
     /// A return of capital received while the sold units were held reduces their
     /// cost base, so the realised gain grows by the per-unit payment × quantity
-    /// (`docs/cgt-non-assessable-payments.md`).
+    /// (`docs/ato/cgt-non-assessable-payments.md`).
     #[tokio::test]
     async fn db_return_of_capital_during_holding_reduces_cost_base() {
         let pool = test_pool().await;

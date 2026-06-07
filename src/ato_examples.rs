@@ -1,5 +1,5 @@
 //! Acceptance tests reproducing the worked examples from the ATO guidance
-//! mirrored in `docs/` (see `docs/OVERVIEW.md`). Each test cites the document
+//! mirrored in `docs/ato/` (see `docs/ato/OVERVIEW.md`). Each test cites the document
 //! and example it reproduces, enters the example's facts purely through the
 //! HTTP API (the full `app::router` — no `db_*` shortcuts), reads the result
 //! back through the report endpoints, and asserts the figures the ATO states.
@@ -11,28 +11,28 @@
 //! the real one).
 //!
 //! Worked examples in the docs that are NOT reproduced here at all, and why:
-//! - `docs/cgt-cost-base.md` "Example: effect of capital works deduction on
+//! - `docs/ato/cgt-cost-base.md` "Example: effect of capital works deduction on
 //!   reduced cost base" and "Example: recouped expenditure" — both need the
 //!   reduced cost base and cost-base elements 3–5, which are not modelled yet
 //!   (TODO "Reduced cost base and the five cost-base elements", NEEDS
 //!   CLARIFICATION). What the asserted outcome looks like depends on that
 //!   clarification, so no meaningful ignored test can be written yet.
-//! - `docs/lic-capital-gain-deduction.md` "Example: Beneficiary of a trust or
+//! - `docs/ato/lic-capital-gain-deduction.md` "Example: Beneficiary of a trust or
 //!   partner in partnership" — needs partnership/trust taxpayer entities,
 //!   which are not modelled (TODO "Taxpayer entity type and CGT discount
 //!   rate", NEEDS CLARIFICATION).
-//! - `docs/bonus-shares.md` Examples 36–37 (Klaus, Mark) — both turn on
+//! - `docs/ato/bonus-shares.md` Examples 36–37 (Klaus, Mark) — both turn on
 //!   partly paid bonus shares and call payments (and pre-CGT original
 //!   shares), which are not modelled; Example 35's post-CGT parcel is
 //!   reproduced below.
-//! - `docs/rights-issues.md` Example 39 (Shanti, sale of rights) — selling
+//! - `docs/ato/rights-issues.md` Example 39 (Shanti, sale of rights) — selling
 //!   the rights themselves (a capital gain whose deemed acquisition date is
 //!   inherited from the original shares) is not modelled; only exercising is
 //!   (TODO "Corporate actions", RightsIssue). Example 40's post-CGT half is
 //!   reproduced below; its pre-CGT half (rights over the 1 June 1985 shares,
 //!   whose cost base includes the rights' market value) turns on pre-CGT
 //!   originals, which are not modelled.
-//! - `docs/takeovers-and-scrip-for-scrip.md` Examples 26–28 (Desiree,
+//! - `docs/ato/takeovers-and-scrip-for-scrip.md` Examples 26–28 (Desiree,
 //!   Gunther, Stephanie) — none matches the modelled case (the full-rollover,
 //!   single-replacement-class exchange, TODO "Corporate actions",
 //!   ScripForScrip): Example 26 is a takeover *without* rollover (an ordinary
@@ -42,12 +42,12 @@
 //!   base apportioned by market value. The modelled mechanics — gain
 //!   disregarded, cost base carried, combined holding period — are covered by
 //!   `scrip_exchange`/report unit tests instead.
-//! - `docs/demergers.md` Examples 31 and 33 (Anita's pre-CGT shares) — both
+//! - `docs/ato/demergers.md` Examples 31 and 33 (Anita's pre-CGT shares) — both
 //!   turn on pre-CGT original interests (and Example 31's no-rollover arm on
 //!   the ordinary cost-base rules for the new interests), which are not
 //!   modelled; Example 30's all-post-CGT apportionment and Example 32's
 //!   discount-clock rule are reproduced below.
-//! - `docs/amma-statement-guidance-notes.md` running example ("In our example,
+//! - `docs/ato/amma-statement-guidance-notes.md` running example ("In our example,
 //!   this is $155") — the underlying Part C component table is not included in
 //!   the mirrored copy, so the example is not reproducible from the doc alone.
 //! - "Guide to foreign income tax offset rules 2025" Example 16 (Anna,
@@ -212,7 +212,7 @@ fn dec(s: &str) -> Decimal {
     s.parse().unwrap()
 }
 
-/// `docs/cgt-how-to-calculate.md` — "Example: CGT with discount".
+/// `docs/ato/cgt-how-to-calculate.md` — "Example: CGT with discount".
 ///
 /// > Justin, an Australian resident, buys a block of land. He owns it for
 /// > 18 months and sells it, making a profit of $10,000. He has no capital
@@ -239,7 +239,7 @@ async fn cgt_how_to_calculate_example_cgt_with_discount() {
     assert_eq!(y.net_capital_gain, dec("5000"), "declares a capital gain of $5,000");
 }
 
-/// `docs/cgt-how-to-calculate.md` — "Example: working out CGT for a single asset".
+/// `docs/ato/cgt-how-to-calculate.md` — "Example: working out CGT for a single asset".
 ///
 /// > Rhi buys an investment property for $500,000 and sells it 5 years later
 /// > for $600,000. She has no other capital gains or losses.
@@ -278,7 +278,7 @@ async fn cgt_how_to_calculate_example_single_asset() {
     assert_eq!(y.net_capital_gain, dec("35000"), "step 8: net capital gain of $35,000");
 }
 
-/// `docs/cgt-how-to-calculate.md` — "Example: working out CGT for multiple assets".
+/// `docs/ato/cgt-how-to-calculate.md` — "Example: working out CGT for multiple assets".
 ///
 /// > Take the same facts as above, except that in addition to the investment
 /// > property, Rhi also sells some shares in the same financial year:
@@ -320,7 +320,7 @@ async fn cgt_how_to_calculate_example_multiple_assets() {
     assert_eq!(y.capital_loss_carried_forward, Decimal::ZERO);
 }
 
-/// `docs/cgt-dividend-reinvestment-plans.md` — "Example: dividend reinvestment plans".
+/// `docs/ato/cgt-dividend-reinvestment-plans.md` — "Example: dividend reinvestment plans".
 ///
 /// > Natalie owns 1,440 shares in a company. In November 2024, the company
 /// > declared a dividend of 25 cents per share. Natalie was offered the choice of:
@@ -382,7 +382,7 @@ async fn drp_example_natalie_reinvested_dividend() {
     assert_eq!(years[0].dividends_assessable, dec("360"), "declares the $360 dividend");
 }
 
-/// `docs/cgt-keeping-records-shares.md` — "Example: identifying when shares or
+/// `docs/ato/cgt-keeping-records-shares.md` — "Example: identifying when shares or
 /// units were acquired".
 ///
 /// > Boris is an investor. He:
@@ -425,7 +425,7 @@ async fn keeping_records_example_boris_identifying_shares_sold() {
     assert_eq!(holdings[0].total_cost_base, dec("20000"));
 }
 
-/// `docs/you-and-your-shares-dividends.md` — "Example 1: payment of dividends" /
+/// `docs/ato/you-and-your-shares-dividends.md` — "Example 1: payment of dividends" /
 /// "Example 2: assessable dividend income" (You and your shares 2025).
 ///
 /// > On 15 February 2025, an Australian resident company Coals Tyer Ltd pays
@@ -464,7 +464,7 @@ async fn you_and_your_shares_examples_1_2_john_assessable_dividend_income() {
     );
 }
 
-/// `docs/you-and-your-shares-dividends.md` — "Example 6: franking credits
+/// `docs/ato/you-and-your-shares-dividends.md` — "Example 6: franking credits
 /// entitlement greater than $5,000" (You and your shares 2025).
 ///
 /// > Matthew acquires a single parcel of shares on 1 March 2025. On 8 April
@@ -520,7 +520,7 @@ async fn you_and_your_shares_example_6_matthew_holding_period_rule() {
     );
 }
 
-/// `docs/you-and-your-shares-dividends.md` — "Example 7: substantially
+/// `docs/ato/you-and-your-shares-dividends.md` — "Example 7: substantially
 /// identical shares" (You and your shares 2025).
 ///
 /// > Jessica holds 10,000 shares in Mimosa Pty Ltd for 12 months. She
@@ -579,7 +579,7 @@ async fn you_and_your_shares_example_7_jessica_lifo_identification() {
     );
 }
 
-/// `docs/cgt-non-assessable-payments.md` — "Example 45: Non-assessable payments"
+/// `docs/ato/cgt-non-assessable-payments.md` — "Example 45: Non-assessable payments"
 /// (Guide to capital gains tax; CGT event G1).
 ///
 /// > Rob bought 1,500 shares in RAP Ltd on 1 July 1994 for $5 each, including
@@ -630,7 +630,7 @@ async fn cgt_non_assessable_payments_example_45_rob_return_of_capital() {
     );
 }
 
-/// `docs/share-splits-and-consolidations.md` (TD 2000/10) — "Example 1".
+/// `docs/ato/share-splits-and-consolidations.md` (TD 2000/10) — "Example 1".
 ///
 /// > XYZ Ltd … converts its share capital into 200,000 ordinary shares on
 /// > 1 July 1992. … John acquired 2,000 ordinary shares in XYZ Ltd in
@@ -683,7 +683,7 @@ async fn td_2000_10_example_1_john_share_split() {
     assert!(years.iter().all(|y| y.net_capital_gain == Decimal::ZERO));
 }
 
-/// `docs/share-splits-and-consolidations.md` (TD 2000/10) — "Example 2".
+/// `docs/ato/share-splits-and-consolidations.md` (TD 2000/10) — "Example 2".
 ///
 /// > If XYZ Ltd in Example 1 decides instead to convert its original share
 /// > capital into 50,000 ordinary shares, and all the other facts remain
@@ -729,7 +729,7 @@ async fn td_2000_10_example_2_john_share_consolidation() {
     assert!(years.iter().all(|y| y.net_capital_gain == Decimal::ZERO));
 }
 
-/// `docs/bonus-shares.md` — "Example 35: Fully paid bonus shares".
+/// `docs/ato/bonus-shares.md` — "Example 35: Fully paid bonus shares".
 ///
 /// > Chris bought 100 shares in MAC Ltd for $1 each on 1 June 1985. He bought
 /// > 300 more shares for $1 each on 27 May 1986. On 15 November 1986, MAC Ltd
@@ -790,7 +790,7 @@ async fn bonus_shares_example_35_chris_fully_paid_bonus_shares() {
     assert!(years.iter().all(|y| y.net_capital_gain == Decimal::ZERO));
 }
 
-/// `docs/rights-issues.md` (Guide to CGT, QC 64895) — "Example 40: Rights
+/// `docs/ato/rights-issues.md` (Guide to CGT, QC 64895) — "Example 40: Rights
 /// exercised" (building on Example 39's facts).
 ///
 /// > Shanti owns 2,000 shares in ZAC Ltd. She bought 1,000 shares on
@@ -858,7 +858,7 @@ async fn rights_issues_example_40_shanti_rights_exercised() {
     assert!(years.iter().all(|y| y.net_capital_gain == Decimal::ZERO));
 }
 
-/// `docs/share-buy-backs.md` (QC 66049) — "Example: off-market buy-back".
+/// `docs/ato/share-buy-backs.md` (QC 66049) — "Example: off-market buy-back".
 ///
 /// > Ranjini bought 10,000 shares in a company that was not a listed public
 /// > company at a cost of $6 per share, including brokerage. A few years
@@ -945,7 +945,7 @@ async fn share_buy_backs_example_ranjini_off_market_buy_back() {
     assert_eq!(holdings[0].total_cost_base, dec("54000.00"));
 }
 
-/// `docs/lic-capital-gain-deduction.md` — "Example: Resident individual".
+/// `docs/ato/lic-capital-gain-deduction.md` — "Example: Resident individual".
 ///
 /// > Ben, an Australian resident, is a shareholder in XYZ Ltd, a LIC. On
 /// > 21 February 2025, Ben received a fully franked dividend from XYZ Ltd of
@@ -988,7 +988,7 @@ async fn lic_capital_gain_deduction_example_resident_individual() {
     );
 }
 
-/// `docs/demergers.md` (QC 64895) — "Example 30: No pre-CGT interests" and
+/// `docs/ato/demergers.md` (QC 64895) — "Example 30: No pre-CGT interests" and
 /// "Example 32: Using the discount method after a demerger (1)".
 ///
 /// > Under the BHP Billiton Ltd demerger of BHP Steel Ltd, shareholders

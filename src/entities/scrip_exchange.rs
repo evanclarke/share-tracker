@@ -1,7 +1,7 @@
 //! Atomic scrip-for-scrip exchange: substitute every open parcel of a
 //! `ScripForScrip` action's original (target) listing with parcels of the
 //! replacement listing, applying the rollover (Subdiv 124-M; see
-//! `docs/takeovers-and-scrip-for-scrip.md`).
+//! `docs/ato/takeovers-and-scrip-for-scrip.md`).
 //!
 //! The rollover disregards the capital gain on the original shares and deems
 //! the replacement shares acquired *for the cost base of the original
@@ -34,7 +34,7 @@
 //! by later allocations or AMIT adjustments); and the action is frozen
 //! against edits and deletes while the group exists.
 //!
-//! Out of scope (documented in `docs/takeovers-and-scrip-for-scrip.md`):
+//! Out of scope (documented in `docs/ato/takeovers-and-scrip-for-scrip.md`):
 //! takeovers without rollover (an ordinary market-value disposal — enter the
 //! Sell and Buy manually), partial rollover with a cash component, multiple
 //! replacement share classes, pre-CGT originals, and exchanges that would
