@@ -283,7 +283,7 @@ mod tests {
             pool,
             &listing::Listing {
                 id,
-                exchange_mic: "XASX".to_string(),
+                exchange_mic: Some("XASX".to_string()),
                 ticker: "BBK".to_string(),
                 name: "Buy-Back Test Co".to_string(),
                 isin: None,

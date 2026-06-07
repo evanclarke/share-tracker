@@ -134,6 +134,32 @@ mod tests {
         assert_eq!(bogus.iso_status, None);
     }
 
+    /// The report validates curated *exchanges*; an exchange-less (Crypto)
+    /// listing has no MIC to validate, so recording one adds no row.
+    #[tokio::test]
+    async fn crypto_listings_are_not_validated() {
+        let pool = test_pool().await;
+        let before = db_validate(&pool).await.unwrap().len();
+        crate::entities::listing::db_upsert(
+            &pool,
+            &crate::entities::listing::Listing {
+                id: 1,
+                exchange_mic: None,
+                ticker: "BTC".to_string(),
+                name: "Bitcoin".to_string(),
+                isin: None,
+                security_type: crate::entities::listing::SecurityType::Crypto,
+                currency: "AUD".to_string(),
+                amit: false,
+                preference: false,
+            },
+        )
+        .await
+        .unwrap();
+        let report = db_validate(&pool).await.unwrap();
+        assert_eq!(report.len(), before, "a Crypto listing adds nothing to validate");
+    }
+
     #[tokio::test]
     async fn api_returns_ok() {
         let pool = test_pool().await;

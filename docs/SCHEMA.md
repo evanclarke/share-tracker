@@ -18,11 +18,11 @@ exchange_holidays             Full-closure non-trading days per exchange (settle
 
 listings
 ├── id           INTEGER PK
-├── exchange_mic TEXT FK→exchanges.mic
-├── ticker       TEXT
+├── exchange_mic TEXT FK→exchanges.mic (nullable)  NULL exactly when security_type = Crypto (CHECK); exchange-less listings are unique by ticker (partial unique index), the rest by UNIQUE(exchange_mic, ticker)
+├── ticker       TEXT             For Crypto: must be a recognised digital-token code in currencies (kind DigitalToken), validated at write time
 ├── name         TEXT
 ├── isin         TEXT (nullable)
-├── security_type TEXT           Share | ETF | LIC | Trust
+├── security_type TEXT           Share | ETF | LIC | Trust | Crypto
 ├── currency     TEXT FK→currencies.code
 ├── amit         BOOLEAN          True if the security is an AMIT
 └── preference   BOOLEAN          Preference share: franking credits need 90 (not 45) at-risk days
@@ -240,6 +240,8 @@ Each `attachments` row belongs to exactly one activity via one of three nullable
 
 `mic_registry` is standalone reference data (no foreign keys), keyed by `mic`. It is populated from the ISO 10383 list and used only to validate curated `exchanges` (see the [exchange MIC validation report](API.md#exchange-mic-validation)); it is *not* the operational exchange table and carries no currency/timezone/settlement data.
 
-`currencies` is reference data keyed by `code` (it has no outgoing foreign keys). It is populated from the ISO 4217 (SIX Group) and ISO 24165 (DTIF) feeds and seeded with a baseline of common currencies (the seed migration), and is the recognised list that **every** currency code in the model is foreign-keyed to: `exchanges.currency`, `listings.currency`, `trades.currency`, `trades.brokerage_currency`, `income.currency`, `amma_statements.currency`, and `corporate_actions.currency` all reference `currencies.code`, so an unrecognised currency is rejected at write time. `minor_units` is informational only — stored amounts remain arbitrary-precision Decimal and are never rounded to it.
+`currencies` is reference data keyed by `code` (it has no outgoing foreign keys). It is populated from the ISO 4217 (SIX Group) and ISO 24165 (DTIF) feeds and seeded with a baseline of common currencies (the seed migration), and is the recognised list that **every** currency code in the model is foreign-keyed to: `exchanges.currency`, `listings.currency`, `trades.currency`, `trades.brokerage_currency`, `income.currency`, `amma_statements.currency`, and `corporate_actions.currency` all reference `currencies.code`, so an unrecognised currency is rejected at write time. `minor_units` is informational only — stored amounts remain arbitrary-precision Decimal and are never rounded to it. A Crypto listing's ticker is additionally validated against the `DigitalToken` rows at write time (matched on `code` or `short_name`).
+
+`listings.exchange_mic` is nullable for exactly the Crypto security type (CHECK-enforced both ways): a crypto asset trades on no MIC-coded venue, settles same-day, and has no holiday calendar. Because `UNIQUE(exchange_mic, ticker)` treats NULLs as distinct, a partial unique index makes exchange-less listings unique by ticker.
 
 Decimal values are stored as TEXT to preserve arbitrary precision.

@@ -13,12 +13,20 @@ pub enum SecurityType {
     ETF,
     LIC,
     Trust,
+    /// A crypto asset held as an investment: a CGT asset like the others
+    /// (docs/ato/crypto-cgt.md), but listed on no exchange — `exchange_mic`
+    /// is NULL, settlement is same-day, and the ticker must be a recognised
+    /// digital-token code in `currencies` (kind DigitalToken).
+    Crypto,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Listing {
     pub id: i64,
-    pub exchange_mic: String,
+    /// NULL exactly for Crypto listings (CHECK-enforced): a crypto asset
+    /// trades on no MIC-coded venue. Exchange-less listings are unique by
+    /// ticker (partial unique index); the rest by (exchange_mic, ticker).
+    pub exchange_mic: Option<String>,
     pub ticker: String,
     pub name: String,
     pub isin: Option<String>,
@@ -32,7 +40,8 @@ pub struct Listing {
 
 #[derive(Debug, Deserialize)]
 pub struct ListingBody {
-    pub exchange_mic: String,
+    #[serde(default)]
+    pub exchange_mic: Option<String>,
     pub ticker: String,
     pub name: String,
     pub isin: Option<String>,
@@ -41,6 +50,25 @@ pub struct ListingBody {
     pub amit: bool,
     #[serde(default)]
     pub preference: bool,
+}
+
+/// Why a listing upsert was refused.
+#[derive(Debug)]
+pub enum UpsertError {
+    /// A Crypto listing's ticker is not a recognised digital-token code in
+    /// `currencies` (kind DigitalToken — the ISO 24165 / DTIF list, matched on
+    /// the DTI `code` or the human `short_name` ticker the import carries).
+    UnrecognisedDigitalToken,
+    /// Constraint violations (Crypto with an exchange / non-Crypto without
+    /// one, duplicate ticker, unknown exchange or currency) surface here via
+    /// the table's CHECKs and FKs.
+    Db(sqlx::Error),
+}
+
+impl From<sqlx::Error> for UpsertError {
+    fn from(e: sqlx::Error) -> Self {
+        UpsertError::Db(e)
+    }
 }
 
 pub fn router() -> Router<SqlitePool> {
@@ -68,7 +96,23 @@ pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<Listing>, sqlx:
     .await
 }
 
-pub async fn db_upsert(pool: &SqlitePool, listing: &Listing) -> Result<(), sqlx::Error> {
+pub async fn db_upsert(pool: &SqlitePool, listing: &Listing) -> Result<(), UpsertError> {
+    let mut tx = pool.begin().await?;
+    // A Crypto listing's ticker must be a recognised digital-token code
+    // (validated in the write transaction; the mic/Crypto pairing and ticker
+    // uniqueness are CHECK/index-enforced by the table itself).
+    if listing.security_type == SecurityType::Crypto {
+        let recognised: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM currencies \
+             WHERE kind = 'DigitalToken' AND (code = ?1 OR short_name = ?1))",
+        )
+        .bind(&listing.ticker)
+        .fetch_one(&mut *tx)
+        .await?;
+        if !recognised {
+            return Err(UpsertError::UnrecognisedDigitalToken);
+        }
+    }
     sqlx::query(
         "INSERT INTO listings (id, exchange_mic, ticker, name, isin, security_type, currency, amit, preference) \
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
@@ -91,8 +135,9 @@ pub async fn db_upsert(pool: &SqlitePool, listing: &Listing) -> Result<(), sqlx:
     .bind(listing.currency.as_str())
     .bind(listing.amit)
     .bind(listing.preference)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -141,7 +186,10 @@ async fn upsert(
     db_upsert(&pool, &listing)
         .await
         .map(|_| StatusCode::NO_CONTENT)
-        .map_err(|e| crate::infra::http::write_error_status(&e))
+        .map_err(|e| match e {
+            UpsertError::UnrecognisedDigitalToken => StatusCode::UNPROCESSABLE_ENTITY,
+            UpsertError::Db(err) => crate::infra::http::write_error_status(&err),
+        })
 }
 
 async fn delete(
@@ -169,13 +217,28 @@ mod tests {
     fn xtest() -> Listing {
         Listing {
             id: 1,
-            exchange_mic: "XASX".to_string(),
+            exchange_mic: Some("XASX".to_string()),
             ticker: "VAS".to_string(),
             name: "Vanguard Australian Shares ETF".to_string(),
             isin: Some("AU0000VASAU4".to_string()),
             security_type: SecurityType::ETF,
             currency: "AUD".to_string(),
             amit: true,
+            preference: false,
+        }
+    }
+
+    /// An exchange-less Crypto listing: BTC is a seeded digital-token code.
+    fn crypto() -> Listing {
+        Listing {
+            id: 2,
+            exchange_mic: None,
+            ticker: "BTC".to_string(),
+            name: "Bitcoin".to_string(),
+            isin: None,
+            security_type: SecurityType::Crypto,
+            currency: "AUD".to_string(),
+            amit: false,
             preference: false,
         }
     }
@@ -188,7 +251,7 @@ mod tests {
         db_upsert(&pool, &xtest()).await.unwrap();
         let got = db_get(&pool, 1).await.unwrap().unwrap();
         assert_eq!(got.ticker, "VAS");
-        assert_eq!(got.exchange_mic, "XASX");
+        assert_eq!(got.exchange_mic.as_deref(), Some("XASX"));
         assert_eq!(got.isin, Some("AU0000VASAU4".to_string()));
         assert!(got.amit);
     }
@@ -243,8 +306,10 @@ mod tests {
     async fn db_fk_constraint_rejects_unknown_exchange() {
         let pool = test_pool().await;
         let mut bad = xtest();
-        bad.exchange_mic = "XXXX".to_string();
-        let err = db_upsert(&pool, &bad).await.unwrap_err();
+        bad.exchange_mic = Some("XXXX".to_string());
+        let UpsertError::Db(err) = db_upsert(&pool, &bad).await.unwrap_err() else {
+            panic!("expected a DB error");
+        };
         assert!(
             err.to_string().contains("FOREIGN KEY"),
             "expected FK error, got: {err}"
@@ -257,7 +322,9 @@ mod tests {
         // 'ZZZ' is not a recognised currency (no row in `currencies`).
         let mut bad = xtest();
         bad.currency = "ZZZ".to_string();
-        let err = db_upsert(&pool, &bad).await.unwrap_err();
+        let UpsertError::Db(err) = db_upsert(&pool, &bad).await.unwrap_err() else {
+            panic!("expected a DB error");
+        };
         assert!(
             err.to_string().contains("FOREIGN KEY"),
             "expected currency FK error, got: {err}"
@@ -266,6 +333,69 @@ mod tests {
         let mut ok = xtest();
         ok.currency = "AUD".to_string();
         db_upsert(&pool, &ok).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn db_crypto_listing_round_trips_without_exchange() {
+        let pool = test_pool().await;
+        db_upsert(&pool, &crypto()).await.unwrap();
+        let got = db_get(&pool, 2).await.unwrap().unwrap();
+        assert_eq!(got.exchange_mic, None);
+        assert_eq!(got.ticker, "BTC");
+        assert_eq!(got.security_type, SecurityType::Crypto);
+    }
+
+    #[tokio::test]
+    async fn db_crypto_ticker_must_be_a_recognised_digital_token() {
+        let pool = test_pool().await;
+        // 'DOGE' has no DigitalToken row in `currencies`: rejected, nothing
+        // persisted (a Crypto listing's ticker is its token code).
+        let mut bad = crypto();
+        bad.ticker = "DOGE".to_string();
+        assert!(matches!(
+            db_upsert(&pool, &bad).await.unwrap_err(),
+            UpsertError::UnrecognisedDigitalToken
+        ));
+        assert!(db_get(&pool, 2).await.unwrap().is_none());
+        // A fiat code is no better: BTC must be a *DigitalToken* row.
+        bad.ticker = "USD".to_string();
+        assert!(matches!(
+            db_upsert(&pool, &bad).await.unwrap_err(),
+            UpsertError::UnrecognisedDigitalToken
+        ));
+    }
+
+    #[tokio::test]
+    async fn db_check_pairs_exchange_with_security_type() {
+        let pool = test_pool().await;
+        // A Crypto listing with an exchange is rejected by the CHECK...
+        let mut bad = crypto();
+        bad.exchange_mic = Some("XASX".to_string());
+        let UpsertError::Db(err) = db_upsert(&pool, &bad).await.unwrap_err() else {
+            panic!("expected a DB error");
+        };
+        assert!(err.to_string().contains("CHECK"), "expected CHECK error, got: {err}");
+        // ...and so is a non-Crypto listing without one.
+        let mut bare = xtest();
+        bare.exchange_mic = None;
+        let UpsertError::Db(err) = db_upsert(&pool, &bare).await.unwrap_err() else {
+            panic!("expected a DB error");
+        };
+        assert!(err.to_string().contains("CHECK"), "expected CHECK error, got: {err}");
+    }
+
+    #[tokio::test]
+    async fn db_duplicate_exchange_less_ticker_rejected() {
+        let pool = test_pool().await;
+        // UNIQUE(exchange_mic, ticker) treats NULLs as distinct, so the
+        // partial unique index must catch a second exchange-less BTC listing.
+        db_upsert(&pool, &crypto()).await.unwrap();
+        let mut dup = crypto();
+        dup.id = 3;
+        let UpsertError::Db(err) = db_upsert(&pool, &dup).await.unwrap_err() else {
+            panic!("expected a DB error");
+        };
+        assert!(err.to_string().contains("UNIQUE"), "expected UNIQUE error, got: {err}");
     }
 
     // API-level tests
@@ -367,6 +497,73 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn api_crypto_listing_round_trips_without_exchange() {
+        let pool = test_pool().await;
+        // No exchange_mic in the body at all: the field defaults to null,
+        // which is exactly what a Crypto listing requires.
+        let body = serde_json::json!({
+            "ticker": "BTC",
+            "name": "Bitcoin",
+            "isin": null,
+            "security_type": "Crypto",
+            "currency": "AUD",
+            "amit": false
+        });
+        let resp = router()
+            .with_state(pool.clone())
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/listings/2")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let got = db_get(&pool, 2).await.unwrap().unwrap();
+        assert_eq!(got.exchange_mic, None);
+        assert_eq!(got.security_type, SecurityType::Crypto);
+    }
+
+    #[tokio::test]
+    async fn api_invalid_crypto_listings_return_422() {
+        let pool = test_pool().await;
+        for body in [
+            // Unrecognised digital-token ticker.
+            serde_json::json!({
+                "ticker": "DOGE", "name": "Dogecoin", "isin": null,
+                "security_type": "Crypto", "currency": "AUD", "amit": false
+            }),
+            // A Crypto listing with an exchange.
+            serde_json::json!({
+                "exchange_mic": "XASX", "ticker": "BTC", "name": "Bitcoin", "isin": null,
+                "security_type": "Crypto", "currency": "AUD", "amit": false
+            }),
+            // A non-Crypto listing without one.
+            serde_json::json!({
+                "ticker": "VAS", "name": "Vanguard", "isin": null,
+                "security_type": "ETF", "currency": "AUD", "amit": false
+            }),
+        ] {
+            let resp = router()
+                .with_state(pool.clone())
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri("/listings/2")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY, "body: {body}");
+        }
     }
 
     #[tokio::test]

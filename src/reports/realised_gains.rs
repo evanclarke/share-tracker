@@ -331,7 +331,7 @@ mod tests {
             pool,
             &listing::Listing {
                 id,
-                exchange_mic: "XASX".to_string(),
+                exchange_mic: Some("XASX".to_string()),
                 ticker: ticker.to_string(),
                 name: ticker.to_string(),
                 isin: None,
@@ -625,6 +625,47 @@ mod tests {
         assert_eq!(result[0].capital_gain_loss, Decimal::from(500));
         // Held > 12 months from the original acquisition date → discount-eligible.
         assert_eq!(result[0].discount_eligible_gain, Decimal::from(500));
+    }
+
+    /// Crypto parcels flow through the report exactly like share parcels:
+    /// satoshi-scale fractional quantities (8 decimal places) stay exact in
+    /// the AUD cost base, proceeds, and gain, and a parcel held more than 12
+    /// months is discount-eligible (docs/ato/crypto-cgt.md).
+    #[tokio::test]
+    async fn db_crypto_sale_keeps_satoshi_precision_and_discount() {
+        let pool = test_pool().await;
+        // An exchange-less Crypto listing (BTC is a seeded digital token).
+        listing::db_upsert(
+            &pool,
+            &listing::Listing {
+                id: 1,
+                exchange_mic: None,
+                ticker: "BTC".to_string(),
+                name: "Bitcoin".to_string(),
+                isin: None,
+                security_type: listing::SecurityType::Crypto,
+                currency: "AUD".to_string(),
+                amit: false,
+                preference: false,
+            },
+        )
+        .await
+        .unwrap();
+        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let sell_date = NaiveDate::from_ymd_opt(2025, 1, 2).unwrap(); // strictly > 12 months
+        let qty: Decimal = "0.12345678".parse().unwrap();
+        insert_buy(&pool, 1, 1, buy_date, qty, Decimal::from(60000)).await;
+        insert_sell(&pool, 2, 1, sell_date, qty, Decimal::from(100000)).await;
+        allocate(&pool, 1, 2, 1, qty).await;
+
+        let result = db_realised_gains(&pool).await.unwrap();
+        assert_eq!(result.len(), 1);
+        // 0.12345678 × 60,000 / 100,000: every satoshi-scale digit preserved.
+        assert_eq!(result[0].cost_base, "7407.40680000".parse::<Decimal>().unwrap());
+        assert_eq!(result[0].proceeds, "12345.67800000".parse::<Decimal>().unwrap());
+        assert_eq!(result[0].capital_gain_loss, "4938.27120000".parse::<Decimal>().unwrap());
+        // Held > 12 months → the whole gain is discount-eligible.
+        assert_eq!(result[0].discount_eligible_gain, result[0].capital_gain_loss);
     }
 
     #[tokio::test]
@@ -1038,7 +1079,7 @@ mod tests {
             pool,
             &listing::Listing {
                 id,
-                exchange_mic: "XNYS".to_string(),
+                exchange_mic: Some("XNYS".to_string()),
                 ticker: ticker.to_string(),
                 name: ticker.to_string(),
                 isin: None,

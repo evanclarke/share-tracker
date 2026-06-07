@@ -13,7 +13,7 @@
 - Money and quantities are always `Decimal`, never `f64`. New monetary columns are `TEXT`; migrations must preserve precision (never round-trip a value through a `REAL` column)
 - When reading a `TEXT` decimal column, propagate parse failures (map to `sqlx::Error::Decode`, as the `FromRow` `dec` helpers do). Never `.parse().unwrap_or(Decimal::ZERO)` — a silent zero corrupts financial output without failing
 - Reports take the Australian-tax view: cost base, proceeds, and income totals are in AUD. Convert every non-AUD amount to AUD using the record's `fx_rate` before aggregating or comparing — never mix currencies in one calculation
-- Market settlement (T+n) counts business days — skip weekends and the exchange's seeded public holidays (`exchange_holidays`, looked up per the listing's exchange via `exchange_holiday::exchange_holidays_for_listing`); never just add calendar days
+- Market settlement (T+n) counts business days — skip weekends and the exchange's seeded public holidays (`exchange_holidays`, looked up per the listing's exchange via `exchange_holiday::exchange_holidays_for_listing`); never just add calendar days. Exchange-less listings (`security_type = 'Crypto'`, NULL `exchange_mic`) settle same-day instead — no T+n, no holiday calendar (`trade::auto_settlement_date`)
 
 # Data integrity
 - Enforce data-model invariants at write time inside a transaction, not only in reports. A multi-row invariant (e.g. a Sell's parcel allocations must sum to its quantity) must be validated and committed atomically so a partial/invalid state can never be persisted; reject with `422` otherwise. If standalone child-entity writes could reintroduce a bad state, restrict them

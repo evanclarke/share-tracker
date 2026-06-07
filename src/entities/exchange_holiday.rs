@@ -228,7 +228,7 @@ mod tests {
             pool,
             &listing::Listing {
                 id,
-                exchange_mic: mic.to_string(),
+                exchange_mic: Some(mic.to_string()),
                 ticker: format!("T{id}"),
                 name: format!("Test {id}"),
                 isin: None,

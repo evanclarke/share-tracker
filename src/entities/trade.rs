@@ -485,18 +485,41 @@ pub(crate) fn warn_if_outside_holiday_coverage(
     }
 }
 
+/// The listing's exchange T+n settlement period, or `None` for an
+/// exchange-less (Crypto) listing — those settle same-day.
 pub(crate) async fn settlement_days_for_listing(
     pool: &SqlitePool,
     listing_id: i64,
-) -> Result<i64, sqlx::Error> {
+) -> Result<Option<i64>, sqlx::Error> {
     sqlx::query_scalar(
         "SELECT e.settlement_days FROM listings l \
-         JOIN exchanges e ON e.mic = l.exchange_mic \
+         LEFT JOIN exchanges e ON e.mic = l.exchange_mic \
          WHERE l.id = ?",
     )
     .bind(listing_id)
     .fetch_one(pool)
     .await
+}
+
+/// Auto-populate a settlement date for a trade with none supplied. An
+/// exchange-listed security settles T+n business days after the trade date,
+/// skipping weekends and the exchange's seeded holidays (warning when the
+/// window leaves seeded coverage). An exchange-less (Crypto) listing settles
+/// same-day — no T+n, no holiday calendar, no coverage warning.
+pub(crate) async fn auto_settlement_date(
+    pool: &SqlitePool,
+    trade_id: i64,
+    listing_id: i64,
+    date: NaiveDate,
+) -> Result<NaiveDate, sqlx::Error> {
+    let Some(days) = settlement_days_for_listing(pool, listing_id).await? else {
+        return Ok(date);
+    };
+    let holidays =
+        crate::entities::exchange_holiday::exchange_holidays_for_listing(pool, listing_id).await?;
+    let settlement = add_business_days(date, days, &holidays);
+    warn_if_outside_holiday_coverage(trade_id, date, settlement, &holidays);
+    Ok(settlement)
 }
 
 async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<Trade>>, StatusCode> {
@@ -529,18 +552,9 @@ async fn upsert(
     }
     let settlement_date = match body.settlement_date {
         Some(d) => d,
-        None => {
-            let days = settlement_days_for_listing(&pool, body.listing_id)
-                .await
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-            let holidays =
-                crate::entities::exchange_holiday::exchange_holidays_for_listing(&pool, body.listing_id)
-                    .await
-                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-            let settlement = add_business_days(body.date, days, &holidays);
-            warn_if_outside_holiday_coverage(id, body.date, settlement, &holidays);
-            settlement
-        }
+        None => auto_settlement_date(&pool, id, body.listing_id, body.date)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
     };
     let trade = Trade {
         id,
@@ -613,7 +627,7 @@ mod tests {
             pool,
             &listing::Listing {
                 id: 1,
-                exchange_mic: "XASX".to_string(),
+                exchange_mic: Some("XASX".to_string()),
                 ticker: "VAS".to_string(),
                 name: "Vanguard Australian Shares ETF".to_string(),
                 isin: None,
@@ -1069,6 +1083,61 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
         let trade = db_get(&pool, 1).await.unwrap().unwrap();
         assert_eq!(trade.settlement_date, NaiveDate::from_ymd_opt(2024, 1, 17).unwrap());
+    }
+
+    /// An exchange-less (Crypto) listing settles same-day: the auto-populated
+    /// settlement date is the trade date itself — a Friday stays a Friday (no
+    /// T+n, no business-day skipping) — and no coverage warning fires (there
+    /// is no holiday calendar to be outside of).
+    #[tracing_test::traced_test]
+    #[tokio::test]
+    async fn api_settlement_date_same_day_for_crypto() {
+        let pool = test_pool().await;
+        listing::db_upsert(
+            &pool,
+            &listing::Listing {
+                id: 1,
+                exchange_mic: None,
+                ticker: "BTC".to_string(),
+                name: "Bitcoin".to_string(),
+                isin: None,
+                security_type: listing::SecurityType::Crypto,
+                currency: "AUD".to_string(),
+                amit: false,
+                preference: false,
+            },
+        )
+        .await
+        .unwrap();
+        // 2030-06-07 is a Friday, far outside every seeded holiday calendar.
+        let body = serde_json::json!({
+            "trade_type": "Buy",
+            "date": "2030-06-07",
+            "listing_id": 1,
+            "average_price": "65000",
+            "quantity": "0.12345678",
+            "currency": "AUD",
+            "brokerage": "0",
+            "gst_on_brokerage": "0",
+            "brokerage_currency": "AUD",
+            "fx_rate": "1"
+        });
+        let resp = router()
+            .with_state(pool.clone())
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/trades/1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let trade = db_get(&pool, 1).await.unwrap().unwrap();
+        assert_eq!(trade.settlement_date, NaiveDate::from_ymd_opt(2030, 6, 7).unwrap());
+        assert!(!logs_contain("settlement window outside seeded exchange-holiday coverage"));
     }
 
     #[tracing_test::traced_test]

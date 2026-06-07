@@ -514,7 +514,7 @@ mod tests {
             pool,
             &listing::Listing {
                 id,
-                exchange_mic: "XNYS".to_string(),
+                exchange_mic: Some("XNYS".to_string()),
                 ticker: ticker.to_string(),
                 name: ticker.to_string(),
                 isin: None,
@@ -624,6 +624,75 @@ mod tests {
         assert_eq!(t.fx_rate, dec("1.5"));
         assert_eq!(t.deemed_acquisition_date, Some(d(2023, 3, 1)));
         assert_eq!(t.transfer_id, Some(1));
+    }
+
+    /// A crypto parcel transfers between holding accounts exactly like a
+    /// share parcel (e.g. moving BTC between custody wallets): not a CGT
+    /// event, satoshi-scale quantity preserved, the transfer-in carrying the
+    /// parcel's cost base and acquisition date.
+    #[tokio::test]
+    async fn crypto_transfer_carries_cost_base_and_acquisition_date() {
+        let pool = test_pool().await;
+        listing::db_upsert(
+            &pool,
+            &listing::Listing {
+                id: 1,
+                exchange_mic: None,
+                ticker: "BTC".to_string(),
+                name: "Bitcoin".to_string(),
+                isin: None,
+                security_type: listing::SecurityType::Crypto,
+                currency: "AUD".to_string(),
+                amit: false,
+                preference: false,
+            },
+        )
+        .await
+        .unwrap();
+        // 0.12345678 BTC bought at A$60,000 in account 2.
+        trade::db_upsert(
+            &pool,
+            &Trade {
+                id: 1,
+                trade_type: TradeType::Buy,
+                date: d(2023, 3, 1),
+                settlement_date: d(2023, 3, 1), // crypto settles same-day
+                listing_id: 1,
+                average_price: dec("60000"),
+                quantity: dec("0.12345678"),
+                currency: "AUD".to_string(),
+                brokerage: Decimal::ZERO,
+                gst_on_brokerage: Decimal::ZERO,
+                brokerage_currency: "AUD".to_string(),
+                fx_rate: Decimal::ONE,
+                contract_note_ref: None,
+                residual_brought_forward: Decimal::ZERO,
+                residual_carried_forward: Decimal::ZERO,
+                residual_paid_out: Decimal::ZERO,
+                rights_action_id: None,
+                buyback_action_id: None,
+                scrip_action_id: None,
+                demerger_action_id: None,
+                deemed_acquisition_date: None,
+                holding_account_id: 2,
+                transfer_id: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let group = db_transfer(&pool, 1, &body(d(2024, 6, 1), 2, 1, vec![(1, "0.12345678")]))
+            .await
+            .unwrap();
+
+        let t = &group.transfer_ins[0];
+        assert_eq!(t.holding_account_id, 1);
+        assert_eq!(t.quantity, dec("0.12345678"), "satoshi-scale quantity preserved");
+        // The whole A$7,407.4068 cost base moves on the brokerage column...
+        assert_eq!(t.average_price, Decimal::ZERO);
+        assert_eq!(t.brokerage, dec("7407.40680000"));
+        // ...with the original acquisition date driving the discount clock.
+        assert_eq!(t.deemed_acquisition_date, Some(d(2023, 3, 1)));
     }
 
     /// A partial transfer splits the parcel: the moved units carry exactly

@@ -1068,3 +1068,85 @@ async fn demergers_examples_30_32_anita_bhp_billiton_demerger() {
     assert_eq!(gains[0].discount_eligible_gain, dec("153.425"));
     assert_eq!(gains[0].non_discountable_gain, Decimal::ZERO);
 }
+
+/// `docs/ato/crypto-cgt.md` — "Example: market value of new asset determines
+/// old asset's disposal proceeds" (Crypto to crypto exchange or swap, QC 69949).
+///
+/// > Katrina acquires 100 Coin A for $15,000 on 5 July 2024. Katrina decides
+/// > to exchange 20 Coin A for 100 Coin B through a reputable digital asset
+/// > exchange on 15 November 2024. Using the exchange rates shown on the
+/// > digital asset exchange at the time of the transaction, the market value
+/// > of 100 Coin B was $6,000. Therefore, Katrina's capital proceeds are
+/// > $6,000 for the disposal of 20 Coin A.
+///
+/// A crypto-to-crypto swap is entered manually as a Sell at the market-value
+/// proceeds plus a Buy of the acquired asset at the same value (README Known
+/// limitations). Coin A / Coin B are represented by the seeded BTC / ETH
+/// token codes — a Crypto listing's ticker must be a recognised digital
+/// token. The 20 disposed Coin A carry 15,000 × 20/100 = $3,000 of cost base,
+/// so the swap realises a $3,000 capital gain, held 5 Jul → 15 Nov 2024
+/// (under 12 months) → not discount-eligible; the acquired Coin B parcel
+/// opens at the $6,000 swap value. Both legs settle same-day (a crypto asset
+/// trades on no exchange — no T+n, no holiday calendar).
+///
+/// The doc's second example (Coin D, proceeds from the *old* asset's market
+/// value when the new one has none) is entered identically — which side's
+/// market value determined the proceeds happens outside this system — so it
+/// is not separately reproduced.
+#[tokio::test]
+async fn crypto_cgt_example_katrina_coin_swap() {
+    let pool = test_pool().await;
+    // Coin A and Coin B: exchange-less Crypto listings (no exchange_mic).
+    for (id, ticker) in [(1, "BTC"), (2, "ETH")] {
+        api_put(
+            &pool,
+            &format!("/listings/{id}"),
+            json!({
+                "ticker": ticker,
+                "name": ticker,
+                "isin": null,
+                "security_type": "Crypto",
+                "currency": "AUD",
+                "amit": false,
+            }),
+        )
+        .await;
+    }
+    put_buy(&pool, 1, 1, "2024-07-05", "100", "150", "0").await; // 100 Coin A for $15,000
+    // The swap on 15 Nov 2024: dispose of 20 Coin A for $6,000 (100 Coin B's
+    // market value) and acquire 100 Coin B for the same $6,000.
+    put_sell(&pool, 2, 1, "2024-11-15", "20", "300", "0", 1).await;
+    put_buy(&pool, 3, 2, "2024-11-15", "100", "60", "0").await;
+
+    // Crypto settles same-day: the auto-populated settlement date is the
+    // trade date itself.
+    let swap_sell: Trade = api_get(&pool, "/trades/2").await;
+    assert_eq!(swap_sell.settlement_date, swap_sell.date, "crypto settles same-day");
+
+    // Katrina's capital proceeds are $6,000 against a $3,000 cost base.
+    let sales: Vec<RealisedGainLoss> = api_get(&pool, "/portfolio/realised-gains").await;
+    assert_eq!(sales.len(), 1);
+    assert_eq!(sales[0].proceeds, dec("6000"), "capital proceeds are $6,000");
+    assert_eq!(sales[0].cost_base, dec("3000"), "20/100 of the $15,000");
+    assert_eq!(sales[0].capital_gain_loss, dec("3000"));
+    assert_eq!(sales[0].non_discountable_gain, dec("3000"), "held under 12 months");
+    assert_eq!(sales[0].discount_eligible_gain, Decimal::ZERO);
+
+    // FY2024-25: the $3,000 gain is assessable in full (no discount).
+    let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net-capital-gain").await;
+    assert_eq!(years.len(), 1);
+    assert_eq!(years[0].tax_year, 2025);
+    assert_eq!(years[0].other_gains, dec("3000"));
+    assert_eq!(years[0].cgt_discount, Decimal::ZERO);
+    assert_eq!(years[0].net_capital_gain, dec("3000"));
+
+    // She now holds 80 Coin A ($12,000 cost base) and 100 Coin B ($6,000).
+    let mut holdings: Vec<HoldingOverview> =
+        api_post(&pool, "/portfolio/overview", json!({}), StatusCode::OK).await;
+    holdings.sort_by_key(|h| h.listing_id);
+    assert_eq!(holdings.len(), 2);
+    assert_eq!(holdings[0].quantity, dec("80"));
+    assert_eq!(holdings[0].total_cost_base, dec("12000"));
+    assert_eq!(holdings[1].quantity, dec("100"));
+    assert_eq!(holdings[1].total_cost_base, dec("6000"));
+}

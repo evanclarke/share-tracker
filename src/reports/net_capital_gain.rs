@@ -512,7 +512,7 @@ mod tests {
             pool,
             &listing::Listing {
                 id,
-                exchange_mic: "XASX".to_string(),
+                exchange_mic: Some("XASX".to_string()),
                 ticker: ticker.to_string(),
                 name: ticker.to_string(),
                 isin: None,

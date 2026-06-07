@@ -38,7 +38,9 @@ pub fn router() -> Router<SqlitePool> {
 /// its exchange's seeded holiday coverage (the calendar-year span of the
 /// exchange's `exchange_holidays` rows). Trades fully inside coverage are
 /// omitted — an empty report means every settlement window was computed
-/// against a complete calendar.
+/// against a complete calendar. Exchange-less (Crypto) listings settle
+/// same-day with no holiday calendar at all, so their trades are skipped —
+/// there is no coverage to be outside of.
 pub async fn db_coverage_alerts(
     pool: &SqlitePool,
 ) -> Result<Vec<SettlementCoverageAlert>, sqlx::Error> {
@@ -49,6 +51,7 @@ pub async fn db_coverage_alerts(
          JOIN listings l ON l.id = t.listing_id \
          LEFT JOIN (SELECT mic, MIN(holiday_date) AS earliest, MAX(holiday_date) AS latest \
                     FROM exchange_holidays GROUP BY mic) h ON h.mic = l.exchange_mic \
+         WHERE l.exchange_mic IS NOT NULL \
          ORDER BY l.ticker, t.date, t.id",
     )
     .fetch_all(pool)
@@ -119,7 +122,7 @@ mod tests {
             pool,
             &listing::Listing {
                 id,
-                exchange_mic: mic.to_string(),
+                exchange_mic: Some(mic.to_string()),
                 ticker: format!("T{id}"),
                 name: format!("Test {id}"),
                 isin: None,
@@ -244,6 +247,32 @@ mod tests {
         assert_eq!(a.coverage_status, "no_holiday_coverage");
         assert_eq!(a.coverage_start, None);
         assert_eq!(a.coverage_end, None);
+    }
+
+    /// An exchange-less (Crypto) listing settles same-day with no holiday
+    /// calendar at all, so its trades are never flagged — even dated far
+    /// outside every seeded calendar.
+    #[tokio::test]
+    async fn db_crypto_trades_are_not_flagged() {
+        let pool = test_pool().await;
+        listing::db_upsert(
+            &pool,
+            &listing::Listing {
+                id: 1,
+                exchange_mic: None,
+                ticker: "BTC".to_string(),
+                name: "Bitcoin".to_string(),
+                isin: None,
+                security_type: listing::SecurityType::Crypto,
+                currency: "AUD".to_string(),
+                amit: false,
+                preference: false,
+            },
+        )
+        .await
+        .unwrap();
+        insert_buy(&pool, 1, 1, ymd(2030, 6, 3), ymd(2030, 6, 3)).await;
+        assert!(db_coverage_alerts(&pool).await.unwrap().is_empty());
     }
 
     #[tokio::test]

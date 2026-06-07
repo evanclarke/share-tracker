@@ -123,6 +123,10 @@ mod tests {
         assert!(js.contains("/listings"));
         // The preference-share flag (90-day franking holding period) is editable.
         assert!(js.contains("preference"));
+        // The Crypto security type is selectable, with the exchange optional
+        // (blank for Crypto) — and crypto-aware labels never print "null".
+        assert!(js.contains("'Crypto'"));
+        assert!(js.contains("l.exchange_mic || 'Crypto'"));
     }
 
     #[tokio::test]

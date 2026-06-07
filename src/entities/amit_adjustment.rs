@@ -251,7 +251,7 @@ mod tests {
             pool,
             &listing::Listing {
                 id,
-                exchange_mic: exchange_mic.to_string(),
+                exchange_mic: Some(exchange_mic.to_string()),
                 ticker: ticker.to_string(),
                 name: ticker.to_string(),
                 isin: None,

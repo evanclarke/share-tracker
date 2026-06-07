@@ -213,15 +213,7 @@ pub async fn db_upsert_sell(pool: &SqlitePool, id: i64, body: &SellBody) -> Resu
     // settlement date outside the write transaction is a consistent read.
     let settlement_date = match body.settlement_date {
         Some(d) => d,
-        None => {
-            let days = trade::settlement_days_for_listing(pool, body.listing_id).await?;
-            let holidays =
-                crate::entities::exchange_holiday::exchange_holidays_for_listing(pool, body.listing_id)
-                    .await?;
-            let settlement = trade::add_business_days(body.date, days, &holidays);
-            trade::warn_if_outside_holiday_coverage(id, body.date, settlement, &holidays);
-            settlement
-        }
+        None => trade::auto_settlement_date(pool, id, body.listing_id, body.date).await?,
     };
 
     let mut tx = pool.begin().await?;
@@ -484,7 +476,7 @@ mod tests {
             pool,
             &listing::Listing {
                 id,
-                exchange_mic: "XASX".to_string(),
+                exchange_mic: Some("XASX".to_string()),
                 ticker: format!("T{id}"),
                 name: format!("Test {id}"),
                 isin: None,

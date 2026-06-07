@@ -323,7 +323,7 @@ mod tests {
             pool,
             &listing::Listing {
                 id: 1,
-                exchange_mic: "XASX".to_string(),
+                exchange_mic: Some("XASX".to_string()),
                 ticker: "VAF".to_string(),
                 name: "Vanguard Australian Fixed Interest ETF".to_string(),
                 isin: None,

@@ -91,7 +91,7 @@
       case 'exchanges':
         return (await api('GET', '/exchanges')).map(function (e) { return { value: e.mic, label: e.mic + ' — ' + e.name }; });
       case 'listings':
-        return (await api('GET', '/listings')).map(function (l) { return { value: l.id, label: l.id + ': ' + l.ticker + ' (' + l.exchange_mic + ')' }; });
+        return (await api('GET', '/listings')).map(function (l) { return { value: l.id, label: l.id + ': ' + l.ticker + ' (' + (l.exchange_mic || 'Crypto') + ')' }; });
       case 'holdingAccounts':
         return (await api('GET', '/holding_accounts')).map(function (a) { return { value: a.id, label: a.id + ': ' + a.name }; });
       case 'amma':
@@ -138,14 +138,14 @@
     },
     {
       slug: 'listings', title: 'Listings', group: 'Reference data', api: '/listings',
-      desc: 'Securities you trade, each on a curated exchange.',
+      desc: 'Securities you trade, each on a curated exchange — except Crypto listings, which have no exchange (leave it blank), settle same-day, and need a recognised digital-token ticker (e.g. BTC).',
       keyFields: [int('id', 'ID', { auto: true })],
       fields: [
-        fk('exchange_mic', 'Exchange', 'exchanges', { required: true, encode: 'string' }),
+        fk('exchange_mic', 'Exchange', 'exchanges', { optional: true, encode: 'string', hint: 'Required except for Crypto; must be blank for Crypto.' }),
         txt('ticker', 'Ticker', { required: true }),
         txt('name', 'Name', { required: true }),
         txt('isin', 'ISIN', { optional: true }),
-        sel('security_type', 'Security type', ['Share', 'ETF', 'LIC', 'Trust'], { required: true }),
+        sel('security_type', 'Security type', ['Share', 'ETF', 'LIC', 'Trust', 'Crypto'], { required: true }),
         fk('currency', 'Currency', 'currencies', { required: true, encode: 'string' }),
         bool('amit', 'AMIT'),
         bool('preference', 'Preference share (90-day franking holding period)'),
@@ -1262,7 +1262,7 @@
     priceForm.appendChild(el('h3', null, 'Current prices (AUD, optional)'));
     listings.forEach(function (l) {
       priceForm.appendChild(el('div', { class: 'field' }, [
-        el('label', null, l.id + ': ' + l.ticker + ' (' + l.exchange_mic + ')'),
+        el('label', null, l.id + ': ' + l.ticker + ' (' + (l.exchange_mic || 'Crypto') + ')'),
         el('input', { type: 'text', inputmode: 'decimal', 'data-listing': l.id }),
       ]));
     });
