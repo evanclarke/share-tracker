@@ -18,6 +18,8 @@
 # Data integrity
 - Enforce data-model invariants at write time inside a transaction, not only in reports. A multi-row invariant (e.g. a Sell's parcel allocations must sum to its quantity) must be validated and committed atomically so a partial/invalid state can never be persisted; reject with `422` otherwise. If standalone child-entity writes could reintroduce a bad state, restrict them
 - Every field in the data model must be used by a calculation or endpoint, or carry a comment marking it informational-only. Don't leave stored fields silently unused
+- Migrations must never drop data: no destructive schema changes — migrate existing rows forward (e.g. the holding-accounts migration moved every row to the seeded default account)
+- A field that holds a limited set of values is an enum: CHECK-constrained in the database (and a typed enum where parsed in Rust), never a free-text column
 
 # Project structure
 Modules are grouped into three folders; `main.rs`, `app.rs`, and the migrations live at the `src` root.
