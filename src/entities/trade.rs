@@ -92,6 +92,19 @@ pub struct Trade {
     /// their listing from the exchange/demerger on). `None` = the trade's
     /// own date.
     pub deemed_acquisition_date: Option<NaiveDate>,
+    /// The holding account the trade sits in (see
+    /// `entities::holding_account`): the same listing can be held in more
+    /// than one account at once — e.g. RSU-vested shares in an employer plan
+    /// account alongside DRP-enrolled shares in a personal broker account.
+    /// Defaults to the seeded default account when omitted from a request.
+    pub holding_account_id: i64,
+    /// Provenance link from a transfer-out Sell / transfer-in Buy back to its
+    /// holding-account transfer (`None` for every other trade). Set only by
+    /// `PUT /transfers/:id` (`entities::transfer`). The trades carrying one
+    /// transfer id form the transfer group: each is rejected by `PUT /sells`
+    /// and `PUT`/`DELETE /trades`; `DELETE /transfers/:id` removes the whole
+    /// group.
+    pub transfer_id: Option<i64>,
 }
 
 impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for Trade {
@@ -121,6 +134,8 @@ impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for Trade {
             scrip_action_id: row.try_get("scrip_action_id")?,
             demerger_action_id: row.try_get("demerger_action_id")?,
             deemed_acquisition_date: row.try_get("deemed_acquisition_date")?,
+            holding_account_id: row.try_get("holding_account_id")?,
+            transfer_id: row.try_get("transfer_id")?,
         })
     }
 }
@@ -147,6 +162,10 @@ pub struct TradeBody {
     pub residual_carried_forward: Decimal,
     #[serde(default)]
     pub residual_paid_out: Decimal,
+    /// Defaults to the seeded default holding account when omitted, so
+    /// single-account clients never see the dimension.
+    #[serde(default = "crate::entities::holding_account::default_holding_account_id")]
+    pub holding_account_id: i64,
 }
 
 pub fn router() -> Router<SqlitePool> {
@@ -160,7 +179,8 @@ pub async fn db_list(pool: &SqlitePool) -> Result<Vec<Trade>, sqlx::Error> {
         "SELECT id, trade_type, date, settlement_date, listing_id, average_price, quantity, \
          currency, brokerage, gst_on_brokerage, brokerage_currency, fx_rate, contract_note_ref, \
          residual_brought_forward, residual_carried_forward, residual_paid_out, rights_action_id, \
-         buyback_action_id, scrip_action_id, demerger_action_id, deemed_acquisition_date \
+         buyback_action_id, scrip_action_id, demerger_action_id, deemed_acquisition_date, \
+         holding_account_id, transfer_id \
          FROM trades ORDER BY date, id",
     )
     .fetch_all(pool)
@@ -172,7 +192,8 @@ pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<Trade>, sqlx::E
         "SELECT id, trade_type, date, settlement_date, listing_id, average_price, quantity, \
          currency, brokerage, gst_on_brokerage, brokerage_currency, fx_rate, contract_note_ref, \
          residual_brought_forward, residual_carried_forward, residual_paid_out, rights_action_id, \
-         buyback_action_id, scrip_action_id, demerger_action_id, deemed_acquisition_date \
+         buyback_action_id, scrip_action_id, demerger_action_id, deemed_acquisition_date, \
+         holding_account_id, transfer_id \
          FROM trades WHERE id = ?",
     )
     .bind(id)
@@ -214,6 +235,12 @@ pub enum UpsertError {
     /// the group via `DELETE /sells` on the closing Sell and re-demerge
     /// instead (see `entities::demerger`).
     DemergerTrade,
+    /// The existing trade belongs to a holding-account transfer group
+    /// (`transfer_id` set): its figures carry the moved parcel's cost base
+    /// and deemed acquisition date, which a free-form edit would corrupt.
+    /// Delete the transfer via `DELETE /transfers/:id` and re-transfer
+    /// instead (see `entities::transfer`).
+    TransferTrade,
 }
 
 impl From<sqlx::Error> for UpsertError {
@@ -236,15 +263,16 @@ pub async fn db_upsert(pool: &SqlitePool, trade: &Trade) -> Result<(), UpsertErr
     // cost base and deemed acquisition date), which an edit could silently
     // break. (The INSERT below never sets any provenance column, so a normal
     // trade can't become one either.)
-    let existing_action: Option<(Option<i64>, Option<i64>, Option<i64>, Option<i64>)> =
+    let existing_action: Option<(Option<i64>, Option<i64>, Option<i64>, Option<i64>, Option<i64>)> =
         sqlx::query_as(
-            "SELECT rights_action_id, buyback_action_id, scrip_action_id, demerger_action_id \
+            "SELECT rights_action_id, buyback_action_id, scrip_action_id, demerger_action_id, \
+                    transfer_id \
              FROM trades WHERE id = ?",
         )
         .bind(trade.id)
         .fetch_optional(&mut *tx)
         .await?;
-    if let Some((rights, buyback, scrip, demerger)) = existing_action {
+    if let Some((rights, buyback, scrip, demerger, transfer)) = existing_action {
         if rights.is_some() {
             return Err(UpsertError::RightsExerciseTrade);
         }
@@ -256,6 +284,9 @@ pub async fn db_upsert(pool: &SqlitePool, trade: &Trade) -> Result<(), UpsertErr
         }
         if demerger.is_some() {
             return Err(UpsertError::DemergerTrade);
+        }
+        if transfer.is_some() {
+            return Err(UpsertError::TransferTrade);
         }
     }
 
@@ -302,8 +333,9 @@ pub async fn db_upsert(pool: &SqlitePool, trade: &Trade) -> Result<(), UpsertErr
         "INSERT INTO trades \
          (id, trade_type, date, settlement_date, listing_id, average_price, quantity, \
           currency, brokerage, gst_on_brokerage, brokerage_currency, fx_rate, contract_note_ref, \
-          residual_brought_forward, residual_carried_forward, residual_paid_out) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+          residual_brought_forward, residual_carried_forward, residual_paid_out, \
+          holding_account_id) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT(id) DO UPDATE SET \
              trade_type               = excluded.trade_type, \
              date                     = excluded.date, \
@@ -319,7 +351,8 @@ pub async fn db_upsert(pool: &SqlitePool, trade: &Trade) -> Result<(), UpsertErr
              contract_note_ref        = excluded.contract_note_ref, \
              residual_brought_forward = excluded.residual_brought_forward, \
              residual_carried_forward = excluded.residual_carried_forward, \
-             residual_paid_out        = excluded.residual_paid_out",
+             residual_paid_out        = excluded.residual_paid_out, \
+             holding_account_id       = excluded.holding_account_id",
     )
     .bind(trade.id)
     .bind(trade.trade_type)
@@ -337,6 +370,7 @@ pub async fn db_upsert(pool: &SqlitePool, trade: &Trade) -> Result<(), UpsertErr
     .bind(trade.residual_brought_forward.to_string())
     .bind(trade.residual_carried_forward.to_string())
     .bind(trade.residual_paid_out.to_string())
+    .bind(trade.holding_account_id)
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -363,20 +397,20 @@ pub enum DeleteOutcome {
 pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<DeleteOutcome, sqlx::Error> {
     let mut tx = pool.begin().await?;
 
-    let exists: Option<(Option<i64>, Option<i64>)> = sqlx::query_as(
-        "SELECT scrip_action_id, demerger_action_id FROM trades WHERE id = ?",
+    let exists: Option<(Option<i64>, Option<i64>, Option<i64>)> = sqlx::query_as(
+        "SELECT scrip_action_id, demerger_action_id, transfer_id FROM trades WHERE id = ?",
     )
     .bind(id)
     .fetch_optional(&mut *tx)
     .await?;
-    let Some((scrip_action, demerger_action)) = exists else {
+    let Some((scrip_action, demerger_action, transfer)) = exists else {
         return Ok(DeleteOutcome::NotFound);
     };
-    // A scrip-for-scrip exchange or demerger trade is never deleted
-    // individually — the group's closing Sell and replacement Buys substitute
-    // the same parcels, so they are removed as a whole via DELETE /sells on
-    // the closing Sell.
-    if scrip_action.is_some() || demerger_action.is_some() {
+    // A scrip-for-scrip exchange, demerger, or holding-account transfer trade
+    // is never deleted individually — the group's closing Sell and
+    // replacement Buys substitute the same parcels, so they are removed as a
+    // whole via DELETE /sells on the closing Sell (or DELETE /transfers/:id).
+    if scrip_action.is_some() || demerger_action.is_some() || transfer.is_some() {
         return Ok(DeleteOutcome::Referenced);
     }
 
@@ -530,6 +564,8 @@ async fn upsert(
         scrip_action_id: None,
         demerger_action_id: None,
         deemed_acquisition_date: None,
+        holding_account_id: body.holding_account_id,
+        transfer_id: None,
     };
     db_upsert(&pool, &trade)
         .await
@@ -541,7 +577,8 @@ async fn upsert(
             | UpsertError::RightsExerciseTrade
             | UpsertError::BuyBackTrade
             | UpsertError::ScripExchangeTrade
-            | UpsertError::DemergerTrade => StatusCode::UNPROCESSABLE_ENTITY,
+            | UpsertError::DemergerTrade
+            | UpsertError::TransferTrade => StatusCode::UNPROCESSABLE_ENTITY,
         })
 }
 
@@ -592,6 +629,8 @@ mod tests {
 
     fn buy_trade() -> Trade {
         Trade {
+            holding_account_id: 1,
+            transfer_id: None,
             id: 1,
             trade_type: TradeType::Buy,
             date: NaiveDate::from_ymd_opt(2024, 1, 15).unwrap(),
@@ -624,6 +663,7 @@ mod tests {
             pool,
             sell_id,
             &sell::SellBody {
+                holding_account_id: 1,
                 date: NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(),
                 settlement_date: Some(NaiveDate::from_ymd_opt(2024, 6, 3).unwrap()),
                 listing_id: 1,
@@ -652,6 +692,7 @@ mod tests {
         amma::db_upsert(
             pool,
             &amma::AmmaStatement {
+                holding_account_id: 1,
                 id: 1,
                 listing_id: 1,
                 tax_year_end_date: NaiveDate::from_ymd_opt(2024, 6, 30).unwrap(),
@@ -744,6 +785,8 @@ mod tests {
         let pool = test_pool().await;
         insert_test_listing(&pool).await;
         let trade = Trade {
+            holding_account_id: 1,
+            transfer_id: None,
             id: 2,
             trade_type: TradeType::Sell,
             date: NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(),
@@ -777,6 +820,8 @@ mod tests {
         let pool = test_pool().await;
         insert_test_listing(&pool).await;
         let trade = Trade {
+            holding_account_id: 1,
+            transfer_id: None,
             id: 3,
             trade_type: TradeType::DRP,
             date: NaiveDate::from_ymd_opt(2024, 3, 15).unwrap(),

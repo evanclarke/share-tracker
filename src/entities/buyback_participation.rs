@@ -61,6 +61,11 @@ pub struct ParticipationBody {
     /// 1; reports prefer the ATO rate and fall back to this — see `infra::fx`).
     #[serde(default)]
     pub fx_rate: Option<Decimal>,
+    /// The holding account participating: the allocations may only consume
+    /// parcels held in it, and the Sell and dividend-component income row
+    /// land in it. Defaults to the seeded default account when omitted.
+    #[serde(default = "crate::entities::holding_account::default_holding_account_id")]
+    pub holding_account_id: i64,
 }
 
 /// The two sides of a participation: the Sell carrying the capital proceeds,
@@ -158,6 +163,7 @@ pub async fn db_participate(
         .fetch_one(&mut *tx)
         .await?;
     let sell_body = SellBody {
+        holding_account_id: body.holding_account_id,
         date: body.date,
         settlement_date: Some(body.date),
         listing_id: action.listing_id,
@@ -178,7 +184,7 @@ pub async fn db_participate(
             })
             .collect(),
     };
-    sell::upsert_sell_in_tx(&mut tx, sell_id, &sell_body, body.date, Some(action_id), None, None)
+    sell::upsert_sell_in_tx(&mut tx, sell_id, &sell_body, body.date, Some(action_id), None, None, None)
         .await?;
 
     // The dividend component: assessable franked income on the participation
@@ -190,8 +196,8 @@ pub async fn db_participate(
         sqlx::query(
             "INSERT INTO income \
              (id, listing_id, date_paid, franked_amount, franking_credits, currency, \
-              buyback_trade_id) \
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
+              buyback_trade_id, holding_account_id) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(id)
         .bind(action.listing_id)
@@ -200,6 +206,7 @@ pub async fn db_participate(
         .bind((credit * body.units).to_string())
         .bind(&currency)
         .bind(sell_id)
+        .bind(body.holding_account_id)
         .execute(&mut *tx)
         .await?;
         Some(id)
@@ -294,6 +301,8 @@ mod tests {
         trade::db_upsert(
             pool,
             &Trade {
+                holding_account_id: 1,
+                transfer_id: None,
                 id,
                 trade_type: TradeType::Buy,
                 date,
@@ -358,6 +367,7 @@ mod tests {
 
     fn body(date: NaiveDate, units: &str, parcel: i64) -> ParticipationBody {
         ParticipationBody {
+            holding_account_id: 1,
             date,
             units: units.parse().unwrap(),
             allocations: vec![AllocationInput {
@@ -545,6 +555,7 @@ mod tests {
 
         // Any edit through the sells endpoint is rejected.
         let edit = sell::SellBody {
+            holding_account_id: 1,
             date: p.trade.date,
             settlement_date: Some(p.trade.settlement_date),
             listing_id: 1,
@@ -621,6 +632,44 @@ mod tests {
         sell::db_delete_sell(&pool, p.trade.id).await.unwrap();
         corporate_action::db_upsert(&pool, &action).await.unwrap();
         assert!(corporate_action::db_delete(&pool, 10).await.unwrap());
+    }
+
+    /// The participation says which holding account it acts in: the Sell and
+    /// the dividend-component income row land there, and its allocations may
+    /// only consume that account's parcels (the shared same-account Sell
+    /// invariant).
+    #[tokio::test]
+    async fn participation_acts_in_the_chosen_holding_account() {
+        use crate::entities::holding_account::{self, HoldingAccount};
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        holding_account::db_upsert(
+            &pool,
+            &HoldingAccount { id: 2, name: "Personal CHESS".to_string() },
+        )
+        .await
+        .unwrap();
+        insert_buy(&pool, 1, d(2020, 10, 1), "1000", "5.00").await;
+        sqlx::query("UPDATE trades SET holding_account_id = 2 WHERE id = 1")
+            .execute(&pool)
+            .await
+            .unwrap();
+        insert_buyback(&pool, 10, d(2024, 7, 1)).await;
+
+        // Participating from the default account can't consume account 2's
+        // parcel.
+        let err = db_participate(&pool, 10, &body(d(2024, 7, 10), "1000", 1)).await.unwrap_err();
+        assert!(matches!(
+            err,
+            ParticipationError::Sell(sell::SellError::PurchaseInDifferentAccount)
+        ));
+
+        // In account 2, the Sell and the dividend income both land there.
+        let mut b = body(d(2024, 7, 10), "1000", 1);
+        b.holding_account_id = 2;
+        let p = db_participate(&pool, 10, &b).await.unwrap();
+        assert_eq!(p.trade.holding_account_id, 2);
+        assert_eq!(p.income.unwrap().holding_account_id, 2);
     }
 
     // API-level tests

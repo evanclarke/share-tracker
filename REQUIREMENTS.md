@@ -386,6 +386,60 @@ encounters corporate actions that change parcels or cost base and are currently 
   rejected for reinvestment; one dated inside an enrolment period reinvests; re-enrolment after
   unenrolment works; overlapping or doubly-open periods are rejected with `422`
 
+## Holding accounts — the same listing held in separate holdings (added 2026-06-07)
+- Motivation: the same listing can be held in more than one place at once, with different treatment.
+  Example: ICE shares delivered by annual RSU vests sit in an employer share-plan account where they
+  cannot participate in the DRP; once transferred to the holder's own broker account they can be
+  DRP-enrolled — all while further vests keep arriving in the plan account. The current model (one
+  implicit holding per listing) cannot represent this
+- Holding Account (reference data): Name (unique). This is a custody/location dimension *within* one
+  taxpayer — distinct from the planned taxpayer-level Accounts / ownership dimension above (if that
+  is introduced later, holding accounts would belong to a taxpayer account)
+- Trade Activity, Income Activity, AMMA Statements, and DRP enrolment periods each carry a Holding
+  Account FK (a registry issues one statement per holder account, so AMMA follows the same rule)
+- A default holding account is seeded and all existing rows migrate to it (no data dropped); API
+  writes that omit the holding account default to it, so existing clients keep working
+- RSU vests are entered as ordinary Buy trades in the plan holding account (quantity, market price
+  at vest — the ESS cost base, zero brokerage). Unvested grants are not tracked (they are not
+  shares); ESS income reporting stays out of scope
+- DRP enrolment is scoped per (listing, holding account):
+  - The period-overlap / single-open-period invariants apply within one holding account; the same
+    listing may be enrolled in one account and unenrolled in another
+  - Reinvestment eligibility tests the *income record's* holding account's enrolment as at the
+    relevant date; the generated DRP trade lands in that same account
+  - The residual carry-forward chain runs per (listing, holding account): Residual Brought Forward
+    comes from the latest prior DRP trade in the same account, never across accounts
+- Cross-account integrity (write-time invariants, rejected with 422):
+  - A Sell's parcel allocations may only consume Buy/DRP parcels in the Sell's holding account
+  - An AMIT adjustment may only target trades in its AMMA statement's holding account
+- Transfer between holding accounts (e.g. plan → personal once vested):
+  - A first-class Transfer records date, listing, source and destination holding accounts (must
+    differ), and per-parcel quantities (like Sell parcel allocations; partial parcels allowed)
+  - Executing it is atomic and mirrors the scrip-for-scrip mechanics: a closing transfer-out (price
+    0) consumes the chosen quantity from each source parcel, and one transfer-in Buy per consumed
+    parcel is created in the destination account carrying that parcel's remaining (AMIT/return-of-
+    capital-adjusted, pro-rated for partial) cost base and its acquisition date as the deemed
+    acquisition date — the 12-month discount clock and AUD translation month are unchanged
+  - Not a CGT event: the same beneficial owner holds the shares before and after, so the transfer
+    trades are excluded from realised-gains / net-capital-gain reports
+  - The transfer's trades are immutable as a group; deleting the transfer removes them all and
+    restores the pre-transfer holding
+- Corporate actions remain recorded per listing and apply across every holding account's parcels;
+  operations that consume or create parcels stay within each parcel's account (a replacement/bonus/
+  split parcel lands in the account of the parcel that produced it). Operations driven by an
+  explicit choice (rights exercise, buy-back participation) say which holding account they act in
+- Reporting: per-parcel and per-holding reports (portfolio, open parcels, unrealised gains) carry
+  the holding account so the same listing shows once per account; taxpayer-level totals (tax
+  summary, net capital gain) are unchanged — one taxpayer — but rows identify the account
+- Web UI: holding accounts are maintainable; trades, income, AMMA, DRP enrolments and transfers
+  show/select the account
+- Tests: the same listing held in two accounts reports as two holdings; a distribution on the
+  enrolled account reinvests while the same listing's distribution in the unenrolled account is
+  rejected; residual carry-forward never crosses accounts; a transfer preserves cost base and
+  acquisition date, appears in no gains report, and a partial transfer splits the parcel; a Sell
+  consuming another account's parcel is rejected with 422; deleting a transfer restores the
+  pre-transfer holdings
+
 ## Settlement-holiday coverage alerting
 - The exchange-holiday calendar is seeded only for 2024-2027; settlement auto-population silently
   degrades to weekends-only for trade dates beyond the seeded range. A trade whose date (or computed

@@ -137,6 +137,8 @@ mod tests {
         trade::db_upsert(
             pool,
             &trade::Trade {
+                holding_account_id: 1,
+                transfer_id: None,
                 id,
                 trade_type: trade::TradeType::Buy,
                 date,

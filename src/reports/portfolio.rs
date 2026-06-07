@@ -11,6 +11,10 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HoldingOverview {
     pub listing_id: i64,
+    /// The holding account the parcels sit in: the same listing held in two
+    /// accounts (e.g. an employer share plan and a personal broker account)
+    /// reports as two holdings.
+    pub holding_account_id: i64,
     pub quantity: Decimal,
     pub avg_cost_base_per_unit: Decimal,
     pub total_cost_base: Decimal,
@@ -30,7 +34,9 @@ pub fn router() -> Router<SqlitePool> {
     Router::new().route("/portfolio/overview", post(overview))
 }
 
-/// Returns open holdings per listing: quantity, cost base, and optional market value.
+/// Returns open holdings per (listing, holding account): quantity, cost base,
+/// and optional market value. The same listing held in two accounts reports
+/// as two holdings.
 ///
 /// "Open" quantity for a parcel = trade.quantity − sum of parcel_allocations where purchase_trade_id = trade.id
 /// (each allocation re-based to the parcel's as-acquired units — a post-split
@@ -42,8 +48,8 @@ pub fn router() -> Router<SqlitePool> {
 /// and return-of-capital payments (CGT event G1) received since acquisition.
 pub async fn db_holdings(pool: &SqlitePool) -> Result<Vec<HoldingOverview>, sqlx::Error> {
     let trade_rows = sqlx::query(
-        "SELECT id, listing_id, date, quantity, average_price, brokerage, gst_on_brokerage, \
-         currency, fx_rate, deemed_acquisition_date \
+        "SELECT id, listing_id, holding_account_id, date, quantity, average_price, brokerage, \
+         gst_on_brokerage, currency, fx_rate, deemed_acquisition_date \
          FROM trades WHERE trade_type IN ('Buy', 'DRP')",
     )
     .fetch_all(pool)
@@ -79,12 +85,13 @@ pub async fn db_holdings(pool: &SqlitePool) -> Result<Vec<HoldingOverview>, sqlx
     // share splits/consolidations per listing (quantity re-basing)
     let split_events = crate::entities::corporate_action::db_share_split_events(pool).await?;
 
-    let mut listing_qty: HashMap<i64, Decimal> = HashMap::new();
-    let mut listing_cost_base: HashMap<i64, Decimal> = HashMap::new();
+    let mut holding_qty: HashMap<(i64, i64), Decimal> = HashMap::new();
+    let mut holding_cost_base: HashMap<(i64, i64), Decimal> = HashMap::new();
 
     for row in &trade_rows {
         let trade_id: i64 = row.try_get("id")?;
         let listing_id: i64 = row.try_get("listing_id")?;
+        let account_id: i64 = row.try_get("holding_account_id")?;
         let trade_date: NaiveDate = row.try_get("date")?;
         let qty = parse_dec("quantity", row.try_get("quantity")?)?;
         let price = parse_dec("average_price", row.try_get("average_price")?)?;
@@ -143,18 +150,23 @@ pub async fn db_holdings(pool: &SqlitePool) -> Result<Vec<HoldingOverview>, sqlx
         let remaining_now = crate::entities::corporate_action::split_adjusted_quantity(
             remaining, splits, trade_date, None,
         );
-        *listing_qty.entry(listing_id).or_insert(Decimal::ZERO) += remaining_now;
-        *listing_cost_base.entry(listing_id).or_insert(Decimal::ZERO) += remaining_cost;
+        *holding_qty.entry((listing_id, account_id)).or_insert(Decimal::ZERO) += remaining_now;
+        *holding_cost_base.entry((listing_id, account_id)).or_insert(Decimal::ZERO) +=
+            remaining_cost;
     }
 
-    let mut result: Vec<HoldingOverview> = listing_qty
+    let mut result: Vec<HoldingOverview> = holding_qty
         .into_iter()
         .filter(|(_, qty)| *qty > Decimal::ZERO)
-        .map(|(listing_id, qty)| {
-            let cost_base = listing_cost_base.get(&listing_id).copied().unwrap_or(Decimal::ZERO);
+        .map(|((listing_id, holding_account_id), qty)| {
+            let cost_base = holding_cost_base
+                .get(&(listing_id, holding_account_id))
+                .copied()
+                .unwrap_or(Decimal::ZERO);
             let avg = if qty > Decimal::ZERO { cost_base / qty } else { Decimal::ZERO };
             HoldingOverview {
                 listing_id,
+                holding_account_id,
                 quantity: qty,
                 avg_cost_base_per_unit: avg,
                 total_cost_base: cost_base,
@@ -164,7 +176,7 @@ pub async fn db_holdings(pool: &SqlitePool) -> Result<Vec<HoldingOverview>, sqlx
         })
         .collect();
 
-    result.sort_by_key(|h| h.listing_id);
+    result.sort_by_key(|h| (h.listing_id, h.holding_account_id));
     Ok(result)
 }
 
@@ -223,6 +235,8 @@ mod tests {
         trade::db_upsert(
             pool,
             &trade::Trade {
+                holding_account_id: 1,
+                transfer_id: None,
                 id,
                 trade_type: trade::TradeType::Buy,
                 date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
@@ -254,6 +268,8 @@ mod tests {
         trade::db_upsert(
             pool,
             &trade::Trade {
+                holding_account_id: 1,
+                transfer_id: None,
                 id,
                 trade_type: trade::TradeType::Sell,
                 date: NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(),
@@ -297,6 +313,7 @@ mod tests {
 
     fn make_amma(id: i64, listing_id: i64, cba: Decimal) -> amma::AmmaStatement {
         amma::AmmaStatement {
+            holding_account_id: 1,
             id,
             listing_id,
             tax_year_end_date: NaiveDate::from_ymd_opt(2024, 6, 30).unwrap(),
@@ -772,6 +789,39 @@ mod tests {
         let holdings: Vec<HoldingOverview> = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(holdings.len(), 1);
         assert!(holdings[0].market_value.is_none());
+    }
+
+    /// The same listing held in two holding accounts reports as two holdings
+    /// (REQUIREMENTS "Holding accounts" — the RSU scenario: vested shares in
+    /// the employer plan account alongside shares in the personal account),
+    /// each with its own quantity and cost base.
+    #[tokio::test]
+    async fn db_same_listing_in_two_accounts_reports_as_two_holdings() {
+        use crate::entities::holding_account::{self, HoldingAccount};
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "ICE").await;
+        holding_account::db_upsert(
+            &pool,
+            &HoldingAccount { id: 2, name: "ICE Employee Plan".to_string() },
+        )
+        .await
+        .unwrap();
+        // 100 @ $10 in the default account, 50 @ $12 in the plan account.
+        insert_buy(&pool, 1, 1, Decimal::from(100), Decimal::from(10)).await;
+        insert_buy(&pool, 2, 1, Decimal::from(50), Decimal::from(12)).await;
+        sqlx::query("UPDATE trades SET holding_account_id = 2 WHERE id = 2")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let holdings = db_holdings(&pool).await.unwrap();
+        assert_eq!(holdings.len(), 2);
+        assert_eq!((holdings[0].listing_id, holdings[0].holding_account_id), (1, 1));
+        assert_eq!(holdings[0].quantity, Decimal::from(100));
+        assert_eq!((holdings[1].listing_id, holdings[1].holding_account_id), (1, 2));
+        assert_eq!(holdings[1].quantity, Decimal::from(50));
+        assert!(holdings[1].total_cost_base > Decimal::ZERO);
+        assert_ne!(holdings[0].total_cost_base, holdings[1].total_cost_base);
     }
 
     /// A scrip-for-scrip exchange moves the holding to the replacement

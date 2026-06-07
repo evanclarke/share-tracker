@@ -531,6 +531,8 @@ mod tests {
         trade::db_upsert(
             pool,
             &trade::Trade {
+                holding_account_id: 1,
+                transfer_id: None,
                 id,
                 trade_type,
                 date,
@@ -588,6 +590,7 @@ mod tests {
 
     fn make_amma(id: i64, listing_id: i64, year_end: NaiveDate) -> amma::AmmaStatement {
         amma::AmmaStatement {
+            holding_account_id: 1,
             id,
             listing_id,
             tax_year_end_date: year_end,

@@ -173,7 +173,7 @@ pub async fn db_demerge(pool: &SqlitePool, action_id: i64) -> Result<Demerge, De
     // internally; allocations re-based across splits).
     let parcel_rows = sqlx::query(
         "SELECT id, date, quantity, average_price, brokerage, gst_on_brokerage, currency, \
-                fx_rate, deemed_acquisition_date \
+                fx_rate, deemed_acquisition_date, holding_account_id \
          FROM trades WHERE listing_id = ? AND trade_type IN ('Buy', 'DRP') ORDER BY date, id",
     )
     .bind(action.listing_id)
@@ -232,6 +232,9 @@ pub async fn db_demerge(pool: &SqlitePool, action_id: i64) -> Result<Demerge, De
         currency: String,
         fx_rate: Decimal,
         deemed_acquisition_date: NaiveDate,
+        /// Replacement parcels stay in the account of the parcel that
+        /// produced them.
+        holding_account_id: i64,
     }
 
     let mut replacements: Vec<Replacement> = Vec::new();
@@ -245,6 +248,7 @@ pub async fn db_demerge(pool: &SqlitePool, action_id: i64) -> Result<Demerge, De
         let currency: String = row.try_get("currency")?;
         let fx_rate = parse_dec("fx_rate", row.try_get("fx_rate")?)?;
         let deemed: Option<NaiveDate> = row.try_get("deemed_acquisition_date")?;
+        let holding_account_id: i64 = row.try_get("holding_account_id")?;
 
         let sold = sold_in_acquired_units(
             qty_sold.get(&parcel_id).map_or(&[][..], |v| v),
@@ -289,6 +293,7 @@ pub async fn db_demerge(pool: &SqlitePool, action_id: i64) -> Result<Demerge, De
             // Chain through an earlier rollover: the clock always runs from
             // the first acquisition in the chain.
             deemed_acquisition_date: deemed.unwrap_or(date),
+            holding_account_id,
         });
     }
     if replacements.is_empty() {
@@ -307,6 +312,7 @@ pub async fn db_demerge(pool: &SqlitePool, action_id: i64) -> Result<Demerge, De
         .fetch_one(&mut *tx)
         .await?;
     let sell_body = SellBody {
+        holding_account_id: 1,
         date: action.date,
         settlement_date: Some(action.date),
         listing_id: action.listing_id,
@@ -326,7 +332,7 @@ pub async fn db_demerge(pool: &SqlitePool, action_id: i64) -> Result<Demerge, De
             })
             .collect(),
     };
-    sell::upsert_sell_in_tx(&mut tx, sell_id, &sell_body, action.date, None, None, Some(action_id))
+    sell::upsert_sell_in_tx(&mut tx, sell_id, &sell_body, action.date, None, None, Some(action_id), None)
         .await?;
 
     // The replacement Buys: per consumed parcel, the head replacement (same
@@ -346,8 +352,8 @@ pub async fn db_demerge(pool: &SqlitePool, action_id: i64) -> Result<Demerge, De
                 "INSERT INTO trades \
                  (id, trade_type, date, settlement_date, listing_id, average_price, quantity, \
                   currency, brokerage, gst_on_brokerage, brokerage_currency, fx_rate, \
-                  demerger_action_id, deemed_acquisition_date) \
-                 VALUES (?, 'Buy', ?, ?, ?, '0', ?, ?, ?, '0', ?, ?, ?, ?)",
+                  demerger_action_id, deemed_acquisition_date, holding_account_id) \
+                 VALUES (?, 'Buy', ?, ?, ?, '0', ?, ?, ?, '0', ?, ?, ?, ?, ?)",
             )
             .bind(buy_id)
             .bind(action.date)
@@ -360,6 +366,7 @@ pub async fn db_demerge(pool: &SqlitePool, action_id: i64) -> Result<Demerge, De
             .bind(r.fx_rate.to_string())
             .bind(action_id)
             .bind(r.deemed_acquisition_date)
+            .bind(r.holding_account_id)
             .execute(&mut *tx)
             .await?;
         }
@@ -469,6 +476,8 @@ mod tests {
         trade::db_upsert(
             pool,
             &Trade {
+                holding_account_id: 1,
+                transfer_id: None,
                 id,
                 trade_type: TradeType::Buy,
                 date,
@@ -535,6 +544,7 @@ mod tests {
             pool,
             sell_id,
             &SellBody {
+                holding_account_id: 1,
                 date,
                 settlement_date: Some(date),
                 listing_id: 1,
@@ -656,6 +666,8 @@ mod tests {
         trade::db_upsert(
             &pool,
             &Trade {
+                holding_account_id: 1,
+                transfer_id: None,
                 id: 1,
                 trade_type: TradeType::Buy,
                 date: d(2020, 10, 1),
@@ -709,6 +721,7 @@ mod tests {
         crate::entities::amma::db_upsert(
             &pool,
             &crate::entities::amma::AmmaStatement {
+                holding_account_id: 1,
                 id: 1,
                 listing_id: 1,
                 tax_year_end_date: d(2021, 6, 30),
@@ -887,6 +900,7 @@ mod tests {
             &pool,
             dm.sell.id,
             &SellBody {
+                holding_account_id: 1,
                 date: d(2024, 7, 1),
                 settlement_date: Some(d(2024, 7, 1)),
                 listing_id: 1,
@@ -943,6 +957,7 @@ mod tests {
             &pool,
             50,
             &SellBody {
+                holding_account_id: 1,
                 date: d(2025, 1, 10),
                 settlement_date: Some(d(2025, 1, 12)),
                 listing_id: 2,
@@ -1006,6 +1021,37 @@ mod tests {
             Err(corporate_action::WriteError::ReferencedByTrade)
         ));
         assert!(corporate_action::db_delete(&pool, 10).await.is_err());
+    }
+
+    /// The demerge spans every holding account; the head replacement and
+    /// demerged-entity Buys stay in the account of the parcel that produced
+    /// them.
+    #[tokio::test]
+    async fn replacements_stay_in_each_parcels_holding_account() {
+        use crate::entities::holding_account::{self, HoldingAccount};
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "HEAD").await;
+        insert_listing(&pool, 2, "DEMERGED").await;
+        holding_account::db_upsert(
+            &pool,
+            &HoldingAccount { id: 2, name: "ICE Employee Plan".to_string() },
+        )
+        .await
+        .unwrap();
+        insert_buy(&pool, 1, 1, d(2020, 10, 1), "1000", "1.50").await;
+        insert_buy(&pool, 2, 1, d(2023, 3, 1), "500", "2.00").await;
+        sqlx::query("UPDATE trades SET holding_account_id = 2 WHERE id = 2")
+            .execute(&pool)
+            .await
+            .unwrap();
+        insert_demerger(&pool, 10, d(2024, 7, 1)).await;
+
+        let dm = db_demerge(&pool, 10).await.unwrap();
+
+        assert_eq!(dm.head_replacements[0].holding_account_id, 1);
+        assert_eq!(dm.demerged_replacements[0].holding_account_id, 1);
+        assert_eq!(dm.head_replacements[1].holding_account_id, 2);
+        assert_eq!(dm.demerged_replacements[1].holding_account_id, 2);
     }
 
     // API-level tests

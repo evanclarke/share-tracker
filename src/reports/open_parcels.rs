@@ -14,6 +14,8 @@ pub struct OpenParcel {
     /// The Buy/DRP trade that created the parcel.
     pub trade_id: i64,
     pub listing_id: i64,
+    /// The holding account the parcel sits in.
+    pub holding_account_id: i64,
     pub ticker: String,
     /// Original acquisition date — preserved across share splits/consolidations
     /// (TD 2000/10), so the 12-month discount clock keeps running from here.
@@ -52,8 +54,9 @@ pub fn router() -> Router<SqlitePool> {
 /// aggregated per listing.
 pub async fn db_open_parcels(pool: &SqlitePool) -> Result<Vec<OpenParcel>, sqlx::Error> {
     let trade_rows = sqlx::query(
-        "SELECT t.id, t.listing_id, l.ticker, t.date, t.quantity, t.average_price, \
-         t.brokerage, t.gst_on_brokerage, t.currency, t.fx_rate, t.deemed_acquisition_date \
+        "SELECT t.id, t.listing_id, t.holding_account_id, l.ticker, t.date, t.quantity, \
+         t.average_price, t.brokerage, t.gst_on_brokerage, t.currency, t.fx_rate, \
+         t.deemed_acquisition_date \
          FROM trades t JOIN listings l ON l.id = t.listing_id \
          WHERE t.trade_type IN ('Buy', 'DRP')",
     )
@@ -92,6 +95,7 @@ pub async fn db_open_parcels(pool: &SqlitePool) -> Result<Vec<OpenParcel>, sqlx:
     for row in &trade_rows {
         let trade_id: i64 = row.try_get("id")?;
         let listing_id: i64 = row.try_get("listing_id")?;
+        let holding_account_id: i64 = row.try_get("holding_account_id")?;
         let ticker: String = row.try_get("ticker")?;
         let trade_date: NaiveDate = row.try_get("date")?;
         let qty = parse_dec("quantity", row.try_get("quantity")?)?;
@@ -167,6 +171,7 @@ pub async fn db_open_parcels(pool: &SqlitePool) -> Result<Vec<OpenParcel>, sqlx:
         parcels.push(OpenParcel {
             trade_id,
             listing_id,
+            holding_account_id,
             ticker,
             acquisition_date: acquired,
             original_quantity: qty,
@@ -179,8 +184,8 @@ pub async fn db_open_parcels(pool: &SqlitePool) -> Result<Vec<OpenParcel>, sqlx:
     }
 
     parcels.sort_by(|a, b| {
-        (a.listing_id, a.acquisition_date, a.trade_id)
-            .cmp(&(b.listing_id, b.acquisition_date, b.trade_id))
+        (a.listing_id, a.holding_account_id, a.acquisition_date, a.trade_id)
+            .cmp(&(b.listing_id, b.holding_account_id, b.acquisition_date, b.trade_id))
     });
     Ok(parcels)
 }
@@ -251,6 +256,8 @@ mod tests {
         trade::db_upsert(
             pool,
             &trade::Trade {
+                holding_account_id: 1,
+                transfer_id: None,
                 id,
                 trade_type: trade::TradeType::Buy,
                 date,
@@ -282,6 +289,8 @@ mod tests {
         trade::db_upsert(
             pool,
             &trade::Trade {
+                holding_account_id: 1,
+                transfer_id: None,
                 id,
                 trade_type: trade::TradeType::Sell,
                 date: NaiveDate::from_ymd_opt(2025, 6, 1).unwrap(),
@@ -336,6 +345,7 @@ mod tests {
         amma::db_upsert(
             pool,
             &amma::AmmaStatement {
+                holding_account_id: 1,
                 id: amma_id,
                 listing_id,
                 tax_year_end_date: NaiveDate::from_ymd_opt(2024, 6, 30).unwrap(),

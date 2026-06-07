@@ -92,6 +92,8 @@
         return (await api('GET', '/exchanges')).map(function (e) { return { value: e.mic, label: e.mic + ' — ' + e.name }; });
       case 'listings':
         return (await api('GET', '/listings')).map(function (l) { return { value: l.id, label: l.id + ': ' + l.ticker + ' (' + l.exchange_mic + ')' }; });
+      case 'holdingAccounts':
+        return (await api('GET', '/holding_accounts')).map(function (a) { return { value: a.id, label: a.id + ': ' + a.name }; });
       case 'amma':
         return (await api('GET', '/amma_statements')).map(function (a) { return { value: a.id, label: a.id + ': listing ' + a.listing_id + ' FY' + a.tax_year_end_date }; });
       case 'buyParcels':
@@ -151,6 +153,13 @@
       columns: ['id', 'exchange_mic', 'ticker', 'name', 'isin', 'security_type', 'currency', 'amit', 'preference'],
     },
     {
+      slug: 'holding_accounts', title: 'Holding Accounts', group: 'Reference data', api: '/holding_accounts',
+      desc: 'Where holdings sit within the one taxpayer (e.g. an employer share-plan account vs a personal broker account). The same listing can be held in several accounts at once, each with its own DRP enrolment; move parcels between them with a Transfer. Account 1 is the seeded default every write falls back to.',
+      keyFields: [int('id', 'ID', { auto: true })],
+      fields: [txt('name', 'Name', { required: true })],
+      columns: ['id', 'name'],
+    },
+    {
       slug: 'currencies', title: 'Currencies', group: 'Reference data', api: '/currencies', readonly: true,
       desc: 'Recognised ISO 4217 fiat and ISO 24165 token codes (import-managed).',
       columns: ['code', 'kind', 'numeric_code', 'name', 'short_name', 'minor_units', 'source'],
@@ -182,14 +191,19 @@
         fk('brokerage_currency', 'Brokerage currency', 'currencies', { required: true, encode: 'string' }),
         dec('fx_rate', 'Manual FX rate', { default: '1', hint: 'Foreign units per AUD; fallback used only when no ATO rate exists. 1 for AUD.' }),
         txt('contract_note_ref', 'Contract note ref', { optional: true }),
+        fk('holding_account_id', 'Holding account', 'holdingAccounts', { required: true, default: '1' }),
       ],
-      columns: ['id', 'trade_type', 'date', 'settlement_date', 'listing_id', 'average_price', 'quantity', 'currency', 'brokerage', 'fx_rate'],
+      columns: ['id', 'trade_type', 'date', 'settlement_date', 'listing_id', 'average_price', 'quantity', 'currency', 'brokerage', 'fx_rate', 'holding_account_id'],
       listFilter: function (row) { return row.trade_type !== 'Sell'; },
       attachOwner: 'trade_id',
     },
     {
       slug: 'sells', title: 'Sells', group: 'Activity', api: '/sells', custom: 'sells',
       desc: 'Sell trades created atomically with their parcel allocations.',
+    },
+    {
+      slug: 'transfers', title: 'Transfers', group: 'Activity', api: '/transfers', custom: 'transfers',
+      desc: 'Moves between holding accounts (e.g. vested plan shares to a personal account) — not a CGT event.',
     },
     {
       slug: 'income', title: 'Income', group: 'Activity', api: '/income',
@@ -209,8 +223,9 @@
         dec('conduit_foreign_income', 'Conduit foreign income'),
         bool('trust_income', 'Trust income'),
         fk('currency', 'Currency', 'currencies', { required: true, encode: 'string', default: 'AUD' }),
+        fk('holding_account_id', 'Holding account', 'holdingAccounts', { required: true, default: '1', hint: 'The account the distribution was paid to — decides whose DRP enrolment applies.' }),
       ],
-      columns: ['id', 'listing_id', 'date_paid', 'franked_amount', 'unfranked_amount', 'franking_credits', 'currency', 'reinvestment_trade_id'],
+      columns: ['id', 'listing_id', 'date_paid', 'franked_amount', 'unfranked_amount', 'franking_credits', 'currency', 'holding_account_id', 'reinvestment_trade_id'],
       rowActions: function (row) {
         return row.reinvestment_trade_id == null ? [{ label: 'Reinvest', href: '#/reinvest/' + row.id }] : [];
       },
@@ -242,8 +257,9 @@
         dec('cost_base_adjustment', 'Cost base adjustment (per unit)'),
         dec('tfn_withholding_tax', 'TFN withholding tax'),
         fk('currency', 'Currency', 'currencies', { required: true, encode: 'string', default: 'AUD' }),
+        fk('holding_account_id', 'Holding account', 'holdingAccounts', { required: true, default: '1', hint: 'The registry issues one statement per holder account.' }),
       ],
-      columns: ['id', 'listing_id', 'tax_year_end_date', 'units_held', 'cost_base_adjustment', 'currency'],
+      columns: ['id', 'listing_id', 'tax_year_end_date', 'units_held', 'cost_base_adjustment', 'currency', 'holding_account_id'],
       attachOwner: 'amma_statement_id',
     },
     {
@@ -264,15 +280,16 @@
     },
     {
       slug: 'drp_enrolments', title: 'DRP Enrolments', group: 'Activity', api: '/drp_enrolments',
-      desc: 'Dated DRP enrolment periods per holding (blank unenrolment date = currently enrolled). Periods must not overlap; unenrolling pays out the trailing carried residual.',
+      desc: 'Dated DRP enrolment periods per (listing, holding account) — the same listing may be enrolled in one account and not another (blank unenrolment date = currently enrolled). Periods within an account must not overlap; unenrolling pays out the trailing carried residual.',
       keyFields: [int('id', 'ID', { auto: true })],
       fields: [
         fk('listing_id', 'Listing', 'listings', { required: true }),
+        fk('holding_account_id', 'Holding account', 'holdingAccounts', { required: true, default: '1' }),
         dt('enrolment_date', 'Enrolment date', { required: true }),
         dt('unenrolment_date', 'Unenrolment date', { optional: true, hint: 'Leave blank while enrolled. Distributions with an ex date on or after this no longer reinvest.' }),
         sel('residual_handling', 'Residual handling', ['CarryForward', 'PayOut'], { required: true }),
       ],
-      columns: ['id', 'listing_id', 'enrolment_date', 'unenrolment_date', 'residual_handling'],
+      columns: ['id', 'listing_id', 'holding_account_id', 'enrolment_date', 'unenrolment_date', 'residual_handling'],
     },
     {
       slug: 'corporate_actions', title: 'Corporate Actions', group: 'Activity', api: '/corporate_actions',
@@ -326,9 +343,9 @@
   ];
 
   const REPORTS = [
-    { slug: 'overview', title: 'Portfolio Overview', api: '/portfolio/overview', method: 'POST', prices: true, desc: 'Open holdings per listing, with optional market value.' },
+    { slug: 'overview', title: 'Portfolio Overview', api: '/portfolio/overview', method: 'POST', prices: true, desc: 'Open holdings per listing and holding account, with optional market value.' },
     { slug: 'open-parcels', title: 'Open Parcels', api: '/portfolio/open-parcels', method: 'GET', desc: 'Every open parcel: acquisition date, original cost base, AMIT and return-of-capital reductions, remaining quantity and adjusted cost base (AUD).' },
-    { slug: 'unrealised-gains', title: 'Unrealised Gains', api: '/portfolio/unrealised-gains', method: 'POST', prices: true, asOfDate: true, desc: 'Per-holding unrealised gain/loss vs cost base.' },
+    { slug: 'unrealised-gains', title: 'Unrealised Gains', api: '/portfolio/unrealised-gains', method: 'POST', prices: true, asOfDate: true, desc: 'Per-holding (listing × holding account) unrealised gain/loss vs cost base.' },
     { slug: 'realised-gains', title: 'Realised Gains', api: '/portfolio/realised-gains', method: 'GET', desc: 'Per-sale capital gain/loss split into CGT buckets.' },
     { slug: 'net-capital-gain', title: 'Net Capital Gain', api: '/portfolio/net-capital-gain', method: 'GET', export: true, desc: 'Assessable net capital gain per financial year.' },
     { slug: 'tax-summary', title: 'Tax Summary', api: '/portfolio/tax-summary', method: 'GET', export: true, desc: 'Income aggregated by Australian financial year.' },
@@ -650,12 +667,13 @@
     fk('brokerage_currency', 'Brokerage currency', 'currencies', { required: true, encode: 'string' }),
     dec('fx_rate', 'Manual FX rate', { default: '1' }),
     txt('contract_note_ref', 'Contract note ref', { optional: true }),
+    fk('holding_account_id', 'Holding account', 'holdingAccounts', { required: true, default: '1', hint: 'Allocations may only consume parcels held in this account.' }),
   ];
 
   async function viewSellsList() {
     setActiveNav('sells');
     const sells = (await api('GET', '/trades')).filter(function (t) { return t.trade_type === 'Sell'; });
-    const cols = ['id', 'date', 'settlement_date', 'listing_id', 'average_price', 'quantity', 'currency'];
+    const cols = ['id', 'date', 'settlement_date', 'listing_id', 'average_price', 'quantity', 'currency', 'holding_account_id'];
     const toolbar = el('div', { class: 'toolbar' }, [
       el('a', { href: '#/sells/new' }, el('button', { class: 'primary' }, '+ New Sell')),
     ]);
@@ -758,6 +776,112 @@
     ]));
   }
 
+  // ---- Transfers between holding accounts --------------------------------
+  // A transfer moves units of one listing between two holding accounts of the
+  // same owner — not a CGT event. PUT /transfers/:id records and executes it
+  // atomically (a price-0 transfer-out Sell consuming the chosen parcels in
+  // the source account plus transfer-in Buys in the destination carrying each
+  // parcel's remaining cost base and acquisition date); DELETE removes the
+  // whole group and restores the pre-transfer holding. A transfer is
+  // immutable — delete and re-transfer to change it.
+  async function viewTransfersList() {
+    setActiveNav('transfers');
+    const rows = await api('GET', '/transfers');
+    const cols = ['id', 'listing_id', 'date', 'from_account_id', 'to_account_id'];
+    const toolbar = el('div', { class: 'toolbar' }, [
+      el('a', { href: '#/transfers/new' }, el('button', { class: 'primary' }, '+ New Transfer')),
+    ]);
+    let table;
+    if (rows.length === 0) {
+      table = el('div', { class: 'empty' }, 'No transfers yet.');
+    } else {
+      table = filterableTable(rows, cols, {
+        actions: function (row) {
+          return el('td', { class: 'actions' }, [
+            el('button', {
+              class: 'link small danger',
+              onclick: async function () {
+                if (!confirm('Delete this transfer and restore the pre-transfer holding?')) return;
+                try { await api('DELETE', '/transfers/' + row.id); toast('Deleted.'); viewTransfersList(); }
+                catch (e) { toast(e.message, true); }
+              },
+            }, 'Delete'),
+          ]);
+        },
+      });
+    }
+    setMain(el('div', null, [
+      el('h2', null, 'Transfers'),
+      el('p', { class: 'view-desc' }, entityBySlug.transfers.desc + ' Each parcel keeps its cost base and acquisition date; deleting a transfer restores the pre-transfer holding.'),
+      toolbar, table,
+    ]));
+  }
+
+  async function viewTransferForm() {
+    setActiveNav('transfers');
+    const form = el('form');
+    const fields = [
+      fk('listing_id', 'Listing', 'listings', { required: true }),
+      dt('date', 'Transfer date', { required: true }),
+      fk('from_account_id', 'From holding account', 'holdingAccounts', { required: true }),
+      fk('to_account_id', 'To holding account', 'holdingAccounts', { required: true }),
+    ];
+    for (const f of fields) form.appendChild(await buildFieldInput(f, null, false));
+
+    // The parcels to move — the same shape as a Sell's allocations; partial
+    // parcels allowed.
+    const parcelOptions = await loadOptions('buyParcels');
+    const allocList = el('div');
+    function addAllocRow() {
+      const purchaseSel = el('select', { name: 'alloc_purchase' });
+      parcelOptions.forEach(function (o) { purchaseSel.appendChild(el('option', { value: o.value }, o.label)); });
+      const qtyInput = el('input', { type: 'text', inputmode: 'decimal', name: 'alloc_qty', value: '' });
+      const row = el('div', { class: 'alloc-row' }, [
+        el('div', { class: 'field' }, [el('label', null, 'Parcel to move'), purchaseSel]),
+        el('div', { class: 'field' }, [el('label', null, 'Units to move'), qtyInput]),
+        el('button', { type: 'button', class: 'small danger', onclick: function () { allocList.removeChild(row); } }, 'Remove'),
+      ]);
+      allocList.appendChild(row);
+    }
+    addAllocRow();
+    form.appendChild(el('div', null, [
+      el('h3', null, 'Parcels to move'),
+      el('p', { class: 'hint' }, 'Each parcel must be a Buy/DRP of the chosen listing held in the source account, with enough remaining units. Moved units keep their cost base and acquisition date.'),
+      allocList,
+      el('button', { type: 'button', class: 'small', onclick: function () { addAllocRow(); } }, '+ Add parcel'),
+    ]));
+
+    form.appendChild(el('div', { class: 'form-actions' }, [
+      el('button', { type: 'submit', class: 'primary' }, 'Transfer'),
+      el('a', { href: '#/transfers' }, el('button', { type: 'button' }, 'Cancel')),
+    ]));
+    form.addEventListener('submit', async function (ev) {
+      ev.preventDefault();
+      try {
+        const body = {};
+        fields.forEach(function (f) { body[f.name] = readFieldValue(f, form); });
+        const allocs = [];
+        allocList.querySelectorAll('.alloc-row').forEach(function (r) {
+          const pid = r.querySelector('[name="alloc_purchase"]').value;
+          const qty = (r.querySelector('[name="alloc_qty"]').value || '').trim();
+          if (pid !== '' && qty !== '') allocs.push({ purchase_trade_id: Number(pid), quantity_allocated: qty });
+        });
+        body.allocations = allocs;
+        const result = await api('PUT', '/transfers/' + await nextId('/transfers'), body);
+        const n = result && result.transfer_ins ? result.transfer_ins.length : 0;
+        toast('Transferred ' + n + ' parcel(s) via transfer-out sell #' + (result && result.sell ? result.sell.id : '?') + '.');
+        location.hash = '#/transfers';
+      } catch (e) {
+        toast(e.message, true);
+      }
+    });
+    setMain(el('div', null, [
+      el('h2', null, 'New Transfer'),
+      el('p', { class: 'view-desc' }, 'Moves units between two holding accounts of the same owner — not a CGT event: nothing appears in the gains reports and each moved parcel keeps its cost base and acquisition date.'),
+      el('div', { class: 'card' }, form),
+    ]));
+  }
+
   // ---- DRP reinvestment -------------------------------------------------
   async function viewReinvest(incomeId) {
     setActiveNav('income');
@@ -809,6 +933,7 @@
       dec('units', 'Units acquired', { required: true, default: '' }),
       dec('rights_cost', 'Amount paid for the rights', { default: '0', hint: 'Total, in ' + action.currency + '. 0 for rights issued free.' }),
       dec('fx_rate', 'FX rate', { default: '1', hint: 'Optional; defaults to 1.' }),
+      fk('holding_account_id', 'Holding account', 'holdingAccounts', { required: true, default: '1', hint: 'Where the exercised parcel lands.' }),
     ];
     for (const f of fields) form.appendChild(await buildFieldInput(f, null, false));
     form.appendChild(el('div', { class: 'form-actions' }, [
@@ -823,6 +948,7 @@
         const fxr = readFieldValue(fields[3], form);
         if (rc != null) body.rights_cost = rc;
         if (fxr != null) body.fx_rate = fxr;
+        body.holding_account_id = readFieldValue(fields[4], form);
         const trade = await api('POST', '/corporate_actions/' + actionId + '/exercise', body);
         toast('Exercised into trade #' + (trade ? trade.id : '?') + '.');
         location.hash = '#/e/corporate_actions';
@@ -851,6 +977,7 @@
       dt('date', 'Participation date', { required: true, hint: 'The CGT event (acceptance) date; on or after the buy-back date (' + action.date + '). Also the dividend component’s pay date.' }),
       dec('units', 'Units sold into the buy-back', { required: true, default: '' }),
       dec('fx_rate', 'FX rate', { default: '1', hint: 'Optional; defaults to 1.' }),
+      fk('holding_account_id', 'Holding account', 'holdingAccounts', { required: true, default: '1', hint: 'The participating account: allocations may only consume its parcels.' }),
     ];
     for (const f of fields) form.appendChild(await buildFieldInput(f, null, false));
 
@@ -886,6 +1013,7 @@
         const body = { date: readFieldValue(fields[0], form), units: readFieldValue(fields[1], form) };
         const fxr = readFieldValue(fields[2], form);
         if (fxr != null) body.fx_rate = fxr;
+        body.holding_account_id = readFieldValue(fields[3], form);
         const allocs = [];
         allocList.querySelectorAll('.alloc-row').forEach(function (r) {
           const pid = r.querySelector('[name="alloc_purchase"]').value;
@@ -1184,6 +1312,10 @@
         if (parts[1] === 'new') return await viewSellForm(null);
         if (parts[1] === 'edit') return await viewSellForm(parts[2]);
         return await viewSellsList();
+      }
+      if (parts[0] === 'transfers') {
+        if (parts[1] === 'new') return await viewTransferForm();
+        return await viewTransfersList();
       }
       if (parts[0] === 'reinvest') return await viewReinvest(parts[1]);
       if (parts[0] === 'exercise') return await viewExercise(parts[1]);

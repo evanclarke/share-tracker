@@ -76,12 +76,15 @@ pub async fn holding_period_test(
     // running, and a dividend going ex shortly after the demerger is not
     // spuriously disqualified. The demerged-entity Buys (group trades on the
     // *other* listing) are included — they are the only record of those
-    // holdings.
+    // holdings. A holding-account transfer likewise never changes beneficial
+    // ownership, so its transfer-out Sell / transfer-in Buys are excluded the
+    // same way: the original parcels keep their at-risk clock running.
     let rows = sqlx::query(
         "SELECT t.trade_type, t.date, t.quantity FROM trades t \
          LEFT JOIN corporate_actions ca ON ca.id = t.demerger_action_id \
          WHERE t.listing_id = ? AND t.date <= ? \
            AND (t.demerger_action_id IS NULL OR ca.listing_id <> t.listing_id) \
+           AND t.transfer_id IS NULL \
          ORDER BY t.date, t.id",
     )
     .bind(listing_id)
@@ -203,6 +206,8 @@ mod tests {
         trade::db_upsert(
             pool,
             &trade::Trade {
+                holding_account_id: 1,
+                transfer_id: None,
                 id,
                 trade_type,
                 date,

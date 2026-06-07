@@ -12,6 +12,9 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UnrealisedGain {
     pub listing_id: i64,
+    /// The holding account the parcels sit in: the same listing held in two
+    /// accounts reports as two rows.
+    pub holding_account_id: i64,
     pub quantity: Decimal,
     pub total_cost_base: Decimal,
     pub current_price: Option<Decimal>,
@@ -40,8 +43,8 @@ pub async fn db_unrealised_gains(
     as_of_date: NaiveDate,
 ) -> Result<Vec<UnrealisedGain>, sqlx::Error> {
     let trade_rows = sqlx::query(
-        "SELECT id, listing_id, date, quantity, average_price, brokerage, gst_on_brokerage, \
-         currency, fx_rate, deemed_acquisition_date \
+        "SELECT id, listing_id, holding_account_id, date, quantity, average_price, brokerage, \
+         gst_on_brokerage, currency, fx_rate, deemed_acquisition_date \
          FROM trades WHERE trade_type IN ('Buy', 'DRP')",
     )
     .fetch_all(pool)
@@ -75,13 +78,14 @@ pub async fn db_unrealised_gains(
     // share splits/consolidations per listing (quantity re-basing)
     let split_events = crate::entities::corporate_action::db_share_split_events(pool).await?;
 
-    let mut listing_qty: HashMap<i64, Decimal> = HashMap::new();
-    let mut listing_cost_base: HashMap<i64, Decimal> = HashMap::new();
-    let mut listing_cgt_eligible_qty: HashMap<i64, Decimal> = HashMap::new();
+    let mut holding_qty: HashMap<(i64, i64), Decimal> = HashMap::new();
+    let mut holding_cost_base: HashMap<(i64, i64), Decimal> = HashMap::new();
+    let mut holding_cgt_eligible_qty: HashMap<(i64, i64), Decimal> = HashMap::new();
 
     for row in &trade_rows {
         let trade_id: i64 = row.try_get("id")?;
         let listing_id: i64 = row.try_get("listing_id")?;
+        let account_id: i64 = row.try_get("holding_account_id")?;
         let trade_date: NaiveDate = row.try_get("date")?;
         let qty = parse_dec("quantity", row.try_get("quantity")?)?;
         let price = parse_dec("average_price", row.try_get("average_price")?)?;
@@ -149,8 +153,9 @@ pub async fn db_unrealised_gains(
             trade_date,
             Some(as_of_date),
         );
-        *listing_qty.entry(listing_id).or_insert(Decimal::ZERO) += remaining_as_of;
-        *listing_cost_base.entry(listing_id).or_insert(Decimal::ZERO) += remaining_cost;
+        let key = (listing_id, account_id);
+        *holding_qty.entry(key).or_insert(Decimal::ZERO) += remaining_as_of;
+        *holding_cost_base.entry(key).or_insert(Decimal::ZERO) += remaining_cost;
 
         // CGT discount: parcel held strictly more than 12 months. A split does
         // not restart the clock — the converted shares keep the original
@@ -158,21 +163,21 @@ pub async fn db_unrealised_gains(
         // parcel counts the combined holding period from its deemed
         // acquisition date.
         if as_of_date > acquired + Months::new(12) {
-            *listing_cgt_eligible_qty.entry(listing_id).or_insert(Decimal::ZERO) +=
-                remaining_as_of;
+            *holding_cgt_eligible_qty.entry(key).or_insert(Decimal::ZERO) += remaining_as_of;
         }
     }
 
-    let mut result: Vec<UnrealisedGain> = listing_qty
+    let mut result: Vec<UnrealisedGain> = holding_qty
         .into_iter()
         .filter(|(_, qty)| *qty > Decimal::ZERO)
-        .map(|(listing_id, qty)| {
-            let cost_base =
-                listing_cost_base.get(&listing_id).copied().unwrap_or(Decimal::ZERO);
+        .map(|(key, qty)| {
+            let (listing_id, holding_account_id) = key;
+            let cost_base = holding_cost_base.get(&key).copied().unwrap_or(Decimal::ZERO);
             let cgt_eligible =
-                listing_cgt_eligible_qty.get(&listing_id).copied().unwrap_or(Decimal::ZERO);
+                holding_cgt_eligible_qty.get(&key).copied().unwrap_or(Decimal::ZERO);
             UnrealisedGain {
                 listing_id,
+                holding_account_id,
                 quantity: qty,
                 total_cost_base: cost_base,
                 current_price: None,
@@ -183,7 +188,7 @@ pub async fn db_unrealised_gains(
         })
         .collect();
 
-    result.sort_by_key(|h| h.listing_id);
+    result.sort_by_key(|h| (h.listing_id, h.holding_account_id));
     Ok(result)
 }
 
@@ -254,6 +259,8 @@ mod tests {
         trade::db_upsert(
             pool,
             &trade::Trade {
+                holding_account_id: 1,
+                transfer_id: None,
                 id,
                 trade_type: trade::TradeType::Buy,
                 date,
@@ -285,6 +292,8 @@ mod tests {
         trade::db_upsert(
             pool,
             &trade::Trade {
+                holding_account_id: 1,
+                transfer_id: None,
                 id,
                 trade_type: trade::TradeType::Sell,
                 date: NaiveDate::from_ymd_opt(2025, 6, 1).unwrap(),
@@ -422,6 +431,7 @@ mod tests {
         amma::db_upsert(
             &pool,
             &amma::AmmaStatement {
+                holding_account_id: 1,
                 id: 1,
                 listing_id: 1,
                 tax_year_end_date: NaiveDate::from_ymd_opt(2024, 6, 30).unwrap(),

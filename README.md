@@ -6,7 +6,9 @@ A personal Australian share portfolio tracker with a REST JSON API. Records trad
 
 - **Trade recording** — buys, sells, and dividend reinvestment plan (DRP) acquisitions, with automatic settlement date calculation per exchange
 - **Income recording** — dividends and trust distributions with full Australian tax component breakdown (franked/unfranked amounts, foreign source income, franking credits, conduit foreign income, TFN withholding, LIC capital gain deductions)
-- **DRP reinvestment** — enrol holdings in a Dividend Reinvestment Plan over dated enrolment periods (enrol, unenrol, re-enrol), then turn a distribution into a linked DRP trade; reinvestability is checked as at the distribution's ex date, and leftover cash that can't buy a whole share is carried forward to the next reinvestment in the period or paid out, per the period — unenrolling pays out the trailing carried residual
+- **DRP reinvestment** — enrol holdings in a Dividend Reinvestment Plan over dated enrolment periods (enrol, unenrol, re-enrol), per (listing, holding account) — the same listing may be enrolled in one account and not another — then turn a distribution into a linked DRP trade in the distribution's account; reinvestability is checked as at the distribution's ex date, and leftover cash that can't buy a whole share is carried forward to the next reinvestment in the period (the chain never crosses accounts) or paid out, per the period — unenrolling pays out the trailing carried residual
+- **Holding accounts** — the same listing can be held in several accounts of the one taxpayer at once (e.g. RSU-vested shares in an employer share-plan account that cannot DRP alongside DRP-enrolled shares in a personal broker account); trades, income, AMMA statements, and DRP enrolment periods each carry a holding account, every write defaults to the seeded default account so single-account users never see the dimension, and the holdings reports show the same listing once per account
+- **Transfers between holding accounts** — move parcels (whole or partial) between two accounts of the same owner, e.g. vested plan shares to the personal account: **not a CGT event** — the transfer atomically closes the moved units in the source account and re-creates them in the destination carrying each parcel's remaining reduced cost base and its acquisition date (the 12-month discount clock and AUD translation month are unchanged), and nothing appears in the gains reports; deleting the transfer restores the pre-transfer holding
 - **AMIT/AMMA support** — annual tax statements for Attribution Managed Investment Trusts (AMITs), with cost base adjustments applied per purchase parcel
 - **Parcel-level CGT** — explicit parcel allocations link sell trades to the parcels they came from; cost bases are pro-rated and AMIT-reduced at the parcel level
 - **Return of capital (CGT event G1)** — record a company's non-assessable payment as a corporate action; the per-unit amount reduces the cost base of every parcel held on the payment date across all reports, and a payment in excess of a parcel's cost base becomes a capital gain in the net capital gain report (the cost base floors at nil — G1 never produces a loss)
@@ -26,7 +28,7 @@ A personal Australian share portfolio tracker with a REST JSON API. Records trad
 - **AUD conversion** — cost base and proceeds in the portfolio, unrealised, and realised reports are converted to AUD at the ATO reference rate (with a per-trade manual `fx_rate` fallback); see [FX conversion](#fx-conversion)
 - **MIC registry import** — the ISO 10383 Market Identifier Code list imported monthly (and via a manual trigger), used by a non-blocking report to flag curated exchanges whose MIC is unknown or expired
 - **Settlement-holiday coverage alerting** — exchange holiday calendars are seeded for a finite range of years; auto-calculating a settlement date outside that range logs a warning, and a non-blocking report flags every trade whose settlement window falls outside its exchange's seeded coverage (see [Settlement holiday coverage](#settlement-holiday-coverage))
-- **Web UI** — a built-in browser frontend (no build step, served from the same binary) with CRUD screens for every entity, atomic Sell + parcel-allocation entry, DRP reinvestment, and a view for each report; see [Web frontend](#web-frontend)
+- **Web UI** — a built-in browser frontend (no build step, served from the same binary) with CRUD screens for every entity, atomic Sell + parcel-allocation entry, holding-account transfers, DRP reinvestment, and a view for each report; see [Web frontend](#web-frontend)
 
 ## Building and running
 
@@ -112,6 +114,18 @@ currencies                    Recognised currencies: fiat (ISO 4217) + digital t
 ├── minor_units   INTEGER (nullable)  ISO 4217 minor unit / token decimals; informational only
 └── source        TEXT             Iso4217 | Iso24165 (which feed the row came from)
 
+holding_accounts             Custody/location accounts within the one taxpayer (e.g. employer share plan vs personal broker)
+├── id           INTEGER PK       Account 1 ('Default') is seeded; writes that omit an account fall back to it
+└── name         TEXT UNIQUE
+
+transfers                    Moves of a listing between two holding accounts of the same owner (not a CGT event)
+├── id              INTEGER PK
+├── listing_id      INTEGER FK→listings.id
+├── date            TEXT          The transfer-out Sell and transfer-in Buys are dated on it
+├── from_account_id INTEGER FK→holding_accounts.id
+└── to_account_id   INTEGER FK→holding_accounts.id   CHECK: differs from from_account_id
+                    The per-parcel quantities live on the transfer-out Sell's parcel_allocations rows
+
 trades
 ├── id                INTEGER PK
 ├── trade_type        TEXT         Buy | Sell | DRP
@@ -133,7 +147,9 @@ trades
 ├── buyback_action_id INTEGER FK→corporate_actions.id (nullable)  Buy-back participation Sells only: the BuyBack action sold into, set by POST /corporate_actions/:id/participate (the trade is immutable via PUT /sells, carries a linked dividend income row removed with it by DELETE /sells, and blocks editing/deleting the action)
 ├── scrip_action_id   INTEGER FK→corporate_actions.id (nullable)  Scrip-for-scrip exchange trades only (the closing Sell + every replacement Buy): the ScripForScrip action exchanged, set by POST /corporate_actions/:id/exchange. The trades carrying one action id form the exchange group: each is immutable via PUT /sells and PUT/DELETE /trades, DELETE /sells on the closing Sell removes the whole group, and the action is frozen while any exists
 ├── demerger_action_id INTEGER FK→corporate_actions.id (nullable)  Demerger trades only (the closing Sell + every head replacement and demerged-entity Buy): the Demerger action demerged, set by POST /corporate_actions/:id/demerge. Same group rules as scrip_action_id: each trade is immutable via PUT /sells and PUT/DELETE /trades, DELETE /sells on the closing Sell removes the whole group, and the action is frozen while any exists
-└── deemed_acquisition_date TEXT (nullable)  Scrip-for-scrip replacement and demerger head/demerged Buys only: the consumed parcel's acquisition date, carried by the rollover (the combined holding period). Drives the 12-month CGT discount clock and the AUD translation month of the cost base in the reports; split/return-of-capital applicability stays on the actual trade date. NULL = the trade's own date
+├── deemed_acquisition_date TEXT (nullable)  Scrip-for-scrip replacement, demerger head/demerged, and transfer-in Buys only: the consumed parcel's acquisition date, carried by the rollover/transfer (the combined holding period; an own-account transfer is not a disposal at all). Drives the 12-month CGT discount clock and the AUD translation month of the cost base in the reports; split/return-of-capital applicability stays on the actual trade date. NULL = the trade's own date
+├── holding_account_id INTEGER FK→holding_accounts.id  The account the trade sits in (defaults to the seeded default account when omitted from a write)
+└── transfer_id       INTEGER FK→transfers.id (nullable)  Transfer trades only (the transfer-out Sell + every transfer-in Buy): the transfer that created them, set by PUT /transfers/:id. The trades carrying one transfer id form the transfer group: each is immutable via PUT /sells, PUT/DELETE /trades, and DELETE /sells; DELETE /transfers/:id removes the whole group (with the transfer record), restoring the pre-transfer holding
 
 income
 ├── id                        INTEGER PK
@@ -151,7 +167,8 @@ income
 ├── trust_income              BOOLEAN
 ├── reinvestment_trade_id     INTEGER FK→trades.id (nullable, for DRP linkage)
 ├── currency                  TEXT FK→currencies.code   ISO 4217; tax summary converts to AUD by date_paid month (default AUD)
-└── buyback_trade_id          INTEGER FK→trades.id (nullable)  Buy-back dividend components only: the participation Sell this row was created with (the row is managed by the participation — PUT/DELETE /income reject it; DELETE /sells on the Sell removes it)
+├── buyback_trade_id          INTEGER FK→trades.id (nullable)  Buy-back dividend components only: the participation Sell this row was created with (the row is managed by the participation — PUT/DELETE /income reject it; DELETE /sells on the Sell removes it)
+└── holding_account_id        INTEGER FK→holding_accounts.id  The account the distribution was paid to — decides whose DRP enrolment applies and where a reinvestment trade lands (defaults to the seeded default account)
 
 amma_statements              Annual AMIT Member Annual (AMMA) statements
 ├── id                              INTEGER PK
@@ -175,7 +192,8 @@ amma_statements              Annual AMIT Member Annual (AMMA) statements
 ├── tax_free_amount                 TEXT (decimal)  Informational only — not a cost-base driver (reflected in cost_base_adjustment)
 ├── cost_base_adjustment            TEXT (decimal)  Per-unit AMIT cost base net amount; sole cost-base driver (+ reduces, − increases)
 ├── tfn_withholding_tax             TEXT (decimal)
-└── currency                        TEXT FK→currencies.code   ISO 4217; tax summary converts to AUD by tax_year_end_date month (default AUD)
+├── currency                        TEXT FK→currencies.code   ISO 4217; tax summary converts to AUD by tax_year_end_date month (default AUD)
+└── holding_account_id              INTEGER FK→holding_accounts.id  The account the statement covers — a registry issues one AMMA statement per holder account (defaults to the seeded default account)
 
 amit_adjustments             Links a purchase parcel to an AMMA statement
 ├── id                   INTEGER PK
@@ -189,14 +207,15 @@ parcel_allocations           Links sell parcels to the purchase parcels they con
 ├── purchase_trade_id    INTEGER FK→trades.id  Must be Buy or DRP
 └── quantity_allocated   TEXT (decimal)
 
-drp_enrolments               Dated DRP enrolment periods per holding (a holding can enrol, unenrol, and re-enrol)
+drp_enrolments               Dated DRP enrolment periods per (listing, holding account) — a holding can enrol, unenrol, and re-enrol, and the same listing may be enrolled in one account and not another
 ├── id                   INTEGER PK
 ├── listing_id           INTEGER FK→listings.id
+├── holding_account_id   INTEGER FK→holding_accounts.id  The account the enrolment applies to (defaults to the seeded default account)
 ├── enrolment_date       TEXT   First day of the period (inclusive)
 ├── unenrolment_date     TEXT (nullable)  Day the unenrolment takes effect (exclusive); NULL = open-ended (currently enrolled)
 └── residual_handling    TEXT   CarryForward | PayOut  Leftover-cash policy for the period (default CarryForward)
                          CHECK: unenrolment_date (when set) is after enrolment_date
-                         Write-time invariant: a listing's periods must not overlap (so at most one is open)
+                         Write-time invariant: a (listing, holding account)'s periods must not overlap (so at most one is open per account)
 
 cgt_settings                 Singleton CGT settings row (CHECK id = 1)
 ├── id                   INTEGER PK  Always 1 (CHECK-enforced singleton)
@@ -261,6 +280,10 @@ exchanges ──< listings ──< trades >────────────�
                        listings ──< income
                        listings ──< drp_enrolments
                        listings ──< corporate_actions
+                       listings ──< transfers
+                       holding_accounts ──< trades, income, amma_statements, drp_enrolments
+                       holding_accounts ──< transfers (from_account_id + to_account_id)
+                       transfers ──< trades (transfer_id)
                        trades (DRP) ──< income (reinvestment_trade_id)
                        corporate_actions (RightsIssue) ──< trades (rights_action_id)
                        corporate_actions (BuyBack) ──< trades (buyback_action_id)
@@ -298,7 +321,7 @@ The server also hosts a built-in web UI — a no-build-step single-page app (pla
 | `GET` | `/static/app.js` | The app bundle (JavaScript) |
 | `GET` | `/static/style.css` | Stylesheet (CSS) |
 
-Open `http://localhost:<port>/` in a browser. The app is hash-routed (`#/e/<entity>`, `#/sells`, `#/jobs`, `#/attachments/<owner>/<id>`, `#/r/<report>`) and drives the JSON API below — it provides CRUD screens for every entity (exchanges, listings, trades, income, AMMA statements, AMIT adjustments, DRP enrolments, exchange holidays, CGT settings, corporate actions), a dedicated Sell screen that captures parcel allocations atomically, a DRP reinvest action on income rows, an Exercise action on RightsIssue corporate-action rows (`POST /corporate_actions/:id/exercise`), a Participate action on BuyBack corporate-action rows (`POST /corporate_actions/:id/participate`), an Exchange action on ScripForScrip corporate-action rows (`POST /corporate_actions/:id/exchange`), a Demerge action on Demerger corporate-action rows (`POST /corporate_actions/:id/demerge`), an Attachments action on each trade/income/AMMA row that uploads, lists, downloads, and deletes its documents, read-only views of the import-managed reference tables (currencies, MIC registry, RBA FX rates, parcel allocations), a Maintenance → Jobs screen that lists the scheduled jobs with each one's last run (when it finished, whether it succeeded, and any error) and runs any of them on demand (`POST /jobs/:name`), and a view for each report (portfolio overview, open parcels, unrealised/realised gains, net capital gain, tax summary, exchange MIC validation, settlement holiday coverage). The net capital gain and tax summary report views carry an **Export CSV** action that downloads the report via its `/export` endpoint.
+Open `http://localhost:<port>/` in a browser. The app is hash-routed (`#/e/<entity>`, `#/sells`, `#/jobs`, `#/attachments/<owner>/<id>`, `#/r/<report>`) and drives the JSON API below — it provides CRUD screens for every entity (exchanges, listings, holding accounts, trades, income, AMMA statements, AMIT adjustments, DRP enrolments, exchange holidays, CGT settings, corporate actions), a dedicated Sell screen that captures parcel allocations atomically, a Transfers screen that moves parcels between holding accounts (`PUT /transfers/:id`) and deletes a transfer to restore the pre-transfer holding, a DRP reinvest action on income rows, an Exercise action on RightsIssue corporate-action rows (`POST /corporate_actions/:id/exercise`), a Participate action on BuyBack corporate-action rows (`POST /corporate_actions/:id/participate`), an Exchange action on ScripForScrip corporate-action rows (`POST /corporate_actions/:id/exchange`), a Demerge action on Demerger corporate-action rows (`POST /corporate_actions/:id/demerge`), an Attachments action on each trade/income/AMMA row that uploads, lists, downloads, and deletes its documents, read-only views of the import-managed reference tables (currencies, MIC registry, RBA FX rates, parcel allocations), a Maintenance → Jobs screen that lists the scheduled jobs with each one's last run (when it finished, whether it succeeded, and any error) and runs any of them on demand (`POST /jobs/:name`), and a view for each report (portfolio overview, open parcels, unrealised/realised gains, net capital gain, tax summary, exchange MIC validation, settlement holiday coverage). The net capital gain and tax summary report views carry an **Export CSV** action that downloads the report via its `/export` endpoint.
 
 ### Exchanges
 
@@ -339,6 +362,19 @@ Coverage is finite: an exchange's calendar is considered to cover the whole cale
 `PUT` returns `422` if `exchange_mic` is not a known exchange or `currency` is not a recognised code in `currencies`. The same currency check applies to the `currency` (and `brokerage_currency`) fields on trades, income, and AMMA writes.
 
 **Ticker or name changes:** a renamed security is the *same* security — record the change by editing the existing listing in place (`PUT /listings/:id` with the same id, new `ticker`/`name`). The listing's `id` is the identity everything references (trades, income, AMMA statements, DRP enrolments, corporate actions), and nothing is keyed by ticker, so the full history — parcels, cost bases, and acquisition dates (the 12-month discount clock) — stays attached across the rename. Don't create a new listing for a renamed security: that would start a second, unrelated history. (A relisting under a new entity via merger/takeover is a different event — a CGT parcel substitution, recorded as a [`ScripForScrip` corporate action](#corporate-actions) — not a rename.)
+
+### Holding accounts
+
+Custody/location accounts within the one taxpayer — e.g. an employer share-plan account holding RSU-vested shares alongside a personal broker account — so the same listing can be held in several places at once with different treatment (notably [DRP enrolment](#drp-enrolments)). Account 1 (`Default`) is seeded by the migrations: every write that omits `holding_account_id` lands in it, so single-account users never see the dimension.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/holding_accounts` | List all holding accounts |
+| `GET` | `/holding_accounts/:id` | Get one holding account |
+| `PUT` | `/holding_accounts/:id` | Create or rename a holding account |
+| `DELETE` | `/holding_accounts/:id` | Delete a holding account |
+
+`PUT` returns `422` for a duplicate `name` (UNIQUE). `DELETE` returns `422` if the account still holds data (trades, income, AMMA statements, DRP enrolment periods, or a transfer references it) or is the seeded default account — move or remove the data first.
 
 ### RBA FX rates
 
@@ -402,12 +438,15 @@ If `settlement_date` is omitted from the PUT body, it is auto-calculated by adva
 
 `PUT /trades/:id` rejects `trade_type: "Sell"` with `422` — Sells must be created via `PUT /sells/:id` (see below) so they are always persisted with a full set of parcel allocations.
 
+`holding_account_id` is optional on the body and defaults to the seeded default account (1) — see [Holding accounts](#holding-accounts). The same default applies to the `holding_account_id` field on income, AMMA statement, DRP enrolment, and Sell writes, and on the rights-exercise and buy-back participation operations.
+
 Buy/DRP trades carry the same write-time integrity as Sells (validated atomically in a transaction):
 
 - `DELETE /trades/:id` returns `422` if the trade is still referenced — as the purchase parcel of a Sell's allocation, by an AMIT adjustment, as a distribution's reinvestment trade, or by a buy-back dividend income row (`income.buyback_trade_id`) — or if it belongs to a scrip-for-scrip exchange or demerger group (`scrip_action_id` / `demerger_action_id` set: the group is only ever deleted as a whole, via `DELETE /sells/:id` on its closing Sell) — instead of surfacing the FK error as `500`. Remove the dependants first (e.g. delete the Sell via `DELETE /sells/:id`).
 - `PUT /trades/:id` returns `422` if the edit would shrink the trade's `quantity` below what its dependants rely on: the total already allocated out to Sells (each allocation re-based to the parcel's as-acquired units across any [share splits/consolidations or bonus issues](#corporate-actions)), or any linked AMIT adjustment's covered quantity (AMIT adjustment quantities are expressed in the parcel's as-acquired units).
 - `PUT /trades/:id` returns `422` if the existing trade is a rights exercise (`rights_action_id` set): its figures were validated against the rights issue's entitlement, which a free-form edit could exceed. Delete it (`DELETE /trades/:id`, which frees the entitlement) and re-exercise instead — see [Corporate actions](#corporate-actions).
 - `PUT /trades/:id` returns `422` if the existing trade belongs to a scrip-for-scrip exchange or demerger group (`scrip_action_id` / `demerger_action_id` set): its figures carry the rollover's cost base and deemed acquisition date, which a free-form edit would corrupt. Delete the group (`DELETE /sells/:id` on its closing Sell) and re-exchange/re-demerge instead — see [Corporate actions](#corporate-actions).
+- `PUT /trades/:id` and `DELETE /trades/:id` return `422` if the existing trade belongs to a holding-account transfer group (`transfer_id` set) — the group only ever changes as a whole, via `DELETE /transfers/:id` (see [Transfers](#transfers)).
 
 An unreferenced trade edits and deletes freely.
 
@@ -441,7 +480,7 @@ An unreferenced trade edits and deletes freely.
 | `PUT` | `/amit_adjustments/:id` | Create or update an AMIT adjustment |
 | `DELETE` | `/amit_adjustments/:id` | Delete an AMIT adjustment |
 
-Returns `422 Unprocessable Entity` if the referenced trade is not a Buy/DRP, the trade and AMMA statement reference different listings, or the quantity exceeds the trade quantity.
+Returns `422 Unprocessable Entity` if the referenced trade is not a Buy/DRP, the trade and AMMA statement reference different listings **or different holding accounts** (a registry issues one statement per holder account, so a statement only adjusts its own account's parcels), or the quantity exceeds the trade quantity.
 
 ### Attachments
 
@@ -459,7 +498,7 @@ Supporting documents (a trade confirmation / contract note PDF, a dividend state
 
 ### DRP enrolments
 
-Records when each holding reinvests its distributions, as **dated enrolment periods**: `enrolment_date` (inclusive) to `unenrolment_date` (exclusive; omitted = open-ended, i.e. currently enrolled). A holding can start unenrolled, enrol, unenrol, and re-enrol — one row per period, each with its own residual handling.
+Records when each holding reinvests its distributions, as **dated enrolment periods**: `enrolment_date` (inclusive) to `unenrolment_date` (exclusive; omitted = open-ended, i.e. currently enrolled). A holding can start unenrolled, enrol, unenrol, and re-enrol — one row per period, each with its own residual handling. Enrolment is per **(listing, holding account)**: the same listing may be enrolled in one account and not another (e.g. an employer share-plan account that cannot DRP alongside an enrolled personal account); `holding_account_id` defaults to the seeded default account when omitted.
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -476,9 +515,9 @@ PUT /drp_enrolments/1
 
 `residual_handling` decides what happens to leftover cash a reinvestment can't spend on whole shares: `CarryForward` adds it to the next reinvestment in the period, `PayOut` records it as paid out.
 
-A listing's periods must not overlap, and at most one may be open at a time — validated atomically at write time (touching periods, where one ends the day the next starts, are allowed). Closing a period (unenrolling) settles its trailing residual: the leftover the period's last reinvestment carried forward is moved to `residual_paid_out` on that DRP trade in the same transaction, since the registry refunds it at termination; it is **not** picked up after a re-enrolment.
+A (listing, holding account)'s periods must not overlap, and at most one may be open at a time per account — validated atomically at write time (touching periods, where one ends the day the next starts, are allowed; the same listing's periods in another account are independent). Closing a period (unenrolling) settles its trailing residual: the leftover the period's last reinvestment carried forward is moved to `residual_paid_out` on that DRP trade (in the period's account) in the same transaction, since the registry refunds it at termination; it is **not** picked up after a re-enrolment.
 
-Returns `204 No Content`, or `422 Unprocessable Entity` if `listing_id` doesn't reference a listing, the period overlaps another period for the listing (or would be a second open period), or `unenrolment_date` is not after `enrolment_date`.
+Returns `204 No Content`, or `422 Unprocessable Entity` if `listing_id` doesn't reference a listing, the period overlaps another period for the same (listing, holding account) (or would be a second open period in that account), or `unenrolment_date` is not after `enrolment_date`.
 
 ### CGT settings
 
@@ -679,11 +718,11 @@ POST /income/:id/reinvest
 
 Creates the DRP reinvestment trade for a distribution and links it back (`income.reinvestment_trade_id`) in one transaction. `fx_rate` (default 1) and `date` (default the distribution's `date_paid`) are optional.
 
-Reinvestability is decided as at the distribution's **ex date** (registry practice: DRP participation is fixed at the record date), falling back to `date_paid` when no ex date is recorded. That date must fall inside one of the holding's [enrolment periods](#drp-enrolments) — a distribution dated before enrolment, or in a gap between unenrolment and re-enrolment, is rejected — and the matching period's `residual_handling` applies.
+Reinvestability is decided as at the distribution's **ex date** (registry practice: DRP participation is fixed at the record date), falling back to `date_paid` when no ex date is recorded. That date must fall inside one of the [enrolment periods](#drp-enrolments) **for the distribution's holding account** — a distribution dated before enrolment, in a gap between unenrolment and re-enrolment, or paid to an account that isn't enrolled (e.g. an employer-plan account while only the personal account is enrolled) is rejected — and the matching period's `residual_handling` applies. The created DRP trade lands in the distribution's holding account.
 
-The reinvestable cash — `franked_amount + unfranked_amount + foreign_source_income − foreign_tax_paid − tfn_withholding_tax` (franking credits are notional and excluded) — plus the residual brought forward from the holding's most recent prior DRP trade *within the same enrolment period* is spent on whole shares at `reinvestment_price`. The leftover is carried forward or paid out per the period's `residual_handling` and recorded on the new trade's residual columns. The carried-forward chain never crosses periods: a period's trailing residual is paid out at unenrolment.
+The reinvestable cash — `franked_amount + unfranked_amount + foreign_source_income − foreign_tax_paid − tfn_withholding_tax` (franking credits are notional and excluded) — plus the residual brought forward from the most recent prior DRP trade *within the same enrolment period and holding account* is spent on whole shares at `reinvestment_price`. The leftover is carried forward or paid out per the period's `residual_handling` and recorded on the new trade's residual columns. The carried-forward chain never crosses periods or accounts: a period's trailing residual is paid out at unenrolment, and each account runs its own chain.
 
-Returns `201 Created` with the created trade as JSON, `404 Not Found` if no income record has that id, or `422 Unprocessable Entity` if no enrolment period covers the distribution's ex date (or pay date when no ex date is recorded), the distribution was already reinvested, or `reinvestment_price` is not positive.
+Returns `201 Created` with the created trade as JSON, `404 Not Found` if no income record has that id, or `422 Unprocessable Entity` if no enrolment period for the distribution's holding account covers its ex date (or pay date when no ex date is recorded), the distribution was already reinvested, or `reinvestment_price` is not positive.
 
 ### Sells
 
@@ -708,21 +747,53 @@ Request body — the Sell trade fields (no `trade_type`; it is always `Sell`) pl
   "brokerage_currency": "AUD",
   "fx_rate": "1",
   "contract_note_ref": null,
+  "holding_account_id": 1,
   "allocations": [
     { "purchase_trade_id": 1, "quantity_allocated": "100" }
   ]
 }
 ```
 
-`settlement_date` is optional and auto-calculated as for trades. Re-`PUT`ting the same id replaces the Sell row and *all* of its allocations with the submitted set.
+`settlement_date` is optional and auto-calculated as for trades. `holding_account_id` is optional and defaults to the seeded default account; the Sell's allocations may only consume parcels held in that account (see [Holding accounts](#holding-accounts)). Re-`PUT`ting the same id replaces the Sell row and *all* of its allocations with the submitted set.
 
-Returns `204 No Content` on success, or `422 Unprocessable Entity` if the allocations do not sum exactly to `quantity`, a referenced purchase trade is missing or is not a Buy/DRP, an allocation would over-allocate a purchase parcel, or the existing trade is a buy-back participation Sell or a scrip-for-scrip exchange or demerger closing Sell (`buyback_action_id` / `scrip_action_id` / `demerger_action_id` set — its figures derive from its action's terms; delete it and re-participate/re-exchange/re-demerge instead, see [Corporate actions](#corporate-actions)). On any failure the whole transaction is rolled back — nothing is persisted. Allocation quantities are in the sale date's unit basis: the over-allocation check re-bases them across any [share splits/consolidations or bonus issues](#corporate-actions) between the purchase and the sale, so after a 2-for-1 split a 100-share parcel covers a 200-share sale.
+Returns `204 No Content` on success, or `422 Unprocessable Entity` if the allocations do not sum exactly to `quantity`, a referenced purchase trade is missing or is not a Buy/DRP, an allocation would over-allocate a purchase parcel, an allocation consumes a parcel held in a different holding account from the Sell's (move it first via a [Transfer](#transfers), or fix the Sell's `holding_account_id`; the mechanically constructed scrip-for-scrip/demerger closing Sells are exempt — they close the whole holding across every account), or the existing trade is a buy-back participation Sell, a scrip-for-scrip exchange or demerger closing Sell, or a holding-account transfer-out Sell (`buyback_action_id` / `scrip_action_id` / `demerger_action_id` / `transfer_id` set — its figures derive from its action's or transfer's terms; delete it and re-participate/re-exchange/re-demerge/re-transfer instead, see [Corporate actions](#corporate-actions) and [Transfers](#transfers)). On any failure the whole transaction is rolled back — nothing is persisted. Allocation quantities are in the sale date's unit basis: the over-allocation check re-bases them across any [share splits/consolidations or bonus issues](#corporate-actions) between the purchase and the sale, so after a 2-for-1 split a 100-share parcel covers a 200-share sale.
 
 ```
 DELETE /sells/:id
 ```
 
-Deletes a Sell trade and all of its parcel allocations in one transaction, freeing the purchase parcels those allocations had consumed. A buy-back participation Sell also takes its linked dividend-component income row (`income.buyback_trade_id`) with it, so the capital and dividend sides are always removed together. A scrip-for-scrip exchange or demerger closing Sell takes its group's replacement Buys (`trades.scrip_action_id` / `trades.demerger_action_id`) with it, restoring the pre-exchange/pre-demerger holding. Returns `204 No Content` on success, `404 Not Found` if no trade has that id, or `422 Unprocessable Entity` if the id refers to a trade that is not a Sell (use `DELETE /trades/:id` for Buy/DRP trades) or a replacement Buy of the group is still consumed by later allocations or AMIT adjustments (remove those first).
+Deletes a Sell trade and all of its parcel allocations in one transaction, freeing the purchase parcels those allocations had consumed. A buy-back participation Sell also takes its linked dividend-component income row (`income.buyback_trade_id`) with it, so the capital and dividend sides are always removed together. A scrip-for-scrip exchange or demerger closing Sell takes its group's replacement Buys (`trades.scrip_action_id` / `trades.demerger_action_id`) with it, restoring the pre-exchange/pre-demerger holding. Returns `204 No Content` on success, `404 Not Found` if no trade has that id, or `422 Unprocessable Entity` if the id refers to a trade that is not a Sell (use `DELETE /trades/:id` for Buy/DRP trades), a replacement Buy of the group is still consumed by later allocations or AMIT adjustments (remove those first), or the Sell is a holding-account transfer-out Sell (its group — and the transfer record — is deleted as a whole via `DELETE /transfers/:id`, see [Transfers](#transfers)).
+
+### Transfers
+
+Moves a quantity of one listing between two holding accounts of the same owner — e.g. vested plan shares to the personal account. **Not a CGT event**: the same beneficial owner holds the shares before and after, so nothing is disposed of, nothing reaches the [realised gains](#realised-gains) or [net capital gain](#net-capital-gain) reports, and the franking 45-day at-risk clock keeps running across the move.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/transfers` | List all transfers |
+| `GET` | `/transfers/:id` | Get one transfer |
+| `PUT` | `/transfers/:id` | Record **and execute** a transfer, atomically |
+| `DELETE` | `/transfers/:id` | Delete the transfer and its whole trade group, restoring the pre-transfer holding |
+
+```
+PUT /transfers/1
+{
+  "listing_id": 1,
+  "date": "2024-06-01",
+  "from_account_id": 2,
+  "to_account_id": 1,
+  "allocations": [ { "purchase_trade_id": 1, "quantity_allocated": "100" } ]
+}
+```
+
+The `allocations` say which parcels move and how many units of each (in transfer-date units, like a Sell's allocations); partial parcels are allowed. Executing creates, in one transaction (mirroring the scrip-for-scrip mechanics):
+
+- a **transfer-out Sell** in the source account dated the transfer date — price 0, consuming the chosen quantity from each parcel via parcel allocations (through the same write-time invariants as [`PUT /sells/:id`](#sells), including the same-account rule). It carries `transfer_id`, which excludes it from every gains report and the franking at-risk walk, and
+- one **transfer-in Buy** per consumed parcel in the destination account — the moved units at price 0, carrying the moved units' share of the parcel's remaining reduced cost base (AMIT- and return-of-capital-adjusted, floored at nil; pro-rated for a partial move) on the `brokerage` column, the parcel's `currency` and manual `fx_rate` fallback, and the parcel's acquisition date (chained through any earlier rollover or transfer) as `deemed_acquisition_date` — the 12-month discount clock and the AUD translation month of the cost base are unchanged by the move.
+
+The created trades form the transfer group (`trades.transfer_id`): each is rejected by `PUT /sells/:id`, `PUT`/`DELETE /trades/:id`, and `DELETE /sells/:id` (`422`). A recorded transfer is immutable — re-`PUT`ting its id returns `422`; delete it and re-transfer instead. `DELETE /transfers/:id` removes the group and the record together, restoring the pre-transfer holding (refused with `422` while a transfer-in Buy is consumed by later allocations, AMIT adjustments, or income links — remove those first).
+
+`PUT` returns `201 Created` with `{ "transfer": …, "sell": …, "transfer_ins": […] }` as JSON (the created trade ids matter to the client, so this operation departs from the bare-`204` PUT convention), or `422 Unprocessable Entity` if the source and destination accounts are the same, the transfer id already exists, there are no allocations, a parcel belongs to a different listing, an account or the listing is unknown (FK), or a Sell-side invariant fails (missing/over-allocated/non-Buy-DRP parcel, or a parcel outside the source account).
 
 ### Parcel allocations
 
@@ -747,13 +818,13 @@ Reports take the Australian-tax view, so every non-AUD trade amount is converted
 POST /portfolio/overview
 ```
 
-Returns open holdings per listing. Request body (optional):
+Returns open holdings per **(listing, holding account)** — the same listing held in two accounts (e.g. an employer share plan and a personal broker account) reports as two holdings. Request body (optional):
 
 ```json
 { "prices": { "<listing_id>": "<price>" } }
 ```
 
-Response fields per holding: `listing_id`, `quantity`, `avg_cost_base_per_unit`, `total_cost_base`, `current_price` (nullable), `market_value` (nullable).
+Response fields per holding: `listing_id`, `holding_account_id`, `quantity`, `avg_cost_base_per_unit`, `total_cost_base`, `current_price` (nullable), `market_value` (nullable).
 
 Cost base is calculated as `(price × quantity + brokerage + GST) − AMIT reductions`, pro-rated to remaining (unsold) units, less [return-of-capital](#corporate-actions) payments received on those units — flooring at nil (CGT events E10 and G1) — then converted to AUD (see [FX conversion](#fx-conversion)). Supplied prices are expected in AUD, so `market_value` is AUD. The unrealised-gains report computes its cost base the same way. `quantity` is in *current* units — re-based across any [share splits/consolidations or bonus issues](#corporate-actions) — so it lines up with a current market price; the re-basing never changes the cost base totals.
 
@@ -763,9 +834,11 @@ Cost base is calculated as `(price × quantity + brokerage + GST) − AMIT reduc
 GET /portfolio/open-parcels
 ```
 
-Returns every open parcel — a Buy/DRP trade whose quantity is not fully consumed by parcel allocations — the per-parcel cost-base schedule to reconcile against a broker statement and the input to a sell decision (the [overview](#overview) aggregates the same parcels per listing). Response fields per parcel: `trade_id`, `listing_id`, `ticker`, `acquisition_date`, `original_quantity`, `remaining_quantity` (units not yet allocated to a Sell), `original_cost_base` (price × quantity + brokerage + GST for the whole parcel), `amit_cost_base_reduction` (cumulative AMIT reductions to date — the full amount, even where CGT event E10 has floored the cost base), `return_of_capital_reduction` (cumulative [return-of-capital](#corporate-actions) payments received on the remaining units since acquisition — likewise the full amount, even where CGT event G1 has floored the cost base), and `remaining_cost_base` (`max(original − AMIT, 0)` pro-rated to the remaining units, less the return-of-capital payments on those units, floored at nil). All monetary fields are AUD, converted at the parcel's buy-month rate (see [FX conversion](#fx-conversion)). `remaining_quantity` is in *current* units — re-based across any [share splits/consolidations or bonus issues](#corporate-actions) so it reconciles with a broker statement — while `original_quantity` stays as transacted; `acquisition_date` is preserved across a split or bonus issue (TD 2000/10; `docs/bonus-shares.md`). A [scrip-for-scrip](#corporate-actions) replacement parcel reports the consumed parcel's acquisition date (the rollover's combined holding period) and carries its remaining reduced cost base; its monetary fields convert at the *original* acquisition month's rate, so the AUD cost base is unchanged by the exchange. A [demerger's](#corporate-actions) head and demerged parcels likewise report the consumed parcel's acquisition date, each carrying its percentage share of that cost base.
+Returns every open parcel — a Buy/DRP trade whose quantity is not fully consumed by parcel allocations — the per-parcel cost-base schedule to reconcile against a broker statement and the input to a sell decision (the [overview](#overview) aggregates the same parcels per listing). Response fields per parcel: `trade_id`, `listing_id`, `holding_account_id` (the account the parcel sits in), `ticker`, `acquisition_date`, `original_quantity`, `remaining_quantity` (units not yet allocated to a Sell), `original_cost_base` (price × quantity + brokerage + GST for the whole parcel), `amit_cost_base_reduction` (cumulative AMIT reductions to date — the full amount, even where CGT event E10 has floored the cost base), `return_of_capital_reduction` (cumulative [return-of-capital](#corporate-actions) payments received on the remaining units since acquisition — likewise the full amount, even where CGT event G1 has floored the cost base), and `remaining_cost_base` (`max(original − AMIT, 0)` pro-rated to the remaining units, less the return-of-capital payments on those units, floored at nil). All monetary fields are AUD, converted at the parcel's buy-month rate (see [FX conversion](#fx-conversion)). `remaining_quantity` is in *current* units — re-based across any [share splits/consolidations or bonus issues](#corporate-actions) so it reconciles with a broker statement — while `original_quantity` stays as transacted; `acquisition_date` is preserved across a split or bonus issue (TD 2000/10; `docs/bonus-shares.md`). A [scrip-for-scrip](#corporate-actions) replacement parcel reports the consumed parcel's acquisition date (the rollover's combined holding period) and carries its remaining reduced cost base; its monetary fields convert at the *original* acquisition month's rate, so the AUD cost base is unchanged by the exchange. A [demerger's](#corporate-actions) head and demerged parcels likewise report the consumed parcel's acquisition date, each carrying its percentage share of that cost base.
 
-Sorted by `listing_id`, then `acquisition_date`, then `trade_id`.
+A [transfer's](#transfers) transfer-in parcel likewise reports the moved parcel's acquisition date and carries its share of the remaining reduced cost base, in the destination account.
+
+Sorted by `listing_id`, then `holding_account_id`, then `acquisition_date`, then `trade_id`.
 
 #### Unrealised gains
 
@@ -779,7 +852,7 @@ Request body (all optional):
 { "prices": { "<listing_id>": "<price>" }, "as_of_date": "YYYY-MM-DD" }
 ```
 
-`as_of_date` defaults to today. Response fields per holding: `listing_id`, `quantity`, `total_cost_base`, `current_price`, `market_value`, `unrealised_gain_loss`, `cgt_discount_eligible_quantity` (units from parcels held strictly more than 12 months as at `as_of_date`). `total_cost_base` is in AUD (see [FX conversion](#fx-conversion)); supplied prices are expected in AUD, so `market_value` and `unrealised_gain_loss` are AUD. Quantities are in the unit basis of `as_of_date` — re-based across any [share splits/consolidations or bonus issues](#corporate-actions) up to that date — and neither a split nor a bonus issue restarts the 12-month discount clock (the converted/bonus shares keep the original acquisition date; TD 2000/10, `docs/bonus-shares.md`). A [scrip-for-scrip](#corporate-actions) replacement or [demerger](#corporate-actions) head/demerged parcel's discount clock likewise runs from its deemed (carried) acquisition date — the rollover's combined holding period.
+`as_of_date` defaults to today. One row per (listing, holding account), like the [overview](#overview). Response fields per holding: `listing_id`, `holding_account_id`, `quantity`, `total_cost_base`, `current_price`, `market_value`, `unrealised_gain_loss`, `cgt_discount_eligible_quantity` (units from parcels held strictly more than 12 months as at `as_of_date`). `total_cost_base` is in AUD (see [FX conversion](#fx-conversion)); supplied prices are expected in AUD, so `market_value` and `unrealised_gain_loss` are AUD. Quantities are in the unit basis of `as_of_date` — re-based across any [share splits/consolidations or bonus issues](#corporate-actions) up to that date — and neither a split nor a bonus issue restarts the 12-month discount clock (the converted/bonus shares keep the original acquisition date; TD 2000/10, `docs/bonus-shares.md`). A [scrip-for-scrip](#corporate-actions) replacement or [demerger](#corporate-actions) head/demerged parcel's discount clock likewise runs from its deemed (carried) acquisition date — the rollover's combined holding period.
 
 #### Realised gains
 
@@ -787,7 +860,7 @@ Request body (all optional):
 GET /portfolio/realised-gains
 ```
 
-Returns one record per sale trade that has at least one parcel allocation. Response fields: `sale_trade_id`, `listing_id`, `sale_date`, `proceeds`, `cost_base`, `capital_gain_loss`, `discount_eligible_gain` (gross gain from parcels held strictly more than 12 months), `non_discountable_gain` (gross gain from parcels held 12 months or less — the "other" method), and `capital_loss` (total losses from allocations sold below cost, as a positive amount). The three buckets satisfy `capital_gain_loss == discount_eligible_gain + non_discountable_gain − capital_loss`. `proceeds`, `cost_base`, and `capital_gain_loss` are in AUD: proceeds are converted at the sale's FX rate and cost base at the purchase's FX rate (see [FX conversion](#fx-conversion)). The cost base of the sold units is reduced by [return-of-capital](#corporate-actions) payments received while they were held — from acquisition up to the sale date — flooring at nil; payments after the sale don't touch them. An allocation's quantity is in the sale date's unit basis: a [share split/consolidation or bonus issue](#corporate-actions) between purchase and sale re-bases it back to as-acquired units for the cost-base pro-rating, and the discount holding period still runs from the original acquisition date (TD 2000/10; `docs/bonus-shares.md`). A [scrip-for-scrip](#corporate-actions) exchange's or [demerger's](#corporate-actions) closing Sell is **excluded** — the rollover disregards its gain — and a sale of a replacement (or demerger head/demerged) parcel uses the carried (apportioned) cost base, converted at the original acquisition month's rate, with the discount clock running from the deemed (carried) acquisition date, the rollover's combined holding period.
+Returns one record per sale trade that has at least one parcel allocation. Response fields: `sale_trade_id`, `listing_id`, `holding_account_id` (the account the Sell happened in — one taxpayer either way, so totals are account-independent), `sale_date`, `proceeds`, `cost_base`, `capital_gain_loss`, `discount_eligible_gain` (gross gain from parcels held strictly more than 12 months), `non_discountable_gain` (gross gain from parcels held 12 months or less — the "other" method), and `capital_loss` (total losses from allocations sold below cost, as a positive amount). The three buckets satisfy `capital_gain_loss == discount_eligible_gain + non_discountable_gain − capital_loss`. `proceeds`, `cost_base`, and `capital_gain_loss` are in AUD: proceeds are converted at the sale's FX rate and cost base at the purchase's FX rate (see [FX conversion](#fx-conversion)). The cost base of the sold units is reduced by [return-of-capital](#corporate-actions) payments received while they were held — from acquisition up to the sale date — flooring at nil; payments after the sale don't touch them. An allocation's quantity is in the sale date's unit basis: a [share split/consolidation or bonus issue](#corporate-actions) between purchase and sale re-bases it back to as-acquired units for the cost-base pro-rating, and the discount holding period still runs from the original acquisition date (TD 2000/10; `docs/bonus-shares.md`). A [scrip-for-scrip](#corporate-actions) exchange's or [demerger's](#corporate-actions) closing Sell is **excluded** — the rollover disregards its gain — as is a [transfer's](#transfers) transfer-out Sell (an own-account move is no disposal at all; a later sale of the transfer-in parcel uses the carried cost base and deemed acquisition date) — and a sale of a replacement (or demerger head/demerged) parcel uses the carried (apportioned) cost base, converted at the original acquisition month's rate, with the discount clock running from the deemed (carried) acquisition date, the rollover's combined holding period.
 
 Sorted by `sale_date` ascending.
 
@@ -857,13 +930,13 @@ Flags every trade whose `[date, settlement_date]` window is not fully inside its
 | Code | Meaning |
 |------|---------|
 | `200 OK` | Successful GET (JSON; the report `/export` endpoints return `text/csv`, an attachment content download returns its stored content type) |
-| `201 Created` | DRP reinvestment trade created via `POST /income/:id/reinvest`, a rights-exercise trade created via `POST /corporate_actions/:id/exercise`, a buy-back participation (Sell + dividend income) created via `POST /corporate_actions/:id/participate`, a scrip-for-scrip exchange (closing Sell + replacement parcels) created via `POST /corporate_actions/:id/exchange`, a demerger (closing Sell + head and demerged parcels) created via `POST /corporate_actions/:id/demerge`, or an attachment uploaded via `POST /attachments` |
+| `201 Created` | DRP reinvestment trade created via `POST /income/:id/reinvest`, a rights-exercise trade created via `POST /corporate_actions/:id/exercise`, a buy-back participation (Sell + dividend income) created via `POST /corporate_actions/:id/participate`, a scrip-for-scrip exchange (closing Sell + replacement parcels) created via `POST /corporate_actions/:id/exchange`, a demerger (closing Sell + head and demerged parcels) created via `POST /corporate_actions/:id/demerge`, a holding-account transfer (transfer-out Sell + transfer-in parcels) created via `PUT /transfers/:id`, or an attachment uploaded via `POST /attachments` |
 | `204 No Content` | Successful PUT or DELETE, or a job run via `POST /jobs/:name` |
 | `400 Bad Request` | Malformed path parameter (e.g. an `exchange_holidays` `:date` that is not `YYYY-MM-DD`) |
 | `404 Not Found` | Resource does not exist |
 | `405 Method Not Allowed` | Write attempted on a read-only path (e.g. `parcel_allocations`) |
 | `413 Payload Too Large` | Uploaded attachment exceeds the 25 MB per-file limit |
-| `422 Unprocessable Entity` | Business rule or constraint violation (e.g. over-allocation, wrong trade type, under-allocated Sell, deleting or shrinking a Buy/DRP that a parcel allocation, AMIT adjustment, or reinvestment link still relies on, unparseable FX or MIC feed, a write referencing an unrecognised currency / unknown exchange / listing, an attachment upload with no/multiple owners or an unsupported content type, a negative / non-singleton `cgt_settings` opening capital loss, an overlapping or empty DRP enrolment period, reinvesting a distribution no enrolment period covers, or a corporate action with a non-positive `amount_per_unit`, a missing/non-positive split/bonus/rights/demerger ratio, exercise price, or buy-back price, a buy-back dividend that is negative or exceeds the price, a franking credit without a dividend, a non-positive market value, a demerger cost-base percentage missing or outside (0, 100), a payload mixing the per-type fields, or an unrecognised `action_type`; a rights exercise that is not against a RightsIssue, has non-positive units or a negative rights cost, is dated before the record date, or exceeds the remaining entitlement; a buy-back participation that is not against a BuyBack, has non-positive units, is dated before the buy-back date, or fails a Sell-side invariant; a scrip-for-scrip exchange that is not against a ScripForScrip, is already exchanged, has nothing held, or whose original listing traded on/after the exchange date — or a ScripForScrip/Demerger whose replacement/demerged listing is missing, unknown, or the same as the original; a demerge that is not against a Demerger, is already demerged, has nothing held, or whose head listing traded on/after the demerger date; editing a rights-exercise trade, a buy-back participation Sell, a buy-back dividend income row, or any scrip-for-scrip exchange or demerger trade, deleting a group trade individually or a group whose replacement parcels are still drawn on, or editing/deleting a RightsIssue, BuyBack, ScripForScrip, or Demerger that exercise/participation/exchange/demerge trades still reference) |
+| `422 Unprocessable Entity` | Business rule or constraint violation (e.g. over-allocation, wrong trade type, under-allocated Sell, deleting or shrinking a Buy/DRP that a parcel allocation, AMIT adjustment, or reinvestment link still relies on, unparseable FX or MIC feed, a write referencing an unrecognised currency / unknown exchange / listing, an attachment upload with no/multiple owners or an unsupported content type, a negative / non-singleton `cgt_settings` opening capital loss, an overlapping or empty DRP enrolment period, reinvesting a distribution no enrolment period covers, or a corporate action with a non-positive `amount_per_unit`, a missing/non-positive split/bonus/rights/demerger ratio, exercise price, or buy-back price, a buy-back dividend that is negative or exceeds the price, a franking credit without a dividend, a non-positive market value, a demerger cost-base percentage missing or outside (0, 100), a payload mixing the per-type fields, or an unrecognised `action_type`; a rights exercise that is not against a RightsIssue, has non-positive units or a negative rights cost, is dated before the record date, or exceeds the remaining entitlement; a buy-back participation that is not against a BuyBack, has non-positive units, is dated before the buy-back date, or fails a Sell-side invariant; a scrip-for-scrip exchange that is not against a ScripForScrip, is already exchanged, has nothing held, or whose original listing traded on/after the exchange date — or a ScripForScrip/Demerger whose replacement/demerged listing is missing, unknown, or the same as the original; a demerge that is not against a Demerger, is already demerged, has nothing held, or whose head listing traded on/after the demerger date; editing a rights-exercise trade, a buy-back participation Sell, a buy-back dividend income row, or any scrip-for-scrip exchange or demerger trade, deleting a group trade individually or a group whose replacement parcels are still drawn on, or editing/deleting a RightsIssue, BuyBack, ScripForScrip, or Demerger that exercise/participation/exchange/demerge trades still reference; a Sell allocation consuming a parcel in a different holding account from the Sell's, an AMIT adjustment whose trade and statement sit in different holding accounts, a duplicate holding-account name, deleting a holding account that still holds data (or the seeded default account), a transfer whose source and destination accounts are the same, whose id already exists, with no allocations or a wrong-listing parcel, editing or individually deleting a transfer-group trade, or deleting a transfer whose transfer-in parcels are still drawn on) |
 | `500 Internal Server Error` | Unexpected database error, or a job triggered via `POST /jobs/:name` failed |
 | `502 Bad Gateway` | Upstream fetch failed (e.g. the RBA FX or ISO MIC import could not reach its source) |
 

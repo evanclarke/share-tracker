@@ -72,6 +72,10 @@ pub enum UpsertError {
     Db(sqlx::Error),
     TradeNotBuyOrDrp,
     ListingMismatch,
+    /// The trade sits in a different holding account from the AMMA
+    /// statement's: a registry issues one statement per holder account, so a
+    /// statement only ever adjusts its own account's parcels.
+    HoldingAccountMismatch,
     QuantityExceedsTrade,
 }
 
@@ -92,18 +96,23 @@ pub async fn db_upsert(pool: &SqlitePool, adj: &AmitAdjustment) -> Result<(), Up
         return Err(UpsertError::TradeNotBuyOrDrp);
     }
 
-    let trade_listing_id: i64 =
-        sqlx::query_scalar("SELECT listing_id FROM trades WHERE id = ?")
+    let (trade_listing_id, trade_account_id): (i64, i64) =
+        sqlx::query_as("SELECT listing_id, holding_account_id FROM trades WHERE id = ?")
             .bind(adj.trade_id)
             .fetch_one(pool)
             .await?;
-    let amma_listing_id: i64 =
-        sqlx::query_scalar("SELECT listing_id FROM amma_statements WHERE id = ?")
+    let (amma_listing_id, amma_account_id): (i64, i64) =
+        sqlx::query_as("SELECT listing_id, holding_account_id FROM amma_statements WHERE id = ?")
             .bind(adj.amma_statement_id)
             .fetch_one(pool)
             .await?;
     if trade_listing_id != amma_listing_id {
         return Err(UpsertError::ListingMismatch);
+    }
+    // A statement only ever adjusts parcels in its own holding account (the
+    // registry issues one AMMA statement per holder account).
+    if trade_account_id != amma_account_id {
+        return Err(UpsertError::HoldingAccountMismatch);
     }
 
     let trade_qty: String = sqlx::query_scalar("SELECT quantity FROM trades WHERE id = ?")
@@ -205,6 +214,7 @@ async fn upsert(
         Ok(()) => Ok(StatusCode::NO_CONTENT),
         Err(UpsertError::TradeNotBuyOrDrp) => Err(StatusCode::UNPROCESSABLE_ENTITY),
         Err(UpsertError::ListingMismatch) => Err(StatusCode::UNPROCESSABLE_ENTITY),
+        Err(UpsertError::HoldingAccountMismatch) => Err(StatusCode::UNPROCESSABLE_ENTITY),
         Err(UpsertError::QuantityExceedsTrade) => Err(StatusCode::UNPROCESSABLE_ENTITY),
         Err(UpsertError::Db(e)) => {
             tracing::error!(error = %e, "AMIT adjustment upsert failed");
@@ -259,6 +269,8 @@ mod tests {
         trade::db_upsert(
             pool,
             &trade::Trade {
+                holding_account_id: 1,
+                transfer_id: None,
                 id,
                 trade_type: trade::TradeType::Buy,
                 date: NaiveDate::from_ymd_opt(2024, 1, 15).unwrap(),
@@ -290,6 +302,8 @@ mod tests {
         trade::db_upsert(
             pool,
             &trade::Trade {
+                holding_account_id: 1,
+                transfer_id: None,
                 id,
                 trade_type: trade::TradeType::Sell,
                 date: NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(),
@@ -321,6 +335,7 @@ mod tests {
         amma::db_upsert(
             pool,
             &amma::AmmaStatement {
+                holding_account_id: 1,
                 id,
                 listing_id,
                 tax_year_end_date: NaiveDate::from_ymd_opt(2024, 6, 30).unwrap(),
@@ -400,6 +415,48 @@ mod tests {
         assert!(matches!(err, UpsertError::ListingMismatch));
     }
 
+    /// A statement only adjusts parcels in its own holding account: the same
+    /// listing's parcel in another account is rejected (the registry issues
+    /// one AMMA statement per holder account).
+    #[tokio::test]
+    async fn db_holding_account_mismatch_rejected() {
+        use crate::entities::holding_account::{self, HoldingAccount};
+        let pool = test_pool().await;
+        insert_test_listing(&pool, 1, "XASX", "VAF").await;
+        holding_account::db_upsert(
+            &pool,
+            &HoldingAccount { id: 2, name: "ICE Employee Plan".to_string() },
+        )
+        .await
+        .unwrap();
+        insert_buy_trade(&pool, 1, 1, Decimal::from(100)).await;
+        sqlx::query("UPDATE trades SET holding_account_id = 2 WHERE id = 1")
+            .execute(&pool)
+            .await
+            .unwrap();
+        insert_amma(&pool, 1, 1, "0.05".parse().unwrap()).await; // default account
+
+        let err = db_upsert(
+            &pool,
+            &AmitAdjustment { id: 1, amma_statement_id: 1, trade_id: 1, quantity: Decimal::from(50) },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, UpsertError::HoldingAccountMismatch));
+
+        // Re-pointing the statement at the parcel's account fixes it.
+        sqlx::query("UPDATE amma_statements SET holding_account_id = 2 WHERE id = 1")
+            .execute(&pool)
+            .await
+            .unwrap();
+        db_upsert(
+            &pool,
+            &AmitAdjustment { id: 1, amma_statement_id: 1, trade_id: 1, quantity: Decimal::from(50) },
+        )
+        .await
+        .unwrap();
+    }
+
     #[tokio::test]
     async fn db_quantity_exceeds_trade_rejected() {
         let pool = test_pool().await;
@@ -451,6 +508,7 @@ mod tests {
         amma::db_upsert(
             &pool,
             &amma::AmmaStatement {
+                holding_account_id: 1,
                 id: 1,
                 listing_id: 1,
                 tax_year_end_date: NaiveDate::from_ymd_opt(2024, 6, 30).unwrap(),

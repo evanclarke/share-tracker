@@ -16,6 +16,7 @@ pub mod drp_enrolment;
 pub mod drp_reinvestment;
 pub mod exchange;
 pub mod exchange_holiday;
+pub mod holding_account;
 pub mod income;
 pub mod listing;
 pub mod mic_registry;
@@ -25,12 +26,14 @@ pub mod rights_exercise;
 pub mod scrip_exchange;
 pub mod sell;
 pub mod trade;
+pub mod transfer;
 
 /// Merge every entity's routes into a single router.
 pub fn router() -> Router<SqlitePool> {
     exchange::router()
         .merge(exchange_holiday::router())
         .merge(listing::router())
+        .merge(holding_account::router())
         .merge(currencies::router())
         .merge(mic_registry::router())
         .merge(rba_fx_rate::router())
@@ -48,5 +51,6 @@ pub fn router() -> Router<SqlitePool> {
         .merge(scrip_exchange::router())
         .merge(demerger::router())
         .merge(drp_reinvestment::router())
+        .merge(transfer::router())
         .merge(attachment::router())
 }

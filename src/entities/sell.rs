@@ -43,6 +43,11 @@ pub struct SellBody {
     pub fx_rate: Decimal,
     #[serde(default)]
     pub contract_note_ref: Option<String>,
+    /// The holding account the Sell happens in: its allocations may only
+    /// consume parcels held in the same account. Defaults to the seeded
+    /// default account when omitted.
+    #[serde(default = "crate::entities::holding_account::default_holding_account_id")]
+    pub holding_account_id: i64,
     #[serde(default)]
     pub allocations: Vec<AllocationInput>,
 }
@@ -77,6 +82,20 @@ pub enum SellError {
     /// also removes the head and demerged-entity Buys) and re-demerge
     /// instead (see `entities::demerger`).
     DemergerSell,
+    /// The existing trade is a holding-account transfer-out Sell
+    /// (`transfer_id` set): it consumes exactly the parcels the transfer
+    /// moved, so free-form edits (and `DELETE /sells`) are rejected. Delete
+    /// the transfer (`DELETE /transfers/:id`, which also removes the
+    /// transfer-in Buys) and re-transfer instead (see `entities::transfer`).
+    TransferSell,
+    /// An allocation consumes a parcel held in a different holding account
+    /// from the Sell's: a sale can only dispose of units its account actually
+    /// holds. Move the parcel first (see `entities::transfer`) or fix the
+    /// Sell's holding account. (Scrip-for-scrip exchange and demerger closing
+    /// Sells are exempt — they mechanically close the *whole* holding across
+    /// every account, and their replacement Buys stay in each consumed
+    /// parcel's account.)
+    PurchaseInDifferentAccount,
 }
 
 impl From<sqlx::Error> for SellError {
@@ -102,6 +121,10 @@ pub enum DeleteOutcome {
     /// adjustments — deleting the group would orphan those dependants. Remove
     /// them first (mapped to 422).
     ReplacementReferenced,
+    /// The Sell is a holding-account transfer-out Sell: its group (and the
+    /// transfer record itself) is deleted as a whole via
+    /// `DELETE /transfers/:id`, not here (mapped to 422).
+    TransferSell,
 }
 
 /// Delete a Sell trade and all of its parcel allocations in one transaction,
@@ -117,16 +140,20 @@ pub enum DeleteOutcome {
 pub async fn db_delete_sell(pool: &SqlitePool, id: i64) -> Result<DeleteOutcome, sqlx::Error> {
     let mut tx = pool.begin().await?;
 
-    let row: Option<(TradeType, Option<i64>, Option<i64>)> = sqlx::query_as(
-        "SELECT trade_type, scrip_action_id, demerger_action_id FROM trades WHERE id = ?",
+    let row: Option<(TradeType, Option<i64>, Option<i64>, Option<i64>)> = sqlx::query_as(
+        "SELECT trade_type, scrip_action_id, demerger_action_id, transfer_id \
+         FROM trades WHERE id = ?",
     )
     .bind(id)
     .fetch_optional(&mut *tx)
     .await?;
     let (scrip_action, demerger_action) = match row {
         None => return Ok(DeleteOutcome::NotFound),
-        Some((t, _, _)) if t != TradeType::Sell => return Ok(DeleteOutcome::NotASell),
-        Some((_, scrip_action, demerger_action)) => (scrip_action, demerger_action),
+        Some((t, _, _, _)) if t != TradeType::Sell => return Ok(DeleteOutcome::NotASell),
+        // A transfer-out Sell only ever goes with its whole group, via
+        // DELETE /transfers/:id (which also removes the transfer record).
+        Some((_, _, _, Some(_))) => return Ok(DeleteOutcome::TransferSell),
+        Some((_, scrip_action, demerger_action, _)) => (scrip_action, demerger_action),
     };
 
     let group = scrip_action
@@ -204,13 +231,14 @@ pub async fn db_upsert_sell(pool: &SqlitePool, id: i64, body: &SellBody) -> Resu
     // carries linked rows — a dividend income row, or the group's replacement
     // Buys). The upsert below never sets any provenance column, so a normal
     // Sell can't become one either.
-    let existing: Option<(Option<i64>, Option<i64>, Option<i64>)> = sqlx::query_as(
-        "SELECT buyback_action_id, scrip_action_id, demerger_action_id FROM trades WHERE id = ?",
+    let existing: Option<(Option<i64>, Option<i64>, Option<i64>, Option<i64>)> = sqlx::query_as(
+        "SELECT buyback_action_id, scrip_action_id, demerger_action_id, transfer_id \
+         FROM trades WHERE id = ?",
     )
     .bind(id)
     .fetch_optional(&mut *tx)
     .await?;
-    if let Some((buyback, scrip, demerger)) = existing {
+    if let Some((buyback, scrip, demerger, transfer)) = existing {
         if buyback.is_some() {
             return Err(SellError::BuyBackSell);
         }
@@ -220,9 +248,12 @@ pub async fn db_upsert_sell(pool: &SqlitePool, id: i64, body: &SellBody) -> Resu
         if demerger.is_some() {
             return Err(SellError::DemergerSell);
         }
+        if transfer.is_some() {
+            return Err(SellError::TransferSell);
+        }
     }
 
-    upsert_sell_in_tx(&mut tx, id, body, settlement_date, None, None, None).await?;
+    upsert_sell_in_tx(&mut tx, id, body, settlement_date, None, None, None, None).await?;
 
     tx.commit().await?;
     Ok(())
@@ -235,8 +266,11 @@ pub async fn db_upsert_sell(pool: &SqlitePool, id: i64, body: &SellBody) -> Resu
 /// and the dividend-component income row in one transaction and stamps the
 /// trade with its `buyback_action_id` provenance — the scrip-for-scrip
 /// exchange (`entities::scrip_exchange`), which stamps its closing Sell with
-/// `scrip_action_id`, and the demerger (`entities::demerger`), which stamps
-/// its closing Sell with `demerger_action_id`.
+/// `scrip_action_id`, the demerger (`entities::demerger`), which stamps its
+/// closing Sell with `demerger_action_id`, and the holding-account transfer
+/// (`entities::transfer`), which stamps its transfer-out Sell with
+/// `transfer_id`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn upsert_sell_in_tx(
     tx: &mut sqlx::SqliteConnection,
     id: i64,
@@ -245,6 +279,7 @@ pub(crate) async fn upsert_sell_in_tx(
     buyback_action_id: Option<i64>,
     scrip_action_id: Option<i64>,
     demerger_action_id: Option<i64>,
+    transfer_id: Option<i64>,
 ) -> Result<(), SellError> {
     // Allocations must account for the whole sale — no more, no less.
     let allocated: Decimal = body
@@ -261,8 +296,8 @@ pub(crate) async fn upsert_sell_in_tx(
         "INSERT INTO trades \
          (id, trade_type, date, settlement_date, listing_id, average_price, quantity, \
           currency, brokerage, gst_on_brokerage, brokerage_currency, fx_rate, contract_note_ref, \
-          buyback_action_id, scrip_action_id, demerger_action_id) \
-         VALUES (?, 'Sell', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+          buyback_action_id, scrip_action_id, demerger_action_id, holding_account_id, transfer_id) \
+         VALUES (?, 'Sell', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT(id) DO UPDATE SET \
              trade_type         = 'Sell', \
              date               = excluded.date, \
@@ -278,7 +313,9 @@ pub(crate) async fn upsert_sell_in_tx(
              contract_note_ref  = excluded.contract_note_ref, \
              buyback_action_id  = excluded.buyback_action_id, \
              scrip_action_id    = excluded.scrip_action_id, \
-             demerger_action_id = excluded.demerger_action_id",
+             demerger_action_id = excluded.demerger_action_id, \
+             holding_account_id = excluded.holding_account_id, \
+             transfer_id        = excluded.transfer_id",
     )
     .bind(id)
     .bind(body.date)
@@ -295,6 +332,8 @@ pub(crate) async fn upsert_sell_in_tx(
     .bind(buyback_action_id)
     .bind(scrip_action_id)
     .bind(demerger_action_id)
+    .bind(body.holding_account_id)
+    .bind(transfer_id)
     .execute(&mut *tx)
     .await?;
 
@@ -307,7 +346,8 @@ pub(crate) async fn upsert_sell_in_tx(
     for alloc in &body.allocations {
         // Purchase parcel must exist and be a Buy/DRP.
         let purchase_row = sqlx::query(
-            "SELECT trade_type, date, listing_id, quantity FROM trades WHERE id = ?",
+            "SELECT trade_type, date, listing_id, quantity, holding_account_id \
+             FROM trades WHERE id = ?",
         )
         .bind(alloc.purchase_trade_id)
         .fetch_optional(&mut *tx)
@@ -318,6 +358,17 @@ pub(crate) async fn upsert_sell_in_tx(
         let purchase_type: TradeType = purchase_row.try_get("trade_type")?;
         if !matches!(purchase_type, TradeType::Buy | TradeType::DRP) {
             return Err(SellError::PurchaseTradeNotBuyOrDrp);
+        }
+        // A sale can only dispose of units its holding account actually
+        // holds. The scrip-for-scrip / demerger closing Sell is exempt: it
+        // mechanically closes the whole holding across every account (each
+        // replacement Buy stays in its consumed parcel's account).
+        let purchase_account: i64 = purchase_row.try_get("holding_account_id")?;
+        if scrip_action_id.is_none()
+            && demerger_action_id.is_none()
+            && purchase_account != body.holding_account_id
+        {
+            return Err(SellError::PurchaseInDifferentAccount);
         }
         let purchase_date: NaiveDate = purchase_row.try_get("date")?;
         let purchase_listing: i64 = purchase_row.try_get("listing_id")?;
@@ -391,6 +442,8 @@ async fn upsert(
         Err(SellError::BuyBackSell) => Err(StatusCode::UNPROCESSABLE_ENTITY),
         Err(SellError::ScripExchangeSell) => Err(StatusCode::UNPROCESSABLE_ENTITY),
         Err(SellError::DemergerSell) => Err(StatusCode::UNPROCESSABLE_ENTITY),
+        Err(SellError::TransferSell) => Err(StatusCode::UNPROCESSABLE_ENTITY),
+        Err(SellError::PurchaseInDifferentAccount) => Err(StatusCode::UNPROCESSABLE_ENTITY),
         Err(SellError::Db(e)) => {
             tracing::error!(error = %e, "sell upsert failed");
             Err(StatusCode::INTERNAL_SERVER_ERROR)
@@ -407,6 +460,7 @@ async fn delete(
         Ok(DeleteOutcome::NotFound) => Err(StatusCode::NOT_FOUND),
         Ok(DeleteOutcome::NotASell) => Err(StatusCode::UNPROCESSABLE_ENTITY),
         Ok(DeleteOutcome::ReplacementReferenced) => Err(StatusCode::UNPROCESSABLE_ENTITY),
+        Ok(DeleteOutcome::TransferSell) => Err(StatusCode::UNPROCESSABLE_ENTITY),
         Err(e) => {
             tracing::error!(error = %e, "sell delete failed");
             Err(StatusCode::INTERNAL_SERVER_ERROR)
@@ -448,6 +502,8 @@ mod tests {
         trade::db_upsert(
             pool,
             &trade::Trade {
+                holding_account_id: 1,
+                transfer_id: None,
                 id,
                 trade_type: trade::TradeType::Buy,
                 date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
@@ -477,6 +533,7 @@ mod tests {
 
     fn sell_body(qty: Decimal, allocations: Vec<AllocationInput>) -> SellBody {
         SellBody {
+            holding_account_id: 1,
             date: NaiveDate::from_ymd_opt(2024, 6, 3).unwrap(),
             settlement_date: None,
             listing_id: 1,
@@ -593,6 +650,92 @@ mod tests {
         );
         let err = db_upsert_sell(&pool, 4, &body).await.unwrap_err();
         assert!(matches!(err, SellError::PurchaseTradeNotBuyOrDrp));
+    }
+
+    /// A Sell may only dispose of parcels its own holding account holds: an
+    /// allocation against another account's parcel is rejected (and rolled
+    /// back), while the same Sell entered in the parcel's account succeeds.
+    #[tokio::test]
+    async fn db_allocation_in_different_account_is_rejected() {
+        use crate::entities::holding_account::{self, HoldingAccount};
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        holding_account::db_upsert(
+            &pool,
+            &HoldingAccount { id: 2, name: "ICE Employee Plan".to_string() },
+        )
+        .await
+        .unwrap();
+        // The parcel sits in the employer-plan account.
+        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
+        sqlx::query("UPDATE trades SET holding_account_id = 2 WHERE id = 1")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // A default-account Sell can't consume it…
+        let body = sell_body(
+            Decimal::from(100),
+            vec![AllocationInput { purchase_trade_id: 1, quantity_allocated: Decimal::from(100) }],
+        );
+        let err = db_upsert_sell(&pool, 2, &body).await.unwrap_err();
+        assert!(matches!(err, SellError::PurchaseInDifferentAccount));
+        assert!(!trade_exists(&pool, 2).await);
+
+        // …while the same Sell in the plan account goes through.
+        let mut body = sell_body(
+            Decimal::from(100),
+            vec![AllocationInput { purchase_trade_id: 1, quantity_allocated: Decimal::from(100) }],
+        );
+        body.holding_account_id = 2;
+        db_upsert_sell(&pool, 2, &body).await.unwrap();
+        assert!(trade_exists(&pool, 2).await);
+    }
+
+    #[tokio::test]
+    async fn api_allocation_in_different_account_returns_422() {
+        use crate::entities::holding_account::{self, HoldingAccount};
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        holding_account::db_upsert(
+            &pool,
+            &HoldingAccount { id: 2, name: "ICE Employee Plan".to_string() },
+        )
+        .await
+        .unwrap();
+        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
+        sqlx::query("UPDATE trades SET holding_account_id = 2 WHERE id = 1")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // holding_account_id omitted → defaults to the default account, which
+        // doesn't hold the parcel.
+        let body = serde_json::json!({
+            "date": "2024-06-03",
+            "listing_id": 1,
+            "average_price": "15",
+            "quantity": "100",
+            "currency": "AUD",
+            "brokerage": "0",
+            "gst_on_brokerage": "0",
+            "brokerage_currency": "AUD",
+            "fx_rate": "1",
+            "allocations": [ { "purchase_trade_id": 1, "quantity_allocated": "100" } ]
+        });
+        let resp = router()
+            .with_state(pool)
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/sells/2")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     async fn apply_split(pool: &SqlitePool, id: i64, listing_id: i64, date: NaiveDate) {

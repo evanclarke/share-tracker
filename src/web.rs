@@ -163,6 +163,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn holding_account_ui_present() {
+        let js = app_js_body().await;
+        // The Holding Accounts entity view drives the /holding_accounts CRUD
+        // API, and trades/income/AMMA/DRP enrolments (and the Sell and
+        // exercise/participate forms) select an account.
+        assert!(js.contains("/holding_accounts"));
+        assert!(js.contains("holding_account_id"));
+        assert!(js.contains("holdingAccounts"));
+    }
+
+    #[tokio::test]
+    async fn transfers_ui_present() {
+        let js = app_js_body().await;
+        // The Transfers view lists/creates/deletes holding-account transfers
+        // via the /transfers API, with from/to accounts and per-parcel
+        // quantities.
+        assert!(js.contains("/transfers"));
+        assert!(js.contains("from_account_id"));
+        assert!(js.contains("to_account_id"));
+        assert!(js.contains("viewTransferForm"));
+    }
+
+    #[tokio::test]
     async fn portfolio_overview_ui_present() {
         let js = app_js_body().await;
         assert!(js.contains("/portfolio/overview"));

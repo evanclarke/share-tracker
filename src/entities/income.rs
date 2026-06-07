@@ -36,6 +36,11 @@ pub struct Income {
     /// the participation: `PUT`/`DELETE /income` reject it (`422`), and it is
     /// removed together with the Sell by `DELETE /sells/:id`.
     pub buyback_trade_id: Option<i64>,
+    /// The holding account the distribution was paid to (see
+    /// `entities::holding_account`): decides whose DRP enrolment applies and
+    /// which account a reinvestment trade lands in. Defaults to the seeded
+    /// default account when omitted from a request.
+    pub holding_account_id: i64,
 }
 
 impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for Income {
@@ -60,6 +65,7 @@ impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for Income {
             reinvestment_trade_id: row.try_get("reinvestment_trade_id")?,
             currency: row.try_get("currency")?,
             buyback_trade_id: row.try_get("buyback_trade_id")?,
+            holding_account_id: row.try_get("holding_account_id")?,
         })
     }
 }
@@ -92,6 +98,9 @@ pub struct IncomeBody {
     pub reinvestment_trade_id: Option<i64>,
     #[serde(default = "default_currency")]
     pub currency: String,
+    /// Defaults to the seeded default holding account when omitted.
+    #[serde(default = "crate::entities::holding_account::default_holding_account_id")]
+    pub holding_account_id: i64,
 }
 
 fn default_currency() -> String {
@@ -109,7 +118,7 @@ pub async fn db_list(pool: &SqlitePool) -> Result<Vec<Income>, sqlx::Error> {
         "SELECT id, listing_id, date_paid, ex_date, franked_amount, unfranked_amount, \
          foreign_source_income, foreign_tax_paid, tfn_withholding_tax, franking_credits, \
          lic_capital_gain_deduction, conduit_foreign_income, trust_income, reinvestment_trade_id, \
-         currency, buyback_trade_id \
+         currency, buyback_trade_id, holding_account_id \
          FROM income ORDER BY date_paid, id",
     )
     .fetch_all(pool)
@@ -121,7 +130,7 @@ pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<Income>, sqlx::
         "SELECT id, listing_id, date_paid, ex_date, franked_amount, unfranked_amount, \
          foreign_source_income, foreign_tax_paid, tfn_withholding_tax, franking_credits, \
          lic_capital_gain_deduction, conduit_foreign_income, trust_income, reinvestment_trade_id, \
-         currency, buyback_trade_id \
+         currency, buyback_trade_id, holding_account_id \
          FROM income WHERE id = ?",
     )
     .bind(id)
@@ -166,8 +175,8 @@ pub async fn db_upsert(pool: &SqlitePool, income: &Income) -> Result<(), UpsertE
          (id, listing_id, date_paid, ex_date, franked_amount, unfranked_amount, \
           foreign_source_income, foreign_tax_paid, tfn_withholding_tax, franking_credits, \
           lic_capital_gain_deduction, conduit_foreign_income, trust_income, reinvestment_trade_id, \
-          currency) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+          currency, holding_account_id) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT(id) DO UPDATE SET \
              listing_id                 = excluded.listing_id, \
              date_paid                  = excluded.date_paid, \
@@ -182,7 +191,8 @@ pub async fn db_upsert(pool: &SqlitePool, income: &Income) -> Result<(), UpsertE
              conduit_foreign_income     = excluded.conduit_foreign_income, \
              trust_income               = excluded.trust_income, \
              reinvestment_trade_id      = excluded.reinvestment_trade_id, \
-             currency                   = excluded.currency",
+             currency                   = excluded.currency, \
+             holding_account_id         = excluded.holding_account_id",
     )
     .bind(income.id)
     .bind(income.listing_id)
@@ -199,6 +209,7 @@ pub async fn db_upsert(pool: &SqlitePool, income: &Income) -> Result<(), UpsertE
     .bind(income.trust_income)
     .bind(income.reinvestment_trade_id)
     .bind(&income.currency)
+    .bind(income.holding_account_id)
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -279,6 +290,7 @@ async fn upsert(
         reinvestment_trade_id: body.reinvestment_trade_id,
         currency: body.currency,
         buyback_trade_id: None,
+        holding_account_id: body.holding_account_id,
     };
     db_upsert(&pool, &income)
         .await
@@ -337,6 +349,8 @@ mod tests {
 
     async fn insert_test_trade(pool: &SqlitePool) -> i64 {
         let t = trade::Trade {
+            holding_account_id: 1,
+            transfer_id: None,
             id: 1,
             trade_type: trade::TradeType::DRP,
             date: NaiveDate::from_ymd_opt(2024, 3, 15).unwrap(),
@@ -365,6 +379,7 @@ mod tests {
 
     fn dividend_income() -> Income {
         Income {
+            holding_account_id: 1,
             id: 1,
             listing_id: 1,
             date_paid: NaiveDate::from_ymd_opt(2024, 3, 15).unwrap(),
@@ -406,6 +421,7 @@ mod tests {
         let pool = test_pool().await;
         insert_test_listing(&pool).await;
         let dist = Income {
+            holding_account_id: 1,
             id: 2,
             listing_id: 1,
             date_paid: NaiveDate::from_ymd_opt(2024, 6, 30).unwrap(),
@@ -437,6 +453,7 @@ mod tests {
         insert_test_listing(&pool).await;
         let trade_id = insert_test_trade(&pool).await;
         let inc = Income {
+            holding_account_id: 1,
             id: 3,
             listing_id: 1,
             date_paid: NaiveDate::from_ymd_opt(2024, 3, 15).unwrap(),

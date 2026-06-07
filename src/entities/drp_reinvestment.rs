@@ -10,9 +10,13 @@
 //! Enrolment is checked as at the distribution's ex date (registry practice:
 //! DRP participation is fixed at the record date), falling back to the pay
 //! date when no ex date is recorded. That date must fall inside one of the
-//! holding's enrolment periods (`entities::drp_enrolment`) — a distribution
-//! dated before enrolment, or in a gap between unenrolment and re-enrolment,
-//! is rejected — and the matching period's residual handling applies.
+//! enrolment periods *for the distribution's holding account*
+//! (`entities::drp_enrolment` — enrolment is per (listing, holding account),
+//! so an employer-plan account's distribution never reinvests off a personal
+//! account's enrolment) — a distribution dated before enrolment, or in a gap
+//! between unenrolment and re-enrolment, is rejected — and the matching
+//! period's residual handling applies. The created DRP trade lands in the
+//! distribution's holding account.
 //!
 //! The carried-forward residual is *not* stored as a separate running balance:
 //! it lives on each DRP trade (`residual_carried_forward`), and "brought
@@ -105,8 +109,9 @@ pub async fn db_reinvest(
 
     // Load the distribution and its cash components.
     let income = sqlx::query(
-        "SELECT listing_id, date_paid, ex_date, reinvestment_trade_id, franked_amount, \
-         unfranked_amount, foreign_source_income, foreign_tax_paid, tfn_withholding_tax \
+        "SELECT listing_id, holding_account_id, date_paid, ex_date, reinvestment_trade_id, \
+         franked_amount, unfranked_amount, foreign_source_income, foreign_tax_paid, \
+         tfn_withholding_tax \
          FROM income WHERE id = ?",
     )
     .bind(income_id)
@@ -123,6 +128,7 @@ pub async fn db_reinvest(
     }
 
     let listing_id: i64 = income.try_get("listing_id")?;
+    let holding_account_id: i64 = income.try_get("holding_account_id")?;
     let date_paid: NaiveDate = income.try_get("date_paid")?;
     let ex_date: Option<NaiveDate> = income.try_get("ex_date")?;
     let cash = reinvestable_cash(&income)?;
@@ -131,17 +137,21 @@ pub async fn db_reinvest(
     // at the record date), falling back to the pay date when not recorded.
     let entitlement_date = ex_date.unwrap_or(date_paid);
 
-    // That date must fall inside an enrolment period — half-open
-    // [enrolment_date, unenrolment_date), open-ended when NULL — and the
-    // matching period decides what happens to the leftover. No match means the
-    // holding wasn't enrolled when the distribution went ex (never enrolled,
-    // before enrolment, or in an unenrolment gap).
+    // That date must fall inside an enrolment period *for the distribution's
+    // holding account* — half-open [enrolment_date, unenrolment_date),
+    // open-ended when NULL — and the matching period decides what happens to
+    // the leftover. No match means that account's holding wasn't enrolled
+    // when the distribution went ex (never enrolled, before enrolment, in an
+    // unenrolment gap — or only ever enrolled in a different account, e.g. a
+    // personal account's enrolment never reinvests an employer-plan
+    // distribution).
     let matched: Option<(ResidualHandling, NaiveDate, Option<NaiveDate>)> = sqlx::query_as(
         "SELECT residual_handling, enrolment_date, unenrolment_date FROM drp_enrolments \
-         WHERE listing_id = ? AND enrolment_date <= ? \
+         WHERE listing_id = ? AND holding_account_id = ? AND enrolment_date <= ? \
            AND (unenrolment_date IS NULL OR ? < unenrolment_date)",
     )
     .bind(listing_id)
+    .bind(holding_account_id)
     .bind(entitlement_date)
     .bind(entitlement_date)
     .fetch_optional(&mut *tx)
@@ -158,16 +168,18 @@ pub async fn db_reinvest(
         .await?;
 
     // Residual brought forward = the most recent prior DRP trade's
-    // carried-forward, *within the same enrolment period*: an earlier period's
-    // trailing residual was paid out at its unenrolment, so the chain never
-    // crosses a period boundary.
+    // carried-forward, *within the same enrolment period and holding
+    // account*: an earlier period's trailing residual was paid out at its
+    // unenrolment, and another account runs its own chain, so the chain never
+    // crosses a period boundary or an account boundary.
     let prior_cf: Option<String> = sqlx::query_scalar(
         "SELECT residual_carried_forward FROM trades \
-         WHERE listing_id = ? AND trade_type = 'DRP' AND date >= ? \
+         WHERE listing_id = ? AND holding_account_id = ? AND trade_type = 'DRP' AND date >= ? \
            AND (? IS NULL OR date < ?) \
          ORDER BY date DESC, id DESC LIMIT 1",
     )
     .bind(listing_id)
+    .bind(holding_account_id)
     .bind(period_start)
     .bind(period_end)
     .bind(period_end)
@@ -197,8 +209,9 @@ pub async fn db_reinvest(
         "INSERT INTO trades \
          (trade_type, date, settlement_date, listing_id, average_price, quantity, currency, \
           brokerage, gst_on_brokerage, brokerage_currency, fx_rate, contract_note_ref, \
-          residual_brought_forward, residual_carried_forward, residual_paid_out) \
-         VALUES ('DRP', ?, ?, ?, ?, ?, ?, '0', '0', ?, ?, NULL, ?, ?, ?)",
+          residual_brought_forward, residual_carried_forward, residual_paid_out, \
+          holding_account_id) \
+         VALUES ('DRP', ?, ?, ?, ?, ?, ?, '0', '0', ?, ?, NULL, ?, ?, ?, ?)",
     )
     .bind(date)
     .bind(date)
@@ -211,6 +224,7 @@ pub async fn db_reinvest(
     .bind(residual_bf.to_string())
     .bind(carried.to_string())
     .bind(paid_out.to_string())
+    .bind(holding_account_id)
     .execute(&mut *tx)
     .await?;
     let new_id = result.last_insert_rowid();
@@ -291,6 +305,7 @@ mod tests {
         drp_enrolment::db_upsert(
             pool,
             &drp_enrolment::DrpEnrolment {
+                holding_account_id: 1,
                 id,
                 listing_id,
                 enrolment_date: from.parse().unwrap(),
@@ -325,6 +340,7 @@ mod tests {
         income::db_upsert(
             pool,
             &income::Income {
+                holding_account_id: 1,
                 id,
                 listing_id,
                 date_paid: date_paid.parse().unwrap(),
@@ -353,6 +369,74 @@ mod tests {
             fx_rate: None,
             date: None,
         }
+    }
+
+    /// A second holding account (e.g. an employer share plan) for the
+    /// per-account tests.
+    async fn insert_account(pool: &SqlitePool, id: i64, name: &str) {
+        crate::entities::holding_account::db_upsert(
+            pool,
+            &crate::entities::holding_account::HoldingAccount { id, name: name.to_string() },
+        )
+        .await
+        .unwrap();
+    }
+
+    /// Open-ended enrolment from 2024-01-01 in a specific holding account.
+    async fn enrol_in_account(
+        pool: &SqlitePool,
+        id: i64,
+        listing_id: i64,
+        account_id: i64,
+        handling: ResidualHandling,
+    ) {
+        drp_enrolment::db_upsert(
+            pool,
+            &drp_enrolment::DrpEnrolment {
+                id,
+                listing_id,
+                holding_account_id: account_id,
+                enrolment_date: "2024-01-01".parse().unwrap(),
+                unenrolment_date: None,
+                residual_handling: handling,
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    /// Distribution of `cash` paid to a specific holding account.
+    async fn insert_distribution_in_account(
+        pool: &SqlitePool,
+        id: i64,
+        listing_id: i64,
+        account_id: i64,
+        cash: Decimal,
+    ) {
+        income::db_upsert(
+            pool,
+            &income::Income {
+                id,
+                listing_id,
+                holding_account_id: account_id,
+                date_paid: "2024-03-31".parse().unwrap(),
+                ex_date: None,
+                franked_amount: Decimal::ZERO,
+                unfranked_amount: cash,
+                foreign_source_income: Decimal::ZERO,
+                foreign_tax_paid: Decimal::ZERO,
+                tfn_withholding_tax: Decimal::ZERO,
+                franking_credits: Decimal::ZERO,
+                lic_capital_gain_deduction: Decimal::ZERO,
+                conduit_foreign_income: Decimal::ZERO,
+                trust_income: true,
+                reinvestment_trade_id: None,
+                currency: "AUD".to_string(),
+                buyback_trade_id: None,
+            },
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -559,6 +643,75 @@ mod tests {
         let next = db_reinvest(&pool, 2, &body("9")).await.unwrap();
         assert_eq!(next.residual_brought_forward, Decimal::ZERO);
         assert_eq!(next.quantity, Decimal::ZERO); // 8 < 9, no whole share
+    }
+
+    /// The RSU scenario (REQUIREMENTS "Holding accounts"): the same listing
+    /// held in two accounts at once, with the personal account DRP-enrolled
+    /// and the employer-plan account not. A distribution paid to the enrolled
+    /// account reinvests — and the DRP trade lands in that account — while
+    /// the plan account's identical distribution is rejected: enrolment is
+    /// per (listing, holding account), not per listing.
+    #[tokio::test]
+    async fn enrolment_is_per_holding_account() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AUD").await;
+        insert_account(&pool, 2, "ICE Employee Plan").await;
+        // Only the default (personal) account is enrolled.
+        enrol_in_account(&pool, 1, 1, 1, ResidualHandling::CarryForward).await;
+
+        // Personal-account distribution reinvests, into the personal account.
+        insert_distribution_in_account(&pool, 1, 1, 1, Decimal::from(100)).await;
+        let trade = db_reinvest(&pool, 1, &body("9")).await.unwrap();
+        assert_eq!(trade.quantity, Decimal::from(11));
+        assert_eq!(trade.holding_account_id, 1);
+
+        // The plan account's distribution on the same listing is rejected.
+        insert_distribution_in_account(&pool, 2, 1, 2, Decimal::from(100)).await;
+        let err = db_reinvest(&pool, 2, &body("9")).await.unwrap_err();
+        assert!(matches!(err, ReinvestError::NotEnrolled));
+    }
+
+    /// The DRP trade is created in the distribution's holding account, not
+    /// the default one.
+    #[tokio::test]
+    async fn drp_trade_lands_in_the_distributions_account() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AUD").await;
+        insert_account(&pool, 2, "Personal CHESS").await;
+        enrol_in_account(&pool, 1, 1, 2, ResidualHandling::CarryForward).await;
+        insert_distribution_in_account(&pool, 1, 1, 2, Decimal::from(100)).await;
+
+        let trade = db_reinvest(&pool, 1, &body("9")).await.unwrap();
+        assert_eq!(trade.holding_account_id, 2);
+    }
+
+    /// Each (listing, holding account) runs its own residual chain: a
+    /// carried-forward leftover in one account is never brought forward by a
+    /// reinvestment in another.
+    #[tokio::test]
+    async fn carried_residual_does_not_cross_accounts() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AUD").await;
+        insert_account(&pool, 2, "Personal CHESS").await;
+        enrol_in_account(&pool, 1, 1, 1, ResidualHandling::CarryForward).await;
+        enrol_in_account(&pool, 2, 1, 2, ResidualHandling::CarryForward).await;
+
+        // Account 1: $100 at $9 → 11 shares, $1 carried forward.
+        insert_distribution_in_account(&pool, 1, 1, 1, Decimal::from(100)).await;
+        let first = db_reinvest(&pool, 1, &body("9")).await.unwrap();
+        assert_eq!(first.residual_carried_forward, Decimal::ONE);
+
+        // Account 2's next reinvestment brings nothing forward from account 1.
+        insert_distribution_in_account(&pool, 2, 1, 2, Decimal::from(8)).await;
+        let other = db_reinvest(&pool, 2, &body("9")).await.unwrap();
+        assert_eq!(other.residual_brought_forward, Decimal::ZERO);
+        assert_eq!(other.quantity, Decimal::ZERO); // 8 < 9, no whole share
+
+        // Account 1's own chain still picks its $1 up.
+        insert_distribution_in_account(&pool, 3, 1, 1, Decimal::from(8)).await;
+        let next = db_reinvest(&pool, 3, &body("9")).await.unwrap();
+        assert_eq!(next.residual_brought_forward, Decimal::ONE);
+        assert_eq!(next.quantity, Decimal::from(1));
     }
 
     #[tokio::test]

@@ -48,8 +48,14 @@ impl Default for ResidualHandling {
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct DrpEnrolment {
     pub id: i64,
-    /// Holding this enrolment period applies to.
+    /// Listing this enrolment period applies to.
     pub listing_id: i64,
+    /// The holding account the enrolment applies to: enrolment is per
+    /// (listing, holding account), so the same listing may be enrolled in one
+    /// account and unenrolled in another (e.g. an employer share-plan account
+    /// that cannot DRP alongside an enrolled personal account). Defaults to
+    /// the seeded default account when omitted from a request.
+    pub holding_account_id: i64,
     /// First day of the period (inclusive).
     pub enrolment_date: NaiveDate,
     /// Day the unenrolment takes effect (exclusive): distributions with an ex
@@ -62,6 +68,9 @@ pub struct DrpEnrolment {
 #[derive(Debug, Deserialize)]
 pub struct DrpEnrolmentBody {
     pub listing_id: i64,
+    /// Defaults to the seeded default holding account when omitted.
+    #[serde(default = "crate::entities::holding_account::default_holding_account_id")]
+    pub holding_account_id: i64,
     pub enrolment_date: NaiveDate,
     #[serde(default)]
     pub unenrolment_date: Option<NaiveDate>,
@@ -91,11 +100,13 @@ pub fn router() -> Router<SqlitePool> {
         .route("/drp_enrolments/{id}", get(get_one).put(upsert).delete(delete))
 }
 
-const COLUMNS: &str = "id, listing_id, enrolment_date, unenrolment_date, residual_handling";
+const COLUMNS: &str =
+    "id, listing_id, holding_account_id, enrolment_date, unenrolment_date, residual_handling";
 
 pub async fn db_list(pool: &SqlitePool) -> Result<Vec<DrpEnrolment>, sqlx::Error> {
     sqlx::query_as(&format!(
-        "SELECT {COLUMNS} FROM drp_enrolments ORDER BY listing_id, enrolment_date, id"
+        "SELECT {COLUMNS} FROM drp_enrolments \
+         ORDER BY listing_id, holding_account_id, enrolment_date, id"
     ))
     .fetch_all(pool)
     .await
@@ -119,16 +130,19 @@ pub async fn db_upsert(pool: &SqlitePool, period: &DrpEnrolment) -> Result<(), U
 
     let mut tx = pool.begin().await?;
 
-    // Half-open [start, end) overlap test against the listing's other periods:
-    // overlap iff new.start < other.end AND other.start < new.end, where an
-    // open end is unbounded. Touching periods (end == next start) are fine.
+    // Half-open [start, end) overlap test against the (listing, holding
+    // account)'s other periods — the same listing's periods in *another*
+    // account are independent: overlap iff new.start < other.end AND
+    // other.start < new.end, where an open end is unbounded. Touching periods
+    // (end == next start) are fine.
     let overlapping: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM drp_enrolments \
-         WHERE listing_id = ? AND id != ? \
+         WHERE listing_id = ? AND holding_account_id = ? AND id != ? \
            AND (unenrolment_date IS NULL OR ? < unenrolment_date) \
            AND (? IS NULL OR enrolment_date < ?)",
     )
     .bind(period.listing_id)
+    .bind(period.holding_account_id)
     .bind(period.id)
     .bind(period.enrolment_date)
     .bind(period.unenrolment_date)
@@ -140,16 +154,19 @@ pub async fn db_upsert(pool: &SqlitePool, period: &DrpEnrolment) -> Result<(), U
     }
 
     sqlx::query(
-        "INSERT INTO drp_enrolments (id, listing_id, enrolment_date, unenrolment_date, residual_handling) \
-         VALUES (?, ?, ?, ?, ?) \
+        "INSERT INTO drp_enrolments \
+         (id, listing_id, holding_account_id, enrolment_date, unenrolment_date, residual_handling) \
+         VALUES (?, ?, ?, ?, ?, ?) \
          ON CONFLICT(id) DO UPDATE SET \
            listing_id = excluded.listing_id, \
+           holding_account_id = excluded.holding_account_id, \
            enrolment_date = excluded.enrolment_date, \
            unenrolment_date = excluded.unenrolment_date, \
            residual_handling = excluded.residual_handling",
     )
     .bind(period.id)
     .bind(period.listing_id)
+    .bind(period.holding_account_id)
     .bind(period.enrolment_date)
     .bind(period.unenrolment_date)
     .bind(period.residual_handling)
@@ -164,10 +181,12 @@ pub async fn db_upsert(pool: &SqlitePool, period: &DrpEnrolment) -> Result<(), U
     if let Some(end) = period.unenrolment_date {
         let trailing: Option<(i64, String, String)> = sqlx::query_as(
             "SELECT id, residual_carried_forward, residual_paid_out FROM trades \
-             WHERE listing_id = ? AND trade_type = 'DRP' AND date >= ? AND date < ? \
+             WHERE listing_id = ? AND holding_account_id = ? \
+               AND trade_type = 'DRP' AND date >= ? AND date < ? \
              ORDER BY date DESC, id DESC LIMIT 1",
         )
         .bind(period.listing_id)
+        .bind(period.holding_account_id)
         .bind(period.enrolment_date)
         .bind(end)
         .fetch_optional(&mut *tx)
@@ -226,6 +245,7 @@ async fn upsert(
     let period = DrpEnrolment {
         id,
         listing_id: body.listing_id,
+        holding_account_id: body.holding_account_id,
         enrolment_date: body.enrolment_date,
         unenrolment_date: body.unenrolment_date,
         residual_handling: body.residual_handling,
@@ -293,6 +313,7 @@ mod tests {
         handling: ResidualHandling,
     ) -> DrpEnrolment {
         DrpEnrolment {
+            holding_account_id: 1,
             id,
             listing_id,
             enrolment_date: d(from),
@@ -497,6 +518,68 @@ mod tests {
         assert_eq!(residuals(&pool, 10).await, ("5".to_string(), "0".to_string()));
     }
 
+    /// Enrolment is per (listing, holding account): the same listing may hold
+    /// an open-ended period in two accounts at once, while two open periods
+    /// in one account still overlap.
+    #[tokio::test]
+    async fn db_same_listing_may_be_enrolled_per_account() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        crate::entities::holding_account::db_upsert(
+            &pool,
+            &crate::entities::holding_account::HoldingAccount {
+                id: 2,
+                name: "ICE Employee Plan".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+
+        db_upsert(&pool, &period(1, 1, "2024-01-01", None, ResidualHandling::CarryForward))
+            .await
+            .unwrap();
+
+        // Same listing, other account: a coexisting open period is fine.
+        let mut other_account = period(2, 1, "2024-01-01", None, ResidualHandling::PayOut);
+        other_account.holding_account_id = 2;
+        db_upsert(&pool, &other_account).await.unwrap();
+
+        // A second open period within account 2 still overlaps.
+        let mut doubly_open = period(3, 1, "2025-01-01", None, ResidualHandling::PayOut);
+        doubly_open.holding_account_id = 2;
+        assert!(matches!(db_upsert(&pool, &doubly_open).await, Err(UpsertError::Overlap)));
+    }
+
+    /// Closing a period settles the trailing residual of *its* account's
+    /// chain only — another account's DRP trades on the same listing are
+    /// untouched.
+    #[tokio::test]
+    async fn db_unenrolment_only_settles_the_periods_accounts_trades() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        crate::entities::holding_account::db_upsert(
+            &pool,
+            &crate::entities::holding_account::HoldingAccount {
+                id: 2,
+                name: "Personal CHESS".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        // An in-period DRP trade, but in account 2.
+        insert_drp_trade(&pool, 10, 1, "2024-06-30", "5", "0").await;
+        sqlx::query("UPDATE trades SET holding_account_id = 2 WHERE id = 10")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // Closing the account-1 period leaves account 2's chain alone.
+        db_upsert(&pool, &period(1, 1, "2024-01-01", Some("2025-01-01"), ResidualHandling::CarryForward))
+            .await
+            .unwrap();
+        assert_eq!(residuals(&pool, 10).await, ("5".to_string(), "0".to_string()));
+    }
+
     /// Migration 0008 rebuilds the old one-row-per-listing table into periods:
     /// each existing enrolment must become an open-ended period (enrolled "since
     /// forever") preserving its residual handling — no data dropped.
@@ -524,8 +607,12 @@ mod tests {
             .await
             .unwrap();
 
-        let v8 = migrator.iter().find(|m| m.version == 8).expect("migration 0008 exists");
-        sqlx::raw_sql(&v8.sql).execute(&pool).await.unwrap();
+        // Apply 0008 and everything after it (0016 adds holding_account_id,
+        // which db_list reads — and must migrate the row to the seeded
+        // default account).
+        for m in migrator.iter().filter(|m| m.version >= 8) {
+            sqlx::raw_sql(&m.sql).execute(&pool).await.unwrap();
+        }
 
         let periods = db_list(&pool).await.unwrap();
         assert_eq!(periods.len(), 1);
@@ -533,6 +620,11 @@ mod tests {
         assert_eq!(periods[0].enrolment_date, d("0001-01-01"), "covers every past distribution");
         assert_eq!(periods[0].unenrolment_date, None, "open-ended = still enrolled");
         assert_eq!(periods[0].residual_handling, ResidualHandling::PayOut);
+        assert_eq!(
+            periods[0].holding_account_id,
+            crate::entities::holding_account::DEFAULT_HOLDING_ACCOUNT_ID,
+            "existing enrolments migrate to the seeded default account"
+        );
     }
 
     #[tokio::test]

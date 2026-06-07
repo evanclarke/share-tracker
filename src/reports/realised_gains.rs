@@ -10,6 +10,9 @@ use std::collections::HashMap;
 pub struct RealisedGainLoss {
     pub sale_trade_id: i64,
     pub listing_id: i64,
+    /// The holding account the Sell happened in (the same taxpayer either
+    /// way — totals are unchanged; rows identify the account).
+    pub holding_account_id: i64,
     pub sale_date: NaiveDate,
     /// Net proceeds from the allocated portion (sale price × qty − pro-rated
     /// brokerage), converted to AUD at the sale's ATO FX rate.
@@ -42,13 +45,16 @@ pub async fn db_realised_gains(pool: &SqlitePool) -> Result<Vec<RealisedGainLoss
     // demerger_action_id set) is not a realised gain or loss: the rollover
     // disregards the gain on the original shares
     // (docs/takeovers-and-scrip-for-scrip.md, docs/demergers.md), and its
-    // zero proceeds must never surface as a capital loss. Its allocations are
-    // skipped with it (the sale id is absent from sell_map).
+    // zero proceeds must never surface as a capital loss. A holding-account
+    // transfer-out Sell (transfer_id set) is not even a disposal — the same
+    // beneficial owner holds the shares before and after, so it is no CGT
+    // event at all. Their allocations are skipped with them (the sale id is
+    // absent from sell_map).
     let sell_rows = sqlx::query(
-        "SELECT id, listing_id, date, quantity, average_price, brokerage, gst_on_brokerage, \
-         currency, fx_rate \
+        "SELECT id, listing_id, holding_account_id, date, quantity, average_price, brokerage, \
+         gst_on_brokerage, currency, fx_rate \
          FROM trades WHERE trade_type = 'Sell' \
-           AND scrip_action_id IS NULL AND demerger_action_id IS NULL",
+           AND scrip_action_id IS NULL AND demerger_action_id IS NULL AND transfer_id IS NULL",
     )
     .fetch_all(pool)
     .await?;
@@ -82,6 +88,7 @@ pub async fn db_realised_gains(pool: &SqlitePool) -> Result<Vec<RealisedGainLoss
     // rates — so totals are never aggregated across mixed currencies.
     struct SellInfo {
         listing_id: i64,
+        holding_account_id: i64,
         date: NaiveDate,
         quantity: Decimal,
         average_price: Decimal,
@@ -116,6 +123,7 @@ pub async fn db_realised_gains(pool: &SqlitePool) -> Result<Vec<RealisedGainLoss
             id,
             SellInfo {
                 listing_id: row.try_get("listing_id")?,
+                holding_account_id: row.try_get("holding_account_id")?,
                 date: row.try_get("date")?,
                 quantity: parse_dec("quantity", row.try_get("quantity")?)?,
                 average_price: parse_dec("average_price", row.try_get("average_price")?)?,
@@ -277,6 +285,7 @@ pub async fn db_realised_gains(pool: &SqlitePool) -> Result<Vec<RealisedGainLoss
             Some(RealisedGainLoss {
                 sale_trade_id: sale_id,
                 listing_id: sale.listing_id,
+                holding_account_id: sale.holding_account_id,
                 sale_date: sale.date,
                 proceeds,
                 cost_base,
@@ -347,6 +356,8 @@ mod tests {
         trade::db_upsert(
             pool,
             &trade::Trade {
+                holding_account_id: 1,
+                transfer_id: None,
                 id,
                 trade_type: trade::TradeType::Buy,
                 date,
@@ -385,6 +396,8 @@ mod tests {
         trade::db_upsert(
             pool,
             &trade::Trade {
+                holding_account_id: 1,
+                transfer_id: None,
                 id,
                 trade_type: trade::TradeType::Sell,
                 date,
@@ -503,6 +516,8 @@ mod tests {
         trade::db_upsert(
             &pool,
             &trade::Trade {
+                holding_account_id: 1,
+                transfer_id: None,
                 id: 1,
                 trade_type: trade::TradeType::Buy,
                 date: buy_date,
@@ -531,6 +546,8 @@ mod tests {
         trade::db_upsert(
             &pool,
             &trade::Trade {
+                holding_account_id: 1,
+                transfer_id: None,
                 id: 2,
                 trade_type: trade::TradeType::Sell,
                 date: sell_date,
@@ -691,6 +708,7 @@ mod tests {
         amma::db_upsert(
             &pool,
             &amma::AmmaStatement {
+                holding_account_id: 1,
                 id: 1,
                 listing_id: 1,
                 tax_year_end_date: NaiveDate::from_ymd_opt(2024, 6, 30).unwrap(),
@@ -1045,6 +1063,8 @@ mod tests {
         trade::db_upsert(
             pool,
             &trade::Trade {
+                holding_account_id: 1,
+                transfer_id: None,
                 id,
                 trade_type,
                 date,
@@ -1263,6 +1283,8 @@ mod tests {
         trade::db_upsert(
             &pool,
             &trade::Trade {
+                holding_account_id: 1,
+                transfer_id: None,
                 id: 50,
                 trade_type: trade::TradeType::Sell,
                 date: sell_date,

@@ -255,6 +255,8 @@ mod tests {
         trade::db_upsert(
             pool,
             &trade::Trade {
+                holding_account_id: 1,
+                transfer_id: None,
                 id,
                 trade_type: trade::TradeType::Buy,
                 date: NaiveDate::from_ymd_opt(2024, 1, 15).unwrap(),
@@ -286,6 +288,8 @@ mod tests {
         trade::db_upsert(
             pool,
             &trade::Trade {
+                holding_account_id: 1,
+                transfer_id: None,
                 id,
                 trade_type: trade::TradeType::DRP,
                 date: NaiveDate::from_ymd_opt(2024, 3, 15).unwrap(),
@@ -317,6 +321,8 @@ mod tests {
         trade::db_upsert(
             pool,
             &trade::Trade {
+                holding_account_id: 1,
+                transfer_id: None,
                 id,
                 trade_type: trade::TradeType::Sell,
                 date: NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(),

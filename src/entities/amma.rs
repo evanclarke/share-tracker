@@ -48,6 +48,10 @@ pub struct AmmaStatement {
     /// converts non-AUD amounts to AUD via the ATO rate for this currency and the
     /// month of `tax_year_end_date` (see `infra::fx::to_aud`). Defaults to AUD.
     pub currency: String,
+    /// The holding account the statement covers (a registry issues one AMMA
+    /// statement per holder account; see `entities::holding_account`).
+    /// Defaults to the seeded default account when omitted from a request.
+    pub holding_account_id: i64,
 }
 
 impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for AmmaStatement {
@@ -78,6 +82,7 @@ impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for AmmaStatement {
             cost_base_adjustment: dec(row.try_get("cost_base_adjustment")?)?,
             tfn_withholding_tax: dec(row.try_get("tfn_withholding_tax")?)?,
             currency: row.try_get("currency")?,
+            holding_account_id: row.try_get("holding_account_id")?,
         })
     }
 }
@@ -123,6 +128,9 @@ pub struct AmmaStatementBody {
     pub tfn_withholding_tax: Decimal,
     #[serde(default = "default_currency")]
     pub currency: String,
+    /// Defaults to the seeded default holding account when omitted.
+    #[serde(default = "crate::entities::holding_account::default_holding_account_id")]
+    pub holding_account_id: i64,
 }
 
 fn default_currency() -> String {
@@ -142,7 +150,7 @@ pub async fn db_list(pool: &SqlitePool) -> Result<Vec<AmmaStatement>, sqlx::Erro
          franking_credits, net_rent, foreign_income, foreign_tax_credits, other_income, \
          cgt_discount_gains, cgt_indexation_gains, cgt_other_gains, capital_losses_applied, \
          tax_deferred_amount, tax_free_amount, cost_base_adjustment, tfn_withholding_tax, \
-         currency \
+         currency, holding_account_id \
          FROM amma_statements ORDER BY tax_year_end_date, id",
     )
     .fetch_all(pool)
@@ -156,7 +164,7 @@ pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<AmmaStatement>,
          franking_credits, net_rent, foreign_income, foreign_tax_credits, other_income, \
          cgt_discount_gains, cgt_indexation_gains, cgt_other_gains, capital_losses_applied, \
          tax_deferred_amount, tax_free_amount, cost_base_adjustment, tfn_withholding_tax, \
-         currency \
+         currency, holding_account_id \
          FROM amma_statements WHERE id = ?",
     )
     .bind(id)
@@ -172,8 +180,8 @@ pub async fn db_upsert(pool: &SqlitePool, stmt: &AmmaStatement) -> Result<(), sq
           franking_credits, net_rent, foreign_income, foreign_tax_credits, other_income, \
           cgt_discount_gains, cgt_indexation_gains, cgt_other_gains, capital_losses_applied, \
           tax_deferred_amount, tax_free_amount, cost_base_adjustment, tfn_withholding_tax, \
-          currency) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+          currency, holding_account_id) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT(id) DO UPDATE SET \
              listing_id                      = excluded.listing_id, \
              tax_year_end_date               = excluded.tax_year_end_date, \
@@ -195,7 +203,8 @@ pub async fn db_upsert(pool: &SqlitePool, stmt: &AmmaStatement) -> Result<(), sq
              tax_free_amount                 = excluded.tax_free_amount, \
              cost_base_adjustment            = excluded.cost_base_adjustment, \
              tfn_withholding_tax             = excluded.tfn_withholding_tax, \
-             currency                        = excluded.currency",
+             currency                        = excluded.currency, \
+             holding_account_id              = excluded.holding_account_id",
     )
     .bind(stmt.id)
     .bind(stmt.listing_id)
@@ -219,6 +228,7 @@ pub async fn db_upsert(pool: &SqlitePool, stmt: &AmmaStatement) -> Result<(), sq
     .bind(stmt.cost_base_adjustment.to_string())
     .bind(stmt.tfn_withholding_tax.to_string())
     .bind(&stmt.currency)
+    .bind(stmt.holding_account_id)
     .execute(pool)
     .await?;
     Ok(())
@@ -278,6 +288,7 @@ async fn upsert(
         cost_base_adjustment: body.cost_base_adjustment,
         tfn_withholding_tax: body.tfn_withholding_tax,
         currency: body.currency,
+        holding_account_id: body.holding_account_id,
     };
     db_upsert(&pool, &stmt)
         .await
@@ -328,6 +339,7 @@ mod tests {
 
     fn sample_amma() -> AmmaStatement {
         AmmaStatement {
+            holding_account_id: 1,
             id: 1,
             listing_id: 1,
             tax_year_end_date: NaiveDate::from_ymd_opt(2024, 6, 30).unwrap(),

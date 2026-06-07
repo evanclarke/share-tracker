@@ -58,6 +58,10 @@ pub struct ExerciseBody {
     /// 1; reports prefer the ATO rate and fall back to this — see `infra::fx`).
     #[serde(default)]
     pub fx_rate: Option<Decimal>,
+    /// The holding account the exercised parcel lands in. Defaults to the
+    /// seeded default account when omitted.
+    #[serde(default = "crate::entities::holding_account::default_holding_account_id")]
+    pub holding_account_id: i64,
 }
 
 #[derive(Debug)]
@@ -174,8 +178,8 @@ pub async fn db_exercise(
          (trade_type, date, settlement_date, listing_id, average_price, quantity, currency, \
           brokerage, gst_on_brokerage, brokerage_currency, fx_rate, contract_note_ref, \
           residual_brought_forward, residual_carried_forward, residual_paid_out, \
-          rights_action_id) \
-         VALUES ('Buy', ?, ?, ?, ?, ?, ?, ?, '0', ?, ?, NULL, '0', '0', '0', ?)",
+          rights_action_id, holding_account_id) \
+         VALUES ('Buy', ?, ?, ?, ?, ?, ?, ?, '0', ?, ?, NULL, '0', '0', '0', ?, ?)",
     )
     .bind(body.date)
     .bind(body.date)
@@ -187,6 +191,7 @@ pub async fn db_exercise(
     .bind(&currency)
     .bind(fx_rate.to_string())
     .bind(action_id)
+    .bind(body.holding_account_id)
     .execute(&mut *tx)
     .await?;
     let new_id = result.last_insert_rowid();
@@ -261,6 +266,8 @@ mod tests {
         trade::db_upsert(
             pool,
             &Trade {
+                holding_account_id: 1,
+                transfer_id: None,
                 id,
                 trade_type: TradeType::Buy,
                 date,
@@ -299,6 +306,7 @@ mod tests {
             pool,
             id,
             &sell::SellBody {
+                holding_account_id: 1,
                 date,
                 settlement_date: Some(date),
                 listing_id: 1,
@@ -342,6 +350,7 @@ mod tests {
 
     fn body(date: NaiveDate, units: &str) -> ExerciseBody {
         ExerciseBody {
+            holding_account_id: 1,
             date,
             units: units.parse().unwrap(),
             rights_cost: None,
@@ -390,6 +399,7 @@ mod tests {
         insert_rights_issue(&pool, 10, d(2024, 7, 1)).await;
 
         let exercise = ExerciseBody {
+            holding_account_id: 1,
             date: d(2024, 8, 1),
             units: "250".parse().unwrap(),
             rights_cost: Some("50.05".parse().unwrap()),
@@ -534,6 +544,7 @@ mod tests {
         let err = db_exercise(&pool, 10, &body(d(2024, 8, 1), "-5")).await;
         assert!(matches!(err, Err(ExerciseError::NonPositiveUnits)));
         let exercise = ExerciseBody {
+            holding_account_id: 1,
             date: d(2024, 8, 1),
             units: "10".parse().unwrap(),
             rights_cost: Some("-1".parse().unwrap()),
@@ -620,6 +631,28 @@ mod tests {
         assert!(sale.capital_gain_loss > Decimal::ZERO);
         assert_eq!(sale.discount_eligible_gain, Decimal::ZERO);
         assert_eq!(sale.non_discountable_gain, sale.capital_gain_loss);
+    }
+
+    /// The exercise says which holding account it acts in: the exercised
+    /// parcel lands there, not in the default account.
+    #[tokio::test]
+    async fn exercise_lands_in_the_chosen_holding_account() {
+        use crate::entities::holding_account::{self, HoldingAccount};
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        holding_account::db_upsert(
+            &pool,
+            &HoldingAccount { id: 2, name: "Personal CHESS".to_string() },
+        )
+        .await
+        .unwrap();
+        insert_buy(&pool, 1, d(2024, 1, 10), "1000", "8.00").await;
+        insert_rights_issue(&pool, 10, d(2024, 3, 1)).await;
+
+        let mut exercise = body(d(2024, 4, 1), "100");
+        exercise.holding_account_id = 2;
+        let trade = db_exercise(&pool, 10, &exercise).await.unwrap();
+        assert_eq!(trade.holding_account_id, 2);
     }
 
     // API-level tests
