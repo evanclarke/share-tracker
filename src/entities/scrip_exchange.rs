@@ -283,6 +283,8 @@ pub async fn db_exchange(pool: &SqlitePool, action_id: i64) -> Result<Exchange, 
         .fetch_one(&mut *tx)
         .await?;
     let sell_body = SellBody {
+        brokerage_includes_gst: false,
+        statement_total: None,
         holding_account_id: 1,
         date: action.date,
         settlement_date: Some(action.date),
@@ -430,6 +432,8 @@ mod tests {
         trade::db_upsert(
             pool,
             &Trade {
+                brokerage_includes_gst: false,
+                statement_total: None,
                 holding_account_id: 1,
                 transfer_id: None,
                 id,
@@ -496,6 +500,8 @@ mod tests {
             pool,
             sell_id,
             &SellBody {
+                brokerage_includes_gst: false,
+                statement_total: None,
                 holding_account_id: 1,
                 date,
                 settlement_date: Some(date),
@@ -585,6 +591,8 @@ mod tests {
         trade::db_upsert(
             &pool,
             &Trade {
+                brokerage_includes_gst: false,
+                statement_total: None,
                 holding_account_id: 1,
                 transfer_id: None,
                 id: 1,
@@ -844,6 +852,8 @@ mod tests {
             &pool,
             ex.sell.id,
             &SellBody {
+                brokerage_includes_gst: false,
+                statement_total: None,
                 holding_account_id: 1,
                 date: d(2024, 7, 1),
                 settlement_date: Some(d(2024, 7, 1)),
@@ -901,6 +911,8 @@ mod tests {
             &pool,
             50,
             &SellBody {
+                brokerage_includes_gst: false,
+                statement_total: None,
                 holding_account_id: 1,
                 date: d(2025, 1, 10),
                 settlement_date: Some(d(2025, 1, 12)),

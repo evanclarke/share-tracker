@@ -462,6 +462,22 @@ mod tests {
         assert_eq!(inc.reinvestment_trade_id, Some(trade.id));
     }
 
+    /// Operation-created trades take no part in GST-inclusive entry or the
+    /// statement cross-check: a reinvestment trade reads back with the flag
+    /// off and no statement total (the columns' defaults).
+    #[tokio::test]
+    async fn reinvestment_trade_is_not_gst_flagged_and_has_no_statement_total() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AUD").await;
+        enrol(&pool, 1, ResidualHandling::CarryForward).await;
+        insert_distribution(&pool, 1, 1, Decimal::from(100), Decimal::ZERO).await;
+
+        let trade = db_reinvest(&pool, 1, &body("9")).await.unwrap();
+        let stored = crate::entities::trade::db_get(&pool, trade.id).await.unwrap().unwrap();
+        assert!(!stored.brokerage_includes_gst);
+        assert_eq!(stored.statement_total, None);
+    }
+
     #[tokio::test]
     async fn carried_residual_is_picked_up_by_the_next_reinvestment() {
         let pool = test_pool().await;

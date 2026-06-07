@@ -266,6 +266,8 @@ mod tests {
         trade::db_upsert(
             pool,
             &Trade {
+                brokerage_includes_gst: false,
+                statement_total: None,
                 holding_account_id: 1,
                 transfer_id: None,
                 id,
@@ -306,6 +308,8 @@ mod tests {
             pool,
             id,
             &sell::SellBody {
+                brokerage_includes_gst: false,
+                statement_total: None,
                 holding_account_id: 1,
                 date,
                 settlement_date: Some(date),

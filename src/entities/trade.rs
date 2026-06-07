@@ -28,8 +28,18 @@ pub struct Trade {
     pub average_price: Decimal,
     pub quantity: Decimal,
     pub currency: String,
+    /// Always stored ex-GST: when a request flags `brokerage_includes_gst`,
+    /// the entered inclusive amount is split at write time (see
+    /// `split_gst_inclusive`) before it lands here, so the cost-base
+    /// arithmetic (`brokerage + gst_on_brokerage`) holds unconditionally.
     pub brokerage: Decimal,
     pub gst_on_brokerage: Decimal,
+    /// Records that the brokerage amount was *entered* GST-inclusive and
+    /// server-split. Persisted only so the entry form can round-trip the
+    /// trade (re-presenting `brokerage + gst_on_brokerage` as one inclusive
+    /// amount); the stored money columns are already split, so nothing else
+    /// reads it.
+    pub brokerage_includes_gst: bool,
     pub brokerage_currency: String,
     /// Manual foreign-per-AUD override (same convention as the ATO rate: AUD =
     /// foreign / fx_rate). Reports prefer the ATO RBA rate for the trade's month
@@ -37,6 +47,13 @@ pub struct Trade {
     /// 1.0 for AUD trades.
     pub fx_rate: Decimal,
     pub contract_note_ref: Option<String>,
+    /// The broker statement's net transaction total in the brokerage
+    /// currency, kept for cross-referencing against the contract note.
+    /// Validated at write time (see `check_statement_total`) — a value that
+    /// doesn't reconcile with quantity × price ± (brokerage + GST) is
+    /// rejected — and informational-only after that: no report or
+    /// calculation uses it.
+    pub statement_total: Option<Decimal>,
     /// DRP reinvestment residual cash (DRP trades only; 0 for Buy/Sell). When a
     /// distribution doesn't divide evenly into whole shares, the leftover is
     /// carried forward to the next reinvestment or paid out. These are populated
@@ -123,9 +140,14 @@ impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for Trade {
             currency: row.try_get("currency")?,
             brokerage: dec(row.try_get("brokerage")?)?,
             gst_on_brokerage: dec(row.try_get("gst_on_brokerage")?)?,
+            brokerage_includes_gst: row.try_get("brokerage_includes_gst")?,
             brokerage_currency: row.try_get("brokerage_currency")?,
             fx_rate: dec(row.try_get("fx_rate")?)?,
             contract_note_ref: row.try_get("contract_note_ref")?,
+            statement_total: row
+                .try_get::<Option<String>, _>("statement_total")?
+                .map(dec)
+                .transpose()?,
             residual_brought_forward: dec(row.try_get("residual_brought_forward")?)?,
             residual_carried_forward: dec(row.try_get("residual_carried_forward")?)?,
             residual_paid_out: dec(row.try_get("residual_paid_out")?)?,
@@ -150,12 +172,20 @@ pub struct TradeBody {
     pub average_price: Decimal,
     pub quantity: Decimal,
     pub currency: String,
+    /// GST-inclusive when `brokerage_includes_gst` is set (the server splits
+    /// it; any supplied `gst_on_brokerage` is ignored), ex-GST otherwise.
     pub brokerage: Decimal,
+    #[serde(default)]
     pub gst_on_brokerage: Decimal,
+    #[serde(default)]
+    pub brokerage_includes_gst: bool,
     pub brokerage_currency: String,
     pub fx_rate: Decimal,
     #[serde(default)]
     pub contract_note_ref: Option<String>,
+    /// Optional statement cross-check; see `Trade::statement_total`.
+    #[serde(default)]
+    pub statement_total: Option<Decimal>,
     #[serde(default)]
     pub residual_brought_forward: Decimal,
     #[serde(default)]
@@ -174,10 +204,82 @@ pub fn router() -> Router<SqlitePool> {
         .route("/trades/{id}", get(get_one).put(upsert).delete(delete))
 }
 
+/// Split a GST-inclusive brokerage amount into its (ex-GST brokerage, GST)
+/// components. Australian GST is 10%, so an inclusive amount carries 1/11
+/// GST; the GST is rounded to the cent (half away from zero, matching how
+/// broker statements quote it) and the brokerage keeps the exact remainder,
+/// so the pair always sums back to the amount actually paid.
+pub(crate) fn split_gst_inclusive(amount: Decimal) -> (Decimal, Decimal) {
+    let gst = (amount / Decimal::from(11))
+        .round_dp_with_strategy(2, rust_decimal::RoundingStrategy::MidpointAwayFromZero);
+    (amount - gst, gst)
+}
+
+/// Resolve a request's brokerage pair: the server-side ÷11 split when the
+/// amount was entered GST-inclusive (any supplied GST value is ignored —
+/// deriving it is the point of the flag), or the values as entered otherwise.
+pub(crate) fn resolve_brokerage(
+    includes_gst: bool,
+    brokerage: Decimal,
+    gst_on_brokerage: Decimal,
+) -> (Decimal, Decimal) {
+    if includes_gst {
+        split_gst_inclusive(brokerage)
+    } else {
+        (brokerage, gst_on_brokerage)
+    }
+}
+
+/// Why a supplied statement total failed to reconcile (both map to 422).
+#[derive(Debug, PartialEq)]
+pub(crate) enum StatementTotalError {
+    /// The trade and brokerage currencies differ, so no single-currency
+    /// total exists to check against — supplying one is rejected rather
+    /// than inventing an FX conversion.
+    CurrencyMismatch,
+    /// The supplied total does not equal the computed figure (carried so
+    /// the rejection can say what the trade actually adds up to).
+    TotalMismatch { expected: Decimal },
+}
+
+/// Cross-check an optionally supplied statement total against the trade's
+/// own figures: quantity × price + brokerage + GST for a Buy/DRP (amount
+/// payable), quantity × price − brokerage − GST for a Sell (net proceeds
+/// receivable — the statement nets costs out). Comparison is numeric
+/// (`Decimal` equality ignores trailing zeros: 1234.50 matches 1234.5).
+/// `None` means the statement total wasn't recorded — nothing to check.
+pub(crate) fn check_statement_total(
+    statement_total: Option<Decimal>,
+    trade_type: TradeType,
+    quantity: Decimal,
+    average_price: Decimal,
+    brokerage: Decimal,
+    gst_on_brokerage: Decimal,
+    currency: &str,
+    brokerage_currency: &str,
+) -> Result<(), StatementTotalError> {
+    let Some(total) = statement_total else {
+        return Ok(());
+    };
+    if currency != brokerage_currency {
+        return Err(StatementTotalError::CurrencyMismatch);
+    }
+    let costs = brokerage + gst_on_brokerage;
+    let expected = match trade_type {
+        TradeType::Buy | TradeType::DRP => quantity * average_price + costs,
+        TradeType::Sell => quantity * average_price - costs,
+    };
+    if total != expected {
+        return Err(StatementTotalError::TotalMismatch { expected });
+    }
+    Ok(())
+}
+
 pub async fn db_list(pool: &SqlitePool) -> Result<Vec<Trade>, sqlx::Error> {
     sqlx::query_as(
         "SELECT id, trade_type, date, settlement_date, listing_id, average_price, quantity, \
-         currency, brokerage, gst_on_brokerage, brokerage_currency, fx_rate, contract_note_ref, \
+         currency, brokerage, gst_on_brokerage, brokerage_includes_gst, brokerage_currency, \
+         fx_rate, contract_note_ref, statement_total, \
          residual_brought_forward, residual_carried_forward, residual_paid_out, rights_action_id, \
          buyback_action_id, scrip_action_id, demerger_action_id, deemed_acquisition_date, \
          holding_account_id, transfer_id \
@@ -190,7 +292,8 @@ pub async fn db_list(pool: &SqlitePool) -> Result<Vec<Trade>, sqlx::Error> {
 pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<Trade>, sqlx::Error> {
     sqlx::query_as(
         "SELECT id, trade_type, date, settlement_date, listing_id, average_price, quantity, \
-         currency, brokerage, gst_on_brokerage, brokerage_currency, fx_rate, contract_note_ref, \
+         currency, brokerage, gst_on_brokerage, brokerage_includes_gst, brokerage_currency, \
+         fx_rate, contract_note_ref, statement_total, \
          residual_brought_forward, residual_carried_forward, residual_paid_out, rights_action_id, \
          buyback_action_id, scrip_action_id, demerger_action_id, deemed_acquisition_date, \
          holding_account_id, transfer_id \
@@ -241,6 +344,11 @@ pub enum UpsertError {
     /// Delete the transfer via `DELETE /transfers/:id` and re-transfer
     /// instead (see `entities::transfer`).
     TransferTrade,
+    /// A supplied statement total failed the cross-check (see
+    /// `check_statement_total`): it doesn't reconcile with the trade's own
+    /// figures, or the trade and brokerage currencies differ so there is no
+    /// single-currency total to check.
+    StatementTotal(StatementTotalError),
 }
 
 impl From<sqlx::Error> for UpsertError {
@@ -255,6 +363,21 @@ impl From<sqlx::Error> for UpsertError {
 /// — the quantity already allocated to Sells, or any linked AMIT adjustment's
 /// covered quantity.
 pub async fn db_upsert(pool: &SqlitePool, trade: &Trade) -> Result<(), UpsertError> {
+    // The statement total (when recorded) must reconcile with the trade's own
+    // figures — a mismatch is a data-entry error against the contract note,
+    // caught before anything is written.
+    check_statement_total(
+        trade.statement_total,
+        trade.trade_type,
+        trade.quantity,
+        trade.average_price,
+        trade.brokerage,
+        trade.gst_on_brokerage,
+        &trade.currency,
+        &trade.brokerage_currency,
+    )
+    .map_err(UpsertError::StatementTotal)?;
+
     let mut tx = pool.begin().await?;
 
     // A rights-exercise, buy-back participation, scrip-for-scrip exchange,
@@ -332,10 +455,11 @@ pub async fn db_upsert(pool: &SqlitePool, trade: &Trade) -> Result<(), UpsertErr
     sqlx::query(
         "INSERT INTO trades \
          (id, trade_type, date, settlement_date, listing_id, average_price, quantity, \
-          currency, brokerage, gst_on_brokerage, brokerage_currency, fx_rate, contract_note_ref, \
+          currency, brokerage, gst_on_brokerage, brokerage_includes_gst, brokerage_currency, \
+          fx_rate, contract_note_ref, statement_total, \
           residual_brought_forward, residual_carried_forward, residual_paid_out, \
           holding_account_id) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT(id) DO UPDATE SET \
              trade_type               = excluded.trade_type, \
              date                     = excluded.date, \
@@ -346,9 +470,11 @@ pub async fn db_upsert(pool: &SqlitePool, trade: &Trade) -> Result<(), UpsertErr
              currency                 = excluded.currency, \
              brokerage                = excluded.brokerage, \
              gst_on_brokerage         = excluded.gst_on_brokerage, \
+             brokerage_includes_gst   = excluded.brokerage_includes_gst, \
              brokerage_currency       = excluded.brokerage_currency, \
              fx_rate                  = excluded.fx_rate, \
              contract_note_ref        = excluded.contract_note_ref, \
+             statement_total          = excluded.statement_total, \
              residual_brought_forward = excluded.residual_brought_forward, \
              residual_carried_forward = excluded.residual_carried_forward, \
              residual_paid_out        = excluded.residual_paid_out, \
@@ -364,9 +490,11 @@ pub async fn db_upsert(pool: &SqlitePool, trade: &Trade) -> Result<(), UpsertErr
     .bind(&trade.currency)
     .bind(trade.brokerage.to_string())
     .bind(trade.gst_on_brokerage.to_string())
+    .bind(trade.brokerage_includes_gst)
     .bind(&trade.brokerage_currency)
     .bind(trade.fx_rate.to_string())
     .bind(&trade.contract_note_ref)
+    .bind(trade.statement_total.map(|d| d.to_string()))
     .bind(trade.residual_brought_forward.to_string())
     .bind(trade.residual_carried_forward.to_string())
     .bind(trade.residual_paid_out.to_string())
@@ -544,18 +672,22 @@ async fn upsert(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
     Json(body): Json<TradeBody>,
-) -> Result<StatusCode, StatusCode> {
+) -> Result<StatusCode, (StatusCode, String)> {
     // Sells must be created via PUT /sells/{id} so they are persisted together
     // with a full set of parcel allocations (no uncovered Sell can exist).
     if body.trade_type == TradeType::Sell {
-        return Err(StatusCode::UNPROCESSABLE_ENTITY);
+        return Err((StatusCode::UNPROCESSABLE_ENTITY, String::new()));
     }
     let settlement_date = match body.settlement_date {
         Some(d) => d,
         None => auto_settlement_date(&pool, id, body.listing_id, body.date)
             .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+            .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, String::new()))?,
     };
+    // A GST-inclusive brokerage entry is split here, at the API boundary, so
+    // the stored columns (and `Trade` itself) are always ex-GST + GST.
+    let (brokerage, gst_on_brokerage) =
+        resolve_brokerage(body.brokerage_includes_gst, body.brokerage, body.gst_on_brokerage);
     let trade = Trade {
         id,
         trade_type: body.trade_type,
@@ -565,11 +697,13 @@ async fn upsert(
         average_price: body.average_price,
         quantity: body.quantity,
         currency: body.currency,
-        brokerage: body.brokerage,
-        gst_on_brokerage: body.gst_on_brokerage,
+        brokerage,
+        gst_on_brokerage,
+        brokerage_includes_gst: body.brokerage_includes_gst,
         brokerage_currency: body.brokerage_currency,
         fx_rate: body.fx_rate,
         contract_note_ref: body.contract_note_ref,
+        statement_total: body.statement_total,
         residual_brought_forward: body.residual_brought_forward,
         residual_carried_forward: body.residual_carried_forward,
         residual_paid_out: body.residual_paid_out,
@@ -585,15 +719,36 @@ async fn upsert(
         .await
         .map(|_| StatusCode::NO_CONTENT)
         .map_err(|e| match e {
-            UpsertError::Db(err) => crate::infra::http::write_error_status(&err),
+            UpsertError::Db(err) => {
+                (crate::infra::http::write_error_status(&err), String::new())
+            }
+            // The cross-check rejection says what the trade adds up to, so a
+            // typo is findable without re-deriving the figure by hand.
+            UpsertError::StatementTotal(detail) => {
+                (StatusCode::UNPROCESSABLE_ENTITY, statement_total_detail(&detail))
+            }
             UpsertError::QuantityBelowAllocated
             | UpsertError::QuantityBelowAmitAdjustment
             | UpsertError::RightsExerciseTrade
             | UpsertError::BuyBackTrade
             | UpsertError::ScripExchangeTrade
             | UpsertError::DemergerTrade
-            | UpsertError::TransferTrade => StatusCode::UNPROCESSABLE_ENTITY,
+            | UpsertError::TransferTrade => (StatusCode::UNPROCESSABLE_ENTITY, String::new()),
         })
+}
+
+/// Human-readable body for a statement-total 422 (shown by the web UI).
+pub(crate) fn statement_total_detail(e: &StatementTotalError) -> String {
+    match e {
+        StatementTotalError::CurrencyMismatch => {
+            "statement_total can only be checked when the trade and brokerage \
+             currencies match — omit it for mixed-currency trades"
+                .to_string()
+        }
+        StatementTotalError::TotalMismatch { expected } => {
+            format!("statement_total does not reconcile: the trade computes to {expected}")
+        }
+    }
 }
 
 async fn delete(
@@ -643,6 +798,8 @@ mod tests {
 
     fn buy_trade() -> Trade {
         Trade {
+            brokerage_includes_gst: false,
+            statement_total: None,
             holding_account_id: 1,
             transfer_id: None,
             id: 1,
@@ -677,6 +834,8 @@ mod tests {
             pool,
             sell_id,
             &sell::SellBody {
+                brokerage_includes_gst: false,
+                statement_total: None,
                 holding_account_id: 1,
                 date: NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(),
                 settlement_date: Some(NaiveDate::from_ymd_opt(2024, 6, 3).unwrap()),
@@ -799,6 +958,8 @@ mod tests {
         let pool = test_pool().await;
         insert_test_listing(&pool).await;
         let trade = Trade {
+            brokerage_includes_gst: false,
+            statement_total: None,
             holding_account_id: 1,
             transfer_id: None,
             id: 2,
@@ -834,6 +995,8 @@ mod tests {
         let pool = test_pool().await;
         insert_test_listing(&pool).await;
         let trade = Trade {
+            brokerage_includes_gst: false,
+            statement_total: None,
             holding_account_id: 1,
             transfer_id: None,
             id: 3,
@@ -1566,5 +1729,196 @@ mod tests {
         assert_eq!(t.average_price, "99.9999999999".parse::<Decimal>().unwrap());
         assert_eq!(t.quantity, "10.5".parse::<Decimal>().unwrap());
         assert_eq!(t.brokerage, "9.95".parse::<Decimal>().unwrap());
+    }
+
+    fn d(s: &str) -> Decimal {
+        s.parse().unwrap()
+    }
+
+    /// PUT the JSON body to /trades/{id}, returning the status and response
+    /// body text (the statement-total 422 carries its detail there).
+    async fn put_trade_json(
+        pool: &SqlitePool,
+        id: i64,
+        body: serde_json::Value,
+    ) -> (StatusCode, String) {
+        let resp = router()
+            .with_state(pool.clone())
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/trades/{id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        (status, String::from_utf8(bytes.to_vec()).unwrap())
+    }
+
+    #[test]
+    fn split_gst_inclusive_rounds_to_the_cent_and_sums_back_exactly() {
+        // $9.95 incl.: 9.95/11 = 0.9045… → $0.90 GST, $9.05 ex-GST.
+        assert_eq!(split_gst_inclusive(d("9.95")), (d("9.05"), d("0.90")));
+        // $10 incl.: 10/11 = 0.9090… → $0.91 GST (rounded up to the cent).
+        assert_eq!(split_gst_inclusive(d("10")), (d("9.09"), d("0.91")));
+        // An exact half-cent rounds away from zero: 0.055/11 = 0.005 → $0.01.
+        assert_eq!(split_gst_inclusive(d("0.055")), (d("0.045"), d("0.01")));
+        // The pair always sums back to the amount paid.
+        for amount in ["9.95", "10", "0.055", "19.99"] {
+            let (brok, gst) = split_gst_inclusive(d(amount));
+            assert_eq!(brok + gst, d(amount));
+        }
+    }
+
+    /// A GST-inclusive entry is split by the server (any supplied GST value is
+    /// ignored), the flag round-trips, and an edit re-splits the new amount.
+    /// An unflagged entry keeps today's behaviour: both values stored as sent.
+    #[tokio::test]
+    async fn api_gst_inclusive_brokerage_is_split_and_round_trips() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        let body = serde_json::json!({
+            "trade_type": "Buy",
+            "date": "2024-01-15",
+            "listing_id": 1,
+            "average_price": "100",
+            "quantity": "10",
+            "currency": "AUD",
+            "brokerage": "9.95",
+            "gst_on_brokerage": "123",   // ignored: the server derives the split
+            "brokerage_includes_gst": true,
+            "brokerage_currency": "AUD",
+            "fx_rate": "1"
+        });
+        let (status, _) = put_trade_json(&pool, 1, body).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let t = db_get(&pool, 1).await.unwrap().unwrap();
+        assert_eq!(t.brokerage, d("9.05"));
+        assert_eq!(t.gst_on_brokerage, d("0.90"));
+        assert!(t.brokerage_includes_gst, "flag must round-trip for the entry form");
+
+        // Editing with a new inclusive amount re-splits it.
+        let body = serde_json::json!({
+            "trade_type": "Buy",
+            "date": "2024-01-15",
+            "listing_id": 1,
+            "average_price": "100",
+            "quantity": "10",
+            "currency": "AUD",
+            "brokerage": "11",
+            "brokerage_includes_gst": true,
+            "brokerage_currency": "AUD",
+            "fx_rate": "1"
+        });
+        let (status, _) = put_trade_json(&pool, 1, body).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let t = db_get(&pool, 1).await.unwrap().unwrap();
+        assert_eq!(t.brokerage, d("10"));
+        assert_eq!(t.gst_on_brokerage, d("1"));
+
+        // Unflagged: stored exactly as entered (ex-GST + manual GST).
+        let body = serde_json::json!({
+            "trade_type": "Buy",
+            "date": "2024-01-15",
+            "listing_id": 1,
+            "average_price": "100",
+            "quantity": "10",
+            "currency": "AUD",
+            "brokerage": "9.95",
+            "gst_on_brokerage": "0.995",
+            "brokerage_currency": "AUD",
+            "fx_rate": "1"
+        });
+        let (status, _) = put_trade_json(&pool, 2, body).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let t = db_get(&pool, 2).await.unwrap().unwrap();
+        assert_eq!(t.brokerage, d("9.95"));
+        assert_eq!(t.gst_on_brokerage, d("0.995"));
+        assert!(!t.brokerage_includes_gst);
+        assert_eq!(t.statement_total, None);
+    }
+
+    /// The statement total must reconcile with quantity × price + brokerage +
+    /// GST for a Buy: a matching figure (in any trailing-zero spelling) is
+    /// accepted and stored; a mismatch is rejected with the computed figure in
+    /// the 422 detail and nothing persisted.
+    #[tokio::test]
+    async fn api_statement_total_cross_check_on_buy() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        // 10 × 100 + 9.05 + 0.90 (from the 9.95 inclusive split) = 1009.95
+        let body = serde_json::json!({
+            "trade_type": "Buy",
+            "date": "2024-01-15",
+            "listing_id": 1,
+            "average_price": "100",
+            "quantity": "10",
+            "currency": "AUD",
+            "brokerage": "9.95",
+            "brokerage_includes_gst": true,
+            "brokerage_currency": "AUD",
+            "fx_rate": "1",
+            "statement_total": "1009.95"
+        });
+        let (status, _) = put_trade_json(&pool, 1, body.clone()).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(db_get(&pool, 1).await.unwrap().unwrap().statement_total, Some(d("1009.95")));
+
+        // Numeric comparison: trailing zeros don't matter.
+        let mut zeros = body.clone();
+        zeros["statement_total"] = "1009.9500".into();
+        let (status, _) = put_trade_json(&pool, 1, zeros).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        // A mismatch is rejected, says what the trade computes to, and
+        // persists nothing.
+        let mut wrong = body.clone();
+        wrong["statement_total"] = "1010".into();
+        let (status, detail) = put_trade_json(&pool, 2, wrong).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(detail.contains("1009.95"), "detail must carry the computed figure: {detail}");
+        assert!(db_get(&pool, 2).await.unwrap().is_none(), "nothing persisted");
+    }
+
+    /// A total can only be checked when the trade and brokerage currencies
+    /// match — supplying one on a mixed-currency trade is rejected rather
+    /// than inventing an FX conversion.
+    #[tokio::test]
+    async fn api_statement_total_on_mixed_currency_trade_returns_422() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        let body = serde_json::json!({
+            "trade_type": "Buy",
+            "date": "2024-01-15",
+            "listing_id": 1,
+            "average_price": "100",
+            "quantity": "10",
+            "currency": "USD",
+            "brokerage": "9.95",
+            "brokerage_currency": "AUD",
+            "fx_rate": "1.5",
+            "statement_total": "1009.95"
+        });
+        let (status, detail) = put_trade_json(&pool, 1, body).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(detail.contains("currencies"), "detail must explain the rejection: {detail}");
+        assert!(db_get(&pool, 1).await.unwrap().is_none(), "nothing persisted");
+    }
+
+    /// The boolean column is CHECK-constrained to 0/1 in the database.
+    #[tokio::test]
+    async fn db_brokerage_includes_gst_check_constraint_enforced() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        db_upsert(&pool, &buy_trade()).await.unwrap();
+        let err = sqlx::query("UPDATE trades SET brokerage_includes_gst = 2 WHERE id = 1")
+            .execute(&pool)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("CHECK"), "{err}");
     }
 }

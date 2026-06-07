@@ -199,6 +199,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn gst_inclusive_brokerage_and_statement_total_ui_present() {
+        let js = app_js_body().await;
+        // The GST-included checkbox ships on both the trades (Buy/DRP) and
+        // Sell forms, driven by the shared wiring helper that hides the GST
+        // field and relabels brokerage when ticked…
+        assert!(js.contains("brokerage_includes_gst"));
+        assert!(js.contains("Brokerage includes GST"));
+        assert!(js.contains("wireGstBrokerage"));
+        assert!(js.contains("Brokerage (GST-inclusive)"));
+        // …re-presenting a flagged trade's split pair as the one inclusive
+        // amount via exact decimal-string addition (money — no float drift).
+        assert!(js.contains("addDecimalStrings"));
+        assert!(js.contains("BigInt"));
+        // The statement-total cross-check field ships on both forms and shows
+        // as a column in the trades and Sells lists.
+        assert!(js.contains("statement_total"));
+        assert!(js.contains("Statement total"));
+        assert!(js.contains("'statement_total', 'fx_rate'"), "trades list column");
+        assert!(js.contains("'statement_total', 'holding_account_id'"), "sells list column");
+    }
+
+    #[tokio::test]
     async fn income_ui_present() {
         let js = app_js_body().await;
         assert!(js.contains("/income"));

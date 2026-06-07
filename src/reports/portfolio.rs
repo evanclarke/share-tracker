@@ -252,6 +252,8 @@ mod tests {
         trade::db_upsert(
             pool,
             &trade::Trade {
+                brokerage_includes_gst: false,
+                statement_total: None,
                 holding_account_id: 1,
                 transfer_id: None,
                 id,
@@ -285,6 +287,8 @@ mod tests {
         trade::db_upsert(
             pool,
             &trade::Trade {
+                brokerage_includes_gst: false,
+                statement_total: None,
                 holding_account_id: 1,
                 transfer_id: None,
                 id,
@@ -399,6 +403,46 @@ mod tests {
         // cost = 10 * 100 + 9.95 + 0.995 = 1010.945
         assert_eq!(h.total_cost_base, "1010.945".parse::<Decimal>().unwrap());
         assert_eq!(h.avg_cost_base_per_unit, "10.10945".parse::<Decimal>().unwrap());
+    }
+
+    /// A Buy entered with GST-inclusive brokerage costs exactly what was paid:
+    /// the server splits $9.95 incl. into $9.05 + $0.90 at write time
+    /// (entered here through the trades API so the split path is exercised),
+    /// and the report's cost base — brokerage + GST on top of price × qty —
+    /// sums back to the inclusive amount.
+    #[tokio::test]
+    async fn db_cost_base_of_gst_inclusive_buy_equals_amount_paid() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "VAS").await;
+        let body = serde_json::json!({
+            "trade_type": "Buy",
+            "date": "2024-01-15",
+            "listing_id": 1,
+            "average_price": "10",
+            "quantity": "100",
+            "currency": "AUD",
+            "brokerage": "9.95",
+            "brokerage_includes_gst": true,
+            "brokerage_currency": "AUD",
+            "fx_rate": "1"
+        });
+        let resp = trade::router()
+            .with_state(pool.clone())
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/trades/1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        let holdings = db_holdings(&pool, None).await.unwrap();
+        // cost = 10 × 100 + 9.95 (the inclusive amount paid) = 1009.95
+        assert_eq!(holdings[0].total_cost_base, "1009.95".parse::<Decimal>().unwrap());
     }
 
     #[tokio::test]

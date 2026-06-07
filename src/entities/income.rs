@@ -349,6 +349,8 @@ mod tests {
 
     async fn insert_test_trade(pool: &SqlitePool) -> i64 {
         let t = trade::Trade {
+            brokerage_includes_gst: false,
+            statement_total: None,
             holding_account_id: 1,
             transfer_id: None,
             id: 1,

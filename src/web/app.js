@@ -215,15 +215,18 @@
         dec('quantity', 'Quantity', { required: true, default: '' }),
         fk('currency', 'Currency', 'currencies', { required: true, encode: 'string' }),
         dec('brokerage', 'Brokerage'),
+        bool('brokerage_includes_gst', 'Brokerage includes GST', { hint: 'Tick when the statement quotes brokerage GST-inclusive; the GST component (1/11, rounded to the cent) is derived automatically.' }),
         dec('gst_on_brokerage', 'GST on brokerage'),
         fk('brokerage_currency', 'Brokerage currency', 'currencies', { required: true, encode: 'string' }),
         dec('fx_rate', 'Manual FX rate', { default: '1', hint: 'Foreign units per AUD; fallback used only when no ATO rate exists. 1 for AUD.' }),
         txt('contract_note_ref', 'Contract note ref', { optional: true }),
+        dec('statement_total', 'Statement total', { optional: true, default: '', hint: 'Optional cross-check in the brokerage currency: quantity × price + brokerage + GST. Rejected if it does not reconcile.' }),
         fk('holding_account_id', 'Holding account', 'holdingAccounts', { required: true, default: '1' }),
       ],
-      columns: ['id', 'trade_type', 'date', 'settlement_date', 'listing_id', 'average_price', 'quantity', 'currency', 'brokerage', 'fx_rate', 'holding_account_id'],
+      columns: ['id', 'trade_type', 'date', 'settlement_date', 'listing_id', 'average_price', 'quantity', 'currency', 'brokerage', 'statement_total', 'fx_rate', 'holding_account_id'],
       listFilter: function (row) { return row.trade_type !== 'Sell'; },
       attachOwner: 'trade_id',
+      wireForm: wireGstBrokerage,
     },
     {
       slug: 'sells', title: 'Sells', group: 'Activity', api: '/sells', custom: 'sells',
@@ -770,6 +773,39 @@
     return raw;
   }
 
+  // ---- GST-inclusive brokerage wiring ------------------------------------
+  // Exact decimal-string addition (the operands are money; float would drift).
+  function addDecimalStrings(a, b) {
+    a = String(a); b = String(b);
+    const dp = function (s) { const i = s.indexOf('.'); return i < 0 ? 0 : s.length - i - 1; };
+    const scale = Math.max(dp(a), dp(b));
+    const scaled = function (s) { return BigInt(s.replace('.', '') + '0'.repeat(scale - dp(s))); };
+    if (scale === 0) return (scaled(a) + scaled(b)).toString();
+    const sum = (scaled(a) + scaled(b)).toString().padStart(scale + 1, '0');
+    return (sum.slice(0, -scale) + '.' + sum.slice(-scale)).replace(/(\.\d*?)0+$/, '$1').replace(/\.$/, '');
+  }
+
+  // Shared by the Buy/DRP trade form and the Sell form: ticking "Brokerage
+  // includes GST" hides the GST field (the server derives GST as 1/11 of the
+  // inclusive amount, rounded to the cent) and relabels brokerage; editing a
+  // flagged trade re-presents the stored ex-GST brokerage + GST as the one
+  // inclusive amount that was originally entered.
+  function wireGstBrokerage(form, existing) {
+    const flag = form.querySelector('[name="brokerage_includes_gst"]');
+    const brokInput = form.querySelector('[name="brokerage"]');
+    const brokLabel = form.querySelector('label[for="f_brokerage"]');
+    const gstWrap = form.querySelector('[name="gst_on_brokerage"]').closest('.field');
+    if (existing && existing.brokerage_includes_gst) {
+      brokInput.value = addDecimalStrings(existing.brokerage, existing.gst_on_brokerage);
+    }
+    function apply() {
+      gstWrap.style.display = flag.checked ? 'none' : '';
+      brokLabel.textContent = flag.checked ? 'Brokerage (GST-inclusive)' : 'Brokerage';
+    }
+    flag.addEventListener('change', apply);
+    apply();
+  }
+
   // ---- allocation editor --------------------------------------------------
   // Shared parcel-allocation row builder used by the Sell form, the Transfer
   // form, and the buy-back Participate action: a list of (purchase-parcel
@@ -890,6 +926,10 @@
       await renderTypeFields();
     }
 
+    // Entity-specific form behaviour beyond what the field configs express
+    // (e.g. the trades form's GST-inclusive brokerage toggle).
+    if (entity.wireForm) entity.wireForm(form, existing);
+
     const actions = el('div', { class: 'form-actions' });
     actions.appendChild(el('button', { type: 'submit', class: 'primary' }, editing ? 'Save' : 'Create'));
     actions.appendChild(el('a', { href: '#/e/' + entity.slug }, el('button', { type: 'button' }, 'Cancel')));
@@ -938,17 +978,19 @@
     dec('quantity', 'Quantity', { required: true, default: '' }),
     fk('currency', 'Currency', 'currencies', { required: true, encode: 'string' }),
     dec('brokerage', 'Brokerage'),
+    bool('brokerage_includes_gst', 'Brokerage includes GST', { hint: 'Tick when the statement quotes brokerage GST-inclusive; the GST component (1/11, rounded to the cent) is derived automatically.' }),
     dec('gst_on_brokerage', 'GST on brokerage'),
     fk('brokerage_currency', 'Brokerage currency', 'currencies', { required: true, encode: 'string' }),
     dec('fx_rate', 'Manual FX rate', { default: '1' }),
     txt('contract_note_ref', 'Contract note ref', { optional: true }),
+    dec('statement_total', 'Statement total', { optional: true, default: '', hint: 'Optional cross-check in the brokerage currency: quantity × price − brokerage − GST (net proceeds). Rejected if it does not reconcile.' }),
     fk('holding_account_id', 'Holding account', 'holdingAccounts', { required: true, default: '1', hint: 'Allocations may only consume parcels held in this account.' }),
   ];
 
   async function viewSellsList() {
     setActiveNav('sells');
     const sells = (await api('GET', '/trades')).filter(function (t) { return t.trade_type === 'Sell'; });
-    const cols = ['id', 'date', 'settlement_date', 'listing_id', 'average_price', 'quantity', 'currency', 'holding_account_id'];
+    const cols = ['id', 'date', 'settlement_date', 'listing_id', 'average_price', 'quantity', 'currency', 'statement_total', 'holding_account_id'];
     const toolbar = el('div', { class: 'toolbar' }, [
       el('a', { href: '#/sells/new' }, el('button', { class: 'primary' }, '+ New Sell')),
     ]);
@@ -992,6 +1034,7 @@
     for (const f of SELL_FIELDS) {
       form.appendChild(await buildFieldInput(f, existing ? existing[f.name] : null, false));
     }
+    wireGstBrokerage(form, existing);
 
     // Allocations: the shared editor, pre-filled with the existing rows.
     const allocEditor = allocationEditor(await loadOptions('buyParcels'), existingAllocs, {

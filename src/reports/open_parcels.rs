@@ -256,6 +256,8 @@ mod tests {
         trade::db_upsert(
             pool,
             &trade::Trade {
+                brokerage_includes_gst: false,
+                statement_total: None,
                 holding_account_id: 1,
                 transfer_id: None,
                 id,
@@ -289,6 +291,8 @@ mod tests {
         trade::db_upsert(
             pool,
             &trade::Trade {
+                brokerage_includes_gst: false,
+                statement_total: None,
                 holding_account_id: 1,
                 transfer_id: None,
                 id,

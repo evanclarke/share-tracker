@@ -37,12 +37,22 @@ pub struct SellBody {
     pub average_price: Decimal,
     pub quantity: Decimal,
     pub currency: String,
+    /// GST-inclusive when `brokerage_includes_gst` is set (the server splits
+    /// it; any supplied `gst_on_brokerage` is ignored), ex-GST otherwise —
+    /// same contract as `trade::TradeBody`.
     pub brokerage: Decimal,
+    #[serde(default)]
     pub gst_on_brokerage: Decimal,
+    #[serde(default)]
+    pub brokerage_includes_gst: bool,
     pub brokerage_currency: String,
     pub fx_rate: Decimal,
     #[serde(default)]
     pub contract_note_ref: Option<String>,
+    /// Optional statement cross-check (net proceeds — quantity × price minus
+    /// brokerage and GST); see `trade::Trade::statement_total`.
+    #[serde(default)]
+    pub statement_total: Option<Decimal>,
     /// The holding account the Sell happens in: its allocations may only
     /// consume parcels held in the same account. Defaults to the seeded
     /// default account when omitted.
@@ -96,6 +106,10 @@ pub enum SellError {
     /// every account, and their replacement Buys stay in each consumed
     /// parcel's account.)
     PurchaseInDifferentAccount,
+    /// A supplied statement total failed the cross-check (see
+    /// `trade::check_statement_total`): for a Sell it must equal the net
+    /// proceeds, quantity × price − brokerage − GST.
+    StatementTotal(trade::StatementTotalError),
 }
 
 impl From<sqlx::Error> for SellError {
@@ -283,31 +297,52 @@ pub(crate) async fn upsert_sell_in_tx(
         return Err(SellError::AllocationMismatch);
     }
 
+    // A GST-inclusive brokerage entry is split here (the operations that
+    // build a SellBody internally pass flag false, making this the identity),
+    // and the statement total — when recorded — must reconcile with the net
+    // proceeds before anything is written.
+    let (brokerage, gst_on_brokerage) =
+        trade::resolve_brokerage(body.brokerage_includes_gst, body.brokerage, body.gst_on_brokerage);
+    trade::check_statement_total(
+        body.statement_total,
+        TradeType::Sell,
+        body.quantity,
+        body.average_price,
+        brokerage,
+        gst_on_brokerage,
+        &body.currency,
+        &body.brokerage_currency,
+    )
+    .map_err(SellError::StatementTotal)?;
+
     // Upsert the Sell trade row.
     sqlx::query(
         "INSERT INTO trades \
          (id, trade_type, date, settlement_date, listing_id, average_price, quantity, \
-          currency, brokerage, gst_on_brokerage, brokerage_currency, fx_rate, contract_note_ref, \
+          currency, brokerage, gst_on_brokerage, brokerage_includes_gst, brokerage_currency, \
+          fx_rate, contract_note_ref, statement_total, \
           buyback_action_id, scrip_action_id, demerger_action_id, holding_account_id, transfer_id) \
-         VALUES (?, 'Sell', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+         VALUES (?, 'Sell', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT(id) DO UPDATE SET \
-             trade_type         = 'Sell', \
-             date               = excluded.date, \
-             settlement_date    = excluded.settlement_date, \
-             listing_id         = excluded.listing_id, \
-             average_price      = excluded.average_price, \
-             quantity           = excluded.quantity, \
-             currency           = excluded.currency, \
-             brokerage          = excluded.brokerage, \
-             gst_on_brokerage   = excluded.gst_on_brokerage, \
-             brokerage_currency = excluded.brokerage_currency, \
-             fx_rate            = excluded.fx_rate, \
-             contract_note_ref  = excluded.contract_note_ref, \
-             buyback_action_id  = excluded.buyback_action_id, \
-             scrip_action_id    = excluded.scrip_action_id, \
-             demerger_action_id = excluded.demerger_action_id, \
-             holding_account_id = excluded.holding_account_id, \
-             transfer_id        = excluded.transfer_id",
+             trade_type             = 'Sell', \
+             date                   = excluded.date, \
+             settlement_date        = excluded.settlement_date, \
+             listing_id             = excluded.listing_id, \
+             average_price          = excluded.average_price, \
+             quantity               = excluded.quantity, \
+             currency               = excluded.currency, \
+             brokerage              = excluded.brokerage, \
+             gst_on_brokerage       = excluded.gst_on_brokerage, \
+             brokerage_includes_gst = excluded.brokerage_includes_gst, \
+             brokerage_currency     = excluded.brokerage_currency, \
+             fx_rate                = excluded.fx_rate, \
+             contract_note_ref      = excluded.contract_note_ref, \
+             statement_total        = excluded.statement_total, \
+             buyback_action_id      = excluded.buyback_action_id, \
+             scrip_action_id        = excluded.scrip_action_id, \
+             demerger_action_id     = excluded.demerger_action_id, \
+             holding_account_id     = excluded.holding_account_id, \
+             transfer_id            = excluded.transfer_id",
     )
     .bind(id)
     .bind(body.date)
@@ -316,11 +351,13 @@ pub(crate) async fn upsert_sell_in_tx(
     .bind(body.average_price.to_string())
     .bind(body.quantity.to_string())
     .bind(&body.currency)
-    .bind(body.brokerage.to_string())
-    .bind(body.gst_on_brokerage.to_string())
+    .bind(brokerage.to_string())
+    .bind(gst_on_brokerage.to_string())
+    .bind(body.brokerage_includes_gst)
     .bind(&body.brokerage_currency)
     .bind(body.fx_rate.to_string())
     .bind(&body.contract_note_ref)
+    .bind(body.statement_total.map(|d| d.to_string()))
     .bind(buyback_action_id)
     .bind(scrip_action_id)
     .bind(demerger_action_id)
@@ -424,23 +461,33 @@ async fn upsert(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
     Json(body): Json<SellBody>,
-) -> Result<StatusCode, StatusCode> {
+) -> Result<StatusCode, (StatusCode, String)> {
     match db_upsert_sell(&pool, id, &body).await {
         Ok(()) => Ok(StatusCode::NO_CONTENT),
-        Err(SellError::AllocationMismatch) => Err(StatusCode::UNPROCESSABLE_ENTITY),
-        Err(SellError::PurchaseParcelMissing) => Err(StatusCode::UNPROCESSABLE_ENTITY),
-        Err(SellError::PurchaseTradeNotBuyOrDrp) => Err(StatusCode::UNPROCESSABLE_ENTITY),
-        Err(SellError::PurchaseQuantityExceeded) => Err(StatusCode::UNPROCESSABLE_ENTITY),
-        Err(SellError::BuyBackSell) => Err(StatusCode::UNPROCESSABLE_ENTITY),
-        Err(SellError::ScripExchangeSell) => Err(StatusCode::UNPROCESSABLE_ENTITY),
-        Err(SellError::DemergerSell) => Err(StatusCode::UNPROCESSABLE_ENTITY),
-        Err(SellError::TransferSell) => Err(StatusCode::UNPROCESSABLE_ENTITY),
-        Err(SellError::PurchaseInDifferentAccount) => Err(StatusCode::UNPROCESSABLE_ENTITY),
+        Err(SellError::AllocationMismatch) => err422(),
+        Err(SellError::PurchaseParcelMissing) => err422(),
+        Err(SellError::PurchaseTradeNotBuyOrDrp) => err422(),
+        Err(SellError::PurchaseQuantityExceeded) => err422(),
+        Err(SellError::BuyBackSell) => err422(),
+        Err(SellError::ScripExchangeSell) => err422(),
+        Err(SellError::DemergerSell) => err422(),
+        Err(SellError::TransferSell) => err422(),
+        Err(SellError::PurchaseInDifferentAccount) => err422(),
+        // The cross-check rejection says what the Sell nets to, so a typo is
+        // findable without re-deriving the figure by hand.
+        Err(SellError::StatementTotal(detail)) => Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            trade::statement_total_detail(&detail),
+        )),
         Err(SellError::Db(e)) => {
             tracing::error!(error = %e, "sell upsert failed");
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
+            Err((StatusCode::INTERNAL_SERVER_ERROR, String::new()))
         }
     }
+}
+
+fn err422() -> Result<StatusCode, (StatusCode, String)> {
+    Err((StatusCode::UNPROCESSABLE_ENTITY, String::new()))
 }
 
 async fn delete(
@@ -494,6 +541,8 @@ mod tests {
         trade::db_upsert(
             pool,
             &trade::Trade {
+                brokerage_includes_gst: false,
+                statement_total: None,
                 holding_account_id: 1,
                 transfer_id: None,
                 id,
@@ -525,6 +574,8 @@ mod tests {
 
     fn sell_body(qty: Decimal, allocations: Vec<AllocationInput>) -> SellBody {
         SellBody {
+            brokerage_includes_gst: false,
+            statement_total: None,
             holding_account_id: 1,
             date: NaiveDate::from_ymd_opt(2024, 6, 3).unwrap(),
             settlement_date: None,
@@ -910,6 +961,78 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// A Sell's statement total is the *net proceeds* — quantity × price −
+    /// brokerage − GST — and a GST-inclusive brokerage entry is split on the
+    /// Sell path too: 100 × 15 − 9.95 (incl.) = 1490.05. A mismatched total
+    /// is rejected (422 with the computed figure) and nothing persisted.
+    #[tokio::test]
+    async fn db_sell_statement_total_checks_net_proceeds_and_gst_splits() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
+
+        let mut body = sell_body(
+            Decimal::from(100),
+            vec![AllocationInput { purchase_trade_id: 1, quantity_allocated: Decimal::from(100) }],
+        );
+        body.brokerage = "9.95".parse().unwrap();
+        body.brokerage_includes_gst = true;
+        body.statement_total = Some("1490.05".parse().unwrap());
+        db_upsert_sell(&pool, 2, &body).await.unwrap();
+
+        let t = trade::db_get(&pool, 2).await.unwrap().unwrap();
+        assert_eq!(t.brokerage, "9.05".parse::<Decimal>().unwrap());
+        assert_eq!(t.gst_on_brokerage, "0.90".parse::<Decimal>().unwrap());
+        assert!(t.brokerage_includes_gst);
+        assert_eq!(t.statement_total, Some("1490.05".parse().unwrap()));
+
+        // The Buy-direction figure (proceeds *plus* costs) must not pass.
+        body.statement_total = Some("1509.95".parse().unwrap());
+        let err = db_upsert_sell(&pool, 3, &body).await.unwrap_err();
+        assert!(matches!(
+            err,
+            SellError::StatementTotal(trade::StatementTotalError::TotalMismatch { .. })
+        ));
+        assert!(!trade_exists(&pool, 3).await);
+    }
+
+    #[tokio::test]
+    async fn api_sell_statement_total_mismatch_returns_422_with_detail() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
+
+        let body = serde_json::json!({
+            "date": "2024-06-03",
+            "listing_id": 1,
+            "average_price": "15",
+            "quantity": "100",
+            "currency": "AUD",
+            "brokerage": "9.95",
+            "brokerage_includes_gst": true,
+            "brokerage_currency": "AUD",
+            "fx_rate": "1",
+            "statement_total": "1500",
+            "allocations": [ { "purchase_trade_id": 1, "quantity_allocated": "100" } ]
+        });
+        let resp = router()
+            .with_state(pool)
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/sells/2")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let bytes = http_body_util::BodyExt::collect(resp.into_body()).await.unwrap().to_bytes();
+        let detail = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(detail.contains("1490.05"), "detail must carry the net proceeds: {detail}");
     }
 
     #[tokio::test]

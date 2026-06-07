@@ -163,6 +163,8 @@ pub async fn db_participate(
         .fetch_one(&mut *tx)
         .await?;
     let sell_body = SellBody {
+        brokerage_includes_gst: false,
+        statement_total: None,
         holding_account_id: body.holding_account_id,
         date: body.date,
         settlement_date: Some(body.date),
@@ -301,6 +303,8 @@ mod tests {
         trade::db_upsert(
             pool,
             &Trade {
+                brokerage_includes_gst: false,
+                statement_total: None,
                 holding_account_id: 1,
                 transfer_id: None,
                 id,
@@ -555,6 +559,8 @@ mod tests {
 
         // Any edit through the sells endpoint is rejected.
         let edit = sell::SellBody {
+            brokerage_includes_gst: false,
+            statement_total: None,
             holding_account_id: 1,
             date: p.trade.date,
             settlement_date: Some(p.trade.settlement_date),

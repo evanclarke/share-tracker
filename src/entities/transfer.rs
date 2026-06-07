@@ -284,6 +284,8 @@ pub async fn db_transfer(
         .fetch_one(&mut *tx)
         .await?;
     let sell_body = SellBody {
+        brokerage_includes_gst: false,
+        statement_total: None,
         date: body.date,
         settlement_date: Some(body.date),
         listing_id: body.listing_id,
@@ -533,6 +535,8 @@ mod tests {
         trade::db_upsert(
             pool,
             &Trade {
+                brokerage_includes_gst: false,
+                statement_total: None,
                 id,
                 trade_type: TradeType::Buy,
                 date,
@@ -653,6 +657,8 @@ mod tests {
         trade::db_upsert(
             &pool,
             &Trade {
+                brokerage_includes_gst: false,
+                statement_total: None,
                 id: 1,
                 trade_type: TradeType::Buy,
                 date: d(2023, 3, 1),
@@ -719,6 +725,8 @@ mod tests {
             &pool,
             50,
             &SellBody {
+                brokerage_includes_gst: false,
+                statement_total: None,
                 date: d(2024, 7, 1),
                 settlement_date: Some(d(2024, 7, 1)),
                 listing_id: 1,
@@ -806,6 +814,8 @@ mod tests {
             &pool,
             50,
             &SellBody {
+                brokerage_includes_gst: false,
+                statement_total: None,
                 date: d(2024, 8, 1),
                 settlement_date: Some(d(2024, 8, 1)),
                 listing_id: 1,
@@ -850,6 +860,8 @@ mod tests {
             &pool,
             group.sell.id,
             &SellBody {
+                brokerage_includes_gst: false,
+                statement_total: None,
                 date: d(2024, 6, 1),
                 settlement_date: Some(d(2024, 6, 1)),
                 listing_id: 1,

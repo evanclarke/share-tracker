@@ -124,3 +124,41 @@ Out of scope (record as Known limitations):
 - **Intraday prices** — only one closing/reference price per listing per day is stored
 - **Automatic backfill triggered by entering a back-dated trade** — backfill is on demand; a
   back-dated fact flags snapshots stale but does not itself fetch missing past prices
+
+## GST-inclusive brokerage entry and statement-total cross-check (2026-06-07)
+
+Trade entry (both Buys and Sells) is made faster and safer to reconcile against a broker
+statement/contract note.
+
+- GST-inclusive brokerage
+  - A trade carries a boolean flag, `brokerage_includes_gst` (default false), recording that the
+    brokerage amount was entered GST-inclusive
+  - When the flag is set, the entered brokerage amount is GST-inclusive and the server splits it
+    at write time: `gst_on_brokerage` = amount × 1/11 rounded to the cent (half away from zero,
+    matching statements), `brokerage` = amount − GST. The stored ex-GST brokerage and GST still
+    sum exactly to the amount paid, so the existing cost-base arithmetic
+    (`brokerage + gst_on_brokerage`) is unchanged everywhere. Any `gst_on_brokerage` supplied in
+    the input is ignored when the flag is set
+  - When the flag is not set, behaviour is unchanged: brokerage is entered ex-GST and
+    `gst_on_brokerage` is entered manually (zero for no-GST trades, e.g. foreign brokers)
+  - The flag is persisted so a trade round-trips: reading the trade back shows the split values
+    plus the flag, and the web form re-presents a single GST-inclusive brokerage amount
+    (brokerage + GST) with the box ticked
+- Statement-total cross-check
+  - A trade can optionally record the statement's transaction total (`statement_total`, decimal,
+    nullable, in the brokerage currency)
+  - When provided, it is validated at write time inside the write transaction: it must equal
+    quantity × price + brokerage + GST for a Buy, or quantity × price − brokerage − GST for a
+    Sell (net amount payable/receivable). Comparison is numeric (1234.50 matches 1234.5).
+    A mismatch is rejected with 422 — this catches data-entry errors against the contract note
+  - A total may only be supplied when the trade currency equals the brokerage currency (the
+    normal statement case); supplying one on a mixed-currency trade is rejected with 422 — no
+    FX conversion is invented for it
+  - The stored total is validation/cross-reference only — no report or calculation uses it
+    (informational column)
+  - Trades created by linked operations (DRP reinvestment, rights exercise, buy-back, scrip,
+    demerger, transfer) are unaffected: flag false, no total
+- Web UI
+  - The Buy and Sell forms gain the GST-included checkbox (when ticked the GST field is hidden
+    and the brokerage field is labelled as GST-inclusive) and the optional statement-total field
+  - The trades and Sells lists show the statement total so it can be eyeballed against statements
