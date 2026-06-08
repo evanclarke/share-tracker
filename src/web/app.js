@@ -492,10 +492,10 @@
     },
     {
       slug: 'trades', title: 'Trades', group: 'Activity', api: '/trades',
-      desc: 'Buy and DRP acquisitions. Sells are entered under Sells so they always carry parcel allocations.',
+      desc: 'Buy acquisitions. Sells are entered under Sells so they always carry parcel allocations; DRP acquisitions are created from the funding distribution under Income (Reinvest under DRP) so the shares stay linked to their dividend and residual chain.',
       keyFields: [int('id', 'ID', { auto: true })],
       fields: [
-        sel('trade_type', 'Type', ['Buy', 'DRP'], { required: true }),
+        sel('trade_type', 'Type', ['Buy'], { required: true }),
         dt('date', 'Trade date', { required: true }),
         dt('settlement_date', 'Settlement date', { optional: true, hint: 'Leave blank to auto-calculate (T+N business days, skipping weekends and holidays).' }),
         fk('listing_id', 'Listing', 'listings', { required: true }),

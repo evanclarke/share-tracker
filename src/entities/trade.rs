@@ -705,6 +705,20 @@ async fn upsert(
                 .to_string(),
         ));
     }
+    // DRP trades are only ever created via POST /income/:id/reinvest, which
+    // links the shares back to their funding distribution and threads the
+    // residual carry-forward chain. A free-form DRP here would be an orphan
+    // parcel (no income link, zero residuals) that could shadow that chain —
+    // and editing a reinvest-created DRP through this endpoint would silently
+    // zero its residual columns (the form doesn't carry them). Reject both.
+    if body.trade_type == TradeType::DRP {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "a DRP trade is created via POST /income/:id/reinvest so it stays linked to its \
+             distribution and residual chain"
+                .to_string(),
+        ));
+    }
     let settlement_date = match body.settlement_date {
         Some(d) => d,
         None => auto_settlement_date(&pool, id, body.listing_id, body.date)
@@ -1587,6 +1601,43 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn api_put_drp_trade_is_rejected() {
+        // DRP trades are created only via POST /income/{id}/reinvest (which links
+        // them to their distribution and threads the residual chain); the generic
+        // trade endpoint rejects a free-form DRP, and nothing is persisted.
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        let body = serde_json::json!({
+            "trade_type": "DRP",
+            "date": "2024-03-15",
+            "listing_id": 1,
+            "average_price": 95.0,
+            "quantity": 2.0,
+            "currency": "AUD",
+            "brokerage": 0.0,
+            "gst_on_brokerage": 0.0,
+            "brokerage_currency": "AUD",
+            "fx_rate": 1.0
+        });
+        let resp = router()
+            .with_state(pool.clone())
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/trades/1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let n: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM trades").fetch_one(&pool).await.unwrap();
+        assert_eq!(n, 0, "rejected DRP must not be persisted");
     }
 
     #[tokio::test]
