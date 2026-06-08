@@ -11,6 +11,10 @@ use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 use std::collections::HashSet;
 
+// `DRP` is serialized verbatim to JSON and persisted to the TEXT `trade_type`
+// column (matched by a CHECK constraint), so the acronym spelling is the
+// wire/storage format and must not be camel-cased.
+#[allow(clippy::upper_case_acronyms)]
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, sqlx::Type)]
 pub enum TradeType {
     Buy,

@@ -270,14 +270,9 @@ pub fn clean_price(price: Decimal) -> Decimal {
 
 /// Yahoo Finance, via the `yfinance-rs` crate (see the module docs for the
 /// provider decision and its verified behaviour).
+#[derive(Default)]
 pub struct YahooFetcher {
     client: yfinance_rs::YfClient,
-}
-
-impl Default for YahooFetcher {
-    fn default() -> Self {
-        YahooFetcher { client: yfinance_rs::YfClient::default() }
-    }
 }
 
 /// The Yahoo symbol for a listing: ASX tickers carry `.AX`, NYSE/Nasdaq are

@@ -31,18 +31,13 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, sqlx::Type)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize, sqlx::Type)]
 pub enum ResidualHandling {
     /// Leftover cash is carried forward and added to the next reinvestment.
+    #[default]
     CarryForward,
     /// Leftover cash is paid out rather than carried.
     PayOut,
-}
-
-impl Default for ResidualHandling {
-    fn default() -> Self {
-        ResidualHandling::CarryForward
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
@@ -122,10 +117,10 @@ pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<DrpEnrolment>, 
 /// Upsert an enrolment period, enforcing the no-overlap invariant and settling
 /// a closed period's trailing residual, all in one transaction.
 pub async fn db_upsert(pool: &SqlitePool, period: &DrpEnrolment) -> Result<(), UpsertError> {
-    if let Some(end) = period.unenrolment_date {
-        if end <= period.enrolment_date {
-            return Err(UpsertError::EmptyPeriod);
-        }
+    if let Some(end) = period.unenrolment_date
+        && end <= period.enrolment_date
+    {
+        return Err(UpsertError::EmptyPeriod);
     }
 
     let mut tx = pool.begin().await?;

@@ -150,7 +150,7 @@ mod tests {
         let entries = std::fs::read_dir(&migrations_dir)
             .expect("migrations dir should exist")
             .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().map_or(false, |x| x == "sql"));
+            .filter(|e| e.path().extension().is_some_and(|x| x == "sql"));
 
         for entry in entries {
             let path = entry.path();
@@ -176,7 +176,6 @@ mod tests {
                     let table = after
                         .strip_prefix("IF EXISTS")
                         .unwrap_or(after)
-                        .trim()
                         .split_whitespace()
                         .next()
                         .unwrap_or("")
@@ -202,7 +201,7 @@ mod tests {
         let entries = std::fs::read_dir(&migrations_dir)
             .expect("migrations dir should exist")
             .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().map_or(false, |x| x == "sql"));
+            .filter(|e| e.path().extension().is_some_and(|x| x == "sql"));
 
         for entry in entries {
             let path = entry.path();

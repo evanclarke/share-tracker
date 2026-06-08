@@ -200,26 +200,26 @@ pub fn parse_iso4217(content: &str) -> Result<Vec<Currency>, ImportError> {
                 if tag == b"CcyNtry" {
                     in_entry = false;
                     cur_tag = None;
-                    if let Some(code) = ccy.take().filter(|c| !c.is_empty()) {
-                        if seen.insert(code.clone()) {
-                            let minor_units = match minor.take().as_deref() {
-                                None | Some("") | Some("N.A.") => None,
-                                Some(s) => Some(s.parse::<i64>().map_err(|e| {
-                                    ImportError::Parse(format!(
-                                        "invalid minor units {s:?} for {code}: {e}"
-                                    ))
-                                })?),
-                            };
-                            out.push(Currency {
-                                code,
-                                kind: CurrencyKind::Fiat,
-                                numeric_code: nbr.take().filter(|c| !c.is_empty()),
-                                name: name.take().unwrap_or_default(),
-                                short_name: None,
-                                minor_units,
-                                source: CurrencySource::Iso4217,
-                            });
-                        }
+                    if let Some(code) = ccy.take().filter(|c| !c.is_empty())
+                        && seen.insert(code.clone())
+                    {
+                        let minor_units = match minor.take().as_deref() {
+                            None | Some("") | Some("N.A.") => None,
+                            Some(s) => Some(s.parse::<i64>().map_err(|e| {
+                                ImportError::Parse(format!(
+                                    "invalid minor units {s:?} for {code}: {e}"
+                                ))
+                            })?),
+                        };
+                        out.push(Currency {
+                            code,
+                            kind: CurrencyKind::Fiat,
+                            numeric_code: nbr.take().filter(|c| !c.is_empty()),
+                            name: name.take().unwrap_or_default(),
+                            short_name: None,
+                            minor_units,
+                            source: CurrencySource::Iso4217,
+                        });
                     }
                 } else if cur_tag.as_deref() == Some(tag) {
                     cur_tag = None;
