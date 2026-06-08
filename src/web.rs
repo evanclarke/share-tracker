@@ -659,4 +659,36 @@ mod tests {
         assert!(js.contains("filter-row"));
         assert!(js.contains("sortable"));
     }
+
+    #[tokio::test]
+    async fn column_headings_are_human_friendly() {
+        let js = app_js_body().await;
+        // Every table column header and filter placeholder reads through the
+        // shared columnLabel — config-driven overrides over a default humaniser,
+        // keyed by column name like COLUMN_KINDS — so the chrome around the data
+        // never shows a raw database/JSON field name.
+        assert!(js.contains("function humanizeLabel("));
+        assert!(js.contains("const COLUMN_LABELS"));
+        assert!(js.contains("function columnLabel("));
+        // The shared table renderer uses the friendly label for both the header
+        // cell and the per-column filter placeholder; the raw column name still
+        // drives sorting/filtering, so it must not leak into the header text.
+        assert!(js.contains("[columnLabel(c), indicator]"));
+        assert!(js.contains("'Filter ' + columnLabel(c)"));
+        assert!(!js.contains(", [c, indicator]"));
+        assert!(!js.contains("'Filter ' + c +"));
+        // The default humaniser drops a trailing "_id" (the cell already shows
+        // the referenced row's name) and keeps known acronyms in canonical
+        // casing rather than title-casing them to "Aud"/"Fx"/"Drp".
+        assert!(js.contains("/_id$/"));
+        assert!(js.contains("const LABEL_ACRONYMS"));
+        assert!(js.contains("aud: 'AUD'"));
+        assert!(js.contains("fx: 'FX'"));
+        assert!(js.contains("fito: 'FITO'"));
+        // Explicit overrides for the headers the requirement calls out, plus a
+        // unit qualifier on an always-AUD report aggregate.
+        assert!(js.contains("exchange_mic: 'Exchange'"));
+        assert!(js.contains("holding_account_id: 'Account'"));
+        assert!(js.contains("'Market value (AUD)'"));
+    }
 }

@@ -346,6 +346,64 @@
     return out;
   }
 
+  // ---- human-friendly column headings -----------------------------------
+  // Every table column header and filter placeholder reads through columnLabel,
+  // so the chrome around the data shows "Amount per security", "FX rate",
+  // "Account" — never the raw database/JSON field name. This is the labelling
+  // counterpart to the foreign-key naming above: that fixed raw id *values*;
+  // this fixes raw field *names* in the headers around them. Keyed by column
+  // name — shared across the JSON API — so a column reused on a new screen
+  // inherits its heading with no per-screen wiring, exactly like COLUMN_KINDS.
+  // (Form input labels and screen/section headings already read from their
+  // per-field `label` / `title` config, so they need no mapping here.)
+
+  // Acronyms kept in their canonical casing inside a humanised label, rather
+  // than title-cased to "Aud"/"Fx"/"Drp". Keyed lowercase; the humaniser looks
+  // each word up case-insensitively.
+  const LABEL_ACRONYMS = {
+    id: 'ID', aud: 'AUD', fx: 'FX', mic: 'MIC', isin: 'ISIN', drp: 'DRP',
+    cgt: 'CGT', amit: 'AMIT', amma: 'AMMA', gst: 'GST', lic: 'LIC', fito: 'FITO',
+    tfn: 'TFN',
+  };
+
+  // Default humaniser so a field with no explicit COLUMN_LABELS entry never
+  // renders a raw identifier: a trailing "_id" is dropped (the cell already
+  // shows the referenced row's name, so "listing_id" → "Listing"), the
+  // snake_case becomes sentence case, and known acronyms keep canonical casing.
+  function humanizeLabel(name) {
+    let s = String(name);
+    if (s.length > 3 && /_id$/.test(s)) s = s.slice(0, -3); // listing_id → Listing
+    const words = s.split('_').filter(Boolean);
+    if (words.length === 0) return String(name);
+    return words.map(function (w, i) {
+      const acr = LABEL_ACRONYMS[w.toLowerCase()];
+      if (acr) return acr;
+      return i === 0 ? w.charAt(0).toUpperCase() + w.slice(1) : w;
+    }).join(' ');
+  }
+
+  // Explicit header overrides where the default humaniser reads wrong or a
+  // unit/qualifier aids reading. The report AUD aggregates carry "(AUD)" — the
+  // Australian-tax view converts every figure to AUD, so those columns are
+  // always AUD; the per-row entity tables deliberately get no currency
+  // qualifier, because their amounts are in the row's own currency column.
+  const COLUMN_LABELS = {
+    exchange_mic: 'Exchange',
+    holding_account_id: 'Account',
+    market_value: 'Market value (AUD)',
+    total_cost_base: 'Total cost base (AUD)',
+    proceeds: 'Proceeds (AUD)',
+    capital_gain_loss: 'Capital gain/loss (AUD)',
+    unrealised_gain_loss: 'Unrealised gain/loss (AUD)',
+    net_capital_gain: 'Net capital gain (AUD)',
+    avg_cost_base_per_unit: 'Average cost base per unit (AUD)',
+  };
+
+  // The friendly heading for a column: an explicit override, else humanised.
+  function columnLabel(c) {
+    return COLUMN_LABELS[c] || humanizeLabel(c);
+  }
+
   // id → "MIC:TICKER" resolver for prose and option labels; an unknown/null
   // id falls back to the raw "listing N" wording.
   async function listingNamer() {
@@ -820,10 +878,11 @@
 
     const container = el('div');
 
-    // Header row: click-to-sort column titles.
+    // Header row: click-to-sort column titles, shown as friendly labels
+    // (columnLabel) while sorting/filtering stay keyed by the raw column name.
     const headCells = cols.map(function (c) {
       const indicator = el('span', { class: 'sort-ind' }, '');
-      const th = el('th', { class: (numeric[c] ? 'num ' : '') + 'sortable' }, [c, indicator]);
+      const th = el('th', { class: (numeric[c] ? 'num ' : '') + 'sortable' }, [columnLabel(c), indicator]);
       th._col = c;
       th._ind = indicator;
       th.addEventListener('click', function () {
@@ -840,7 +899,7 @@
     // Filter row: one input per column, AND-combined.
     const filterCells = cols.map(function (c) {
       const input = el('input', {
-        type: 'search', class: 'table-filter', placeholder: 'Filter ' + c + '…',
+        type: 'search', class: 'table-filter', placeholder: 'Filter ' + columnLabel(c) + '…',
         oninput: function () {
           const v = this.value.trim().toLowerCase();
           if (v === '') delete filters[c]; else filters[c] = v;
