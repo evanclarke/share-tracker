@@ -175,7 +175,7 @@ pub async fn db_cost_base_reductions_up_to<'e, E>(
 where
     E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
 {
-    let cutoff = up_to.unwrap_or_else(|| chrono::NaiveDate::from_ymd_opt(9999, 12, 31).unwrap());
+    let cutoff = crate::infra::date::as_of_or_open(up_to);
     let rows = sqlx::query(
         "SELECT aa.trade_id, aa.quantity, a.cost_base_adjustment \
          FROM amit_adjustments aa \

@@ -74,8 +74,7 @@ pub async fn db_holdings(
     pool: &SqlitePool,
     as_of: Option<NaiveDate>,
 ) -> Result<Vec<HoldingOverview>, sqlx::Error> {
-    // ISO dates compare as strings, so a far-future literal is "no cutoff".
-    let cutoff = as_of.unwrap_or_else(|| NaiveDate::from_ymd_opt(9999, 12, 31).unwrap());
+    let cutoff = crate::infra::date::as_of_or_open(as_of);
     let trade_rows = sqlx::query(
         "SELECT id, listing_id, holding_account_id, date, quantity, average_price, brokerage, \
          gst_on_brokerage, currency, fx_rate, deemed_acquisition_date \

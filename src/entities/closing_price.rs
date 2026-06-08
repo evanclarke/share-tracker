@@ -457,9 +457,7 @@ pub async fn db_held_listing_ids(
     pool: &SqlitePool,
     as_of: Option<NaiveDate>,
 ) -> Result<Vec<i64>, sqlx::Error> {
-    // ISO dates compare as strings, so a far-future literal is "no cutoff"
-    // (NaiveDate::MAX would render with a leading '+' and sort before digits).
-    let cutoff = as_of.unwrap_or_else(|| NaiveDate::from_ymd_opt(9999, 12, 31).unwrap());
+    let cutoff = crate::infra::date::as_of_or_open(as_of);
     let buys = sqlx::query(
         "SELECT id, listing_id, quantity FROM trades \
          WHERE trade_type IN ('Buy', 'DRP') AND date <= ?",
