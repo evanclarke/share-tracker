@@ -445,6 +445,17 @@ pub async fn db_upsert(pool: &SqlitePool, trade: &Trade) -> Result<(), UpsertErr
             return Err(UpsertError::EssVestTrade);
         }
     }
+    // A transfer's network-fee disposal Sell is immutable here too: its
+    // provenance lives on the transfer (transfers.fee_sale_trade_id), not on
+    // the trade row, so it is guarded by a lookup rather than a column.
+    let is_transfer_fee: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM transfers WHERE fee_sale_trade_id = ?)")
+            .bind(trade.id)
+            .fetch_one(&mut *tx)
+            .await?;
+    if is_transfer_fee {
+        return Err(UpsertError::TransferTrade);
+    }
 
     // Sum is computed in Decimal (the column is TEXT; SQL SUM would coerce to
     // float). For a new id both dependant sets are empty, so the checks pass.

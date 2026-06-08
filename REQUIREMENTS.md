@@ -541,3 +541,42 @@ Out of scope (record as Known limitations):
 - **Start-up concession schemes** (no upfront discount is assessable; the interest is taxed only
   under CGT on disposal) and **the employer's ESS annual report** lodgement (an employer
   obligation, not the individual's) are not modelled
+
+## Crypto wallet-to-wallet transfer with a network fee (2026-06-08)
+
+Moving a crypto asset between two wallets you own is already modelled as a holding-account transfer
+(not a CGT event). What's missing is the **on-chain network fee**: an on-chain transfer reduces the
+holding to pay a fee in the crypto itself, and per the ATO ("Crypto asset investments and tax",
+QC 69952, mirrored in `docs/ato/crypto-cgt.md`): *"Transferring crypto assets from one digital
+wallet to another digital wallet is not considered as a disposal as long as you maintain ownership
+of it. If your crypto holding reduces during a transfer to cover a network fee, the transaction fee
+is a disposal and has capital gain consequences."* So the move stays a non-CGT event, but the crypto
+burned to cover the fee **is a disposal** that must surface in the gains reports.
+
+- The holding-account transfer operation (`PUT /transfers/:id`) gains an **optional network fee**:
+  - `fee_allocations` — the source parcels (and units) consumed to pay the fee, in the same shape as
+    the moved `allocations`; empty/absent means no fee. They must belong to the transfer's listing
+    and the source account, and the moved units plus the fee units are validated together against
+    each parcel's capacity
+  - `fee_market_price` — the fee crypto's per-unit market value at the transfer date, in the
+    listing's currency (AUD for an AUD-priced crypto; an optional `fee_fx_rate`, default 1, converts
+    a non-AUD listing's price to AUD). Required when `fee_allocations` is non-empty; a fee without a
+    positive market value is rejected (422) — the disposal needs its capital proceeds
+- The fee is recorded as an **ordinary disposal Sell** in the source account at that market value:
+  it carries **no `transfer_id`** (so the realised-gains, net-capital-gain, and performance reports
+  count it, with the 12-month discount where the fee units were held ≥ 12 months), but is linked to
+  the transfer so the two are created and deleted atomically and the fee Sell is individually
+  immutable (rejected by `PUT /sells`, `PUT`/`DELETE /trades`, `DELETE /sells`; undo by deleting the
+  transfer). Deleting the transfer removes the fee disposal and restores the whole source parcel
+- ATO documentation: the wallet-transfer/network-fee guidance is mirrored into
+  `docs/ato/crypto-cgt.md` (source URL + retrieval date, indexed in `OVERVIEW.md`)
+- Web UI: the transfer form gains an optional fee-parcel allocation editor + the per-unit market
+  value field, via the shared `allocationEditor`
+- Docs: the new `transfers.fee_sale_trade_id` column updates `docs/SCHEMA.md` (incl. Relationships);
+  the changed `PUT /transfers/:id` request/response and 422 cases update `docs/API.md`; the README
+  Transfers feature notes the crypto network fee
+
+Out of scope (already recorded as Known limitations, unchanged): crypto-to-crypto swaps, staking
+rewards/airdrops, chain splits/forks, wrapping, the personal-use-asset exemption, and Div 775
+foreign-currency balances. A transfer fee charged in **fiat** by an exchange is not a crypto
+disposal — it is a (non-deductible) transaction cost, not modelled here.

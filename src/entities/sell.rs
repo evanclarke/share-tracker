@@ -169,6 +169,20 @@ struct SellProvenance {
     worthless_action_id: Option<i64>,
 }
 
+/// Whether the trade `id` is a holding-account transfer's network-fee disposal
+/// Sell (linked from `transfers.fee_sale_trade_id`). Such a Sell is part of its
+/// transfer group: it is created and removed only via the transfer, never
+/// edited or deleted on its own here.
+async fn is_transfer_fee_sale(
+    tx: &mut sqlx::SqliteConnection,
+    id: i64,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM transfers WHERE fee_sale_trade_id = ?)")
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await
+}
+
 /// Delete a Sell trade and all of its parcel allocations in one transaction,
 /// freeing the purchase parcels those allocations consumed. A buy-back
 /// participation Sell takes its linked dividend-component income row
@@ -197,6 +211,12 @@ pub async fn db_delete_sell(pool: &SqlitePool, id: i64) -> Result<DeleteOutcome,
         Some(r) if r.transfer_id.is_some() => return Ok(DeleteOutcome::TransferSell),
         Some(r) => (r.scrip_action_id, r.demerger_action_id),
     };
+    // A transfer's network-fee disposal Sell is likewise part of its transfer
+    // group (linked via transfers.fee_sale_trade_id, not transfer_id, so it
+    // stays in the gains reports) — it too is removed via DELETE /transfers.
+    if is_transfer_fee_sale(&mut tx, id).await? {
+        return Ok(DeleteOutcome::TransferSell);
+    }
 
     let group = scrip_action
         .map(|a| ("scrip_action_id", a))
@@ -289,6 +309,12 @@ pub async fn db_upsert_sell(pool: &SqlitePool, id: i64, body: &SellBody) -> Resu
         if p.worthless_action_id.is_some() {
             return Err(SellError::WorthlessSell);
         }
+    }
+    // A transfer's network-fee disposal Sell carries its provenance on the
+    // transfer (transfers.fee_sale_trade_id), not on the trade row, so it is
+    // guarded separately — it is immutable here, like the transfer-out Sell.
+    if is_transfer_fee_sale(&mut tx, id).await? {
+        return Err(SellError::TransferSell);
     }
 
     upsert_sell_in_tx(&mut tx, id, body, settlement_date, None, None, None, None, None).await?;

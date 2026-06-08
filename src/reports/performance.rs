@@ -837,6 +837,9 @@ mod tests {
                     purchase_trade_id: 1,
                     quantity_allocated: Decimal::from(100),
                 }],
+                fee_allocations: Vec::new(),
+                fee_market_price: None,
+                fee_fx_rate: None,
             },
         )
         .await

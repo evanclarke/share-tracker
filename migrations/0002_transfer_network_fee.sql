@@ -1,0 +1,16 @@
+-- Crypto wallet-to-wallet transfers can incur an on-chain network fee paid in
+-- the crypto itself. Per ATO guidance ("Crypto asset investments and tax",
+-- QC 69952, mirrored in docs/ato/crypto-cgt.md): moving a crypto asset between
+-- wallets you own is NOT a CGT event, but "if your crypto holding reduces
+-- during a transfer to cover a network fee, the transaction fee is a disposal
+-- and has capital gain consequences".
+--
+-- That fee disposal is recorded as an ordinary Sell in the source account at
+-- the fee crypto's market value, so it flows through the gains reports (with
+-- the 12-month discount) exactly like any disposal. It is linked back to its
+-- transfer here so it is created and deleted atomically with the transfer and
+-- is individually immutable (a recorded transfer is immutable — delete it and
+-- re-transfer instead). Unlike the transfer-out Sell (trades.transfer_id),
+-- this Sell IS counted by the gains reports — it is a real disposal — so it
+-- must not carry transfer_id; the link lives here on the transfer instead.
+ALTER TABLE transfers ADD COLUMN fee_sale_trade_id INTEGER REFERENCES trades(id);

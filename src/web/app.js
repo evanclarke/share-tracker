@@ -1787,7 +1787,8 @@
 
     // The parcels to move — the same shape as a Sell's allocations (the shared
     // editor); partial parcels allowed.
-    const allocEditor = allocationEditor(await loadOptions('buyParcels'), null, {
+    const buyParcels = await loadOptions('buyParcels');
+    const allocEditor = allocationEditor(buyParcels, null, {
       heading: 'Parcels to move',
       hint: 'Each parcel must be a Buy/DRP of the chosen listing held in the source account, with enough remaining units. Moved units keep their cost base and acquisition date.',
       parcelLabel: 'Parcel to move',
@@ -1795,6 +1796,22 @@
       addLabel: '+ Add parcel',
     });
     form.appendChild(allocEditor.section);
+
+    // The optional crypto network fee: the source parcels disposed of to cover
+    // an on-chain transfer fee. Unlike the move, these units are a CGT event
+    // (ATO: a holding reducing to cover a network fee is a disposal) — they
+    // show up in the gains reports at the per-unit market value below.
+    const feeEditor = allocationEditor(buyParcels, null, {
+      heading: 'Network fee (optional)',
+      hint: 'Leave empty for no fee. Otherwise: the source parcels disposed of to pay the on-chain network fee. These units are a CGT disposal (not moved) at the per-unit market value below — they surface a capital gain/loss in the realised-gains report.',
+      parcelLabel: 'Fee parcel',
+      qtyLabel: 'Fee units',
+      addLabel: '+ Add fee parcel',
+    });
+    form.appendChild(feeEditor.section);
+    const feePrice = field('fee_market_price', 'Fee market value per unit (AUD)', 'decimal',
+      { required: false, hint: "The fee crypto's market value per unit at the transfer date — the disposal's capital proceeds. Required only when a fee parcel is set." });
+    form.appendChild(await buildFieldInput(feePrice, null, false));
 
     form.appendChild(el('div', { class: 'form-actions' }, [
       el('button', { type: 'submit', class: 'primary' }, 'Transfer'),
@@ -1806,14 +1823,21 @@
         const body = {};
         fields.forEach(function (f) { body[f.name] = readFieldValue(f, form); });
         body.allocations = allocEditor.read();
+        const feeAllocs = feeEditor.read();
+        if (feeAllocs.length) {
+          body.fee_allocations = feeAllocs;
+          body.fee_market_price = readFieldValue(feePrice, form);
+        }
         const result = await api('PUT', '/transfers/' + await nextId('/transfers'), body);
         const n = result && result.transfer_ins ? result.transfer_ins.length : 0;
         const listingName = await listingNamer();
         const acct = (await fkLabelMaps({ a: 'holdingAccounts' })).a || {};
         const acctName = function (id) { return acct[id] || ('account ' + id); };
+        const feeNote = result && result.fee_sale
+          ? ' Network fee disposed as sell #' + result.fee_sale.id + ' (a CGT event).' : '';
         toast('Transferred ' + n + ' parcel(s) of ' + listingName(body.listing_id)
           + ' from ' + acctName(body.from_account_id) + ' to ' + acctName(body.to_account_id)
-          + ' (transfer-out sell #' + (result && result.sell ? result.sell.id : '?') + ').');
+          + ' (transfer-out sell #' + (result && result.sell ? result.sell.id : '?') + ').' + feeNote);
         location.hash = '#/transfers';
       } catch (e) {
         toast(e.message, true);
@@ -1821,7 +1845,7 @@
     });
     setMain(el('div', null, [
       el('h2', null, 'New Transfer'),
-      el('p', { class: 'view-desc' }, 'Moves units between two holding accounts of the same owner — not a CGT event: nothing appears in the gains reports and each moved parcel keeps its cost base and acquisition date.'),
+      el('p', { class: 'view-desc' }, 'Moves units between two holding accounts of the same owner — not a CGT event: nothing appears in the gains reports and each moved parcel keeps its cost base and acquisition date. An optional crypto network fee, paid in the transferred crypto, is the exception: those units are disposed of at market value and do surface a capital gain/loss.'),
       el('div', { class: 'card' }, form),
     ]));
   }

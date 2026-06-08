@@ -419,10 +419,11 @@ mod tests {
         assert!(js.contains("/sells"));
         assert!(js.contains("allocations"));
         // The allocation rows are built by the shared allocationEditor helper,
-        // driven by the Sell form, the Transfer form, and the buy-back
-        // Participate action: one definition plus three call sites.
+        // driven by the Sell form, the Transfer form (twice: the parcels to
+        // move and the optional crypto network-fee parcels), and the buy-back
+        // Participate action: one definition plus four call sites.
         assert!(js.contains("function allocationEditor"));
-        assert_eq!(js.matches("allocationEditor(").count(), 4);
+        assert_eq!(js.matches("allocationEditor(").count(), 5);
     }
 
     #[tokio::test]
@@ -455,6 +456,10 @@ mod tests {
         assert!(js.contains("from_account_id"));
         assert!(js.contains("to_account_id"));
         assert!(js.contains("viewTransferForm"));
+        // The optional crypto network fee: a fee-parcel allocation editor plus
+        // the per-unit market value driving the fee's CGT disposal.
+        assert!(js.contains("fee_allocations"));
+        assert!(js.contains("fee_market_price"));
     }
 
     #[tokio::test]

@@ -109,6 +109,31 @@ disposing of to work out the capital proceeds.
 > Therefore, Katrina's capital proceeds are **$5,000** for the disposal of
 > Coin A.
 
+## Transferring crypto between wallets you own (and network fees)
+
+> **Source:** the "Crypto asset investments and tax" guidance (QC 69952) and
+> [Crypto asset transactions](https://www.ato.gov.au/individuals-and-families/investments-and-assets/crypto-asset-investments/transactions-acquiring-and-disposing-of-crypto-assets/crypto-asset-transactions).
+> **Retrieved:** 2026-06-08.
+
+Moving a crypto asset between two wallets you own is **not a disposal** as long
+as you keep ownership — no CGT event, exactly like a share transfer between two
+of your own holding accounts. Verbatim:
+
+> Transferring crypto assets from one digital wallet to another digital wallet
+> is not considered as a disposal as long as you maintain ownership of it.
+>
+> **If your crypto holding reduces during a transfer to cover a network fee,
+> the transaction fee is a disposal and has capital gain consequences.**
+
+So an on-chain transfer fee paid **in the crypto** is itself a CGT event: the
+fee units are disposed of at their market value (in Australian dollars) at the
+transfer time, and the capital gain or loss is that AUD market value less the
+fee units' share of the parcel's cost base — with the 12-month CGT discount
+available if those units had been held for at least 12 months. (A transfer fee
+charged in **fiat** by an exchange is not a crypto disposal; it is a
+transaction cost, and like brokerage it is not separately deductible — see
+[`investment-income-deductions.md`](investment-income-deductions.md).)
+
 ## How this maps to this project
 
 A crypto asset held as an investment is a CGT asset whose gains are calculated
@@ -118,6 +143,14 @@ listing (no exchange, same-day settlement, ticker = a recognised digital-token
 code in `currencies`) flows through the existing parcel machinery — parcel
 allocations, reduced cost base, transfers between holding accounts — with no
 crypto-specific calculation code.
+
+A holding-account transfer can carry an optional **network fee** paid in the
+transferred crypto: the move stays a non-CGT event (transfer-out Sell +
+transfer-in Buys carrying cost base), while the fee units are recorded as an
+ordinary disposal Sell in the source account at the supplied AUD market value
+— linked to the transfer (`transfers.fee_sale_trade_id`) so it is created and
+removed atomically with it, but **counted by the gains reports** (with the
+discount) because it is a real disposal. See `src/entities/transfer.rs`.
 
 Out of scope (Known limitations in README): a crypto-to-crypto **swap is
 entered manually** as a Sell at the market-value proceeds plus a Buy of the

@@ -61,7 +61,8 @@ transfers                    Moves of a listing between two holding accounts of 
 ├── listing_id      INTEGER FK→listings.id
 ├── date            TEXT          The transfer-out Sell and transfer-in Buys are dated on it
 ├── from_account_id INTEGER FK→holding_accounts.id
-└── to_account_id   INTEGER FK→holding_accounts.id   CHECK: differs from from_account_id
+├── to_account_id   INTEGER FK→holding_accounts.id   CHECK: differs from from_account_id
+└── fee_sale_trade_id INTEGER FK→trades.id (nullable)  The network-fee disposal Sell, when a crypto wallet transfer burned an on-chain fee paid in the crypto (NULL otherwise). Unlike the transfer-out Sell (trades.transfer_id), this Sell is a real disposal and IS counted by the gains reports — linked here, not via transfer_id, so it stays visible to them. Set by PUT /transfers/:id, removed with the transfer by DELETE /transfers/:id; immutable via PUT /sells, PUT /trades, DELETE /sells
                     The per-parcel quantities live on the transfer-out Sell's parcel_allocations rows
 
 trades
@@ -277,6 +278,7 @@ exchanges ──< listings ──< trades >────────────�
                        holding_accounts ──< investment_expenses (nullable; portfolio-wide expense leaves it NULL)
                        holding_accounts ──< transfers (from_account_id + to_account_id)
                        transfers ──< trades (transfer_id)
+                       transfers >── trades (fee_sale_trade_id; the crypto network-fee disposal Sell)
                        ess_statements ──< trades (ess_statement_id; the cost-base-reset vest Buy)
                        trades (DRP) ──< income (reinvestment_trade_id)
                        corporate_actions (RightsIssue) ──< trades (rights_action_id)

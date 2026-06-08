@@ -59,6 +59,12 @@ pub struct Transfer {
     pub date: NaiveDate,
     pub from_account_id: i64,
     pub to_account_id: i64,
+    /// The id of the network-fee disposal Sell, when the transfer incurred a
+    /// fee paid in the crypto (NULL otherwise). Unlike the transfer-out Sell,
+    /// this Sell is a real disposal and IS counted by the gains reports — it is
+    /// linked here (not via `trades.transfer_id`) so it round-trips with the
+    /// transfer yet stays visible to those reports.
+    pub fee_sale_trade_id: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -70,6 +76,22 @@ pub struct TransferBody {
     /// The parcels to move and how many units of each (in transfer-date
     /// units, like a Sell's allocations) — partial parcels allowed.
     pub allocations: Vec<AllocationInput>,
+    /// Optional on-chain network fee paid in the transferred crypto: the source
+    /// parcels (and unit counts) consumed to cover the fee. Empty/absent means
+    /// no fee. These units are **disposed of** — a CGT event — not moved, so
+    /// they are not transferred in; the disposal Sell flows through the gains
+    /// reports. Must belong to the transfer's listing and the source account.
+    #[serde(default)]
+    pub fee_allocations: Vec<AllocationInput>,
+    /// The fee crypto's market value per unit at the transfer date, in the
+    /// listing's currency (AUD for an AUD-priced crypto) — the disposal's
+    /// capital proceeds per unit. Required when `fee_allocations` is non-empty.
+    #[serde(default)]
+    pub fee_market_price: Option<Decimal>,
+    /// The fee disposal's manual AUD fallback FX rate for a non-AUD-priced
+    /// crypto listing (defaults to 1, the AUD case).
+    #[serde(default)]
+    pub fee_fx_rate: Option<Decimal>,
 }
 
 /// The two sides of an executed transfer: the transfer-out Sell in the source
@@ -80,6 +102,9 @@ pub struct TransferGroup {
     pub transfer: Transfer,
     pub sell: Trade,
     pub transfer_ins: Vec<Trade>,
+    /// The network-fee disposal Sell, when the transfer incurred a fee
+    /// (`None` otherwise).
+    pub fee_sale: Option<Trade>,
 }
 
 #[derive(Debug)]
@@ -92,8 +117,13 @@ pub enum TransferError {
     AlreadyExists,
     /// No allocations — a transfer must move at least one parcel.
     NothingToTransfer,
-    /// A referenced parcel does not belong to the transfer's listing.
+    /// A referenced parcel (moved or fee) does not belong to the transfer's
+    /// listing.
     ListingMismatch,
+    /// A network fee was specified (`fee_allocations` non-empty) without a
+    /// positive per-unit market value for the fee crypto — the disposal needs
+    /// its capital proceeds.
+    FeeMarketPriceMissing,
     /// The Sell-side invariants failed: missing/over-allocated parcel, a
     /// non-Buy/DRP parcel, or a parcel outside the source account.
     Sell(sell::SellError),
@@ -122,7 +152,7 @@ pub fn router() -> Router<SqlitePool> {
 
 pub async fn db_list(pool: &SqlitePool) -> Result<Vec<Transfer>, sqlx::Error> {
     sqlx::query_as(
-        "SELECT id, listing_id, date, from_account_id, to_account_id \
+        "SELECT id, listing_id, date, from_account_id, to_account_id, fee_sale_trade_id \
          FROM transfers ORDER BY date, id",
     )
     .fetch_all(pool)
@@ -131,7 +161,7 @@ pub async fn db_list(pool: &SqlitePool) -> Result<Vec<Transfer>, sqlx::Error> {
 
 pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<Transfer>, sqlx::Error> {
     sqlx::query_as(
-        "SELECT id, listing_id, date, from_account_id, to_account_id \
+        "SELECT id, listing_id, date, from_account_id, to_account_id, fee_sale_trade_id \
          FROM transfers WHERE id = ?",
     )
     .bind(id)
@@ -294,7 +324,7 @@ pub async fn db_transfer(
         currency: listing_currency.clone(),
         brokerage: Decimal::ZERO,
         gst_on_brokerage: Decimal::ZERO,
-        brokerage_currency: listing_currency,
+        brokerage_currency: listing_currency.clone(),
         fx_rate: Decimal::ONE,
         contract_note_ref: None,
         holding_account_id: body.from_account_id,
@@ -340,6 +370,71 @@ pub async fn db_transfer(
         transfer_in_ids.push(buy_id);
     }
 
+    // The optional network-fee disposal: the crypto consumed to cover the
+    // on-chain fee is a CGT event (ATO: "if your crypto holding reduces during
+    // a transfer to cover a network fee, the transaction fee is a disposal and
+    // has capital gain consequences"). It is an ordinary Sell in the source
+    // account at the fee crypto's market value — no `transfer_id`, so it is
+    // counted by the gains reports like any disposal — linked to this transfer
+    // via `transfers.fee_sale_trade_id` so the two are created and deleted
+    // together. Its parcels' over-allocation is checked against the source
+    // holding net of the transfer-out Sell above (both share the same tx).
+    let mut fee_sale_id: Option<i64> = None;
+    if !body.fee_allocations.is_empty() {
+        let fee_market_price = match body.fee_market_price {
+            Some(p) if p > Decimal::ZERO => p,
+            _ => return Err(TransferError::FeeMarketPriceMissing),
+        };
+        // Fee parcels must be of the transfer's listing (the Sell core checks
+        // the source-account and capacity invariants, but not the listing).
+        for alloc in &body.fee_allocations {
+            let parcel_listing: Option<i64> =
+                sqlx::query_scalar("SELECT listing_id FROM trades WHERE id = ?")
+                    .bind(alloc.purchase_trade_id)
+                    .fetch_optional(&mut *tx)
+                    .await?;
+            match parcel_listing {
+                None => return Err(TransferError::Sell(sell::SellError::PurchaseParcelMissing)),
+                Some(l) if l != body.listing_id => return Err(TransferError::ListingMismatch),
+                Some(_) => {}
+            }
+        }
+
+        let id_for_fee = sell_id + 1 + transfer_ins.len() as i64;
+        let fee_body = SellBody {
+            brokerage_includes_gst: false,
+            statement_total: None,
+            date: body.date,
+            settlement_date: Some(body.date),
+            listing_id: body.listing_id,
+            average_price: fee_market_price,
+            quantity: body.fee_allocations.iter().map(|a| a.quantity_allocated).sum(),
+            currency: listing_currency.clone(),
+            brokerage: Decimal::ZERO,
+            gst_on_brokerage: Decimal::ZERO,
+            brokerage_currency: listing_currency,
+            fx_rate: body.fee_fx_rate.unwrap_or(Decimal::ONE),
+            contract_note_ref: None,
+            holding_account_id: body.from_account_id,
+            allocations: body
+                .fee_allocations
+                .iter()
+                .map(|a| AllocationInput {
+                    purchase_trade_id: a.purchase_trade_id,
+                    quantity_allocated: a.quantity_allocated,
+                })
+                .collect(),
+        };
+        sell::upsert_sell_in_tx(&mut tx, id_for_fee, &fee_body, body.date, None, None, None, None, None)
+            .await?;
+        sqlx::query("UPDATE transfers SET fee_sale_trade_id = ? WHERE id = ?")
+            .bind(id_for_fee)
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        fee_sale_id = Some(id_for_fee);
+    }
+
     tx.commit().await?;
 
     // Read the freshly created rows back so the response is exactly what was
@@ -357,7 +452,15 @@ pub async fn db_transfer(
                 .ok_or_else(|| TransferError::Db(sqlx::Error::RowNotFound))?,
         );
     }
-    Ok(TransferGroup { transfer, sell, transfer_ins: created })
+    let fee_sale = match fee_sale_id {
+        Some(fid) => Some(
+            trade::db_get(pool, fid)
+                .await?
+                .ok_or_else(|| TransferError::Db(sqlx::Error::RowNotFound))?,
+        ),
+        None => None,
+    };
+    Ok(TransferGroup { transfer, sell, transfer_ins: created, fee_sale })
 }
 
 /// Outcome of a delete request, so the handler can map to the right status.
@@ -372,21 +475,22 @@ pub enum DeleteOutcome {
 }
 
 /// Delete a transfer and its whole trade group (the transfer-out Sell, its
-/// allocations, and every transfer-in Buy) in one transaction, restoring the
-/// pre-transfer holding.
+/// allocations, every transfer-in Buy, and the network-fee disposal Sell if
+/// any) in one transaction, restoring the pre-transfer holding.
 pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<DeleteOutcome, sqlx::Error> {
     let mut tx = pool.begin().await?;
 
-    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM transfers WHERE id = ?)")
-        .bind(id)
-        .fetch_one(&mut *tx)
-        .await?;
-    if !exists {
+    let fee_sale_id: Option<Option<i64>> =
+        sqlx::query_scalar("SELECT fee_sale_trade_id FROM transfers WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    let Some(fee_sale_id) = fee_sale_id else {
         return Ok(DeleteOutcome::NotFound);
-    }
+    };
 
     // The transfer-in Buys go with the group — but not while anything still
-    // draws on them.
+    // draws on them. (The fee Sell never gets drawn on — it is a disposal.)
     let referenced: bool = sqlx::query_scalar(
         "SELECT EXISTS(\
              SELECT 1 FROM trades t \
@@ -410,10 +514,29 @@ pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<DeleteOutcome, sqlx
     .bind(id)
     .execute(&mut *tx)
     .await?;
+    // Break the transfer→fee-Sell link before deleting the trade rows so
+    // neither foreign key (trades.transfer_id, transfers.fee_sale_trade_id)
+    // is left dangling mid-delete (foreign_keys is on).
+    if let Some(fee_id) = fee_sale_id {
+        sqlx::query("UPDATE transfers SET fee_sale_trade_id = NULL WHERE id = ?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM parcel_allocations WHERE sale_trade_id = ?")
+            .bind(fee_id)
+            .execute(&mut *tx)
+            .await?;
+    }
     sqlx::query("DELETE FROM trades WHERE transfer_id = ?")
         .bind(id)
         .execute(&mut *tx)
         .await?;
+    if let Some(fee_id) = fee_sale_id {
+        sqlx::query("DELETE FROM trades WHERE id = ?")
+            .bind(fee_id)
+            .execute(&mut *tx)
+            .await?;
+    }
     sqlx::query("DELETE FROM transfers WHERE id = ?")
         .bind(id)
         .execute(&mut *tx)
@@ -463,6 +586,10 @@ async fn upsert(
         Err(TransferError::ListingMismatch) => {
             unprocessable("a selected parcel does not belong to the transfer's listing")
         }
+        Err(TransferError::FeeMarketPriceMissing) => unprocessable(
+            "a network fee was specified without a positive per-unit market value for the fee \
+             crypto — the disposal needs its capital proceeds",
+        ),
         Err(TransferError::Sell(e)) => {
             tracing::warn!(error = ?e, "transfer rejected by a sell invariant");
             unprocessable(
@@ -601,6 +728,9 @@ mod tests {
                     quantity_allocated: q.parse().unwrap(),
                 })
                 .collect(),
+            fee_allocations: Vec::new(),
+            fee_market_price: None,
+            fee_fx_rate: None,
         }
     }
 
@@ -718,6 +848,291 @@ mod tests {
         assert_eq!(t.brokerage, dec("7407.40680000"));
         // ...with the original acquisition date driving the discount clock.
         assert_eq!(t.deemed_acquisition_date, Some(d(2023, 3, 1)));
+    }
+
+    /// Seed an AUD-priced BTC `Crypto` listing (id 1) and a single parcel
+    /// (trade id 1) of `qty` units bought at A$`price`/unit on 2023-03-01 in
+    /// account 2 — held long enough that a 2024-06-01 disposal is
+    /// discount-eligible.
+    async fn insert_crypto(pool: &SqlitePool, qty: &str, price: &str) {
+        listing::db_upsert(
+            pool,
+            &listing::Listing {
+                id: 1,
+                exchange_mic: None,
+                ticker: "BTC".to_string(),
+                name: "Bitcoin".to_string(),
+                isin: None,
+                security_type: listing::SecurityType::Crypto,
+                currency: "AUD".to_string(),
+                amit: false,
+                preference: false,
+            },
+        )
+        .await
+        .unwrap();
+        trade::db_upsert(
+            pool,
+            &Trade {
+                brokerage_includes_gst: false,
+                statement_total: None,
+                id: 1,
+                trade_type: TradeType::Buy,
+                date: d(2023, 3, 1),
+                settlement_date: d(2023, 3, 1),
+                listing_id: 1,
+                average_price: dec(price),
+                quantity: dec(qty),
+                currency: "AUD".to_string(),
+                brokerage: Decimal::ZERO,
+                gst_on_brokerage: Decimal::ZERO,
+                brokerage_currency: "AUD".to_string(),
+                fx_rate: Decimal::ONE,
+                contract_note_ref: None,
+                residual_brought_forward: Decimal::ZERO,
+                residual_carried_forward: Decimal::ZERO,
+                residual_paid_out: Decimal::ZERO,
+                rights_action_id: None,
+                buyback_action_id: None,
+                scrip_action_id: None,
+                demerger_action_id: None,
+                worthless_action_id: None,
+                deemed_acquisition_date: None,
+                holding_account_id: 2,
+                transfer_id: None,
+                ess_statement_id: None,
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    /// A transfer body carrying a network fee: `allocations` move, while
+    /// `fee_allocations` are disposed of at `fee_price`/unit to cover the fee.
+    fn fee_body(
+        date: NaiveDate,
+        from: i64,
+        to: i64,
+        allocations: Vec<(i64, &str)>,
+        fee_allocations: Vec<(i64, &str)>,
+        fee_price: &str,
+    ) -> TransferBody {
+        let map = |v: Vec<(i64, &str)>| {
+            v.into_iter()
+                .map(|(id, q)| AllocationInput {
+                    purchase_trade_id: id,
+                    quantity_allocated: q.parse().unwrap(),
+                })
+                .collect()
+        };
+        TransferBody {
+            listing_id: 1,
+            date,
+            from_account_id: from,
+            to_account_id: to,
+            allocations: map(allocations),
+            fee_allocations: map(fee_allocations),
+            fee_market_price: Some(dec(fee_price)),
+            fee_fx_rate: None,
+        }
+    }
+
+    /// A crypto wallet transfer that burns a network fee: the moved units
+    /// carry their cost base (not a CGT event), while the fee units are a
+    /// real disposal — a Sell at market value that surfaces a capital gain in
+    /// the realised-gains report (with the 12-month discount), and is linked
+    /// back to the transfer.
+    #[tokio::test]
+    async fn network_fee_is_disposed_and_surfaces_in_realised_gains() {
+        let pool = test_pool().await;
+        insert_crypto(&pool, "1.0", "60000").await; // 1 BTC at A$60,000
+
+        // Move 0.5 BTC to account 1; pay a 0.001 BTC network fee, the fee
+        // crypto worth A$80,000/unit at the transfer date.
+        let group = db_transfer(
+            &pool,
+            1,
+            &fee_body(d(2024, 6, 1), 2, 1, vec![(1, "0.5")], vec![(1, "0.001")], "80000"),
+        )
+        .await
+        .unwrap();
+
+        // The move itself: 0.5 BTC lands in account 1 carrying A$30,000 cost
+        // base, not a disposal.
+        let moved = &group.transfer_ins[0];
+        assert_eq!(moved.holding_account_id, 1);
+        assert_eq!(moved.quantity, dec("0.5"));
+        assert_eq!(moved.brokerage, dec("30000.0"));
+
+        // The fee disposal: a Sell in the source account, no transfer_id (so
+        // the gains reports count it), linked from the transfer.
+        let fee = group.fee_sale.as_ref().expect("a fee Sell was created");
+        assert_eq!(fee.trade_type, TradeType::Sell);
+        assert_eq!(fee.holding_account_id, 2);
+        assert_eq!(fee.quantity, dec("0.001"));
+        assert_eq!(fee.average_price, dec("80000"));
+        assert_eq!(fee.transfer_id, None);
+        assert_eq!(group.transfer.fee_sale_trade_id, Some(fee.id));
+
+        // The realised-gains report shows exactly the fee disposal: proceeds
+        // 0.001 × 80,000 = A$80, cost base 0.001 × 60,000 = A$60, a A$20 gain,
+        // fully discount-eligible (held > 12 months). The transfer-out Sell
+        // (zero proceeds, transfer_id) is absent.
+        let realised = crate::reports::realised_gains::db_realised_gains(&pool).await.unwrap();
+        assert_eq!(realised.len(), 1, "only the fee is a disposal");
+        let g = &realised[0];
+        assert_eq!(g.sale_trade_id, fee.id);
+        assert_eq!(g.proceeds, dec("80"));
+        assert_eq!(g.cost_base, dec("60"));
+        assert_eq!(g.capital_gain_loss, dec("20"));
+        assert_eq!(g.discount_eligible_gain, dec("20"));
+    }
+
+    /// A fee disposal needs its capital proceeds: specifying fee parcels
+    /// without a positive per-unit market value is rejected and nothing is
+    /// persisted.
+    #[tokio::test]
+    async fn network_fee_requires_a_positive_market_price() {
+        let pool = test_pool().await;
+        insert_crypto(&pool, "1.0", "60000").await;
+
+        let mut no_price = fee_body(d(2024, 6, 1), 2, 1, vec![(1, "0.5")], vec![(1, "0.001")], "0");
+        no_price.fee_market_price = None;
+        assert!(matches!(
+            db_transfer(&pool, 1, &no_price).await,
+            Err(TransferError::FeeMarketPriceMissing)
+        ));
+
+        // A zero price is just as invalid (the fee crypto has market value).
+        let zero_price =
+            fee_body(d(2024, 6, 1), 2, 1, vec![(1, "0.5")], vec![(1, "0.001")], "0");
+        assert!(matches!(
+            db_transfer(&pool, 1, &zero_price).await,
+            Err(TransferError::FeeMarketPriceMissing)
+        ));
+
+        let transfers: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM transfers").fetch_one(&pool).await.unwrap();
+        assert_eq!(transfers, 0);
+        let trades: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM trades WHERE id <> 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(trades, 0, "no transfer trades persisted");
+    }
+
+    /// The combined draw (moved units + fee units) can't exceed the source
+    /// parcel — both Sells share the transfer's transaction, so the capacity
+    /// check sees their sum.
+    #[tokio::test]
+    async fn moved_plus_fee_cannot_exceed_the_parcel() {
+        let pool = test_pool().await;
+        insert_crypto(&pool, "1.0", "60000").await;
+
+        // 0.6 moved + 0.5 fee = 1.1 > 1.0 held.
+        assert!(matches!(
+            db_transfer(
+                &pool,
+                1,
+                &fee_body(d(2024, 6, 1), 2, 1, vec![(1, "0.6")], vec![(1, "0.5")], "80000"),
+            )
+            .await,
+            Err(TransferError::Sell(SellError::PurchaseQuantityExceeded))
+        ));
+        let transfers: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM transfers").fetch_one(&pool).await.unwrap();
+        assert_eq!(transfers, 0);
+    }
+
+    /// Deleting a fee'd transfer removes the fee disposal too (and its
+    /// allocations), restoring the whole source parcel and clearing the gains
+    /// report.
+    #[tokio::test]
+    async fn deleting_a_feed_transfer_removes_the_fee_disposal() {
+        let pool = test_pool().await;
+        insert_crypto(&pool, "1.0", "60000").await;
+        let group = db_transfer(
+            &pool,
+            1,
+            &fee_body(d(2024, 6, 1), 2, 1, vec![(1, "0.5")], vec![(1, "0.001")], "80000"),
+        )
+        .await
+        .unwrap();
+        let fee_id = group.fee_sale.unwrap().id;
+
+        assert_eq!(db_delete(&pool, 1).await.unwrap(), DeleteOutcome::Deleted);
+
+        assert!(trade::db_get(&pool, fee_id).await.unwrap().is_none(), "fee Sell gone");
+        let allocs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM parcel_allocations")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(allocs, 0, "fee + transfer-out allocations freed");
+        let realised = crate::reports::realised_gains::db_realised_gains(&pool).await.unwrap();
+        assert!(realised.is_empty());
+        // The whole 1.0 BTC parcel is open again in account 2.
+        let parcel = trade::db_get(&pool, 1).await.unwrap().unwrap();
+        assert_eq!(parcel.quantity, dec("1.0"));
+        assert_eq!(parcel.holding_account_id, 2);
+    }
+
+    /// The fee disposal Sell is part of the transfer group: it can't be
+    /// edited or deleted on its own (PUT/DELETE /sells, PUT /trades) — undo
+    /// it by deleting the transfer.
+    #[tokio::test]
+    async fn fee_disposal_sell_is_immutable_individually() {
+        let pool = test_pool().await;
+        insert_crypto(&pool, "1.0", "60000").await;
+        let group = db_transfer(
+            &pool,
+            1,
+            &fee_body(d(2024, 6, 1), 2, 1, vec![(1, "0.5")], vec![(1, "0.001")], "80000"),
+        )
+        .await
+        .unwrap();
+        let fee = group.fee_sale.unwrap();
+
+        // PUT /sells on the fee Sell → rejected.
+        let err = sell::db_upsert_sell(
+            &pool,
+            fee.id,
+            &SellBody {
+                brokerage_includes_gst: false,
+                statement_total: None,
+                date: d(2024, 6, 1),
+                settlement_date: Some(d(2024, 6, 1)),
+                listing_id: 1,
+                average_price: dec("99"),
+                quantity: dec("0.001"),
+                currency: "AUD".to_string(),
+                brokerage: Decimal::ZERO,
+                gst_on_brokerage: Decimal::ZERO,
+                brokerage_currency: "AUD".to_string(),
+                fx_rate: Decimal::ONE,
+                contract_note_ref: None,
+                holding_account_id: 2,
+                allocations: vec![AllocationInput {
+                    purchase_trade_id: 1,
+                    quantity_allocated: dec("0.001"),
+                }],
+            },
+        )
+        .await;
+        assert!(matches!(err, Err(SellError::TransferSell)));
+
+        // DELETE /sells on it → refused (goes via DELETE /transfers).
+        assert_eq!(
+            sell::db_delete_sell(&pool, fee.id).await.unwrap(),
+            sell::DeleteOutcome::TransferSell
+        );
+
+        // PUT /trades on it → rejected.
+        let mut edited = fee.clone();
+        edited.average_price = dec("99");
+        assert!(matches!(
+            trade::db_upsert(&pool, &edited).await,
+            Err(trade::UpsertError::TransferTrade)
+        ));
     }
 
     /// A partial transfer splits the parcel: the moved units carry exactly
