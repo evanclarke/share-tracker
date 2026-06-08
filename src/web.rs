@@ -181,6 +181,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn currency_amounts_round_in_tables_rates_keep_precision() {
+        let js = app_js_body().await;
+        // Display-only rounding lives in the web layer's formatter, fed by a
+        // per-column kind keyed by column name (COLUMN_KINDS) so every table —
+        // entity lists, the bespoke Sells/Transfers lists, and the report
+        // tables — inherits the rule with no bespoke code.
+        assert!(js.contains("COLUMN_KINDS"));
+        assert!(js.contains("function columnKinds("));
+        assert!(js.contains("const kinds = columnKinds(cols)"));
+        // Monetary amounts round to 2 dp (half away from zero) with thousands
+        // grouping, via exact BigInt decimal-string arithmetic — never
+        // parseFloat on money.
+        assert!(js.contains("function roundDecimalStr("));
+        assert!(js.contains("function groupThousands("));
+        assert!(js.contains("roundDecimalStr(value, 2)"));
+        // Representative columns classified: a money amount, a per-unit rate
+        // (kept at entered precision), a derived per-unit figure (≥4 dp), and a
+        // quantity (kept at entered precision).
+        assert!(js.contains("'total_cost_base'"));
+        assert!(js.contains("'average_price'"));
+        assert!(js.contains("'avg_cost_base_per_unit'"));
+        assert!(js.contains("'quantity'"));
+        // Rates/quantities keep their precision; derived per-unit figures show
+        // at least 4 dp.
+        assert!(js.contains("function padMinDp("));
+        assert!(js.contains("kind === 'rate4'"));
+        // The shared cell renderer applies the kinds and, when money rounding
+        // drops precision, keeps the full value on the hover tooltip.
+        assert!(js.contains("numericDisplay(row[c], kinds[c])"));
+        assert!(js.contains("nd.tip"));
+    }
+
+    #[tokio::test]
     async fn listing_management_ui_present() {
         let js = app_js_body().await;
         assert!(js.contains("/listings"));

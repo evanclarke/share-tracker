@@ -81,6 +81,82 @@
     return String(v);
   }
 
+  // ---- numeric display formatting ---------------------------------------
+  // Display-only rounding (the JSON API and CSV exports keep full precision):
+  // monetary amounts read as currency — rounded to the cent and thousands-
+  // grouped — while per-unit rates and quantities keep their entered precision,
+  // because rounding a rate breaks statement reconciliation. A column's kind is
+  // looked up by name (COLUMN_KINDS), so every table — entity lists, the
+  // bespoke Sells/Transfers lists, and the report tables — inherits the rule
+  // with no per-screen wiring. All arithmetic is exact (BigInt on the decimal
+  // string), never parseFloat on money. When rounding a money cell loses
+  // precision the full value is shown on hover.
+
+  // Round a decimal string to `dp` places, half away from zero. Exact; returns
+  // null for a non-decimal input (the caller then falls back to verbatim text).
+  function roundDecimalStr(value, dp) {
+    let s = String(value).trim();
+    let neg = false;
+    if (s[0] === '+') s = s.slice(1);
+    else if (s[0] === '-') { neg = true; s = s.slice(1); }
+    if (!/^\d+(\.\d+)?$/.test(s)) return null;
+    const dot = s.indexOf('.');
+    const curDp = dot < 0 ? 0 : s.length - dot - 1;
+    let units = BigInt(dot < 0 ? s : s.slice(0, dot) + s.slice(dot + 1));
+    if (curDp <= dp) {
+      units *= 10n ** BigInt(dp - curDp);
+    } else {
+      const div = 10n ** BigInt(curDp - dp);
+      const rem = units % div;
+      units /= div;
+      if (rem * 2n >= div) units += 1n; // half away from zero (operand is non-negative here)
+    }
+    let str = units.toString();
+    if (dp > 0) { str = str.padStart(dp + 1, '0'); str = str.slice(0, -dp) + '.' + str.slice(-dp); }
+    return (neg && units !== 0n ? '-' : '') + str;
+  }
+
+  // Thousands-group the integer part of a signed/decimal plain decimal string.
+  function groupThousands(s) {
+    let neg = '';
+    if (s[0] === '-') { neg = '-'; s = s.slice(1); }
+    const dot = s.indexOf('.');
+    const intPart = dot < 0 ? s : s.slice(0, dot);
+    const frac = dot < 0 ? '' : s.slice(dot);
+    return neg + intPart.replace(/\B(?=(\d{3})+(?!\d))/g, ',') + frac;
+  }
+
+  // Pad to at least `dp` fractional places without rounding (derived per-unit
+  // figures show ≥4 dp; entered rates keep their own precision).
+  function padMinDp(s, dp) {
+    s = String(s);
+    const dot = s.indexOf('.');
+    const curDp = dot < 0 ? 0 : s.length - dot - 1;
+    if (curDp >= dp) return s;
+    return (dot < 0 ? s + '.' : s) + '0'.repeat(dp - curDp);
+  }
+
+  // Numeric equality of two decimal strings (1234.5 == 1234.50), used to decide
+  // whether money rounding actually dropped precision (→ original on tooltip).
+  function decStrEq(a, b) {
+    const ra = roundDecimalStr(a, 12), rb = roundDecimalStr(b, 12);
+    return ra != null && ra === rb;
+  }
+
+  // Format a numeric cell for display per its column kind. Returns null when
+  // the column has no kind or the value isn't numeric (caller uses cellText);
+  // otherwise { text, tip } where tip is the original value when money rounding
+  // lost precision (shown on hover), else null.
+  function numericDisplay(value, kind) {
+    if (!kind || !looksNumeric(value)) return null;
+    if (kind === 'money') {
+      const r = roundDecimalStr(value, 2);
+      return { text: groupThousands(r), tip: decStrEq(r, value) ? null : String(value) };
+    }
+    if (kind === 'rate4') return { text: padMinDp(String(value), 4), tip: null };
+    return { text: String(value), tip: null }; // rate / quantity: entered precision, verbatim
+  }
+
   // ---- API client -------------------------------------------------------
   async function api(method, path, body) {
     const opts = { method: method, headers: {} };
@@ -208,6 +284,66 @@
     const specs = {};
     cols.forEach(function (c) { if (FK_COLUMN_SOURCES[c]) specs[c] = FK_COLUMN_SOURCES[c]; });
     return fkLabelMaps(specs);
+  }
+
+  // Display kind per numeric column, looked up by name across every table.
+  // 'money' rounds to 2 dp + thousands grouping; 'rate' / 'quantity' keep the
+  // entered precision; 'rate4' is a derived per-unit figure shown to ≥4 dp.
+  // Numeric columns absent here (ids, financial years, counts, percentages)
+  // display verbatim. Because the map is keyed by column name — shared across
+  // the JSON API — a column reused on a new screen classifies once.
+  const COLUMN_KINDS = (function () {
+    const k = {};
+    const set = function (kind, names) { names.forEach(function (n) { k[n] = kind; }); };
+    set('money', [
+      // Trade / income / AMMA / settings monetary line items.
+      'brokerage', 'gst_on_brokerage', 'statement_total', 'opening_capital_loss',
+      'franked_amount', 'unfranked_amount', 'foreign_source_income', 'foreign_tax_paid',
+      'tfn_withholding_tax', 'franking_credits', 'lic_capital_gain_deduction', 'conduit_foreign_income',
+      'australian_interest', 'australian_dividends_unfranked', 'franked_dividends', 'net_rent',
+      'foreign_income', 'foreign_tax_credits', 'other_income', 'cgt_discount_gains',
+      'cgt_indexation_gains', 'cgt_other_gains', 'capital_losses_applied', 'tax_deferred_amount',
+      'tax_free_amount',
+      // Report AUD aggregates (portfolio, open-parcels, unrealised, realised,
+      // performance, net-capital-gain, tax-summary incl. its amma_* lines).
+      'total_cost_base', 'market_value', 'original_cost_base', 'amit_cost_base_reduction',
+      'remaining_cost_base', 'return_of_capital_reduction', 'unrealised_gain_loss',
+      'proceeds', 'cost_base', 'capital_gain_loss', 'discount_eligible_gain',
+      'non_discountable_gain', 'capital_loss', 'invested', 'income', 'total_return',
+      'discount_eligible_gains', 'net_discount_eligible_gain', 'other_gains', 'net_other_gain',
+      'capital_losses', 'capital_loss_brought_forward', 'capital_loss_carried_forward',
+      'cgt_discount', 'net_capital_gain', 'dividends_assessable', 'franking_credits_denied',
+      'foreign_tax_offsets', 'foreign_tax_offset_excess',
+      'amma_australian_interest', 'amma_dividends_unfranked', 'amma_franked_dividends',
+      'amma_net_rent', 'amma_foreign_income', 'amma_other_income', 'amma_cgt_discount_gains',
+      'amma_cgt_indexation_gains', 'amma_cgt_other_gains', 'amma_capital_losses_applied',
+    ]);
+    set('rate', [
+      // Per-unit prices/rates entered from statements — rounding them would
+      // break reconciliation, so they keep their precision.
+      'average_price', 'fx_rate', 'amount_per_security', 'cost_base_adjustment', 'rate',
+      'price', 'current_price', 'reinvestment_price', 'exercise_price', 'amount_per_unit',
+      'buyback_price', 'buyback_dividend', 'buyback_franking_credit', 'buyback_market_value',
+    ]);
+    // A derived per-unit figure: show at least 4 dp, never cent-rounded.
+    set('rate4', ['avg_cost_base_per_unit']);
+    set('quantity', [
+      'quantity', 'quantity_allocated', 'securities_held', 'units_held', 'units',
+      'original_quantity', 'remaining_quantity', 'quantity_held', 'cgt_discount_eligible_quantity',
+      'split_new_units', 'split_old_units', 'bonus_units', 'bonus_held_units',
+      'rights_units', 'rights_held_units', 'scrip_new_units', 'scrip_old_units',
+      'demerger_new_units', 'demerger_held_units',
+    ]);
+    return k;
+  })();
+
+  // { col: kind } for whichever of `cols` carry a display kind — the synchronous
+  // analogue of columnLabelMaps, threaded into filterableTable so the formatter
+  // runs on every table without per-call wiring.
+  function columnKinds(cols) {
+    const out = {};
+    cols.forEach(function (c) { if (COLUMN_KINDS[c]) out[c] = COLUMN_KINDS[c]; });
+    return out;
   }
 
   // id → "MIC:TICKER" resolver for prose and option labels; an unknown/null
@@ -661,9 +797,15 @@
     const statusField = opts.statusField;
     const actions = opts.actions;
     const labels = opts.labels || {};
+    // Display kinds are derived from the column names alone (COLUMN_KINDS), so
+    // every caller of filterableTable gets money rounding / rate precision with
+    // no per-call wiring; numeric sorting still uses the raw underlying value.
+    const kinds = columnKinds(cols);
     function displayText(row, c) {
       const map = labels[c];
       if (map && row[c] != null && map[row[c]] !== undefined) return map[row[c]];
+      const nd = numericDisplay(row[c], kinds[c]);
+      if (nd) return nd.text;
       return cellText(row[c]);
     }
     // A column is numeric if any row has a numeric value there — used for
@@ -756,9 +898,16 @@
             return el('td', { title: utcTooltip(v) }, cellText(v));
           }
           const text = displayText(row, c);
-          // A labelled fk cell keeps its raw id reachable on the tooltip.
-          const idTip = labels[c] && text !== cellText(v) ? 'id ' + cellText(v) : null;
-          return el('td', { class: numeric[c] ? 'num' : null, title: idTip }, text);
+          // A labelled fk cell keeps its raw id reachable on the tooltip; a
+          // money cell rounded for display keeps its full value there.
+          let title = null;
+          if (labels[c] && text !== cellText(v)) {
+            title = 'id ' + cellText(v);
+          } else {
+            const nd = numericDisplay(v, kinds[c]);
+            if (nd && nd.tip) title = nd.tip;
+          }
+          return el('td', { class: numeric[c] ? 'num' : null, title: title }, text);
         });
         if (actions) tds.push(actions(row) || el('td'));
         tbody.appendChild(el('tr', null, tds));
