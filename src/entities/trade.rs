@@ -1433,7 +1433,7 @@ mod tests {
     async fn api_settlement_beyond_holiday_coverage_logs_warning() {
         let pool = test_pool().await;
         insert_test_listing(&pool).await;
-        // XASX holidays are seeded 2024–2027 only: a 2030 trade's settlement is
+        // XASX holidays are seeded 2019–2027 only: a 2030 trade's settlement is
         // computed skipping weekends only, so the auto-population warns rather
         // than silently using the incomplete calendar.
         let body = serde_json::json!({

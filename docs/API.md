@@ -35,7 +35,7 @@ Seed data includes `XASX` (ASX, T+2) and `XNYS` (NYSE, T+2). `PUT` returns `422`
 
 ## Exchange holidays
 
-Full-closure non-trading days per exchange, keyed by `(mic, holiday_date)`. Settlement-date calculation skips these in addition to weekends (see [Trades](#trades)). Seeded from the published NYSE and ASX calendars for 2024–2027 (extend as later years are published).
+Full-closure non-trading days per exchange, keyed by `(mic, holiday_date)`. Settlement-date calculation skips these in addition to weekends (see [Trades](#trades)). Seeded from the published NYSE and ASX calendars for 2019–2027 (extend as later years are published).
 
 Coverage is finite: an exchange's calendar is considered to cover the whole calendar years spanned by its seeded holidays (1 Jan of the earliest holiday's year to 31 Dec of the latest's). Outside that span, settlement calculation degrades to weekend-only skipping — this is never an error, but it is surfaced rather than silent: the write logs a `WARN` and the [Settlement holiday coverage](#settlement-holiday-coverage) report flags the affected trades until the missing years are entered.
 

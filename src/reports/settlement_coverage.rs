@@ -173,7 +173,7 @@ mod tests {
         .unwrap();
     }
 
-    /// Seed holidays run 2024–2027 for XASX; a trade settling inside that
+    /// Seed holidays run 2019–2027 for XASX; a trade settling inside that
     /// span was computed against a complete calendar, so nothing is flagged.
     #[tokio::test]
     async fn db_trade_inside_coverage_is_not_flagged() {
@@ -183,7 +183,7 @@ mod tests {
         assert!(db_coverage_alerts(&pool).await.unwrap().is_empty());
     }
 
-    /// A trade dated beyond the seeded holiday range (2024–2027) is flagged,
+    /// A trade dated beyond the seeded holiday range (2019–2027) is flagged,
     /// rather than the incomplete calendar being used silently.
     #[tokio::test]
     async fn db_trade_beyond_seeded_holiday_range_is_flagged() {
@@ -197,7 +197,7 @@ mod tests {
         assert_eq!(a.mic, "XASX");
         assert_eq!(a.coverage_status, "outside_holiday_coverage");
         // Coverage span is whole calendar years of the seeded holidays.
-        assert_eq!(a.coverage_start, Some(ymd(2024, 1, 1)));
+        assert_eq!(a.coverage_start, Some(ymd(2019, 1, 1)));
         assert_eq!(a.coverage_end, Some(ymd(2027, 12, 31)));
     }
 
@@ -206,7 +206,7 @@ mod tests {
     async fn db_trade_before_seeded_holiday_range_is_flagged() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "XASX").await;
-        insert_buy(&pool, 1, 1, ymd(2023, 3, 6), ymd(2023, 3, 8)).await;
+        insert_buy(&pool, 1, 1, ymd(2018, 3, 6), ymd(2018, 3, 8)).await;
         let alerts = db_coverage_alerts(&pool).await.unwrap();
         assert_eq!(alerts.len(), 1);
         assert_eq!(alerts[0].coverage_status, "outside_holiday_coverage");

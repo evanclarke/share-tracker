@@ -675,6 +675,47 @@ INSERT INTO exchanges (mic, name, country, currency, timezone, settlement_days) 
 
 -- ASX (XASX) — NSW public holidays observed by the ASX cash market.
 INSERT INTO exchange_holidays (mic, holiday_date, name) VALUES
+    ('XASX', '2019-01-01', 'New Year''s Day'),
+    ('XASX', '2019-01-28', 'Australia Day'),               -- 26 Jan is a Saturday; observed Mon 28
+    ('XASX', '2019-04-19', 'Good Friday'),
+    ('XASX', '2019-04-22', 'Easter Monday'),
+    ('XASX', '2019-04-25', 'Anzac Day'),
+    ('XASX', '2019-06-10', 'Queen''s Birthday'),
+    ('XASX', '2019-12-25', 'Christmas Day'),
+    ('XASX', '2019-12-26', 'Boxing Day'),
+    ('XASX', '2020-01-01', 'New Year''s Day'),
+    ('XASX', '2020-01-27', 'Australia Day'),               -- 26 Jan is a Sunday; observed Mon 27
+    ('XASX', '2020-04-10', 'Good Friday'),
+    ('XASX', '2020-04-13', 'Easter Monday'),
+    ('XASX', '2020-04-25', 'Anzac Day'),                   -- a Saturday; named on its actual date
+    ('XASX', '2020-06-08', 'Queen''s Birthday'),
+    ('XASX', '2020-12-25', 'Christmas Day'),
+    ('XASX', '2020-12-28', 'Boxing Day'),                  -- 26 Dec is a Saturday; observed Mon 28
+    ('XASX', '2021-01-01', 'New Year''s Day'),
+    ('XASX', '2021-01-26', 'Australia Day'),
+    ('XASX', '2021-04-02', 'Good Friday'),
+    ('XASX', '2021-04-05', 'Easter Monday'),
+    ('XASX', '2021-04-25', 'Anzac Day'),                   -- a Sunday; named on its actual date
+    ('XASX', '2021-06-14', 'Queen''s Birthday'),
+    ('XASX', '2021-12-27', 'Christmas Day'),               -- 25 Dec is a Saturday; observed Mon 27
+    ('XASX', '2021-12-28', 'Boxing Day'),                  -- 26 Dec is a Sunday; observed Tue 28
+    ('XASX', '2022-01-03', 'New Year''s Day'),             -- 1 Jan is a Saturday; observed Mon 3
+    ('XASX', '2022-01-26', 'Australia Day'),
+    ('XASX', '2022-04-15', 'Good Friday'),
+    ('XASX', '2022-04-18', 'Easter Monday'),
+    ('XASX', '2022-04-25', 'Anzac Day'),
+    ('XASX', '2022-06-13', 'Queen''s Birthday'),
+    ('XASX', '2022-09-22', 'National Day of Mourning'),    -- Queen Elizabeth II (one-off)
+    ('XASX', '2022-12-26', 'Boxing Day'),
+    ('XASX', '2022-12-27', 'Christmas Day'),               -- 25 Dec is a Sunday; observed Tue 27
+    ('XASX', '2023-01-02', 'New Year''s Day'),             -- 1 Jan is a Sunday; observed Mon 2
+    ('XASX', '2023-01-26', 'Australia Day'),
+    ('XASX', '2023-04-07', 'Good Friday'),
+    ('XASX', '2023-04-10', 'Easter Monday'),
+    ('XASX', '2023-04-25', 'Anzac Day'),
+    ('XASX', '2023-06-12', 'King''s Birthday'),
+    ('XASX', '2023-12-25', 'Christmas Day'),
+    ('XASX', '2023-12-26', 'Boxing Day'),
     ('XASX', '2024-01-01', 'New Year''s Day'),
     ('XASX', '2024-01-26', 'Australia Day'),
     ('XASX', '2024-03-29', 'Good Friday'),
@@ -712,6 +753,52 @@ INSERT INTO exchange_holidays (mic, holiday_date, name) VALUES
 -- Saturday is not observed (no weekday closure); a Sunday holiday is observed the
 -- following Monday.
 INSERT INTO exchange_holidays (mic, holiday_date, name) VALUES
+    ('XNYS', '2019-01-01', 'New Year''s Day'),
+    ('XNYS', '2019-01-21', 'Martin Luther King, Jr. Day'),
+    ('XNYS', '2019-02-18', 'Washington''s Birthday'),
+    ('XNYS', '2019-04-19', 'Good Friday'),
+    ('XNYS', '2019-05-27', 'Memorial Day'),
+    ('XNYS', '2019-07-04', 'Independence Day'),
+    ('XNYS', '2019-09-02', 'Labor Day'),
+    ('XNYS', '2019-11-28', 'Thanksgiving Day'),
+    ('XNYS', '2019-12-25', 'Christmas Day'),
+    ('XNYS', '2020-01-01', 'New Year''s Day'),
+    ('XNYS', '2020-01-20', 'Martin Luther King, Jr. Day'),
+    ('XNYS', '2020-02-17', 'Washington''s Birthday'),
+    ('XNYS', '2020-04-10', 'Good Friday'),
+    ('XNYS', '2020-05-25', 'Memorial Day'),
+    ('XNYS', '2020-07-03', 'Independence Day'),            -- 4 Jul is a Saturday; observed Fri 3
+    ('XNYS', '2020-09-07', 'Labor Day'),
+    ('XNYS', '2020-11-26', 'Thanksgiving Day'),
+    ('XNYS', '2020-12-25', 'Christmas Day'),
+    ('XNYS', '2021-01-01', 'New Year''s Day'),
+    ('XNYS', '2021-01-18', 'Martin Luther King, Jr. Day'),
+    ('XNYS', '2021-02-15', 'Washington''s Birthday'),
+    ('XNYS', '2021-04-02', 'Good Friday'),
+    ('XNYS', '2021-05-31', 'Memorial Day'),
+    ('XNYS', '2021-07-05', 'Independence Day'),            -- 4 Jul is a Sunday; observed Mon 5
+    ('XNYS', '2021-09-06', 'Labor Day'),
+    ('XNYS', '2021-11-25', 'Thanksgiving Day'),
+    ('XNYS', '2021-12-24', 'Christmas Day'),               -- 25 Dec is a Saturday; observed Fri 24
+    ('XNYS', '2022-01-17', 'Martin Luther King, Jr. Day'), -- 1 Jan (New Year) is a Saturday; not observed
+    ('XNYS', '2022-02-21', 'Washington''s Birthday'),
+    ('XNYS', '2022-04-15', 'Good Friday'),
+    ('XNYS', '2022-05-30', 'Memorial Day'),
+    ('XNYS', '2022-06-20', 'Juneteenth National Independence Day'),  -- 19 Jun is a Sunday; observed Mon 20
+    ('XNYS', '2022-07-04', 'Independence Day'),
+    ('XNYS', '2022-09-05', 'Labor Day'),
+    ('XNYS', '2022-11-24', 'Thanksgiving Day'),
+    ('XNYS', '2022-12-26', 'Christmas Day'),               -- 25 Dec is a Sunday; observed Mon 26
+    ('XNYS', '2023-01-02', 'New Year''s Day'),             -- 1 Jan is a Sunday; observed Mon 2
+    ('XNYS', '2023-01-16', 'Martin Luther King, Jr. Day'),
+    ('XNYS', '2023-02-20', 'Washington''s Birthday'),
+    ('XNYS', '2023-04-07', 'Good Friday'),
+    ('XNYS', '2023-05-29', 'Memorial Day'),
+    ('XNYS', '2023-06-19', 'Juneteenth National Independence Day'),
+    ('XNYS', '2023-07-04', 'Independence Day'),
+    ('XNYS', '2023-09-04', 'Labor Day'),
+    ('XNYS', '2023-11-23', 'Thanksgiving Day'),
+    ('XNYS', '2023-12-25', 'Christmas Day'),
     ('XNYS', '2024-01-01', 'New Year''s Day'),
     ('XNYS', '2024-01-15', 'Martin Luther King, Jr. Day'),
     ('XNYS', '2024-02-19', 'Washington''s Birthday'),
@@ -739,7 +826,8 @@ INSERT INTO exchange_holidays (mic, holiday_date, name) VALUES
     ('XNYS', '2026-04-03', 'Good Friday'),
     ('XNYS', '2026-05-25', 'Memorial Day'),
     ('XNYS', '2026-06-19', 'Juneteenth National Independence Day'),
-    ('XNYS', '2026-09-07', 'Labor Day'),                   -- 4 Jul is a Saturday; not observed
+    ('XNYS', '2026-07-03', 'Independence Day'),            -- 4 Jul is a Saturday; observed Fri 3
+    ('XNYS', '2026-09-07', 'Labor Day'),
     ('XNYS', '2026-11-26', 'Thanksgiving Day'),
     ('XNYS', '2026-12-25', 'Christmas Day'),
     ('XNYS', '2027-01-01', 'New Year''s Day'),
