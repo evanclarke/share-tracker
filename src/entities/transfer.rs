@@ -307,7 +307,7 @@ pub async fn db_transfer(
             })
             .collect(),
     };
-    sell::upsert_sell_in_tx(&mut tx, sell_id, &sell_body, body.date, None, None, None, Some(id))
+    sell::upsert_sell_in_tx(&mut tx, sell_id, &sell_body, body.date, None, None, None, Some(id), None)
         .await?;
 
     // The transfer-in Buys: one per consumed parcel, dated the transfer date,
@@ -572,6 +572,7 @@ mod tests {
                 buyback_action_id: None,
                 scrip_action_id: None,
                 demerger_action_id: None,
+                worthless_action_id: None,
                 deemed_acquisition_date: None,
                 holding_account_id: 2,
                 transfer_id: None,
@@ -695,6 +696,7 @@ mod tests {
                 buyback_action_id: None,
                 scrip_action_id: None,
                 demerger_action_id: None,
+                worthless_action_id: None,
                 deemed_acquisition_date: None,
                 holding_account_id: 2,
                 transfer_id: None,

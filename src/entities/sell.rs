@@ -106,6 +106,12 @@ pub enum SellError {
     /// every account, and their replacement Buys stay in each consumed
     /// parcel's account.)
     PurchaseInDifferentAccount,
+    /// The existing trade is a worthless-shares recognise closing Sell
+    /// (`worthless_action_id` set): it consumes exactly the parcels the
+    /// recognise operation closed at nil proceeds, so free-form edits are
+    /// rejected. Delete it (`DELETE /sells/:id`, which restores the holding)
+    /// and re-recognise instead (see `entities::worthless`).
+    WorthlessSell,
     /// A supplied statement total failed the cross-check (see
     /// `trade::check_statement_total`): for a Sell it must equal the net
     /// proceeds, quantity × price − brokerage − GST.
@@ -237,14 +243,16 @@ pub async fn db_upsert_sell(pool: &SqlitePool, id: i64, body: &SellBody) -> Resu
     // carries linked rows — a dividend income row, or the group's replacement
     // Buys). The upsert below never sets any provenance column, so a normal
     // Sell can't become one either.
-    let existing: Option<(Option<i64>, Option<i64>, Option<i64>, Option<i64>)> = sqlx::query_as(
-        "SELECT buyback_action_id, scrip_action_id, demerger_action_id, transfer_id \
-         FROM trades WHERE id = ?",
-    )
-    .bind(id)
-    .fetch_optional(&mut *tx)
-    .await?;
-    if let Some((buyback, scrip, demerger, transfer)) = existing {
+    let existing: Option<(Option<i64>, Option<i64>, Option<i64>, Option<i64>, Option<i64>)> =
+        sqlx::query_as(
+            "SELECT buyback_action_id, scrip_action_id, demerger_action_id, transfer_id, \
+                    worthless_action_id \
+             FROM trades WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?;
+    if let Some((buyback, scrip, demerger, transfer, worthless)) = existing {
         if buyback.is_some() {
             return Err(SellError::BuyBackSell);
         }
@@ -257,9 +265,12 @@ pub async fn db_upsert_sell(pool: &SqlitePool, id: i64, body: &SellBody) -> Resu
         if transfer.is_some() {
             return Err(SellError::TransferSell);
         }
+        if worthless.is_some() {
+            return Err(SellError::WorthlessSell);
+        }
     }
 
-    upsert_sell_in_tx(&mut tx, id, body, settlement_date, None, None, None, None).await?;
+    upsert_sell_in_tx(&mut tx, id, body, settlement_date, None, None, None, None, None).await?;
 
     tx.commit().await?;
     Ok(())
@@ -286,6 +297,7 @@ pub(crate) async fn upsert_sell_in_tx(
     scrip_action_id: Option<i64>,
     demerger_action_id: Option<i64>,
     transfer_id: Option<i64>,
+    worthless_action_id: Option<i64>,
 ) -> Result<(), SellError> {
     // Allocations must account for the whole sale — no more, no less.
     let allocated: Decimal = body
@@ -321,8 +333,9 @@ pub(crate) async fn upsert_sell_in_tx(
          (id, trade_type, date, settlement_date, listing_id, average_price, quantity, \
           currency, brokerage, gst_on_brokerage, brokerage_includes_gst, brokerage_currency, \
           fx_rate, contract_note_ref, statement_total, \
-          buyback_action_id, scrip_action_id, demerger_action_id, holding_account_id, transfer_id) \
-         VALUES (?, 'Sell', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+          buyback_action_id, scrip_action_id, demerger_action_id, holding_account_id, transfer_id, \
+          worthless_action_id) \
+         VALUES (?, 'Sell', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT(id) DO UPDATE SET \
              trade_type             = 'Sell', \
              date                   = excluded.date, \
@@ -342,7 +355,8 @@ pub(crate) async fn upsert_sell_in_tx(
              scrip_action_id        = excluded.scrip_action_id, \
              demerger_action_id     = excluded.demerger_action_id, \
              holding_account_id     = excluded.holding_account_id, \
-             transfer_id            = excluded.transfer_id",
+             transfer_id            = excluded.transfer_id, \
+             worthless_action_id    = excluded.worthless_action_id",
     )
     .bind(id)
     .bind(body.date)
@@ -363,6 +377,7 @@ pub(crate) async fn upsert_sell_in_tx(
     .bind(demerger_action_id)
     .bind(body.holding_account_id)
     .bind(transfer_id)
+    .bind(worthless_action_id)
     .execute(&mut *tx)
     .await?;
 
@@ -389,12 +404,15 @@ pub(crate) async fn upsert_sell_in_tx(
             return Err(SellError::PurchaseTradeNotBuyOrDrp);
         }
         // A sale can only dispose of units its holding account actually
-        // holds. The scrip-for-scrip / demerger closing Sell is exempt: it
-        // mechanically closes the whole holding across every account (each
-        // replacement Buy stays in its consumed parcel's account).
+        // holds. The scrip-for-scrip / demerger / worthless-shares closing Sell
+        // is exempt: it mechanically closes the whole holding across every
+        // account (the rollover replacement Buys stay in each consumed parcel's
+        // account; a worthless recognise has no replacements — the loss rows
+        // identify the closing Sell's account, totals unchanged).
         let purchase_account: i64 = purchase_row.try_get("holding_account_id")?;
         if scrip_action_id.is_none()
             && demerger_action_id.is_none()
+            && worthless_action_id.is_none()
             && purchase_account != body.holding_account_id
         {
             return Err(SellError::PurchaseInDifferentAccount);
@@ -492,6 +510,10 @@ async fn upsert(
         Err(SellError::TransferSell) => unprocessable(
             "this Sell is a holding-account transfer-out and cannot be edited — \
              delete the transfer and re-transfer instead",
+        ),
+        Err(SellError::WorthlessSell) => unprocessable(
+            "this Sell is a worthless-shares recognise closing Sell and cannot be edited — \
+             delete it and re-recognise instead",
         ),
         Err(SellError::PurchaseInDifferentAccount) => unprocessable(
             "an allocated parcel is held in a different holding account from the Sell — \
@@ -601,6 +623,7 @@ mod tests {
                 buyback_action_id: None,
                 scrip_action_id: None,
                 demerger_action_id: None,
+                worthless_action_id: None,
                 deemed_acquisition_date: None,
             },
         )

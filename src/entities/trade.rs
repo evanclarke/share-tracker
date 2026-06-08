@@ -131,6 +131,16 @@ pub struct Trade {
     /// allocation or AMIT adjustment), and the statement is frozen against
     /// edits while it exists.
     pub ess_statement_id: Option<i64>,
+    /// Provenance link from a worthless-shares recognise closing Sell back to
+    /// its `WorthlessShares` corporate action (`None` for every other trade).
+    /// Set only by `POST /corporate_actions/:id/recognise`
+    /// (`entities::worthless`). The Sell carrying it is rejected by `PUT /sells`
+    /// and `PUT`/`DELETE /trades`; `DELETE /sells` removes it and restores the
+    /// holding; and the action cannot be edited or deleted while it exists.
+    /// Unlike the rollover provenance columns it does **not** exclude the Sell
+    /// from the realised-gains report — its nil proceeds recognise the capital
+    /// loss (see `docs/ato/worthless-shares.md`).
+    pub worthless_action_id: Option<i64>,
 }
 
 impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for Trade {
@@ -168,6 +178,7 @@ impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for Trade {
             holding_account_id: row.try_get("holding_account_id")?,
             transfer_id: row.try_get("transfer_id")?,
             ess_statement_id: row.try_get("ess_statement_id")?,
+            worthless_action_id: row.try_get("worthless_action_id")?,
         })
     }
 }
@@ -292,7 +303,7 @@ pub async fn db_list(pool: &SqlitePool) -> Result<Vec<Trade>, sqlx::Error> {
          fx_rate, contract_note_ref, statement_total, \
          residual_brought_forward, residual_carried_forward, residual_paid_out, rights_action_id, \
          buyback_action_id, scrip_action_id, demerger_action_id, deemed_acquisition_date, \
-         holding_account_id, transfer_id, ess_statement_id \
+         holding_account_id, transfer_id, ess_statement_id, worthless_action_id \
          FROM trades ORDER BY date, id",
     )
     .fetch_all(pool)
@@ -306,7 +317,7 @@ pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<Trade>, sqlx::E
          fx_rate, contract_note_ref, statement_total, \
          residual_brought_forward, residual_carried_forward, residual_paid_out, rights_action_id, \
          buyback_action_id, scrip_action_id, demerger_action_id, deemed_acquisition_date, \
-         holding_account_id, transfer_id, ess_statement_id \
+         holding_account_id, transfer_id, ess_statement_id, worthless_action_id \
          FROM trades WHERE id = ?",
     )
     .bind(id)
@@ -545,14 +556,16 @@ pub enum DeleteOutcome {
 pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<DeleteOutcome, sqlx::Error> {
     let mut tx = pool.begin().await?;
 
-    let exists: Option<(Option<i64>, Option<i64>, Option<i64>, Option<i64>)> = sqlx::query_as(
-        "SELECT scrip_action_id, demerger_action_id, transfer_id, ess_statement_id \
-         FROM trades WHERE id = ?",
-    )
-    .bind(id)
-    .fetch_optional(&mut *tx)
-    .await?;
-    let Some((scrip_action, demerger_action, transfer, ess)) = exists else {
+    let exists: Option<(Option<i64>, Option<i64>, Option<i64>, Option<i64>, Option<i64>)> =
+        sqlx::query_as(
+            "SELECT scrip_action_id, demerger_action_id, transfer_id, ess_statement_id, \
+                    worthless_action_id \
+             FROM trades WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?;
+    let Some((scrip_action, demerger_action, transfer, ess, worthless)) = exists else {
         return Ok(DeleteOutcome::NotFound);
     };
     // A scrip-for-scrip exchange, demerger, or holding-account transfer trade
@@ -560,8 +573,15 @@ pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<DeleteOutcome, sqlx
     // replacement Buys substitute the same parcels, so they are removed as a
     // whole via DELETE /sells on the closing Sell (or DELETE /transfers/:id).
     // An ESS vest Buy is likewise only ever removed via DELETE
-    // /ess_statements/:id (which deletes the statement and its vest together).
-    if scrip_action.is_some() || demerger_action.is_some() || transfer.is_some() || ess.is_some() {
+    // /ess_statements/:id (which deletes the statement and its vest together). A
+    // worthless-shares recognise closing Sell is removed via DELETE /sells
+    // (which restores the holding).
+    if scrip_action.is_some()
+        || demerger_action.is_some()
+        || transfer.is_some()
+        || ess.is_some()
+        || worthless.is_some()
+    {
         return Ok(DeleteOutcome::Referenced);
     }
 
@@ -752,6 +772,7 @@ async fn upsert(
         buyback_action_id: None,
         scrip_action_id: None,
         demerger_action_id: None,
+        worthless_action_id: None,
         deemed_acquisition_date: None,
         holding_account_id: body.holding_account_id,
         transfer_id: None,
@@ -908,6 +929,7 @@ mod tests {
             buyback_action_id: None,
             scrip_action_id: None,
             demerger_action_id: None,
+            worthless_action_id: None,
             deemed_acquisition_date: None,
         }
     }
@@ -1069,6 +1091,7 @@ mod tests {
             buyback_action_id: None,
             scrip_action_id: None,
             demerger_action_id: None,
+            worthless_action_id: None,
             deemed_acquisition_date: None,
         };
         db_upsert(&pool, &trade).await.unwrap();
@@ -1107,6 +1130,7 @@ mod tests {
             buyback_action_id: None,
             scrip_action_id: None,
             demerger_action_id: None,
+            worthless_action_id: None,
             deemed_acquisition_date: None,
         };
         db_upsert(&pool, &trade).await.unwrap();

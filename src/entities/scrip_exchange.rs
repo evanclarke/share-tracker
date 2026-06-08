@@ -305,7 +305,7 @@ pub async fn db_exchange(pool: &SqlitePool, action_id: i64) -> Result<Exchange, 
             })
             .collect(),
     };
-    sell::upsert_sell_in_tx(&mut tx, sell_id, &sell_body, action.date, None, Some(action_id), None, None)
+    sell::upsert_sell_in_tx(&mut tx, sell_id, &sell_body, action.date, None, Some(action_id), None, None, None)
         .await?;
 
     // The replacement Buys: one per consumed parcel, dated the exchange date,
@@ -467,6 +467,7 @@ mod tests {
                 buyback_action_id: None,
                 scrip_action_id: None,
                 demerger_action_id: None,
+                worthless_action_id: None,
                 deemed_acquisition_date: None,
             },
         )
@@ -627,6 +628,7 @@ mod tests {
                 buyback_action_id: None,
                 scrip_action_id: None,
                 demerger_action_id: None,
+                worthless_action_id: None,
                 deemed_acquisition_date: None,
             },
         )

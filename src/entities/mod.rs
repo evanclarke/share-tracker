@@ -30,6 +30,7 @@ pub mod scrip_exchange;
 pub mod sell;
 pub mod trade;
 pub mod transfer;
+pub mod worthless;
 
 /// Merge every entity's routes into a single router.
 pub fn router() -> Router<SqlitePool> {
@@ -58,5 +59,6 @@ pub fn router() -> Router<SqlitePool> {
         .merge(ess_statement::router())
         .merge(ess_vest::router())
         .merge(transfer::router())
+        .merge(worthless::router())
         .merge(attachment::router())
 }

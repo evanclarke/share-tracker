@@ -636,10 +636,10 @@
     },
     {
       slug: 'corporate_actions', title: 'Corporate Actions', group: 'Activity', api: '/corporate_actions',
-      desc: 'Capital events against a listing: return of capital, share splits/consolidations, bonus issues, rights issues, off-market buy-backs, scrip-for-scrip takeovers, and demergers. The form shows only the chosen action type’s fields; rights issues, buy-backs, scrip-for-scrip takeovers, and demergers are executed after recording via the row’s Exercise / Participate / Exchange / Demerge action.',
+      desc: 'Capital events against a listing: return of capital, share splits/consolidations, bonus issues, rights issues, off-market buy-backs, scrip-for-scrip takeovers, demergers, and worthless/delisted shares. The form shows only the chosen action type’s fields; rights issues, buy-backs, scrip-for-scrip takeovers, demergers, and worthless shares are executed after recording via the row’s Exercise / Participate / Exchange / Demerge / Recognise action.',
       keyFields: [int('id', 'ID', { auto: true })],
       fields: [
-        sel('action_type', 'Action type', ['ReturnOfCapital', 'ShareSplit', 'BonusIssue', 'RightsIssue', 'BuyBack', 'ScripForScrip', 'Demerger'], { required: true }),
+        sel('action_type', 'Action type', ['ReturnOfCapital', 'ShareSplit', 'BonusIssue', 'RightsIssue', 'BuyBack', 'ScripForScrip', 'Demerger', 'WorthlessShares'], { required: true }),
         fk('listing_id', 'Listing', 'listings', { required: true }),
         dt('date', 'Date', { required: true }),
         dec('amount_per_unit', 'Amount per unit', { optional: true, default: '' }),
@@ -662,6 +662,7 @@
         dec('demerger_new_units', 'Demerger: new units', { optional: true, default: '' }),
         dec('demerger_held_units', 'Demerger: per units held', { optional: true, default: '' }),
         dec('demerger_cost_base_pct', 'Demerger: cost base % to demerged entity', { optional: true, default: '', hint: 'The head-entity-advised percentage (0–100 exclusive), e.g. 5.063.' }),
+        sel('worthless_event', 'Worthless: CGT event', ['G3Declaration', 'C2Cancellation'], { optional: true, default: '', hint: 'G3 = liquidator/administrator declaration; C2 = deregistration/cancellation.' }),
       ],
       // The form renders only the selected action_type's field group (plus the
       // common fields above that appear in no group); the unchosen groups'
@@ -676,6 +677,7 @@
         BuyBack: ['buyback_price', 'buyback_dividend', 'buyback_franking_credit', 'buyback_market_value', 'currency'],
         ScripForScrip: ['scrip_listing_id', 'scrip_new_units', 'scrip_old_units'],
         Demerger: ['demerger_listing_id', 'demerger_new_units', 'demerger_held_units', 'demerger_cost_base_pct'],
+        WorthlessShares: ['worthless_event'],
       },
       typeDescs: {
         ReturnOfCapital: 'Return-of-capital payment (CGT event G1): the per-unit amount reduces the cost base of parcels held on the payment date; any excess over a parcel’s cost base is a capital gain in the Net Capital Gain report.',
@@ -685,6 +687,7 @@
         BuyBack: 'Off-market buy-back: record the per-unit buy-back price, the dividend component of that price and its franking credit (both 0 for a listed-company buy-back announced after 25 Oct 2022), and the market value had the buy-back not been proposed (blank if the price is at or above it); recording changes nothing — use the row’s Participate action to sell units into the buy-back, which creates the Sell at the capital proceeds (max(price, market value) − dividend) plus the dividend income row.',
         ScripForScrip: 'Scrip-for-scrip takeover (all-scrip, with rollover): on the exchange date every “old units” of this listing become “new units” of the replacement listing (1-for-1 merger: new 1, old 1) — recording changes nothing; use the row’s Exchange action to substitute every open parcel: the capital gain is disregarded and each replacement parcel carries the consumed parcel’s remaining cost base and acquisition date (the combined period counts toward the 12-month discount).',
         Demerger: 'Demerger (eligible, rollover chosen): on the demerger date every “held units” of this (head) listing receive “new units” of the demerged listing (BHP Steel’s 1-for-5: new 1, held 5), and the advised percentage of each parcel’s cost base moves to the new interests — recording changes nothing; use the row’s Demerge action to apportion every open parcel: any gain is disregarded, the head parcels keep the rest of the cost base and their acquisition dates, and the new parcels’ 12-month discount clock runs from the original acquisition.',
+        WorthlessShares: 'Worthless / delisted shares (CGT events G3 and C2): a capital loss on a failed company without a sale — choose G3Declaration (a liquidator/administrator declared the shares worthless) or C2Cancellation (the company was deregistered). Recording changes nothing; use the row’s Recognise action to close every open parcel at nil proceeds: each parcel’s remaining reduced cost base becomes a capital loss (never income, never discounted) that flows through the realised-gains and net-capital-gain reports.',
       },
       // Per-type label for the common date field (generic 'Date' until a type
       // is chosen).
@@ -697,14 +700,16 @@
           BuyBack: 'Buy-back date',
           ScripForScrip: 'Exchange date',
           Demerger: 'Demerger date',
+          WorthlessShares: 'Event date',
         },
       },
-      columns: ['id', 'action_type', 'listing_id', 'date', 'amount_per_unit', 'currency', 'split_new_units', 'split_old_units', 'bonus_units', 'bonus_held_units', 'rights_units', 'rights_held_units', 'exercise_price', 'buyback_price', 'buyback_dividend', 'buyback_franking_credit', 'buyback_market_value', 'scrip_listing_id', 'scrip_new_units', 'scrip_old_units', 'demerger_listing_id', 'demerger_new_units', 'demerger_held_units', 'demerger_cost_base_pct'],
+      columns: ['id', 'action_type', 'listing_id', 'date', 'amount_per_unit', 'currency', 'split_new_units', 'split_old_units', 'bonus_units', 'bonus_held_units', 'rights_units', 'rights_held_units', 'exercise_price', 'buyback_price', 'buyback_dividend', 'buyback_franking_credit', 'buyback_market_value', 'scrip_listing_id', 'scrip_new_units', 'scrip_old_units', 'demerger_listing_id', 'demerger_new_units', 'demerger_held_units', 'demerger_cost_base_pct', 'worthless_event'],
       rowActions: function (row) {
         if (row.action_type === 'RightsIssue') return [{ label: 'Exercise', href: '#/exercise/' + row.id }];
         if (row.action_type === 'BuyBack') return [{ label: 'Participate', href: '#/participate/' + row.id }];
         if (row.action_type === 'ScripForScrip') return [{ label: 'Exchange', href: '#/scrip-exchange/' + row.id }];
         if (row.action_type === 'Demerger') return [{ label: 'Demerge', href: '#/demerge/' + row.id }];
+        if (row.action_type === 'WorthlessShares') return [{ label: 'Recognise', href: '#/recognise/' + row.id }];
         return [];
       },
     },
@@ -829,6 +834,21 @@
       toast: function (r, listing, a) {
         const n = r && r.demerged_replacements ? r.demerged_replacements.length : 0;
         return 'Demerged ' + listing(a.listing_id) + ' into ' + n + ' parcel(s) of ' + listing(a.demerger_listing_id)
+          + ' (closing sell #' + (r && r.sell ? r.sell.id : '?') + ').';
+      },
+    },
+    // Worthless-shares recognise (confirm-only): POST takes no parameters. It
+    // atomically closes every open parcel of the listing at nil proceeds,
+    // recognising each parcel's remaining reduced cost base as a capital loss
+    // (unlike the rollover closing Sells, this one reaches the gains reports).
+    {
+      slug: 'recognise', nav: 'corporate_actions', ownerApi: '/corporate_actions', cancel: '#/e/corporate_actions', submit: 'Recognise',
+      post: function (id) { return '/corporate_actions/' + id + '/recognise'; },
+      title: function (id, owner, listing) { return 'Recognise worthless ' + listing(owner.listing_id) + ' #' + id; },
+      desc: function (a, listing) { return 'Closes every open parcel of ' + listing(a.listing_id) + ' held at ' + a.date + ' through a single Sell at nil proceeds (' + a.worthless_event + '). Each parcel’s remaining reduced cost base becomes a capital loss — never income, never discounted — that flows through the realised-gains and net-capital-gain reports. Undo by deleting the closing Sell from the Sells view, which restores the holding.'; },
+      fields: [],
+      toast: function (r, listing, a) {
+        return 'Recognised worthless ' + listing(a.listing_id) + ' as a capital loss'
           + ' (closing sell #' + (r && r.sell ? r.sell.id : '?') + ').';
       },
     },

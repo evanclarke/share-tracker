@@ -597,6 +597,14 @@ mod tests {
         // A Demerger row's Demerge action drives the demerge endpoint.
         assert!(js.contains("#/demerge/"));
         assert!(js.contains("/demerge"));
+        // Worthless / delisted shares (CGT events G3 and C2): the type, its
+        // event discriminator, and the Recognise action driving the endpoint.
+        assert!(js.contains("WorthlessShares"));
+        assert!(js.contains("worthless_event"));
+        assert!(js.contains("G3Declaration"));
+        assert!(js.contains("C2Cancellation"));
+        assert!(js.contains("#/recognise/"));
+        assert!(js.contains("/recognise"));
     }
 
     #[tokio::test]
@@ -614,6 +622,7 @@ mod tests {
             "'participate'",
             "'scrip-exchange'",
             "'demerge'",
+            "'recognise'",
         ] {
             assert!(js.contains(slug), "missing action slug {slug}");
         }
@@ -624,6 +633,7 @@ mod tests {
             "/participate'",
             "/exchange'",
             "/demerge'",
+            "/recognise'",
         ] {
             assert!(js.contains(endpoint), "missing action endpoint {endpoint}");
         }
@@ -659,6 +669,7 @@ mod tests {
             "BuyBack: [",
             "ScripForScrip: [",
             "Demerger: [",
+            "WorthlessShares: [",
         ] {
             assert!(js.contains(group), "missing field group {group}");
         }

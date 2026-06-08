@@ -381,6 +381,7 @@ mod tests {
                 buyback_action_id: None,
                 scrip_action_id: None,
                 demerger_action_id: None,
+                worthless_action_id: None,
                 deemed_acquisition_date: None,
             },
         )
@@ -424,6 +425,7 @@ mod tests {
                 buyback_action_id: None,
                 scrip_action_id: None,
                 demerger_action_id: None,
+                worthless_action_id: None,
                 deemed_acquisition_date: None,
             },
         )
@@ -547,6 +549,7 @@ mod tests {
                 buyback_action_id: None,
                 scrip_action_id: None,
                 demerger_action_id: None,
+                worthless_action_id: None,
                 deemed_acquisition_date: None,
             },
         )
@@ -580,6 +583,7 @@ mod tests {
                 buyback_action_id: None,
                 scrip_action_id: None,
                 demerger_action_id: None,
+                worthless_action_id: None,
                 deemed_acquisition_date: None,
             },
         )
@@ -1142,6 +1146,7 @@ mod tests {
                 buyback_action_id: None,
                 scrip_action_id: None,
                 demerger_action_id: None,
+                worthless_action_id: None,
                 deemed_acquisition_date: None,
             },
         )
@@ -1364,6 +1369,7 @@ mod tests {
                 buyback_action_id: None,
                 scrip_action_id: None,
                 demerger_action_id: None,
+                worthless_action_id: None,
                 deemed_acquisition_date: None,
             },
         )

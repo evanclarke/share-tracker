@@ -1,6 +1,6 @@
 //! Corporate actions recorded against a listing.
 //!
-//! Three action types are modelled so far:
+//! The action types modelled so far:
 //!
 //! **ReturnOfCapital** — a non-assessable payment from a company (a
 //! shareholder-approved return of share capital, CGT event G1; see
@@ -101,6 +101,23 @@
 //! original acquisition). An action referenced by demerge trades is frozen
 //! against edits.
 //!
+//! **WorthlessShares** — a capital loss on a failed company without an
+//! ordinary sale (CGT events G3 and C2; see `docs/ato/worthless-shares.md`):
+//! the action records, against the failed listing, which event the user is
+//! invoking (`worthless_event`: `G3Declaration` — a liquidator's/administrator's
+//! written declaration of no-likely-distribution, s 104-145/TD 2000/52; or
+//! `C2Cancellation` — deregistration cancelling the shares, s 104-25/TD
+//! 2000/7), the `date` being the declaration or cancellation date. Recording
+//! the action changes nothing by itself; recognising (`POST
+//! /corporate_actions/:id/recognise`, `entities::worthless`) atomically closes
+//! every open parcel held at the event date through a provenance-marked Sell at
+//! **nil proceeds**, each parcel producing a capital loss equal to its
+//! remaining reduced cost base. Unlike the scrip-for-scrip and demerger closing
+//! Sells, this Sell is **not** excluded from the realised-gains and
+//! net-capital-gain reports — its nil proceeds against the cost base
+//! *recognise* the loss (never income, never discounted). An action referenced
+//! by a recognise Sell is frozen against edits.
+//!
 //! `ActionKind` is the extension point for future corporate actions, each
 //! widening the enum and its CHECK.
 
@@ -117,6 +134,39 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 use std::collections::HashMap;
+
+/// Which CGT event a [`ActionKind::WorthlessShares`] action records. Both
+/// produce the identical loss arithmetic (close every open parcel at nil
+/// proceeds); the discriminator captures the legal basis. Serialized as its
+/// variant name, the value stored in the `worthless_event` TEXT column.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum WorthlessEvent {
+    /// CGT event G3 (s 104-145): a liquidator/administrator declared the shares
+    /// worthless and the shareholder chose to crystallise the loss.
+    G3Declaration,
+    /// CGT event C2 (s 104-25): the company was deregistered and the shares
+    /// cancelled.
+    C2Cancellation,
+}
+
+impl WorthlessEvent {
+    fn as_str(self) -> &'static str {
+        match self {
+            WorthlessEvent::G3Declaration => "G3Declaration",
+            WorthlessEvent::C2Cancellation => "C2Cancellation",
+        }
+    }
+
+    fn from_str(s: &str) -> Result<Self, sqlx::Error> {
+        match s {
+            "G3Declaration" => Ok(WorthlessEvent::G3Declaration),
+            "C2Cancellation" => Ok(WorthlessEvent::C2Cancellation),
+            other => Err(sqlx::Error::Decode(
+                format!("unknown worthless_event {other}").into(),
+            )),
+        }
+    }
+}
 
 /// The per-type payload of a corporate action. Each variant carries exactly
 /// the fields its action type needs, so a mixed or partial payload (the
@@ -197,6 +247,10 @@ pub enum ActionKind {
         /// Steel). The head parcels keep the remaining `100 − pct` percent.
         demerger_cost_base_pct: Decimal,
     },
+    WorthlessShares {
+        /// Which CGT event the loss is recognised under (see [`WorthlessEvent`]).
+        worthless_event: WorthlessEvent,
+    },
 }
 
 impl ActionKind {
@@ -210,6 +264,7 @@ impl ActionKind {
             ActionKind::BuyBack { .. } => "BuyBack",
             ActionKind::ScripForScrip { .. } => "ScripForScrip",
             ActionKind::Demerger { .. } => "Demerger",
+            ActionKind::WorthlessShares { .. } => "WorthlessShares",
         }
     }
 }
@@ -288,6 +343,9 @@ fn kind_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<ActionKind, sqlx::Erro
             demerger_held_units: req_dec(row, "demerger_held_units")?,
             demerger_cost_base_pct: req_dec(row, "demerger_cost_base_pct")?,
         }),
+        "WorthlessShares" => Ok(ActionKind::WorthlessShares {
+            worthless_event: WorthlessEvent::from_str(row.try_get("worthless_event")?)?,
+        }),
         other => Err(sqlx::Error::Decode(
             format!("unknown corporate action_type {other}").into(),
         )),
@@ -317,6 +375,7 @@ enum ActionType {
     BuyBack,
     ScripForScrip,
     Demerger,
+    WorthlessShares,
 }
 
 #[derive(Debug, Deserialize)]
@@ -364,6 +423,8 @@ pub struct CorporateActionBody {
     demerger_held_units: Option<Decimal>,
     #[serde(default)]
     demerger_cost_base_pct: Option<Decimal>,
+    #[serde(default)]
+    worthless_event: Option<WorthlessEvent>,
 }
 
 impl CorporateActionBody {
@@ -386,6 +447,8 @@ impl CorporateActionBody {
     /// demerged listing different from the head, and a cost-base percentage
     /// strictly between 0 and 100 — 0 or 100 would zero out one side's cost
     /// base entirely, and anything outside would make one side negative.
+    /// WorthlessShares needs only the `worthless_event` discriminator (the CGT
+    /// event basis), with every numeric/listing payload absent.
     fn kind(self) -> Option<ActionKind> {
         let payment = self.amount_per_unit.is_some();
         let split = self.split_new_units.is_some() || self.split_old_units.is_some();
@@ -404,10 +467,12 @@ impl CorporateActionBody {
             || self.demerger_new_units.is_some()
             || self.demerger_held_units.is_some()
             || self.demerger_cost_base_pct.is_some();
+        let worthless = self.worthless_event.is_some();
         let positive = |d: Option<Decimal>| d.filter(|v| *v > Decimal::ZERO);
         match self.action_type {
             ActionType::ReturnOfCapital
-                if !split && !bonus && !rights && !buyback && !scrip && !demerger =>
+                if !split && !bonus && !rights && !buyback && !scrip && !demerger
+                    && !worthless =>
             {
                 Some(ActionKind::ReturnOfCapital {
                     amount_per_unit: positive(self.amount_per_unit)?,
@@ -416,7 +481,7 @@ impl CorporateActionBody {
             }
             ActionType::ShareSplit
                 if !payment && !bonus && !rights && !buyback && !scrip && !demerger
-                    && self.currency.is_none() =>
+                    && !worthless && self.currency.is_none() =>
             {
                 Some(ActionKind::ShareSplit {
                     split_new_units: positive(self.split_new_units)?,
@@ -425,7 +490,7 @@ impl CorporateActionBody {
             }
             ActionType::BonusIssue
                 if !payment && !split && !rights && !buyback && !scrip && !demerger
-                    && self.currency.is_none() =>
+                    && !worthless && self.currency.is_none() =>
             {
                 Some(ActionKind::BonusIssue {
                     bonus_units: positive(self.bonus_units)?,
@@ -433,7 +498,8 @@ impl CorporateActionBody {
                 })
             }
             ActionType::RightsIssue
-                if !payment && !split && !bonus && !buyback && !scrip && !demerger =>
+                if !payment && !split && !bonus && !buyback && !scrip && !demerger
+                    && !worthless =>
             {
                 Some(ActionKind::RightsIssue {
                     rights_units: positive(self.rights_units)?,
@@ -444,7 +510,7 @@ impl CorporateActionBody {
             }
             ActionType::ScripForScrip
                 if !payment && !split && !bonus && !rights && !buyback && !demerger
-                    && self.currency.is_none() =>
+                    && !worthless && self.currency.is_none() =>
             {
                 let scrip_listing_id =
                     self.scrip_listing_id.filter(|&l| l != self.listing_id)?;
@@ -456,7 +522,7 @@ impl CorporateActionBody {
             }
             ActionType::Demerger
                 if !payment && !split && !bonus && !rights && !buyback && !scrip
-                    && self.currency.is_none() =>
+                    && !worthless && self.currency.is_none() =>
             {
                 let demerger_listing_id =
                     self.demerger_listing_id.filter(|&l| l != self.listing_id)?;
@@ -471,7 +537,8 @@ impl CorporateActionBody {
                 })
             }
             ActionType::BuyBack
-                if !payment && !split && !bonus && !rights && !scrip && !demerger =>
+                if !payment && !split && !bonus && !rights && !scrip && !demerger
+                    && !worthless =>
             {
                 let buyback_price = positive(self.buyback_price)?;
                 let buyback_dividend = self.buyback_dividend.unwrap_or(Decimal::ZERO);
@@ -498,6 +565,12 @@ impl CorporateActionBody {
                     currency: self.currency?,
                 })
             }
+            ActionType::WorthlessShares
+                if !payment && !split && !bonus && !rights && !buyback && !scrip
+                    && !demerger && self.currency.is_none() =>
+            {
+                Some(ActionKind::WorthlessShares { worthless_event: self.worthless_event? })
+            }
             _ => None,
         }
     }
@@ -515,7 +588,7 @@ const COLUMNS: &str = "id, action_type, listing_id, date, amount_per_unit, curre
                        buyback_price, buyback_dividend, buyback_franking_credit, \
                        buyback_market_value, scrip_listing_id, scrip_new_units, \
                        scrip_old_units, demerger_listing_id, demerger_new_units, \
-                       demerger_held_units, demerger_cost_base_pct";
+                       demerger_held_units, demerger_cost_base_pct, worthless_event";
 
 pub async fn db_list(pool: &SqlitePool) -> Result<Vec<CorporateAction>, sqlx::Error> {
     sqlx::query_as(&format!("SELECT {COLUMNS} FROM corporate_actions ORDER BY id"))
@@ -543,10 +616,11 @@ where
 pub enum WriteError {
     Db(sqlx::Error),
     /// The action is referenced by rights-exercise, buy-back participation,
-    /// scrip-for-scrip exchange, or demerger trades (`trades.rights_action_id`
-    /// / `trades.buyback_action_id` / `trades.scrip_action_id` /
-    /// `trades.demerger_action_id`): editing it would retroactively change
-    /// the terms those trades were created and validated against. Delete the
+    /// scrip-for-scrip exchange, demerger, or worthless-shares recognise trades
+    /// (`trades.rights_action_id` / `trades.buyback_action_id` /
+    /// `trades.scrip_action_id` / `trades.demerger_action_id` /
+    /// `trades.worthless_action_id`): editing it would retroactively change the
+    /// terms those trades were created and validated against. Delete the
     /// referencing trades first. Mapped to `422`.
     ReferencedByTrade,
 }
@@ -582,6 +656,7 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
         demerger_new_units: Option<String>,
         demerger_held_units: Option<String>,
         demerger_cost_base_pct: Option<String>,
+        worthless_event: Option<&'static str>,
     }
     let mut c = Cols::default();
     match &action.kind {
@@ -632,6 +707,9 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
             c.demerger_held_units = Some(demerger_held_units.to_string());
             c.demerger_cost_base_pct = Some(demerger_cost_base_pct.to_string());
         }
+        ActionKind::WorthlessShares { worthless_event } => {
+            c.worthless_event = Some(worthless_event.as_str());
+        }
     }
 
     let mut tx = pool.begin().await?;
@@ -643,7 +721,8 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
     let referenced: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM trades \
                        WHERE rights_action_id = ?1 OR buyback_action_id = ?1 \
-                          OR scrip_action_id = ?1 OR demerger_action_id = ?1)",
+                          OR scrip_action_id = ?1 OR demerger_action_id = ?1 \
+                          OR worthless_action_id = ?1)",
     )
     .bind(action.id)
     .fetch_one(&mut *tx)
@@ -660,8 +739,8 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
           buyback_price, buyback_dividend, buyback_franking_credit, buyback_market_value, \
           scrip_listing_id, scrip_new_units, scrip_old_units, \
           demerger_listing_id, demerger_new_units, demerger_held_units, \
-          demerger_cost_base_pct) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+          demerger_cost_base_pct, worthless_event) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT(id) DO UPDATE SET \
              action_type       = excluded.action_type, \
              listing_id        = excluded.listing_id, \
@@ -685,7 +764,8 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
              demerger_listing_id    = excluded.demerger_listing_id, \
              demerger_new_units     = excluded.demerger_new_units, \
              demerger_held_units    = excluded.demerger_held_units, \
-             demerger_cost_base_pct = excluded.demerger_cost_base_pct",
+             demerger_cost_base_pct = excluded.demerger_cost_base_pct, \
+             worthless_event        = excluded.worthless_event",
     )
     .bind(action.id)
     .bind(action.kind.type_str())
@@ -711,6 +791,7 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
     .bind(c.demerger_new_units)
     .bind(c.demerger_held_units)
     .bind(c.demerger_cost_base_pct)
+    .bind(c.worthless_event)
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -981,8 +1062,8 @@ async fn upsert(
             WriteError::ReferencedByTrade => (
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "this corporate action is referenced by rights-exercise, buy-back, \
-                 scrip-for-scrip, or demerger trades and cannot be edited — delete \
-                 those trades first"
+                 scrip-for-scrip, demerger, or worthless-shares trades and cannot be \
+                 edited — delete those trades first"
                     .to_string(),
             ),
         })
@@ -2266,6 +2347,108 @@ mod tests {
                 "action_type": "ScripForScrip", "listing_id": 1, "date": "2024-11-30",
                 "scrip_listing_id": 2, "scrip_new_units": "2", "scrip_old_units": "1",
                 "demerger_cost_base_pct": "5.063",
+            }),
+        ] {
+            api_put_expecting(&pool, body, StatusCode::UNPROCESSABLE_ENTITY).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn db_insert_and_retrieve_worthless_shares_preserves_event() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "DEAD").await;
+        for (id, event) in
+            [(1, WorthlessEvent::G3Declaration), (2, WorthlessEvent::C2Cancellation)]
+        {
+            db_upsert(
+                &pool,
+                &CorporateAction {
+                    id,
+                    listing_id: 1,
+                    date: d(2025, 3, 31),
+                    kind: ActionKind::WorthlessShares { worthless_event: event },
+                },
+            )
+            .await
+            .unwrap();
+            let got = db_get(&pool, id).await.unwrap().unwrap();
+            assert_eq!(got.kind, ActionKind::WorthlessShares { worthless_event: event });
+        }
+    }
+
+    /// A WorthlessShares action never appears in the split-event or
+    /// return-of-capital streams — recording one changes no existing parcel
+    /// (the recognise operation closes the holding).
+    #[tokio::test]
+    async fn db_worthless_shares_is_not_a_split_or_payment_event() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "DEAD").await;
+        db_upsert(
+            &pool,
+            &CorporateAction {
+                id: 1,
+                listing_id: 1,
+                date: d(2025, 3, 31),
+                kind: ActionKind::WorthlessShares {
+                    worthless_event: WorthlessEvent::G3Declaration,
+                },
+            },
+        )
+        .await
+        .unwrap();
+        assert!(db_share_split_events(&pool).await.unwrap().is_empty());
+        assert!(db_return_of_capital_events(&pool).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn api_worthless_shares_round_trip() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "DEAD").await;
+        api_put_expecting(
+            &pool,
+            serde_json::json!({
+                "action_type": "WorthlessShares",
+                "listing_id": 1,
+                "date": "2025-03-31",
+                "worthless_event": "G3Declaration",
+            }),
+            StatusCode::NO_CONTENT,
+        )
+        .await;
+        let got = db_get(&pool, 1).await.unwrap().unwrap();
+        assert_eq!(
+            got.kind,
+            ActionKind::WorthlessShares { worthless_event: WorthlessEvent::G3Declaration }
+        );
+    }
+
+    #[tokio::test]
+    async fn api_invalid_worthless_shares_payloads_return_422() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "DEAD").await;
+        // Missing the event discriminator, an unknown event value, a stray
+        // currency, stray cross-type payload fields — and another type
+        // carrying a worthless_event.
+        for body in [
+            serde_json::json!({
+                "action_type": "WorthlessShares", "listing_id": 1, "date": "2025-03-31",
+            }),
+            serde_json::json!({
+                "action_type": "WorthlessShares", "listing_id": 1, "date": "2025-03-31",
+                "worthless_event": "Nope",
+            }),
+            serde_json::json!({
+                "action_type": "WorthlessShares", "listing_id": 1, "date": "2025-03-31",
+                "worthless_event": "G3Declaration", "currency": "AUD",
+            }),
+            serde_json::json!({
+                "action_type": "WorthlessShares", "listing_id": 1, "date": "2025-03-31",
+                "worthless_event": "G3Declaration", "split_new_units": "2", "split_old_units": "1",
+            }),
+            serde_json::json!({
+                "action_type": "ShareSplit", "listing_id": 1, "date": "2025-03-31",
+                "split_new_units": "2", "split_old_units": "1",
+                "worthless_event": "G3Declaration",
             }),
         ] {
             api_put_expecting(&pool, body, StatusCode::UNPROCESSABLE_ENTITY).await;

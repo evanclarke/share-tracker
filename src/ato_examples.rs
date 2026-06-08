@@ -1216,3 +1216,66 @@ async fn ess_example_matt_taxed_upfront_eligible_reduction() {
     assert_eq!(holdings[0].quantity, dec("600"));
     assert_eq!(holdings[0].total_cost_base, dec("3600"));
 }
+
+/// `docs/ato/worthless-shares.md` (QC 52234) — "Capital loss when company
+/// dissolves" (Dave).
+///
+/// > On 31 March 2025, the administrators of Company Ltd made a written
+/// > declaration that they had reasonable grounds to believe there was no
+/// > likelihood that shareholders would receive any distribution. Dave owned
+/// > 1,000 Company Ltd shares, acquired in March 2012 for $1.70 each including
+/// > brokerage … the reduced cost base of Dave's shares and his capital loss …
+/// > is $1,700 — that is, 1,000 multiplied by $1.70.
+///
+/// Entered as a `WorthlessShares` corporate action (a G3 declaration) whose
+/// recognise operation closes the holding at nil proceeds. The realised-gains
+/// report shows a $1,700 capital loss (no gain, no discount), and the
+/// net-capital-gain report carries it into FY2024/25's loss pool.
+#[tokio::test]
+async fn worthless_shares_example_dave_capital_loss_on_dissolution() {
+    let pool = test_pool().await;
+    put_listing(&pool, 1, "CMP").await;
+    // 1,000 shares acquired March 2012 for $1.70 each, including brokerage.
+    put_buy(&pool, 1, 1, "2012-03-15", "1000", "1.70", "0").await;
+
+    // The administrators' written declaration of worthlessness (CGT event G3).
+    api_put(
+        &pool,
+        "/corporate_actions/1",
+        json!({
+            "action_type": "WorthlessShares",
+            "listing_id": 1,
+            "date": "2025-03-31",
+            "worthless_event": "G3Declaration",
+        }),
+    )
+    .await;
+
+    // Recognise the loss: the closing Sell consumes the whole holding at nil
+    // proceeds.
+    let recognise: Value =
+        api_post(&pool, "/corporate_actions/1/recognise", json!({}), StatusCode::CREATED).await;
+    assert_eq!(recognise["sell"]["quantity"], "1000");
+
+    // The capital loss equals the reduced cost base: 1,000 × $1.70 = $1,700,
+    // recognised (not disregarded), and never discounted.
+    let sales: Vec<RealisedGainLoss> = api_get(&pool, "/portfolio/realised-gains").await;
+    assert_eq!(sales.len(), 1);
+    assert_eq!(sales[0].proceeds, Decimal::ZERO);
+    assert_eq!(sales[0].cost_base, dec("1700"));
+    assert_eq!(sales[0].capital_loss, dec("1700"));
+    assert_eq!(sales[0].discount_eligible_gain, Decimal::ZERO);
+
+    // The loss is taken into account for FY2024/25 (year ending 30 June 2025),
+    // carried forward as there are no gains to offset.
+    let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net-capital-gain").await;
+    let y = years.iter().find(|y| y.tax_year == 2025).unwrap();
+    assert_eq!(y.capital_losses, dec("1700"));
+    assert_eq!(y.net_capital_gain, Decimal::ZERO);
+    assert_eq!(y.capital_loss_carried_forward, dec("1700"));
+
+    // The holding is fully closed.
+    let holdings: Vec<HoldingOverview> =
+        api_post(&pool, "/portfolio/overview", json!({}), StatusCode::OK).await;
+    assert!(holdings.iter().all(|h| h.quantity == Decimal::ZERO));
+}
