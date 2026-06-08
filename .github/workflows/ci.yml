@@ -12,5 +12,10 @@ jobs:
       # yfinance-rs's build.rs compiles a protobuf schema and needs protoc.
       - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
       - uses: Swatinem/rust-cache@v2
+      # Keep the tree clippy-clean: lint everything (incl. tests) and fail on any
+      # warning. Intentional exceptions carry an in-code #[allow] with a reason.
+      - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
