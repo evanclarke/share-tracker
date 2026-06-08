@@ -527,6 +527,9 @@ mod tests {
         insert_demerger_terms(pool, id, 1, 2, date, "1", "5", "20").await;
     }
 
+    // Test fixture: flat positional args read fine here; bundling them into a
+    // params struct would add ceremony without aiding the tests.
+    #[allow(clippy::too_many_arguments)]
     async fn insert_demerger_terms(
         pool: &SqlitePool,
         id: i64,

@@ -147,6 +147,28 @@ pub enum DeleteOutcome {
     TransferSell,
 }
 
+/// The columns [`db_delete_sell`] inspects to classify the target row before
+/// deleting it. Mapped by column name via `FromRow`.
+#[derive(sqlx::FromRow)]
+struct SellDeleteRow {
+    trade_type: TradeType,
+    scrip_action_id: Option<i64>,
+    demerger_action_id: Option<i64>,
+    transfer_id: Option<i64>,
+}
+
+/// The provenance links a trade may carry that make it an immutable
+/// action-derived Sell. Read by [`db_upsert_sell`] and mapped by column name
+/// via `FromRow`.
+#[derive(sqlx::FromRow)]
+struct SellProvenance {
+    buyback_action_id: Option<i64>,
+    scrip_action_id: Option<i64>,
+    demerger_action_id: Option<i64>,
+    transfer_id: Option<i64>,
+    worthless_action_id: Option<i64>,
+}
+
 /// Delete a Sell trade and all of its parcel allocations in one transaction,
 /// freeing the purchase parcels those allocations consumed. A buy-back
 /// participation Sell takes its linked dividend-component income row
@@ -160,7 +182,7 @@ pub enum DeleteOutcome {
 pub async fn db_delete_sell(pool: &SqlitePool, id: i64) -> Result<DeleteOutcome, sqlx::Error> {
     let mut tx = pool.begin().await?;
 
-    let row: Option<(TradeType, Option<i64>, Option<i64>, Option<i64>)> = sqlx::query_as(
+    let row: Option<SellDeleteRow> = sqlx::query_as(
         "SELECT trade_type, scrip_action_id, demerger_action_id, transfer_id \
          FROM trades WHERE id = ?",
     )
@@ -169,11 +191,11 @@ pub async fn db_delete_sell(pool: &SqlitePool, id: i64) -> Result<DeleteOutcome,
     .await?;
     let (scrip_action, demerger_action) = match row {
         None => return Ok(DeleteOutcome::NotFound),
-        Some((t, _, _, _)) if t != TradeType::Sell => return Ok(DeleteOutcome::NotASell),
+        Some(r) if r.trade_type != TradeType::Sell => return Ok(DeleteOutcome::NotASell),
         // A transfer-out Sell only ever goes with its whole group, via
         // DELETE /transfers/:id (which also removes the transfer record).
-        Some((_, _, _, Some(_))) => return Ok(DeleteOutcome::TransferSell),
-        Some((_, scrip_action, demerger_action, _)) => (scrip_action, demerger_action),
+        Some(r) if r.transfer_id.is_some() => return Ok(DeleteOutcome::TransferSell),
+        Some(r) => (r.scrip_action_id, r.demerger_action_id),
     };
 
     let group = scrip_action
@@ -243,29 +265,28 @@ pub async fn db_upsert_sell(pool: &SqlitePool, id: i64, body: &SellBody) -> Resu
     // carries linked rows — a dividend income row, or the group's replacement
     // Buys). The upsert below never sets any provenance column, so a normal
     // Sell can't become one either.
-    let existing: Option<(Option<i64>, Option<i64>, Option<i64>, Option<i64>, Option<i64>)> =
-        sqlx::query_as(
-            "SELECT buyback_action_id, scrip_action_id, demerger_action_id, transfer_id, \
-                    worthless_action_id \
-             FROM trades WHERE id = ?",
-        )
-        .bind(id)
-        .fetch_optional(&mut *tx)
-        .await?;
-    if let Some((buyback, scrip, demerger, transfer, worthless)) = existing {
-        if buyback.is_some() {
+    let existing: Option<SellProvenance> = sqlx::query_as(
+        "SELECT buyback_action_id, scrip_action_id, demerger_action_id, transfer_id, \
+                worthless_action_id \
+         FROM trades WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if let Some(p) = existing {
+        if p.buyback_action_id.is_some() {
             return Err(SellError::BuyBackSell);
         }
-        if scrip.is_some() {
+        if p.scrip_action_id.is_some() {
             return Err(SellError::ScripExchangeSell);
         }
-        if demerger.is_some() {
+        if p.demerger_action_id.is_some() {
             return Err(SellError::DemergerSell);
         }
-        if transfer.is_some() {
+        if p.transfer_id.is_some() {
             return Err(SellError::TransferSell);
         }
-        if worthless.is_some() {
+        if p.worthless_action_id.is_some() {
             return Err(SellError::WorthlessSell);
         }
     }
@@ -315,16 +336,16 @@ pub(crate) async fn upsert_sell_in_tx(
     // proceeds before anything is written.
     let (brokerage, gst_on_brokerage) =
         trade::resolve_brokerage(body.brokerage_includes_gst, body.brokerage, body.gst_on_brokerage);
-    trade::check_statement_total(
-        body.statement_total,
-        TradeType::Sell,
-        body.quantity,
-        body.average_price,
+    trade::check_statement_total(trade::StatementTotalCheck {
+        statement_total: body.statement_total,
+        trade_type: TradeType::Sell,
+        quantity: body.quantity,
+        average_price: body.average_price,
         brokerage,
         gst_on_brokerage,
-        &body.currency,
-        &body.brokerage_currency,
-    )
+        currency: &body.currency,
+        brokerage_currency: &body.brokerage_currency,
+    })
     .map_err(SellError::StatementTotal)?;
 
     // Upsert the Sell trade row.

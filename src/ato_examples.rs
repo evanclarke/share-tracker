@@ -185,6 +185,9 @@ async fn put_buy(pool: &SqlitePool, id: i64, listing_id: i64, date: &str, qty: &
 }
 
 /// Enter a Sell with its parcel allocation atomically via `PUT /sells/:id`.
+// Test fixture: flat positional args read fine here; bundling them into a params
+// struct would add ceremony without aiding the tests.
+#[allow(clippy::too_many_arguments)]
 async fn put_sell(
     pool: &SqlitePool,
     id: i64,

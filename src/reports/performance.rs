@@ -213,12 +213,18 @@ fn money_weighted_annual_return(flows: &[(NaiveDate, Decimal)]) -> Option<Decima
     Some((lo + hi) / two)
 }
 
-/// Assemble one report row from accumulated figures. `open` = units are still
-/// held, so the market value is required for the value-dependent metrics.
-fn build_row(
+/// Identifies which holding a performance row is for. The portfolio-wide
+/// `OVERALL` row carries no listing or account.
+struct RowKey {
     listing_id: Option<i64>,
     ticker: String,
     holding_account_id: Option<i64>,
+}
+
+/// Assemble one report row from accumulated figures. `open` = units are still
+/// held, so the market value is required for the value-dependent metrics.
+fn build_row(
+    key: RowKey,
     quantity_held: Option<Decimal>,
     market_value: Option<Decimal>,
     open: bool,
@@ -245,9 +251,9 @@ fn build_row(
         (mv > Decimal::ZERO).then(|| (acc.trailing_income / mv * hundred).round_dp(4))
     });
     HoldingPerformance {
-        listing_id,
-        ticker,
-        holding_account_id,
+        listing_id: key.listing_id,
+        ticker: key.ticker,
+        holding_account_id: key.holding_account_id,
         quantity_held,
         invested: acc.invested,
         proceeds: acc.proceeds,
@@ -456,9 +462,11 @@ pub async fn db_performance(
         }
         let ticker = tickers.get(&listing_id).cloned().unwrap_or_default();
         result.push(build_row(
-            Some(listing_id),
-            ticker,
-            Some(account_id),
+            RowKey {
+                listing_id: Some(listing_id),
+                ticker,
+                holding_account_id: Some(account_id),
+            },
             Some(acc.quantity),
             market_value,
             open,
@@ -468,9 +476,11 @@ pub async fn db_performance(
     }
     let overall_mv = if any_open { overall_mv } else { None };
     result.push(build_row(
-        None,
-        "OVERALL".to_string(),
-        None,
+        RowKey {
+            listing_id: None,
+            ticker: "OVERALL".to_string(),
+            holding_account_id: None,
+        },
         None,
         overall_mv,
         any_open,

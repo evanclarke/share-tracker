@@ -261,32 +261,37 @@ pub(crate) enum StatementTotalError {
     TotalMismatch { expected: Decimal },
 }
 
+/// The figures a recorded statement total is cross-checked against, gathered
+/// for [`check_statement_total`]. Named fields keep the four adjacent `Decimal`
+/// amounts from being transposed at the call site.
+pub(crate) struct StatementTotalCheck<'a> {
+    pub statement_total: Option<Decimal>,
+    pub trade_type: TradeType,
+    pub quantity: Decimal,
+    pub average_price: Decimal,
+    pub brokerage: Decimal,
+    pub gst_on_brokerage: Decimal,
+    pub currency: &'a str,
+    pub brokerage_currency: &'a str,
+}
+
 /// Cross-check an optionally supplied statement total against the trade's
 /// own figures: quantity × price + brokerage + GST for a Buy/DRP (amount
 /// payable), quantity × price − brokerage − GST for a Sell (net proceeds
 /// receivable — the statement nets costs out). Comparison is numeric
 /// (`Decimal` equality ignores trailing zeros: 1234.50 matches 1234.5).
 /// `None` means the statement total wasn't recorded — nothing to check.
-pub(crate) fn check_statement_total(
-    statement_total: Option<Decimal>,
-    trade_type: TradeType,
-    quantity: Decimal,
-    average_price: Decimal,
-    brokerage: Decimal,
-    gst_on_brokerage: Decimal,
-    currency: &str,
-    brokerage_currency: &str,
-) -> Result<(), StatementTotalError> {
-    let Some(total) = statement_total else {
+pub(crate) fn check_statement_total(c: StatementTotalCheck) -> Result<(), StatementTotalError> {
+    let Some(total) = c.statement_total else {
         return Ok(());
     };
-    if currency != brokerage_currency {
+    if c.currency != c.brokerage_currency {
         return Err(StatementTotalError::CurrencyMismatch);
     }
-    let costs = brokerage + gst_on_brokerage;
-    let expected = match trade_type {
-        TradeType::Buy | TradeType::DRP => quantity * average_price + costs,
-        TradeType::Sell => quantity * average_price - costs,
+    let costs = c.brokerage + c.gst_on_brokerage;
+    let expected = match c.trade_type {
+        TradeType::Buy | TradeType::DRP => c.quantity * c.average_price + costs,
+        TradeType::Sell => c.quantity * c.average_price - costs,
     };
     if total != expected {
         return Err(StatementTotalError::TotalMismatch { expected });
@@ -390,16 +395,16 @@ pub async fn db_upsert(pool: &SqlitePool, trade: &Trade) -> Result<(), UpsertErr
     // The statement total (when recorded) must reconcile with the trade's own
     // figures — a mismatch is a data-entry error against the contract note,
     // caught before anything is written.
-    check_statement_total(
-        trade.statement_total,
-        trade.trade_type,
-        trade.quantity,
-        trade.average_price,
-        trade.brokerage,
-        trade.gst_on_brokerage,
-        &trade.currency,
-        &trade.brokerage_currency,
-    )
+    check_statement_total(StatementTotalCheck {
+        statement_total: trade.statement_total,
+        trade_type: trade.trade_type,
+        quantity: trade.quantity,
+        average_price: trade.average_price,
+        brokerage: trade.brokerage,
+        gst_on_brokerage: trade.gst_on_brokerage,
+        currency: &trade.currency,
+        brokerage_currency: &trade.brokerage_currency,
+    })
     .map_err(UpsertError::StatementTotal)?;
 
     let mut tx = pool.begin().await?;
@@ -551,19 +556,29 @@ pub enum DeleteOutcome {
     Referenced,
 }
 
+/// The provenance links a trade may carry that block deleting it on its own.
+/// Read by [`db_delete`] and mapped by column name via `FromRow`.
+#[derive(sqlx::FromRow)]
+struct DeleteGuard {
+    scrip_action_id: Option<i64>,
+    demerger_action_id: Option<i64>,
+    transfer_id: Option<i64>,
+    ess_statement_id: Option<i64>,
+    worthless_action_id: Option<i64>,
+}
+
 pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<DeleteOutcome, sqlx::Error> {
     let mut tx = pool.begin().await?;
 
-    let exists: Option<(Option<i64>, Option<i64>, Option<i64>, Option<i64>, Option<i64>)> =
-        sqlx::query_as(
-            "SELECT scrip_action_id, demerger_action_id, transfer_id, ess_statement_id, \
-                    worthless_action_id \
-             FROM trades WHERE id = ?",
-        )
-        .bind(id)
-        .fetch_optional(&mut *tx)
-        .await?;
-    let Some((scrip_action, demerger_action, transfer, ess, worthless)) = exists else {
+    let guard: Option<DeleteGuard> = sqlx::query_as(
+        "SELECT scrip_action_id, demerger_action_id, transfer_id, ess_statement_id, \
+                worthless_action_id \
+         FROM trades WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(guard) = guard else {
         return Ok(DeleteOutcome::NotFound);
     };
     // A scrip-for-scrip exchange, demerger, or holding-account transfer trade
@@ -574,11 +589,11 @@ pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<DeleteOutcome, sqlx
     // /ess_statements/:id (which deletes the statement and its vest together). A
     // worthless-shares recognise closing Sell is removed via DELETE /sells
     // (which restores the holding).
-    if scrip_action.is_some()
-        || demerger_action.is_some()
-        || transfer.is_some()
-        || ess.is_some()
-        || worthless.is_some()
+    if guard.scrip_action_id.is_some()
+        || guard.demerger_action_id.is_some()
+        || guard.transfer_id.is_some()
+        || guard.ess_statement_id.is_some()
+        || guard.worthless_action_id.is_some()
     {
         return Ok(DeleteOutcome::Referenced);
     }
