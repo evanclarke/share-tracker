@@ -81,9 +81,17 @@ async fn test_pool() -> SqlitePool {
     db::init(":memory:").await.unwrap()
 }
 
-/// The full application router, exactly as `main` serves it.
+/// The full application router, exactly as `main` serves it — but with an
+/// offline price-source stub instead of the live `YahooFetcher`, so these
+/// acceptance tests never reach the network (they value via explicit cost-base
+/// assertions, not live prices).
 fn router(pool: &SqlitePool) -> axum::Router {
-    app::router(pool.clone(), scheduler::registry(pool.clone(), ":memory:".to_string()))
+    let fetcher = crate::entities::closing_price::test_support::QuoteStub::default().shared();
+    app::router(
+        pool.clone(),
+        scheduler::registry(pool.clone(), ":memory:".to_string(), fetcher.clone()),
+        fetcher,
+    )
 }
 
 /// PUT a JSON body to the API and require the entity-write success status (204).

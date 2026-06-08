@@ -3,16 +3,15 @@
 use axum::{Extension, Router};
 use sqlx::SqlitePool;
 
-use crate::entities::closing_price;
+use crate::entities::closing_price::SharedFetcher;
 use crate::infra::scheduler::{self, JobRegistry};
 
 /// Build the HTTP router: the web frontend plus all entity and report routes and
 /// scheduler inspection, sharing the pool as state and the job registry as an
-/// extension. The live Yahoo price fetcher is injected the same way (entity
-/// tests layer a stub `SharedFetcher` instead).
-pub fn router(pool: SqlitePool, registry: JobRegistry) -> Router {
-    let fetcher: closing_price::SharedFetcher =
-        std::sync::Arc::new(closing_price::YahooFetcher::default());
+/// extension. The price fetcher is injected (not constructed here) and layered
+/// as an extension, so the live `YahooFetcher` only reaches the router from
+/// `main`; tests pass a stub `SharedFetcher` and never touch the network.
+pub fn router(pool: SqlitePool, registry: JobRegistry, fetcher: SharedFetcher) -> Router {
     crate::entities::router()
         .merge(crate::reports::router())
         .merge(scheduler::router())

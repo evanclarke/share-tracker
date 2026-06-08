@@ -25,7 +25,7 @@
 # Project structure
 Modules are grouped into three folders; `main.rs`, `app.rs`, and the migrations live at the `src` root.
 - `src/main.rs` — server startup: init pool, build registry, spawn scheduler, serve, graceful shutdown
-- `src/app.rs` — `app::router(pool, registry)` assembles entity + report + scheduler routers (testable without `main`)
+- `src/app.rs` — `app::router(pool, registry, fetcher)` assembles entity + report + scheduler routers (testable without `main`). The price `fetcher` (`closing_price::SharedFetcher`) is injected, not constructed here, and `scheduler::registry(pool, db_path, fetcher)` takes it the same way — the live `YahooFetcher` is built only in `main`, so no test path can reach the network (tests pass `closing_price::test_support::QuoteStub`)
 - `src/ato_examples.rs` — `#[cfg(test)]`-only acceptance tests reproducing the worked examples in the ATO docs (`docs/ato/`): each test cites its doc + example, enters the facts purely via the HTTP API (full `app::router`), and asserts the ATO's stated figures. Add a test here when a new feature makes another doc example representable
 - `src/infra/` — cross-cutting infrastructure (`mod.rs` re-exports each):
   - `infra/db.rs` — pool init (runs migrations), weekly DB backup (`backup`/`backup_path`)

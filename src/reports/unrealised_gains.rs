@@ -1,5 +1,6 @@
+use crate::entities::closing_price::{self, SharedFetcher};
 use crate::infra::decimal::parse_dec;
-use axum::{Json, Router, extract::State, http::StatusCode, routing::post};
+use axum::{Extension, Json, Router, extract::State, http::StatusCode, routing::post};
 use chrono::{Months, NaiveDate};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -22,16 +23,31 @@ pub struct UnrealisedGain {
     pub unrealised_gain_loss: Option<Decimal>,
     /// Portion of open quantity in parcels acquired more than 12 months before `as_of_date`.
     pub cgt_discount_eligible_quantity: Decimal,
+    /// The price source's quote timestamp (the "as at" moment) when
+    /// `current_price` came from a live fetch; absent for an explicitly
+    /// supplied price or a stored snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub price_as_of: Option<String>,
+    /// Why a live price could not be obtained: the row is left unvalued with
+    /// the reason rather than silently zeroed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub price_unavailable: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
 pub struct UnrealisedGainsRequest {
     /// Current price per unit by listing id, expected in AUD so it lines up with
-    /// the AUD-denominated cost base.
+    /// the AUD-denominated cost base. An explicit price overrides a
+    /// live-fetched one.
     #[serde(default)]
     pub prices: HashMap<i64, Decimal>,
     #[serde(default)]
     pub as_of_date: Option<NaiveDate>,
+    /// Fetch the current price live from the price source for every held
+    /// listing without an explicit price (off by default — see
+    /// `portfolio::OverviewRequest::live`).
+    #[serde(default)]
+    pub live: bool,
 }
 
 pub fn router() -> Router<SqlitePool> {
@@ -193,6 +209,8 @@ pub async fn db_unrealised_gains(
                 market_value: None,
                 unrealised_gain_loss: None,
                 cgt_discount_eligible_quantity: cgt_eligible,
+                price_as_of: None,
+                price_unavailable: None,
             }
         })
         .collect();
@@ -203,23 +221,41 @@ pub async fn db_unrealised_gains(
 
 async fn unrealised_gains_handler(
     State(pool): State<SqlitePool>,
+    fetcher: Option<Extension<SharedFetcher>>,
     body: Option<Json<UnrealisedGainsRequest>>,
 ) -> Result<Json<Vec<UnrealisedGain>>, StatusCode> {
-    let (prices, as_of_date) = body
-        .map(|Json(req)| (req.prices, req.as_of_date))
-        .unwrap_or_default();
-    let as_of_date =
-        as_of_date.unwrap_or_else(|| chrono::Local::now().date_naive());
+    let req = body.map(|Json(req)| req).unwrap_or_default();
+    let as_of_date = req.as_of_date.unwrap_or_else(|| chrono::Local::now().date_naive());
 
     let mut gains = db_unrealised_gains(&pool, as_of_date)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    let live = closing_price::resolve_live_prices(
+        &pool,
+        fetcher.as_ref().map(|f| f.0.as_ref()),
+        req.live,
+        &req.prices,
+        gains.iter().map(|g| g.listing_id),
+    )
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
     for g in &mut gains {
-        if let Some(&price) = prices.get(&g.listing_id) {
+        if let Some(&price) = req.prices.get(&g.listing_id) {
             g.current_price = Some(price);
             g.market_value = Some(g.quantity * price);
             g.unrealised_gain_loss = Some(g.quantity * price - g.total_cost_base);
+        } else if let Some(result) = live.get(&g.listing_id) {
+            match result {
+                Ok(v) => {
+                    g.current_price = Some(v.aud_price);
+                    g.market_value = Some(g.quantity * v.aud_price);
+                    g.unrealised_gain_loss = Some(g.quantity * v.aud_price - g.total_cost_base);
+                    g.price_as_of = Some(v.as_of.clone());
+                }
+                Err(reason) => g.price_unavailable = Some(reason.clone()),
+            }
         }
     }
 
@@ -680,6 +716,76 @@ mod tests {
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let gains: Vec<UnrealisedGain> = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(gains[0].cgt_discount_eligible_quantity, Decimal::from(100));
+    }
+
+    /// With `live` and no explicit price, the holding is valued from the price
+    /// source's latest quote: market value, unrealised gain, and the as-of time
+    /// all come through.
+    #[tokio::test]
+    async fn api_live_fetch_values_holding_with_as_of() {
+        use crate::entities::closing_price::test_support::QuoteStub;
+        let pool = test_pool().await;
+        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        insert_listing(&pool, 1, "VAS").await;
+        // cost base = 10 × 100 + 9.95 + 0.995 = 1010.945
+        insert_buy(&pool, 1, 1, buy_date, Decimal::from(100), Decimal::from(10)).await;
+        let as_of = chrono::TimeZone::with_ymd_and_hms(&chrono::Utc, 2026, 6, 5, 6, 30, 0).unwrap();
+        let fetcher = QuoteStub::default().with_quote(1, "15.00", "AUD", as_of).shared();
+
+        let body = serde_json::json!({ "live": true, "as_of_date": "2026-06-05" });
+        let resp = router()
+            .with_state(pool)
+            .layer(axum::Extension(fetcher))
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/portfolio/unrealised-gains")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let gains: Vec<UnrealisedGain> = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(gains[0].market_value, Some(Decimal::from(1500)));
+        assert_eq!(gains[0].unrealised_gain_loss, Some("489.055".parse().unwrap()));
+        assert_eq!(gains[0].price_as_of.as_deref(), Some(as_of.to_rfc3339().as_str()));
+    }
+
+    /// A blanket live-fetch failure leaves the holding unvalued with a reason —
+    /// never a silent zero — while the report still returns the row.
+    #[tokio::test]
+    async fn api_live_fetch_failure_degrades_gracefully() {
+        use crate::entities::closing_price::test_support::QuoteStub;
+        let pool = test_pool().await;
+        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        insert_listing(&pool, 1, "VAS").await;
+        insert_buy(&pool, 1, 1, buy_date, Decimal::from(100), Decimal::from(10)).await;
+        let fetcher = QuoteStub::failing("provider down").shared();
+
+        let body = serde_json::json!({ "live": true, "as_of_date": "2026-06-05" });
+        let resp = router()
+            .with_state(pool)
+            .layer(axum::Extension(fetcher))
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/portfolio/unrealised-gains")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let gains: Vec<UnrealisedGain> = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(gains.len(), 1);
+        assert!(gains[0].market_value.is_none());
+        assert!(gains[0].unrealised_gain_loss.is_none());
+        assert!(gains[0].price_unavailable.as_deref().unwrap().contains("provider down"));
     }
 
     /// The report is the position *as at* `as_of_date`: a parcel bought and a

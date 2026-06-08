@@ -117,8 +117,14 @@ impl std::error::Error for ScheduleError {}
 
 /// Build the registry of maintenance jobs, wiring each name to existing work
 /// functions. Adding a future job is a new entry here plus a line in the
-/// schedule file.
-pub fn registry(pool: SqlitePool, db_path: String) -> JobRegistry {
+/// schedule file. The price source is injected (not constructed here) so the
+/// live `YahooFetcher` only ever reaches the registry from `main`; tests pass a
+/// stub and never touch the network.
+pub fn registry(
+    pool: SqlitePool,
+    db_path: String,
+    fetcher: crate::entities::closing_price::SharedFetcher,
+) -> JobRegistry {
     let mut jobs: HashMap<String, Job> = HashMap::new();
 
     let backup_pool = pool.clone();
@@ -168,8 +174,7 @@ pub fn registry(pool: SqlitePool, db_path: String) -> JobRegistry {
     );
 
     let price_pool = pool.clone();
-    let price_fetcher =
-        std::sync::Arc::new(crate::entities::closing_price::YahooFetcher::default());
+    let price_fetcher = fetcher;
     jobs.insert(
         "price-import".to_string(),
         Arc::new(move || {
@@ -414,11 +419,18 @@ mod tests {
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
+    /// An offline price-source stub so building a registry never constructs the
+    /// live `YahooFetcher` (these tests trigger only the `backup` job, but the
+    /// stub guarantees no test path can reach the network).
+    fn stub_fetcher() -> crate::entities::closing_price::SharedFetcher {
+        crate::entities::closing_price::test_support::QuoteStub::default().shared()
+    }
+
     async fn test_registry() -> (JobRegistry, SqlitePool, tempfile::TempDir, String) {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db").to_string_lossy().to_string();
         let pool = db::init(&db_path).await.unwrap();
-        (registry(pool.clone(), db_path.clone()), pool, dir, db_path)
+        (registry(pool.clone(), db_path.clone(), stub_fetcher()), pool, dir, db_path)
     }
 
     #[test]
@@ -513,7 +525,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("t.db").to_string_lossy().to_string();
         let pool = db::init(&db_path).await.unwrap();
-        let reg = registry(pool.clone(), db_path.clone());
+        let reg = registry(pool.clone(), db_path.clone(), stub_fetcher());
         let app = router().with_state(pool).layer(Extension(reg));
 
         let resp = app
@@ -560,7 +572,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("t.db").to_string_lossy().to_string();
         let pool = db::init(&db_path).await.unwrap();
-        let reg = registry(pool.clone(), db_path);
+        let reg = registry(pool.clone(), db_path, stub_fetcher());
         let app = router().with_state(pool).layer(Extension(reg));
 
         let resp = app
@@ -584,7 +596,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("t.db").to_string_lossy().to_string();
         let pool = db::init(&db_path).await.unwrap();
-        let reg = registry(pool.clone(), db_path);
+        let reg = registry(pool.clone(), db_path, stub_fetcher());
         let app = router().with_state(pool).layer(Extension(reg));
 
         let resp = app
@@ -606,7 +618,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("t.db").to_string_lossy().to_string();
         let pool = db::init(&db_path).await.unwrap();
-        let reg = registry(pool.clone(), db_path);
+        let reg = registry(pool.clone(), db_path, stub_fetcher());
         let app = router().with_state(pool).layer(Extension(reg));
 
         let resp = app

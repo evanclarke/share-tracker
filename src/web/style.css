@@ -165,3 +165,5 @@ input[type=checkbox] { width: auto; }
 .legend-ug { color: var(--ok); }
 .badge.stale { background: #fdf3e0; color: var(--warn); }
 .hint.warn { color: var(--warn); }
+.hint.as-at { margin: 0 0 10px; }
+.hint.as-at .warn { color: var(--warn); }

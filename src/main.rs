@@ -25,10 +25,14 @@ async fn main() {
         Some(path) => std::fs::read_to_string(path).expect("failed to read schedule file"),
         None => include_str!("../schedule.cron").to_string(),
     };
-    let registry = scheduler::registry(pool.clone(), args.db.clone());
+    // The live price source, constructed once and shared by the scheduled
+    // price-import job and the on-demand live valuation in the router.
+    let fetcher: entities::closing_price::SharedFetcher =
+        std::sync::Arc::new(entities::closing_price::YahooFetcher::default());
+    let registry = scheduler::registry(pool.clone(), args.db.clone(), fetcher.clone());
     scheduler::spawn(registry.clone(), pool.clone(), &schedule).expect("invalid schedule");
 
-    let app = app::router(pool.clone(), registry);
+    let app = app::router(pool.clone(), registry, fetcher);
     let ip: std::net::IpAddr = args.host.parse().expect("invalid --host address");
     let addr = std::net::SocketAddr::new(ip, args.port);
     let listener = tokio::net::TcpListener::bind(addr).await.expect("failed to bind");

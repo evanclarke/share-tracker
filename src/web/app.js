@@ -2098,8 +2098,37 @@
     }
     const result = el('div');
 
+    // Summarise the live-fetched prices' as-of times into one "as at …" line
+    // (the freshness of the valuation), plus a count of holdings the live fetch
+    // could not value.
+    function asAtSummary(rows) {
+      const asOf = [];
+      let unavailable = 0;
+      (rows || []).forEach(function (r) {
+        if (r && r.price_as_of) asOf.push(r.price_as_of);
+        if (r && r.price_unavailable) unavailable += 1;
+      });
+      if (asOf.length === 0 && unavailable === 0) return null;
+      const line = el('p', { class: 'hint as-at' });
+      if (asOf.length > 0) {
+        asOf.sort();
+        const lo = asOf[0], hi = asOf[asOf.length - 1];
+        const text = lo === hi
+          ? 'Live prices as at ' + fmtLocalTimestamp(lo)
+          : 'Live prices as at ' + fmtLocalTimestamp(lo) + ' – ' + fmtLocalTimestamp(hi);
+        line.appendChild(el('span', { title: utcTooltip(hi) }, text));
+      }
+      if (unavailable > 0) {
+        line.appendChild(el('span', { class: 'warn' },
+          (asOf.length > 0 ? ' · ' : '') + unavailable + ' holding(s) had no live price'));
+      }
+      return line;
+    }
+
     async function render(rows) {
       result.innerHTML = '';
+      const asAt = asAtSummary(rows);
+      if (asAt) result.appendChild(asAt);
       result.appendChild(await dataTable(rows, null, report.statusField));
     }
 
@@ -2109,10 +2138,15 @@
       return;
     }
 
-    // POST reports take optional market prices (per listing) and an optional date.
+    // POST reports value each held listing from the live price source by
+    // default (live: true); the form below lets the user override specific
+    // listings' prices (what-if) and pick an as-of date. An explicit price
+    // wins over the live fetch.
     const listings = await api('GET', '/listings');
     const priceForm = el('form', { class: 'card' });
-    priceForm.appendChild(el('h3', null, 'Current prices (AUD, optional)'));
+    priceForm.appendChild(el('h3', null, 'Price overrides (AUD, optional)'));
+    priceForm.appendChild(el('p', { class: 'hint' },
+      'Leave blank to value from the live price source. Enter a price to override that listing.'));
     listings.forEach(function (l) {
       priceForm.appendChild(el('div', { class: 'field' }, [
         el('label', null, l.id + ': ' + l.ticker + ' (' + (l.exchange_mic || 'Crypto') + ')'),
@@ -2128,25 +2162,34 @@
     priceForm.appendChild(el('div', { class: 'form-actions' }, [
       el('button', { type: 'submit', class: 'primary' }, 'Run report'),
     ]));
+    function buildBody() {
+      const prices = {};
+      priceForm.querySelectorAll('[data-listing]').forEach(function (inp) {
+        const v = (inp.value || '').trim();
+        if (v !== '') prices[inp.getAttribute('data-listing')] = v;
+      });
+      const body = { prices: prices, live: true };
+      if (report.asOfDate) {
+        const d = (priceForm.querySelector('[name="as_of_date"]').value || '').trim();
+        if (d !== '') body.as_of_date = d;
+      }
+      return body;
+    }
     priceForm.addEventListener('submit', async function (ev) {
       ev.preventDefault();
       try {
-        const prices = {};
-        priceForm.querySelectorAll('[data-listing]').forEach(function (inp) {
-          const v = (inp.value || '').trim();
-          if (v !== '') prices[inp.getAttribute('data-listing')] = v;
-        });
-        const body = { prices: prices };
-        if (report.asOfDate) {
-          const d = (priceForm.querySelector('[name="as_of_date"]').value || '').trim();
-          if (d !== '') body.as_of_date = d;
-        }
-        await render(await api('POST', report.api, body));
+        await render(await api('POST', report.api, buildBody()));
       } catch (e) {
         toast(e.message, true);
       }
     });
     setMain(el('div', null, [header, priceForm, result]));
+    // Run live on first load so the valuation is shown without manual entry.
+    try {
+      await render(await api('POST', report.api, buildBody()));
+    } catch (e) {
+      toast(e.message, true);
+    }
   }
 
   // ---- router -----------------------------------------------------------

@@ -1,5 +1,6 @@
+use crate::entities::closing_price::{self, SharedFetcher};
 use crate::infra::decimal::parse_dec;
-use axum::{Json, Router, extract::State, http::StatusCode, routing::post};
+use axum::{Extension, Json, Router, extract::State, http::StatusCode, routing::post};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -20,14 +21,31 @@ pub struct HoldingOverview {
     pub total_cost_base: Decimal,
     pub current_price: Option<Decimal>,
     pub market_value: Option<Decimal>,
+    /// The price source's quote timestamp (the "as at" moment) when
+    /// `current_price` came from a live fetch; absent for an explicitly
+    /// supplied price or a stored snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub price_as_of: Option<String>,
+    /// Why a live price could not be obtained for this holding: it is left
+    /// unvalued (no `current_price`/`market_value`) with the reason, rather
+    /// than silently zeroed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub price_unavailable: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
 pub struct OverviewRequest {
     /// Current price per unit by listing id, expected in AUD so it lines up with
-    /// the AUD-denominated cost base.
+    /// the AUD-denominated cost base. An explicit price always overrides a
+    /// live-fetched one.
     #[serde(default)]
     pub prices: HashMap<i64, Decimal>,
+    /// Fetch the current price live from the price source for every held
+    /// listing without an explicit price above. Off by default so existing
+    /// callers (and the deterministic ATO acceptance tests) never hit the
+    /// network; the web UI sets it.
+    #[serde(default)]
+    pub live: bool,
 }
 
 pub fn router() -> Router<SqlitePool> {
@@ -189,6 +207,8 @@ pub async fn db_holdings(
                 total_cost_base: cost_base,
                 current_price: None,
                 market_value: None,
+                price_as_of: None,
+                price_unavailable: None,
             }
         })
         .collect();
@@ -199,17 +219,39 @@ pub async fn db_holdings(
 
 async fn overview(
     State(pool): State<SqlitePool>,
+    fetcher: Option<Extension<SharedFetcher>>,
     body: Option<Json<OverviewRequest>>,
 ) -> Result<Json<Vec<HoldingOverview>>, StatusCode> {
-    let prices = body.map(|Json(req)| req.prices).unwrap_or_default();
+    let req = body.map(|Json(req)| req).unwrap_or_default();
     let mut holdings = db_holdings(&pool, None)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    // Live-fetch a current price for every held listing without an explicit
+    // override (when requested); an explicit price always wins.
+    let live = closing_price::resolve_live_prices(
+        &pool,
+        fetcher.as_ref().map(|f| f.0.as_ref()),
+        req.live,
+        &req.prices,
+        holdings.iter().map(|h| h.listing_id),
+    )
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
     for h in &mut holdings {
-        if let Some(&price) = prices.get(&h.listing_id) {
+        if let Some(&price) = req.prices.get(&h.listing_id) {
             h.current_price = Some(price);
             h.market_value = Some(h.quantity * price);
+        } else if let Some(result) = live.get(&h.listing_id) {
+            match result {
+                Ok(v) => {
+                    h.current_price = Some(v.aud_price);
+                    h.market_value = Some(h.quantity * v.aud_price);
+                    h.price_as_of = Some(v.as_of.clone());
+                }
+                Err(reason) => h.price_unavailable = Some(reason.clone()),
+            }
         }
     }
 
@@ -868,6 +910,87 @@ mod tests {
         let holdings: Vec<HoldingOverview> = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(holdings.len(), 1);
         assert!(holdings[0].market_value.is_none());
+    }
+
+    /// With `live` set and no explicit price, each held listing is valued from
+    /// the price source's latest quote, converted to AUD, and the quote's
+    /// as-of time rides through to the row.
+    #[tokio::test]
+    async fn api_overview_live_fetches_prices_and_carries_as_of() {
+        use crate::entities::closing_price::test_support::QuoteStub;
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "VAS").await;
+        insert_buy(&pool, 1, 1, Decimal::from(100), Decimal::from(10)).await;
+        let as_of = chrono::TimeZone::with_ymd_and_hms(&chrono::Utc, 2026, 6, 5, 6, 30, 0).unwrap();
+        let fetcher = QuoteStub::default().with_quote(1, "12.50", "AUD", as_of).shared();
+
+        let body = serde_json::json!({ "live": true });
+        let resp = router()
+            .with_state(pool)
+            .layer(axum::Extension(fetcher))
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/portfolio/overview")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let holdings: Vec<HoldingOverview> = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(holdings[0].current_price, Some("12.50".parse().unwrap()));
+        assert_eq!(holdings[0].market_value, Some(Decimal::from(1250)));
+        assert_eq!(holdings[0].price_as_of.as_deref(), Some(as_of.to_rfc3339().as_str()));
+        assert!(holdings[0].price_unavailable.is_none());
+    }
+
+    /// An explicit supplied price wins over the live fetch (and is never
+    /// fetched); a per-listing live-fetch failure leaves that holding unvalued
+    /// with a reason while the rest of the report still values.
+    #[tokio::test]
+    async fn api_overview_override_wins_and_failure_degrades_gracefully() {
+        use crate::entities::closing_price::test_support::QuoteStub;
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "VAS").await; // priced live
+        insert_listing(&pool, 2, "VAF").await; // explicit override
+        insert_listing(&pool, 3, "VGS").await; // live fetch fails (no stub quote)
+        insert_buy(&pool, 1, 1, Decimal::from(100), Decimal::from(10)).await;
+        insert_buy(&pool, 2, 2, Decimal::from(50), Decimal::from(12)).await;
+        insert_buy(&pool, 3, 3, Decimal::from(10), Decimal::from(5)).await;
+        let as_of = chrono::TimeZone::with_ymd_and_hms(&chrono::Utc, 2026, 6, 5, 6, 30, 0).unwrap();
+        // Stub only quotes listing 1; listing 3 has no quote → graceful failure.
+        let fetcher = QuoteStub::default().with_quote(1, "20", "AUD", as_of).shared();
+
+        let body = serde_json::json!({ "live": true, "prices": { "2": "99" } });
+        let resp = router()
+            .with_state(pool)
+            .layer(axum::Extension(fetcher))
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/portfolio/overview")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let holdings: Vec<HoldingOverview> = serde_json::from_slice(&bytes).unwrap();
+        // Listing 1: live-valued.
+        assert_eq!(holdings[0].current_price, Some(Decimal::from(20)));
+        assert!(holdings[0].price_as_of.is_some());
+        // Listing 2: the explicit override, no as-of time.
+        assert_eq!(holdings[1].current_price, Some(Decimal::from(99)));
+        assert!(holdings[1].price_as_of.is_none());
+        // Listing 3: unvalued, with a reason — never a silent zero.
+        assert!(holdings[2].current_price.is_none());
+        assert!(holdings[2].market_value.is_none());
+        assert!(holdings[2].price_unavailable.is_some());
     }
 
     /// The same listing held in two holding accounts reports as two holdings

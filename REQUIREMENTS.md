@@ -290,3 +290,82 @@ response body when present (`api()` appends it), so the work is server-side.
   non-obvious
 - Tests assert the body text (or a distinctive fragment of it) for each validated rejection, not
   just the status code
+
+## Live current prices from the price source, with an as-of time (2026-06-08)
+
+Now that there is a real price source (Yahoo, via the `PriceFetcher` trait), any report or screen
+that needs *current* market prices should fetch them from the source rather than requiring the
+user to type them into the request. Today the price-dependent reports (portfolio/valuation,
+unrealised gains, performance) only value holdings if the caller supplies a `prices` map in the
+request body — otherwise `market_value`/`current_price` come back empty. That should no longer be
+the default experience.
+
+- When a price-dependent report or screen is requested without explicitly supplied prices, fetch
+  the latest available price for each held listing from the price source (the existing
+  `PriceFetcher` / `YahooFetcher`), instead of returning empty valuations
+  - Prices come from the source in the listing's quote currency and are converted to AUD per the
+    existing FX rules before valuation — never mix currencies (per `CLAUDE.md`)
+  - Exchange-less (Crypto) listings are quoted continuously; their latest quote is fetched the
+    same way
+- Every fetched price carries, and the report/screen surfaces, the **as-of time** the price is
+  for (the provider's quote timestamp, not the time we fetched) — so the user can see how fresh
+  the valuation is and that different listings may be as-of different moments (e.g. a closed
+  market vs an open one). The web UI shows this near the valuation (per-row and/or a summary "as
+  at …" line)
+- Explicitly supplied prices still override the fetched ones (the existing `prices` request body
+  keeps working unchanged) — used for what-if valuations and to keep the ATO acceptance tests
+  deterministic
+- A failed/unavailable live fetch for a listing is surfaced, not silently zeroed: that holding
+  shows no current value with a reason, while the rest of the report still values (consistent with
+  the "never silent zero" rule)
+- Stored closing-price history and daily snapshots are unchanged — this is about *current/live*
+  valuation on demand; the snapshot series remains the historical record
+- `docs/API.md` documents the new behaviour (default = live-fetched, the as-of time field, the
+  override), and the Features list notes live valuation. Tests cover: live fetch fills valuations,
+  the as-of time is returned, an explicit override wins, and a per-listing fetch failure degrades
+  gracefully
+
+## Human-friendly headings and field labels throughout the web UI (2026-06-08)
+
+Every heading, table column header, and form field label shown to the user must read as a
+human-friendly name, not the raw database/JSON field name — `amount_per_security` shows as
+"Amount per security", `exchange_mic` as "Exchange", `fx_rate` as "FX rate", `holding_account_id`
+as "Account", and so on. This is the labelling counterpart to the no-raw-foreign-keys requirement:
+that one fixed raw *id values*; this one fixes raw *field names* in the chrome around them.
+
+- All column headers in the shared `filterableTable`, all form input labels, all report table
+  headers, and all section/screen headings use human-readable names
+- The mapping is config-driven and lives with the existing per-entity/report config in `app.js`
+  (the `ENTITIES`/`REPORTS`/`ACTIONS` descriptors) — labels are declared once per field, not
+  hand-written per view; generic list/form/table code reads them. A field with no explicit label
+  falls back to a humanised form of its name (e.g. snake_case → "Title case") so nothing ever
+  renders a raw identifier by default
+- Units/qualifiers belong in the label where they aid reading (e.g. "Price (AUD)", "Quantity
+  (units)") without changing the underlying field
+- Acronyms keep their canonical casing (AUD, FX, MIC, DRP, CGT, AMIT, GST, LIC, FITO), not
+  title-cased into "Aud"/"Drp"
+- Tested by asserting the served bundle renders the friendly labels and no raw field name leaks
+  into a heading/label (consistent with the existing "UI items tested against the served bundle"
+  approach)
+
+## Client-side pagination for large tables (2026-06-08)
+
+Tables that can grow large (entity lists, the Sells list, report tables — trades, closing-price
+history, snapshots, parcels) should paginate so a long result set is not dumped as one enormous
+table. At this stage pagination is done client-side: the existing JSON endpoints keep returning
+the full array and the web layer pages through it.
+
+- The shared `filterableTable` gains pagination: a page size and page navigation (next/prev and/or
+  page numbers), so only one page of rows is in the DOM at a time
+- Pagination composes correctly with the existing filtering and sorting: filtering/sorting apply
+  to the **whole** result set, then the result is paged — never page-then-filter. Changing a
+  filter resets to the first page; the row/result count reflects the filtered total, and the
+  control shows e.g. "showing 1–50 of 320"
+- Applied uniformly through `filterableTable` (per the "route new tables through it" rule), so
+  every table benefits without bespoke per-table paging
+- The default page size is 50 rows; small tables (50 rows or fewer) show no pagination control
+- Server-side pagination of the JSON API is explicitly out of scope for now (record as a Known
+  limitation): the full set is still fetched, so this addresses rendering/usability, not payload
+  size. If result sets later outgrow a client-side fetch, server paging becomes a follow-up
+- Tested by asserting the paging controls and behaviour are present in the served bundle and that
+  filtering still reflects the full set (per the served-bundle UI test approach)

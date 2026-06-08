@@ -559,14 +559,26 @@ POST /portfolio/overview
 Returns open holdings per **(listing, holding account)** — the same listing held in two accounts (e.g. an employer share plan and a personal broker account) reports as two holdings. Request body (optional):
 
 ```json
-{ "prices": { "<listing_id>": "<price>" } }
+{ "live": true, "prices": { "<listing_id>": "<price>" } }
 ```
 
-Response fields per holding: `listing_id`, `holding_account_id`, `quantity`, `avg_cost_base_per_unit`, `total_cost_base`, `current_price` (nullable), `market_value` (nullable).
+Response fields per holding: `listing_id`, `holding_account_id`, `quantity`, `avg_cost_base_per_unit`, `total_cost_base`, `current_price` (nullable), `market_value` (nullable), `price_as_of` (nullable), `price_unavailable` (nullable).
 
 Cost base is calculated as `(price × quantity + brokerage + GST) − AMIT reductions`, pro-rated to remaining (unsold) units, less [return-of-capital](#corporate-actions) payments received on those units — flooring at nil (CGT events E10 and G1) — then converted to AUD (see [FX conversion](#fx-conversion)). Supplied prices are expected in AUD, so `market_value` is AUD. The unrealised-gains report computes its cost base the same way. `quantity` is in *current* units — re-based across any [share splits/consolidations or bonus issues](#corporate-actions) — so it lines up with a current market price; the re-basing never changes the cost base totals.
 
+**Live valuation (`live`):** see [Live valuation](#live-valuation) — with `live: true` each held listing with no explicit price is valued from the [price source](#closing-prices)'s latest quote (converted to AUD), and `price_as_of` carries the provider's quote timestamp; an unavailable quote sets `price_unavailable` and leaves the holding unvalued. The web UI defaults to live; the API defaults to off (so existing callers are unchanged).
+
 The three price-taking reports (overview, [unrealised gains](#unrealised-gains), [performance](#performance)) are also run automatically against the stored [closing prices](#closing-prices) each day and persisted as [report snapshots](#report-snapshots); the request-supplied `prices` remain for ad-hoc what-if runs.
+
+### Live valuation
+
+The three price-taking reports — [overview](#overview), [unrealised gains](#unrealised-gains), and [performance](#performance) — accept `"live": true` to value holdings from the **current** price at the [price source](#closing-prices) (Yahoo) instead of returning empty valuations when no `prices` are supplied. Each held listing without an explicit price is valued from the provider's latest available quote, in the listing's quote currency, **converted to AUD** via the [FX rules](#fx-conversion) (the quote-month ATO rate; no manual override) — currencies are never mixed.
+
+- **As-of time:** every live-valued row carries `price_as_of`, the provider's quote timestamp (RFC 3339 UTC) — how fresh the valuation is. The UI rolls the per-row times up into one "as at …" line; an explicitly supplied price has no `price_as_of`.
+- **Explicit override:** a price in `prices` always wins and is never fetched — what-if valuations and the deterministic acceptance tests keep working unchanged.
+- **Graceful failure:** a per-listing fetch failure (provider error, a currency mismatch, or no AUD rate for the quote month) does not zero the holding or fail the request — that row is left unvalued (`current_price`/`market_value` null) with the reason in `price_unavailable`, while the rest of the report still values (consistent with the never-silent-zero rule).
+
+`live` defaults to **off** so existing API callers and the deterministic ATO acceptance tests never hit the network; the web UI sets it on by default. This is on-demand live valuation only — it does not write to the [closing-price history](#closing-prices) or the daily [report snapshots](#report-snapshots), which remain sourced from stored closing prices.
 
 ### Open parcels
 
@@ -589,10 +601,10 @@ POST /portfolio/unrealised-gains
 Request body (all optional):
 
 ```json
-{ "prices": { "<listing_id>": "<price>" }, "as_of_date": "YYYY-MM-DD" }
+{ "live": true, "prices": { "<listing_id>": "<price>" }, "as_of_date": "YYYY-MM-DD" }
 ```
 
-`as_of_date` defaults to today, and the report is the position **as at** that date: trades, sales, corporate actions, and AMIT adjustments (by their statement's year end) dated after it are excluded. One row per (listing, holding account), like the [overview](#overview). Response fields per holding: `listing_id`, `holding_account_id`, `quantity`, `total_cost_base`, `current_price`, `market_value`, `unrealised_gain_loss`, `cgt_discount_eligible_quantity` (units from parcels held strictly more than 12 months as at `as_of_date`). `total_cost_base` is in AUD (see [FX conversion](#fx-conversion)); supplied prices are expected in AUD, so `market_value` and `unrealised_gain_loss` are AUD. Quantities are in the unit basis of `as_of_date` — re-based across any [share splits/consolidations or bonus issues](#corporate-actions) up to that date — and neither a split nor a bonus issue restarts the 12-month discount clock (the converted/bonus shares keep the original acquisition date; TD 2000/10, `docs/ato/bonus-shares.md`). A [scrip-for-scrip](#corporate-actions) replacement or [demerger](#corporate-actions) head/demerged parcel's discount clock likewise runs from its deemed (carried) acquisition date — the rollover's combined holding period.
+`as_of_date` defaults to today, and the report is the position **as at** that date: trades, sales, corporate actions, and AMIT adjustments (by their statement's year end) dated after it are excluded. One row per (listing, holding account), like the [overview](#overview). Response fields per holding: `listing_id`, `holding_account_id`, `quantity`, `total_cost_base`, `current_price`, `market_value`, `unrealised_gain_loss`, `cgt_discount_eligible_quantity` (units from parcels held strictly more than 12 months as at `as_of_date`), `price_as_of` (nullable), `price_unavailable` (nullable). With `live: true`, unpriced holdings are valued from the price source's latest quote — see [Live valuation](#live-valuation). `total_cost_base` is in AUD (see [FX conversion](#fx-conversion)); supplied prices are expected in AUD, so `market_value` and `unrealised_gain_loss` are AUD. Quantities are in the unit basis of `as_of_date` — re-based across any [share splits/consolidations or bonus issues](#corporate-actions) up to that date — and neither a split nor a bonus issue restarts the 12-month discount clock (the converted/bonus shares keep the original acquisition date; TD 2000/10, `docs/ato/bonus-shares.md`). A [scrip-for-scrip](#corporate-actions) replacement or [demerger](#corporate-actions) head/demerged parcel's discount clock likewise runs from its deemed (carried) acquisition date — the rollover's combined holding period.
 
 ### Realised gains
 
@@ -608,12 +620,12 @@ Sorted by `sale_date` ascending.
 
 ```
 POST /portfolio/performance
-Body (optional): { "prices": { "<listing_id>": "12.34", ... }, "as_of_date": "2026-06-30" }
+Body (optional): { "live": true, "prices": { "<listing_id>": "12.34", ... }, "as_of_date": "2026-06-30" }
 ```
 
 Investment performance (not tax) per holding (listing × holding account) plus a final **OVERALL** row, valued at `as_of_date` (default: today; trades and income dated after it are ignored) with the supplied AUD prices. The report is cash-flow based: **out** — each Buy/DRP parcel's AUD cost on its trade date (converted at the acquisition month, or the deemed acquisition month for a rollover-created parcel); **in** — each Sell's AUD net proceeds, each distribution's cash (franked + unfranked + foreign source − foreign tax − TFN withholding; franking credits are not cash), and the holding's market value at `as_of_date`. Internal movements — [transfers](#transfers), [scrip-for-scrip exchanges, and demergers](#corporate-actions) — are valued **at the carried cost** within each holding (the source exits without gain; the destination carries the cost base, so the gain shows up where the parcels now sit) and are skipped entirely in the OVERALL row, which sees only external cash. AMMA statements attribute taxable income, not cash, and are excluded; a DRP reinvestment is both cash income and a same-sized purchase, so it nets out.
 
-Response fields per row: `listing_id`, `ticker`, `holding_account_id`, `quantity_held` (as-of units; all three `null`/`"OVERALL"` on the total row), `invested`, `proceeds`, `income` (lifetime AUD figures), `market_value` (`quantity_held` × the supplied price), `total_return` (proceeds + income + market value − invested, AUD), `total_return_pct` (of invested), `money_weighted_return_pct` (annualised internal rate of return over the dated flows, actual/365, % p.a.), and `income_yield_pct` (trailing 12 months' income / market value). A still-open holding with no supplied price reports `null` for every market-dependent metric rather than a silently wrong figure; the OVERALL row likewise reports them only when every open holding is priced.
+Response fields per row: `listing_id`, `ticker`, `holding_account_id`, `quantity_held` (as-of units; all three `null`/`"OVERALL"` on the total row), `invested`, `proceeds`, `income` (lifetime AUD figures), `market_value` (`quantity_held` × the supplied or live price), `total_return` (proceeds + income + market value − invested, AUD), `total_return_pct` (of invested), `money_weighted_return_pct` (annualised internal rate of return over the dated flows, actual/365, % p.a.), `income_yield_pct` (trailing 12 months' income / market value), `price_as_of` (nullable; absent on the OVERALL row), and `price_unavailable` (nullable). A still-open holding with no supplied price reports `null` for every market-dependent metric rather than a silently wrong figure; the OVERALL row likewise reports them only when every open holding is priced. With `live: true`, unpriced open holdings are valued from the price source's latest quote — see [Live valuation](#live-valuation).
 
 ### Net capital gain
 

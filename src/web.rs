@@ -468,6 +468,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn live_valuation_ui_present() {
+        let js = app_js_body().await;
+        // The price-dependent report views value live by default: the shared
+        // POST-report runner sends `live: true`, runs on first load (no manual
+        // price entry needed), and treats the price form as overrides.
+        assert!(js.contains("live: true"));
+        assert!(js.contains("function buildBody()"));
+        assert!(js.contains("Price overrides (AUD, optional)"));
+        assert!(js.contains("Leave blank to value from the live price source"));
+        // The per-row as-of times roll up into a freshness "as at …" line, with
+        // a count of holdings the live fetch could not value.
+        assert!(js.contains("function asAtSummary("));
+        assert!(js.contains("Live prices as at "));
+        assert!(js.contains("price_as_of"));
+        assert!(js.contains("price_unavailable"));
+        assert!(js.contains("had no live price"));
+        // The "as at" line styling ships in the bundle.
+        let css = body_string(get("/static/style.css").await).await;
+        assert!(css.contains(".hint.as-at"));
+    }
+
+    #[tokio::test]
     async fn report_export_ui_present() {
         let js = app_js_body().await;
         // The tax-summary and net-capital-gain report views carry an Export CSV

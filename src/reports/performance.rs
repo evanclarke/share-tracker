@@ -36,9 +36,10 @@
 //! market-dependent metrics rather than a silently wrong figure; the OVERALL
 //! row does the same unless every open holding is priced.
 
+use crate::entities::closing_price::{self, SharedFetcher};
 use crate::infra::decimal::parse_dec;
 use crate::infra::fx::to_aud;
-use axum::{Json, Router, extract::State, http::StatusCode, routing::post};
+use axum::{Extension, Json, Router, extract::State, http::StatusCode, routing::post};
 use chrono::{Months, NaiveDate};
 use rust_decimal::{Decimal, MathematicalOps};
 use serde::{Deserialize, Serialize};
@@ -81,18 +82,34 @@ pub struct HoldingPerformance {
     /// Trailing 12 months' income / market value × 100. `None` when the
     /// market value is unknown or zero.
     pub income_yield_pct: Option<Decimal>,
+    /// The price source's quote timestamp (the "as at" moment) when the market
+    /// value came from a live fetch; absent on the OVERALL row, for an
+    /// explicitly supplied price, or a stored snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub price_as_of: Option<String>,
+    /// Why a live price could not be obtained for an open holding: its
+    /// market-dependent metrics are left unknown with the reason rather than
+    /// silently zeroed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub price_unavailable: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
 pub struct PerformanceRequest {
     /// Current price per unit by listing id, expected in AUD so it lines up
-    /// with the AUD-denominated flows.
+    /// with the AUD-denominated flows. An explicit price overrides a
+    /// live-fetched one.
     #[serde(default)]
     pub prices: HashMap<i64, Decimal>,
     /// Valuation date for the supplied prices; flows after it are ignored.
     /// Defaults to today.
     #[serde(default)]
     pub as_of_date: Option<NaiveDate>,
+    /// Fetch the current price live from the price source for every open
+    /// holding without an explicit price (off by default — see
+    /// `portfolio::OverviewRequest::live`).
+    #[serde(default)]
+    pub live: bool,
 }
 
 pub fn router() -> Router<SqlitePool> {
@@ -240,6 +257,8 @@ fn build_row(
         total_return_pct,
         money_weighted_return_pct,
         income_yield_pct,
+        price_as_of: None,
+        price_unavailable: None,
     }
 }
 
@@ -463,16 +482,57 @@ pub async fn db_performance(
 
 async fn performance_handler(
     State(pool): State<SqlitePool>,
+    fetcher: Option<Extension<SharedFetcher>>,
     body: Option<Json<PerformanceRequest>>,
 ) -> Result<Json<Vec<HoldingPerformance>>, StatusCode> {
-    let (prices, as_of_date) = body
-        .map(|Json(req)| (req.prices, req.as_of_date))
-        .unwrap_or_default();
-    let as_of = as_of_date.unwrap_or_else(|| chrono::Local::now().date_naive());
-    db_performance(&pool, &prices, as_of)
+    let req = body.map(|Json(req)| req).unwrap_or_default();
+    let as_of = req.as_of_date.unwrap_or_else(|| chrono::Local::now().date_naive());
+
+    // Live-fetch a current price for each open held listing without an explicit
+    // override (when requested); an explicit price always wins.
+    let held = closing_price::db_held_listing_ids(&pool, Some(as_of))
         .await
-        .map(Json)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let live = closing_price::resolve_live_prices(
+        &pool,
+        fetcher.as_ref().map(|f| f.0.as_ref()),
+        req.live,
+        &req.prices,
+        held,
+    )
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // The effective AUD price per listing feeding the valuation: explicit
+    // overrides plus the successful live quotes.
+    let mut prices = req.prices.clone();
+    for (id, result) in &live {
+        if let Ok(v) = result {
+            prices.insert(*id, v.aud_price);
+        }
+    }
+
+    let mut rows = db_performance(&pool, &prices, as_of)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // Carry each live price's as-of time, and surface a live-fetch failure on
+    // an open holding (left unvalued by db_performance) as its reason.
+    for row in &mut rows {
+        let Some(listing_id) = row.listing_id else { continue };
+        match live.get(&listing_id) {
+            Some(Ok(v)) => row.price_as_of = Some(v.as_of.clone()),
+            Some(Err(reason))
+                if row.market_value.is_none()
+                    && row.quantity_held.is_some_and(|q| q > Decimal::ZERO) =>
+            {
+                row.price_unavailable = Some(reason.clone());
+            }
+            _ => {}
+        }
+    }
+
+    Ok(Json(rows))
 }
 
 #[cfg(test)]
@@ -869,6 +929,62 @@ mod tests {
         assert_eq!(rows[0].ticker, "VAS");
         assert_eq!(rows[0].market_value, Some(Decimal::from(1200)));
         assert_eq!(rows.last().unwrap().ticker, "OVERALL");
+    }
+
+    /// With `live`, an open holding is valued from the price source's latest
+    /// quote: the market value and the as-of time come through, and the OVERALL
+    /// row aggregates the live value. An explicit override still wins, and a
+    /// per-listing failure leaves that holding's market metrics unknown with a
+    /// reason (others still valued).
+    #[tokio::test]
+    async fn api_performance_live_fetch_with_as_of_override_and_failure() {
+        use crate::entities::closing_price::test_support::QuoteStub;
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "VAS", "XASX", "AUD").await; // live-valued
+        insert_listing(&pool, 2, "VAF", "XASX", "AUD").await; // explicit override
+        insert_listing(&pool, 3, "VGS", "XASX", "AUD").await; // live fetch fails
+        buy(&pool, 1, 1, d(2024, 1, 1), 100, 10).await; // invested 1,000
+        buy(&pool, 2, 2, d(2024, 1, 1), 50, 12).await;
+        buy(&pool, 3, 3, d(2024, 1, 1), 10, 5).await;
+        let as_of =
+            chrono::TimeZone::with_ymd_and_hms(&chrono::Utc, 2024, 12, 31, 6, 30, 0).unwrap();
+        let fetcher = QuoteStub::default().with_quote(1, "12", "AUD", as_of).shared();
+
+        let body = serde_json::json!({
+            "live": true,
+            "as_of_date": "2024-12-31",
+            "prices": { "2": "20" },
+        });
+        let resp = router()
+            .with_state(pool)
+            .layer(axum::Extension(fetcher))
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/portfolio/performance")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let rows: Vec<HoldingPerformance> = serde_json::from_slice(&bytes).unwrap();
+        let by_id = |id: i64| rows.iter().find(|r| r.listing_id == Some(id)).unwrap();
+        // Listing 1: live-valued at 12 → market value 1,200, as-of carried.
+        assert_eq!(by_id(1).market_value, Some(Decimal::from(1200)));
+        assert_eq!(by_id(1).price_as_of.as_deref(), Some(as_of.to_rfc3339().as_str()));
+        // Listing 2: explicit override 20 → 50 × 20 = 1,000, no as-of.
+        assert_eq!(by_id(2).market_value, Some(Decimal::from(1000)));
+        assert!(by_id(2).price_as_of.is_none());
+        // Listing 3: live fetch failed → market metrics unknown, with a reason.
+        assert!(by_id(3).market_value.is_none());
+        assert!(by_id(3).total_return.is_none());
+        assert!(by_id(3).price_unavailable.is_some());
+        // OVERALL is unknown while an open holding is unpriced.
+        let overall = rows.iter().find(|r| r.ticker == "OVERALL").unwrap();
+        assert!(overall.market_value.is_none());
     }
 
     #[tokio::test]

@@ -209,12 +209,27 @@ pub struct FetchedClose {
     pub currency: String,
 }
 
-type FetchFuture<'a> = Pin<Box<dyn Future<Output = Result<Vec<FetchedClose>, String>> + Send + 'a>>;
+pub type FetchFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<Vec<FetchedClose>, String>> + Send + 'a>>;
 
-/// A source of daily closing prices. Implementations do their own
-/// symbol mapping and candle-timestamp→trading-date conversion (both are
-/// provider-specific); a failure is an error result, never a silent zero or a
-/// skipped row.
+/// The most recent available price for a listing, for on-demand live
+/// valuation: the price in the listing's quote currency and the provider's
+/// quote timestamp (the as-of moment the price was observed).
+#[derive(Debug, Clone)]
+pub struct LatestQuote {
+    pub price: Decimal,
+    /// The quote currency the provider reports — cross-checked against the
+    /// listing's currency before the price is used.
+    pub currency: String,
+    /// The provider's quote timestamp (the as-of moment).
+    pub as_of: DateTime<Utc>,
+}
+
+pub type QuoteFuture<'a> = Pin<Box<dyn Future<Output = Result<LatestQuote, String>> + Send + 'a>>;
+
+/// A source of prices. Implementations do their own symbol mapping and
+/// candle-timestamp→trading-date conversion (both are provider-specific); a
+/// failure is an error result, never a silent zero or a skipped row.
 pub trait PriceFetcher: Send + Sync {
     /// Identifier stored in each row's `source` column, e.g. "yahoo".
     fn source(&self) -> &'static str;
@@ -224,6 +239,12 @@ pub trait PriceFetcher: Send + Sync {
     /// have no entry.
     fn daily_closes<'a>(&'a self, market: &'a Market, from: NaiveDate, to: NaiveDate)
     -> FetchFuture<'a>;
+
+    /// The most recent available price for the listing, with the provider's
+    /// quote timestamp — for exchange-listed and exchange-less (Crypto)
+    /// listings alike. Drives on-demand live valuation (the price-dependent
+    /// reports). A failure is an error result, never a silent zero.
+    fn latest_quote<'a>(&'a self, market: &'a Market) -> QuoteFuture<'a>;
 }
 
 /// The fetcher handlers receive via an axum `Extension` (so tests can inject a
@@ -305,6 +326,30 @@ impl PriceFetcher for YahooFetcher {
                     currency: c.close.currency().to_string(),
                 })
                 .collect())
+        })
+    }
+
+    fn latest_quote<'a>(&'a self, market: &'a Market) -> QuoteFuture<'a> {
+        Box::pin(async move {
+            let symbol = yahoo_symbol(&market.listing)?;
+            let quotes = yfinance_rs::quotes(&self.client, [symbol.clone()])
+                .await
+                .map_err(|e| format!("yahoo quote for {symbol} failed: {e}"))?;
+            let quote = quotes
+                .into_iter()
+                .next()
+                .ok_or_else(|| format!("yahoo returned no quote for {symbol}"))?;
+            let price = quote
+                .price
+                .ok_or_else(|| format!("yahoo quote for {symbol} carries no price"))?;
+            let as_of = quote
+                .as_of
+                .ok_or_else(|| format!("yahoo quote for {symbol} carries no timestamp"))?;
+            Ok(LatestQuote {
+                price: clean_price(price.amount()),
+                currency: price.currency().to_string(),
+                as_of,
+            })
         })
     }
 }
@@ -579,6 +624,100 @@ pub async fn run_collection(
 }
 
 // ---------------------------------------------------------------------------
+// On-demand live valuation: latest quote per listing, converted to AUD
+// ---------------------------------------------------------------------------
+
+/// One held listing's live valuation: the latest provider quote converted to
+/// AUD, with the provider's as-of time. Consumed by the price-dependent
+/// reports for current valuation.
+#[derive(Debug, Clone)]
+pub struct LiveValuation {
+    /// Price per unit in AUD (the quote currency converted via the FX rules).
+    pub aud_price: Decimal,
+    /// The provider's quote timestamp, RFC 3339 UTC.
+    pub as_of: String,
+}
+
+/// Fetch the latest live quote for each listing and convert it to AUD. Returns
+/// one entry per listing id: `Ok` with the AUD price + as-of time, or
+/// `Err(reason)` when the fetch, a currency mismatch, or the AUD conversion
+/// failed — the caller surfaces the reason per holding and leaves it unvalued
+/// (never a silent zero, per the never-silent-zero rule).
+pub async fn fetch_live_aud_prices(
+    pool: &SqlitePool,
+    fetcher: &dyn PriceFetcher,
+    listing_ids: &[i64],
+) -> Result<HashMap<i64, Result<LiveValuation, String>>, sqlx::Error> {
+    let mut out = HashMap::new();
+    for &id in listing_ids {
+        let Some(market) = load_market(pool, id).await? else {
+            out.insert(id, Err(format!("listing {id} no longer exists")));
+            continue;
+        };
+        let result = match fetcher.latest_quote(&market).await {
+            Err(e) => Err(e),
+            Ok(quote) if quote.currency != market.listing.currency => Err(format!(
+                "currency mismatch: provider quoted {}, listing is {}",
+                quote.currency, market.listing.currency
+            )),
+            Ok(quote) => {
+                // Convert the quote-currency price to AUD via the standard FX
+                // rules (ATO monthly rate for the quote's month, no manual
+                // override). A missing rate is surfaced as the row's reason,
+                // never a silent or zeroed value.
+                match crate::infra::fx::to_aud(
+                    pool,
+                    quote.price,
+                    &quote.currency,
+                    quote.as_of.date_naive(),
+                    None,
+                )
+                .await
+                {
+                    Ok(aud_price) => {
+                        Ok(LiveValuation { aud_price, as_of: quote.as_of.to_rfc3339() })
+                    }
+                    Err(e) => Err(e.to_string()),
+                }
+            }
+        };
+        out.insert(id, result);
+    }
+    Ok(out)
+}
+
+/// Resolve live AUD prices for the price-dependent report handlers: when `live`
+/// is set, fetch the latest quote for every listing in `listing_ids` that has
+/// no explicit override (an explicit price always wins, so it is never
+/// fetched). Off, or with no fetcher available, yields an empty map (no live
+/// valuation). A live request with no fetcher marks each listing unavailable
+/// rather than silently dropping the as-of contract.
+pub async fn resolve_live_prices(
+    pool: &SqlitePool,
+    fetcher: Option<&dyn PriceFetcher>,
+    live: bool,
+    overrides: &HashMap<i64, Decimal>,
+    listing_ids: impl IntoIterator<Item = i64>,
+) -> Result<HashMap<i64, Result<LiveValuation, String>>, sqlx::Error> {
+    if !live {
+        return Ok(HashMap::new());
+    }
+    let ids: Vec<i64> = listing_ids
+        .into_iter()
+        .filter(|id| !overrides.contains_key(id))
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    match fetcher {
+        Some(fetcher) => fetch_live_aud_prices(pool, fetcher, &ids).await,
+        None => Ok(ids
+            .into_iter()
+            .map(|id| (id, Err("live price source unavailable".to_string())))
+            .collect()),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // HTTP API
 // ---------------------------------------------------------------------------
 
@@ -729,6 +868,76 @@ pub fn router() -> Router<SqlitePool> {
         .route("/closing_prices/backfill", post(backfill))
 }
 
+/// Reusable price-fetcher stub for the report tests (the daily-close tests in
+/// this module use their own richer stub). Returns a canned latest quote per
+/// listing, or a blanket failure for every listing.
+#[cfg(test)]
+pub mod test_support {
+    use super::*;
+
+    #[derive(Default)]
+    pub struct QuoteStub {
+        quotes: HashMap<i64, LatestQuote>,
+        fail: Option<String>,
+    }
+
+    impl QuoteStub {
+        pub fn with_quote(
+            mut self,
+            listing_id: i64,
+            price: &str,
+            currency: &str,
+            as_of: DateTime<Utc>,
+        ) -> Self {
+            self.quotes.insert(
+                listing_id,
+                LatestQuote {
+                    price: price.parse().unwrap(),
+                    currency: currency.to_string(),
+                    as_of,
+                },
+            );
+            self
+        }
+
+        pub fn failing(msg: &str) -> Self {
+            QuoteStub { fail: Some(msg.to_string()), ..Default::default() }
+        }
+
+        /// As a `SharedFetcher` for layering onto a report router.
+        pub fn shared(self) -> SharedFetcher {
+            Arc::new(self)
+        }
+    }
+
+    impl PriceFetcher for QuoteStub {
+        fn source(&self) -> &'static str {
+            "stub"
+        }
+
+        fn daily_closes<'a>(
+            &'a self,
+            _market: &'a Market,
+            _from: NaiveDate,
+            _to: NaiveDate,
+        ) -> FetchFuture<'a> {
+            Box::pin(async move { Ok(vec![]) })
+        }
+
+        fn latest_quote<'a>(&'a self, market: &'a Market) -> QuoteFuture<'a> {
+            Box::pin(async move {
+                if let Some(msg) = &self.fail {
+                    return Err(msg.clone());
+                }
+                self.quotes
+                    .get(&market.listing.id)
+                    .cloned()
+                    .ok_or_else(|| format!("no stub quote for listing {}", market.listing.id))
+            })
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -870,11 +1079,13 @@ mod tests {
         .unwrap();
     }
 
-    /// Stub provider: per-listing canned closes (keyed by listing id), or a
-    /// blanket failure. Records every (listing, from, to) call.
+    /// Stub provider: per-listing canned closes and latest quotes (keyed by
+    /// listing id), or a blanket failure. Records every (listing, from, to)
+    /// call.
     #[derive(Default)]
     struct StubFetcher {
         closes: HashMap<i64, Vec<FetchedClose>>,
+        quotes: HashMap<i64, LatestQuote>,
         fail: Option<String>,
         calls: Mutex<Vec<(i64, NaiveDate, NaiveDate)>>,
     }
@@ -886,6 +1097,20 @@ mod tests {
                 price: price.parse().unwrap(),
                 currency: ccy.to_string(),
             });
+            self
+        }
+
+        fn with_quote(
+            mut self,
+            listing_id: i64,
+            price: &str,
+            ccy: &str,
+            as_of: DateTime<Utc>,
+        ) -> Self {
+            self.quotes.insert(
+                listing_id,
+                LatestQuote { price: price.parse().unwrap(), currency: ccy.to_string(), as_of },
+            );
             self
         }
 
@@ -921,6 +1146,18 @@ mod tests {
                         v.iter().filter(|c| c.date >= from && c.date <= to).cloned().collect()
                     })
                     .unwrap_or_default())
+            })
+        }
+
+        fn latest_quote<'a>(&'a self, market: &'a Market) -> QuoteFuture<'a> {
+            Box::pin(async move {
+                if let Some(msg) = &self.fail {
+                    return Err(msg.clone());
+                }
+                self.quotes
+                    .get(&market.listing.id)
+                    .cloned()
+                    .ok_or_else(|| format!("no stub quote for listing {}", market.listing.id))
             })
         }
     }
@@ -1357,6 +1594,84 @@ mod tests {
         let one_day = get("/closing_prices?from=2026-06-05&to=2026-06-05").await;
         assert_eq!(one_day.len(), 2);
         assert!(one_day.iter().any(|r| r.status == PriceStatus::Error));
+    }
+
+    // --- live quote / valuation ---
+
+    #[tokio::test]
+    async fn live_aud_prices_converts_quote_currency_and_carries_as_of() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
+        insert_listing(&pool, 2, "ICE", "XNYS", "USD").await;
+        // 2 USD per AUD for June 2026 → US$141.50 = A$70.75.
+        sqlx::query("INSERT INTO rba_fx_rates (currency, month, rate) VALUES ('USD', '2026-06', '2')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let as_of = utc(2026, 6, 5, 6, 30);
+        let fetcher = StubFetcher::default()
+            .with_quote(1, "62.48", "AUD", as_of)
+            .with_quote(2, "141.50", "USD", as_of);
+
+        let prices = fetch_live_aud_prices(&pool, &fetcher, &[1, 2]).await.unwrap();
+        let bhp = prices[&1].as_ref().unwrap();
+        assert_eq!(bhp.aud_price, "62.48".parse::<Decimal>().unwrap());
+        assert_eq!(bhp.as_of, as_of.to_rfc3339());
+        let ice = prices[&2].as_ref().unwrap();
+        assert_eq!(ice.aud_price, "70.75".parse::<Decimal>().unwrap());
+    }
+
+    #[tokio::test]
+    async fn live_aud_prices_surface_failures_instead_of_zeroing() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BHP", "XASX", "AUD").await; // provider down
+        insert_listing(&pool, 2, "ICE", "XNYS", "USD").await; // currency mismatch
+        insert_listing(&pool, 3, "VAS", "XASX", "USD").await; // no ATO rate for the quote month
+
+        // Listing 1: blanket failure.
+        let down = fetch_live_aud_prices(&pool, &StubFetcher::failing("provider down"), &[1])
+            .await
+            .unwrap();
+        assert!(down[&1].as_ref().unwrap_err().contains("provider down"));
+
+        let as_of = utc(2026, 6, 5, 6, 30);
+        // Listing 2: provider quotes AUD for a USD listing.
+        let mismatch = StubFetcher::default().with_quote(2, "141.50", "AUD", as_of);
+        let m = fetch_live_aud_prices(&pool, &mismatch, &[2]).await.unwrap();
+        assert!(m[&2].as_ref().unwrap_err().contains("currency mismatch"));
+
+        // Listing 3: USD quote but no ATO rate imported for the quote month.
+        let unconvertible = StubFetcher::default().with_quote(3, "10.00", "USD", as_of);
+        let u = fetch_live_aud_prices(&pool, &unconvertible, &[3]).await.unwrap();
+        assert!(u[&3].as_ref().unwrap_err().contains("no ATO FX rate"));
+    }
+
+    #[tokio::test]
+    async fn resolve_live_prices_skips_overridden_and_respects_the_flag() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
+        insert_listing(&pool, 2, "WBC", "XASX", "AUD").await;
+        let as_of = utc(2026, 6, 5, 6, 30);
+        let fetcher =
+            StubFetcher::default().with_quote(1, "62.48", "AUD", as_of).with_quote(2, "30", "AUD", as_of);
+
+        // live = false → nothing fetched.
+        let off = resolve_live_prices(&pool, Some(&fetcher), false, &HashMap::new(), [1, 2])
+            .await
+            .unwrap();
+        assert!(off.is_empty());
+
+        // live = true, listing 1 overridden → only listing 2 is fetched.
+        let overrides = HashMap::from([(1i64, "99".parse::<Decimal>().unwrap())]);
+        let on = resolve_live_prices(&pool, Some(&fetcher), true, &overrides, [1, 2]).await.unwrap();
+        assert!(!on.contains_key(&1), "overridden listing is never fetched");
+        assert_eq!(on[&2].as_ref().unwrap().aud_price, Decimal::from(30));
+
+        // live = true with no fetcher → each listing marked unavailable.
+        let none = resolve_live_prices(&pool, None, true, &HashMap::new(), [1])
+            .await
+            .unwrap();
+        assert!(none[&1].as_ref().unwrap_err().contains("unavailable"));
     }
 
     // --- schema invariants ---
