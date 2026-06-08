@@ -13,7 +13,7 @@
 //! every holding account belongs to the same taxpayer, so taxpayer-level
 //! reports (tax summary, net capital gain) aggregate across all of them.
 
-use crate::infra::http::write_error_status;
+use crate::infra::http::write_error_body;
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -148,23 +148,31 @@ async fn upsert(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
     Json(body): Json<HoldingAccountBody>,
-) -> Result<StatusCode, StatusCode> {
+) -> Result<StatusCode, (StatusCode, String)> {
     db_upsert(&pool, &HoldingAccount { id, name: body.name })
         .await
         .map(|_| StatusCode::NO_CONTENT)
         // A duplicate name violates the UNIQUE constraint → 422.
-        .map_err(|e| write_error_status(&e))
+        .map_err(|e| write_error_body(&e))
 }
 
 async fn delete(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
-) -> Result<StatusCode, StatusCode> {
+) -> Result<StatusCode, (StatusCode, String)> {
     match db_delete(&pool, id).await {
         Ok(DeleteOutcome::Deleted) => Ok(StatusCode::NO_CONTENT),
-        Ok(DeleteOutcome::NotFound) => Err(StatusCode::NOT_FOUND),
-        Ok(DeleteOutcome::Referenced) => Err(StatusCode::UNPROCESSABLE_ENTITY),
-        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+        Ok(DeleteOutcome::NotFound) => {
+            Err((StatusCode::NOT_FOUND, "no holding account with that id".to_string()))
+        }
+        Ok(DeleteOutcome::Referenced) => Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "this account still has trades, income, AMMA statements, DRP enrolments, or \
+             transfers — reassign or delete those first (and the default account cannot be \
+             deleted)"
+                .to_string(),
+        )),
+        Err(_) => Err((StatusCode::INTERNAL_SERVER_ERROR, String::new())),
     }
 }
 
@@ -213,7 +221,10 @@ mod tests {
         let err = db_upsert(&pool, &HoldingAccount { id: 3, name: "Plan".into() })
             .await
             .unwrap_err();
-        assert_eq!(crate::infra::http::write_error_status(&err), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            crate::infra::http::write_error_body(&err).0,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
     }
 
     #[tokio::test]
@@ -299,6 +310,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let bytes = BodyExt::collect(resp.into_body()).await.unwrap().to_bytes();
+        let detail = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(detail.contains("already exists"), "detail: {detail}");
 
         let resp = app()
             .oneshot(
@@ -311,5 +325,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let bytes = BodyExt::collect(resp.into_body()).await.unwrap().to_bytes();
+        let detail = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(detail.contains("still has"), "detail: {detail}");
     }
 }

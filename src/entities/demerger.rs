@@ -405,23 +405,33 @@ pub async fn db_demerge(pool: &SqlitePool, action_id: i64) -> Result<Demerge, De
 async fn demerge(
     State(pool): State<SqlitePool>,
     Path(action_id): Path<i64>,
-) -> Result<(StatusCode, Json<Demerge>), StatusCode> {
+) -> Result<(StatusCode, Json<Demerge>), (StatusCode, String)> {
+    let unprocessable = |msg: &str| Err((StatusCode::UNPROCESSABLE_ENTITY, msg.to_string()));
     match db_demerge(&pool, action_id).await {
         Ok(demerge) => Ok((StatusCode::CREATED, Json(demerge))),
-        Err(DemergeError::ActionNotFound) => Err(StatusCode::NOT_FOUND),
-        Err(
-            DemergeError::NotADemerger
-            | DemergeError::AlreadyDemerged
-            | DemergeError::NothingHeld
-            | DemergeError::TradedOnOrAfterDemergerDate,
-        ) => Err(StatusCode::UNPROCESSABLE_ENTITY),
+        Err(DemergeError::ActionNotFound) => {
+            Err((StatusCode::NOT_FOUND, "no corporate action with that id".to_string()))
+        }
+        Err(DemergeError::NotADemerger) => {
+            unprocessable("that corporate action is not a demerger")
+        }
+        Err(DemergeError::AlreadyDemerged) => unprocessable(
+            "this demerger has already been applied — delete its closing Sell first to redo it",
+        ),
+        Err(DemergeError::NothingHeld) => {
+            unprocessable("nothing of the head listing is held at the demerger date")
+        }
+        Err(DemergeError::TradedOnOrAfterDemergerDate) => unprocessable(
+            "the head listing has a trade dated on or after the demerger date — \
+             enter later activity after demerging, not before",
+        ),
         Err(DemergeError::Sell(e)) => {
             tracing::warn!(error = ?e, "demerge rejected by a sell invariant");
-            Err(StatusCode::UNPROCESSABLE_ENTITY)
+            unprocessable("the demerger's parcel allocations are invalid")
         }
         Err(DemergeError::Db(e)) => {
             tracing::error!(error = %e, "demerge failed");
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
+            Err((StatusCode::INTERNAL_SERVER_ERROR, String::new()))
         }
     }
 }

@@ -218,7 +218,7 @@ async fn get_one(
 async fn import(
     State(pool): State<SqlitePool>,
     body: String,
-) -> Result<Json<ImportSummary>, StatusCode> {
+) -> Result<Json<ImportSummary>, (StatusCode, String)> {
     let result = if body.trim().is_empty() {
         run_import(&pool).await
     } else {
@@ -227,15 +227,15 @@ async fn import(
     result.map(Json).map_err(|e| match e {
         ImportError::Parse(msg) => {
             tracing::warn!(%msg, "RBA FX rate import rejected malformed feed");
-            StatusCode::UNPROCESSABLE_ENTITY
+            (StatusCode::UNPROCESSABLE_ENTITY, format!("the RBA FX rate feed is malformed: {msg}"))
         }
         ImportError::Fetch(msg) => {
             tracing::warn!(%msg, "RBA FX rate fetch failed");
-            StatusCode::BAD_GATEWAY
+            (StatusCode::BAD_GATEWAY, "could not fetch the RBA FX rate feed from its source".to_string())
         }
         ImportError::Db(e) => {
             tracing::error!(error = %e, "RBA FX rate import db error");
-            StatusCode::INTERNAL_SERVER_ERROR
+            (StatusCode::INTERNAL_SERVER_ERROR, String::new())
         }
     })
 }

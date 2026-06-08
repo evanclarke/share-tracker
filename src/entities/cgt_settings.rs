@@ -8,7 +8,7 @@
 //! indefinitely, per `docs/ato/cgt-using-capital-losses.md`). Absent row = zero.
 
 use crate::infra::decimal::parse_dec;
-use crate::infra::http::write_error_status;
+use crate::infra::http::write_error_body;
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -112,25 +112,32 @@ async fn upsert(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
     Json(body): Json<CgtSettingsBody>,
-) -> Result<StatusCode, StatusCode> {
+) -> Result<StatusCode, (StatusCode, String)> {
     // A negative opening loss is meaningless (losses are stored as positive
     // amounts); reject at write time so the report never consumes one.
     if body.opening_capital_loss < Decimal::ZERO {
-        return Err(StatusCode::UNPROCESSABLE_ENTITY);
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "the opening capital loss cannot be negative (losses are stored as positive amounts)"
+                .to_string(),
+        ));
     }
     let settings = CgtSettings { id, opening_capital_loss: body.opening_capital_loss };
     db_upsert(&pool, &settings)
         .await
         .map(|_| StatusCode::NO_CONTENT)
         // id != 1 violates the singleton CHECK → 422.
-        .map_err(|e| write_error_status(&e))
+        .map_err(|e| write_error_body(&e))
 }
 
-async fn delete(State(pool): State<SqlitePool>, Path(id): Path<i64>) -> Result<StatusCode, StatusCode> {
+async fn delete(
+    State(pool): State<SqlitePool>,
+    Path(id): Path<i64>,
+) -> Result<StatusCode, (StatusCode, String)> {
     db_delete(&pool, id)
         .await
         .map(|found| if found { StatusCode::NO_CONTENT } else { StatusCode::NOT_FOUND })
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(|e| write_error_body(&e))
 }
 
 #[cfg(test)]
@@ -256,6 +263,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let bytes = BodyExt::collect(resp.into_body()).await.unwrap().to_bytes();
+        let detail = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(detail.contains("cannot be negative"), "detail: {detail}");
     }
 
     #[tokio::test]

@@ -208,20 +208,31 @@ async fn exercise(
     State(pool): State<SqlitePool>,
     Path(action_id): Path<i64>,
     Json(body): Json<ExerciseBody>,
-) -> Result<(StatusCode, Json<Trade>), StatusCode> {
+) -> Result<(StatusCode, Json<Trade>), (StatusCode, String)> {
+    let unprocessable = |msg: &str| Err((StatusCode::UNPROCESSABLE_ENTITY, msg.to_string()));
     match db_exercise(&pool, action_id, &body).await {
         Ok(trade) => Ok((StatusCode::CREATED, Json(trade))),
-        Err(ExerciseError::ActionNotFound) => Err(StatusCode::NOT_FOUND),
-        Err(
-            ExerciseError::NotARightsIssue
-            | ExerciseError::NonPositiveUnits
-            | ExerciseError::NegativeRightsCost
-            | ExerciseError::BeforeRecordDate
-            | ExerciseError::ExceedsEntitlement,
-        ) => Err(StatusCode::UNPROCESSABLE_ENTITY),
+        Err(ExerciseError::ActionNotFound) => {
+            Err((StatusCode::NOT_FOUND, "no corporate action with that id".to_string()))
+        }
+        Err(ExerciseError::NotARightsIssue) => {
+            unprocessable("that corporate action is not a rights issue")
+        }
+        Err(ExerciseError::NonPositiveUnits) => {
+            unprocessable("the number of units exercised must be greater than zero")
+        }
+        Err(ExerciseError::NegativeRightsCost) => {
+            unprocessable("the rights cost cannot be negative")
+        }
+        Err(ExerciseError::BeforeRecordDate) => {
+            unprocessable("the exercise date is before the issue's record date")
+        }
+        Err(ExerciseError::ExceedsEntitlement) => unprocessable(
+            "the units exercised exceed the entitlement earned by the holding at the record date",
+        ),
         Err(ExerciseError::Db(e)) => {
             tracing::error!(error = %e, "rights exercise failed");
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
+            Err((StatusCode::INTERNAL_SERVER_ERROR, String::new()))
         }
     }
 }
@@ -715,6 +726,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), expected);
+        // Every client-error rejection carries a reason for the toast.
+        if expected.is_client_error() {
+            let bytes = BodyExt::collect(resp.into_body()).await.unwrap().to_bytes();
+            assert!(!bytes.is_empty(), "a {expected} rejection must carry a reason body");
+        }
     }
 
     #[tokio::test]

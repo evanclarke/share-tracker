@@ -65,8 +65,13 @@ pub enum ReinvestError {
     IncomeNotFound,
     /// No enrolment period covers the distribution's ex date (or pay date when
     /// no ex date is recorded): never enrolled, dated before enrolment, or in a
-    /// gap between unenrolment and re-enrolment.
-    NotEnrolled,
+    /// gap between unenrolment and re-enrolment. Carries the account name,
+    /// ticker, and date so the rejection can name them rather than raw ids.
+    NotEnrolled {
+        account: String,
+        ticker: String,
+        date: NaiveDate,
+    },
     /// The distribution already has a reinvestment trade.
     AlreadyReinvested,
     /// The reinvestment price is not strictly positive.
@@ -158,7 +163,24 @@ pub async fn db_reinvest(
     .await?;
     let (handling, period_start, period_end) = match matched {
         Some(p) => p,
-        None => return Err(ReinvestError::NotEnrolled),
+        None => {
+            // Name the account and listing in the rejection so the user knows
+            // exactly what to enrol — never echo the raw foreign-key ids.
+            let account: String =
+                sqlx::query_scalar("SELECT name FROM holding_accounts WHERE id = ?")
+                    .bind(holding_account_id)
+                    .fetch_one(&mut *tx)
+                    .await?;
+            let ticker: String = sqlx::query_scalar("SELECT ticker FROM listings WHERE id = ?")
+                .bind(listing_id)
+                .fetch_one(&mut *tx)
+                .await?;
+            return Err(ReinvestError::NotEnrolled {
+                account,
+                ticker,
+                date: entitlement_date,
+            });
+        }
     };
 
     // The DRP trade is denominated in the holding's currency.
@@ -247,16 +269,31 @@ async fn reinvest(
     State(pool): State<SqlitePool>,
     Path(income_id): Path<i64>,
     Json(body): Json<ReinvestBody>,
-) -> Result<(StatusCode, Json<Trade>), StatusCode> {
+) -> Result<(StatusCode, Json<Trade>), (StatusCode, String)> {
     match db_reinvest(&pool, income_id, &body).await {
         Ok(trade) => Ok((StatusCode::CREATED, Json(trade))),
-        Err(ReinvestError::IncomeNotFound) => Err(StatusCode::NOT_FOUND),
-        Err(ReinvestError::NotEnrolled) => Err(StatusCode::UNPROCESSABLE_ENTITY),
-        Err(ReinvestError::AlreadyReinvested) => Err(StatusCode::UNPROCESSABLE_ENTITY),
-        Err(ReinvestError::NonPositivePrice) => Err(StatusCode::UNPROCESSABLE_ENTITY),
+        Err(ReinvestError::IncomeNotFound) => {
+            Err((StatusCode::NOT_FOUND, "no distribution with that id".to_string()))
+        }
+        Err(ReinvestError::NotEnrolled { account, ticker, date }) => Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!(
+                "account '{account}' is not enrolled in a DRP for {ticker} at {date} \
+                 — enrol it on the DRP enrolments screen first"
+            ),
+        )),
+        Err(ReinvestError::AlreadyReinvested) => Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "this distribution already has a reinvestment trade — delete it first to redo it"
+                .to_string(),
+        )),
+        Err(ReinvestError::NonPositivePrice) => Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "the reinvestment price must be greater than zero".to_string(),
+        )),
         Err(ReinvestError::Db(e)) => {
             tracing::error!(error = %e, "drp reinvestment failed");
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
+            Err((StatusCode::INTERNAL_SERVER_ERROR, String::new()))
         }
     }
 }
@@ -541,7 +578,7 @@ mod tests {
         insert_distribution(&pool, 1, 1, Decimal::from(100), Decimal::ZERO).await;
 
         let err = db_reinvest(&pool, 1, &body("9")).await.unwrap_err();
-        assert!(matches!(err, ReinvestError::NotEnrolled));
+        assert!(matches!(err, ReinvestError::NotEnrolled { .. }));
         // No trade created, distribution unlinked.
         let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM trades").fetch_one(&pool).await.unwrap();
         assert_eq!(n, 0);
@@ -588,7 +625,7 @@ mod tests {
         enrol_period(&pool, 1, 1, "2024-06-01", None, ResidualHandling::CarryForward).await;
         insert_distribution(&pool, 1, 1, Decimal::from(100), Decimal::ZERO).await; // 2024-03-31
         let err = db_reinvest(&pool, 1, &body("9")).await.unwrap_err();
-        assert!(matches!(err, ReinvestError::NotEnrolled));
+        assert!(matches!(err, ReinvestError::NotEnrolled { .. }));
     }
 
     #[tokio::test]
@@ -600,7 +637,7 @@ mod tests {
         enrol_period(&pool, 2, 1, "2025-01-01", None, ResidualHandling::CarryForward).await;
         insert_distribution(&pool, 1, 1, Decimal::from(100), Decimal::ZERO).await; // 2024-03-31
         let err = db_reinvest(&pool, 1, &body("9")).await.unwrap_err();
-        assert!(matches!(err, ReinvestError::NotEnrolled));
+        assert!(matches!(err, ReinvestError::NotEnrolled { .. }));
     }
 
     #[tokio::test]
@@ -636,7 +673,7 @@ mod tests {
         insert_distribution_dated(&pool, 2, 1, "2024-02-01", Some("2023-12-15"), Decimal::from(100), Decimal::ZERO)
             .await;
         let err = db_reinvest(&pool, 2, &body("9")).await.unwrap_err();
-        assert!(matches!(err, ReinvestError::NotEnrolled));
+        assert!(matches!(err, ReinvestError::NotEnrolled { .. }));
     }
 
     #[tokio::test]
@@ -688,7 +725,7 @@ mod tests {
         // The plan account's distribution on the same listing is rejected.
         insert_distribution_in_account(&pool, 2, 1, 2, Decimal::from(100)).await;
         let err = db_reinvest(&pool, 2, &body("9")).await.unwrap_err();
-        assert!(matches!(err, ReinvestError::NotEnrolled));
+        assert!(matches!(err, ReinvestError::NotEnrolled { .. }));
     }
 
     /// The DRP trade is created in the distribution's holding account, not
@@ -778,6 +815,12 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        // The rejection names the account and ticker, not raw ids.
+        assert!(text.contains("Default"), "body: {text}");
+        assert!(text.contains("T1"), "body: {text}");
+        assert!(text.contains("not enrolled"), "body: {text}");
     }
 
     #[tokio::test]

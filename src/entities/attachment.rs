@@ -36,7 +36,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::{QueryBuilder, Sqlite, SqlitePool};
 
-use crate::infra::http::write_error_status;
+use crate::infra::http::write_error_body;
 
 /// Per-file upload ceiling (25 MB). Enforced explicitly so an oversized upload is
 /// rejected with `413`; the route's body limit is set a little higher so this
@@ -232,13 +232,18 @@ async fn get_one(
 async fn upload(
     State(pool): State<SqlitePool>,
     mut multipart: Multipart,
-) -> Result<Response, StatusCode> {
+) -> Result<Response, (StatusCode, String)> {
+    let bad_request = |msg: &str| (StatusCode::BAD_REQUEST, msg.to_string());
     let mut trade_id: Option<i64> = None;
     let mut income_id: Option<i64> = None;
     let mut amma_statement_id: Option<i64> = None;
     let mut file: Option<(String, ContentType, Vec<u8>)> = None;
 
-    while let Some(field) = multipart.next_field().await.map_err(|_| StatusCode::BAD_REQUEST)? {
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|_| bad_request("the multipart upload is malformed"))?
+    {
         // Take an owned name so the field can be consumed in the arm below.
         let name = field.name().map(str::to_string);
         match name.as_deref() {
@@ -248,11 +253,14 @@ async fn upload(
             Some("file") => {
                 let filename = field.file_name().unwrap_or("attachment").to_string();
                 let declared = field.content_type().map(str::to_string);
-                let bytes = field.bytes().await.map_err(|_| StatusCode::BAD_REQUEST)?;
-                let content_type = declared
-                    .as_deref()
-                    .and_then(ContentType::from_mime)
-                    .ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
+                let bytes = field
+                    .bytes()
+                    .await
+                    .map_err(|_| bad_request("the uploaded file could not be read"))?;
+                let content_type = declared.as_deref().and_then(ContentType::from_mime).ok_or((
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "the file's content type is not a supported attachment type".to_string(),
+                ))?;
                 file = Some((filename, content_type, bytes.to_vec()));
             }
             // Ignore unknown fields, but drain the body to keep the stream sane.
@@ -265,12 +273,21 @@ async fn upload(
     // Exactly one owner must be set.
     let owners = trade_id.is_some() as u8 + income_id.is_some() as u8 + amma_statement_id.is_some() as u8;
     if owners != 1 {
-        return Err(StatusCode::UNPROCESSABLE_ENTITY);
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "attach to exactly one of a trade, income, or AMMA statement".to_string(),
+        ));
     }
 
-    let (filename, content_type, content) = file.ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
+    let (filename, content_type, content) = file.ok_or((
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "no file was included in the upload".to_string(),
+    ))?;
     if content.len() > MAX_UPLOAD_BYTES {
-        return Err(StatusCode::PAYLOAD_TOO_LARGE);
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!("the file exceeds the {MAX_UPLOAD_BYTES}-byte upload limit"),
+        ));
     }
 
     let new = NewAttachment {
@@ -285,21 +302,28 @@ async fn upload(
     };
 
     // A bad owner id violates the FK to the activity table → client error (422).
-    let id = db_insert(&pool, &new).await.map_err(|e| write_error_status(&e))?;
+    let id = db_insert(&pool, &new).await.map_err(|e| write_error_body(&e))?;
     let stored = db_get(&pool, id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, String::new()))?
+        .ok_or((StatusCode::INTERNAL_SERVER_ERROR, String::new()))?;
     Ok((StatusCode::CREATED, Json(stored)).into_response())
 }
 
-async fn read_owner_field(field: axum::extract::multipart::Field<'_>) -> Result<Option<i64>, StatusCode> {
-    let text = field.text().await.map_err(|_| StatusCode::BAD_REQUEST)?;
+async fn read_owner_field(
+    field: axum::extract::multipart::Field<'_>,
+) -> Result<Option<i64>, (StatusCode, String)> {
+    let text = field
+        .text()
+        .await
+        .map_err(|_| (StatusCode::BAD_REQUEST, "an owner field could not be read".to_string()))?;
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return Ok(None);
     }
-    trimmed.parse::<i64>().map(Some).map_err(|_| StatusCode::UNPROCESSABLE_ENTITY)
+    trimmed.parse::<i64>().map(Some).map_err(|_| {
+        (StatusCode::UNPROCESSABLE_ENTITY, "an owner id is not a valid integer".to_string())
+    })
 }
 
 async fn download(
@@ -325,11 +349,11 @@ async fn download(
 async fn delete(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
-) -> Result<StatusCode, StatusCode> {
+) -> Result<StatusCode, (StatusCode, String)> {
     db_delete(&pool, id)
         .await
         .map(|found| if found { StatusCode::NO_CONTENT } else { StatusCode::NOT_FOUND })
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, String::new()))
 }
 
 #[cfg(test)]

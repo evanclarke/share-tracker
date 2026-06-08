@@ -238,22 +238,31 @@ async fn participate(
     State(pool): State<SqlitePool>,
     Path(action_id): Path<i64>,
     Json(body): Json<ParticipationBody>,
-) -> Result<(StatusCode, Json<Participation>), StatusCode> {
+) -> Result<(StatusCode, Json<Participation>), (StatusCode, String)> {
+    let unprocessable = |msg: &str| Err((StatusCode::UNPROCESSABLE_ENTITY, msg.to_string()));
     match db_participate(&pool, action_id, &body).await {
         Ok(participation) => Ok((StatusCode::CREATED, Json(participation))),
-        Err(ParticipationError::ActionNotFound) => Err(StatusCode::NOT_FOUND),
-        Err(
-            ParticipationError::NotABuyBack
-            | ParticipationError::NonPositiveUnits
-            | ParticipationError::BeforeBuyBackDate,
-        ) => Err(StatusCode::UNPROCESSABLE_ENTITY),
+        Err(ParticipationError::ActionNotFound) => {
+            Err((StatusCode::NOT_FOUND, "no corporate action with that id".to_string()))
+        }
+        Err(ParticipationError::NotABuyBack) => {
+            unprocessable("that corporate action is not a buy-back")
+        }
+        Err(ParticipationError::NonPositiveUnits) => {
+            unprocessable("the number of units participated must be greater than zero")
+        }
+        Err(ParticipationError::BeforeBuyBackDate) => {
+            unprocessable("the participation date is before the buy-back date")
+        }
         Err(ParticipationError::Sell(e)) => {
             tracing::warn!(error = ?e, "buy-back participation rejected by a sell invariant");
-            Err(StatusCode::UNPROCESSABLE_ENTITY)
+            unprocessable(
+                "the holding cannot cover the units participated (over-allocated parcels)",
+            )
         }
         Err(ParticipationError::Db(e)) => {
             tracing::error!(error = %e, "buy-back participation failed");
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
+            Err((StatusCode::INTERNAL_SERVER_ERROR, String::new()))
         }
     }
 }

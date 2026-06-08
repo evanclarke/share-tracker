@@ -19,7 +19,7 @@
 //! transaction. Deleting a period record means "it never existed" and settles
 //! nothing.
 
-use crate::infra::{decimal::parse_dec, http::write_error_status};
+use crate::infra::{decimal::parse_dec, http::write_error_body};
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -241,7 +241,7 @@ async fn upsert(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
     Json(body): Json<DrpEnrolmentBody>,
-) -> Result<StatusCode, StatusCode> {
+) -> Result<StatusCode, (StatusCode, String)> {
     let period = DrpEnrolment {
         id,
         listing_id: body.listing_id,
@@ -252,22 +252,29 @@ async fn upsert(
     };
     match db_upsert(&pool, &period).await {
         Ok(()) => Ok(StatusCode::NO_CONTENT),
-        Err(UpsertError::EmptyPeriod) | Err(UpsertError::Overlap) => {
-            Err(StatusCode::UNPROCESSABLE_ENTITY)
-        }
+        Err(UpsertError::EmptyPeriod) => Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "the unenrolment date must be after the enrolment date".to_string(),
+        )),
+        Err(UpsertError::Overlap) => Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "this period overlaps an existing enrolment for the same listing and account \
+             (a listing can have at most one open period per account)"
+                .to_string(),
+        )),
         // A bad listing_id violates the FK to listings → 422 via the shared map.
-        Err(UpsertError::Db(e)) => Err(write_error_status(&e)),
+        Err(UpsertError::Db(e)) => Err(write_error_body(&e)),
     }
 }
 
 async fn delete(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
-) -> Result<StatusCode, StatusCode> {
+) -> Result<StatusCode, (StatusCode, String)> {
     db_delete(&pool, id)
         .await
         .map(|found| if found { StatusCode::NO_CONTENT } else { StatusCode::NOT_FOUND })
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(|e| write_error_body(&e))
 }
 
 #[cfg(test)]
@@ -693,6 +700,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let bytes = BodyExt::collect(resp.into_body()).await.unwrap().to_bytes();
+        let detail = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(detail.contains("overlaps"), "detail: {detail}");
     }
 
     #[tokio::test]

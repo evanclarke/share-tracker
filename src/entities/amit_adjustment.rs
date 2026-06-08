@@ -5,6 +5,7 @@ use axum::{
     routing::get,
 };
 use crate::infra::decimal::parse_dec;
+use crate::infra::http::write_error_body;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
@@ -220,34 +221,41 @@ async fn upsert(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
     Json(body): Json<AmitAdjustmentBody>,
-) -> Result<StatusCode, StatusCode> {
+) -> Result<StatusCode, (StatusCode, String)> {
     let adj = AmitAdjustment {
         id,
         amma_statement_id: body.amma_statement_id,
         trade_id: body.trade_id,
         quantity: body.quantity,
     };
+    let unprocessable = |msg: &str| Err((StatusCode::UNPROCESSABLE_ENTITY, msg.to_string()));
     match db_upsert(&pool, &adj).await {
         Ok(()) => Ok(StatusCode::NO_CONTENT),
-        Err(UpsertError::TradeNotBuyOrDrp) => Err(StatusCode::UNPROCESSABLE_ENTITY),
-        Err(UpsertError::ListingMismatch) => Err(StatusCode::UNPROCESSABLE_ENTITY),
-        Err(UpsertError::HoldingAccountMismatch) => Err(StatusCode::UNPROCESSABLE_ENTITY),
-        Err(UpsertError::QuantityExceedsTrade) => Err(StatusCode::UNPROCESSABLE_ENTITY),
-        Err(UpsertError::Db(e)) => {
-            tracing::error!(error = %e, "AMIT adjustment upsert failed");
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        Err(UpsertError::TradeNotBuyOrDrp) => {
+            unprocessable("the adjusted trade is not a Buy or DRP parcel")
         }
+        Err(UpsertError::ListingMismatch) => {
+            unprocessable("the trade's listing differs from the AMMA statement's listing")
+        }
+        Err(UpsertError::HoldingAccountMismatch) => unprocessable(
+            "the trade sits in a different holding account from the AMMA statement — \
+             a statement only adjusts its own account's parcels",
+        ),
+        Err(UpsertError::QuantityExceedsTrade) => {
+            unprocessable("the adjusted quantity exceeds the trade's quantity")
+        }
+        Err(UpsertError::Db(e)) => Err(write_error_body(&e)),
     }
 }
 
 async fn delete(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
-) -> Result<StatusCode, StatusCode> {
+) -> Result<StatusCode, (StatusCode, String)> {
     db_delete(&pool, id)
         .await
         .map(|found| if found { StatusCode::NO_CONTENT } else { StatusCode::NOT_FOUND })
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(|e| write_error_body(&e))
 }
 
 #[cfg(test)]
@@ -625,6 +633,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let bytes = http_body_util::BodyExt::collect(resp.into_body()).await.unwrap().to_bytes();
+        let detail = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(detail.contains("not a Buy or DRP"), "detail: {detail}");
     }
 
     #[tokio::test]

@@ -264,7 +264,7 @@ async fn upsert(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
     Json(body): Json<AmmaStatementBody>,
-) -> Result<StatusCode, StatusCode> {
+) -> Result<StatusCode, (StatusCode, String)> {
     let stmt = AmmaStatement {
         id,
         listing_id: body.listing_id,
@@ -293,17 +293,18 @@ async fn upsert(
     db_upsert(&pool, &stmt)
         .await
         .map(|_| StatusCode::NO_CONTENT)
-        .map_err(|e| crate::infra::http::write_error_status(&e))
+        .map_err(|e| crate::infra::http::write_error_body(&e))
 }
 
 async fn delete(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
-) -> Result<StatusCode, StatusCode> {
+) -> Result<StatusCode, (StatusCode, String)> {
     db_delete(&pool, id)
         .await
         .map(|found| if found { StatusCode::NO_CONTENT } else { StatusCode::NOT_FOUND })
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        // Deleting a statement still referenced by AMIT adjustments violates an FK → 422.
+        .map_err(|e| crate::infra::http::write_error_body(&e))
 }
 
 #[cfg(test)]

@@ -462,17 +462,41 @@ async fn upsert(
     Path(id): Path<i64>,
     Json(body): Json<SellBody>,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    let unprocessable = |msg: &str| Err((StatusCode::UNPROCESSABLE_ENTITY, msg.to_string()));
     match db_upsert_sell(&pool, id, &body).await {
         Ok(()) => Ok(StatusCode::NO_CONTENT),
-        Err(SellError::AllocationMismatch) => err422(),
-        Err(SellError::PurchaseParcelMissing) => err422(),
-        Err(SellError::PurchaseTradeNotBuyOrDrp) => err422(),
-        Err(SellError::PurchaseQuantityExceeded) => err422(),
-        Err(SellError::BuyBackSell) => err422(),
-        Err(SellError::ScripExchangeSell) => err422(),
-        Err(SellError::DemergerSell) => err422(),
-        Err(SellError::TransferSell) => err422(),
-        Err(SellError::PurchaseInDifferentAccount) => err422(),
+        Err(SellError::AllocationMismatch) => {
+            unprocessable("the parcel allocations do not sum to the sell quantity")
+        }
+        Err(SellError::PurchaseParcelMissing) => {
+            unprocessable("an allocated purchase parcel does not exist")
+        }
+        Err(SellError::PurchaseTradeNotBuyOrDrp) => {
+            unprocessable("an allocated parcel is not a Buy or DRP trade")
+        }
+        Err(SellError::PurchaseQuantityExceeded) => {
+            unprocessable("the allocations exceed a purchase parcel's available quantity")
+        }
+        Err(SellError::BuyBackSell) => unprocessable(
+            "this Sell is a buy-back participation and cannot be edited — \
+             delete it and re-participate instead",
+        ),
+        Err(SellError::ScripExchangeSell) => unprocessable(
+            "this Sell is a scrip-for-scrip exchange closing Sell and cannot be edited — \
+             delete it and re-exchange instead",
+        ),
+        Err(SellError::DemergerSell) => unprocessable(
+            "this Sell is a demerger closing Sell and cannot be edited — \
+             delete it and re-demerge instead",
+        ),
+        Err(SellError::TransferSell) => unprocessable(
+            "this Sell is a holding-account transfer-out and cannot be edited — \
+             delete the transfer and re-transfer instead",
+        ),
+        Err(SellError::PurchaseInDifferentAccount) => unprocessable(
+            "an allocated parcel is held in a different holding account from the Sell — \
+             transfer it first or fix the Sell's account",
+        ),
         // The cross-check rejection says what the Sell nets to, so a typo is
         // findable without re-deriving the figure by hand.
         Err(SellError::StatementTotal(detail)) => Err((
@@ -486,23 +510,34 @@ async fn upsert(
     }
 }
 
-fn err422() -> Result<StatusCode, (StatusCode, String)> {
-    Err((StatusCode::UNPROCESSABLE_ENTITY, String::new()))
-}
-
 async fn delete(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
-) -> Result<StatusCode, StatusCode> {
+) -> Result<StatusCode, (StatusCode, String)> {
     match db_delete_sell(&pool, id).await {
         Ok(DeleteOutcome::Deleted) => Ok(StatusCode::NO_CONTENT),
-        Ok(DeleteOutcome::NotFound) => Err(StatusCode::NOT_FOUND),
-        Ok(DeleteOutcome::NotASell) => Err(StatusCode::UNPROCESSABLE_ENTITY),
-        Ok(DeleteOutcome::ReplacementReferenced) => Err(StatusCode::UNPROCESSABLE_ENTITY),
-        Ok(DeleteOutcome::TransferSell) => Err(StatusCode::UNPROCESSABLE_ENTITY),
+        Ok(DeleteOutcome::NotFound) => {
+            Err((StatusCode::NOT_FOUND, "no sell with that id".to_string()))
+        }
+        Ok(DeleteOutcome::NotASell) => Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "that trade is not a Sell — a Buy/DRP parcel cannot be deleted through this endpoint"
+                .to_string(),
+        )),
+        Ok(DeleteOutcome::ReplacementReferenced) => Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "a replacement parcel created by this exchange/demerger is consumed by a later \
+             sale or AMIT adjustment — remove those first"
+                .to_string(),
+        )),
+        Ok(DeleteOutcome::TransferSell) => Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "this Sell belongs to a holding-account transfer — delete the transfer instead"
+                .to_string(),
+        )),
         Err(e) => {
             tracing::error!(error = %e, "sell delete failed");
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
+            Err((StatusCode::INTERNAL_SERVER_ERROR, String::new()))
         }
     }
 }
@@ -1066,5 +1101,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = http_body_util::BodyExt::collect(resp.into_body()).await.unwrap().to_bytes();
+        let detail = String::from_utf8(body.to_vec()).unwrap();
+        // The rejection says why, not a bare "HTTP 422".
+        assert!(detail.contains("sum to the sell quantity"), "detail: {detail}");
     }
 }

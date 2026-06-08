@@ -171,7 +171,7 @@ async fn upsert(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
     Json(body): Json<ListingBody>,
-) -> Result<StatusCode, StatusCode> {
+) -> Result<StatusCode, (StatusCode, String)> {
     let listing = Listing {
         id,
         exchange_mic: body.exchange_mic,
@@ -187,19 +187,23 @@ async fn upsert(
         .await
         .map(|_| StatusCode::NO_CONTENT)
         .map_err(|e| match e {
-            UpsertError::UnrecognisedDigitalToken => StatusCode::UNPROCESSABLE_ENTITY,
-            UpsertError::Db(err) => crate::infra::http::write_error_status(&err),
+            UpsertError::UnrecognisedDigitalToken => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "a Crypto listing's ticker must be a recognised digital-token code".to_string(),
+            ),
+            UpsertError::Db(err) => crate::infra::http::write_error_body(&err),
         })
 }
 
 async fn delete(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
-) -> Result<StatusCode, StatusCode> {
+) -> Result<StatusCode, (StatusCode, String)> {
     db_delete(&pool, id)
         .await
         .map(|found| if found { StatusCode::NO_CONTENT } else { StatusCode::NOT_FOUND })
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        // Deleting a listing still referenced by trades/income violates an FK → 422.
+        .map_err(|e| crate::infra::http::write_error_body(&e))
 }
 
 #[cfg(test)]
@@ -564,6 +568,29 @@ mod tests {
                 .unwrap();
             assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY, "body: {body}");
         }
+
+        // The unrecognised-digital-token rejection says why, not a bare "HTTP 422".
+        let resp = router()
+            .with_state(pool.clone())
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/listings/2")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "ticker": "DOGE", "name": "Dogecoin", "isin": null,
+                            "security_type": "Crypto", "currency": "AUD", "amit": false
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bytes = http_body_util::BodyExt::collect(resp.into_body()).await.unwrap().to_bytes();
+        let detail = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(detail.contains("digital-token"), "detail: {detail}");
     }
 
     #[tokio::test]

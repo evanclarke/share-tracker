@@ -105,7 +105,7 @@
 //! widening the enum and its CHECK.
 
 use crate::infra::decimal::parse_dec;
-use crate::infra::http::write_error_status;
+use crate::infra::http::write_error_body;
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -964,31 +964,40 @@ async fn upsert(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
     Json(body): Json<CorporateActionBody>,
-) -> Result<StatusCode, StatusCode> {
+) -> Result<StatusCode, (StatusCode, String)> {
     let (listing_id, date) = (body.listing_id, body.date);
-    let kind = body.kind().ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
+    let kind = body.kind().ok_or((
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "the corporate-action terms are missing or do not match the action type".to_string(),
+    ))?;
     let action = CorporateAction { id, listing_id, date, kind };
     db_upsert(&pool, &action)
         .await
         .map(|_| StatusCode::NO_CONTENT)
         .map_err(|e| match e {
             // Unknown listing/currency FK or enum CHECK violation → 422.
-            WriteError::Db(err) => write_error_status(&err),
+            WriteError::Db(err) => write_error_body(&err),
             // Frozen while exercise/participation trades reference it → 422.
-            WriteError::ReferencedByTrade => StatusCode::UNPROCESSABLE_ENTITY,
+            WriteError::ReferencedByTrade => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "this corporate action is referenced by rights-exercise, buy-back, \
+                 scrip-for-scrip, or demerger trades and cannot be edited — delete \
+                 those trades first"
+                    .to_string(),
+            ),
         })
 }
 
 async fn delete(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
-) -> Result<StatusCode, StatusCode> {
+) -> Result<StatusCode, (StatusCode, String)> {
     db_delete(&pool, id)
         .await
         .map(|found| if found { StatusCode::NO_CONTENT } else { StatusCode::NOT_FOUND })
         // Deleting an action still referenced by rights-exercise trades
         // violates the trades.rights_action_id FK → 422 (delete those first).
-        .map_err(|e| write_error_status(&e))
+        .map_err(|e| write_error_body(&e))
 }
 
 #[cfg(test)]

@@ -676,7 +676,11 @@ async fn upsert(
     // Sells must be created via PUT /sells/{id} so they are persisted together
     // with a full set of parcel allocations (no uncovered Sell can exist).
     if body.trade_type == TradeType::Sell {
-        return Err((StatusCode::UNPROCESSABLE_ENTITY, String::new()));
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "a Sell must be created via PUT /sells/:id so it carries its parcel allocations"
+                .to_string(),
+        ));
     }
     let settlement_date = match body.settlement_date {
         Some(d) => d,
@@ -719,21 +723,51 @@ async fn upsert(
         .await
         .map(|_| StatusCode::NO_CONTENT)
         .map_err(|e| match e {
-            UpsertError::Db(err) => {
-                (crate::infra::http::write_error_status(&err), String::new())
-            }
+            UpsertError::Db(err) => crate::infra::http::write_error_body(&err),
             // The cross-check rejection says what the trade adds up to, so a
             // typo is findable without re-deriving the figure by hand.
             UpsertError::StatementTotal(detail) => {
                 (StatusCode::UNPROCESSABLE_ENTITY, statement_total_detail(&detail))
             }
-            UpsertError::QuantityBelowAllocated
-            | UpsertError::QuantityBelowAmitAdjustment
-            | UpsertError::RightsExerciseTrade
-            | UpsertError::BuyBackTrade
-            | UpsertError::ScripExchangeTrade
-            | UpsertError::DemergerTrade
-            | UpsertError::TransferTrade => (StatusCode::UNPROCESSABLE_ENTITY, String::new()),
+            UpsertError::QuantityBelowAllocated => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "the new quantity is below what Sell allocations already draw from this parcel"
+                    .to_string(),
+            ),
+            UpsertError::QuantityBelowAmitAdjustment => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "the new quantity is below a linked AMIT adjustment's covered quantity".to_string(),
+            ),
+            UpsertError::RightsExerciseTrade => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "this trade is a rights exercise and cannot be edited — delete it and \
+                 re-exercise instead"
+                    .to_string(),
+            ),
+            UpsertError::BuyBackTrade => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "this trade is a buy-back participation and cannot be edited — delete it and \
+                 re-participate instead"
+                    .to_string(),
+            ),
+            UpsertError::ScripExchangeTrade => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "this trade belongs to a scrip-for-scrip exchange and cannot be edited — \
+                 delete the group and re-exchange instead"
+                    .to_string(),
+            ),
+            UpsertError::DemergerTrade => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "this trade belongs to a demerger and cannot be edited — delete the group and \
+                 re-demerge instead"
+                    .to_string(),
+            ),
+            UpsertError::TransferTrade => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "this trade belongs to a holding-account transfer and cannot be edited — \
+                 delete the transfer and re-transfer instead"
+                    .to_string(),
+            ),
         })
 }
 
@@ -754,12 +788,19 @@ pub(crate) fn statement_total_detail(e: &StatementTotalError) -> String {
 async fn delete(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
-) -> Result<StatusCode, StatusCode> {
+) -> Result<StatusCode, (StatusCode, String)> {
     match db_delete(&pool, id).await {
         Ok(DeleteOutcome::Deleted) => Ok(StatusCode::NO_CONTENT),
-        Ok(DeleteOutcome::NotFound) => Err(StatusCode::NOT_FOUND),
-        Ok(DeleteOutcome::Referenced) => Err(StatusCode::UNPROCESSABLE_ENTITY),
-        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+        Ok(DeleteOutcome::NotFound) => {
+            Err((StatusCode::NOT_FOUND, "no trade with that id".to_string()))
+        }
+        Ok(DeleteOutcome::Referenced) => Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "this trade is referenced by a sale allocation, AMIT adjustment, reinvestment, or \
+             a scrip-for-scrip/demerger group — remove those first (e.g. delete the Sell)"
+                .to_string(),
+        )),
+        Err(_) => Err((StatusCode::INTERNAL_SERVER_ERROR, String::new())),
     }
 }
 

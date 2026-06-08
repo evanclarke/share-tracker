@@ -376,11 +376,14 @@ async fn upsert(
         .await
         .map(|_| StatusCode::NO_CONTENT)
         .map_err(|e| match e {
-            UpsertError::Db(err) => {
-                (crate::infra::http::write_error_status(&err), String::new())
-            }
+            UpsertError::Db(err) => crate::infra::http::write_error_body(&err),
             // Managed by the buy-back participation → 422.
-            UpsertError::BuyBackIncome => (StatusCode::UNPROCESSABLE_ENTITY, String::new()),
+            UpsertError::BuyBackIncome => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "this income row is a buy-back dividend component and cannot be edited — \
+                 it is managed by the buy-back participation"
+                    .to_string(),
+            ),
             // The cross-check rejection says what the statement figures
             // multiply to, so a typo is findable without a calculator.
             UpsertError::PerShare(detail) => {
@@ -392,13 +395,20 @@ async fn upsert(
 async fn delete(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
-) -> Result<StatusCode, StatusCode> {
+) -> Result<StatusCode, (StatusCode, String)> {
     match db_delete(&pool, id).await {
         Ok(DeleteOutcome::Deleted) => Ok(StatusCode::NO_CONTENT),
-        Ok(DeleteOutcome::NotFound) => Err(StatusCode::NOT_FOUND),
+        Ok(DeleteOutcome::NotFound) => {
+            Err((StatusCode::NOT_FOUND, "no income with that id".to_string()))
+        }
         // Managed by the buy-back participation → 422.
-        Ok(DeleteOutcome::BuyBackIncome) => Err(StatusCode::UNPROCESSABLE_ENTITY),
-        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+        Ok(DeleteOutcome::BuyBackIncome) => Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "this income row is a buy-back dividend component — delete the buy-back Sell \
+             instead, which removes it too"
+                .to_string(),
+        )),
+        Err(_) => Err((StatusCode::INTERNAL_SERVER_ERROR, String::new())),
     }
 }
 

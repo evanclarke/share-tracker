@@ -445,36 +445,51 @@ async fn upsert(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
     Json(body): Json<TransferBody>,
-) -> Result<(StatusCode, Json<TransferGroup>), StatusCode> {
+) -> Result<(StatusCode, Json<TransferGroup>), (StatusCode, String)> {
+    let unprocessable = |msg: &str| Err((StatusCode::UNPROCESSABLE_ENTITY, msg.to_string()));
     match db_transfer(&pool, id, &body).await {
         // 201 with the created group (like the scrip exchange): the client
         // needs the created trade ids, which a bare 204 would hide.
         Ok(group) => Ok((StatusCode::CREATED, Json(group))),
-        Err(
-            TransferError::SameAccount
-            | TransferError::AlreadyExists
-            | TransferError::NothingToTransfer
-            | TransferError::ListingMismatch,
-        ) => Err(StatusCode::UNPROCESSABLE_ENTITY),
+        Err(TransferError::SameAccount) => {
+            unprocessable("the source and destination accounts are the same — nothing to move")
+        }
+        Err(TransferError::AlreadyExists) => unprocessable(
+            "a transfer with that id already exists and is immutable — delete it to re-transfer",
+        ),
+        Err(TransferError::NothingToTransfer) => {
+            unprocessable("a transfer must move at least one parcel")
+        }
+        Err(TransferError::ListingMismatch) => {
+            unprocessable("a selected parcel does not belong to the transfer's listing")
+        }
         Err(TransferError::Sell(e)) => {
             tracing::warn!(error = ?e, "transfer rejected by a sell invariant");
-            Err(StatusCode::UNPROCESSABLE_ENTITY)
+            unprocessable(
+                "the selected parcels are invalid: missing, over-allocated, not a Buy/DRP, \
+                 or held in a different account from the source",
+            )
         }
-        Err(TransferError::Db(e)) => Err(crate::infra::http::write_error_status(&e)),
+        Err(TransferError::Db(e)) => Err(crate::infra::http::write_error_body(&e)),
     }
 }
 
 async fn delete(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
-) -> Result<StatusCode, StatusCode> {
+) -> Result<StatusCode, (StatusCode, String)> {
     match db_delete(&pool, id).await {
         Ok(DeleteOutcome::Deleted) => Ok(StatusCode::NO_CONTENT),
-        Ok(DeleteOutcome::NotFound) => Err(StatusCode::NOT_FOUND),
-        Ok(DeleteOutcome::TransferInReferenced) => Err(StatusCode::UNPROCESSABLE_ENTITY),
+        Ok(DeleteOutcome::NotFound) => Err((StatusCode::NOT_FOUND, "no transfer with that id".to_string())),
+        Ok(DeleteOutcome::TransferInReferenced) => Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "a transferred-in parcel is consumed by a later sale, AMIT adjustment, or income \
+             link — remove those first"
+                .to_string(),
+        )),
         Err(e) => {
             tracing::error!(error = %e, "transfer delete failed");
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
+            Err((StatusCode::INTERNAL_SERVER_ERROR, String::new()))
         }
     }
 }
@@ -1137,6 +1152,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let bytes = http_body_util::BodyExt::collect(resp.into_body()).await.unwrap().to_bytes();
+        let detail = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(detail.contains("same"), "detail: {detail}");
 
         // Unknown destination account → FK violation → 422.
         let body = serde_json::json!({

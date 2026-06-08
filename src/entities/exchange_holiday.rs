@@ -187,24 +187,28 @@ async fn upsert(
     State(pool): State<SqlitePool>,
     Path((mic, date)): Path<(String, String)>,
     Json(body): Json<ExchangeHolidayBody>,
-) -> Result<StatusCode, StatusCode> {
-    let holiday_date: NaiveDate = date.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+) -> Result<StatusCode, (StatusCode, String)> {
+    let holiday_date: NaiveDate = date
+        .parse()
+        .map_err(|_| (StatusCode::BAD_REQUEST, "the holiday date is not a valid date".to_string()))?;
     let holiday = ExchangeHoliday { mic, holiday_date, name: body.name };
     db_upsert(&pool, &holiday)
         .await
         .map(|_| StatusCode::NO_CONTENT)
-        .map_err(|e| crate::infra::http::write_error_status(&e))
+        .map_err(|e| crate::infra::http::write_error_body(&e))
 }
 
 async fn delete(
     State(pool): State<SqlitePool>,
     Path((mic, date)): Path<(String, String)>,
-) -> Result<StatusCode, StatusCode> {
-    let date: NaiveDate = date.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+) -> Result<StatusCode, (StatusCode, String)> {
+    let date: NaiveDate = date
+        .parse()
+        .map_err(|_| (StatusCode::BAD_REQUEST, "the holiday date is not a valid date".to_string()))?;
     db_delete(&pool, &mic, date)
         .await
         .map(|found| if found { StatusCode::NO_CONTENT } else { StatusCode::NOT_FOUND })
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(|e| crate::infra::http::write_error_body(&e))
 }
 
 #[cfg(test)]

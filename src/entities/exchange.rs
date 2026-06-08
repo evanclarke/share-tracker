@@ -115,7 +115,7 @@ async fn upsert(
     State(pool): State<SqlitePool>,
     Path(mic): Path<String>,
     Json(body): Json<ExchangeBody>,
-) -> Result<StatusCode, StatusCode> {
+) -> Result<StatusCode, (StatusCode, String)> {
     let exchange = Exchange {
         mic,
         name: body.name,
@@ -128,17 +128,18 @@ async fn upsert(
     db_upsert(&pool, &exchange)
         .await
         .map(|_| StatusCode::NO_CONTENT)
-        .map_err(|e| crate::infra::http::write_error_status(&e))
+        .map_err(|e| crate::infra::http::write_error_body(&e))
 }
 
 async fn delete(
     State(pool): State<SqlitePool>,
     Path(mic): Path<String>,
-) -> Result<StatusCode, StatusCode> {
+) -> Result<StatusCode, (StatusCode, String)> {
     db_delete(&pool, &mic)
         .await
         .map(|found| if found { StatusCode::NO_CONTENT } else { StatusCode::NOT_FOUND })
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        // Deleting an exchange still referenced by listings/holidays violates an FK → 422.
+        .map_err(|e| crate::infra::http::write_error_body(&e))
 }
 
 #[cfg(test)]
