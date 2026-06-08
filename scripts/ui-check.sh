@@ -78,10 +78,18 @@ base="http://127.0.0.1:$port"
 server_pid=""
 
 cleanup() {
+  trap - EXIT INT TERM            # don't re-enter while cleaning up
   [ -n "$server_pid" ] && kill "$server_pid" 2>/dev/null || true
+  # Reap the whole Chrome tree (browser + render/gpu/network helpers) by our
+  # unique temp profile path — killing the launcher PID alone leaves helpers.
+  pkill -9 -f "$profile" 2>/dev/null || true
   rm -rf "$work"
 }
+# EXIT covers normal/errexit termination; INT/TERM turn a signal into an exit so
+# the EXIT trap still runs (a Ctrl-C or a harness `kill` no longer leaks).
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # --- start the server and wait for it to answer -----------------------------
 "$bin" --db "$db" --port "$port" >"$work/server.log" 2>&1 &
@@ -125,6 +133,32 @@ fi
 chrome_common=(--headless=new --disable-gpu --no-first-run --no-default-browser-check
                --user-data-dir="$profile" --virtual-time-budget="$budget")
 
+# Hard ceiling for a single render: the virtual-time budget plus slack for
+# startup. A render that blocks (e.g. a stalled live-price fetch keeping the
+# page from going idle) is killed rather than hanging the whole script — which
+# is what previously stranded the server and Chrome past the cleanup trap.
+chrome_timeout=$(( budget / 1000 + 15 ))
+
+# Run Chrome bounded by chrome_timeout; on timeout kill the launcher and any
+# helper still referencing our temp profile. stdout (the dumped DOM) passes
+# through; Chrome's chatter on stderr is dropped. Returns Chrome's exit code,
+# or 124 if it was timed out.
+chrome_run() {
+  "$chrome" "${chrome_common[@]}" "$@" 2>/dev/null &
+  local cpid=$!
+  ( sleep "$chrome_timeout"; kill -9 "$cpid" 2>/dev/null; pkill -9 -f "$profile" 2>/dev/null ) &
+  local wd=$!
+  local rc=0
+  wait "$cpid" 2>/dev/null || rc=$?
+  if kill -0 "$wd" 2>/dev/null; then
+    kill "$wd" 2>/dev/null || true   # render finished first — cancel the watchdog
+    wait "$wd" 2>/dev/null || true
+  else
+    rc=124                           # watchdog already fired: render timed out
+  fi
+  return $rc
+}
+
 [ "$mode" = shot ] && mkdir -p "$out"
 multi=0; [ "${#routes[@]}" -gt 1 ] && multi=1
 
@@ -132,11 +166,17 @@ for route in "${routes[@]}"; do
   url="$base/$route"
   if [ "$mode" = dom ]; then
     [ "$multi" = 1 ] && echo "===== $route ====="
-    "$chrome" "${chrome_common[@]}" --dump-dom "$url" 2>/dev/null
+    chrome_run --dump-dom "$url" || echo "ui-check: render of $route timed out after ${chrome_timeout}s" >&2
   else
     safe="$(printf '%s' "$route" | tr -c 'A-Za-z0-9' '_')"
     file="$out/${safe}.png"
-    "$chrome" "${chrome_common[@]}" --window-size=1280,1600 --screenshot="$file" "$url" 2>/dev/null
-    echo "saved $file"
+    if chrome_run --window-size=1280,1600 --screenshot="$file" "$url"; then
+      echo "saved $file"
+    else
+      echo "ui-check: render of $route timed out after ${chrome_timeout}s" >&2
+    fi
   fi
+  # Clear any straggler helper from a killed render before the next route reuses
+  # the shared profile (a profile lock from a stray helper would wedge it).
+  pkill -9 -f "$profile" 2>/dev/null || true
 done
