@@ -59,8 +59,26 @@ pub struct TaxYearSummary {
     /// `foreign_tax_offsets`). Claimable only to the extent the taxpayer's own
     /// offset-limit calculation supports it.
     pub foreign_tax_offset_excess: Decimal,
-    /// Total TFN withholding tax (income + AMMA).
+    /// Total TFN withholding tax (income + AMMA + ESS discounts).
     pub tfn_withholding_tax: Decimal,
+    /// Assessable employee-share-scheme discount (Item 12 label B): the sum of
+    /// the taxed-upfront (eligible + not eligible), deferral, and pre-2009
+    /// cessation discounts, **net of** the applied $1,000 taxed-upfront
+    /// reduction. Reported separately from dividend/trust income, in AUD
+    /// (foreign-currency statements converted via the ATO rate for the
+    /// taxing-point month). See `docs/ato/employee-share-schemes.md`.
+    pub ess_discount_assessable: Decimal,
+    /// The taxed-upfront $1,000 reduction actually applied this year
+    /// (`min($1,000, total taxed-upfront-eligible discount)`). Surfaced like the
+    /// FITO de-minimis: the tool applies the cap but the ≤A$180,000
+    /// adjusted-taxable-income eligibility test needs the taxpayer's whole
+    /// income position, so **confirming eligibility is the user's
+    /// responsibility** (an ineligible taxpayer must add this amount back).
+    pub ess_taxed_upfront_reduction: Decimal,
+    /// Informational (Item 12 label A): the foreign-source portion of the ESS
+    /// discounts, already counted within `ess_discount_assessable`, surfaced
+    /// separately for the foreign-income / FITO calculation. Not added on top.
+    pub ess_foreign_source_discount: Decimal,
     /// Informational: the taxpayer assumption behind the hard-wired rates
     /// (always [`crate::reports::TAXPAYER_BASIS`]) — the LIC capital gain
     /// deduction passed through here is the Australian-resident-individual 50%
@@ -97,6 +115,9 @@ const CSV_HEADER: &[&str] = &[
     "foreign_tax_offsets",
     "foreign_tax_offset_excess",
     "tfn_withholding_tax",
+    "ess_discount_assessable",
+    "ess_taxed_upfront_reduction",
+    "ess_foreign_source_discount",
     "taxpayer_basis",
 ];
 
@@ -121,8 +142,18 @@ fn zero_summary(tax_year: i32) -> TaxYearSummary {
         foreign_tax_offsets: Decimal::ZERO,
         foreign_tax_offset_excess: Decimal::ZERO,
         tfn_withholding_tax: Decimal::ZERO,
+        ess_discount_assessable: Decimal::ZERO,
+        ess_taxed_upfront_reduction: Decimal::ZERO,
+        ess_foreign_source_discount: Decimal::ZERO,
         taxpayer_basis: crate::reports::TAXPAYER_BASIS.to_string(),
     }
+}
+
+/// Taxed-upfront eligible discounts are reducible by up to this de-minimis per
+/// year (docs/ato/employee-share-schemes.md); the ≤A$180,000 income-test
+/// eligibility is the user's responsibility (mirrors the FITO de-minimis).
+fn ess_reduction_cap_aud() -> Decimal {
+    Decimal::from(1000)
 }
 
 /// FITO de-minimis (docs/ato/fito-limit.md): up to A$1,000 of foreign income tax
@@ -162,6 +193,15 @@ pub async fn db_tax_summary(pool: &SqlitePool) -> Result<Vec<TaxYearSummary>, sq
          other_income, cgt_discount_gains, cgt_indexation_gains, cgt_other_gains, \
          capital_losses_applied, tfn_withholding_tax, currency \
          FROM amma_statements",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let ess_rows = sqlx::query(
+        "SELECT taxing_point_date, taxed_upfront_eligible, taxed_upfront_not_eligible, \
+         deferral_discount, pre_2009_cessation_discount, foreign_source_discount, \
+         tfn_withholding, currency \
+         FROM ess_statements",
     )
     .fetch_all(pool)
     .await?;
@@ -267,6 +307,45 @@ pub async fn db_tax_summary(pool: &SqlitePool) -> Result<Vec<TaxYearSummary>, sq
         *attached_credits_by_year.entry(tax_year).or_default() += fc;
     }
 
+    // ESS discounts (docs/ato/employee-share-schemes.md): the assessable
+    // discount (labels D + E + F + G) is declared in the year of the taxing
+    // point, separately from dividend/trust income; the taxed-upfront-eligible
+    // (D) total is reducible by up to A$1,000 per year. Accumulate the raw
+    // discount and the eligible total here, then net the reduction below.
+    let mut ess_eligible_by_year: HashMap<i32, Decimal> = HashMap::new();
+    for row in &ess_rows {
+        let taxing_point: NaiveDate = row.try_get("taxing_point_date")?;
+        let tax_year =
+            if taxing_point.month() >= 7 { taxing_point.year() + 1 } else { taxing_point.year() };
+
+        let currency: String = row.try_get("currency")?;
+        let d = taxing_point;
+        let eligible = aud_field(pool, row, "taxed_upfront_eligible", &currency, d).await?;
+        let not_eligible = aud_field(pool, row, "taxed_upfront_not_eligible", &currency, d).await?;
+        let deferral = aud_field(pool, row, "deferral_discount", &currency, d).await?;
+        let pre_2009 = aud_field(pool, row, "pre_2009_cessation_discount", &currency, d).await?;
+        let foreign = aud_field(pool, row, "foreign_source_discount", &currency, d).await?;
+        let tfn = aud_field(pool, row, "tfn_withholding", &currency, d).await?;
+
+        let s = map.entry(tax_year).or_insert_with(|| zero_summary(tax_year));
+        // Raw discount; the $1,000 reduction is subtracted per year below.
+        s.ess_discount_assessable += eligible + not_eligible + deferral + pre_2009;
+        s.ess_foreign_source_discount += foreign;
+        s.tfn_withholding_tax += tfn;
+        *ess_eligible_by_year.entry(tax_year).or_default() += eligible;
+    }
+    // Apply the taxed-upfront $1,000 reduction per year: reduce the assessable
+    // discount by min(A$1,000, the year's eligible discount), and surface the
+    // amount applied (the ≤A$180,000 income test is the user's responsibility).
+    for (tax_year, eligible_total) in ess_eligible_by_year {
+        let reduction = eligible_total.min(ess_reduction_cap_aud());
+        if reduction > Decimal::ZERO {
+            let s = map.get_mut(&tax_year).expect("year inserted with the ESS row");
+            s.ess_taxed_upfront_reduction = reduction;
+            s.ess_discount_assessable -= reduction;
+        }
+    }
+
     // Franking-credit entitlement (docs/ato/you-and-your-shares-dividends.md): in a
     // year with A$5,000 or more of attached credits the small-shareholder
     // exemption doesn't apply, so each dividend's shares must pass the at-risk
@@ -324,7 +403,7 @@ async fn tax_summary_export_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{infra::db, entities::{amma, income, listing, rba_fx_rate, trade}};
+    use crate::{infra::db, entities::{amma, ess_statement, income, listing, rba_fx_rate, trade}};
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
     use tower::ServiceExt;
@@ -367,6 +446,7 @@ mod tests {
                 statement_total: None,
                 holding_account_id: 1,
                 transfer_id: None,
+                ess_statement_id: None,
                 id,
                 trade_type,
                 date,
@@ -442,6 +522,24 @@ mod tests {
             tax_deferred_amount: Decimal::ZERO,
             tax_free_amount: Decimal::ZERO,
             tfn_withholding_tax: Decimal::ZERO,
+            currency: "AUD".to_string(),
+        }
+    }
+
+    fn make_ess(id: i64, listing_id: i64, taxing_point: NaiveDate) -> ess_statement::EssStatement {
+        ess_statement::EssStatement {
+            id,
+            listing_id,
+            holding_account_id: 1,
+            taxing_point_date: taxing_point,
+            quantity: Decimal::ZERO,
+            market_value_per_share: Decimal::ZERO,
+            taxed_upfront_eligible: Decimal::ZERO,
+            taxed_upfront_not_eligible: Decimal::ZERO,
+            deferral_discount: Decimal::ZERO,
+            pre_2009_cessation_discount: Decimal::ZERO,
+            foreign_source_discount: Decimal::ZERO,
+            tfn_withholding: Decimal::ZERO,
             currency: "AUD".to_string(),
         }
     }
@@ -982,6 +1080,126 @@ mod tests {
         assert!(row.starts_with("2024,100,"));
         assert!(row.contains(",30.50,")); // franking_credits keeps its precision
         assert_eq!(lines.next(), None);
+    }
+
+    // ESS discount (docs/ato/employee-share-schemes.md): the assessable
+    // discount is declared in the year of the taxing point, separately from
+    // dividend income; the taxed-upfront-eligible total is reducible by up to
+    // A$1,000 per year; the ESS TFN withheld joins the existing TFN line.
+
+    /// Labels D + E + F + G total the assessable discount; with the eligible
+    /// total over $1,000 the reduction is capped at $1,000 and surfaced.
+    #[tokio::test]
+    async fn db_ess_discount_totals_labels_net_of_1000_reduction() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        // Taxing point Sep 2024 → FY2025.
+        let mut e = make_ess(1, 1, NaiveDate::from_ymd_opt(2024, 9, 1).unwrap());
+        e.taxed_upfront_eligible = Decimal::from(2400); // D
+        e.taxed_upfront_not_eligible = Decimal::from(100); // E
+        e.deferral_discount = Decimal::from(500); // F
+        e.pre_2009_cessation_discount = Decimal::from(50); // G
+        e.tfn_withholding = Decimal::from(30);
+        ess_statement::db_upsert(&pool, &e).await.unwrap();
+
+        let result = db_tax_summary(&pool).await.unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].tax_year, 2025);
+        // 2400 + 100 + 500 + 50 − 1000 = 2050.
+        assert_eq!(result[0].ess_discount_assessable, Decimal::from(2050));
+        assert_eq!(result[0].ess_taxed_upfront_reduction, Decimal::from(1000));
+        // The ESS discount is not lumped into dividend income.
+        assert_eq!(result[0].dividends_assessable, Decimal::ZERO);
+        // ESS TFN joins the existing TFN line.
+        assert_eq!(result[0].tfn_withholding_tax, Decimal::from(30));
+    }
+
+    /// An eligible discount of $1,000 or less is reduced by the whole of it (not
+    /// a flat $1,000) — the reduction caps at the eligible total.
+    #[tokio::test]
+    async fn db_ess_reduction_caps_at_the_eligible_discount() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        let mut e = make_ess(1, 1, NaiveDate::from_ymd_opt(2024, 9, 1).unwrap());
+        e.taxed_upfront_eligible = Decimal::from(600); // D ≤ 1000
+        e.deferral_discount = Decimal::from(900); // F
+        ess_statement::db_upsert(&pool, &e).await.unwrap();
+
+        let result = db_tax_summary(&pool).await.unwrap();
+        // 600 + 900 − 600 = 900 (only the eligible 600 is removed).
+        assert_eq!(result[0].ess_discount_assessable, Decimal::from(900));
+        assert_eq!(result[0].ess_taxed_upfront_reduction, Decimal::from(600));
+    }
+
+    /// With no taxed-upfront-eligible discount there is no reduction; a pure
+    /// deferral (RSU) statement is assessable in full.
+    #[tokio::test]
+    async fn db_ess_deferral_only_has_no_reduction() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        let mut e = make_ess(1, 1, NaiveDate::from_ymd_opt(2024, 9, 1).unwrap());
+        e.deferral_discount = Decimal::from(5000);
+        ess_statement::db_upsert(&pool, &e).await.unwrap();
+
+        let result = db_tax_summary(&pool).await.unwrap();
+        assert_eq!(result[0].ess_discount_assessable, Decimal::from(5000));
+        assert_eq!(result[0].ess_taxed_upfront_reduction, Decimal::ZERO);
+    }
+
+    /// The reduction is a per-year total across statements: two eligible
+    /// discounts in the same year share one $1,000 cap.
+    #[tokio::test]
+    async fn db_ess_reduction_is_one_cap_per_year_across_statements() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        let mut e1 = make_ess(1, 1, NaiveDate::from_ymd_opt(2024, 9, 1).unwrap());
+        e1.taxed_upfront_eligible = Decimal::from(800);
+        ess_statement::db_upsert(&pool, &e1).await.unwrap();
+        let mut e2 = make_ess(2, 1, NaiveDate::from_ymd_opt(2025, 2, 1).unwrap());
+        e2.taxed_upfront_eligible = Decimal::from(800);
+        ess_statement::db_upsert(&pool, &e2).await.unwrap();
+
+        let result = db_tax_summary(&pool).await.unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].tax_year, 2025);
+        // 1600 eligible − 1000 cap = 600.
+        assert_eq!(result[0].ess_discount_assessable, Decimal::from(600));
+        assert_eq!(result[0].ess_taxed_upfront_reduction, Decimal::from(1000));
+    }
+
+    /// The foreign-source discount is a memo already within the assessable
+    /// total — surfaced separately, never added on top. Non-AUD statements
+    /// convert via the ATO rate for the taxing-point month.
+    #[tokio::test]
+    async fn db_ess_foreign_source_converted_and_not_double_counted() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        // A$1 = 0.50 USD for Sep 2024 → AUD = USD / 0.50.
+        rba_fx_rate::db_import_rate(&pool, "USD", "2024-09", "0.50".parse().unwrap())
+            .await
+            .unwrap();
+        let mut e = make_ess(1, 1, NaiveDate::from_ymd_opt(2024, 9, 1).unwrap());
+        e.currency = "USD".to_string();
+        e.deferral_discount = Decimal::from(1000); // USD → 2000 AUD
+        e.foreign_source_discount = Decimal::from(1000); // the whole discount is foreign
+        ess_statement::db_upsert(&pool, &e).await.unwrap();
+
+        let result = db_tax_summary(&pool).await.unwrap();
+        // 1000 / 0.50 = 2000 assessable; foreign memo 2000; not 4000.
+        assert_eq!(result[0].ess_discount_assessable, Decimal::from(2000));
+        assert_eq!(result[0].ess_foreign_source_discount, Decimal::from(2000));
+    }
+
+    /// A non-AUD ESS statement with no ATO rate fails loudly (no silent zero).
+    #[tokio::test]
+    async fn db_ess_non_aud_without_rate_fails_loudly() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        let mut e = make_ess(1, 1, NaiveDate::from_ymd_opt(2024, 9, 1).unwrap());
+        e.currency = "USD".to_string();
+        e.deferral_discount = Decimal::from(1000);
+        ess_statement::db_upsert(&pool, &e).await.unwrap();
+        assert!(db_tax_summary(&pool).await.is_err());
     }
 
     #[tokio::test]

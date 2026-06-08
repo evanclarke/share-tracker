@@ -48,6 +48,7 @@ implementation — see "How this maps to open TODO items" at the end.
 | [`lic-capital-gain-deduction.md`](lic-capital-gain-deduction.md) | The **LIC capital gain deduction** (Subdiv 115-D): an individual deducts **50%** of the LIC capital gain amount advised on the dividend statement (33⅓% for super/life; 50% for trusts/partnerships). Drives the `lic_capital_gain_deduction` income field. |
 | [`mytax-managed-funds.md`](mytax-managed-funds.md) | How managed-fund/trust distribution components map to tax-return labels: franked/unfranked dividends, **franking credits**, foreign income & **foreign income tax offset**, **conduit foreign income** (NANE — excluded from assessable income), capital gains, AMIT cost base net amount, TFN amounts withheld. Reference for the `income` and `amma_statements` component fields and how each is treated. |
 | [`fito-limit.md`](fito-limit.md) | The **FITO offset limit** (Guide to foreign income tax offset rules 2025, retrieved 2026-06-06): up to **A$1,000** of foreign income tax is claimable without a limit calculation; above that the offset limit (steps 1–3 over the taxpayer's full tax position) applies — not computable from this system's data. Worked example (Anna, Example 16). Drives the tax summary's `foreign_tax_offsets` cap + `foreign_tax_offset_excess`. |
+| [`employee-share-schemes.md`](employee-share-schemes.md) | **Employee share schemes — income side** (Item 12 2025 QC 104101; tax-deferred schemes; taxed-upfront $1,000 reduction QC 47628; retrieved 2026-06-08): the assessable **discount** on ESS interests, declared at Item 12 in the year of the taxing point (labels D/E/F/G + the foreign-source memo A and TFN line C). The **$1,000 reduction** on taxed-upfront-eligible (label D) discounts, income-tested at ≤A$180,000 (not computable here — mirrors the FITO de-minimis). The CGT side resets the cost base to the taxing-point market value and re-acquires at that date. Worked example (Matt, QC 47628) — reproduced in `src/ato_examples.rs`. Drives the `ess_statements` entity, the vesting operation, and the tax summary's ESS-discount fields. |
 
 ## How this maps to open TODO items
 
@@ -72,3 +73,8 @@ implementation — see "How this maps to open TODO items" at the end.
   [`fito-limit.md`](fito-limit.md) confirms the A$1,000 de-minimis the tax summary applies, and
   why the full offset-limit calculation (and its Example 16) is out of scope — it needs the
   taxpayer's whole income-tax position.
+- **ESS income** (TODO "Employee share scheme (ESS) income"):
+  [`employee-share-schemes.md`](employee-share-schemes.md) documents the Item 12 discount labels,
+  the $1,000 taxed-upfront reduction and its ≤A$180,000 income test (applied as a de-minimis with
+  the test flagged as the user's responsibility, like the FITO cap), and the cost-base-reset CGT
+  treatment the vesting operation's Buy implements.

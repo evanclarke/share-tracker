@@ -450,6 +450,7 @@ mod tests {
             statement_total: None,
             holding_account_id: 1,
             transfer_id: None,
+            ess_statement_id: None,
             id: 1,
             trade_type: trade::TradeType::DRP,
             date: NaiveDate::from_ymd_opt(2024, 3, 15).unwrap(),

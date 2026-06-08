@@ -575,6 +575,7 @@ mod tests {
                 deemed_acquisition_date: None,
                 holding_account_id: 2,
                 transfer_id: None,
+                ess_statement_id: None,
             },
         )
         .await
@@ -697,6 +698,7 @@ mod tests {
                 deemed_acquisition_date: None,
                 holding_account_id: 2,
                 transfer_id: None,
+                ess_statement_id: None,
             },
         )
         .await

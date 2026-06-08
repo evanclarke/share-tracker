@@ -122,6 +122,15 @@ pub struct Trade {
     /// and `PUT`/`DELETE /trades`; `DELETE /transfers/:id` removes the whole
     /// group.
     pub transfer_id: Option<i64>,
+    /// Provenance link from a cost-base-reset ESS vest Buy back to its
+    /// `ess_statements` row (`None` for every other trade). Set only by
+    /// `POST /ess_statements/:id/vest` (`entities::ess_vest`). A trade carrying
+    /// it is the statement's vest: it is rejected by `PUT /trades` (delete and
+    /// re-vest instead), and never deleted individually — `DELETE
+    /// /ess_statements/:id` removes it (refused while it is drawn on by a Sell
+    /// allocation or AMIT adjustment), and the statement is frozen against
+    /// edits while it exists.
+    pub ess_statement_id: Option<i64>,
 }
 
 impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for Trade {
@@ -158,6 +167,7 @@ impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for Trade {
             deemed_acquisition_date: row.try_get("deemed_acquisition_date")?,
             holding_account_id: row.try_get("holding_account_id")?,
             transfer_id: row.try_get("transfer_id")?,
+            ess_statement_id: row.try_get("ess_statement_id")?,
         })
     }
 }
@@ -282,7 +292,7 @@ pub async fn db_list(pool: &SqlitePool) -> Result<Vec<Trade>, sqlx::Error> {
          fx_rate, contract_note_ref, statement_total, \
          residual_brought_forward, residual_carried_forward, residual_paid_out, rights_action_id, \
          buyback_action_id, scrip_action_id, demerger_action_id, deemed_acquisition_date, \
-         holding_account_id, transfer_id \
+         holding_account_id, transfer_id, ess_statement_id \
          FROM trades ORDER BY date, id",
     )
     .fetch_all(pool)
@@ -296,7 +306,7 @@ pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<Trade>, sqlx::E
          fx_rate, contract_note_ref, statement_total, \
          residual_brought_forward, residual_carried_forward, residual_paid_out, rights_action_id, \
          buyback_action_id, scrip_action_id, demerger_action_id, deemed_acquisition_date, \
-         holding_account_id, transfer_id \
+         holding_account_id, transfer_id, ess_statement_id \
          FROM trades WHERE id = ?",
     )
     .bind(id)
@@ -344,6 +354,11 @@ pub enum UpsertError {
     /// Delete the transfer via `DELETE /transfers/:id` and re-transfer
     /// instead (see `entities::transfer`).
     TransferTrade,
+    /// The existing trade is a cost-base-reset ESS vest Buy
+    /// (`ess_statement_id` set): its figures derive from the ESS statement's
+    /// quantity and taxing-point market value. Delete the statement (which
+    /// removes the vest) and re-vest instead (see `entities::ess_vest`).
+    EssVestTrade,
     /// A supplied statement total failed the cross-check (see
     /// `check_statement_total`): it doesn't reconcile with the trade's own
     /// figures, or the trade and brokerage currencies differ so there is no
@@ -386,16 +401,17 @@ pub async fn db_upsert(pool: &SqlitePool, trade: &Trade) -> Result<(), UpsertErr
     // cost base and deemed acquisition date), which an edit could silently
     // break. (The INSERT below never sets any provenance column, so a normal
     // trade can't become one either.)
-    let existing_action: Option<(Option<i64>, Option<i64>, Option<i64>, Option<i64>, Option<i64>)> =
-        sqlx::query_as(
-            "SELECT rights_action_id, buyback_action_id, scrip_action_id, demerger_action_id, \
-                    transfer_id \
-             FROM trades WHERE id = ?",
-        )
-        .bind(trade.id)
-        .fetch_optional(&mut *tx)
-        .await?;
-    if let Some((rights, buyback, scrip, demerger, transfer)) = existing_action {
+    type ProvenanceRow =
+        (Option<i64>, Option<i64>, Option<i64>, Option<i64>, Option<i64>, Option<i64>);
+    let existing_action: Option<ProvenanceRow> = sqlx::query_as(
+        "SELECT rights_action_id, buyback_action_id, scrip_action_id, demerger_action_id, \
+                transfer_id, ess_statement_id \
+         FROM trades WHERE id = ?",
+    )
+    .bind(trade.id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if let Some((rights, buyback, scrip, demerger, transfer, ess)) = existing_action {
         if rights.is_some() {
             return Err(UpsertError::RightsExerciseTrade);
         }
@@ -410,6 +426,9 @@ pub async fn db_upsert(pool: &SqlitePool, trade: &Trade) -> Result<(), UpsertErr
         }
         if transfer.is_some() {
             return Err(UpsertError::TransferTrade);
+        }
+        if ess.is_some() {
+            return Err(UpsertError::EssVestTrade);
         }
     }
 
@@ -514,7 +533,8 @@ pub enum DeleteOutcome {
     /// allocation (or a Sell with allocations), by an AMIT adjustment, or as a
     /// distribution's reinvestment trade — or it belongs to a scrip-for-scrip
     /// exchange or demerger group, which is only ever deleted as a whole (via
-    /// `DELETE /sells` on the group's closing Sell). Deleting it would orphan
+    /// `DELETE /sells` on the group's closing Sell), or it is an ESS vest Buy
+    /// (removed via `DELETE /ess_statements/:id`). Deleting it would orphan
     /// those dependants or break the rollover's parcel substitution, so the
     /// request is refused (mapped to 422) rather than surfacing the SQLite FK
     /// error as a 500. Remove the dependants first (e.g. delete the Sell via
@@ -525,20 +545,23 @@ pub enum DeleteOutcome {
 pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<DeleteOutcome, sqlx::Error> {
     let mut tx = pool.begin().await?;
 
-    let exists: Option<(Option<i64>, Option<i64>, Option<i64>)> = sqlx::query_as(
-        "SELECT scrip_action_id, demerger_action_id, transfer_id FROM trades WHERE id = ?",
+    let exists: Option<(Option<i64>, Option<i64>, Option<i64>, Option<i64>)> = sqlx::query_as(
+        "SELECT scrip_action_id, demerger_action_id, transfer_id, ess_statement_id \
+         FROM trades WHERE id = ?",
     )
     .bind(id)
     .fetch_optional(&mut *tx)
     .await?;
-    let Some((scrip_action, demerger_action, transfer)) = exists else {
+    let Some((scrip_action, demerger_action, transfer, ess)) = exists else {
         return Ok(DeleteOutcome::NotFound);
     };
     // A scrip-for-scrip exchange, demerger, or holding-account transfer trade
     // is never deleted individually — the group's closing Sell and
     // replacement Buys substitute the same parcels, so they are removed as a
     // whole via DELETE /sells on the closing Sell (or DELETE /transfers/:id).
-    if scrip_action.is_some() || demerger_action.is_some() || transfer.is_some() {
+    // An ESS vest Buy is likewise only ever removed via DELETE
+    // /ess_statements/:id (which deletes the statement and its vest together).
+    if scrip_action.is_some() || demerger_action.is_some() || transfer.is_some() || ess.is_some() {
         return Ok(DeleteOutcome::Referenced);
     }
 
@@ -718,6 +741,7 @@ async fn upsert(
         deemed_acquisition_date: None,
         holding_account_id: body.holding_account_id,
         transfer_id: None,
+        ess_statement_id: None,
     };
     db_upsert(&pool, &trade)
         .await
@@ -766,6 +790,12 @@ async fn upsert(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "this trade belongs to a holding-account transfer and cannot be edited — \
                  delete the transfer and re-transfer instead"
+                    .to_string(),
+            ),
+            UpsertError::EssVestTrade => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "this trade is an ESS vest and cannot be edited — delete the ESS statement \
+                 and re-vest instead"
                     .to_string(),
             ),
         })
@@ -843,6 +873,7 @@ mod tests {
             statement_total: None,
             holding_account_id: 1,
             transfer_id: None,
+            ess_statement_id: None,
             id: 1,
             trade_type: TradeType::Buy,
             date: NaiveDate::from_ymd_opt(2024, 1, 15).unwrap(),
@@ -1003,6 +1034,7 @@ mod tests {
             statement_total: None,
             holding_account_id: 1,
             transfer_id: None,
+            ess_statement_id: None,
             id: 2,
             trade_type: TradeType::Sell,
             date: NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(),
@@ -1040,6 +1072,7 @@ mod tests {
             statement_total: None,
             holding_account_id: 1,
             transfer_id: None,
+            ess_statement_id: None,
             id: 3,
             trade_type: TradeType::DRP,
             date: NaiveDate::from_ymd_opt(2024, 3, 15).unwrap(),

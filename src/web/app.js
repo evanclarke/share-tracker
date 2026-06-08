@@ -317,6 +317,10 @@
       'amma_australian_interest', 'amma_dividends_unfranked', 'amma_franked_dividends',
       'amma_net_rent', 'amma_foreign_income', 'amma_other_income', 'amma_cgt_discount_gains',
       'amma_cgt_indexation_gains', 'amma_cgt_other_gains', 'amma_capital_losses_applied',
+      // ESS statement discount line items + the tax-summary ESS aggregates.
+      'taxed_upfront_eligible', 'taxed_upfront_not_eligible', 'deferral_discount',
+      'pre_2009_cessation_discount', 'foreign_source_discount', 'tfn_withholding',
+      'ess_discount_assessable', 'ess_taxed_upfront_reduction', 'ess_foreign_source_discount',
     ]);
     set('rate', [
       // Per-unit prices/rates entered from statements — rounding them would
@@ -324,6 +328,7 @@
       'average_price', 'fx_rate', 'amount_per_security', 'cost_base_adjustment', 'rate',
       'price', 'current_price', 'reinvestment_price', 'exercise_price', 'amount_per_unit',
       'buyback_price', 'buyback_dividend', 'buyback_franking_credit', 'buyback_market_value',
+      'market_value_per_share',
     ]);
     // A derived per-unit figure: show at least 4 dp, never cent-rounded.
     set('rate4', ['avg_cost_base_per_unit']);
@@ -580,6 +585,27 @@
       attachOwner: 'amma_statement_id',
     },
     {
+      slug: 'ess_statements', title: 'ESS Statements', group: 'Activity', api: '/ess_statements',
+      desc: 'Employee share scheme statements: the assessable discount on ESS interests (declared at Item 12 in the year of the taxing point), split by scheme type. The taxed-upfront-eligible discount is reduced by up to $1,000 per year in the tax summary (the ≤$180,000 income test is your responsibility). Use the row’s Vest action to create the cost-base-reset Buy for the vested shares.',
+      keyFields: [int('id', 'ID', { auto: true })],
+      fields: [
+        fk('listing_id', 'Listing', 'listings', { required: true }),
+        fk('holding_account_id', 'Holding account', 'holdingAccounts', { required: true, default: '1', hint: 'The account the ESS interests vest into.' }),
+        dt('taxing_point_date', 'Taxing point date', { required: true, hint: 'The deferred taxing point (or acquisition date for a taxed-upfront scheme): sets the assessable year and the vest Buy’s acquisition date.' }),
+        dec('quantity', 'Quantity vested', { default: '0', hint: 'Shares that vest — drives the cost-base-reset Buy.' }),
+        dec('market_value_per_share', 'Market value per share', { default: '0', hint: 'At the taxing point; the vest Buy’s price (the reset cost base).' }),
+        dec('taxed_upfront_eligible', 'Taxed-upfront eligible discount (D)', { hint: 'Discount from taxed-upfront schemes eligible for the $1,000 reduction.' }),
+        dec('taxed_upfront_not_eligible', 'Taxed-upfront not-eligible discount (E)'),
+        dec('deferral_discount', 'Deferral-scheme discount (F)', { hint: 'The RSU case.' }),
+        dec('pre_2009_cessation_discount', 'Pre-2009 cessation discount (G)'),
+        dec('foreign_source_discount', 'Foreign-source discount (A)', { hint: 'The foreign-sourced portion of the above discounts (already included in them); for the foreign income tax offset.' }),
+        dec('tfn_withholding', 'TFN amounts withheld (C)'),
+        fk('currency', 'Currency', 'currencies', { required: true, encode: 'string', default: 'AUD' }),
+      ],
+      columns: ['id', 'listing_id', 'holding_account_id', 'taxing_point_date', 'quantity', 'market_value_per_share', 'deferral_discount', 'taxed_upfront_eligible', 'currency'],
+      rowActions: function (row) { return [{ label: 'Vest', href: '#/ess-vest/' + row.id }]; },
+    },
+    {
       slug: 'amit_adjustments', title: 'AMIT Adjustments', group: 'Activity', api: '/amit_adjustments',
       desc: 'Links a purchase parcel (Buy/DRP trade) to an AMMA statement.',
       keyFields: [int('id', 'ID', { auto: true })],
@@ -805,6 +831,18 @@
         return 'Demerged ' + listing(a.listing_id) + ' into ' + n + ' parcel(s) of ' + listing(a.demerger_listing_id)
           + ' (closing sell #' + (r && r.sell ? r.sell.id : '?') + ').';
       },
+    },
+    // ESS vest (confirm-only): POST takes no parameters — the statement's
+    // quantity, per-share market value, and taxing-point date determine the
+    // cost-base-reset Buy. The discount (income side) is already on the
+    // statement; this creates the CGT parcel and links it back.
+    {
+      slug: 'ess-vest', nav: 'ess_statements', ownerApi: '/ess_statements', cancel: '#/e/ess_statements', submit: 'Vest',
+      post: function (id) { return '/ess_statements/' + id + '/vest'; },
+      title: function (id, owner, listing) { return 'Vest ' + listing(owner.listing_id) + ' ESS statement #' + id; },
+      desc: function (s, listing) { return 'Creates the cost-base-reset Buy for ' + s.quantity + ' share(s) of ' + listing(s.listing_id) + ' at the taxing-point market value (' + s.market_value_per_share + ' ' + s.currency + ' per share), acquired ' + s.taxing_point_date + '. Undo by deleting this ESS statement, which removes the vest Buy.'; },
+      fields: [],
+      toast: function (trade, listing) { return trade ? 'Vested into ' + describeTrade(trade, listing) + ' (trade #' + trade.id + ').' : 'Vested.'; },
     },
   ];
 

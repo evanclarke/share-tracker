@@ -1158,3 +1158,61 @@ async fn crypto_cgt_example_katrina_coin_swap() {
     assert_eq!(holdings[1].quantity, dec("100"));
     assert_eq!(holdings[1].total_cost_base, dec("6000"));
 }
+
+/// `docs/ato/employee-share-schemes.md` (QC 47628) — "Example: Taxed-upfront
+/// scheme – eligible for reduction" (Matt).
+///
+/// > Core Bank Ltd provides its employee Matt 600 shares under an ESS on
+/// > 4 August 2015. The total market value of the shares is $3,600. Matt pays
+/// > Core Bank Ltd $1,200 to purchase the shares, acquiring the shares for a
+/// > discount of $2,400 ($3,600 less $1,200), reported at label D "Discount from
+/// > taxed upfront schemes – eligible for reduction".
+///
+/// As an eligible taxpayer (adjusted taxable income ≤ $180,000) Matt reduces the
+/// discount by the $1,000 concession: the assessable discount is $1,400. His
+/// shares' CGT cost base is the $3,600 market value, acquired 4 August 2015 —
+/// the cost-base-reset Buy the vesting operation creates.
+#[tokio::test]
+async fn ess_example_matt_taxed_upfront_eligible_reduction() {
+    let pool = test_pool().await;
+    put_listing(&pool, 1, "CBL").await; // Core Bank Ltd
+
+    api_put(
+        &pool,
+        "/ess_statements/1",
+        json!({
+            "listing_id": 1,
+            "taxing_point_date": "2015-08-04",
+            "quantity": "600",
+            "market_value_per_share": "6", // $3,600 / 600
+            "taxed_upfront_eligible": "2400", // label D
+            "currency": "AUD",
+        }),
+    )
+    .await;
+
+    // The vesting operation creates the cost-base-reset Buy: 600 shares at the
+    // $6 market value, acquired (and settled) on the taxing-point date.
+    let vest: Trade = api_post(&pool, "/ess_statements/1/vest", json!({}), StatusCode::CREATED).await;
+    assert_eq!(vest.quantity, dec("600"));
+    assert_eq!(vest.average_price, dec("6"));
+    assert_eq!(vest.date, "2015-08-04".parse().unwrap());
+    assert_eq!(vest.deemed_acquisition_date, None, "the taxing point is the acquisition date");
+
+    // The assessable ESS discount: $2,400 − $1,000 reduction = $1,400, in
+    // FY2016 (acquired Aug 2015), reported separately from dividend income.
+    let years: Vec<TaxYearSummary> = api_get(&pool, "/portfolio/tax-summary").await;
+    assert_eq!(years.len(), 1);
+    let y = &years[0];
+    assert_eq!(y.tax_year, 2016);
+    assert_eq!(y.ess_taxed_upfront_reduction, dec("1000"), "the $1,000 concession");
+    assert_eq!(y.ess_discount_assessable, dec("1400"), "$2,400 − $1,000");
+    assert_eq!(y.dividends_assessable, Decimal::ZERO);
+
+    // The CGT cost base is reset to the $3,600 market value (600 × $6).
+    let holdings: Vec<HoldingOverview> =
+        api_post(&pool, "/portfolio/overview", json!({}), StatusCode::OK).await;
+    assert_eq!(holdings.len(), 1);
+    assert_eq!(holdings[0].quantity, dec("600"));
+    assert_eq!(holdings[0].total_cost_base, dec("3600"));
+}

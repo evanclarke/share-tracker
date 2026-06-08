@@ -15,6 +15,8 @@ pub mod currencies;
 pub mod demerger;
 pub mod drp_enrolment;
 pub mod drp_reinvestment;
+pub mod ess_statement;
+pub mod ess_vest;
 pub mod exchange;
 pub mod exchange_holiday;
 pub mod holding_account;
@@ -53,6 +55,8 @@ pub fn router() -> Router<SqlitePool> {
         .merge(scrip_exchange::router())
         .merge(demerger::router())
         .merge(drp_reinvestment::router())
+        .merge(ess_statement::router())
+        .merge(ess_vest::router())
         .merge(transfer::router())
         .merge(attachment::router())
 }

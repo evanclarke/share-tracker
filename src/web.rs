@@ -378,6 +378,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ess_statement_ui_present() {
+        let js = app_js_body().await;
+        // The ESS statement CRUD screen and its discount labels.
+        assert!(js.contains("/ess_statements"));
+        assert!(js.contains("ESS Statements"));
+        assert!(js.contains("taxed_upfront_eligible"));
+        assert!(js.contains("deferral_discount"));
+        assert!(js.contains("market_value_per_share"));
+        // The Vest action (creates the cost-base-reset Buy) is reachable from a
+        // statement row and posts to the vest endpoint.
+        assert!(js.contains("#/ess-vest/"));
+        assert!(js.contains("/ess_statements/' + id + '/vest"));
+        // The new tax-summary ESS columns are classified as money so they format.
+        assert!(js.contains("ess_discount_assessable"));
+    }
+
+    #[tokio::test]
     async fn parcel_allocation_ui_present() {
         let js = app_js_body().await;
         // Allocations are entered as part of a Sell (PUT /sells/:id).

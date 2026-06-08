@@ -592,6 +592,7 @@ mod tests {
                 statement_total: None,
                 holding_account_id: account_id,
                 transfer_id: None,
+                ess_statement_id: None,
                 id,
                 trade_type,
                 date,

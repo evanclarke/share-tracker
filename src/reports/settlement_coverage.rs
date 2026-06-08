@@ -144,6 +144,7 @@ mod tests {
                 statement_total: None,
                 holding_account_id: 1,
                 transfer_id: None,
+                ess_statement_id: None,
                 id,
                 trade_type: trade::TradeType::Buy,
                 date,

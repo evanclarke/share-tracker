@@ -89,7 +89,8 @@ trades
 ├── demerger_action_id INTEGER FK→corporate_actions.id (nullable)  Demerger trades only (the closing Sell + every head replacement and demerged-entity Buy): the Demerger action demerged, set by POST /corporate_actions/:id/demerge. Same group rules as scrip_action_id: each trade is immutable via PUT /sells and PUT/DELETE /trades, DELETE /sells on the closing Sell removes the whole group, and the action is frozen while any exists
 ├── deemed_acquisition_date TEXT (nullable)  Scrip-for-scrip replacement, demerger head/demerged, and transfer-in Buys only: the consumed parcel's acquisition date, carried by the rollover/transfer (the combined holding period; an own-account transfer is not a disposal at all). Drives the 12-month CGT discount clock and the AUD translation month of the cost base in the reports; split/return-of-capital applicability stays on the actual trade date. NULL = the trade's own date
 ├── holding_account_id INTEGER FK→holding_accounts.id  The account the trade sits in (defaults to the seeded default account when omitted from a write)
-└── transfer_id       INTEGER FK→transfers.id (nullable)  Transfer trades only (the transfer-out Sell + every transfer-in Buy): the transfer that created them, set by PUT /transfers/:id. The trades carrying one transfer id form the transfer group: each is immutable via PUT /sells, PUT/DELETE /trades, and DELETE /sells; DELETE /transfers/:id removes the whole group (with the transfer record), restoring the pre-transfer holding
+├── transfer_id       INTEGER FK→transfers.id (nullable)  Transfer trades only (the transfer-out Sell + every transfer-in Buy): the transfer that created them, set by PUT /transfers/:id. The trades carrying one transfer id form the transfer group: each is immutable via PUT /sells, PUT/DELETE /trades, and DELETE /sells; DELETE /transfers/:id removes the whole group (with the transfer record), restoring the pre-transfer holding
+└── ess_statement_id  INTEGER FK→ess_statements.id (nullable)  ESS vest Buys only: the ESS statement whose discount this parcel resets the cost base for, set by POST /ess_statements/:id/vest. The Buy is immutable via PUT /trades and never deleted individually — DELETE /ess_statements/:id removes it (refused while it is drawn on by a Sell allocation or AMIT adjustment), and the statement is frozen against edits while it exists
 
 income
 ├── id                        INTEGER PK
@@ -142,6 +143,22 @@ amit_adjustments             Links a purchase parcel to an AMMA statement
 ├── amma_statement_id    INTEGER FK→amma_statements.id
 ├── trade_id             INTEGER FK→trades.id  Must be Buy or DRP
 └── quantity             TEXT (decimal)       Units of the parcel covered by the adjustment
+
+ess_statements               Employee share scheme statements — the income side of an ESS interest (Item 12 discount, declared in the year of the taxing point)
+├── id                          INTEGER PK
+├── listing_id                  INTEGER FK→listings.id
+├── holding_account_id          INTEGER FK→holding_accounts.id  The account the interests vest into (defaults to the seeded default account)
+├── taxing_point_date           DATE   The taxing point: sets the assessable financial year and the vest Buy's acquisition/settlement date
+├── quantity                    TEXT (decimal)  Shares that vest — the vest Buy's quantity
+├── market_value_per_share      TEXT (decimal)  Market value per share at the taxing point — the vest Buy's price (the reset cost base)
+├── taxed_upfront_eligible      TEXT (decimal)  Item 12 label D: taxed-upfront discount eligible for the $1,000 reduction
+├── taxed_upfront_not_eligible  TEXT (decimal)  Item 12 label E: taxed-upfront discount not eligible for the reduction
+├── deferral_discount           TEXT (decimal)  Item 12 label F: deferral-scheme discount (the RSU case)
+├── pre_2009_cessation_discount TEXT (decimal)  Pre-1 July 2009 cessation discounts assessable this year (label G)
+├── foreign_source_discount     TEXT (decimal)  Item 12 label A: the foreign-source portion of the above discounts (a memo already within them; surfaced by the tax summary for the FITO calc, not added on top)
+├── tfn_withholding             TEXT (decimal)  Item 12 label C: TFN amounts withheld from the discounts; folded into the tax summary's TFN line
+└── currency                    TEXT FK→currencies.code   ISO 4217; tax summary converts to AUD by taxing_point_date month (default AUD)
+                             The assessable discount (D+E+F+G − the applied $1,000 reduction) reaches the tax summary; the vest Buy is created by POST /ess_statements/:id/vest (entities::ess_vest)
 
 parcel_allocations           Links sell parcels to the purchase parcels they consume
 ├── id                   INTEGER PK
@@ -239,9 +256,11 @@ exchanges ──< listings ──< trades >────────────�
                        listings ──< drp_enrolments
                        listings ──< corporate_actions
                        listings ──< transfers
-                       holding_accounts ──< trades, income, amma_statements, drp_enrolments
+                       listings ──< ess_statements
+                       holding_accounts ──< trades, income, amma_statements, drp_enrolments, ess_statements
                        holding_accounts ──< transfers (from_account_id + to_account_id)
                        transfers ──< trades (transfer_id)
+                       ess_statements ──< trades (ess_statement_id; the cost-base-reset vest Buy)
                        trades (DRP) ──< income (reinvestment_trade_id)
                        corporate_actions (RightsIssue) ──< trades (rights_action_id)
                        corporate_actions (BuyBack) ──< trades (buyback_action_id)
@@ -255,7 +274,7 @@ exchanges ──< listings ──< trades >────────────�
                        trades, parcel_allocations, income, amma_statements, amit_adjustments,
                        corporate_actions, closing_prices ──> report_snapshots.stale (staleness triggers)
 
-currencies ──< exchanges, listings, trades (currency + brokerage_currency), income, amma_statements, corporate_actions
+currencies ──< exchanges, listings, trades (currency + brokerage_currency), income, amma_statements, corporate_actions, ess_statements
 ```
 
 Each `attachments` row belongs to exactly one activity via one of three nullable foreign keys (`trade_id` / `income_id` / `amma_statement_id`), with a `CHECK` enforcing that exactly one is set — a real foreign key keeps referential integrity to the owning row, and `ON DELETE CASCADE` removes an activity's attachments when it is deleted. File contents live in the `content` BLOB so the weekly DB backup captures the documents with no separate file store.
@@ -266,7 +285,7 @@ Each `attachments` row belongs to exactly one activity via one of three nullable
 
 `mic_registry` is standalone reference data (no foreign keys), keyed by `mic`. It is populated from the ISO 10383 list and used only to validate curated `exchanges` (see the [exchange MIC validation report](API.md#exchange-mic-validation)); it is *not* the operational exchange table and carries no currency/timezone/settlement data.
 
-`currencies` is reference data keyed by `code` (it has no outgoing foreign keys). It is populated from the ISO 4217 (SIX Group) and ISO 24165 (DTIF) feeds and seeded with a baseline of common currencies (the seed migration), and is the recognised list that **every** currency code in the model is foreign-keyed to: `exchanges.currency`, `listings.currency`, `trades.currency`, `trades.brokerage_currency`, `income.currency`, `amma_statements.currency`, and `corporate_actions.currency` all reference `currencies.code`, so an unrecognised currency is rejected at write time. `minor_units` is informational only — stored amounts remain arbitrary-precision Decimal and are never rounded to it. A Crypto listing's ticker is additionally validated against the `DigitalToken` rows at write time (matched on `code` or `short_name`).
+`currencies` is reference data keyed by `code` (it has no outgoing foreign keys). It is populated from the ISO 4217 (SIX Group) and ISO 24165 (DTIF) feeds and seeded with a baseline of common currencies (the seed migration), and is the recognised list that **every** currency code in the model is foreign-keyed to: `exchanges.currency`, `listings.currency`, `trades.currency`, `trades.brokerage_currency`, `income.currency`, `amma_statements.currency`, `corporate_actions.currency`, and `ess_statements.currency` all reference `currencies.code`, so an unrecognised currency is rejected at write time. `minor_units` is informational only — stored amounts remain arbitrary-precision Decimal and are never rounded to it. A Crypto listing's ticker is additionally validated against the `DigitalToken` rows at write time (matched on `code` or `short_name`).
 
 `listings.exchange_mic` is nullable for exactly the Crypto security type (CHECK-enforced both ways): a crypto asset trades on no MIC-coded venue, settles same-day, and has no holiday calendar. Because `UNIQUE(exchange_mic, ticker)` treats NULLs as distinct, a partial unique index makes exchange-less listings unique by ticker.
 
