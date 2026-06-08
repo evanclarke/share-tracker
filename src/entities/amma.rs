@@ -5,6 +5,7 @@ use axum::{
     routing::get,
 };
 use chrono::NaiveDate;
+use crate::infra::decimal::row_dec;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
@@ -56,31 +57,28 @@ pub struct AmmaStatement {
 
 impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for AmmaStatement {
     fn from_row(row: &'r sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
-        fn dec(s: String) -> Result<Decimal, sqlx::Error> {
-            s.parse().map_err(|e: rust_decimal::Error| sqlx::Error::Decode(Box::new(e)))
-        }
         Ok(AmmaStatement {
             id: row.try_get("id")?,
             listing_id: row.try_get("listing_id")?,
             tax_year_end_date: row.try_get("tax_year_end_date")?,
-            units_held: dec(row.try_get("units_held")?)?,
+            units_held: row_dec(row, "units_held")?,
             date_received: row.try_get("date_received")?,
-            australian_interest: dec(row.try_get("australian_interest")?)?,
-            australian_dividends_unfranked: dec(row.try_get("australian_dividends_unfranked")?)?,
-            franked_dividends: dec(row.try_get("franked_dividends")?)?,
-            franking_credits: dec(row.try_get("franking_credits")?)?,
-            net_rent: dec(row.try_get("net_rent")?)?,
-            foreign_income: dec(row.try_get("foreign_income")?)?,
-            foreign_tax_credits: dec(row.try_get("foreign_tax_credits")?)?,
-            other_income: dec(row.try_get("other_income")?)?,
-            cgt_discount_gains: dec(row.try_get("cgt_discount_gains")?)?,
-            cgt_indexation_gains: dec(row.try_get("cgt_indexation_gains")?)?,
-            cgt_other_gains: dec(row.try_get("cgt_other_gains")?)?,
-            capital_losses_applied: dec(row.try_get("capital_losses_applied")?)?,
-            tax_deferred_amount: dec(row.try_get("tax_deferred_amount")?)?,
-            tax_free_amount: dec(row.try_get("tax_free_amount")?)?,
-            cost_base_adjustment: dec(row.try_get("cost_base_adjustment")?)?,
-            tfn_withholding_tax: dec(row.try_get("tfn_withholding_tax")?)?,
+            australian_interest: row_dec(row, "australian_interest")?,
+            australian_dividends_unfranked: row_dec(row, "australian_dividends_unfranked")?,
+            franked_dividends: row_dec(row, "franked_dividends")?,
+            franking_credits: row_dec(row, "franking_credits")?,
+            net_rent: row_dec(row, "net_rent")?,
+            foreign_income: row_dec(row, "foreign_income")?,
+            foreign_tax_credits: row_dec(row, "foreign_tax_credits")?,
+            other_income: row_dec(row, "other_income")?,
+            cgt_discount_gains: row_dec(row, "cgt_discount_gains")?,
+            cgt_indexation_gains: row_dec(row, "cgt_indexation_gains")?,
+            cgt_other_gains: row_dec(row, "cgt_other_gains")?,
+            capital_losses_applied: row_dec(row, "capital_losses_applied")?,
+            tax_deferred_amount: row_dec(row, "tax_deferred_amount")?,
+            tax_free_amount: row_dec(row, "tax_free_amount")?,
+            cost_base_adjustment: row_dec(row, "cost_base_adjustment")?,
+            tfn_withholding_tax: row_dec(row, "tfn_withholding_tax")?,
             currency: row.try_get("currency")?,
             holding_account_id: row.try_get("holding_account_id")?,
         })

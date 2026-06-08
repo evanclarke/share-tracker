@@ -5,7 +5,7 @@ use axum::{
     routing::get,
 };
 use chrono::{Datelike, NaiveDate};
-use crate::infra::decimal::parse_dec;
+use crate::infra::decimal::{parse_dec, row_dec, row_opt_dec};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
@@ -145,31 +145,25 @@ pub struct Trade {
 
 impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for Trade {
     fn from_row(row: &'r sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
-        fn dec(s: String) -> Result<Decimal, sqlx::Error> {
-            s.parse().map_err(|e: rust_decimal::Error| sqlx::Error::Decode(Box::new(e)))
-        }
         Ok(Trade {
             id: row.try_get("id")?,
             trade_type: row.try_get::<TradeType, _>("trade_type")?,
             date: row.try_get("date")?,
             settlement_date: row.try_get("settlement_date")?,
             listing_id: row.try_get("listing_id")?,
-            average_price: dec(row.try_get("average_price")?)?,
-            quantity: dec(row.try_get("quantity")?)?,
+            average_price: row_dec(row, "average_price")?,
+            quantity: row_dec(row, "quantity")?,
             currency: row.try_get("currency")?,
-            brokerage: dec(row.try_get("brokerage")?)?,
-            gst_on_brokerage: dec(row.try_get("gst_on_brokerage")?)?,
+            brokerage: row_dec(row, "brokerage")?,
+            gst_on_brokerage: row_dec(row, "gst_on_brokerage")?,
             brokerage_includes_gst: row.try_get("brokerage_includes_gst")?,
             brokerage_currency: row.try_get("brokerage_currency")?,
-            fx_rate: dec(row.try_get("fx_rate")?)?,
+            fx_rate: row_dec(row, "fx_rate")?,
             contract_note_ref: row.try_get("contract_note_ref")?,
-            statement_total: row
-                .try_get::<Option<String>, _>("statement_total")?
-                .map(dec)
-                .transpose()?,
-            residual_brought_forward: dec(row.try_get("residual_brought_forward")?)?,
-            residual_carried_forward: dec(row.try_get("residual_carried_forward")?)?,
-            residual_paid_out: dec(row.try_get("residual_paid_out")?)?,
+            statement_total: row_opt_dec(row, "statement_total")?,
+            residual_brought_forward: row_dec(row, "residual_brought_forward")?,
+            residual_carried_forward: row_dec(row, "residual_carried_forward")?,
+            residual_paid_out: row_dec(row, "residual_paid_out")?,
             rights_action_id: row.try_get("rights_action_id")?,
             buyback_action_id: row.try_get("buyback_action_id")?,
             scrip_action_id: row.try_get("scrip_action_id")?,

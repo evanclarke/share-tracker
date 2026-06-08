@@ -22,6 +22,7 @@ use axum::{
     routing::get,
 };
 use chrono::NaiveDate;
+use crate::infra::decimal::{row_dec, row_opt_dec};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
@@ -72,19 +73,13 @@ pub struct InvestmentExpense {
 
 impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for InvestmentExpense {
     fn from_row(row: &'r sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
-        fn dec(s: String) -> Result<Decimal, sqlx::Error> {
-            s.parse().map_err(|e: rust_decimal::Error| sqlx::Error::Decode(Box::new(e)))
-        }
-        fn opt_dec(s: Option<String>) -> Result<Option<Decimal>, sqlx::Error> {
-            s.map(dec).transpose()
-        }
         Ok(InvestmentExpense {
             id: row.try_get("id")?,
             date_incurred: row.try_get("date_incurred")?,
             expense_type: row.try_get("expense_type")?,
-            amount: dec(row.try_get("amount")?)?,
-            gross_amount: opt_dec(row.try_get("gross_amount")?)?,
-            deductible_percentage: opt_dec(row.try_get("deductible_percentage")?)?,
+            amount: row_dec(row, "amount")?,
+            gross_amount: row_opt_dec(row, "gross_amount")?,
+            deductible_percentage: row_opt_dec(row, "deductible_percentage")?,
             currency: row.try_get("currency")?,
             description: row.try_get("description")?,
             listing_id: row.try_get("listing_id")?,

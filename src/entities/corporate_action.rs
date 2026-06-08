@@ -121,7 +121,7 @@
 //! `ActionKind` is the extension point for future corporate actions, each
 //! widening the enum and its CHECK.
 
-use crate::infra::decimal::parse_dec;
+use crate::infra::decimal::{parse_dec, row_dec, row_opt_dec};
 use crate::infra::http::write_error_body;
 use axum::{
     Json, Router,
@@ -290,58 +290,43 @@ pub struct CorporateAction {
     pub kind: ActionKind,
 }
 
-/// A required `TEXT` decimal column: NULL or an unparsable value is a Decode
-/// error — the table CHECKs guarantee the column is set for the row's type.
-fn req_dec(row: &sqlx::sqlite::SqliteRow, column: &str) -> Result<Decimal, sqlx::Error> {
-    parse_dec(column, row.try_get(column)?)
-}
-
-/// An optional `TEXT` decimal column: NULL is `None`, an unparsable value is
-/// a Decode error.
-fn opt_dec(row: &sqlx::sqlite::SqliteRow, column: &str) -> Result<Option<Decimal>, sqlx::Error> {
-    match row.try_get::<Option<String>, _>(column)? {
-        Some(s) => parse_dec(column, s).map(Some),
-        None => Ok(None),
-    }
-}
-
 fn kind_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<ActionKind, sqlx::Error> {
     match row.try_get::<String, _>("action_type")?.as_str() {
         "ReturnOfCapital" => Ok(ActionKind::ReturnOfCapital {
-            amount_per_unit: req_dec(row, "amount_per_unit")?,
+            amount_per_unit: row_dec(row, "amount_per_unit")?,
             currency: row.try_get("currency")?,
         }),
         "ShareSplit" => Ok(ActionKind::ShareSplit {
-            split_new_units: req_dec(row, "split_new_units")?,
-            split_old_units: req_dec(row, "split_old_units")?,
+            split_new_units: row_dec(row, "split_new_units")?,
+            split_old_units: row_dec(row, "split_old_units")?,
         }),
         "BonusIssue" => Ok(ActionKind::BonusIssue {
-            bonus_units: req_dec(row, "bonus_units")?,
-            bonus_held_units: req_dec(row, "bonus_held_units")?,
+            bonus_units: row_dec(row, "bonus_units")?,
+            bonus_held_units: row_dec(row, "bonus_held_units")?,
         }),
         "RightsIssue" => Ok(ActionKind::RightsIssue {
-            rights_units: req_dec(row, "rights_units")?,
-            rights_held_units: req_dec(row, "rights_held_units")?,
-            exercise_price: req_dec(row, "exercise_price")?,
+            rights_units: row_dec(row, "rights_units")?,
+            rights_held_units: row_dec(row, "rights_held_units")?,
+            exercise_price: row_dec(row, "exercise_price")?,
             currency: row.try_get("currency")?,
         }),
         "BuyBack" => Ok(ActionKind::BuyBack {
-            buyback_price: req_dec(row, "buyback_price")?,
-            buyback_dividend: req_dec(row, "buyback_dividend")?,
-            buyback_franking_credit: req_dec(row, "buyback_franking_credit")?,
-            buyback_market_value: opt_dec(row, "buyback_market_value")?,
+            buyback_price: row_dec(row, "buyback_price")?,
+            buyback_dividend: row_dec(row, "buyback_dividend")?,
+            buyback_franking_credit: row_dec(row, "buyback_franking_credit")?,
+            buyback_market_value: row_opt_dec(row, "buyback_market_value")?,
             currency: row.try_get("currency")?,
         }),
         "ScripForScrip" => Ok(ActionKind::ScripForScrip {
             scrip_listing_id: row.try_get("scrip_listing_id")?,
-            scrip_new_units: req_dec(row, "scrip_new_units")?,
-            scrip_old_units: req_dec(row, "scrip_old_units")?,
+            scrip_new_units: row_dec(row, "scrip_new_units")?,
+            scrip_old_units: row_dec(row, "scrip_old_units")?,
         }),
         "Demerger" => Ok(ActionKind::Demerger {
             demerger_listing_id: row.try_get("demerger_listing_id")?,
-            demerger_new_units: req_dec(row, "demerger_new_units")?,
-            demerger_held_units: req_dec(row, "demerger_held_units")?,
-            demerger_cost_base_pct: req_dec(row, "demerger_cost_base_pct")?,
+            demerger_new_units: row_dec(row, "demerger_new_units")?,
+            demerger_held_units: row_dec(row, "demerger_held_units")?,
+            demerger_cost_base_pct: row_dec(row, "demerger_cost_base_pct")?,
         }),
         "WorthlessShares" => Ok(ActionKind::WorthlessShares {
             worthless_event: WorthlessEvent::from_str(row.try_get("worthless_event")?)?,

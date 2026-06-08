@@ -24,6 +24,7 @@ use axum::{
     routing::get,
 };
 use chrono::NaiveDate;
+use crate::infra::decimal::row_dec;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
@@ -66,22 +67,19 @@ pub struct EssStatement {
 
 impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for EssStatement {
     fn from_row(row: &'r sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
-        fn dec(s: String) -> Result<Decimal, sqlx::Error> {
-            s.parse().map_err(|e: rust_decimal::Error| sqlx::Error::Decode(Box::new(e)))
-        }
         Ok(EssStatement {
             id: row.try_get("id")?,
             listing_id: row.try_get("listing_id")?,
             holding_account_id: row.try_get("holding_account_id")?,
             taxing_point_date: row.try_get("taxing_point_date")?,
-            quantity: dec(row.try_get("quantity")?)?,
-            market_value_per_share: dec(row.try_get("market_value_per_share")?)?,
-            taxed_upfront_eligible: dec(row.try_get("taxed_upfront_eligible")?)?,
-            taxed_upfront_not_eligible: dec(row.try_get("taxed_upfront_not_eligible")?)?,
-            deferral_discount: dec(row.try_get("deferral_discount")?)?,
-            pre_2009_cessation_discount: dec(row.try_get("pre_2009_cessation_discount")?)?,
-            foreign_source_discount: dec(row.try_get("foreign_source_discount")?)?,
-            tfn_withholding: dec(row.try_get("tfn_withholding")?)?,
+            quantity: row_dec(row, "quantity")?,
+            market_value_per_share: row_dec(row, "market_value_per_share")?,
+            taxed_upfront_eligible: row_dec(row, "taxed_upfront_eligible")?,
+            taxed_upfront_not_eligible: row_dec(row, "taxed_upfront_not_eligible")?,
+            deferral_discount: row_dec(row, "deferral_discount")?,
+            pre_2009_cessation_discount: row_dec(row, "pre_2009_cessation_discount")?,
+            foreign_source_discount: row_dec(row, "foreign_source_discount")?,
+            tfn_withholding: row_dec(row, "tfn_withholding")?,
             currency: row.try_get("currency")?,
         })
     }

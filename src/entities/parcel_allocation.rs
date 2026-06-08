@@ -4,6 +4,7 @@ use axum::{
     http::StatusCode,
     routing::get,
 };
+use crate::infra::decimal::row_dec;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
@@ -18,14 +19,11 @@ pub struct ParcelAllocation {
 
 impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for ParcelAllocation {
     fn from_row(row: &'r sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
-        fn dec(s: String) -> Result<Decimal, sqlx::Error> {
-            s.parse().map_err(|e: rust_decimal::Error| sqlx::Error::Decode(Box::new(e)))
-        }
         Ok(ParcelAllocation {
             id: row.try_get("id")?,
             sale_trade_id: row.try_get("sale_trade_id")?,
             purchase_trade_id: row.try_get("purchase_trade_id")?,
-            quantity_allocated: dec(row.try_get("quantity_allocated")?)?,
+            quantity_allocated: row_dec(row, "quantity_allocated")?,
         })
     }
 }

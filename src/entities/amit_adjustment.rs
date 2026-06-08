@@ -4,7 +4,7 @@ use axum::{
     http::StatusCode,
     routing::get,
 };
-use crate::infra::decimal::parse_dec;
+use crate::infra::decimal::{parse_dec, row_dec};
 use crate::infra::http::write_error_body;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -26,14 +26,11 @@ pub struct AmitAdjustment {
 
 impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for AmitAdjustment {
     fn from_row(row: &'r sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
-        fn dec(s: String) -> Result<Decimal, sqlx::Error> {
-            s.parse().map_err(|e: rust_decimal::Error| sqlx::Error::Decode(Box::new(e)))
-        }
         Ok(AmitAdjustment {
             id: row.try_get("id")?,
             amma_statement_id: row.try_get("amma_statement_id")?,
             trade_id: row.try_get("trade_id")?,
-            quantity: dec(row.try_get("quantity")?)?,
+            quantity: row_dec(row, "quantity")?,
         })
     }
 }

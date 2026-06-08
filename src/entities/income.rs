@@ -5,6 +5,7 @@ use axum::{
     routing::get,
 };
 use chrono::NaiveDate;
+use crate::infra::decimal::{row_dec, row_opt_dec};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
@@ -53,32 +54,26 @@ pub struct Income {
 
 impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for Income {
     fn from_row(row: &'r sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
-        fn dec(s: String) -> Result<Decimal, sqlx::Error> {
-            s.parse().map_err(|e: rust_decimal::Error| sqlx::Error::Decode(Box::new(e)))
-        }
-        fn opt_dec(s: Option<String>) -> Result<Option<Decimal>, sqlx::Error> {
-            s.map(dec).transpose()
-        }
         Ok(Income {
             id: row.try_get("id")?,
             listing_id: row.try_get("listing_id")?,
             date_paid: row.try_get("date_paid")?,
             ex_date: row.try_get("ex_date")?,
-            franked_amount: dec(row.try_get("franked_amount")?)?,
-            unfranked_amount: dec(row.try_get("unfranked_amount")?)?,
-            foreign_source_income: dec(row.try_get("foreign_source_income")?)?,
-            foreign_tax_paid: dec(row.try_get("foreign_tax_paid")?)?,
-            tfn_withholding_tax: dec(row.try_get("tfn_withholding_tax")?)?,
-            franking_credits: dec(row.try_get("franking_credits")?)?,
-            lic_capital_gain_deduction: dec(row.try_get("lic_capital_gain_deduction")?)?,
-            conduit_foreign_income: dec(row.try_get("conduit_foreign_income")?)?,
+            franked_amount: row_dec(row, "franked_amount")?,
+            unfranked_amount: row_dec(row, "unfranked_amount")?,
+            foreign_source_income: row_dec(row, "foreign_source_income")?,
+            foreign_tax_paid: row_dec(row, "foreign_tax_paid")?,
+            tfn_withholding_tax: row_dec(row, "tfn_withholding_tax")?,
+            franking_credits: row_dec(row, "franking_credits")?,
+            lic_capital_gain_deduction: row_dec(row, "lic_capital_gain_deduction")?,
+            conduit_foreign_income: row_dec(row, "conduit_foreign_income")?,
             trust_income: row.try_get("trust_income")?,
             reinvestment_trade_id: row.try_get("reinvestment_trade_id")?,
             currency: row.try_get("currency")?,
             buyback_trade_id: row.try_get("buyback_trade_id")?,
             holding_account_id: row.try_get("holding_account_id")?,
-            amount_per_security: opt_dec(row.try_get("amount_per_security")?)?,
-            securities_held: opt_dec(row.try_get("securities_held")?)?,
+            amount_per_security: row_opt_dec(row, "amount_per_security")?,
+            securities_held: row_opt_dec(row, "securities_held")?,
         })
     }
 }
