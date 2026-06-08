@@ -661,6 +661,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tables_are_paginated() {
+        let js = app_js_body().await;
+        // Pagination lives in the shared filterableTable, so every entity list
+        // and report table inherits it: a 50-row default page with a prev/next
+        // pager + "showing m–n of total" count, only one page in the DOM at once.
+        assert!(js.contains("const PAGE_SIZE = 50"));
+        assert!(js.contains("function updatePager("));
+        assert!(js.contains("showing "));
+        assert!(js.contains("‹ Prev"));
+        assert!(js.contains("Next ›"));
+        // Filtering/sorting build the whole result set (visibleRows); only the
+        // current page's slice is put in the DOM.
+        assert!(js.contains("vr.slice(start, start + PAGE_SIZE)"));
+        assert!(js.contains("pageRows.forEach"));
+        // A changed filter re-pages from the first page; the pager hides when
+        // the filtered total fits one page.
+        assert!(js.contains("page = 0; // a changed filter re-pages"));
+        assert!(js.contains("if (total <= PAGE_SIZE) { pager.hidden = true"));
+        // The pager styling ships in the bundle too.
+        let css = body_string(get("/static/style.css").await).await;
+        assert!(css.contains(".pager"));
+        assert!(css.contains(".pager-info"));
+    }
+
+    #[tokio::test]
     async fn column_headings_are_human_friendly() {
         let js = app_js_body().await;
         // Every table column header and filter placeholder reads through the

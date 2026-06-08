@@ -97,6 +97,12 @@ th.sortable:hover { background: #e7eaef; }
 .filter-row th { position: static; background: #f7f9fc; padding: 4px 6px; font-weight: 400; }
 .table-filter { width: 100%; box-sizing: border-box; padding: 3px 6px; font-size: 12px; }
 
+/* Client-side pager beneath a table; hidden when the result set fits one page. */
+.pager { display: flex; align-items: center; gap: 12px; margin-top: 10px; }
+.pager[hidden] { display: none; }
+.pager-info { color: var(--muted); font-size: 12px; }
+.pager button[disabled] { opacity: 0.5; cursor: default; }
+
 .card {
   background: var(--panel);
   border: 1px solid var(--line);

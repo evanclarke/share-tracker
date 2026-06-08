@@ -840,16 +840,24 @@
   }
 
   // ---- generic table ----------------------------------------------------
+  // Default page size: tables with this many rows or fewer show no pager; a
+  // larger filtered result set is paged so only one page is in the DOM at once.
+  const PAGE_SIZE = 50;
+
   // Every data table in the app — entity lists, the Sells list, and report
-  // tables — goes through this one renderer so they are uniformly filterable
-  // and sortable. Each column has its own filter input (substring match on that
-  // column's text); the filters AND together, so you can e.g. filter currency
-  // to "USD" and date to "2024" at once. Click a column header to sort it
-  // (toggling ascending/descending). `opts.actions`, if given, renders a
-  // trailing non-sortable, non-filtered Actions cell per row; `opts.statusField`
-  // renders that column as a status badge; `opts.labels` ({col: {id → label}},
-  // from fkLabelMaps) shows the label instead of the raw foreign-key id —
-  // filtering and sorting follow the label, and the id moves to the tooltip.
+  // tables — goes through this one renderer so they are uniformly filterable,
+  // sortable, and paginated. Each column has its own filter input (substring
+  // match on that column's text); the filters AND together, so you can e.g.
+  // filter currency to "USD" and date to "2024" at once. Click a column header
+  // to sort it (toggling ascending/descending). Filtering and sorting apply to
+  // the whole result set; only the current page's slice (PAGE_SIZE rows) is put
+  // in the DOM, with a prev/next pager + "showing m–n of total" count that
+  // appears only when the filtered total exceeds one page. `opts.actions`, if
+  // given, renders a trailing non-sortable, non-filtered Actions cell per row;
+  // `opts.statusField` renders that column as a status badge; `opts.labels`
+  // ({col: {id → label}}, from fkLabelMaps) shows the label instead of the raw
+  // foreign-key id — filtering and sorting follow the label, and the id moves to
+  // the tooltip.
   function filterableTable(rows, cols, opts) {
     opts = opts || {};
     const statusField = opts.statusField;
@@ -875,6 +883,7 @@
     let sortCol = null;
     let sortDir = 1; // 1 = ascending, -1 = descending
     const filters = {}; // column → lowercased substring; absent/empty = no filter
+    let page = 0; // zero-based current page within the filtered/sorted result set
 
     const container = el('div');
 
@@ -903,6 +912,7 @@
         oninput: function () {
           const v = this.value.trim().toLowerCase();
           if (v === '') delete filters[c]; else filters[c] = v;
+          page = 0; // a changed filter re-pages from the first page
           renderBody();
         },
       });
@@ -917,6 +927,20 @@
     ]);
     container.appendChild(el('table', null, [thead, tbody]));
 
+    // Pager: a "showing m–n of total" count flanked by prev/next. Hidden when
+    // the filtered total fits one page; updatePager toggles it per render.
+    const pagerInfo = el('span', { class: 'pager-info' });
+    const prevBtn = el('button', {
+      type: 'button', class: 'small', onclick: function () { if (page > 0) { page--; renderBody(); } },
+    }, '‹ Prev');
+    const nextBtn = el('button', {
+      type: 'button', class: 'small', onclick: function () { page++; renderBody(); },
+    }, 'Next ›');
+    const pager = el('div', { class: 'pager', hidden: true }, [prevBtn, pagerInfo, nextBtn]);
+    container.appendChild(pager);
+
+    // The whole filtered/sorted result set, paged only at render time so the
+    // count and sort order always reflect the full set, never the visible page.
     function visibleRows() {
       let out = rows;
       const active = Object.keys(filters);
@@ -937,6 +961,16 @@
       return out;
     }
 
+    // Show the pager (and set its count) only when the filtered total spills
+    // past one page; `start` is the zero-based index of the first shown row.
+    function updatePager(total, start, shown) {
+      if (total <= PAGE_SIZE) { pager.hidden = true; return; }
+      pager.hidden = false;
+      pagerInfo.textContent = 'showing ' + (start + 1) + '–' + (start + shown) + ' of ' + total;
+      prevBtn.disabled = start === 0;
+      nextBtn.disabled = start + shown >= total;
+    }
+
     function renderBody() {
       tbody.innerHTML = '';
       const vr = visibleRows();
@@ -945,9 +979,18 @@
         const filtered = Object.keys(filters).length > 0;
         tbody.appendChild(el('tr', null, el('td', { colspan: span, class: 'empty' },
           filtered ? 'No matching records.' : 'No records.')));
+        updatePager(0, 0, 0);
         return;
       }
-      vr.forEach(function (row) {
+      // Clamp the page into range (e.g. after filtering shrinks the result set),
+      // then put only that page's slice in the DOM.
+      const lastPage = Math.ceil(vr.length / PAGE_SIZE) - 1;
+      if (page > lastPage) page = lastPage;
+      if (page < 0) page = 0;
+      const start = page * PAGE_SIZE;
+      const pageRows = vr.slice(start, start + PAGE_SIZE);
+      updatePager(vr.length, start, pageRows.length);
+      pageRows.forEach(function (row) {
         const tds = cols.map(function (c) {
           const v = row[c];
           if (statusField && c === statusField) {
