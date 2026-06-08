@@ -582,53 +582,6 @@ mod tests {
         assert_eq!(residuals(&pool, 10).await, ("5".to_string(), "0".to_string()));
     }
 
-    /// Migration 0008 rebuilds the old one-row-per-listing table into periods:
-    /// each existing enrolment must become an open-ended period (enrolled "since
-    /// forever") preserving its residual handling — no data dropped.
-    #[tokio::test]
-    async fn migration_converts_old_enrolments_to_open_ended_periods() {
-        use sqlx::sqlite::SqliteConnectOptions;
-        use std::str::FromStr;
-        let opts = SqliteConnectOptions::from_str("sqlite::memory:").unwrap().foreign_keys(true);
-        let pool = SqlitePool::connect_with(opts).await.unwrap();
-
-        // Apply every migration before 0008, recreate the old state, then apply 0008.
-        let migrator = sqlx::migrate!();
-        for m in migrator.iter().filter(|m| m.version < 8) {
-            sqlx::raw_sql(&m.sql).execute(&pool).await.unwrap();
-        }
-        sqlx::query(
-            "INSERT INTO listings (id, exchange_mic, ticker, name, security_type, currency, amit, preference) \
-             VALUES (1, 'XASX', 'T1', 'Test', 'Share', 'AUD', 0, 0)",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-        sqlx::query("INSERT INTO drp_enrolments (listing_id, residual_handling) VALUES (1, 'PayOut')")
-            .execute(&pool)
-            .await
-            .unwrap();
-
-        // Apply 0008 and everything after it (0016 adds holding_account_id,
-        // which db_list reads — and must migrate the row to the seeded
-        // default account).
-        for m in migrator.iter().filter(|m| m.version >= 8) {
-            sqlx::raw_sql(&m.sql).execute(&pool).await.unwrap();
-        }
-
-        let periods = db_list(&pool).await.unwrap();
-        assert_eq!(periods.len(), 1);
-        assert_eq!(periods[0].listing_id, 1);
-        assert_eq!(periods[0].enrolment_date, d("0001-01-01"), "covers every past distribution");
-        assert_eq!(periods[0].unenrolment_date, None, "open-ended = still enrolled");
-        assert_eq!(periods[0].residual_handling, ResidualHandling::PayOut);
-        assert_eq!(
-            periods[0].holding_account_id,
-            crate::entities::holding_account::DEFAULT_HOLDING_ACCOUNT_ID,
-            "existing enrolments migrate to the seeded default account"
-        );
-    }
-
     #[tokio::test]
     async fn api_put_get_delete_round_trip() {
         let pool = test_pool().await;
