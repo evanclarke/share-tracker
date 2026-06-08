@@ -14,6 +14,11 @@ participation, ESS income). The full historical requirement text and each item's
 preserved in git history and in `TODO.md`'s entries. Ongoing engineering rules (Decimal-only money,
 non-destructive migrations, enum constraints, write-time invariants, …) live in `CLAUDE.md`.
 
+The three sections dated 2026-06-08 at the end (worthless / delisted shares — CGT events G3 and C2;
+deductible investment expenses; employee share scheme (ESS) income) are **newly specified and not
+yet implemented** — they have not been folded into `TODO.md`. The ESS-income section supersedes the
+existing "ESS income reporting is out of scope" Known limitation.
+
 # New Requirements
 
 New requirements are written below and then folded into `TODO.md`.
@@ -369,3 +374,170 @@ the full array and the web layer pages through it.
   size. If result sets later outgrow a client-side fetch, server paging becomes a follow-up
 - Tested by asserting the paging controls and behaviour are present in the served bundle and that
   filtering still reflects the full set (per the served-bundle UI test approach)
+
+## Worthless / delisted shares — capital loss on a company in liquidation (CGT events G3 and C2) (2026-06-08)
+
+A company an individual holds can fail: it goes into liquidation or administration, or is
+deregistered, often with no disposal a broker can settle (the shares are suspended/delisted and
+worthless). The ATO lets the holder recognise the capital loss without an ordinary sale, but today
+the dead parcel sits as an open holding forever and the real, deductible capital loss never reaches
+the realised-gains or net-capital-gain reports. This requirement lets that loss be recorded. It is
+a **capital loss** (never income, never discounted), so once recognised it flows through the
+existing loss-netting order and indefinite carry-forward unchanged.
+
+- The mechanism — two ATO events, modelled as a new corporate action against the listing (the
+  natural extension point: the `corporate_actions` `action_type` enum):
+  - **CGT event G3** (s104-145; TD 2000/52): the liquidator or administrator declares **in
+    writing** that they have reasonable grounds to believe there is no likelihood shareholders
+    will receive any further distribution. The holder may **choose** (it is opt-in) to make a
+    capital loss equal to the **reduced cost base** of the shares at the declaration date. The
+    shares are not cancelled — but on making the choice their cost base and reduced cost base are
+    reset to nil, so a later actual cancellation cannot double-count the loss (and any later
+    distribution becomes a capital gain)
+  - **CGT event C2** (s104-25; TD 2000/7): the shares are actually cancelled/redeemed or the
+    company is deregistered — an ordinary disposal at the capital proceeds (usually nil), so the
+    capital loss is the reduced cost base if not already crystallised under G3
+  - The action records the listing, the event date, and which event it is (a `G3Declaration` vs a
+    `C2Cancellation` subtype, or one type with an event-kind field). Recording it is itself the
+    G3 opt-in choice
+- The operation closes every open parcel of the listing held at the event date through a
+  provenance-marked Sell at **nil proceeds** (reusing the shared sell core and the
+  closing-Sell/group mechanics already built for scrip-for-scrip and demergers) — but, unlike a
+  rollover, the loss **is** recognised: each parcel produces a capital loss equal to its remaining
+  reduced cost base (cost base after any AMIT/return-of-capital reductions), reaching the
+  realised-gains report (as a `capital_loss`) and the net-capital-gain report's loss pool. Because
+  the project captures only cost-base elements 1–2, the reduced cost base equals the cost base (the
+  existing Known limitation), so the loss is the remaining cost base
+- A capital loss is never discounted, so there is no discount-eligibility/12-month concern; the
+  acquisition date is irrelevant to the loss amount
+- Write-time integrity, mirroring the existing group operations: the closing Sells are immutable
+  individually (PUT/DELETE on a group trade → 422), deleting the operation restores the pre-event
+  holding, the action is frozen while referenced, and the operation rejects (422) a wrong action
+  type, an already-recognised action, or nothing held at the event date
+- ATO documentation: mirror the G3/C2 worthless-shares guidance into `docs/ato/` (the
+  "Investments in a company in liquidation or administration" page + TD 2000/52 and TD 2000/7;
+  source URL + retrieval date, indexed in `OVERVIEW.md`); add an `ato_examples.rs` acceptance test
+  for any worked example the feature makes representable
+- Web UI: the action and its operation render through the existing config-driven Corporate Actions
+  view + `ACTIONS` descriptor — no bespoke screen
+- Docs: a new corporate-action type updates `docs/SCHEMA.md` (columns + CHECKs) and `docs/API.md`
+  (the action, the operation endpoint, the 201/404/422 cases); the user-visible capital-loss
+  recognition updates the README Features list
+
+Out of scope (record as Known limitations):
+- **The choice *not* to crystallise a G3 loss** — recording the action is the opt-in; a holder who
+  does not record it simply keeps the parcel open (no modelling needed)
+- **Declarations limited to a class of shares** — handled at the listing granularity; a per-class
+  partial declaration is not separately modelled
+- **Pre-CGT original shares** — consistent with the other corporate actions
+- **An unexpected later distribution after a G3 choice** (reduced cost base already reset to nil →
+  the whole distribution is a capital gain) — entered manually as a return-of-capital/G1 if it
+  arises
+
+## Deductible investment expenses (2026-06-08)
+
+The tax summary today reports **gross** assessable investment income with no deductions side, so it
+overstates the net assessable position. An individual share investor can deduct the expenses
+incurred in earning that income — most materially **interest on money borrowed to buy income-
+producing shares** (margin/investment loans), plus ongoing management and adviser fees, account-
+keeping fees on investment accounts, and specialist investment subscriptions/data services. This
+requirement adds a place to record those deductions and nets them in the tax summary.
+
+- A new entity (`investment_expenses`): id, date incurred, an expense-type enum
+  (`LoanInterest`, `ManagementFee`, `AdviceFee`, `AccountKeepingFee`, `Subscription`, `Other`),
+  amount (Decimal), `currency` (AUD default; non-AUD converted to AUD via the existing ATO-rate
+  rules at the month incurred, like income), a free-text description, and optional attribution to a
+  `listing_id` and/or `holding_account_id` (an expense may be portfolio-wide — both null)
+- Apportionment for part-private use (e.g. internet): the **deductible amount** is what is stored
+  and totalled (post-apportionment, the figure that goes on the return); the gross amount and the
+  deductible percentage may be stored alongside for provenance, but the tool does not itself rule
+  on the correct apportionment — that is the user's determination (consistent with how it treats
+  the FITO income test)
+- The tax summary gains a deductions side per Australian financial year: a total by expense type
+  and overall, and a **net assessable investment income** figure (existing gross income totals
+  minus the deductions), without removing the gross figures. AUD throughout, per the existing
+  never-mix-currencies rule. This is distinct from, and additional to, the existing LIC capital
+  gain deduction (a different statutory mechanism, kept as-is)
+- The tax-return CSV export carries the new deduction columns and the net figure
+- ATO documentation: mirror the "Interest, dividend and other investment income deductions" and
+  "Dividend income deductions" guidance into `docs/ato/` (source URL + retrieval date, indexed in
+  `OVERVIEW.md`)
+- Web UI: a CRUD screen via the existing `ENTITIES` config; the new tax-summary columns surface
+  automatically (report columns derive from the response keys)
+- Docs: the new table updates `docs/SCHEMA.md`; the new tax-summary fields and any 422 validations
+  update `docs/API.md`; the deductions feature updates the README Features list
+
+Out of scope (record as Known limitations):
+- **Non-deductible costs** are not the tool's job to police: acquisition brokerage/stamp duty stay
+  as cost-base element 2 (already handled), and the user is responsible for not entering exempt-
+  income or capital expenses as deductions
+- **Prepaid-interest timing rules** (the 12-month prepayment rule, capital-protected borrowing
+  interest apportionment, split-loan arrangements) — the expense is recorded in the year the user
+  attributes it to; these timing/character apportionments are the user's determination
+- **The deductibility determination itself** — the tool records and totals what the user enters; it
+  does not rule on whether a given expense is deductible
+
+## Employee share scheme (ESS) income (2026-06-08)
+
+The project already models the **CGT side** of an employee share scheme correctly: an RSU vest is
+entered as an ordinary Buy at the **market value at the deferred taxing point** with the **vest
+date** as the acquisition date — which is exactly the ATO's cost-base reset (at the deferred taxing
+point the ESS interest is taken to be re-acquired at market value, and the 50% discount clock
+restarts from that date). What is missing is the **income side**: the assessable ESS discount must
+be declared in the year of the taxing point and surfaced in the tax summary. This requirement adds
+that, and links it to the cost-base-reset Buy so the income and CGT sides are entered once and stay
+consistent. It **supersedes the current "ESS income reporting is out of scope" Known limitation.**
+
+- A new ESS-income record capturing the figures an employer's **ESS statement** prints (the
+  individual tax return's Item 12 labels), per statement, attributed to a `listing_id` and
+  `holding_account_id`:
+  - `taxed_upfront_eligible` — discount from taxed-upfront schemes **eligible** for the $1,000
+    reduction (label D)
+  - `taxed_upfront_not_eligible` — discount from taxed-upfront schemes **not** eligible (label E)
+  - `deferral_discount` — discount from tax-deferral schemes (label F; the RSU case)
+  - `pre_2009_cessation_discount` — discount on pre-1 July 2009 interests whose cessation time fell
+    in the year (label G)
+  - `foreign_source_discount` — the foreign-source portion of the above (label B)
+  - `tfn_withholding` — TFN amounts withheld from ESS discounts (label C), where no TFN/ABN was
+    given to the employer
+  - the taxing-point date and the market value at the taxing point (drives both the assessable
+    discount and the linked Buy's cost base)
+- The **$1,000 reduction** (taxed-upfront eligible schemes): reduce the assessable discount by up
+  to the lesser of $1,000 and `taxed_upfront_eligible`, and surface the reduction applied — but the
+  full eligibility test needs the taxpayer's **adjusted taxable income ≤ $180,000**, which is
+  outside this system's data. So apply the up-to-$1,000 de-minimis and flag the income-test caveat
+  as the user's responsibility, exactly mirroring the FITO $1,000 cap pattern (a
+  `taxed_upfront_reduction` field + an informational caveat in the row)
+- The tax summary gains an **assessable ESS discount** total per Australian financial year (total
+  of the labels, net of the applied reduction), reported separately from dividend/trust income, in
+  AUD (foreign-source discounts converted via the ATO rate), with the TFN-withholding total carried
+  alongside the existing TFN line. The CSV export carries the new fields
+- An **ESS vesting operation** ties the two sides together atomically (like the buy-back/scrip
+  participations): from one entry it records the ESS-income discount components **and** creates the
+  cost-base-reset Buy parcel (quantity vested, price = market value at the taxing point, zero
+  brokerage, acquisition/settlement date = the taxing point), linked by provenance. Editing/deleting
+  is symmetric (deleting the ESS record removes its linked vest Buy unless that parcel is already
+  drawn on by a Sell/allocation, per the existing group-integrity rules)
+- ATO documentation: mirror the ESS guidance into `docs/ato/` (the "tax-deferred schemes",
+  "taxed-upfront $1,000 reduction", "ESS and capital gains tax", and Item 12 pages; source URL +
+  retrieval date, indexed in `OVERVIEW.md`); add an `ato_examples.rs` acceptance test for any
+  worked example the feature makes representable
+- Web UI: a CRUD screen + the vesting operation via the existing `ENTITIES`/`ACTIONS` config; the
+  new tax-summary columns surface automatically
+- Docs: the new table updates `docs/SCHEMA.md`; the new endpoint/operation, fields, and 422 cases
+  update `docs/API.md`; remove the superseded ESS-income Known limitation and add the ESS-income
+  feature to the README Features list
+
+Out of scope (record as Known limitations):
+- **Determining the deferred taxing point** — the user enters the taxing-point date and market
+  value from their ESS statement; the tool does not compute the earliest-of test (no real risk of
+  forfeiture and no disposal restriction, or 15 years). The **30-day rule** (a sale within 30 days
+  of the taxing point moves the taxing point to the sale date) is likewise reflected by the user
+  entering the correct taxing-point date/value
+- **The $180,000 adjusted-taxable-income test** for the $1,000 reduction — needs the taxpayer's
+  whole income position (as with FITO); the de-minimis is applied and the caveat surfaced
+- **Unvested grants and forfeiture before the taxing point** — there is no ESS interest to value
+  yet, so nothing is tracked until vesting (consistent with the prior limitation)
+- **Start-up concession schemes** (no upfront discount is assessable; the interest is taxed only
+  under CGT on disposal) and **the employer's ESS annual report** lodgement (an employer
+  obligation, not the individual's) are not modelled
