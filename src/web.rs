@@ -372,6 +372,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn investment_expenses_ui_present() {
+        let js = app_js_body().await;
+        // The Investment Expenses CRUD screen drives the /investment_expenses API,
+        // with the deductible-expense type selector and the deductible amount.
+        assert!(js.contains("/investment_expenses"));
+        assert!(js.contains("Investment Expenses"));
+        assert!(js.contains("expense_type"));
+        assert!(js.contains("LoanInterest"));
+        assert!(js.contains("ManagementFee"));
+        assert!(js.contains("Deductible amount"));
+        // The new tax-summary deduction/net columns are classified as money so
+        // they format automatically when the report response carries them.
+        assert!(js.contains("gross_assessable_investment_income"));
+        assert!(js.contains("deductions_total"));
+        assert!(js.contains("net_assessable_investment_income"));
+    }
+
+    #[tokio::test]
     async fn amma_statement_ui_present() {
         let js = app_js_body().await;
         assert!(js.contains("/amma_statements"));

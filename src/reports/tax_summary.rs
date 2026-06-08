@@ -79,6 +79,34 @@ pub struct TaxYearSummary {
     /// discounts, already counted within `ess_discount_assessable`, surfaced
     /// separately for the foreign-income / FITO calculation. Not added on top.
     pub ess_foreign_source_discount: Decimal,
+    /// Gross assessable investment income for the year (AUD): the sum of the
+    /// report's existing assessable income lines — `dividends_assessable`
+    /// (franked + unfranked) + `foreign_source_income` + the six AMMA income
+    /// components (`amma_australian_interest`, `amma_dividends_unfranked`,
+    /// `amma_franked_dividends`, `amma_net_rent`, `amma_foreign_income`,
+    /// `amma_other_income`). It deliberately excludes the franking-credit
+    /// gross-up and FITO (carried as offset lines), conduit foreign income
+    /// (NANE), the ESS discount (employment income, Item 12), and capital gains
+    /// (the net-capital-gain report). `net_assessable_investment_income`
+    /// subtracts the investment-expense deductions from this.
+    pub gross_assessable_investment_income: Decimal,
+    /// Deductible investment-expense total for the year, by expense type (AUD;
+    /// see `entities::investment_expense`, docs/ato/investment-income-deductions.md).
+    /// Each is the post-apportionment deductible amount the user recorded.
+    pub deductions_loan_interest: Decimal,
+    pub deductions_management_fee: Decimal,
+    pub deductions_advice_fee: Decimal,
+    pub deductions_account_keeping_fee: Decimal,
+    pub deductions_subscription: Decimal,
+    pub deductions_other: Decimal,
+    /// Total deductible investment expenses for the year (sum of the per-type
+    /// lines above), in AUD.
+    pub deductions_total: Decimal,
+    /// Net assessable investment income: `gross_assessable_investment_income −
+    /// deductions_total` (AUD). The LIC capital gain deduction, franking-credit
+    /// gross-up, and FITO are distinct and tracked on their own lines, so they
+    /// are not folded in here.
+    pub net_assessable_investment_income: Decimal,
     /// Informational: the taxpayer assumption behind the hard-wired rates
     /// (always [`crate::reports::TAXPAYER_BASIS`]) — the LIC capital gain
     /// deduction passed through here is the Australian-resident-individual 50%
@@ -118,6 +146,15 @@ const CSV_HEADER: &[&str] = &[
     "ess_discount_assessable",
     "ess_taxed_upfront_reduction",
     "ess_foreign_source_discount",
+    "gross_assessable_investment_income",
+    "deductions_loan_interest",
+    "deductions_management_fee",
+    "deductions_advice_fee",
+    "deductions_account_keeping_fee",
+    "deductions_subscription",
+    "deductions_other",
+    "deductions_total",
+    "net_assessable_investment_income",
     "taxpayer_basis",
 ];
 
@@ -145,6 +182,15 @@ fn zero_summary(tax_year: i32) -> TaxYearSummary {
         ess_discount_assessable: Decimal::ZERO,
         ess_taxed_upfront_reduction: Decimal::ZERO,
         ess_foreign_source_discount: Decimal::ZERO,
+        gross_assessable_investment_income: Decimal::ZERO,
+        deductions_loan_interest: Decimal::ZERO,
+        deductions_management_fee: Decimal::ZERO,
+        deductions_advice_fee: Decimal::ZERO,
+        deductions_account_keeping_fee: Decimal::ZERO,
+        deductions_subscription: Decimal::ZERO,
+        deductions_other: Decimal::ZERO,
+        deductions_total: Decimal::ZERO,
+        net_assessable_investment_income: Decimal::ZERO,
         taxpayer_basis: crate::reports::TAXPAYER_BASIS.to_string(),
     }
 }
@@ -202,6 +248,12 @@ pub async fn db_tax_summary(pool: &SqlitePool) -> Result<Vec<TaxYearSummary>, sq
          deferral_discount, pre_2009_cessation_discount, foreign_source_discount, \
          tfn_withholding, currency \
          FROM ess_statements",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let expense_rows = sqlx::query(
+        "SELECT date_incurred, expense_type, amount, currency FROM investment_expenses",
     )
     .fetch_all(pool)
     .await?;
@@ -346,6 +398,44 @@ pub async fn db_tax_summary(pool: &SqlitePool) -> Result<Vec<TaxYearSummary>, sq
         }
     }
 
+    // Deductible investment expenses (docs/ato/investment-income-deductions.md,
+    // dividend-income-deductions.md): the cost of earning assessable investment
+    // income, recorded as the post-apportionment deductible amount. Total by
+    // expense type per Australian financial year; a non-AUD amount converts to
+    // AUD via the ATO rate for the month incurred (fails loudly with no rate). An
+    // expense in a year with no income still creates that year's row so the
+    // deduction is visible.
+    for row in &expense_rows {
+        let date_incurred: NaiveDate = row.try_get("date_incurred")?;
+        let tax_year = if date_incurred.month() >= 7 {
+            date_incurred.year() + 1
+        } else {
+            date_incurred.year()
+        };
+        let currency: String = row.try_get("currency")?;
+        let amount = aud_field(pool, row, "amount", &currency, date_incurred).await?;
+        let expense_type: String = row.try_get("expense_type")?;
+
+        let s = map.entry(tax_year).or_insert_with(|| zero_summary(tax_year));
+        let line = match expense_type.as_str() {
+            "LoanInterest" => &mut s.deductions_loan_interest,
+            "ManagementFee" => &mut s.deductions_management_fee,
+            "AdviceFee" => &mut s.deductions_advice_fee,
+            "AccountKeepingFee" => &mut s.deductions_account_keeping_fee,
+            "Subscription" => &mut s.deductions_subscription,
+            "Other" => &mut s.deductions_other,
+            // The column is CHECK-constrained to the set above; an unknown value
+            // means the data model was bypassed — fail loudly rather than drop it.
+            other => {
+                return Err(sqlx::Error::Decode(
+                    format!("unknown investment expense_type '{other}'").into(),
+                ));
+            }
+        };
+        *line += amount;
+        s.deductions_total += amount;
+    }
+
     // Franking-credit entitlement (docs/ato/you-and-your-shares-dividends.md): in a
     // year with A$5,000 or more of attached credits the small-shareholder
     // exemption doesn't apply, so each dividend's shares must pass the at-risk
@@ -373,6 +463,22 @@ pub async fn db_tax_summary(pool: &SqlitePool) -> Result<Vec<TaxYearSummary>, sq
             s.foreign_tax_offset_excess = s.foreign_tax_offsets - limit;
             s.foreign_tax_offsets = limit;
         }
+    }
+
+    // Gross assessable investment income (the report's existing assessable income
+    // lines) and the net position after the investment-expense deductions. Done
+    // last so every income, AMMA and deduction line is already aggregated.
+    for s in map.values_mut() {
+        s.gross_assessable_investment_income = s.dividends_assessable
+            + s.foreign_source_income
+            + s.amma_australian_interest
+            + s.amma_dividends_unfranked
+            + s.amma_franked_dividends
+            + s.amma_net_rent
+            + s.amma_foreign_income
+            + s.amma_other_income;
+        s.net_assessable_investment_income =
+            s.gross_assessable_investment_income - s.deductions_total;
     }
 
     let mut result: Vec<TaxYearSummary> = map.into_values().collect();
@@ -403,7 +509,7 @@ async fn tax_summary_export_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{infra::db, entities::{amma, ess_statement, income, listing, rba_fx_rate, trade}};
+    use crate::{infra::db, entities::{amma, ess_statement, income, investment_expense, listing, rba_fx_rate, trade}};
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
     use tower::ServiceExt;
@@ -542,6 +648,26 @@ mod tests {
             foreign_source_discount: Decimal::ZERO,
             tfn_withholding: Decimal::ZERO,
             currency: "AUD".to_string(),
+        }
+    }
+
+    fn make_expense(
+        id: i64,
+        date: NaiveDate,
+        expense_type: investment_expense::ExpenseType,
+        amount: Decimal,
+    ) -> investment_expense::InvestmentExpense {
+        investment_expense::InvestmentExpense {
+            id,
+            date_incurred: date,
+            expense_type,
+            amount,
+            gross_amount: None,
+            deductible_percentage: None,
+            currency: "AUD".to_string(),
+            description: None,
+            listing_id: None,
+            holding_account_id: None,
         }
     }
 
@@ -1201,6 +1327,183 @@ mod tests {
         e.deferral_discount = Decimal::from(1000);
         ess_statement::db_upsert(&pool, &e).await.unwrap();
         assert!(db_tax_summary(&pool).await.is_err());
+    }
+
+    // Deductible investment expenses (docs/ato/investment-income-deductions.md,
+    // dividend-income-deductions.md): netted against gross assessable investment
+    // income per Australian financial year, totalled by expense type and overall.
+
+    use investment_expense::ExpenseType;
+
+    /// Gross assessable investment income sums the existing assessable lines;
+    /// the deductions net it to a separate "net assessable" figure, by type and
+    /// overall, with the gross figures retained.
+    #[tokio::test]
+    async fn db_deductions_net_gross_assessable_investment_income() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        // FY2024 dividend income: 140 franked + 60 unfranked = 200 assessable.
+        let mut div = make_income(1, 1, NaiveDate::from_ymd_opt(2024, 3, 15).unwrap());
+        div.franked_amount = Decimal::from(140);
+        div.unfranked_amount = Decimal::from(60);
+        div.franking_credits = Decimal::from(60); // an offset line, not in gross
+        income::db_upsert(&pool, &div).await.unwrap();
+        // Loan interest 500 + management fee 120 = 620 deductions.
+        investment_expense::db_upsert(
+            &pool,
+            &make_expense(1, NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(), ExpenseType::LoanInterest, Decimal::from(500)),
+        )
+        .await
+        .unwrap();
+        investment_expense::db_upsert(
+            &pool,
+            &make_expense(2, NaiveDate::from_ymd_opt(2024, 5, 1).unwrap(), ExpenseType::ManagementFee, Decimal::from(120)),
+        )
+        .await
+        .unwrap();
+
+        let result = db_tax_summary(&pool).await.unwrap();
+        assert_eq!(result.len(), 1);
+        let s = &result[0];
+        assert_eq!(s.tax_year, 2024);
+        // Gross is the cash assessable lines only (franking credits excluded).
+        assert_eq!(s.gross_assessable_investment_income, Decimal::from(200));
+        assert_eq!(s.deductions_loan_interest, Decimal::from(500));
+        assert_eq!(s.deductions_management_fee, Decimal::from(120));
+        assert_eq!(s.deductions_total, Decimal::from(620));
+        // Net = 200 − 620 = −420 (deductions can exceed income → a loss).
+        assert_eq!(s.net_assessable_investment_income, Decimal::from(-420));
+        // The gross dividend line is retained unchanged.
+        assert_eq!(s.dividends_assessable, Decimal::from(200));
+    }
+
+    /// Gross assessable investment income includes the foreign-source income and
+    /// the AMMA income components, but not conduit foreign income (NANE), the
+    /// franking-credit gross-up, the ESS discount, or capital gains.
+    #[tokio::test]
+    async fn db_gross_assessable_spans_income_and_amma_excludes_nane_and_cgt() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        let mut inc = make_income(1, 1, NaiveDate::from_ymd_opt(2024, 3, 15).unwrap());
+        inc.unfranked_amount = Decimal::from(100);
+        inc.foreign_source_income = Decimal::from(50);
+        inc.conduit_foreign_income = Decimal::from(40); // NANE, excluded
+        income::db_upsert(&pool, &inc).await.unwrap();
+        let mut a = make_amma(1, 1, NaiveDate::from_ymd_opt(2024, 6, 30).unwrap());
+        a.australian_interest = Decimal::from(10);
+        a.franked_dividends = Decimal::from(20);
+        a.foreign_income = Decimal::from(5);
+        a.other_income = Decimal::from(3);
+        a.cgt_discount_gains = Decimal::from(1000); // a capital gain, excluded
+        amma::db_upsert(&pool, &a).await.unwrap();
+
+        let result = db_tax_summary(&pool).await.unwrap();
+        // 100 + 50 + 10 + 20 + 5 + 3 = 188 (conduit and CGT excluded).
+        assert_eq!(result[0].gross_assessable_investment_income, Decimal::from(188));
+        // No deductions → net equals gross.
+        assert_eq!(result[0].net_assessable_investment_income, Decimal::from(188));
+        assert_eq!(result[0].deductions_total, Decimal::ZERO);
+    }
+
+    /// Each expense type totals into its own line, and into the overall total.
+    #[tokio::test]
+    async fn db_deductions_totalled_by_type() {
+        let pool = test_pool().await;
+        let d = NaiveDate::from_ymd_opt(2024, 3, 1).unwrap();
+        let kinds = [
+            (ExpenseType::LoanInterest, 100),
+            (ExpenseType::ManagementFee, 200),
+            (ExpenseType::AdviceFee, 300),
+            (ExpenseType::AccountKeepingFee, 40),
+            (ExpenseType::Subscription, 50),
+            (ExpenseType::Other, 6),
+        ];
+        for (i, (kind, amt)) in kinds.iter().enumerate() {
+            investment_expense::db_upsert(
+                &pool,
+                &make_expense(i as i64 + 1, d, *kind, Decimal::from(*amt)),
+            )
+            .await
+            .unwrap();
+        }
+
+        let result = db_tax_summary(&pool).await.unwrap();
+        assert_eq!(result.len(), 1);
+        let s = &result[0];
+        assert_eq!(s.deductions_loan_interest, Decimal::from(100));
+        assert_eq!(s.deductions_management_fee, Decimal::from(200));
+        assert_eq!(s.deductions_advice_fee, Decimal::from(300));
+        assert_eq!(s.deductions_account_keeping_fee, Decimal::from(40));
+        assert_eq!(s.deductions_subscription, Decimal::from(50));
+        assert_eq!(s.deductions_other, Decimal::from(6));
+        assert_eq!(s.deductions_total, Decimal::from(696));
+        // No assessable income → net is the negative of the deductions.
+        assert_eq!(s.gross_assessable_investment_income, Decimal::ZERO);
+        assert_eq!(s.net_assessable_investment_income, Decimal::from(-696));
+    }
+
+    /// Expenses are attributed to the financial year of the date incurred (a July
+    /// date belongs to the next FY), independently per year.
+    #[tokio::test]
+    async fn db_deductions_attributed_by_financial_year() {
+        let pool = test_pool().await;
+        // June 2024 → FY2024; July 2024 → FY2025.
+        investment_expense::db_upsert(
+            &pool,
+            &make_expense(1, NaiveDate::from_ymd_opt(2024, 6, 30).unwrap(), ExpenseType::LoanInterest, Decimal::from(100)),
+        )
+        .await
+        .unwrap();
+        investment_expense::db_upsert(
+            &pool,
+            &make_expense(2, NaiveDate::from_ymd_opt(2024, 7, 1).unwrap(), ExpenseType::LoanInterest, Decimal::from(200)),
+        )
+        .await
+        .unwrap();
+
+        let result = db_tax_summary(&pool).await.unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].tax_year, 2024);
+        assert_eq!(result[0].deductions_total, Decimal::from(100));
+        assert_eq!(result[1].tax_year, 2025);
+        assert_eq!(result[1].deductions_total, Decimal::from(200));
+    }
+
+    /// A non-AUD expense converts to AUD via the ATO rate for the month incurred.
+    #[tokio::test]
+    async fn db_non_aud_expense_converted_to_aud() {
+        let pool = test_pool().await;
+        // A$1 = 0.50 USD for Mar 2024 → AUD = USD / 0.50.
+        rba_fx_rate::db_import_rate(&pool, "USD", "2024-03", "0.50".parse().unwrap())
+            .await
+            .unwrap();
+        let mut e = make_expense(1, NaiveDate::from_ymd_opt(2024, 3, 15).unwrap(), ExpenseType::AdviceFee, Decimal::from(100));
+        e.currency = "USD".to_string();
+        investment_expense::db_upsert(&pool, &e).await.unwrap();
+
+        let result = db_tax_summary(&pool).await.unwrap();
+        // 100 / 0.50 = 200 AUD.
+        assert_eq!(result[0].deductions_advice_fee, Decimal::from(200));
+        assert_eq!(result[0].deductions_total, Decimal::from(200));
+    }
+
+    /// A non-AUD expense with no ATO rate fails loudly (no silent zero).
+    #[tokio::test]
+    async fn db_non_aud_expense_without_rate_fails_loudly() {
+        let pool = test_pool().await;
+        let mut e = make_expense(1, NaiveDate::from_ymd_opt(2024, 3, 15).unwrap(), ExpenseType::LoanInterest, Decimal::from(100));
+        e.currency = "USD".to_string();
+        investment_expense::db_upsert(&pool, &e).await.unwrap();
+        assert!(db_tax_summary(&pool).await.is_err());
+    }
+
+    /// The new deduction columns ship in the CSV export.
+    #[tokio::test]
+    async fn db_csv_header_carries_deduction_columns() {
+        assert!(CSV_HEADER.contains(&"gross_assessable_investment_income"));
+        assert!(CSV_HEADER.contains(&"deductions_loan_interest"));
+        assert!(CSV_HEADER.contains(&"deductions_total"));
+        assert!(CSV_HEADER.contains(&"net_assessable_investment_income"));
     }
 
     #[tokio::test]

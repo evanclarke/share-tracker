@@ -114,6 +114,19 @@ income
 ├── amount_per_security       TEXT (decimal, nullable)  Optional statement cross-check, supplied only together with securities_held: their product, cent-rounded, must equal franked + unfranked + foreign source income (422 otherwise). Informational/validation-only — no report uses it (mirrors trades.statement_total)
 └── securities_held           TEXT (decimal, nullable)  See amount_per_security — the statement's securities-held count
 
+investment_expenses          Deductible investment expenses — the cost of earning assessable investment income (interest on borrowed money, management/adviser fees, account-keeping fees, subscriptions). The tax summary nets these against gross assessable investment income per financial year
+├── id                    INTEGER PK
+├── date_incurred         DATE   Its month sets the ATO FX conversion month and the Australian financial year the deduction falls in (a July date belongs to the next FY)
+├── expense_type          TEXT   LoanInterest | ManagementFee | AdviceFee | AccountKeepingFee | Subscription | Other (CHECK-enforced enum)
+├── amount                TEXT (decimal)  The deductible amount — post-apportionment, the figure that goes on the return and the value the tax summary totals
+├── gross_amount          TEXT (decimal, nullable)  Optional provenance (informational only): the pre-apportionment gross expense
+├── deductible_percentage TEXT (decimal, nullable)  Optional provenance (informational only): the percentage of gross_amount the user determined deductible
+├── currency              TEXT FK→currencies.code   ISO 4217; tax summary converts to AUD by date_incurred month (default AUD)
+├── description           TEXT (nullable)  Free-text note
+├── listing_id            INTEGER FK→listings.id (nullable)  The listing the expense relates to; NULL = portfolio-wide
+└── holding_account_id    INTEGER FK→holding_accounts.id (nullable)  The holding account the expense relates to; NULL = portfolio-wide
+                          Brokerage is not recorded here (it forms a trade's CGT cost base); the LIC capital gain deduction is its own income field
+
 amma_statements              Annual AMIT Member Annual (AMMA) statements
 ├── id                              INTEGER PK
 ├── listing_id                      INTEGER FK→listings.id
@@ -259,7 +272,9 @@ exchanges ──< listings ──< trades >────────────�
                        listings ──< corporate_actions
                        listings ──< transfers
                        listings ──< ess_statements
+                       listings ──< investment_expenses (nullable; portfolio-wide expense leaves it NULL)
                        holding_accounts ──< trades, income, amma_statements, drp_enrolments, ess_statements
+                       holding_accounts ──< investment_expenses (nullable; portfolio-wide expense leaves it NULL)
                        holding_accounts ──< transfers (from_account_id + to_account_id)
                        transfers ──< trades (transfer_id)
                        ess_statements ──< trades (ess_statement_id; the cost-base-reset vest Buy)
@@ -277,7 +292,7 @@ exchanges ──< listings ──< trades >────────────�
                        trades, parcel_allocations, income, amma_statements, amit_adjustments,
                        corporate_actions, closing_prices ──> report_snapshots.stale (staleness triggers)
 
-currencies ──< exchanges, listings, trades (currency + brokerage_currency), income, amma_statements, corporate_actions, ess_statements
+currencies ──< exchanges, listings, trades (currency + brokerage_currency), income, amma_statements, corporate_actions, ess_statements, investment_expenses
 ```
 
 Each `attachments` row belongs to exactly one activity via one of three nullable foreign keys (`trade_id` / `income_id` / `amma_statement_id`), with a `CHECK` enforcing that exactly one is set — a real foreign key keeps referential integrity to the owning row, and `ON DELETE CASCADE` removes an activity's attachments when it is deleted. File contents live in the `content` BLOB so the weekly DB backup captures the documents with no separate file store.
@@ -288,7 +303,7 @@ Each `attachments` row belongs to exactly one activity via one of three nullable
 
 `mic_registry` is standalone reference data (no foreign keys), keyed by `mic`. It is populated from the ISO 10383 list and used only to validate curated `exchanges` (see the [exchange MIC validation report](API.md#exchange-mic-validation)); it is *not* the operational exchange table and carries no currency/timezone/settlement data.
 
-`currencies` is reference data keyed by `code` (it has no outgoing foreign keys). It is populated from the ISO 4217 (SIX Group) and ISO 24165 (DTIF) feeds and seeded with a baseline of common currencies (the seed migration), and is the recognised list that **every** currency code in the model is foreign-keyed to: `exchanges.currency`, `listings.currency`, `trades.currency`, `trades.brokerage_currency`, `income.currency`, `amma_statements.currency`, `corporate_actions.currency`, and `ess_statements.currency` all reference `currencies.code`, so an unrecognised currency is rejected at write time. `minor_units` is informational only — stored amounts remain arbitrary-precision Decimal and are never rounded to it. A Crypto listing's ticker is additionally validated against the `DigitalToken` rows at write time (matched on `code` or `short_name`).
+`currencies` is reference data keyed by `code` (it has no outgoing foreign keys). It is populated from the ISO 4217 (SIX Group) and ISO 24165 (DTIF) feeds and seeded with a baseline of common currencies (the seed migration), and is the recognised list that **every** currency code in the model is foreign-keyed to: `exchanges.currency`, `listings.currency`, `trades.currency`, `trades.brokerage_currency`, `income.currency`, `amma_statements.currency`, `corporate_actions.currency`, `ess_statements.currency`, and `investment_expenses.currency` all reference `currencies.code`, so an unrecognised currency is rejected at write time. `minor_units` is informational only — stored amounts remain arbitrary-precision Decimal and are never rounded to it. A Crypto listing's ticker is additionally validated against the `DigitalToken` rows at write time (matched on `code` or `short_name`).
 
 `listings.exchange_mic` is nullable for exactly the Crypto security type (CHECK-enforced both ways): a crypto asset trades on no MIC-coded venue, settles same-day, and has no holiday calendar. Because `UNIQUE(exchange_mic, ticker)` treats NULLs as distinct, a partial unique index makes exchange-less listings unique by ticker.
 

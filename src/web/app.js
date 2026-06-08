@@ -321,6 +321,11 @@
       'taxed_upfront_eligible', 'taxed_upfront_not_eligible', 'deferral_discount',
       'pre_2009_cessation_discount', 'foreign_source_discount', 'tfn_withholding',
       'ess_discount_assessable', 'ess_taxed_upfront_reduction', 'ess_foreign_source_discount',
+      // Investment-expense line items + the tax-summary deduction aggregates.
+      'amount', 'gross_amount', 'gross_assessable_investment_income',
+      'deductions_loan_interest', 'deductions_management_fee', 'deductions_advice_fee',
+      'deductions_account_keeping_fee', 'deductions_subscription', 'deductions_other',
+      'deductions_total', 'net_assessable_investment_income',
     ]);
     set('rate', [
       // Per-unit prices/rates entered from statements — rounding them would
@@ -328,7 +333,7 @@
       'average_price', 'fx_rate', 'amount_per_security', 'cost_base_adjustment', 'rate',
       'price', 'current_price', 'reinvestment_price', 'exercise_price', 'amount_per_unit',
       'buyback_price', 'buyback_dividend', 'buyback_franking_credit', 'buyback_market_value',
-      'market_value_per_share',
+      'market_value_per_share', 'deductible_percentage',
     ]);
     // A derived per-unit figure: show at least 4 dp, never cent-rounded.
     set('rate4', ['avg_cost_base_per_unit']);
@@ -552,6 +557,23 @@
         return row.reinvestment_trade_id == null ? [{ label: 'Reinvest', href: '#/reinvest/' + row.id }] : [];
       },
       attachOwner: 'income_id',
+    },
+    {
+      slug: 'investment_expenses', title: 'Investment Expenses', group: 'Activity', api: '/investment_expenses',
+      desc: 'Deductible investment expenses — the cost of earning assessable investment income: interest on money borrowed to buy income-producing shares, management/adviser fees, account-keeping fees, and subscriptions. Enter the amount as the deductible figure (post-apportionment — the portion you have determined is income-producing); the tax summary nets these against gross assessable investment income per financial year. Brokerage is not an expense here (it forms the CGT cost base on the trade) and the LIC capital gain deduction is its own income field.',
+      keyFields: [int('id', 'ID', { auto: true })],
+      fields: [
+        dt('date_incurred', 'Date incurred', { required: true, hint: 'Sets the financial year the deduction falls in and the ATO FX month for a non-AUD amount.' }),
+        sel('expense_type', 'Expense type', ['LoanInterest', 'ManagementFee', 'AdviceFee', 'AccountKeepingFee', 'Subscription', 'Other'], { required: true }),
+        dec('amount', 'Deductible amount', { required: true, hint: 'Post-apportionment — the figure that goes on the return.' }),
+        dec('gross_amount', 'Gross amount', { optional: true, default: '', hint: 'Optional provenance: the pre-apportionment expense (informational only).' }),
+        dec('deductible_percentage', 'Deductible %', { optional: true, default: '', hint: 'Optional provenance: the percentage you determined was deductible (informational only).' }),
+        fk('currency', 'Currency', 'currencies', { required: true, encode: 'string', default: 'AUD' }),
+        txt('description', 'Description', { optional: true, default: '' }),
+        fk('listing_id', 'Listing', 'listings', { optional: true, default: '', hint: 'Optional — leave blank for a portfolio-wide expense.' }),
+        fk('holding_account_id', 'Holding account', 'holdingAccounts', { optional: true, default: '', hint: 'Optional — leave blank for a portfolio-wide expense.' }),
+      ],
+      columns: ['id', 'date_incurred', 'expense_type', 'amount', 'currency', 'description', 'listing_id', 'holding_account_id'],
     },
     {
       slug: 'amma_statements', title: 'AMMA Statements', group: 'Activity', api: '/amma_statements',
