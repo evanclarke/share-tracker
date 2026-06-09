@@ -548,6 +548,7 @@
         dec('lic_capital_gain_deduction', 'LIC capital gain deduction'),
         dec('conduit_foreign_income', 'Conduit foreign income'),
         bool('trust_income', 'Trust income'),
+        dt('entitlement_date', 'Entitlement date', { optional: true, hint: 'Trust distributions only: the date you became presently entitled — usually the distribution period’s end on the statement. Trust income is assessed in this date’s financial year even when the cash arrives later (a June distribution paid in July belongs to the year just ended). Leave empty to assess by the pay date.' }),
         fk('currency', 'Currency', 'currencies', { required: true, encode: 'string', default: 'AUD' }),
         fk('holding_account_id', 'Holding account', 'holdingAccounts', { required: true, default: '1', hint: 'The account the distribution was paid to — decides whose DRP enrolment applies.' }),
       ],
@@ -1292,7 +1293,7 @@
     'ex_date', 'franked_amount', 'unfranked_amount', 'foreign_source_income',
     'foreign_tax_paid', 'tfn_withholding_tax', 'franking_credits',
     'lic_capital_gain_deduction', 'conduit_foreign_income', 'trust_income',
-    'currency', 'holding_account_id',
+    'entitlement_date', 'currency', 'holding_account_id',
   ];
 
   // Classify a stored row for the simple form: which franking-selector mode
@@ -1366,6 +1367,20 @@
     frankSel.addEventListener('change', updateFrankHint);
     updateFrankHint();
 
+    // Trust distributions are assessed by present entitlement, not payment
+    // (docs/ato/trust-income-timing.md): selecting Trust reveals the
+    // entitlement-date field in simple mode too, prefilled with the pay date.
+    const entitlementInput = form.querySelector('[name="entitlement_date"]');
+    const datePaidInput = form.querySelector('[name="date_paid"]');
+    function applyEntitlement() {
+      if (advFlag.checked) return; // advanced mode shows every field
+      const isTrust = frankSel.value === 'Trust';
+      entitlementInput.closest('.field').style.display = isTrust ? '' : 'none';
+      if (isTrust && !entitlementInput.value) entitlementInput.value = datePaidInput.value || '';
+    }
+    frankSel.addEventListener('change', applyEntitlement);
+    datePaidInput.addEventListener('change', applyEntitlement);
+
     // Live product hint for the per-share cross-check pair.
     const apsInput = form.querySelector('[name="amount_per_security"]');
     const heldInput = form.querySelector('[name="securities_held"]');
@@ -1427,6 +1442,7 @@
         const inp = form.querySelector('[name="' + n + '"]');
         if (inp) inp.closest('.field').style.display = adv ? '' : 'none';
       });
+      applyEntitlement();
       updateProductHint();
     }
     advFlag.addEventListener('change', applyMode);
@@ -1444,6 +1460,9 @@
         body.unfranked_amount = mode === 'FullyFranked' ? '0' : amount;
         body.franking_credits = mode === 'FullyFranked' ? frankingCreditFor(amount) : '0';
         body.trust_income = mode === 'Trust';
+        // Only a trust row may carry an entitlement date (the server rejects
+        // it otherwise) — clear a value left behind by switching modes.
+        if (mode !== 'Trust') body.entitlement_date = null;
       },
       afterSave: async function (id) {
         if (!drpFlag || !drpFlag.checked) return null;

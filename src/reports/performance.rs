@@ -679,6 +679,7 @@ mod tests {
                 lic_capital_gain_deduction: Decimal::ZERO,
                 conduit_foreign_income: Decimal::ZERO,
                 trust_income: false,
+                entitlement_date: None,
                 reinvestment_trade_id: None,
                 currency: "AUD".to_string(),
                 buyback_trade_id: None,

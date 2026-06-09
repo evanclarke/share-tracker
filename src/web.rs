@@ -372,6 +372,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn income_entitlement_date_ui_present() {
+        let js = app_js_body().await;
+        // Trust present-entitlement timing (docs/ato/trust-income-timing.md):
+        // the field exists, selecting Trust reveals it in simple mode
+        // prefilled with the pay date, and switching away clears it so the
+        // server's trust-only 422 can't be tripped by a leftover value.
+        assert!(js.contains("entitlement_date"));
+        assert!(js.contains("Entitlement date"));
+        assert!(js.contains("applyEntitlement"));
+        assert!(js.contains("presently entitled"));
+        assert!(js.contains("if (mode !== 'Trust') body.entitlement_date = null;"));
+    }
+
+    #[tokio::test]
     async fn investment_expenses_ui_present() {
         let js = app_js_body().await;
         // The Investment Expenses CRUD screen drives the /investment_expenses API,

@@ -25,17 +25,6 @@ Smaller:
 - [ ] Split `web/app.js` (2,445 lines, one file) into native ES modules (`<script type="module">`) — config (`ENTITIES`/`REPORTS`/`ACTIONS`) separate from the generic rendering engine; no build step needed
 - [ ] Trim `tokio` features in Cargo.toml from `full` to what the server uses (`rt-multi-thread`, `macros`, `signal`, `net`, `time`, `fs`) for slightly faster builds
 
-## Trust distribution income year — present entitlement (2026-06-10)
-
-(REQUIREMENTS 2026-06-10; `docs/ato/trust-income-timing.md`, QC 23087. The one correctness gap from the BA review: a July-paid June trust distribution is currently attributed to the wrong FY.)
-
-- [ ] Migration: nullable `entitlement_date` (TEXT date) on `income`; supplying it on a non-trust row (`trust_income` false) is rejected 422 at write time
-- [ ] Tax summary + CSV export: a trust row with `entitlement_date` has **every** component attributed to the FY of that date (fall back to `date_paid` when absent; non-trust rows unchanged)
-- [ ] Franking 45-day at-risk test keeps anchoring on `ex_date`/`date_paid`; the A$5,000 small-shareholder threshold year follows the row's assessment year
-- [ ] Web UI: the income form's Trust distribution selection reveals the entitlement-date field (defaulting to the pay date); included in the advanced field set
-- [ ] Tests: July-paid June trust distribution reaches the earlier FY; a dividend paid the same day is unchanged; 422 on a non-trust row; threshold-year test
-- [ ] Docs: `docs/SCHEMA.md` (column), `docs/API.md` (attribution rule + 422), README tax-summary feature text
-
 ## Non-AMIT trust tax-deferred amounts — CGT event E4 cross-check (2026-06-10)
 
 (REQUIREMENTS 2026-06-10; `docs/ato/cgt-non-assessable-payments.md` (E4), `docs/ato/amit-cost-base-adjustments.md` (AMIT treatment unchanged).)

@@ -227,7 +227,7 @@ pub async fn db_tax_summary(pool: &SqlitePool) -> Result<Vec<TaxYearSummary>, sq
     let income_rows = sqlx::query(
         "SELECT listing_id, date_paid, ex_date, franked_amount, unfranked_amount, \
          foreign_source_income, foreign_tax_paid, tfn_withholding_tax, franking_credits, \
-         lic_capital_gain_deduction, currency \
+         lic_capital_gain_deduction, currency, trust_income, entitlement_date \
          FROM income",
     )
     .fetch_all(pool)
@@ -276,24 +276,36 @@ pub async fn db_tax_summary(pool: &SqlitePool) -> Result<Vec<TaxYearSummary>, sq
 
     for row in &income_rows {
         let date_paid: NaiveDate = row.try_get("date_paid")?;
-        let tax_year = if date_paid.month() >= 7 {
-            date_paid.year() + 1
+        // Trust income is assessed in the year of *present entitlement*, not
+        // payment (ATO QC 23087, docs/ato/trust-income-timing.md) — a June
+        // trust distribution paid in mid-July belongs to the FY just ended.
+        // When a trust row records its entitlement date, every component of
+        // the row is attributed by it; dividends always go by date_paid.
+        let trust_income: bool = row.try_get("trust_income")?;
+        let entitlement_date: Option<NaiveDate> = row.try_get("entitlement_date")?;
+        let assessed = match entitlement_date {
+            Some(d) if trust_income => d,
+            _ => date_paid,
+        };
+        let tax_year = if assessed.month() >= 7 {
+            assessed.year() + 1
         } else {
-            date_paid.year()
+            assessed.year()
         };
 
         // Amounts are denominated in the record's currency; convert to AUD via the
-        // ATO rate for the month of date_paid before aggregating.
+        // ATO rate for the month of the assessment date (the entitlement date when
+        // it governs, otherwise date_paid) before aggregating.
         let currency: String = row.try_get("currency")?;
-        let franked = aud_field(pool, row, "franked_amount", &currency, date_paid).await?;
-        let unfranked = aud_field(pool, row, "unfranked_amount", &currency, date_paid).await?;
+        let franked = aud_field(pool, row, "franked_amount", &currency, assessed).await?;
+        let unfranked = aud_field(pool, row, "unfranked_amount", &currency, assessed).await?;
         let foreign_income =
-            aud_field(pool, row, "foreign_source_income", &currency, date_paid).await?;
-        let foreign_tax = aud_field(pool, row, "foreign_tax_paid", &currency, date_paid).await?;
-        let tfn_wht = aud_field(pool, row, "tfn_withholding_tax", &currency, date_paid).await?;
-        let fc = aud_field(pool, row, "franking_credits", &currency, date_paid).await?;
+            aud_field(pool, row, "foreign_source_income", &currency, assessed).await?;
+        let foreign_tax = aud_field(pool, row, "foreign_tax_paid", &currency, assessed).await?;
+        let tfn_wht = aud_field(pool, row, "tfn_withholding_tax", &currency, assessed).await?;
+        let fc = aud_field(pool, row, "franking_credits", &currency, assessed).await?;
         let lic =
-            aud_field(pool, row, "lic_capital_gain_deduction", &currency, date_paid).await?;
+            aud_field(pool, row, "lic_capital_gain_deduction", &currency, assessed).await?;
 
         if fc > Decimal::ZERO {
             let ex_date: Option<NaiveDate> = row.try_get("ex_date")?;
@@ -597,6 +609,7 @@ mod tests {
             lic_capital_gain_deduction: Decimal::ZERO,
             conduit_foreign_income: Decimal::ZERO,
             trust_income: false,
+            entitlement_date: None,
             reinvestment_trade_id: None,
             currency: "AUD".to_string(),
             buyback_trade_id: None,
@@ -730,6 +743,117 @@ mod tests {
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].tax_year, 2024);
         assert_eq!(result[0].dividends_assessable, Decimal::from(50));
+    }
+
+    /// Trust income is assessed in the year of present entitlement, not
+    /// payment (ATO QC 23087, docs/ato/trust-income-timing.md): a June trust
+    /// distribution paid in mid-July belongs to the FY just ended, while a
+    /// dividend paid the same day stays in the FY of payment.
+    #[tokio::test]
+    async fn db_trust_distribution_assessed_by_entitlement_date_not_payment() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        // June 2026 trust distribution, paid 15 July 2026 → FY2026.
+        let mut trust = make_income(1, 1, NaiveDate::from_ymd_opt(2026, 7, 15).unwrap());
+        trust.trust_income = true;
+        trust.entitlement_date = Some(NaiveDate::from_ymd_opt(2026, 6, 30).unwrap());
+        trust.unfranked_amount = Decimal::from(100);
+        trust.tfn_withholding_tax = Decimal::from(10);
+        income::db_upsert(&pool, &trust).await.unwrap();
+        // A dividend paid the same day is assessed when paid → FY2027.
+        let mut div = make_income(2, 1, NaiveDate::from_ymd_opt(2026, 7, 15).unwrap());
+        div.unfranked_amount = Decimal::from(50);
+        income::db_upsert(&pool, &div).await.unwrap();
+
+        let result = db_tax_summary(&pool).await.unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].tax_year, 2026);
+        // Every component follows the entitlement date, not just the income line.
+        assert_eq!(result[0].dividends_assessable, Decimal::from(100));
+        assert_eq!(result[0].tfn_withholding_tax, Decimal::from(10));
+        assert_eq!(result[1].tax_year, 2027);
+        assert_eq!(result[1].dividends_assessable, Decimal::from(50));
+    }
+
+    /// Without an entitlement date a trust row keeps the date_paid attribution
+    /// (existing rows are unaffected by the new column).
+    #[tokio::test]
+    async fn db_trust_without_entitlement_date_assessed_by_date_paid() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        let mut trust = make_income(1, 1, NaiveDate::from_ymd_opt(2026, 7, 15).unwrap());
+        trust.trust_income = true;
+        trust.unfranked_amount = Decimal::from(100);
+        income::db_upsert(&pool, &trust).await.unwrap();
+
+        let result = db_tax_summary(&pool).await.unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].tax_year, 2027);
+    }
+
+    /// The AUD conversion month follows the assessment date too: a USD trust
+    /// row entitled in June converts at the June rate (a July-keyed lookup
+    /// would find no rate and fail loudly).
+    #[tokio::test]
+    async fn db_trust_entitlement_date_drives_fx_month() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        // A$1 = 0.50 USD for June 2026 only — no July rate exists.
+        rba_fx_rate::db_import_rate(&pool, "USD", "2026-06", "0.50".parse().unwrap())
+            .await
+            .unwrap();
+        let mut trust = make_income(1, 1, NaiveDate::from_ymd_opt(2026, 7, 15).unwrap());
+        trust.trust_income = true;
+        trust.entitlement_date = Some(NaiveDate::from_ymd_opt(2026, 6, 30).unwrap());
+        trust.currency = "USD".to_string();
+        trust.unfranked_amount = Decimal::from(100);
+        income::db_upsert(&pool, &trust).await.unwrap();
+
+        let result = db_tax_summary(&pool).await.unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].tax_year, 2026);
+        assert_eq!(result[0].dividends_assessable, Decimal::from(200)); // 100 / 0.50
+    }
+
+    /// The A$5,000 small-shareholder threshold groups attached credits by the
+    /// assessment year, so July-paid June trust credits count toward the
+    /// entitlement year's total.
+    #[tokio::test]
+    async fn db_franking_threshold_year_follows_entitlement_date() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        // Long-held parcel so the 45-day at-risk test passes once the
+        // threshold is crossed.
+        insert_trade(
+            &pool,
+            1,
+            1,
+            trade::TradeType::Buy,
+            NaiveDate::from_ymd_opt(2024, 1, 10).unwrap(),
+            1000,
+        )
+        .await;
+        // FY2026 dividend credits just below the threshold on their own.
+        let mut div = make_income(1, 1, NaiveDate::from_ymd_opt(2026, 1, 15).unwrap());
+        div.ex_date = Some(NaiveDate::from_ymd_opt(2026, 1, 2).unwrap());
+        div.franked_amount = "11643.33".parse().unwrap();
+        div.franking_credits = Decimal::from(4990);
+        income::db_upsert(&pool, &div).await.unwrap();
+        // July-paid June trust credits tip FY2026 over A$5,000.
+        let mut trust = make_income(2, 1, NaiveDate::from_ymd_opt(2026, 7, 15).unwrap());
+        trust.trust_income = true;
+        trust.entitlement_date = Some(NaiveDate::from_ymd_opt(2026, 6, 15).unwrap());
+        trust.unfranked_amount = Decimal::from(100);
+        trust.franking_credits = Decimal::from(20);
+        income::db_upsert(&pool, &trust).await.unwrap();
+
+        let result = db_tax_summary(&pool).await.unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].tax_year, 2026);
+        // Threshold crossed (4,990 + 20 ≥ 5,000) → the at-risk walk runs; the
+        // long-held parcel passes it, so all credits stay claimable in FY2026.
+        assert_eq!(result[0].franking_credits, Decimal::from(5010));
+        assert_eq!(result[0].franking_credits_denied, Decimal::ZERO);
     }
 
     #[tokio::test]

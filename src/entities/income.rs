@@ -25,10 +25,19 @@ pub struct Income {
     pub lic_capital_gain_deduction: Decimal,
     pub conduit_foreign_income: Decimal,
     pub trust_income: bool,
+    /// Trust distributions only: the date the holder became presently entitled
+    /// (in practice the distribution period's end, printed on the statement).
+    /// Trust income is assessed in the year of present entitlement regardless
+    /// of when it is paid (ATO QC 23087, `docs/ato/trust-income-timing.md`),
+    /// so when set the tax summary attributes the row by this date instead of
+    /// `date_paid`. Rejected (`422`) on a non-trust row — a dividend is always
+    /// assessed by payment.
+    pub entitlement_date: Option<NaiveDate>,
     pub reinvestment_trade_id: Option<i64>,
     /// ISO 4217 currency the amounts are denominated in. The tax summary converts
     /// non-AUD amounts to AUD via the ATO rate for this currency and the month of
-    /// `date_paid` (see `infra::fx::to_aud`). Defaults to AUD.
+    /// the assessment date — `date_paid`, or `entitlement_date` when that governs
+    /// a trust row (see `infra::fx::to_aud`). Defaults to AUD.
     pub currency: String,
     /// Provenance link from a buy-back dividend-component row to the buy-back
     /// Sell trade it was created with (`None` for every other row). Set only
@@ -68,6 +77,7 @@ impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for Income {
             lic_capital_gain_deduction: row_dec(row, "lic_capital_gain_deduction")?,
             conduit_foreign_income: row_dec(row, "conduit_foreign_income")?,
             trust_income: row.try_get("trust_income")?,
+            entitlement_date: row.try_get("entitlement_date")?,
             reinvestment_trade_id: row.try_get("reinvestment_trade_id")?,
             currency: row.try_get("currency")?,
             buyback_trade_id: row.try_get("buyback_trade_id")?,
@@ -102,6 +112,9 @@ pub struct IncomeBody {
     pub conduit_foreign_income: Decimal,
     #[serde(default)]
     pub trust_income: bool,
+    /// See `Income::entitlement_date` — trust rows only.
+    #[serde(default)]
+    pub entitlement_date: Option<NaiveDate>,
     #[serde(default)]
     pub reinvestment_trade_id: Option<i64>,
     #[serde(default = "default_currency")]
@@ -130,8 +143,9 @@ pub async fn db_list(pool: &SqlitePool) -> Result<Vec<Income>, sqlx::Error> {
     sqlx::query_as(
         "SELECT id, listing_id, date_paid, ex_date, franked_amount, unfranked_amount, \
          foreign_source_income, foreign_tax_paid, tfn_withholding_tax, franking_credits, \
-         lic_capital_gain_deduction, conduit_foreign_income, trust_income, reinvestment_trade_id, \
-         currency, buyback_trade_id, holding_account_id, amount_per_security, securities_held \
+         lic_capital_gain_deduction, conduit_foreign_income, trust_income, entitlement_date, \
+         reinvestment_trade_id, currency, buyback_trade_id, holding_account_id, \
+         amount_per_security, securities_held \
          FROM income ORDER BY date_paid, id",
     )
     .fetch_all(pool)
@@ -142,8 +156,9 @@ pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<Income>, sqlx::
     sqlx::query_as(
         "SELECT id, listing_id, date_paid, ex_date, franked_amount, unfranked_amount, \
          foreign_source_income, foreign_tax_paid, tfn_withholding_tax, franking_credits, \
-         lic_capital_gain_deduction, conduit_foreign_income, trust_income, reinvestment_trade_id, \
-         currency, buyback_trade_id, holding_account_id, amount_per_security, securities_held \
+         lic_capital_gain_deduction, conduit_foreign_income, trust_income, entitlement_date, \
+         reinvestment_trade_id, currency, buyback_trade_id, holding_account_id, \
+         amount_per_security, securities_held \
          FROM income WHERE id = ?",
     )
     .bind(id)
@@ -161,6 +176,11 @@ pub enum UpsertError {
     BuyBackIncome,
     /// The supplied per-share figures failed the cross-check. Mapped to `422`.
     PerShare(PerShareError),
+    /// An `entitlement_date` was supplied on a non-trust row. A dividend is
+    /// assessed when paid or credited — present entitlement only shifts the
+    /// assessment year of trust distributions (`docs/ato/trust-income-timing.md`).
+    /// Mapped to `422`.
+    EntitlementDateOnNonTrust,
 }
 
 impl From<sqlx::Error> for UpsertError {
@@ -223,6 +243,9 @@ pub(crate) fn per_share_detail(e: &PerShareError) -> String {
 
 pub async fn db_upsert(pool: &SqlitePool, income: &Income) -> Result<(), UpsertError> {
     check_per_share(income).map_err(UpsertError::PerShare)?;
+    if income.entitlement_date.is_some() && !income.trust_income {
+        return Err(UpsertError::EntitlementDateOnNonTrust);
+    }
 
     let mut tx = pool.begin().await?;
 
@@ -243,9 +266,10 @@ pub async fn db_upsert(pool: &SqlitePool, income: &Income) -> Result<(), UpsertE
         "INSERT INTO income \
          (id, listing_id, date_paid, ex_date, franked_amount, unfranked_amount, \
           foreign_source_income, foreign_tax_paid, tfn_withholding_tax, franking_credits, \
-          lic_capital_gain_deduction, conduit_foreign_income, trust_income, reinvestment_trade_id, \
-          currency, holding_account_id, amount_per_security, securities_held) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+          lic_capital_gain_deduction, conduit_foreign_income, trust_income, entitlement_date, \
+          reinvestment_trade_id, currency, holding_account_id, amount_per_security, \
+          securities_held) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT(id) DO UPDATE SET \
              listing_id                 = excluded.listing_id, \
              date_paid                  = excluded.date_paid, \
@@ -259,6 +283,7 @@ pub async fn db_upsert(pool: &SqlitePool, income: &Income) -> Result<(), UpsertE
              lic_capital_gain_deduction = excluded.lic_capital_gain_deduction, \
              conduit_foreign_income     = excluded.conduit_foreign_income, \
              trust_income               = excluded.trust_income, \
+             entitlement_date           = excluded.entitlement_date, \
              reinvestment_trade_id      = excluded.reinvestment_trade_id, \
              currency                   = excluded.currency, \
              holding_account_id         = excluded.holding_account_id, \
@@ -278,6 +303,7 @@ pub async fn db_upsert(pool: &SqlitePool, income: &Income) -> Result<(), UpsertE
     .bind(income.lic_capital_gain_deduction.to_string())
     .bind(income.conduit_foreign_income.to_string())
     .bind(income.trust_income)
+    .bind(income.entitlement_date)
     .bind(income.reinvestment_trade_id)
     .bind(&income.currency)
     .bind(income.holding_account_id)
@@ -360,6 +386,7 @@ async fn upsert(
         lic_capital_gain_deduction: body.lic_capital_gain_deduction,
         conduit_foreign_income: body.conduit_foreign_income,
         trust_income: body.trust_income,
+        entitlement_date: body.entitlement_date,
         reinvestment_trade_id: body.reinvestment_trade_id,
         currency: body.currency,
         buyback_trade_id: None,
@@ -384,6 +411,12 @@ async fn upsert(
             UpsertError::PerShare(detail) => {
                 (StatusCode::UNPROCESSABLE_ENTITY, per_share_detail(&detail))
             }
+            UpsertError::EntitlementDateOnNonTrust => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "entitlement_date only applies to trust distributions — a dividend is \
+                 assessed when paid; tick trust income or clear the entitlement date"
+                    .to_string(),
+            ),
         })
 }
 
@@ -489,6 +522,7 @@ mod tests {
             lic_capital_gain_deduction: Decimal::ZERO,
             conduit_foreign_income: Decimal::ZERO,
             trust_income: false,
+            entitlement_date: None,
             reinvestment_trade_id: None,
             currency: "AUD".to_string(),
             buyback_trade_id: None,
@@ -533,6 +567,7 @@ mod tests {
             lic_capital_gain_deduction: Decimal::from(5),
             conduit_foreign_income: Decimal::from(3),
             trust_income: true,
+            entitlement_date: None,
             reinvestment_trade_id: None,
             currency: "AUD".to_string(),
             buyback_trade_id: None,
@@ -567,6 +602,7 @@ mod tests {
             lic_capital_gain_deduction: Decimal::ZERO,
             conduit_foreign_income: Decimal::ZERO,
             trust_income: false,
+            entitlement_date: None,
             reinvestment_trade_id: Some(trade_id),
             currency: "AUD".to_string(),
             buyback_trade_id: None,
@@ -902,5 +938,79 @@ mod tests {
         let inc: Income = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(inc.amount_per_security, Some("0.89891492".parse::<Decimal>().unwrap()));
         assert_eq!(inc.securities_held, Some(Decimal::from(866)));
+    }
+
+    // Entitlement date (trust present-entitlement timing,
+    // docs/ato/trust-income-timing.md): trust rows only.
+
+    #[tokio::test]
+    async fn db_entitlement_date_round_trips_on_trust_row() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        let mut dist = dividend_income();
+        dist.trust_income = true;
+        dist.entitlement_date = Some(NaiveDate::from_ymd_opt(2026, 6, 30).unwrap());
+        db_upsert(&pool, &dist).await.unwrap();
+        let got = db_get(&pool, 1).await.unwrap().unwrap();
+        assert_eq!(got.entitlement_date, Some(NaiveDate::from_ymd_opt(2026, 6, 30).unwrap()));
+    }
+
+    #[tokio::test]
+    async fn db_entitlement_date_on_non_trust_rejected() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        let mut div = dividend_income();
+        div.entitlement_date = Some(NaiveDate::from_ymd_opt(2026, 6, 30).unwrap());
+        let err = db_upsert(&pool, &div).await.unwrap_err();
+        assert!(matches!(err, UpsertError::EntitlementDateOnNonTrust));
+        assert!(db_get(&pool, 1).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn api_entitlement_date_on_dividend_returns_422_with_detail() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        let (status, detail) = put_income(
+            &pool,
+            1,
+            serde_json::json!({
+                "listing_id": 1,
+                "date_paid": "2026-07-15",
+                "franked_amount": "70",
+                "entitlement_date": "2026-06-30"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(detail.contains("trust distributions"), "detail: {detail}");
+        assert!(db_get(&pool, 1).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn api_trust_entitlement_date_round_trips() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        let (status, _) = put_income(
+            &pool,
+            1,
+            serde_json::json!({
+                "listing_id": 1,
+                "date_paid": "2026-07-15",
+                "unfranked_amount": "100",
+                "trust_income": true,
+                "entitlement_date": "2026-06-30"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let resp = router()
+            .with_state(pool)
+            .oneshot(Request::builder().uri("/income/1").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let inc: Income = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(inc.entitlement_date, Some(NaiveDate::from_ymd_opt(2026, 6, 30).unwrap()));
+        assert!(inc.trust_income);
     }
 }
