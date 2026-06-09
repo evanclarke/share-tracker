@@ -81,7 +81,13 @@ async fn lookup_ato_rate(
 /// `date`. AUD always resolves to 1. Otherwise the ATO rate for the month of
 /// `date` takes precedence; `manual_override` is used only when no ATO rate exists
 /// for that (currency, month). Fails loudly when neither is available.
-async fn resolve_rate(
+///
+/// Public so a caller converting several amounts at the same (currency, month)
+/// — e.g. `domain::cost_base` converting a cost-base breakdown — can resolve
+/// the rate once instead of one lookup per amount. Apply it as `AUD = foreign
+/// / rate`, passing amounts through unchanged at rate 1 (AUD and parity rates)
+/// so an exact value is never reshaped by a divide, exactly as [`to_aud`] does.
+pub async fn resolve_rate(
     pool: &SqlitePool,
     currency: &str,
     date: NaiveDate,

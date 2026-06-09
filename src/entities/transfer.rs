@@ -33,9 +33,7 @@
 //! Buy is consumed by later allocations, AMIT adjustments, or income links).
 //! A recorded transfer is immutable — delete it and re-transfer instead.
 
-use crate::entities::corporate_action::{
-    self, RocEvent, as_acquired_quantity, per_unit_reduction,
-};
+use crate::entities::corporate_action::{self, RocEvent, as_acquired_quantity};
 use crate::entities::sell::{self, AllocationInput, SellBody};
 use crate::entities::trade::{self, Trade};
 use crate::infra::decimal::parse_dec;
@@ -273,23 +271,27 @@ pub async fn db_transfer(
         let deemed: Option<NaiveDate> = parcel.try_get("deemed_acquisition_date")?;
 
         // The moved units' share of the parcel's remaining reduced cost base,
-        // in the parcel's own currency: the open-parcels formula
-        // (AMIT-reduced, then return-of-capital payments on the moved units,
-        // both flooring at nil), pro-rated over the *as-acquired* moved units
+        // in the parcel's own currency: the shared pipeline
+        // (`domain::cost_base`), pro-rated over the *as-acquired* moved units
         // so a partial transfer carries exactly its share.
         let moved_as_acquired =
             as_acquired_quantity(alloc.quantity_allocated, &splits, date, body.date);
-        let initial_cost = price * qty + brok + gst;
-        let amit = *amit_reductions.get(&alloc.purchase_trade_id).unwrap_or(&Decimal::ZERO);
-        let net_cost = (initial_cost - amit).max(Decimal::ZERO);
-        let roc_per_unit =
-            per_unit_reduction(&roc_events, &splits, &currency, date, Some(body.date))?;
-        let carried_cost_base = if qty > Decimal::ZERO {
-            (net_cost * moved_as_acquired / qty - roc_per_unit * moved_as_acquired)
-                .max(Decimal::ZERO)
-        } else {
-            Decimal::ZERO
-        };
+        let carried_cost_base = crate::domain::cost_base::adjusted_cost_base(
+            &crate::domain::cost_base::Parcel {
+                quantity: qty,
+                average_price: price,
+                brokerage: brok,
+                gst_on_brokerage: gst,
+                currency: &currency,
+                trade_date: date,
+            },
+            moved_as_acquired,
+            *amit_reductions.get(&alloc.purchase_trade_id).unwrap_or(&Decimal::ZERO),
+            &roc_events,
+            &splits,
+            Some(body.date),
+        )?
+        .adjusted;
 
         transfer_ins.push(TransferIn {
             quantity: alloc.quantity_allocated,

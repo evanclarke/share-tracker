@@ -53,8 +53,7 @@
 //! entitlements (the demerge keeps exact fractional unit counts).
 
 use crate::entities::corporate_action::{
-    self, ActionKind, RocEvent, per_unit_reduction, sold_in_acquired_units,
-    split_adjusted_quantity,
+    self, ActionKind, RocEvent, sold_in_acquired_units, split_adjusted_quantity,
 };
 use crate::entities::sell::{self, AllocationInput, SellBody};
 use crate::entities::trade::{self, Trade};
@@ -261,19 +260,25 @@ pub async fn db_demerge(pool: &SqlitePool, action_id: i64) -> Result<Demerge, De
         }
 
         // Remaining reduced cost base in the parcel's own currency: the
-        // open-parcels report's formula (AMIT-reduced, then return-of-capital
-        // payments on the remaining units, both flooring at nil). The ATO's
-        // step 1 takes the cost base immediately before the demerger.
-        let initial_cost = price * qty + brok + gst;
-        let amit = *amit_reductions.get(&parcel_id).unwrap_or(&Decimal::ZERO);
-        let net_cost = (initial_cost - amit).max(Decimal::ZERO);
-        let roc_per_unit =
-            per_unit_reduction(&roc_events, &splits, &currency, date, Some(action.date))?;
-        let carried_cost_base = if qty > Decimal::ZERO {
-            (net_cost * remaining / qty - roc_per_unit * remaining).max(Decimal::ZERO)
-        } else {
-            Decimal::ZERO
-        };
+        // shared pipeline (`domain::cost_base`). The ATO's step 1 takes the
+        // cost base immediately before the demerger, so `up_to` is the
+        // demerger date.
+        let carried_cost_base = crate::domain::cost_base::adjusted_cost_base(
+            &crate::domain::cost_base::Parcel {
+                quantity: qty,
+                average_price: price,
+                brokerage: brok,
+                gst_on_brokerage: gst,
+                currency: &currency,
+                trade_date: date,
+            },
+            remaining,
+            *amit_reductions.get(&parcel_id).unwrap_or(&Decimal::ZERO),
+            &roc_events,
+            &splits,
+            Some(action.date),
+        )?
+        .adjusted;
 
         // Step 2: apportion by the advised percentage. demerged + head sum
         // exactly to the carried cost base by construction.

@@ -1,3 +1,4 @@
+use crate::domain::cost_base;
 use crate::infra::decimal::parse_dec;
 use axum::{Json, Router, extract::State, http::StatusCode, routing::get};
 use chrono::NaiveDate;
@@ -124,42 +125,28 @@ pub async fn db_open_parcels(pool: &SqlitePool) -> Result<Vec<OpenParcel>, sqlx:
             continue;
         }
 
-        let initial_cost = price * qty + brok + gst;
-        let amit = *cba_reduction.get(&trade_id).unwrap_or(&Decimal::ZERO);
-        // CGT event E10: an AMIT cost base reduction can only take the cost base
-        // to nil, never negative (the excess is a capital gain in the
-        // net-capital-gain report).
-        let net_cost = (initial_cost - amit).max(Decimal::ZERO);
-        // Return-of-capital payments (CGT event G1) received on the remaining
-        // units since acquisition; the cost base floors at nil (the excess is a
-        // capital gain in the net-capital-gain report).
-        let roc_per_unit = crate::entities::corporate_action::per_unit_reduction(
+        // The shared pipeline (`domain::cost_base`) for the remaining units —
+        // `up_to: None`: an unsold unit was held for every payment since
+        // acquisition — with every figure converted to AUD at the parcel's
+        // acquisition-month ATO rate (the trade's manual fx_rate as fallback)
+        // so the schedule is uniformly AUD.
+        let cb = cost_base::adjusted_cost_base(
+            &cost_base::Parcel {
+                quantity: qty,
+                average_price: price,
+                brokerage: brok,
+                gst_on_brokerage: gst,
+                currency: &currency,
+                trade_date,
+            },
+            remaining,
+            *cba_reduction.get(&trade_id).unwrap_or(&Decimal::ZERO),
             roc_events.get(&listing_id).map_or(&[][..], |v| v),
             splits,
-            &currency,
-            trade_date,
             None,
-        )?;
-        let roc = roc_per_unit * remaining;
-        let remaining_cost = if qty > Decimal::ZERO {
-            (net_cost * remaining / qty - roc).max(Decimal::ZERO)
-        } else {
-            Decimal::ZERO
-        };
-
-        // Convert each figure to AUD at the parcel's acquisition-month ATO
-        // rate (the trade's manual fx_rate as fallback) so the schedule is
-        // uniformly AUD.
-        let original_cost_base =
-            crate::infra::fx::to_aud(pool, initial_cost, &currency, acquired, Some(fx_rate))
-                .await?;
-        let amit_cost_base_reduction =
-            crate::infra::fx::to_aud(pool, amit, &currency, acquired, Some(fx_rate)).await?;
-        let return_of_capital_reduction =
-            crate::infra::fx::to_aud(pool, roc, &currency, acquired, Some(fx_rate)).await?;
-        let remaining_cost_base =
-            crate::infra::fx::to_aud(pool, remaining_cost, &currency, acquired, Some(fx_rate))
-                .await?;
+        )?
+        .into_aud(pool, &currency, acquired, Some(fx_rate))
+        .await?;
 
         // The remaining quantity is reported in current units — after every
         // recorded split/consolidation — so it reconciles with a broker
@@ -176,10 +163,10 @@ pub async fn db_open_parcels(pool: &SqlitePool) -> Result<Vec<OpenParcel>, sqlx:
             acquisition_date: acquired,
             original_quantity: qty,
             remaining_quantity: remaining_now,
-            original_cost_base,
-            amit_cost_base_reduction,
-            return_of_capital_reduction,
-            remaining_cost_base,
+            original_cost_base: cb.initial_cost,
+            amit_cost_base_reduction: cb.amit_reduction,
+            return_of_capital_reduction: cb.roc_reduction,
+            remaining_cost_base: cb.adjusted,
         });
     }
 

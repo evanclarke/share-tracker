@@ -1,3 +1,4 @@
+use crate::domain::cost_base;
 use crate::entities::closing_price::{self, SharedFetcher};
 use crate::infra::decimal::parse_dec;
 use axum::{Extension, Json, Router, extract::State, http::StatusCode, routing::post};
@@ -146,37 +147,31 @@ pub async fn db_holdings(
             continue;
         }
 
-        let initial_cost = price * qty + brok + gst;
-        let amit = *cba_reduction.get(&trade_id).unwrap_or(&Decimal::ZERO);
-        // CGT event E10: an AMIT cost base reduction can only take the cost base to
-        // nil, never negative. Any excess is a capital gain reported by the
-        // net-capital-gain report, not a negative cost base here.
-        let net_cost = (initial_cost - amit).max(Decimal::ZERO);
-        // pro-rate cost base to remaining units, then net off the return-of-capital
-        // payments received on those units (CGT event G1 also floors at nil — the
-        // excess is a capital gain in the net-capital-gain report, never a
-        // negative cost base here)
-        let roc_per_unit = crate::entities::corporate_action::per_unit_reduction(
-            roc_events.get(&listing_id).map_or(&[][..], |v| v),
-            splits,
-            &currency,
-            trade_date,
-            as_of,
-        )?;
-        let remaining_cost = if qty > Decimal::ZERO {
-            (net_cost * remaining / qty - roc_per_unit * remaining).max(Decimal::ZERO)
-        } else {
-            Decimal::ZERO
-        };
-        // Convert the parcel's cost base to AUD (ATO rate for the acquisition
-        // month, else the trade's manual fx_rate) so holdings aggregate in
-        // AUD. A scrip-for-scrip replacement parcel converts at its deemed
-        // acquisition month — the rollover carries the AUD cost base over.
+        // Adjusted cost base of the remaining units via the shared pipeline
+        // (`domain::cost_base`), converted to AUD at the (possibly deemed)
+        // acquisition month so holdings aggregate in AUD. `up_to` is the
+        // report's as-of date: payments after it haven't happened yet in
+        // this view.
         let deemed: Option<NaiveDate> = row.try_get("deemed_acquisition_date")?;
         let acquired = deemed.unwrap_or(trade_date);
-        let remaining_cost =
-            crate::infra::fx::to_aud(pool, remaining_cost, &currency, acquired, Some(fx_rate))
-                .await?;
+        let remaining_cost = cost_base::adjusted_cost_base(
+            &cost_base::Parcel {
+                quantity: qty,
+                average_price: price,
+                brokerage: brok,
+                gst_on_brokerage: gst,
+                currency: &currency,
+                trade_date,
+            },
+            remaining,
+            *cba_reduction.get(&trade_id).unwrap_or(&Decimal::ZERO),
+            roc_events.get(&listing_id).map_or(&[][..], |v| v),
+            splits,
+            as_of,
+        )?
+        .into_aud(pool, &currency, acquired, Some(fx_rate))
+        .await?
+        .adjusted;
 
         // The holding's quantity is reported in the unit basis of `as_of`
         // (live view: current units, after every recorded split) so market

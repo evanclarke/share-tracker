@@ -2,6 +2,7 @@ mod app;
 // API-level acceptance tests reproducing the worked examples in the ATO docs.
 #[cfg(test)]
 mod ato_examples;
+mod domain;
 mod entities;
 mod infra;
 mod reports;

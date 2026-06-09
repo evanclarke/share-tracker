@@ -1,3 +1,4 @@
+use crate::domain::cost_base;
 use crate::infra::decimal::parse_dec;
 use axum::{Json, Router, extract::State, http::StatusCode, routing::get};
 use chrono::{Months, NaiveDate};
@@ -208,46 +209,29 @@ pub async fn db_realised_gains(pool: &SqlitePool) -> Result<Vec<RealisedGainLoss
             qty_alloc, splits, buy.date, sale.date,
         );
 
-        // Cost base for allocated portion of purchase parcel (AMIT-reduced, pro-rated)
-        let buy_initial_cost =
-            buy.average_price * buy.quantity + buy.brokerage + buy.gst_on_brokerage;
-        let amit = *cba_reduction.get(&buy_id).unwrap_or(&Decimal::ZERO);
-        // CGT event E10: an AMIT cost base reduction can only take the cost base to
-        // nil, never negative. Any excess is reported as a capital gain by the
-        // net-capital-gain report (see `e10_gains`), so a sale of an exhausted parcel
-        // uses a nil cost base here rather than a negative one.
-        let buy_net_cost = (buy_initial_cost - amit).max(Decimal::ZERO);
-        // Return-of-capital payments (CGT event G1) received while the sold
-        // units were held — from acquisition up to the sale date — reduce their
-        // cost base, flooring at nil (the excess is a capital gain in the
-        // net-capital-gain report). Payments after the sale don't touch these
-        // units: they were no longer held.
-        let roc_per_unit = crate::entities::corporate_action::per_unit_reduction(
+        // Adjusted cost base of the allocated portion via the shared pipeline
+        // (`domain::cost_base`), converted to AUD at the (possibly deemed)
+        // acquisition month. `up_to` is the sale date: return-of-capital
+        // payments after the sale don't touch these units — they were no
+        // longer held.
+        let alloc_cost = cost_base::adjusted_cost_base(
+            &cost_base::Parcel {
+                quantity: buy.quantity,
+                average_price: buy.average_price,
+                brokerage: buy.brokerage,
+                gst_on_brokerage: buy.gst_on_brokerage,
+                currency: &buy.currency,
+                trade_date: buy.date,
+            },
+            qty_alloc_acquired,
+            *cba_reduction.get(&buy_id).unwrap_or(&Decimal::ZERO),
             roc_events.get(&buy.listing_id).map_or(&[][..], |v| v),
             splits,
-            &buy.currency,
-            buy.date,
             Some(sale.date),
-        )?;
-        let alloc_cost = if buy.quantity > Decimal::ZERO {
-            (buy_net_cost * qty_alloc_acquired / buy.quantity
-                - roc_per_unit * qty_alloc_acquired)
-                .max(Decimal::ZERO)
-        } else {
-            Decimal::ZERO
-        };
-        // Convert to AUD at the acquisition's rate (ATO rate for the
-        // acquisition month, else the buy's manual fx_rate). A scrip-for-scrip
-        // replacement parcel converts at its deemed acquisition month — the
-        // rollover carries the original AUD cost base over.
-        let alloc_cost = crate::infra::fx::to_aud(
-            pool,
-            alloc_cost,
-            &buy.currency,
-            buy.acquired,
-            Some(buy.fx_rate),
-        )
-        .await?;
+        )?
+        .into_aud(pool, &buy.currency, buy.acquired, Some(buy.fx_rate))
+        .await?
+        .adjusted;
 
         let alloc_gain = alloc_proceeds - alloc_cost;
 
