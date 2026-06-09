@@ -14,10 +14,13 @@ participation, ESS income). The full historical requirement text and each item's
 preserved in git history and in `TODO.md`'s entries. Ongoing engineering rules (Decimal-only money,
 non-destructive migrations, enum constraints, write-time invariants, …) live in `CLAUDE.md`.
 
-The three sections dated 2026-06-08 at the end (worthless / delisted shares — CGT events G3 and C2;
-deductible investment expenses; employee share scheme (ESS) income) are **newly specified and not
-yet implemented** — they have not been folded into `TODO.md`. The ESS-income section supersedes the
-existing "ESS income reporting is out of scope" Known limitation.
+Everything specified through 2026-06-08 (worthless / delisted shares, deductible investment
+expenses, ESS income, the crypto network fee) is now also implemented and documented in
+`README.md` / `DONE.md`.
+
+The sections dated 2026-06-10 at the end come from the **2026-06-10 business-analysis gap review**
+(an individual-investor gap analysis against the ATO guidance mirrored in `docs/ato/`). They are
+newly specified and folded into `TODO.md` as open work.
 
 # New Requirements
 
@@ -580,3 +583,212 @@ Out of scope (already recorded as Known limitations, unchanged): crypto-to-crypt
 rewards/airdrops, chain splits/forks, wrapping, the personal-use-asset exemption, and Div 775
 foreign-currency balances. A transfer fee charged in **fiat** by an exchange is not a crypto
 disposal — it is a (non-deductible) transaction cost, not modelled here.
+
+## Trust distribution income year — present entitlement (2026-06-10)
+
+The tax summary attributes `income` rows to a financial year by `date_paid` (July ⇒ next FY).
+That is correct for dividends (assessable when paid or credited) but **wrong for trust
+distributions**: per ATO QC 23087 (mirrored in `docs/ato/trust-income-timing.md`) a beneficiary
+is assessed in the year they are **presently entitled**, regardless of when the cash is paid —
+and managed funds routinely pay the June distribution in mid-July. Today a `trust_income` row
+paid 15 July 2026 for the June 2026 period lands in FY 2027; it belongs in FY 2026. AMMA
+statements are unaffected (attributed by `tax_year_end_date`).
+
+- `income` gains an optional `entitlement_date` (TEXT date, nullable): the date the beneficiary
+  became presently entitled (in practice the distribution period's end, printed on the statement)
+  - Only meaningful on trust distributions: supplying it on a non-trust row (`trust_income`
+    false) is rejected with 422 — a dividend is always assessed by payment
+  - When present on a trust row, the tax summary (and its CSV export) attributes **every**
+    component of that row by `entitlement_date` instead of `date_paid`; absent, behaviour is
+    unchanged (`date_paid`), so existing rows are unaffected
+  - The franking 45-day at-risk test keeps anchoring on `ex_date`/`date_paid` (the at-risk window
+    is about holding the shares, not the assessment year); the A$5,000 threshold year follows the
+    row's assessment year
+- Web UI: the income form's **Trust distribution** selection reveals the entitlement-date field
+  (defaulting to the pay date); the advanced field set includes it
+- Docs: `docs/SCHEMA.md` (new column), `docs/API.md` (the 422 and the attribution rule), README
+  tax-summary feature text; an `ato_examples.rs`-style test asserts a July-paid June trust
+  distribution reaches the earlier FY
+
+## Non-AMIT trust tax-deferred amounts — CGT event E4 cross-check (2026-06-10)
+
+For a **non-AMIT** unit trust, a tax-deferred amount on the annual statement is a CGT event E4
+cost-base reduction (`docs/ato/cgt-non-assessable-payments.md`). The model handles it via a
+`ReturnOfCapital` corporate action, but nothing connects the income entry to that obligation — a
+user who faithfully keys the statement will silently overstate cost base. (For an AMIT the
+per-unit `cost_base_adjustment` is the sole driver and tax-deferred is informational —
+`docs/ato/amit-cost-base-adjustments.md` — that stays unchanged.)
+
+- `income` gains an optional informational `tax_deferred_amount` (TEXT decimal, nullable, ≥ 0;
+  only valid on `trust_income` rows, 422 otherwise) — recorded from the statement, used by no
+  calculation (the E4 reduction itself remains the `ReturnOfCapital` action)
+- A new non-blocking report (pattern: settlement-holiday coverage) flags every trust income row
+  with a non-zero `tax_deferred_amount` whose listing has **no** `ReturnOfCapital` action dated
+  within that row's financial year — "tax-deferred amount recorded but no cost-base reduction
+  entered". Entering the matching action clears the flag; rows whose listing has a same-FY action
+  are omitted
+- Web UI: the field joins the advanced income fields; the report renders via the standard
+  `REPORTS` config
+- Docs: `docs/SCHEMA.md`, `docs/API.md` (new report + 422), README
+
+## Inherited share parcels (2026-06-10)
+
+Shares inherited from a deceased estate enter the portfolio with a cost base that is not a market
+purchase (ATO QC 66053, mirrored in `docs/ato/inherited-assets-cost-base.md`): the transfer from
+the estate is no CGT event; the beneficiary's first-element cost base is the **deceased's cost
+base at death** (asset acquired by the deceased on/after 20 Sep 1985) or the **market value at
+death** (pre-CGT asset), plus any LPR expenditure. Today the only entry path is a synthetic Buy
+with hand-computed figures and no provenance.
+
+- A way to enter an inherited parcel recording: listing, holding account, units, **date of
+  death**, the cost base per the rule above (entered as a figure, with which rule applied), the
+  **deceased's acquisition date** where the asset was post-CGT in their hands, and any LPR
+  expenditure (added to cost base, dated when the LPR incurred it)
+- The 12-month discount clock follows s 115-30: confirm the rule from the ATO source during
+  implementation and mirror the page into `docs/ato/` — the intended outcome is that a post-CGT
+  inherited parcel's discount period runs from the **deceased's** acquisition and a pre-CGT
+  parcel's from the **date of death**
+- The parcel flows through every report and write-time capacity check like any Buy; provenance is
+  visible (it is an inherited parcel, not a market trade)
+- Web UI via the existing config-driven entity/action patterns; docs per the standard sync rule;
+  an `ato_examples.rs` acceptance test for any worked example the feature makes representable
+
+Out of scope (record as Known limitations):
+- **The estate/LPR side** (the executor's own return, assets sold by the executor) — only parcels
+  that pass to the beneficiary are modelled
+- **Market valuation at death** — the user supplies the figure (as elsewhere)
+
+## Renounceable rights — selling, lapsing, and retail premiums (2026-06-10)
+
+The `RightsIssue` action models exercise only. ASX retail entitlement offers constantly produce
+the other outcomes, already documented in the mirrored guidance (`docs/ato/rights-issues.md`):
+**selling** free rights is a CGT event with the rights taking the **original parcel's acquisition
+date** and a nil cost base (so the proceeds are essentially all gain, discount-eligible off the
+original holding date); **lapse** of free rights is a non-event (nil cost base, nil proceeds).
+
+- A **sell-rights** operation against a `RightsIssue`: units of rights sold (capped, together
+  with exercises, at the entitlement), proceeds per right, sale date; produces a provenance-marked
+  disposal whose acquisition date for the discount is the original parcel's, reaching the realised
+  and net-capital-gain reports. Free rights have nil cost base; rights paid for carry that cost
+- **Lapse** needs no operation for free rights (no gain, no loss); a paid-for right that lapses
+  is a capital loss of its cost — supported by the same operation at nil proceeds
+- **Retail premiums** (the payment a non-participating holder receives when the shortfall is
+  placed): the ATO treats these as assessable — fetch and mirror the ATO's retail-premiums
+  guidance before implementing, and resolve the exact character (the needs-clarification step);
+  model only after the doc is mirrored
+- Web UI via the existing `ACTIONS` config; docs per the standard sync rule; `ato_examples.rs`
+  tests for the worked examples this makes representable (Example 39's sold-rights case)
+
+## Takeovers with a cash component — partial scrip-for-scrip rollover (2026-06-10)
+
+`ScripForScrip` models only the all-scrip full rollover, yet most real takeovers pay cash or
+mixed consideration. The mirrored guidance (`docs/ato/takeovers-and-scrip-for-scrip.md`, Example
+27 — Gunther) covers the partial case: rollover applies only to the scrip portion; the cost base
+is apportioned between cash and scrip by the **market values of the consideration**; the cash
+portion is an ordinary disposal whose gain is assessed now (discount per the original holding
+period), and the replacement parcels carry the scrip-apportioned cost base and original
+acquisition dates.
+
+- Extend the `ScripForScrip` action with an optional per-unit cash component alongside the scrip
+  ratio; the exchange operation then splits each consumed parcel's remaining reduced cost base by
+  the consideration's market values, recognises the cash-side gain/loss in the realised and
+  net-capital-gain reports, and creates the replacement parcels exactly as today for the scrip
+  side
+- A pure-cash takeover stays an ordinary Sell (unchanged); the all-scrip case is unchanged
+- `ato_examples.rs`: Example 27 becomes representable — add the acceptance test
+- Web UI via the existing action config; docs per the standard sync rule
+
+Out of scope (record as Known limitations, unchanged): takeovers without rollover eligibility
+(enter as ordinary Sells) and multiple replacement share classes (Example 28)
+
+## CGT decision support — parcel-selection optimiser and pre-sale what-if (2026-06-10)
+
+Everything in the system is retrospective, but parcel selection is the taxpayer's **choice**
+(`docs/ato/cgt-keeping-records-shares.md`) — the largest legal CGT lever an individual has. The
+tool records the choice; it should help make it. Both features are **read-only reports** over
+data the open-parcels report already has; nothing is persisted.
+
+- **Parcel-selection optimiser**: given a listing, holding account, unit quantity, sale date, and
+  a price (live-fetched by default, per the live-valuation rules), return candidate allocation
+  strategies — at least: minimise current-year assessable gain, maximise discount-eligible
+  proportion, harvest losses first, FIFO as the baseline — each with its per-parcel allocation
+  and the resulting gross gain / discountable split, so the user can pick allocations for the
+  real Sell
+- **Pre-sale what-if**: the net-capital-gain report accepts a hypothetical disposal (listing,
+  units, proceeds, date, chosen allocations or a strategy from the optimiser) and returns the
+  year's figures with and without it — a dry run, no rows written. The whole-of-income tax
+  estimate stays out of scope (consistent with the FITO decision); this is the CGT-side delta
+  only
+- Web UI: a screen per report via the existing `REPORTS`/action config; docs per the standard
+  sync rule
+
+## Compliance alert reports — wash sales and franking at-risk foresight (2026-06-10)
+
+Two non-blocking alert reports in the established pattern (MIC validation, settlement coverage):
+
+- **Wash-sale flag**: list every loss-realising Sell followed (or preceded) by a Buy of the same
+  listing within a configurable window (default 30 days) in any holding account — the fact
+  pattern the ATO warns may attract Part IVA. Fetch and mirror the ATO's wash-sale guidance
+  (TR 2008/1 / the current ATO page) into `docs/ato/` before implementing. Non-blocking: writes
+  are never rejected; the report only surfaces the pattern with the dates and amounts
+- **Franking at-risk foresight**: the 45-day rule is currently applied silently at tax-summary
+  time. Add a report listing each dividend whose credits are denied (or would be denied by a
+  contemplated sale — reusing the holding-period walk) with the failing window, so the user sees
+  *why* credits disappear and can time disposals; surfaced in the UI near the Sell flow
+- Docs per the standard sync rule; both reports render via the standard `REPORTS` config
+
+## Tax-return label mapping on the CSV exports (2026-06-10)
+
+The tax-summary and net-capital-gain exports carry the right figures but not the tax-return
+labels, so every June the user re-derives the mapping. Map each exported column to its
+myTax/paper-return label (e.g. net capital gain → 18A, total current-year gains → 18H, franked
+dividends/credits → 11T/11U, trust income → 13U, foreign income/FITO → 20E/20O, deductions →
+D7/D8, ESS → Item 12 D/E/F/G/A/C).
+
+- Verify the current year's labels from the ATO instructions at implementation time and mirror
+  the label reference into `docs/ato/` (labels shift year to year — the mirror records which
+  year's form the mapping targets)
+- The mapping appears in `docs/API.md` and on the export itself (e.g. a second header row or a
+  label column) without changing the existing columns
+- Existing user-responsibility caveats (`taxpayer_basis`, FITO, ESS income test) are unchanged
+
+## Interest income (2026-06-10)
+
+The deductions side of investment income is modelled (`investment_expenses`), but assessable
+**interest income** (broker cash hub accounts, margin-loan offset interest) is not recordable —
+`net_assessable_investment_income` is structurally understated. The `income` entity is
+listing-keyed, so interest needs its own small entity.
+
+- A new entity `interest_income`: id, date paid, amount (Decimal), currency (AUD default,
+  converted per the existing ATO-rate rules at the month paid), TFN withholding, optional
+  `holding_account_id`, free-text source description
+- The tax summary gains an `interest_income` line per financial year, included in
+  `gross_assessable_investment_income` (and so netted by the existing deductions); the TFN amount
+  joins the existing withholding line; CSV export updated
+- Standard entity module pattern, web UI `ENTITIES` entry, docs per the standard sync rule
+
+## Operational hardening — restore, off-disk backups, localhost default (2026-06-10)
+
+- **Backups**: the weekly backup writes beside the live database — same disk, same failure
+  domain — and no restore procedure is documented or tested. Add an optional `--backup-dir`
+  (default: beside the DB, as today) so backups can land on another volume; document the restore
+  procedure in the README and prove it with a test (back up, mutate, restore, assert the
+  pre-mutation state)
+- **Bind address**: the server defaults to `0.0.0.0` with no authentication while holding a
+  near-complete tax position. Change the default `--host` to `127.0.0.1`; `--host 0.0.0.0`
+  remains available and the README note inverts accordingly (opt into network exposure rather
+  than out of it)
+
+## Known-limitation documentation — gifts, pre-CGT holdings, indexation (2026-06-10)
+
+Three scope cuts that are currently silent; document each in the Known limitations list (no
+modelling):
+
+- **Gifts / off-market related-party transfers**: a gift is a disposal at **market value**
+  (market-value substitution); enterable today as a manual Sell (gift out) or Buy (gift in) at
+  market value — say so
+- **Pre-CGT holdings**: a parcel acquired before 20 September 1985 is outside CGT entirely; the
+  system would wrongly compute gains on it — state that pre-CGT parcels are not modelled
+- **The indexation method**: for assets acquired before 21 September 1999 an individual may
+  index the cost base (frozen at Sep 1999) instead of the 50% discount; the discount is almost
+  always better for individuals and indexation is not modelled — state it
