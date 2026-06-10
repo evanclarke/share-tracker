@@ -211,42 +211,27 @@ async fn delete(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::infra::db;
+    use crate::test_support::test_pool;
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
-    async fn test_pool() -> SqlitePool {
-        db::init(":memory:").await.unwrap()
-    }
-
     fn xtest() -> Listing {
-        Listing {
-            id: 1,
-            exchange_mic: Some("XASX".to_string()),
-            ticker: "VAS".to_string(),
-            name: "Vanguard Australian Shares ETF".to_string(),
-            isin: Some("AU0000VASAU4".to_string()),
-            security_type: SecurityType::ETF,
-            currency: "AUD".to_string(),
-            amit: true,
-            preference: false,
-        }
+        crate::test_support::listing(1)
+            .ticker("VAS")
+            .name("Vanguard Australian Shares ETF")
+            .amit(true)
+            .with(|l| l.isin = Some("AU0000VASAU4".to_string()))
+            .build()
     }
 
     /// An exchange-less Crypto listing: BTC is a seeded digital-token code.
     fn crypto() -> Listing {
-        Listing {
-            id: 2,
-            exchange_mic: None,
-            ticker: "BTC".to_string(),
-            name: "Bitcoin".to_string(),
-            isin: None,
-            security_type: SecurityType::Crypto,
-            currency: "AUD".to_string(),
-            amit: false,
-            preference: false,
-        }
+        crate::test_support::listing(2)
+            .crypto()
+            .ticker("BTC")
+            .name("Bitcoin")
+            .build()
     }
 
     // DB-level tests

@@ -267,143 +267,48 @@ async fn delete(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        entities::{amma, listing, trade},
-        infra::db,
-    };
+    use crate::test_support::{self, dec, test_pool, ymd};
     use axum::{body::Body, http::Request};
-    use chrono::NaiveDate;
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
-    async fn test_pool() -> SqlitePool {
-        db::init(":memory:").await.unwrap()
-    }
-
     async fn insert_test_listing(pool: &SqlitePool, id: i64, exchange_mic: &str, ticker: &str) {
-        listing::db_upsert(
-            pool,
-            &listing::Listing {
-                id,
-                exchange_mic: Some(exchange_mic.to_string()),
-                ticker: ticker.to_string(),
-                name: ticker.to_string(),
-                isin: None,
-                security_type: listing::SecurityType::ETF,
-                currency: "AUD".to_string(),
-                amit: true,
-                preference: false,
-            },
-        )
-        .await
-        .unwrap();
+        test_support::listing(id)
+            .mic(exchange_mic)
+            .ticker(ticker)
+            .name(ticker)
+            .amit(true)
+            .insert(pool)
+            .await;
     }
 
     async fn insert_buy_trade(pool: &SqlitePool, id: i64, listing_id: i64, quantity: Decimal) {
-        trade::db_upsert(
-            pool,
-            &trade::Trade {
-                brokerage_includes_gst: false,
-                statement_total: None,
-                holding_account_id: 1,
-                transfer_id: None,
-                ess_statement_id: None,
-                id,
-                trade_type: trade::TradeType::Buy,
-                date: NaiveDate::from_ymd_opt(2024, 1, 15).unwrap(),
-                settlement_date: NaiveDate::from_ymd_opt(2024, 1, 17).unwrap(),
-                listing_id,
-                average_price: Decimal::from(100),
-                quantity,
-                currency: "AUD".to_string(),
-                brokerage: "9.95".parse().unwrap(),
-                gst_on_brokerage: "0.995".parse().unwrap(),
-                brokerage_currency: "AUD".to_string(),
-                fx_rate: Decimal::ONE,
-                contract_note_ref: None,
-                residual_brought_forward: Decimal::ZERO,
-                residual_carried_forward: Decimal::ZERO,
-                residual_paid_out: Decimal::ZERO,
-                rights_action_id: None,
-                buyback_action_id: None,
-                scrip_action_id: None,
-                demerger_action_id: None,
-                worthless_action_id: None,
-                deemed_acquisition_date: None,
-            },
-        )
-        .await
-        .unwrap();
+        test_support::buy(id, listing_id)
+            .date(ymd(2024, 1, 15))
+            .qty(quantity)
+            .price(Decimal::from(100))
+            .brokerage(dec("9.95"))
+            .gst_on_brokerage(dec("0.995"))
+            .insert(pool)
+            .await;
     }
 
     async fn insert_sell_trade(pool: &SqlitePool, id: i64, listing_id: i64, quantity: Decimal) {
-        trade::db_upsert(
-            pool,
-            &trade::Trade {
-                brokerage_includes_gst: false,
-                statement_total: None,
-                holding_account_id: 1,
-                transfer_id: None,
-                ess_statement_id: None,
-                id,
-                trade_type: trade::TradeType::Sell,
-                date: NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(),
-                settlement_date: NaiveDate::from_ymd_opt(2024, 6, 3).unwrap(),
-                listing_id,
-                average_price: Decimal::from(120),
-                quantity,
-                currency: "AUD".to_string(),
-                brokerage: "9.95".parse().unwrap(),
-                gst_on_brokerage: "0.995".parse().unwrap(),
-                brokerage_currency: "AUD".to_string(),
-                fx_rate: Decimal::ONE,
-                contract_note_ref: None,
-                residual_brought_forward: Decimal::ZERO,
-                residual_carried_forward: Decimal::ZERO,
-                residual_paid_out: Decimal::ZERO,
-                rights_action_id: None,
-                buyback_action_id: None,
-                scrip_action_id: None,
-                demerger_action_id: None,
-                worthless_action_id: None,
-                deemed_acquisition_date: None,
-            },
-        )
-        .await
-        .unwrap();
+        test_support::sell(id, listing_id)
+            .date(ymd(2024, 6, 1))
+            .qty(quantity)
+            .price(Decimal::from(120))
+            .brokerage(dec("9.95"))
+            .gst_on_brokerage(dec("0.995"))
+            .insert(pool)
+            .await;
     }
 
     async fn insert_amma(pool: &SqlitePool, id: i64, listing_id: i64, cost_base_adj: Decimal) {
-        amma::db_upsert(
-            pool,
-            &amma::AmmaStatement {
-                holding_account_id: 1,
-                id,
-                listing_id,
-                tax_year_end_date: NaiveDate::from_ymd_opt(2024, 6, 30).unwrap(),
-                units_held: Decimal::from(100),
-                date_received: NaiveDate::from_ymd_opt(2024, 8, 15).unwrap(),
-                australian_interest: Decimal::ZERO,
-                australian_dividends_unfranked: Decimal::ZERO,
-                franked_dividends: Decimal::ZERO,
-                franking_credits: Decimal::ZERO,
-                net_rent: Decimal::ZERO,
-                foreign_income: Decimal::ZERO,
-                foreign_tax_credits: Decimal::ZERO,
-                other_income: Decimal::ZERO,
-                cgt_discount_gains: Decimal::ZERO,
-                cgt_indexation_gains: Decimal::ZERO,
-                cgt_other_gains: Decimal::ZERO,
-                capital_losses_applied: Decimal::ZERO,
-                tax_deferred_amount: Decimal::ZERO,
-                tax_free_amount: Decimal::ZERO,
-                cost_base_adjustment: cost_base_adj,
-                tfn_withholding_tax: Decimal::ZERO,
-                currency: "AUD".to_string(),
-            },
-        )
-        .await
-        .unwrap();
+        test_support::amma(id, listing_id)
+            .cost_base_adjustment(cost_base_adj)
+            .insert(pool)
+            .await;
     }
 
     // DB-level tests
@@ -599,36 +504,14 @@ mod tests {
         insert_buy_trade(&pool, 1, 1, Decimal::from(100)).await;
 
         // AMMA with cost_base_adjustment 0.05/unit but huge tax-deferred / tax-free lines.
-        amma::db_upsert(
-            &pool,
-            &amma::AmmaStatement {
-                holding_account_id: 1,
-                id: 1,
-                listing_id: 1,
-                tax_year_end_date: NaiveDate::from_ymd_opt(2024, 6, 30).unwrap(),
-                units_held: Decimal::from(100),
-                date_received: NaiveDate::from_ymd_opt(2024, 8, 15).unwrap(),
-                australian_interest: Decimal::ZERO,
-                australian_dividends_unfranked: Decimal::ZERO,
-                franked_dividends: Decimal::ZERO,
-                franking_credits: Decimal::ZERO,
-                net_rent: Decimal::ZERO,
-                foreign_income: Decimal::ZERO,
-                foreign_tax_credits: Decimal::ZERO,
-                other_income: Decimal::ZERO,
-                cgt_discount_gains: Decimal::ZERO,
-                cgt_indexation_gains: Decimal::ZERO,
-                cgt_other_gains: Decimal::ZERO,
-                capital_losses_applied: Decimal::ZERO,
-                tax_deferred_amount: "999.99".parse().unwrap(),
-                tax_free_amount: "888.88".parse().unwrap(),
-                cost_base_adjustment: "0.05".parse().unwrap(),
-                tfn_withholding_tax: Decimal::ZERO,
-                currency: "AUD".to_string(),
-            },
-        )
-        .await
-        .unwrap();
+        test_support::amma(1, 1)
+            .cost_base_adjustment(dec("0.05"))
+            .with(|a| {
+                a.tax_deferred_amount = dec("999.99");
+                a.tax_free_amount = dec("888.88");
+            })
+            .insert(&pool)
+            .await;
 
         db_upsert(
             &pool,

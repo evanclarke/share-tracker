@@ -236,11 +236,7 @@ pub async fn to_aud(
 mod tests {
     use super::*;
     use crate::entities::rba_fx_rate;
-    use crate::infra::db;
-
-    async fn test_pool() -> SqlitePool {
-        db::init(":memory:").await.unwrap()
-    }
+    use crate::test_support::test_pool;
 
     fn date(y: i32, m: u32, d: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(y, m, d).unwrap()

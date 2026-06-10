@@ -502,39 +502,19 @@ async fn net_capital_gain_export_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        entities::{
-            amit_adjustment, amma, cgt_settings, corporate_action, listing, parcel_allocation,
-            rba_fx_rate, trade,
-        },
-        infra::db,
-    };
+    use crate::entities::{amma, cgt_settings, corporate_action, rba_fx_rate, trade};
+    use crate::test_support::{self, allocate, test_pool};
     use axum::http::StatusCode;
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
-    async fn test_pool() -> SqlitePool {
-        db::init(":memory:").await.unwrap()
-    }
-
     async fn insert_listing(pool: &SqlitePool, id: i64, ticker: &str) {
-        listing::db_upsert(
-            pool,
-            &listing::Listing {
-                id,
-                exchange_mic: Some("XASX".to_string()),
-                ticker: ticker.to_string(),
-                name: ticker.to_string(),
-                isin: None,
-                security_type: listing::SecurityType::ETF,
-                currency: "AUD".to_string(),
-                amit: false,
-                preference: false,
-            },
-        )
-        .await
-        .unwrap();
+        test_support::listing(id)
+            .ticker(ticker)
+            .name(ticker)
+            .insert(pool)
+            .await;
     }
 
     async fn insert_trade(
@@ -546,54 +526,12 @@ mod tests {
         qty: Decimal,
         price: Decimal,
     ) {
-        trade::db_upsert(
-            pool,
-            &trade::Trade {
-                brokerage_includes_gst: false,
-                statement_total: None,
-                holding_account_id: 1,
-                transfer_id: None,
-                ess_statement_id: None,
-                id,
-                trade_type,
-                date,
-                settlement_date: date + chrono::Duration::days(2),
-                listing_id,
-                average_price: price,
-                quantity: qty,
-                currency: "AUD".to_string(),
-                brokerage: Decimal::ZERO,
-                gst_on_brokerage: Decimal::ZERO,
-                brokerage_currency: "AUD".to_string(),
-                fx_rate: Decimal::ONE,
-                contract_note_ref: None,
-                residual_brought_forward: Decimal::ZERO,
-                residual_carried_forward: Decimal::ZERO,
-                residual_paid_out: Decimal::ZERO,
-                rights_action_id: None,
-                buyback_action_id: None,
-                scrip_action_id: None,
-                demerger_action_id: None,
-                worthless_action_id: None,
-                deemed_acquisition_date: None,
-            },
-        )
-        .await
-        .unwrap();
-    }
-
-    async fn allocate(pool: &SqlitePool, id: i64, sale_id: i64, buy_id: i64, qty: Decimal) {
-        parcel_allocation::db_upsert(
-            pool,
-            &parcel_allocation::ParcelAllocation {
-                id,
-                sale_trade_id: sale_id,
-                purchase_trade_id: buy_id,
-                quantity_allocated: qty,
-            },
-        )
-        .await
-        .unwrap();
+        test_support::trade(id, listing_id, trade_type)
+            .date(date)
+            .qty(qty)
+            .price(price)
+            .insert(pool)
+            .await;
     }
 
     async fn link_adjustment(
@@ -603,45 +541,16 @@ mod tests {
         trade_id: i64,
         qty: Decimal,
     ) {
-        amit_adjustment::db_upsert(
-            pool,
-            &amit_adjustment::AmitAdjustment {
-                id,
-                amma_statement_id: amma_id,
-                trade_id,
-                quantity: qty,
-            },
-        )
-        .await
-        .unwrap();
+        test_support::amit_adjustment(pool, id, amma_id, trade_id, qty).await;
     }
 
     fn make_amma(id: i64, listing_id: i64, year_end: NaiveDate) -> amma::AmmaStatement {
-        amma::AmmaStatement {
-            holding_account_id: 1,
-            id,
-            listing_id,
-            tax_year_end_date: year_end,
-            units_held: Decimal::from(100),
-            date_received: year_end + chrono::Duration::days(60),
-            cost_base_adjustment: Decimal::ZERO,
-            australian_interest: Decimal::ZERO,
-            australian_dividends_unfranked: Decimal::ZERO,
-            franked_dividends: Decimal::ZERO,
-            franking_credits: Decimal::ZERO,
-            net_rent: Decimal::ZERO,
-            foreign_income: Decimal::ZERO,
-            foreign_tax_credits: Decimal::ZERO,
-            other_income: Decimal::ZERO,
-            cgt_discount_gains: Decimal::ZERO,
-            cgt_indexation_gains: Decimal::ZERO,
-            cgt_other_gains: Decimal::ZERO,
-            capital_losses_applied: Decimal::ZERO,
-            tax_deferred_amount: Decimal::ZERO,
-            tax_free_amount: Decimal::ZERO,
-            tfn_withholding_tax: Decimal::ZERO,
-            currency: "AUD".to_string(),
-        }
+        test_support::amma(id, listing_id)
+            .with(|a| {
+                a.tax_year_end_date = year_end;
+                a.date_received = year_end + chrono::Duration::days(60);
+            })
+            .build()
     }
 
     #[tokio::test]

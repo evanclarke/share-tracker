@@ -267,15 +267,11 @@ impl From<ImportError> for ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::infra::db;
+    use crate::test_support::test_pool;
     use axum::http::StatusCode;
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
     use tower::ServiceExt;
-
-    async fn test_pool() -> SqlitePool {
-        db::init(":memory:").await.unwrap()
-    }
 
     /// A trimmed slice of the real ISO10383_MIC layout: a BOM, the full quoted
     /// header row, an ACTIVE operating MIC, an ACTIVE segment MIC with an empty

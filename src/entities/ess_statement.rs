@@ -343,50 +343,28 @@ async fn delete(
 mod tests {
     use super::*;
     use crate::entities::listing;
-    use crate::infra::db;
+    use crate::test_support::{self, test_pool, ymd};
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
-    async fn test_pool() -> SqlitePool {
-        db::init(":memory:").await.unwrap()
-    }
-
     async fn insert_listing(pool: &SqlitePool, id: i64) {
-        listing::db_upsert(
-            pool,
-            &listing::Listing {
-                id,
-                exchange_mic: Some("XASX".to_string()),
-                ticker: format!("ESS{id}"),
-                name: format!("ESS {id}"),
-                isin: None,
-                security_type: listing::SecurityType::Share,
-                currency: "AUD".to_string(),
-                amit: false,
-                preference: false,
-            },
-        )
-        .await
-        .unwrap();
+        test_support::listing(id)
+            .ticker(&format!("ESS{id}"))
+            .name(&format!("ESS {id}"))
+            .security_type(listing::SecurityType::Share)
+            .insert(pool)
+            .await;
     }
 
     fn sample(id: i64) -> EssStatement {
-        EssStatement {
-            id,
-            listing_id: 1,
-            holding_account_id: 1,
-            taxing_point_date: NaiveDate::from_ymd_opt(2024, 9, 1).unwrap(),
-            quantity: Decimal::from(100),
-            market_value_per_share: Decimal::from(6),
-            taxed_upfront_eligible: Decimal::ZERO,
-            taxed_upfront_not_eligible: Decimal::ZERO,
-            deferral_discount: Decimal::from(600),
-            pre_2009_cessation_discount: Decimal::ZERO,
-            foreign_source_discount: Decimal::ZERO,
-            tfn_withholding: Decimal::ZERO,
-            currency: "AUD".to_string(),
-        }
+        test_support::ess_statement(id, 1, ymd(2024, 9, 1))
+            .with(|s| {
+                s.quantity = Decimal::from(100);
+                s.market_value_per_share = Decimal::from(6);
+                s.deferral_discount = Decimal::from(600);
+            })
+            .build()
     }
 
     #[tokio::test]

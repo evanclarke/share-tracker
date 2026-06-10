@@ -532,20 +532,12 @@ pub fn router() -> Router<SqlitePool> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::entities::{corporate_action, income, listing, trade};
-    use crate::infra::db;
+    use crate::entities::{corporate_action, listing};
+    use crate::test_support::{self, test_pool, ymd};
     use axum::http::StatusCode;
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
     use tower::ServiceExt;
-
-    async fn test_pool() -> SqlitePool {
-        db::init(":memory:").await.unwrap()
-    }
-
-    fn ymd(y: i32, m: u32, d: u32) -> NaiveDate {
-        NaiveDate::from_ymd_opt(y, m, d).unwrap()
-    }
 
     fn utc(y: i32, m: u32, d: u32, h: u32, min: u32) -> DateTime<Utc> {
         chrono::TimeZone::with_ymd_and_hms(&Utc, y, m, d, h, min, 0).unwrap()
@@ -563,26 +555,19 @@ mod tests {
         mic: Option<&str>,
         ccy: &str,
     ) {
-        listing::db_upsert(
-            pool,
-            &listing::Listing {
-                id,
-                exchange_mic: mic.map(str::to_string),
-                ticker: ticker.to_string(),
-                name: ticker.to_string(),
-                isin: None,
-                security_type: if mic.is_none() {
-                    listing::SecurityType::Crypto
-                } else {
-                    listing::SecurityType::Share
-                },
-                currency: ccy.to_string(),
-                amit: false,
-                preference: false,
-            },
-        )
-        .await
-        .unwrap();
+        let b = test_support::listing(id)
+            .ticker(ticker)
+            .name(ticker)
+            .currency(ccy);
+        match mic {
+            Some(m) => {
+                b.mic(m)
+                    .security_type(listing::SecurityType::Share)
+                    .insert(pool)
+                    .await
+            }
+            None => b.crypto().insert(pool).await,
+        }
     }
 
     async fn insert_buy(
@@ -594,40 +579,14 @@ mod tests {
         price: &str,
         ccy: &str,
     ) {
-        trade::db_upsert(
-            pool,
-            &trade::Trade {
-                brokerage_includes_gst: false,
-                statement_total: None,
-                holding_account_id: 1,
-                transfer_id: None,
-                ess_statement_id: None,
-                id,
-                trade_type: trade::TradeType::Buy,
-                date,
-                settlement_date: date,
-                listing_id,
-                average_price: price.parse().unwrap(),
-                quantity: qty.parse().unwrap(),
-                currency: ccy.to_string(),
-                brokerage: Decimal::ZERO,
-                gst_on_brokerage: Decimal::ZERO,
-                brokerage_currency: ccy.to_string(),
-                fx_rate: Decimal::ONE,
-                contract_note_ref: None,
-                residual_brought_forward: Decimal::ZERO,
-                residual_carried_forward: Decimal::ZERO,
-                residual_paid_out: Decimal::ZERO,
-                rights_action_id: None,
-                buyback_action_id: None,
-                scrip_action_id: None,
-                demerger_action_id: None,
-                worthless_action_id: None,
-                deemed_acquisition_date: None,
-            },
-        )
-        .await
-        .unwrap();
+        test_support::buy(id, listing_id)
+            .date(date)
+            .settlement(date)
+            .qty(qty.parse().unwrap())
+            .price(price.parse().unwrap())
+            .currency(ccy)
+            .insert(pool)
+            .await;
     }
 
     async fn store_price(pool: &SqlitePool, listing_id: i64, date: NaiveDate, price: &str) {
@@ -824,33 +783,13 @@ mod tests {
 
         // The other fact paths invalidate the same way: a back-dated income
         // row and corporate action each re-stale Friday.
-        income::db_upsert(
-            &pool,
-            &income::Income {
-                id: 1,
-                listing_id: 1,
-                date_paid: ymd(2026, 6, 4),
-                ex_date: None,
-                franked_amount: Decimal::from(70),
-                unfranked_amount: Decimal::ZERO,
-                foreign_source_income: Decimal::ZERO,
-                foreign_tax_paid: Decimal::ZERO,
-                tfn_withholding_tax: Decimal::ZERO,
-                franking_credits: Decimal::from(30),
-                lic_capital_gain_deduction: Decimal::ZERO,
-                conduit_foreign_income: Decimal::ZERO,
-                trust_income: false,
-                entitlement_date: None,
-                reinvestment_trade_id: None,
-                currency: "AUD".to_string(),
-                buyback_trade_id: None,
-                holding_account_id: 1,
-                amount_per_security: None,
-                securities_held: None,
-            },
-        )
-        .await
-        .unwrap();
+        test_support::income(1, 1, ymd(2026, 6, 4))
+            .with(|i| {
+                i.franked_amount = Decimal::from(70);
+                i.franking_credits = Decimal::from(30);
+            })
+            .insert(&pool)
+            .await;
         assert_eq!(stale_flags(&pool, ymd(2026, 6, 5)).await, vec![true; 3]);
         assert_eq!(stale_flags(&pool, ymd(2026, 6, 3)).await, vec![false; 3]);
 

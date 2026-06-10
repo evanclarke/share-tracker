@@ -106,39 +106,16 @@ async fn report(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::entities::{exchange, listing, trade};
-    use crate::infra::db;
+    use crate::entities::exchange;
+    use crate::test_support::{self, test_pool, ymd};
     use axum::http::StatusCode;
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
     use rust_decimal::Decimal;
     use tower::ServiceExt;
 
-    async fn test_pool() -> SqlitePool {
-        db::init(":memory:").await.unwrap()
-    }
-
-    fn ymd(y: i32, m: u32, d: u32) -> NaiveDate {
-        NaiveDate::from_ymd_opt(y, m, d).unwrap()
-    }
-
     async fn insert_listing(pool: &SqlitePool, id: i64, mic: &str) {
-        listing::db_upsert(
-            pool,
-            &listing::Listing {
-                id,
-                exchange_mic: Some(mic.to_string()),
-                ticker: format!("T{id}"),
-                name: format!("Test {id}"),
-                isin: None,
-                security_type: listing::SecurityType::ETF,
-                currency: "AUD".to_string(),
-                amit: false,
-                preference: false,
-            },
-        )
-        .await
-        .unwrap();
+        test_support::listing(id).mic(mic).insert(pool).await;
     }
 
     async fn insert_buy(
@@ -148,40 +125,13 @@ mod tests {
         date: NaiveDate,
         settlement: NaiveDate,
     ) {
-        trade::db_upsert(
-            pool,
-            &trade::Trade {
-                brokerage_includes_gst: false,
-                statement_total: None,
-                holding_account_id: 1,
-                transfer_id: None,
-                ess_statement_id: None,
-                id,
-                trade_type: trade::TradeType::Buy,
-                date,
-                settlement_date: settlement,
-                listing_id,
-                average_price: Decimal::from(100),
-                quantity: Decimal::from(10),
-                currency: "AUD".to_string(),
-                brokerage: Decimal::ZERO,
-                gst_on_brokerage: Decimal::ZERO,
-                brokerage_currency: "AUD".to_string(),
-                fx_rate: Decimal::ONE,
-                contract_note_ref: None,
-                residual_brought_forward: Decimal::ZERO,
-                residual_carried_forward: Decimal::ZERO,
-                residual_paid_out: Decimal::ZERO,
-                rights_action_id: None,
-                buyback_action_id: None,
-                scrip_action_id: None,
-                demerger_action_id: None,
-                worthless_action_id: None,
-                deemed_acquisition_date: None,
-            },
-        )
-        .await
-        .unwrap();
+        test_support::buy(id, listing_id)
+            .date(date)
+            .settlement(settlement)
+            .qty(Decimal::from(10))
+            .price(Decimal::from(100))
+            .insert(pool)
+            .await;
     }
 
     /// Seed holidays run 2019–2027 for XASX; a trade settling inside that
@@ -271,22 +221,12 @@ mod tests {
     #[tokio::test]
     async fn db_crypto_trades_are_not_flagged() {
         let pool = test_pool().await;
-        listing::db_upsert(
-            &pool,
-            &listing::Listing {
-                id: 1,
-                exchange_mic: None,
-                ticker: "BTC".to_string(),
-                name: "Bitcoin".to_string(),
-                isin: None,
-                security_type: listing::SecurityType::Crypto,
-                currency: "AUD".to_string(),
-                amit: false,
-                preference: false,
-            },
-        )
-        .await
-        .unwrap();
+        test_support::listing(1)
+            .crypto()
+            .ticker("BTC")
+            .name("Bitcoin")
+            .insert(&pool)
+            .await;
         insert_buy(&pool, 1, 1, ymd(2030, 6, 3), ymd(2030, 6, 3)).await;
         assert!(db_coverage_alerts(&pool).await.unwrap().is_empty());
     }

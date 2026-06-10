@@ -64,15 +64,11 @@ async fn report(State(pool): State<SqlitePool>) -> Result<Json<Vec<ExchangeMicSt
 mod tests {
     use super::*;
     use crate::entities::{exchange, mic_registry};
-    use crate::infra::db;
+    use crate::test_support::test_pool;
     use axum::http::StatusCode;
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
     use tower::ServiceExt;
-
-    async fn test_pool() -> SqlitePool {
-        db::init(":memory:").await.unwrap()
-    }
 
     fn mic(mic: &str, status: &str, expiry: Option<&str>) -> mic_registry::MicEntry {
         mic_registry::MicEntry {
@@ -145,22 +141,12 @@ mod tests {
     async fn crypto_listings_are_not_validated() {
         let pool = test_pool().await;
         let before = db_validate(&pool).await.unwrap().len();
-        crate::entities::listing::db_upsert(
-            &pool,
-            &crate::entities::listing::Listing {
-                id: 1,
-                exchange_mic: None,
-                ticker: "BTC".to_string(),
-                name: "Bitcoin".to_string(),
-                isin: None,
-                security_type: crate::entities::listing::SecurityType::Crypto,
-                currency: "AUD".to_string(),
-                amit: false,
-                preference: false,
-            },
-        )
-        .await
-        .unwrap();
+        crate::test_support::listing(1)
+            .crypto()
+            .ticker("BTC")
+            .name("Bitcoin")
+            .insert(&pool)
+            .await;
         let report = db_validate(&pool).await.unwrap();
         assert_eq!(
             report.len(),

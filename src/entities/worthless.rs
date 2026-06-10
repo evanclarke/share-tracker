@@ -297,14 +297,10 @@ mod tests {
     use crate::entities::corporate_action::{CorporateAction, WorthlessEvent};
     use crate::entities::listing;
     use crate::entities::trade::TradeType;
-    use crate::infra::db;
+    use crate::test_support::{self, test_pool};
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
     use tower::ServiceExt;
-
-    async fn test_pool() -> SqlitePool {
-        db::init(":memory:").await.unwrap()
-    }
 
     fn d(y: i32, m: u32, day: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(y, m, day).unwrap()
@@ -315,22 +311,12 @@ mod tests {
     }
 
     async fn insert_listing(pool: &SqlitePool, id: i64, ticker: &str) {
-        listing::db_upsert(
-            pool,
-            &listing::Listing {
-                id,
-                exchange_mic: Some("XASX".to_string()),
-                ticker: ticker.to_string(),
-                name: ticker.to_string(),
-                isin: None,
-                security_type: listing::SecurityType::Share,
-                currency: "AUD".to_string(),
-                amit: false,
-                preference: false,
-            },
-        )
-        .await
-        .unwrap();
+        test_support::listing(id)
+            .ticker(ticker)
+            .name(ticker)
+            .security_type(listing::SecurityType::Share)
+            .insert(pool)
+            .await;
     }
 
     async fn insert_buy(
@@ -341,40 +327,13 @@ mod tests {
         qty: &str,
         price: &str,
     ) {
-        trade::db_upsert(
-            pool,
-            &Trade {
-                brokerage_includes_gst: false,
-                statement_total: None,
-                holding_account_id: 1,
-                transfer_id: None,
-                ess_statement_id: None,
-                id,
-                trade_type: TradeType::Buy,
-                date,
-                settlement_date: date,
-                listing_id,
-                average_price: price.parse().unwrap(),
-                quantity: qty.parse().unwrap(),
-                currency: "AUD".to_string(),
-                brokerage: Decimal::ZERO,
-                gst_on_brokerage: Decimal::ZERO,
-                brokerage_currency: "AUD".to_string(),
-                fx_rate: Decimal::ONE,
-                contract_note_ref: None,
-                residual_brought_forward: Decimal::ZERO,
-                residual_carried_forward: Decimal::ZERO,
-                residual_paid_out: Decimal::ZERO,
-                rights_action_id: None,
-                buyback_action_id: None,
-                scrip_action_id: None,
-                demerger_action_id: None,
-                worthless_action_id: None,
-                deemed_acquisition_date: None,
-            },
-        )
-        .await
-        .unwrap();
+        test_support::buy(id, listing_id)
+            .date(date)
+            .settlement(date)
+            .qty(qty.parse().unwrap())
+            .price(price.parse().unwrap())
+            .insert(pool)
+            .await;
     }
 
     async fn insert_worthless(

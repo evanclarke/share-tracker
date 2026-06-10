@@ -475,14 +475,10 @@ mod tests {
     use super::*;
     use crate::entities::trade::TradeType;
     use crate::entities::{corporate_action::CorporateAction, listing};
-    use crate::infra::db;
+    use crate::test_support::{self, test_pool};
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
     use tower::ServiceExt;
-
-    async fn test_pool() -> SqlitePool {
-        db::init(":memory:").await.unwrap()
-    }
 
     fn d(y: i32, m: u32, day: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(y, m, day).unwrap()
@@ -493,22 +489,12 @@ mod tests {
     }
 
     async fn insert_listing(pool: &SqlitePool, id: i64, ticker: &str) {
-        listing::db_upsert(
-            pool,
-            &listing::Listing {
-                id,
-                exchange_mic: Some("XASX".to_string()),
-                ticker: ticker.to_string(),
-                name: ticker.to_string(),
-                isin: None,
-                security_type: listing::SecurityType::Share,
-                currency: "AUD".to_string(),
-                amit: false,
-                preference: false,
-            },
-        )
-        .await
-        .unwrap();
+        test_support::listing(id)
+            .ticker(ticker)
+            .name(ticker)
+            .security_type(listing::SecurityType::Share)
+            .insert(pool)
+            .await;
     }
 
     async fn insert_buy(
@@ -519,40 +505,13 @@ mod tests {
         qty: &str,
         price: &str,
     ) {
-        trade::db_upsert(
-            pool,
-            &Trade {
-                brokerage_includes_gst: false,
-                statement_total: None,
-                holding_account_id: 1,
-                transfer_id: None,
-                ess_statement_id: None,
-                id,
-                trade_type: TradeType::Buy,
-                date,
-                settlement_date: date,
-                listing_id,
-                average_price: price.parse().unwrap(),
-                quantity: qty.parse().unwrap(),
-                currency: "AUD".to_string(),
-                brokerage: Decimal::ZERO,
-                gst_on_brokerage: Decimal::ZERO,
-                brokerage_currency: "AUD".to_string(),
-                fx_rate: Decimal::ONE,
-                contract_note_ref: None,
-                residual_brought_forward: Decimal::ZERO,
-                residual_carried_forward: Decimal::ZERO,
-                residual_paid_out: Decimal::ZERO,
-                rights_action_id: None,
-                buyback_action_id: None,
-                scrip_action_id: None,
-                demerger_action_id: None,
-                worthless_action_id: None,
-                deemed_acquisition_date: None,
-            },
-        )
-        .await
-        .unwrap();
+        test_support::buy(id, listing_id)
+            .date(date)
+            .settlement(date)
+            .qty(qty.parse().unwrap())
+            .price(price.parse().unwrap())
+            .insert(pool)
+            .await;
     }
 
     /// A 1-for-5 demerger of listing 2 out of listing 1 on the given date,
@@ -732,40 +691,14 @@ mod tests {
         insert_listing(&pool, 2, "DEM").await;
         // 1,000 @ $1.50 + $50 brokerage = $1,550; sell 400 → 600 remain at
         // 60% of the cost base = $930 → head $744 + demerged $186.
-        trade::db_upsert(
-            &pool,
-            &Trade {
-                brokerage_includes_gst: false,
-                statement_total: None,
-                holding_account_id: 1,
-                transfer_id: None,
-                ess_statement_id: None,
-                id: 1,
-                trade_type: TradeType::Buy,
-                date: d(2020, 10, 1),
-                settlement_date: d(2020, 10, 1),
-                listing_id: 1,
-                average_price: dec("1.50"),
-                quantity: dec("1000"),
-                currency: "AUD".to_string(),
-                brokerage: dec("50"),
-                gst_on_brokerage: Decimal::ZERO,
-                brokerage_currency: "AUD".to_string(),
-                fx_rate: Decimal::ONE,
-                contract_note_ref: None,
-                residual_brought_forward: Decimal::ZERO,
-                residual_carried_forward: Decimal::ZERO,
-                residual_paid_out: Decimal::ZERO,
-                rights_action_id: None,
-                buyback_action_id: None,
-                scrip_action_id: None,
-                demerger_action_id: None,
-                worthless_action_id: None,
-                deemed_acquisition_date: None,
-            },
-        )
-        .await
-        .unwrap();
+        test_support::buy(1, 1)
+            .date(d(2020, 10, 1))
+            .settlement(d(2020, 10, 1))
+            .qty(dec("1000"))
+            .price(dec("1.50"))
+            .brokerage(dec("50"))
+            .insert(&pool)
+            .await;
         sell_units(&pool, 2, 1, d(2022, 5, 1), "400").await;
         insert_demerger(&pool, 10, d(2024, 7, 1)).await;
 
@@ -791,47 +724,16 @@ mod tests {
 
         // An AMMA statement with a 10c/unit cost-base decrease over the
         // parcel's 1,000 units → −$100.
-        crate::entities::amma::db_upsert(
-            &pool,
-            &crate::entities::amma::AmmaStatement {
-                holding_account_id: 1,
-                id: 1,
-                listing_id: 1,
-                tax_year_end_date: d(2021, 6, 30),
-                units_held: dec("1000"),
-                date_received: d(2021, 7, 15),
-                australian_interest: Decimal::ZERO,
-                australian_dividends_unfranked: Decimal::ZERO,
-                franked_dividends: Decimal::ZERO,
-                franking_credits: Decimal::ZERO,
-                net_rent: Decimal::ZERO,
-                foreign_income: Decimal::ZERO,
-                foreign_tax_credits: Decimal::ZERO,
-                other_income: Decimal::ZERO,
-                cgt_discount_gains: Decimal::ZERO,
-                cgt_indexation_gains: Decimal::ZERO,
-                cgt_other_gains: Decimal::ZERO,
-                capital_losses_applied: Decimal::ZERO,
-                tax_deferred_amount: Decimal::ZERO,
-                tax_free_amount: Decimal::ZERO,
-                cost_base_adjustment: dec("0.10"),
-                tfn_withholding_tax: Decimal::ZERO,
-                currency: "AUD".to_string(),
-            },
-        )
-        .await
-        .unwrap();
-        crate::entities::amit_adjustment::db_upsert(
-            &pool,
-            &crate::entities::amit_adjustment::AmitAdjustment {
-                id: 1,
-                amma_statement_id: 1,
-                trade_id: 1,
-                quantity: dec("1000"),
-            },
-        )
-        .await
-        .unwrap();
+        test_support::amma(1, 1)
+            .units(dec("1000"))
+            .cost_base_adjustment(dec("0.10"))
+            .with(|a| {
+                a.tax_year_end_date = d(2021, 6, 30);
+                a.date_received = d(2021, 7, 15);
+            })
+            .insert(&pool)
+            .await;
+        test_support::amit_adjustment(&pool, 1, 1, 1, dec("1000")).await;
 
         // A 5c/unit return of capital while held → −$50.
         corporate_action::db_upsert(

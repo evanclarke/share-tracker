@@ -151,56 +151,32 @@ mod tests {
     use super::*;
     use crate::entities::trade::TradeType;
     use crate::entities::{ess_statement, listing};
-    use crate::infra::db;
+    use crate::test_support::{self, test_pool, ymd};
     use axum::{body::Body, http::Request};
     use chrono::NaiveDate;
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
-    async fn test_pool() -> SqlitePool {
-        db::init(":memory:").await.unwrap()
-    }
-
     async fn insert_listing(pool: &SqlitePool, id: i64, currency: &str) {
-        listing::db_upsert(
-            pool,
-            &listing::Listing {
-                id,
-                exchange_mic: Some("XASX".to_string()),
-                ticker: format!("ESS{id}"),
-                name: format!("ESS {id}"),
-                isin: None,
-                security_type: listing::SecurityType::Share,
-                currency: currency.to_string(),
-                amit: false,
-                preference: false,
-            },
-        )
-        .await
-        .unwrap();
+        test_support::listing(id)
+            .ticker(&format!("ESS{id}"))
+            .name(&format!("ESS {id}"))
+            .security_type(listing::SecurityType::Share)
+            .currency(currency)
+            .insert(pool)
+            .await;
     }
 
     async fn insert_statement(pool: &SqlitePool, id: i64, qty: &str, price: &str, currency: &str) {
-        ess_statement::db_upsert(
-            pool,
-            &ess_statement::EssStatement {
-                id,
-                listing_id: 1,
-                holding_account_id: 1,
-                taxing_point_date: NaiveDate::from_ymd_opt(2024, 9, 1).unwrap(),
-                quantity: qty.parse().unwrap(),
-                market_value_per_share: price.parse().unwrap(),
-                taxed_upfront_eligible: Decimal::ZERO,
-                taxed_upfront_not_eligible: Decimal::ZERO,
-                deferral_discount: Decimal::from(600),
-                pre_2009_cessation_discount: Decimal::ZERO,
-                foreign_source_discount: Decimal::ZERO,
-                tfn_withholding: Decimal::ZERO,
-                currency: currency.to_string(),
-            },
-        )
-        .await
-        .unwrap();
+        test_support::ess_statement(id, 1, ymd(2024, 9, 1))
+            .with(|s| {
+                s.quantity = qty.parse().unwrap();
+                s.market_value_per_share = price.parse().unwrap();
+                s.deferral_discount = Decimal::from(600);
+                s.currency = currency.to_string();
+            })
+            .insert(pool)
+            .await;
     }
 
     #[tokio::test]

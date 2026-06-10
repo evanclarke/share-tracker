@@ -439,15 +439,11 @@ impl From<ImportError> for ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::infra::db;
+    use crate::test_support::test_pool;
     use axum::http::StatusCode;
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
     use tower::ServiceExt;
-
-    async fn test_pool() -> SqlitePool {
-        db::init(":memory:").await.unwrap()
-    }
 
     /// A trimmed slice of the real List One layout: the `<ISO_4217>`/`<CcyTbl>`
     /// wrappers, AUD (minor units 2), a second EUR country row (same code → must

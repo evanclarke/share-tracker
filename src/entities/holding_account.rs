@@ -179,14 +179,10 @@ async fn delete(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::infra::db;
+    use crate::test_support::test_pool;
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
     use tower::ServiceExt;
-
-    async fn test_pool() -> SqlitePool {
-        db::init(":memory:").await.unwrap()
-    }
 
     // DB-level tests
 

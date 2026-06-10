@@ -434,95 +434,40 @@ async fn delete(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        entities::{listing, trade},
-        infra::db,
-    };
+    use crate::test_support::{self, test_pool, ymd};
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
     use rust_decimal::Decimal;
     use tower::ServiceExt;
 
-    async fn test_pool() -> SqlitePool {
-        db::init(":memory:").await.unwrap()
-    }
-
     async fn insert_test_listing(pool: &SqlitePool) {
-        listing::db_upsert(
-            pool,
-            &listing::Listing {
-                id: 1,
-                exchange_mic: Some("XASX".to_string()),
-                ticker: "VAS".to_string(),
-                name: "Vanguard Australian Shares ETF".to_string(),
-                isin: None,
-                security_type: listing::SecurityType::ETF,
-                currency: "AUD".to_string(),
-                amit: false,
-                preference: false,
-            },
-        )
-        .await
-        .unwrap();
+        test_support::listing(1)
+            .ticker("VAS")
+            .name("Vanguard Australian Shares ETF")
+            .insert(pool)
+            .await;
     }
 
     async fn insert_test_trade(pool: &SqlitePool) -> i64 {
-        let t = trade::Trade {
-            brokerage_includes_gst: false,
-            statement_total: None,
-            holding_account_id: 1,
-            transfer_id: None,
-            ess_statement_id: None,
-            id: 1,
-            trade_type: trade::TradeType::DRP,
-            date: NaiveDate::from_ymd_opt(2024, 3, 15).unwrap(),
-            settlement_date: NaiveDate::from_ymd_opt(2024, 3, 15).unwrap(),
-            listing_id: 1,
-            average_price: Decimal::from(95),
-            quantity: Decimal::from(2),
-            currency: "AUD".to_string(),
-            brokerage: Decimal::ZERO,
-            gst_on_brokerage: Decimal::ZERO,
-            brokerage_currency: "AUD".to_string(),
-            fx_rate: Decimal::ONE,
-            contract_note_ref: None,
-            residual_brought_forward: Decimal::ZERO,
-            residual_carried_forward: Decimal::ZERO,
-            residual_paid_out: Decimal::ZERO,
-            rights_action_id: None,
-            buyback_action_id: None,
-            scrip_action_id: None,
-            demerger_action_id: None,
-            worthless_action_id: None,
-            deemed_acquisition_date: None,
-        };
-        trade::db_upsert(pool, &t).await.unwrap();
-        t.id
+        test_support::drp(1, 1)
+            .date(ymd(2024, 3, 15))
+            .settlement(ymd(2024, 3, 15))
+            .qty(Decimal::from(2))
+            .price(Decimal::from(95))
+            .insert(pool)
+            .await;
+        1
     }
 
     fn dividend_income() -> Income {
-        Income {
-            holding_account_id: 1,
-            id: 1,
-            listing_id: 1,
-            date_paid: NaiveDate::from_ymd_opt(2024, 3, 15).unwrap(),
-            ex_date: Some(NaiveDate::from_ymd_opt(2024, 3, 1).unwrap()),
-            franked_amount: Decimal::from(70),
-            unfranked_amount: Decimal::from(30),
-            foreign_source_income: Decimal::ZERO,
-            foreign_tax_paid: Decimal::ZERO,
-            tfn_withholding_tax: Decimal::ZERO,
-            franking_credits: Decimal::from(30),
-            lic_capital_gain_deduction: Decimal::ZERO,
-            conduit_foreign_income: Decimal::ZERO,
-            trust_income: false,
-            entitlement_date: None,
-            reinvestment_trade_id: None,
-            currency: "AUD".to_string(),
-            buyback_trade_id: None,
-            amount_per_security: None,
-            securities_held: None,
-        }
+        test_support::income(1, 1, ymd(2024, 3, 15))
+            .with(|i| {
+                i.ex_date = Some(ymd(2024, 3, 1));
+                i.franked_amount = Decimal::from(70);
+                i.unfranked_amount = Decimal::from(30);
+                i.franking_credits = Decimal::from(30);
+            })
+            .build()
     }
 
     // DB-level tests

@@ -881,66 +881,30 @@ async fn delete(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{entities::listing, infra::db};
+    use crate::test_support::{self, dec, test_pool, ymd};
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
     use rust_decimal::Decimal;
     use std::collections::HashSet;
     use tower::ServiceExt;
 
-    async fn test_pool() -> SqlitePool {
-        db::init(":memory:").await.unwrap()
-    }
-
     async fn insert_test_listing(pool: &SqlitePool) {
-        listing::db_upsert(
-            pool,
-            &listing::Listing {
-                id: 1,
-                exchange_mic: Some("XASX".to_string()),
-                ticker: "VAS".to_string(),
-                name: "Vanguard Australian Shares ETF".to_string(),
-                isin: None,
-                security_type: listing::SecurityType::ETF,
-                currency: "AUD".to_string(),
-                amit: false,
-                preference: false,
-            },
-        )
-        .await
-        .unwrap();
+        test_support::listing(1)
+            .ticker("VAS")
+            .name("Vanguard Australian Shares ETF")
+            .insert(pool)
+            .await;
     }
 
     fn buy_trade() -> Trade {
-        Trade {
-            brokerage_includes_gst: false,
-            statement_total: None,
-            holding_account_id: 1,
-            transfer_id: None,
-            ess_statement_id: None,
-            id: 1,
-            trade_type: TradeType::Buy,
-            date: NaiveDate::from_ymd_opt(2024, 1, 15).unwrap(),
-            settlement_date: NaiveDate::from_ymd_opt(2024, 1, 17).unwrap(),
-            listing_id: 1,
-            average_price: Decimal::from(100),
-            quantity: Decimal::from(10),
-            currency: "AUD".to_string(),
-            brokerage: "9.95".parse().unwrap(),
-            gst_on_brokerage: "0.995".parse().unwrap(),
-            brokerage_currency: "AUD".to_string(),
-            fx_rate: Decimal::ONE,
-            contract_note_ref: Some("CN001".to_string()),
-            residual_brought_forward: Decimal::ZERO,
-            residual_carried_forward: Decimal::ZERO,
-            residual_paid_out: Decimal::ZERO,
-            rights_action_id: None,
-            buyback_action_id: None,
-            scrip_action_id: None,
-            demerger_action_id: None,
-            worthless_action_id: None,
-            deemed_acquisition_date: None,
-        }
+        test_support::buy(1, 1)
+            .date(ymd(2024, 1, 15))
+            .qty(Decimal::from(10))
+            .price(Decimal::from(100))
+            .brokerage(dec("9.95"))
+            .gst_on_brokerage(dec("0.995"))
+            .with(|t| t.contract_note_ref = Some("CN001".to_string()))
+            .build()
     }
 
     /// Sell `qty` units out of the Buy parcel `buy_id` (listing 1), via the
@@ -978,48 +942,12 @@ mod tests {
     /// Link an AMIT adjustment covering `qty` units of trade `trade_id`
     /// (listing 1), creating the AMMA statement it hangs off.
     async fn insert_amit_adjustment_covering(pool: &SqlitePool, trade_id: i64, qty: Decimal) {
-        use crate::entities::{amit_adjustment, amma};
-        amma::db_upsert(
-            pool,
-            &amma::AmmaStatement {
-                holding_account_id: 1,
-                id: 1,
-                listing_id: 1,
-                tax_year_end_date: NaiveDate::from_ymd_opt(2024, 6, 30).unwrap(),
-                units_held: qty,
-                date_received: NaiveDate::from_ymd_opt(2024, 8, 15).unwrap(),
-                australian_interest: Decimal::ZERO,
-                australian_dividends_unfranked: Decimal::ZERO,
-                franked_dividends: Decimal::ZERO,
-                franking_credits: Decimal::ZERO,
-                net_rent: Decimal::ZERO,
-                foreign_income: Decimal::ZERO,
-                foreign_tax_credits: Decimal::ZERO,
-                other_income: Decimal::ZERO,
-                cgt_discount_gains: Decimal::ZERO,
-                cgt_indexation_gains: Decimal::ZERO,
-                cgt_other_gains: Decimal::ZERO,
-                capital_losses_applied: Decimal::ZERO,
-                tax_deferred_amount: Decimal::ZERO,
-                tax_free_amount: Decimal::ZERO,
-                cost_base_adjustment: "0.05".parse().unwrap(),
-                tfn_withholding_tax: Decimal::ZERO,
-                currency: "AUD".to_string(),
-            },
-        )
-        .await
-        .unwrap();
-        amit_adjustment::db_upsert(
-            pool,
-            &amit_adjustment::AmitAdjustment {
-                id: 1,
-                amma_statement_id: 1,
-                trade_id,
-                quantity: qty,
-            },
-        )
-        .await
-        .unwrap();
+        test_support::amma(1, 1)
+            .units(qty)
+            .cost_base_adjustment(dec("0.05"))
+            .insert(pool)
+            .await;
+        test_support::amit_adjustment(pool, 1, 1, trade_id, qty).await;
     }
 
     // DB-level tests
@@ -1080,35 +1008,13 @@ mod tests {
     async fn db_sell_trade_insert_and_retrieve() {
         let pool = test_pool().await;
         insert_test_listing(&pool).await;
-        let trade = Trade {
-            brokerage_includes_gst: false,
-            statement_total: None,
-            holding_account_id: 1,
-            transfer_id: None,
-            ess_statement_id: None,
-            id: 2,
-            trade_type: TradeType::Sell,
-            date: NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(),
-            settlement_date: NaiveDate::from_ymd_opt(2024, 6, 3).unwrap(),
-            listing_id: 1,
-            average_price: Decimal::from(120),
-            quantity: Decimal::from(5),
-            currency: "AUD".to_string(),
-            brokerage: "9.95".parse().unwrap(),
-            gst_on_brokerage: "0.995".parse().unwrap(),
-            brokerage_currency: "AUD".to_string(),
-            fx_rate: Decimal::ONE,
-            contract_note_ref: None,
-            residual_brought_forward: Decimal::ZERO,
-            residual_carried_forward: Decimal::ZERO,
-            residual_paid_out: Decimal::ZERO,
-            rights_action_id: None,
-            buyback_action_id: None,
-            scrip_action_id: None,
-            demerger_action_id: None,
-            worthless_action_id: None,
-            deemed_acquisition_date: None,
-        };
+        let trade = test_support::sell(2, 1)
+            .date(ymd(2024, 6, 1))
+            .qty(Decimal::from(5))
+            .price(Decimal::from(120))
+            .brokerage(dec("9.95"))
+            .gst_on_brokerage(dec("0.995"))
+            .build();
         db_upsert(&pool, &trade).await.unwrap();
         let got = db_get(&pool, 2).await.unwrap().unwrap();
         assert_eq!(got.trade_type, TradeType::Sell);
@@ -1119,35 +1025,12 @@ mod tests {
     async fn db_drp_trade_insert_and_retrieve() {
         let pool = test_pool().await;
         insert_test_listing(&pool).await;
-        let trade = Trade {
-            brokerage_includes_gst: false,
-            statement_total: None,
-            holding_account_id: 1,
-            transfer_id: None,
-            ess_statement_id: None,
-            id: 3,
-            trade_type: TradeType::DRP,
-            date: NaiveDate::from_ymd_opt(2024, 3, 15).unwrap(),
-            settlement_date: NaiveDate::from_ymd_opt(2024, 3, 15).unwrap(),
-            listing_id: 1,
-            average_price: Decimal::from(95),
-            quantity: Decimal::from(2),
-            currency: "AUD".to_string(),
-            brokerage: Decimal::ZERO,
-            gst_on_brokerage: Decimal::ZERO,
-            brokerage_currency: "AUD".to_string(),
-            fx_rate: Decimal::ONE,
-            contract_note_ref: None,
-            residual_brought_forward: Decimal::ZERO,
-            residual_carried_forward: Decimal::ZERO,
-            residual_paid_out: Decimal::ZERO,
-            rights_action_id: None,
-            buyback_action_id: None,
-            scrip_action_id: None,
-            demerger_action_id: None,
-            worthless_action_id: None,
-            deemed_acquisition_date: None,
-        };
+        let trade = test_support::drp(3, 1)
+            .date(ymd(2024, 3, 15))
+            .settlement(ymd(2024, 3, 15))
+            .qty(Decimal::from(2))
+            .price(Decimal::from(95))
+            .build();
         db_upsert(&pool, &trade).await.unwrap();
         let got = db_get(&pool, 3).await.unwrap().unwrap();
         assert_eq!(got.trade_type, TradeType::DRP);
@@ -1431,22 +1314,12 @@ mod tests {
     #[tokio::test]
     async fn api_settlement_date_same_day_for_crypto() {
         let pool = test_pool().await;
-        listing::db_upsert(
-            &pool,
-            &listing::Listing {
-                id: 1,
-                exchange_mic: None,
-                ticker: "BTC".to_string(),
-                name: "Bitcoin".to_string(),
-                isin: None,
-                security_type: listing::SecurityType::Crypto,
-                currency: "AUD".to_string(),
-                amit: false,
-                preference: false,
-            },
-        )
-        .await
-        .unwrap();
+        test_support::listing(1)
+            .crypto()
+            .ticker("BTC")
+            .name("Bitcoin")
+            .insert(&pool)
+            .await;
         // 2030-06-07 is a Friday, far outside every seeded holiday calendar.
         let body = serde_json::json!({
             "trade_type": "Buy",

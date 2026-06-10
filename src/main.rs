@@ -6,6 +6,9 @@ mod domain;
 mod entities;
 mod infra;
 mod reports;
+// Shared builder-style test fixtures used by every entity/report test module.
+#[cfg(test)]
+mod test_support;
 mod web;
 
 use clap::Parser;

@@ -68,7 +68,7 @@ use crate::reports::net_capital_gain::NetCapitalGainYear;
 use crate::reports::portfolio::HoldingOverview;
 use crate::reports::realised_gains::RealisedGainLoss;
 use crate::reports::tax_summary::TaxYearSummary;
-use crate::{app, infra::db, infra::scheduler};
+use crate::{app, infra::scheduler};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
@@ -77,9 +77,7 @@ use serde_json::{Value, json};
 use sqlx::SqlitePool;
 use tower::ServiceExt;
 
-async fn test_pool() -> SqlitePool {
-    db::init(":memory:").await.unwrap()
-}
+use crate::test_support::test_pool;
 
 /// The full application router, exactly as `main` serves it — but with an
 /// offline price-source stub instead of the live `YahooFetcher`, so these

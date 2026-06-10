@@ -302,32 +302,17 @@ async fn reinvest(
 mod tests {
     use super::*;
     use crate::entities::{drp_enrolment, income, listing, trade::TradeType};
-    use crate::infra::db;
+    use crate::test_support::{self, test_pool};
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
-    async fn test_pool() -> SqlitePool {
-        db::init(":memory:").await.unwrap()
-    }
-
     async fn insert_listing(pool: &SqlitePool, id: i64, currency: &str) {
-        listing::db_upsert(
-            pool,
-            &listing::Listing {
-                id,
-                exchange_mic: Some("XASX".to_string()),
-                ticker: format!("T{id}"),
-                name: format!("Test {id}"),
-                isin: None,
-                security_type: listing::SecurityType::Trust,
-                currency: currency.to_string(),
-                amit: false,
-                preference: false,
-            },
-        )
-        .await
-        .unwrap();
+        test_support::listing(id)
+            .security_type(listing::SecurityType::Trust)
+            .currency(currency)
+            .insert(pool)
+            .await;
     }
 
     /// Create an enrolment period `[from, to)`; `to = None` = open-ended.
@@ -380,33 +365,15 @@ mod tests {
         cash: Decimal,
         franking: Decimal,
     ) {
-        income::db_upsert(
-            pool,
-            &income::Income {
-                holding_account_id: 1,
-                id,
-                listing_id,
-                date_paid: date_paid.parse().unwrap(),
-                ex_date: ex_date.map(|d| d.parse().unwrap()),
-                franked_amount: Decimal::ZERO,
-                unfranked_amount: cash,
-                foreign_source_income: Decimal::ZERO,
-                foreign_tax_paid: Decimal::ZERO,
-                tfn_withholding_tax: Decimal::ZERO,
-                franking_credits: franking,
-                lic_capital_gain_deduction: Decimal::ZERO,
-                conduit_foreign_income: Decimal::ZERO,
-                trust_income: true,
-                entitlement_date: None,
-                reinvestment_trade_id: None,
-                currency: "AUD".to_string(),
-                buyback_trade_id: None,
-                amount_per_security: None,
-                securities_held: None,
-            },
-        )
-        .await
-        .unwrap();
+        test_support::income(id, listing_id, date_paid.parse().unwrap())
+            .with(|i| {
+                i.ex_date = ex_date.map(|d| d.parse().unwrap());
+                i.unfranked_amount = cash;
+                i.franking_credits = franking;
+                i.trust_income = true;
+            })
+            .insert(pool)
+            .await;
     }
 
     fn body(price: &str) -> ReinvestBody {
@@ -462,33 +429,14 @@ mod tests {
         account_id: i64,
         cash: Decimal,
     ) {
-        income::db_upsert(
-            pool,
-            &income::Income {
-                id,
-                listing_id,
-                holding_account_id: account_id,
-                date_paid: "2024-03-31".parse().unwrap(),
-                ex_date: None,
-                franked_amount: Decimal::ZERO,
-                unfranked_amount: cash,
-                foreign_source_income: Decimal::ZERO,
-                foreign_tax_paid: Decimal::ZERO,
-                tfn_withholding_tax: Decimal::ZERO,
-                franking_credits: Decimal::ZERO,
-                lic_capital_gain_deduction: Decimal::ZERO,
-                conduit_foreign_income: Decimal::ZERO,
-                trust_income: true,
-                entitlement_date: None,
-                reinvestment_trade_id: None,
-                currency: "AUD".to_string(),
-                buyback_trade_id: None,
-                amount_per_security: None,
-                securities_held: None,
-            },
-        )
-        .await
-        .unwrap();
+        test_support::income(id, listing_id, "2024-03-31".parse().unwrap())
+            .with(|i| {
+                i.holding_account_id = account_id;
+                i.unfranked_amount = cash;
+                i.trust_income = true;
+            })
+            .insert(pool)
+            .await;
     }
 
     #[tokio::test]

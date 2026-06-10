@@ -220,36 +220,17 @@ async fn delete(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{entities::listing, infra::db};
+    use crate::test_support::{self, test_pool, ymd};
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
-    async fn test_pool() -> SqlitePool {
-        db::init(":memory:").await.unwrap()
-    }
-
-    fn ymd(y: i32, m: u32, d: u32) -> NaiveDate {
-        NaiveDate::from_ymd_opt(y, m, d).unwrap()
-    }
-
     async fn insert_listing(pool: &SqlitePool, id: i64, mic: &str) {
-        listing::db_upsert(
-            pool,
-            &listing::Listing {
-                id,
-                exchange_mic: Some(mic.to_string()),
-                ticker: format!("T{id}"),
-                name: format!("Test {id}"),
-                isin: None,
-                security_type: listing::SecurityType::ETF,
-                currency: if mic == "XNYS" { "USD" } else { "AUD" }.to_string(),
-                amit: false,
-                preference: false,
-            },
-        )
-        .await
-        .unwrap();
+        test_support::listing(id)
+            .mic(mic)
+            .currency(if mic == "XNYS" { "USD" } else { "AUD" })
+            .insert(pool)
+            .await;
     }
 
     // Coverage-span helpers

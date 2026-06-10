@@ -568,38 +568,26 @@ async fn performance_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::entities::{income, listing, parcel_allocation, trade};
-    use crate::infra::db;
+    use crate::entities::{listing, trade};
+    use crate::test_support::{self, test_pool};
     use axum::http::StatusCode;
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
     use tower::ServiceExt;
-
-    async fn test_pool() -> SqlitePool {
-        db::init(":memory:").await.unwrap()
-    }
 
     fn d(y: i32, m: u32, day: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(y, m, day).unwrap()
     }
 
     async fn insert_listing(pool: &SqlitePool, id: i64, ticker: &str, mic: &str, currency: &str) {
-        listing::db_upsert(
-            pool,
-            &listing::Listing {
-                id,
-                exchange_mic: Some(mic.to_string()),
-                ticker: ticker.to_string(),
-                name: ticker.to_string(),
-                isin: None,
-                security_type: listing::SecurityType::Share,
-                currency: currency.to_string(),
-                amit: false,
-                preference: false,
-            },
-        )
-        .await
-        .unwrap();
+        test_support::listing(id)
+            .ticker(ticker)
+            .name(ticker)
+            .mic(mic)
+            .security_type(listing::SecurityType::Share)
+            .currency(currency)
+            .insert(pool)
+            .await;
     }
 
     /// A trade with zero brokerage/GST so the flow figures stay round.
@@ -616,40 +604,15 @@ mod tests {
         currency: &str,
         fx_rate: Decimal,
     ) {
-        trade::db_upsert(
-            pool,
-            &trade::Trade {
-                brokerage_includes_gst: false,
-                statement_total: None,
-                holding_account_id: account_id,
-                transfer_id: None,
-                ess_statement_id: None,
-                id,
-                trade_type,
-                date,
-                settlement_date: date + chrono::Duration::days(2),
-                listing_id,
-                average_price: price,
-                quantity: qty,
-                currency: currency.to_string(),
-                brokerage: Decimal::ZERO,
-                gst_on_brokerage: Decimal::ZERO,
-                brokerage_currency: currency.to_string(),
-                fx_rate,
-                contract_note_ref: None,
-                residual_brought_forward: Decimal::ZERO,
-                residual_carried_forward: Decimal::ZERO,
-                residual_paid_out: Decimal::ZERO,
-                rights_action_id: None,
-                buyback_action_id: None,
-                scrip_action_id: None,
-                demerger_action_id: None,
-                worthless_action_id: None,
-                deemed_acquisition_date: None,
-            },
-        )
-        .await
-        .unwrap();
+        test_support::trade(id, listing_id, trade_type)
+            .account(account_id)
+            .date(date)
+            .qty(qty)
+            .price(price)
+            .currency(currency)
+            .fx_rate(fx_rate)
+            .insert(pool)
+            .await;
     }
 
     async fn buy(pool: &SqlitePool, id: i64, listing: i64, date: NaiveDate, qty: i64, price: i64) {
@@ -685,17 +648,7 @@ mod tests {
     }
 
     async fn allocate(pool: &SqlitePool, id: i64, sale_id: i64, buy_id: i64, qty: i64) {
-        parcel_allocation::db_upsert(
-            pool,
-            &parcel_allocation::ParcelAllocation {
-                id,
-                sale_trade_id: sale_id,
-                purchase_trade_id: buy_id,
-                quantity_allocated: Decimal::from(qty),
-            },
-        )
-        .await
-        .unwrap();
+        test_support::allocate(pool, id, sale_id, buy_id, Decimal::from(qty)).await;
     }
 
     /// An unfranked cash distribution (everything else zero).
@@ -706,33 +659,10 @@ mod tests {
         date_paid: NaiveDate,
         amount: i64,
     ) {
-        income::db_upsert(
-            pool,
-            &income::Income {
-                id,
-                listing_id,
-                date_paid,
-                ex_date: None,
-                franked_amount: Decimal::ZERO,
-                unfranked_amount: Decimal::from(amount),
-                foreign_source_income: Decimal::ZERO,
-                foreign_tax_paid: Decimal::ZERO,
-                tfn_withholding_tax: Decimal::ZERO,
-                franking_credits: Decimal::ZERO,
-                lic_capital_gain_deduction: Decimal::ZERO,
-                conduit_foreign_income: Decimal::ZERO,
-                trust_income: false,
-                entitlement_date: None,
-                reinvestment_trade_id: None,
-                currency: "AUD".to_string(),
-                buyback_trade_id: None,
-                holding_account_id: 1,
-                amount_per_security: None,
-                securities_held: None,
-            },
-        )
-        .await
-        .unwrap();
+        test_support::income(id, listing_id, date_paid)
+            .with(|i| i.unfranked_amount = Decimal::from(amount))
+            .insert(pool)
+            .await;
     }
 
     fn price_map(listing_id: i64, price: &str) -> HashMap<i64, Decimal> {

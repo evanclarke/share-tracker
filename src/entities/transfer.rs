@@ -649,15 +649,15 @@ async fn delete(
 mod tests {
     use super::*;
     use crate::entities::holding_account::{self, HoldingAccount};
+    use crate::entities::sell::SellError;
     use crate::entities::trade::TradeType;
-    use crate::entities::{listing, sell::SellError};
-    use crate::infra::db;
+    use crate::test_support::{self, dec};
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
     async fn test_pool() -> SqlitePool {
-        let pool = db::init(":memory:").await.unwrap();
+        let pool = test_support::test_pool().await;
         // Account 1 ('Default') is seeded; 2 is the employer plan the RSU
         // scenario transfers out of.
         holding_account::db_upsert(
@@ -676,65 +676,29 @@ mod tests {
         NaiveDate::from_ymd_opt(y, m, day).unwrap()
     }
 
-    fn dec(s: &str) -> Decimal {
-        s.parse().unwrap()
-    }
-
     async fn insert_listing(pool: &SqlitePool, id: i64, ticker: &str) {
-        listing::db_upsert(
-            pool,
-            &listing::Listing {
-                id,
-                exchange_mic: Some("XNYS".to_string()),
-                ticker: ticker.to_string(),
-                name: ticker.to_string(),
-                isin: None,
-                security_type: listing::SecurityType::Share,
-                currency: "USD".to_string(),
-                amit: false,
-                preference: false,
-            },
-        )
-        .await
-        .unwrap();
+        test_support::listing(id)
+            .mic("XNYS")
+            .ticker(ticker)
+            .name(ticker)
+            .security_type(crate::entities::listing::SecurityType::Share)
+            .currency("USD")
+            .insert(pool)
+            .await;
     }
 
     /// An RSU vest: a Buy at market value in the plan account (account 2).
     async fn insert_vest(pool: &SqlitePool, id: i64, date: NaiveDate, qty: &str, price: &str) {
-        trade::db_upsert(
-            pool,
-            &Trade {
-                brokerage_includes_gst: false,
-                statement_total: None,
-                id,
-                trade_type: TradeType::Buy,
-                date,
-                settlement_date: date,
-                listing_id: 1,
-                average_price: price.parse().unwrap(),
-                quantity: qty.parse().unwrap(),
-                currency: "USD".to_string(),
-                brokerage: Decimal::ZERO,
-                gst_on_brokerage: Decimal::ZERO,
-                brokerage_currency: "USD".to_string(),
-                fx_rate: dec("1.5"),
-                contract_note_ref: None,
-                residual_brought_forward: Decimal::ZERO,
-                residual_carried_forward: Decimal::ZERO,
-                residual_paid_out: Decimal::ZERO,
-                rights_action_id: None,
-                buyback_action_id: None,
-                scrip_action_id: None,
-                demerger_action_id: None,
-                worthless_action_id: None,
-                deemed_acquisition_date: None,
-                holding_account_id: 2,
-                transfer_id: None,
-                ess_statement_id: None,
-            },
-        )
-        .await
-        .unwrap();
+        test_support::buy(id, 1)
+            .date(date)
+            .settlement(date)
+            .qty(qty.parse().unwrap())
+            .price(price.parse().unwrap())
+            .currency("USD")
+            .fx_rate(dec("1.5"))
+            .account(2)
+            .insert(pool)
+            .await;
     }
 
     fn body(date: NaiveDate, from: i64, to: i64, allocations: Vec<(i64, &str)>) -> TransferBody {
@@ -806,57 +770,8 @@ mod tests {
     #[tokio::test]
     async fn crypto_transfer_carries_cost_base_and_acquisition_date() {
         let pool = test_pool().await;
-        listing::db_upsert(
-            &pool,
-            &listing::Listing {
-                id: 1,
-                exchange_mic: None,
-                ticker: "BTC".to_string(),
-                name: "Bitcoin".to_string(),
-                isin: None,
-                security_type: listing::SecurityType::Crypto,
-                currency: "AUD".to_string(),
-                amit: false,
-                preference: false,
-            },
-        )
-        .await
-        .unwrap();
         // 0.12345678 BTC bought at A$60,000 in account 2.
-        trade::db_upsert(
-            &pool,
-            &Trade {
-                brokerage_includes_gst: false,
-                statement_total: None,
-                id: 1,
-                trade_type: TradeType::Buy,
-                date: d(2023, 3, 1),
-                settlement_date: d(2023, 3, 1), // crypto settles same-day
-                listing_id: 1,
-                average_price: dec("60000"),
-                quantity: dec("0.12345678"),
-                currency: "AUD".to_string(),
-                brokerage: Decimal::ZERO,
-                gst_on_brokerage: Decimal::ZERO,
-                brokerage_currency: "AUD".to_string(),
-                fx_rate: Decimal::ONE,
-                contract_note_ref: None,
-                residual_brought_forward: Decimal::ZERO,
-                residual_carried_forward: Decimal::ZERO,
-                residual_paid_out: Decimal::ZERO,
-                rights_action_id: None,
-                buyback_action_id: None,
-                scrip_action_id: None,
-                demerger_action_id: None,
-                worthless_action_id: None,
-                deemed_acquisition_date: None,
-                holding_account_id: 2,
-                transfer_id: None,
-                ess_statement_id: None,
-            },
-        )
-        .await
-        .unwrap();
+        insert_crypto(&pool, "0.12345678", "60000").await;
 
         let group = db_transfer(
             &pool,
@@ -885,56 +800,20 @@ mod tests {
     /// account 2 — held long enough that a 2024-06-01 disposal is
     /// discount-eligible.
     async fn insert_crypto(pool: &SqlitePool, qty: &str, price: &str) {
-        listing::db_upsert(
-            pool,
-            &listing::Listing {
-                id: 1,
-                exchange_mic: None,
-                ticker: "BTC".to_string(),
-                name: "Bitcoin".to_string(),
-                isin: None,
-                security_type: listing::SecurityType::Crypto,
-                currency: "AUD".to_string(),
-                amit: false,
-                preference: false,
-            },
-        )
-        .await
-        .unwrap();
-        trade::db_upsert(
-            pool,
-            &Trade {
-                brokerage_includes_gst: false,
-                statement_total: None,
-                id: 1,
-                trade_type: TradeType::Buy,
-                date: d(2023, 3, 1),
-                settlement_date: d(2023, 3, 1),
-                listing_id: 1,
-                average_price: dec(price),
-                quantity: dec(qty),
-                currency: "AUD".to_string(),
-                brokerage: Decimal::ZERO,
-                gst_on_brokerage: Decimal::ZERO,
-                brokerage_currency: "AUD".to_string(),
-                fx_rate: Decimal::ONE,
-                contract_note_ref: None,
-                residual_brought_forward: Decimal::ZERO,
-                residual_carried_forward: Decimal::ZERO,
-                residual_paid_out: Decimal::ZERO,
-                rights_action_id: None,
-                buyback_action_id: None,
-                scrip_action_id: None,
-                demerger_action_id: None,
-                worthless_action_id: None,
-                deemed_acquisition_date: None,
-                holding_account_id: 2,
-                transfer_id: None,
-                ess_statement_id: None,
-            },
-        )
-        .await
-        .unwrap();
+        test_support::listing(1)
+            .crypto()
+            .ticker("BTC")
+            .name("Bitcoin")
+            .insert(pool)
+            .await;
+        test_support::buy(1, 1)
+            .date(d(2023, 3, 1))
+            .settlement(d(2023, 3, 1))
+            .qty(dec(qty))
+            .price(dec(price))
+            .account(2)
+            .insert(pool)
+            .await;
     }
 
     /// A transfer body carrying a network fee: `allocations` move, while
@@ -1509,47 +1388,18 @@ mod tests {
 
         // An AMMA statement (in the plan account) with a $1/unit decrease
         // over the 100 units → −$100.
-        crate::entities::amma::db_upsert(
-            &pool,
-            &crate::entities::amma::AmmaStatement {
-                id: 1,
-                listing_id: 1,
-                holding_account_id: 2,
-                tax_year_end_date: d(2023, 6, 30),
-                units_held: dec("100"),
-                date_received: d(2023, 7, 15),
-                australian_interest: Decimal::ZERO,
-                australian_dividends_unfranked: Decimal::ZERO,
-                franked_dividends: Decimal::ZERO,
-                franking_credits: Decimal::ZERO,
-                net_rent: Decimal::ZERO,
-                foreign_income: Decimal::ZERO,
-                foreign_tax_credits: Decimal::ZERO,
-                other_income: Decimal::ZERO,
-                cgt_discount_gains: Decimal::ZERO,
-                cgt_indexation_gains: Decimal::ZERO,
-                cgt_other_gains: Decimal::ZERO,
-                capital_losses_applied: Decimal::ZERO,
-                tax_deferred_amount: Decimal::ZERO,
-                tax_free_amount: Decimal::ZERO,
-                cost_base_adjustment: dec("1"),
-                tfn_withholding_tax: Decimal::ZERO,
-                currency: "USD".to_string(),
-            },
-        )
-        .await
-        .unwrap();
-        crate::entities::amit_adjustment::db_upsert(
-            &pool,
-            &crate::entities::amit_adjustment::AmitAdjustment {
-                id: 1,
-                amma_statement_id: 1,
-                trade_id: 1,
-                quantity: dec("100"),
-            },
-        )
-        .await
-        .unwrap();
+        test_support::amma(1, 1)
+            .units(dec("100"))
+            .cost_base_adjustment(dec("1"))
+            .with(|a| {
+                a.holding_account_id = 2;
+                a.tax_year_end_date = d(2023, 6, 30);
+                a.date_received = d(2023, 7, 15);
+                a.currency = "USD".to_string();
+            })
+            .insert(&pool)
+            .await;
+        test_support::amit_adjustment(&pool, 1, 1, 1, dec("100")).await;
 
         // A $2/unit return of capital while held → −$200.
         corporate_action::db_upsert(

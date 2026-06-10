@@ -616,71 +616,19 @@ async fn delete(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        entities::{listing, trade},
-        infra::db,
-    };
+    use crate::test_support::{self, test_pool};
     use axum::{body::Body, http::Request};
     use tower::ServiceExt;
 
-    async fn test_pool() -> SqlitePool {
-        db::init(":memory:").await.unwrap()
-    }
-
     async fn insert_listing(pool: &SqlitePool, id: i64) {
-        listing::db_upsert(
-            pool,
-            &listing::Listing {
-                id,
-                exchange_mic: Some("XASX".to_string()),
-                ticker: format!("T{id}"),
-                name: format!("Test {id}"),
-                isin: None,
-                security_type: listing::SecurityType::ETF,
-                currency: "AUD".to_string(),
-                amit: false,
-                preference: false,
-            },
-        )
-        .await
-        .unwrap();
+        test_support::listing(id).insert(pool).await;
     }
 
     async fn insert_buy(pool: &SqlitePool, id: i64, listing_id: i64, qty: Decimal) {
-        trade::db_upsert(
-            pool,
-            &trade::Trade {
-                brokerage_includes_gst: false,
-                statement_total: None,
-                holding_account_id: 1,
-                transfer_id: None,
-                ess_statement_id: None,
-                id,
-                trade_type: trade::TradeType::Buy,
-                date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-                settlement_date: NaiveDate::from_ymd_opt(2024, 1, 3).unwrap(),
-                listing_id,
-                average_price: Decimal::from(10),
-                quantity: qty,
-                currency: "AUD".to_string(),
-                brokerage: Decimal::ZERO,
-                gst_on_brokerage: Decimal::ZERO,
-                brokerage_currency: "AUD".to_string(),
-                fx_rate: Decimal::ONE,
-                contract_note_ref: None,
-                residual_brought_forward: Decimal::ZERO,
-                residual_carried_forward: Decimal::ZERO,
-                residual_paid_out: Decimal::ZERO,
-                rights_action_id: None,
-                buyback_action_id: None,
-                scrip_action_id: None,
-                demerger_action_id: None,
-                worthless_action_id: None,
-                deemed_acquisition_date: None,
-            },
-        )
-        .await
-        .unwrap();
+        test_support::buy(id, listing_id)
+            .qty(qty)
+            .insert(pool)
+            .await;
     }
 
     fn sell_body(qty: Decimal, allocations: Vec<AllocationInput>) -> SellBody {

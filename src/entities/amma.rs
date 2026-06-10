@@ -313,60 +313,31 @@ async fn delete(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{entities::listing, infra::db};
+    use crate::test_support::{self, dec, test_pool};
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
-    async fn test_pool() -> SqlitePool {
-        db::init(":memory:").await.unwrap()
-    }
-
     async fn insert_test_listing(pool: &SqlitePool) {
-        listing::db_upsert(
-            pool,
-            &listing::Listing {
-                id: 1,
-                exchange_mic: Some("XASX".to_string()),
-                ticker: "VAF".to_string(),
-                name: "Vanguard Australian Fixed Interest ETF".to_string(),
-                isin: None,
-                security_type: listing::SecurityType::ETF,
-                currency: "AUD".to_string(),
-                amit: true,
-                preference: false,
-            },
-        )
-        .await
-        .unwrap();
+        test_support::listing(1)
+            .ticker("VAF")
+            .name("Vanguard Australian Fixed Interest ETF")
+            .amit(true)
+            .insert(pool)
+            .await;
     }
 
     fn sample_amma() -> AmmaStatement {
-        AmmaStatement {
-            holding_account_id: 1,
-            id: 1,
-            listing_id: 1,
-            tax_year_end_date: NaiveDate::from_ymd_opt(2024, 6, 30).unwrap(),
-            units_held: "1000".parse().unwrap(),
-            date_received: NaiveDate::from_ymd_opt(2024, 8, 15).unwrap(),
-            australian_interest: "12.50".parse().unwrap(),
-            australian_dividends_unfranked: "5.25".parse().unwrap(),
-            franked_dividends: Decimal::ZERO,
-            franking_credits: Decimal::ZERO,
-            net_rent: Decimal::ZERO,
-            foreign_income: Decimal::ZERO,
-            foreign_tax_credits: Decimal::ZERO,
-            other_income: Decimal::ZERO,
-            cgt_discount_gains: Decimal::ZERO,
-            cgt_indexation_gains: Decimal::ZERO,
-            cgt_other_gains: Decimal::ZERO,
-            capital_losses_applied: Decimal::ZERO,
-            tax_deferred_amount: "2.30".parse().unwrap(),
-            tax_free_amount: "1.10".parse().unwrap(),
-            cost_base_adjustment: "0.0023".parse().unwrap(),
-            tfn_withholding_tax: Decimal::ZERO,
-            currency: "AUD".to_string(),
-        }
+        test_support::amma(1, 1)
+            .units(dec("1000"))
+            .cost_base_adjustment(dec("0.0023"))
+            .with(|a| {
+                a.australian_interest = dec("12.50");
+                a.australian_dividends_unfranked = dec("5.25");
+                a.tax_deferred_amount = dec("2.30");
+                a.tax_free_amount = dec("1.10");
+            })
+            .build()
     }
 
     // DB-level tests

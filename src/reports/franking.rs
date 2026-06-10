@@ -176,29 +176,15 @@ pub async fn holding_period_test(
 mod tests {
     use super::*;
     use crate::entities::{listing, trade};
-    use crate::infra::db;
-
-    async fn test_pool() -> SqlitePool {
-        db::init(":memory:").await.unwrap()
-    }
+    use crate::test_support::{self, test_pool};
 
     async fn insert_listing(pool: &SqlitePool, id: i64, preference: bool) {
-        listing::db_upsert(
-            pool,
-            &listing::Listing {
-                id,
-                exchange_mic: Some("XASX".to_string()),
-                ticker: format!("TST{id}"),
-                name: format!("Test {id}"),
-                isin: None,
-                security_type: listing::SecurityType::Share,
-                currency: "AUD".to_string(),
-                amit: false,
-                preference,
-            },
-        )
-        .await
-        .unwrap();
+        test_support::listing(id)
+            .ticker(&format!("TST{id}"))
+            .security_type(listing::SecurityType::Share)
+            .preference(preference)
+            .insert(pool)
+            .await;
     }
 
     async fn insert_trade(
@@ -209,40 +195,12 @@ mod tests {
         date: NaiveDate,
         qty: i64,
     ) {
-        trade::db_upsert(
-            pool,
-            &trade::Trade {
-                brokerage_includes_gst: false,
-                statement_total: None,
-                holding_account_id: 1,
-                transfer_id: None,
-                ess_statement_id: None,
-                id,
-                trade_type,
-                date,
-                settlement_date: date + Duration::days(2),
-                listing_id,
-                average_price: Decimal::ONE,
-                quantity: Decimal::from(qty),
-                currency: "AUD".to_string(),
-                brokerage: Decimal::ZERO,
-                gst_on_brokerage: Decimal::ZERO,
-                brokerage_currency: "AUD".to_string(),
-                fx_rate: Decimal::ONE,
-                contract_note_ref: None,
-                residual_brought_forward: Decimal::ZERO,
-                residual_carried_forward: Decimal::ZERO,
-                residual_paid_out: Decimal::ZERO,
-                rights_action_id: None,
-                buyback_action_id: None,
-                scrip_action_id: None,
-                demerger_action_id: None,
-                worthless_action_id: None,
-                deemed_acquisition_date: None,
-            },
-        )
-        .await
-        .unwrap();
+        test_support::trade(id, listing_id, trade_type)
+            .date(date)
+            .qty(Decimal::from(qty))
+            .price(Decimal::ONE)
+            .insert(pool)
+            .await;
     }
 
     fn d(s: &str) -> NaiveDate {

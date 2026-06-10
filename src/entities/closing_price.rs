@@ -971,16 +971,12 @@ pub mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::entities::{exchange_holiday, parcel_allocation, trade};
-    use crate::infra::db;
+    use crate::entities::exchange_holiday;
+    use crate::test_support::test_pool;
     use axum::{body::Body, http::Request, http::StatusCode};
     use http_body_util::BodyExt;
     use std::sync::Mutex;
     use tower::ServiceExt;
-
-    async fn test_pool() -> SqlitePool {
-        db::init(":memory:").await.unwrap()
-    }
 
     fn ymd(y: i32, m: u32, d: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(y, m, d).unwrap()
@@ -991,78 +987,32 @@ mod tests {
     }
 
     async fn insert_listing(pool: &SqlitePool, id: i64, ticker: &str, mic: &str, currency: &str) {
-        listing::db_upsert(
-            pool,
-            &listing::Listing {
-                id,
-                exchange_mic: Some(mic.to_string()),
-                ticker: ticker.to_string(),
-                name: ticker.to_string(),
-                isin: None,
-                security_type: listing::SecurityType::Share,
-                currency: currency.to_string(),
-                amit: false,
-                preference: false,
-            },
-        )
-        .await
-        .unwrap();
+        crate::test_support::listing(id)
+            .ticker(ticker)
+            .name(ticker)
+            .mic(mic)
+            .security_type(listing::SecurityType::Share)
+            .currency(currency)
+            .insert(pool)
+            .await;
     }
 
     async fn insert_crypto_listing(pool: &SqlitePool, id: i64, ticker: &str) {
-        listing::db_upsert(
-            pool,
-            &listing::Listing {
-                id,
-                exchange_mic: None,
-                ticker: ticker.to_string(),
-                name: ticker.to_string(),
-                isin: None,
-                security_type: listing::SecurityType::Crypto,
-                currency: "AUD".to_string(),
-                amit: false,
-                preference: false,
-            },
-        )
-        .await
-        .unwrap();
+        crate::test_support::listing(id)
+            .crypto()
+            .ticker(ticker)
+            .name(ticker)
+            .insert(pool)
+            .await;
     }
 
     async fn insert_buy(pool: &SqlitePool, id: i64, listing_id: i64, qty: &str) {
-        trade::db_upsert(
-            pool,
-            &trade::Trade {
-                brokerage_includes_gst: false,
-                statement_total: None,
-                holding_account_id: 1,
-                transfer_id: None,
-                ess_statement_id: None,
-                id,
-                trade_type: trade::TradeType::Buy,
-                date: ymd(2024, 1, 15),
-                settlement_date: ymd(2024, 1, 17),
-                listing_id,
-                average_price: Decimal::from(10),
-                quantity: qty.parse().unwrap(),
-                currency: "AUD".to_string(),
-                brokerage: Decimal::ZERO,
-                gst_on_brokerage: Decimal::ZERO,
-                brokerage_currency: "AUD".to_string(),
-                fx_rate: Decimal::ONE,
-                contract_note_ref: None,
-                residual_brought_forward: Decimal::ZERO,
-                residual_carried_forward: Decimal::ZERO,
-                residual_paid_out: Decimal::ZERO,
-                rights_action_id: None,
-                buyback_action_id: None,
-                scrip_action_id: None,
-                demerger_action_id: None,
-                worthless_action_id: None,
-                deemed_acquisition_date: None,
-            },
-        )
-        .await
-        .unwrap();
+        crate::test_support::buy(id, listing_id)
+            .date(ymd(2024, 1, 15))
+            .qty(qty.parse().unwrap())
+            .price(Decimal::from(10))
+            .insert(pool)
+            .await;
     }
 
     async fn sell_everything(
@@ -1072,51 +1022,13 @@ mod tests {
         listing_id: i64,
         qty: &str,
     ) {
-        trade::db_upsert(
-            pool,
-            &trade::Trade {
-                brokerage_includes_gst: false,
-                statement_total: None,
-                holding_account_id: 1,
-                transfer_id: None,
-                ess_statement_id: None,
-                id: sell_id,
-                trade_type: trade::TradeType::Sell,
-                date: ymd(2024, 6, 3),
-                settlement_date: ymd(2024, 6, 5),
-                listing_id,
-                average_price: Decimal::from(12),
-                quantity: qty.parse().unwrap(),
-                currency: "AUD".to_string(),
-                brokerage: Decimal::ZERO,
-                gst_on_brokerage: Decimal::ZERO,
-                brokerage_currency: "AUD".to_string(),
-                fx_rate: Decimal::ONE,
-                contract_note_ref: None,
-                residual_brought_forward: Decimal::ZERO,
-                residual_carried_forward: Decimal::ZERO,
-                residual_paid_out: Decimal::ZERO,
-                rights_action_id: None,
-                buyback_action_id: None,
-                scrip_action_id: None,
-                demerger_action_id: None,
-                worthless_action_id: None,
-                deemed_acquisition_date: None,
-            },
-        )
-        .await
-        .unwrap();
-        parcel_allocation::db_upsert(
-            pool,
-            &parcel_allocation::ParcelAllocation {
-                id: sell_id,
-                sale_trade_id: sell_id,
-                purchase_trade_id: buy_id,
-                quantity_allocated: qty.parse().unwrap(),
-            },
-        )
-        .await
-        .unwrap();
+        crate::test_support::sell(sell_id, listing_id)
+            .date(ymd(2024, 6, 3))
+            .qty(qty.parse().unwrap())
+            .price(Decimal::from(12))
+            .insert(pool)
+            .await;
+        crate::test_support::allocate(pool, sell_id, sell_id, buy_id, qty.parse().unwrap()).await;
     }
 
     /// Stub provider: per-listing canned closes and latest quotes (keyed by
@@ -1872,20 +1784,16 @@ mod tests {
 
     #[test]
     fn yahoo_symbols_cover_asx_us_and_crypto() {
-        let mk = |mic: Option<&str>, ticker: &str, ccy: &str| listing::Listing {
-            id: 1,
-            exchange_mic: mic.map(str::to_string),
-            ticker: ticker.to_string(),
-            name: ticker.to_string(),
-            isin: None,
-            security_type: if mic.is_none() {
-                listing::SecurityType::Crypto
-            } else {
-                listing::SecurityType::Share
-            },
-            currency: ccy.to_string(),
-            amit: false,
-            preference: false,
+        let mk = |mic: Option<&str>, ticker: &str, ccy: &str| {
+            let b = crate::test_support::listing(1)
+                .ticker(ticker)
+                .name(ticker)
+                .currency(ccy);
+            match mic {
+                Some(m) => b.mic(m).security_type(listing::SecurityType::Share),
+                None => b.crypto(),
+            }
+            .build()
         };
         assert_eq!(
             yahoo_symbol(&mk(Some("XASX"), "BHP", "AUD")).unwrap(),

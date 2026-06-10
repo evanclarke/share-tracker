@@ -257,15 +257,11 @@ impl From<ImportError> for ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::infra::db;
+    use crate::test_support::test_pool;
     use axum::http::StatusCode;
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
     use tower::ServiceExt;
-
-    async fn test_pool() -> SqlitePool {
-        db::init(":memory:").await.unwrap()
-    }
 
     /// A trimmed slice of the real RBA F11 layout: BOM, metadata rows, a Title row
     /// with a non-currency Index column to skip, and two monthly data rows (the

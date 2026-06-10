@@ -540,35 +540,19 @@ async fn tax_summary_export_handler(State(pool): State<SqlitePool>) -> Result<Re
 mod tests {
     use super::*;
     use crate::{
-        entities::{amma, ess_statement, income, investment_expense, listing, rba_fx_rate, trade},
-        infra::db,
+        entities::{amma, ess_statement, income, investment_expense, rba_fx_rate, trade},
+        test_support::{self, test_pool},
     };
     use axum::http::StatusCode;
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
-    async fn test_pool() -> SqlitePool {
-        db::init(":memory:").await.unwrap()
-    }
-
     async fn insert_listing(pool: &SqlitePool, id: i64) {
-        listing::db_upsert(
-            pool,
-            &listing::Listing {
-                id,
-                exchange_mic: Some("XASX".to_string()),
-                ticker: format!("TST{id}"),
-                name: format!("Test {id}"),
-                isin: None,
-                security_type: listing::SecurityType::ETF,
-                currency: "AUD".to_string(),
-                amit: false,
-                preference: false,
-            },
-        )
-        .await
-        .unwrap();
+        test_support::listing(id)
+            .ticker(&format!("TST{id}"))
+            .insert(pool)
+            .await;
     }
 
     async fn insert_trade(
@@ -579,111 +563,29 @@ mod tests {
         date: NaiveDate,
         qty: i64,
     ) {
-        trade::db_upsert(
-            pool,
-            &trade::Trade {
-                brokerage_includes_gst: false,
-                statement_total: None,
-                holding_account_id: 1,
-                transfer_id: None,
-                ess_statement_id: None,
-                id,
-                trade_type,
-                date,
-                settlement_date: date + chrono::Duration::days(2),
-                listing_id,
-                average_price: Decimal::ONE,
-                quantity: Decimal::from(qty),
-                currency: "AUD".to_string(),
-                brokerage: Decimal::ZERO,
-                gst_on_brokerage: Decimal::ZERO,
-                brokerage_currency: "AUD".to_string(),
-                fx_rate: Decimal::ONE,
-                contract_note_ref: None,
-                residual_brought_forward: Decimal::ZERO,
-                residual_carried_forward: Decimal::ZERO,
-                residual_paid_out: Decimal::ZERO,
-                rights_action_id: None,
-                buyback_action_id: None,
-                scrip_action_id: None,
-                demerger_action_id: None,
-                worthless_action_id: None,
-                deemed_acquisition_date: None,
-            },
-        )
-        .await
-        .unwrap();
+        test_support::trade(id, listing_id, trade_type)
+            .date(date)
+            .qty(Decimal::from(qty))
+            .price(Decimal::ONE)
+            .insert(pool)
+            .await;
     }
 
     fn make_income(id: i64, listing_id: i64, date: NaiveDate) -> income::Income {
-        income::Income {
-            holding_account_id: 1,
-            id,
-            listing_id,
-            date_paid: date,
-            ex_date: None,
-            franked_amount: Decimal::ZERO,
-            unfranked_amount: Decimal::ZERO,
-            foreign_source_income: Decimal::ZERO,
-            foreign_tax_paid: Decimal::ZERO,
-            tfn_withholding_tax: Decimal::ZERO,
-            franking_credits: Decimal::ZERO,
-            lic_capital_gain_deduction: Decimal::ZERO,
-            conduit_foreign_income: Decimal::ZERO,
-            trust_income: false,
-            entitlement_date: None,
-            reinvestment_trade_id: None,
-            currency: "AUD".to_string(),
-            buyback_trade_id: None,
-            amount_per_security: None,
-            securities_held: None,
-        }
+        test_support::income(id, listing_id, date).build()
     }
 
     fn make_amma(id: i64, listing_id: i64, year_end: NaiveDate) -> amma::AmmaStatement {
-        amma::AmmaStatement {
-            holding_account_id: 1,
-            id,
-            listing_id,
-            tax_year_end_date: year_end,
-            units_held: Decimal::from(100),
-            date_received: year_end + chrono::Duration::days(60),
-            cost_base_adjustment: Decimal::ZERO,
-            australian_interest: Decimal::ZERO,
-            australian_dividends_unfranked: Decimal::ZERO,
-            franked_dividends: Decimal::ZERO,
-            franking_credits: Decimal::ZERO,
-            net_rent: Decimal::ZERO,
-            foreign_income: Decimal::ZERO,
-            foreign_tax_credits: Decimal::ZERO,
-            other_income: Decimal::ZERO,
-            cgt_discount_gains: Decimal::ZERO,
-            cgt_indexation_gains: Decimal::ZERO,
-            cgt_other_gains: Decimal::ZERO,
-            capital_losses_applied: Decimal::ZERO,
-            tax_deferred_amount: Decimal::ZERO,
-            tax_free_amount: Decimal::ZERO,
-            tfn_withholding_tax: Decimal::ZERO,
-            currency: "AUD".to_string(),
-        }
+        test_support::amma(id, listing_id)
+            .with(|a| {
+                a.tax_year_end_date = year_end;
+                a.date_received = year_end + chrono::Duration::days(60);
+            })
+            .build()
     }
 
     fn make_ess(id: i64, listing_id: i64, taxing_point: NaiveDate) -> ess_statement::EssStatement {
-        ess_statement::EssStatement {
-            id,
-            listing_id,
-            holding_account_id: 1,
-            taxing_point_date: taxing_point,
-            quantity: Decimal::ZERO,
-            market_value_per_share: Decimal::ZERO,
-            taxed_upfront_eligible: Decimal::ZERO,
-            taxed_upfront_not_eligible: Decimal::ZERO,
-            deferral_discount: Decimal::ZERO,
-            pre_2009_cessation_discount: Decimal::ZERO,
-            foreign_source_discount: Decimal::ZERO,
-            tfn_withholding: Decimal::ZERO,
-            currency: "AUD".to_string(),
-        }
+        test_support::ess_statement(id, listing_id, taxing_point).build()
     }
 
     fn make_expense(

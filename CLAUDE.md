@@ -59,6 +59,6 @@ New entity modules are added by dropping the file in `src/entities/` and adding 
 - `DELETE /entities/:id` → 204 No Content or 404
 
 # Test conventions
-- `test_pool()` creates an in-memory DB via `db::init(":memory:")` — migrations and seed data are included
+- Shared fixtures live in `src/test_support.rs` (`#[cfg(test)]`-declared in `main.rs`): `test_pool()` (in-memory DB via `db::init(":memory:")`, migrations + seed data included) and builder-style row factories — `listing(id)`, `buy/sell/drp(id, listing_id)`, `trade(id, listing_id, type)`, `amma(id, listing_id)`, `income(…)`, `ess_statement(…)` — each starting from a complete default row with setters for what tests vary, a `.with(|x| …)` escape hatch for anything else, and `.insert(&pool)`/`.build()` terminals (inserts go through the entity's own `db_upsert`, so write-time invariants still apply). Never re-declare `test_pool` or spell out a full `Trade`/`Listing`/`AmmaStatement` literal in a test module — a new column is added once, in the builder. Module-specific defaults stay as thin local wrappers delegating to the builders
 - API tests use `router().with_state(pool).oneshot(request)` — no network, no port binding
 - DB tests call `db_*` functions directly against the pool

@@ -363,16 +363,12 @@ async fn delete(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::infra::db;
+    use crate::test_support::test_pool;
     use axum::http::Request;
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
     const BOUNDARY: &str = "X-TEST-BOUNDARY";
-
-    async fn test_pool() -> SqlitePool {
-        db::init(":memory:").await.unwrap()
-    }
 
     /// Seed a listing (id 1) so trades/income can reference it.
     async fn insert_listing(pool: &SqlitePool) {

@@ -1157,32 +1157,19 @@ async fn delete(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{entities::listing, infra::db};
+    use crate::entities::listing;
+    use crate::test_support::{self, test_pool};
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
-    async fn test_pool() -> SqlitePool {
-        db::init(":memory:").await.unwrap()
-    }
-
     async fn insert_listing(pool: &SqlitePool, id: i64, ticker: &str) {
-        listing::db_upsert(
-            pool,
-            &listing::Listing {
-                id,
-                exchange_mic: Some("XASX".to_string()),
-                ticker: ticker.to_string(),
-                name: ticker.to_string(),
-                isin: None,
-                security_type: listing::SecurityType::Share,
-                currency: "AUD".to_string(),
-                amit: false,
-                preference: false,
-            },
-        )
-        .await
-        .unwrap();
+        test_support::listing(id)
+            .ticker(ticker)
+            .name(ticker)
+            .security_type(listing::SecurityType::Share)
+            .insert(pool)
+            .await;
     }
 
     fn roc(id: i64, listing_id: i64, date: NaiveDate, amount: &str) -> CorporateAction {
