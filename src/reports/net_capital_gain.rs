@@ -29,7 +29,13 @@ use crate::infra::decimal::parse_dec;
 use crate::infra::fx::FxRates;
 use crate::infra::http::ApiError;
 use crate::reports::export;
-use axum::{Json, Router, extract::State, response::Response, routing::get};
+use crate::reports::parcel_optimiser::{self, DisposalTotals, HypotheticalAllocation, Strategy};
+use axum::{
+    Json, Router,
+    extract::State,
+    response::Response,
+    routing::{get, post},
+};
 use chrono::{Datelike, Months, NaiveDate};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -91,6 +97,7 @@ pub fn router() -> Router<SqlitePool> {
             "/portfolio/net-capital-gain/export",
             get(net_capital_gain_export_handler),
         )
+        .route("/portfolio/net-capital-gain/what-if", post(what_if_handler))
 }
 
 /// CSV export columns — `NetCapitalGainYear`'s fields in declaration order. The
@@ -113,7 +120,7 @@ const CSV_HEADER: &[&str] = &[
 ];
 
 /// Gross gains and losses accumulated for one tax year before netting.
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct GrossBuckets {
     discount_eligible: Decimal,
     other: Decimal,
@@ -359,6 +366,16 @@ async fn g1_gains(
 pub async fn db_net_capital_gain(
     pool: &SqlitePool,
 ) -> Result<Vec<NetCapitalGainYear>, sqlx::Error> {
+    let buckets = gross_buckets(pool).await?;
+    let opening = crate::entities::cgt_settings::db_opening_capital_loss(pool).await?;
+    Ok(net_years(buckets, opening))
+}
+
+/// Accumulate the gross per-year buckets from every recorded source:
+/// realised disposals, AMMA CGT components, and the E10/G1 excess gains.
+/// Shared by the report and the what-if (which injects a hypothetical
+/// disposal's buckets before netting).
+async fn gross_buckets(pool: &SqlitePool) -> Result<HashMap<i32, GrossBuckets>, sqlx::Error> {
     let mut buckets: HashMap<i32, GrossBuckets> = HashMap::new();
 
     // Every imported ATO FX rate — the AMMA/E10/G1 conversions below are map
@@ -428,16 +445,23 @@ pub async fn db_net_capital_gain(
         b.g1 += amount;
     }
 
-    // Walk the years in order, chaining unused net capital losses forward: a
-    // year's leftover loss becomes the next year's brought-forward balance (losses
-    // carry forward indefinitely). The chain starts from the entered opening
-    // carried-forward loss (pre-system loss years) in `cgt_settings`.
+    Ok(buckets)
+}
+
+/// Steps 3 and 4: walk the years in order, applying losses ATO-optimally and
+/// chaining unused net capital losses forward — a year's leftover loss
+/// becomes the next year's brought-forward balance (losses carry forward
+/// indefinitely). The chain starts from `brought_forward`, the entered
+/// opening carried-forward loss (pre-system loss years) in `cgt_settings`.
+fn net_years(
+    buckets: HashMap<i32, GrossBuckets>,
+    mut brought_forward: Decimal,
+) -> Vec<NetCapitalGainYear> {
     let mut years: Vec<(i32, GrossBuckets)> = buckets.into_iter().collect();
     years.sort_by_key(|(tax_year, _)| *tax_year);
 
     let two = Decimal::from(2);
-    let mut brought_forward = crate::entities::cgt_settings::db_opening_capital_loss(pool).await?;
-    let result = years
+    years
         .into_iter()
         .map(|(tax_year, b)| {
             // Apply losses (this year's + brought forward — both offset gains before
@@ -471,8 +495,7 @@ pub async fn db_net_capital_gain(
             brought_forward = carried_forward;
             year
         })
-        .collect();
-    Ok(result)
+        .collect()
 }
 
 async fn net_capital_gain_handler(
@@ -490,6 +513,193 @@ async fn net_capital_gain_export_handler(
 ) -> Result<Response, ApiError> {
     let rows = db_net_capital_gain(&pool).await.map_err(ApiError::from)?;
     export::csv_response("net-capital-gain.csv", CSV_HEADER, &rows).map_err(ApiError::from)
+}
+
+// ---------------------------------------------------------------------------
+// Pre-sale what-if
+// ---------------------------------------------------------------------------
+
+/// A hypothetical disposal: `units` of `listing_id` sold on `date` for
+/// `proceeds` (total capital proceeds, AUD), drawn from open parcels via
+/// either explicit `allocations` or a named optimiser `strategy` — exactly
+/// one of the two.
+#[derive(Debug, Deserialize)]
+pub struct WhatIfRequest {
+    pub listing_id: i64,
+    /// Restricts strategy-derived (and validates explicit) allocations to
+    /// one account's parcels; absent = parcels from any account.
+    #[serde(default)]
+    pub holding_account_id: Option<i64>,
+    pub units: Decimal,
+    /// Total capital proceeds in AUD.
+    pub proceeds: Decimal,
+    pub date: NaiveDate,
+    #[serde(default)]
+    pub allocations: Option<Vec<WhatIfAllocation>>,
+    #[serde(default)]
+    pub strategy: Option<Strategy>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct WhatIfAllocation {
+    pub purchase_trade_id: i64,
+    pub units: Decimal,
+}
+
+/// One year row labelled with its scenario (`without` / `with` the
+/// hypothetical disposal).
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ScenarioYear {
+    pub scenario: String,
+    #[serde(flatten)]
+    pub year: NetCapitalGainYear,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct WhatIfResponse {
+    /// The disposal's tax year — the year the two scenario rows describe.
+    pub tax_year: i32,
+    /// The strategy used to derive the allocations, when one was named.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strategy: Option<Strategy>,
+    /// The hypothetical disposal's own totals (the realised-gains buckets).
+    pub hypothetical: DisposalTotals,
+    /// Its per-parcel allocations (derived or as supplied).
+    pub allocations: Vec<HypotheticalAllocation>,
+    /// The disposal year's figures without and with the disposal, computed
+    /// through the full loss-chaining walk (earlier years' carried-forward
+    /// losses included).
+    pub years: Vec<ScenarioYear>,
+}
+
+/// Dry-run a hypothetical disposal through the net-capital-gain computation:
+/// the disposal's gain/loss buckets are injected into its tax year and the
+/// netting walk re-run — nothing is written. The whole-of-income tax estimate
+/// is out of scope; this is the CGT-side delta only.
+async fn what_if_handler(
+    State(pool): State<SqlitePool>,
+    Json(req): Json<WhatIfRequest>,
+) -> Result<Json<WhatIfResponse>, ApiError> {
+    if req.units <= Decimal::ZERO {
+        return Err(ApiError::Unprocessable(
+            "units must be positive".to_string(),
+        ));
+    }
+    if req.proceeds < Decimal::ZERO {
+        return Err(ApiError::Unprocessable(
+            "proceeds must not be negative".to_string(),
+        ));
+    }
+
+    let parcels =
+        parcel_optimiser::db_candidate_parcels(&pool, req.listing_id, req.holding_account_id)
+            .await
+            .map_err(ApiError::from)?;
+
+    // Exactly one of explicit allocations / a named strategy.
+    let picks: Vec<(i64, Decimal)> = match (&req.allocations, req.strategy) {
+        (Some(_), Some(_)) | (None, None) => {
+            return Err(ApiError::Unprocessable(
+                "supply either allocations or a strategy (exactly one)".to_string(),
+            ));
+        }
+        (Some(allocs), None) => {
+            let mut remaining: HashMap<i64, Decimal> = parcels
+                .iter()
+                .map(|p| (p.trade_id, p.remaining_quantity))
+                .collect();
+            let mut picks = Vec::with_capacity(allocs.len());
+            for a in allocs {
+                if a.units <= Decimal::ZERO {
+                    return Err(ApiError::Unprocessable(format!(
+                        "allocation units for parcel {} must be positive",
+                        a.purchase_trade_id
+                    )));
+                }
+                let Some(left) = remaining.get_mut(&a.purchase_trade_id) else {
+                    return Err(ApiError::Unprocessable(format!(
+                        "parcel {} is not an open parcel of listing {}{}",
+                        a.purchase_trade_id,
+                        req.listing_id,
+                        req.holding_account_id
+                            .map(|h| format!(" in holding account {h}"))
+                            .unwrap_or_default()
+                    )));
+                };
+                if a.units > *left {
+                    return Err(ApiError::Unprocessable(format!(
+                        "parcel {} has only {left} unit(s) remaining",
+                        a.purchase_trade_id
+                    )));
+                }
+                *left -= a.units;
+                picks.push((a.purchase_trade_id, a.units));
+            }
+            let total: Decimal = picks.iter().map(|&(_, q)| q).sum();
+            if total != req.units {
+                return Err(ApiError::Unprocessable(format!(
+                    "the allocations sum to {total}, not the {} units sold",
+                    req.units
+                )));
+            }
+            picks
+        }
+        (None, Some(strategy)) => {
+            let open: Decimal = parcels.iter().map(|p| p.remaining_quantity).sum();
+            if req.units > open {
+                return Err(ApiError::Unprocessable(format!(
+                    "only {open} unit(s) of listing {} are open",
+                    req.listing_id
+                )));
+            }
+            // The per-unit price the strategy's gain orderings see.
+            let price = req.proceeds / req.units;
+            parcel_optimiser::allocate_strategy(&parcels, req.units, price, req.date, strategy)
+        }
+    };
+
+    let (allocations, totals) =
+        parcel_optimiser::disposal_figures(&parcels, &picks, req.proceeds, req.units, req.date);
+
+    // Re-run the report's own computation with the hypothetical's buckets
+    // injected into the disposal year — and the year ensured in both runs, so
+    // a year with no recorded activity still yields a row (with the correct
+    // brought-forward chain from earlier years).
+    let tax_year = tax_year_for(req.date);
+    let buckets = gross_buckets(&pool).await.map_err(ApiError::from)?;
+    let opening = crate::entities::cgt_settings::db_opening_capital_loss(&pool)
+        .await
+        .map_err(ApiError::from)?;
+
+    let mut without = buckets.clone();
+    without.entry(tax_year).or_default();
+    let mut with = buckets;
+    let b = with.entry(tax_year).or_default();
+    b.discount_eligible += totals.discount_eligible_gain;
+    b.other += totals.non_discountable_gain;
+    b.losses += totals.capital_loss;
+
+    let year_row = |rows: Vec<NetCapitalGainYear>, scenario: &str| {
+        rows.into_iter()
+            .find(|y| y.tax_year == tax_year)
+            .map(|year| ScenarioYear {
+                scenario: scenario.to_string(),
+                year,
+            })
+            .expect("the disposal year was ensured in the buckets")
+    };
+    let years = vec![
+        year_row(net_years(without, opening), "without"),
+        year_row(net_years(with, opening), "with"),
+    ];
+
+    Ok(Json(WhatIfResponse {
+        tax_year,
+        strategy: req.strategy,
+        hypothetical: totals,
+        allocations,
+        years,
+    }))
 }
 
 #[cfg(test)]
@@ -1919,5 +2129,331 @@ mod tests {
         assert_eq!(years[0].discount_eligible_gains, Decimal::from(1100));
         assert_eq!(years[0].cgt_discount, Decimal::from(550));
         assert_eq!(years[0].net_capital_gain, Decimal::from(550));
+    }
+
+    // ---- pre-sale what-if -------------------------------------------------
+
+    async fn post_what_if(pool: SqlitePool, body: serde_json::Value) -> (StatusCode, Vec<u8>) {
+        let resp = router()
+            .with_state(pool)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/portfolio/net-capital-gain/what-if")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        (status, bytes.to_vec())
+    }
+
+    /// FY2026 already holds a realised non-discountable gain of 500; the
+    /// hypothetical sale of the >12-month parcel adds a discount-eligible
+    /// 1,000. `without` matches the plain report; `with` adds the disposal —
+    /// and the database is untouched (a dry run).
+    #[tokio::test]
+    async fn api_what_if_reports_the_year_with_and_without_the_disposal() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "VAS").await;
+        // Open parcel: 200 @ $10, bought Jan 2024 (>12mo by Jun 2026).
+        insert_trade(
+            &pool,
+            1,
+            trade::TradeType::Buy,
+            1,
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            Decimal::from(200),
+            Decimal::from(10),
+        )
+        .await;
+        // Recorded FY2026 non-discountable gain of 500 on another parcel.
+        insert_trade(
+            &pool,
+            2,
+            trade::TradeType::Buy,
+            1,
+            NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
+        insert_trade(
+            &pool,
+            3,
+            trade::TradeType::Sell,
+            1,
+            NaiveDate::from_ymd_opt(2026, 6, 1).unwrap(),
+            Decimal::from(100),
+            Decimal::from(15),
+        )
+        .await;
+        allocate(&pool, 1, 3, 2, Decimal::from(100)).await;
+
+        let baseline = db_net_capital_gain(&pool).await.unwrap();
+
+        // Hypothetical: sell 100 of parcel 1 on 2026-06-15 for $2,000
+        // (cost base $1,000 → discount-eligible gain $1,000).
+        let (status, body) = post_what_if(
+            pool.clone(),
+            serde_json::json!({
+                "listing_id": 1, "units": "100", "proceeds": "2000",
+                "date": "2026-06-15",
+                "allocations": [ { "purchase_trade_id": 1, "units": "100" } ]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let r: WhatIfResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(r.tax_year, 2026);
+        assert_eq!(r.hypothetical.discount_eligible_gain, Decimal::from(1000));
+        assert_eq!(r.hypothetical.capital_loss, Decimal::ZERO);
+        assert_eq!(r.allocations.len(), 1);
+        assert!(r.allocations[0].discount_eligible);
+
+        assert_eq!(r.years.len(), 2);
+        let without = &r.years[0];
+        let with = &r.years[1];
+        assert_eq!(without.scenario, "without");
+        assert_eq!(without.year.net_capital_gain, Decimal::from(500));
+        assert_eq!(with.scenario, "with");
+        assert_eq!(with.year.discount_eligible_gains, Decimal::from(1000));
+        // 500 non-discountable + 1,000/2 discounted = 1,000.
+        assert_eq!(with.year.net_capital_gain, Decimal::from(1000));
+
+        // Dry run: the stored report is unchanged, and no rows were written.
+        let after = db_net_capital_gain(&pool).await.unwrap();
+        assert_eq!(after.len(), baseline.len());
+        assert_eq!(after[0].net_capital_gain, baseline[0].net_capital_gain);
+        let trades: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM trades")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(trades, 3, "the what-if must not write trades");
+        let allocs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM parcel_allocations")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(allocs, 1, "the what-if must not write allocations");
+    }
+
+    /// A year with no recorded activity still yields both scenario rows, with
+    /// the brought-forward chain from earlier years intact: a FY2024 loss of
+    /// 300 offsets the hypothetical FY2026 gain before the discount.
+    #[tokio::test]
+    async fn api_what_if_on_an_empty_year_chains_earlier_losses() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "VAS").await;
+        // FY2024 realised loss of 300.
+        insert_trade(
+            &pool,
+            1,
+            trade::TradeType::Buy,
+            1,
+            NaiveDate::from_ymd_opt(2023, 7, 1).unwrap(),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
+        insert_trade(
+            &pool,
+            2,
+            trade::TradeType::Sell,
+            1,
+            NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(),
+            Decimal::from(100),
+            Decimal::from(7),
+        )
+        .await;
+        allocate(&pool, 1, 2, 1, Decimal::from(100)).await;
+        // Open parcel bought Jan 2024.
+        insert_trade(
+            &pool,
+            3,
+            trade::TradeType::Buy,
+            1,
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
+
+        // Sell all 100 on 2026-06-15 for 1,500 → gain 500, eligible.
+        let (status, body) = post_what_if(
+            pool,
+            serde_json::json!({
+                "listing_id": 1, "units": "100", "proceeds": "1500",
+                "date": "2026-06-15", "strategy": "fifo"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let r: WhatIfResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(r.strategy, Some(Strategy::Fifo));
+        // The FIFO strategy drew on the open parcel (parcel 1 is fully sold).
+        assert_eq!(r.allocations.len(), 1);
+        assert_eq!(r.allocations[0].purchase_trade_id, 3);
+        // Without: an all-zero FY2026 row carrying the 300 loss forward.
+        let without = &r.years[0];
+        assert_eq!(without.year.tax_year, 2026);
+        assert_eq!(
+            without.year.capital_loss_brought_forward,
+            Decimal::from(300)
+        );
+        assert_eq!(without.year.net_capital_gain, Decimal::ZERO);
+        assert_eq!(
+            without.year.capital_loss_carried_forward,
+            Decimal::from(300)
+        );
+        // With: (500 − 300) / 2 = 100.
+        let with = &r.years[1];
+        assert_eq!(with.year.discount_eligible_gains, Decimal::from(500));
+        assert_eq!(with.year.capital_loss_brought_forward, Decimal::from(300));
+        assert_eq!(with.year.net_capital_gain, Decimal::from(100));
+        assert_eq!(with.year.capital_loss_carried_forward, Decimal::ZERO);
+    }
+
+    #[tokio::test]
+    async fn api_what_if_rejects_bad_allocations_and_modes() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "VAS").await;
+        insert_trade(
+            &pool,
+            1,
+            trade::TradeType::Buy,
+            1,
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
+
+        // Neither allocations nor strategy.
+        let (status, _) = post_what_if(
+            pool.clone(),
+            serde_json::json!({
+                "listing_id": 1, "units": "10", "proceeds": "100", "date": "2026-06-15"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+
+        // Both at once.
+        let (status, _) = post_what_if(
+            pool.clone(),
+            serde_json::json!({
+                "listing_id": 1, "units": "10", "proceeds": "100", "date": "2026-06-15",
+                "strategy": "fifo",
+                "allocations": [ { "purchase_trade_id": 1, "units": "10" } ]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+
+        // Allocations not summing to the units.
+        let (status, body) = post_what_if(
+            pool.clone(),
+            serde_json::json!({
+                "listing_id": 1, "units": "10", "proceeds": "100", "date": "2026-06-15",
+                "allocations": [ { "purchase_trade_id": 1, "units": "5" } ]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(String::from_utf8(body).unwrap().contains("sum to 5"));
+
+        // Over-allocating the parcel.
+        let (status, body) = post_what_if(
+            pool.clone(),
+            serde_json::json!({
+                "listing_id": 1, "units": "150", "proceeds": "100", "date": "2026-06-15",
+                "allocations": [ { "purchase_trade_id": 1, "units": "150" } ]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(String::from_utf8(body).unwrap().contains("only 100"));
+
+        // A parcel that isn't an open parcel of the listing.
+        let (status, body) = post_what_if(
+            pool.clone(),
+            serde_json::json!({
+                "listing_id": 1, "units": "10", "proceeds": "100", "date": "2026-06-15",
+                "allocations": [ { "purchase_trade_id": 99, "units": "10" } ]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(String::from_utf8(body).unwrap().contains("99"));
+
+        // Strategy mode with more units than are open.
+        let (status, _) = post_what_if(
+            pool,
+            serde_json::json!({
+                "listing_id": 1, "units": "150", "proceeds": "100", "date": "2026-06-15",
+                "strategy": "min_gain"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    /// A hypothetical loss enters the year's loss pool: it offsets the
+    /// recorded non-discountable gain first, ATO-optimally.
+    #[tokio::test]
+    async fn api_what_if_loss_offsets_recorded_gains() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "VAS").await;
+        // Recorded FY2026 non-discountable gain of 500.
+        insert_trade(
+            &pool,
+            1,
+            trade::TradeType::Buy,
+            1,
+            NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
+        insert_trade(
+            &pool,
+            2,
+            trade::TradeType::Sell,
+            1,
+            NaiveDate::from_ymd_opt(2026, 6, 1).unwrap(),
+            Decimal::from(100),
+            Decimal::from(15),
+        )
+        .await;
+        allocate(&pool, 1, 2, 1, Decimal::from(100)).await;
+        // Open parcel at $10; hypothetically sold at $8 → loss 200.
+        insert_trade(
+            &pool,
+            3,
+            trade::TradeType::Buy,
+            1,
+            NaiveDate::from_ymd_opt(2025, 1, 1).unwrap(),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
+
+        let (status, body) = post_what_if(
+            pool,
+            serde_json::json!({
+                "listing_id": 1, "units": "100", "proceeds": "800",
+                "date": "2026-06-15", "strategy": "harvest_losses"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let r: WhatIfResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(r.hypothetical.capital_loss, Decimal::from(200));
+        assert_eq!(r.years[0].year.net_capital_gain, Decimal::from(500));
+        assert_eq!(r.years[1].year.capital_losses, Decimal::from(200));
+        assert_eq!(r.years[1].year.net_capital_gain, Decimal::from(300));
     }
 }

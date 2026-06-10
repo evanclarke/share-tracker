@@ -381,10 +381,47 @@ export const ENTITIES = [
 export const REPORTS = [
   { slug: 'overview', title: 'Portfolio Overview', api: '/portfolio/overview', method: 'POST', prices: true, desc: 'Open holdings per listing and holding account, with optional market value.' },
   { slug: 'open-parcels', title: 'Open Parcels', api: '/portfolio/open-parcels', method: 'GET', desc: 'Every open parcel: acquisition date, original cost base, AMIT and return-of-capital reductions, remaining quantity and adjusted cost base (AUD).' },
+  {
+    slug: 'parcel-optimiser', title: 'Parcel Optimiser', api: '/portfolio/parcel-optimiser', method: 'POST',
+    desc: 'Candidate parcel selections for a contemplated sale — which parcels a sale comes from is your choice, and it changes the tax outcome. Each strategy shows its per-parcel allocations and the resulting gross gain / discountable split. Nothing is recorded: enter the chosen allocations on the real Sell.',
+    params: [
+      fk('listing_id', 'Listing', 'listings', { required: true }),
+      fk('holding_account_id', 'Holding account', 'holdingAccounts', { required: true, default: '1', hint: 'The account the Sell would happen in — a Sell may only consume its own account’s parcels.' }),
+      dec('units', 'Units to sell', { required: true, default: '' }),
+      dt('sale_date', 'Sale date', { optional: true, hint: 'Blank = today. Drives the 12-month discount clock.' }),
+      dec('price', 'Price per unit (AUD)', { optional: true, default: '', hint: 'Blank = the live price from the price source.' }),
+    ],
+    tables: [
+      { key: 'strategies', title: 'Strategies' },
+      { key: 'allocations', title: 'Per-parcel allocations' },
+    ],
+  },
   { slug: 'unrealised-gains', title: 'Unrealised Gains', api: '/portfolio/unrealised-gains', method: 'POST', prices: true, asOfDate: true, desc: 'Per-holding (listing × holding account) unrealised gain/loss vs cost base.' },
   { slug: 'realised-gains', title: 'Realised Gains', api: '/portfolio/realised-gains', method: 'GET', desc: 'Per-disposal capital gain/loss split into CGT buckets — ordinary sales plus rights sales/lapses (source column).' },
   { slug: 'performance', title: 'Performance', api: '/portfolio/performance', method: 'POST', prices: true, asOfDate: true, desc: 'Investment performance per holding and overall: total return, money-weighted return (% p.a.), trailing-12-month income yield.' },
   { slug: 'net-capital-gain', title: 'Net Capital Gain', api: '/portfolio/net-capital-gain', method: 'GET', export: true, desc: 'Assessable net capital gain per financial year.' },
+  {
+    slug: 'net-capital-gain-what-if', title: 'Pre-Sale What-If', api: '/portfolio/net-capital-gain/what-if', method: 'POST',
+    desc: 'Dry-run a hypothetical disposal through the Net Capital Gain report: the disposal year’s figures with and without it, using a Parcel Optimiser strategy to pick the parcels (the API also accepts explicit allocations). Nothing is written, and the whole-of-income tax estimate is out of scope — this is the CGT-side delta only.',
+    params: [
+      fk('listing_id', 'Listing', 'listings', { required: true }),
+      fk('holding_account_id', 'Holding account', 'holdingAccounts', { optional: true, default: '', hint: 'Blank = parcels from any account.' }),
+      dec('units', 'Units to sell', { required: true, default: '' }),
+      dec('proceeds', 'Total proceeds (AUD)', { required: true, default: '' }),
+      dt('date', 'Sale date', { required: true }),
+      sel('strategy', 'Parcel-selection strategy', [
+        { value: 'fifo', label: 'FIFO (oldest first)' },
+        { value: 'min_gain', label: 'Minimise current-year gain' },
+        { value: 'max_discount', label: 'Maximise discount-eligible proportion' },
+        { value: 'harvest_losses', label: 'Harvest losses first' },
+      ], { required: true, default: 'min_gain', hint: 'How the sold units are drawn from the open parcels — compare the candidates on the Parcel Optimiser screen.' }),
+    ],
+    tables: [
+      { key: 'years', title: 'The year, without and with the disposal' },
+      { key: 'hypothetical', title: 'Hypothetical disposal' },
+      { key: 'allocations', title: 'Its per-parcel allocations' },
+    ],
+  },
   { slug: 'tax-summary', title: 'Tax Summary', api: '/portfolio/tax-summary', method: 'GET', export: true, desc: 'Income aggregated by Australian financial year.' },
   { slug: 'exchange-mic-validation', title: 'Exchange MIC Validation', api: '/reports/exchange_mic_validation', method: 'GET', statusField: 'registry_status', desc: 'Curated exchanges checked against the ISO MIC registry.' },
   { slug: 'settlement-holiday-coverage', title: 'Settlement Holiday Coverage', api: '/reports/settlement_holiday_coverage', method: 'GET', statusField: 'coverage_status', desc: 'Trades whose settlement window falls outside the seeded exchange-holiday calendars (settlement may have skipped weekends only).' },

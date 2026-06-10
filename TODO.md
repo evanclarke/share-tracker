@@ -4,16 +4,6 @@ Items are only marked done when a passing test exists for them.
 
 Completed and decided (out-of-scope / not-reproducible) sections are archived in [DONE.md](DONE.md) to keep this list focused on active work. When a section here is fully done, move it to DONE.md rather than leaving it — see CLAUDE.md.
 
-## CGT decision support — parcel-selection optimiser and pre-sale what-if (2026-06-10)
-
-(REQUIREMENTS 2026-06-10; `docs/ato/cgt-keeping-records-shares.md` — parcel choice is the taxpayer's. Read-only; nothing persisted.)
-
-- [ ] Parcel-selection optimiser report: given listing, account, units, sale date, price (live-fetched default per the live-valuation rules; explicit override wins) → candidate strategies (minimise current-year gain, maximise discount-eligible proportion, harvest losses first, FIFO baseline), each with per-parcel allocations and gross gain / discountable split
-- [ ] Pre-sale what-if: net-capital-gain accepts a hypothetical disposal (units, proceeds, date, allocations or a named strategy) and returns the year's figures with and without it — dry run, no rows written; whole-of-income tax estimate stays out of scope
-- [ ] Web UI: screens via the existing `REPORTS`/action config
-- [ ] Tests: each strategy's allocation choice; what-if leaves the DB untouched; API tests
-- [ ] Docs: `docs/API.md`, README Features
-
 ## Compliance alert reports — wash sales and franking at-risk foresight (2026-06-10)
 
 (REQUIREMENTS 2026-06-10; non-blocking, pattern: MIC validation / settlement coverage.)

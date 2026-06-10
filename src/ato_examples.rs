@@ -511,6 +511,94 @@ async fn keeping_records_example_boris_identifying_shares_sold() {
     assert_eq!(holdings[0].total_cost_base, dec("20000"));
 }
 
+/// `docs/ato/cgt-keeping-records-shares.md` — "Example: identifying when shares
+/// or units were acquired" (Boris), decision-support side.
+///
+/// The same facts as `keeping_records_example_boris_identifying_shares_sold`,
+/// but *before* the sale is entered: the parcel-selection optimiser's
+/// harvest-losses candidate makes Boris's choice — sell 1,500 of the $10
+/// (2024) shares to claim the $3,000 capital loss — and the pre-sale what-if
+/// previews the 2025 income year with and without that disposal, all without
+/// writing a row.
+#[tokio::test]
+async fn keeping_records_example_boris_optimiser_recommends_the_loss_parcel() {
+    use crate::reports::net_capital_gain::WhatIfResponse;
+    use crate::reports::parcel_optimiser::{OptimiserResponse, Strategy};
+    let pool = test_pool().await;
+    put_listing(&pool, 1, "BORI").await;
+    put_buy(&pool, 1, 1, "2023-05-15", "1000", "5", "0").await;
+    put_buy(&pool, 2, 1, "2024-05-15", "3000", "10", "0").await;
+
+    // Optimise a sale of 1,500 at $8 on Boris's 2025 sale date.
+    let r: OptimiserResponse = api_post(
+        &pool,
+        "/portfolio/parcel-optimiser",
+        json!({
+            "listing_id": 1, "holding_account_id": 1, "units": "1500",
+            "sale_date": "2025-05-15", "price": "8"
+        }),
+        StatusCode::OK,
+    )
+    .await;
+    let harvest = r
+        .strategies
+        .iter()
+        .find(|s| s.strategy == Strategy::HarvestLosses)
+        .unwrap();
+    assert_eq!(
+        harvest.totals.capital_loss,
+        dec("3000"),
+        "(10 − 8) × 1,500 — Boris's claimed loss"
+    );
+    assert_eq!(harvest.totals.capital_gain_loss, dec("-3000"));
+    let harvest_allocs: Vec<_> = r
+        .allocations
+        .iter()
+        .filter(|a| a.strategy == Strategy::HarvestLosses)
+        .collect();
+    assert_eq!(harvest_allocs.len(), 1, "all 1,500 from one parcel");
+    assert_eq!(
+        harvest_allocs[0].allocation.purchase_trade_id, 2,
+        "the 2024 ($10) parcel"
+    );
+    assert_eq!(harvest_allocs[0].allocation.units, dec("1500"));
+    // The FIFO baseline would instead realise a gain on the $5 shares.
+    let fifo = r
+        .strategies
+        .iter()
+        .find(|s| s.strategy == Strategy::Fifo)
+        .unwrap();
+    assert_eq!(
+        fifo.totals.capital_gain_loss,
+        dec("2000"),
+        "FIFO: 1,000 × $3 gain − 500 × $2 loss"
+    );
+
+    // The what-if previews the 2025 income year for that choice — a dry run.
+    let w: WhatIfResponse = api_post(
+        &pool,
+        "/portfolio/net-capital-gain/what-if",
+        json!({
+            "listing_id": 1, "units": "1500", "proceeds": "12000",
+            "date": "2025-05-15", "strategy": "harvest_losses"
+        }),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(w.tax_year, 2025, "loss claimed in the 2025 income year");
+    assert_eq!(w.years[0].year.capital_losses, dec("0"));
+    assert_eq!(w.years[1].year.capital_losses, dec("3000"));
+    assert_eq!(w.years[1].year.net_capital_gain, dec("0"));
+    assert_eq!(w.years[1].year.capital_loss_carried_forward, dec("3000"));
+
+    // Nothing was persisted: the holding is still 4,000 shares at $35,000.
+    let holdings: Vec<HoldingOverview> =
+        api_post(&pool, "/portfolio/overview", json!({}), StatusCode::OK).await;
+    assert_eq!(holdings.len(), 1);
+    assert_eq!(holdings[0].quantity, dec("4000"));
+    assert_eq!(holdings[0].total_cost_base, dec("35000"));
+}
+
 /// `docs/ato/you-and-your-shares-dividends.md` — "Example 1: payment of dividends" /
 /// "Example 2: assessable dividend income" (You and your shares 2025).
 ///

@@ -19,6 +19,7 @@ pub mod franking;
 pub mod mic_validation;
 pub mod net_capital_gain;
 pub mod open_parcels;
+pub mod parcel_optimiser;
 pub mod performance;
 pub mod portfolio;
 pub mod realised_gains;
@@ -35,6 +36,7 @@ pub fn router() -> Router<SqlitePool> {
         .merge(unrealised_gains::router())
         .merge(realised_gains::router())
         .merge(net_capital_gain::router())
+        .merge(parcel_optimiser::router())
         .merge(tax_summary::router())
         .merge(mic_validation::router())
         .merge(settlement_coverage::router())

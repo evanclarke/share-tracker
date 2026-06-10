@@ -1133,14 +1133,52 @@ async function viewReport(report) {
 
   async function render(rows) {
     result.innerHTML = '';
-    const asAt = asAtSummary(rows);
+    const asAt = asAtSummary(Array.isArray(rows) ? rows : [rows]);
     if (asAt) result.appendChild(asAt);
+    // Reports with `tables` return one object whose listed keys each render
+    // as a titled table (a non-array value renders as a one-row table).
+    if (report.tables) {
+      for (const t of report.tables) {
+        const v = rows[t.key];
+        const arr = Array.isArray(v) ? v : (v == null ? [] : [v]);
+        result.appendChild(el('h3', null, t.title));
+        result.appendChild(await dataTable(arr, null, report.statusField));
+      }
+      return;
+    }
     result.appendChild(await dataTable(rows, null, report.statusField));
   }
 
   if (report.method === 'GET') {
     await render(await api('GET', report.api));
     setMain(el('div', null, [header, result]));
+    return;
+  }
+
+  // Parameterised POST reports (the parcel optimiser, the pre-sale what-if):
+  // the body comes from the configured `params` fields — the same field
+  // constructors the entity forms use — and the report runs on submit only
+  // (no auto-run: the inputs are required).
+  if (report.params) {
+    const form = el('form', { class: 'card' });
+    for (const f of report.params) form.appendChild(await buildFieldInput(f));
+    form.appendChild(el('div', { class: 'form-actions' }, [
+      el('button', { type: 'submit', class: 'primary' }, 'Run report'),
+    ]));
+    form.addEventListener('submit', async function (ev) {
+      ev.preventDefault();
+      const body = {};
+      report.params.forEach(function (f) {
+        const v = readFieldValue(f, form);
+        if (v !== null) body[f.name] = v;
+      });
+      try {
+        await render(await api('POST', report.api, body));
+      } catch (e) {
+        toast(e.message, true);
+      }
+    });
+    setMain(el('div', null, [header, form, result]));
     return;
   }
 

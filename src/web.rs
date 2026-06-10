@@ -213,6 +213,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cgt_decision_support_ui_present() {
+        let js = app_js_body().await;
+        // The parcel-optimiser screen drives the optimiser endpoint…
+        assert!(js.contains("'parcel-optimiser'"));
+        assert!(js.contains("/portfolio/parcel-optimiser"));
+        // …and the pre-sale what-if screen the dry-run endpoint, with the
+        // strategy picker naming each optimiser strategy.
+        assert!(js.contains("'net-capital-gain-what-if'"));
+        assert!(js.contains("/portfolio/net-capital-gain/what-if"));
+        for strategy in ["'fifo'", "'min_gain'", "'max_discount'", "'harvest_losses'"] {
+            assert!(js.contains(strategy), "missing strategy {strategy}");
+        }
+        // Both render through the generic report runner's params form and
+        // per-key result tables (no bespoke views).
+        assert!(js.contains("report.params"));
+        assert!(js.contains("report.tables"));
+    }
+
+    #[tokio::test]
     async fn timestamps_render_local_with_utc_tooltip() {
         let js = app_js_body().await;
         // RFC 3339 UTC server timestamps (fetched_at, generated_at,
