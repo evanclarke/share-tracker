@@ -40,13 +40,13 @@
 //! replacement share classes, pre-CGT originals, and exchanges that would
 //! crystallise a capital loss (the law does not allow rolling over a loss).
 
-use crate::infra::http::ApiError;
 use crate::entities::corporate_action::{
     self, ActionKind, RocEvent, sold_in_acquired_units, split_adjusted_quantity,
 };
 use crate::entities::sell::{self, AllocationInput, SellBody};
 use crate::entities::trade::{self, Trade};
 use crate::infra::decimal::parse_dec;
+use crate::infra::http::ApiError;
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -120,9 +120,11 @@ pub async fn db_exchange(pool: &SqlitePool, action_id: i64) -> Result<Exchange, 
         None => return Err(ExchangeError::ActionNotFound),
     };
     let (scrip_listing_id, new_units, old_units) = match &action.kind {
-        ActionKind::ScripForScrip { scrip_listing_id, scrip_new_units, scrip_old_units } => {
-            (*scrip_listing_id, *scrip_new_units, *scrip_old_units)
-        }
+        ActionKind::ScripForScrip {
+            scrip_listing_id,
+            scrip_new_units,
+            scrip_old_units,
+        } => (*scrip_listing_id, *scrip_new_units, *scrip_old_units),
         _ => return Err(ExchangeError::NotAScripForScrip),
     };
 
@@ -179,8 +181,7 @@ pub async fn db_exchange(pool: &SqlitePool, action_id: i64) -> Result<Exchange, 
         ));
     }
 
-    let splits =
-        corporate_action::db_splits_for_listing(&mut *tx, action.listing_id).await?;
+    let splits = corporate_action::db_splits_for_listing(&mut *tx, action.listing_id).await?;
     let roc_rows = sqlx::query(
         "SELECT date, amount_per_unit, currency FROM corporate_actions \
          WHERE action_type = 'ReturnOfCapital' AND listing_id = ? ORDER BY date, id",
@@ -279,11 +280,10 @@ pub async fn db_exchange(pool: &SqlitePool, action_id: i64) -> Result<Exchange, 
     // The closing Sell: zero proceeds (the rollover disregards the gain and
     // this Sell never reaches the realised-gains report), consuming every
     // open parcel. Settlement is the exchange date — nothing market-settles.
-    let listing_currency: String =
-        sqlx::query_scalar("SELECT currency FROM listings WHERE id = ?")
-            .bind(action.listing_id)
-            .fetch_one(&mut *tx)
-            .await?;
+    let listing_currency: String = sqlx::query_scalar("SELECT currency FROM listings WHERE id = ?")
+        .bind(action.listing_id)
+        .fetch_one(&mut *tx)
+        .await?;
     let sell_id: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(id), 0) + 1 FROM trades")
         .fetch_one(&mut *tx)
         .await?;
@@ -310,8 +310,18 @@ pub async fn db_exchange(pool: &SqlitePool, action_id: i64) -> Result<Exchange, 
             })
             .collect(),
     };
-    sell::upsert_sell_in_tx(&mut tx, sell_id, &sell_body, action.date, None, Some(action_id), None, None, None)
-        .await?;
+    sell::upsert_sell_in_tx(
+        &mut tx,
+        sell_id,
+        &sell_body,
+        action.date,
+        None,
+        Some(action_id),
+        None,
+        None,
+        None,
+    )
+    .await?;
 
     // The replacement Buys: one per consumed parcel, dated the exchange date,
     // carrying the parcel's cost base (on the brokerage column, price 0) and
@@ -358,7 +368,10 @@ pub async fn db_exchange(pool: &SqlitePool, action_id: i64) -> Result<Exchange, 
                 .ok_or_else(|| ExchangeError::Db(sqlx::Error::RowNotFound))?,
         );
     }
-    Ok(Exchange { sell, replacements: created })
+    Ok(Exchange {
+        sell,
+        replacements: created,
+    })
 }
 
 async fn exchange(
@@ -518,7 +531,13 @@ mod tests {
         .unwrap();
     }
 
-    async fn sell_units(pool: &SqlitePool, sell_id: i64, parcel_id: i64, date: NaiveDate, qty: &str) {
+    async fn sell_units(
+        pool: &SqlitePool,
+        sell_id: i64,
+        parcel_id: i64,
+        date: NaiveDate,
+        qty: &str,
+    ) {
         sell::db_upsert_sell(
             pool,
             sell_id,
@@ -765,7 +784,10 @@ mod tests {
         assert_eq!(ex.sell.quantity, dec("3000"));
         assert_eq!(ex.replacements[0].quantity, dec("6000"));
         assert_eq!(ex.replacements[0].brokerage, dec("1500"));
-        assert_eq!(ex.replacements[0].deemed_acquisition_date, Some(d(2020, 10, 1)));
+        assert_eq!(
+            ex.replacements[0].deemed_acquisition_date,
+            Some(d(2020, 10, 1))
+        );
     }
 
     /// A second exchange chains the deemed acquisition date from the first —
@@ -788,7 +810,10 @@ mod tests {
         assert_eq!(ex.replacements[0].listing_id, 3);
         assert_eq!(ex.replacements[0].quantity, dec("1000"));
         assert_eq!(ex.replacements[0].brokerage, dec("1500"));
-        assert_eq!(ex.replacements[0].deemed_acquisition_date, Some(d(2020, 10, 1)));
+        assert_eq!(
+            ex.replacements[0].deemed_acquisition_date,
+            Some(d(2020, 10, 1))
+        );
     }
 
     #[tokio::test]
@@ -825,7 +850,10 @@ mod tests {
 
         // Nothing held at the exchange date.
         insert_scrip(&pool, 10, d(2024, 7, 1)).await;
-        assert!(matches!(db_exchange(&pool, 10).await, Err(ExchangeError::NothingHeld)));
+        assert!(matches!(
+            db_exchange(&pool, 10).await,
+            Err(ExchangeError::NothingHeld)
+        ));
 
         // A target trade dated on/after the exchange date contradicts the
         // takeover.
@@ -836,12 +864,11 @@ mod tests {
         ));
 
         // Nothing was persisted by any of the rejections.
-        let trades: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM trades WHERE scrip_action_id IS NOT NULL",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let trades: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM trades WHERE scrip_action_id IS NOT NULL")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(trades, 0);
     }
 
@@ -910,7 +937,9 @@ mod tests {
 
         // DELETE /trades on a replacement Buy (or the Sell) → refused.
         assert_eq!(
-            trade::db_delete(&pool, ex.replacements[0].id).await.unwrap(),
+            trade::db_delete(&pool, ex.replacements[0].id)
+                .await
+                .unwrap(),
             trade::DeleteOutcome::Referenced
         );
         assert_eq!(
@@ -973,19 +1002,17 @@ mod tests {
             sell::db_delete_sell(&pool, ex.sell.id).await.unwrap(),
             sell::DeleteOutcome::Deleted
         );
-        let remaining: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM trades WHERE scrip_action_id IS NOT NULL",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(remaining, 0);
-        // The original parcel is open again.
-        let allocs: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM parcel_allocations")
+        let remaining: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM trades WHERE scrip_action_id IS NOT NULL")
                 .fetch_one(&pool)
                 .await
                 .unwrap();
+        assert_eq!(remaining, 0);
+        // The original parcel is open again.
+        let allocs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM parcel_allocations")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
         assert_eq!(allocs, 0);
         assert!(corporate_action::db_delete(&pool, 10).await.unwrap());
     }
@@ -1019,7 +1046,10 @@ mod tests {
         insert_listing(&pool, 2, "NEW").await;
         holding_account::db_upsert(
             &pool,
-            &HoldingAccount { id: 2, name: "ICE Employee Plan".to_string() },
+            &HoldingAccount {
+                id: 2,
+                name: "ICE Employee Plan".to_string(),
+            },
         )
         .await
         .unwrap();
@@ -1065,7 +1095,10 @@ mod tests {
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["sell"]["quantity"], "1000");
         assert_eq!(v["replacements"][0]["quantity"], "2000");
-        assert_eq!(v["replacements"][0]["deemed_acquisition_date"], "2020-10-01");
+        assert_eq!(
+            v["replacements"][0]["deemed_acquisition_date"],
+            "2020-10-01"
+        );
     }
 
     #[tokio::test]

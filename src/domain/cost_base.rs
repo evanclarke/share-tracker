@@ -96,9 +96,8 @@ pub fn adjusted_cost_base(
     splits: &[SplitEvent],
     up_to: Option<NaiveDate>,
 ) -> Result<CostBase, sqlx::Error> {
-    let initial_cost = parcel.average_price * parcel.quantity
-        + parcel.brokerage
-        + parcel.gst_on_brokerage;
+    let initial_cost =
+        parcel.average_price * parcel.quantity + parcel.brokerage + parcel.gst_on_brokerage;
     let net_cost = (initial_cost - amit_reduction).max(Decimal::ZERO);
     let roc_per_unit = per_unit_reduction(
         roc_events,
@@ -113,7 +112,12 @@ pub fn adjusted_cost_base(
     } else {
         Decimal::ZERO
     };
-    Ok(CostBase { initial_cost, amit_reduction, roc_reduction, adjusted })
+    Ok(CostBase {
+        initial_cost,
+        amit_reduction,
+        roc_reduction,
+        adjusted,
+    })
 }
 
 impl CostBase {
@@ -173,8 +177,7 @@ mod tests {
             gst_on_brokerage: "0.995".parse().unwrap(),
             ..parcel(100, 10)
         };
-        let cb = adjusted_cost_base(&p, Decimal::from(100), Decimal::ZERO, &[], &[], None)
-            .unwrap();
+        let cb = adjusted_cost_base(&p, Decimal::from(100), Decimal::ZERO, &[], &[], None).unwrap();
         assert_eq!(cb.initial_cost, "1010.945".parse::<Decimal>().unwrap());
         assert_eq!(cb.adjusted, "1010.945".parse::<Decimal>().unwrap());
     }
@@ -325,15 +328,8 @@ mod tests {
 
     #[test]
     fn zero_quantity_parcel_costs_nil() {
-        let cb = adjusted_cost_base(
-            &parcel(0, 10),
-            Decimal::ZERO,
-            Decimal::ZERO,
-            &[],
-            &[],
-            None,
-        )
-        .unwrap();
+        let cb = adjusted_cost_base(&parcel(0, 10), Decimal::ZERO, Decimal::ZERO, &[], &[], None)
+            .unwrap();
         assert_eq!(cb.adjusted, Decimal::ZERO);
     }
 
@@ -349,7 +345,10 @@ mod tests {
             None,
         )
         .unwrap();
-        let aud = cb.into_aud(&pool, "AUD", date(2024, 1, 1), None).await.unwrap();
+        let aud = cb
+            .into_aud(&pool, "AUD", date(2024, 1, 1), None)
+            .await
+            .unwrap();
         assert_eq!(aud.adjusted, Decimal::from(1000));
         assert_eq!(aud.initial_cost, Decimal::from(1000));
     }
@@ -361,22 +360,21 @@ mod tests {
         rba_fx_rate::db_import_rate(&pool, "USD", "2024-01", "0.50".parse().unwrap())
             .await
             .unwrap();
-        let p = Parcel { currency: "USD", ..parcel(100, 10) };
+        let p = Parcel {
+            currency: "USD",
+            ..parcel(100, 10)
+        };
         let roc = RocEvent {
             date: date(2024, 3, 1),
             amount_per_unit: "0.50".parse().unwrap(),
             currency: "USD".to_string(),
         };
-        let cb = adjusted_cost_base(
-            &p,
-            Decimal::from(100),
-            Decimal::from(5),
-            &[roc],
-            &[],
-            None,
-        )
-        .unwrap();
-        let aud = cb.into_aud(&pool, "USD", date(2024, 1, 15), None).await.unwrap();
+        let cb = adjusted_cost_base(&p, Decimal::from(100), Decimal::from(5), &[roc], &[], None)
+            .unwrap();
+        let aud = cb
+            .into_aud(&pool, "USD", date(2024, 1, 15), None)
+            .await
+            .unwrap();
         // Every component is USD / 0.50: 1000 → 2000, 5 → 10, 50 → 100,
         // (1000 − 5 − 50) → 1890.
         assert_eq!(aud.initial_cost, Decimal::from(2000));
@@ -397,7 +395,10 @@ mod tests {
             None,
         )
         .unwrap();
-        let err = cb.into_aud(&pool, "USD", date(2024, 1, 15), None).await.unwrap_err();
+        let err = cb
+            .into_aud(&pool, "USD", date(2024, 1, 15), None)
+            .await
+            .unwrap_err();
         assert!(matches!(err, fx::FxError::MissingRate { .. }));
     }
 }

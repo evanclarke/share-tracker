@@ -95,10 +95,7 @@ pub async fn db_delete(pool: &SqlitePool, mic: &str) -> Result<bool, sqlx::Error
 }
 
 async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<Exchange>>, ApiError> {
-    db_list(&pool)
-        .await
-        .map(Json)
-        .map_err(ApiError::from)
+    db_list(&pool).await.map(Json).map_err(ApiError::from)
 }
 
 async fn get_one(
@@ -138,7 +135,13 @@ async fn delete(
 ) -> Result<StatusCode, ApiError> {
     db_delete(&pool, &mic)
         .await
-        .map(|found| if found { StatusCode::NO_CONTENT } else { StatusCode::NOT_FOUND })
+        .map(|found| {
+            if found {
+                StatusCode::NO_CONTENT
+            } else {
+                StatusCode::NOT_FOUND
+            }
+        })
         // Deleting an exchange still referenced by listings/holidays violates an FK → 422.
         .map_err(ApiError::from)
 }
@@ -225,7 +228,12 @@ mod tests {
         let pool = test_pool().await;
         let resp = router()
             .with_state(pool)
-            .oneshot(Request::builder().uri("/exchanges").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/exchanges")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -240,7 +248,12 @@ mod tests {
         let pool = test_pool().await;
         let resp = router()
             .with_state(pool)
-            .oneshot(Request::builder().uri("/exchanges/XASX").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/exchanges/XASX")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -254,7 +267,12 @@ mod tests {
         let pool = test_pool().await;
         let resp = router()
             .with_state(pool)
-            .oneshot(Request::builder().uri("/exchanges/XXXX").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/exchanges/XXXX")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);

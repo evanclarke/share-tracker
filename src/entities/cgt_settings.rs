@@ -7,8 +7,8 @@
 //! when chaining unused losses across its year series (losses carry forward
 //! indefinitely, per `docs/ato/cgt-using-capital-losses.md`). Absent row = zero.
 
-use crate::infra::http::ApiError;
 use crate::infra::decimal::parse_dec;
+use crate::infra::http::ApiError;
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -46,9 +46,10 @@ pub struct CgtSettingsBody {
 }
 
 pub fn router() -> Router<SqlitePool> {
-    Router::new()
-        .route("/cgt_settings", get(list))
-        .route("/cgt_settings/{id}", get(get_one).put(upsert).delete(delete))
+    Router::new().route("/cgt_settings", get(list)).route(
+        "/cgt_settings/{id}",
+        get(get_one).put(upsert).delete(delete),
+    )
 }
 
 pub async fn db_list(pool: &SqlitePool) -> Result<Vec<CgtSettings>, sqlx::Error> {
@@ -87,14 +88,13 @@ pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<bool, sqlx::Error> 
 /// The opening carried-forward capital loss, or zero when no settings row exists.
 /// Used by the net-capital-gain report as the starting loss balance.
 pub async fn db_opening_capital_loss(pool: &SqlitePool) -> Result<Decimal, sqlx::Error> {
-    Ok(db_get(pool, 1).await?.map_or(Decimal::ZERO, |s| s.opening_capital_loss))
+    Ok(db_get(pool, 1)
+        .await?
+        .map_or(Decimal::ZERO, |s| s.opening_capital_loss))
 }
 
 async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<CgtSettings>>, ApiError> {
-    db_list(&pool)
-        .await
-        .map(Json)
-        .map_err(ApiError::from)
+    db_list(&pool).await.map(Json).map_err(ApiError::from)
 }
 
 async fn get_one(
@@ -120,7 +120,10 @@ async fn upsert(
             "the opening capital loss cannot be negative (losses are stored as positive amounts)",
         ));
     }
-    let settings = CgtSettings { id, opening_capital_loss: body.opening_capital_loss };
+    let settings = CgtSettings {
+        id,
+        opening_capital_loss: body.opening_capital_loss,
+    };
     db_upsert(&pool, &settings)
         .await
         .map(|_| StatusCode::NO_CONTENT)
@@ -134,7 +137,13 @@ async fn delete(
 ) -> Result<StatusCode, ApiError> {
     db_delete(&pool, id)
         .await
-        .map(|found| if found { StatusCode::NO_CONTENT } else { StatusCode::NOT_FOUND })
+        .map(|found| {
+            if found {
+                StatusCode::NO_CONTENT
+            } else {
+                StatusCode::NOT_FOUND
+            }
+        })
         .map_err(ApiError::from)
 }
 
@@ -154,7 +163,15 @@ mod tests {
     async fn db_insert_and_retrieve_preserves_precision() {
         let pool = test_pool().await;
         let loss: Decimal = "1234.5678".parse().unwrap();
-        db_upsert(&pool, &CgtSettings { id: 1, opening_capital_loss: loss }).await.unwrap();
+        db_upsert(
+            &pool,
+            &CgtSettings {
+                id: 1,
+                opening_capital_loss: loss,
+            },
+        )
+        .await
+        .unwrap();
         let got = db_get(&pool, 1).await.unwrap().unwrap();
         assert_eq!(got.id, 1);
         assert_eq!(got.opening_capital_loss, loss);
@@ -163,12 +180,24 @@ mod tests {
     #[tokio::test]
     async fn db_upsert_updates_singleton_row() {
         let pool = test_pool().await;
-        db_upsert(&pool, &CgtSettings { id: 1, opening_capital_loss: Decimal::from(100) })
-            .await
-            .unwrap();
-        db_upsert(&pool, &CgtSettings { id: 1, opening_capital_loss: Decimal::from(250) })
-            .await
-            .unwrap();
+        db_upsert(
+            &pool,
+            &CgtSettings {
+                id: 1,
+                opening_capital_loss: Decimal::from(100),
+            },
+        )
+        .await
+        .unwrap();
+        db_upsert(
+            &pool,
+            &CgtSettings {
+                id: 1,
+                opening_capital_loss: Decimal::from(250),
+            },
+        )
+        .await
+        .unwrap();
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM cgt_settings")
             .fetch_one(&pool)
             .await
@@ -183,8 +212,18 @@ mod tests {
     #[tokio::test]
     async fn db_singleton_check_rejects_other_ids() {
         let pool = test_pool().await;
-        let err = db_upsert(&pool, &CgtSettings { id: 2, opening_capital_loss: Decimal::ONE }).await;
-        assert!(err.is_err(), "CHECK (id = 1) should reject a second settings row");
+        let err = db_upsert(
+            &pool,
+            &CgtSettings {
+                id: 2,
+                opening_capital_loss: Decimal::ONE,
+            },
+        )
+        .await;
+        assert!(
+            err.is_err(),
+            "CHECK (id = 1) should reject a second settings row"
+        );
     }
 
     #[tokio::test]
@@ -212,17 +251,30 @@ mod tests {
 
         let resp = router()
             .with_state(pool.clone())
-            .oneshot(Request::builder().uri("/cgt_settings/1").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/cgt_settings/1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let got: CgtSettings = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(got.opening_capital_loss, "1500.25".parse::<Decimal>().unwrap());
+        assert_eq!(
+            got.opening_capital_loss,
+            "1500.25".parse::<Decimal>().unwrap()
+        );
 
         let resp = router()
             .with_state(pool.clone())
-            .oneshot(Request::builder().uri("/cgt_settings").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/cgt_settings")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -289,7 +341,12 @@ mod tests {
         let pool = test_pool().await;
         let resp = router()
             .with_state(pool.clone())
-            .oneshot(Request::builder().uri("/cgt_settings/1").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/cgt_settings/1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);

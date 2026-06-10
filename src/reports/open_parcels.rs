@@ -1,6 +1,6 @@
-use crate::infra::http::ApiError;
 use crate::domain::cost_base;
 use crate::infra::decimal::parse_dec;
+use crate::infra::http::ApiError;
 use axum::{Json, Router, extract::State, routing::get};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
@@ -88,8 +88,7 @@ pub async fn db_open_parcels(pool: &SqlitePool) -> Result<Vec<OpenParcel>, sqlx:
     }
 
     let cba_reduction = crate::entities::amit_adjustment::db_cost_base_reductions(pool).await?;
-    let roc_events =
-        crate::entities::corporate_action::db_return_of_capital_events(pool).await?;
+    let roc_events = crate::entities::corporate_action::db_return_of_capital_events(pool).await?;
     // share splits/consolidations per listing (quantity re-basing)
     let split_events = crate::entities::corporate_action::db_share_split_events(pool).await?;
 
@@ -172,8 +171,18 @@ pub async fn db_open_parcels(pool: &SqlitePool) -> Result<Vec<OpenParcel>, sqlx:
     }
 
     parcels.sort_by(|a, b| {
-        (a.listing_id, a.holding_account_id, a.acquisition_date, a.trade_id)
-            .cmp(&(b.listing_id, b.holding_account_id, b.acquisition_date, b.trade_id))
+        (
+            a.listing_id,
+            a.holding_account_id,
+            a.acquisition_date,
+            a.trade_id,
+        )
+            .cmp(&(
+                b.listing_id,
+                b.holding_account_id,
+                b.acquisition_date,
+                b.trade_id,
+            ))
     });
     Ok(parcels)
 }
@@ -190,11 +199,11 @@ async fn open_parcels_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::http::StatusCode;
     use crate::{
         entities::{amit_adjustment, amma, corporate_action, listing, parcel_allocation, trade},
         infra::db,
     };
+    use axum::http::StatusCode;
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
     use tower::ServiceExt;
@@ -410,7 +419,10 @@ mod tests {
         // cost = 10 * 100 + 9.95 + 0.995 = 1010.945
         assert_eq!(p.original_cost_base, "1010.945".parse::<Decimal>().unwrap());
         assert_eq!(p.amit_cost_base_reduction, Decimal::ZERO);
-        assert_eq!(p.remaining_cost_base, "1010.945".parse::<Decimal>().unwrap());
+        assert_eq!(
+            p.remaining_cost_base,
+            "1010.945".parse::<Decimal>().unwrap()
+        );
     }
 
     /// Security identity continuity across a ticker/name change: a rename is an
@@ -434,7 +446,10 @@ mod tests {
         assert_eq!(p.ticker, "NEW");
         assert_eq!(p.acquisition_date, buy_date);
         assert_eq!(p.remaining_quantity, Decimal::from(100));
-        assert_eq!(p.remaining_cost_base, "1010.945".parse::<Decimal>().unwrap());
+        assert_eq!(
+            p.remaining_cost_base,
+            "1010.945".parse::<Decimal>().unwrap()
+        );
     }
 
     #[tokio::test]
@@ -527,8 +542,16 @@ mod tests {
         )
         .await
         .unwrap();
-        insert_buy_ccy(&pool, 1, 1, buy_date, Decimal::from(100), Decimal::from(10), "USD")
-            .await;
+        insert_buy_ccy(
+            &pool,
+            1,
+            1,
+            buy_date,
+            Decimal::from(100),
+            Decimal::from(10),
+            "USD",
+        )
+        .await;
 
         let parcels = db_open_parcels(&pool).await.unwrap();
         assert_eq!(parcels.len(), 1);
@@ -555,8 +578,10 @@ mod tests {
         insert_buy(&pool, 3, 1, d1, Decimal::from(10), Decimal::from(10)).await;
 
         let parcels = db_open_parcels(&pool).await.unwrap();
-        let order: Vec<(i64, NaiveDate)> =
-            parcels.iter().map(|p| (p.listing_id, p.acquisition_date)).collect();
+        let order: Vec<(i64, NaiveDate)> = parcels
+            .iter()
+            .map(|p| (p.listing_id, p.acquisition_date))
+            .collect();
         assert_eq!(order, vec![(1, d1), (1, d2), (2, d1)]);
     }
 
@@ -611,7 +636,15 @@ mod tests {
         let buy_date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
         insert_listing(&pool, 1, "SPL").await;
         insert_buy(&pool, 1, 1, buy_date, Decimal::from(100), Decimal::from(10)).await;
-        apply_split(&pool, 1, 1, NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(), "2", "1").await;
+        apply_split(
+            &pool,
+            1,
+            1,
+            NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(),
+            "2",
+            "1",
+        )
+        .await;
         // Sell 80 post-split units (= 40 as-acquired) after the split.
         insert_sell(&pool, 2, 1, Decimal::from(80)).await; // sale dated 2025-06-01
         allocate(&pool, 1, 2, 1, Decimal::from(80)).await;
@@ -637,12 +670,23 @@ mod tests {
         insert_listing(&pool, 1, "CON").await;
         insert_buy(&pool, 1, 1, buy_date, Decimal::from(150), Decimal::from(10)).await;
         // 1-for-10 consolidation → 15 units.
-        apply_split(&pool, 1, 1, NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(), "1", "10").await;
+        apply_split(
+            &pool,
+            1,
+            1,
+            NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(),
+            "1",
+            "10",
+        )
+        .await;
 
         let parcels = db_open_parcels(&pool).await.unwrap();
         assert_eq!(parcels[0].remaining_quantity, Decimal::from(15));
         // Total cost base untouched: 10 × 150 + 9.95 + 0.995.
-        assert_eq!(parcels[0].remaining_cost_base, "1510.945".parse::<Decimal>().unwrap());
+        assert_eq!(
+            parcels[0].remaining_cost_base,
+            "1510.945".parse::<Decimal>().unwrap()
+        );
     }
 
     /// A return of capital (CGT event G1) is reported per parcel and netted off
@@ -657,7 +701,14 @@ mod tests {
         // Sell 40 first, then a 50c/unit payment on the 60 still held.
         insert_sell(&pool, 2, 1, Decimal::from(40)).await; // sale dated 2025-06-01
         allocate(&pool, 1, 2, 1, Decimal::from(40)).await;
-        apply_roc(&pool, 1, 1, NaiveDate::from_ymd_opt(2025, 7, 1).unwrap(), "0.50").await;
+        apply_roc(
+            &pool,
+            1,
+            1,
+            NaiveDate::from_ymd_opt(2025, 7, 1).unwrap(),
+            "0.50",
+        )
+        .await;
 
         let parcels = db_open_parcels(&pool).await.unwrap();
         assert_eq!(parcels.len(), 1);
@@ -678,7 +729,14 @@ mod tests {
         insert_listing(&pool, 1, "RAP").await;
         insert_buy(&pool, 1, 1, buy_date, Decimal::from(100), Decimal::from(10)).await;
         // $11/unit × 100 = 1100 exceeds the 1010.945 cost base.
-        apply_roc(&pool, 1, 1, NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(), "11").await;
+        apply_roc(
+            &pool,
+            1,
+            1,
+            NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(),
+            "11",
+        )
+        .await;
 
         let parcels = db_open_parcels(&pool).await.unwrap();
         assert_eq!(parcels.len(), 1);
@@ -735,13 +793,26 @@ mod tests {
         insert_listing(&pool, 2, "NEW").await;
         // A$1 = 0.50 USD in the buy month, 0.80 in the exchange month.
         for (month, rate) in [("2024-01", "0.50"), ("2024-07", "0.80")] {
-            crate::entities::rba_fx_rate::db_import_rate(&pool, "USD", month, rate.parse().unwrap())
-                .await
-                .unwrap();
+            crate::entities::rba_fx_rate::db_import_rate(
+                &pool,
+                "USD",
+                month,
+                rate.parse().unwrap(),
+            )
+            .await
+            .unwrap();
         }
         // US$10 × 100 + US$9.95 + US$0.995 = US$1,010.945 = A$2,021.89.
-        insert_buy_ccy(&pool, 1, 1, buy_date, Decimal::from(100), Decimal::from(10), "USD")
-            .await;
+        insert_buy_ccy(
+            &pool,
+            1,
+            1,
+            buy_date,
+            Decimal::from(100),
+            Decimal::from(10),
+            "USD",
+        )
+        .await;
         corporate_action::db_upsert(
             &pool,
             &corporate_action::CorporateAction {
@@ -757,7 +828,9 @@ mod tests {
         )
         .await
         .unwrap();
-        crate::entities::scrip_exchange::db_exchange(&pool, 10).await.unwrap();
+        crate::entities::scrip_exchange::db_exchange(&pool, 10)
+            .await
+            .unwrap();
 
         let parcels = db_open_parcels(&pool).await.unwrap();
         // The original parcel is fully consumed; only the replacement is open.
@@ -768,7 +841,10 @@ mod tests {
         assert_eq!(p.remaining_quantity, Decimal::from(200));
         // A$2,021.89 at the Jan-2024 rate — not US$1,010.945 / 0.80.
         assert_eq!(p.original_cost_base, "2021.890".parse::<Decimal>().unwrap());
-        assert_eq!(p.remaining_cost_base, "2021.890".parse::<Decimal>().unwrap());
+        assert_eq!(
+            p.remaining_cost_base,
+            "2021.890".parse::<Decimal>().unwrap()
+        );
     }
 
     /// Demerger head and demerged parcels are ordinary open parcels, each
@@ -799,7 +875,9 @@ mod tests {
         )
         .await
         .unwrap();
-        crate::entities::demerger::db_demerge(&pool, 10).await.unwrap();
+        crate::entities::demerger::db_demerge(&pool, 10)
+            .await
+            .unwrap();
 
         let mut parcels = db_open_parcels(&pool).await.unwrap();
         // The original parcel is fully consumed; both replacement legs are
@@ -811,12 +889,18 @@ mod tests {
         assert_eq!(head.acquisition_date, buy_date);
         assert_eq!(head.remaining_quantity, Decimal::from(100));
         // 80% of $1,010.945 = $808.756.
-        assert_eq!(head.remaining_cost_base, "808.756".parse::<Decimal>().unwrap());
+        assert_eq!(
+            head.remaining_cost_base,
+            "808.756".parse::<Decimal>().unwrap()
+        );
         let demerged = &parcels[1];
         assert_eq!(demerged.listing_id, 2);
         assert_eq!(demerged.acquisition_date, buy_date);
         assert_eq!(demerged.remaining_quantity, Decimal::from(20));
         // 20% of $1,010.945 = $202.189.
-        assert_eq!(demerged.remaining_cost_base, "202.189".parse::<Decimal>().unwrap());
+        assert_eq!(
+            demerged.remaining_cost_base,
+            "202.189".parse::<Decimal>().unwrap()
+        );
     }
 }

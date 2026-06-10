@@ -54,8 +54,11 @@ pub enum ReportKind {
 }
 
 impl ReportKind {
-    pub const ALL: [ReportKind; 3] =
-        [ReportKind::PortfolioOverview, ReportKind::UnrealisedGains, ReportKind::Performance];
+    pub const ALL: [ReportKind; 3] = [
+        ReportKind::PortfolioOverview,
+        ReportKind::UnrealisedGains,
+        ReportKind::Performance,
+    ];
 
     pub fn slug(self) -> &'static str {
         match self {
@@ -266,10 +269,15 @@ pub async fn latest_snapshot_date(
     let Some(&(_, mut candidate)) = pairs.iter().max_by_key(|(_, latest)| *latest) else {
         return Ok(None);
     };
-    let floor = pairs.iter().map(|&(_, latest)| latest).min().unwrap_or(candidate);
+    let floor = pairs
+        .iter()
+        .map(|&(_, latest)| latest)
+        .min()
+        .unwrap_or(candidate);
     while candidate > floor {
         let all_final = pairs.iter().all(|&(m, latest)| {
-            m.latest_trading_day_on_or_before(candidate).is_some_and(|t| t <= latest)
+            m.latest_trading_day_on_or_before(candidate)
+                .is_some_and(|t| t <= latest)
         });
         if all_final {
             return Ok(Some(candidate));
@@ -292,7 +300,9 @@ async fn aud_prices_for(
 ) -> Result<HashMap<i64, Decimal>, GenerateError> {
     let markets = held_markets(pool, Some(date)).await?;
     if markets.is_empty() {
-        return Err(GenerateError::Unprocessable(format!("nothing was held on {date}")));
+        return Err(GenerateError::Unprocessable(format!(
+            "nothing was held on {date}"
+        )));
     }
 
     let mut prices = HashMap::new();
@@ -300,12 +310,18 @@ async fn aud_prices_for(
     for market in &markets {
         let ticker = &market.listing.ticker;
         let Some(valuation_day) = market.latest_trading_day_on_or_before(date) else {
-            blockers.push(format!("{ticker}: no trading day in the year before {date}"));
+            blockers.push(format!(
+                "{ticker}: no trading day in the year before {date}"
+            ));
             continue;
         };
-        let final_day = market.latest_complete_trading_day(now).map_err(GenerateError::Db)?;
+        let final_day = market
+            .latest_complete_trading_day(now)
+            .map_err(GenerateError::Db)?;
         if final_day.is_none_or(|f| valuation_day > f) {
-            blockers.push(format!("{ticker}: the close of {valuation_day} is not final yet"));
+            blockers.push(format!(
+                "{ticker}: the close of {valuation_day} is not final yet"
+            ));
             continue;
         }
         match closing_price::db_get_one(pool, market.listing.id, valuation_day).await? {
@@ -327,7 +343,11 @@ async fn aud_prices_for(
             )),
         }
     }
-    if blockers.is_empty() { Ok(prices) } else { Err(GenerateError::Unprocessable(blockers.join("; "))) }
+    if blockers.is_empty() {
+        Ok(prices)
+    } else {
+        Err(GenerateError::Unprocessable(blockers.join("; ")))
+    }
 }
 
 /// Generate (or regenerate) the three snapshots for `date` and store them in
@@ -357,10 +377,15 @@ pub async fn generate(
     let perf = performance::db_performance(pool, &prices, date).await?;
 
     let to_json = |kind: ReportKind, value: serde_json::Result<String>| {
-        value.map(|json| (kind, json)).map_err(|e| GenerateError::Db(e.to_string()))
+        value
+            .map(|json| (kind, json))
+            .map_err(|e| GenerateError::Db(e.to_string()))
     };
     let payloads = [
-        to_json(ReportKind::PortfolioOverview, serde_json::to_string(&overview))?,
+        to_json(
+            ReportKind::PortfolioOverview,
+            serde_json::to_string(&overview),
+        )?,
         to_json(ReportKind::UnrealisedGains, serde_json::to_string(&gains))?,
         to_json(ReportKind::Performance, serde_json::to_string(&perf))?,
     ];
@@ -409,13 +434,16 @@ pub async fn run_snapshot_job(pool: &SqlitePool, now: DateTime<Utc>) -> Result<(
         }
         Err(e) => return Err(e.to_string()),
     };
-    let existing =
-        db_list(pool, None, Some(date), Some(date)).await.map_err(|e| e.to_string())?;
+    let existing = db_list(pool, None, Some(date), Some(date))
+        .await
+        .map_err(|e| e.to_string())?;
     if existing.len() == ReportKind::ALL.len() && existing.iter().all(|m| !m.stale) {
         tracing::info!(%date, "report snapshots already stored fresh");
         return Ok(());
     }
-    generate(pool, date, now).await.map_err(|e| format!("snapshot for {date}: {e}"))?;
+    generate(pool, date, now)
+        .await
+        .map_err(|e| format!("snapshot for {date}: {e}"))?;
     tracing::info!(%date, "report snapshots stored");
     Ok(())
 }
@@ -501,9 +529,9 @@ pub fn router() -> Router<SqlitePool> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::http::StatusCode;
     use crate::entities::{corporate_action, income, listing, trade};
     use crate::infra::db;
+    use axum::http::StatusCode;
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
     use tower::ServiceExt;
@@ -525,7 +553,13 @@ mod tests {
         utc(2026, 6, 5, 8, 0)
     }
 
-    async fn insert_listing(pool: &SqlitePool, id: i64, ticker: &str, mic: Option<&str>, ccy: &str) {
+    async fn insert_listing(
+        pool: &SqlitePool,
+        id: i64,
+        ticker: &str,
+        mic: Option<&str>,
+        ccy: &str,
+    ) {
         listing::db_upsert(
             pool,
             &listing::Listing {
@@ -650,7 +684,10 @@ mod tests {
         // Friday evening Sydney: the NYSE close for Friday is hours away, so
         // the latest date the whole portfolio is final for is Thursday.
         let now = friday_evening_sydney();
-        assert_eq!(latest_snapshot_date(&pool, now).await.unwrap(), Some(ymd(2026, 6, 4)));
+        assert_eq!(
+            latest_snapshot_date(&pool, now).await.unwrap(),
+            Some(ymd(2026, 6, 4))
+        );
         store_price(&pool, 1, ymd(2026, 6, 4), "62.48").await;
         store_price(&pool, 2, ymd(2026, 6, 4), "141.50").await;
 
@@ -658,35 +695,50 @@ mod tests {
 
         let metas = db_list(&pool, None, None, None).await.unwrap();
         assert_eq!(metas.len(), 3, "one snapshot per price-dependent report");
-        assert!(metas.iter().all(|m| m.snapshot_date == ymd(2026, 6, 4) && !m.stale));
+        assert!(
+            metas
+                .iter()
+                .all(|m| m.snapshot_date == ymd(2026, 6, 4) && !m.stale)
+        );
 
         // The unrealised-gains snapshot carries AUD market values: BHP at the
         // stored AUD price, ICE converted at 141.50 USD / 2 = 70.75 AUD.
-        let snap =
-            db_get(&pool, ReportKind::UnrealisedGains, ymd(2026, 6, 4)).await.unwrap().unwrap();
+        let snap = db_get(&pool, ReportKind::UnrealisedGains, ymd(2026, 6, 4))
+            .await
+            .unwrap()
+            .unwrap();
         let gains: Vec<unrealised_gains::UnrealisedGain> =
             serde_json::from_value(snap.rows).unwrap();
         assert_eq!(gains.len(), 2);
         assert_eq!(gains[0].market_value, Some("6248.00".parse().unwrap())); // 100 × 62.48
         assert_eq!(gains[1].market_value, Some("707.50".parse().unwrap())); // 10 × 70.75
-        let overview =
-            db_get(&pool, ReportKind::PortfolioOverview, ymd(2026, 6, 4)).await.unwrap().unwrap();
+        let overview = db_get(&pool, ReportKind::PortfolioOverview, ymd(2026, 6, 4))
+            .await
+            .unwrap()
+            .unwrap();
         let holdings: Vec<portfolio::HoldingOverview> =
             serde_json::from_value(overview.rows).unwrap();
         assert_eq!(holdings[0].market_value, Some("6248.00".parse().unwrap()));
-        let perf =
-            db_get(&pool, ReportKind::Performance, ymd(2026, 6, 4)).await.unwrap().unwrap();
-        let rows: Vec<performance::HoldingPerformance> =
-            serde_json::from_value(perf.rows).unwrap();
+        let perf = db_get(&pool, ReportKind::Performance, ymd(2026, 6, 4))
+            .await
+            .unwrap()
+            .unwrap();
+        let rows: Vec<performance::HoldingPerformance> = serde_json::from_value(perf.rows).unwrap();
         assert_eq!(rows.last().unwrap().ticker, "OVERALL");
-        assert_eq!(rows.last().unwrap().market_value, Some("6955.50".parse().unwrap()));
+        assert_eq!(
+            rows.last().unwrap().market_value,
+            Some("6955.50".parse().unwrap())
+        );
 
         // A second run the same evening finds the date stored fresh and skips.
         let generated_at = metas[0].generated_at.clone();
         run_snapshot_job(&pool, now).await.unwrap();
         let metas = db_list(&pool, None, None, None).await.unwrap();
         assert_eq!(metas.len(), 3);
-        assert_eq!(metas[0].generated_at, generated_at, "fresh snapshots are not regenerated");
+        assert_eq!(
+            metas[0].generated_at, generated_at,
+            "fresh snapshots are not regenerated"
+        );
     }
 
     /// A weekend (or holiday) date values each listing at its nearest earlier
@@ -705,11 +757,16 @@ mod tests {
         // Sunday 01:30 UTC: Saturday's crypto candle is complete, Friday's ASX
         // close long final → the portfolio is valuable as at Saturday.
         let now = utc(2026, 6, 7, 1, 30);
-        assert_eq!(latest_snapshot_date(&pool, now).await.unwrap(), Some(ymd(2026, 6, 6)));
+        assert_eq!(
+            latest_snapshot_date(&pool, now).await.unwrap(),
+            Some(ymd(2026, 6, 6))
+        );
 
         generate(&pool, ymd(2026, 6, 6), now).await.unwrap();
-        let snap =
-            db_get(&pool, ReportKind::UnrealisedGains, ymd(2026, 6, 6)).await.unwrap().unwrap();
+        let snap = db_get(&pool, ReportKind::UnrealisedGains, ymd(2026, 6, 6))
+            .await
+            .unwrap()
+            .unwrap();
         let gains: Vec<unrealised_gains::UnrealisedGain> =
             serde_json::from_value(snap.rows).unwrap();
         assert_eq!(gains[0].market_value, Some("6248.00".parse().unwrap()));
@@ -740,16 +797,24 @@ mod tests {
         // Regeneration re-runs with the new facts and clears the flag.
         generate(&pool, ymd(2026, 6, 5), now).await.unwrap();
         assert_eq!(stale_flags(&pool, ymd(2026, 6, 5)).await, vec![false; 3]);
-        let snap =
-            db_get(&pool, ReportKind::UnrealisedGains, ymd(2026, 6, 5)).await.unwrap().unwrap();
+        let snap = db_get(&pool, ReportKind::UnrealisedGains, ymd(2026, 6, 5))
+            .await
+            .unwrap()
+            .unwrap();
         let gains: Vec<unrealised_gains::UnrealisedGain> =
             serde_json::from_value(snap.rows).unwrap();
-        assert_eq!(gains[0].quantity, Decimal::from(150), "regenerated with the new parcel");
+        assert_eq!(
+            gains[0].quantity,
+            Decimal::from(150),
+            "regenerated with the new parcel"
+        );
         // …while Wednesday's regenerated result would still exclude the
         // Thursday parcel (the reports are as-at-date), keeping the series
         // consistent. Its stored rows already reflect that.
-        let snap =
-            db_get(&pool, ReportKind::UnrealisedGains, ymd(2026, 6, 3)).await.unwrap().unwrap();
+        let snap = db_get(&pool, ReportKind::UnrealisedGains, ymd(2026, 6, 3))
+            .await
+            .unwrap()
+            .unwrap();
         let gains: Vec<unrealised_gains::UnrealisedGain> =
             serde_json::from_value(snap.rows).unwrap();
         assert_eq!(gains[0].quantity, Decimal::from(100));
@@ -820,8 +885,13 @@ mod tests {
         insert_buy(&pool, 1, 1, ymd(2024, 1, 15), "100", "10", "AUD").await;
         store_errored_price(&pool, 1, ymd(2026, 6, 5), "provider down").await;
 
-        let err = run_snapshot_job(&pool, friday_evening_sydney()).await.unwrap_err();
-        assert!(err.contains("BHP"), "job error names the blocking listing: {err}");
+        let err = run_snapshot_job(&pool, friday_evening_sydney())
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("BHP"),
+            "job error names the blocking listing: {err}"
+        );
         assert!(err.contains("errored"), "and the errored price: {err}");
         assert!(
             db_list(&pool, None, None, None).await.unwrap().is_empty(),
@@ -829,13 +899,16 @@ mod tests {
         );
 
         // A missing (never fetched) price blocks the same way.
-        let err =
-            generate(&pool, ymd(2026, 6, 4), friday_evening_sydney()).await.unwrap_err();
+        let err = generate(&pool, ymd(2026, 6, 4), friday_evening_sydney())
+            .await
+            .unwrap_err();
         assert!(matches!(err, GenerateError::Unprocessable(ref msg) if msg.contains("backfill")));
 
         // Once the re-fetch succeeds, the job stores the snapshot.
         store_price(&pool, 1, ymd(2026, 6, 5), "62.48").await;
-        run_snapshot_job(&pool, friday_evening_sydney()).await.unwrap();
+        run_snapshot_job(&pool, friday_evening_sydney())
+            .await
+            .unwrap();
         assert_eq!(db_list(&pool, None, None, None).await.unwrap().len(), 3);
     }
 
@@ -844,13 +917,17 @@ mod tests {
     #[tokio::test]
     async fn db_job_skips_when_nothing_held_and_generate_rejects_unfinal_dates() {
         let pool = test_pool().await;
-        run_snapshot_job(&pool, friday_evening_sydney()).await.unwrap();
+        run_snapshot_job(&pool, friday_evening_sydney())
+            .await
+            .unwrap();
         assert!(db_list(&pool, None, None, None).await.unwrap().is_empty());
 
         insert_listing(&pool, 1, "BHP", Some("XASX"), "AUD").await;
         insert_buy(&pool, 1, 1, ymd(2024, 1, 15), "100", "10", "AUD").await;
         // Friday 15:00 Sydney: Friday's close is not final yet.
-        let err = generate(&pool, ymd(2026, 6, 5), utc(2026, 6, 5, 5, 0)).await.unwrap_err();
+        let err = generate(&pool, ymd(2026, 6, 5), utc(2026, 6, 5, 5, 0))
+            .await
+            .unwrap_err();
         assert!(matches!(err, GenerateError::Unprocessable(ref msg) if msg.contains("not final")));
     }
 
@@ -948,9 +1025,10 @@ mod tests {
         assert_eq!(points[1]["unrealised_gain"], "5248.00");
 
         // Unknown report or date → 404.
-        for uri in
-            ["/report_snapshots/no_such_report/2026-06-05", "/report_snapshots/performance/2020-01-01"]
-        {
+        for uri in [
+            "/report_snapshots/no_such_report/2026-06-05",
+            "/report_snapshots/performance/2020-01-01",
+        ] {
             let resp = app
                 .clone()
                 .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
@@ -981,6 +1059,9 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let detail = String::from_utf8_lossy(&bytes);
-        assert!(detail.contains("BHP") && detail.contains("backfill"), "{detail}");
+        assert!(
+            detail.contains("BHP") && detail.contains("backfill"),
+            "{detail}"
+        );
     }
 }

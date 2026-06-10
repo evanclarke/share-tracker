@@ -13,8 +13,10 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
+      # Keep the tree rustfmt-clean; fix locally with `cargo fmt`.
+      - run: cargo fmt --check
       # Keep the tree clippy-clean: lint everything (incl. tests) and fail on any
       # warning. Intentional exceptions carry an in-code #[allow] with a reason.
       - run: cargo clippy --all-targets -- -D warnings

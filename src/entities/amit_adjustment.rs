@@ -1,3 +1,4 @@
+use crate::infra::decimal::{parse_dec, row_dec};
 use crate::infra::http::ApiError;
 use axum::{
     Json, Router,
@@ -5,7 +6,6 @@ use axum::{
     http::StatusCode,
     routing::get,
 };
-use crate::infra::decimal::{parse_dec, row_dec};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
@@ -43,9 +43,10 @@ pub struct AmitAdjustmentBody {
 }
 
 pub fn router() -> Router<SqlitePool> {
-    Router::new()
-        .route("/amit_adjustments", get(list))
-        .route("/amit_adjustments/{id}", get(get_one).put(upsert).delete(delete))
+    Router::new().route("/amit_adjustments", get(list)).route(
+        "/amit_adjustments/{id}",
+        get(get_one).put(upsert).delete(delete),
+    )
 }
 
 pub async fn db_list(pool: &SqlitePool) -> Result<Vec<AmitAdjustment>, sqlx::Error> {
@@ -197,10 +198,7 @@ where
 }
 
 async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<AmitAdjustment>>, ApiError> {
-    db_list(&pool)
-        .await
-        .map(Json)
-        .map_err(ApiError::from)
+    db_list(&pool).await.map(Json).map_err(ApiError::from)
 }
 
 async fn get_one(
@@ -256,14 +254,23 @@ async fn delete(
 ) -> Result<StatusCode, ApiError> {
     db_delete(&pool, id)
         .await
-        .map(|found| if found { StatusCode::NO_CONTENT } else { StatusCode::NOT_FOUND })
+        .map(|found| {
+            if found {
+                StatusCode::NO_CONTENT
+            } else {
+                StatusCode::NOT_FOUND
+            }
+        })
         .map_err(ApiError::from)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{infra::db, entities::{amma, listing, trade}};
+    use crate::{
+        entities::{amma, listing, trade},
+        infra::db,
+    };
     use axum::{body::Body, http::Request};
     use chrono::NaiveDate;
     use http_body_util::BodyExt;
@@ -408,7 +415,12 @@ mod tests {
         insert_buy_trade(&pool, 1, 1, Decimal::from(100)).await;
         insert_amma(&pool, 1, 1, "0.05".parse().unwrap()).await;
 
-        let adj = AmitAdjustment { id: 1, amma_statement_id: 1, trade_id: 1, quantity: Decimal::from(100) };
+        let adj = AmitAdjustment {
+            id: 1,
+            amma_statement_id: 1,
+            trade_id: 1,
+            quantity: Decimal::from(100),
+        };
         db_upsert(&pool, &adj).await.unwrap();
 
         let got = db_get(&pool, 1).await.unwrap().unwrap();
@@ -426,7 +438,12 @@ mod tests {
 
         let err = db_upsert(
             &pool,
-            &AmitAdjustment { id: 1, amma_statement_id: 1, trade_id: 1, quantity: Decimal::from(50) },
+            &AmitAdjustment {
+                id: 1,
+                amma_statement_id: 1,
+                trade_id: 1,
+                quantity: Decimal::from(50),
+            },
         )
         .await
         .unwrap_err();
@@ -443,7 +460,12 @@ mod tests {
 
         let err = db_upsert(
             &pool,
-            &AmitAdjustment { id: 1, amma_statement_id: 1, trade_id: 1, quantity: Decimal::from(50) },
+            &AmitAdjustment {
+                id: 1,
+                amma_statement_id: 1,
+                trade_id: 1,
+                quantity: Decimal::from(50),
+            },
         )
         .await
         .unwrap_err();
@@ -460,7 +482,10 @@ mod tests {
         insert_test_listing(&pool, 1, "XASX", "VAF").await;
         holding_account::db_upsert(
             &pool,
-            &HoldingAccount { id: 2, name: "ICE Employee Plan".to_string() },
+            &HoldingAccount {
+                id: 2,
+                name: "ICE Employee Plan".to_string(),
+            },
         )
         .await
         .unwrap();
@@ -473,7 +498,12 @@ mod tests {
 
         let err = db_upsert(
             &pool,
-            &AmitAdjustment { id: 1, amma_statement_id: 1, trade_id: 1, quantity: Decimal::from(50) },
+            &AmitAdjustment {
+                id: 1,
+                amma_statement_id: 1,
+                trade_id: 1,
+                quantity: Decimal::from(50),
+            },
         )
         .await
         .unwrap_err();
@@ -486,7 +516,12 @@ mod tests {
             .unwrap();
         db_upsert(
             &pool,
-            &AmitAdjustment { id: 1, amma_statement_id: 1, trade_id: 1, quantity: Decimal::from(50) },
+            &AmitAdjustment {
+                id: 1,
+                amma_statement_id: 1,
+                trade_id: 1,
+                quantity: Decimal::from(50),
+            },
         )
         .await
         .unwrap();
@@ -501,7 +536,12 @@ mod tests {
 
         let err = db_upsert(
             &pool,
-            &AmitAdjustment { id: 1, amma_statement_id: 1, trade_id: 1, quantity: Decimal::from(101) },
+            &AmitAdjustment {
+                id: 1,
+                amma_statement_id: 1,
+                trade_id: 1,
+                quantity: Decimal::from(101),
+            },
         )
         .await
         .unwrap_err();
@@ -517,16 +557,35 @@ mod tests {
         insert_amma(&pool, 1, 1, "0.05".parse().unwrap()).await;
         insert_amma(&pool, 2, 1, "0.03".parse().unwrap()).await;
 
-        db_upsert(&pool, &AmitAdjustment { id: 1, amma_statement_id: 1, trade_id: 1, quantity: Decimal::from(100) })
-            .await
-            .unwrap();
-        db_upsert(&pool, &AmitAdjustment { id: 2, amma_statement_id: 2, trade_id: 1, quantity: Decimal::from(80) })
-            .await
-            .unwrap();
+        db_upsert(
+            &pool,
+            &AmitAdjustment {
+                id: 1,
+                amma_statement_id: 1,
+                trade_id: 1,
+                quantity: Decimal::from(100),
+            },
+        )
+        .await
+        .unwrap();
+        db_upsert(
+            &pool,
+            &AmitAdjustment {
+                id: 2,
+                amma_statement_id: 2,
+                trade_id: 1,
+                quantity: Decimal::from(80),
+            },
+        )
+        .await
+        .unwrap();
 
         let reductions = db_cost_base_reductions(&pool).await.unwrap();
         // 100 * 0.05 + 80 * 0.03 = 5.00 + 2.40 = 7.40
-        assert_eq!(reductions.get(&1).copied(), Some("7.40".parse::<Decimal>().unwrap()));
+        assert_eq!(
+            reductions.get(&1).copied(),
+            Some("7.40".parse::<Decimal>().unwrap())
+        );
     }
 
     /// The cost base adjustment is driven solely by `cost_base_adjustment` (the per-unit
@@ -571,13 +630,24 @@ mod tests {
         .await
         .unwrap();
 
-        db_upsert(&pool, &AmitAdjustment { id: 1, amma_statement_id: 1, trade_id: 1, quantity: Decimal::from(100) })
-            .await
-            .unwrap();
+        db_upsert(
+            &pool,
+            &AmitAdjustment {
+                id: 1,
+                amma_statement_id: 1,
+                trade_id: 1,
+                quantity: Decimal::from(100),
+            },
+        )
+        .await
+        .unwrap();
 
         let reductions = db_cost_base_reductions(&pool).await.unwrap();
         // 100 * 0.05 = 5.00 — the tax-deferred/tax-free amounts are NOT added in.
-        assert_eq!(reductions.get(&1).copied(), Some("5.00".parse::<Decimal>().unwrap()));
+        assert_eq!(
+            reductions.get(&1).copied(),
+            Some("5.00".parse::<Decimal>().unwrap())
+        );
     }
 
     // API-level tests
@@ -639,7 +709,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        let bytes = http_body_util::BodyExt::collect(resp.into_body()).await.unwrap().to_bytes();
+        let bytes = http_body_util::BodyExt::collect(resp.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
         let detail = String::from_utf8(bytes.to_vec()).unwrap();
         assert!(detail.contains("not a Buy or DRP"), "detail: {detail}");
     }
@@ -678,13 +751,26 @@ mod tests {
         insert_test_listing(&pool, 1, "XASX", "VAF").await;
         insert_buy_trade(&pool, 1, 1, Decimal::from(100)).await;
         insert_amma(&pool, 1, 1, "0.05".parse().unwrap()).await;
-        db_upsert(&pool, &AmitAdjustment { id: 1, amma_statement_id: 1, trade_id: 1, quantity: Decimal::from(100) })
-            .await
-            .unwrap();
+        db_upsert(
+            &pool,
+            &AmitAdjustment {
+                id: 1,
+                amma_statement_id: 1,
+                trade_id: 1,
+                quantity: Decimal::from(100),
+            },
+        )
+        .await
+        .unwrap();
 
         let resp = router()
             .with_state(pool)
-            .oneshot(Request::builder().uri("/amit_adjustments").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/amit_adjustments")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -698,7 +784,12 @@ mod tests {
         let pool = test_pool().await;
         let resp = router()
             .with_state(pool)
-            .oneshot(Request::builder().uri("/amit_adjustments/999").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/amit_adjustments/999")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
@@ -710,9 +801,17 @@ mod tests {
         insert_test_listing(&pool, 1, "XASX", "VAF").await;
         insert_buy_trade(&pool, 1, 1, Decimal::from(100)).await;
         insert_amma(&pool, 1, 1, "0.05".parse().unwrap()).await;
-        db_upsert(&pool, &AmitAdjustment { id: 1, amma_statement_id: 1, trade_id: 1, quantity: Decimal::from(100) })
-            .await
-            .unwrap();
+        db_upsert(
+            &pool,
+            &AmitAdjustment {
+                id: 1,
+                amma_statement_id: 1,
+                trade_id: 1,
+                quantity: Decimal::from(100),
+            },
+        )
+        .await
+        .unwrap();
 
         let resp = router()
             .with_state(pool)

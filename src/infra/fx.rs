@@ -100,7 +100,10 @@ pub async fn resolve_rate(
     if let Some(rate) = lookup_ato_rate(pool, currency, &month).await? {
         return Ok(rate);
     }
-    manual_override.ok_or(FxError::MissingRate { currency: currency.to_string(), month })
+    manual_override.ok_or(FxError::MissingRate {
+        currency: currency.to_string(),
+        month,
+    })
 }
 
 /// Convert `amount` (denominated in `currency`) to AUD for `date`.
@@ -144,8 +147,15 @@ mod tests {
     async fn aud_passes_through_without_a_rate() {
         let pool = test_pool().await;
         // No rba_fx_rates rows at all: AUD must still convert (rate = 1).
-        let aud =
-            to_aud(&pool, "1234.56".parse().unwrap(), "AUD", date(2024, 1, 15), None).await.unwrap();
+        let aud = to_aud(
+            &pool,
+            "1234.56".parse().unwrap(),
+            "AUD",
+            date(2024, 1, 15),
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(aud, "1234.56".parse::<Decimal>().unwrap());
     }
 
@@ -156,8 +166,9 @@ mod tests {
         rba_fx_rate::db_import_rate(&pool, "USD", "2024-01", "0.50".parse().unwrap())
             .await
             .unwrap();
-        let aud =
-            to_aud(&pool, Decimal::from(1000), "USD", date(2024, 1, 15), None).await.unwrap();
+        let aud = to_aud(&pool, Decimal::from(1000), "USD", date(2024, 1, 15), None)
+            .await
+            .unwrap();
         assert_eq!(aud, Decimal::from(2000));
     }
 
@@ -234,10 +245,12 @@ mod tests {
     #[tokio::test]
     async fn malformed_stored_rate_is_an_error_not_zero() {
         let pool = test_pool().await;
-        sqlx::query("INSERT INTO rba_fx_rates (currency, month, rate) VALUES ('USD', '2024-01', 'oops')")
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "INSERT INTO rba_fx_rates (currency, month, rate) VALUES ('USD', '2024-01', 'oops')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
         let err = to_aud(&pool, Decimal::from(1000), "USD", date(2024, 1, 15), None)
             .await
             .unwrap_err();

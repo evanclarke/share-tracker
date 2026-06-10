@@ -44,9 +44,10 @@ pub struct HoldingAccountBody {
 }
 
 pub fn router() -> Router<SqlitePool> {
-    Router::new()
-        .route("/holding_accounts", get(list))
-        .route("/holding_accounts/{id}", get(get_one).put(upsert).delete(delete))
+    Router::new().route("/holding_accounts", get(list)).route(
+        "/holding_accounts/{id}",
+        get(get_one).put(upsert).delete(delete),
+    )
 }
 
 pub async fn db_list(pool: &SqlitePool) -> Result<Vec<HoldingAccount>, sqlx::Error> {
@@ -90,10 +91,11 @@ pub enum DeleteOutcome {
 pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<DeleteOutcome, sqlx::Error> {
     let mut tx = pool.begin().await?;
 
-    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM holding_accounts WHERE id = ?)")
-        .bind(id)
-        .fetch_one(&mut *tx)
-        .await?;
+    let exists: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM holding_accounts WHERE id = ?)")
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await?;
     if !exists {
         return Ok(DeleteOutcome::NotFound);
     }
@@ -127,10 +129,7 @@ pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<DeleteOutcome, sqlx
 }
 
 async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<HoldingAccount>>, ApiError> {
-    db_list(&pool)
-        .await
-        .map(Json)
-        .map_err(ApiError::from)
+    db_list(&pool).await.map(Json).map_err(ApiError::from)
 }
 
 async fn get_one(
@@ -149,11 +148,17 @@ async fn upsert(
     Path(id): Path<i64>,
     Json(body): Json<HoldingAccountBody>,
 ) -> Result<StatusCode, ApiError> {
-    db_upsert(&pool, &HoldingAccount { id, name: body.name })
-        .await
-        .map(|_| StatusCode::NO_CONTENT)
-        // A duplicate name violates the UNIQUE constraint → 422.
-        .map_err(ApiError::from)
+    db_upsert(
+        &pool,
+        &HoldingAccount {
+            id,
+            name: body.name,
+        },
+    )
+    .await
+    .map(|_| StatusCode::NO_CONTENT)
+    // A duplicate name violates the UNIQUE constraint → 422.
+    .map_err(ApiError::from)
 }
 
 async fn delete(
@@ -197,25 +202,57 @@ mod tests {
     #[tokio::test]
     async fn db_insert_retrieve_and_rename() {
         let pool = test_pool().await;
-        db_upsert(&pool, &HoldingAccount { id: 2, name: "ICE Employee Plan".into() })
-            .await
-            .unwrap();
-        assert_eq!(db_get(&pool, 2).await.unwrap().unwrap().name, "ICE Employee Plan");
+        db_upsert(
+            &pool,
+            &HoldingAccount {
+                id: 2,
+                name: "ICE Employee Plan".into(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            db_get(&pool, 2).await.unwrap().unwrap().name,
+            "ICE Employee Plan"
+        );
 
-        db_upsert(&pool, &HoldingAccount { id: 2, name: "Personal CHESS".into() })
-            .await
-            .unwrap();
-        assert_eq!(db_get(&pool, 2).await.unwrap().unwrap().name, "Personal CHESS");
+        db_upsert(
+            &pool,
+            &HoldingAccount {
+                id: 2,
+                name: "Personal CHESS".into(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            db_get(&pool, 2).await.unwrap().unwrap().name,
+            "Personal CHESS"
+        );
         assert_eq!(db_list(&pool).await.unwrap().len(), 2);
     }
 
     #[tokio::test]
     async fn db_duplicate_name_is_rejected() {
         let pool = test_pool().await;
-        db_upsert(&pool, &HoldingAccount { id: 2, name: "Plan".into() }).await.unwrap();
-        let err = db_upsert(&pool, &HoldingAccount { id: 3, name: "Plan".into() })
-            .await
-            .unwrap_err();
+        db_upsert(
+            &pool,
+            &HoldingAccount {
+                id: 2,
+                name: "Plan".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let err = db_upsert(
+            &pool,
+            &HoldingAccount {
+                id: 3,
+                name: "Plan".into(),
+            },
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(
             crate::infra::http::ApiError::from(err),
             crate::infra::http::ApiError::Unprocessable(_)
@@ -225,7 +262,15 @@ mod tests {
     #[tokio::test]
     async fn db_delete_unused_account_and_missing_account() {
         let pool = test_pool().await;
-        db_upsert(&pool, &HoldingAccount { id: 2, name: "Plan".into() }).await.unwrap();
+        db_upsert(
+            &pool,
+            &HoldingAccount {
+                id: 2,
+                name: "Plan".into(),
+            },
+        )
+        .await
+        .unwrap();
         assert_eq!(db_delete(&pool, 2).await.unwrap(), DeleteOutcome::Deleted);
         assert_eq!(db_delete(&pool, 2).await.unwrap(), DeleteOutcome::NotFound);
     }
@@ -260,7 +305,12 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
 
         let resp = app()
-            .oneshot(Request::builder().uri("/holding_accounts").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/holding_accounts")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -282,7 +332,12 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
 
         let resp = app()
-            .oneshot(Request::builder().uri("/holding_accounts/2").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/holding_accounts/2")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);

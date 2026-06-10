@@ -248,7 +248,9 @@ mod tests {
         // …and a trade (an id alone is meaningless) shows side/quantity/
         // listing/date via the shared describeTrade.
         assert!(js.contains("function describeTrade("));
-        assert!(js.contains("t.trade_type + ' ' + t.quantity + ' ' + listingName(t.listing_id) + ' on ' + t.date"));
+        assert!(js.contains(
+            "t.trade_type + ' ' + t.quantity + ' ' + listingName(t.listing_id) + ' on ' + t.date"
+        ));
         // The trade/amma id columns are mapped by name — so income's
         // reinvestment_trade_id, the parcel-allocation sale/purchase trade ids,
         // and the amit-adjustment statement/trade ids all render names with no
@@ -298,7 +300,9 @@ mod tests {
         assert!(js.contains("'Demerged ' + listing(a.listing_id) + ' into '"));
         // The transfer toast names the listing and both accounts (the
         // transfer-out sell id is only secondary detail).
-        assert!(js.contains("'Transferred ' + n + ' parcel(s) of ' + listingName(body.listing_id)"));
+        assert!(
+            js.contains("'Transferred ' + n + ' parcel(s) of ' + listingName(body.listing_id)")
+        );
         // The bare "trade #N" toast/heading wording is gone.
         assert!(!js.contains("'Reinvested into trade #'"));
         assert!(!js.contains("'Exercised into trade #'"));
@@ -326,8 +330,14 @@ mod tests {
         // as a column in the trades and Sells lists.
         assert!(js.contains("statement_total"));
         assert!(js.contains("Statement total"));
-        assert!(js.contains("'statement_total', 'fx_rate'"), "trades list column");
-        assert!(js.contains("'statement_total', 'holding_account_id'"), "sells list column");
+        assert!(
+            js.contains("'statement_total', 'fx_rate'"),
+            "trades list column"
+        );
+        assert!(
+            js.contains("'statement_total', 'holding_account_id'"),
+            "sells list column"
+        );
     }
 
     #[tokio::test]

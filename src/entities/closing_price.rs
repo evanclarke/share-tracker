@@ -116,10 +116,12 @@ impl Market {
     fn tz(&self) -> Result<Tz, String> {
         match &self.exchange {
             None => Ok(chrono_tz::UTC),
-            Some(ex) => ex
-                .timezone
-                .parse()
-                .map_err(|_| format!("exchange {} has unrecognised timezone {:?}", ex.mic, ex.timezone)),
+            Some(ex) => ex.timezone.parse().map_err(|_| {
+                format!(
+                    "exchange {} has unrecognised timezone {:?}",
+                    ex.mic, ex.timezone
+                )
+            }),
         }
     }
 
@@ -167,7 +169,10 @@ impl Market {
             None => now.date_naive() - Duration::days(1),
             Some(ex) => {
                 let close = NaiveTime::parse_from_str(&ex.close_time, "%H:%M").map_err(|_| {
-                    format!("exchange {} has malformed close_time {:?}", ex.mic, ex.close_time)
+                    format!(
+                        "exchange {} has malformed close_time {:?}",
+                        ex.mic, ex.close_time
+                    )
                 })?;
                 let now_local = now.with_timezone(&self.tz()?);
                 if now_local.time() >= close {
@@ -182,7 +187,10 @@ impl Market {
 }
 
 /// Load the market context for a listing; None if the listing doesn't exist.
-pub async fn load_market(pool: &SqlitePool, listing_id: i64) -> Result<Option<Market>, sqlx::Error> {
+pub async fn load_market(
+    pool: &SqlitePool,
+    listing_id: i64,
+) -> Result<Option<Market>, sqlx::Error> {
     let Some(listing) = listing::db_get(pool, listing_id).await? else {
         return Ok(None);
     };
@@ -192,7 +200,11 @@ pub async fn load_market(pool: &SqlitePool, listing_id: i64) -> Result<Option<Ma
     };
     let holidays =
         crate::entities::exchange_holiday::exchange_holidays_for_listing(pool, listing_id).await?;
-    Ok(Some(Market { listing, exchange, holidays }))
+    Ok(Some(Market {
+        listing,
+        exchange,
+        holidays,
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -237,8 +249,12 @@ pub trait PriceFetcher: Send + Sync {
     /// Daily closes for the listing over `from..=to` (trading-day dates in the
     /// market's timezone convention). Non-trading days in the range simply
     /// have no entry.
-    fn daily_closes<'a>(&'a self, market: &'a Market, from: NaiveDate, to: NaiveDate)
-    -> FetchFuture<'a>;
+    fn daily_closes<'a>(
+        &'a self,
+        market: &'a Market,
+        from: NaiveDate,
+        to: NaiveDate,
+    ) -> FetchFuture<'a>;
 
     /// The most recent available price for the listing, with the provider's
     /// quote timestamp — for exchange-listed and exchange-less (Crypto)
@@ -491,8 +507,11 @@ pub async fn db_held_listing_ids(
         }
     }
 
-    let mut ids: Vec<i64> =
-        held.into_iter().filter(|(_, qty)| *qty > Decimal::ZERO).map(|(id, _)| id).collect();
+    let mut ids: Vec<i64> = held
+        .into_iter()
+        .filter(|(_, qty)| *qty > Decimal::ZERO)
+        .map(|(id, _)| id)
+        .collect();
     ids.sort();
     Ok(ids)
 }
@@ -574,7 +593,9 @@ pub async fn run_collection(
     fetcher: &dyn PriceFetcher,
     now: DateTime<Utc>,
 ) -> Result<(), String> {
-    let ids = db_held_listing_ids(pool, None).await.map_err(|e| e.to_string())?;
+    let ids = db_held_listing_ids(pool, None)
+        .await
+        .map_err(|e| e.to_string())?;
 
     let (mut stored, mut skipped) = (0, 0);
     let mut failures: Vec<String> = Vec::new();
@@ -601,8 +622,9 @@ pub async fn run_collection(
             continue;
         }
 
-        let (ok, errored) =
-            fetch_and_store(pool, fetcher, &market, &[target]).await.map_err(|e| e.to_string())?;
+        let (ok, errored) = fetch_and_store(pool, fetcher, &market, &[target])
+            .await
+            .map_err(|e| e.to_string())?;
         stored += ok;
         if errored > 0 {
             failures.push(format!(
@@ -612,8 +634,17 @@ pub async fn run_collection(
         }
     }
 
-    tracing::info!(stored, skipped, failed = failures.len(), "closing-price collection complete");
-    if failures.is_empty() { Ok(()) } else { Err(failures.join("; ")) }
+    tracing::info!(
+        stored,
+        skipped,
+        failed = failures.len(),
+        "closing-price collection complete"
+    );
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("; "))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -667,9 +698,10 @@ pub async fn fetch_live_aud_prices(
                 )
                 .await
                 {
-                    Ok(aud_price) => {
-                        Ok(LiveValuation { aud_price, as_of: quote.as_of.to_rfc3339() })
-                    }
+                    Ok(aud_price) => Ok(LiveValuation {
+                        aud_price,
+                        as_of: quote.as_of.to_rfc3339(),
+                    }),
                     Err(e) => Err(e.to_string()),
                 }
             }
@@ -810,12 +842,18 @@ async fn backfill(
         }
         date += Duration::days(1);
     }
-    let stored_ok = db_ok_dates(&pool, body.listing_id, body.from, to).await.map_err(internal)?;
-    let missing: Vec<NaiveDate> =
-        trading_days.iter().copied().filter(|d| !stored_ok.contains(d)).collect();
+    let stored_ok = db_ok_dates(&pool, body.listing_id, body.from, to)
+        .await
+        .map_err(internal)?;
+    let missing: Vec<NaiveDate> = trading_days
+        .iter()
+        .copied()
+        .filter(|d| !stored_ok.contains(d))
+        .collect();
 
-    let (fetched_ok, errored) =
-        fetch_and_store(&pool, fetcher.as_ref(), &market, &missing).await.map_err(internal)?;
+    let (fetched_ok, errored) = fetch_and_store(&pool, fetcher.as_ref(), &market, &missing)
+        .await
+        .map_err(internal)?;
     Ok(Json(BackfillSummary {
         trading_days: trading_days.len(),
         already_stored: trading_days.len() - missing.len(),
@@ -825,16 +863,19 @@ async fn backfill(
 }
 
 /// 422 unless `date` is a trading day whose close has passed.
-fn validate_complete_trading_day(
-    market: &Market,
-    date: NaiveDate,
-) -> Result<(), ApiError> {
-    let latest = market.latest_complete_trading_day(Utc::now()).map_err(unprocessable)?;
+fn validate_complete_trading_day(market: &Market, date: NaiveDate) -> Result<(), ApiError> {
+    let latest = market
+        .latest_complete_trading_day(Utc::now())
+        .map_err(unprocessable)?;
     if latest.is_none_or(|latest| date > latest) {
-        return Err(ApiError::unprocessable(format!("the close of {date} is not final yet")));
+        return Err(ApiError::unprocessable(format!(
+            "the close of {date} is not final yet"
+        )));
     }
     if !market.is_trading_day(date) {
-        return Err(ApiError::unprocessable(format!("{date} is not a trading day")));
+        return Err(ApiError::unprocessable(format!(
+            "{date} is not a trading day"
+        )));
     }
     Ok(())
 }
@@ -887,7 +928,10 @@ pub mod test_support {
         }
 
         pub fn failing(msg: &str) -> Self {
-            QuoteStub { fail: Some(msg.to_string()), ..Default::default() }
+            QuoteStub {
+                fail: Some(msg.to_string()),
+                ..Default::default()
+            }
         }
 
         /// As a `SharedFetcher` for layering onto a report router.
@@ -1021,7 +1065,13 @@ mod tests {
         .unwrap();
     }
 
-    async fn sell_everything(pool: &SqlitePool, sell_id: i64, buy_id: i64, listing_id: i64, qty: &str) {
+    async fn sell_everything(
+        pool: &SqlitePool,
+        sell_id: i64,
+        buy_id: i64,
+        listing_id: i64,
+        qty: &str,
+    ) {
         trade::db_upsert(
             pool,
             &trade::Trade {
@@ -1082,11 +1132,14 @@ mod tests {
 
     impl StubFetcher {
         fn with_close(mut self, listing_id: i64, date: NaiveDate, price: &str, ccy: &str) -> Self {
-            self.closes.entry(listing_id).or_default().push(FetchedClose {
-                date,
-                price: price.parse().unwrap(),
-                currency: ccy.to_string(),
-            });
+            self.closes
+                .entry(listing_id)
+                .or_default()
+                .push(FetchedClose {
+                    date,
+                    price: price.parse().unwrap(),
+                    currency: ccy.to_string(),
+                });
             self
         }
 
@@ -1099,13 +1152,20 @@ mod tests {
         ) -> Self {
             self.quotes.insert(
                 listing_id,
-                LatestQuote { price: price.parse().unwrap(), currency: ccy.to_string(), as_of },
+                LatestQuote {
+                    price: price.parse().unwrap(),
+                    currency: ccy.to_string(),
+                    as_of,
+                },
             );
             self
         }
 
         fn failing(msg: &str) -> Self {
-            StubFetcher { fail: Some(msg.to_string()), ..Default::default() }
+            StubFetcher {
+                fail: Some(msg.to_string()),
+                ..Default::default()
+            }
         }
 
         fn calls(&self) -> Vec<(i64, NaiveDate, NaiveDate)> {
@@ -1125,7 +1185,10 @@ mod tests {
             to: NaiveDate,
         ) -> FetchFuture<'a> {
             Box::pin(async move {
-                self.calls.lock().unwrap().push((market.listing.id, from, to));
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .push((market.listing.id, from, to));
                 if let Some(msg) = &self.fail {
                     return Err(msg.clone());
                 }
@@ -1133,7 +1196,10 @@ mod tests {
                     .closes
                     .get(&market.listing.id)
                     .map(|v| {
-                        v.iter().filter(|c| c.date >= from && c.date <= to).cloned().collect()
+                        v.iter()
+                            .filter(|c| c.date >= from && c.date <= to)
+                            .cloned()
+                            .collect()
                     })
                     .unwrap_or_default())
             })
@@ -1163,8 +1229,8 @@ mod tests {
     #[test]
     fn clean_price_strips_float_noise_and_keeps_tiny_prices() {
         let cases = [
-            ("62.4799995422363", "62.48"),  // 62.48f32 — the live BHP.AX shape
-            ("99545.3515625", "99545.35"),  // 99545.35f32 — the live BTC-AUD shape
+            ("62.4799995422363", "62.48"), // 62.48f32 — the live BHP.AX shape
+            ("99545.3515625", "99545.35"), // 99545.35f32 — the live BTC-AUD shape
             ("141.5", "141.5"),
             ("0.000012345678", "0.00001234568"), // sub-$1: significance starts at the 1
         ];
@@ -1193,7 +1259,9 @@ mod tests {
         );
         // Friday 18:00 Sydney: after the close → Friday itself.
         assert_eq!(
-            market.latest_complete_trading_day(friday_evening_sydney()).unwrap(),
+            market
+                .latest_complete_trading_day(friday_evening_sydney())
+                .unwrap(),
             Some(ymd(2026, 6, 5))
         );
     }
@@ -1205,7 +1273,9 @@ mod tests {
         // Sunday 18:00 Sydney → Friday (weekend skipped).
         let market = load_market(&pool, 1).await.unwrap().unwrap();
         assert_eq!(
-            market.latest_complete_trading_day(utc(2026, 6, 7, 8, 0)).unwrap(),
+            market
+                .latest_complete_trading_day(utc(2026, 6, 7, 8, 0))
+                .unwrap(),
             Some(ymd(2026, 6, 5))
         );
 
@@ -1222,7 +1292,9 @@ mod tests {
         .unwrap();
         let market = load_market(&pool, 1).await.unwrap().unwrap();
         assert_eq!(
-            market.latest_complete_trading_day(utc(2026, 6, 7, 8, 0)).unwrap(),
+            market
+                .latest_complete_trading_day(utc(2026, 6, 7, 8, 0))
+                .unwrap(),
             Some(ymd(2026, 6, 4))
         );
     }
@@ -1235,7 +1307,9 @@ mod tests {
         // Sunday 01:30 UTC: Saturday's UTC candle is complete — weekends and
         // holiday calendars don't apply to a continuously-trading asset.
         assert_eq!(
-            market.latest_complete_trading_day(utc(2026, 6, 7, 1, 30)).unwrap(),
+            market
+                .latest_complete_trading_day(utc(2026, 6, 7, 1, 30))
+                .unwrap(),
             Some(ymd(2026, 6, 6))
         );
     }
@@ -1255,8 +1329,18 @@ mod tests {
         assert_eq!(db_held_listing_ids(&pool, None).await.unwrap(), vec![1]);
         // As at a date before the sale, the sold listing still counts; before
         // any buys, nothing does.
-        assert_eq!(db_held_listing_ids(&pool, Some(ymd(2024, 5, 31))).await.unwrap(), vec![1, 2]);
-        assert!(db_held_listing_ids(&pool, Some(ymd(2024, 1, 1))).await.unwrap().is_empty());
+        assert_eq!(
+            db_held_listing_ids(&pool, Some(ymd(2024, 5, 31)))
+                .await
+                .unwrap(),
+            vec![1, 2]
+        );
+        assert!(
+            db_held_listing_ids(&pool, Some(ymd(2024, 1, 1)))
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     // --- scheduled collection ---
@@ -1269,7 +1353,9 @@ mod tests {
         insert_buy(&pool, 1, 1, "100").await;
         let fetcher = StubFetcher::default().with_close(1, ymd(2026, 6, 5), "62.48", "AUD");
 
-        run_collection(&pool, &fetcher, friday_evening_sydney()).await.unwrap();
+        run_collection(&pool, &fetcher, friday_evening_sydney())
+            .await
+            .unwrap();
 
         let rows = db_list(&pool, None, None, None).await.unwrap();
         assert_eq!(rows.len(), 1, "only the held listing is collected");
@@ -1288,11 +1374,15 @@ mod tests {
         insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
         insert_buy(&pool, 1, 1, "100").await;
         let fetcher = StubFetcher::default().with_close(1, ymd(2026, 6, 5), "62.48", "AUD");
-        run_collection(&pool, &fetcher, friday_evening_sydney()).await.unwrap();
+        run_collection(&pool, &fetcher, friday_evening_sydney())
+            .await
+            .unwrap();
         assert_eq!(fetcher.calls().len(), 1);
 
         // A second run (same evening) finds the ok row and does not re-fetch.
-        run_collection(&pool, &fetcher, friday_evening_sydney()).await.unwrap();
+        run_collection(&pool, &fetcher, friday_evening_sydney())
+            .await
+            .unwrap();
         assert_eq!(fetcher.calls().len(), 1, "no second provider call");
         assert_eq!(db_list(&pool, None, None, None).await.unwrap().len(), 1);
     }
@@ -1304,11 +1394,17 @@ mod tests {
         insert_buy(&pool, 1, 1, "100").await;
         let fetcher = StubFetcher::failing("provider down");
 
-        let err = run_collection(&pool, &fetcher, friday_evening_sydney()).await.unwrap_err();
+        let err = run_collection(&pool, &fetcher, friday_evening_sydney())
+            .await
+            .unwrap_err();
         assert!(err.contains("BHP"), "job error names the listing: {err}");
 
         let rows = db_list(&pool, None, None, None).await.unwrap();
-        assert_eq!(rows.len(), 1, "the failure is recorded, never silently missing");
+        assert_eq!(
+            rows.len(),
+            1,
+            "the failure is recorded, never silently missing"
+        );
         assert_eq!(rows[0].status, PriceStatus::Error);
         assert!(rows[0].price.is_none());
         assert!(rows[0].error.as_deref().unwrap().contains("provider down"));
@@ -1319,14 +1415,23 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
         insert_buy(&pool, 1, 1, "100").await;
-        run_collection(&pool, &StubFetcher::failing("down"), friday_evening_sydney())
-            .await
-            .unwrap_err();
+        run_collection(
+            &pool,
+            &StubFetcher::failing("down"),
+            friday_evening_sydney(),
+        )
+        .await
+        .unwrap_err();
 
         let fetcher = StubFetcher::default().with_close(1, ymd(2026, 6, 5), "62.48", "AUD");
-        run_collection(&pool, &fetcher, friday_evening_sydney()).await.unwrap();
+        run_collection(&pool, &fetcher, friday_evening_sydney())
+            .await
+            .unwrap();
 
-        let row = db_get_one(&pool, 1, ymd(2026, 6, 5)).await.unwrap().unwrap();
+        let row = db_get_one(&pool, 1, ymd(2026, 6, 5))
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(row.status, PriceStatus::Ok);
         assert_eq!(row.price, Some("62.48".parse().unwrap()));
         assert!(row.error.is_none());
@@ -1342,8 +1447,13 @@ mod tests {
         let fetcher = StubFetcher::default().with_close(1, ymd(2026, 6, 5), "141.50", "AUD");
 
         // 21:00 UTC Friday = 17:00 New York, after the close.
-        run_collection(&pool, &fetcher, utc(2026, 6, 5, 21, 0)).await.unwrap_err();
-        let row = db_get_one(&pool, 1, ymd(2026, 6, 5)).await.unwrap().unwrap();
+        run_collection(&pool, &fetcher, utc(2026, 6, 5, 21, 0))
+            .await
+            .unwrap_err();
+        let row = db_get_one(&pool, 1, ymd(2026, 6, 5))
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(row.status, PriceStatus::Error);
         assert!(row.error.as_deref().unwrap().contains("currency mismatch"));
     }
@@ -1356,8 +1466,13 @@ mod tests {
         let fetcher = StubFetcher::default().with_close(1, ymd(2026, 6, 6), "86378.35", "AUD");
 
         // Sunday 01:30 UTC: Saturday 2026-06-06 is a complete crypto day.
-        run_collection(&pool, &fetcher, utc(2026, 6, 7, 1, 30)).await.unwrap();
-        let row = db_get_one(&pool, 1, ymd(2026, 6, 6)).await.unwrap().unwrap();
+        run_collection(&pool, &fetcher, utc(2026, 6, 7, 1, 30))
+            .await
+            .unwrap();
+        let row = db_get_one(&pool, 1, ymd(2026, 6, 6))
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(row.status, PriceStatus::Ok);
         assert_eq!(row.price, Some("86378.35".parse().unwrap()));
     }
@@ -1399,7 +1514,9 @@ mod tests {
         // Week of Mon 2026-06-01 .. Fri 2026-06-05; Wednesday already stored ok.
         let pre = StubFetcher::default().with_close(1, ymd(2026, 6, 3), "64.91", "AUD");
         let market = load_market(&pool, 1).await.unwrap().unwrap();
-        fetch_and_store(&pool, &pre, &market, &[ymd(2026, 6, 3)]).await.unwrap();
+        fetch_and_store(&pool, &pre, &market, &[ymd(2026, 6, 3)])
+            .await
+            .unwrap();
 
         let fetcher = StubFetcher::default()
             .with_close(1, ymd(2026, 6, 1), "62.48", "AUD")
@@ -1415,7 +1532,12 @@ mod tests {
             serde_json::json!({ "listing_id": 1, "from": "2026-05-30", "to": "2026-06-06" }),
         )
         .await;
-        assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&bytes));
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
         let summary: BackfillSummary = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(summary.trading_days, 5);
         assert_eq!(summary.already_stored, 1);
@@ -1427,7 +1549,10 @@ mod tests {
         assert!(rows.iter().all(|r| r.status == PriceStatus::Ok));
         // Wednesday kept its original fetch (source "stub" both ways, but the
         // pre-stored price is unchanged).
-        let wed = db_get_one(&pool, 1, ymd(2026, 6, 3)).await.unwrap().unwrap();
+        let wed = db_get_one(&pool, 1, ymd(2026, 6, 3))
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(wed.price, Some("64.91".parse().unwrap()));
     }
 
@@ -1455,7 +1580,10 @@ mod tests {
         assert_eq!(summary.fetched_ok, 2);
         assert_eq!(summary.errored, 3);
 
-        let row = db_get_one(&pool, 1, ymd(2026, 6, 2)).await.unwrap().unwrap();
+        let row = db_get_one(&pool, 1, ymd(2026, 6, 2))
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(row.status, PriceStatus::Error);
         assert!(row.error.as_deref().unwrap().contains("no candle"));
     }
@@ -1490,9 +1618,13 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
         insert_buy(&pool, 1, 1, "100").await;
-        run_collection(&pool, &StubFetcher::failing("down"), friday_evening_sydney())
-            .await
-            .unwrap_err();
+        run_collection(
+            &pool,
+            &StubFetcher::failing("down"),
+            friday_evening_sydney(),
+        )
+        .await
+        .unwrap_err();
 
         let fetcher = StubFetcher::default().with_close(1, ymd(2026, 6, 5), "62.48", "AUD");
         let app = full_router(pool.clone(), fetcher);
@@ -1507,8 +1639,15 @@ mod tests {
         assert_eq!(row.status, PriceStatus::Ok);
         assert_eq!(row.price, Some("62.48".parse().unwrap()));
 
-        let stored = db_get_one(&pool, 1, ymd(2026, 6, 5)).await.unwrap().unwrap();
-        assert_eq!(stored.status, PriceStatus::Ok, "the errored row was replaced");
+        let stored = db_get_one(&pool, 1, ymd(2026, 6, 5))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            stored.status,
+            PriceStatus::Ok,
+            "the errored row was replaced"
+        );
     }
 
     #[tokio::test]
@@ -1559,10 +1698,17 @@ mod tests {
         let ok = StubFetcher::default()
             .with_close(1, ymd(2026, 6, 4), "62.80", "AUD")
             .with_close(1, ymd(2026, 6, 5), "61.24", "AUD");
-        fetch_and_store(&pool, &ok, &market1, &[ymd(2026, 6, 4), ymd(2026, 6, 5)]).await.unwrap();
-        fetch_and_store(&pool, &StubFetcher::failing("down"), &market2, &[ymd(2026, 6, 5)])
+        fetch_and_store(&pool, &ok, &market1, &[ymd(2026, 6, 4), ymd(2026, 6, 5)])
             .await
             .unwrap();
+        fetch_and_store(
+            &pool,
+            &StubFetcher::failing("down"),
+            &market2,
+            &[ymd(2026, 6, 5)],
+        )
+        .await
+        .unwrap();
 
         let app = full_router(pool, StubFetcher::default());
         let get = |uri: &str| {
@@ -1579,7 +1725,11 @@ mod tests {
             }
         };
 
-        assert_eq!(get("/closing_prices").await.len(), 3, "errored rows are listed too");
+        assert_eq!(
+            get("/closing_prices").await.len(),
+            3,
+            "errored rows are listed too"
+        );
         assert_eq!(get("/closing_prices?listing_id=1").await.len(), 2);
         let one_day = get("/closing_prices?from=2026-06-05&to=2026-06-05").await;
         assert_eq!(one_day.len(), 2);
@@ -1594,16 +1744,20 @@ mod tests {
         insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
         insert_listing(&pool, 2, "ICE", "XNYS", "USD").await;
         // 2 USD per AUD for June 2026 → US$141.50 = A$70.75.
-        sqlx::query("INSERT INTO rba_fx_rates (currency, month, rate) VALUES ('USD', '2026-06', '2')")
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "INSERT INTO rba_fx_rates (currency, month, rate) VALUES ('USD', '2026-06', '2')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
         let as_of = utc(2026, 6, 5, 6, 30);
         let fetcher = StubFetcher::default()
             .with_quote(1, "62.48", "AUD", as_of)
             .with_quote(2, "141.50", "USD", as_of);
 
-        let prices = fetch_live_aud_prices(&pool, &fetcher, &[1, 2]).await.unwrap();
+        let prices = fetch_live_aud_prices(&pool, &fetcher, &[1, 2])
+            .await
+            .unwrap();
         let bhp = prices[&1].as_ref().unwrap();
         assert_eq!(bhp.aud_price, "62.48".parse::<Decimal>().unwrap());
         assert_eq!(bhp.as_of, as_of.to_rfc3339());
@@ -1632,7 +1786,9 @@ mod tests {
 
         // Listing 3: USD quote but no ATO rate imported for the quote month.
         let unconvertible = StubFetcher::default().with_quote(3, "10.00", "USD", as_of);
-        let u = fetch_live_aud_prices(&pool, &unconvertible, &[3]).await.unwrap();
+        let u = fetch_live_aud_prices(&pool, &unconvertible, &[3])
+            .await
+            .unwrap();
         assert!(u[&3].as_ref().unwrap_err().contains("no ATO FX rate"));
     }
 
@@ -1642,8 +1798,9 @@ mod tests {
         insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
         insert_listing(&pool, 2, "WBC", "XASX", "AUD").await;
         let as_of = utc(2026, 6, 5, 6, 30);
-        let fetcher =
-            StubFetcher::default().with_quote(1, "62.48", "AUD", as_of).with_quote(2, "30", "AUD", as_of);
+        let fetcher = StubFetcher::default()
+            .with_quote(1, "62.48", "AUD", as_of)
+            .with_quote(2, "30", "AUD", as_of);
 
         // live = false → nothing fetched.
         let off = resolve_live_prices(&pool, Some(&fetcher), false, &HashMap::new(), [1, 2])
@@ -1653,7 +1810,9 @@ mod tests {
 
         // live = true, listing 1 overridden → only listing 2 is fetched.
         let overrides = HashMap::from([(1i64, "99".parse::<Decimal>().unwrap())]);
-        let on = resolve_live_prices(&pool, Some(&fetcher), true, &overrides, [1, 2]).await.unwrap();
+        let on = resolve_live_prices(&pool, Some(&fetcher), true, &overrides, [1, 2])
+            .await
+            .unwrap();
         assert!(!on.contains_key(&1), "overridden listing is never fetched");
         assert_eq!(on[&2].as_ref().unwrap().aud_price, Decimal::from(30));
 
@@ -1697,7 +1856,9 @@ mod tests {
         // duplicate (listing, date) is rejected by the primary key.
         let market = load_market(&pool, 1).await.unwrap().unwrap();
         let ok = StubFetcher::default().with_close(1, ymd(2026, 6, 5), "62.48", "AUD");
-        fetch_and_store(&pool, &ok, &market, &[ymd(2026, 6, 5)]).await.unwrap();
+        fetch_and_store(&pool, &ok, &market, &[ymd(2026, 6, 5)])
+            .await
+            .unwrap();
         let dup = sqlx::query(
             "INSERT INTO closing_prices (listing_id, price_date, price, source, fetched_at, status, error) \
              VALUES (1, '2026-06-05', '1.23', 'stub', 'now', 'ok', NULL)",
@@ -1726,9 +1887,19 @@ mod tests {
             amit: false,
             preference: false,
         };
-        assert_eq!(yahoo_symbol(&mk(Some("XASX"), "BHP", "AUD")).unwrap(), "BHP.AX");
-        assert_eq!(yahoo_symbol(&mk(Some("XNYS"), "ICE", "USD")).unwrap(), "ICE");
+        assert_eq!(
+            yahoo_symbol(&mk(Some("XASX"), "BHP", "AUD")).unwrap(),
+            "BHP.AX"
+        );
+        assert_eq!(
+            yahoo_symbol(&mk(Some("XNYS"), "ICE", "USD")).unwrap(),
+            "ICE"
+        );
         assert_eq!(yahoo_symbol(&mk(None, "BTC", "AUD")).unwrap(), "BTC-AUD");
-        assert!(yahoo_symbol(&mk(Some("XLON"), "BARC", "GBP")).unwrap_err().contains("XLON"));
+        assert!(
+            yahoo_symbol(&mk(Some("XLON"), "BARC", "GBP"))
+                .unwrap_err()
+                .contains("XLON")
+        );
     }
 }

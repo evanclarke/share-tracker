@@ -27,8 +27,7 @@ use std::collections::HashSet;
 /// SIX Group "List One" — the official machine-readable ISO 4217 currency list.
 /// SIX is the ISO 4217 Maintenance Agency (on behalf of the SNV) and publishes
 /// this free of charge.
-const ISO_4217_URL: &str =
-    "https://www.six-group.com/dam/download/financial-information/data-center/iso-currrency/lists/list-one.xml";
+const ISO_4217_URL: &str = "https://www.six-group.com/dam/download/financial-information/data-center/iso-currrency/lists/list-one.xml";
 
 /// DTIF registry snapshot — the ISO 24165 Digital Token Identifier registry,
 /// maintained by the DTI Foundation (the ISO 24165 Registration Authority) and
@@ -163,8 +162,12 @@ pub fn parse_iso4217(content: &str) -> Result<Vec<Currency>, ImportError> {
 
     let mut in_entry = false;
     let mut cur_tag: Option<Vec<u8>> = None;
-    let (mut name, mut ccy, mut nbr, mut minor) =
-        (None::<String>, None::<String>, None::<String>, None::<String>);
+    let (mut name, mut ccy, mut nbr, mut minor) = (
+        None::<String>,
+        None::<String>,
+        None::<String>,
+        None::<String>,
+    );
 
     loop {
         match reader.read_event() {
@@ -183,8 +186,11 @@ pub fn parse_iso4217(content: &str) -> Result<Vec<Currency>, ImportError> {
             }
             Ok(Event::Text(t)) if in_entry => {
                 if let Some(tag) = &cur_tag {
-                    let text =
-                        t.unescape().map_err(|e| ImportError::Parse(e.to_string()))?.trim().to_string();
+                    let text = t
+                        .unescape()
+                        .map_err(|e| ImportError::Parse(e.to_string()))?
+                        .trim()
+                        .to_string();
                     match tag.as_slice() {
                         b"CcyNm" => name = Some(text),
                         b"Ccy" => ccy = Some(text),
@@ -230,7 +236,9 @@ pub fn parse_iso4217(content: &str) -> Result<Vec<Currency>, ImportError> {
     }
 
     if out.is_empty() {
-        return Err(ImportError::Parse("ISO 4217 feed contained no currency entries".into()));
+        return Err(ImportError::Parse(
+            "ISO 4217 feed contained no currency entries".into(),
+        ));
     }
     Ok(out)
 }
@@ -254,7 +262,11 @@ pub fn parse_iso24165(content: &str) -> Result<Vec<Currency>, ImportError> {
     let mut out = Vec::new();
     let mut seen = HashSet::new();
     for rec in records {
-        let dti = match rec.get("Header").and_then(|h| h.get("DTI")).and_then(Value::as_str) {
+        let dti = match rec
+            .get("Header")
+            .and_then(|h| h.get("DTI"))
+            .and_then(Value::as_str)
+        {
             Some(d) if !d.is_empty() => d.to_string(),
             _ => continue, // not a token record (no DTI) — skip like the DTIF tooling
         };
@@ -267,7 +279,9 @@ pub fn parse_iso24165(content: &str) -> Result<Vec<Currency>, ImportError> {
             .and_then(Value::as_str)
             .map(str::to_string)
             .unwrap_or_else(|| dti.clone());
-        let short_name = informative.and_then(|i| i.get("ShortNames")).and_then(first_short_name);
+        let short_name = informative
+            .and_then(|i| i.get("ShortNames"))
+            .and_then(first_short_name);
         out.push(Currency {
             code: dti,
             kind: CurrencyKind::DigitalToken,
@@ -280,7 +294,9 @@ pub fn parse_iso24165(content: &str) -> Result<Vec<Currency>, ImportError> {
     }
 
     if out.is_empty() {
-        return Err(ImportError::Parse("DTI feed contained no token records".into()));
+        return Err(ImportError::Parse(
+            "DTI feed contained no token records".into(),
+        ));
     }
     Ok(out)
 }
@@ -290,9 +306,11 @@ pub fn parse_iso24165(content: &str) -> Result<Vec<Currency>, ImportError> {
 /// a bare string.
 fn first_short_name(value: &Value) -> Option<String> {
     fn one(v: &Value) -> Option<String> {
-        v.as_str()
-            .map(str::to_string)
-            .or_else(|| v.get("ShortName").and_then(Value::as_str).map(str::to_string))
+        v.as_str().map(str::to_string).or_else(|| {
+            v.get("ShortName")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
     }
     match value {
         Value::Array(items) => items.iter().find_map(one),
@@ -324,7 +342,9 @@ pub async fn import_from_content(
         db_upsert(&mut *tx, currency).await?;
     }
     tx.commit().await?;
-    Ok(ImportSummary { imported: currencies.len() })
+    Ok(ImportSummary {
+        imported: currencies.len(),
+    })
 }
 
 /// Fetch and import both feeds: the ISO 4217 fiat list (free) always, and the
@@ -335,7 +355,10 @@ pub async fn run_import(pool: &SqlitePool) -> Result<ImportSummary, ImportError>
     let fiat = fetch(ISO_4217_URL, None).await?;
     let mut summary = import_from_content(pool, &fiat).await?;
 
-    match (std::env::var("DTI_REGISTRY_USER_ID"), std::env::var("DTI_REGISTRY_PASSWORD")) {
+    match (
+        std::env::var("DTI_REGISTRY_USER_ID"),
+        std::env::var("DTI_REGISTRY_PASSWORD"),
+    ) {
         (Ok(user), Ok(pass)) => {
             let tokens = fetch(ISO_24165_URL, Some((&user, &pass))).await?;
             let token_summary = import_from_content(pool, &tokens).await?;
@@ -361,7 +384,9 @@ async fn fetch(url: &str, basic_auth: Option<(&str, &str)>) -> Result<String, Im
         .map_err(|e| ImportError::Fetch(e.to_string()))?
         .error_for_status()
         .map_err(|e| ImportError::Fetch(e.to_string()))?;
-    resp.text().await.map_err(|e| ImportError::Fetch(e.to_string()))
+    resp.text()
+        .await
+        .map_err(|e| ImportError::Fetch(e.to_string()))
 }
 
 async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<Currency>>, ApiError> {
@@ -403,10 +428,9 @@ impl From<ImportError> for ApiError {
                 ApiError::unprocessable(format!("the currency feed is malformed: {msg}"))
             }
             // The upstream fetch error is logged when the response is built.
-            ImportError::Fetch(msg) => ApiError::bad_gateway(
-                "could not fetch the currency feed from its source",
-                msg,
-            ),
+            ImportError::Fetch(msg) => {
+                ApiError::bad_gateway("could not fetch the currency feed from its source", msg)
+            }
             ImportError::Db(err) => err.into(),
         }
     }
@@ -415,8 +439,8 @@ impl From<ImportError> for ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::http::StatusCode;
     use crate::infra::db;
+    use axum::http::StatusCode;
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
     use tower::ServiceExt;
@@ -522,13 +546,15 @@ mod tests {
         let mut renamed = aud();
         renamed.name = "Aussie Dollar".to_string();
         db_upsert(&pool, &renamed).await.unwrap();
-        let count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM currencies WHERE code = 'AUD'")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM currencies WHERE code = 'AUD'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
         assert_eq!(count, 1);
-        assert_eq!(db_get(&pool, "AUD").await.unwrap().unwrap().name, "Aussie Dollar");
+        assert_eq!(
+            db_get(&pool, "AUD").await.unwrap().unwrap().name,
+            "Aussie Dollar"
+        );
     }
 
     #[tokio::test]
@@ -539,7 +565,10 @@ mod tests {
         )
         .execute(&pool)
         .await;
-        assert!(err.is_err(), "CHECK constraint should reject an unknown kind");
+        assert!(
+            err.is_err(),
+            "CHECK constraint should reject an unknown kind"
+        );
     }
 
     #[tokio::test]
@@ -550,7 +579,10 @@ mod tests {
         )
         .execute(&pool)
         .await;
-        assert!(err.is_err(), "CHECK constraint should reject an unknown source");
+        assert!(
+            err.is_err(),
+            "CHECK constraint should reject an unknown source"
+        );
     }
 
     // Parsing tests
@@ -578,7 +610,10 @@ mod tests {
     fn parse_iso4217_errors_on_malformed_minor_units() {
         let xml = "<ISO_4217><CcyTbl><CcyNtry><CcyNm>Bad</CcyNm><Ccy>BAD</Ccy>\
             <CcyNbr>999</CcyNbr><CcyMnrUnts>two</CcyMnrUnts></CcyNtry></CcyTbl></ISO_4217>";
-        assert!(matches!(parse_iso4217(xml).unwrap_err(), ImportError::Parse(_)));
+        assert!(matches!(
+            parse_iso4217(xml).unwrap_err(),
+            ImportError::Parse(_)
+        ));
     }
 
     #[test]
@@ -601,7 +636,10 @@ mod tests {
 
     #[test]
     fn parse_iso24165_errors_when_records_missing() {
-        assert!(matches!(parse_iso24165("{\"foo\": 1}").unwrap_err(), ImportError::Parse(_)));
+        assert!(matches!(
+            parse_iso24165("{\"foo\": 1}").unwrap_err(),
+            ImportError::Parse(_)
+        ));
     }
 
     // Import
@@ -615,7 +653,10 @@ mod tests {
         let first = import_from_content(&pool, SAMPLE_XML).await.unwrap();
         assert_eq!(first, ImportSummary { imported: 3 });
         let after_first = db_list(&pool).await.unwrap().len();
-        assert!(db_get(&pool, "XAU").await.unwrap().is_some(), "import added the new XAU row");
+        assert!(
+            db_get(&pool, "XAU").await.unwrap().is_some(),
+            "import added the new XAU row"
+        );
 
         // Re-running upserts the same rows: no duplicates, count unchanged.
         let second = import_from_content(&pool, SAMPLE_XML).await.unwrap();
@@ -639,8 +680,14 @@ mod tests {
         import_from_content(&pool, SAMPLE_XML).await.unwrap();
         import_from_content(&pool, SAMPLE_JSON).await.unwrap();
         // Fiat and tokens live in the same table, keyed by code.
-        assert_eq!(db_get(&pool, "AUD").await.unwrap().unwrap().kind, CurrencyKind::Fiat);
-        assert_eq!(db_get(&pool, "XAU").await.unwrap().unwrap().kind, CurrencyKind::Fiat);
+        assert_eq!(
+            db_get(&pool, "AUD").await.unwrap().unwrap().kind,
+            CurrencyKind::Fiat
+        );
+        assert_eq!(
+            db_get(&pool, "XAU").await.unwrap().unwrap().kind,
+            CurrencyKind::Fiat
+        );
         assert_eq!(
             db_get(&pool, "4H95J0R2X").await.unwrap().unwrap().kind,
             CurrencyKind::DigitalToken
@@ -651,7 +698,9 @@ mod tests {
     async fn import_rejects_unrecognised_feed() {
         let pool = test_pool().await;
         assert!(matches!(
-            import_from_content(&pool, "code,name\nAUD,Dollar").await.unwrap_err(),
+            import_from_content(&pool, "code,name\nAUD,Dollar")
+                .await
+                .unwrap_err(),
             ImportError::Parse(_)
         ));
     }
@@ -664,7 +713,12 @@ mod tests {
         db_upsert(&pool, &aud()).await.unwrap();
         let resp = router()
             .with_state(pool)
-            .oneshot(Request::builder().uri("/currencies").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/currencies")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -680,7 +734,12 @@ mod tests {
         db_upsert(&pool, &aud()).await.unwrap();
         let resp = router()
             .with_state(pool)
-            .oneshot(Request::builder().uri("/currencies/AUD").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/currencies/AUD")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -694,7 +753,12 @@ mod tests {
         let pool = test_pool().await;
         let resp = router()
             .with_state(pool)
-            .oneshot(Request::builder().uri("/currencies/ZZZ").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/currencies/ZZZ")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);

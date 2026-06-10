@@ -1,3 +1,4 @@
+use crate::infra::decimal::{row_dec, row_opt_dec};
 use crate::infra::http::ApiError;
 use axum::{
     Json, Router,
@@ -6,7 +7,6 @@ use axum::{
     routing::get,
 };
 use chrono::NaiveDate;
-use crate::infra::decimal::{row_dec, row_opt_dec};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
@@ -351,10 +351,7 @@ pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<DeleteOutcome, sqlx
 }
 
 async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<Income>>, ApiError> {
-    db_list(&pool)
-        .await
-        .map(Json)
-        .map_err(ApiError::from)
+    db_list(&pool).await.map(Json).map_err(ApiError::from)
 }
 
 async fn get_one(
@@ -437,7 +434,10 @@ async fn delete(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{infra::db, entities::{listing, trade}};
+    use crate::{
+        entities::{listing, trade},
+        infra::db,
+    };
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
     use rust_decimal::Decimal;
@@ -537,7 +537,10 @@ mod tests {
         assert_eq!(got.franked_amount, Decimal::from(70));
         assert_eq!(got.unfranked_amount, Decimal::from(30));
         assert_eq!(got.franking_credits, Decimal::from(30));
-        assert_eq!(got.ex_date, Some(NaiveDate::from_ymd_opt(2024, 3, 1).unwrap()));
+        assert_eq!(
+            got.ex_date,
+            Some(NaiveDate::from_ymd_opt(2024, 3, 1).unwrap())
+        );
         assert!(!got.trust_income);
         assert!(got.reinvestment_trade_id.is_none());
     }
@@ -653,7 +656,12 @@ mod tests {
         db_upsert(&pool, &dividend_income()).await.unwrap();
         let resp = router()
             .with_state(pool)
-            .oneshot(Request::builder().uri("/income").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/income")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -667,7 +675,12 @@ mod tests {
         let pool = test_pool().await;
         let resp = router()
             .with_state(pool)
-            .oneshot(Request::builder().uri("/income/999").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/income/999")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
@@ -735,19 +748,37 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
         let resp = router()
             .with_state(pool)
-            .oneshot(Request::builder().uri("/income/1").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/income/1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let inc: Income = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(inc.franked_amount, "70.123456789".parse::<Decimal>().unwrap());
-        assert_eq!(inc.unfranked_amount, "29.876543211".parse::<Decimal>().unwrap());
-        assert_eq!(inc.franking_credits, "30.052631578".parse::<Decimal>().unwrap());
+        assert_eq!(
+            inc.franked_amount,
+            "70.123456789".parse::<Decimal>().unwrap()
+        );
+        assert_eq!(
+            inc.unfranked_amount,
+            "29.876543211".parse::<Decimal>().unwrap()
+        );
+        assert_eq!(
+            inc.franking_credits,
+            "30.052631578".parse::<Decimal>().unwrap()
+        );
     }
 
     // Per-share cross-check tests
 
-    async fn put_income(pool: &SqlitePool, id: i64, body: serde_json::Value) -> (StatusCode, String) {
+    async fn put_income(
+        pool: &SqlitePool,
+        id: i64,
+        body: serde_json::Value,
+    ) -> (StatusCode, String) {
         let resp = router()
             .with_state(pool.clone())
             .oneshot(
@@ -832,7 +863,10 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         // The rejection carries the computed product so the typo is findable.
-        assert!(detail.contains("2954.25"), "detail should cite the product: {detail}");
+        assert!(
+            detail.contains("2954.25"),
+            "detail should cite the product: {detail}"
+        );
         assert!(db_get(&pool, 1).await.unwrap().is_none());
     }
 
@@ -925,12 +959,20 @@ mod tests {
         assert_eq!(status, StatusCode::NO_CONTENT);
         let resp = router()
             .with_state(pool)
-            .oneshot(Request::builder().uri("/income/1").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/income/1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let inc: Income = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(inc.amount_per_security, Some("0.89891492".parse::<Decimal>().unwrap()));
+        assert_eq!(
+            inc.amount_per_security,
+            Some("0.89891492".parse::<Decimal>().unwrap())
+        );
         assert_eq!(inc.securities_held, Some(Decimal::from(866)));
     }
 
@@ -946,7 +988,10 @@ mod tests {
         dist.entitlement_date = Some(NaiveDate::from_ymd_opt(2026, 6, 30).unwrap());
         db_upsert(&pool, &dist).await.unwrap();
         let got = db_get(&pool, 1).await.unwrap().unwrap();
-        assert_eq!(got.entitlement_date, Some(NaiveDate::from_ymd_opt(2026, 6, 30).unwrap()));
+        assert_eq!(
+            got.entitlement_date,
+            Some(NaiveDate::from_ymd_opt(2026, 6, 30).unwrap())
+        );
     }
 
     #[tokio::test]
@@ -999,12 +1044,20 @@ mod tests {
         assert_eq!(status, StatusCode::NO_CONTENT);
         let resp = router()
             .with_state(pool)
-            .oneshot(Request::builder().uri("/income/1").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/income/1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let inc: Income = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(inc.entitlement_date, Some(NaiveDate::from_ymd_opt(2026, 6, 30).unwrap()));
+        assert_eq!(
+            inc.entitlement_date,
+            Some(NaiveDate::from_ymd_opt(2026, 6, 30).unwrap())
+        );
         assert!(inc.trust_income);
     }
 }

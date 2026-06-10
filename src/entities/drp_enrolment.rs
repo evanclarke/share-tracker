@@ -19,8 +19,8 @@
 //! transaction. Deleting a period record means "it never existed" and settles
 //! nothing.
 
-use crate::infra::http::ApiError;
 use crate::infra::decimal::parse_dec;
+use crate::infra::http::ApiError;
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -91,9 +91,10 @@ impl From<sqlx::Error> for UpsertError {
 }
 
 pub fn router() -> Router<SqlitePool> {
-    Router::new()
-        .route("/drp_enrolments", get(list))
-        .route("/drp_enrolments/{id}", get(get_one).put(upsert).delete(delete))
+    Router::new().route("/drp_enrolments", get(list)).route(
+        "/drp_enrolments/{id}",
+        get(get_one).put(upsert).delete(delete),
+    )
 }
 
 const COLUMNS: &str =
@@ -109,10 +110,12 @@ pub async fn db_list(pool: &SqlitePool) -> Result<Vec<DrpEnrolment>, sqlx::Error
 }
 
 pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<DrpEnrolment>, sqlx::Error> {
-    sqlx::query_as(&format!("SELECT {COLUMNS} FROM drp_enrolments WHERE id = ?"))
-        .bind(id)
-        .fetch_optional(pool)
-        .await
+    sqlx::query_as(&format!(
+        "SELECT {COLUMNS} FROM drp_enrolments WHERE id = ?"
+    ))
+    .bind(id)
+    .fetch_optional(pool)
+    .await
 }
 
 /// Upsert an enrolment period, enforcing the no-overlap invariant and settling
@@ -216,10 +219,7 @@ pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<bool, sqlx::Error> 
 }
 
 async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<DrpEnrolment>>, ApiError> {
-    db_list(&pool)
-        .await
-        .map(Json)
-        .map_err(ApiError::from)
+    db_list(&pool).await.map(Json).map_err(ApiError::from)
 }
 
 async fn get_one(
@@ -253,9 +253,9 @@ async fn upsert(
 impl From<UpsertError> for ApiError {
     fn from(e: UpsertError) -> Self {
         match e {
-            UpsertError::EmptyPeriod => ApiError::unprocessable(
-                "the unenrolment date must be after the enrolment date",
-            ),
+            UpsertError::EmptyPeriod => {
+                ApiError::unprocessable("the unenrolment date must be after the enrolment date")
+            }
             UpsertError::Overlap => ApiError::unprocessable(
                 "this period overlaps an existing enrolment for the same listing and account \
                  (a listing can have at most one open period per account)",
@@ -272,7 +272,13 @@ async fn delete(
 ) -> Result<StatusCode, ApiError> {
     db_delete(&pool, id)
         .await
-        .map(|found| if found { StatusCode::NO_CONTENT } else { StatusCode::NOT_FOUND })
+        .map(|found| {
+            if found {
+                StatusCode::NO_CONTENT
+            } else {
+                StatusCode::NOT_FOUND
+            }
+        })
         .map_err(ApiError::from)
 }
 
@@ -332,13 +338,19 @@ mod tests {
     async fn db_insert_and_retrieve_period() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        db_upsert(&pool, &period(1, 1, "2024-01-01", None, ResidualHandling::PayOut))
-            .await
-            .unwrap();
+        db_upsert(
+            &pool,
+            &period(1, 1, "2024-01-01", None, ResidualHandling::PayOut),
+        )
+        .await
+        .unwrap();
         let got = db_get(&pool, 1).await.unwrap().unwrap();
         assert_eq!(got.listing_id, 1);
         assert_eq!(got.enrolment_date, d("2024-01-01"));
-        assert_eq!(got.unenrolment_date, None, "open-ended = currently enrolled");
+        assert_eq!(
+            got.unenrolment_date, None,
+            "open-ended = currently enrolled"
+        );
         assert_eq!(got.residual_handling, ResidualHandling::PayOut);
     }
 
@@ -348,12 +360,24 @@ mod tests {
         insert_listing(&pool, 1).await;
         // Enrolled, unenrolled, then re-enrolled open-ended with a different
         // residual handling — the exact history the period model exists for.
-        db_upsert(&pool, &period(1, 1, "2023-01-01", Some("2024-01-01"), ResidualHandling::CarryForward))
-            .await
-            .unwrap();
-        db_upsert(&pool, &period(2, 1, "2025-01-01", None, ResidualHandling::PayOut))
-            .await
-            .unwrap();
+        db_upsert(
+            &pool,
+            &period(
+                1,
+                1,
+                "2023-01-01",
+                Some("2024-01-01"),
+                ResidualHandling::CarryForward,
+            ),
+        )
+        .await
+        .unwrap();
+        db_upsert(
+            &pool,
+            &period(2, 1, "2025-01-01", None, ResidualHandling::PayOut),
+        )
+        .await
+        .unwrap();
         let all = db_list(&pool).await.unwrap();
         assert_eq!(all.len(), 2);
         assert_eq!(all[0].unenrolment_date, Some(d("2024-01-01")));
@@ -365,54 +389,90 @@ mod tests {
     async fn db_overlapping_periods_rejected() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        db_upsert(&pool, &period(1, 1, "2024-01-01", Some("2024-06-01"), ResidualHandling::CarryForward))
-            .await
-            .unwrap();
+        db_upsert(
+            &pool,
+            &period(
+                1,
+                1,
+                "2024-01-01",
+                Some("2024-06-01"),
+                ResidualHandling::CarryForward,
+            ),
+        )
+        .await
+        .unwrap();
 
         // Closed period starting inside the existing one.
         let err = db_upsert(
             &pool,
-            &period(2, 1, "2024-03-01", Some("2024-09-01"), ResidualHandling::CarryForward),
+            &period(
+                2,
+                1,
+                "2024-03-01",
+                Some("2024-09-01"),
+                ResidualHandling::CarryForward,
+            ),
         )
         .await
         .unwrap_err();
         assert!(matches!(err, UpsertError::Overlap));
 
         // Open period starting before the existing one ends.
-        let err = db_upsert(&pool, &period(2, 1, "2024-05-31", None, ResidualHandling::CarryForward))
-            .await
-            .unwrap_err();
+        let err = db_upsert(
+            &pool,
+            &period(2, 1, "2024-05-31", None, ResidualHandling::CarryForward),
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(err, UpsertError::Overlap));
 
         // Touching is not overlapping: the next period may start the day the
         // previous one's unenrolment takes effect.
-        db_upsert(&pool, &period(2, 1, "2024-06-01", None, ResidualHandling::CarryForward))
-            .await
-            .unwrap();
+        db_upsert(
+            &pool,
+            &period(2, 1, "2024-06-01", None, ResidualHandling::CarryForward),
+        )
+        .await
+        .unwrap();
 
         // Overlap on a different listing is fine.
         insert_listing(&pool, 2).await;
-        db_upsert(&pool, &period(3, 2, "2024-03-01", None, ResidualHandling::CarryForward))
-            .await
-            .unwrap();
+        db_upsert(
+            &pool,
+            &period(3, 2, "2024-03-01", None, ResidualHandling::CarryForward),
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
     async fn db_two_open_periods_rejected() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        db_upsert(&pool, &period(1, 1, "2023-01-01", None, ResidualHandling::CarryForward))
-            .await
-            .unwrap();
+        db_upsert(
+            &pool,
+            &period(1, 1, "2023-01-01", None, ResidualHandling::CarryForward),
+        )
+        .await
+        .unwrap();
         // A second open period — even starting later — always overlaps an open one.
-        let err = db_upsert(&pool, &period(2, 1, "2025-01-01", None, ResidualHandling::CarryForward))
-            .await
-            .unwrap_err();
+        let err = db_upsert(
+            &pool,
+            &period(2, 1, "2025-01-01", None, ResidualHandling::CarryForward),
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(err, UpsertError::Overlap));
         // And a later closed period overlaps the open one too.
         let err = db_upsert(
             &pool,
-            &period(2, 1, "2025-01-01", Some("2026-01-01"), ResidualHandling::CarryForward),
+            &period(
+                2,
+                1,
+                "2025-01-01",
+                Some("2026-01-01"),
+                ResidualHandling::CarryForward,
+            ),
         )
         .await
         .unwrap_err();
@@ -424,10 +484,22 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
         for end in ["2024-01-01", "2023-12-31"] {
-            let err = db_upsert(&pool, &period(1, 1, "2024-01-01", Some(end), ResidualHandling::CarryForward))
-                .await
-                .unwrap_err();
-            assert!(matches!(err, UpsertError::EmptyPeriod), "end {end} is not after start");
+            let err = db_upsert(
+                &pool,
+                &period(
+                    1,
+                    1,
+                    "2024-01-01",
+                    Some(end),
+                    ResidualHandling::CarryForward,
+                ),
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                matches!(err, UpsertError::EmptyPeriod),
+                "end {end} is not after start"
+            );
         }
     }
 
@@ -435,10 +507,16 @@ mod tests {
     async fn db_listing_fk_enforced() {
         let pool = test_pool().await;
         // No listing 99 exists → FK violation.
-        let err = db_upsert(&pool, &period(1, 99, "2024-01-01", None, ResidualHandling::CarryForward))
-            .await
-            .unwrap_err();
-        assert!(matches!(err, UpsertError::Db(_)), "FK to listings should reject an unknown listing_id");
+        let err = db_upsert(
+            &pool,
+            &period(1, 99, "2024-01-01", None, ResidualHandling::CarryForward),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, UpsertError::Db(_)),
+            "FK to listings should reject an unknown listing_id"
+        );
     }
 
     #[tokio::test]
@@ -451,12 +529,22 @@ mod tests {
         )
         .execute(&pool)
         .await;
-        assert!(err.is_err(), "CHECK constraint should reject an unknown residual_handling");
+        assert!(
+            err.is_err(),
+            "CHECK constraint should reject an unknown residual_handling"
+        );
     }
 
     /// Insert a DRP trade directly (the shape `drp_reinvestment` creates) so the
     /// unenrolment settlement has a residual chain to act on.
-    async fn insert_drp_trade(pool: &SqlitePool, id: i64, listing_id: i64, date: &str, carried: &str, paid: &str) {
+    async fn insert_drp_trade(
+        pool: &SqlitePool,
+        id: i64,
+        listing_id: i64,
+        date: &str,
+        carried: &str,
+        paid: &str,
+    ) {
         sqlx::query(
             "INSERT INTO trades \
              (id, trade_type, date, settlement_date, listing_id, average_price, quantity, currency, \
@@ -476,40 +564,72 @@ mod tests {
     }
 
     async fn residuals(pool: &SqlitePool, trade_id: i64) -> (String, String) {
-        sqlx::query_as("SELECT residual_carried_forward, residual_paid_out FROM trades WHERE id = ?")
-            .bind(trade_id)
-            .fetch_one(pool)
-            .await
-            .unwrap()
+        sqlx::query_as(
+            "SELECT residual_carried_forward, residual_paid_out FROM trades WHERE id = ?",
+        )
+        .bind(trade_id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
     }
 
     #[tokio::test]
     async fn db_unenrolment_pays_out_trailing_carried_residual() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        db_upsert(&pool, &period(1, 1, "2024-01-01", None, ResidualHandling::CarryForward))
-            .await
-            .unwrap();
+        db_upsert(
+            &pool,
+            &period(1, 1, "2024-01-01", None, ResidualHandling::CarryForward),
+        )
+        .await
+        .unwrap();
         // Two reinvestments in the period; only the latest carries the trailing residual.
         insert_drp_trade(&pool, 10, 1, "2024-03-31", "1", "0").await;
         insert_drp_trade(&pool, 11, 1, "2024-09-30", "2.50", "0").await;
 
         // Unenrol: the open period is closed and the trailing residual paid out.
-        db_upsert(&pool, &period(1, 1, "2024-01-01", Some("2025-01-01"), ResidualHandling::CarryForward))
-            .await
-            .unwrap();
+        db_upsert(
+            &pool,
+            &period(
+                1,
+                1,
+                "2024-01-01",
+                Some("2025-01-01"),
+                ResidualHandling::CarryForward,
+            ),
+        )
+        .await
+        .unwrap();
 
         let (carried, paid) = residuals(&pool, 11).await;
         assert_eq!(carried, "0", "the refunded residual is no longer carried");
-        assert_eq!(paid, "2.50", "the registry refunds the leftover at unenrolment");
+        assert_eq!(
+            paid, "2.50",
+            "the registry refunds the leftover at unenrolment"
+        );
         // The earlier reinvestment's historical snapshot is untouched.
-        assert_eq!(residuals(&pool, 10).await, ("1".to_string(), "0".to_string()));
+        assert_eq!(
+            residuals(&pool, 10).await,
+            ("1".to_string(), "0".to_string())
+        );
 
         // Re-saving the closed period is idempotent — nothing is paid twice.
-        db_upsert(&pool, &period(1, 1, "2024-01-01", Some("2025-01-01"), ResidualHandling::CarryForward))
-            .await
-            .unwrap();
-        assert_eq!(residuals(&pool, 11).await, ("0".to_string(), "2.50".to_string()));
+        db_upsert(
+            &pool,
+            &period(
+                1,
+                1,
+                "2024-01-01",
+                Some("2025-01-01"),
+                ResidualHandling::CarryForward,
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            residuals(&pool, 11).await,
+            ("0".to_string(), "2.50".to_string())
+        );
     }
 
     #[tokio::test]
@@ -518,10 +638,22 @@ mod tests {
         insert_listing(&pool, 1).await;
         // A DRP trade from before the period must not be touched by its closure.
         insert_drp_trade(&pool, 10, 1, "2023-06-30", "5", "0").await;
-        db_upsert(&pool, &period(1, 1, "2024-01-01", Some("2025-01-01"), ResidualHandling::CarryForward))
-            .await
-            .unwrap();
-        assert_eq!(residuals(&pool, 10).await, ("5".to_string(), "0".to_string()));
+        db_upsert(
+            &pool,
+            &period(
+                1,
+                1,
+                "2024-01-01",
+                Some("2025-01-01"),
+                ResidualHandling::CarryForward,
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            residuals(&pool, 10).await,
+            ("5".to_string(), "0".to_string())
+        );
     }
 
     /// Enrolment is per (listing, holding account): the same listing may hold
@@ -541,9 +673,12 @@ mod tests {
         .await
         .unwrap();
 
-        db_upsert(&pool, &period(1, 1, "2024-01-01", None, ResidualHandling::CarryForward))
-            .await
-            .unwrap();
+        db_upsert(
+            &pool,
+            &period(1, 1, "2024-01-01", None, ResidualHandling::CarryForward),
+        )
+        .await
+        .unwrap();
 
         // Same listing, other account: a coexisting open period is fine.
         let mut other_account = period(2, 1, "2024-01-01", None, ResidualHandling::PayOut);
@@ -553,7 +688,10 @@ mod tests {
         // A second open period within account 2 still overlaps.
         let mut doubly_open = period(3, 1, "2025-01-01", None, ResidualHandling::PayOut);
         doubly_open.holding_account_id = 2;
-        assert!(matches!(db_upsert(&pool, &doubly_open).await, Err(UpsertError::Overlap)));
+        assert!(matches!(
+            db_upsert(&pool, &doubly_open).await,
+            Err(UpsertError::Overlap)
+        ));
     }
 
     /// Closing a period settles the trailing residual of *its* account's
@@ -580,10 +718,22 @@ mod tests {
             .unwrap();
 
         // Closing the account-1 period leaves account 2's chain alone.
-        db_upsert(&pool, &period(1, 1, "2024-01-01", Some("2025-01-01"), ResidualHandling::CarryForward))
-            .await
-            .unwrap();
-        assert_eq!(residuals(&pool, 10).await, ("5".to_string(), "0".to_string()));
+        db_upsert(
+            &pool,
+            &period(
+                1,
+                1,
+                "2024-01-01",
+                Some("2025-01-01"),
+                ResidualHandling::CarryForward,
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            residuals(&pool, 10).await,
+            ("5".to_string(), "0".to_string())
+        );
     }
 
     #[tokio::test]
@@ -598,7 +748,9 @@ mod tests {
                     .uri("/drp_enrolments/1")
                     .header("content-type", "application/json")
                     // No residual_handling → default CarryForward.
-                    .body(Body::from(r#"{"listing_id":1,"enrolment_date":"2024-01-01"}"#))
+                    .body(Body::from(
+                        r#"{"listing_id":1,"enrolment_date":"2024-01-01"}"#,
+                    ))
                     .unwrap(),
             )
             .await
@@ -607,7 +759,12 @@ mod tests {
 
         let resp = router()
             .with_state(pool.clone())
-            .oneshot(Request::builder().uri("/drp_enrolments").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/drp_enrolments")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -636,9 +793,12 @@ mod tests {
     async fn api_put_overlapping_period_returns_422() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        db_upsert(&pool, &period(1, 1, "2024-01-01", None, ResidualHandling::CarryForward))
-            .await
-            .unwrap();
+        db_upsert(
+            &pool,
+            &period(1, 1, "2024-01-01", None, ResidualHandling::CarryForward),
+        )
+        .await
+        .unwrap();
         let resp = router()
             .with_state(pool)
             .oneshot(
@@ -646,7 +806,9 @@ mod tests {
                     .method("PUT")
                     .uri("/drp_enrolments/2")
                     .header("content-type", "application/json")
-                    .body(Body::from(r#"{"listing_id":1,"enrolment_date":"2025-01-01"}"#))
+                    .body(Body::from(
+                        r#"{"listing_id":1,"enrolment_date":"2025-01-01"}"#,
+                    ))
                     .unwrap(),
             )
             .await
@@ -667,7 +829,9 @@ mod tests {
                     .method("PUT")
                     .uri("/drp_enrolments/1")
                     .header("content-type", "application/json")
-                    .body(Body::from(r#"{"listing_id":99,"enrolment_date":"2024-01-01"}"#))
+                    .body(Body::from(
+                        r#"{"listing_id":99,"enrolment_date":"2024-01-01"}"#,
+                    ))
                     .unwrap(),
             )
             .await
@@ -680,7 +844,12 @@ mod tests {
         let pool = test_pool().await;
         let resp = router()
             .with_state(pool)
-            .oneshot(Request::builder().uri("/drp_enrolments/1").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/drp_enrolments/1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);

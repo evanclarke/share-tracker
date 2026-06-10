@@ -33,11 +33,11 @@
 //! Buy is consumed by later allocations, AMIT adjustments, or income links).
 //! A recorded transfer is immutable — delete it and re-transfer instead.
 
-use crate::infra::http::ApiError;
 use crate::entities::corporate_action::{self, RocEvent, as_acquired_quantity};
 use crate::entities::sell::{self, AllocationInput, SellBody};
 use crate::entities::trade::{self, Trade};
 use crate::infra::decimal::parse_dec;
+use crate::infra::http::ApiError;
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -319,7 +319,9 @@ pub async fn db_transfer(
                 trade_date: date,
             },
             moved_as_acquired,
-            *amit_reductions.get(&alloc.purchase_trade_id).unwrap_or(&Decimal::ZERO),
+            *amit_reductions
+                .get(&alloc.purchase_trade_id)
+                .unwrap_or(&Decimal::ZERO),
             &roc_events,
             &splits,
             Some(body.date),
@@ -372,8 +374,18 @@ pub async fn db_transfer(
             })
             .collect(),
     };
-    sell::upsert_sell_in_tx(&mut tx, sell_id, &sell_body, body.date, None, None, None, Some(id), None)
-        .await?;
+    sell::upsert_sell_in_tx(
+        &mut tx,
+        sell_id,
+        &sell_body,
+        body.date,
+        None,
+        None,
+        None,
+        Some(id),
+        None,
+    )
+    .await?;
 
     // The transfer-in Buys: one per consumed parcel, dated the transfer date,
     // in the destination account, carrying the moved units' cost base (on the
@@ -443,7 +455,11 @@ pub async fn db_transfer(
             settlement_date: Some(body.date),
             listing_id: body.listing_id,
             average_price: fee_market_price,
-            quantity: body.fee_allocations.iter().map(|a| a.quantity_allocated).sum(),
+            quantity: body
+                .fee_allocations
+                .iter()
+                .map(|a| a.quantity_allocated)
+                .sum(),
             currency: listing_currency.clone(),
             brokerage: Decimal::ZERO,
             gst_on_brokerage: Decimal::ZERO,
@@ -460,8 +476,10 @@ pub async fn db_transfer(
                 })
                 .collect(),
         };
-        sell::upsert_sell_in_tx(&mut tx, id_for_fee, &fee_body, body.date, None, None, None, None, None)
-            .await?;
+        sell::upsert_sell_in_tx(
+            &mut tx, id_for_fee, &fee_body, body.date, None, None, None, None, None,
+        )
+        .await?;
         sqlx::query("UPDATE transfers SET fee_sale_trade_id = ? WHERE id = ?")
             .bind(id_for_fee)
             .bind(id)
@@ -474,8 +492,9 @@ pub async fn db_transfer(
 
     // Read the freshly created rows back so the response is exactly what was
     // stored.
-    let transfer =
-        db_get(pool, id).await?.ok_or_else(|| TransferError::Db(sqlx::Error::RowNotFound))?;
+    let transfer = db_get(pool, id)
+        .await?
+        .ok_or_else(|| TransferError::Db(sqlx::Error::RowNotFound))?;
     let sell = trade::db_get(pool, sell_id)
         .await?
         .ok_or_else(|| TransferError::Db(sqlx::Error::RowNotFound))?;
@@ -495,7 +514,12 @@ pub async fn db_transfer(
         ),
         None => None,
     };
-    Ok(TransferGroup { transfer, sell, transfer_ins: created, fee_sale })
+    Ok(TransferGroup {
+        transfer,
+        sell,
+        transfer_ins: created,
+        fee_sale,
+    })
 }
 
 /// Outcome of a delete request, so the handler can map to the right status.
@@ -582,10 +606,7 @@ pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<DeleteOutcome, sqlx
 }
 
 async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<Transfer>>, ApiError> {
-    db_list(&pool)
-        .await
-        .map(Json)
-        .map_err(ApiError::from)
+    db_list(&pool).await.map(Json).map_err(ApiError::from)
 }
 
 async fn get_one(
@@ -641,7 +662,10 @@ mod tests {
         // scenario transfers out of.
         holding_account::db_upsert(
             &pool,
-            &HoldingAccount { id: 2, name: "ICE Employee Plan".to_string() },
+            &HoldingAccount {
+                id: 2,
+                name: "ICE Employee Plan".to_string(),
+            },
         )
         .await
         .unwrap();
@@ -713,12 +737,7 @@ mod tests {
         .unwrap();
     }
 
-    fn body(
-        date: NaiveDate,
-        from: i64,
-        to: i64,
-        allocations: Vec<(i64, &str)>,
-    ) -> TransferBody {
+    fn body(date: NaiveDate, from: i64, to: i64, allocations: Vec<(i64, &str)>) -> TransferBody {
         TransferBody {
             listing_id: 1,
             date,
@@ -839,13 +858,21 @@ mod tests {
         .await
         .unwrap();
 
-        let group = db_transfer(&pool, 1, &body(d(2024, 6, 1), 2, 1, vec![(1, "0.12345678")]))
-            .await
-            .unwrap();
+        let group = db_transfer(
+            &pool,
+            1,
+            &body(d(2024, 6, 1), 2, 1, vec![(1, "0.12345678")]),
+        )
+        .await
+        .unwrap();
 
         let t = &group.transfer_ins[0];
         assert_eq!(t.holding_account_id, 1);
-        assert_eq!(t.quantity, dec("0.12345678"), "satoshi-scale quantity preserved");
+        assert_eq!(
+            t.quantity,
+            dec("0.12345678"),
+            "satoshi-scale quantity preserved"
+        );
         // The whole A$7,407.4068 cost base moves on the brokerage column...
         assert_eq!(t.average_price, Decimal::ZERO);
         assert_eq!(t.brokerage, dec("7407.40680000"));
@@ -955,7 +982,14 @@ mod tests {
         let group = db_transfer(
             &pool,
             1,
-            &fee_body(d(2024, 6, 1), 2, 1, vec![(1, "0.5")], vec![(1, "0.001")], "80000"),
+            &fee_body(
+                d(2024, 6, 1),
+                2,
+                1,
+                vec![(1, "0.5")],
+                vec![(1, "0.001")],
+                "80000",
+            ),
         )
         .await
         .unwrap();
@@ -981,7 +1015,9 @@ mod tests {
         // 0.001 × 80,000 = A$80, cost base 0.001 × 60,000 = A$60, a A$20 gain,
         // fully discount-eligible (held > 12 months). The transfer-out Sell
         // (zero proceeds, transfer_id) is absent.
-        let realised = crate::reports::realised_gains::db_realised_gains(&pool).await.unwrap();
+        let realised = crate::reports::realised_gains::db_realised_gains(&pool)
+            .await
+            .unwrap();
         assert_eq!(realised.len(), 1, "only the fee is a disposal");
         let g = &realised[0];
         assert_eq!(g.sale_trade_id, fee.id);
@@ -999,7 +1035,14 @@ mod tests {
         let pool = test_pool().await;
         insert_crypto(&pool, "1.0", "60000").await;
 
-        let mut no_price = fee_body(d(2024, 6, 1), 2, 1, vec![(1, "0.5")], vec![(1, "0.001")], "0");
+        let mut no_price = fee_body(
+            d(2024, 6, 1),
+            2,
+            1,
+            vec![(1, "0.5")],
+            vec![(1, "0.001")],
+            "0",
+        );
         no_price.fee_market_price = None;
         assert!(matches!(
             db_transfer(&pool, 1, &no_price).await,
@@ -1007,15 +1050,23 @@ mod tests {
         ));
 
         // A zero price is just as invalid (the fee crypto has market value).
-        let zero_price =
-            fee_body(d(2024, 6, 1), 2, 1, vec![(1, "0.5")], vec![(1, "0.001")], "0");
+        let zero_price = fee_body(
+            d(2024, 6, 1),
+            2,
+            1,
+            vec![(1, "0.5")],
+            vec![(1, "0.001")],
+            "0",
+        );
         assert!(matches!(
             db_transfer(&pool, 1, &zero_price).await,
             Err(TransferError::FeeMarketPriceMissing)
         ));
 
-        let transfers: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM transfers").fetch_one(&pool).await.unwrap();
+        let transfers: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM transfers")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
         assert_eq!(transfers, 0);
         let trades: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM trades WHERE id <> 1")
             .fetch_one(&pool)
@@ -1037,13 +1088,22 @@ mod tests {
             db_transfer(
                 &pool,
                 1,
-                &fee_body(d(2024, 6, 1), 2, 1, vec![(1, "0.6")], vec![(1, "0.5")], "80000"),
+                &fee_body(
+                    d(2024, 6, 1),
+                    2,
+                    1,
+                    vec![(1, "0.6")],
+                    vec![(1, "0.5")],
+                    "80000"
+                ),
             )
             .await,
             Err(TransferError::Sell(SellError::PurchaseQuantityExceeded))
         ));
-        let transfers: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM transfers").fetch_one(&pool).await.unwrap();
+        let transfers: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM transfers")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
         assert_eq!(transfers, 0);
     }
 
@@ -1057,7 +1117,14 @@ mod tests {
         let group = db_transfer(
             &pool,
             1,
-            &fee_body(d(2024, 6, 1), 2, 1, vec![(1, "0.5")], vec![(1, "0.001")], "80000"),
+            &fee_body(
+                d(2024, 6, 1),
+                2,
+                1,
+                vec![(1, "0.5")],
+                vec![(1, "0.001")],
+                "80000",
+            ),
         )
         .await
         .unwrap();
@@ -1065,13 +1132,18 @@ mod tests {
 
         assert_eq!(db_delete(&pool, 1).await.unwrap(), DeleteOutcome::Deleted);
 
-        assert!(trade::db_get(&pool, fee_id).await.unwrap().is_none(), "fee Sell gone");
+        assert!(
+            trade::db_get(&pool, fee_id).await.unwrap().is_none(),
+            "fee Sell gone"
+        );
         let allocs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM parcel_allocations")
             .fetch_one(&pool)
             .await
             .unwrap();
         assert_eq!(allocs, 0, "fee + transfer-out allocations freed");
-        let realised = crate::reports::realised_gains::db_realised_gains(&pool).await.unwrap();
+        let realised = crate::reports::realised_gains::db_realised_gains(&pool)
+            .await
+            .unwrap();
         assert!(realised.is_empty());
         // The whole 1.0 BTC parcel is open again in account 2.
         let parcel = trade::db_get(&pool, 1).await.unwrap().unwrap();
@@ -1089,7 +1161,14 @@ mod tests {
         let group = db_transfer(
             &pool,
             1,
-            &fee_body(d(2024, 6, 1), 2, 1, vec![(1, "0.5")], vec![(1, "0.001")], "80000"),
+            &fee_body(
+                d(2024, 6, 1),
+                2,
+                1,
+                vec![(1, "0.5")],
+                vec![(1, "0.001")],
+                "80000",
+            ),
         )
         .await
         .unwrap();
@@ -1199,9 +1278,13 @@ mod tests {
             .await
             .unwrap();
 
-        let realised =
-            crate::reports::realised_gains::db_realised_gains(&pool).await.unwrap();
-        assert!(realised.is_empty(), "an own-account transfer is not a disposal");
+        let realised = crate::reports::realised_gains::db_realised_gains(&pool)
+            .await
+            .unwrap();
+        assert!(
+            realised.is_empty(),
+            "an own-account transfer is not a disposal"
+        );
     }
 
     /// Deleting the transfer removes the whole group and the record,
@@ -1274,10 +1357,16 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(db_delete(&pool, 1).await.unwrap(), DeleteOutcome::TransferInReferenced);
+        assert_eq!(
+            db_delete(&pool, 1).await.unwrap(),
+            DeleteOutcome::TransferInReferenced
+        );
 
         // Removing the later sale unblocks the delete.
-        assert_eq!(sell::db_delete_sell(&pool, 50).await.unwrap(), sell::DeleteOutcome::Deleted);
+        assert_eq!(
+            sell::db_delete_sell(&pool, 50).await.unwrap(),
+            sell::DeleteOutcome::Deleted
+        );
         assert_eq!(db_delete(&pool, 1).await.unwrap(), DeleteOutcome::Deleted);
     }
 
@@ -1336,7 +1425,9 @@ mod tests {
 
         // DELETE /trades on either → refused.
         assert_eq!(
-            trade::db_delete(&pool, group.transfer_ins[0].id).await.unwrap(),
+            trade::db_delete(&pool, group.transfer_ins[0].id)
+                .await
+                .unwrap(),
             trade::DeleteOutcome::Referenced
         );
         assert_eq!(
@@ -1385,8 +1476,10 @@ mod tests {
         ));
 
         // Nothing was persisted by any rejection.
-        let transfers: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM transfers").fetch_one(&pool).await.unwrap();
+        let transfers: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM transfers")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
         assert_eq!(transfers, 0);
         let trades: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM trades WHERE transfer_id IS NOT NULL")
@@ -1396,7 +1489,9 @@ mod tests {
         assert_eq!(trades, 0);
 
         // A recorded transfer is immutable: re-PUT of the same id is rejected.
-        db_transfer(&pool, 1, &body(d(2024, 6, 1), 2, 1, vec![(1, "100")])).await.unwrap();
+        db_transfer(&pool, 1, &body(d(2024, 6, 1), 2, 1, vec![(1, "100")]))
+            .await
+            .unwrap();
         assert!(matches!(
             db_transfer(&pool, 1, &body(d(2024, 7, 1), 2, 1, vec![(1, "100")])).await,
             Err(TransferError::AlreadyExists)
@@ -1513,11 +1608,19 @@ mod tests {
         assert_eq!(v["sell"]["holding_account_id"], 2);
         assert_eq!(v["transfer_ins"][0]["holding_account_id"], 1);
         assert_eq!(v["transfer_ins"][0]["brokerage"], "12000");
-        assert_eq!(v["transfer_ins"][0]["deemed_acquisition_date"], "2023-03-01");
+        assert_eq!(
+            v["transfer_ins"][0]["deemed_acquisition_date"],
+            "2023-03-01"
+        );
 
         // GET list/one.
         let resp = app()
-            .oneshot(Request::builder().uri("/transfers/1").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/transfers/1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -1574,7 +1677,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        let bytes = http_body_util::BodyExt::collect(resp.into_body()).await.unwrap().to_bytes();
+        let bytes = http_body_util::BodyExt::collect(resp.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
         let detail = String::from_utf8(bytes.to_vec()).unwrap();
         assert!(detail.contains("same"), "detail: {detail}");
 

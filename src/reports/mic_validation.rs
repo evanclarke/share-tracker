@@ -63,9 +63,9 @@ async fn report(State(pool): State<SqlitePool>) -> Result<Json<Vec<ExchangeMicSt
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::http::StatusCode;
     use crate::entities::{exchange, mic_registry};
     use crate::infra::db;
+    use axum::http::StatusCode;
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
     use tower::ServiceExt;
@@ -101,7 +101,9 @@ mod tests {
     async fn classifies_ok_expired_and_unknown() {
         let pool = test_pool().await;
         // XASX active, XNYS expired in the registry. Both are seed exchanges.
-        mic_registry::db_upsert(&pool, &mic("XASX", "ACTIVE", None)).await.unwrap();
+        mic_registry::db_upsert(&pool, &mic("XASX", "ACTIVE", None))
+            .await
+            .unwrap();
         mic_registry::db_upsert(&pool, &mic("XNYS", "EXPIRED", Some("2024-06-30")))
             .await
             .unwrap();
@@ -160,13 +162,19 @@ mod tests {
         .await
         .unwrap();
         let report = db_validate(&pool).await.unwrap();
-        assert_eq!(report.len(), before, "a Crypto listing adds nothing to validate");
+        assert_eq!(
+            report.len(),
+            before,
+            "a Crypto listing adds nothing to validate"
+        );
     }
 
     #[tokio::test]
     async fn api_returns_ok() {
         let pool = test_pool().await;
-        mic_registry::db_upsert(&pool, &mic("XASX", "ACTIVE", None)).await.unwrap();
+        mic_registry::db_upsert(&pool, &mic("XASX", "ACTIVE", None))
+            .await
+            .unwrap();
         let resp = router()
             .with_state(pool)
             .oneshot(
@@ -180,6 +188,10 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let report: Vec<ExchangeMicStatus> = serde_json::from_slice(&bytes).unwrap();
-        assert!(report.iter().any(|s| s.mic == "XASX" && s.registry_status == "ok"));
+        assert!(
+            report
+                .iter()
+                .any(|s| s.mic == "XASX" && s.registry_status == "ok")
+        );
     }
 }

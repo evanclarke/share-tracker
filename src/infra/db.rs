@@ -12,7 +12,9 @@ pub async fn init(db_path: &str) -> Result<SqlitePool, sqlx::Error> {
         format!("sqlite:{db_path}")
     };
 
-    let mut opts = SqliteConnectOptions::from_str(&url)?.create_if_missing(true).foreign_keys(true);
+    let mut opts = SqliteConnectOptions::from_str(&url)?
+        .create_if_missing(true)
+        .foreign_keys(true);
 
     if db_path != ":memory:" {
         opts = opts.journal_mode(SqliteJournalMode::Wal);
@@ -74,7 +76,10 @@ async fn backup_to(pool: &SqlitePool, dest: &str) -> Result<(), sqlx::Error> {
         tracing::debug!(path = dest, "backup already exists, skipping");
     } else {
         tracing::info!(path = dest, "starting backup");
-        sqlx::query("VACUUM INTO ?").bind(dest).execute(pool).await?;
+        sqlx::query("VACUUM INTO ?")
+            .bind(dest)
+            .execute(pool)
+            .await?;
         tracing::info!(path = dest, "backup complete");
     }
     Ok(())

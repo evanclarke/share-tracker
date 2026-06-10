@@ -52,13 +52,13 @@
 //! separate capital returns, and registry cash-in-lieu of fractional
 //! entitlements (the demerge keeps exact fractional unit counts).
 
-use crate::infra::http::ApiError;
 use crate::entities::corporate_action::{
     self, ActionKind, RocEvent, sold_in_acquired_units, split_adjusted_quantity,
 };
 use crate::entities::sell::{self, AllocationInput, SellBody};
 use crate::entities::trade::{self, Trade};
 use crate::infra::decimal::parse_dec;
+use crate::infra::http::ApiError;
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -139,7 +139,12 @@ pub async fn db_demerge(pool: &SqlitePool, action_id: i64) -> Result<Demerge, De
             demerger_new_units,
             demerger_held_units,
             demerger_cost_base_pct,
-        } => (*demerger_listing_id, *demerger_new_units, *demerger_held_units, *demerger_cost_base_pct),
+        } => (
+            *demerger_listing_id,
+            *demerger_new_units,
+            *demerger_held_units,
+            *demerger_cost_base_pct,
+        ),
         _ => return Err(DemergeError::NotADemerger),
     };
 
@@ -199,8 +204,7 @@ pub async fn db_demerge(pool: &SqlitePool, action_id: i64) -> Result<Demerge, De
         ));
     }
 
-    let splits =
-        corporate_action::db_splits_for_listing(&mut *tx, action.listing_id).await?;
+    let splits = corporate_action::db_splits_for_listing(&mut *tx, action.listing_id).await?;
     let roc_rows = sqlx::query(
         "SELECT date, amount_per_unit, currency FROM corporate_actions \
          WHERE action_type = 'ReturnOfCapital' AND listing_id = ? ORDER BY date, id",
@@ -309,11 +313,10 @@ pub async fn db_demerge(pool: &SqlitePool, action_id: i64) -> Result<Demerge, De
     // The closing Sell: zero proceeds (the rollover disregards any gain and
     // this Sell never reaches the realised-gains report), consuming every
     // open parcel. Settlement is the demerger date — nothing market-settles.
-    let listing_currency: String =
-        sqlx::query_scalar("SELECT currency FROM listings WHERE id = ?")
-            .bind(action.listing_id)
-            .fetch_one(&mut *tx)
-            .await?;
+    let listing_currency: String = sqlx::query_scalar("SELECT currency FROM listings WHERE id = ?")
+        .bind(action.listing_id)
+        .fetch_one(&mut *tx)
+        .await?;
     let sell_id: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(id), 0) + 1 FROM trades")
         .fetch_one(&mut *tx)
         .await?;
@@ -340,8 +343,18 @@ pub async fn db_demerge(pool: &SqlitePool, action_id: i64) -> Result<Demerge, De
             })
             .collect(),
     };
-    sell::upsert_sell_in_tx(&mut tx, sell_id, &sell_body, action.date, None, None, Some(action_id), None, None)
-        .await?;
+    sell::upsert_sell_in_tx(
+        &mut tx,
+        sell_id,
+        &sell_body,
+        action.date,
+        None,
+        None,
+        Some(action_id),
+        None,
+        None,
+    )
+    .await?;
 
     // The replacement Buys: per consumed parcel, the head replacement (same
     // listing, same units, head share of the cost base) and the
@@ -353,8 +366,18 @@ pub async fn db_demerge(pool: &SqlitePool, action_id: i64) -> Result<Demerge, De
         let head_id = sell_id + 1 + (2 * i) as i64;
         let demerged_id = head_id + 1;
         for (buy_id, listing_id, quantity, cost_base) in [
-            (head_id, action.listing_id, r.at_date_units, r.head_cost_base),
-            (demerged_id, demerged_listing_id, r.demerged_quantity, r.demerged_cost_base),
+            (
+                head_id,
+                action.listing_id,
+                r.at_date_units,
+                r.head_cost_base,
+            ),
+            (
+                demerged_id,
+                demerged_listing_id,
+                r.demerged_quantity,
+                r.demerged_cost_base,
+            ),
         ] {
             sqlx::query(
                 "INSERT INTO trades \
@@ -405,7 +428,11 @@ pub async fn db_demerge(pool: &SqlitePool, action_id: i64) -> Result<Demerge, De
                 .ok_or_else(|| DemergeError::Db(sqlx::Error::RowNotFound))?,
         );
     }
-    Ok(Demerge { sell, head_replacements, demerged_replacements })
+    Ok(Demerge {
+        sell,
+        head_replacements,
+        demerged_replacements,
+    })
 }
 
 async fn demerge(
@@ -419,9 +446,7 @@ async fn demerge(
 impl From<DemergeError> for ApiError {
     fn from(e: DemergeError) -> Self {
         match e {
-            DemergeError::ActionNotFound => {
-                ApiError::not_found("no corporate action with that id")
-            }
+            DemergeError::ActionNotFound => ApiError::not_found("no corporate action with that id"),
             DemergeError::NotADemerger => {
                 ApiError::unprocessable("that corporate action is not a demerger")
             }
@@ -429,9 +454,9 @@ impl From<DemergeError> for ApiError {
                 "this demerger has already been applied — delete its closing Sell first to redo \
                  it",
             ),
-            DemergeError::NothingHeld => ApiError::unprocessable(
-                "nothing of the head listing is held at the demerger date",
-            ),
+            DemergeError::NothingHeld => {
+                ApiError::unprocessable("nothing of the head listing is held at the demerger date")
+            }
             DemergeError::TradedOnOrAfterDemergerDate => ApiError::unprocessable(
                 "the head listing has a trade dated on or after the demerger date — \
                  enter later activity after demerging, not before",
@@ -567,7 +592,13 @@ mod tests {
         .unwrap();
     }
 
-    async fn sell_units(pool: &SqlitePool, sell_id: i64, parcel_id: i64, date: NaiveDate, qty: &str) {
+    async fn sell_units(
+        pool: &SqlitePool,
+        sell_id: i64,
+        parcel_id: i64,
+        date: NaiveDate,
+        qty: &str,
+    ) {
         sell::db_upsert_sell(
             pool,
             sell_id,
@@ -671,7 +702,15 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "HEAD").await;
         insert_listing(&pool, 2, "DEM").await;
-        insert_buy(&pool, 1, 1, d(2020, 10, 1), "280", "8.9285714285714285714285714286").await;
+        insert_buy(
+            &pool,
+            1,
+            1,
+            d(2020, 10, 1),
+            "280",
+            "8.9285714285714285714285714286",
+        )
+        .await;
         insert_demerger_terms(&pool, 10, 1, 2, d(2024, 7, 1), "1", "5", "5.063").await;
 
         let dm = db_demerge(&pool, 10).await.unwrap();
@@ -851,10 +890,16 @@ mod tests {
         assert_eq!(dm.sell.quantity, dec("3000"));
         assert_eq!(dm.head_replacements[0].quantity, dec("3000"));
         assert_eq!(dm.head_replacements[0].brokerage, dec("1200"));
-        assert_eq!(dm.head_replacements[0].deemed_acquisition_date, Some(d(2020, 10, 1)));
+        assert_eq!(
+            dm.head_replacements[0].deemed_acquisition_date,
+            Some(d(2020, 10, 1))
+        );
         assert_eq!(dm.demerged_replacements[0].quantity, dec("600"));
         assert_eq!(dm.demerged_replacements[0].brokerage, dec("300"));
-        assert_eq!(dm.demerged_replacements[0].deemed_acquisition_date, Some(d(2020, 10, 1)));
+        assert_eq!(
+            dm.demerged_replacements[0].deemed_acquisition_date,
+            Some(d(2020, 10, 1))
+        );
     }
 
     #[tokio::test]
@@ -864,7 +909,10 @@ mod tests {
         insert_listing(&pool, 2, "DEM").await;
 
         // Missing action.
-        assert!(matches!(db_demerge(&pool, 99).await, Err(DemergeError::ActionNotFound)));
+        assert!(matches!(
+            db_demerge(&pool, 99).await,
+            Err(DemergeError::ActionNotFound)
+        ));
 
         // Not a Demerger.
         corporate_action::db_upsert(
@@ -881,11 +929,17 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(matches!(db_demerge(&pool, 1).await, Err(DemergeError::NotADemerger)));
+        assert!(matches!(
+            db_demerge(&pool, 1).await,
+            Err(DemergeError::NotADemerger)
+        ));
 
         // Nothing held at the demerger date.
         insert_demerger(&pool, 10, d(2024, 7, 1)).await;
-        assert!(matches!(db_demerge(&pool, 10).await, Err(DemergeError::NothingHeld)));
+        assert!(matches!(
+            db_demerge(&pool, 10).await,
+            Err(DemergeError::NothingHeld)
+        ));
 
         // A head-listing trade dated on/after the demerger date would draw on
         // parcels the closing Sell consumes — enter it after demerging.
@@ -896,12 +950,11 @@ mod tests {
         ));
 
         // Nothing was persisted by any of the rejections.
-        let trades: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM trades WHERE demerger_action_id IS NOT NULL",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let trades: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM trades WHERE demerger_action_id IS NOT NULL")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(trades, 0);
     }
 
@@ -914,7 +967,10 @@ mod tests {
         insert_demerger(&pool, 10, d(2024, 7, 1)).await;
         db_demerge(&pool, 10).await.unwrap();
 
-        assert!(matches!(db_demerge(&pool, 10).await, Err(DemergeError::AlreadyDemerged)));
+        assert!(matches!(
+            db_demerge(&pool, 10).await,
+            Err(DemergeError::AlreadyDemerged)
+        ));
     }
 
     /// The group is immutable trade by trade: the closing Sell rejects
@@ -968,7 +1024,11 @@ mod tests {
         }
 
         // DELETE /trades on any group trade → refused.
-        for id in [dm.head_replacements[0].id, dm.demerged_replacements[0].id, dm.sell.id] {
+        for id in [
+            dm.head_replacements[0].id,
+            dm.demerged_replacements[0].id,
+            dm.sell.id,
+        ] {
             assert_eq!(
                 trade::db_delete(&pool, id).await.unwrap(),
                 trade::DeleteOutcome::Referenced
@@ -1022,17 +1082,19 @@ mod tests {
 
         // Remove the later sale; the group then deletes as a whole and the
         // action thaws (it can be deleted again).
-        assert_eq!(sell::db_delete_sell(&pool, 50).await.unwrap(), sell::DeleteOutcome::Deleted);
+        assert_eq!(
+            sell::db_delete_sell(&pool, 50).await.unwrap(),
+            sell::DeleteOutcome::Deleted
+        );
         assert_eq!(
             sell::db_delete_sell(&pool, dm.sell.id).await.unwrap(),
             sell::DeleteOutcome::Deleted
         );
-        let remaining: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM trades WHERE demerger_action_id IS NOT NULL",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let remaining: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM trades WHERE demerger_action_id IS NOT NULL")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(remaining, 0);
         // The original parcel is open again.
         let allocs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM parcel_allocations")
@@ -1072,7 +1134,10 @@ mod tests {
         insert_listing(&pool, 2, "DEMERGED").await;
         holding_account::db_upsert(
             &pool,
-            &HoldingAccount { id: 2, name: "ICE Employee Plan".to_string() },
+            &HoldingAccount {
+                id: 2,
+                name: "ICE Employee Plan".to_string(),
+            },
         )
         .await
         .unwrap();
@@ -1122,7 +1187,10 @@ mod tests {
         assert_eq!(v["head_replacements"][0]["brokerage"], "1200.00");
         assert_eq!(v["demerged_replacements"][0]["quantity"], "200");
         assert_eq!(v["demerged_replacements"][0]["brokerage"], "300.00");
-        assert_eq!(v["demerged_replacements"][0]["deemed_acquisition_date"], "2020-10-01");
+        assert_eq!(
+            v["demerged_replacements"][0]["deemed_acquisition_date"],
+            "2020-10-01"
+        );
     }
 
     #[tokio::test]

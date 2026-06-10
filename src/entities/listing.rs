@@ -201,7 +201,11 @@ async fn delete(
     Path(id): Path<i64>,
 ) -> Result<StatusCode, ApiError> {
     // Deleting a listing still referenced by trades/income violates an FK → 422.
-    if db_delete(&pool, id).await? { Ok(StatusCode::NO_CONTENT) } else { Err(ApiError::NotFound) }
+    if db_delete(&pool, id).await? {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError::NotFound)
+    }
 }
 
 #[cfg(test)]
@@ -376,14 +380,20 @@ mod tests {
         let UpsertError::Db(err) = db_upsert(&pool, &bad).await.unwrap_err() else {
             panic!("expected a DB error");
         };
-        assert!(err.to_string().contains("CHECK"), "expected CHECK error, got: {err}");
+        assert!(
+            err.to_string().contains("CHECK"),
+            "expected CHECK error, got: {err}"
+        );
         // ...and so is a non-Crypto listing without one.
         let mut bare = xtest();
         bare.exchange_mic = None;
         let UpsertError::Db(err) = db_upsert(&pool, &bare).await.unwrap_err() else {
             panic!("expected a DB error");
         };
-        assert!(err.to_string().contains("CHECK"), "expected CHECK error, got: {err}");
+        assert!(
+            err.to_string().contains("CHECK"),
+            "expected CHECK error, got: {err}"
+        );
     }
 
     #[tokio::test]
@@ -397,7 +407,10 @@ mod tests {
         let UpsertError::Db(err) = db_upsert(&pool, &dup).await.unwrap_err() else {
             panic!("expected a DB error");
         };
-        assert!(err.to_string().contains("UNIQUE"), "expected UNIQUE error, got: {err}");
+        assert!(
+            err.to_string().contains("UNIQUE"),
+            "expected UNIQUE error, got: {err}"
+        );
     }
 
     // API-level tests
@@ -408,7 +421,12 @@ mod tests {
         db_upsert(&pool, &xtest()).await.unwrap();
         let resp = router()
             .with_state(pool)
-            .oneshot(Request::builder().uri("/listings").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/listings")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -424,7 +442,12 @@ mod tests {
         db_upsert(&pool, &xtest()).await.unwrap();
         let resp = router()
             .with_state(pool)
-            .oneshot(Request::builder().uri("/listings/1").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/listings/1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -438,7 +461,12 @@ mod tests {
         let pool = test_pool().await;
         let resp = router()
             .with_state(pool)
-            .oneshot(Request::builder().uri("/listings/999").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/listings/999")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
@@ -564,7 +592,11 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY, "body: {body}");
+            assert_eq!(
+                resp.status(),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "body: {body}"
+            );
         }
 
         // The unrecognised-digital-token rejection says why, not a bare "HTTP 422".
@@ -586,7 +618,10 @@ mod tests {
             )
             .await
             .unwrap();
-        let bytes = http_body_util::BodyExt::collect(resp.into_body()).await.unwrap().to_bytes();
+        let bytes = http_body_util::BodyExt::collect(resp.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
         let detail = String::from_utf8(bytes.to_vec()).unwrap();
         assert!(detail.contains("digital-token"), "detail: {detail}");
     }

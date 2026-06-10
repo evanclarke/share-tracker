@@ -1,5 +1,5 @@
-use crate::infra::http::ApiError;
 use crate::entities::exchange_holiday::{coverage_span_for, window_outside_coverage};
+use crate::infra::http::ApiError;
 use axum::{Json, Router, extract::State, routing::get};
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
@@ -97,15 +97,18 @@ pub async fn db_coverage_alerts(
 async fn report(
     State(pool): State<SqlitePool>,
 ) -> Result<Json<Vec<SettlementCoverageAlert>>, ApiError> {
-    db_coverage_alerts(&pool).await.map(Json).map_err(ApiError::from)
+    db_coverage_alerts(&pool)
+        .await
+        .map(Json)
+        .map_err(ApiError::from)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::http::StatusCode;
     use crate::entities::{exchange, listing, trade};
     use crate::infra::db;
+    use axum::http::StatusCode;
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
     use rust_decimal::Decimal;
@@ -138,7 +141,13 @@ mod tests {
         .unwrap();
     }
 
-    async fn insert_buy(pool: &SqlitePool, id: i64, listing_id: i64, date: NaiveDate, settlement: NaiveDate) {
+    async fn insert_buy(
+        pool: &SqlitePool,
+        id: i64,
+        listing_id: i64,
+        date: NaiveDate,
+        settlement: NaiveDate,
+    ) {
         trade::db_upsert(
             pool,
             &trade::Trade {

@@ -29,11 +29,11 @@
 //! adjustments where the participating shareholder is itself a company, and
 //! shares held on revenue account.
 
-use crate::infra::http::ApiError;
 use crate::entities::corporate_action::{self, ActionKind};
 use crate::entities::income::{self, Income};
 use crate::entities::sell::{self, AllocationInput, SellBody};
 use crate::entities::trade::{self, Trade};
+use crate::infra::http::ApiError;
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -118,9 +118,9 @@ impl From<ParticipationError> for ApiError {
             ParticipationError::NotABuyBack => {
                 ApiError::unprocessable("that corporate action is not a buy-back")
             }
-            ParticipationError::NonPositiveUnits => {
-                ApiError::unprocessable("the number of units participated must be greater than zero")
-            }
+            ParticipationError::NonPositiveUnits => ApiError::unprocessable(
+                "the number of units participated must be greater than zero",
+            ),
             ParticipationError::BeforeBuyBackDate => {
                 ApiError::unprocessable("the participation date is before the buy-back date")
             }
@@ -213,8 +213,18 @@ pub async fn db_participate(
             })
             .collect(),
     };
-    sell::upsert_sell_in_tx(&mut tx, sell_id, &sell_body, body.date, Some(action_id), None, None, None, None)
-        .await?;
+    sell::upsert_sell_in_tx(
+        &mut tx,
+        sell_id,
+        &sell_body,
+        body.date,
+        Some(action_id),
+        None,
+        None,
+        None,
+        None,
+    )
+    .await?;
 
     // The dividend component: assessable franked income on the participation
     // date, linked to the Sell so the two sides stay consistent.
@@ -408,7 +418,9 @@ mod tests {
         insert_buy(&pool, 1, d(2020, 1, 15), "10000", "6.00").await;
         insert_buyback(&pool, 10, d(2024, 7, 1)).await;
 
-        let p = db_participate(&pool, 10, &body(d(2024, 7, 10), "1000", 1)).await.unwrap();
+        let p = db_participate(&pool, 10, &body(d(2024, 7, 10), "1000", 1))
+            .await
+            .unwrap();
 
         // The Sell: 1,000 units at $8.80 capital proceeds per unit
         // (max(9.60, 10.20) − 1.40), settled on the participation date.
@@ -449,13 +461,26 @@ mod tests {
         insert_buy(&pool, 1, d(2020, 1, 15), "10000", "6.00").await;
 
         // MV $9.00 < price $9.60 → proceeds = 9.60 − 1.40 = 8.20.
-        insert_buyback_terms(&pool, 10, d(2024, 7, 1), "9.60", "1.40", "0.60", Some("9.00")).await;
-        let p = db_participate(&pool, 10, &body(d(2024, 7, 10), "100", 1)).await.unwrap();
+        insert_buyback_terms(
+            &pool,
+            10,
+            d(2024, 7, 1),
+            "9.60",
+            "1.40",
+            "0.60",
+            Some("9.00"),
+        )
+        .await;
+        let p = db_participate(&pool, 10, &body(d(2024, 7, 10), "100", 1))
+            .await
+            .unwrap();
         assert_eq!(p.trade.average_price, dec("8.20"));
 
         // No MV recorded → proceeds = 9.60 − 1.40 = 8.20.
         insert_buyback_terms(&pool, 11, d(2024, 8, 1), "9.60", "1.40", "0.60", None).await;
-        let p = db_participate(&pool, 11, &body(d(2024, 8, 10), "100", 1)).await.unwrap();
+        let p = db_participate(&pool, 11, &body(d(2024, 8, 10), "100", 1))
+            .await
+            .unwrap();
         assert_eq!(p.trade.average_price, dec("8.20"));
     }
 
@@ -469,7 +494,9 @@ mod tests {
         insert_buy(&pool, 1, d(2020, 1, 15), "10000", "6.00").await;
         insert_buyback_terms(&pool, 10, d(2024, 7, 1), "9.60", "0", "0", None).await;
 
-        let p = db_participate(&pool, 10, &body(d(2024, 7, 10), "1000", 1)).await.unwrap();
+        let p = db_participate(&pool, 10, &body(d(2024, 7, 10), "1000", 1))
+            .await
+            .unwrap();
         assert_eq!(p.trade.average_price, dec("9.60"));
         assert!(p.income.is_none());
 
@@ -489,10 +516,17 @@ mod tests {
         insert_listing(&pool, 1).await;
         insert_buy(&pool, 1, d(2020, 1, 15), "10000", "6.00").await;
         insert_buyback(&pool, 10, d(2024, 7, 1)).await;
-        let p = db_participate(&pool, 10, &body(d(2024, 7, 10), "1000", 1)).await.unwrap();
+        let p = db_participate(&pool, 10, &body(d(2024, 7, 10), "1000", 1))
+            .await
+            .unwrap();
 
-        let gains = crate::reports::realised_gains::db_realised_gains(&pool).await.unwrap();
-        let sale = gains.iter().find(|g| g.sale_trade_id == p.trade.id).unwrap();
+        let gains = crate::reports::realised_gains::db_realised_gains(&pool)
+            .await
+            .unwrap();
+        let sale = gains
+            .iter()
+            .find(|g| g.sale_trade_id == p.trade.id)
+            .unwrap();
         assert_eq!(sale.proceeds, dec("8800.00"));
         assert_eq!(sale.cost_base, dec("6000.00"));
         assert_eq!(sale.capital_gain_loss, dec("2800.00"));
@@ -539,13 +573,17 @@ mod tests {
         let err = db_participate(&pool, 10, &mismatch).await;
         assert!(matches!(
             err,
-            Err(ParticipationError::Sell(sell::SellError::AllocationMismatch))
+            Err(ParticipationError::Sell(
+                sell::SellError::AllocationMismatch
+            ))
         ));
         // …and may not over-allocate the parcel.
         let err = db_participate(&pool, 10, &body(d(2024, 7, 10), "10001", 1)).await;
         assert!(matches!(
             err,
-            Err(ParticipationError::Sell(sell::SellError::PurchaseQuantityExceeded))
+            Err(ParticipationError::Sell(
+                sell::SellError::PurchaseQuantityExceeded
+            ))
         ));
 
         // Nothing persisted by any rejected attempt.
@@ -555,8 +593,10 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(trades, 0, "no rejected participation may persist a trade");
-        let incomes: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM income").fetch_one(&pool).await.unwrap();
+        let incomes: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM income")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
         assert_eq!(incomes, 0, "no rejected participation may persist income");
     }
 
@@ -568,7 +608,9 @@ mod tests {
         insert_listing(&pool, 1).await;
         insert_buy(&pool, 1, d(2020, 1, 15), "10000", "6.00").await;
         insert_buyback(&pool, 10, d(2024, 7, 1)).await;
-        let p = db_participate(&pool, 10, &body(d(2024, 7, 10), "1000", 1)).await.unwrap();
+        let p = db_participate(&pool, 10, &body(d(2024, 7, 10), "1000", 1))
+            .await
+            .unwrap();
         let income_id = p.income.as_ref().unwrap().id;
 
         // Any edit through the sells endpoint is rejected.
@@ -624,11 +666,15 @@ mod tests {
         // failed buy-back leaves no trace): the full 10,000 units at the
         // original cost base, and the parcel's capacity is freed so a fresh
         // participation for the same units succeeds.
-        let holdings = crate::reports::portfolio::db_holdings(&pool, None).await.unwrap();
+        let holdings = crate::reports::portfolio::db_holdings(&pool, None)
+            .await
+            .unwrap();
         assert_eq!(holdings.len(), 1);
         assert_eq!(holdings[0].quantity, dec("10000"));
         assert_eq!(holdings[0].total_cost_base, dec("60000.00"));
-        db_participate(&pool, 10, &body(d(2024, 7, 11), "1000", 1)).await.unwrap();
+        db_participate(&pool, 10, &body(d(2024, 7, 11), "1000", 1))
+            .await
+            .unwrap();
     }
 
     /// The action the participations were created against is frozen while
@@ -640,13 +686,21 @@ mod tests {
         insert_listing(&pool, 1).await;
         insert_buy(&pool, 1, d(2020, 1, 15), "10000", "6.00").await;
         insert_buyback(&pool, 10, d(2024, 7, 1)).await;
-        let p = db_participate(&pool, 10, &body(d(2024, 7, 10), "1000", 1)).await.unwrap();
+        let p = db_participate(&pool, 10, &body(d(2024, 7, 10), "1000", 1))
+            .await
+            .unwrap();
 
         let action = corporate_action::db_get(&pool, 10).await.unwrap().unwrap();
         let err = corporate_action::db_upsert(&pool, &action).await;
-        assert!(matches!(err, Err(corporate_action::WriteError::ReferencedByTrade)));
+        assert!(matches!(
+            err,
+            Err(corporate_action::WriteError::ReferencedByTrade)
+        ));
         let err = corporate_action::db_delete(&pool, 10).await;
-        assert!(err.is_err(), "the trades.buyback_action_id FK must block the delete");
+        assert!(
+            err.is_err(),
+            "the trades.buyback_action_id FK must block the delete"
+        );
 
         // Removing the participation Sell unfreezes the action.
         sell::db_delete_sell(&pool, p.trade.id).await.unwrap();
@@ -665,7 +719,10 @@ mod tests {
         insert_listing(&pool, 1).await;
         holding_account::db_upsert(
             &pool,
-            &HoldingAccount { id: 2, name: "Personal CHESS".to_string() },
+            &HoldingAccount {
+                id: 2,
+                name: "Personal CHESS".to_string(),
+            },
         )
         .await
         .unwrap();
@@ -678,7 +735,9 @@ mod tests {
 
         // Participating from the default account can't consume account 2's
         // parcel.
-        let err = db_participate(&pool, 10, &body(d(2024, 7, 10), "1000", 1)).await.unwrap_err();
+        let err = db_participate(&pool, 10, &body(d(2024, 7, 10), "1000", 1))
+            .await
+            .unwrap_err();
         assert!(matches!(
             err,
             ParticipationError::Sell(sell::SellError::PurchaseInDifferentAccount)
@@ -794,12 +853,11 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        let income_id: i64 =
-            sqlx::query_scalar("SELECT id FROM income WHERE buyback_trade_id = ?")
-                .bind(trade_id)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
+        let income_id: i64 = sqlx::query_scalar("SELECT id FROM income WHERE buyback_trade_id = ?")
+            .bind(trade_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
         let app = crate::entities::router().with_state(pool.clone());
         let resp = app
             .clone()

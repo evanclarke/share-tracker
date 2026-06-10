@@ -36,8 +36,14 @@ async fn main() {
     let app = app::router(pool.clone(), registry, fetcher);
     let ip: std::net::IpAddr = args.host.parse().expect("invalid --host address");
     let addr = std::net::SocketAddr::new(ip, args.port);
-    let listener = tokio::net::TcpListener::bind(addr).await.expect("failed to bind");
-    tracing::info!("share-tracker started, db: {}, listening on: http://{}", args.db, addr);
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .expect("failed to bind");
+    tracing::info!(
+        "share-tracker started, db: {}, listening on: http://{}",
+        args.db,
+        addr
+    );
 
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
@@ -54,7 +60,8 @@ async fn shutdown_signal() {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{SignalKind, signal};
-        let mut sigterm = signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
+        let mut sigterm =
+            signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
         tokio::select! {
             _ = ctrl_c => {},
             _ = sigterm.recv() => {},

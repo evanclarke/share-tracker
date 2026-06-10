@@ -1,7 +1,7 @@
-use crate::infra::http::ApiError;
 use crate::domain::cost_base;
 use crate::entities::closing_price::{self, SharedFetcher};
 use crate::infra::decimal::parse_dec;
+use crate::infra::http::ApiError;
 use axum::{Extension, Json, Router, extract::State, routing::post};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
@@ -115,8 +115,7 @@ pub async fn db_holdings(
     let cba_reduction =
         crate::entities::amit_adjustment::db_cost_base_reductions_up_to(pool, as_of).await?;
     // return-of-capital payments (CGT event G1) per listing
-    let roc_events =
-        crate::entities::corporate_action::db_return_of_capital_events(pool).await?;
+    let roc_events = crate::entities::corporate_action::db_return_of_capital_events(pool).await?;
     // share splits/consolidations per listing (quantity re-basing)
     let split_events = crate::entities::corporate_action::db_share_split_events(pool).await?;
 
@@ -180,9 +179,12 @@ pub async fn db_holdings(
         let remaining_now = crate::entities::corporate_action::split_adjusted_quantity(
             remaining, splits, trade_date, as_of,
         );
-        *holding_qty.entry((listing_id, account_id)).or_insert(Decimal::ZERO) += remaining_now;
-        *holding_cost_base.entry((listing_id, account_id)).or_insert(Decimal::ZERO) +=
-            remaining_cost;
+        *holding_qty
+            .entry((listing_id, account_id))
+            .or_insert(Decimal::ZERO) += remaining_now;
+        *holding_cost_base
+            .entry((listing_id, account_id))
+            .or_insert(Decimal::ZERO) += remaining_cost;
     }
 
     let mut result: Vec<HoldingOverview> = holding_qty
@@ -193,7 +195,11 @@ pub async fn db_holdings(
                 .get(&(listing_id, holding_account_id))
                 .copied()
                 .unwrap_or(Decimal::ZERO);
-            let avg = if qty > Decimal::ZERO { cost_base / qty } else { Decimal::ZERO };
+            let avg = if qty > Decimal::ZERO {
+                cost_base / qty
+            } else {
+                Decimal::ZERO
+            };
             HoldingOverview {
                 listing_id,
                 holding_account_id,
@@ -218,9 +224,7 @@ async fn overview(
     body: Option<Json<OverviewRequest>>,
 ) -> Result<Json<Vec<HoldingOverview>>, ApiError> {
     let req = body.map(|Json(req)| req).unwrap_or_default();
-    let mut holdings = db_holdings(&pool, None)
-        .await
-        .map_err(ApiError::from)?;
+    let mut holdings = db_holdings(&pool, None).await.map_err(ApiError::from)?;
 
     // Live-fetch a current price for every held listing without an explicit
     // override (when requested); an explicit price always wins.
@@ -256,8 +260,11 @@ async fn overview(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        entities::{amit_adjustment, amma, corporate_action, listing, parcel_allocation, trade},
+        infra::db,
+    };
     use axum::http::StatusCode;
-    use crate::{infra::db, entities::{amma, amit_adjustment, corporate_action, listing, parcel_allocation, trade}};
     use axum::{body::Body, http::Request};
     use chrono::NaiveDate;
     use http_body_util::BodyExt;
@@ -444,7 +451,10 @@ mod tests {
         assert_eq!(h.quantity, Decimal::from(100));
         // cost = 10 * 100 + 9.95 + 0.995 = 1010.945
         assert_eq!(h.total_cost_base, "1010.945".parse::<Decimal>().unwrap());
-        assert_eq!(h.avg_cost_base_per_unit, "10.10945".parse::<Decimal>().unwrap());
+        assert_eq!(
+            h.avg_cost_base_per_unit,
+            "10.10945".parse::<Decimal>().unwrap()
+        );
     }
 
     /// A Buy entered with GST-inclusive brokerage costs exactly what was paid:
@@ -484,7 +494,10 @@ mod tests {
 
         let holdings = db_holdings(&pool, None).await.unwrap();
         // cost = 10 × 100 + 9.95 (the inclusive amount paid) = 1009.95
-        assert_eq!(holdings[0].total_cost_base, "1009.95".parse::<Decimal>().unwrap());
+        assert_eq!(
+            holdings[0].total_cost_base,
+            "1009.95".parse::<Decimal>().unwrap()
+        );
     }
 
     #[tokio::test]
@@ -501,7 +514,10 @@ mod tests {
         assert_eq!(h.quantity, Decimal::from(60));
         // remaining_cost = 1010.945 * 60 / 100 = 606.567
         assert_eq!(h.total_cost_base, "606.567".parse::<Decimal>().unwrap());
-        assert_eq!(h.avg_cost_base_per_unit, "10.10945".parse::<Decimal>().unwrap());
+        assert_eq!(
+            h.avg_cost_base_per_unit,
+            "10.10945".parse::<Decimal>().unwrap()
+        );
     }
 
     #[tokio::test]
@@ -521,7 +537,9 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "VAF").await;
         insert_buy(&pool, 1, 1, Decimal::from(100), Decimal::from(10)).await;
-        amma::db_upsert(&pool, &make_amma(1, 1, "0.05".parse().unwrap())).await.unwrap();
+        amma::db_upsert(&pool, &make_amma(1, 1, "0.05".parse().unwrap()))
+            .await
+            .unwrap();
         amit_adjustment::db_upsert(
             &pool,
             &amit_adjustment::AmitAdjustment {
@@ -539,7 +557,10 @@ mod tests {
         let h = &holdings[0];
         // initial = 1010.945, AMIT = 100 * 0.05 = 5.00, net = 1005.945
         assert_eq!(h.total_cost_base, "1005.945".parse::<Decimal>().unwrap());
-        assert_eq!(h.avg_cost_base_per_unit, "10.05945".parse::<Decimal>().unwrap());
+        assert_eq!(
+            h.avg_cost_base_per_unit,
+            "10.05945".parse::<Decimal>().unwrap()
+        );
     }
 
     #[tokio::test]
@@ -552,7 +573,9 @@ mod tests {
         // initial cost = 1*100 + 9.95 + 0.995 = 110.945
         insert_buy(&pool, 1, 1, Decimal::from(100), Decimal::from(1)).await;
         // reduction = 100 * 1.50 = 150 > 110.945 → cost base floored at 0
-        amma::db_upsert(&pool, &make_amma(1, 1, "1.50".parse().unwrap())).await.unwrap();
+        amma::db_upsert(&pool, &make_amma(1, 1, "1.50".parse().unwrap()))
+            .await
+            .unwrap();
         amit_adjustment::db_upsert(
             &pool,
             &amit_adjustment::AmitAdjustment {
@@ -656,7 +679,15 @@ mod tests {
         // Buy 100 @ $10 on 2024-01-01 → cost base 1010.945 (incl. brokerage).
         insert_buy(&pool, 1, 1, Decimal::from(100), Decimal::from(10)).await;
         // 2-for-1 split after acquisition.
-        apply_split(&pool, 1, 1, NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(), "2", "1").await;
+        apply_split(
+            &pool,
+            1,
+            1,
+            NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(),
+            "2",
+            "1",
+        )
+        .await;
 
         let holdings = db_holdings(&pool, None).await.unwrap();
         assert_eq!(holdings.len(), 1);
@@ -664,7 +695,10 @@ mod tests {
         assert_eq!(h.quantity, Decimal::from(200));
         assert_eq!(h.total_cost_base, "1010.945".parse::<Decimal>().unwrap());
         // per-unit cost base halves: 1010.945 / 200
-        assert_eq!(h.avg_cost_base_per_unit, "5.054725".parse::<Decimal>().unwrap());
+        assert_eq!(
+            h.avg_cost_base_per_unit,
+            "5.054725".parse::<Decimal>().unwrap()
+        );
     }
 
     /// A non-assessable bonus issue (`docs/ato/bonus-shares.md`) adds the bonus
@@ -711,11 +745,22 @@ mod tests {
         insert_listing(&pool, 1, "CON").await;
         insert_buy(&pool, 1, 1, Decimal::from(100), Decimal::from(10)).await;
         // 1-for-10 consolidation.
-        apply_split(&pool, 1, 1, NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(), "1", "10").await;
+        apply_split(
+            &pool,
+            1,
+            1,
+            NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(),
+            "1",
+            "10",
+        )
+        .await;
 
         let holdings = db_holdings(&pool, None).await.unwrap();
         assert_eq!(holdings[0].quantity, Decimal::from(10));
-        assert_eq!(holdings[0].total_cost_base, "1010.945".parse::<Decimal>().unwrap());
+        assert_eq!(
+            holdings[0].total_cost_base,
+            "1010.945".parse::<Decimal>().unwrap()
+        );
     }
 
     /// A sale entered after a split is in post-split units; the holding nets it
@@ -725,7 +770,15 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "SPL").await;
         insert_buy(&pool, 1, 1, Decimal::from(100), Decimal::from(10)).await; // 2024-01-01
-        apply_split(&pool, 1, 1, NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(), "2", "1").await;
+        apply_split(
+            &pool,
+            1,
+            1,
+            NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(),
+            "2",
+            "1",
+        )
+        .await;
         // Sell 80 post-split units (= 40 as-acquired) on 2024-06-01.
         insert_sell(&pool, 2, 1, Decimal::from(80)).await;
         allocate(&pool, 1, 2, 1, Decimal::from(80)).await;
@@ -735,7 +788,10 @@ mod tests {
         // 200 post-split − 80 sold = 120 held now.
         assert_eq!(holdings[0].quantity, Decimal::from(120));
         // Cost base of the remaining 60 as-acquired units: 1010.945 × 60/100.
-        assert_eq!(holdings[0].total_cost_base, "606.567".parse::<Decimal>().unwrap());
+        assert_eq!(
+            holdings[0].total_cost_base,
+            "606.567".parse::<Decimal>().unwrap()
+        );
     }
 
     /// A split dated before acquisition does not touch the parcel — its trade
@@ -744,7 +800,15 @@ mod tests {
     async fn db_split_before_acquisition_does_not_apply() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "SPL").await;
-        apply_split(&pool, 1, 1, NaiveDate::from_ymd_opt(2023, 6, 1).unwrap(), "2", "1").await;
+        apply_split(
+            &pool,
+            1,
+            1,
+            NaiveDate::from_ymd_opt(2023, 6, 1).unwrap(),
+            "2",
+            "1",
+        )
+        .await;
         insert_buy(&pool, 1, 1, Decimal::from(100), Decimal::from(10)).await; // 2024-01-01
 
         let holdings = db_holdings(&pool, None).await.unwrap();
@@ -758,13 +822,31 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "SPL").await;
         insert_buy(&pool, 1, 1, Decimal::from(100), Decimal::from(10)).await; // 2024-01-01
-        apply_split(&pool, 1, 1, NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(), "2", "1").await;
+        apply_split(
+            &pool,
+            1,
+            1,
+            NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(),
+            "2",
+            "1",
+        )
+        .await;
         // 25c/unit on the 200 post-split units → 50.00 off the cost base.
-        apply_roc(&pool, 2, 1, NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(), "0.25").await;
+        apply_roc(
+            &pool,
+            2,
+            1,
+            NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(),
+            "0.25",
+        )
+        .await;
 
         let holdings = db_holdings(&pool, None).await.unwrap();
         // 1010.945 − 200 × 0.25 = 960.945
-        assert_eq!(holdings[0].total_cost_base, "960.945".parse::<Decimal>().unwrap());
+        assert_eq!(
+            holdings[0].total_cost_base,
+            "960.945".parse::<Decimal>().unwrap()
+        );
     }
 
     /// A return of capital (CGT event G1) reduces the holding's cost base by the
@@ -777,12 +859,22 @@ mod tests {
         // Buy 100 @ $10 on 2024-01-01 → cost base 1010.945 (incl. brokerage).
         insert_buy(&pool, 1, 1, Decimal::from(100), Decimal::from(10)).await;
         // 50c/unit return of capital while all 100 units are held.
-        apply_roc(&pool, 1, 1, NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(), "0.50").await;
+        apply_roc(
+            &pool,
+            1,
+            1,
+            NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(),
+            "0.50",
+        )
+        .await;
 
         let holdings = db_holdings(&pool, None).await.unwrap();
         assert_eq!(holdings.len(), 1);
         // 1010.945 − 100 × 0.50 = 960.945
-        assert_eq!(holdings[0].total_cost_base, "960.945".parse::<Decimal>().unwrap());
+        assert_eq!(
+            holdings[0].total_cost_base,
+            "960.945".parse::<Decimal>().unwrap()
+        );
     }
 
     #[tokio::test]
@@ -790,11 +882,21 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "RAP").await;
         // Payment made before this parcel was acquired (2024-01-01): unaffected.
-        apply_roc(&pool, 1, 1, NaiveDate::from_ymd_opt(2023, 11, 30).unwrap(), "0.50").await;
+        apply_roc(
+            &pool,
+            1,
+            1,
+            NaiveDate::from_ymd_opt(2023, 11, 30).unwrap(),
+            "0.50",
+        )
+        .await;
         insert_buy(&pool, 1, 1, Decimal::from(100), Decimal::from(10)).await;
 
         let holdings = db_holdings(&pool, None).await.unwrap();
-        assert_eq!(holdings[0].total_cost_base, "1010.945".parse::<Decimal>().unwrap());
+        assert_eq!(
+            holdings[0].total_cost_base,
+            "1010.945".parse::<Decimal>().unwrap()
+        );
     }
 
     /// G1 can never push the cost base below nil: the excess over cost base is a
@@ -805,7 +907,14 @@ mod tests {
         insert_listing(&pool, 1, "RAP").await;
         insert_buy(&pool, 1, 1, Decimal::from(100), Decimal::from(10)).await;
         // $11/unit × 100 = 1100 exceeds the 1010.945 cost base.
-        apply_roc(&pool, 1, 1, NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(), "11").await;
+        apply_roc(
+            &pool,
+            1,
+            1,
+            NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(),
+            "11",
+        )
+        .await;
 
         let holdings = db_holdings(&pool, None).await.unwrap();
         assert_eq!(holdings[0].total_cost_base, Decimal::ZERO);
@@ -826,7 +935,11 @@ mod tests {
         let as_at = db_holdings(&pool, Some(NaiveDate::from_ymd_opt(2024, 3, 1).unwrap()))
             .await
             .unwrap();
-        assert_eq!(as_at[0].quantity, Decimal::from(100), "the June sale hasn't happened yet");
+        assert_eq!(
+            as_at[0].quantity,
+            Decimal::from(100),
+            "the June sale hasn't happened yet"
+        );
     }
 
     // API-level tests
@@ -880,9 +993,15 @@ mod tests {
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let holdings: Vec<HoldingOverview> = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(holdings.len(), 1);
-        assert_eq!(holdings[0].current_price, Some("120.50".parse::<Decimal>().unwrap()));
+        assert_eq!(
+            holdings[0].current_price,
+            Some("120.50".parse::<Decimal>().unwrap())
+        );
         // market_value = 100 * 120.50 = 12050.00
-        assert_eq!(holdings[0].market_value, Some("12050.00".parse::<Decimal>().unwrap()));
+        assert_eq!(
+            holdings[0].market_value,
+            Some("12050.00".parse::<Decimal>().unwrap())
+        );
     }
 
     #[tokio::test]
@@ -922,7 +1041,9 @@ mod tests {
         insert_listing(&pool, 1, "VAS").await;
         insert_buy(&pool, 1, 1, Decimal::from(100), Decimal::from(10)).await;
         let as_of = chrono::TimeZone::with_ymd_and_hms(&chrono::Utc, 2026, 6, 5, 6, 30, 0).unwrap();
-        let fetcher = QuoteStub::default().with_quote(1, "12.50", "AUD", as_of).shared();
+        let fetcher = QuoteStub::default()
+            .with_quote(1, "12.50", "AUD", as_of)
+            .shared();
 
         let body = serde_json::json!({ "live": true });
         let resp = router()
@@ -943,7 +1064,10 @@ mod tests {
         let holdings: Vec<HoldingOverview> = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(holdings[0].current_price, Some("12.50".parse().unwrap()));
         assert_eq!(holdings[0].market_value, Some(Decimal::from(1250)));
-        assert_eq!(holdings[0].price_as_of.as_deref(), Some(as_of.to_rfc3339().as_str()));
+        assert_eq!(
+            holdings[0].price_as_of.as_deref(),
+            Some(as_of.to_rfc3339().as_str())
+        );
         assert!(holdings[0].price_unavailable.is_none());
     }
 
@@ -962,7 +1086,9 @@ mod tests {
         insert_buy(&pool, 3, 3, Decimal::from(10), Decimal::from(5)).await;
         let as_of = chrono::TimeZone::with_ymd_and_hms(&chrono::Utc, 2026, 6, 5, 6, 30, 0).unwrap();
         // Stub only quotes listing 1; listing 3 has no quote → graceful failure.
-        let fetcher = QuoteStub::default().with_quote(1, "20", "AUD", as_of).shared();
+        let fetcher = QuoteStub::default()
+            .with_quote(1, "20", "AUD", as_of)
+            .shared();
 
         let body = serde_json::json!({ "live": true, "prices": { "2": "99" } });
         let resp = router()
@@ -1004,7 +1130,10 @@ mod tests {
         insert_listing(&pool, 1, "ICE").await;
         holding_account::db_upsert(
             &pool,
-            &HoldingAccount { id: 2, name: "ICE Employee Plan".to_string() },
+            &HoldingAccount {
+                id: 2,
+                name: "ICE Employee Plan".to_string(),
+            },
         )
         .await
         .unwrap();
@@ -1018,9 +1147,15 @@ mod tests {
 
         let holdings = db_holdings(&pool, None).await.unwrap();
         assert_eq!(holdings.len(), 2);
-        assert_eq!((holdings[0].listing_id, holdings[0].holding_account_id), (1, 1));
+        assert_eq!(
+            (holdings[0].listing_id, holdings[0].holding_account_id),
+            (1, 1)
+        );
         assert_eq!(holdings[0].quantity, Decimal::from(100));
-        assert_eq!((holdings[1].listing_id, holdings[1].holding_account_id), (1, 2));
+        assert_eq!(
+            (holdings[1].listing_id, holdings[1].holding_account_id),
+            (1, 2)
+        );
         assert_eq!(holdings[1].quantity, Decimal::from(50));
         assert!(holdings[1].total_cost_base > Decimal::ZERO);
         assert_ne!(holdings[0].total_cost_base, holdings[1].total_cost_base);
@@ -1052,13 +1187,18 @@ mod tests {
         )
         .await
         .unwrap();
-        crate::entities::scrip_exchange::db_exchange(&pool, 10).await.unwrap();
+        crate::entities::scrip_exchange::db_exchange(&pool, 10)
+            .await
+            .unwrap();
 
         let holdings = db_holdings(&pool, None).await.unwrap();
         assert_eq!(holdings.len(), 1);
         assert_eq!(holdings[0].listing_id, 2);
         assert_eq!(holdings[0].quantity, Decimal::from(200));
-        assert_eq!(holdings[0].total_cost_base, "1010.945".parse::<Decimal>().unwrap());
+        assert_eq!(
+            holdings[0].total_cost_base,
+            "1010.945".parse::<Decimal>().unwrap()
+        );
     }
 
     /// A demerger splits the holding across both listings: the head listing
@@ -1088,7 +1228,9 @@ mod tests {
         )
         .await
         .unwrap();
-        crate::entities::demerger::db_demerge(&pool, 10).await.unwrap();
+        crate::entities::demerger::db_demerge(&pool, 10)
+            .await
+            .unwrap();
 
         let mut holdings = db_holdings(&pool, None).await.unwrap();
         holdings.sort_by_key(|h| h.listing_id);
@@ -1096,10 +1238,16 @@ mod tests {
         assert_eq!(holdings[0].listing_id, 1);
         assert_eq!(holdings[0].quantity, Decimal::from(100));
         // 80% of $1,010.945 = $808.756.
-        assert_eq!(holdings[0].total_cost_base, "808.756".parse::<Decimal>().unwrap());
+        assert_eq!(
+            holdings[0].total_cost_base,
+            "808.756".parse::<Decimal>().unwrap()
+        );
         assert_eq!(holdings[1].listing_id, 2);
         assert_eq!(holdings[1].quantity, Decimal::from(20));
         // 20% of $1,010.945 = $202.189.
-        assert_eq!(holdings[1].total_cost_base, "202.189".parse::<Decimal>().unwrap());
+        assert_eq!(
+            holdings[1].total_cost_base,
+            "202.189".parse::<Decimal>().unwrap()
+        );
     }
 }

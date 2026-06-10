@@ -17,6 +17,7 @@
 //! transaction — **refused** (422) while that Buy is drawn on by a Sell
 //! allocation or AMIT adjustment.
 
+use crate::infra::decimal::row_dec;
 use crate::infra::http::ApiError;
 use axum::{
     Json, Router,
@@ -25,7 +26,6 @@ use axum::{
     routing::get,
 };
 use chrono::NaiveDate;
-use crate::infra::decimal::row_dec;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
@@ -117,9 +117,10 @@ fn default_currency() -> String {
 }
 
 pub fn router() -> Router<SqlitePool> {
-    Router::new()
-        .route("/ess_statements", get(list))
-        .route("/ess_statements/{id}", get(get_one).put(upsert).delete(delete))
+    Router::new().route("/ess_statements", get(list)).route(
+        "/ess_statements/{id}",
+        get(get_one).put(upsert).delete(delete),
+    )
 }
 
 const COLUMNS: &str = "id, listing_id, holding_account_id, taxing_point_date, quantity, \
@@ -136,10 +137,12 @@ pub async fn db_list(pool: &SqlitePool) -> Result<Vec<EssStatement>, sqlx::Error
 }
 
 pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<EssStatement>, sqlx::Error> {
-    sqlx::query_as(&format!("SELECT {COLUMNS} FROM ess_statements WHERE id = ?"))
-        .bind(id)
-        .fetch_optional(pool)
-        .await
+    sqlx::query_as(&format!(
+        "SELECT {COLUMNS} FROM ess_statements WHERE id = ?"
+    ))
+    .bind(id)
+    .fetch_optional(pool)
+    .await
 }
 
 #[derive(Debug)]
@@ -272,10 +275,7 @@ pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<DeleteOutcome, sqlx
 }
 
 async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<EssStatement>>, ApiError> {
-    db_list(&pool)
-        .await
-        .map(Json)
-        .map_err(ApiError::from)
+    db_list(&pool).await.map(Json).map_err(ApiError::from)
 }
 
 async fn get_one(
@@ -398,9 +398,18 @@ mod tests {
         s.deferral_discount = "612.345678900".parse().unwrap();
         db_upsert(&pool, &s).await.unwrap();
         let got = db_get(&pool, 1).await.unwrap().unwrap();
-        assert_eq!(got.market_value_per_share, "6.123456789".parse::<Decimal>().unwrap());
-        assert_eq!(got.deferral_discount, "612.345678900".parse::<Decimal>().unwrap());
-        assert_eq!(got.taxing_point_date, NaiveDate::from_ymd_opt(2024, 9, 1).unwrap());
+        assert_eq!(
+            got.market_value_per_share,
+            "6.123456789".parse::<Decimal>().unwrap()
+        );
+        assert_eq!(
+            got.deferral_discount,
+            "612.345678900".parse::<Decimal>().unwrap()
+        );
+        assert_eq!(
+            got.taxing_point_date,
+            NaiveDate::from_ymd_opt(2024, 9, 1).unwrap()
+        );
     }
 
     #[tokio::test]
@@ -474,7 +483,12 @@ mod tests {
         db_upsert(&pool, &sample(1)).await.unwrap();
         let resp = router()
             .with_state(pool.clone())
-            .oneshot(Request::builder().uri("/ess_statements").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/ess_statements")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);

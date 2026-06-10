@@ -11,8 +11,7 @@ use sqlx::SqlitePool;
 /// LIC capital gain deduction. Other entity types (SMSF/complying super 33⅓%,
 /// company 0%, trust/partnership flow-through) are deliberately not modelled
 /// (scope decision, 2026-06-07). Kept comma-free so it stays a single CSV field.
-pub const TAXPAYER_BASIS: &str =
-    "individual resident: 50% CGT discount; 50% LIC deduction";
+pub const TAXPAYER_BASIS: &str = "individual resident: 50% CGT discount; 50% LIC deduction";
 
 pub mod export;
 pub mod franking;

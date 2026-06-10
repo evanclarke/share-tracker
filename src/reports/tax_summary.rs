@@ -1,10 +1,8 @@
-use crate::infra::http::ApiError;
 use crate::infra::decimal::parse_dec;
 use crate::infra::fx::to_aud;
+use crate::infra::http::ApiError;
 use crate::reports::{export, franking};
-use axum::{
-    Json, Router, extract::State, response::Response, routing::get,
-};
+use axum::{Json, Router, extract::State, response::Response, routing::get};
 use chrono::{Datelike, NaiveDate};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -118,7 +116,10 @@ pub struct TaxYearSummary {
 pub fn router() -> Router<SqlitePool> {
     Router::new()
         .route("/portfolio/tax-summary", get(tax_summary_handler))
-        .route("/portfolio/tax-summary/export", get(tax_summary_export_handler))
+        .route(
+            "/portfolio/tax-summary/export",
+            get(tax_summary_export_handler),
+        )
 }
 
 /// CSV export columns — `TaxYearSummary`'s fields in declaration order. The csv
@@ -305,8 +306,7 @@ pub async fn db_tax_summary(pool: &SqlitePool) -> Result<Vec<TaxYearSummary>, sq
         let foreign_tax = aud_field(pool, row, "foreign_tax_paid", &currency, assessed).await?;
         let tfn_wht = aud_field(pool, row, "tfn_withholding_tax", &currency, assessed).await?;
         let fc = aud_field(pool, row, "franking_credits", &currency, assessed).await?;
-        let lic =
-            aud_field(pool, row, "lic_capital_gain_deduction", &currency, assessed).await?;
+        let lic = aud_field(pool, row, "lic_capital_gain_deduction", &currency, assessed).await?;
 
         if fc > Decimal::ZERO {
             let ex_date: Option<NaiveDate> = row.try_get("ex_date")?;
@@ -319,7 +319,9 @@ pub async fn db_tax_summary(pool: &SqlitePool) -> Result<Vec<TaxYearSummary>, sq
             *attached_credits_by_year.entry(tax_year).or_default() += fc;
         }
 
-        let s = map.entry(tax_year).or_insert_with(|| zero_summary(tax_year));
+        let s = map
+            .entry(tax_year)
+            .or_insert_with(|| zero_summary(tax_year));
         s.dividends_assessable += franked + unfranked;
         s.foreign_source_income += foreign_income;
         s.lic_capital_gain_deduction += lic;
@@ -351,7 +353,9 @@ pub async fn db_tax_summary(pool: &SqlitePool) -> Result<Vec<TaxYearSummary>, sq
         let cap_losses = aud_field(pool, row, "capital_losses_applied", &currency, d).await?;
         let tfn_wht = aud_field(pool, row, "tfn_withholding_tax", &currency, d).await?;
 
-        let s = map.entry(tax_year).or_insert_with(|| zero_summary(tax_year));
+        let s = map
+            .entry(tax_year)
+            .or_insert_with(|| zero_summary(tax_year));
         s.amma_australian_interest += interest;
         s.amma_dividends_unfranked += div_unfranked;
         s.amma_franked_dividends += franked_div;
@@ -380,8 +384,11 @@ pub async fn db_tax_summary(pool: &SqlitePool) -> Result<Vec<TaxYearSummary>, sq
     let mut ess_eligible_by_year: HashMap<i32, Decimal> = HashMap::new();
     for row in &ess_rows {
         let taxing_point: NaiveDate = row.try_get("taxing_point_date")?;
-        let tax_year =
-            if taxing_point.month() >= 7 { taxing_point.year() + 1 } else { taxing_point.year() };
+        let tax_year = if taxing_point.month() >= 7 {
+            taxing_point.year() + 1
+        } else {
+            taxing_point.year()
+        };
 
         let currency: String = row.try_get("currency")?;
         let d = taxing_point;
@@ -392,7 +399,9 @@ pub async fn db_tax_summary(pool: &SqlitePool) -> Result<Vec<TaxYearSummary>, sq
         let foreign = aud_field(pool, row, "foreign_source_discount", &currency, d).await?;
         let tfn = aud_field(pool, row, "tfn_withholding", &currency, d).await?;
 
-        let s = map.entry(tax_year).or_insert_with(|| zero_summary(tax_year));
+        let s = map
+            .entry(tax_year)
+            .or_insert_with(|| zero_summary(tax_year));
         // Raw discount; the $1,000 reduction is subtracted per year below.
         s.ess_discount_assessable += eligible + not_eligible + deferral + pre_2009;
         s.ess_foreign_source_discount += foreign;
@@ -405,7 +414,9 @@ pub async fn db_tax_summary(pool: &SqlitePool) -> Result<Vec<TaxYearSummary>, sq
     for (tax_year, eligible_total) in ess_eligible_by_year {
         let reduction = eligible_total.min(ess_reduction_cap_aud());
         if reduction > Decimal::ZERO {
-            let s = map.get_mut(&tax_year).expect("year inserted with the ESS row");
+            let s = map
+                .get_mut(&tax_year)
+                .expect("year inserted with the ESS row");
             s.ess_taxed_upfront_reduction = reduction;
             s.ess_discount_assessable -= reduction;
         }
@@ -429,7 +440,9 @@ pub async fn db_tax_summary(pool: &SqlitePool) -> Result<Vec<TaxYearSummary>, sq
         let amount = aud_field(pool, row, "amount", &currency, date_incurred).await?;
         let expense_type: String = row.try_get("expense_type")?;
 
-        let s = map.entry(tax_year).or_insert_with(|| zero_summary(tax_year));
+        let s = map
+            .entry(tax_year)
+            .or_insert_with(|| zero_summary(tax_year));
         let line = match expense_type.as_str() {
             "LoanInterest" => &mut s.deductions_loan_interest,
             "ManagementFee" => &mut s.deductions_management_fee,
@@ -461,7 +474,9 @@ pub async fn db_tax_summary(pool: &SqlitePool) -> Result<Vec<TaxYearSummary>, sq
         let test = franking::holding_period_test(pool, div.listing_id, div.ex_date).await?;
         let denied = test.denied(div.credits_aud);
         if denied > Decimal::ZERO {
-            let s = map.get_mut(&div.tax_year).expect("year inserted with the income row");
+            let s = map
+                .get_mut(&div.tax_year)
+                .expect("year inserted with the income row");
             s.franking_credits -= denied;
             s.franking_credits_denied += denied;
         }
@@ -509,21 +524,19 @@ async fn tax_summary_handler(
 }
 
 /// The same per-year rows as the JSON report, as a downloadable tax-return-ready CSV.
-async fn tax_summary_export_handler(
-    State(pool): State<SqlitePool>,
-) -> Result<Response, ApiError> {
-    let rows = db_tax_summary(&pool)
-        .await
-        .map_err(ApiError::from)?;
-    export::csv_response("tax-summary.csv", CSV_HEADER, &rows)
-        .map_err(ApiError::from)
+async fn tax_summary_export_handler(State(pool): State<SqlitePool>) -> Result<Response, ApiError> {
+    let rows = db_tax_summary(&pool).await.map_err(ApiError::from)?;
+    export::csv_response("tax-summary.csv", CSV_HEADER, &rows).map_err(ApiError::from)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        entities::{amma, ess_statement, income, investment_expense, listing, rba_fx_rate, trade},
+        infra::db,
+    };
     use axum::http::StatusCode;
-    use crate::{infra::db, entities::{amma, ess_statement, income, investment_expense, listing, rba_fx_rate, trade}};
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
     use tower::ServiceExt;
@@ -1068,8 +1081,24 @@ mod tests {
     async fn db_franking_credits_denied_when_held_under_45_days() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        insert_trade(&pool, 1, 1, trade::TradeType::Buy, NaiveDate::from_ymd_opt(2025, 3, 1).unwrap(), 1000).await;
-        insert_trade(&pool, 2, 1, trade::TradeType::Sell, NaiveDate::from_ymd_opt(2025, 4, 10).unwrap(), 1000).await;
+        insert_trade(
+            &pool,
+            1,
+            1,
+            trade::TradeType::Buy,
+            NaiveDate::from_ymd_opt(2025, 3, 1).unwrap(),
+            1000,
+        )
+        .await;
+        insert_trade(
+            &pool,
+            2,
+            1,
+            trade::TradeType::Sell,
+            NaiveDate::from_ymd_opt(2025, 4, 10).unwrap(),
+            1000,
+        )
+        .await;
         let mut inc = make_income(1, 1, NaiveDate::from_ymd_opt(2025, 4, 8).unwrap());
         inc.ex_date = Some(NaiveDate::from_ymd_opt(2025, 3, 14).unwrap());
         inc.franked_amount = Decimal::from(13066);
@@ -1090,8 +1119,24 @@ mod tests {
     async fn db_small_shareholder_exemption_keeps_credits_below_5000() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        insert_trade(&pool, 1, 1, trade::TradeType::Buy, NaiveDate::from_ymd_opt(2025, 3, 1).unwrap(), 1000).await;
-        insert_trade(&pool, 2, 1, trade::TradeType::Sell, NaiveDate::from_ymd_opt(2025, 4, 10).unwrap(), 1000).await;
+        insert_trade(
+            &pool,
+            1,
+            1,
+            trade::TradeType::Buy,
+            NaiveDate::from_ymd_opt(2025, 3, 1).unwrap(),
+            1000,
+        )
+        .await;
+        insert_trade(
+            &pool,
+            2,
+            1,
+            trade::TradeType::Sell,
+            NaiveDate::from_ymd_opt(2025, 4, 10).unwrap(),
+            1000,
+        )
+        .await;
         let mut inc = make_income(1, 1, NaiveDate::from_ymd_opt(2025, 4, 8).unwrap());
         inc.ex_date = Some(NaiveDate::from_ymd_opt(2025, 3, 14).unwrap());
         inc.franked_amount = Decimal::from(7000);
@@ -1109,8 +1154,24 @@ mod tests {
     async fn db_exactly_5000_attached_credits_is_not_exempt() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        insert_trade(&pool, 1, 1, trade::TradeType::Buy, NaiveDate::from_ymd_opt(2025, 3, 1).unwrap(), 1000).await;
-        insert_trade(&pool, 2, 1, trade::TradeType::Sell, NaiveDate::from_ymd_opt(2025, 4, 10).unwrap(), 1000).await;
+        insert_trade(
+            &pool,
+            1,
+            1,
+            trade::TradeType::Buy,
+            NaiveDate::from_ymd_opt(2025, 3, 1).unwrap(),
+            1000,
+        )
+        .await;
+        insert_trade(
+            &pool,
+            2,
+            1,
+            trade::TradeType::Sell,
+            NaiveDate::from_ymd_opt(2025, 4, 10).unwrap(),
+            1000,
+        )
+        .await;
         let mut inc = make_income(1, 1, NaiveDate::from_ymd_opt(2025, 4, 8).unwrap());
         inc.ex_date = Some(NaiveDate::from_ymd_opt(2025, 3, 14).unwrap());
         inc.franking_credits = Decimal::from(5000);
@@ -1128,8 +1189,24 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
         insert_listing(&pool, 2).await;
-        insert_trade(&pool, 1, 1, trade::TradeType::Buy, NaiveDate::from_ymd_opt(2025, 3, 1).unwrap(), 1000).await;
-        insert_trade(&pool, 2, 1, trade::TradeType::Sell, NaiveDate::from_ymd_opt(2025, 4, 10).unwrap(), 1000).await;
+        insert_trade(
+            &pool,
+            1,
+            1,
+            trade::TradeType::Buy,
+            NaiveDate::from_ymd_opt(2025, 3, 1).unwrap(),
+            1000,
+        )
+        .await;
+        insert_trade(
+            &pool,
+            2,
+            1,
+            trade::TradeType::Sell,
+            NaiveDate::from_ymd_opt(2025, 4, 10).unwrap(),
+            1000,
+        )
+        .await;
         // $3,000 income credits alone would be exempt…
         let mut inc = make_income(1, 1, NaiveDate::from_ymd_opt(2025, 4, 8).unwrap());
         inc.ex_date = Some(NaiveDate::from_ymd_opt(2025, 3, 14).unwrap());
@@ -1152,8 +1229,24 @@ mod tests {
     async fn db_missing_ex_date_falls_back_to_date_paid() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        insert_trade(&pool, 1, 1, trade::TradeType::Buy, NaiveDate::from_ymd_opt(2025, 4, 1).unwrap(), 1000).await;
-        insert_trade(&pool, 2, 1, trade::TradeType::Sell, NaiveDate::from_ymd_opt(2025, 4, 20).unwrap(), 1000).await;
+        insert_trade(
+            &pool,
+            1,
+            1,
+            trade::TradeType::Buy,
+            NaiveDate::from_ymd_opt(2025, 4, 1).unwrap(),
+            1000,
+        )
+        .await;
+        insert_trade(
+            &pool,
+            2,
+            1,
+            trade::TradeType::Sell,
+            NaiveDate::from_ymd_opt(2025, 4, 20).unwrap(),
+            1000,
+        )
+        .await;
         let mut inc = make_income(1, 1, NaiveDate::from_ymd_opt(2025, 4, 8).unwrap());
         inc.ex_date = None;
         inc.franking_credits = Decimal::from(6000);
@@ -1170,7 +1263,15 @@ mod tests {
     async fn db_long_held_parcel_keeps_credits_in_non_exempt_year() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        insert_trade(&pool, 1, 1, trade::TradeType::Buy, NaiveDate::from_ymd_opt(2023, 1, 10).unwrap(), 1000).await;
+        insert_trade(
+            &pool,
+            1,
+            1,
+            trade::TradeType::Buy,
+            NaiveDate::from_ymd_opt(2023, 1, 10).unwrap(),
+            1000,
+        )
+        .await;
         let mut inc = make_income(1, 1, NaiveDate::from_ymd_opt(2025, 4, 8).unwrap());
         inc.ex_date = Some(NaiveDate::from_ymd_opt(2025, 3, 14).unwrap());
         inc.franking_credits = Decimal::from(6000);
@@ -1316,11 +1417,15 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(
-            resp.headers().get(axum::http::header::CONTENT_TYPE).unwrap(),
+            resp.headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .unwrap(),
             "text/csv; charset=utf-8"
         );
         assert_eq!(
-            resp.headers().get(axum::http::header::CONTENT_DISPOSITION).unwrap(),
+            resp.headers()
+                .get(axum::http::header::CONTENT_DISPOSITION)
+                .unwrap(),
             "attachment; filename=\"tax-summary.csv\""
         );
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
@@ -1477,13 +1582,23 @@ mod tests {
         // Loan interest 500 + management fee 120 = 620 deductions.
         investment_expense::db_upsert(
             &pool,
-            &make_expense(1, NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(), ExpenseType::LoanInterest, Decimal::from(500)),
+            &make_expense(
+                1,
+                NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+                ExpenseType::LoanInterest,
+                Decimal::from(500),
+            ),
         )
         .await
         .unwrap();
         investment_expense::db_upsert(
             &pool,
-            &make_expense(2, NaiveDate::from_ymd_opt(2024, 5, 1).unwrap(), ExpenseType::ManagementFee, Decimal::from(120)),
+            &make_expense(
+                2,
+                NaiveDate::from_ymd_opt(2024, 5, 1).unwrap(),
+                ExpenseType::ManagementFee,
+                Decimal::from(120),
+            ),
         )
         .await
         .unwrap();
@@ -1525,9 +1640,15 @@ mod tests {
 
         let result = db_tax_summary(&pool).await.unwrap();
         // 100 + 50 + 10 + 20 + 5 + 3 = 188 (conduit and CGT excluded).
-        assert_eq!(result[0].gross_assessable_investment_income, Decimal::from(188));
+        assert_eq!(
+            result[0].gross_assessable_investment_income,
+            Decimal::from(188)
+        );
         // No deductions → net equals gross.
-        assert_eq!(result[0].net_assessable_investment_income, Decimal::from(188));
+        assert_eq!(
+            result[0].net_assessable_investment_income,
+            Decimal::from(188)
+        );
         assert_eq!(result[0].deductions_total, Decimal::ZERO);
     }
 
@@ -1576,13 +1697,23 @@ mod tests {
         // June 2024 → FY2024; July 2024 → FY2025.
         investment_expense::db_upsert(
             &pool,
-            &make_expense(1, NaiveDate::from_ymd_opt(2024, 6, 30).unwrap(), ExpenseType::LoanInterest, Decimal::from(100)),
+            &make_expense(
+                1,
+                NaiveDate::from_ymd_opt(2024, 6, 30).unwrap(),
+                ExpenseType::LoanInterest,
+                Decimal::from(100),
+            ),
         )
         .await
         .unwrap();
         investment_expense::db_upsert(
             &pool,
-            &make_expense(2, NaiveDate::from_ymd_opt(2024, 7, 1).unwrap(), ExpenseType::LoanInterest, Decimal::from(200)),
+            &make_expense(
+                2,
+                NaiveDate::from_ymd_opt(2024, 7, 1).unwrap(),
+                ExpenseType::LoanInterest,
+                Decimal::from(200),
+            ),
         )
         .await
         .unwrap();
@@ -1603,7 +1734,12 @@ mod tests {
         rba_fx_rate::db_import_rate(&pool, "USD", "2024-03", "0.50".parse().unwrap())
             .await
             .unwrap();
-        let mut e = make_expense(1, NaiveDate::from_ymd_opt(2024, 3, 15).unwrap(), ExpenseType::AdviceFee, Decimal::from(100));
+        let mut e = make_expense(
+            1,
+            NaiveDate::from_ymd_opt(2024, 3, 15).unwrap(),
+            ExpenseType::AdviceFee,
+            Decimal::from(100),
+        );
         e.currency = "USD".to_string();
         investment_expense::db_upsert(&pool, &e).await.unwrap();
 
@@ -1617,7 +1753,12 @@ mod tests {
     #[tokio::test]
     async fn db_non_aud_expense_without_rate_fails_loudly() {
         let pool = test_pool().await;
-        let mut e = make_expense(1, NaiveDate::from_ymd_opt(2024, 3, 15).unwrap(), ExpenseType::LoanInterest, Decimal::from(100));
+        let mut e = make_expense(
+            1,
+            NaiveDate::from_ymd_opt(2024, 3, 15).unwrap(),
+            ExpenseType::LoanInterest,
+            Decimal::from(100),
+        );
         e.currency = "USD".to_string();
         investment_expense::db_upsert(&pool, &e).await.unwrap();
         assert!(db_tax_summary(&pool).await.is_err());

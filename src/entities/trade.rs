@@ -1,3 +1,4 @@
+use crate::infra::decimal::{parse_dec, row_dec, row_opt_dec};
 use crate::infra::http::ApiError;
 use axum::{
     Json, Router,
@@ -6,7 +7,6 @@ use axum::{
     routing::get,
 };
 use chrono::{Datelike, NaiveDate};
-use crate::infra::decimal::{parse_dec, row_dec, row_opt_dec};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
@@ -416,8 +416,14 @@ pub async fn db_upsert(pool: &SqlitePool, trade: &Trade) -> Result<(), UpsertErr
     // cost base and deemed acquisition date), which an edit could silently
     // break. (The INSERT below never sets any provenance column, so a normal
     // trade can't become one either.)
-    type ProvenanceRow =
-        (Option<i64>, Option<i64>, Option<i64>, Option<i64>, Option<i64>, Option<i64>);
+    type ProvenanceRow = (
+        Option<i64>,
+        Option<i64>,
+        Option<i64>,
+        Option<i64>,
+        Option<i64>,
+        Option<i64>,
+    );
     let existing_action: Option<ProvenanceRow> = sqlx::query_as(
         "SELECT rights_action_id, buyback_action_id, scrip_action_id, demerger_action_id, \
                 transfer_id, ess_statement_id \
@@ -719,10 +725,7 @@ pub(crate) async fn auto_settlement_date(
 }
 
 async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<Trade>>, ApiError> {
-    db_list(&pool)
-        .await
-        .map(Json)
-        .map_err(ApiError::from)
+    db_list(&pool).await.map(Json).map_err(ApiError::from)
 }
 
 async fn get_one(
@@ -766,8 +769,11 @@ async fn upsert(
     };
     // A GST-inclusive brokerage entry is split here, at the API boundary, so
     // the stored columns (and `Trade` itself) are always ex-GST + GST.
-    let (brokerage, gst_on_brokerage) =
-        resolve_brokerage(body.brokerage_includes_gst, body.brokerage, body.gst_on_brokerage);
+    let (brokerage, gst_on_brokerage) = resolve_brokerage(
+        body.brokerage_includes_gst,
+        body.brokerage,
+        body.gst_on_brokerage,
+    );
     let trade = Trade {
         id,
         trade_type: body.trade_type,
@@ -875,7 +881,7 @@ async fn delete(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{infra::db, entities::listing};
+    use crate::{entities::listing, infra::db};
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
     use rust_decimal::Decimal;
@@ -1027,7 +1033,10 @@ mod tests {
         assert_eq!(got.trade_type, TradeType::Buy);
         assert_eq!(got.quantity, Decimal::from(10));
         assert_eq!(got.average_price, Decimal::from(100));
-        assert_eq!(got.settlement_date, NaiveDate::from_ymd_opt(2024, 1, 17).unwrap());
+        assert_eq!(
+            got.settlement_date,
+            NaiveDate::from_ymd_opt(2024, 1, 17).unwrap()
+        );
         assert_eq!(got.contract_note_ref, Some("CN001".to_string()));
     }
 
@@ -1049,7 +1058,10 @@ mod tests {
         // 'ZZZ' is not a recognised currency → each currency column's FK rejects it.
         let mut bad_currency = buy_trade();
         bad_currency.currency = "ZZZ".to_string();
-        assert_fk_error(db_upsert(&pool, &bad_currency).await.unwrap_err(), "currency");
+        assert_fk_error(
+            db_upsert(&pool, &bad_currency).await.unwrap_err(),
+            "currency",
+        );
 
         let mut bad_brokerage = buy_trade();
         bad_brokerage.brokerage_currency = "ZZZ".to_string();
@@ -1154,9 +1166,18 @@ mod tests {
         trade.residual_paid_out = "2.500000001".parse().unwrap();
         db_upsert(&pool, &trade).await.unwrap();
         let got = db_get(&pool, 7).await.unwrap().unwrap();
-        assert_eq!(got.residual_brought_forward, "1.234567890".parse::<Decimal>().unwrap());
-        assert_eq!(got.residual_carried_forward, "0.987654321".parse::<Decimal>().unwrap());
-        assert_eq!(got.residual_paid_out, "2.500000001".parse::<Decimal>().unwrap());
+        assert_eq!(
+            got.residual_brought_forward,
+            "1.234567890".parse::<Decimal>().unwrap()
+        );
+        assert_eq!(
+            got.residual_carried_forward,
+            "0.987654321".parse::<Decimal>().unwrap()
+        );
+        assert_eq!(
+            got.residual_paid_out,
+            "2.500000001".parse::<Decimal>().unwrap()
+        );
     }
 
     #[tokio::test]
@@ -1186,8 +1207,14 @@ mod tests {
         db_upsert(&pool, &buy_trade()).await.unwrap();
         insert_sell_consuming(&pool, 2, 1, Decimal::from(5)).await;
 
-        assert_eq!(db_delete(&pool, 1).await.unwrap(), DeleteOutcome::Referenced);
-        assert!(db_get(&pool, 1).await.unwrap().is_some(), "consumed buy must remain");
+        assert_eq!(
+            db_delete(&pool, 1).await.unwrap(),
+            DeleteOutcome::Referenced
+        );
+        assert!(
+            db_get(&pool, 1).await.unwrap().is_some(),
+            "consumed buy must remain"
+        );
     }
 
     #[tokio::test]
@@ -1197,8 +1224,14 @@ mod tests {
         db_upsert(&pool, &buy_trade()).await.unwrap();
         insert_amit_adjustment_covering(&pool, 1, Decimal::from(10)).await;
 
-        assert_eq!(db_delete(&pool, 1).await.unwrap(), DeleteOutcome::Referenced);
-        assert!(db_get(&pool, 1).await.unwrap().is_some(), "covered buy must remain");
+        assert_eq!(
+            db_delete(&pool, 1).await.unwrap(),
+            DeleteOutcome::Referenced
+        );
+        assert!(
+            db_get(&pool, 1).await.unwrap().is_some(),
+            "covered buy must remain"
+        );
     }
 
     #[tokio::test]
@@ -1218,8 +1251,14 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(db_delete(&pool, 1).await.unwrap(), DeleteOutcome::Referenced);
-        assert!(db_get(&pool, 1).await.unwrap().is_some(), "reinvestment trade must remain");
+        assert_eq!(
+            db_delete(&pool, 1).await.unwrap(),
+            DeleteOutcome::Referenced
+        );
+        assert!(
+            db_get(&pool, 1).await.unwrap().is_some(),
+            "reinvestment trade must remain"
+        );
     }
 
     #[tokio::test]
@@ -1237,13 +1276,19 @@ mod tests {
             matches!(err, UpsertError::QuantityBelowAllocated),
             "expected QuantityBelowAllocated, got: {err:?}"
         );
-        assert_eq!(db_get(&pool, 1).await.unwrap().unwrap().quantity, Decimal::from(10));
+        assert_eq!(
+            db_get(&pool, 1).await.unwrap().unwrap().quantity,
+            Decimal::from(10)
+        );
 
         // …but shrinking exactly to the allocated quantity is fine.
         let mut exact = buy_trade();
         exact.quantity = Decimal::from(5);
         db_upsert(&pool, &exact).await.unwrap();
-        assert_eq!(db_get(&pool, 1).await.unwrap().unwrap().quantity, Decimal::from(5));
+        assert_eq!(
+            db_get(&pool, 1).await.unwrap().unwrap().quantity,
+            Decimal::from(5)
+        );
     }
 
     /// With a 2-for-1 split (TD 2000/10) between the buy and the sale, the
@@ -1285,7 +1330,10 @@ mod tests {
         let mut exact = buy_trade();
         exact.quantity = Decimal::from(5);
         db_upsert(&pool, &exact).await.unwrap();
-        assert_eq!(db_get(&pool, 1).await.unwrap().unwrap().quantity, Decimal::from(5));
+        assert_eq!(
+            db_get(&pool, 1).await.unwrap().unwrap().quantity,
+            Decimal::from(5)
+        );
     }
 
     #[tokio::test]
@@ -1303,13 +1351,19 @@ mod tests {
             matches!(err, UpsertError::QuantityBelowAmitAdjustment),
             "expected QuantityBelowAmitAdjustment, got: {err:?}"
         );
-        assert_eq!(db_get(&pool, 1).await.unwrap().unwrap().quantity, Decimal::from(10));
+        assert_eq!(
+            db_get(&pool, 1).await.unwrap().unwrap().quantity,
+            Decimal::from(10)
+        );
 
         // …but shrinking exactly to the covered quantity is fine.
         let mut exact = buy_trade();
         exact.quantity = Decimal::from(8);
         db_upsert(&pool, &exact).await.unwrap();
-        assert_eq!(db_get(&pool, 1).await.unwrap().unwrap().quantity, Decimal::from(8));
+        assert_eq!(
+            db_get(&pool, 1).await.unwrap().unwrap().quantity,
+            Decimal::from(8)
+        );
     }
 
     #[tokio::test]
@@ -1321,7 +1375,10 @@ mod tests {
         let mut shrunk = buy_trade();
         shrunk.quantity = Decimal::ONE;
         db_upsert(&pool, &shrunk).await.unwrap();
-        assert_eq!(db_get(&pool, 1).await.unwrap().unwrap().quantity, Decimal::ONE);
+        assert_eq!(
+            db_get(&pool, 1).await.unwrap().unwrap().quantity,
+            Decimal::ONE
+        );
 
         assert_eq!(db_delete(&pool, 1).await.unwrap(), DeleteOutcome::Deleted);
         assert!(db_get(&pool, 1).await.unwrap().is_none());
@@ -1360,7 +1417,10 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
         let trade = db_get(&pool, 1).await.unwrap().unwrap();
-        assert_eq!(trade.settlement_date, NaiveDate::from_ymd_opt(2024, 1, 17).unwrap());
+        assert_eq!(
+            trade.settlement_date,
+            NaiveDate::from_ymd_opt(2024, 1, 17).unwrap()
+        );
     }
 
     /// An exchange-less (Crypto) listing settles same-day: the auto-populated
@@ -1414,8 +1474,13 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
         let trade = db_get(&pool, 1).await.unwrap().unwrap();
-        assert_eq!(trade.settlement_date, NaiveDate::from_ymd_opt(2030, 6, 7).unwrap());
-        assert!(!logs_contain("settlement window outside seeded exchange-holiday coverage"));
+        assert_eq!(
+            trade.settlement_date,
+            NaiveDate::from_ymd_opt(2030, 6, 7).unwrap()
+        );
+        assert!(!logs_contain(
+            "settlement window outside seeded exchange-holiday coverage"
+        ));
     }
 
     #[tracing_test::traced_test]
@@ -1452,7 +1517,9 @@ mod tests {
             .unwrap();
         // Non-blocking: the write succeeds, the warning surfaces the gap.
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
-        assert!(logs_contain("settlement window outside seeded exchange-holiday coverage"));
+        assert!(logs_contain(
+            "settlement window outside seeded exchange-holiday coverage"
+        ));
     }
 
     #[tracing_test::traced_test]
@@ -1485,7 +1552,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
-        assert!(!logs_contain("settlement window outside seeded exchange-holiday coverage"));
+        assert!(!logs_contain(
+            "settlement window outside seeded exchange-holiday coverage"
+        ));
     }
 
     #[test]
@@ -1561,7 +1630,10 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
         let trade = db_get(&pool, 1).await.unwrap().unwrap();
-        assert_eq!(trade.settlement_date, NaiveDate::from_ymd_opt(2024, 12, 30).unwrap());
+        assert_eq!(
+            trade.settlement_date,
+            NaiveDate::from_ymd_opt(2024, 12, 30).unwrap()
+        );
     }
 
     #[tokio::test]
@@ -1595,7 +1667,10 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
         let trade = db_get(&pool, 1).await.unwrap().unwrap();
-        assert_eq!(trade.settlement_date, NaiveDate::from_ymd_opt(2024, 1, 23).unwrap());
+        assert_eq!(
+            trade.settlement_date,
+            NaiveDate::from_ymd_opt(2024, 1, 23).unwrap()
+        );
     }
 
     #[tokio::test]
@@ -1662,8 +1737,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        let n: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM trades").fetch_one(&pool).await.unwrap();
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM trades")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
         assert_eq!(n, 0, "rejected DRP must not be persisted");
     }
 
@@ -1698,7 +1775,10 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
         let trade = db_get(&pool, 1).await.unwrap().unwrap();
-        assert_eq!(trade.settlement_date, NaiveDate::from_ymd_opt(2024, 1, 20).unwrap());
+        assert_eq!(
+            trade.settlement_date,
+            NaiveDate::from_ymd_opt(2024, 1, 20).unwrap()
+        );
     }
 
     #[tokio::test]
@@ -1708,7 +1788,12 @@ mod tests {
         db_upsert(&pool, &buy_trade()).await.unwrap();
         let resp = router()
             .with_state(pool)
-            .oneshot(Request::builder().uri("/trades").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/trades")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -1725,7 +1810,12 @@ mod tests {
         db_upsert(&pool, &buy_trade()).await.unwrap();
         let resp = router()
             .with_state(pool)
-            .oneshot(Request::builder().uri("/trades/1").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/trades/1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -1740,7 +1830,12 @@ mod tests {
         let pool = test_pool().await;
         let resp = router()
             .with_state(pool)
-            .oneshot(Request::builder().uri("/trades/999").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/trades/999")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
@@ -1801,7 +1896,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        assert!(db_get(&pool, 1).await.unwrap().is_some(), "consumed buy must remain");
+        assert!(
+            db_get(&pool, 1).await.unwrap().is_some(),
+            "consumed buy must remain"
+        );
     }
 
     #[tokio::test]
@@ -1839,7 +1937,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        assert_eq!(db_get(&pool, 1).await.unwrap().unwrap().quantity, Decimal::from(10));
+        assert_eq!(
+            db_get(&pool, 1).await.unwrap().unwrap().quantity,
+            Decimal::from(10)
+        );
     }
 
     #[tokio::test]
@@ -1873,7 +1974,12 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
         let resp = router()
             .with_state(pool)
-            .oneshot(Request::builder().uri("/trades/1").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/trades/1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
@@ -1951,7 +2057,10 @@ mod tests {
         let t = db_get(&pool, 1).await.unwrap().unwrap();
         assert_eq!(t.brokerage, d("9.05"));
         assert_eq!(t.gst_on_brokerage, d("0.90"));
-        assert!(t.brokerage_includes_gst, "flag must round-trip for the entry form");
+        assert!(
+            t.brokerage_includes_gst,
+            "flag must round-trip for the entry form"
+        );
 
         // Editing with a new inclusive amount re-splits it.
         let body = serde_json::json!({
@@ -2018,7 +2127,10 @@ mod tests {
         });
         let (status, _) = put_trade_json(&pool, 1, body.clone()).await;
         assert_eq!(status, StatusCode::NO_CONTENT);
-        assert_eq!(db_get(&pool, 1).await.unwrap().unwrap().statement_total, Some(d("1009.95")));
+        assert_eq!(
+            db_get(&pool, 1).await.unwrap().unwrap().statement_total,
+            Some(d("1009.95"))
+        );
 
         // Numeric comparison: trailing zeros don't matter.
         let mut zeros = body.clone();
@@ -2032,8 +2144,14 @@ mod tests {
         wrong["statement_total"] = "1010".into();
         let (status, detail) = put_trade_json(&pool, 2, wrong).await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-        assert!(detail.contains("1009.95"), "detail must carry the computed figure: {detail}");
-        assert!(db_get(&pool, 2).await.unwrap().is_none(), "nothing persisted");
+        assert!(
+            detail.contains("1009.95"),
+            "detail must carry the computed figure: {detail}"
+        );
+        assert!(
+            db_get(&pool, 2).await.unwrap().is_none(),
+            "nothing persisted"
+        );
     }
 
     /// A total can only be checked when the trade and brokerage currencies
@@ -2057,8 +2175,14 @@ mod tests {
         });
         let (status, detail) = put_trade_json(&pool, 1, body).await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-        assert!(detail.contains("currencies"), "detail must explain the rejection: {detail}");
-        assert!(db_get(&pool, 1).await.unwrap().is_none(), "nothing persisted");
+        assert!(
+            detail.contains("currencies"),
+            "detail must explain the rejection: {detail}"
+        );
+        assert!(
+            db_get(&pool, 1).await.unwrap().is_none(),
+            "nothing persisted"
+        );
     }
 
     /// The boolean column is CHECK-constrained to 0/1 in the database.

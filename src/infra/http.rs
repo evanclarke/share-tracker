@@ -68,7 +68,10 @@ impl ApiError {
     /// A 502 with a short user-facing body, wrapping the upstream fetch
     /// error (logged when the response is built).
     pub fn bad_gateway(body: impl Into<String>, source: impl Into<BoxError>) -> Self {
-        ApiError::BadGateway { body: body.into(), source: source.into() }
+        ApiError::BadGateway {
+            body: body.into(),
+            source: source.into(),
+        }
     }
 
     /// A 404 whose body names what was missing.
@@ -96,9 +99,7 @@ impl IntoResponse for ApiError {
                 (StatusCode::BAD_GATEWAY, body).into_response()
             }
             ApiError::NotFound => StatusCode::NOT_FOUND.into_response(),
-            ApiError::NotFoundWithReason(body) => {
-                (StatusCode::NOT_FOUND, body).into_response()
-            }
+            ApiError::NotFoundWithReason(body) => (StatusCode::NOT_FOUND, body).into_response(),
         }
     }
 }
@@ -170,10 +171,13 @@ mod tests {
 
     #[tokio::test]
     async fn unprocessable_is_422_with_the_message_as_body() {
-        let resp = ApiError::unprocessable("the date is before the listing existed")
-            .into_response();
+        let resp =
+            ApiError::unprocessable("the date is before the listing existed").into_response();
         assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        assert_eq!(body_of(resp).await, "the date is before the listing existed");
+        assert_eq!(
+            body_of(resp).await,
+            "the date is before the listing existed"
+        );
     }
 
     #[tokio::test]
@@ -224,7 +228,10 @@ mod tests {
         });
 
         let logged = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
-        assert!(logged.contains("ERROR"), "no error-level line logged: {logged}");
+        assert!(
+            logged.contains("ERROR"),
+            "no error-level line logged: {logged}"
+        );
         assert!(
             logged.contains("invalid decimal in column fx_rate: oops"),
             "the wrapped error's message is missing from the log: {logged}"
@@ -253,8 +260,7 @@ mod tests {
 
     #[tokio::test]
     async fn non_constraint_db_errors_classify_as_internal() {
-        let api: ApiError =
-            sqlx::Error::Decode("invalid decimal in column quantity".into()).into();
+        let api: ApiError = sqlx::Error::Decode("invalid decimal in column quantity".into()).into();
         assert!(matches!(api, ApiError::Internal(_)));
     }
 }

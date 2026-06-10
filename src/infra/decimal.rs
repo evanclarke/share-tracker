@@ -28,5 +28,7 @@ pub fn row_dec(row: &SqliteRow, column: &str) -> Result<Decimal, sqlx::Error> {
 /// parsed via [`parse_dec`] (so a malformed value is a column-named error, never a
 /// silent `None`).
 pub fn row_opt_dec(row: &SqliteRow, column: &str) -> Result<Option<Decimal>, sqlx::Error> {
-    row.try_get::<Option<String>, _>(column)?.map(|s| parse_dec(column, s)).transpose()
+    row.try_get::<Option<String>, _>(column)?
+        .map(|s| parse_dec(column, s))
+        .transpose()
 }

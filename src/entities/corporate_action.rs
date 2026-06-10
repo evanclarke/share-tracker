@@ -121,8 +121,8 @@
 //! `ActionKind` is the extension point for future corporate actions, each
 //! widening the enum and its CHECK.
 
-use crate::infra::http::ApiError;
 use crate::infra::decimal::{parse_dec, row_dec, row_opt_dec};
+use crate::infra::http::ApiError;
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -456,8 +456,7 @@ impl CorporateActionBody {
         let positive = |d: Option<Decimal>| d.filter(|v| *v > Decimal::ZERO);
         match self.action_type {
             ActionType::ReturnOfCapital
-                if !split && !bonus && !rights && !buyback && !scrip && !demerger
-                    && !worthless =>
+                if !split && !bonus && !rights && !buyback && !scrip && !demerger && !worthless =>
             {
                 Some(ActionKind::ReturnOfCapital {
                     amount_per_unit: positive(self.amount_per_unit)?,
@@ -465,8 +464,14 @@ impl CorporateActionBody {
                 })
             }
             ActionType::ShareSplit
-                if !payment && !bonus && !rights && !buyback && !scrip && !demerger
-                    && !worthless && self.currency.is_none() =>
+                if !payment
+                    && !bonus
+                    && !rights
+                    && !buyback
+                    && !scrip
+                    && !demerger
+                    && !worthless
+                    && self.currency.is_none() =>
             {
                 Some(ActionKind::ShareSplit {
                     split_new_units: positive(self.split_new_units)?,
@@ -474,8 +479,14 @@ impl CorporateActionBody {
                 })
             }
             ActionType::BonusIssue
-                if !payment && !split && !rights && !buyback && !scrip && !demerger
-                    && !worthless && self.currency.is_none() =>
+                if !payment
+                    && !split
+                    && !rights
+                    && !buyback
+                    && !scrip
+                    && !demerger
+                    && !worthless
+                    && self.currency.is_none() =>
             {
                 Some(ActionKind::BonusIssue {
                     bonus_units: positive(self.bonus_units)?,
@@ -483,7 +494,12 @@ impl CorporateActionBody {
                 })
             }
             ActionType::RightsIssue
-                if !payment && !split && !bonus && !buyback && !scrip && !demerger
+                if !payment
+                    && !split
+                    && !bonus
+                    && !buyback
+                    && !scrip
+                    && !demerger
                     && !worthless =>
             {
                 Some(ActionKind::RightsIssue {
@@ -494,11 +510,16 @@ impl CorporateActionBody {
                 })
             }
             ActionType::ScripForScrip
-                if !payment && !split && !bonus && !rights && !buyback && !demerger
-                    && !worthless && self.currency.is_none() =>
+                if !payment
+                    && !split
+                    && !bonus
+                    && !rights
+                    && !buyback
+                    && !demerger
+                    && !worthless
+                    && self.currency.is_none() =>
             {
-                let scrip_listing_id =
-                    self.scrip_listing_id.filter(|&l| l != self.listing_id)?;
+                let scrip_listing_id = self.scrip_listing_id.filter(|&l| l != self.listing_id)?;
                 Some(ActionKind::ScripForScrip {
                     scrip_listing_id,
                     scrip_new_units: positive(self.scrip_new_units)?,
@@ -506,8 +527,14 @@ impl CorporateActionBody {
                 })
             }
             ActionType::Demerger
-                if !payment && !split && !bonus && !rights && !buyback && !scrip
-                    && !worthless && self.currency.is_none() =>
+                if !payment
+                    && !split
+                    && !bonus
+                    && !rights
+                    && !buyback
+                    && !scrip
+                    && !worthless
+                    && self.currency.is_none() =>
             {
                 let demerger_listing_id =
                     self.demerger_listing_id.filter(|&l| l != self.listing_id)?;
@@ -522,16 +549,14 @@ impl CorporateActionBody {
                 })
             }
             ActionType::BuyBack
-                if !payment && !split && !bonus && !rights && !scrip && !demerger
-                    && !worthless =>
+                if !payment && !split && !bonus && !rights && !scrip && !demerger && !worthless =>
             {
                 let buyback_price = positive(self.buyback_price)?;
                 let buyback_dividend = self.buyback_dividend.unwrap_or(Decimal::ZERO);
                 if buyback_dividend < Decimal::ZERO || buyback_dividend > buyback_price {
                     return None;
                 }
-                let buyback_franking_credit =
-                    self.buyback_franking_credit.unwrap_or(Decimal::ZERO);
+                let buyback_franking_credit = self.buyback_franking_credit.unwrap_or(Decimal::ZERO);
                 if buyback_franking_credit < Decimal::ZERO
                     || (buyback_franking_credit > Decimal::ZERO
                         && buyback_dividend == Decimal::ZERO)
@@ -551,10 +576,18 @@ impl CorporateActionBody {
                 })
             }
             ActionType::WorthlessShares
-                if !payment && !split && !bonus && !rights && !buyback && !scrip
-                    && !demerger && self.currency.is_none() =>
+                if !payment
+                    && !split
+                    && !bonus
+                    && !rights
+                    && !buyback
+                    && !scrip
+                    && !demerger
+                    && self.currency.is_none() =>
             {
-                Some(ActionKind::WorthlessShares { worthless_event: self.worthless_event? })
+                Some(ActionKind::WorthlessShares {
+                    worthless_event: self.worthless_event?,
+                })
             }
             _ => None,
         }
@@ -562,9 +595,10 @@ impl CorporateActionBody {
 }
 
 pub fn router() -> Router<SqlitePool> {
-    Router::new()
-        .route("/corporate_actions", get(list))
-        .route("/corporate_actions/{id}", get(get_one).put(upsert).delete(delete))
+    Router::new().route("/corporate_actions", get(list)).route(
+        "/corporate_actions/{id}",
+        get(get_one).put(upsert).delete(delete),
+    )
 }
 
 const COLUMNS: &str = "id, action_type, listing_id, date, amount_per_unit, currency, \
@@ -576,9 +610,11 @@ const COLUMNS: &str = "id, action_type, listing_id, date, amount_per_unit, curre
                        demerger_held_units, demerger_cost_base_pct, worthless_event";
 
 pub async fn db_list(pool: &SqlitePool) -> Result<Vec<CorporateAction>, sqlx::Error> {
-    sqlx::query_as(&format!("SELECT {COLUMNS} FROM corporate_actions ORDER BY id"))
-        .fetch_all(pool)
-        .await
+    sqlx::query_as(&format!(
+        "SELECT {COLUMNS} FROM corporate_actions ORDER BY id"
+    ))
+    .fetch_all(pool)
+    .await
 }
 
 pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<CorporateAction>, sqlx::Error> {
@@ -591,10 +627,12 @@ pub async fn db_get_tx<'e, E>(executor: E, id: i64) -> Result<Option<CorporateAc
 where
     E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
 {
-    sqlx::query_as(&format!("SELECT {COLUMNS} FROM corporate_actions WHERE id = ?"))
-        .bind(id)
-        .fetch_optional(executor)
-        .await
+    sqlx::query_as(&format!(
+        "SELECT {COLUMNS} FROM corporate_actions WHERE id = ?"
+    ))
+    .bind(id)
+    .fetch_optional(executor)
+    .await
 }
 
 #[derive(Debug)]
@@ -660,19 +698,33 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
     }
     let mut c = Cols::default();
     match &action.kind {
-        ActionKind::ReturnOfCapital { amount_per_unit, currency } => {
+        ActionKind::ReturnOfCapital {
+            amount_per_unit,
+            currency,
+        } => {
             c.amount_per_unit = Some(amount_per_unit.to_string());
             c.currency = Some(currency.clone());
         }
-        ActionKind::ShareSplit { split_new_units, split_old_units } => {
+        ActionKind::ShareSplit {
+            split_new_units,
+            split_old_units,
+        } => {
             c.split_new_units = Some(split_new_units.to_string());
             c.split_old_units = Some(split_old_units.to_string());
         }
-        ActionKind::BonusIssue { bonus_units, bonus_held_units } => {
+        ActionKind::BonusIssue {
+            bonus_units,
+            bonus_held_units,
+        } => {
             c.bonus_units = Some(bonus_units.to_string());
             c.bonus_held_units = Some(bonus_held_units.to_string());
         }
-        ActionKind::RightsIssue { rights_units, rights_held_units, exercise_price, currency } => {
+        ActionKind::RightsIssue {
+            rights_units,
+            rights_held_units,
+            exercise_price,
+            currency,
+        } => {
             c.rights_units = Some(rights_units.to_string());
             c.rights_held_units = Some(rights_held_units.to_string());
             c.exercise_price = Some(exercise_price.to_string());
@@ -691,7 +743,11 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
             c.buyback_market_value = buyback_market_value.map(|v| v.to_string());
             c.currency = Some(currency.clone());
         }
-        ActionKind::ScripForScrip { scrip_listing_id, scrip_new_units, scrip_old_units } => {
+        ActionKind::ScripForScrip {
+            scrip_listing_id,
+            scrip_new_units,
+            scrip_old_units,
+        } => {
             c.scrip_listing_id = Some(*scrip_listing_id);
             c.scrip_new_units = Some(scrip_new_units.to_string());
             c.scrip_old_units = Some(scrip_old_units.to_string());
@@ -864,7 +920,11 @@ fn split_event_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<SplitEvent, sql
         "BonusIssue" => {
             let bonus = parse_dec("bonus_units", row.try_get("bonus_units")?)?;
             let held = parse_dec("bonus_held_units", row.try_get("bonus_held_units")?)?;
-            Ok(SplitEvent { date, new_units: held + bonus, old_units: held })
+            Ok(SplitEvent {
+                date,
+                new_units: held + bonus,
+                old_units: held,
+            })
         }
         _ => Ok(SplitEvent {
             date,
@@ -892,7 +952,9 @@ pub async fn db_share_split_events(
     let mut map: HashMap<i64, Vec<SplitEvent>> = HashMap::new();
     for row in &rows {
         let listing_id: i64 = row.try_get("listing_id")?;
-        map.entry(listing_id).or_default().push(split_event_from_row(row)?);
+        map.entry(listing_id)
+            .or_default()
+            .push(split_event_from_row(row)?);
     }
     Ok(map)
 }
@@ -978,7 +1040,10 @@ pub fn sold_in_acquired_units(
     splits: &[SplitEvent],
     acquired: NaiveDate,
 ) -> Decimal {
-    sales.iter().map(|&(date, qty)| as_acquired_quantity(qty, splits, acquired, date)).sum()
+    sales
+        .iter()
+        .map(|&(date, qty)| as_acquired_quantity(qty, splits, acquired, date))
+        .sum()
 }
 
 /// Cumulative return-of-capital cost-base reduction per *as-acquired* unit for
@@ -1018,16 +1083,17 @@ pub fn per_unit_reduction(
             ));
         }
         let (new, old) = split_ratio(splits, acquired, Some(e.date));
-        total += if new == old { e.amount_per_unit } else { e.amount_per_unit * new / old };
+        total += if new == old {
+            e.amount_per_unit
+        } else {
+            e.amount_per_unit * new / old
+        };
     }
     Ok(total)
 }
 
 async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<CorporateAction>>, ApiError> {
-    db_list(&pool)
-        .await
-        .map(Json)
-        .map_err(ApiError::from)
+    db_list(&pool).await.map(Json).map_err(ApiError::from)
 }
 
 async fn get_one(
@@ -1052,7 +1118,12 @@ async fn upsert(
             "the corporate-action terms are missing or do not match the action type",
         )
     })?;
-    let action = CorporateAction { id, listing_id, date, kind };
+    let action = CorporateAction {
+        id,
+        listing_id,
+        date,
+        kind,
+    };
     db_upsert(&pool, &action).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -1063,7 +1134,13 @@ async fn delete(
 ) -> Result<StatusCode, ApiError> {
     db_delete(&pool, id)
         .await
-        .map(|found| if found { StatusCode::NO_CONTENT } else { StatusCode::NOT_FOUND })
+        .map(|found| {
+            if found {
+                StatusCode::NO_CONTENT
+            } else {
+                StatusCode::NOT_FOUND
+            }
+        })
         // Deleting an action still referenced by rights-exercise trades
         // violates the trades.rights_action_id FK → 422 (delete those first).
         .map_err(ApiError::from)
@@ -1124,7 +1201,13 @@ mod tests {
         }
     }
 
-    fn bonus(id: i64, listing_id: i64, date: NaiveDate, units: &str, held: &str) -> CorporateAction {
+    fn bonus(
+        id: i64,
+        listing_id: i64,
+        date: NaiveDate,
+        units: &str,
+        held: &str,
+    ) -> CorporateAction {
         CorporateAction {
             id,
             listing_id,
@@ -1223,7 +1306,11 @@ mod tests {
     }
 
     fn split_event(date: NaiveDate, new: &str, old: &str) -> SplitEvent {
-        SplitEvent { date, new_units: new.parse().unwrap(), old_units: old.parse().unwrap() }
+        SplitEvent {
+            date,
+            new_units: new.parse().unwrap(),
+            old_units: old.parse().unwrap(),
+        }
     }
 
     fn d(y: i32, m: u32, day: u32) -> NaiveDate {
@@ -1236,7 +1323,9 @@ mod tests {
     async fn db_insert_and_retrieve_preserves_precision() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "RAP").await;
-        db_upsert(&pool, &roc(1, 1, d(2024, 11, 30), "0.505")).await.unwrap();
+        db_upsert(&pool, &roc(1, 1, d(2024, 11, 30), "0.505"))
+            .await
+            .unwrap();
 
         let got = db_get(&pool, 1).await.unwrap().unwrap();
         assert_eq!(got.listing_id, 1);
@@ -1255,7 +1344,9 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "SPL").await;
         // An uneven ratio (e.g. a 7-for-2 split) must round-trip exactly.
-        db_upsert(&pool, &split(1, 1, d(2024, 11, 30), "7", "2")).await.unwrap();
+        db_upsert(&pool, &split(1, 1, d(2024, 11, 30), "7", "2"))
+            .await
+            .unwrap();
 
         let got = db_get(&pool, 1).await.unwrap().unwrap();
         assert_eq!(
@@ -1272,7 +1363,9 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "BON").await;
         // An uneven ratio (e.g. 3 bonus shares per 7 held) must round-trip exactly.
-        db_upsert(&pool, &bonus(1, 1, d(2024, 11, 30), "3", "7")).await.unwrap();
+        db_upsert(&pool, &bonus(1, 1, d(2024, 11, 30), "3", "7"))
+            .await
+            .unwrap();
 
         let got = db_get(&pool, 1).await.unwrap().unwrap();
         assert_eq!(
@@ -1289,7 +1382,9 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "RTS").await;
         // An uneven ratio and a sub-cent price must round-trip exactly.
-        db_upsert(&pool, &rights(1, 1, d(2024, 11, 30), "3", "7", "1.805")).await.unwrap();
+        db_upsert(&pool, &rights(1, 1, d(2024, 11, 30), "3", "7", "1.805"))
+            .await
+            .unwrap();
 
         let got = db_get(&pool, 1).await.unwrap().unwrap();
         assert_eq!(
@@ -1308,9 +1403,20 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "BBK").await;
         // Sub-cent per-unit components must round-trip exactly.
-        db_upsert(&pool, &buyback(1, 1, d(2024, 11, 30), "9.60", "1.405", "0.605", Some("10.20")))
-            .await
-            .unwrap();
+        db_upsert(
+            &pool,
+            &buyback(
+                1,
+                1,
+                d(2024, 11, 30),
+                "9.60",
+                "1.405",
+                "0.605",
+                Some("10.20"),
+            ),
+        )
+        .await
+        .unwrap();
 
         let got = db_get(&pool, 1).await.unwrap().unwrap();
         assert_eq!(
@@ -1325,11 +1431,19 @@ mod tests {
         );
 
         // The market value is optional: absent round-trips as None.
-        db_upsert(&pool, &buyback(2, 1, d(2024, 12, 31), "5.00", "0", "0", None)).await.unwrap();
+        db_upsert(
+            &pool,
+            &buyback(2, 1, d(2024, 12, 31), "5.00", "0", "0", None),
+        )
+        .await
+        .unwrap();
         let got = db_get(&pool, 2).await.unwrap().unwrap();
         assert!(matches!(
             got.kind,
-            ActionKind::BuyBack { buyback_market_value: None, .. }
+            ActionKind::BuyBack {
+                buyback_market_value: None,
+                ..
+            }
         ));
     }
 
@@ -1340,7 +1454,9 @@ mod tests {
         insert_listing(&pool, 2, "NEW").await;
         // An uneven exchange ratio (e.g. 3 new shares per 7 old) must
         // round-trip exactly.
-        db_upsert(&pool, &scrip(1, 1, 2, d(2024, 11, 30), "3", "7")).await.unwrap();
+        db_upsert(&pool, &scrip(1, 1, 2, d(2024, 11, 30), "3", "7"))
+            .await
+            .unwrap();
 
         let got = db_get(&pool, 1).await.unwrap().unwrap();
         assert_eq!(got.listing_id, 1);
@@ -1361,7 +1477,12 @@ mod tests {
         insert_listing(&pool, 2, "DEM").await;
         // An uneven ratio and a sub-unit percentage (BHP Steel's 5.063%) must
         // round-trip exactly.
-        db_upsert(&pool, &demerger(1, 1, 2, d(2024, 11, 30), "1", "5", "5.063")).await.unwrap();
+        db_upsert(
+            &pool,
+            &demerger(1, 1, 2, d(2024, 11, 30), "1", "5", "5.063"),
+        )
+        .await
+        .unwrap();
 
         let got = db_get(&pool, 1).await.unwrap().unwrap();
         assert_eq!(got.listing_id, 1);
@@ -1384,7 +1505,12 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "HEAD").await;
         insert_listing(&pool, 2, "DEM").await;
-        db_upsert(&pool, &demerger(1, 1, 2, d(2024, 11, 30), "1", "5", "5.063")).await.unwrap();
+        db_upsert(
+            &pool,
+            &demerger(1, 1, 2, d(2024, 11, 30), "1", "5", "5.063"),
+        )
+        .await
+        .unwrap();
 
         assert!(db_share_split_events(&pool).await.unwrap().is_empty());
         assert!(db_splits_for_listing(&pool, 1).await.unwrap().is_empty());
@@ -1405,7 +1531,10 @@ mod tests {
         )
         .execute(&pool)
         .await;
-        assert!(result.is_err(), "demerger_listing_id == listing_id should violate the CHECK");
+        assert!(
+            result.is_err(),
+            "demerger_listing_id == listing_id should violate the CHECK"
+        );
     }
 
     /// A ScripForScrip never appears in the split-event or return-of-capital
@@ -1416,7 +1545,9 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "OLD").await;
         insert_listing(&pool, 2, "NEW").await;
-        db_upsert(&pool, &scrip(1, 1, 2, d(2024, 11, 30), "2", "1")).await.unwrap();
+        db_upsert(&pool, &scrip(1, 1, 2, d(2024, 11, 30), "2", "1"))
+            .await
+            .unwrap();
 
         assert!(db_share_split_events(&pool).await.unwrap().is_empty());
         assert!(db_splits_for_listing(&pool, 1).await.unwrap().is_empty());
@@ -1436,7 +1567,10 @@ mod tests {
         )
         .execute(&pool)
         .await;
-        assert!(result.is_err(), "scrip_listing_id == listing_id should violate the CHECK");
+        assert!(
+            result.is_err(),
+            "scrip_listing_id == listing_id should violate the CHECK"
+        );
     }
 
     /// A BuyBack never appears in the split-event or return-of-capital
@@ -1445,9 +1579,12 @@ mod tests {
     async fn db_buy_back_is_not_a_split_or_payment_event() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "BBK").await;
-        db_upsert(&pool, &buyback(1, 1, d(2024, 11, 30), "9.60", "1.40", "0.60", Some("10.20")))
-            .await
-            .unwrap();
+        db_upsert(
+            &pool,
+            &buyback(1, 1, d(2024, 11, 30), "9.60", "1.40", "0.60", Some("10.20")),
+        )
+        .await
+        .unwrap();
 
         assert!(db_share_split_events(&pool).await.unwrap().is_empty());
         assert!(db_splits_for_listing(&pool, 1).await.unwrap().is_empty());
@@ -1460,7 +1597,9 @@ mod tests {
     async fn db_rights_issue_is_not_a_split_or_payment_event() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "RTS").await;
-        db_upsert(&pool, &rights(1, 1, d(2024, 11, 30), "1", "4", "1.80")).await.unwrap();
+        db_upsert(&pool, &rights(1, 1, d(2024, 11, 30), "1", "4", "1.80"))
+            .await
+            .unwrap();
 
         assert!(db_share_split_events(&pool).await.unwrap().is_empty());
         assert!(db_splits_for_listing(&pool, 1).await.unwrap().is_empty());
@@ -1471,8 +1610,12 @@ mod tests {
     async fn db_upsert_updates_existing() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "RAP").await;
-        db_upsert(&pool, &roc(1, 1, d(2024, 11, 30), "0.50")).await.unwrap();
-        db_upsert(&pool, &roc(1, 1, d(2024, 12, 31), "0.75")).await.unwrap();
+        db_upsert(&pool, &roc(1, 1, d(2024, 11, 30), "0.50"))
+            .await
+            .unwrap();
+        db_upsert(&pool, &roc(1, 1, d(2024, 12, 31), "0.75"))
+            .await
+            .unwrap();
 
         let all = db_list(&pool).await.unwrap();
         assert_eq!(all.len(), 1);
@@ -1500,37 +1643,79 @@ mod tests {
             // A ShareSplit carrying a payment, a bonus ratio, or rights terms…
             ("ShareSplit", "amount_per_unit = '0.50', currency = 'AUD'"),
             ("ShareSplit", "bonus_units = '1', bonus_held_units = '10'"),
-            ("ShareSplit", "rights_units = '1', rights_held_units = '4', exercise_price = '1.80'"),
+            (
+                "ShareSplit",
+                "rights_units = '1', rights_held_units = '4', exercise_price = '1.80'",
+            ),
             // …a ReturnOfCapital carrying a split ratio…
-            ("ReturnOfCapital", "split_new_units = '2', split_old_units = '1'"),
+            (
+                "ReturnOfCapital",
+                "split_new_units = '2', split_old_units = '1'",
+            ),
             // …a BonusIssue carrying a split ratio…
             ("BonusIssue", "split_new_units = '2', split_old_units = '1'"),
             // …a RightsIssue carrying a payment or a split ratio…
             ("RightsIssue", "amount_per_unit = '0.50'"),
-            ("RightsIssue", "split_new_units = '2', split_old_units = '1'"),
+            (
+                "RightsIssue",
+                "split_new_units = '2', split_old_units = '1'",
+            ),
             // …a BuyBack carrying a payment, a split ratio, or rights terms…
             ("BuyBack", "amount_per_unit = '0.50'"),
             ("BuyBack", "split_new_units = '2', split_old_units = '1'"),
-            ("BuyBack", "rights_units = '1', rights_held_units = '4', exercise_price = '1.80'"),
+            (
+                "BuyBack",
+                "rights_units = '1', rights_held_units = '4', exercise_price = '1.80'",
+            ),
             // …the other types carrying buy-back terms…
-            ("ShareSplit", "buyback_price = '9.60', buyback_dividend = '0', buyback_franking_credit = '0'"),
-            ("ReturnOfCapital", "buyback_price = '9.60', buyback_dividend = '0', buyback_franking_credit = '0'"),
+            (
+                "ShareSplit",
+                "buyback_price = '9.60', buyback_dividend = '0', buyback_franking_credit = '0'",
+            ),
+            (
+                "ReturnOfCapital",
+                "buyback_price = '9.60', buyback_dividend = '0', buyback_franking_credit = '0'",
+            ),
             ("RightsIssue", "buyback_market_value = '10.20'"),
             // …a ScripForScrip carrying a payment, a split ratio, or buy-back
             // terms…
-            ("ScripForScrip", "amount_per_unit = '0.50', currency = 'AUD'"),
-            ("ScripForScrip", "split_new_units = '2', split_old_units = '1'"),
-            ("ScripForScrip", "buyback_price = '9.60', buyback_dividend = '0', buyback_franking_credit = '0'"),
+            (
+                "ScripForScrip",
+                "amount_per_unit = '0.50', currency = 'AUD'",
+            ),
+            (
+                "ScripForScrip",
+                "split_new_units = '2', split_old_units = '1'",
+            ),
+            (
+                "ScripForScrip",
+                "buyback_price = '9.60', buyback_dividend = '0', buyback_franking_credit = '0'",
+            ),
             // …and the other types carrying scrip terms…
-            ("ShareSplit", "scrip_listing_id = 2, scrip_new_units = '2', scrip_old_units = '1'"),
-            ("BuyBack", "scrip_listing_id = 2, scrip_new_units = '2', scrip_old_units = '1'"),
+            (
+                "ShareSplit",
+                "scrip_listing_id = 2, scrip_new_units = '2', scrip_old_units = '1'",
+            ),
+            (
+                "BuyBack",
+                "scrip_listing_id = 2, scrip_new_units = '2', scrip_old_units = '1'",
+            ),
             // …a Demerger carrying a payment, a split ratio, or scrip terms…
             ("Demerger", "amount_per_unit = '0.50', currency = 'AUD'"),
             ("Demerger", "split_new_units = '2', split_old_units = '1'"),
-            ("Demerger", "scrip_listing_id = 2, scrip_new_units = '2', scrip_old_units = '1'"),
+            (
+                "Demerger",
+                "scrip_listing_id = 2, scrip_new_units = '2', scrip_old_units = '1'",
+            ),
             // …and the other types carrying demerger terms.
-            ("ShareSplit", "demerger_listing_id = 2, demerger_new_units = '1', demerger_held_units = '5', demerger_cost_base_pct = '5.063'"),
-            ("ScripForScrip", "demerger_listing_id = 2, demerger_new_units = '1', demerger_held_units = '5', demerger_cost_base_pct = '5.063'"),
+            (
+                "ShareSplit",
+                "demerger_listing_id = 2, demerger_new_units = '1', demerger_held_units = '5', demerger_cost_base_pct = '5.063'",
+            ),
+            (
+                "ScripForScrip",
+                "demerger_listing_id = 2, demerger_new_units = '1', demerger_held_units = '5', demerger_cost_base_pct = '5.063'",
+            ),
         ] {
             let (base_cols, base_vals) = match action_type {
                 "ShareSplit" => ("split_new_units, split_old_units", "'2', '1'"),
@@ -1567,8 +1752,14 @@ mod tests {
             ))
             .execute(&pool)
             .await;
-            assert!(result.is_err(), "{action_type} + {stray_cols} should violate the CHECK");
-            sqlx::query("DELETE FROM corporate_actions").execute(&pool).await.unwrap();
+            assert!(
+                result.is_err(),
+                "{action_type} + {stray_cols} should violate the CHECK"
+            );
+            sqlx::query("DELETE FROM corporate_actions")
+                .execute(&pool)
+                .await
+                .unwrap();
         }
     }
 
@@ -1583,9 +1774,15 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "RAP").await;
         insert_listing(&pool, 2, "XYZ").await;
-        db_upsert(&pool, &roc(1, 1, d(2025, 3, 1), "0.30")).await.unwrap();
-        db_upsert(&pool, &roc(2, 1, d(2024, 11, 30), "0.50")).await.unwrap();
-        db_upsert(&pool, &roc(3, 2, d(2024, 6, 1), "1.00")).await.unwrap();
+        db_upsert(&pool, &roc(1, 1, d(2025, 3, 1), "0.30"))
+            .await
+            .unwrap();
+        db_upsert(&pool, &roc(2, 1, d(2024, 11, 30), "0.50"))
+            .await
+            .unwrap();
+        db_upsert(&pool, &roc(3, 2, d(2024, 6, 1), "1.00"))
+            .await
+            .unwrap();
 
         let events = db_return_of_capital_events(&pool).await.unwrap();
         assert_eq!(events.len(), 2);
@@ -1599,11 +1796,19 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "SPL").await;
         insert_listing(&pool, 2, "XYZ").await;
-        db_upsert(&pool, &split(1, 1, d(2025, 3, 1), "2", "1")).await.unwrap();
-        db_upsert(&pool, &split(2, 1, d(2024, 11, 30), "1", "10")).await.unwrap();
-        db_upsert(&pool, &split(3, 2, d(2024, 6, 1), "3", "1")).await.unwrap();
+        db_upsert(&pool, &split(1, 1, d(2025, 3, 1), "2", "1"))
+            .await
+            .unwrap();
+        db_upsert(&pool, &split(2, 1, d(2024, 11, 30), "1", "10"))
+            .await
+            .unwrap();
+        db_upsert(&pool, &split(3, 2, d(2024, 6, 1), "3", "1"))
+            .await
+            .unwrap();
         // A ReturnOfCapital on the same listing must not appear as a split.
-        db_upsert(&pool, &roc(4, 1, d(2024, 6, 1), "0.50")).await.unwrap();
+        db_upsert(&pool, &roc(4, 1, d(2024, 6, 1), "0.50"))
+            .await
+            .unwrap();
 
         let events = db_share_split_events(&pool).await.unwrap();
         assert_eq!(events.len(), 2);
@@ -1623,19 +1828,31 @@ mod tests {
     async fn db_split_events_include_bonus_issues_as_equivalent_splits() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "BON").await;
-        db_upsert(&pool, &bonus(1, 1, d(2025, 3, 1), "1", "10")).await.unwrap();
+        db_upsert(&pool, &bonus(1, 1, d(2025, 3, 1), "1", "10"))
+            .await
+            .unwrap();
         // A real split on the same listing interleaves in date order…
-        db_upsert(&pool, &split(2, 1, d(2024, 11, 30), "2", "1")).await.unwrap();
+        db_upsert(&pool, &split(2, 1, d(2024, 11, 30), "2", "1"))
+            .await
+            .unwrap();
         // …and a ReturnOfCapital never appears as a re-basing event.
-        db_upsert(&pool, &roc(3, 1, d(2024, 6, 1), "0.50")).await.unwrap();
+        db_upsert(&pool, &roc(3, 1, d(2024, 6, 1), "0.50"))
+            .await
+            .unwrap();
 
         let events = db_share_split_events(&pool).await.unwrap();
         let l1 = &events[&1];
         assert_eq!(l1.len(), 2);
         assert_eq!(l1[0].date, d(2024, 11, 30));
-        assert_eq!((l1[0].new_units, l1[0].old_units), (Decimal::from(2), Decimal::ONE));
+        assert_eq!(
+            (l1[0].new_units, l1[0].old_units),
+            (Decimal::from(2), Decimal::ONE)
+        );
         assert_eq!(l1[1].date, d(2025, 3, 1));
-        assert_eq!((l1[1].new_units, l1[1].old_units), (Decimal::from(11), Decimal::from(10)));
+        assert_eq!(
+            (l1[1].new_units, l1[1].old_units),
+            (Decimal::from(11), Decimal::from(10))
+        );
 
         let for_listing = db_splits_for_listing(&pool, 1).await.unwrap();
         assert_eq!(for_listing.len(), 2);
@@ -1696,9 +1913,21 @@ mod tests {
     #[test]
     fn per_unit_reduction_sums_events_from_acquisition() {
         let events = vec![
-            RocEvent { date: d(2024, 1, 1), amount_per_unit: "0.10".parse().unwrap(), currency: "AUD".into() },
-            RocEvent { date: d(2024, 6, 1), amount_per_unit: "0.20".parse().unwrap(), currency: "AUD".into() },
-            RocEvent { date: d(2025, 1, 1), amount_per_unit: "0.40".parse().unwrap(), currency: "AUD".into() },
+            RocEvent {
+                date: d(2024, 1, 1),
+                amount_per_unit: "0.10".parse().unwrap(),
+                currency: "AUD".into(),
+            },
+            RocEvent {
+                date: d(2024, 6, 1),
+                amount_per_unit: "0.20".parse().unwrap(),
+                currency: "AUD".into(),
+            },
+            RocEvent {
+                date: d(2025, 1, 1),
+                amount_per_unit: "0.40".parse().unwrap(),
+                currency: "AUD".into(),
+            },
         ];
         // Acquired between the first and second events: the first doesn't apply.
         let pu = per_unit_reduction(&events, &[], "AUD", d(2024, 3, 1), None).unwrap();
@@ -1711,17 +1940,28 @@ mod tests {
     #[test]
     fn per_unit_reduction_bounds_at_sale_date() {
         let events = vec![
-            RocEvent { date: d(2024, 6, 1), amount_per_unit: "0.20".parse().unwrap(), currency: "AUD".into() },
-            RocEvent { date: d(2025, 1, 1), amount_per_unit: "0.40".parse().unwrap(), currency: "AUD".into() },
+            RocEvent {
+                date: d(2024, 6, 1),
+                amount_per_unit: "0.20".parse().unwrap(),
+                currency: "AUD".into(),
+            },
+            RocEvent {
+                date: d(2025, 1, 1),
+                amount_per_unit: "0.40".parse().unwrap(),
+                currency: "AUD".into(),
+            },
         ];
         // Sold between the events: only the payment received while held applies.
-        let pu = per_unit_reduction(&events, &[], "AUD", d(2024, 1, 1), Some(d(2024, 9, 1))).unwrap();
+        let pu =
+            per_unit_reduction(&events, &[], "AUD", d(2024, 1, 1), Some(d(2024, 9, 1))).unwrap();
         assert_eq!(pu, "0.20".parse::<Decimal>().unwrap());
         // Sold on the payment date: still held at the payment, so it applies.
-        let pu = per_unit_reduction(&events, &[], "AUD", d(2024, 1, 1), Some(d(2025, 1, 1))).unwrap();
+        let pu =
+            per_unit_reduction(&events, &[], "AUD", d(2024, 1, 1), Some(d(2025, 1, 1))).unwrap();
         assert_eq!(pu, "0.60".parse::<Decimal>().unwrap());
         // Sold before any payment: unaffected.
-        let pu = per_unit_reduction(&events, &[], "AUD", d(2024, 1, 1), Some(d(2024, 5, 1))).unwrap();
+        let pu =
+            per_unit_reduction(&events, &[], "AUD", d(2024, 1, 1), Some(d(2024, 5, 1))).unwrap();
         assert_eq!(pu, Decimal::ZERO);
     }
 
@@ -1732,9 +1972,17 @@ mod tests {
     fn per_unit_reduction_scales_payments_across_a_split() {
         let events = vec![
             // Before the split: per as-acquired unit as-is.
-            RocEvent { date: d(2024, 3, 1), amount_per_unit: "0.30".parse().unwrap(), currency: "AUD".into() },
+            RocEvent {
+                date: d(2024, 3, 1),
+                amount_per_unit: "0.30".parse().unwrap(),
+                currency: "AUD".into(),
+            },
             // After a 2-for-1 split: each as-acquired unit receives it twice.
-            RocEvent { date: d(2024, 9, 1), amount_per_unit: "0.20".parse().unwrap(), currency: "AUD".into() },
+            RocEvent {
+                date: d(2024, 9, 1),
+                amount_per_unit: "0.20".parse().unwrap(),
+                currency: "AUD".into(),
+            },
         ];
         let splits = vec![split_event(d(2024, 6, 1), "2", "1")];
         let pu = per_unit_reduction(&events, &splits, "AUD", d(2024, 1, 1), None).unwrap();
@@ -1790,7 +2038,12 @@ mod tests {
 
         let resp = router()
             .with_state(pool.clone())
-            .oneshot(Request::builder().uri("/corporate_actions/1").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/corporate_actions/1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -1800,7 +2053,12 @@ mod tests {
 
         let resp = router()
             .with_state(pool.clone())
-            .oneshot(Request::builder().uri("/corporate_actions").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/corporate_actions")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -2345,22 +2603,30 @@ mod tests {
     async fn db_insert_and_retrieve_worthless_shares_preserves_event() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "DEAD").await;
-        for (id, event) in
-            [(1, WorthlessEvent::G3Declaration), (2, WorthlessEvent::C2Cancellation)]
-        {
+        for (id, event) in [
+            (1, WorthlessEvent::G3Declaration),
+            (2, WorthlessEvent::C2Cancellation),
+        ] {
             db_upsert(
                 &pool,
                 &CorporateAction {
                     id,
                     listing_id: 1,
                     date: d(2025, 3, 31),
-                    kind: ActionKind::WorthlessShares { worthless_event: event },
+                    kind: ActionKind::WorthlessShares {
+                        worthless_event: event,
+                    },
                 },
             )
             .await
             .unwrap();
             let got = db_get(&pool, id).await.unwrap().unwrap();
-            assert_eq!(got.kind, ActionKind::WorthlessShares { worthless_event: event });
+            assert_eq!(
+                got.kind,
+                ActionKind::WorthlessShares {
+                    worthless_event: event
+                }
+            );
         }
     }
 
@@ -2406,7 +2672,9 @@ mod tests {
         let got = db_get(&pool, 1).await.unwrap().unwrap();
         assert_eq!(
             got.kind,
-            ActionKind::WorthlessShares { worthless_event: WorthlessEvent::G3Declaration }
+            ActionKind::WorthlessShares {
+                worthless_event: WorthlessEvent::G3Declaration
+            }
         );
     }
 
@@ -2555,7 +2823,12 @@ mod tests {
         let pool = test_pool().await;
         let resp = router()
             .with_state(pool.clone())
-            .oneshot(Request::builder().uri("/corporate_actions/999").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/corporate_actions/999")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);

@@ -97,8 +97,7 @@ pub async fn holding_period_test(
     // incomparable, so every quantity is normalised to the basis at the end of
     // the qualification window. The entitled/disqualified ratio (all the
     // caller uses) is basis-invariant.
-    let splits =
-        crate::entities::corporate_action::db_splits_for_listing(pool, listing_id).await?;
+    let splits = crate::entities::corporate_action::db_splits_for_listing(pool, listing_id).await?;
 
     struct Parcel {
         acquired: NaiveDate,
@@ -154,7 +153,11 @@ pub async fn holding_period_test(
         } else {
             // Buy or DRP: a new acquisition parcel (entitled only if it is
             // still held when the snapshot above fires).
-            stack.push(Parcel { acquired: date, qty, entitled: false });
+            stack.push(Parcel {
+                acquired: date,
+                qty,
+                entitled: false,
+            });
         }
     }
     if !snapshotted {
@@ -163,7 +166,10 @@ pub async fn holding_period_test(
         entitled_units = stack.iter().map(|p| p.qty).sum();
     }
 
-    Ok(HoldingPeriodTest { entitled_units, disqualified_units })
+    Ok(HoldingPeriodTest {
+        entitled_units,
+        disqualified_units,
+    })
 }
 
 #[cfg(test)]
@@ -249,7 +255,9 @@ mod tests {
         insert_listing(&pool, 1, false).await;
         // Acquired the day before ex-date and never sold: entitled and qualified.
         insert_trade(&pool, 1, 1, trade::TradeType::Buy, d("2025-03-13"), 100).await;
-        let t = holding_period_test(&pool, 1, d("2025-03-14")).await.unwrap();
+        let t = holding_period_test(&pool, 1, d("2025-03-14"))
+            .await
+            .unwrap();
         assert_eq!(t.entitled_units, Decimal::from(100));
         assert_eq!(t.disqualified_units, Decimal::ZERO);
     }
@@ -262,7 +270,9 @@ mod tests {
         // days (both end days excluded), under 45.
         insert_trade(&pool, 1, 1, trade::TradeType::Buy, d("2025-03-01"), 1000).await;
         insert_trade(&pool, 2, 1, trade::TradeType::Sell, d("2025-04-10"), 1000).await;
-        let t = holding_period_test(&pool, 1, d("2025-03-14")).await.unwrap();
+        let t = holding_period_test(&pool, 1, d("2025-03-14"))
+            .await
+            .unwrap();
         assert_eq!(t.entitled_units, Decimal::from(1000));
         assert_eq!(t.disqualified_units, Decimal::from(1000));
         assert_eq!(t.denied(Decimal::from(5600)), Decimal::from(5600));
@@ -275,14 +285,18 @@ mod tests {
         // Bought 1 Mar. Sold 46 days later (16 Apr): exactly 45 at-risk days → qualifies.
         insert_trade(&pool, 1, 1, trade::TradeType::Buy, d("2025-03-01"), 100).await;
         insert_trade(&pool, 2, 1, trade::TradeType::Sell, d("2025-04-16"), 100).await;
-        let t = holding_period_test(&pool, 1, d("2025-03-02")).await.unwrap();
+        let t = holding_period_test(&pool, 1, d("2025-03-02"))
+            .await
+            .unwrap();
         assert_eq!(t.disqualified_units, Decimal::ZERO);
 
         // Same shape sold one day earlier (44 at-risk days) → disqualified.
         insert_listing(&pool, 2, false).await;
         insert_trade(&pool, 3, 2, trade::TradeType::Buy, d("2025-03-01"), 100).await;
         insert_trade(&pool, 4, 2, trade::TradeType::Sell, d("2025-04-15"), 100).await;
-        let t = holding_period_test(&pool, 2, d("2025-03-02")).await.unwrap();
+        let t = holding_period_test(&pool, 2, d("2025-03-02"))
+            .await
+            .unwrap();
         assert_eq!(t.disqualified_units, Decimal::from(100));
     }
 
@@ -313,7 +327,9 @@ mod tests {
         .await
         .unwrap();
         insert_trade(&pool, 2, 1, trade::TradeType::Sell, d("2025-04-03"), 200).await;
-        let t = holding_period_test(&pool, 1, d("2025-03-14")).await.unwrap();
+        let t = holding_period_test(&pool, 1, d("2025-03-14"))
+            .await
+            .unwrap();
         assert_eq!(t.entitled_units, Decimal::from(200));
         // Held since 2024 → well over 45 at-risk days: nothing disqualified.
         assert_eq!(t.disqualified_units, Decimal::ZERO);
@@ -337,7 +353,9 @@ mod tests {
         .await
         .unwrap();
         insert_trade(&pool, 4, 2, trade::TradeType::Sell, d("2025-04-03"), 200).await;
-        let t = holding_period_test(&pool, 2, d("2025-03-14")).await.unwrap();
+        let t = holding_period_test(&pool, 2, d("2025-03-14"))
+            .await
+            .unwrap();
         assert_eq!(t.entitled_units, Decimal::from(200));
         assert_eq!(t.disqualified_units, Decimal::from(200));
     }
@@ -352,7 +370,9 @@ mod tests {
         insert_trade(&pool, 1, 1, trade::TradeType::Buy, d("2024-03-14"), 10000).await;
         insert_trade(&pool, 2, 1, trade::TradeType::Buy, d("2025-03-04"), 4000).await;
         insert_trade(&pool, 3, 1, trade::TradeType::Sell, d("2025-04-03"), 4000).await;
-        let t = holding_period_test(&pool, 1, d("2025-03-14")).await.unwrap();
+        let t = holding_period_test(&pool, 1, d("2025-03-14"))
+            .await
+            .unwrap();
         assert_eq!(t.entitled_units, Decimal::from(14000));
         assert_eq!(t.disqualified_units, Decimal::from(4000));
         // Denied proportionally, multiply-before-divide: 7000 × 4000 / 14000 = 2000 exact.
@@ -367,14 +387,32 @@ mod tests {
         for (listing_id, preference) in [(1, false), (2, true)] {
             insert_listing(&pool, listing_id, preference).await;
             let base = (listing_id - 1) * 10;
-            insert_trade(&pool, base + 1, listing_id, trade::TradeType::Buy, d("2025-03-04"), 100)
-                .await;
-            insert_trade(&pool, base + 2, listing_id, trade::TradeType::Sell, d("2025-05-13"), 100)
-                .await;
+            insert_trade(
+                &pool,
+                base + 1,
+                listing_id,
+                trade::TradeType::Buy,
+                d("2025-03-04"),
+                100,
+            )
+            .await;
+            insert_trade(
+                &pool,
+                base + 2,
+                listing_id,
+                trade::TradeType::Sell,
+                d("2025-05-13"),
+                100,
+            )
+            .await;
         }
-        let ordinary = holding_period_test(&pool, 1, d("2025-03-14")).await.unwrap();
+        let ordinary = holding_period_test(&pool, 1, d("2025-03-14"))
+            .await
+            .unwrap();
         assert_eq!(ordinary.disqualified_units, Decimal::ZERO);
-        let preference = holding_period_test(&pool, 2, d("2025-03-14")).await.unwrap();
+        let preference = holding_period_test(&pool, 2, d("2025-03-14"))
+            .await
+            .unwrap();
         assert_eq!(preference.disqualified_units, Decimal::from(100));
     }
 
@@ -387,7 +425,9 @@ mod tests {
         insert_trade(&pool, 1, 1, trade::TradeType::Buy, d("2024-01-10"), 100).await;
         insert_trade(&pool, 2, 1, trade::TradeType::Buy, d("2025-03-09"), 50).await;
         insert_trade(&pool, 3, 1, trade::TradeType::Sell, d("2025-03-12"), 50).await;
-        let t = holding_period_test(&pool, 1, d("2025-03-14")).await.unwrap();
+        let t = holding_period_test(&pool, 1, d("2025-03-14"))
+            .await
+            .unwrap();
         assert_eq!(t.entitled_units, Decimal::from(100));
         assert_eq!(t.disqualified_units, Decimal::ZERO);
     }
@@ -401,7 +441,9 @@ mod tests {
         insert_trade(&pool, 1, 1, trade::TradeType::Buy, d("2024-01-10"), 100).await;
         insert_trade(&pool, 2, 1, trade::TradeType::Buy, d("2025-03-19"), 50).await;
         insert_trade(&pool, 3, 1, trade::TradeType::Sell, d("2025-03-24"), 50).await;
-        let t = holding_period_test(&pool, 1, d("2025-03-14")).await.unwrap();
+        let t = holding_period_test(&pool, 1, d("2025-03-14"))
+            .await
+            .unwrap();
         assert_eq!(t.entitled_units, Decimal::from(100));
         assert_eq!(t.disqualified_units, Decimal::ZERO);
     }
@@ -415,7 +457,9 @@ mod tests {
         insert_trade(&pool, 1, 1, trade::TradeType::Buy, d("2024-01-10"), 100).await;
         insert_trade(&pool, 2, 1, trade::TradeType::DRP, d("2025-03-04"), 10).await;
         insert_trade(&pool, 3, 1, trade::TradeType::Sell, d("2025-04-03"), 10).await;
-        let t = holding_period_test(&pool, 1, d("2025-03-14")).await.unwrap();
+        let t = holding_period_test(&pool, 1, d("2025-03-14"))
+            .await
+            .unwrap();
         assert_eq!(t.entitled_units, Decimal::from(110));
         assert_eq!(t.disqualified_units, Decimal::from(10));
     }
@@ -450,15 +494,21 @@ mod tests {
         )
         .await
         .unwrap();
-        crate::entities::demerger::db_demerge(&pool, 10).await.unwrap();
+        crate::entities::demerger::db_demerge(&pool, 10)
+            .await
+            .unwrap();
 
         // The head shares were never disposed of: nothing is disqualified.
-        let t = holding_period_test(&pool, 1, d("2025-03-14")).await.unwrap();
+        let t = holding_period_test(&pool, 1, d("2025-03-14"))
+            .await
+            .unwrap();
         assert_eq!(t.entitled_units, Decimal::from(1000));
         assert_eq!(t.disqualified_units, Decimal::ZERO);
 
         // The demerged listing's walk sees the demerged-entity parcel.
-        let t = holding_period_test(&pool, 2, d("2025-05-10")).await.unwrap();
+        let t = holding_period_test(&pool, 2, d("2025-05-10"))
+            .await
+            .unwrap();
         assert_eq!(t.entitled_units, Decimal::from(200));
         assert_eq!(t.disqualified_units, Decimal::ZERO);
     }

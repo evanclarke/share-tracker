@@ -88,11 +88,7 @@ pub async fn db_upsert(pool: &SqlitePool, holiday: &ExchangeHoliday) -> Result<(
     Ok(())
 }
 
-pub async fn db_delete(
-    pool: &SqlitePool,
-    mic: &str,
-    date: NaiveDate,
-) -> Result<bool, sqlx::Error> {
+pub async fn db_delete(pool: &SqlitePool, mic: &str, date: NaiveDate) -> Result<bool, sqlx::Error> {
     let result = sqlx::query("DELETE FROM exchange_holidays WHERE mic = ? AND holiday_date = ?")
         .bind(mic)
         .bind(date)
@@ -156,10 +152,7 @@ pub(crate) async fn exchange_holidays_for_listing(
 }
 
 async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<ExchangeHoliday>>, ApiError> {
-    db_list(&pool)
-        .await
-        .map(Json)
-        .map_err(ApiError::from)
+    db_list(&pool).await.map(Json).map_err(ApiError::from)
 }
 
 async fn list_for_exchange(
@@ -176,8 +169,9 @@ async fn get_one(
     State(pool): State<SqlitePool>,
     Path((mic, date)): Path<(String, String)>,
 ) -> Result<Json<ExchangeHoliday>, ApiError> {
-    let date: NaiveDate =
-        date.parse().map_err(|_| ApiError::bad_request("the holiday date is not a valid date"))?;
+    let date: NaiveDate = date
+        .parse()
+        .map_err(|_| ApiError::bad_request("the holiday date is not a valid date"))?;
     db_get(&pool, &mic, date)
         .await
         .map_err(ApiError::from)?
@@ -193,7 +187,11 @@ async fn upsert(
     let holiday_date: NaiveDate = date
         .parse()
         .map_err(|_| ApiError::bad_request("the holiday date is not a valid date"))?;
-    let holiday = ExchangeHoliday { mic, holiday_date, name: body.name };
+    let holiday = ExchangeHoliday {
+        mic,
+        holiday_date,
+        name: body.name,
+    };
     db_upsert(&pool, &holiday)
         .await
         .map(|_| StatusCode::NO_CONTENT)
@@ -209,7 +207,13 @@ async fn delete(
         .map_err(|_| ApiError::bad_request("the holiday date is not a valid date"))?;
     db_delete(&pool, &mic, date)
         .await
-        .map(|found| if found { StatusCode::NO_CONTENT } else { StatusCode::NOT_FOUND })
+        .map(|found| {
+            if found {
+                StatusCode::NO_CONTENT
+            } else {
+                StatusCode::NOT_FOUND
+            }
+        })
         .map_err(ApiError::from)
 }
 
@@ -252,10 +256,14 @@ mod tests {
 
     #[test]
     fn coverage_span_spans_whole_calendar_years() {
-        let holidays: HashSet<NaiveDate> =
-            [ymd(2024, 4, 25), ymd(2026, 12, 25), ymd(2025, 1, 1)].into_iter().collect();
+        let holidays: HashSet<NaiveDate> = [ymd(2024, 4, 25), ymd(2026, 12, 25), ymd(2025, 1, 1)]
+            .into_iter()
+            .collect();
         // A published calendar covers its whole year, not just its listed days.
-        assert_eq!(coverage_span(&holidays), Some((ymd(2024, 1, 1), ymd(2026, 12, 31))));
+        assert_eq!(
+            coverage_span(&holidays),
+            Some((ymd(2024, 1, 1), ymd(2026, 12, 31)))
+        );
         assert_eq!(coverage_span(&HashSet::new()), None);
     }
 
@@ -263,14 +271,34 @@ mod tests {
     fn window_outside_coverage_checks_both_ends_and_no_coverage() {
         let span = Some((ymd(2024, 1, 1), ymd(2027, 12, 31)));
         // Fully inside.
-        assert!(!window_outside_coverage(ymd(2024, 1, 2), ymd(2024, 1, 4), span));
+        assert!(!window_outside_coverage(
+            ymd(2024, 1, 2),
+            ymd(2024, 1, 4),
+            span
+        ));
         // The whole span is covered, boundaries included.
-        assert!(!window_outside_coverage(ymd(2024, 1, 1), ymd(2027, 12, 31), span));
+        assert!(!window_outside_coverage(
+            ymd(2024, 1, 1),
+            ymd(2027, 12, 31),
+            span
+        ));
         // Starts before coverage / ends after coverage (straddling counts).
-        assert!(window_outside_coverage(ymd(2023, 12, 29), ymd(2024, 1, 2), span));
-        assert!(window_outside_coverage(ymd(2027, 12, 30), ymd(2028, 1, 4), span));
+        assert!(window_outside_coverage(
+            ymd(2023, 12, 29),
+            ymd(2024, 1, 2),
+            span
+        ));
+        assert!(window_outside_coverage(
+            ymd(2027, 12, 30),
+            ymd(2028, 1, 4),
+            span
+        ));
         // No seeded holidays covers nothing.
-        assert!(window_outside_coverage(ymd(2024, 1, 2), ymd(2024, 1, 4), None));
+        assert!(window_outside_coverage(
+            ymd(2024, 1, 2),
+            ymd(2024, 1, 4),
+            None
+        ));
     }
 
     // DB-level tests
@@ -284,7 +312,10 @@ mod tests {
             name: "New Year's Day".to_string(),
         };
         db_upsert(&pool, &holiday).await.unwrap();
-        let got = db_get(&pool, "XASX", ymd(2030, 1, 1)).await.unwrap().unwrap();
+        let got = db_get(&pool, "XASX", ymd(2030, 1, 1))
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(got.name, "New Year's Day");
         assert_eq!(got.holiday_date, ymd(2030, 1, 1));
     }
@@ -300,7 +331,10 @@ mod tests {
         db_upsert(&pool, &holiday).await.unwrap();
         holiday.name = "New Year's Day".to_string();
         db_upsert(&pool, &holiday).await.unwrap();
-        let got = db_get(&pool, "XASX", ymd(2030, 1, 1)).await.unwrap().unwrap();
+        let got = db_get(&pool, "XASX", ymd(2030, 1, 1))
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(got.name, "New Year's Day");
     }
 
@@ -314,23 +348,46 @@ mod tests {
             name: "Nope".to_string(),
         };
         let err = db_upsert(&pool, &holiday).await.unwrap_err();
-        assert!(err.to_string().contains("FOREIGN KEY"), "expected mic FK error, got: {err}");
+        assert!(
+            err.to_string().contains("FOREIGN KEY"),
+            "expected mic FK error, got: {err}"
+        );
     }
 
     #[tokio::test]
     async fn db_get_missing_returns_none() {
         let pool = test_pool().await;
-        assert!(db_get(&pool, "XASX", ymd(1999, 1, 1)).await.unwrap().is_none());
+        assert!(
+            db_get(&pool, "XASX", ymd(1999, 1, 1))
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]
     async fn seed_data_has_asx_and_nyse_holidays() {
         let pool = test_pool().await;
         // ASX observes Anzac Day; NYSE observes Thanksgiving — neither is the other's.
-        assert!(db_get(&pool, "XASX", ymd(2024, 4, 25)).await.unwrap().is_some());
-        assert!(db_get(&pool, "XNYS", ymd(2024, 11, 28)).await.unwrap().is_some());
+        assert!(
+            db_get(&pool, "XASX", ymd(2024, 4, 25))
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            db_get(&pool, "XNYS", ymd(2024, 11, 28))
+                .await
+                .unwrap()
+                .is_some()
+        );
         // The NYSE Sunday→Monday Independence Day observance is seeded.
-        assert!(db_get(&pool, "XNYS", ymd(2027, 7, 5)).await.unwrap().is_some());
+        assert!(
+            db_get(&pool, "XNYS", ymd(2027, 7, 5))
+                .await
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[tokio::test]
@@ -386,7 +443,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
-        let got = db_get(&pool, "XASX", ymd(2030, 4, 1)).await.unwrap().unwrap();
+        let got = db_get(&pool, "XASX", ymd(2030, 4, 1))
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(got.name, "Test Holiday");
     }
 

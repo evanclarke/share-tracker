@@ -15,6 +15,7 @@
 //! investment income, converting a non-AUD amount to AUD via the ATO rate for the
 //! month of `date_incurred` (failing loudly when no rate exists).
 
+use crate::infra::decimal::{row_dec, row_opt_dec};
 use crate::infra::http::ApiError;
 use axum::{
     Json, Router,
@@ -23,7 +24,6 @@ use axum::{
     routing::get,
 };
 use chrono::NaiveDate;
-use crate::infra::decimal::{row_dec, row_opt_dec};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
@@ -116,7 +116,10 @@ fn default_currency() -> String {
 pub fn router() -> Router<SqlitePool> {
     Router::new()
         .route("/investment_expenses", get(list))
-        .route("/investment_expenses/{id}", get(get_one).put(upsert).delete(delete))
+        .route(
+            "/investment_expenses/{id}",
+            get(get_one).put(upsert).delete(delete),
+        )
 }
 
 const COLUMNS: &str = "id, date_incurred, expense_type, amount, gross_amount, \
@@ -131,10 +134,12 @@ pub async fn db_list(pool: &SqlitePool) -> Result<Vec<InvestmentExpense>, sqlx::
 }
 
 pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<InvestmentExpense>, sqlx::Error> {
-    sqlx::query_as(&format!("SELECT {COLUMNS} FROM investment_expenses WHERE id = ?"))
-        .bind(id)
-        .fetch_optional(pool)
-        .await
+    sqlx::query_as(&format!(
+        "SELECT {COLUMNS} FROM investment_expenses WHERE id = ?"
+    ))
+    .bind(id)
+    .fetch_optional(pool)
+    .await
 }
 
 pub async fn db_upsert(pool: &SqlitePool, e: &InvestmentExpense) -> Result<(), sqlx::Error> {
@@ -179,10 +184,7 @@ pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<bool, sqlx::Error> 
 }
 
 async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<InvestmentExpense>>, ApiError> {
-    db_list(&pool)
-        .await
-        .map(Json)
-        .map_err(ApiError::from)
+    db_list(&pool).await.map(Json).map_err(ApiError::from)
 }
 
 async fn get_one(
@@ -289,7 +291,10 @@ mod tests {
         db_upsert(&pool, &e).await.unwrap();
         let got = db_get(&pool, 1).await.unwrap().unwrap();
         assert_eq!(got.amount, "612.345678900".parse::<Decimal>().unwrap());
-        assert_eq!(got.gross_amount, Some("816.460905200".parse::<Decimal>().unwrap()));
+        assert_eq!(
+            got.gross_amount,
+            Some("816.460905200".parse::<Decimal>().unwrap())
+        );
         assert_eq!(got.deductible_percentage, Some(Decimal::from(75)));
         assert_eq!(got.expense_type, ExpenseType::LoanInterest);
         assert_eq!(got.description.as_deref(), Some("margin loan interest"));

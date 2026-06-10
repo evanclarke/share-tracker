@@ -27,12 +27,12 @@
 //! the rights themselves, pre-CGT originals, and retail premiums (entered as
 //! unfranked dividend income).
 
-use crate::infra::http::ApiError;
 use crate::entities::corporate_action::{
     self, ActionKind, as_acquired_quantity, split_adjusted_quantity,
 };
 use crate::entities::trade::{self, Trade, TradeType};
 use crate::infra::decimal::parse_dec;
+use crate::infra::http::ApiError;
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -141,9 +141,17 @@ pub async fn db_exercise(
         None => return Err(ExerciseError::ActionNotFound),
     };
     let (rights_units, rights_held_units, exercise_price, currency) = match &action.kind {
-        ActionKind::RightsIssue { rights_units, rights_held_units, exercise_price, currency } => {
-            (*rights_units, *rights_held_units, *exercise_price, currency.clone())
-        }
+        ActionKind::RightsIssue {
+            rights_units,
+            rights_held_units,
+            exercise_price,
+            currency,
+        } => (
+            *rights_units,
+            *rights_held_units,
+            *exercise_price,
+            currency.clone(),
+        ),
         _ => return Err(ExerciseError::NotARightsIssue),
     };
     let record_date = action.date;
@@ -156,8 +164,7 @@ pub async fn db_exercise(
     // half-open convention as splits/bonus issues); each quantity is re-based
     // to record-date units across any splits/consolidations so buys, sells,
     // prior exercises, and the cap all compare in one basis.
-    let splits =
-        corporate_action::db_splits_for_listing(&mut *tx, action.listing_id).await?;
+    let splits = corporate_action::db_splits_for_listing(&mut *tx, action.listing_id).await?;
     let held_rows = sqlx::query(
         "SELECT trade_type, date, quantity FROM trades \
          WHERE listing_id = ? AND date < ?",
@@ -170,8 +177,7 @@ pub async fn db_exercise(
     for row in &held_rows {
         let trade_date: NaiveDate = row.try_get("date")?;
         let qty = parse_dec("quantity", row.try_get("quantity")?)?;
-        let in_record_units =
-            split_adjusted_quantity(qty, &splits, trade_date, Some(record_date));
+        let in_record_units = split_adjusted_quantity(qty, &splits, trade_date, Some(record_date));
         match row.try_get::<TradeType, _>("trade_type")? {
             TradeType::Buy | TradeType::DRP => held += in_record_units,
             TradeType::Sell => held -= in_record_units,
@@ -183,12 +189,10 @@ pub async fn db_exercise(
     let entitled = (held.max(Decimal::ZERO) * rights_units / rights_held_units).ceil();
 
     // Prior exercises against this action, re-based to record-date units.
-    let prior_rows = sqlx::query(
-        "SELECT date, quantity FROM trades WHERE rights_action_id = ?",
-    )
-    .bind(action_id)
-    .fetch_all(&mut *tx)
-    .await?;
+    let prior_rows = sqlx::query("SELECT date, quantity FROM trades WHERE rights_action_id = ?")
+        .bind(action_id)
+        .fetch_all(&mut *tx)
+        .await?;
     let mut exercised = Decimal::ZERO;
     for row in &prior_rows {
         let trade_date: NaiveDate = row.try_get("date")?;
@@ -388,7 +392,9 @@ mod tests {
         insert_buy(&pool, 1, d(2024, 1, 15), "1000", "2.00").await;
         insert_rights_issue(&pool, 10, d(2024, 7, 1)).await;
 
-        let trade = db_exercise(&pool, 10, &body(d(2024, 8, 1), "250")).await.unwrap();
+        let trade = db_exercise(&pool, 10, &body(d(2024, 8, 1), "250"))
+            .await
+            .unwrap();
         assert_eq!(trade.trade_type, TradeType::Buy);
         // Acquired on the exercise date (the discount clock runs from here),
         // allotted by the company so settlement is the same day.
@@ -403,7 +409,9 @@ mod tests {
         assert_eq!(trade.rights_action_id, Some(10));
 
         // The parcel's cost base is exactly the amount paid to exercise.
-        let parcels = crate::reports::open_parcels::db_open_parcels(&pool).await.unwrap();
+        let parcels = crate::reports::open_parcels::db_open_parcels(&pool)
+            .await
+            .unwrap();
         let parcel = parcels.iter().find(|p| p.trade_id == trade.id).unwrap();
         assert_eq!(parcel.acquisition_date, d(2024, 8, 1));
         assert_eq!(parcel.original_cost_base, Decimal::from(450)); // 250 × 1.80
@@ -429,10 +437,15 @@ mod tests {
         let trade = db_exercise(&pool, 10, &exercise).await.unwrap();
         assert_eq!(trade.brokerage, "50.05".parse::<Decimal>().unwrap());
 
-        let parcels = crate::reports::open_parcels::db_open_parcels(&pool).await.unwrap();
+        let parcels = crate::reports::open_parcels::db_open_parcels(&pool)
+            .await
+            .unwrap();
         let parcel = parcels.iter().find(|p| p.trade_id == trade.id).unwrap();
         // 250 × 1.80 + 50.05
-        assert_eq!(parcel.original_cost_base, "500.05".parse::<Decimal>().unwrap());
+        assert_eq!(
+            parcel.original_cost_base,
+            "500.05".parse::<Decimal>().unwrap()
+        );
     }
 
     #[tokio::test]
@@ -442,8 +455,12 @@ mod tests {
         insert_buy(&pool, 1, d(2024, 1, 15), "1000", "2.00").await;
         insert_rights_issue(&pool, 10, d(2024, 7, 1)).await; // entitled to 250
 
-        db_exercise(&pool, 10, &body(d(2024, 7, 10), "100")).await.unwrap();
-        db_exercise(&pool, 10, &body(d(2024, 8, 1), "150")).await.unwrap();
+        db_exercise(&pool, 10, &body(d(2024, 7, 10), "100"))
+            .await
+            .unwrap();
+        db_exercise(&pool, 10, &body(d(2024, 8, 1), "150"))
+            .await
+            .unwrap();
         let err = db_exercise(&pool, 10, &body(d(2024, 8, 2), "1")).await;
         assert!(matches!(err, Err(ExerciseError::ExceedsEntitlement)));
 
@@ -470,7 +487,9 @@ mod tests {
         // Held at the record date = 1000 − 600 = 400 → entitled to 100.
         let err = db_exercise(&pool, 10, &body(d(2024, 8, 1), "101")).await;
         assert!(matches!(err, Err(ExerciseError::ExceedsEntitlement)));
-        db_exercise(&pool, 10, &body(d(2024, 8, 1), "100")).await.unwrap();
+        db_exercise(&pool, 10, &body(d(2024, 8, 1), "100"))
+            .await
+            .unwrap();
     }
 
     /// A split between acquisition and the record date re-bases the holding
@@ -499,7 +518,9 @@ mod tests {
         // 100 as-acquired units are 200 record-date units → entitled to 50.
         let err = db_exercise(&pool, 10, &body(d(2024, 8, 1), "51")).await;
         assert!(matches!(err, Err(ExerciseError::ExceedsEntitlement)));
-        db_exercise(&pool, 10, &body(d(2024, 8, 1), "50")).await.unwrap();
+        db_exercise(&pool, 10, &body(d(2024, 8, 1), "50"))
+            .await
+            .unwrap();
     }
 
     /// A fractional entitlement rounds up to a whole unit, so the cap is
@@ -529,7 +550,9 @@ mod tests {
 
         let err = db_exercise(&pool, 10, &body(d(2024, 8, 1), "430")).await;
         assert!(matches!(err, Err(ExerciseError::ExceedsEntitlement)));
-        db_exercise(&pool, 10, &body(d(2024, 8, 1), "429")).await.unwrap();
+        db_exercise(&pool, 10, &body(d(2024, 8, 1), "429"))
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -574,12 +597,11 @@ mod tests {
         let err = db_exercise(&pool, 10, &exercise).await;
         assert!(matches!(err, Err(ExerciseError::NegativeRightsCost)));
 
-        let n: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM trades WHERE rights_action_id IS NOT NULL",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let n: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM trades WHERE rights_action_id IS NOT NULL")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(n, 0, "no rejected exercise may persist a trade");
     }
 
@@ -591,7 +613,9 @@ mod tests {
         insert_listing(&pool, 1).await;
         insert_buy(&pool, 1, d(2024, 1, 15), "1000", "2.00").await;
         insert_rights_issue(&pool, 10, d(2024, 7, 1)).await;
-        let created = db_exercise(&pool, 10, &body(d(2024, 8, 1), "250")).await.unwrap();
+        let created = db_exercise(&pool, 10, &body(d(2024, 8, 1), "250"))
+            .await
+            .unwrap();
 
         // Any edit — even one keeping the same figures — is rejected.
         let mut edited = created.clone();
@@ -606,7 +630,9 @@ mod tests {
             trade::db_delete(&pool, created.id).await.unwrap(),
             trade::DeleteOutcome::Deleted
         );
-        db_exercise(&pool, 10, &body(d(2024, 8, 2), "250")).await.unwrap();
+        db_exercise(&pool, 10, &body(d(2024, 8, 2), "250"))
+            .await
+            .unwrap();
     }
 
     /// The action the exercises were validated against is frozen while they
@@ -617,13 +643,21 @@ mod tests {
         insert_listing(&pool, 1).await;
         insert_buy(&pool, 1, d(2024, 1, 15), "1000", "2.00").await;
         insert_rights_issue(&pool, 10, d(2024, 7, 1)).await;
-        let created = db_exercise(&pool, 10, &body(d(2024, 8, 1), "250")).await.unwrap();
+        let created = db_exercise(&pool, 10, &body(d(2024, 8, 1), "250"))
+            .await
+            .unwrap();
 
         let action = corporate_action::db_get(&pool, 10).await.unwrap().unwrap();
         let err = corporate_action::db_upsert(&pool, &action).await;
-        assert!(matches!(err, Err(corporate_action::WriteError::ReferencedByTrade)));
+        assert!(matches!(
+            err,
+            Err(corporate_action::WriteError::ReferencedByTrade)
+        ));
         let err = corporate_action::db_delete(&pool, 10).await;
-        assert!(err.is_err(), "the trades.rights_action_id FK must block the delete");
+        assert!(
+            err.is_err(),
+            "the trades.rights_action_id FK must block the delete"
+        );
 
         // Removing the exercise trade unfreezes the action.
         trade::db_delete(&pool, created.id).await.unwrap();
@@ -641,13 +675,17 @@ mod tests {
         insert_listing(&pool, 1).await;
         insert_buy(&pool, 1, d(2023, 1, 10), "1000", "2.00").await;
         insert_rights_issue(&pool, 10, d(2024, 7, 1)).await;
-        let parcel = db_exercise(&pool, 10, &body(d(2024, 8, 1), "250")).await.unwrap();
+        let parcel = db_exercise(&pool, 10, &body(d(2024, 8, 1), "250"))
+            .await
+            .unwrap();
 
         // Sold at a gain ~5 months after exercise (~2 years after the
         // original buy that earned the rights).
         insert_sell(&pool, 50, d(2025, 1, 10), "250", parcel.id).await;
 
-        let gains = crate::reports::realised_gains::db_realised_gains(&pool).await.unwrap();
+        let gains = crate::reports::realised_gains::db_realised_gains(&pool)
+            .await
+            .unwrap();
         let sale = gains.iter().find(|g| g.sale_trade_id == 50).unwrap();
         assert!(sale.capital_gain_loss > Decimal::ZERO);
         assert_eq!(sale.discount_eligible_gain, Decimal::ZERO);
@@ -663,7 +701,10 @@ mod tests {
         insert_listing(&pool, 1).await;
         holding_account::db_upsert(
             &pool,
-            &HoldingAccount { id: 2, name: "Personal CHESS".to_string() },
+            &HoldingAccount {
+                id: 2,
+                name: "Personal CHESS".to_string(),
+            },
         )
         .await
         .unwrap();
@@ -735,7 +776,10 @@ mod tests {
         // Every client-error rejection carries a reason for the toast.
         if expected.is_client_error() {
             let bytes = BodyExt::collect(resp.into_body()).await.unwrap().to_bytes();
-            assert!(!bytes.is_empty(), "a {expected} rejection must carry a reason body");
+            assert!(
+                !bytes.is_empty(),
+                "a {expected} rejection must carry a reason body"
+            );
         }
     }
 
@@ -760,11 +804,10 @@ mod tests {
         // PUT /trades on the exercise trade → 422 (immutable); the frozen
         // action → 422 on PUT and DELETE.
         api_exercise_expecting(&pool, 10, ok, StatusCode::CREATED).await;
-        let trade_id: i64 =
-            sqlx::query_scalar("SELECT id FROM trades WHERE rights_action_id = 10")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
+        let trade_id: i64 = sqlx::query_scalar("SELECT id FROM trades WHERE rights_action_id = 10")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
         let app = crate::entities::router().with_state(pool.clone());
         let resp = app
             .clone()

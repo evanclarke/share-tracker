@@ -164,7 +164,15 @@ async fn put_listing(pool: &SqlitePool, id: i64, ticker: &str) {
 }
 
 /// Enter a Buy via `PUT /trades/:id` (AUD, with optional incidental costs as brokerage).
-async fn put_buy(pool: &SqlitePool, id: i64, listing_id: i64, date: &str, qty: &str, price: &str, brokerage: &str) {
+async fn put_buy(
+    pool: &SqlitePool,
+    id: i64,
+    listing_id: i64,
+    date: &str,
+    qty: &str,
+    price: &str,
+    brokerage: &str,
+) {
     api_put(
         pool,
         &format!("/trades/{id}"),
@@ -244,10 +252,18 @@ async fn cgt_how_to_calculate_example_cgt_with_discount() {
     assert_eq!(years.len(), 1);
     let y = &years[0];
     assert_eq!(y.tax_year, 2025); // sold July 2024 → FY2024-25
-    assert_eq!(y.discount_eligible_gains, dec("10000"), "the $10,000 profit");
+    assert_eq!(
+        y.discount_eligible_gains,
+        dec("10000"),
+        "the $10,000 profit"
+    );
     assert_eq!(y.capital_losses, Decimal::ZERO, "he has no capital losses");
     assert_eq!(y.cgt_discount, dec("5000"), "50% CGT discount");
-    assert_eq!(y.net_capital_gain, dec("5000"), "declares a capital gain of $5,000");
+    assert_eq!(
+        y.net_capital_gain,
+        dec("5000"),
+        "declares a capital gain of $5,000"
+    );
 }
 
 /// `docs/ato/cgt-how-to-calculate.md` — "Example: working out CGT for a single asset".
@@ -276,17 +292,41 @@ async fn cgt_how_to_calculate_example_single_asset() {
     let sales: Vec<RealisedGainLoss> = api_get(&pool, "/portfolio/realised-gains").await;
     assert_eq!(sales.len(), 1);
     let s = &sales[0];
-    assert_eq!(s.cost_base, dec("516200"), "purchase price + stamp duty + conveyancing");
-    assert_eq!(s.proceeds, dec("586200"), "$600,000 less the $13,800 sale costs");
-    assert_eq!(s.capital_gain_loss, dec("70000"), "step 3: the $70,000 capital gain");
-    assert_eq!(s.discount_eligible_gain, dec("70000"), "owned at least 12 months");
+    assert_eq!(
+        s.cost_base,
+        dec("516200"),
+        "purchase price + stamp duty + conveyancing"
+    );
+    assert_eq!(
+        s.proceeds,
+        dec("586200"),
+        "$600,000 less the $13,800 sale costs"
+    );
+    assert_eq!(
+        s.capital_gain_loss,
+        dec("70000"),
+        "step 3: the $70,000 capital gain"
+    );
+    assert_eq!(
+        s.discount_eligible_gain,
+        dec("70000"),
+        "owned at least 12 months"
+    );
 
     let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net-capital-gain").await;
     assert_eq!(years.len(), 1);
     let y = &years[0];
     assert_eq!(y.tax_year, 2025); // contract dated 4 June 2025 → FY ending 30 June 2025
-    assert_eq!(y.cgt_discount, dec("35000"), "step 7: $70,000 × 50% = $35,000");
-    assert_eq!(y.net_capital_gain, dec("35000"), "step 8: net capital gain of $35,000");
+    assert_eq!(
+        y.cgt_discount,
+        dec("35000"),
+        "step 7: $70,000 × 50% = $35,000"
+    );
+    assert_eq!(
+        y.net_capital_gain,
+        dec("35000"),
+        "step 8: net capital gain of $35,000"
+    );
 }
 
 /// `docs/ato/cgt-how-to-calculate.md` — "Example: working out CGT for multiple assets".
@@ -315,7 +355,11 @@ async fn cgt_how_to_calculate_example_multiple_assets() {
 
     let sales: Vec<RealisedGainLoss> = api_get(&pool, "/portfolio/realised-gains").await;
     let shares = sales.iter().find(|s| s.sale_trade_id == 4).unwrap();
-    assert_eq!(shares.capital_gain_loss, dec("-4500"), "step 3: a $4,500 capital loss");
+    assert_eq!(
+        shares.capital_gain_loss,
+        dec("-4500"),
+        "step 3: a $4,500 capital loss"
+    );
     assert_eq!(shares.capital_loss, dec("4500"));
 
     let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net-capital-gain").await;
@@ -326,8 +370,16 @@ async fn cgt_how_to_calculate_example_multiple_assets() {
     assert_eq!(y.capital_losses, dec("4500"), "the share loss");
     // Step 5: losses come off before the discount → $70,000 − $4,500 = $65,500.
     assert_eq!(y.net_discount_eligible_gain, dec("65500"));
-    assert_eq!(y.cgt_discount, dec("32750"), "step 7: $65,500 × 50% = $32,750");
-    assert_eq!(y.net_capital_gain, dec("32750"), "step 8: net capital gain of $32,750");
+    assert_eq!(
+        y.cgt_discount,
+        dec("32750"),
+        "step 7: $65,500 × 50% = $32,750"
+    );
+    assert_eq!(
+        y.net_capital_gain,
+        dec("32750"),
+        "step 8: net capital gain of $32,750"
+    );
     assert_eq!(y.capital_loss_carried_forward, Decimal::ZERO);
 }
 
@@ -377,20 +429,32 @@ async fn drp_example_natalie_reinvested_dividend() {
     assert_eq!(trade.trade_type, TradeType::DRP);
     assert_eq!(trade.quantity, dec("45"), "45 new shares");
     assert_eq!(trade.average_price, dec("8"), "at $8 per share");
-    assert_eq!(trade.date.to_string(), "2024-12-20", "received on 20 December 2024");
+    assert_eq!(
+        trade.date.to_string(),
+        "2024-12-20",
+        "received on 20 December 2024"
+    );
 
     // For CGT purposes the 45 shares were acquired for $360.
     let holdings: Vec<HoldingOverview> =
         api_post(&pool, "/portfolio/overview", json!({}), StatusCode::OK).await;
     assert_eq!(holdings.len(), 1);
     assert_eq!(holdings[0].quantity, dec("45"));
-    assert_eq!(holdings[0].total_cost_base, dec("360"), "acquired the 45 new shares for $360");
+    assert_eq!(
+        holdings[0].total_cost_base,
+        dec("360"),
+        "acquired the 45 new shares for $360"
+    );
 
     // The $360 dividend is assessable income in her 2024–25 tax return.
     let years: Vec<TaxYearSummary> = api_get(&pool, "/portfolio/tax-summary").await;
     assert_eq!(years.len(), 1);
     assert_eq!(years[0].tax_year, 2025); // paid Dec 2024 → 2024–25
-    assert_eq!(years[0].dividends_assessable, dec("360"), "declares the $360 dividend");
+    assert_eq!(
+        years[0].dividends_assessable,
+        dec("360"),
+        "declares the $360 dividend"
+    );
 }
 
 /// `docs/ato/cgt-keeping-records-shares.md` — "Example: identifying when shares or
@@ -420,12 +484,23 @@ async fn keeping_records_example_boris_identifying_shares_sold() {
     // The nominated parcel makes it a $3,000 capital loss in the 2025 income year.
     let sales: Vec<RealisedGainLoss> = api_get(&pool, "/portfolio/realised-gains").await;
     assert_eq!(sales.len(), 1);
-    assert_eq!(sales[0].cost_base, dec("15000"), "1,500 of the $10 (2024) shares");
+    assert_eq!(
+        sales[0].cost_base,
+        dec("15000"),
+        "1,500 of the $10 (2024) shares"
+    );
     assert_eq!(sales[0].proceeds, dec("12000"), "1,500 × $8");
-    assert_eq!(sales[0].capital_gain_loss, dec("-3000"), "the claimed capital loss");
+    assert_eq!(
+        sales[0].capital_gain_loss,
+        dec("-3000"),
+        "the claimed capital loss"
+    );
     assert_eq!(sales[0].capital_loss, dec("3000"));
     let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net-capital-gain").await;
-    assert_eq!(years[0].tax_year, 2025, "loss claimed in the 2025 income year");
+    assert_eq!(
+        years[0].tax_year, 2025,
+        "loss claimed in the 2025 income year"
+    );
     assert_eq!(years[0].capital_losses, dec("3000"));
 
     // Boris still has 1,000 × $5 + 1,500 × $10 = 2,500 shares costing $20,000.
@@ -466,7 +541,11 @@ async fn you_and_your_shares_examples_1_2_john_assessable_dividend_income() {
     assert_eq!(years.len(), 1);
     let y = &years[0];
     assert_eq!(y.tax_year, 2025); // paid Feb 2025 → 2024–25
-    assert_eq!(y.dividends_assessable, dec("900"), "unfranked $200 + franked $700");
+    assert_eq!(
+        y.dividends_assessable,
+        dec("900"),
+        "unfranked $200 + franked $700"
+    );
     assert_eq!(y.franking_credits, dec("300"), "franking credit $300");
     assert_eq!(
         y.dividends_assessable + y.franking_credits,
@@ -516,7 +595,11 @@ async fn you_and_your_shares_example_6_matthew_holding_period_rule() {
     let y = &years[0];
     assert_eq!(y.tax_year, 2025);
     // He still shows the $13,066 franked amount as income…
-    assert_eq!(y.dividends_assessable, dec("13066"), "shows the dividend as a franked amount");
+    assert_eq!(
+        y.dividends_assessable,
+        dec("13066"),
+        "shows the dividend as a franked amount"
+    );
     // …but has no entitlement to any part of the $5,600 franking credits
     // (credits > $5,000, so the small-shareholder exemption can't restore them).
     assert_eq!(
@@ -859,10 +942,18 @@ async fn rights_issues_example_40_shanti_rights_exercised() {
     let parcels: Vec<crate::reports::open_parcels::OpenParcel> =
         api_get(&pool, "/portfolio/open-parcels").await;
     assert_eq!(parcels.len(), 2);
-    assert_eq!(parcels[0].remaining_quantity, dec("1000"), "original parcel untouched");
+    assert_eq!(
+        parcels[0].remaining_quantity,
+        dec("1000"),
+        "original parcel untouched"
+    );
     assert_eq!(parcels[1].acquisition_date.to_string(), "1998-08-01");
     assert_eq!(parcels[1].remaining_quantity, dec("250"));
-    assert_eq!(parcels[1].remaining_cost_base, dec("450"), "$1.80 for each share");
+    assert_eq!(
+        parcels[1].remaining_cost_base,
+        dec("450"),
+        "$1.80 for each share"
+    );
 
     // "There are no CGT consequences arising from the exercise of the rights."
     let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net-capital-gain").await;
@@ -931,8 +1022,16 @@ async fn share_buy_backs_example_ranjini_off_market_buy_back() {
     // (before applying any discount; held > 12 months so it is eligible).
     let gains: Vec<RealisedGainLoss> = api_get(&pool, "/portfolio/realised-gains").await;
     assert_eq!(gains.len(), 1);
-    assert_eq!(gains[0].proceeds, dec("8800.00"), "capital proceeds: $10,200 − $1,400");
-    assert_eq!(gains[0].cost_base, dec("6000.00"), "cost base: $6.00 × 1,000");
+    assert_eq!(
+        gains[0].proceeds,
+        dec("8800.00"),
+        "capital proceeds: $10,200 − $1,400"
+    );
+    assert_eq!(
+        gains[0].cost_base,
+        dec("6000.00"),
+        "cost base: $6.00 × 1,000"
+    );
     assert_eq!(
         gains[0].capital_gain_loss,
         dec("2800.00"),
@@ -945,8 +1044,16 @@ async fn share_buy_backs_example_ranjini_off_market_buy_back() {
     let years: Vec<TaxYearSummary> = api_get(&pool, "/portfolio/tax-summary").await;
     assert_eq!(years.len(), 1);
     assert_eq!(years[0].tax_year, 2025);
-    assert_eq!(years[0].dividends_assessable, dec("1400.00"), "dividend: $1.40 × 1,000");
-    assert_eq!(years[0].franking_credits, dec("600.00"), "franking credit: $0.60 × 1,000");
+    assert_eq!(
+        years[0].dividends_assessable,
+        dec("1400.00"),
+        "dividend: $1.40 × 1,000"
+    );
+    assert_eq!(
+        years[0].franking_credits,
+        dec("600.00"),
+        "franking credit: $0.60 × 1,000"
+    );
 
     // Her remaining holding: 9,000 shares at the untouched $6 cost base.
     let holdings: Vec<HoldingOverview> =
@@ -990,8 +1097,16 @@ async fn lic_capital_gain_deduction_example_resident_individual() {
     assert_eq!(years.len(), 1);
     let y = &years[0];
     assert_eq!(y.tax_year, 2025); // paid Feb 2025 → 2024–25 return
-    assert_eq!(y.dividends_assessable, dec("70"), "Dividends – Franked amount: $70");
-    assert_eq!(y.franking_credits, dec("30"), "Dividends – Franking credit: $30");
+    assert_eq!(
+        y.dividends_assessable,
+        dec("70"),
+        "Dividends – Franked amount: $70"
+    );
+    assert_eq!(
+        y.franking_credits,
+        dec("30"),
+        "Dividends – Franking credit: $30"
+    );
     assert_eq!(
         y.lic_capital_gain_deduction,
         dec("25"),
@@ -1040,8 +1155,13 @@ async fn demergers_examples_30_32_anita_bhp_billiton_demerger() {
         }),
     )
     .await;
-    let demerge: Value =
-        api_post(&pool, "/corporate_actions/1/demerge", json!({}), StatusCode::CREATED).await;
+    let demerge: Value = api_post(
+        &pool,
+        "/corporate_actions/1/demerge",
+        json!({}),
+        StatusCode::CREATED,
+    )
+    .await;
     let demerged_buy_id = demerge["demerged_replacements"][0]["id"].as_i64().unwrap();
 
     // Step 2: 94.937% of $2,500 stays with the 280 BHP Billiton shares and
@@ -1054,17 +1174,28 @@ async fn demergers_examples_30_32_anita_bhp_billiton_demerger() {
     assert_eq!(parcels.len(), 2);
     assert_eq!(parcels[0].ticker, "BHP");
     assert_eq!(parcels[0].remaining_quantity, dec("280"));
-    assert_eq!(parcels[0].remaining_cost_base, dec("2373.425"), "ATO: $2,373.43");
+    assert_eq!(
+        parcels[0].remaining_cost_base,
+        dec("2373.425"),
+        "ATO: $2,373.43"
+    );
     assert_eq!(parcels[0].acquisition_date.to_string(), "2001-08-15");
     assert_eq!(parcels[1].ticker, "BSL");
     assert_eq!(parcels[1].remaining_quantity, dec("56"));
-    assert_eq!(parcels[1].remaining_cost_base, dec("126.575"), "ATO: $126.58");
+    assert_eq!(
+        parcels[1].remaining_cost_base,
+        dec("126.575"),
+        "ATO: $126.58"
+    );
     assert_eq!(parcels[1].acquisition_date.to_string(), "2001-08-15");
 
     // The demerger itself: no CGT consequences (the rollover disregards any
     // gain made under the demerger).
     let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net-capital-gain").await;
-    assert!(years.is_empty(), "the demerger is not a CGT event: {years:?}");
+    assert!(
+        years.is_empty(),
+        "the demerger is not a CGT event: {years:?}"
+    );
 
     // Example 32: dispose of the BHP Steel shares after 15 August 2002 —
     // under 12 months after the demerger but over 12 months after the BHP
@@ -1132,15 +1263,26 @@ async fn crypto_cgt_example_katrina_coin_swap() {
     // Crypto settles same-day: the auto-populated settlement date is the
     // trade date itself.
     let swap_sell: Trade = api_get(&pool, "/trades/2").await;
-    assert_eq!(swap_sell.settlement_date, swap_sell.date, "crypto settles same-day");
+    assert_eq!(
+        swap_sell.settlement_date, swap_sell.date,
+        "crypto settles same-day"
+    );
 
     // Katrina's capital proceeds are $6,000 against a $3,000 cost base.
     let sales: Vec<RealisedGainLoss> = api_get(&pool, "/portfolio/realised-gains").await;
     assert_eq!(sales.len(), 1);
-    assert_eq!(sales[0].proceeds, dec("6000"), "capital proceeds are $6,000");
+    assert_eq!(
+        sales[0].proceeds,
+        dec("6000"),
+        "capital proceeds are $6,000"
+    );
     assert_eq!(sales[0].cost_base, dec("3000"), "20/100 of the $15,000");
     assert_eq!(sales[0].capital_gain_loss, dec("3000"));
-    assert_eq!(sales[0].non_discountable_gain, dec("3000"), "held under 12 months");
+    assert_eq!(
+        sales[0].non_discountable_gain,
+        dec("3000"),
+        "held under 12 months"
+    );
     assert_eq!(sales[0].discount_eligible_gain, Decimal::ZERO);
 
     // FY2024-25: the $3,000 gain is assessable in full (no discount).
@@ -1196,11 +1338,20 @@ async fn ess_example_matt_taxed_upfront_eligible_reduction() {
 
     // The vesting operation creates the cost-base-reset Buy: 600 shares at the
     // $6 market value, acquired (and settled) on the taxing-point date.
-    let vest: Trade = api_post(&pool, "/ess_statements/1/vest", json!({}), StatusCode::CREATED).await;
+    let vest: Trade = api_post(
+        &pool,
+        "/ess_statements/1/vest",
+        json!({}),
+        StatusCode::CREATED,
+    )
+    .await;
     assert_eq!(vest.quantity, dec("600"));
     assert_eq!(vest.average_price, dec("6"));
     assert_eq!(vest.date, "2015-08-04".parse().unwrap());
-    assert_eq!(vest.deemed_acquisition_date, None, "the taxing point is the acquisition date");
+    assert_eq!(
+        vest.deemed_acquisition_date, None,
+        "the taxing point is the acquisition date"
+    );
 
     // The assessable ESS discount: $2,400 − $1,000 reduction = $1,400, in
     // FY2016 (acquired Aug 2015), reported separately from dividend income.
@@ -1208,7 +1359,11 @@ async fn ess_example_matt_taxed_upfront_eligible_reduction() {
     assert_eq!(years.len(), 1);
     let y = &years[0];
     assert_eq!(y.tax_year, 2016);
-    assert_eq!(y.ess_taxed_upfront_reduction, dec("1000"), "the $1,000 concession");
+    assert_eq!(
+        y.ess_taxed_upfront_reduction,
+        dec("1000"),
+        "the $1,000 concession"
+    );
     assert_eq!(y.ess_discount_assessable, dec("1400"), "$2,400 − $1,000");
     assert_eq!(y.dividends_assessable, Decimal::ZERO);
 
@@ -1256,8 +1411,13 @@ async fn worthless_shares_example_dave_capital_loss_on_dissolution() {
 
     // Recognise the loss: the closing Sell consumes the whole holding at nil
     // proceeds.
-    let recognise: Value =
-        api_post(&pool, "/corporate_actions/1/recognise", json!({}), StatusCode::CREATED).await;
+    let recognise: Value = api_post(
+        &pool,
+        "/corporate_actions/1/recognise",
+        json!({}),
+        StatusCode::CREATED,
+    )
+    .await;
     assert_eq!(recognise["sell"]["quantity"], "1000");
 
     // The capital loss equals the reduced cost base: 1,000 × $1.70 = $1,700,

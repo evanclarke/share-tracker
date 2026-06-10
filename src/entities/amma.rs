@@ -1,3 +1,4 @@
+use crate::infra::decimal::row_dec;
 use crate::infra::http::ApiError;
 use axum::{
     Json, Router,
@@ -6,7 +7,6 @@ use axum::{
     routing::get,
 };
 use chrono::NaiveDate;
-use crate::infra::decimal::row_dec;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
@@ -137,9 +137,10 @@ fn default_currency() -> String {
 }
 
 pub fn router() -> Router<SqlitePool> {
-    Router::new()
-        .route("/amma_statements", get(list))
-        .route("/amma_statements/{id}", get(get_one).put(upsert).delete(delete))
+    Router::new().route("/amma_statements", get(list)).route(
+        "/amma_statements/{id}",
+        get(get_one).put(upsert).delete(delete),
+    )
 }
 
 pub async fn db_list(pool: &SqlitePool) -> Result<Vec<AmmaStatement>, sqlx::Error> {
@@ -242,10 +243,7 @@ pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<bool, sqlx::Error> 
 }
 
 async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<AmmaStatement>>, ApiError> {
-    db_list(&pool)
-        .await
-        .map(Json)
-        .map_err(ApiError::from)
+    db_list(&pool).await.map(Json).map_err(ApiError::from)
 }
 
 async fn get_one(
@@ -301,7 +299,13 @@ async fn delete(
 ) -> Result<StatusCode, ApiError> {
     db_delete(&pool, id)
         .await
-        .map(|found| if found { StatusCode::NO_CONTENT } else { StatusCode::NOT_FOUND })
+        .map(|found| {
+            if found {
+                StatusCode::NO_CONTENT
+            } else {
+                StatusCode::NOT_FOUND
+            }
+        })
         // Deleting a statement still referenced by AMIT adjustments violates an FK → 422.
         .map_err(ApiError::from)
 }
@@ -309,7 +313,7 @@ async fn delete(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{infra::db, entities::listing};
+    use crate::{entities::listing, infra::db};
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
     use tower::ServiceExt;
@@ -374,13 +378,22 @@ mod tests {
         db_upsert(&pool, &sample_amma()).await.unwrap();
         let got = db_get(&pool, 1).await.unwrap().unwrap();
         assert_eq!(got.listing_id, 1);
-        assert_eq!(got.tax_year_end_date, NaiveDate::from_ymd_opt(2024, 6, 30).unwrap());
+        assert_eq!(
+            got.tax_year_end_date,
+            NaiveDate::from_ymd_opt(2024, 6, 30).unwrap()
+        );
         assert_eq!(got.units_held, "1000".parse::<Decimal>().unwrap());
         assert_eq!(got.australian_interest, "12.50".parse::<Decimal>().unwrap());
-        assert_eq!(got.australian_dividends_unfranked, "5.25".parse::<Decimal>().unwrap());
+        assert_eq!(
+            got.australian_dividends_unfranked,
+            "5.25".parse::<Decimal>().unwrap()
+        );
         assert_eq!(got.tax_deferred_amount, "2.30".parse::<Decimal>().unwrap());
         assert_eq!(got.tax_free_amount, "1.10".parse::<Decimal>().unwrap());
-        assert_eq!(got.cost_base_adjustment, "0.0023".parse::<Decimal>().unwrap());
+        assert_eq!(
+            got.cost_base_adjustment,
+            "0.0023".parse::<Decimal>().unwrap()
+        );
     }
 
     #[tokio::test]
@@ -442,7 +455,10 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
         let got = db_get(&pool, 1).await.unwrap().unwrap();
         assert_eq!(got.australian_interest, "12.50".parse::<Decimal>().unwrap());
-        assert_eq!(got.cost_base_adjustment, "0.0023".parse::<Decimal>().unwrap());
+        assert_eq!(
+            got.cost_base_adjustment,
+            "0.0023".parse::<Decimal>().unwrap()
+        );
     }
 
     #[tokio::test]
@@ -452,7 +468,12 @@ mod tests {
         db_upsert(&pool, &sample_amma()).await.unwrap();
         let resp = router()
             .with_state(pool)
-            .oneshot(Request::builder().uri("/amma_statements").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/amma_statements")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -551,7 +572,13 @@ mod tests {
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let got: AmmaStatement = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(got.units_held, "1234.567890123".parse::<Decimal>().unwrap());
-        assert_eq!(got.australian_interest, "9.876543210".parse::<Decimal>().unwrap());
-        assert_eq!(got.cost_base_adjustment, "0.001234567890".parse::<Decimal>().unwrap());
+        assert_eq!(
+            got.australian_interest,
+            "9.876543210".parse::<Decimal>().unwrap()
+        );
+        assert_eq!(
+            got.cost_base_adjustment,
+            "0.001234567890".parse::<Decimal>().unwrap()
+        );
     }
 }

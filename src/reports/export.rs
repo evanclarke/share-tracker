@@ -61,7 +61,10 @@ mod tests {
 
     #[tokio::test]
     async fn renders_header_and_rows_with_decimal_precision() {
-        let rows = vec![Row { year: 2024, amount: "1234.5678".parse().unwrap() }];
+        let rows = vec![Row {
+            year: 2024,
+            amount: "1234.5678".parse().unwrap(),
+        }];
         let resp = csv_response("test.csv", &["year", "amount"], &rows).unwrap();
         assert_eq!(
             resp.headers().get(header::CONTENT_TYPE).unwrap(),
@@ -82,7 +85,10 @@ mod tests {
 
     #[tokio::test]
     async fn header_struct_drift_is_an_error_not_misaligned_columns() {
-        let rows = vec![Row { year: 2024, amount: "1".parse().unwrap() }];
+        let rows = vec![Row {
+            year: 2024,
+            amount: "1".parse().unwrap(),
+        }];
         // A header missing a column (as after adding a struct field without
         // updating the header list) must fail, not ship shifted columns.
         assert!(csv_response("test.csv", &["year"], &rows).is_err());

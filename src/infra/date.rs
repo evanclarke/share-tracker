@@ -32,7 +32,10 @@ mod tests {
 
     #[test]
     fn none_is_the_open_ended_cutoff() {
-        assert_eq!(as_of_or_open(None), NaiveDate::from_ymd_opt(9999, 12, 31).unwrap());
+        assert_eq!(
+            as_of_or_open(None),
+            NaiveDate::from_ymd_opt(9999, 12, 31).unwrap()
+        );
     }
 
     #[test]

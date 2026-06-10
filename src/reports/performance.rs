@@ -36,10 +36,10 @@
 //! market-dependent metrics rather than a silently wrong figure; the OVERALL
 //! row does the same unless every open holding is priced.
 
-use crate::infra::http::ApiError;
 use crate::entities::closing_price::{self, SharedFetcher};
 use crate::infra::decimal::parse_dec;
 use crate::infra::fx::to_aud;
+use crate::infra::http::ApiError;
 use axum::{Extension, Json, Router, extract::State, routing::post};
 use chrono::{Months, NaiveDate};
 use rust_decimal::{Decimal, MathematicalOps};
@@ -344,7 +344,9 @@ pub async fn db_performance(
     }
 
     let split_events = crate::entities::corporate_action::db_share_split_events(pool).await?;
-    let ticker_rows = sqlx::query("SELECT id, ticker FROM listings").fetch_all(pool).await?;
+    let ticker_rows = sqlx::query("SELECT id, ticker FROM listings")
+        .fetch_all(pool)
+        .await?;
     let mut tickers: HashMap<i64, String> = HashMap::new();
     for row in &ticker_rows {
         tickers.insert(row.try_get("id")?, row.try_get("ticker")?);
@@ -423,7 +425,10 @@ pub async fn db_performance(
         let date_paid: NaiveDate = row.try_get("date_paid")?;
         let cash = parse_dec("franked_amount", row.try_get("franked_amount")?)?
             + parse_dec("unfranked_amount", row.try_get("unfranked_amount")?)?
-            + parse_dec("foreign_source_income", row.try_get("foreign_source_income")?)?
+            + parse_dec(
+                "foreign_source_income",
+                row.try_get("foreign_source_income")?,
+            )?
             - parse_dec("foreign_tax_paid", row.try_get("foreign_tax_paid")?)?
             - parse_dec("tfn_withholding_tax", row.try_get("tfn_withholding_tax")?)?;
         let currency: String = row.try_get("currency")?;
@@ -497,7 +502,9 @@ async fn performance_handler(
     body: Option<Json<PerformanceRequest>>,
 ) -> Result<Json<Vec<HoldingPerformance>>, ApiError> {
     let req = body.map(|Json(req)| req).unwrap_or_default();
-    let as_of = req.as_of_date.unwrap_or_else(|| chrono::Local::now().date_naive());
+    let as_of = req
+        .as_of_date
+        .unwrap_or_else(|| chrono::Local::now().date_naive());
 
     // Live-fetch a current price for each open held listing without an explicit
     // override (when requested); an explicit price always wins.
@@ -530,7 +537,9 @@ async fn performance_handler(
     // Carry each live price's as-of time, and surface a live-fetch failure on
     // an open holding (left unvalued by db_performance) as its reason.
     for row in &mut rows {
-        let Some(listing_id) = row.listing_id else { continue };
+        let Some(listing_id) = row.listing_id else {
+            continue;
+        };
         match live.get(&listing_id) {
             Some(Ok(v)) => row.price_as_of = Some(v.as_of.clone()),
             Some(Err(reason))
@@ -549,9 +558,9 @@ async fn performance_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::http::StatusCode;
     use crate::entities::{income, listing, parcel_allocation, trade};
     use crate::infra::db;
+    use axum::http::StatusCode;
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
     use tower::ServiceExt;
@@ -634,13 +643,35 @@ mod tests {
     }
 
     async fn buy(pool: &SqlitePool, id: i64, listing: i64, date: NaiveDate, qty: i64, price: i64) {
-        insert_trade(pool, id, trade::TradeType::Buy, listing, 1, date,
-            Decimal::from(qty), Decimal::from(price), "AUD", Decimal::ONE).await;
+        insert_trade(
+            pool,
+            id,
+            trade::TradeType::Buy,
+            listing,
+            1,
+            date,
+            Decimal::from(qty),
+            Decimal::from(price),
+            "AUD",
+            Decimal::ONE,
+        )
+        .await;
     }
 
     async fn sell(pool: &SqlitePool, id: i64, listing: i64, date: NaiveDate, qty: i64, price: i64) {
-        insert_trade(pool, id, trade::TradeType::Sell, listing, 1, date,
-            Decimal::from(qty), Decimal::from(price), "AUD", Decimal::ONE).await;
+        insert_trade(
+            pool,
+            id,
+            trade::TradeType::Sell,
+            listing,
+            1,
+            date,
+            Decimal::from(qty),
+            Decimal::from(price),
+            "AUD",
+            Decimal::ONE,
+        )
+        .await;
     }
 
     async fn allocate(pool: &SqlitePool, id: i64, sale_id: i64, buy_id: i64, qty: i64) {
@@ -701,7 +732,9 @@ mod tests {
     #[tokio::test]
     async fn db_empty_returns_empty() {
         let pool = test_pool().await;
-        let rows = db_performance(&pool, &HashMap::new(), d(2024, 12, 31)).await.unwrap();
+        let rows = db_performance(&pool, &HashMap::new(), d(2024, 12, 31))
+            .await
+            .unwrap();
         assert!(rows.is_empty());
     }
 
@@ -714,8 +747,9 @@ mod tests {
         buy(&pool, 1, 1, d(2024, 1, 1), 100, 10).await; // invested 1,000
         insert_income(&pool, 1, 1, d(2024, 6, 30), 50).await;
 
-        let rows =
-            db_performance(&pool, &price_map(1, "12"), d(2024, 12, 31)).await.unwrap();
+        let rows = db_performance(&pool, &price_map(1, "12"), d(2024, 12, 31))
+            .await
+            .unwrap();
         assert_eq!(rows.len(), 2);
         let h = &rows[0];
         assert_eq!((h.listing_id, h.holding_account_id), (Some(1), Some(1)));
@@ -733,7 +767,10 @@ mod tests {
 
         let o = &rows[1];
         assert_eq!(o.ticker, "OVERALL");
-        assert_eq!((o.listing_id, o.holding_account_id, o.quantity_held), (None, None, None));
+        assert_eq!(
+            (o.listing_id, o.holding_account_id, o.quantity_held),
+            (None, None, None)
+        );
         assert_eq!(o.invested, Decimal::from(1000));
         assert_eq!(o.market_value, Some(Decimal::from(1200)));
         assert_eq!(o.total_return, Some(Decimal::from(250)));
@@ -747,7 +784,9 @@ mod tests {
         insert_listing(&pool, 1, "VAS", "XASX", "AUD").await;
         buy(&pool, 1, 1, d(2023, 1, 1), 100, 10).await;
 
-        let rows = db_performance(&pool, &price_map(1, "11"), d(2024, 1, 1)).await.unwrap();
+        let rows = db_performance(&pool, &price_map(1, "11"), d(2024, 1, 1))
+            .await
+            .unwrap();
         assert_eq!(rows[0].money_weighted_return_pct, Some(Decimal::from(10)));
         assert_eq!(rows[1].money_weighted_return_pct, Some(Decimal::from(10)));
     }
@@ -762,7 +801,9 @@ mod tests {
         sell(&pool, 2, 1, d(2024, 1, 1), 100, 11).await;
         allocate(&pool, 1, 2, 1, 100).await;
 
-        let rows = db_performance(&pool, &HashMap::new(), d(2024, 6, 30)).await.unwrap();
+        let rows = db_performance(&pool, &HashMap::new(), d(2024, 6, 30))
+            .await
+            .unwrap();
         let h = &rows[0];
         assert_eq!(h.quantity_held, Some(Decimal::ZERO));
         assert_eq!(h.market_value, None);
@@ -783,7 +824,9 @@ mod tests {
         insert_listing(&pool, 1, "VAS", "XASX", "AUD").await;
         buy(&pool, 1, 1, d(2024, 1, 1), 100, 10).await;
 
-        let rows = db_performance(&pool, &HashMap::new(), d(2024, 12, 31)).await.unwrap();
+        let rows = db_performance(&pool, &HashMap::new(), d(2024, 12, 31))
+            .await
+            .unwrap();
         for row in &rows {
             assert_eq!(row.invested, Decimal::from(1000));
             assert_eq!(row.market_value, None);
@@ -804,8 +847,9 @@ mod tests {
         insert_income(&pool, 1, 1, d(2022, 6, 30), 40).await; // outside the window
         insert_income(&pool, 2, 1, d(2024, 6, 30), 60).await; // inside
 
-        let rows =
-            db_performance(&pool, &price_map(1, "12"), d(2024, 12, 31)).await.unwrap();
+        let rows = db_performance(&pool, &price_map(1, "12"), d(2024, 12, 31))
+            .await
+            .unwrap();
         let h = &rows[0];
         assert_eq!(h.income, Decimal::from(100));
         // 60 / 1,200 = 5%.
@@ -823,7 +867,10 @@ mod tests {
         insert_listing(&pool, 1, "ICE", "XASX", "AUD").await;
         holding_account::db_upsert(
             &pool,
-            &holding_account::HoldingAccount { id: 2, name: "Broker".to_string() },
+            &holding_account::HoldingAccount {
+                id: 2,
+                name: "Broker".to_string(),
+            },
         )
         .await
         .unwrap();
@@ -848,7 +895,9 @@ mod tests {
         .await
         .unwrap();
 
-        let rows = db_performance(&pool, &price_map(1, "15"), d(2024, 1, 1)).await.unwrap();
+        let rows = db_performance(&pool, &price_map(1, "15"), d(2024, 1, 1))
+            .await
+            .unwrap();
         assert_eq!(rows.len(), 3);
 
         // Source holding: closed at the carried cost — zero return.
@@ -884,10 +933,23 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "ICE", "XNYS", "USD").await;
         // 100 × US$10 = US$1,000 at 2 USD/AUD → A$500 invested.
-        insert_trade(&pool, 1, trade::TradeType::Buy, 1, 1, d(2024, 1, 1),
-            Decimal::from(100), Decimal::from(10), "USD", Decimal::from(2)).await;
+        insert_trade(
+            &pool,
+            1,
+            trade::TradeType::Buy,
+            1,
+            1,
+            d(2024, 1, 1),
+            Decimal::from(100),
+            Decimal::from(10),
+            "USD",
+            Decimal::from(2),
+        )
+        .await;
 
-        let rows = db_performance(&pool, &price_map(1, "6"), d(2024, 12, 31)).await.unwrap();
+        let rows = db_performance(&pool, &price_map(1, "6"), d(2024, 12, 31))
+            .await
+            .unwrap();
         let h = &rows[0];
         assert_eq!(h.invested, Decimal::from(500));
         assert_eq!(h.market_value, Some(Decimal::from(600)));
@@ -907,7 +969,9 @@ mod tests {
         insert_income(&pool, 1, 1, d(2024, 5, 1), 50).await;
 
         // As at 31 Mar the sale and the May distribution haven't happened.
-        let rows = db_performance(&pool, &price_map(1, "12"), d(2024, 3, 31)).await.unwrap();
+        let rows = db_performance(&pool, &price_map(1, "12"), d(2024, 3, 31))
+            .await
+            .unwrap();
         let h = &rows[0];
         assert_eq!(h.quantity_held, Some(Decimal::from(100)));
         assert_eq!(h.proceeds, Decimal::ZERO);
@@ -966,7 +1030,9 @@ mod tests {
         buy(&pool, 3, 3, d(2024, 1, 1), 10, 5).await;
         let as_of =
             chrono::TimeZone::with_ymd_and_hms(&chrono::Utc, 2024, 12, 31, 6, 30, 0).unwrap();
-        let fetcher = QuoteStub::default().with_quote(1, "12", "AUD", as_of).shared();
+        let fetcher = QuoteStub::default()
+            .with_quote(1, "12", "AUD", as_of)
+            .shared();
 
         let body = serde_json::json!({
             "live": true,
@@ -992,7 +1058,10 @@ mod tests {
         let by_id = |id: i64| rows.iter().find(|r| r.listing_id == Some(id)).unwrap();
         // Listing 1: live-valued at 12 → market value 1,200, as-of carried.
         assert_eq!(by_id(1).market_value, Some(Decimal::from(1200)));
-        assert_eq!(by_id(1).price_as_of.as_deref(), Some(as_of.to_rfc3339().as_str()));
+        assert_eq!(
+            by_id(1).price_as_of.as_deref(),
+            Some(as_of.to_rfc3339().as_str())
+        );
         // Listing 2: explicit override 20 → 50 × 20 = 1,000, no as-of.
         assert_eq!(by_id(2).market_value, Some(Decimal::from(1000)));
         assert!(by_id(2).price_as_of.is_none());

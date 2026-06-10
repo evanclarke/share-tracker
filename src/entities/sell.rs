@@ -10,8 +10,8 @@
 //! `PUT /sells/{id}` is an upsert: it replaces the Sell trade row and *all* of
 //! its parcel allocations with the submitted set.
 
-use crate::infra::http::ApiError;
 use crate::entities::trade::{self, TradeType};
+use crate::infra::http::ApiError;
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -137,9 +137,9 @@ impl From<SellError> for ApiError {
             SellError::PurchaseTradeNotBuyOrDrp => {
                 ApiError::unprocessable("an allocated parcel is not a Buy or DRP trade")
             }
-            SellError::PurchaseQuantityExceeded => {
-                ApiError::unprocessable("the allocations exceed a purchase parcel's available quantity")
-            }
+            SellError::PurchaseQuantityExceeded => ApiError::unprocessable(
+                "the allocations exceed a purchase parcel's available quantity",
+            ),
             SellError::BuyBackSell => ApiError::unprocessable(
                 "this Sell is a buy-back participation and cannot be edited — \
                  delete it and re-participate instead",
@@ -291,11 +291,13 @@ pub async fn db_delete_sell(pool: &SqlitePool, id: i64) -> Result<DeleteOutcome,
         if replacement_referenced {
             return Ok(DeleteOutcome::ReplacementReferenced);
         }
-        sqlx::query(&format!("DELETE FROM trades WHERE {column} = ? AND id <> ?"))
-            .bind(action_id)
-            .bind(id)
-            .execute(&mut *tx)
-            .await?;
+        sqlx::query(&format!(
+            "DELETE FROM trades WHERE {column} = ? AND id <> ?"
+        ))
+        .bind(action_id)
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
     }
 
     sqlx::query("DELETE FROM income WHERE buyback_trade_id = ?")
@@ -367,7 +369,18 @@ pub async fn db_upsert_sell(pool: &SqlitePool, id: i64, body: &SellBody) -> Resu
         return Err(SellError::TransferSell);
     }
 
-    upsert_sell_in_tx(&mut tx, id, body, settlement_date, None, None, None, None, None).await?;
+    upsert_sell_in_tx(
+        &mut tx,
+        id,
+        body,
+        settlement_date,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await?;
 
     tx.commit().await?;
     Ok(())
@@ -397,11 +410,7 @@ pub(crate) async fn upsert_sell_in_tx(
     worthless_action_id: Option<i64>,
 ) -> Result<(), SellError> {
     // Allocations must account for the whole sale — no more, no less.
-    let allocated: Decimal = body
-        .allocations
-        .iter()
-        .map(|a| a.quantity_allocated)
-        .sum();
+    let allocated: Decimal = body.allocations.iter().map(|a| a.quantity_allocated).sum();
     if allocated != body.quantity {
         return Err(SellError::AllocationMismatch);
     }
@@ -410,8 +419,11 @@ pub(crate) async fn upsert_sell_in_tx(
     // build a SellBody internally pass flag false, making this the identity),
     // and the statement total — when recorded — must reconcile with the net
     // proceeds before anything is written.
-    let (brokerage, gst_on_brokerage) =
-        trade::resolve_brokerage(body.brokerage_includes_gst, body.brokerage, body.gst_on_brokerage);
+    let (brokerage, gst_on_brokerage) = trade::resolve_brokerage(
+        body.brokerage_includes_gst,
+        body.brokerage,
+        body.gst_on_brokerage,
+    );
     trade::check_statement_total(trade::StatementTotalCheck {
         statement_total: body.statement_total,
         trade_type: TradeType::Sell,
@@ -604,7 +616,10 @@ async fn delete(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{infra::db, entities::{listing, trade}};
+    use crate::{
+        entities::{listing, trade},
+        infra::db,
+    };
     use axum::{body::Body, http::Request};
     use tower::ServiceExt;
 
@@ -713,7 +728,10 @@ mod tests {
 
         let body = sell_body(
             Decimal::from(100),
-            vec![AllocationInput { purchase_trade_id: 1, quantity_allocated: Decimal::from(100) }],
+            vec![AllocationInput {
+                purchase_trade_id: 1,
+                quantity_allocated: Decimal::from(100),
+            }],
         );
         db_upsert_sell(&pool, 2, &body).await.unwrap();
 
@@ -730,7 +748,10 @@ mod tests {
         // sell 100 but only allocate 60
         let body = sell_body(
             Decimal::from(100),
-            vec![AllocationInput { purchase_trade_id: 1, quantity_allocated: Decimal::from(60) }],
+            vec![AllocationInput {
+                purchase_trade_id: 1,
+                quantity_allocated: Decimal::from(60),
+            }],
         );
         let err = db_upsert_sell(&pool, 2, &body).await.unwrap_err();
         assert!(matches!(err, SellError::AllocationMismatch));
@@ -748,7 +769,10 @@ mod tests {
         // allocations sum to 120 but sell quantity is 100
         let body = sell_body(
             Decimal::from(100),
-            vec![AllocationInput { purchase_trade_id: 1, quantity_allocated: Decimal::from(120) }],
+            vec![AllocationInput {
+                purchase_trade_id: 1,
+                quantity_allocated: Decimal::from(120),
+            }],
         );
         let err = db_upsert_sell(&pool, 2, &body).await.unwrap_err();
         assert!(matches!(err, SellError::AllocationMismatch));
@@ -763,7 +787,10 @@ mod tests {
         // sell 100, fully allocated against a 50-unit parcel -> exceeds parcel
         let body = sell_body(
             Decimal::from(100),
-            vec![AllocationInput { purchase_trade_id: 1, quantity_allocated: Decimal::from(100) }],
+            vec![AllocationInput {
+                purchase_trade_id: 1,
+                quantity_allocated: Decimal::from(100),
+            }],
         );
         let err = db_upsert_sell(&pool, 2, &body).await.unwrap_err();
         assert!(matches!(err, SellError::PurchaseQuantityExceeded));
@@ -778,14 +805,20 @@ mod tests {
         // trade 3 is itself a Sell (created via this endpoint)
         let prior = sell_body(
             Decimal::from(100),
-            vec![AllocationInput { purchase_trade_id: 1, quantity_allocated: Decimal::from(100) }],
+            vec![AllocationInput {
+                purchase_trade_id: 1,
+                quantity_allocated: Decimal::from(100),
+            }],
         );
         db_upsert_sell(&pool, 3, &prior).await.unwrap();
 
         // now try to allocate a new sell against the Sell trade 3
         let body = sell_body(
             Decimal::from(10),
-            vec![AllocationInput { purchase_trade_id: 3, quantity_allocated: Decimal::from(10) }],
+            vec![AllocationInput {
+                purchase_trade_id: 3,
+                quantity_allocated: Decimal::from(10),
+            }],
         );
         let err = db_upsert_sell(&pool, 4, &body).await.unwrap_err();
         assert!(matches!(err, SellError::PurchaseTradeNotBuyOrDrp));
@@ -801,7 +834,10 @@ mod tests {
         insert_listing(&pool, 1).await;
         holding_account::db_upsert(
             &pool,
-            &HoldingAccount { id: 2, name: "ICE Employee Plan".to_string() },
+            &HoldingAccount {
+                id: 2,
+                name: "ICE Employee Plan".to_string(),
+            },
         )
         .await
         .unwrap();
@@ -815,7 +851,10 @@ mod tests {
         // A default-account Sell can't consume it…
         let body = sell_body(
             Decimal::from(100),
-            vec![AllocationInput { purchase_trade_id: 1, quantity_allocated: Decimal::from(100) }],
+            vec![AllocationInput {
+                purchase_trade_id: 1,
+                quantity_allocated: Decimal::from(100),
+            }],
         );
         let err = db_upsert_sell(&pool, 2, &body).await.unwrap_err();
         assert!(matches!(err, SellError::PurchaseInDifferentAccount));
@@ -824,7 +863,10 @@ mod tests {
         // …while the same Sell in the plan account goes through.
         let mut body = sell_body(
             Decimal::from(100),
-            vec![AllocationInput { purchase_trade_id: 1, quantity_allocated: Decimal::from(100) }],
+            vec![AllocationInput {
+                purchase_trade_id: 1,
+                quantity_allocated: Decimal::from(100),
+            }],
         );
         body.holding_account_id = 2;
         db_upsert_sell(&pool, 2, &body).await.unwrap();
@@ -838,7 +880,10 @@ mod tests {
         insert_listing(&pool, 1).await;
         holding_account::db_upsert(
             &pool,
-            &HoldingAccount { id: 2, name: "ICE Employee Plan".to_string() },
+            &HoldingAccount {
+                id: 2,
+                name: "ICE Employee Plan".to_string(),
+            },
         )
         .await
         .unwrap();
@@ -909,7 +954,10 @@ mod tests {
         // (and rolled back)…
         let body = sell_body(
             Decimal::from(201),
-            vec![AllocationInput { purchase_trade_id: 1, quantity_allocated: Decimal::from(201) }],
+            vec![AllocationInput {
+                purchase_trade_id: 1,
+                quantity_allocated: Decimal::from(201),
+            }],
         );
         let err = db_upsert_sell(&pool, 2, &body).await.unwrap_err();
         assert!(matches!(err, SellError::PurchaseQuantityExceeded));
@@ -918,7 +966,10 @@ mod tests {
         // …while selling exactly the 200 post-split units succeeds.
         let body = sell_body(
             Decimal::from(200),
-            vec![AllocationInput { purchase_trade_id: 1, quantity_allocated: Decimal::from(200) }],
+            vec![AllocationInput {
+                purchase_trade_id: 1,
+                quantity_allocated: Decimal::from(200),
+            }],
         );
         db_upsert_sell(&pool, 2, &body).await.unwrap();
         assert!(trade_exists(&pool, 2).await);
@@ -934,7 +985,10 @@ mod tests {
         // first version: 100 from parcel 1
         let v1 = sell_body(
             Decimal::from(100),
-            vec![AllocationInput { purchase_trade_id: 1, quantity_allocated: Decimal::from(100) }],
+            vec![AllocationInput {
+                purchase_trade_id: 1,
+                quantity_allocated: Decimal::from(100),
+            }],
         );
         db_upsert_sell(&pool, 3, &v1).await.unwrap();
         assert_eq!(count_allocations(&pool, 3).await, 1);
@@ -943,8 +997,14 @@ mod tests {
         let v2 = sell_body(
             Decimal::from(100),
             vec![
-                AllocationInput { purchase_trade_id: 1, quantity_allocated: Decimal::from(40) },
-                AllocationInput { purchase_trade_id: 2, quantity_allocated: Decimal::from(60) },
+                AllocationInput {
+                    purchase_trade_id: 1,
+                    quantity_allocated: Decimal::from(40),
+                },
+                AllocationInput {
+                    purchase_trade_id: 2,
+                    quantity_allocated: Decimal::from(60),
+                },
             ],
         );
         db_upsert_sell(&pool, 3, &v2).await.unwrap();
@@ -991,7 +1051,10 @@ mod tests {
         insert_buy(&pool, 1, 1, Decimal::from(100)).await;
         let body = sell_body(
             Decimal::from(100),
-            vec![AllocationInput { purchase_trade_id: 1, quantity_allocated: Decimal::from(100) }],
+            vec![AllocationInput {
+                purchase_trade_id: 1,
+                quantity_allocated: Decimal::from(100),
+            }],
         );
         db_upsert_sell(&pool, 2, &body).await.unwrap();
         assert_eq!(count_allocations(&pool, 2).await, 1);
@@ -1007,7 +1070,10 @@ mod tests {
     #[tokio::test]
     async fn db_delete_missing_sell_is_not_found() {
         let pool = test_pool().await;
-        assert_eq!(db_delete_sell(&pool, 99).await.unwrap(), DeleteOutcome::NotFound);
+        assert_eq!(
+            db_delete_sell(&pool, 99).await.unwrap(),
+            DeleteOutcome::NotFound
+        );
     }
 
     #[tokio::test]
@@ -1016,7 +1082,10 @@ mod tests {
         insert_listing(&pool, 1).await;
         insert_buy(&pool, 1, 1, Decimal::from(100)).await;
         // trade 1 is a Buy — deleting it via the sells endpoint is refused
-        assert_eq!(db_delete_sell(&pool, 1).await.unwrap(), DeleteOutcome::NotASell);
+        assert_eq!(
+            db_delete_sell(&pool, 1).await.unwrap(),
+            DeleteOutcome::NotASell
+        );
         assert!(trade_exists(&pool, 1).await);
     }
 
@@ -1027,7 +1096,10 @@ mod tests {
         insert_buy(&pool, 1, 1, Decimal::from(100)).await;
         let body = sell_body(
             Decimal::from(100),
-            vec![AllocationInput { purchase_trade_id: 1, quantity_allocated: Decimal::from(100) }],
+            vec![AllocationInput {
+                purchase_trade_id: 1,
+                quantity_allocated: Decimal::from(100),
+            }],
         );
         db_upsert_sell(&pool, 2, &body).await.unwrap();
 
@@ -1071,7 +1143,10 @@ mod tests {
 
         let mut body = sell_body(
             Decimal::from(100),
-            vec![AllocationInput { purchase_trade_id: 1, quantity_allocated: Decimal::from(100) }],
+            vec![AllocationInput {
+                purchase_trade_id: 1,
+                quantity_allocated: Decimal::from(100),
+            }],
         );
         body.brokerage = "9.95".parse().unwrap();
         body.brokerage_includes_gst = true;
@@ -1126,9 +1201,15 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        let bytes = http_body_util::BodyExt::collect(resp.into_body()).await.unwrap().to_bytes();
+        let bytes = http_body_util::BodyExt::collect(resp.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
         let detail = String::from_utf8(bytes.to_vec()).unwrap();
-        assert!(detail.contains("1490.05"), "detail must carry the net proceeds: {detail}");
+        assert!(
+            detail.contains("1490.05"),
+            "detail must carry the net proceeds: {detail}"
+        );
     }
 
     #[tokio::test]
@@ -1162,9 +1243,15 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        let body = http_body_util::BodyExt::collect(resp.into_body()).await.unwrap().to_bytes();
+        let body = http_body_util::BodyExt::collect(resp.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
         let detail = String::from_utf8(body.to_vec()).unwrap();
         // The rejection says why, not a bare "HTTP 422".
-        assert!(detail.contains("sum to the sell quantity"), "detail: {detail}");
+        assert!(
+            detail.contains("sum to the sell quantity"),
+            "detail: {detail}"
+        );
     }
 }

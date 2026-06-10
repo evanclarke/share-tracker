@@ -1,7 +1,7 @@
-use crate::infra::http::ApiError;
 use crate::domain::cost_base;
 use crate::entities::closing_price::{self, SharedFetcher};
 use crate::infra::decimal::parse_dec;
+use crate::infra::http::ApiError;
 use axum::{Extension, Json, Router, extract::State, routing::post};
 use chrono::{Months, NaiveDate};
 use rust_decimal::Decimal;
@@ -53,7 +53,10 @@ pub struct UnrealisedGainsRequest {
 }
 
 pub fn router() -> Router<SqlitePool> {
-    Router::new().route("/portfolio/unrealised-gains", post(unrealised_gains_handler))
+    Router::new().route(
+        "/portfolio/unrealised-gains",
+        post(unrealised_gains_handler),
+    )
 }
 
 /// The report is the position *as at* `as_of_date`: trades, sales, corporate
@@ -100,8 +103,7 @@ pub async fn db_unrealised_gains(
     let cba_reduction =
         crate::entities::amit_adjustment::db_cost_base_reductions_up_to(pool, Some(as_of_date))
             .await?;
-    let roc_events =
-        crate::entities::corporate_action::db_return_of_capital_events(pool).await?;
+    let roc_events = crate::entities::corporate_action::db_return_of_capital_events(pool).await?;
     // share splits/consolidations per listing (quantity re-basing)
     let split_events = crate::entities::corporate_action::db_share_split_events(pool).await?;
 
@@ -189,9 +191,14 @@ pub async fn db_unrealised_gains(
         .filter(|(_, qty)| *qty > Decimal::ZERO)
         .map(|(key, qty)| {
             let (listing_id, holding_account_id) = key;
-            let cost_base = holding_cost_base.get(&key).copied().unwrap_or(Decimal::ZERO);
-            let cgt_eligible =
-                holding_cgt_eligible_qty.get(&key).copied().unwrap_or(Decimal::ZERO);
+            let cost_base = holding_cost_base
+                .get(&key)
+                .copied()
+                .unwrap_or(Decimal::ZERO);
+            let cgt_eligible = holding_cgt_eligible_qty
+                .get(&key)
+                .copied()
+                .unwrap_or(Decimal::ZERO);
             UnrealisedGain {
                 listing_id,
                 holding_account_id,
@@ -217,7 +224,9 @@ async fn unrealised_gains_handler(
     body: Option<Json<UnrealisedGainsRequest>>,
 ) -> Result<Json<Vec<UnrealisedGain>>, ApiError> {
     let req = body.map(|Json(req)| req).unwrap_or_default();
-    let as_of_date = req.as_of_date.unwrap_or_else(|| chrono::Local::now().date_naive());
+    let as_of_date = req
+        .as_of_date
+        .unwrap_or_else(|| chrono::Local::now().date_naive());
 
     let mut gains = db_unrealised_gains(&pool, as_of_date)
         .await
@@ -257,8 +266,11 @@ async fn unrealised_gains_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        entities::{amit_adjustment, amma, corporate_action, listing, parcel_allocation, trade},
+        infra::db,
+    };
     use axum::http::StatusCode;
-    use crate::{infra::db, entities::{amma, amit_adjustment, corporate_action, listing, parcel_allocation, trade}};
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
     use tower::ServiceExt;
@@ -444,7 +456,10 @@ mod tests {
         assert_eq!(gains.len(), 1);
         assert_eq!(gains[0].quantity, Decimal::from(60));
         // remaining cost = 1010.945 * 60 / 100 = 606.567
-        assert_eq!(gains[0].total_cost_base, "606.567".parse::<Decimal>().unwrap());
+        assert_eq!(
+            gains[0].total_cost_base,
+            "606.567".parse::<Decimal>().unwrap()
+        );
         // all remaining 60 units are from a >12mo parcel
         assert_eq!(gains[0].cgt_discount_eligible_quantity, Decimal::from(60));
     }
@@ -519,7 +534,10 @@ mod tests {
         let gains = db_unrealised_gains(&pool, as_of).await.unwrap();
         assert_eq!(gains.len(), 1);
         // initial = 1010.945, AMIT = 100 * 0.05 = 5.00, net = 1005.945
-        assert_eq!(gains[0].total_cost_base, "1005.945".parse::<Decimal>().unwrap());
+        assert_eq!(
+            gains[0].total_cost_base,
+            "1005.945".parse::<Decimal>().unwrap()
+        );
     }
 
     /// A return of capital (CGT event G1) reduces the holding's cost base by the
@@ -555,13 +573,15 @@ mod tests {
         .await
         .unwrap();
 
-        let gains =
-            db_unrealised_gains(&pool, NaiveDate::from_ymd_opt(2024, 6, 1).unwrap())
-                .await
-                .unwrap();
+        let gains = db_unrealised_gains(&pool, NaiveDate::from_ymd_opt(2024, 6, 1).unwrap())
+            .await
+            .unwrap();
         assert_eq!(gains.len(), 1);
         // 1010.945 − 100 × 0.50 = 960.945
-        assert_eq!(gains[0].total_cost_base, "960.945".parse::<Decimal>().unwrap());
+        assert_eq!(
+            gains[0].total_cost_base,
+            "960.945".parse::<Decimal>().unwrap()
+        );
     }
 
     /// TD 2000/10: the converted shares keep the original acquisition date, so
@@ -595,7 +615,10 @@ mod tests {
         assert_eq!(gains.len(), 1);
         assert_eq!(gains[0].quantity, Decimal::from(200));
         // Total cost base unchanged by the split.
-        assert_eq!(gains[0].total_cost_base, "1010.945".parse::<Decimal>().unwrap());
+        assert_eq!(
+            gains[0].total_cost_base,
+            "1010.945".parse::<Decimal>().unwrap()
+        );
         // All 200 post-split units carry the 2024-01-01 acquisition date.
         assert_eq!(gains[0].cgt_discount_eligible_quantity, Decimal::from(200));
 
@@ -643,8 +666,7 @@ mod tests {
         // cost base = 10 * 100 + 9.95 + 0.995 = 1010.945
         insert_buy(&pool, 1, 1, buy_date, Decimal::from(100), Decimal::from(10)).await;
 
-        let body =
-            serde_json::json!({ "prices": { "1": "15.00" }, "as_of_date": "2025-06-01" });
+        let body = serde_json::json!({ "prices": { "1": "15.00" }, "as_of_date": "2025-06-01" });
         let resp = router()
             .with_state(pool)
             .oneshot(
@@ -666,7 +688,10 @@ mod tests {
         // market_value = 100 * 15 = 1500
         assert_eq!(g.market_value, Some(Decimal::from(1500)));
         // gain = 1500 - 1010.945 = 489.055
-        assert_eq!(g.unrealised_gain_loss, Some("489.055".parse::<Decimal>().unwrap()));
+        assert_eq!(
+            g.unrealised_gain_loss,
+            Some("489.055".parse::<Decimal>().unwrap())
+        );
         // parcel is >12 months old (2024-01-01 + 12mo = 2025-01-01, as_of = 2025-06-01 > 2025-01-01)
         assert_eq!(g.cgt_discount_eligible_quantity, Decimal::from(100));
     }
@@ -727,7 +752,9 @@ mod tests {
         // cost base = 10 × 100 + 9.95 + 0.995 = 1010.945
         insert_buy(&pool, 1, 1, buy_date, Decimal::from(100), Decimal::from(10)).await;
         let as_of = chrono::TimeZone::with_ymd_and_hms(&chrono::Utc, 2026, 6, 5, 6, 30, 0).unwrap();
-        let fetcher = QuoteStub::default().with_quote(1, "15.00", "AUD", as_of).shared();
+        let fetcher = QuoteStub::default()
+            .with_quote(1, "15.00", "AUD", as_of)
+            .shared();
 
         let body = serde_json::json!({ "live": true, "as_of_date": "2026-06-05" });
         let resp = router()
@@ -747,8 +774,14 @@ mod tests {
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let gains: Vec<UnrealisedGain> = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(gains[0].market_value, Some(Decimal::from(1500)));
-        assert_eq!(gains[0].unrealised_gain_loss, Some("489.055".parse().unwrap()));
-        assert_eq!(gains[0].price_as_of.as_deref(), Some(as_of.to_rfc3339().as_str()));
+        assert_eq!(
+            gains[0].unrealised_gain_loss,
+            Some("489.055".parse().unwrap())
+        );
+        assert_eq!(
+            gains[0].price_as_of.as_deref(),
+            Some(as_of.to_rfc3339().as_str())
+        );
     }
 
     /// A blanket live-fetch failure leaves the holding unvalued with a reason —
@@ -782,7 +815,13 @@ mod tests {
         assert_eq!(gains.len(), 1);
         assert!(gains[0].market_value.is_none());
         assert!(gains[0].unrealised_gain_loss.is_none());
-        assert!(gains[0].price_unavailable.as_deref().unwrap().contains("provider down"));
+        assert!(
+            gains[0]
+                .price_unavailable
+                .as_deref()
+                .unwrap()
+                .contains("provider down")
+        );
     }
 
     /// The report is the position *as at* `as_of_date`: a parcel bought and a
@@ -793,8 +832,24 @@ mod tests {
     async fn db_facts_dated_after_as_of_are_excluded() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "VAS").await;
-        insert_buy(&pool, 1, 1, NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(), Decimal::from(100), Decimal::from(10)).await;
-        insert_buy(&pool, 2, 1, NaiveDate::from_ymd_opt(2025, 1, 10).unwrap(), Decimal::from(50), Decimal::from(12)).await;
+        insert_buy(
+            &pool,
+            1,
+            1,
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
+        insert_buy(
+            &pool,
+            2,
+            1,
+            NaiveDate::from_ymd_opt(2025, 1, 10).unwrap(),
+            Decimal::from(50),
+            Decimal::from(12),
+        )
+        .await;
         // Sell 40 of the first parcel on 2025-06-01 (the helper's sale date).
         insert_sell(&pool, 3, 1, Decimal::from(40)).await;
         allocate(&pool, 1, 3, 1, Decimal::from(40)).await;
@@ -805,7 +860,10 @@ mod tests {
             .unwrap();
         assert_eq!(gains.len(), 1);
         assert_eq!(gains[0].quantity, Decimal::from(100));
-        assert_eq!(gains[0].total_cost_base, "1010.945".parse::<Decimal>().unwrap());
+        assert_eq!(
+            gains[0].total_cost_base,
+            "1010.945".parse::<Decimal>().unwrap()
+        );
 
         // As at mid-2025 both later facts count: 100 + 50 − 40 = 110.
         let gains = db_unrealised_gains(&pool, NaiveDate::from_ymd_opt(2025, 7, 1).unwrap())
@@ -839,7 +897,9 @@ mod tests {
         )
         .await
         .unwrap();
-        crate::entities::scrip_exchange::db_exchange(&pool, 10).await.unwrap();
+        crate::entities::scrip_exchange::db_exchange(&pool, 10)
+            .await
+            .unwrap();
 
         // 2025-02-01: over 12 months after the original buy, under 12 months
         // after the exchange — eligible via the combined period.

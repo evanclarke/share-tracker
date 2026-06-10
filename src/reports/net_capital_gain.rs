@@ -23,13 +23,11 @@
 //!     discount-eligible gain. Any unused loss is carried forward into the next
 //!     year in the series.
 
-use crate::infra::http::ApiError;
 use crate::infra::decimal::parse_dec;
 use crate::infra::fx::to_aud;
+use crate::infra::http::ApiError;
 use crate::reports::export;
-use axum::{
-    Json, Router, extract::State, response::Response, routing::get,
-};
+use axum::{Json, Router, extract::State, response::Response, routing::get};
 use chrono::{Datelike, Months, NaiveDate};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -196,13 +194,15 @@ async fn e10_gains(pool: &SqlitePool) -> Result<Vec<(i32, Decimal, bool)>, sqlx:
 
         while i < rows.len() && rows[i].try_get::<i64, _>("trade_id")? == trade_id {
             let adj_qty = parse_dec("adj_qty", rows[i].try_get("adj_qty")?)?;
-            let cba = parse_dec("cost_base_adjustment", rows[i].try_get("cost_base_adjustment")?)?;
+            let cba = parse_dec(
+                "cost_base_adjustment",
+                rows[i].try_get("cost_base_adjustment")?,
+            )?;
             let year_end: NaiveDate = rows[i].try_get("tax_year_end_date")?;
             let reduction = adj_qty * cba;
             if reduction > remaining {
                 let excess = reduction - remaining;
-                let excess_aud =
-                    to_aud(pool, excess, &currency, acquired, Some(fx_rate)).await?;
+                let excess_aud = to_aud(pool, excess, &currency, acquired, Some(fx_rate)).await?;
                 let discount_eligible = year_end > acquired + Months::new(12);
                 out.push((year_end.year(), excess_aud, discount_eligible));
                 remaining = Decimal::ZERO;
@@ -329,23 +329,20 @@ async fn g1_gains(pool: &SqlitePool) -> Result<Vec<(i32, Decimal, bool)>, sqlx::
                 // Only the units still held at the payment date received it
                 // (sold units re-based back to as-acquired units).
                 let held = trade_qty
-                    - sold
-                        .get(&trade_id)
-                        .map_or(Decimal::ZERO, |sales| {
-                            sales
-                                .iter()
-                                .filter(|(d, _)| *d < action_date)
-                                .map(|&(d, q)| {
-                                    crate::entities::corporate_action::as_acquired_quantity(
-                                        q, splits, trade_date, d,
-                                    )
-                                })
-                                .sum()
-                        });
+                    - sold.get(&trade_id).map_or(Decimal::ZERO, |sales| {
+                        sales
+                            .iter()
+                            .filter(|(d, _)| *d < action_date)
+                            .map(|&(d, q)| {
+                                crate::entities::corporate_action::as_acquired_quantity(
+                                    q, splits, trade_date, d,
+                                )
+                            })
+                            .sum()
+                    });
                 if held > Decimal::ZERO && trade_qty > Decimal::ZERO {
                     let gain = excess * held / trade_qty;
-                    let gain_aud =
-                        to_aud(pool, gain, &action_currency, action_date, None).await?;
+                    let gain_aud = to_aud(pool, gain, &action_currency, action_date, None).await?;
                     let discount_eligible = action_date > acquired + Months::new(12);
                     out.push((tax_year_for(action_date), gain_aud, discount_eligible));
                 }
@@ -359,7 +356,9 @@ async fn g1_gains(pool: &SqlitePool) -> Result<Vec<(i32, Decimal, bool)>, sqlx::
     Ok(out)
 }
 
-pub async fn db_net_capital_gain(pool: &SqlitePool) -> Result<Vec<NetCapitalGainYear>, sqlx::Error> {
+pub async fn db_net_capital_gain(
+    pool: &SqlitePool,
+) -> Result<Vec<NetCapitalGainYear>, sqlx::Error> {
     let mut buckets: HashMap<i32, GrossBuckets> = HashMap::new();
 
     // Realised parcel gains (already AUD), bucketed by the sale's tax year.
@@ -433,8 +432,7 @@ pub async fn db_net_capital_gain(pool: &SqlitePool) -> Result<Vec<NetCapitalGain
     years.sort_by_key(|(tax_year, _)| *tax_year);
 
     let two = Decimal::from(2);
-    let mut brought_forward =
-        crate::entities::cgt_settings::db_opening_capital_loss(pool).await?;
+    let mut brought_forward = crate::entities::cgt_settings::db_opening_capital_loss(pool).await?;
     let result = years
         .into_iter()
         .map(|(tax_year, b)| {
@@ -486,21 +484,21 @@ async fn net_capital_gain_handler(
 async fn net_capital_gain_export_handler(
     State(pool): State<SqlitePool>,
 ) -> Result<Response, ApiError> {
-    let rows = db_net_capital_gain(&pool)
-        .await
-        .map_err(ApiError::from)?;
-    export::csv_response("net-capital-gain.csv", CSV_HEADER, &rows)
-        .map_err(ApiError::from)
+    let rows = db_net_capital_gain(&pool).await.map_err(ApiError::from)?;
+    export::csv_response("net-capital-gain.csv", CSV_HEADER, &rows).map_err(ApiError::from)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::http::StatusCode;
     use crate::{
-        entities::{amit_adjustment, amma, cgt_settings, corporate_action, listing, parcel_allocation, rba_fx_rate, trade},
+        entities::{
+            amit_adjustment, amma, cgt_settings, corporate_action, listing, parcel_allocation,
+            rba_fx_rate, trade,
+        },
         infra::db,
     };
+    use axum::http::StatusCode;
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
     use tower::ServiceExt;
@@ -587,7 +585,13 @@ mod tests {
         .unwrap();
     }
 
-    async fn link_adjustment(pool: &SqlitePool, id: i64, amma_id: i64, trade_id: i64, qty: Decimal) {
+    async fn link_adjustment(
+        pool: &SqlitePool,
+        id: i64,
+        amma_id: i64,
+        trade_id: i64,
+        qty: Decimal,
+    ) {
         amit_adjustment::db_upsert(
             pool,
             &amit_adjustment::AmitAdjustment {
@@ -640,10 +644,26 @@ mod tests {
         let pool = test_pool().await;
         // Buy 100 @ $10 (Jan 2024), sell 100 @ $15 (Jun 2025) → held > 12 months.
         insert_listing(&pool, 1, "VAS").await;
-        insert_trade(&pool, 1, trade::TradeType::Buy, 1,
-            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(), Decimal::from(100), Decimal::from(10)).await;
-        insert_trade(&pool, 2, trade::TradeType::Sell, 1,
-            NaiveDate::from_ymd_opt(2025, 6, 1).unwrap(), Decimal::from(100), Decimal::from(15)).await;
+        insert_trade(
+            &pool,
+            1,
+            trade::TradeType::Buy,
+            1,
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
+        insert_trade(
+            &pool,
+            2,
+            trade::TradeType::Sell,
+            1,
+            NaiveDate::from_ymd_opt(2025, 6, 1).unwrap(),
+            Decimal::from(100),
+            Decimal::from(15),
+        )
+        .await;
         allocate(&pool, 1, 2, 1, Decimal::from(100)).await;
 
         let r = db_net_capital_gain(&pool).await.unwrap();
@@ -665,10 +685,26 @@ mod tests {
     async fn db_rows_state_the_individual_resident_basis() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "VAS").await;
-        insert_trade(&pool, 1, trade::TradeType::Buy, 1,
-            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(), Decimal::from(100), Decimal::from(10)).await;
-        insert_trade(&pool, 2, trade::TradeType::Sell, 1,
-            NaiveDate::from_ymd_opt(2025, 6, 1).unwrap(), Decimal::from(100), Decimal::from(15)).await;
+        insert_trade(
+            &pool,
+            1,
+            trade::TradeType::Buy,
+            1,
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
+        insert_trade(
+            &pool,
+            2,
+            trade::TradeType::Sell,
+            1,
+            NaiveDate::from_ymd_opt(2025, 6, 1).unwrap(),
+            Decimal::from(100),
+            Decimal::from(15),
+        )
+        .await;
         allocate(&pool, 1, 2, 1, Decimal::from(100)).await;
 
         let r = db_net_capital_gain(&pool).await.unwrap();
@@ -685,10 +721,26 @@ mod tests {
         let pool = test_pool().await;
         // Held ≤ 12 months → non-discountable; full gain assessable.
         insert_listing(&pool, 1, "VAS").await;
-        insert_trade(&pool, 1, trade::TradeType::Buy, 1,
-            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(), Decimal::from(100), Decimal::from(10)).await;
-        insert_trade(&pool, 2, trade::TradeType::Sell, 1,
-            NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(), Decimal::from(100), Decimal::from(15)).await;
+        insert_trade(
+            &pool,
+            1,
+            trade::TradeType::Buy,
+            1,
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
+        insert_trade(
+            &pool,
+            2,
+            trade::TradeType::Sell,
+            1,
+            NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(),
+            Decimal::from(100),
+            Decimal::from(15),
+        )
+        .await;
         allocate(&pool, 1, 2, 1, Decimal::from(100)).await;
 
         let r = db_net_capital_gain(&pool).await.unwrap();
@@ -707,22 +759,70 @@ mod tests {
         // first → net_other = 100, net_discount = 500, NCG = 100 + 250 = 350.
         insert_listing(&pool, 1, "VAS").await;
         // Discount-eligible: buy Jan 2024, sell Jun 2025 (>12mo), gain 500.
-        insert_trade(&pool, 1, trade::TradeType::Buy, 1,
-            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(), Decimal::from(100), Decimal::from(10)).await;
-        insert_trade(&pool, 2, trade::TradeType::Sell, 1,
-            NaiveDate::from_ymd_opt(2025, 6, 1).unwrap(), Decimal::from(100), Decimal::from(15)).await;
+        insert_trade(
+            &pool,
+            1,
+            trade::TradeType::Buy,
+            1,
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
+        insert_trade(
+            &pool,
+            2,
+            trade::TradeType::Sell,
+            1,
+            NaiveDate::from_ymd_opt(2025, 6, 1).unwrap(),
+            Decimal::from(100),
+            Decimal::from(15),
+        )
+        .await;
         allocate(&pool, 1, 2, 1, Decimal::from(100)).await;
         // Non-discountable: buy Mar 2025, sell Jun 2025 (≤12mo), gain 200.
-        insert_trade(&pool, 3, trade::TradeType::Buy, 1,
-            NaiveDate::from_ymd_opt(2025, 3, 1).unwrap(), Decimal::from(100), Decimal::from(10)).await;
-        insert_trade(&pool, 4, trade::TradeType::Sell, 1,
-            NaiveDate::from_ymd_opt(2025, 6, 2).unwrap(), Decimal::from(100), Decimal::from(12)).await;
+        insert_trade(
+            &pool,
+            3,
+            trade::TradeType::Buy,
+            1,
+            NaiveDate::from_ymd_opt(2025, 3, 1).unwrap(),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
+        insert_trade(
+            &pool,
+            4,
+            trade::TradeType::Sell,
+            1,
+            NaiveDate::from_ymd_opt(2025, 6, 2).unwrap(),
+            Decimal::from(100),
+            Decimal::from(12),
+        )
+        .await;
         allocate(&pool, 2, 4, 3, Decimal::from(100)).await;
         // Capital loss of 100: buy Mar 2025 @ $10, sell Jun 2025 @ $9.
-        insert_trade(&pool, 5, trade::TradeType::Buy, 1,
-            NaiveDate::from_ymd_opt(2025, 3, 1).unwrap(), Decimal::from(100), Decimal::from(10)).await;
-        insert_trade(&pool, 6, trade::TradeType::Sell, 1,
-            NaiveDate::from_ymd_opt(2025, 6, 3).unwrap(), Decimal::from(100), Decimal::from(9)).await;
+        insert_trade(
+            &pool,
+            5,
+            trade::TradeType::Buy,
+            1,
+            NaiveDate::from_ymd_opt(2025, 3, 1).unwrap(),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
+        insert_trade(
+            &pool,
+            6,
+            trade::TradeType::Sell,
+            1,
+            NaiveDate::from_ymd_opt(2025, 6, 3).unwrap(),
+            Decimal::from(100),
+            Decimal::from(9),
+        )
+        .await;
         allocate(&pool, 3, 6, 5, Decimal::from(100)).await;
 
         let r = db_net_capital_gain(&pool).await.unwrap();
@@ -745,16 +845,48 @@ mod tests {
         // Loss exhausts other (0), then reduces discount gain to 0 (uses 500),
         // leaving 200 carried forward. NCG = 0.
         insert_listing(&pool, 1, "VAS").await;
-        insert_trade(&pool, 1, trade::TradeType::Buy, 1,
-            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(), Decimal::from(100), Decimal::from(10)).await;
-        insert_trade(&pool, 2, trade::TradeType::Sell, 1,
-            NaiveDate::from_ymd_opt(2025, 6, 1).unwrap(), Decimal::from(100), Decimal::from(15)).await;
+        insert_trade(
+            &pool,
+            1,
+            trade::TradeType::Buy,
+            1,
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
+        insert_trade(
+            &pool,
+            2,
+            trade::TradeType::Sell,
+            1,
+            NaiveDate::from_ymd_opt(2025, 6, 1).unwrap(),
+            Decimal::from(100),
+            Decimal::from(15),
+        )
+        .await;
         allocate(&pool, 1, 2, 1, Decimal::from(100)).await;
         // Loss of 700: buy 100 @ $17, sell 100 @ $10 (Jun 2025).
-        insert_trade(&pool, 3, trade::TradeType::Buy, 1,
-            NaiveDate::from_ymd_opt(2025, 1, 1).unwrap(), Decimal::from(100), Decimal::from(17)).await;
-        insert_trade(&pool, 4, trade::TradeType::Sell, 1,
-            NaiveDate::from_ymd_opt(2025, 6, 2).unwrap(), Decimal::from(100), Decimal::from(10)).await;
+        insert_trade(
+            &pool,
+            3,
+            trade::TradeType::Buy,
+            1,
+            NaiveDate::from_ymd_opt(2025, 1, 1).unwrap(),
+            Decimal::from(100),
+            Decimal::from(17),
+        )
+        .await;
+        insert_trade(
+            &pool,
+            4,
+            trade::TradeType::Sell,
+            1,
+            NaiveDate::from_ymd_opt(2025, 6, 2).unwrap(),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
         allocate(&pool, 2, 4, 3, Decimal::from(100)).await;
 
         let r = db_net_capital_gain(&pool).await.unwrap();
@@ -773,16 +905,48 @@ mod tests {
         // FY2026: non-discountable gain 500 → brought-forward 300 applied → NCG 200.
         insert_listing(&pool, 1, "VAS").await;
         // Loss of 300: buy 100 @ $10 (Jul 2023), sell 100 @ $7 (Jun 2024).
-        insert_trade(&pool, 1, trade::TradeType::Buy, 1,
-            NaiveDate::from_ymd_opt(2023, 7, 1).unwrap(), Decimal::from(100), Decimal::from(10)).await;
-        insert_trade(&pool, 2, trade::TradeType::Sell, 1,
-            NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(), Decimal::from(100), Decimal::from(7)).await;
+        insert_trade(
+            &pool,
+            1,
+            trade::TradeType::Buy,
+            1,
+            NaiveDate::from_ymd_opt(2023, 7, 1).unwrap(),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
+        insert_trade(
+            &pool,
+            2,
+            trade::TradeType::Sell,
+            1,
+            NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(),
+            Decimal::from(100),
+            Decimal::from(7),
+        )
+        .await;
         allocate(&pool, 1, 2, 1, Decimal::from(100)).await;
         // Gain of 500 two FYs later (≤12mo → non-discountable): buy Mar 2026, sell Jun 2026.
-        insert_trade(&pool, 3, trade::TradeType::Buy, 1,
-            NaiveDate::from_ymd_opt(2026, 3, 1).unwrap(), Decimal::from(100), Decimal::from(10)).await;
-        insert_trade(&pool, 4, trade::TradeType::Sell, 1,
-            NaiveDate::from_ymd_opt(2026, 6, 1).unwrap(), Decimal::from(100), Decimal::from(15)).await;
+        insert_trade(
+            &pool,
+            3,
+            trade::TradeType::Buy,
+            1,
+            NaiveDate::from_ymd_opt(2026, 3, 1).unwrap(),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
+        insert_trade(
+            &pool,
+            4,
+            trade::TradeType::Sell,
+            1,
+            NaiveDate::from_ymd_opt(2026, 6, 1).unwrap(),
+            Decimal::from(100),
+            Decimal::from(15),
+        )
+        .await;
         allocate(&pool, 2, 4, 3, Decimal::from(100)).await;
 
         let r = db_net_capital_gain(&pool).await.unwrap();
@@ -809,16 +973,48 @@ mod tests {
         // FY2024: capital loss 1000. FY2025: discount-eligible gain 500.
         // Brought-forward 1000 absorbs the full gain → NCG 0, 500 carried on.
         insert_listing(&pool, 1, "VAS").await;
-        insert_trade(&pool, 1, trade::TradeType::Buy, 1,
-            NaiveDate::from_ymd_opt(2023, 7, 1).unwrap(), Decimal::from(100), Decimal::from(20)).await;
-        insert_trade(&pool, 2, trade::TradeType::Sell, 1,
-            NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(), Decimal::from(100), Decimal::from(10)).await;
+        insert_trade(
+            &pool,
+            1,
+            trade::TradeType::Buy,
+            1,
+            NaiveDate::from_ymd_opt(2023, 7, 1).unwrap(),
+            Decimal::from(100),
+            Decimal::from(20),
+        )
+        .await;
+        insert_trade(
+            &pool,
+            2,
+            trade::TradeType::Sell,
+            1,
+            NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
         allocate(&pool, 1, 2, 1, Decimal::from(100)).await;
         // Discount-eligible gain 500: buy Jan 2024, sell Jun 2025 (>12mo).
-        insert_trade(&pool, 3, trade::TradeType::Buy, 1,
-            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(), Decimal::from(100), Decimal::from(10)).await;
-        insert_trade(&pool, 4, trade::TradeType::Sell, 1,
-            NaiveDate::from_ymd_opt(2025, 6, 1).unwrap(), Decimal::from(100), Decimal::from(15)).await;
+        insert_trade(
+            &pool,
+            3,
+            trade::TradeType::Buy,
+            1,
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
+        insert_trade(
+            &pool,
+            4,
+            trade::TradeType::Sell,
+            1,
+            NaiveDate::from_ymd_opt(2025, 6, 1).unwrap(),
+            Decimal::from(100),
+            Decimal::from(15),
+        )
+        .await;
         allocate(&pool, 2, 4, 3, Decimal::from(100)).await;
 
         let r = db_net_capital_gain(&pool).await.unwrap();
@@ -840,15 +1036,34 @@ mod tests {
         // FY2025 discount-eligible gain of 500 → 100 remains, halved → NCG 50.
         cgt_settings::db_upsert(
             &pool,
-            &cgt_settings::CgtSettings { id: 1, opening_capital_loss: Decimal::from(400) },
+            &cgt_settings::CgtSettings {
+                id: 1,
+                opening_capital_loss: Decimal::from(400),
+            },
         )
         .await
         .unwrap();
         insert_listing(&pool, 1, "VAS").await;
-        insert_trade(&pool, 1, trade::TradeType::Buy, 1,
-            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(), Decimal::from(100), Decimal::from(10)).await;
-        insert_trade(&pool, 2, trade::TradeType::Sell, 1,
-            NaiveDate::from_ymd_opt(2025, 6, 1).unwrap(), Decimal::from(100), Decimal::from(15)).await;
+        insert_trade(
+            &pool,
+            1,
+            trade::TradeType::Buy,
+            1,
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
+        insert_trade(
+            &pool,
+            2,
+            trade::TradeType::Sell,
+            1,
+            NaiveDate::from_ymd_opt(2025, 6, 1).unwrap(),
+            Decimal::from(100),
+            Decimal::from(15),
+        )
+        .await;
         allocate(&pool, 1, 2, 1, Decimal::from(100)).await;
 
         let r = db_net_capital_gain(&pool).await.unwrap();
@@ -869,22 +1084,57 @@ mod tests {
         // (≤12mo, non-discountable) → NCG 100.
         cgt_settings::db_upsert(
             &pool,
-            &cgt_settings::CgtSettings { id: 1, opening_capital_loss: Decimal::from(100) },
+            &cgt_settings::CgtSettings {
+                id: 1,
+                opening_capital_loss: Decimal::from(100),
+            },
         )
         .await
         .unwrap();
         insert_listing(&pool, 1, "VAS").await;
         // FY2024 loss of 300.
-        insert_trade(&pool, 1, trade::TradeType::Buy, 1,
-            NaiveDate::from_ymd_opt(2023, 7, 1).unwrap(), Decimal::from(100), Decimal::from(10)).await;
-        insert_trade(&pool, 2, trade::TradeType::Sell, 1,
-            NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(), Decimal::from(100), Decimal::from(7)).await;
+        insert_trade(
+            &pool,
+            1,
+            trade::TradeType::Buy,
+            1,
+            NaiveDate::from_ymd_opt(2023, 7, 1).unwrap(),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
+        insert_trade(
+            &pool,
+            2,
+            trade::TradeType::Sell,
+            1,
+            NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(),
+            Decimal::from(100),
+            Decimal::from(7),
+        )
+        .await;
         allocate(&pool, 1, 2, 1, Decimal::from(100)).await;
         // FY2025 non-discountable gain of 500.
-        insert_trade(&pool, 3, trade::TradeType::Buy, 1,
-            NaiveDate::from_ymd_opt(2025, 3, 1).unwrap(), Decimal::from(100), Decimal::from(10)).await;
-        insert_trade(&pool, 4, trade::TradeType::Sell, 1,
-            NaiveDate::from_ymd_opt(2025, 6, 1).unwrap(), Decimal::from(100), Decimal::from(15)).await;
+        insert_trade(
+            &pool,
+            3,
+            trade::TradeType::Buy,
+            1,
+            NaiveDate::from_ymd_opt(2025, 3, 1).unwrap(),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
+        insert_trade(
+            &pool,
+            4,
+            trade::TradeType::Sell,
+            1,
+            NaiveDate::from_ymd_opt(2025, 6, 1).unwrap(),
+            Decimal::from(100),
+            Decimal::from(15),
+        )
+        .await;
         allocate(&pool, 2, 4, 3, Decimal::from(100)).await;
 
         let r = db_net_capital_gain(&pool).await.unwrap();
@@ -942,10 +1192,26 @@ mod tests {
         // FY2024: realised discount-eligible gain 500 (sale May 2024) + AMMA discount
         // gain net 100 (gross 200) → discount-eligible 700; NCG = 700/2 = 350.
         insert_listing(&pool, 1, "VAF").await;
-        insert_trade(&pool, 1, trade::TradeType::Buy, 1,
-            NaiveDate::from_ymd_opt(2023, 1, 1).unwrap(), Decimal::from(100), Decimal::from(10)).await;
-        insert_trade(&pool, 2, trade::TradeType::Sell, 1,
-            NaiveDate::from_ymd_opt(2024, 5, 1).unwrap(), Decimal::from(100), Decimal::from(15)).await;
+        insert_trade(
+            &pool,
+            1,
+            trade::TradeType::Buy,
+            1,
+            NaiveDate::from_ymd_opt(2023, 1, 1).unwrap(),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
+        insert_trade(
+            &pool,
+            2,
+            trade::TradeType::Sell,
+            1,
+            NaiveDate::from_ymd_opt(2024, 5, 1).unwrap(),
+            Decimal::from(100),
+            Decimal::from(15),
+        )
+        .await;
         allocate(&pool, 1, 2, 1, Decimal::from(100)).await;
         let mut a = make_amma(1, 1, NaiveDate::from_ymd_opt(2024, 6, 30).unwrap());
         a.cgt_discount_gains = Decimal::from(100);
@@ -1012,8 +1278,16 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "VAF").await;
         // Buy 100 @ $1 → cost base $100; held ~6 months at the 30 Jun 2024 year end.
-        insert_trade(&pool, 1, trade::TradeType::Buy, 1,
-            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(), Decimal::from(100), Decimal::from(1)).await;
+        insert_trade(
+            &pool,
+            1,
+            trade::TradeType::Buy,
+            1,
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            Decimal::from(100),
+            Decimal::from(1),
+        )
+        .await;
         // AMMA reduces cost base by $1.50/unit × 100 = $150 → $50 excess over the $100 base.
         let mut a = make_amma(1, 1, NaiveDate::from_ymd_opt(2024, 6, 30).unwrap());
         a.cost_base_adjustment = "1.50".parse().unwrap();
@@ -1035,8 +1309,16 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "VAF").await;
         // Bought Jan 2023 → held > 12 months at the 30 Jun 2024 year end.
-        insert_trade(&pool, 1, trade::TradeType::Buy, 1,
-            NaiveDate::from_ymd_opt(2023, 1, 1).unwrap(), Decimal::from(100), Decimal::from(1)).await;
+        insert_trade(
+            &pool,
+            1,
+            trade::TradeType::Buy,
+            1,
+            NaiveDate::from_ymd_opt(2023, 1, 1).unwrap(),
+            Decimal::from(100),
+            Decimal::from(1),
+        )
+        .await;
         let mut a = make_amma(1, 1, NaiveDate::from_ymd_opt(2024, 6, 30).unwrap());
         a.cost_base_adjustment = "1.50".parse().unwrap();
         amma::db_upsert(&pool, &a).await.unwrap();
@@ -1057,8 +1339,16 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "VAF").await;
         // Buy 100 @ $1 → cost base $100, bought Jan 2024.
-        insert_trade(&pool, 1, trade::TradeType::Buy, 1,
-            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(), Decimal::from(100), Decimal::from(1)).await;
+        insert_trade(
+            &pool,
+            1,
+            trade::TradeType::Buy,
+            1,
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            Decimal::from(100),
+            Decimal::from(1),
+        )
+        .await;
         // FY2024: reduce $0.60/unit × 100 = $60 → cost base $40 remaining, no excess.
         let mut a1 = make_amma(1, 1, NaiveDate::from_ymd_opt(2024, 6, 30).unwrap());
         a1.cost_base_adjustment = "0.60".parse().unwrap();
@@ -1132,12 +1422,35 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "SPL").await;
         // Buy 100 @ $1 → cost base $100 (Jan 2024); 2-for-1 split in March.
-        insert_trade(&pool, 1, trade::TradeType::Buy, 1,
-            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(), Decimal::from(100), Decimal::from(1)).await;
-        apply_split(&pool, 1, 1, NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(), "2", "1").await;
+        insert_trade(
+            &pool,
+            1,
+            trade::TradeType::Buy,
+            1,
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            Decimal::from(100),
+            Decimal::from(1),
+        )
+        .await;
+        apply_split(
+            &pool,
+            1,
+            1,
+            NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(),
+            "2",
+            "1",
+        )
+        .await;
         // 75c per post-split unit × 200 units = $150 → $50 excess over the
         // unchanged $100 cost base.
-        apply_roc(&pool, 2, 1, NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(), "0.75").await;
+        apply_roc(
+            &pool,
+            2,
+            1,
+            NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(),
+            "0.75",
+        )
+        .await;
 
         let r = db_net_capital_gain(&pool).await.unwrap();
         assert_eq!(r.len(), 1);
@@ -1154,10 +1467,25 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "RAP").await;
         // Buy 100 @ $1 → cost base $100; held ~5 months at the payment date.
-        insert_trade(&pool, 1, trade::TradeType::Buy, 1,
-            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(), Decimal::from(100), Decimal::from(1)).await;
+        insert_trade(
+            &pool,
+            1,
+            trade::TradeType::Buy,
+            1,
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            Decimal::from(100),
+            Decimal::from(1),
+        )
+        .await;
         // $1.50/unit × 100 = $150 payment → $50 excess over the $100 cost base.
-        apply_roc(&pool, 1, 1, NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(), "1.50").await;
+        apply_roc(
+            &pool,
+            1,
+            1,
+            NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(),
+            "1.50",
+        )
+        .await;
 
         let r = db_net_capital_gain(&pool).await.unwrap();
         assert_eq!(r.len(), 1);
@@ -1175,9 +1503,24 @@ mod tests {
     async fn db_g1_payment_within_cost_base_produces_no_gain() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "RAP").await;
-        insert_trade(&pool, 1, trade::TradeType::Buy, 1,
-            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(), Decimal::from(1500), Decimal::from(5)).await;
-        apply_roc(&pool, 1, 1, NaiveDate::from_ymd_opt(2024, 11, 30).unwrap(), "0.50").await;
+        insert_trade(
+            &pool,
+            1,
+            trade::TradeType::Buy,
+            1,
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            Decimal::from(1500),
+            Decimal::from(5),
+        )
+        .await;
+        apply_roc(
+            &pool,
+            1,
+            1,
+            NaiveDate::from_ymd_opt(2024, 11, 30).unwrap(),
+            "0.50",
+        )
+        .await;
 
         let r = db_net_capital_gain(&pool).await.unwrap();
         assert!(
@@ -1193,9 +1536,24 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "RAP").await;
         // Bought Jan 2023 → held > 12 months at the Jun 2024 payment date.
-        insert_trade(&pool, 1, trade::TradeType::Buy, 1,
-            NaiveDate::from_ymd_opt(2023, 1, 1).unwrap(), Decimal::from(100), Decimal::from(1)).await;
-        apply_roc(&pool, 1, 1, NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(), "1.50").await;
+        insert_trade(
+            &pool,
+            1,
+            trade::TradeType::Buy,
+            1,
+            NaiveDate::from_ymd_opt(2023, 1, 1).unwrap(),
+            Decimal::from(100),
+            Decimal::from(1),
+        )
+        .await;
+        apply_roc(
+            &pool,
+            1,
+            1,
+            NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(),
+            "1.50",
+        )
+        .await;
 
         let r = db_net_capital_gain(&pool).await.unwrap();
         assert_eq!(r.len(), 1);
@@ -1212,12 +1570,34 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "RAP").await;
         // Buy 100 @ $1 → cost base $100, bought Jan 2024.
-        insert_trade(&pool, 1, trade::TradeType::Buy, 1,
-            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(), Decimal::from(100), Decimal::from(1)).await;
+        insert_trade(
+            &pool,
+            1,
+            trade::TradeType::Buy,
+            1,
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            Decimal::from(100),
+            Decimal::from(1),
+        )
+        .await;
         // FY2024: 60c/unit × 100 = $60 → $40 cost base remains, no excess.
-        apply_roc(&pool, 1, 1, NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(), "0.60").await;
+        apply_roc(
+            &pool,
+            1,
+            1,
+            NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(),
+            "0.60",
+        )
+        .await;
         // FY2025: 70c/unit × 100 = $70 > $40 remaining → $30 excess (G1) in FY2025.
-        apply_roc(&pool, 2, 1, NaiveDate::from_ymd_opt(2025, 6, 1).unwrap(), "0.70").await;
+        apply_roc(
+            &pool,
+            2,
+            1,
+            NaiveDate::from_ymd_opt(2025, 6, 1).unwrap(),
+            "0.70",
+        )
+        .await;
 
         let r = db_net_capital_gain(&pool).await.unwrap();
         // Only FY2025 carries a gain (FY2024's payment stayed within cost base).
@@ -1237,12 +1617,35 @@ mod tests {
         insert_listing(&pool, 1, "RAP").await;
         // Buy 100 @ $1 (Jan 2024); sell 40 @ $1 (Mar 2024, no gain); then a
         // $1.50/unit payment lands on the 60 still held.
-        insert_trade(&pool, 1, trade::TradeType::Buy, 1,
-            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(), Decimal::from(100), Decimal::from(1)).await;
-        insert_trade(&pool, 2, trade::TradeType::Sell, 1,
-            NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(), Decimal::from(40), Decimal::from(1)).await;
+        insert_trade(
+            &pool,
+            1,
+            trade::TradeType::Buy,
+            1,
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            Decimal::from(100),
+            Decimal::from(1),
+        )
+        .await;
+        insert_trade(
+            &pool,
+            2,
+            trade::TradeType::Sell,
+            1,
+            NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(),
+            Decimal::from(40),
+            Decimal::from(1),
+        )
+        .await;
         allocate(&pool, 1, 2, 1, Decimal::from(40)).await;
-        apply_roc(&pool, 1, 1, NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(), "1.50").await;
+        apply_roc(
+            &pool,
+            1,
+            1,
+            NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(),
+            "1.50",
+        )
+        .await;
 
         let r = db_net_capital_gain(&pool).await.unwrap();
         assert_eq!(r.len(), 1);
@@ -1255,10 +1658,26 @@ mod tests {
     async fn api_net_capital_gain_returns_json() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "VAS").await;
-        insert_trade(&pool, 1, trade::TradeType::Buy, 1,
-            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(), Decimal::from(100), Decimal::from(10)).await;
-        insert_trade(&pool, 2, trade::TradeType::Sell, 1,
-            NaiveDate::from_ymd_opt(2025, 6, 1).unwrap(), Decimal::from(100), Decimal::from(15)).await;
+        insert_trade(
+            &pool,
+            1,
+            trade::TradeType::Buy,
+            1,
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
+        insert_trade(
+            &pool,
+            2,
+            trade::TradeType::Sell,
+            1,
+            NaiveDate::from_ymd_opt(2025, 6, 1).unwrap(),
+            Decimal::from(100),
+            Decimal::from(15),
+        )
+        .await;
         allocate(&pool, 1, 2, 1, Decimal::from(100)).await;
 
         let resp = router()
@@ -1284,10 +1703,26 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "VAS").await;
         // Held > 12 months: $500 gross gain → discounted to a $250 net capital gain.
-        insert_trade(&pool, 1, trade::TradeType::Buy, 1,
-            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(), Decimal::from(100), Decimal::from(10)).await;
-        insert_trade(&pool, 2, trade::TradeType::Sell, 1,
-            NaiveDate::from_ymd_opt(2025, 6, 1).unwrap(), Decimal::from(100), Decimal::from(15)).await;
+        insert_trade(
+            &pool,
+            1,
+            trade::TradeType::Buy,
+            1,
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
+        insert_trade(
+            &pool,
+            2,
+            trade::TradeType::Sell,
+            1,
+            NaiveDate::from_ymd_opt(2025, 6, 1).unwrap(),
+            Decimal::from(100),
+            Decimal::from(15),
+        )
+        .await;
         allocate(&pool, 1, 2, 1, Decimal::from(100)).await;
 
         let resp = router()
@@ -1303,11 +1738,15 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(
-            resp.headers().get(axum::http::header::CONTENT_TYPE).unwrap(),
+            resp.headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .unwrap(),
             "text/csv; charset=utf-8"
         );
         assert_eq!(
-            resp.headers().get(axum::http::header::CONTENT_DISPOSITION).unwrap(),
+            resp.headers()
+                .get(axum::http::header::CONTENT_DISPOSITION)
+                .unwrap(),
             "attachment; filename=\"net-capital-gain.csv\""
         );
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
@@ -1380,7 +1819,9 @@ mod tests {
         )
         .await
         .unwrap();
-        let ex = crate::entities::scrip_exchange::db_exchange(&pool, 10).await.unwrap();
+        let ex = crate::entities::scrip_exchange::db_exchange(&pool, 10)
+            .await
+            .unwrap();
 
         // The exchange alone: no tax year reports any gain or loss.
         let years = db_net_capital_gain(&pool).await.unwrap();
@@ -1446,7 +1887,9 @@ mod tests {
         )
         .await
         .unwrap();
-        let dm = crate::entities::demerger::db_demerge(&pool, 10).await.unwrap();
+        let dm = crate::entities::demerger::db_demerge(&pool, 10)
+            .await
+            .unwrap();
 
         // The demerge alone: no tax year reports any gain or loss.
         let years = db_net_capital_gain(&pool).await.unwrap();
@@ -1466,7 +1909,14 @@ mod tests {
             Decimal::from(2),
         )
         .await;
-        allocate(&pool, 1, 50, dm.head_replacements[0].id, Decimal::from(1000)).await;
+        allocate(
+            &pool,
+            1,
+            50,
+            dm.head_replacements[0].id,
+            Decimal::from(1000),
+        )
+        .await;
         insert_trade(
             &pool,
             51,
@@ -1477,7 +1927,14 @@ mod tests {
             Decimal::from(3),
         )
         .await;
-        allocate(&pool, 2, 51, dm.demerged_replacements[0].id, Decimal::from(200)).await;
+        allocate(
+            &pool,
+            2,
+            51,
+            dm.demerged_replacements[0].id,
+            Decimal::from(200),
+        )
+        .await;
 
         let years = db_net_capital_gain(&pool).await.unwrap();
         assert_eq!(years.len(), 1);

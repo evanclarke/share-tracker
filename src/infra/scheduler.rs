@@ -20,7 +20,9 @@ use chrono::{DateTime, Local};
 use croner::Cron;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
-use std::{collections::HashMap, future::Future, pin::Pin, str::FromStr, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap, future::Future, pin::Pin, str::FromStr, sync::Arc, time::Duration,
+};
 
 /// A unit of scheduled work. Each call runs the job once, returning `Ok(())` on
 /// success or a human-readable error. Jobs do their own detailed INFO logging.
@@ -134,7 +136,9 @@ pub fn registry(
             let pool = backup_pool.clone();
             let db_path = db_path.clone();
             Box::pin(async move {
-                crate::infra::db::backup(&pool, &db_path).await.map_err(|e| e.to_string())
+                crate::infra::db::backup(&pool, &db_path)
+                    .await
+                    .map_err(|e| e.to_string())
             })
         }),
     );
@@ -275,8 +279,10 @@ fn parse(schedule: &str) -> Result<Vec<(Cron, String)>, ScheduleError> {
 
         let expr = fields[..5].join(" ");
         let name = fields[5].to_string();
-        let cron = Cron::from_str(&expr)
-            .map_err(|e| ScheduleError::Parse { line, msg: format!("invalid cron {expr:?}: {e}") })?;
+        let cron = Cron::from_str(&expr).map_err(|e| ScheduleError::Parse {
+            line,
+            msg: format!("invalid cron {expr:?}: {e}"),
+        })?;
         entries.push((cron, name));
     }
 
@@ -293,7 +299,10 @@ pub fn spawn(registry: JobRegistry, pool: SqlitePool, schedule: &str) -> Result<
     // than spawning a partial set of tasks.
     for (idx, (_, name)) in entries.iter().enumerate() {
         if !registry.contains_key(name) {
-            return Err(ScheduleError::UnknownJob { line: idx + 1, name: name.clone() });
+            return Err(ScheduleError::UnknownJob {
+                line: idx + 1,
+                name: name.clone(),
+            });
         }
     }
 
@@ -403,7 +412,9 @@ async fn trigger(
 /// supplied to handlers via an `Extension` layer (added in `main`), so this
 /// router shares the common `SqlitePool` state and merges with the others.
 pub fn router() -> Router<SqlitePool> {
-    Router::new().route("/jobs", get(list)).route("/jobs/{name}", post(trigger))
+    Router::new()
+        .route("/jobs", get(list))
+        .route("/jobs/{name}", post(trigger))
 }
 
 #[cfg(test)]
@@ -427,7 +438,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db").to_string_lossy().to_string();
         let pool = db::init(&db_path).await.unwrap();
-        (registry(pool.clone(), db_path.clone(), stub_fetcher()), pool, dir, db_path)
+        (
+            registry(pool.clone(), db_path.clone(), stub_fetcher()),
+            pool,
+            dir,
+            db_path,
+        )
     }
 
     #[test]
@@ -476,7 +492,11 @@ mod tests {
             let (next, delay) = next_run(&cron, now).unwrap();
             assert!(next > now, "next {next} must be strictly after now {now}");
             let slept = chrono::Duration::from_std(delay).unwrap();
-            assert_eq!(now + slept, next, "delay must land exactly on next, not before");
+            assert_eq!(
+                now + slept,
+                next,
+                "delay must land exactly on next, not before"
+            );
         }
     }
 
@@ -492,8 +512,10 @@ mod tests {
         // REQUIREMENTS specifies weekly backups: the committed schedule's backup
         // entry must parse and fire exactly 7 days apart.
         let entries = parse(include_str!("../../schedule.cron")).unwrap();
-        let (cron, _) =
-            entries.iter().find(|(_, name)| name == "backup").expect("backup must be scheduled");
+        let (cron, _) = entries
+            .iter()
+            .find(|(_, name)| name == "backup")
+            .expect("backup must be scheduled");
         let from = Local.with_ymd_and_hms(2026, 6, 1, 12, 0, 0).unwrap();
         let first = cron.find_next_occurrence(&from, false).unwrap();
         let second = cron.find_next_occurrence(&first, false).unwrap();
@@ -547,7 +569,10 @@ mod tests {
                 let name = e.file_name().to_string_lossy().into_owned();
                 name.starts_with("t-") && name.ends_with(".db")
             });
-        assert!(made_backup, "expected a timestamped backup file beside t.db");
+        assert!(
+            made_backup,
+            "expected a timestamped backup file beside t.db"
+        );
     }
 
     #[tracing_test::traced_test]
@@ -663,17 +688,31 @@ mod tests {
         // A failed run stores success = 0 and the error text; a later success for
         // the same job overwrites it (one row per job).
         let (_reg, pool, _dir, _path) = test_registry().await;
-        db_record_run(&pool, "backup", "2026-06-01T00:00:00Z", "2026-06-01T00:00:01Z", false, Some("boom"))
-            .await
-            .unwrap();
+        db_record_run(
+            &pool,
+            "backup",
+            "2026-06-01T00:00:00Z",
+            "2026-06-01T00:00:01Z",
+            false,
+            Some("boom"),
+        )
+        .await
+        .unwrap();
         let runs = db_last_runs(&pool).await.unwrap();
         let run = runs.get("backup").unwrap();
         assert!(!run.success);
         assert_eq!(run.error.as_deref(), Some("boom"));
 
-        db_record_run(&pool, "backup", "2026-06-02T00:00:00Z", "2026-06-02T00:00:01Z", true, None)
-            .await
-            .unwrap();
+        db_record_run(
+            &pool,
+            "backup",
+            "2026-06-02T00:00:00Z",
+            "2026-06-02T00:00:01Z",
+            true,
+            None,
+        )
+        .await
+        .unwrap();
         let runs = db_last_runs(&pool).await.unwrap();
         let run = runs.get("backup").unwrap();
         assert!(run.success);

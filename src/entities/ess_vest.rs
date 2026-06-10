@@ -16,8 +16,8 @@
 //! creating a second Buy. The created Buy is immutable (`PUT /trades` → 422) and
 //! never deleted individually; `DELETE /ess_statements/:id` removes it.
 
-use crate::infra::http::ApiError;
 use crate::entities::trade::{self, Trade};
+use crate::infra::http::ApiError;
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -215,7 +215,10 @@ mod tests {
         assert_eq!(trade.quantity, Decimal::from(100));
         assert_eq!(trade.average_price, Decimal::from(6));
         assert_eq!(trade.date, NaiveDate::from_ymd_opt(2024, 9, 1).unwrap());
-        assert_eq!(trade.settlement_date, NaiveDate::from_ymd_opt(2024, 9, 1).unwrap());
+        assert_eq!(
+            trade.settlement_date,
+            NaiveDate::from_ymd_opt(2024, 9, 1).unwrap()
+        );
         assert_eq!(trade.brokerage, Decimal::ZERO);
         assert_eq!(trade.deemed_acquisition_date, None);
         assert_eq!(trade.ess_statement_id, Some(1));
@@ -247,7 +250,10 @@ mod tests {
     #[tokio::test]
     async fn missing_statement_is_not_found() {
         let pool = test_pool().await;
-        assert!(matches!(db_vest(&pool, 99).await, Err(VestError::StatementNotFound)));
+        assert!(matches!(
+            db_vest(&pool, 99).await,
+            Err(VestError::StatementNotFound)
+        ));
     }
 
     #[tokio::test]
@@ -256,7 +262,10 @@ mod tests {
         insert_listing(&pool, 1, "AUD").await;
         insert_statement(&pool, 1, "100", "6", "AUD").await;
         db_vest(&pool, 1).await.unwrap();
-        assert!(matches!(db_vest(&pool, 1).await, Err(VestError::AlreadyVested)));
+        assert!(matches!(
+            db_vest(&pool, 1).await,
+            Err(VestError::AlreadyVested)
+        ));
         let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM trades WHERE ess_statement_id = 1")
             .fetch_one(&pool)
             .await
@@ -269,7 +278,10 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "AUD").await;
         insert_statement(&pool, 1, "0", "6", "AUD").await;
-        assert!(matches!(db_vest(&pool, 1).await, Err(VestError::NothingToVest)));
+        assert!(matches!(
+            db_vest(&pool, 1).await,
+            Err(VestError::NothingToVest)
+        ));
     }
 
     /// The vest Buy is immutable individually and only removed by deleting the
@@ -350,7 +362,10 @@ mod tests {
             ess_statement::DeleteOutcome::VestDrawnOn
         );
         // Removing the sale frees the statement to delete.
-        assert_eq!(sell::db_delete_sell(&pool, 50).await.unwrap(), sell::DeleteOutcome::Deleted);
+        assert_eq!(
+            sell::db_delete_sell(&pool, 50).await.unwrap(),
+            sell::DeleteOutcome::Deleted
+        );
         assert_eq!(
             ess_statement::db_delete(&pool, 1).await.unwrap(),
             ess_statement::DeleteOutcome::Deleted

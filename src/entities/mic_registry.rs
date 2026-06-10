@@ -127,7 +127,10 @@ pub fn parse_registry(content: &str) -> Result<Vec<MicEntry>, ImportError> {
         .flexible(true)
         .from_reader(content.as_bytes());
 
-    let headers = reader.headers().map_err(|e| ImportError::Parse(e.to_string()))?.clone();
+    let headers = reader
+        .headers()
+        .map_err(|e| ImportError::Parse(e.to_string()))?
+        .clone();
     let col = |name: &str| -> Result<usize, ImportError> {
         headers
             .iter()
@@ -193,7 +196,9 @@ pub async fn import_from_content(
         db_upsert(&mut *tx, entry).await?;
     }
     tx.commit().await?;
-    Ok(ImportSummary { imported: entries.len() })
+    Ok(ImportSummary {
+        imported: entries.len(),
+    })
 }
 
 /// Fetch the published registry from ISO and import it.
@@ -208,7 +213,9 @@ async fn fetch_registry(url: &str) -> Result<String, ImportError> {
         .map_err(|e| ImportError::Fetch(e.to_string()))?
         .error_for_status()
         .map_err(|e| ImportError::Fetch(e.to_string()))?;
-    resp.text().await.map_err(|e| ImportError::Fetch(e.to_string()))
+    resp.text()
+        .await
+        .map_err(|e| ImportError::Fetch(e.to_string()))
 }
 
 async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<MicEntry>>, ApiError> {
@@ -249,10 +256,9 @@ impl From<ImportError> for ApiError {
                 ApiError::unprocessable(format!("the MIC registry feed is malformed: {msg}"))
             }
             // The upstream fetch error is logged when the response is built.
-            ImportError::Fetch(msg) => ApiError::bad_gateway(
-                "could not fetch the MIC registry feed from its source",
-                msg,
-            ),
+            ImportError::Fetch(msg) => {
+                ApiError::bad_gateway("could not fetch the MIC registry feed from its source", msg)
+            }
             ImportError::Db(err) => err.into(),
         }
     }
@@ -261,8 +267,8 @@ impl From<ImportError> for ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::http::StatusCode;
     use crate::infra::db;
+    use axum::http::StatusCode;
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
     use tower::ServiceExt;
@@ -349,7 +355,10 @@ mod tests {
     #[test]
     fn parse_registry_errors_on_missing_column() {
         let csv = "\"MIC\",\"STATUS\"\n\"XNYS\",\"ACTIVE\"\n";
-        assert!(matches!(parse_registry(csv).unwrap_err(), ImportError::Parse(_)));
+        assert!(matches!(
+            parse_registry(csv).unwrap_err(),
+            ImportError::Parse(_)
+        ));
     }
 
     #[test]
@@ -357,7 +366,10 @@ mod tests {
         let csv = "\"MIC\",\"OPERATING MIC\",\"MARKET NAME-INSTITUTION DESCRIPTION\",\
             \"ISO COUNTRY CODE (ISO 3166)\",\"CITY\",\"STATUS\",\"EXPIRY DATE\"\n\
             \"XNYS\",\"XNYS\",\"NEW YORK STOCK EXCHANGE\",\"US\",\"NEW YORK\",\"EXPIRED\",\"not-a-date\"\n";
-        assert!(matches!(parse_registry(csv).unwrap_err(), ImportError::Parse(_)));
+        assert!(matches!(
+            parse_registry(csv).unwrap_err(),
+            ImportError::Parse(_)
+        ));
     }
 
     // Import
@@ -399,7 +411,12 @@ mod tests {
         db_upsert(&pool, &sample_entry()).await.unwrap();
         let resp = router()
             .with_state(pool)
-            .oneshot(Request::builder().uri("/mic_registry").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/mic_registry")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -414,7 +431,12 @@ mod tests {
         db_upsert(&pool, &sample_entry()).await.unwrap();
         let resp = router()
             .with_state(pool)
-            .oneshot(Request::builder().uri("/mic_registry/XTES").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/mic_registry/XTES")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -428,7 +450,12 @@ mod tests {
         let pool = test_pool().await;
         let resp = router()
             .with_state(pool)
-            .oneshot(Request::builder().uri("/mic_registry/XXXX").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/mic_registry/XXXX")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);

@@ -34,11 +34,13 @@
 //! closes the whole holding), worthless *financial instruments* other than
 //! shares, and the 18-month later-recovery timing rule.
 
-use crate::infra::http::ApiError;
-use crate::entities::corporate_action::{self, ActionKind, sold_in_acquired_units, split_adjusted_quantity};
+use crate::entities::corporate_action::{
+    self, ActionKind, sold_in_acquired_units, split_adjusted_quantity,
+};
 use crate::entities::sell::{self, AllocationInput, SellBody};
 use crate::entities::trade::{self, Trade};
 use crate::infra::decimal::parse_dec;
+use crate::infra::http::ApiError;
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -204,11 +206,10 @@ pub async fn db_recognise(pool: &SqlitePool, action_id: i64) -> Result<Recognise
     // Like the scrip/demerger closing Sells it is exempt from the per-account
     // allocation check (it closes the whole holding); the loss rows identify
     // this Sell's account, with totals unchanged for the one taxpayer.
-    let listing_currency: String =
-        sqlx::query_scalar("SELECT currency FROM listings WHERE id = ?")
-            .bind(action.listing_id)
-            .fetch_one(&mut *tx)
-            .await?;
+    let listing_currency: String = sqlx::query_scalar("SELECT currency FROM listings WHERE id = ?")
+        .bind(action.listing_id)
+        .fetch_one(&mut *tx)
+        .await?;
     let sell_id: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(id), 0) + 1 FROM trades")
         .fetch_one(&mut *tx)
         .await?;
@@ -294,8 +295,8 @@ impl From<RecogniseError> for ApiError {
 mod tests {
     use super::*;
     use crate::entities::corporate_action::{CorporateAction, WorthlessEvent};
-    use crate::entities::trade::TradeType;
     use crate::entities::listing;
+    use crate::entities::trade::TradeType;
     use crate::infra::db;
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
@@ -376,14 +377,22 @@ mod tests {
         .unwrap();
     }
 
-    async fn insert_worthless(pool: &SqlitePool, id: i64, listing_id: i64, date: NaiveDate, event: WorthlessEvent) {
+    async fn insert_worthless(
+        pool: &SqlitePool,
+        id: i64,
+        listing_id: i64,
+        date: NaiveDate,
+        event: WorthlessEvent,
+    ) {
         corporate_action::db_upsert(
             pool,
             &CorporateAction {
                 id,
                 listing_id,
                 date,
-                kind: ActionKind::WorthlessShares { worthless_event: event },
+                kind: ActionKind::WorthlessShares {
+                    worthless_event: event,
+                },
             },
         )
         .await
@@ -424,7 +433,9 @@ mod tests {
         assert_eq!(n, 2);
 
         // The realised-gains report recognises the loss = total reduced cost base.
-        let gains = crate::reports::realised_gains::db_realised_gains(&pool).await.unwrap();
+        let gains = crate::reports::realised_gains::db_realised_gains(&pool)
+            .await
+            .unwrap();
         assert_eq!(gains.len(), 1);
         let g = &gains[0];
         assert_eq!(g.sale_trade_id, r.sell.id);
@@ -463,7 +474,10 @@ mod tests {
                 brokerage_currency: "AUD".to_string(),
                 fx_rate: Decimal::ONE,
                 contract_note_ref: None,
-                allocations: vec![AllocationInput { purchase_trade_id: 1, quantity_allocated: dec("400") }],
+                allocations: vec![AllocationInput {
+                    purchase_trade_id: 1,
+                    quantity_allocated: dec("400"),
+                }],
             },
         )
         .await
@@ -475,7 +489,9 @@ mod tests {
 
         // The closing Sell's loss is the remaining $900; the earlier Sell's
         // $200 gain (400 × ($2.00 − $1.50)) is a separate row.
-        let gains = crate::reports::realised_gains::db_realised_gains(&pool).await.unwrap();
+        let gains = crate::reports::realised_gains::db_realised_gains(&pool)
+            .await
+            .unwrap();
         let closing = gains.iter().find(|g| g.sale_trade_id == r.sell.id).unwrap();
         assert_eq!(closing.cost_base, dec("900"));
         assert_eq!(closing.capital_loss, dec("900"));
@@ -491,7 +507,9 @@ mod tests {
         insert_worthless(&pool, 10, 1, d(2025, 3, 31), WorthlessEvent::G3Declaration).await;
         db_recognise(&pool, 10).await.unwrap();
 
-        let years = crate::reports::net_capital_gain::db_net_capital_gain(&pool).await.unwrap();
+        let years = crate::reports::net_capital_gain::db_net_capital_gain(&pool)
+            .await
+            .unwrap();
         // FY2024/25 (year ending 30 June 2025) carries the $2,000 loss forward
         // (no gains to offset).
         let y = years.iter().find(|y| y.tax_year == 2025).unwrap();
@@ -506,7 +524,10 @@ mod tests {
         insert_listing(&pool, 1, "DEAD").await;
 
         // Missing action.
-        assert!(matches!(db_recognise(&pool, 99).await, Err(RecogniseError::ActionNotFound)));
+        assert!(matches!(
+            db_recognise(&pool, 99).await,
+            Err(RecogniseError::ActionNotFound)
+        ));
 
         // Not a WorthlessShares.
         corporate_action::db_upsert(
@@ -523,11 +544,17 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(matches!(db_recognise(&pool, 1).await, Err(RecogniseError::NotWorthlessShares)));
+        assert!(matches!(
+            db_recognise(&pool, 1).await,
+            Err(RecogniseError::NotWorthlessShares)
+        ));
 
         // Nothing held at the event date.
         insert_worthless(&pool, 10, 1, d(2025, 3, 31), WorthlessEvent::G3Declaration).await;
-        assert!(matches!(db_recognise(&pool, 10).await, Err(RecogniseError::NothingHeld)));
+        assert!(matches!(
+            db_recognise(&pool, 10).await,
+            Err(RecogniseError::NothingHeld)
+        ));
 
         // A trade dated on/after the event date contradicts the failure.
         insert_buy(&pool, 2, 1, d(2025, 3, 31), "100", "1.50").await;
@@ -553,7 +580,10 @@ mod tests {
         insert_worthless(&pool, 10, 1, d(2025, 3, 31), WorthlessEvent::G3Declaration).await;
         db_recognise(&pool, 10).await.unwrap();
 
-        assert!(matches!(db_recognise(&pool, 10).await, Err(RecogniseError::AlreadyRecognised)));
+        assert!(matches!(
+            db_recognise(&pool, 10).await,
+            Err(RecogniseError::AlreadyRecognised)
+        ));
     }
 
     /// The closing Sell is immutable individually: `PUT /sells` rejects it and
@@ -584,7 +614,10 @@ mod tests {
                 brokerage_currency: "AUD".to_string(),
                 fx_rate: Decimal::ONE,
                 contract_note_ref: None,
-                allocations: vec![AllocationInput { purchase_trade_id: 1, quantity_allocated: dec("1000") }],
+                allocations: vec![AllocationInput {
+                    purchase_trade_id: 1,
+                    quantity_allocated: dec("1000"),
+                }],
             },
         )
         .await;
@@ -606,7 +639,10 @@ mod tests {
         insert_worthless(&pool, 10, 1, d(2025, 3, 31), WorthlessEvent::G3Declaration).await;
         let r = db_recognise(&pool, 10).await.unwrap();
 
-        assert_eq!(sell::db_delete_sell(&pool, r.sell.id).await.unwrap(), sell::DeleteOutcome::Deleted);
+        assert_eq!(
+            sell::db_delete_sell(&pool, r.sell.id).await.unwrap(),
+            sell::DeleteOutcome::Deleted
+        );
         // The original parcel is open again (no allocations remain).
         let allocs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM parcel_allocations")
             .fetch_one(&pool)
@@ -648,7 +684,10 @@ mod tests {
         insert_listing(&pool, 1, "DEAD").await;
         holding_account::db_upsert(
             &pool,
-            &HoldingAccount { id: 2, name: "ICE Employee Plan".to_string() },
+            &HoldingAccount {
+                id: 2,
+                name: "ICE Employee Plan".to_string(),
+            },
         )
         .await
         .unwrap();
@@ -662,7 +701,9 @@ mod tests {
 
         let r = db_recognise(&pool, 10).await.unwrap();
         assert_eq!(r.sell.quantity, dec("1500"));
-        let gains = crate::reports::realised_gains::db_realised_gains(&pool).await.unwrap();
+        let gains = crate::reports::realised_gains::db_realised_gains(&pool)
+            .await
+            .unwrap();
         assert_eq!(gains[0].capital_loss, dec("2500"));
     }
 

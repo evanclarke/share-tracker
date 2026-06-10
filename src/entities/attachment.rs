@@ -37,7 +37,6 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::{QueryBuilder, Sqlite, SqlitePool};
 
-
 /// Per-file upload ceiling (25 MB). Enforced explicitly so an oversized upload is
 /// rejected with `413`; the route's body limit is set a little higher so this
 /// check (on the file's own bytes, not the whole multipart envelope) is the
@@ -116,8 +115,7 @@ pub struct ListQuery {
     pub amma_statement_id: Option<i64>,
 }
 
-const METADATA_COLS: &str =
-    "id, trade_id, income_id, amma_statement_id, filename, content_type, byte_size, checksum, uploaded_at";
+const METADATA_COLS: &str = "id, trade_id, income_id, amma_statement_id, filename, content_type, byte_size, checksum, uploaded_at";
 
 pub fn router() -> Router<SqlitePool> {
     Router::new()
@@ -163,10 +161,12 @@ pub async fn db_list(pool: &SqlitePool, q: &ListQuery) -> Result<Vec<Attachment>
 }
 
 pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<Attachment>, sqlx::Error> {
-    sqlx::query_as(&format!("SELECT {METADATA_COLS} FROM attachments WHERE id = ?"))
-        .bind(id)
-        .fetch_optional(pool)
-        .await
+    sqlx::query_as(&format!(
+        "SELECT {METADATA_COLS} FROM attachments WHERE id = ?"
+    ))
+    .bind(id)
+    .fetch_optional(pool)
+    .await
 }
 
 /// Load the content for download: its content type, filename, and raw bytes.
@@ -212,10 +212,7 @@ async fn list(
     State(pool): State<SqlitePool>,
     Query(q): Query<ListQuery>,
 ) -> Result<Json<Vec<Attachment>>, ApiError> {
-    db_list(&pool, &q)
-        .await
-        .map(Json)
-        .map_err(ApiError::from)
+    db_list(&pool, &q).await.map(Json).map_err(ApiError::from)
 }
 
 async fn get_one(
@@ -257,8 +254,10 @@ async fn upload(
                     .bytes()
                     .await
                     .map_err(|_| bad_request("the uploaded file could not be read"))?;
-                let content_type =
-                    declared.as_deref().and_then(ContentType::from_mime).ok_or_else(|| {
+                let content_type = declared
+                    .as_deref()
+                    .and_then(ContentType::from_mime)
+                    .ok_or_else(|| {
                         ApiError::unprocessable(
                             "the file's content type is not a supported attachment type",
                         )
@@ -273,7 +272,8 @@ async fn upload(
     }
 
     // Exactly one owner must be set.
-    let owners = trade_id.is_some() as u8 + income_id.is_some() as u8 + amma_statement_id.is_some() as u8;
+    let owners =
+        trade_id.is_some() as u8 + income_id.is_some() as u8 + amma_statement_id.is_some() as u8;
     if owners != 1 {
         return Err(ApiError::unprocessable(
             "attach to exactly one of a trade, income, or AMMA statement",
@@ -350,7 +350,13 @@ async fn delete(
 ) -> Result<StatusCode, ApiError> {
     db_delete(&pool, id)
         .await
-        .map(|found| if found { StatusCode::NO_CONTENT } else { StatusCode::NOT_FOUND })
+        .map(|found| {
+            if found {
+                StatusCode::NO_CONTENT
+            } else {
+                StatusCode::NOT_FOUND
+            }
+        })
         .map_err(ApiError::from)
 }
 
@@ -433,7 +439,10 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/attachments")
-                    .header("content-type", format!("multipart/form-data; boundary={BOUNDARY}"))
+                    .header(
+                        "content-type",
+                        format!("multipart/form-data; boundary={BOUNDARY}"),
+                    )
                     .body(Body::from(body))
                     .unwrap(),
             )
@@ -507,7 +516,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(dl.status(), StatusCode::OK);
-        assert_eq!(dl.headers().get(header::CONTENT_TYPE).unwrap(), "application/pdf");
+        assert_eq!(
+            dl.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/pdf"
+        );
         assert!(
             dl.headers()
                 .get(header::CONTENT_DISPOSITION)
@@ -627,7 +639,10 @@ mod tests {
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         // The JSON carries metadata fields but never a "content" key.
         let text = String::from_utf8(bytes.to_vec()).unwrap();
-        assert!(!text.contains("\"content\""), "list must not include the blob");
+        assert!(
+            !text.contains("\"content\""),
+            "list must not include the blob"
+        );
         let items: Vec<Attachment> = serde_json::from_str(&text).unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].trade_id, Some(trade_id));
@@ -707,10 +722,19 @@ mod tests {
             .await
             .unwrap();
 
-        let remaining = db_list(&pool, &ListQuery { trade_id: Some(trade_id), ..Default::default() })
-            .await
-            .unwrap();
-        assert!(remaining.is_empty(), "ON DELETE CASCADE should remove the attachment");
+        let remaining = db_list(
+            &pool,
+            &ListQuery {
+                trade_id: Some(trade_id),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            remaining.is_empty(),
+            "ON DELETE CASCADE should remove the attachment"
+        );
     }
 
     #[tokio::test]
@@ -727,7 +751,10 @@ mod tests {
         .bind(income_id)
         .execute(&pool)
         .await;
-        assert!(err.is_err(), "exactly-one-owner CHECK should reject two owners");
+        assert!(
+            err.is_err(),
+            "exactly-one-owner CHECK should reject two owners"
+        );
 
         // Zero owners set → CHECK violation.
         let err = sqlx::query(
@@ -736,7 +763,10 @@ mod tests {
         )
         .execute(&pool)
         .await;
-        assert!(err.is_err(), "exactly-one-owner CHECK should reject zero owners");
+        assert!(
+            err.is_err(),
+            "exactly-one-owner CHECK should reject zero owners"
+        );
     }
 
     #[tokio::test]
@@ -750,6 +780,9 @@ mod tests {
         .bind(trade_id)
         .execute(&pool)
         .await;
-        assert!(err.is_err(), "content_type CHECK should reject a type outside the allowlist");
+        assert!(
+            err.is_err(),
+            "content_type CHECK should reject a type outside the allowlist"
+        );
     }
 }

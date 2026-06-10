@@ -5,7 +5,9 @@ fn build_filter() -> EnvFilter {
 }
 
 pub fn init() {
-    tracing_subscriber::fmt().with_env_filter(build_filter()).init();
+    tracing_subscriber::fmt()
+        .with_env_filter(build_filter())
+        .init();
 }
 
 #[cfg(test)]

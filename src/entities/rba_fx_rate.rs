@@ -146,19 +146,25 @@ pub fn parse_rates(content: &str) -> Result<Vec<(String, String, Decimal)>, Impo
 
         for (col, currency) in currencies.iter().enumerate() {
             let Some(currency) = currency else { continue };
-            let Some(value) = fields.get(col + 1) else { continue };
+            let Some(value) = fields.get(col + 1) else {
+                continue;
+            };
             if value.is_empty() {
                 continue;
             }
             let rate: Decimal = value.parse().map_err(|e| {
-                ImportError::Parse(format!("invalid {currency} rate {value:?} for {month}: {e}"))
+                ImportError::Parse(format!(
+                    "invalid {currency} rate {value:?} for {month}: {e}"
+                ))
             })?;
             out.push((currency.clone(), month.clone(), rate));
         }
     }
 
     if currencies.is_none() {
-        return Err(ImportError::Parse("no `Title` header row found in feed".into()));
+        return Err(ImportError::Parse(
+            "no `Title` header row found in feed".into(),
+        ));
     }
     Ok(out)
 }
@@ -170,7 +176,10 @@ pub async fn import_from_content(
     content: &str,
 ) -> Result<ImportSummary, ImportError> {
     let rates = parse_rates(content)?;
-    let mut summary = ImportSummary { inserted: 0, skipped: 0 };
+    let mut summary = ImportSummary {
+        inserted: 0,
+        skipped: 0,
+    };
     for (currency, month, rate) in rates {
         if db_import_rate(pool, &currency, &month, rate).await? {
             summary.inserted += 1;
@@ -193,7 +202,9 @@ async fn fetch_rates(url: &str) -> Result<String, ImportError> {
         .map_err(|e| ImportError::Fetch(e.to_string()))?
         .error_for_status()
         .map_err(|e| ImportError::Fetch(e.to_string()))?;
-    resp.text().await.map_err(|e| ImportError::Fetch(e.to_string()))
+    resp.text()
+        .await
+        .map_err(|e| ImportError::Fetch(e.to_string()))
 }
 
 async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<RbaFxRate>>, ApiError> {
@@ -235,10 +246,9 @@ impl From<ImportError> for ApiError {
                 ApiError::unprocessable(format!("the RBA FX rate feed is malformed: {msg}"))
             }
             // The upstream fetch error is logged when the response is built.
-            ImportError::Fetch(msg) => ApiError::bad_gateway(
-                "could not fetch the RBA FX rate feed from its source",
-                msg,
-            ),
+            ImportError::Fetch(msg) => {
+                ApiError::bad_gateway("could not fetch the RBA FX rate feed from its source", msg)
+            }
             ImportError::Db(err) => err.into(),
         }
     }
@@ -247,8 +257,8 @@ impl From<ImportError> for ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::http::StatusCode;
     use crate::infra::db;
+    use axum::http::StatusCode;
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
     use tower::ServiceExt;
@@ -274,7 +284,11 @@ mod tests {
     #[tokio::test]
     async fn db_insert_and_retrieve() {
         let pool = test_pool().await;
-        assert!(db_import_rate(&pool, "USD", "2024-01", "1.5".parse().unwrap()).await.unwrap());
+        assert!(
+            db_import_rate(&pool, "USD", "2024-01", "1.5".parse().unwrap())
+                .await
+                .unwrap()
+        );
         let rows = db_list(&pool).await.unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].currency, "USD");
@@ -288,16 +302,30 @@ mod tests {
     #[tokio::test]
     async fn db_currency_month_uniqueness_enforced() {
         let pool = test_pool().await;
-        assert!(db_import_rate(&pool, "USD", "2024-01", "1.5".parse().unwrap()).await.unwrap());
+        assert!(
+            db_import_rate(&pool, "USD", "2024-01", "1.5".parse().unwrap())
+                .await
+                .unwrap()
+        );
         // Same (currency, month): no new row, existing left unchanged.
-        assert!(!db_import_rate(&pool, "USD", "2024-01", "1.6".parse().unwrap()).await.unwrap());
+        assert!(
+            !db_import_rate(&pool, "USD", "2024-01", "1.6".parse().unwrap())
+                .await
+                .unwrap()
+        );
 
         let rows = db_list(&pool).await.unwrap();
         assert_eq!(rows.len(), 1, "(currency, month) must be unique");
-        assert_eq!(rows[0].rate, "1.5".parse::<Decimal>().unwrap(), "existing row unchanged");
+        assert_eq!(
+            rows[0].rate,
+            "1.5".parse::<Decimal>().unwrap(),
+            "existing row unchanged"
+        );
 
         // A different month is a distinct row.
-        db_import_rate(&pool, "USD", "2024-02", "1.7".parse().unwrap()).await.unwrap();
+        db_import_rate(&pool, "USD", "2024-02", "1.7".parse().unwrap())
+            .await
+            .unwrap();
         assert_eq!(db_list(&pool).await.unwrap().len(), 2);
     }
 
@@ -320,11 +348,31 @@ mod tests {
         assert_eq!(
             parsed,
             vec![
-                ("USD".to_string(), "2010-01".to_string(), "0.8909".parse().unwrap()),
-                ("GBP".to_string(), "2010-01".to_string(), "0.5523".parse().unwrap()),
-                ("USD".to_string(), "2010-02".to_string(), "0.8899".parse().unwrap()),
-                ("GBP".to_string(), "2010-02".to_string(), "0.5826".parse().unwrap()),
-                ("PHP".to_string(), "2010-02".to_string(), "40.10".parse().unwrap()),
+                (
+                    "USD".to_string(),
+                    "2010-01".to_string(),
+                    "0.8909".parse().unwrap()
+                ),
+                (
+                    "GBP".to_string(),
+                    "2010-01".to_string(),
+                    "0.5523".parse().unwrap()
+                ),
+                (
+                    "USD".to_string(),
+                    "2010-02".to_string(),
+                    "0.8899".parse().unwrap()
+                ),
+                (
+                    "GBP".to_string(),
+                    "2010-02".to_string(),
+                    "0.5826".parse().unwrap()
+                ),
+                (
+                    "PHP".to_string(),
+                    "2010-02".to_string(),
+                    "40.10".parse().unwrap()
+                ),
             ]
         );
     }
@@ -332,13 +380,19 @@ mod tests {
     #[tokio::test]
     async fn parse_rates_rejects_malformed_rate() {
         let csv = "Title,A$1=USD\n29-Jan-2010,not-a-number\n";
-        assert!(matches!(parse_rates(csv).unwrap_err(), ImportError::Parse(_)));
+        assert!(matches!(
+            parse_rates(csv).unwrap_err(),
+            ImportError::Parse(_)
+        ));
     }
 
     #[tokio::test]
     async fn parse_rates_errors_without_title_header() {
         let csv = "F11 EXCHANGE RATES\nDescription,foo\n";
-        assert!(matches!(parse_rates(csv).unwrap_err(), ImportError::Parse(_)));
+        assert!(matches!(
+            parse_rates(csv).unwrap_err(),
+            ImportError::Parse(_)
+        ));
     }
 
     // Import idempotency
@@ -348,18 +402,37 @@ mod tests {
         let pool = test_pool().await;
 
         let first = import_from_content(&pool, SAMPLE_CSV).await.unwrap();
-        assert_eq!(first, ImportSummary { inserted: 5, skipped: 0 });
+        assert_eq!(
+            first,
+            ImportSummary {
+                inserted: 5,
+                skipped: 0
+            }
+        );
 
         // Re-running stores no duplicates and leaves existing rows unchanged, even
         // if the feed carries a different rate for an existing (currency, month).
         let altered = SAMPLE_CSV.replace("0.8909", "9.9999");
         let second = import_from_content(&pool, &altered).await.unwrap();
-        assert_eq!(second, ImportSummary { inserted: 0, skipped: 5 });
+        assert_eq!(
+            second,
+            ImportSummary {
+                inserted: 0,
+                skipped: 5
+            }
+        );
 
         let rows = db_list(&pool).await.unwrap();
         assert_eq!(rows.len(), 5, "no duplicates created");
-        let usd_jan = rows.iter().find(|r| r.currency == "USD" && r.month == "2010-01").unwrap();
-        assert_eq!(usd_jan.rate, "0.8909".parse::<Decimal>().unwrap(), "existing row unchanged");
+        let usd_jan = rows
+            .iter()
+            .find(|r| r.currency == "USD" && r.month == "2010-01")
+            .unwrap();
+        assert_eq!(
+            usd_jan.rate,
+            "0.8909".parse::<Decimal>().unwrap(),
+            "existing row unchanged"
+        );
     }
 
     #[tokio::test]
@@ -369,7 +442,13 @@ mod tests {
         // Feed now includes a new month alongside the existing rows.
         let extended = format!("{SAMPLE_CSV}31-Mar-2010,0.9159,71.7,0.6072,42.00\n");
         let summary = import_from_content(&pool, &extended).await.unwrap();
-        assert_eq!(summary, ImportSummary { inserted: 3, skipped: 5 });
+        assert_eq!(
+            summary,
+            ImportSummary {
+                inserted: 3,
+                skipped: 5
+            }
+        );
         assert_eq!(db_list(&pool).await.unwrap().len(), 8);
     }
 
@@ -378,10 +457,17 @@ mod tests {
     #[tokio::test]
     async fn api_list_returns_rates() {
         let pool = test_pool().await;
-        db_import_rate(&pool, "USD", "2024-01", "1.5".parse().unwrap()).await.unwrap();
+        db_import_rate(&pool, "USD", "2024-01", "1.5".parse().unwrap())
+            .await
+            .unwrap();
         let resp = router()
             .with_state(pool)
-            .oneshot(Request::builder().uri("/rba_fx_rates").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/rba_fx_rates")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -394,12 +480,17 @@ mod tests {
     #[tokio::test]
     async fn api_get_existing_returns_rate() {
         let pool = test_pool().await;
-        db_import_rate(&pool, "USD", "2024-01", "1.5".parse().unwrap()).await.unwrap();
+        db_import_rate(&pool, "USD", "2024-01", "1.5".parse().unwrap())
+            .await
+            .unwrap();
         let id = db_list(&pool).await.unwrap()[0].id;
         let resp = router()
             .with_state(pool)
             .oneshot(
-                Request::builder().uri(format!("/rba_fx_rates/{id}")).body(Body::empty()).unwrap(),
+                Request::builder()
+                    .uri(format!("/rba_fx_rates/{id}"))
+                    .body(Body::empty())
+                    .unwrap(),
             )
             .await
             .unwrap();
@@ -415,7 +506,12 @@ mod tests {
         let pool = test_pool().await;
         let resp = router()
             .with_state(pool)
-            .oneshot(Request::builder().uri("/rba_fx_rates/999").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/rba_fx_rates/999")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
@@ -438,7 +534,13 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let summary: ImportSummary = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(summary, ImportSummary { inserted: 5, skipped: 0 });
+        assert_eq!(
+            summary,
+            ImportSummary {
+                inserted: 5,
+                skipped: 0
+            }
+        );
         assert_eq!(db_list(&pool).await.unwrap().len(), 5);
     }
 

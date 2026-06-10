@@ -29,12 +29,12 @@
 //! A distribution may be reinvested at most once — re-posting is rejected
 //! rather than creating a second trade.
 
-use crate::infra::http::ApiError;
 use crate::entities::{
     drp_enrolment::ResidualHandling,
     trade::{self, Trade},
 };
 use crate::infra::decimal::parse_dec;
+use crate::infra::http::ApiError;
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -89,12 +89,14 @@ impl From<ReinvestError> for ApiError {
     fn from(e: ReinvestError) -> Self {
         match e {
             ReinvestError::IncomeNotFound => ApiError::not_found("no distribution with that id"),
-            ReinvestError::NotEnrolled { account, ticker, date } => {
-                ApiError::unprocessable(format!(
-                    "account '{account}' is not enrolled in a DRP for {ticker} at {date} \
+            ReinvestError::NotEnrolled {
+                account,
+                ticker,
+                date,
+            } => ApiError::unprocessable(format!(
+                "account '{account}' is not enrolled in a DRP for {ticker} at {date} \
                      — enrol it on the DRP enrolments screen first"
-                ))
-            }
+            )),
             ReinvestError::AlreadyReinvested => ApiError::unprocessable(
                 "this distribution already has a reinvestment trade — delete it first to redo it",
             ),
@@ -115,11 +117,11 @@ pub fn router() -> Router<SqlitePool> {
 /// tax and TFN amounts withheld at source reduce the cash received.
 fn reinvestable_cash(row: &sqlx::sqlite::SqliteRow) -> Result<Decimal, sqlx::Error> {
     let dec = |col: &str| -> Result<Decimal, sqlx::Error> { parse_dec(col, row.try_get(col)?) };
-    Ok(dec("franked_amount")?
-        + dec("unfranked_amount")?
-        + dec("foreign_source_income")?
-        - dec("foreign_tax_paid")?
-        - dec("tfn_withholding_tax")?)
+    Ok(
+        dec("franked_amount")? + dec("unfranked_amount")? + dec("foreign_source_income")?
+            - dec("foreign_tax_paid")?
+            - dec("tfn_withholding_tax")?,
+    )
 }
 
 /// Create the DRP trade for a distribution and link it, atomically.
@@ -359,7 +361,13 @@ mod tests {
 
     /// Insert a distribution paying `cash` as unfranked cash (the simplest cash
     /// component), with `franking` notional franking credits that must be ignored.
-    async fn insert_distribution(pool: &SqlitePool, id: i64, listing_id: i64, cash: Decimal, franking: Decimal) {
+    async fn insert_distribution(
+        pool: &SqlitePool,
+        id: i64,
+        listing_id: i64,
+        cash: Decimal,
+        franking: Decimal,
+    ) {
         insert_distribution_dated(pool, id, listing_id, "2024-03-31", None, cash, franking).await;
     }
 
@@ -414,7 +422,10 @@ mod tests {
     async fn insert_account(pool: &SqlitePool, id: i64, name: &str) {
         crate::entities::holding_account::db_upsert(
             pool,
-            &crate::entities::holding_account::HoldingAccount { id, name: name.to_string() },
+            &crate::entities::holding_account::HoldingAccount {
+                id,
+                name: name.to_string(),
+            },
         )
         .await
         .unwrap();
@@ -514,7 +525,10 @@ mod tests {
         insert_distribution(&pool, 1, 1, Decimal::from(100), Decimal::ZERO).await;
 
         let trade = db_reinvest(&pool, 1, &body("9")).await.unwrap();
-        let stored = crate::entities::trade::db_get(&pool, trade.id).await.unwrap().unwrap();
+        let stored = crate::entities::trade::db_get(&pool, trade.id)
+            .await
+            .unwrap()
+            .unwrap();
         assert!(!stored.brokerage_includes_gst);
         assert_eq!(stored.statement_total, None);
     }
@@ -580,9 +594,19 @@ mod tests {
         let err = db_reinvest(&pool, 1, &body("9")).await.unwrap_err();
         assert!(matches!(err, ReinvestError::NotEnrolled { .. }));
         // No trade created, distribution unlinked.
-        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM trades").fetch_one(&pool).await.unwrap();
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM trades")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
         assert_eq!(n, 0);
-        assert!(income::db_get(&pool, 1).await.unwrap().unwrap().reinvestment_trade_id.is_none());
+        assert!(
+            income::db_get(&pool, 1)
+                .await
+                .unwrap()
+                .unwrap()
+                .reinvestment_trade_id
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -596,7 +620,10 @@ mod tests {
         let err = db_reinvest(&pool, 1, &body("9")).await.unwrap_err();
         assert!(matches!(err, ReinvestError::AlreadyReinvested));
         // Still exactly one DRP trade.
-        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM trades").fetch_one(&pool).await.unwrap();
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM trades")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
         assert_eq!(n, 1);
     }
 
@@ -622,7 +649,15 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "AUD").await;
         // Enrolled only from June 2024; the distribution went ex in March.
-        enrol_period(&pool, 1, 1, "2024-06-01", None, ResidualHandling::CarryForward).await;
+        enrol_period(
+            &pool,
+            1,
+            1,
+            "2024-06-01",
+            None,
+            ResidualHandling::CarryForward,
+        )
+        .await;
         insert_distribution(&pool, 1, 1, Decimal::from(100), Decimal::ZERO).await; // 2024-03-31
         let err = db_reinvest(&pool, 1, &body("9")).await.unwrap_err();
         assert!(matches!(err, ReinvestError::NotEnrolled { .. }));
@@ -633,8 +668,24 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "AUD").await;
         // Enrolled through 2023, re-enrolled from 2025 — 2024 is a gap.
-        enrol_period(&pool, 1, 1, "2023-01-01", Some("2024-01-01"), ResidualHandling::CarryForward).await;
-        enrol_period(&pool, 2, 1, "2025-01-01", None, ResidualHandling::CarryForward).await;
+        enrol_period(
+            &pool,
+            1,
+            1,
+            "2023-01-01",
+            Some("2024-01-01"),
+            ResidualHandling::CarryForward,
+        )
+        .await;
+        enrol_period(
+            &pool,
+            2,
+            1,
+            "2025-01-01",
+            None,
+            ResidualHandling::CarryForward,
+        )
+        .await;
         insert_distribution(&pool, 1, 1, Decimal::from(100), Decimal::ZERO).await; // 2024-03-31
         let err = db_reinvest(&pool, 1, &body("9")).await.unwrap_err();
         assert!(matches!(err, ReinvestError::NotEnrolled { .. }));
@@ -644,12 +695,28 @@ mod tests {
     async fn re_enrolment_after_unenrolment_uses_the_new_periods_handling() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "AUD").await;
-        enrol_period(&pool, 1, 1, "2023-01-01", Some("2024-01-01"), ResidualHandling::CarryForward).await;
+        enrol_period(
+            &pool,
+            1,
+            1,
+            "2023-01-01",
+            Some("2024-01-01"),
+            ResidualHandling::CarryForward,
+        )
+        .await;
         enrol_period(&pool, 2, 1, "2025-01-01", None, ResidualHandling::PayOut).await;
         // A distribution inside the re-enrolment period reinvests, and its
         // leftover follows the *new* period's PayOut, not the old CarryForward.
-        insert_distribution_dated(&pool, 1, 1, "2025-03-31", None, Decimal::from(100), Decimal::ZERO)
-            .await;
+        insert_distribution_dated(
+            &pool,
+            1,
+            1,
+            "2025-03-31",
+            None,
+            Decimal::from(100),
+            Decimal::ZERO,
+        )
+        .await;
         let trade = db_reinvest(&pool, 1, &body("9")).await.unwrap();
         assert_eq!(trade.quantity, Decimal::from(11));
         assert_eq!(trade.residual_paid_out, Decimal::ONE);
@@ -660,18 +727,42 @@ mod tests {
     async fn reinvestability_is_decided_by_ex_date_not_pay_date() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "AUD").await;
-        enrol_period(&pool, 1, 1, "2024-01-01", Some("2024-04-01"), ResidualHandling::CarryForward).await;
+        enrol_period(
+            &pool,
+            1,
+            1,
+            "2024-01-01",
+            Some("2024-04-01"),
+            ResidualHandling::CarryForward,
+        )
+        .await;
 
         // Ex inside the period, paid after the unenrolment took effect → the
         // participation was fixed at the ex date, so it still reinvests.
-        insert_distribution_dated(&pool, 1, 1, "2024-04-10", Some("2024-03-15"), Decimal::from(100), Decimal::ZERO)
-            .await;
+        insert_distribution_dated(
+            &pool,
+            1,
+            1,
+            "2024-04-10",
+            Some("2024-03-15"),
+            Decimal::from(100),
+            Decimal::ZERO,
+        )
+        .await;
         let trade = db_reinvest(&pool, 1, &body("9")).await.unwrap();
         assert_eq!(trade.quantity, Decimal::from(11));
 
         // Ex before the period, paid inside it → was not enrolled at ex → rejected.
-        insert_distribution_dated(&pool, 2, 1, "2024-02-01", Some("2023-12-15"), Decimal::from(100), Decimal::ZERO)
-            .await;
+        insert_distribution_dated(
+            &pool,
+            2,
+            1,
+            "2024-02-01",
+            Some("2023-12-15"),
+            Decimal::from(100),
+            Decimal::ZERO,
+        )
+        .await;
         let err = db_reinvest(&pool, 2, &body("9")).await.unwrap_err();
         assert!(matches!(err, ReinvestError::NotEnrolled { .. }));
     }
@@ -688,15 +779,39 @@ mod tests {
         assert_eq!(first.residual_carried_forward, Decimal::ONE);
 
         // Unenrol (close the period): the trailing $1 is paid out...
-        enrol_period(&pool, 1, 1, "2024-01-01", Some("2024-06-01"), ResidualHandling::CarryForward).await;
+        enrol_period(
+            &pool,
+            1,
+            1,
+            "2024-01-01",
+            Some("2024-06-01"),
+            ResidualHandling::CarryForward,
+        )
+        .await;
         let settled = trade::db_get(&pool, first.id).await.unwrap().unwrap();
         assert_eq!(settled.residual_carried_forward, Decimal::ZERO);
         assert_eq!(settled.residual_paid_out, Decimal::ONE);
 
         // ...so a reinvestment in the re-enrolment period brings nothing forward.
-        enrol_period(&pool, 2, 1, "2025-01-01", None, ResidualHandling::CarryForward).await;
-        insert_distribution_dated(&pool, 2, 1, "2025-03-31", None, Decimal::from(8), Decimal::ZERO)
-            .await;
+        enrol_period(
+            &pool,
+            2,
+            1,
+            "2025-01-01",
+            None,
+            ResidualHandling::CarryForward,
+        )
+        .await;
+        insert_distribution_dated(
+            &pool,
+            2,
+            1,
+            "2025-03-31",
+            None,
+            Decimal::from(8),
+            Decimal::ZERO,
+        )
+        .await;
         let next = db_reinvest(&pool, 2, &body("9")).await.unwrap();
         assert_eq!(next.residual_brought_forward, Decimal::ZERO);
         assert_eq!(next.quantity, Decimal::ZERO); // 8 < 9, no whole share

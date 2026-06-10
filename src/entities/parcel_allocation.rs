@@ -1,10 +1,10 @@
+use crate::infra::decimal::row_dec;
 use crate::infra::http::ApiError;
 use axum::{
     Json, Router,
     extract::{Path, State},
     routing::get,
 };
-use crate::infra::decimal::row_dec;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
@@ -27,7 +27,6 @@ impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for ParcelAllocation {
         })
     }
 }
-
 
 /// Parcel allocations are read-only over HTTP. They are created and replaced
 /// atomically together with their Sell trade via `PUT /sells/{id}` (see
@@ -101,7 +100,10 @@ async fn sum_allocated(
 }
 
 #[cfg(test)]
-pub async fn db_upsert(pool: &SqlitePool, allocation: &ParcelAllocation) -> Result<(), UpsertError> {
+pub async fn db_upsert(
+    pool: &SqlitePool,
+    allocation: &ParcelAllocation,
+) -> Result<(), UpsertError> {
     use crate::entities::corporate_action;
     use crate::entities::trade::TradeType;
     use chrono::NaiveDate;
@@ -172,12 +174,15 @@ pub async fn db_upsert(pool: &SqlitePool, allocation: &ParcelAllocation) -> Resu
         .bind(allocation.sale_trade_id)
         .fetch_one(pool)
         .await?;
-    let sale_qty: Decimal = sale_qty
-        .parse()
-        .map_err(|_| UpsertError::Db)?;
+    let sale_qty: Decimal = sale_qty.parse().map_err(|_| UpsertError::Db)?;
 
-    let already_sale_allocated =
-        sum_allocated(pool, "sale_trade_id", allocation.sale_trade_id, allocation.id).await?;
+    let already_sale_allocated = sum_allocated(
+        pool,
+        "sale_trade_id",
+        allocation.sale_trade_id,
+        allocation.id,
+    )
+    .await?;
     if already_sale_allocated + allocation.quantity_allocated > sale_qty {
         return Err(UpsertError::SaleQuantityExceeded);
     }
@@ -200,10 +205,7 @@ pub async fn db_upsert(pool: &SqlitePool, allocation: &ParcelAllocation) -> Resu
 }
 
 async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<ParcelAllocation>>, ApiError> {
-    db_list(&pool)
-        .await
-        .map(Json)
-        .map_err(ApiError::from)
+    db_list(&pool).await.map(Json).map_err(ApiError::from)
 }
 
 async fn get_one(
@@ -220,8 +222,11 @@ async fn get_one(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        entities::{listing, trade},
+        infra::db,
+    };
     use axum::http::StatusCode;
-    use crate::{infra::db, entities::{listing, trade}};
     use axum::{body::Body, http::Request};
     use chrono::NaiveDate;
     use http_body_util::BodyExt;
@@ -427,22 +432,28 @@ mod tests {
         insert_sell_trade(&pool, 3, Decimal::from(8)).await;
 
         // First allocation: 8 of 10 purchase units
-        db_upsert(&pool, &ParcelAllocation {
-            id: 1,
-            sale_trade_id: 2,
-            purchase_trade_id: 1,
-            quantity_allocated: Decimal::from(8),
-        })
+        db_upsert(
+            &pool,
+            &ParcelAllocation {
+                id: 1,
+                sale_trade_id: 2,
+                purchase_trade_id: 1,
+                quantity_allocated: Decimal::from(8),
+            },
+        )
         .await
         .unwrap();
 
         // Second allocation: 3 more from same purchase would exceed 10
-        let err = db_upsert(&pool, &ParcelAllocation {
-            id: 2,
-            sale_trade_id: 3,
-            purchase_trade_id: 1,
-            quantity_allocated: Decimal::from(3),
-        })
+        let err = db_upsert(
+            &pool,
+            &ParcelAllocation {
+                id: 2,
+                sale_trade_id: 3,
+                purchase_trade_id: 1,
+                quantity_allocated: Decimal::from(3),
+            },
+        )
         .await
         .unwrap_err();
         assert!(matches!(err, UpsertError::PurchaseQuantityExceeded));
@@ -456,21 +467,27 @@ mod tests {
         insert_buy_trade(&pool, 2, Decimal::from(10)).await;
         insert_sell_trade(&pool, 3, Decimal::from(5)).await;
 
-        db_upsert(&pool, &ParcelAllocation {
-            id: 1,
-            sale_trade_id: 3,
-            purchase_trade_id: 1,
-            quantity_allocated: Decimal::from(4),
-        })
+        db_upsert(
+            &pool,
+            &ParcelAllocation {
+                id: 1,
+                sale_trade_id: 3,
+                purchase_trade_id: 1,
+                quantity_allocated: Decimal::from(4),
+            },
+        )
         .await
         .unwrap();
 
-        let err = db_upsert(&pool, &ParcelAllocation {
-            id: 2,
-            sale_trade_id: 3,
-            purchase_trade_id: 2,
-            quantity_allocated: Decimal::from(3),
-        })
+        let err = db_upsert(
+            &pool,
+            &ParcelAllocation {
+                id: 2,
+                sale_trade_id: 3,
+                purchase_trade_id: 2,
+                quantity_allocated: Decimal::from(3),
+            },
+        )
         .await
         .unwrap_err();
         assert!(matches!(err, UpsertError::SaleQuantityExceeded));
@@ -483,12 +500,15 @@ mod tests {
         insert_buy_trade(&pool, 1, Decimal::from(10)).await;
         insert_buy_trade(&pool, 2, Decimal::from(10)).await;
 
-        let err = db_upsert(&pool, &ParcelAllocation {
-            id: 1,
-            sale_trade_id: 1, // Buy, not Sell
-            purchase_trade_id: 2,
-            quantity_allocated: Decimal::from(5),
-        })
+        let err = db_upsert(
+            &pool,
+            &ParcelAllocation {
+                id: 1,
+                sale_trade_id: 1, // Buy, not Sell
+                purchase_trade_id: 2,
+                quantity_allocated: Decimal::from(5),
+            },
+        )
         .await
         .unwrap_err();
         assert!(matches!(err, UpsertError::SaleTradeNotSell));
@@ -501,12 +521,15 @@ mod tests {
         insert_sell_trade(&pool, 1, Decimal::from(10)).await;
         insert_sell_trade(&pool, 2, Decimal::from(10)).await;
 
-        let err = db_upsert(&pool, &ParcelAllocation {
-            id: 1,
-            sale_trade_id: 1,
-            purchase_trade_id: 2, // Sell, not Buy/DRP
-            quantity_allocated: Decimal::from(5),
-        })
+        let err = db_upsert(
+            &pool,
+            &ParcelAllocation {
+                id: 1,
+                sale_trade_id: 1,
+                purchase_trade_id: 2, // Sell, not Buy/DRP
+                quantity_allocated: Decimal::from(5),
+            },
+        )
         .await
         .unwrap_err();
         assert!(matches!(err, UpsertError::PurchaseTradeNotBuyOrDrp));
@@ -519,12 +542,15 @@ mod tests {
         insert_drp_trade(&pool, 1, Decimal::from(5)).await;
         insert_sell_trade(&pool, 2, Decimal::from(5)).await;
 
-        db_upsert(&pool, &ParcelAllocation {
-            id: 1,
-            sale_trade_id: 2,
-            purchase_trade_id: 1,
-            quantity_allocated: Decimal::from(5),
-        })
+        db_upsert(
+            &pool,
+            &ParcelAllocation {
+                id: 1,
+                sale_trade_id: 2,
+                purchase_trade_id: 1,
+                quantity_allocated: Decimal::from(5),
+            },
+        )
         .await
         .unwrap();
     }
@@ -578,18 +604,26 @@ mod tests {
         insert_test_listing(&pool).await;
         insert_buy_trade(&pool, 1, Decimal::from(10)).await;
         insert_sell_trade(&pool, 2, Decimal::from(5)).await;
-        db_upsert(&pool, &ParcelAllocation {
-            id: 1,
-            sale_trade_id: 2,
-            purchase_trade_id: 1,
-            quantity_allocated: Decimal::from(5),
-        })
+        db_upsert(
+            &pool,
+            &ParcelAllocation {
+                id: 1,
+                sale_trade_id: 2,
+                purchase_trade_id: 1,
+                quantity_allocated: Decimal::from(5),
+            },
+        )
         .await
         .unwrap();
 
         let resp = router()
             .with_state(pool)
-            .oneshot(Request::builder().uri("/parcel_allocations").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/parcel_allocations")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -604,7 +638,12 @@ mod tests {
         let pool = test_pool().await;
         let resp = router()
             .with_state(pool)
-            .oneshot(Request::builder().uri("/parcel_allocations/999").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/parcel_allocations/999")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
@@ -616,18 +655,26 @@ mod tests {
         insert_test_listing(&pool).await;
         insert_buy_trade(&pool, 1, "10.5".parse().unwrap()).await;
         insert_sell_trade(&pool, 2, "10.5".parse().unwrap()).await;
-        db_upsert(&pool, &ParcelAllocation {
-            id: 1,
-            sale_trade_id: 2,
-            purchase_trade_id: 1,
-            quantity_allocated: "10.5".parse().unwrap(),
-        })
+        db_upsert(
+            &pool,
+            &ParcelAllocation {
+                id: 1,
+                sale_trade_id: 2,
+                purchase_trade_id: 1,
+                quantity_allocated: "10.5".parse().unwrap(),
+            },
+        )
         .await
         .unwrap();
 
         let resp = router()
             .with_state(pool)
-            .oneshot(Request::builder().uri("/parcel_allocations/1").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/parcel_allocations/1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
