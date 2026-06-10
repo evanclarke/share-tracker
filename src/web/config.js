@@ -302,6 +302,9 @@ export const ENTITIES = [
       fk('scrip_listing_id', 'Scrip: replacement listing', 'listings', { optional: true, default: '', hint: 'Must differ from the listing being taken over.' }),
       dec('scrip_new_units', 'Scrip: new units', { optional: true, default: '' }),
       dec('scrip_old_units', 'Scrip: per old units', { optional: true, default: '' }),
+      dec('scrip_cash_per_unit', 'Scrip: cash per old unit', { optional: true, default: '', hint: 'Blank for an all-scrip exchange. With cash (a partial rollover), also give the market value and currency.' }),
+      dec('scrip_market_value', 'Scrip: market value per new unit', { optional: true, default: '', hint: 'Value of one replacement share just after issue — apportions the cost base between cash and scrip.' }),
+      fk('scrip_cash_currency', 'Scrip: cash currency', 'currencies', { optional: true, encode: 'string', default: '', hint: 'Currency of the cash and market value.' }),
       fk('demerger_listing_id', 'Demerger: demerged listing', 'listings', { optional: true, default: '', hint: 'Must differ from the head listing.' }),
       dec('demerger_new_units', 'Demerger: new units', { optional: true, default: '' }),
       dec('demerger_held_units', 'Demerger: per units held', { optional: true, default: '' }),
@@ -319,7 +322,7 @@ export const ENTITIES = [
       BonusIssue: ['bonus_units', 'bonus_held_units'],
       RightsIssue: ['rights_units', 'rights_held_units', 'exercise_price', 'currency'],
       BuyBack: ['buyback_price', 'buyback_dividend', 'buyback_franking_credit', 'buyback_market_value', 'currency'],
-      ScripForScrip: ['scrip_listing_id', 'scrip_new_units', 'scrip_old_units'],
+      ScripForScrip: ['scrip_listing_id', 'scrip_new_units', 'scrip_old_units', 'scrip_cash_per_unit', 'scrip_market_value', 'scrip_cash_currency'],
       Demerger: ['demerger_listing_id', 'demerger_new_units', 'demerger_held_units', 'demerger_cost_base_pct'],
       WorthlessShares: ['worthless_event'],
     },
@@ -329,7 +332,7 @@ export const ENTITIES = [
       BonusIssue: 'Bonus issue (non-assessable): on the issue date every “held units” receive “bonus units” extra units (1-for-10 issue: bonus 1, held 10) — no CGT event, the cost base is apportioned over original + bonus shares and the acquisition date is preserved; bonus shares chosen in lieu of a dividend are a DRP trade, not entered here.',
       RightsIssue: 'Rights issue: units held before the record date earn “rights units” per “held units” at the exercise price (1-for-4 issue: rights 1, held 4) — recording the issue changes nothing; use the row’s Exercise action to create the new Buy parcel (acquired at the exercise date, cost base = exercise payment + any amount paid for the rights), or its Sell rights action to dispose of rights instead — sold, lapsed, or paid out as a retail premium (a CGT event on the rights themselves, anchored to the original parcels’ acquisition dates).',
       BuyBack: 'Off-market buy-back: record the per-unit buy-back price, the dividend component of that price and its franking credit (both 0 for a listed-company buy-back announced after 25 Oct 2022), and the market value had the buy-back not been proposed (blank if the price is at or above it); recording changes nothing — use the row’s Participate action to sell units into the buy-back, which creates the Sell at the capital proceeds (max(price, market value) − dividend) plus the dividend income row.',
-      ScripForScrip: 'Scrip-for-scrip takeover (all-scrip, with rollover): on the exchange date every “old units” of this listing become “new units” of the replacement listing (1-for-1 merger: new 1, old 1) — recording changes nothing; use the row’s Exchange action to substitute every open parcel: the capital gain is disregarded and each replacement parcel carries the consumed parcel’s remaining cost base and acquisition date (the combined period counts toward the 12-month discount).',
+      ScripForScrip: 'Scrip-for-scrip takeover (with rollover): on the exchange date every “old units” of this listing become “new units” of the replacement listing (1-for-1 merger: new 1, old 1), plus optionally cash per old unit (a partial rollover — also give the replacement share’s market value just after issue and the currency) — recording changes nothing; use the row’s Exchange action to substitute every open parcel: the scrip side’s gain is disregarded and each replacement parcel carries the consumed parcel’s remaining cost base (its market-value share when there is cash) and acquisition date (the combined period counts toward the 12-month discount), while the cash side is a capital gain assessed now in the realised-gains and net-capital-gain reports.',
       Demerger: 'Demerger (eligible, rollover chosen): on the demerger date every “held units” of this (head) listing receive “new units” of the demerged listing (BHP Steel’s 1-for-5: new 1, held 5), and the advised percentage of each parcel’s cost base moves to the new interests — recording changes nothing; use the row’s Demerge action to apportion every open parcel: any gain is disregarded, the head parcels keep the rest of the cost base and their acquisition dates, and the new parcels’ 12-month discount clock runs from the original acquisition.',
       WorthlessShares: 'Worthless / delisted shares (CGT events G3 and C2): a capital loss on a failed company without a sale — choose G3Declaration (a liquidator/administrator declared the shares worthless) or C2Cancellation (the company was deregistered). Recording changes nothing; use the row’s Recognise action to close every open parcel at nil proceeds: each parcel’s remaining reduced cost base becomes a capital loss (never income, never discounted) that flows through the realised-gains and net-capital-gain reports.',
     },
@@ -347,7 +350,7 @@ export const ENTITIES = [
         WorthlessShares: 'Event date',
       },
     },
-    columns: ['id', 'action_type', 'listing_id', 'date', 'amount_per_unit', 'currency', 'split_new_units', 'split_old_units', 'bonus_units', 'bonus_held_units', 'rights_units', 'rights_held_units', 'exercise_price', 'buyback_price', 'buyback_dividend', 'buyback_franking_credit', 'buyback_market_value', 'scrip_listing_id', 'scrip_new_units', 'scrip_old_units', 'demerger_listing_id', 'demerger_new_units', 'demerger_held_units', 'demerger_cost_base_pct', 'worthless_event'],
+    columns: ['id', 'action_type', 'listing_id', 'date', 'amount_per_unit', 'currency', 'split_new_units', 'split_old_units', 'bonus_units', 'bonus_held_units', 'rights_units', 'rights_held_units', 'exercise_price', 'buyback_price', 'buyback_dividend', 'buyback_franking_credit', 'buyback_market_value', 'scrip_listing_id', 'scrip_new_units', 'scrip_old_units', 'scrip_cash_per_unit', 'scrip_market_value', 'scrip_cash_currency', 'demerger_listing_id', 'demerger_new_units', 'demerger_held_units', 'demerger_cost_base_pct', 'worthless_event'],
     rowActions: function (row) {
       if (row.action_type === 'RightsIssue') {
         return [
@@ -483,13 +486,20 @@ export const ACTIONS = [
   // Scrip-for-scrip exchange (confirm-only): POST takes no parameters — the
   // action's terms and the holdings at its date determine everything. It
   // atomically closes every open parcel of the original listing (the
-  // rollover disregards the gain) and creates the replacement parcels
-  // carrying each consumed parcel's remaining cost base and acquisition date.
+  // rollover disregards the gain; with a cash component the cash side's
+  // apportioned gain is assessed now) and creates the replacement parcels
+  // carrying each consumed parcel's remaining rolled-over cost base and
+  // acquisition date.
   {
     slug: 'scrip-exchange', nav: 'corporate_actions', ownerApi: '/corporate_actions', cancel: '#/e/corporate_actions', submit: 'Exchange',
     post: function (id) { return '/corporate_actions/' + id + '/exchange'; },
     title: function (id, owner, listing) { return 'Exchange ' + listing(owner.listing_id) + ' scrip-for-scrip takeover #' + id; },
-    desc: function (a, listing) { return 'Substitutes every open parcel of ' + listing(a.listing_id) + ' held at ' + a.date + ' with ' + a.scrip_new_units + ' unit(s) of ' + listing(a.scrip_listing_id) + ' per ' + a.scrip_old_units + ' held. The rollover disregards the capital gain; each replacement parcel carries its consumed parcel’s remaining cost base and acquisition date (the combined holding period counts toward the 12-month discount). Undo by deleting the closing Sell from the Sells view.'; },
+    desc: function (a, listing) {
+      const cash = a.scrip_cash_per_unit
+        ? ' Plus ' + a.scrip_cash_per_unit + ' ' + a.scrip_cash_currency + ' cash per old unit (partial rollover): the cash side’s market-value share of each parcel’s cost base is assessed as a capital gain now, and only the scrip side’s share rolls over.'
+        : ' The rollover disregards the capital gain.';
+      return 'Substitutes every open parcel of ' + listing(a.listing_id) + ' held at ' + a.date + ' with ' + a.scrip_new_units + ' unit(s) of ' + listing(a.scrip_listing_id) + ' per ' + a.scrip_old_units + ' held.' + cash + ' Each replacement parcel carries its consumed parcel’s remaining (rolled-over) cost base and acquisition date (the combined holding period counts toward the 12-month discount). Undo by deleting the closing Sell from the Sells view.';
+    },
     fields: [],
     toast: function (r, listing, a) {
       const n = r && r.replacements ? r.replacements.length : 0;

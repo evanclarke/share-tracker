@@ -736,6 +736,10 @@ mod tests {
         assert!(js.contains("scrip_listing_id"));
         assert!(js.contains("scrip_new_units"));
         assert!(js.contains("scrip_old_units"));
+        // The optional cash component (partial rollover, Example 27).
+        assert!(js.contains("scrip_cash_per_unit"));
+        assert!(js.contains("scrip_market_value"));
+        assert!(js.contains("scrip_cash_currency"));
         // A ScripForScrip row's Exchange action drives the exchange endpoint.
         assert!(js.contains("#/scrip-exchange/"));
         assert!(js.contains("/exchange"));

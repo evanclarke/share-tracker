@@ -4,16 +4,6 @@ Items are only marked done when a passing test exists for them.
 
 Completed and decided (out-of-scope / not-reproducible) sections are archived in [DONE.md](DONE.md) to keep this list focused on active work. When a section here is fully done, move it to DONE.md rather than leaving it — see CLAUDE.md.
 
-## Takeovers with a cash component — partial scrip-for-scrip rollover (2026-06-10)
-
-(REQUIREMENTS 2026-06-10; `docs/ato/takeovers-and-scrip-for-scrip.md` Example 27 (Gunther). Supersedes the README "partial cash consideration not modelled" note — update it as part of this work.)
-
-- [ ] Extend `ScripForScrip` with an optional per-unit cash component; the exchange operation apportions each consumed parcel's remaining reduced cost base between cash and scrip by the consideration's market values, recognises the cash-side gain/loss (discount per the original holding period) in the realised + net-capital-gain reports, and creates replacement parcels for the scrip side exactly as today
-- [ ] All-scrip behaviour unchanged; pure-cash takeovers remain ordinary Sells
-- [ ] Tests: apportionment arithmetic; `ato_examples.rs` Example 27 acceptance test
-- [ ] Web UI: the action/operation config gains the cash field
-- [ ] Docs: `docs/SCHEMA.md` (new column + CHECKs), `docs/API.md`, README Features + Known limitations (no-rollover and multi-class cases stay out)
-
 ## CGT decision support — parcel-selection optimiser and pre-sale what-if (2026-06-10)
 
 (REQUIREMENTS 2026-06-10; `docs/ato/cgt-keeping-records-shares.md` — parcel choice is the taxpayer's. Read-only; nothing persisted.)

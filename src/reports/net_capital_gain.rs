@@ -1788,6 +1788,9 @@ mod tests {
                     scrip_listing_id: 2,
                     scrip_new_units: Decimal::from(2),
                     scrip_old_units: Decimal::ONE,
+                    scrip_cash_per_unit: None,
+                    scrip_market_value: None,
+                    scrip_cash_currency: None,
                 },
             },
         )

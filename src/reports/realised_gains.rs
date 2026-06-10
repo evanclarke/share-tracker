@@ -1,6 +1,6 @@
 use crate::domain::cost_base::{self, ParcelRow};
 use crate::entities::corporate_action::{RocEvent, SplitEvent};
-use crate::infra::decimal::row_dec;
+use crate::infra::decimal::{row_dec, row_opt_dec};
 use crate::infra::fx::FxRates;
 use crate::infra::http::ApiError;
 use axum::{Json, Router, extract::State, routing::get};
@@ -76,10 +76,29 @@ struct SellInfo {
     gst_on_brokerage: Decimal,
     currency: String,
     fx_rate: Decimal,
+    /// Set on a partial-rollover scrip-for-scrip closing Sell (its action has
+    /// a cash component): the `(numerator, denominator)` of the cash side's
+    /// market-value share of each allocated parcel's reduced cost base —
+    /// cash×old / (cash×old + mv×new), per
+    /// `docs/ato/takeovers-and-scrip-for-scrip.md` Example 27. The scrip
+    /// side's share rolled over into the replacement parcels at exchange
+    /// time, so only this share is realised against the cash proceeds. Kept
+    /// as a pair and multiplied before dividing so exact fractions (e.g.
+    /// Gunther's 1/3) don't round twice. `None` for ordinary Sells.
+    scrip_cash_apportionment: Option<(Decimal, Decimal)>,
 }
 
 impl sqlx::FromRow<'_, SqliteRow> for SellInfo {
     fn from_row(row: &SqliteRow) -> Result<Self, sqlx::Error> {
+        let scrip_cash_apportionment = match row_opt_dec(row, "scrip_cash_per_unit")? {
+            Some(cash) => {
+                let mv = row_dec(row, "scrip_market_value")?;
+                let new = row_dec(row, "scrip_new_units")?;
+                let old = row_dec(row, "scrip_old_units")?;
+                Some((cash * old, cash * old + mv * new))
+            }
+            None => None,
+        };
         Ok(SellInfo {
             id: row.try_get("id")?,
             listing_id: row.try_get("listing_id")?,
@@ -91,6 +110,7 @@ impl sqlx::FromRow<'_, SqliteRow> for SellInfo {
             gst_on_brokerage: row_dec(row, "gst_on_brokerage")?,
             currency: row.try_get("currency")?,
             fx_rate: row_dec(row, "fx_rate")?,
+            scrip_cash_apportionment,
         })
     }
 }
@@ -196,20 +216,27 @@ struct ReportData {
 async fn load_report_data(pool: &SqlitePool) -> Result<ReportData, sqlx::Error> {
     let mut tx = pool.begin().await?;
 
-    // A scrip-for-scrip exchange or demerger closing Sell (scrip_action_id /
-    // demerger_action_id set) is not a realised gain or loss: the rollover
-    // disregards the gain on the original shares
+    // An all-scrip scrip-for-scrip exchange or demerger closing Sell
+    // (scrip_action_id / demerger_action_id set) is not a realised gain or
+    // loss: the rollover disregards the gain on the original shares
     // (docs/ato/takeovers-and-scrip-for-scrip.md, docs/ato/demergers.md), and its
-    // zero proceeds must never surface as a capital loss. A holding-account
+    // zero proceeds must never surface as a capital loss. A *partial-rollover*
+    // scrip closing Sell (its action has a cash component) IS included: the
+    // rollover applies only to the scrip portion, so the cash proceeds are
+    // assessed now against the cash-apportioned cost-base share (Example 27)
+    // — the join carries the action's cash terms in. A holding-account
     // transfer-out Sell (transfer_id set) is not even a disposal — the same
     // beneficial owner holds the shares before and after, so it is no CGT
-    // event at all. Their allocations are skipped with them (the sale id is
-    // absent from `sells`).
+    // event at all. Excluded sells' allocations are skipped with them (the
+    // sale id is absent from `sells`).
     let sells: Vec<SellInfo> = sqlx::query_as(
-        "SELECT id, listing_id, holding_account_id, date, quantity, average_price, brokerage, \
-         gst_on_brokerage, currency, fx_rate \
-         FROM trades WHERE trade_type = 'Sell' \
-           AND scrip_action_id IS NULL AND demerger_action_id IS NULL AND transfer_id IS NULL",
+        "SELECT t.id, t.listing_id, t.holding_account_id, t.date, t.quantity, t.average_price, \
+         t.brokerage, t.gst_on_brokerage, t.currency, t.fx_rate, \
+         ca.scrip_cash_per_unit, ca.scrip_market_value, ca.scrip_new_units, ca.scrip_old_units \
+         FROM trades t LEFT JOIN corporate_actions ca ON ca.id = t.scrip_action_id \
+         WHERE t.trade_type = 'Sell' \
+           AND (t.scrip_action_id IS NULL OR ca.scrip_cash_per_unit IS NOT NULL) \
+           AND t.demerger_action_id IS NULL AND t.transfer_id IS NULL",
     )
     .fetch_all(&mut *tx)
     .await?;
@@ -354,6 +381,16 @@ fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sq
         )?
         .into_aud_with(&data.fx, &buy.currency, buy.acquired(), Some(buy.fx_rate))?
         .adjusted;
+
+        // A partial-rollover scrip closing Sell realises only the cash
+        // side's market-value share of the parcel's reduced cost base; the
+        // scrip side's share rolled over into the replacement parcels (the
+        // exchange carried exactly the complement, so the two sum to the
+        // full reduced cost base).
+        let alloc_cost = match sale.scrip_cash_apportionment {
+            Some((num, den)) => alloc_cost * num / den,
+            None => alloc_cost,
+        };
 
         let alloc_gain = alloc_proceeds - alloc_cost;
 
@@ -567,6 +604,7 @@ mod tests {
             gst_on_brokerage: Decimal::ZERO,
             currency: currency.to_string(),
             fx_rate: Decimal::ONE,
+            scrip_cash_apportionment: None,
         }
     }
 
@@ -1663,6 +1701,9 @@ mod tests {
                     scrip_listing_id: to,
                     scrip_new_units: Decimal::from(2),
                     scrip_old_units: Decimal::ONE,
+                    scrip_cash_per_unit: None,
+                    scrip_market_value: None,
+                    scrip_cash_currency: None,
                 },
             },
         )
@@ -1705,6 +1746,77 @@ mod tests {
             result.is_empty(),
             "the rollover disposal is not a realised gain/loss"
         );
+    }
+
+    /// A partial-rollover exchange (cash component) realises the cash side:
+    /// proceeds = cash × units, cost base = the market-value-apportioned
+    /// share of the parcel's reduced cost base, discount-classified by the
+    /// original holding period (docs/ato/takeovers-and-scrip-for-scrip.md
+    /// Example 27 — Gunther's $700 gain).
+    #[tokio::test]
+    async fn db_partial_rollover_cash_component_realises_the_cash_side() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "WDR").await;
+        insert_listing(&pool, 2, "RGL").await;
+        let buy_date = NaiveDate::from_ymd_opt(2023, 1, 15).unwrap();
+        // Gunther: 100 shares, $9 cost base each = $900.
+        insert_buy(&pool, 1, 1, buy_date, Decimal::from(100), Decimal::from(9)).await;
+        // 1-for-1 plus $10 cash per old share; new shares worth $20.
+        corporate_action::db_upsert(
+            &pool,
+            &corporate_action::CorporateAction {
+                id: 10,
+                listing_id: 1,
+                date: NaiveDate::from_ymd_opt(2024, 7, 10).unwrap(),
+                kind: corporate_action::ActionKind::ScripForScrip {
+                    scrip_listing_id: 2,
+                    scrip_new_units: Decimal::ONE,
+                    scrip_old_units: Decimal::ONE,
+                    scrip_cash_per_unit: Some(Decimal::from(10)),
+                    scrip_market_value: Some(Decimal::from(20)),
+                    scrip_cash_currency: Some("AUD".to_string()),
+                },
+            },
+        )
+        .await
+        .unwrap();
+        crate::entities::scrip_exchange::db_exchange(&pool, 10)
+            .await
+            .unwrap();
+
+        let result = db_realised_gains(&pool).await.unwrap();
+        assert_eq!(result.len(), 1);
+        // $1,000 cash proceeds − $300 (10/(10+20) of $900) = $700 gain,
+        // discount-eligible from the original 2023 acquisition (> 12 months).
+        assert_eq!(result[0].proceeds, Decimal::from(1000));
+        assert_eq!(result[0].cost_base, Decimal::from(300));
+        assert_eq!(result[0].capital_gain_loss, Decimal::from(700));
+        assert_eq!(result[0].discount_eligible_gain, Decimal::from(700));
+        assert_eq!(result[0].non_discountable_gain, Decimal::ZERO);
+        assert_eq!(result[0].capital_loss, Decimal::ZERO);
+    }
+
+    /// The pure apportionment seam: a sell carrying a cash apportionment
+    /// realises only that share of the cost base — exact fractions (1/3)
+    /// divide once, after the multiplication.
+    #[test]
+    fn pure_scrip_cash_apportionment_scales_the_cost_base() {
+        let d = |y, m, day| NaiveDate::from_ymd_opt(y, m, day).unwrap();
+        // 100 units, $9 cost base each; $10 cash against a $30 per-unit total
+        // consideration → apportionment (10, 30).
+        let mut sell = mem_sell(2, d(2024, 7, 10), 100, 10, "AUD");
+        sell.scrip_cash_apportionment = Some((Decimal::from(10), Decimal::from(30)));
+        let data = ReportData {
+            sells: [(2, sell)].into(),
+            buys: [(1, mem_buy(1, d(2023, 1, 15), 100, 9, "AUD"))].into(),
+            allocations: vec![mem_alloc(2, 1, 100)],
+            ..ReportData::default()
+        };
+
+        let result = compute_realised_gains(&data).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].cost_base, Decimal::from(300));
+        assert_eq!(result[0].capital_gain_loss, Decimal::from(700));
     }
 
     /// A later sale of the replacement parcel uses the carried cost base and

@@ -68,18 +68,25 @@
 //! allocations, plus the dividend-component income row when there is one.
 //! An action referenced by participation trades is frozen against edits.
 //!
-//! **ScripForScrip** — a takeover or merger completed as an all-scrip
-//! exchange with scrip-for-scrip rollover (Subdiv 124-M; see
+//! **ScripForScrip** — a takeover or merger completed as a scrip exchange
+//! with scrip-for-scrip rollover (Subdiv 124-M; see
 //! `docs/ato/takeovers-and-scrip-for-scrip.md`): on the exchange `date` every
 //! `scrip_old_units` units of the original (target) listing become
-//! `scrip_new_units` units of `scrip_listing_id` (the replacement listing).
+//! `scrip_new_units` units of `scrip_listing_id` (the replacement listing),
+//! plus — the partial-rollover case (Example 27) — an optional
+//! `scrip_cash_per_unit` cash per old unit (with `scrip_market_value`, the
+//! replacement unit's market value just after issue, and
+//! `scrip_cash_currency`; the three are all present or all absent).
 //! Recording the action changes nothing by itself; exchanging (`POST
 //! /corporate_actions/:id/exchange`, `entities::scrip_exchange`) atomically
 //! creates a closing Sell on the original listing consuming every open
-//! parcel — excluded from the realised-gains and net-capital-gain reports,
-//! because the rollover disregards the capital gain — plus one replacement
-//! Buy per consumed parcel carrying the parcel's remaining reduced cost base
-//! and (as `trades.deemed_acquisition_date`) its acquisition date, the
+//! parcel — at zero proceeds and excluded from the realised-gains and
+//! net-capital-gain reports when all-scrip (the rollover disregards the
+//! capital gain); at the cash per-unit price when there is a cash component,
+//! whose gain over the cash-apportioned cost base those reports assess now —
+//! plus one replacement Buy per consumed parcel carrying the parcel's
+//! remaining reduced cost base (the scrip-apportioned share when there is
+//! cash) and (as `trades.deemed_acquisition_date`) its acquisition date, the
 //! rollover's combined-holding-period rule for the 12-month CGT discount.
 //! An action referenced by exchange trades is frozen against edits.
 //!
@@ -230,6 +237,26 @@ pub enum ActionKind {
         /// listing (both positive).
         scrip_new_units: Decimal,
         scrip_old_units: Decimal,
+        /// Optional cash component — the partial-rollover case
+        /// (`docs/ato/takeovers-and-scrip-for-scrip.md` Example 27): cash
+        /// received per OLD unit exchanged, in `scrip_cash_currency`
+        /// (positive). The rollover applies only to the scrip portion, so
+        /// the exchange apportions each parcel's cost base between cash and
+        /// scrip by market value and the cash side is assessed now. The
+        /// three cash fields are present together or all absent (the
+        /// all-scrip full rollover) — enforced by the body validation and
+        /// the table CHECKs (0007).
+        #[serde(default)]
+        scrip_cash_per_unit: Option<Decimal>,
+        /// Market value of one NEW (replacement) unit just after issue, in
+        /// `scrip_cash_currency` (positive) — the scrip side of the
+        /// market-value apportionment.
+        #[serde(default)]
+        scrip_market_value: Option<Decimal>,
+        /// Currency of the cash and market value. Its own column: the shared
+        /// `currency` column stays NULL for ScripForScrip.
+        #[serde(default)]
+        scrip_cash_currency: Option<String>,
     },
     Demerger {
         /// The demerged entity's listing (must differ from the action's own
@@ -321,6 +348,9 @@ fn kind_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<ActionKind, sqlx::Erro
             scrip_listing_id: row.try_get("scrip_listing_id")?,
             scrip_new_units: row_dec(row, "scrip_new_units")?,
             scrip_old_units: row_dec(row, "scrip_old_units")?,
+            scrip_cash_per_unit: row_opt_dec(row, "scrip_cash_per_unit")?,
+            scrip_market_value: row_opt_dec(row, "scrip_market_value")?,
+            scrip_cash_currency: row.try_get("scrip_cash_currency")?,
         }),
         "Demerger" => Ok(ActionKind::Demerger {
             demerger_listing_id: row.try_get("demerger_listing_id")?,
@@ -401,6 +431,12 @@ pub struct CorporateActionBody {
     #[serde(default)]
     scrip_old_units: Option<Decimal>,
     #[serde(default)]
+    scrip_cash_per_unit: Option<Decimal>,
+    #[serde(default)]
+    scrip_market_value: Option<Decimal>,
+    #[serde(default)]
+    scrip_cash_currency: Option<String>,
+    #[serde(default)]
     demerger_listing_id: Option<i64>,
     #[serde(default)]
     demerger_new_units: Option<Decimal>,
@@ -428,7 +464,10 @@ impl CorporateActionBody {
     /// or invert holdings or entitlements. ScripForScrip needs a positive
     /// exchange ratio and a replacement listing different from the original —
     /// exchanging a listing into itself would consume its parcels and
-    /// recreate them in place. Demerger needs a positive entitlement ratio, a
+    /// recreate them in place — and may carry a cash component: per-old-unit
+    /// cash, the replacement unit's market value, and their currency, all
+    /// three present (cash and market value positive) or all absent.
+    /// Demerger needs a positive entitlement ratio, a
     /// demerged listing different from the head, and a cost-base percentage
     /// strictly between 0 and 100 — 0 or 100 would zero out one side's cost
     /// base entirely, and anything outside would make one side negative.
@@ -447,7 +486,10 @@ impl CorporateActionBody {
             || self.buyback_market_value.is_some();
         let scrip = self.scrip_listing_id.is_some()
             || self.scrip_new_units.is_some()
-            || self.scrip_old_units.is_some();
+            || self.scrip_old_units.is_some()
+            || self.scrip_cash_per_unit.is_some()
+            || self.scrip_market_value.is_some()
+            || self.scrip_cash_currency.is_some();
         let demerger = self.demerger_listing_id.is_some()
             || self.demerger_new_units.is_some()
             || self.demerger_held_units.is_some()
@@ -520,10 +562,31 @@ impl CorporateActionBody {
                     && self.currency.is_none() =>
             {
                 let scrip_listing_id = self.scrip_listing_id.filter(|&l| l != self.listing_id)?;
+                // The cash component is all-or-none: cash per old unit, the
+                // replacement unit's market value (the apportionment needs
+                // both sides of the consideration), and their currency. A
+                // partial set would make the market-value apportionment
+                // undefined; zero/negative amounts would zero or invert it.
+                let (scrip_cash_per_unit, scrip_market_value, scrip_cash_currency) = match (
+                    self.scrip_cash_per_unit,
+                    self.scrip_market_value,
+                    self.scrip_cash_currency,
+                ) {
+                    (None, None, None) => (None, None, None),
+                    (Some(cash), Some(mv), Some(currency)) => (
+                        Some(positive(Some(cash))?),
+                        Some(positive(Some(mv))?),
+                        Some(currency),
+                    ),
+                    _ => return None,
+                };
                 Some(ActionKind::ScripForScrip {
                     scrip_listing_id,
                     scrip_new_units: positive(self.scrip_new_units)?,
                     scrip_old_units: positive(self.scrip_old_units)?,
+                    scrip_cash_per_unit,
+                    scrip_market_value,
+                    scrip_cash_currency,
                 })
             }
             ActionType::Demerger
@@ -606,7 +669,8 @@ const COLUMNS: &str = "id, action_type, listing_id, date, amount_per_unit, curre
                        rights_units, rights_held_units, exercise_price, \
                        buyback_price, buyback_dividend, buyback_franking_credit, \
                        buyback_market_value, scrip_listing_id, scrip_new_units, \
-                       scrip_old_units, demerger_listing_id, demerger_new_units, \
+                       scrip_old_units, scrip_cash_per_unit, scrip_market_value, \
+                       scrip_cash_currency, demerger_listing_id, demerger_new_units, \
                        demerger_held_units, demerger_cost_base_pct, worthless_event";
 
 pub async fn db_list(pool: &SqlitePool) -> Result<Vec<CorporateAction>, sqlx::Error> {
@@ -691,6 +755,9 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
         scrip_listing_id: Option<i64>,
         scrip_new_units: Option<String>,
         scrip_old_units: Option<String>,
+        scrip_cash_per_unit: Option<String>,
+        scrip_market_value: Option<String>,
+        scrip_cash_currency: Option<String>,
         demerger_listing_id: Option<i64>,
         demerger_new_units: Option<String>,
         demerger_held_units: Option<String>,
@@ -748,10 +815,16 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
             scrip_listing_id,
             scrip_new_units,
             scrip_old_units,
+            scrip_cash_per_unit,
+            scrip_market_value,
+            scrip_cash_currency,
         } => {
             c.scrip_listing_id = Some(*scrip_listing_id);
             c.scrip_new_units = Some(scrip_new_units.to_string());
             c.scrip_old_units = Some(scrip_old_units.to_string());
+            c.scrip_cash_per_unit = scrip_cash_per_unit.map(|v| v.to_string());
+            c.scrip_market_value = scrip_market_value.map(|v| v.to_string());
+            c.scrip_cash_currency = scrip_cash_currency.clone();
         }
         ActionKind::Demerger {
             demerger_listing_id,
@@ -796,9 +869,10 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
           rights_units, rights_held_units, exercise_price, \
           buyback_price, buyback_dividend, buyback_franking_credit, buyback_market_value, \
           scrip_listing_id, scrip_new_units, scrip_old_units, \
+          scrip_cash_per_unit, scrip_market_value, scrip_cash_currency, \
           demerger_listing_id, demerger_new_units, demerger_held_units, \
           demerger_cost_base_pct, worthless_event) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT(id) DO UPDATE SET \
              action_type       = excluded.action_type, \
              listing_id        = excluded.listing_id, \
@@ -819,6 +893,9 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
              scrip_listing_id  = excluded.scrip_listing_id, \
              scrip_new_units   = excluded.scrip_new_units, \
              scrip_old_units   = excluded.scrip_old_units, \
+             scrip_cash_per_unit = excluded.scrip_cash_per_unit, \
+             scrip_market_value  = excluded.scrip_market_value, \
+             scrip_cash_currency = excluded.scrip_cash_currency, \
              demerger_listing_id    = excluded.demerger_listing_id, \
              demerger_new_units     = excluded.demerger_new_units, \
              demerger_held_units    = excluded.demerger_held_units, \
@@ -845,6 +922,9 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
     .bind(c.scrip_listing_id)
     .bind(c.scrip_new_units)
     .bind(c.scrip_old_units)
+    .bind(c.scrip_cash_per_unit)
+    .bind(c.scrip_market_value)
+    .bind(c.scrip_cash_currency)
     .bind(c.demerger_listing_id)
     .bind(c.demerger_new_units)
     .bind(c.demerger_held_units)
@@ -1276,6 +1356,9 @@ mod tests {
                 scrip_listing_id,
                 scrip_new_units: new.parse().unwrap(),
                 scrip_old_units: old.parse().unwrap(),
+                scrip_cash_per_unit: None,
+                scrip_market_value: None,
+                scrip_cash_currency: None,
             },
         }
     }
@@ -1463,6 +1546,9 @@ mod tests {
                 scrip_listing_id: 2,
                 scrip_new_units: Decimal::from(3),
                 scrip_old_units: Decimal::from(7),
+                scrip_cash_per_unit: None,
+                scrip_market_value: None,
+                scrip_cash_currency: None,
             }
         );
     }
@@ -1696,6 +1782,14 @@ mod tests {
             (
                 "BuyBack",
                 "scrip_listing_id = 2, scrip_new_units = '2', scrip_old_units = '1'",
+            ),
+            // …a ScripForScrip carrying a partial cash set (all-or-none) and
+            // another type carrying a full cash set…
+            ("ScripForScrip", "scrip_cash_per_unit = '10'"),
+            (
+                "ShareSplit",
+                "scrip_cash_per_unit = '10', scrip_market_value = '20', \
+                 scrip_cash_currency = 'AUD'",
             ),
             // …a Demerger carrying a payment, a split ratio, or scrip terms…
             ("Demerger", "amount_per_unit = '0.50', currency = 'AUD'"),
@@ -2422,8 +2516,99 @@ mod tests {
                 scrip_listing_id: 2,
                 scrip_new_units: Decimal::from(2),
                 scrip_old_units: Decimal::ONE,
+                scrip_cash_per_unit: None,
+                scrip_market_value: None,
+                scrip_cash_currency: None,
             }
         );
+    }
+
+    /// The optional cash component (partial rollover, Example 27) round-trips
+    /// with sub-cent precision.
+    #[tokio::test]
+    async fn api_scrip_for_scrip_cash_component_round_trip() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "OLD").await;
+        insert_listing(&pool, 2, "NEW").await;
+        api_put_expecting(
+            &pool,
+            serde_json::json!({
+                "action_type": "ScripForScrip", "listing_id": 1, "date": "2024-11-30",
+                "scrip_listing_id": 2, "scrip_new_units": "1", "scrip_old_units": "1",
+                "scrip_cash_per_unit": "10.005", "scrip_market_value": "20.105",
+                "scrip_cash_currency": "AUD",
+            }),
+            StatusCode::NO_CONTENT,
+        )
+        .await;
+        let got = db_get(&pool, 1).await.unwrap().unwrap();
+        assert_eq!(
+            got.kind,
+            ActionKind::ScripForScrip {
+                scrip_listing_id: 2,
+                scrip_new_units: Decimal::ONE,
+                scrip_old_units: Decimal::ONE,
+                scrip_cash_per_unit: Some("10.005".parse().unwrap()),
+                scrip_market_value: Some("20.105".parse().unwrap()),
+                scrip_cash_currency: Some("AUD".to_string()),
+            }
+        );
+    }
+
+    /// The cash component is all-or-none (cash, market value, currency) and
+    /// both amounts must be positive; cash fields on another action type are
+    /// stray.
+    #[tokio::test]
+    async fn api_invalid_scrip_cash_payloads_return_422() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "OLD").await;
+        insert_listing(&pool, 2, "NEW").await;
+        let scrip_base = serde_json::json!({
+            "action_type": "ScripForScrip", "listing_id": 1, "date": "2024-11-30",
+            "scrip_listing_id": 2, "scrip_new_units": "1", "scrip_old_units": "1",
+        });
+        let with = |extra: serde_json::Value| {
+            let mut body = scrip_base.clone();
+            body.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            body
+        };
+        for body in [
+            // Partial sets.
+            with(serde_json::json!({ "scrip_cash_per_unit": "10" })),
+            with(serde_json::json!({ "scrip_cash_per_unit": "10", "scrip_market_value": "20" })),
+            with(serde_json::json!({ "scrip_market_value": "20", "scrip_cash_currency": "AUD" })),
+            with(serde_json::json!({ "scrip_cash_currency": "AUD" })),
+            // Non-positive amounts.
+            with(serde_json::json!({
+                "scrip_cash_per_unit": "0", "scrip_market_value": "20",
+                "scrip_cash_currency": "AUD",
+            })),
+            with(serde_json::json!({
+                "scrip_cash_per_unit": "10", "scrip_market_value": "-20",
+                "scrip_cash_currency": "AUD",
+            })),
+            // An unknown cash currency (FK).
+            with(serde_json::json!({
+                "scrip_cash_per_unit": "10", "scrip_market_value": "20",
+                "scrip_cash_currency": "ZZZ",
+            })),
+            // The shared `currency` column stays forbidden for ScripForScrip.
+            with(serde_json::json!({
+                "scrip_cash_per_unit": "10", "scrip_market_value": "20",
+                "scrip_cash_currency": "AUD", "currency": "AUD",
+            })),
+            // Cash fields are stray on another action type.
+            serde_json::json!({
+                "action_type": "ShareSplit", "listing_id": 1, "date": "2024-11-30",
+                "split_new_units": "2", "split_old_units": "1",
+                "scrip_cash_per_unit": "10", "scrip_market_value": "20",
+                "scrip_cash_currency": "AUD",
+            }),
+        ] {
+            api_put_expecting(&pool, body, StatusCode::UNPROCESSABLE_ENTITY).await;
+        }
     }
 
     #[tokio::test]

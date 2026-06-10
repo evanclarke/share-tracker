@@ -161,15 +161,17 @@ the replacement interest is its market value just after the acquisition.
 
 ## How this project models it
 
-The `ScripForScrip` corporate action models the **full-rollover, single
-replacement class** case — the dominant retail shape of a completed scheme of
-arrangement: every `scrip_old_units` shares held in the original (target)
-listing at the exchange date are replaced by `scrip_new_units` shares in the
-replacement listing. The exchange operation
-(`POST /corporate_actions/:id/exchange`) consumes every open parcel of the
-original listing through a provenance-marked closing Sell (excluded from the
-realised-gains and net-capital-gain reports — the rollover disregards the
-gain) and creates one replacement parcel per consumed parcel carrying:
+The `ScripForScrip` corporate action models the **single-replacement-class
+rollover**, all-scrip or with a cash component — the dominant retail shapes
+of a completed scheme of arrangement: every `scrip_old_units` shares held in
+the original (target) listing at the exchange date are replaced by
+`scrip_new_units` shares in the replacement listing, plus an optional
+`scrip_cash_per_unit` cash per old unit (with `scrip_market_value`, one
+replacement share's market value just after issue, and
+`scrip_cash_currency` — the three together or not at all). The exchange
+operation (`POST /corporate_actions/:id/exchange`) consumes every open parcel
+of the original listing through a provenance-marked closing Sell and creates
+one replacement parcel per consumed parcel carrying:
 
 - the consumed parcel's **remaining reduced cost base** (after AMIT and
   return-of-capital adjustments) — "you are taken to have acquired the
@@ -179,14 +181,30 @@ gain) and creates one replacement parcel per consumed parcel carrying:
   12-month CGT discount clock (and the AUD translation month of the carried
   cost base stays the original acquisition month).
 
+**All-scrip** (no cash fields): the closing Sell has zero proceeds and is
+excluded from the realised-gains and net-capital-gain reports — the rollover
+disregards the whole gain.
+
+**Partial rollover** (Example 27 — Gunther): the rollover applies only to
+the scrip portion. Each parcel's remaining reduced cost base is apportioned
+between cash and scrip by the consideration's market values — the cash
+side's share is `cash×old ÷ (cash×old + mv×new)`, the per-old-unit form of
+the example's `cash ÷ total proceeds` — and:
+
+- the closing Sell is priced at the cash per old unit, and the
+  realised-gains and net-capital-gain reports assess its proceeds against
+  the cash-apportioned cost-base share, with the discount classified by the
+  original parcel's holding period (Gunther: $1,000 − $300 = $700);
+- the replacement parcels carry only the scrip side's share (Gunther:
+  $900 − $300 = $600, $6 per Regal share).
+
 Out of scope (enter these manually or seek advice):
 
 - **No-rollover takeovers** (Example 26): an ordinary disposal at market
   value — enter a Sell at the market-value-derived price plus a Buy of the
-  new holding.
-- **Partial rollover / cash consideration** (Example 27) and **multiple
-  replacement classes** (Example 28's ordinary + preference split): the
-  action models a single all-scrip replacement leg.
+  new holding. A **pure-cash takeover** is likewise an ordinary Sell.
+- **Multiple replacement classes** (Example 28's ordinary + preference
+  split): the action models a single replacement leg.
 - **Pre-CGT original interests** (not eligible for rollover; pre-CGT assets
   are not modelled anywhere in this project).
 - **Rollover of a capital loss**: not permitted by law — if the exchange

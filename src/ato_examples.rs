@@ -29,16 +29,15 @@
 //!   post-CGT half is reproduced below (39 via the sell-rights operation, 40
 //!   via the exercise operation); both pre-CGT halves (the rights over the
 //!   1 June 1985 shares) turn on pre-CGT originals, which are not modelled.
-//! - `docs/ato/takeovers-and-scrip-for-scrip.md` Examples 26–28 (Desiree,
-//!   Gunther, Stephanie) — none matches the modelled case (the full-rollover,
-//!   single-replacement-class exchange, TODO "Corporate actions",
-//!   ScripForScrip): Example 26 is a takeover *without* rollover (an ordinary
-//!   market-value disposal, enterable as a manual Sell + Buy), Example 27 is
-//!   a partial rollover with a cash component, and Example 28 exchanges into
-//!   *two* replacement share classes (ordinary + preference) with the cost
-//!   base apportioned by market value. The modelled mechanics — gain
-//!   disregarded, cost base carried, combined holding period — are covered by
-//!   `scrip_exchange`/report unit tests instead.
+//! - `docs/ato/takeovers-and-scrip-for-scrip.md` Examples 26 and 28 (Desiree,
+//!   Stephanie) — neither matches the modelled cases (TODO "Corporate
+//!   actions", ScripForScrip): Example 26 is a takeover *without* rollover
+//!   (an ordinary market-value disposal, enterable as a manual Sell + Buy)
+//!   and Example 28 exchanges into *two* replacement share classes
+//!   (ordinary + preference) with the cost base apportioned by market value.
+//!   Example 27's partial rollover (cash component) is reproduced below; the
+//!   all-scrip mechanics — gain disregarded, cost base carried, combined
+//!   holding period — are covered by `scrip_exchange`/report unit tests.
 //! - `docs/ato/demergers.md` Examples 31 and 33 (Anita's pre-CGT shares) — both
 //!   turn on pre-CGT original interests (and Example 31's no-rollover arm on
 //!   the ordinary cost-base rules for the new interests), which are not
@@ -1292,6 +1291,81 @@ async fn demergers_examples_30_32_anita_bhp_billiton_demerger() {
     assert_eq!(gains[0].capital_gain_loss, dec("153.425"));
     assert_eq!(gains[0].discount_eligible_gain, dec("153.425"));
     assert_eq!(gains[0].non_discountable_gain, Decimal::ZERO);
+}
+
+/// `docs/ato/takeovers-and-scrip-for-scrip.md` (QC 64895) — "Example 27:
+/// Partial scrip for scrip rollover".
+///
+/// > Gunther owns 100 shares in Windsor Ltd, each with a cost base of $9. He
+/// > accepts a takeover offer from Regal Ltd, which provides for Gunther to
+/// > receive one Regal share plus $10 cash for each share in Windsor.
+/// > Gunther receives 100 shares in Regal and $1,000 cash. Just after
+/// > Gunther is issued shares in Regal, each share is worth $20.
+/// >
+/// > $1,000 ÷ $3,000 × $900 = $300 (cost base apportioned to the cash).
+/// > Gunther's capital gain: $1,000 (cash) − $300 (cost base) = $700.
+/// > Cost base of each of his Regal shares: ($900 − $300) ÷ 100 = $6.
+///
+/// The ATO doesn't date Gunther's acquisition; held > 12 months here, so the
+/// $700 cash-side gain is discount-eligible per the original holding period
+/// (the rollover side's combined-period rule).
+#[tokio::test]
+async fn takeovers_example_27_gunther_partial_scrip_for_scrip_rollover() {
+    let pool = test_pool().await;
+    put_listing(&pool, 1, "WDR").await;
+    put_listing(&pool, 2, "RGL").await;
+    // 100 Windsor shares, $9 cost base each = $900.
+    put_buy(&pool, 1, 1, "2023-01-15", "100", "9", "0").await;
+    api_put(
+        &pool,
+        "/corporate_actions/1",
+        json!({
+            "action_type": "ScripForScrip",
+            "listing_id": 1,
+            "date": "2024-07-10",
+            "scrip_listing_id": 2,
+            "scrip_new_units": "1",
+            "scrip_old_units": "1",
+            "scrip_cash_per_unit": "10",
+            "scrip_market_value": "20",
+            "scrip_cash_currency": "AUD",
+        }),
+    )
+    .await;
+    let _: Value = api_post(
+        &pool,
+        "/corporate_actions/1/exchange",
+        json!({}),
+        StatusCode::CREATED,
+    )
+    .await;
+
+    // The cash side is assessed now: $1,000 proceeds against the $300
+    // apportioned cost base.
+    let gains: Vec<RealisedGainLoss> = api_get(&pool, "/portfolio/realised-gains").await;
+    assert_eq!(gains.len(), 1);
+    assert_eq!(gains[0].proceeds, dec("1000"));
+    assert_eq!(gains[0].cost_base, dec("300"), "ATO: $300 to the cash");
+    assert_eq!(gains[0].capital_gain_loss, dec("700"), "ATO: $700 gain");
+    assert_eq!(gains[0].discount_eligible_gain, dec("700"));
+
+    // The rollover carries the rest: 100 Regal shares at $600 total — the
+    // ATO's $6 each — with the original acquisition date.
+    let parcels: Vec<crate::reports::open_parcels::OpenParcel> =
+        api_get(&pool, "/portfolio/open-parcels").await;
+    assert_eq!(parcels.len(), 1);
+    assert_eq!(parcels[0].ticker, "RGL");
+    assert_eq!(parcels[0].remaining_quantity, dec("100"));
+    assert_eq!(parcels[0].remaining_cost_base, dec("600"), "ATO: $6 each");
+    assert_eq!(parcels[0].acquisition_date.to_string(), "2023-01-15");
+
+    // FY2025's net capital gain: the $700 discount-eligible gain halves.
+    let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net-capital-gain").await;
+    assert_eq!(years.len(), 1);
+    assert_eq!(years[0].tax_year, 2025);
+    assert_eq!(years[0].discount_eligible_gains, dec("700"));
+    assert_eq!(years[0].cgt_discount, dec("350"));
+    assert_eq!(years[0].net_capital_gain, dec("350"));
 }
 
 /// `docs/ato/crypto-cgt.md` — "Example: market value of new asset determines

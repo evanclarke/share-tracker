@@ -6,20 +6,30 @@
 //! The rollover disregards the capital gain on the original shares and deems
 //! the replacement shares acquired *for the cost base of the original
 //! interest*, with the combined holding period counting toward the 12-month
-//! CGT discount. The exchange therefore creates, in one transaction:
+//! CGT discount. With a cash component (the partial rollover, Example 27),
+//! the rollover applies only to the scrip portion: each parcel's remaining
+//! reduced cost base is apportioned between cash and scrip by the
+//! consideration's market values — cash×old / (cash×old + mv×new) to the
+//! cash side — and the cash side's gain is assessed now. The exchange
+//! creates, in one transaction:
 //!
 //! - a **closing Sell** on the original listing dated the exchange date —
-//!   price 0, with parcel allocations consuming every open parcel, written
-//!   through the shared `/sells` core so all its invariants hold. It carries
-//!   `scrip_action_id`, which excludes it from the realised-gains and
-//!   net-capital-gain reports (the disposal happens, but its gain is
-//!   disregarded; the zero proceeds never surface as a loss), and
+//!   priced at the per-old-unit cash component (0 when all-scrip), with
+//!   parcel allocations consuming every open parcel, written through the
+//!   shared `/sells` core so all its invariants hold. It carries
+//!   `scrip_action_id`: when all-scrip that excludes it from the
+//!   realised-gains and net-capital-gain reports (the disposal happens, but
+//!   its gain is disregarded; the zero proceeds never surface as a loss);
+//!   with cash those reports assess it against the cash-apportioned share of
+//!   each parcel's reduced cost base, discount-classified by the parcel's
+//!   original (or deemed) acquisition date, and
 //! - one **replacement Buy** per consumed parcel on the replacement listing,
 //!   dated the exchange date (so later splits and returns of capital on the
 //!   replacement listing apply only from then), with quantity = the parcel's
 //!   remaining units at the exchange date × the exchange ratio. The parcel's
 //!   remaining reduced cost base (AMIT- and return-of-capital-adjusted,
-//!   floored at nil) is carried on the `brokerage` column with a zero price —
+//!   floored at nil; the scrip-apportioned share of it when there is cash)
+//!   is carried on the `brokerage` column with a zero price —
 //!   numerically part of the single cost base everywhere, with no division —
 //!   and the parcel's acquisition date (chaining through any earlier
 //!   exchange) is carried as `deemed_acquisition_date`, which drives the
@@ -36,7 +46,7 @@
 //!
 //! Out of scope (documented in `docs/ato/takeovers-and-scrip-for-scrip.md`):
 //! takeovers without rollover (an ordinary market-value disposal — enter the
-//! Sell and Buy manually), partial rollover with a cash component, multiple
+//! Sell and Buy manually; a pure-cash takeover is an ordinary Sell), multiple
 //! replacement share classes, pre-CGT originals, and exchanges that would
 //! crystallise a capital loss (the law does not allow rolling over a loss).
 
@@ -119,14 +129,37 @@ pub async fn db_exchange(pool: &SqlitePool, action_id: i64) -> Result<Exchange, 
         Some(a) => a,
         None => return Err(ExchangeError::ActionNotFound),
     };
-    let (scrip_listing_id, new_units, old_units) = match &action.kind {
+    let (scrip_listing_id, new_units, old_units, cash) = match &action.kind {
         ActionKind::ScripForScrip {
             scrip_listing_id,
             scrip_new_units,
             scrip_old_units,
-        } => (*scrip_listing_id, *scrip_new_units, *scrip_old_units),
+            scrip_cash_per_unit,
+            scrip_market_value,
+            scrip_cash_currency,
+        } => (
+            *scrip_listing_id,
+            *scrip_new_units,
+            *scrip_old_units,
+            // All three are present together or all absent (body validation
+            // + table CHECKs), so a partial set never reaches here.
+            match (scrip_cash_per_unit, scrip_market_value, scrip_cash_currency) {
+                (Some(cash), Some(mv), Some(currency)) => Some((*cash, *mv, currency.clone())),
+                _ => None,
+            },
+        ),
         _ => return Err(ExchangeError::NotAScripForScrip),
     };
+
+    // Partial rollover (Example 27): the cash side's share of each parcel's
+    // remaining reduced cost base, apportioned by the consideration's market
+    // values. Per old unit the holder receives `cash` plus `mv × new/old` of
+    // scrip, so cash's share is cash×old / (cash×old + mv×new) — kept as a
+    // (numerator, denominator) pair and multiplied before dividing, so exact
+    // fractions (e.g. Gunther's 1/3) don't round twice.
+    let cash_apportionment = cash
+        .as_ref()
+        .map(|(cash, mv, _)| (*cash * old_units, *cash * old_units + *mv * new_units));
 
     let already: bool =
         sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM trades WHERE scrip_action_id = ?)")
@@ -241,7 +274,7 @@ pub async fn db_exchange(pool: &SqlitePool, action_id: i64) -> Result<Exchange, 
 
         // Remaining reduced cost base in the parcel's own currency: the
         // shared pipeline (`domain::cost_base`), bounded at the exchange date.
-        let carried_cost_base = crate::domain::cost_base::adjusted_cost_base(
+        let reduced_cost_base = crate::domain::cost_base::adjusted_cost_base(
             &crate::domain::cost_base::Parcel {
                 quantity: qty,
                 average_price: price,
@@ -257,6 +290,16 @@ pub async fn db_exchange(pool: &SqlitePool, action_id: i64) -> Result<Exchange, 
             Some(action.date),
         )?
         .adjusted;
+
+        // With a cash component, only the scrip side's market-value share of
+        // the cost base rolls over into the replacement; the cash side's
+        // share stays behind for the closing Sell's gain (computed the same
+        // way by the realised-gains report). The two sides sum exactly to
+        // the reduced cost base by construction.
+        let carried_cost_base = match cash_apportionment {
+            Some((num, den)) => reduced_cost_base - reduced_cost_base * num / den,
+            None => reduced_cost_base,
+        };
 
         // The exchange ratio applies to units as held at the exchange date.
         let at_date_units = split_adjusted_quantity(remaining, &splits, date, Some(action.date));
@@ -277,13 +320,21 @@ pub async fn db_exchange(pool: &SqlitePool, action_id: i64) -> Result<Exchange, 
         return Err(ExchangeError::NothingHeld);
     }
 
-    // The closing Sell: zero proceeds (the rollover disregards the gain and
-    // this Sell never reaches the realised-gains report), consuming every
-    // open parcel. Settlement is the exchange date — nothing market-settles.
+    // The closing Sell, consuming every open parcel. All-scrip: zero
+    // proceeds — the rollover disregards the gain and the Sell never reaches
+    // the realised-gains report. With a cash component: the cash per old
+    // unit is the Sell's price, and the realised-gains/net-capital-gain
+    // reports assess its gain over the cash-apportioned cost base (the
+    // AUD conversion prefers the ATO monthly rate for the cash currency).
+    // Settlement is the exchange date — nothing market-settles.
     let listing_currency: String = sqlx::query_scalar("SELECT currency FROM listings WHERE id = ?")
         .bind(action.listing_id)
         .fetch_one(&mut *tx)
         .await?;
+    let (sell_price, sell_currency) = match &cash {
+        Some((cash_per_unit, _, currency)) => (*cash_per_unit, currency.clone()),
+        None => (Decimal::ZERO, listing_currency),
+    };
     let sell_id: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(id), 0) + 1 FROM trades")
         .fetch_one(&mut *tx)
         .await?;
@@ -294,12 +345,12 @@ pub async fn db_exchange(pool: &SqlitePool, action_id: i64) -> Result<Exchange, 
         date: action.date,
         settlement_date: Some(action.date),
         listing_id: action.listing_id,
-        average_price: Decimal::ZERO,
+        average_price: sell_price,
         quantity: replacements.iter().map(|r| r.at_date_units).sum(),
-        currency: listing_currency.clone(),
+        currency: sell_currency.clone(),
         brokerage: Decimal::ZERO,
         gst_on_brokerage: Decimal::ZERO,
-        brokerage_currency: listing_currency,
+        brokerage_currency: sell_currency,
         fx_rate: Decimal::ONE,
         contract_note_ref: None,
         allocations: replacements
@@ -473,6 +524,22 @@ mod tests {
         new: &str,
         old: &str,
     ) {
+        insert_scrip_cash_terms(pool, id, listing_id, scrip_listing_id, date, new, old, None).await;
+    }
+
+    /// A takeover with an optional cash component: `cash` is
+    /// `(cash per old unit, market value per new unit)` in AUD.
+    #[allow(clippy::too_many_arguments)]
+    async fn insert_scrip_cash_terms(
+        pool: &SqlitePool,
+        id: i64,
+        listing_id: i64,
+        scrip_listing_id: i64,
+        date: NaiveDate,
+        new: &str,
+        old: &str,
+        cash: Option<(&str, &str)>,
+    ) {
         corporate_action::db_upsert(
             pool,
             &CorporateAction {
@@ -483,6 +550,9 @@ mod tests {
                     scrip_listing_id,
                     scrip_new_units: new.parse().unwrap(),
                     scrip_old_units: old.parse().unwrap(),
+                    scrip_cash_per_unit: cash.map(|(c, _)| c.parse().unwrap()),
+                    scrip_market_value: cash.map(|(_, mv)| mv.parse().unwrap()),
+                    scrip_cash_currency: cash.map(|_| "AUD".to_string()),
                 },
             },
         )
@@ -652,6 +722,63 @@ mod tests {
 
         // $1,500 − $100 (AMIT) − $50 (ROC) = $1,350 carried.
         assert_eq!(ex.replacements[0].brokerage, dec("1350"));
+    }
+
+    /// A cash component (partial rollover — Example 27's arithmetic at the
+    /// exchange level): the consumed parcel's reduced cost base is
+    /// apportioned by the consideration's market values — cash×old /
+    /// (cash×old + mv×new) to the cash side — and only the scrip side's
+    /// share is carried into the replacement; the closing Sell is priced at
+    /// the cash per old unit in the cash currency.
+    #[tokio::test]
+    async fn cash_component_apportions_the_cost_base_and_prices_the_closing_sell() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "WDR").await;
+        insert_listing(&pool, 2, "RGL").await;
+        // Gunther: 100 shares with a $9 cost base each = $900.
+        insert_buy(&pool, 1, 1, d(2020, 10, 1), "100", "9").await;
+        // 1-for-1, $10 cash per old share, $20 market value per new share.
+        insert_scrip_cash_terms(&pool, 10, 1, 2, d(2024, 7, 1), "1", "1", Some(("10", "20"))).await;
+
+        let ex = db_exchange(&pool, 10).await.unwrap();
+
+        // The closing Sell carries the cash proceeds: 100 × $10.
+        assert_eq!(ex.sell.average_price, dec("10"));
+        assert_eq!(ex.sell.quantity, dec("100"));
+        assert_eq!(ex.sell.currency, "AUD");
+        assert_eq!(ex.sell.scrip_action_id, Some(10));
+        // Cash's share of the $900: 10/(10 + 20) = $300 — realised by the
+        // reports against the Sell; the replacement carries the $600 rest.
+        assert_eq!(ex.replacements.len(), 1);
+        assert_eq!(ex.replacements[0].quantity, dec("100"));
+        assert_eq!(ex.replacements[0].brokerage, dec("600"));
+        assert_eq!(
+            ex.replacements[0].deemed_acquisition_date,
+            Some(d(2020, 10, 1))
+        );
+    }
+
+    /// The apportionment respects a non-1:1 exchange ratio — per old unit
+    /// the scrip side is worth mv × new/old — and an exact fraction (3/11
+    /// here) divides once, after the multiplication, so the carried and
+    /// realised shares sum exactly to the reduced cost base.
+    #[tokio::test]
+    async fn cash_apportionment_scales_the_scrip_side_by_the_exchange_ratio() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "OLD").await;
+        insert_listing(&pool, 2, "NEW").await;
+        // Cost base $1,100; 2-for-1 exchange, $3 cash per old unit, $4 market
+        // value per new unit → per old unit 3 cash + 8 scrip; the cash share
+        // is 3/11 of $1,100 = $300.
+        insert_buy(&pool, 1, 1, d(2020, 10, 1), "100", "11").await;
+        insert_scrip_cash_terms(&pool, 10, 1, 2, d(2024, 7, 1), "2", "1", Some(("3", "4"))).await;
+
+        let ex = db_exchange(&pool, 10).await.unwrap();
+
+        assert_eq!(ex.sell.average_price, dec("3"));
+        assert_eq!(ex.replacements[0].quantity, dec("200"));
+        // Carried = 1,100 − 1,100 × 3/11 = $800, exact.
+        assert_eq!(ex.replacements[0].brokerage, dec("800"));
     }
 
     /// A split on the original listing before the exchange re-bases the

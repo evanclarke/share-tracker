@@ -23,8 +23,11 @@
 //! only its own period and any deferred gain shows up where the parcels now
 //! sit. In the **OVERALL** row those internal legs are skipped entirely (they
 //! net to zero), leaving only external cash, so portfolio-level figures are
-//! unaffected by moving parcels around. A rights exercise and a buy-back
-//! participation are real cash and count as ordinary flows. AMMA statements
+//! unaffected by moving parcels around. The cash component of a
+//! partial-rollover scrip exchange (the closing Sell's price × quantity) is
+//! real external cash on top of the carried cost, and reaches OVERALL too.
+//! A rights exercise and a buy-back participation are real cash and count as
+//! ordinary flows. AMMA statements
 //! attribute taxable income, not cash, and are excluded; a DRP reinvestment is
 //! both the cash income and a same-sized purchase, so it nets out naturally.
 //!
@@ -405,14 +408,23 @@ pub async fn db_performance(
     }
 
     // Pass 2 — disposals. An internal closing Sell is worth the carried cost
-    // its replacement parcels took (no external cash moved); a real Sell is
-    // worth its net proceeds.
+    // its replacement parcels took (no external cash moved) — plus, for a
+    // partial-rollover scrip exchange, its cash component (price × quantity:
+    // real external cash the holder received, so it also reaches OVERALL);
+    // a real Sell is worth its net proceeds.
     for t in trades.iter().filter(|t| t.is_sell) {
         if let Some(key) = t.group {
             let carried = group_costs.get(&key).copied().unwrap_or(Decimal::ZERO);
+            let mut inflow = carried;
+            if !t.price.is_zero() {
+                let cash = fx.to_aud(t.price * t.quantity, &t.currency, t.date, Some(t.fx_rate))?;
+                inflow += cash;
+                overall.proceeds += cash;
+                overall.flows.push((t.date, cash));
+            }
             let acc = holdings.entry((t.listing_id, t.account_id)).or_default();
-            acc.proceeds += carried;
-            acc.flows.push((t.date, carried));
+            acc.proceeds += inflow;
+            acc.flows.push((t.date, inflow));
         } else {
             let net = t.price * t.quantity - t.brokerage - t.gst;
             let net = fx.to_aud(net, &t.currency, t.date, Some(t.fx_rate))?;
@@ -864,6 +876,67 @@ mod tests {
         assert_eq!(o.market_value, Some(Decimal::from(1500)));
         assert_eq!(o.total_return, Some(Decimal::from(500)));
         assert_eq!(o.total_return_pct, Some(Decimal::from(50)));
+    }
+
+    /// A partial-rollover scrip exchange's cash component is real external
+    /// cash: the source holding's closing Sell is worth the carried cost
+    /// plus the cash, and the cash (only) reaches the OVERALL row — the
+    /// rolled-over cost stays internal.
+    #[tokio::test]
+    async fn db_scrip_exchange_cash_component_counts_as_external_cash() {
+        use crate::entities::{corporate_action, scrip_exchange};
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "OLD", "XASX", "AUD").await;
+        insert_listing(&pool, 2, "NEW", "XASX", "AUD").await;
+        buy(&pool, 1, 1, d(2023, 1, 1), 100, 10).await; // invested 1,000
+        // 1-for-1 with $2 cash per old unit; new shares worth $18 → the cash
+        // side takes 2/20 = $100 of the cost base, $900 rolls over; $200
+        // cash is received.
+        corporate_action::db_upsert(
+            &pool,
+            &corporate_action::CorporateAction {
+                id: 10,
+                listing_id: 1,
+                date: d(2023, 7, 1),
+                kind: corporate_action::ActionKind::ScripForScrip {
+                    scrip_listing_id: 2,
+                    scrip_new_units: Decimal::ONE,
+                    scrip_old_units: Decimal::ONE,
+                    scrip_cash_per_unit: Some(Decimal::from(2)),
+                    scrip_market_value: Some(Decimal::from(18)),
+                    scrip_cash_currency: Some("AUD".to_string()),
+                },
+            },
+        )
+        .await
+        .unwrap();
+        scrip_exchange::db_exchange(&pool, 10).await.unwrap();
+
+        let rows = db_performance(&pool, &price_map(2, "12"), d(2024, 1, 1))
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 3);
+
+        // Source holding: exits at the carried $900 plus the $200 cash.
+        let src = &rows[0];
+        assert_eq!((src.listing_id, src.holding_account_id), (Some(1), Some(1)));
+        assert_eq!(src.invested, Decimal::from(1000));
+        assert_eq!(src.proceeds, Decimal::from(1100));
+
+        // Replacement holding: invested at the carried cost only.
+        let dst = &rows[1];
+        assert_eq!((dst.listing_id, dst.holding_account_id), (Some(2), Some(1)));
+        assert_eq!(dst.invested, Decimal::from(900));
+        assert_eq!(dst.market_value, Some(Decimal::from(1200)));
+
+        // OVERALL: only external cash — $1,000 in, the $200 cash out; the
+        // rolled-over legs net to nothing. 200 + 1,200 − 1,000 = 400.
+        let o = rows.last().unwrap();
+        assert_eq!(o.ticker, "OVERALL");
+        assert_eq!(o.invested, Decimal::from(1000));
+        assert_eq!(o.proceeds, Decimal::from(200));
+        assert_eq!(o.market_value, Some(Decimal::from(1200)));
+        assert_eq!(o.total_return, Some(Decimal::from(400)));
     }
 
     /// Non-AUD flows convert to AUD (here via the trade's manual fx fallback,
