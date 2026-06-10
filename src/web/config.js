@@ -1,0 +1,469 @@
+//
+// share-tracker frontend: the configuration the generic engine renders. Each
+// domain entity is described once (API path, key, fields, columns), each
+// report once (API path, method, price/as-of options), and each post-record
+// action once (owner fetch, fields, POST endpoint, texts) — app.js's generic
+// list/form/report/action code does the rest. Adding or changing an entity,
+// report, or action means editing the matching entry here, not adding views.
+//
+import { describeTrade } from './util.js';
+import { txt, dec, int, dt, bool, sel, fk, wireGstBrokerage, wireIncomeEntry } from './forms.js';
+
+// ---- entity configuration --------------------------------------------
+export const ENTITIES = [
+  {
+    slug: 'exchanges', title: 'Exchanges', group: 'Reference data', api: '/exchanges',
+    desc: 'Curated trading venues. Seeded with XASX (ASX) and XNYS (NYSE).',
+    keyFields: [txt('mic', 'MIC', { required: true })],
+    fields: [
+      txt('name', 'Name', { required: true }),
+      txt('country', 'Country', { required: true }),
+      fk('currency', 'Default currency', 'currencies', { required: true, encode: 'string' }),
+      txt('timezone', 'Timezone', { required: true, default: 'Australia/Sydney' }),
+      int('settlement_days', 'Settlement days (T+N)', { required: true, default: '2' }),
+      txt('close_time', 'Close time (HH:MM local)', { required: true, default: '16:00', hint: 'End of the regular session in the exchange timezone; closing prices are only collected after this.' }),
+    ],
+    columns: ['mic', 'name', 'country', 'currency', 'timezone', 'settlement_days', 'close_time'],
+  },
+  {
+    slug: 'exchange_holidays', title: 'Exchange Holidays', group: 'Reference data', api: '/exchange_holidays',
+    desc: 'Full-closure non-trading days; settlement skips these as well as weekends.',
+    keyFields: [fk('mic', 'Exchange', 'exchanges', { required: true, encode: 'string' }), dt('holiday_date', 'Date', { required: true })],
+    fields: [txt('name', 'Name', { required: true })],
+    columns: ['mic', 'holiday_date', 'name'],
+  },
+  {
+    slug: 'listings', title: 'Listings', group: 'Reference data', api: '/listings',
+    desc: 'Securities you trade, each on a curated exchange — except Crypto listings, which have no exchange (leave it blank), settle same-day, and need a recognised digital-token ticker (e.g. BTC).',
+    keyFields: [int('id', 'ID', { auto: true })],
+    fields: [
+      fk('exchange_mic', 'Exchange', 'exchanges', { optional: true, encode: 'string', hint: 'Required except for Crypto; must be blank for Crypto.' }),
+      txt('ticker', 'Ticker', { required: true }),
+      txt('name', 'Name', { required: true }),
+      txt('isin', 'ISIN', { optional: true }),
+      sel('security_type', 'Security type', ['Share', 'ETF', 'LIC', 'Trust', 'Crypto'], { required: true }),
+      fk('currency', 'Currency', 'currencies', { required: true, encode: 'string' }),
+      bool('amit', 'AMIT'),
+      bool('preference', 'Preference share (90-day franking holding period)'),
+    ],
+    columns: ['id', 'exchange_mic', 'ticker', 'name', 'isin', 'security_type', 'currency', 'amit', 'preference'],
+  },
+  {
+    slug: 'holding_accounts', title: 'Holding Accounts', group: 'Reference data', api: '/holding_accounts',
+    desc: 'Where holdings sit within the one taxpayer (e.g. an employer share-plan account vs a personal broker account). The same listing can be held in several accounts at once, each with its own DRP enrolment; move parcels between them with a Transfer. Account 1 is the seeded default every write falls back to.',
+    keyFields: [int('id', 'ID', { auto: true })],
+    fields: [txt('name', 'Name', { required: true })],
+    columns: ['id', 'name'],
+  },
+  {
+    slug: 'currencies', title: 'Currencies', group: 'Reference data', api: '/currencies', readonly: true,
+    desc: 'Recognised ISO 4217 fiat and ISO 24165 token codes (import-managed).',
+    columns: ['code', 'kind', 'numeric_code', 'name', 'short_name', 'minor_units', 'source'],
+  },
+  {
+    slug: 'mic_registry', title: 'MIC Registry', group: 'Reference data', api: '/mic_registry', readonly: true,
+    desc: 'ISO 10383 Market Identifier Codes (import-managed).',
+    columns: ['mic', 'operating_mic', 'name', 'country_code', 'city', 'status', 'expiry_date'],
+  },
+  {
+    slug: 'closing_prices', title: 'Closing Prices', group: 'Reference data', api: '/closing_prices', custom: 'prices',
+    desc: 'Stored daily closing prices per held listing, collected by the price-import job.',
+  },
+  {
+    slug: 'rba_fx_rates', title: 'RBA FX Rates', group: 'Reference data', api: '/rba_fx_rates', readonly: true,
+    desc: 'Monthly RBA F11 rates (foreign units per AUD) used for ATO conversion (import-managed).',
+    columns: ['id', 'currency', 'month', 'rate'],
+  },
+  {
+    slug: 'trades', title: 'Trades', group: 'Activity', api: '/trades',
+    desc: 'Buy acquisitions. Sells are entered under Sells so they always carry parcel allocations; DRP acquisitions are created from the funding distribution under Income (Reinvest under DRP) so the shares stay linked to their dividend and residual chain.',
+    keyFields: [int('id', 'ID', { auto: true })],
+    fields: [
+      sel('trade_type', 'Type', ['Buy'], { required: true }),
+      dt('date', 'Trade date', { required: true }),
+      dt('settlement_date', 'Settlement date', { optional: true, hint: 'Leave blank to auto-calculate (T+N business days, skipping weekends and holidays).' }),
+      fk('listing_id', 'Listing', 'listings', { required: true }),
+      dec('average_price', 'Average price', { required: true, default: '' }),
+      dec('quantity', 'Quantity', { required: true, default: '' }),
+      fk('currency', 'Currency', 'currencies', { required: true, encode: 'string' }),
+      dec('brokerage', 'Brokerage'),
+      bool('brokerage_includes_gst', 'Brokerage includes GST', { hint: 'Tick when the statement quotes brokerage GST-inclusive; the GST component (1/11, rounded to the cent) is derived automatically.' }),
+      dec('gst_on_brokerage', 'GST on brokerage'),
+      fk('brokerage_currency', 'Brokerage currency', 'currencies', { required: true, encode: 'string' }),
+      dec('fx_rate', 'Manual FX rate', { default: '1', hint: 'Foreign units per AUD; fallback used only when no ATO rate exists. 1 for AUD.' }),
+      txt('contract_note_ref', 'Contract note ref', { optional: true }),
+      dec('statement_total', 'Statement total', { optional: true, default: '', hint: 'Optional cross-check in the brokerage currency: quantity × price + brokerage + GST. Rejected if it does not reconcile.' }),
+      fk('holding_account_id', 'Holding account', 'holdingAccounts', { required: true, default: '1' }),
+    ],
+    columns: ['id', 'trade_type', 'date', 'settlement_date', 'listing_id', 'average_price', 'quantity', 'currency', 'brokerage', 'statement_total', 'fx_rate', 'holding_account_id'],
+    listFilter: function (row) { return row.trade_type !== 'Sell'; },
+    attachOwner: 'trade_id',
+    wireForm: wireGstBrokerage,
+  },
+  {
+    slug: 'sells', title: 'Sells', group: 'Activity', api: '/sells', custom: 'sells',
+    desc: 'Sell trades created atomically with their parcel allocations.',
+  },
+  {
+    slug: 'transfers', title: 'Transfers', group: 'Activity', api: '/transfers', custom: 'transfers',
+    desc: 'Moves between holding accounts (e.g. vested plan shares to a personal account) — not a CGT event.',
+  },
+  {
+    slug: 'income', title: 'Income', group: 'Activity', api: '/income',
+    desc: 'Dividends and trust distributions. The form captures what the payment advice prints — amount, franking treatment, the per-share figures — and the advanced toggle reveals the full tax-component breakdown; a DRP statement’s reinvestment can be entered in the same form.',
+    keyFields: [int('id', 'ID', { auto: true })],
+    fields: [
+      fk('listing_id', 'Listing', 'listings', { required: true }),
+      dt('date_paid', 'Date paid', { required: true }),
+      dec('amount_per_security', 'Amount per security', { optional: true, default: '', hint: 'Optional cross-check from the statement, supplied together with securities held: their product must equal the gross amount. Rejected if it does not reconcile.' }),
+      dec('securities_held', 'Securities held', { optional: true, default: '' }),
+      dt('ex_date', 'Ex date', { optional: true }),
+      dec('franked_amount', 'Franked amount'),
+      dec('unfranked_amount', 'Unfranked amount'),
+      dec('foreign_source_income', 'Foreign source income'),
+      dec('foreign_tax_paid', 'Foreign tax paid'),
+      dec('tfn_withholding_tax', 'TFN withholding tax'),
+      dec('franking_credits', 'Franking credits'),
+      dec('lic_capital_gain_deduction', 'LIC capital gain deduction'),
+      dec('conduit_foreign_income', 'Conduit foreign income'),
+      bool('trust_income', 'Trust income'),
+      dt('entitlement_date', 'Entitlement date', { optional: true, hint: 'Trust distributions only: the date you became presently entitled — usually the distribution period’s end on the statement. Trust income is assessed in this date’s financial year even when the cash arrives later (a June distribution paid in July belongs to the year just ended). Leave empty to assess by the pay date.' }),
+      fk('currency', 'Currency', 'currencies', { required: true, encode: 'string', default: 'AUD' }),
+      fk('holding_account_id', 'Holding account', 'holdingAccounts', { required: true, default: '1', hint: 'The account the distribution was paid to — decides whose DRP enrolment applies.' }),
+    ],
+    wireForm: wireIncomeEntry,
+    columns: ['id', 'listing_id', 'date_paid', 'franked_amount', 'unfranked_amount', 'franking_credits', 'currency', 'holding_account_id', 'reinvestment_trade_id'],
+    rowActions: function (row) {
+      return row.reinvestment_trade_id == null ? [{ label: 'Reinvest', href: '#/reinvest/' + row.id }] : [];
+    },
+    attachOwner: 'income_id',
+  },
+  {
+    slug: 'investment_expenses', title: 'Investment Expenses', group: 'Activity', api: '/investment_expenses',
+    desc: 'Deductible investment expenses — the cost of earning assessable investment income: interest on money borrowed to buy income-producing shares, management/adviser fees, account-keeping fees, and subscriptions. Enter the amount as the deductible figure (post-apportionment — the portion you have determined is income-producing); the tax summary nets these against gross assessable investment income per financial year. Brokerage is not an expense here (it forms the CGT cost base on the trade) and the LIC capital gain deduction is its own income field.',
+    keyFields: [int('id', 'ID', { auto: true })],
+    fields: [
+      dt('date_incurred', 'Date incurred', { required: true, hint: 'Sets the financial year the deduction falls in and the ATO FX month for a non-AUD amount.' }),
+      sel('expense_type', 'Expense type', ['LoanInterest', 'ManagementFee', 'AdviceFee', 'AccountKeepingFee', 'Subscription', 'Other'], { required: true }),
+      dec('amount', 'Deductible amount', { required: true, hint: 'Post-apportionment — the figure that goes on the return.' }),
+      dec('gross_amount', 'Gross amount', { optional: true, default: '', hint: 'Optional provenance: the pre-apportionment expense (informational only).' }),
+      dec('deductible_percentage', 'Deductible %', { optional: true, default: '', hint: 'Optional provenance: the percentage you determined was deductible (informational only).' }),
+      fk('currency', 'Currency', 'currencies', { required: true, encode: 'string', default: 'AUD' }),
+      txt('description', 'Description', { optional: true, default: '' }),
+      fk('listing_id', 'Listing', 'listings', { optional: true, default: '', hint: 'Optional — leave blank for a portfolio-wide expense.' }),
+      fk('holding_account_id', 'Holding account', 'holdingAccounts', { optional: true, default: '', hint: 'Optional — leave blank for a portfolio-wide expense.' }),
+    ],
+    columns: ['id', 'date_incurred', 'expense_type', 'amount', 'currency', 'description', 'listing_id', 'holding_account_id'],
+  },
+  {
+    slug: 'amma_statements', title: 'AMMA Statements', group: 'Activity', api: '/amma_statements',
+    desc: 'Annual AMIT Member Annual statements.',
+    keyFields: [int('id', 'ID', { auto: true })],
+    fields: [
+      fk('listing_id', 'Listing', 'listings', { required: true }),
+      dt('tax_year_end_date', 'Tax year end', { required: true }),
+      dec('units_held', 'Units held'),
+      dt('date_received', 'Date received', { required: true }),
+      dec('australian_interest', 'Australian interest'),
+      dec('australian_dividends_unfranked', 'Australian dividends (unfranked)'),
+      dec('franked_dividends', 'Franked dividends'),
+      dec('franking_credits', 'Franking credits'),
+      dec('net_rent', 'Net rent'),
+      dec('foreign_income', 'Foreign income'),
+      dec('foreign_tax_credits', 'Foreign tax credits'),
+      dec('other_income', 'Other income'),
+      dec('cgt_discount_gains', 'CGT discount gains'),
+      dec('cgt_indexation_gains', 'CGT indexation gains'),
+      dec('cgt_other_gains', 'CGT other gains'),
+      dec('capital_losses_applied', 'Capital losses applied'),
+      dec('tax_deferred_amount', 'Tax-deferred amount'),
+      dec('tax_free_amount', 'Tax-free amount'),
+      dec('cost_base_adjustment', 'Cost base adjustment (per unit)'),
+      dec('tfn_withholding_tax', 'TFN withholding tax'),
+      fk('currency', 'Currency', 'currencies', { required: true, encode: 'string', default: 'AUD' }),
+      fk('holding_account_id', 'Holding account', 'holdingAccounts', { required: true, default: '1', hint: 'The registry issues one statement per holder account.' }),
+    ],
+    columns: ['id', 'listing_id', 'tax_year_end_date', 'units_held', 'cost_base_adjustment', 'currency', 'holding_account_id'],
+    attachOwner: 'amma_statement_id',
+  },
+  {
+    slug: 'ess_statements', title: 'ESS Statements', group: 'Activity', api: '/ess_statements',
+    desc: 'Employee share scheme statements: the assessable discount on ESS interests (declared at Item 12 in the year of the taxing point), split by scheme type. The taxed-upfront-eligible discount is reduced by up to $1,000 per year in the tax summary (the ≤$180,000 income test is your responsibility). Use the row’s Vest action to create the cost-base-reset Buy for the vested shares.',
+    keyFields: [int('id', 'ID', { auto: true })],
+    fields: [
+      fk('listing_id', 'Listing', 'listings', { required: true }),
+      fk('holding_account_id', 'Holding account', 'holdingAccounts', { required: true, default: '1', hint: 'The account the ESS interests vest into.' }),
+      dt('taxing_point_date', 'Taxing point date', { required: true, hint: 'The deferred taxing point (or acquisition date for a taxed-upfront scheme): sets the assessable year and the vest Buy’s acquisition date.' }),
+      dec('quantity', 'Quantity vested', { default: '0', hint: 'Shares that vest — drives the cost-base-reset Buy.' }),
+      dec('market_value_per_share', 'Market value per share', { default: '0', hint: 'At the taxing point; the vest Buy’s price (the reset cost base).' }),
+      dec('taxed_upfront_eligible', 'Taxed-upfront eligible discount (D)', { hint: 'Discount from taxed-upfront schemes eligible for the $1,000 reduction.' }),
+      dec('taxed_upfront_not_eligible', 'Taxed-upfront not-eligible discount (E)'),
+      dec('deferral_discount', 'Deferral-scheme discount (F)', { hint: 'The RSU case.' }),
+      dec('pre_2009_cessation_discount', 'Pre-2009 cessation discount (G)'),
+      dec('foreign_source_discount', 'Foreign-source discount (A)', { hint: 'The foreign-sourced portion of the above discounts (already included in them); for the foreign income tax offset.' }),
+      dec('tfn_withholding', 'TFN amounts withheld (C)'),
+      fk('currency', 'Currency', 'currencies', { required: true, encode: 'string', default: 'AUD' }),
+    ],
+    columns: ['id', 'listing_id', 'holding_account_id', 'taxing_point_date', 'quantity', 'market_value_per_share', 'deferral_discount', 'taxed_upfront_eligible', 'currency'],
+    rowActions: function (row) { return [{ label: 'Vest', href: '#/ess-vest/' + row.id }]; },
+  },
+  {
+    slug: 'amit_adjustments', title: 'AMIT Adjustments', group: 'Activity', api: '/amit_adjustments',
+    desc: 'Links a purchase parcel (Buy/DRP trade) to an AMMA statement.',
+    keyFields: [int('id', 'ID', { auto: true })],
+    fields: [
+      fk('amma_statement_id', 'AMMA statement', 'amma', { required: true }),
+      fk('trade_id', 'Trade (Buy/DRP)', 'buyParcels', { required: true }),
+      dec('quantity', 'Quantity', { required: true, default: '' }),
+    ],
+    columns: ['id', 'amma_statement_id', 'trade_id', 'quantity'],
+  },
+  {
+    slug: 'parcel_allocations', title: 'Parcel Allocations', group: 'Activity', api: '/parcel_allocations', readonly: true,
+    desc: 'Sell→purchase parcel links (read-only; managed via Sells).',
+    columns: ['id', 'sale_trade_id', 'purchase_trade_id', 'quantity_allocated'],
+  },
+  {
+    slug: 'drp_enrolments', title: 'DRP Enrolments', group: 'Activity', api: '/drp_enrolments',
+    desc: 'Dated DRP enrolment periods per (listing, holding account) — the same listing may be enrolled in one account and not another (blank unenrolment date = currently enrolled). Periods within an account must not overlap; unenrolling pays out the trailing carried residual.',
+    keyFields: [int('id', 'ID', { auto: true })],
+    fields: [
+      fk('listing_id', 'Listing', 'listings', { required: true }),
+      fk('holding_account_id', 'Holding account', 'holdingAccounts', { required: true, default: '1' }),
+      dt('enrolment_date', 'Enrolment date', { required: true }),
+      dt('unenrolment_date', 'Unenrolment date', { optional: true, hint: 'Leave blank while enrolled. Distributions with an ex date on or after this no longer reinvest.' }),
+      sel('residual_handling', 'Residual handling', ['CarryForward', 'PayOut'], { required: true }),
+    ],
+    columns: ['id', 'listing_id', 'holding_account_id', 'enrolment_date', 'unenrolment_date', 'residual_handling'],
+  },
+  {
+    slug: 'corporate_actions', title: 'Corporate Actions', group: 'Activity', api: '/corporate_actions',
+    desc: 'Capital events against a listing: return of capital, share splits/consolidations, bonus issues, rights issues, off-market buy-backs, scrip-for-scrip takeovers, demergers, and worthless/delisted shares. The form shows only the chosen action type’s fields; rights issues, buy-backs, scrip-for-scrip takeovers, demergers, and worthless shares are executed after recording via the row’s Exercise / Participate / Exchange / Demerge / Recognise action.',
+    keyFields: [int('id', 'ID', { auto: true })],
+    fields: [
+      sel('action_type', 'Action type', ['ReturnOfCapital', 'ShareSplit', 'BonusIssue', 'RightsIssue', 'BuyBack', 'ScripForScrip', 'Demerger', 'WorthlessShares'], { required: true }),
+      fk('listing_id', 'Listing', 'listings', { required: true }),
+      dt('date', 'Date', { required: true }),
+      dec('amount_per_unit', 'Amount per unit', { optional: true, default: '' }),
+      fk('currency', 'Currency', 'currencies', { optional: true, encode: 'string', default: '', hint: 'Currency of the per-unit amount(s).' }),
+      dec('split_new_units', 'Split: new units', { optional: true, default: '' }),
+      dec('split_old_units', 'Split: old units', { optional: true, default: '' }),
+      dec('bonus_units', 'Bonus: units issued', { optional: true, default: '' }),
+      dec('bonus_held_units', 'Bonus: per units held', { optional: true, default: '' }),
+      dec('rights_units', 'Rights: new units', { optional: true, default: '' }),
+      dec('rights_held_units', 'Rights: per units held', { optional: true, default: '' }),
+      dec('exercise_price', 'Rights: exercise price per unit', { optional: true, default: '' }),
+      dec('buyback_price', 'Buy-back: price per unit', { optional: true, default: '' }),
+      dec('buyback_dividend', 'Buy-back: dividend per unit', { optional: true, default: '', hint: '0 (or blank) when the price has no dividend component.' }),
+      dec('buyback_franking_credit', 'Buy-back: franking credit per unit', { optional: true, default: '', hint: 'Needs a dividend.' }),
+      dec('buyback_market_value', 'Buy-back: market value per unit', { optional: true, default: '', hint: 'Had the buy-back not been proposed. Blank if the price is at or above it.' }),
+      fk('scrip_listing_id', 'Scrip: replacement listing', 'listings', { optional: true, default: '', hint: 'Must differ from the listing being taken over.' }),
+      dec('scrip_new_units', 'Scrip: new units', { optional: true, default: '' }),
+      dec('scrip_old_units', 'Scrip: per old units', { optional: true, default: '' }),
+      fk('demerger_listing_id', 'Demerger: demerged listing', 'listings', { optional: true, default: '', hint: 'Must differ from the head listing.' }),
+      dec('demerger_new_units', 'Demerger: new units', { optional: true, default: '' }),
+      dec('demerger_held_units', 'Demerger: per units held', { optional: true, default: '' }),
+      dec('demerger_cost_base_pct', 'Demerger: cost base % to demerged entity', { optional: true, default: '', hint: 'The head-entity-advised percentage (0–100 exclusive), e.g. 5.063.' }),
+      sel('worthless_event', 'Worthless: CGT event', ['G3Declaration', 'C2Cancellation'], { optional: true, default: '', hint: 'G3 = liquidator/administrator declaration; C2 = deregistration/cancellation.' }),
+    ],
+    // The form renders only the selected action_type's field group (plus the
+    // common fields above that appear in no group); the unchosen groups'
+    // fields submit as null, exactly as their blank inputs used to. The
+    // matching typeDescs entry scopes the form's description to the type.
+    typeField: 'action_type',
+    fieldGroups: {
+      ReturnOfCapital: ['amount_per_unit', 'currency'],
+      ShareSplit: ['split_new_units', 'split_old_units'],
+      BonusIssue: ['bonus_units', 'bonus_held_units'],
+      RightsIssue: ['rights_units', 'rights_held_units', 'exercise_price', 'currency'],
+      BuyBack: ['buyback_price', 'buyback_dividend', 'buyback_franking_credit', 'buyback_market_value', 'currency'],
+      ScripForScrip: ['scrip_listing_id', 'scrip_new_units', 'scrip_old_units'],
+      Demerger: ['demerger_listing_id', 'demerger_new_units', 'demerger_held_units', 'demerger_cost_base_pct'],
+      WorthlessShares: ['worthless_event'],
+    },
+    typeDescs: {
+      ReturnOfCapital: 'Return-of-capital payment (CGT event G1): the per-unit amount reduces the cost base of parcels held on the payment date; any excess over a parcel’s cost base is a capital gain in the Net Capital Gain report.',
+      ShareSplit: 'Share split/consolidation (TD 2000/10): on the conversion date every “old units” become “new units” (2-for-1 split: new 2, old 1; 1-for-10 consolidation: new 1, old 10) — no CGT event, the parcels keep their total cost base and original acquisition date.',
+      BonusIssue: 'Bonus issue (non-assessable): on the issue date every “held units” receive “bonus units” extra units (1-for-10 issue: bonus 1, held 10) — no CGT event, the cost base is apportioned over original + bonus shares and the acquisition date is preserved; bonus shares chosen in lieu of a dividend are a DRP trade, not entered here.',
+      RightsIssue: 'Rights issue: units held before the record date earn “rights units” per “held units” at the exercise price (1-for-4 issue: rights 1, held 4) — recording the issue changes nothing; use the row’s Exercise action to create the new Buy parcel (acquired at the exercise date, cost base = exercise payment + any amount paid for the rights).',
+      BuyBack: 'Off-market buy-back: record the per-unit buy-back price, the dividend component of that price and its franking credit (both 0 for a listed-company buy-back announced after 25 Oct 2022), and the market value had the buy-back not been proposed (blank if the price is at or above it); recording changes nothing — use the row’s Participate action to sell units into the buy-back, which creates the Sell at the capital proceeds (max(price, market value) − dividend) plus the dividend income row.',
+      ScripForScrip: 'Scrip-for-scrip takeover (all-scrip, with rollover): on the exchange date every “old units” of this listing become “new units” of the replacement listing (1-for-1 merger: new 1, old 1) — recording changes nothing; use the row’s Exchange action to substitute every open parcel: the capital gain is disregarded and each replacement parcel carries the consumed parcel’s remaining cost base and acquisition date (the combined period counts toward the 12-month discount).',
+      Demerger: 'Demerger (eligible, rollover chosen): on the demerger date every “held units” of this (head) listing receive “new units” of the demerged listing (BHP Steel’s 1-for-5: new 1, held 5), and the advised percentage of each parcel’s cost base moves to the new interests — recording changes nothing; use the row’s Demerge action to apportion every open parcel: any gain is disregarded, the head parcels keep the rest of the cost base and their acquisition dates, and the new parcels’ 12-month discount clock runs from the original acquisition.',
+      WorthlessShares: 'Worthless / delisted shares (CGT events G3 and C2): a capital loss on a failed company without a sale — choose G3Declaration (a liquidator/administrator declared the shares worthless) or C2Cancellation (the company was deregistered). Recording changes nothing; use the row’s Recognise action to close every open parcel at nil proceeds: each parcel’s remaining reduced cost base becomes a capital loss (never income, never discounted) that flows through the realised-gains and net-capital-gain reports.',
+    },
+    // Per-type label for the common date field (generic 'Date' until a type
+    // is chosen).
+    typeLabels: {
+      date: {
+        ReturnOfCapital: 'Payment date',
+        ShareSplit: 'Conversion date',
+        BonusIssue: 'Issue date',
+        RightsIssue: 'Record date',
+        BuyBack: 'Buy-back date',
+        ScripForScrip: 'Exchange date',
+        Demerger: 'Demerger date',
+        WorthlessShares: 'Event date',
+      },
+    },
+    columns: ['id', 'action_type', 'listing_id', 'date', 'amount_per_unit', 'currency', 'split_new_units', 'split_old_units', 'bonus_units', 'bonus_held_units', 'rights_units', 'rights_held_units', 'exercise_price', 'buyback_price', 'buyback_dividend', 'buyback_franking_credit', 'buyback_market_value', 'scrip_listing_id', 'scrip_new_units', 'scrip_old_units', 'demerger_listing_id', 'demerger_new_units', 'demerger_held_units', 'demerger_cost_base_pct', 'worthless_event'],
+    rowActions: function (row) {
+      if (row.action_type === 'RightsIssue') return [{ label: 'Exercise', href: '#/exercise/' + row.id }];
+      if (row.action_type === 'BuyBack') return [{ label: 'Participate', href: '#/participate/' + row.id }];
+      if (row.action_type === 'ScripForScrip') return [{ label: 'Exchange', href: '#/scrip-exchange/' + row.id }];
+      if (row.action_type === 'Demerger') return [{ label: 'Demerge', href: '#/demerge/' + row.id }];
+      if (row.action_type === 'WorthlessShares') return [{ label: 'Recognise', href: '#/recognise/' + row.id }];
+      return [];
+    },
+  },
+  {
+    slug: 'cgt_settings', title: 'CGT Settings', group: 'Activity', api: '/cgt_settings',
+    desc: 'Opening carried-forward capital loss (pre-system loss years), applied as the starting balance in the Net Capital Gain report.',
+    keyFields: [int('id', 'ID', { required: true, default: '1', hint: 'Singleton — always 1.' })],
+    fields: [dec('opening_capital_loss', 'Opening capital loss carried forward', { required: true })],
+    columns: ['id', 'opening_capital_loss'],
+  },
+  {
+    slug: 'jobs', title: 'Jobs', group: 'Maintenance', api: '/jobs', custom: 'jobs',
+    desc: 'Run scheduled maintenance jobs (backup, reference-data imports) on demand.',
+  },
+];
+
+export const REPORTS = [
+  { slug: 'overview', title: 'Portfolio Overview', api: '/portfolio/overview', method: 'POST', prices: true, desc: 'Open holdings per listing and holding account, with optional market value.' },
+  { slug: 'open-parcels', title: 'Open Parcels', api: '/portfolio/open-parcels', method: 'GET', desc: 'Every open parcel: acquisition date, original cost base, AMIT and return-of-capital reductions, remaining quantity and adjusted cost base (AUD).' },
+  { slug: 'unrealised-gains', title: 'Unrealised Gains', api: '/portfolio/unrealised-gains', method: 'POST', prices: true, asOfDate: true, desc: 'Per-holding (listing × holding account) unrealised gain/loss vs cost base.' },
+  { slug: 'realised-gains', title: 'Realised Gains', api: '/portfolio/realised-gains', method: 'GET', desc: 'Per-sale capital gain/loss split into CGT buckets.' },
+  { slug: 'performance', title: 'Performance', api: '/portfolio/performance', method: 'POST', prices: true, asOfDate: true, desc: 'Investment performance per holding and overall: total return, money-weighted return (% p.a.), trailing-12-month income yield.' },
+  { slug: 'net-capital-gain', title: 'Net Capital Gain', api: '/portfolio/net-capital-gain', method: 'GET', export: true, desc: 'Assessable net capital gain per financial year.' },
+  { slug: 'tax-summary', title: 'Tax Summary', api: '/portfolio/tax-summary', method: 'GET', export: true, desc: 'Income aggregated by Australian financial year.' },
+  { slug: 'exchange-mic-validation', title: 'Exchange MIC Validation', api: '/reports/exchange_mic_validation', method: 'GET', statusField: 'registry_status', desc: 'Curated exchanges checked against the ISO MIC registry.' },
+  { slug: 'settlement-holiday-coverage', title: 'Settlement Holiday Coverage', api: '/reports/settlement_holiday_coverage', method: 'GET', statusField: 'coverage_status', desc: 'Trades whose settlement window falls outside the seeded exchange-holiday calendars (settlement may have skipped weekends only).' },
+  { slug: 'snapshots', title: 'Snapshots', custom: 'snapshots', api: '/report_snapshots', desc: 'Stored daily results of the price-dependent reports (portfolio overview, unrealised gains, performance), valued at the stored closing prices, with a time-series graph. A back-dated fact marks affected snapshots stale; regenerate them here.' },
+];
+
+// ---- post-action configuration -----------------------------------------
+// Follow-up actions reached from an owning row (a distribution's Reinvest, a
+// corporate action's Exercise / Participate / Exchange / Demerge). Each is
+// one config entry — owner fetch, fields, optional parcel allocations, POST
+// endpoint, texts — rendered by the generic viewAction, mirroring how
+// ENTITIES drives viewEntityForm. The confirm-only actions (scrip exchange,
+// demerge) are the degenerate config with `fields: []`.
+export const ACTIONS = [
+  // DRP reinvestment: creates a DRP trade and links it to the distribution.
+  {
+    slug: 'reinvest', nav: 'income', ownerApi: '/income', cancel: '#/e/income', submit: 'Reinvest',
+    post: function (id) { return '/income/' + id + '/reinvest'; },
+    title: function (id, owner, listing) { return 'Reinvest ' + listing(owner.listing_id) + ' distribution #' + id; },
+    desc: function (income, listing) { return 'Creates a DRP trade for ' + listing(income.listing_id) + ' and links it back to this distribution. The holding must be DRP-enrolled.'; },
+    fields: function (income) {
+      return [
+        dec('reinvestment_price', 'Reinvestment price', { required: true, default: '' }),
+        dec('fx_rate', 'FX rate', { default: '1', hint: 'Optional; defaults to 1.' }),
+        dt('date', 'Trade date', { optional: true, hint: 'Optional; defaults to the distribution pay date (' + income.date_paid + ').' }),
+      ];
+    },
+    toast: function (trade, listing) { return trade ? 'Reinvested into ' + describeTrade(trade, listing) + ' (trade #' + trade.id + ').' : 'Reinvested.'; },
+  },
+  // Rights exercise: creates the new Buy parcel (acquired at the exercise
+  // date); the server caps cumulative exercised units at the entitlement.
+  {
+    slug: 'exercise', nav: 'corporate_actions', ownerApi: '/corporate_actions', cancel: '#/e/corporate_actions', submit: 'Exercise',
+    post: function (id) { return '/corporate_actions/' + id + '/exercise'; },
+    title: function (id, owner, listing) { return 'Exercise ' + listing(owner.listing_id) + ' rights issue #' + id; },
+    desc: function (a, listing) { return 'Creates a Buy trade for ' + listing(a.listing_id) + ' at the exercise price (' + a.exercise_price + ' ' + a.currency + ' per unit): ' + a.rights_units + ' new unit(s) per ' + a.rights_held_units + ' held at the record date.'; },
+    fields: function (a) {
+      return [
+        dt('date', 'Exercise date', { required: true, hint: 'The new parcel’s acquisition date; on or after the record date (' + a.date + ').' }),
+        dec('units', 'Units acquired', { required: true, default: '' }),
+        dec('rights_cost', 'Amount paid for the rights', { default: '0', hint: 'Total, in ' + a.currency + '. 0 for rights issued free.' }),
+        dec('fx_rate', 'FX rate', { default: '1', hint: 'Optional; defaults to 1.' }),
+        fk('holding_account_id', 'Holding account', 'holdingAccounts', { required: true, default: '1', hint: 'Where the exercised parcel lands.' }),
+      ];
+    },
+    toast: function (trade, listing) { return trade ? 'Exercised into ' + describeTrade(trade, listing) + ' (trade #' + trade.id + ').' : 'Exercised.'; },
+  },
+  // Buy-back participation: atomically creates the Sell at the capital
+  // proceeds per unit (max(price, market value) − dividend) with the chosen
+  // parcel allocations, plus the dividend-component income row if any.
+  {
+    slug: 'participate', nav: 'corporate_actions', ownerApi: '/corporate_actions', cancel: '#/e/corporate_actions', submit: 'Participate',
+    post: function (id) { return '/corporate_actions/' + id + '/participate'; },
+    title: function (id, owner, listing) { return 'Participate in ' + listing(owner.listing_id) + ' buy-back #' + id; },
+    desc: function (a, listing) { return 'Creates a Sell trade for ' + listing(a.listing_id) + ' at the capital proceeds per unit — max(price ' + a.buyback_price + ', market value ' + (a.buyback_market_value || a.buyback_price) + ') − dividend ' + a.buyback_dividend + ' ' + a.currency + ' — plus the dividend-component income row when there is one.'; },
+    fields: function (a) {
+      return [
+        dt('date', 'Participation date', { required: true, hint: 'The CGT event (acceptance) date; on or after the buy-back date (' + a.date + '). Also the dividend component’s pay date.' }),
+        dec('units', 'Units sold into the buy-back', { required: true, default: '' }),
+        dec('fx_rate', 'FX rate', { default: '1', hint: 'Optional; defaults to 1.' }),
+        fk('holding_account_id', 'Holding account', 'holdingAccounts', { required: true, default: '1', hint: 'The participating account: allocations may only consume its parcels.' }),
+      ];
+    },
+    allocations: { hint: 'Allocations must sum exactly to the units sold. Each parcel must be a Buy/DRP with enough remaining units.' },
+    toast: function (r, listing) {
+      const t = r && r.trade;
+      return 'Sold into the buy-back: ' + describeTrade(t, listing) + (t ? ' (trade #' + t.id + ')' : '')
+        + (r && r.income ? ', plus dividend income for ' + listing(r.income.listing_id) + ' (income #' + r.income.id + ')' : '') + '.';
+    },
+  },
+  // Scrip-for-scrip exchange (confirm-only): POST takes no parameters — the
+  // action's terms and the holdings at its date determine everything. It
+  // atomically closes every open parcel of the original listing (the
+  // rollover disregards the gain) and creates the replacement parcels
+  // carrying each consumed parcel's remaining cost base and acquisition date.
+  {
+    slug: 'scrip-exchange', nav: 'corporate_actions', ownerApi: '/corporate_actions', cancel: '#/e/corporate_actions', submit: 'Exchange',
+    post: function (id) { return '/corporate_actions/' + id + '/exchange'; },
+    title: function (id, owner, listing) { return 'Exchange ' + listing(owner.listing_id) + ' scrip-for-scrip takeover #' + id; },
+    desc: function (a, listing) { return 'Substitutes every open parcel of ' + listing(a.listing_id) + ' held at ' + a.date + ' with ' + a.scrip_new_units + ' unit(s) of ' + listing(a.scrip_listing_id) + ' per ' + a.scrip_old_units + ' held. The rollover disregards the capital gain; each replacement parcel carries its consumed parcel’s remaining cost base and acquisition date (the combined holding period counts toward the 12-month discount). Undo by deleting the closing Sell from the Sells view.'; },
+    fields: [],
+    toast: function (r, listing, a) {
+      const n = r && r.replacements ? r.replacements.length : 0;
+      return 'Exchanged ' + listing(a.listing_id) + ' into ' + n + ' parcel(s) of ' + listing(a.scrip_listing_id)
+        + ' (closing sell #' + (r && r.sell ? r.sell.id : '?') + ').';
+    },
+  },
+  // Demerger (confirm-only): POST takes no parameters. It atomically closes
+  // every open parcel of the head listing (the rollover disregards any gain)
+  // and recreates each as a head replacement parcel plus a demerged-entity
+  // parcel splitting the cost base by the advised percentage, both keeping
+  // the consumed parcel's acquisition date.
+  {
+    slug: 'demerge', nav: 'corporate_actions', ownerApi: '/corporate_actions', cancel: '#/e/corporate_actions', submit: 'Demerge',
+    post: function (id) { return '/corporate_actions/' + id + '/demerge'; },
+    title: function (id, owner, listing) { return 'Demerge ' + listing(owner.listing_id) + ' #' + id; },
+    desc: function (a, listing) { return 'Apportions every open parcel of head listing ' + listing(a.listing_id) + ' held at ' + a.date + ': ' + a.demerger_cost_base_pct + '% of each parcel’s cost base moves to ' + a.demerger_new_units + ' unit(s) of demerged listing ' + listing(a.demerger_listing_id) + ' per ' + a.demerger_held_units + ' held; the head parcels keep the rest. Any gain is disregarded and both sides keep the original acquisition date (the 12-month discount clock). Undo by deleting the closing Sell from the Sells view.'; },
+    fields: [],
+    toast: function (r, listing, a) {
+      const n = r && r.demerged_replacements ? r.demerged_replacements.length : 0;
+      return 'Demerged ' + listing(a.listing_id) + ' into ' + n + ' parcel(s) of ' + listing(a.demerger_listing_id)
+        + ' (closing sell #' + (r && r.sell ? r.sell.id : '?') + ').';
+    },
+  },
+  // Worthless-shares recognise (confirm-only): POST takes no parameters. It
+  // atomically closes every open parcel of the listing at nil proceeds,
+  // recognising each parcel's remaining reduced cost base as a capital loss
+  // (unlike the rollover closing Sells, this one reaches the gains reports).
+  {
+    slug: 'recognise', nav: 'corporate_actions', ownerApi: '/corporate_actions', cancel: '#/e/corporate_actions', submit: 'Recognise',
+    post: function (id) { return '/corporate_actions/' + id + '/recognise'; },
+    title: function (id, owner, listing) { return 'Recognise worthless ' + listing(owner.listing_id) + ' #' + id; },
+    desc: function (a, listing) { return 'Closes every open parcel of ' + listing(a.listing_id) + ' held at ' + a.date + ' through a single Sell at nil proceeds (' + a.worthless_event + '). Each parcel’s remaining reduced cost base becomes a capital loss — never income, never discounted — that flows through the realised-gains and net-capital-gain reports. Undo by deleting the closing Sell from the Sells view, which restores the holding.'; },
+    fields: [],
+    toast: function (r, listing, a) {
+      return 'Recognised worthless ' + listing(a.listing_id) + ' as a capital loss'
+        + ' (closing sell #' + (r && r.sell ? r.sell.id : '?') + ').';
+    },
+  },
+  // ESS vest (confirm-only): POST takes no parameters — the statement's
+  // quantity, per-share market value, and taxing-point date determine the
+  // cost-base-reset Buy. The discount (income side) is already on the
+  // statement; this creates the CGT parcel and links it back.
+  {
+    slug: 'ess-vest', nav: 'ess_statements', ownerApi: '/ess_statements', cancel: '#/e/ess_statements', submit: 'Vest',
+    post: function (id) { return '/ess_statements/' + id + '/vest'; },
+    title: function (id, owner, listing) { return 'Vest ' + listing(owner.listing_id) + ' ESS statement #' + id; },
+    desc: function (s, listing) { return 'Creates the cost-base-reset Buy for ' + s.quantity + ' share(s) of ' + listing(s.listing_id) + ' at the taxing-point market value (' + s.market_value_per_share + ' ' + s.currency + ' per share), acquired ' + s.taxing_point_date + '. Undo by deleting this ESS statement, which removes the vest Buy.'; },
+    fields: [],
+    toast: function (trade, listing) { return trade ? 'Vested into ' + describeTrade(trade, listing) + ' (trade #' + trade.id + ').' : 'Vested.'; },
+  },
+];

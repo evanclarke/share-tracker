@@ -1,12 +1,17 @@
 //! Serves the embedded single-page web frontend.
 //!
-//! The frontend is plain HTML/CSS/JS with no build step — the three assets are
+//! The frontend is plain HTML/CSS/JS with no build step — the assets are
 //! compiled into the binary with `include_str!` (the same approach as
 //! `schedule.cron`), so the server has no runtime filesystem dependency and the
-//! routes are testable with `oneshot`. The app is a hash-routed SPA that talks
-//! to the existing JSON API, so `/` is the only HTML entry point (deep links use
-//! `#/...` fragments, which never reach the server) and no SPA fallback route is
-//! needed.
+//! routes are testable with `oneshot`. The JS ships as native ES modules
+//! (`<script type="module">` in the shell): `app.js` is the entry point (the
+//! generic rendering engine and router) importing `config.js` (the
+//! ENTITIES/REPORTS/ACTIONS configuration), `forms.js` (field constructors and
+//! form wiring), and `util.js` (shared utilities) — each import specifier must
+//! have a matching `/static/...` route here. The app is a hash-routed SPA that
+//! talks to the existing JSON API, so `/` is the only HTML entry point (deep
+//! links use `#/...` fragments, which never reach the server) and no SPA
+//! fallback route is needed.
 use axum::{
     Router,
     http::header,
@@ -16,29 +21,41 @@ use axum::{
 use sqlx::SqlitePool;
 
 const INDEX_HTML: &str = include_str!("web/index.html");
-const APP_JS: &str = include_str!("web/app.js");
 const STYLE_CSS: &str = include_str!("web/style.css");
+
+/// The ES modules making up the app, as (route, source) pairs: the `app.js`
+/// entry point plus everything it (transitively) imports. A new module is
+/// served by adding a pair here.
+const JS_MODULES: [(&str, &str); 4] = [
+    ("/static/app.js", include_str!("web/app.js")),
+    ("/static/config.js", include_str!("web/config.js")),
+    ("/static/forms.js", include_str!("web/forms.js")),
+    ("/static/util.js", include_str!("web/util.js")),
+];
 
 /// Routes serving the frontend shell and its static assets. Returns a
 /// `Router<SqlitePool>` purely so it merges with the entity/report routers; the
 /// handlers are stateless.
 pub fn router() -> Router<SqlitePool> {
-    Router::new()
+    let mut router = Router::new()
         .route("/", get(index))
-        .route("/static/app.js", get(app_js))
-        .route("/static/style.css", get(style_css))
+        .route("/static/style.css", get(style_css));
+    for (path, source) in JS_MODULES {
+        router = router.route(path, get(move || async move { js_asset(source) }));
+    }
+    router
 }
 
 fn asset(content_type: &'static str, body: &'static str) -> Response {
     ([(header::CONTENT_TYPE, content_type)], body).into_response()
 }
 
-async fn index() -> Response {
-    asset("text/html; charset=utf-8", INDEX_HTML)
+fn js_asset(body: &'static str) -> Response {
+    asset("text/javascript; charset=utf-8", body)
 }
 
-async fn app_js() -> Response {
-    asset("text/javascript; charset=utf-8", APP_JS)
+async fn index() -> Response {
+    asset("text/html; charset=utf-8", INDEX_HTML)
 }
 
 async fn style_css() -> Response {
@@ -78,20 +95,45 @@ mod tests {
         );
         let body = body_string(resp).await;
         // The shell loads the SPA assets and provides the mount point + nav.
-        assert!(body.contains("/static/app.js"));
+        // The JS is native ES modules, so the entry script must load as one.
+        assert!(body.contains("<script type=\"module\" src=\"/static/app.js\">"));
         assert!(body.contains("/static/style.css"));
         assert!(body.contains("id=\"app\""));
         assert!(body.contains("id=\"nav\""));
     }
 
     #[tokio::test]
-    async fn app_js_is_served_as_javascript() {
-        let resp = get("/static/app.js").await;
-        assert_eq!(resp.status(), StatusCode::OK);
-        assert_eq!(
-            resp.headers().get(header::CONTENT_TYPE).unwrap(),
-            "text/javascript; charset=utf-8"
-        );
+    async fn es_modules_are_served_as_javascript() {
+        for (path, source) in JS_MODULES {
+            let resp = get(path).await;
+            assert_eq!(resp.status(), StatusCode::OK, "{path}");
+            assert_eq!(
+                resp.headers().get(header::CONTENT_TYPE).unwrap(),
+                "text/javascript; charset=utf-8",
+                "{path}"
+            );
+            assert_eq!(body_string(resp).await, source, "{path}");
+        }
+    }
+
+    // Every `./x.js` import specifier in the served modules must resolve to a
+    // served `/static/x.js` route — a module added to the graph but not to
+    // JS_MODULES would 404 at runtime and break the whole app.
+    #[tokio::test]
+    async fn every_module_import_is_served() {
+        for (path, source) in JS_MODULES {
+            for line in source.lines() {
+                let Some((_, spec)) = line.split_once(" from './") else {
+                    continue;
+                };
+                let module = spec.trim_end_matches(';').trim_end_matches('\'');
+                let route = format!("/static/{module}");
+                assert!(
+                    JS_MODULES.iter().any(|(p, _)| *p == route),
+                    "{path} imports {module}, but {route} is not served"
+                );
+            }
+        }
     }
 
     #[tokio::test]
@@ -104,11 +146,16 @@ mod tests {
         );
     }
 
-    // Each UI item maps to a view registered in the served app bundle. Without a
-    // browser harness these assert the view (and the API endpoint it drives) is
-    // present in the shipped JS — the honest, testable limit of an embedded SPA.
+    // Each UI item maps to a view registered in the served app bundle — the
+    // concatenation of every served ES module. Without a browser harness these
+    // assert the view (and the API endpoint it drives) is present in the
+    // shipped JS — the honest, testable limit of an embedded SPA.
     async fn app_js_body() -> String {
-        body_string(get("/static/app.js").await).await
+        let mut bundle = String::new();
+        for (path, _) in JS_MODULES {
+            bundle.push_str(&body_string(get(path).await).await);
+        }
+        bundle
     }
 
     #[tokio::test]
