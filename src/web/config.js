@@ -259,6 +259,13 @@ export const ENTITIES = [
     columns: ['id', 'sale_trade_id', 'purchase_trade_id', 'quantity_allocated'],
   },
   {
+    slug: 'rights_sales', title: 'Rights Sales', group: 'Activity', api: '/rights_sales', deleteOnly: true,
+    desc: 'Disposals of renounceable rights — sold on-market, lapsed, or compensated by a retail premium — recorded via a rights issue row’s Sell rights action (Corporate Actions). Each is a CGT event on the rights themselves, not the shares: the holding is untouched, free rights have a nil cost base (purchased rights carry their cost), and the gain/loss is anchored to the original parcels’ acquisition dates in the realised-gains and net-capital-gain reports. Rows are immutable — delete (freeing the entitlement) and re-enter to amend.',
+    keyFields: [int('id', 'ID', { auto: true })],
+    fields: [],
+    columns: ['id', 'rights_action_id', 'date', 'units', 'proceeds_per_right', 'rights_cost', 'fx_rate', 'holding_account_id'],
+  },
+  {
     slug: 'drp_enrolments', title: 'DRP Enrolments', group: 'Activity', api: '/drp_enrolments',
     desc: 'Dated DRP enrolment periods per (listing, holding account) — the same listing may be enrolled in one account and not another (blank unenrolment date = currently enrolled). Periods within an account must not overlap; unenrolling pays out the trailing carried residual.',
     keyFields: [int('id', 'ID', { auto: true })],
@@ -320,7 +327,7 @@ export const ENTITIES = [
       ReturnOfCapital: 'Return-of-capital payment (CGT event G1): the per-unit amount reduces the cost base of parcels held on the payment date; any excess over a parcel’s cost base is a capital gain in the Net Capital Gain report.',
       ShareSplit: 'Share split/consolidation (TD 2000/10): on the conversion date every “old units” become “new units” (2-for-1 split: new 2, old 1; 1-for-10 consolidation: new 1, old 10) — no CGT event, the parcels keep their total cost base and original acquisition date.',
       BonusIssue: 'Bonus issue (non-assessable): on the issue date every “held units” receive “bonus units” extra units (1-for-10 issue: bonus 1, held 10) — no CGT event, the cost base is apportioned over original + bonus shares and the acquisition date is preserved; bonus shares chosen in lieu of a dividend are a DRP trade, not entered here.',
-      RightsIssue: 'Rights issue: units held before the record date earn “rights units” per “held units” at the exercise price (1-for-4 issue: rights 1, held 4) — recording the issue changes nothing; use the row’s Exercise action to create the new Buy parcel (acquired at the exercise date, cost base = exercise payment + any amount paid for the rights).',
+      RightsIssue: 'Rights issue: units held before the record date earn “rights units” per “held units” at the exercise price (1-for-4 issue: rights 1, held 4) — recording the issue changes nothing; use the row’s Exercise action to create the new Buy parcel (acquired at the exercise date, cost base = exercise payment + any amount paid for the rights), or its Sell rights action to dispose of rights instead — sold, lapsed, or paid out as a retail premium (a CGT event on the rights themselves, anchored to the original parcels’ acquisition dates).',
       BuyBack: 'Off-market buy-back: record the per-unit buy-back price, the dividend component of that price and its franking credit (both 0 for a listed-company buy-back announced after 25 Oct 2022), and the market value had the buy-back not been proposed (blank if the price is at or above it); recording changes nothing — use the row’s Participate action to sell units into the buy-back, which creates the Sell at the capital proceeds (max(price, market value) − dividend) plus the dividend income row.',
       ScripForScrip: 'Scrip-for-scrip takeover (all-scrip, with rollover): on the exchange date every “old units” of this listing become “new units” of the replacement listing (1-for-1 merger: new 1, old 1) — recording changes nothing; use the row’s Exchange action to substitute every open parcel: the capital gain is disregarded and each replacement parcel carries the consumed parcel’s remaining cost base and acquisition date (the combined period counts toward the 12-month discount).',
       Demerger: 'Demerger (eligible, rollover chosen): on the demerger date every “held units” of this (head) listing receive “new units” of the demerged listing (BHP Steel’s 1-for-5: new 1, held 5), and the advised percentage of each parcel’s cost base moves to the new interests — recording changes nothing; use the row’s Demerge action to apportion every open parcel: any gain is disregarded, the head parcels keep the rest of the cost base and their acquisition dates, and the new parcels’ 12-month discount clock runs from the original acquisition.',
@@ -342,7 +349,12 @@ export const ENTITIES = [
     },
     columns: ['id', 'action_type', 'listing_id', 'date', 'amount_per_unit', 'currency', 'split_new_units', 'split_old_units', 'bonus_units', 'bonus_held_units', 'rights_units', 'rights_held_units', 'exercise_price', 'buyback_price', 'buyback_dividend', 'buyback_franking_credit', 'buyback_market_value', 'scrip_listing_id', 'scrip_new_units', 'scrip_old_units', 'demerger_listing_id', 'demerger_new_units', 'demerger_held_units', 'demerger_cost_base_pct', 'worthless_event'],
     rowActions: function (row) {
-      if (row.action_type === 'RightsIssue') return [{ label: 'Exercise', href: '#/exercise/' + row.id }];
+      if (row.action_type === 'RightsIssue') {
+        return [
+          { label: 'Exercise', href: '#/exercise/' + row.id },
+          { label: 'Sell rights', href: '#/sell-rights/' + row.id },
+        ];
+      }
       if (row.action_type === 'BuyBack') return [{ label: 'Participate', href: '#/participate/' + row.id }];
       if (row.action_type === 'ScripForScrip') return [{ label: 'Exchange', href: '#/scrip-exchange/' + row.id }];
       if (row.action_type === 'Demerger') return [{ label: 'Demerge', href: '#/demerge/' + row.id }];
@@ -367,7 +379,7 @@ export const REPORTS = [
   { slug: 'overview', title: 'Portfolio Overview', api: '/portfolio/overview', method: 'POST', prices: true, desc: 'Open holdings per listing and holding account, with optional market value.' },
   { slug: 'open-parcels', title: 'Open Parcels', api: '/portfolio/open-parcels', method: 'GET', desc: 'Every open parcel: acquisition date, original cost base, AMIT and return-of-capital reductions, remaining quantity and adjusted cost base (AUD).' },
   { slug: 'unrealised-gains', title: 'Unrealised Gains', api: '/portfolio/unrealised-gains', method: 'POST', prices: true, asOfDate: true, desc: 'Per-holding (listing × holding account) unrealised gain/loss vs cost base.' },
-  { slug: 'realised-gains', title: 'Realised Gains', api: '/portfolio/realised-gains', method: 'GET', desc: 'Per-sale capital gain/loss split into CGT buckets.' },
+  { slug: 'realised-gains', title: 'Realised Gains', api: '/portfolio/realised-gains', method: 'GET', desc: 'Per-disposal capital gain/loss split into CGT buckets — ordinary sales plus rights sales/lapses (source column).' },
   { slug: 'performance', title: 'Performance', api: '/portfolio/performance', method: 'POST', prices: true, asOfDate: true, desc: 'Investment performance per holding and overall: total return, money-weighted return (% p.a.), trailing-12-month income yield.' },
   { slug: 'net-capital-gain', title: 'Net Capital Gain', api: '/portfolio/net-capital-gain', method: 'GET', export: true, desc: 'Assessable net capital gain per financial year.' },
   { slug: 'tax-summary', title: 'Tax Summary', api: '/portfolio/tax-summary', method: 'GET', export: true, desc: 'Income aggregated by Australian financial year.' },
@@ -417,6 +429,33 @@ export const ACTIONS = [
       ];
     },
     toast: function (trade, listing) { return trade ? 'Exercised into ' + describeTrade(trade, listing) + ' (trade #' + trade.id + ').' : 'Exercised.'; },
+  },
+  // Rights sale/lapse: disposes of the rights themselves — the share
+  // holding is untouched — anchored to the original parcels whose
+  // record-date units earned the rights (their acquisition dates drive the
+  // 12-month CGT discount). The server shares the entitlement cap with the
+  // Exercise action and caps each parcel's anchoring at what it earned.
+  {
+    slug: 'sell-rights', nav: 'corporate_actions', ownerApi: '/corporate_actions', cancel: '#/e/corporate_actions', submit: 'Sell rights',
+    post: function (id) { return '/corporate_actions/' + id + '/sell_rights'; },
+    title: function (id, owner, listing) { return 'Sell ' + listing(owner.listing_id) + ' rights from issue #' + id; },
+    desc: function (a, listing) { return 'Records a disposal of the rights themselves — sold on-market, lapsed, or compensated by a retail premium under this renounceable offer (enter the premium as the proceeds per right). The ' + listing(a.listing_id) + ' holding is untouched. Free rights have a nil cost base and take each anchoring parcel’s acquisition date for the 12-month discount; rights you paid for carry that cost instead, so nil proceeds (a lapse) realise a capital loss. Together with exercises, sales may not exceed the record-date entitlement. Undo by deleting the row under Rights Sales.'; },
+    fields: function (a) {
+      return [
+        dt('date', 'Sale / lapse date', { required: true, hint: 'On or after the record date (' + a.date + ').' }),
+        dec('units', 'Rights sold or lapsed', { required: true, default: '' }),
+        dec('proceeds_per_right', 'Proceeds per right', { default: '0', hint: 'In ' + a.currency + '. 0 for a lapse; a retail premium is entered per right.' }),
+        dec('rights_cost', 'Amount paid for the rights', { default: '0', hint: 'Total, in ' + a.currency + '. 0 for rights issued free.' }),
+        dec('fx_rate', 'FX rate', { default: '1', hint: 'Optional; defaults to 1.' }),
+        fk('holding_account_id', 'Holding account', 'holdingAccounts', { required: true, default: '1', hint: 'The account the disposal is reported under.' }),
+      ];
+    },
+    allocations: {
+      heading: 'Anchoring parcels', parcelLabel: 'Original parcel', qtyLabel: 'Rights anchored',
+      addLabel: '+ Add parcel', qtyField: 'units',
+      hint: 'Which original parcels earned the sold rights — each anchors its rights to that parcel’s acquisition date for the CGT discount; no parcel units are consumed. Must sum exactly to the rights sold; each parcel is capped at the entitlement its record-date units earned.',
+    },
+    toast: function (sale) { return sale ? 'Recorded rights sale #' + sale.id + ' (' + sale.units + ' right(s)).' : 'Recorded rights sale.'; },
   },
   // Buy-back participation: atomically creates the Sell at the capital
   // proceeds per unit (max(price, market value) − dividend) with the chosen

@@ -1,8 +1,9 @@
 //! Net capital gain / overall CGT position per Australian tax year.
 //!
-//! Combines the realised parcel gains (per the realised-gains report) with the
-//! CGT components attributed on AMMA statements, then computes the assessable net
-//! capital gain the ATO way:
+//! Combines the realised disposal gains (per the realised-gains report —
+//! ordinary Sells plus rights sales/lapses, whose gains and losses enter the
+//! same buckets) with the CGT components attributed on AMMA statements, then
+//! computes the assessable net capital gain the ATO way:
 //!
 //!  1. Total the year's gross capital gains, split into:
 //!     - discount-eligible gains (realised parcels held > 12 months, plus AMMA
@@ -1134,6 +1135,67 @@ mod tests {
         assert_eq!(r[0].tax_year, 2024);
         assert_eq!(r[0].discount_eligible_gains, Decimal::from(700));
         assert_eq!(r[0].net_capital_gain, Decimal::from(350));
+    }
+
+    /// A rights sale's gain enters the year's buckets through the realised
+    /// report: anchored to a >12-month parcel it is discount-eligible, so the
+    /// net capital gain halves it (docs/ato/rights-issues.md Example 39).
+    #[tokio::test]
+    async fn db_rights_sale_gain_enters_the_year_buckets() {
+        use crate::entities::{corporate_action, rights_sale};
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "RTS").await;
+        insert_trade(
+            &pool,
+            1,
+            trade::TradeType::Buy,
+            1,
+            NaiveDate::from_ymd_opt(2023, 1, 15).unwrap(),
+            Decimal::from(1000),
+            Decimal::from(2),
+        )
+        .await;
+        corporate_action::db_upsert(
+            &pool,
+            &corporate_action::CorporateAction {
+                id: 10,
+                listing_id: 1,
+                date: NaiveDate::from_ymd_opt(2024, 7, 1).unwrap(),
+                kind: corporate_action::ActionKind::RightsIssue {
+                    rights_units: Decimal::ONE,
+                    rights_held_units: Decimal::from(4),
+                    exercise_price: "1.80".parse().unwrap(),
+                    currency: "AUD".to_string(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+        // 250 rights sold at 20c in July 2024 → FY2025, $50 discount-eligible.
+        rights_sale::db_sell_rights(
+            &pool,
+            10,
+            &rights_sale::SellRightsBody {
+                date: NaiveDate::from_ymd_opt(2024, 7, 20).unwrap(),
+                units: Decimal::from(250),
+                proceeds_per_right: Some("0.20".parse().unwrap()),
+                rights_cost: None,
+                fx_rate: None,
+                holding_account_id: 1,
+                allocations: vec![rights_sale::AllocationInput {
+                    purchase_trade_id: 1,
+                    units: Decimal::from(250),
+                }],
+            },
+        )
+        .await
+        .unwrap();
+
+        let r = db_net_capital_gain(&pool).await.unwrap();
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].tax_year, 2025);
+        assert_eq!(r[0].discount_eligible_gains, Decimal::from(50));
+        assert_eq!(r[0].net_capital_gain, Decimal::from(25));
     }
 
     #[tokio::test]

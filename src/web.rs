@@ -571,6 +571,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rights_sales_ui_present() {
+        let js = app_js_body().await;
+        // The Rights Sales view lists the disposals recorded by the Sell
+        // rights action via GET /rights_sales. Rows are operation-created and
+        // immutable, so the entity is delete-only: Delete stays as the undo
+        // path (DELETE /rights_sales/:id frees the entitlement) but there is
+        // no New or Edit form.
+        assert!(js.contains("'/rights_sales'"));
+        assert!(js.contains("deleteOnly: true"));
+        assert!(js.contains("entity.deleteOnly"));
+    }
+
+    #[tokio::test]
     async fn portfolio_overview_ui_present() {
         let js = app_js_body().await;
         assert!(js.contains("/portfolio/overview"));
@@ -705,6 +718,12 @@ mod tests {
         assert!(js.contains("#/exercise/"));
         assert!(js.contains("/exercise"));
         assert!(js.contains("rights_cost"));
+        // ...and its Sell rights action drives the sell-rights endpoint, with
+        // the anchoring-parcel allocation editor posting `units` rows.
+        assert!(js.contains("#/sell-rights/"));
+        assert!(js.contains("/sell_rights"));
+        assert!(js.contains("proceeds_per_right"));
+        assert!(js.contains("qtyField: 'units'"));
         assert!(js.contains("BuyBack"));
         assert!(js.contains("buyback_price"));
         assert!(js.contains("buyback_dividend"));
@@ -754,6 +773,7 @@ mod tests {
             "'scrip-exchange'",
             "'demerge'",
             "'recognise'",
+            "'sell-rights'",
         ] {
             assert!(js.contains(slug), "missing action slug {slug}");
         }
@@ -765,6 +785,7 @@ mod tests {
             "/exchange'",
             "/demerge'",
             "/recognise'",
+            "/sell_rights'",
         ] {
             assert!(js.contains(endpoint), "missing action endpoint {endpoint}");
         }

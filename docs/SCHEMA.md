@@ -240,6 +240,23 @@ corporate_actions            Corporate actions per listing (company returns of c
 ├── demerger_cost_base_pct TEXT (decimal, nullable)  Demerger only: the percentage of each parcel's cost base apportioned to the new interests in the demerged entity (the head-entity-advised step 2 percentage, 0 < pct < 100); the head parcels keep the rest
 └── worthless_event   TEXT (nullable)  WorthlessShares only: which CGT event the loss is recognised under — G3Declaration (s 104-145, liquidator/administrator declaration) or C2Cancellation (s 104-25, deregistration); CHECK-enforced enum. Both close every open parcel at nil proceeds (the recognise operation); the discriminator records the legal basis
 
+rights_sales                 Disposals of renounceable rights — sold on-market, lapsed, or compensated by a retail premium (TR 2017/4) — recorded by POST /corporate_actions/:id/sell_rights against a RightsIssue action. A CGT event on the rights themselves: the share holding is untouched, and the realised-gains report surfaces each row as a source = RightsSale disposal
+├── id                 INTEGER PK
+├── rights_action_id   INTEGER FK→corporate_actions.id   The RightsIssue disposed against; the action is frozen (no edit/delete) while rows reference it. Cumulative units — together with exercise trades — are capped at the record-date entitlement (write-time check shared with the exercise operation)
+├── date               TEXT   Sale (or lapse/expiry) date; never before the issue's record date (write-time check)
+├── units              TEXT (decimal)  Rights disposed of, in record-date (as-issued) rights units (positive)
+├── proceeds_per_right TEXT (decimal)  Per-right capital proceeds in the issue's currency (the action's currency column — no column here; non-negative, default 0 = a lapse). A renounceable-offer retail premium is entered here
+├── rights_cost        TEXT (decimal)  Total paid to acquire the disposed rights (the purchased-rights case; non-negative, default 0 = rights issued free, nil cost base) — apportioned over the allocations by the realised-gains report, so nil proceeds on a paid right realises a capital loss
+├── fx_rate            TEXT (decimal)  Manual foreign-per-AUD fallback rate (reports prefer the ATO/RBA rate for the sale month)
+└── holding_account_id INTEGER FK→holding_accounts.id  The account the disposal is reported under (defaults to the seeded default account)
+                       Rows are immutable (no PUT) — delete and re-enter to amend; deleting frees the entitlement
+
+rights_sale_allocations      Which original parcels the sold rights are anchored to: free rights are deemed acquired with the original shares, so each allocation's 12-month discount clock runs from its parcel's (possibly deemed) acquisition date. Unlike parcel_allocations these consume no parcel units — the shares are still held
+├── id                INTEGER PK
+├── rights_sale_id    INTEGER FK→rights_sales.id (ON DELETE CASCADE)
+├── purchase_trade_id INTEGER FK→trades.id   A Buy/DRP of the issue's listing dated before the record date; the parcel is frozen against PUT/DELETE /trades while referenced. Cumulative rights anchored to a parcel (across the action's sales) are capped at the entitlement its record-date units earned
+└── units             TEXT (decimal)  Rights anchored to this parcel (positive); a sale's allocations sum exactly to its units
+
 attachments                  Supporting documents for an activity; bytes stored in the DB (captured by the weekly backup)
 ├── id                INTEGER PK
 ├── trade_id          INTEGER FK→trades.id (nullable, ON DELETE CASCADE)            Owner (exactly one of the three is set)
@@ -302,6 +319,8 @@ exchanges ──< listings ──< trades >────────────�
                        inheritances ──< trades (inheritance_id; the inherited-parcel Buy)
                        trades (DRP) ──< income (reinvestment_trade_id)
                        corporate_actions (RightsIssue) ──< trades (rights_action_id)
+                       corporate_actions (RightsIssue) ──< rights_sales ──< rights_sale_allocations >── trades (purchase_trade_id; date-anchoring only — consumes no units)
+                       holding_accounts ──< rights_sales
                        corporate_actions (BuyBack) ──< trades (buyback_action_id)
                        corporate_actions (ScripForScrip) ──< trades (scrip_action_id)
                        corporate_actions (ScripForScrip) >── listings (scrip_listing_id)
@@ -319,7 +338,7 @@ currencies ──< exchanges, listings, trades (currency + brokerage_currency), 
 
 Each `attachments` row belongs to exactly one activity via one of three nullable foreign keys (`trade_id` / `income_id` / `amma_statement_id`), with a `CHECK` enforcing that exactly one is set — a real foreign key keeps referential integrity to the owning row, and `ON DELETE CASCADE` removes an activity's attachments when it is deleted. File contents live in the `content` BLOB so the weekly DB backup captures the documents with no separate file store.
 
-`report_snapshots` has no foreign keys of its own (`report` is an in-code enum, the rows are a JSON payload), but every dated fact table writes to it through **staleness triggers** (migration 0019): inserting, updating, or deleting a row in `trades`, `parcel_allocations` (dated by its sale trade), `income` (by `date_paid`), `amma_statements` / `amit_adjustments` (by the statement's `tax_year_end_date`), or `corporate_actions` sets `stale = 1` on every snapshot dated on or after the fact — an update from the earlier of the old and new dates — atomically with the fact write, so no write path (entity CRUD, Sells, transfers, corporate-action operations, DRP reinvestment) can bypass the invalidation. Revising a stored ok closing price (or erroring it out) likewise stales snapshots from its date, since they were valued at it.
+`report_snapshots` has no foreign keys of its own (`report` is an in-code enum, the rows are a JSON payload), but every dated fact table writes to it through **staleness triggers** (0001_schema.sql): inserting, updating, or deleting a row in `trades`, `parcel_allocations` (dated by its sale trade), `income` (by `date_paid`), `amma_statements` / `amit_adjustments` (by the statement's `tax_year_end_date`), or `corporate_actions` sets `stale = 1` on every snapshot dated on or after the fact — an update from the earlier of the old and new dates — atomically with the fact write, so no write path (entity CRUD, Sells, transfers, corporate-action operations, DRP reinvestment) can bypass the invalidation. Revising a stored ok closing price (or erroring it out) likewise stales snapshots from its date, since they were valued at it. `rights_sales` / `rights_sale_allocations` are the deliberate exception: no snapshotted report reads them (a rights sale changes no holding quantity and no parcel cost base — its effect is confined to the live-computed CGT reports), so they carry no trigger set.
 
 `rba_fx_rates` is standalone reference data (no foreign keys); it is looked up by `(currency, month)`. `job_runs` is likewise standalone: it is keyed by the in-code job name (not a foreign key), and each scheduled or manual run upserts the job's row so only its last run is kept. `cgt_settings` is also standalone: a singleton row (`CHECK (id = 1)`) holding the entered opening carried-forward capital loss consumed by the [net capital gain report](API.md#net-capital-gain).
 

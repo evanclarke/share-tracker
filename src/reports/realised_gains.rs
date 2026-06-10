@@ -10,8 +10,23 @@ use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool, sqlite::SqliteRow};
 use std::collections::HashMap;
 
+/// Where a realised disposal came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum DisposalSource {
+    /// An ordinary Sell trade (incl. buy-back and worthless-shares closing
+    /// Sells) — `sale_trade_id` is the trade id.
+    Sell,
+    /// A rights sale/lapse (`entities::rights_sale` — a disposal of the
+    /// rights themselves; the share holding is untouched) — `sale_trade_id`
+    /// is the `rights_sales` row id.
+    RightsSale,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RealisedGainLoss {
+    pub source: DisposalSource,
+    /// The disposal's row id in its `source`'s table (`trades` for `Sell`,
+    /// `rights_sales` for `RightsSale`).
     pub sale_trade_id: i64,
     pub listing_id: i64,
     /// The holding account the Sell happened in (the same taxpayer either
@@ -98,6 +113,60 @@ impl sqlx::FromRow<'_, SqliteRow> for Allocation {
     }
 }
 
+/// A rights sale/lapse as the report reads it (`rights_sales` joined to its
+/// RightsIssue action for the listing and currency): a disposal of the rights
+/// themselves (see `entities::rights_sale`). Proceeds are
+/// `units × proceeds_per_right`; the cost base is `rights_cost` (nil for
+/// rights issued free), apportioned over the anchoring allocations. Both
+/// convert to AUD at the sale month's ATO rate (manual `fx_rate` fallback) —
+/// the rights' own purchase date isn't tracked, so the cost leg uses the sale
+/// date too.
+struct RightsSaleInfo {
+    id: i64,
+    listing_id: i64,
+    holding_account_id: i64,
+    date: NaiveDate,
+    units: Decimal,
+    proceeds_per_right: Decimal,
+    rights_cost: Decimal,
+    currency: String,
+    fx_rate: Decimal,
+}
+
+impl sqlx::FromRow<'_, SqliteRow> for RightsSaleInfo {
+    fn from_row(row: &SqliteRow) -> Result<Self, sqlx::Error> {
+        Ok(RightsSaleInfo {
+            id: row.try_get("id")?,
+            listing_id: row.try_get("listing_id")?,
+            holding_account_id: row.try_get("holding_account_id")?,
+            date: row.try_get("date")?,
+            units: row_dec(row, "units")?,
+            proceeds_per_right: row_dec(row, "proceeds_per_right")?,
+            rights_cost: row_dec(row, "rights_cost")?,
+            currency: row.try_get("currency")?,
+            fx_rate: row_dec(row, "fx_rate")?,
+        })
+    }
+}
+
+/// One rights-sale anchoring row: `units` of the sale's rights were earned by
+/// (and take the acquisition date of) the purchase parcel. Consumes nothing.
+struct RightsAllocation {
+    rights_sale_id: i64,
+    purchase_trade_id: i64,
+    units: Decimal,
+}
+
+impl sqlx::FromRow<'_, SqliteRow> for RightsAllocation {
+    fn from_row(row: &SqliteRow) -> Result<Self, sqlx::Error> {
+        Ok(RightsAllocation {
+            rights_sale_id: row.try_get("rights_sale_id")?,
+            purchase_trade_id: row.try_get("purchase_trade_id")?,
+            units: row_dec(row, "units")?,
+        })
+    }
+}
+
 /// Everything the realised-gains computation consumes, read in one go by
 /// [`load_report_data`] so [`compute_realised_gains`] is a pure function over
 /// in-memory data.
@@ -106,6 +175,10 @@ struct ReportData {
     sells: HashMap<i64, SellInfo>,
     buys: HashMap<i64, ParcelRow>,
     allocations: Vec<Allocation>,
+    /// Rights sales/lapses (disposals of the rights themselves) and their
+    /// parcel anchorings, surfaced as `source = RightsSale` rows.
+    rights_sales: Vec<RightsSaleInfo>,
+    rights_allocations: Vec<RightsAllocation>,
     /// Cumulative AMIT cost-base reduction per purchase parcel.
     cba_reduction: HashMap<i64, Decimal>,
     /// Return-of-capital payments (CGT event G1) per listing.
@@ -140,10 +213,26 @@ async fn load_report_data(pool: &SqlitePool) -> Result<ReportData, sqlx::Error> 
     )
     .fetch_all(&mut *tx)
     .await?;
-    if sells.is_empty() {
+
+    let rights_sales: Vec<RightsSaleInfo> = sqlx::query_as(
+        "SELECT rs.id, ca.listing_id, rs.holding_account_id, rs.date, rs.units, \
+                rs.proceeds_per_right, rs.rights_cost, ca.currency, rs.fx_rate \
+         FROM rights_sales rs JOIN corporate_actions ca ON ca.id = rs.rights_action_id",
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+
+    if sells.is_empty() && rights_sales.is_empty() {
         // Nothing to report; the dropped transaction was read-only.
         return Ok(ReportData::default());
     }
+
+    let rights_allocations: Vec<RightsAllocation> = sqlx::query_as(
+        "SELECT rights_sale_id, purchase_trade_id, units FROM rights_sale_allocations \
+         ORDER BY id",
+    )
+    .fetch_all(&mut *tx)
+    .await?;
 
     let buys: Vec<ParcelRow> = sqlx::query_as(&format!(
         "SELECT {} FROM trades WHERE trade_type IN ('Buy', 'DRP')",
@@ -170,6 +259,8 @@ async fn load_report_data(pool: &SqlitePool) -> Result<ReportData, sqlx::Error> 
         sells: sells.into_iter().map(|s| (s.id, s)).collect(),
         buys: buys.into_iter().map(|b| (b.id, b)).collect(),
         allocations,
+        rights_sales,
+        rights_allocations,
         cba_reduction,
         roc_events,
         split_events,
@@ -304,6 +395,7 @@ fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sq
                 .unwrap_or(Decimal::ZERO);
             let loss = sale_loss.get(&sale_id).copied().unwrap_or(Decimal::ZERO);
             Some(RealisedGainLoss {
+                source: DisposalSource::Sell,
                 sale_trade_id: sale_id,
                 listing_id: sale.listing_id,
                 holding_account_id: sale.holding_account_id,
@@ -318,9 +410,83 @@ fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sq
         })
         .collect();
 
+    // Rights sales/lapses: one row per sale, each anchoring allocation
+    // classified against its parcel's (possibly deemed) acquisition date —
+    // free rights are taken to have been acquired with the original shares
+    // (docs/ato/rights-issues.md Example 39, docs/ato/retail-premiums.md), so
+    // the 12-month discount clock runs from the parcel, unlike an exercise.
+    for sale in &data.rights_sales {
+        let mut proceeds = Decimal::ZERO;
+        let mut cost_base = Decimal::ZERO;
+        let mut discount_gain = Decimal::ZERO;
+        let mut non_discount_gain = Decimal::ZERO;
+        let mut loss = Decimal::ZERO;
+        // rights_cost apportioned by units as a cumulative difference, so the
+        // per-allocation shares sum exactly to the total (any division
+        // remainder lands on the last allocation).
+        let mut units_so_far = Decimal::ZERO;
+        let mut cost_so_far = Decimal::ZERO;
+        for alloc in data
+            .rights_allocations
+            .iter()
+            .filter(|a| a.rights_sale_id == sale.id)
+        {
+            let Some(buy) = data.buys.get(&alloc.purchase_trade_id) else {
+                continue;
+            };
+            units_so_far += alloc.units;
+            let alloc_cost = if sale.units > Decimal::ZERO {
+                sale.rights_cost * units_so_far / sale.units - cost_so_far
+            } else {
+                Decimal::ZERO
+            };
+            cost_so_far += alloc_cost;
+
+            // Both legs convert at the sale month (manual fx_rate fallback):
+            // the rights' own purchase date isn't tracked, so the cost leg
+            // has no earlier anchor.
+            let alloc_proceeds = data.fx.to_aud(
+                sale.proceeds_per_right * alloc.units,
+                &sale.currency,
+                sale.date,
+                Some(sale.fx_rate),
+            )?;
+            let alloc_cost =
+                data.fx
+                    .to_aud(alloc_cost, &sale.currency, sale.date, Some(sale.fx_rate))?;
+
+            let alloc_gain = alloc_proceeds - alloc_cost;
+            proceeds += alloc_proceeds;
+            cost_base += alloc_cost;
+            if alloc_gain > Decimal::ZERO {
+                if sale.date > buy.acquired() + Months::new(12) {
+                    discount_gain += alloc_gain;
+                } else {
+                    non_discount_gain += alloc_gain;
+                }
+            } else if alloc_gain < Decimal::ZERO {
+                loss += -alloc_gain;
+            }
+        }
+        result.push(RealisedGainLoss {
+            source: DisposalSource::RightsSale,
+            sale_trade_id: sale.id,
+            listing_id: sale.listing_id,
+            holding_account_id: sale.holding_account_id,
+            sale_date: sale.date,
+            proceeds,
+            cost_base,
+            capital_gain_loss: proceeds - cost_base,
+            discount_eligible_gain: discount_gain,
+            non_discountable_gain: non_discount_gain,
+            capital_loss: loss,
+        });
+    }
+
     result.sort_by(|a, b| {
         a.sale_date
             .cmp(&b.sale_date)
+            .then(a.source.cmp(&b.source))
             .then(a.sale_trade_id.cmp(&b.sale_trade_id))
     });
     Ok(result)
@@ -1828,5 +1994,191 @@ mod tests {
         assert_eq!(result[1].capital_gain_loss, Decimal::from(300));
         assert_eq!(result[1].discount_eligible_gain, Decimal::from(300));
         assert_eq!(result[1].non_discountable_gain, Decimal::ZERO);
+    }
+
+    // Rights sales/lapses (docs/ato/rights-issues.md Example 39,
+    // docs/ato/retail-premiums.md)
+
+    fn mem_rights_sale(
+        id: i64,
+        date: NaiveDate,
+        units: i64,
+        proceeds_per_right: &str,
+        rights_cost: &str,
+    ) -> RightsSaleInfo {
+        RightsSaleInfo {
+            id,
+            listing_id: 1,
+            holding_account_id: 1,
+            date,
+            units: Decimal::from(units),
+            proceeds_per_right: proceeds_per_right.parse().unwrap(),
+            rights_cost: rights_cost.parse().unwrap(),
+            currency: "AUD".to_string(),
+            fx_rate: Decimal::ONE,
+        }
+    }
+
+    fn mem_rights_alloc(sale: i64, buy: i64, units: i64) -> RightsAllocation {
+        RightsAllocation {
+            rights_sale_id: sale,
+            purchase_trade_id: buy,
+            units: Decimal::from(units),
+        }
+    }
+
+    /// Free rights sold take the **original parcel's** acquisition date for
+    /// the discount — unlike an exercised parcel, whose clock restarts at the
+    /// exercise. Sold weeks after the record date but >12 months after the
+    /// anchoring buy → the whole (nil-cost-base) gain is discount-eligible.
+    #[test]
+    fn pure_rights_sale_discount_anchors_to_the_original_parcel() {
+        let d = |y, m, day| NaiveDate::from_ymd_opt(y, m, day).unwrap();
+        let data = ReportData {
+            buys: [
+                (1, mem_buy(1, d(2023, 1, 1), 1000, 2, "AUD")), // > 12 months
+                (2, mem_buy(2, d(2025, 3, 1), 200, 2, "AUD")),  // ≤ 12 months
+            ]
+            .into(),
+            rights_sales: vec![mem_rights_sale(7, d(2025, 5, 1), 300, "0.20", "0")],
+            rights_allocations: vec![mem_rights_alloc(7, 1, 250), mem_rights_alloc(7, 2, 50)],
+            ..ReportData::default()
+        };
+
+        let result = compute_realised_gains(&data).unwrap();
+        assert_eq!(result.len(), 1);
+        let r = &result[0];
+        assert_eq!(r.source, DisposalSource::RightsSale);
+        assert_eq!(r.sale_trade_id, 7);
+        // Nil cost base: the gain is the whole proceeds, 300 × $0.20.
+        assert_eq!(r.proceeds, Decimal::from(60));
+        assert_eq!(r.cost_base, Decimal::ZERO);
+        assert_eq!(r.capital_gain_loss, Decimal::from(60));
+        // 250 rights anchored to the 2023 parcel are discount-eligible; the
+        // 50 anchored to the 2025 parcel are not.
+        assert_eq!(r.discount_eligible_gain, Decimal::from(50));
+        assert_eq!(r.non_discountable_gain, Decimal::from(10));
+        assert_eq!(r.capital_loss, Decimal::ZERO);
+        assert_eq!(
+            r.capital_gain_loss,
+            r.discount_eligible_gain + r.non_discountable_gain - r.capital_loss
+        );
+    }
+
+    /// A paid right that lapses (nil proceeds) realises a capital loss equal
+    /// to its carried cost, and the cost shares sum exactly across
+    /// allocations (cumulative-difference apportionment: $10 over three
+    /// 1-right allocations has no third-of-a-cent leak).
+    #[test]
+    fn pure_lapsed_paid_rights_realise_the_carried_cost_as_a_loss() {
+        let d = |y, m, day| NaiveDate::from_ymd_opt(y, m, day).unwrap();
+        let data = ReportData {
+            buys: [
+                (1, mem_buy(1, d(2024, 1, 1), 100, 2, "AUD")),
+                (2, mem_buy(2, d(2024, 2, 1), 100, 2, "AUD")),
+                (3, mem_buy(3, d(2024, 3, 1), 100, 2, "AUD")),
+            ]
+            .into(),
+            rights_sales: vec![mem_rights_sale(7, d(2024, 8, 1), 3, "0", "10")],
+            rights_allocations: vec![
+                mem_rights_alloc(7, 1, 1),
+                mem_rights_alloc(7, 2, 1),
+                mem_rights_alloc(7, 3, 1),
+            ],
+            ..ReportData::default()
+        };
+
+        let result = compute_realised_gains(&data).unwrap();
+        assert_eq!(result.len(), 1);
+        let r = &result[0];
+        assert_eq!(r.proceeds, Decimal::ZERO);
+        assert_eq!(r.cost_base, Decimal::from(10));
+        assert_eq!(r.capital_gain_loss, Decimal::from(-10));
+        assert_eq!(r.capital_loss, Decimal::from(10));
+        assert_eq!(r.discount_eligible_gain, Decimal::ZERO);
+        assert_eq!(r.non_discountable_gain, Decimal::ZERO);
+    }
+
+    /// End to end: a rights sale recorded through the operation reaches the
+    /// report alongside ordinary Sells, AUD-converted via the ATO rate.
+    #[tokio::test]
+    async fn db_rights_sale_flows_into_the_report() {
+        use crate::entities::rights_sale;
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "RTS").await;
+        insert_buy(
+            &pool,
+            1,
+            1,
+            NaiveDate::from_ymd_opt(2023, 1, 15).unwrap(),
+            Decimal::from(1000),
+            Decimal::from(2),
+        )
+        .await;
+        corporate_action::db_upsert(
+            &pool,
+            &corporate_action::CorporateAction {
+                id: 10,
+                listing_id: 1,
+                date: NaiveDate::from_ymd_opt(2024, 7, 1).unwrap(),
+                kind: corporate_action::ActionKind::RightsIssue {
+                    rights_units: Decimal::ONE,
+                    rights_held_units: Decimal::from(4),
+                    exercise_price: "1.80".parse().unwrap(),
+                    currency: "AUD".to_string(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+        rights_sale::db_sell_rights(
+            &pool,
+            10,
+            &rights_sale::SellRightsBody {
+                date: NaiveDate::from_ymd_opt(2024, 7, 20).unwrap(),
+                units: Decimal::from(250),
+                proceeds_per_right: Some("0.20".parse().unwrap()),
+                rights_cost: None,
+                fx_rate: None,
+                holding_account_id: 1,
+                allocations: vec![rights_sale::AllocationInput {
+                    purchase_trade_id: 1,
+                    units: Decimal::from(250),
+                }],
+            },
+        )
+        .await
+        .unwrap();
+        // An ordinary Sell too, so both sources coexist in one report.
+        insert_sell(
+            &pool,
+            2,
+            1,
+            NaiveDate::from_ymd_opt(2024, 8, 1).unwrap(),
+            Decimal::from(100),
+            Decimal::from(3),
+        )
+        .await;
+        allocate(&pool, 1, 2, 1, Decimal::from(100)).await;
+
+        let result = db_realised_gains(&pool).await.unwrap();
+        assert_eq!(result.len(), 2);
+        let rights = result
+            .iter()
+            .find(|r| r.source == DisposalSource::RightsSale)
+            .unwrap();
+        // 250 × $0.20 = $50 gain, nil cost base, discount-eligible from the
+        // 2023 parcel — not from the 2024 record date.
+        assert_eq!(rights.listing_id, 1);
+        assert_eq!(rights.proceeds, Decimal::from(50));
+        assert_eq!(rights.cost_base, Decimal::ZERO);
+        assert_eq!(rights.capital_gain_loss, Decimal::from(50));
+        assert_eq!(rights.discount_eligible_gain, Decimal::from(50));
+        let sell = result
+            .iter()
+            .find(|r| r.source == DisposalSource::Sell)
+            .unwrap();
+        assert_eq!(sell.sale_trade_id, 2);
+        assert_eq!(sell.capital_gain_loss, Decimal::from(100));
     }
 }

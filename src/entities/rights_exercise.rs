@@ -18,17 +18,19 @@
 //! across any splits) earn `rights_units` new units per `rights_held_units`
 //! held, rounded **up** to a whole unit (registry practice for fractional
 //! entitlements). Cumulative exercises against the same action — linked via
-//! `trades.rights_action_id` — may not exceed it. To keep that check honest,
-//! an exercise trade is immutable via `PUT /trades` (delete it and
-//! re-exercise instead) and the action itself is frozen while exercise
-//! trades reference it.
+//! `trades.rights_action_id` — **plus rights sold or lapsed against it**
+//! (`rights_sales`, see `entities::rights_sale`) may not exceed it; the two
+//! operations share [`db_rights_used`] so their combined usage is capped
+//! once. To keep that check honest, an exercise trade is immutable via
+//! `PUT /trades` (delete it and re-exercise instead) and the action itself
+//! is frozen while exercise trades reference it.
 //!
-//! Out of scope (documented in `docs/ato/rights-issues.md`): selling or lapsing
-//! the rights themselves, pre-CGT originals, and retail premiums (entered as
-//! unfranked dividend income).
+//! Out of scope (documented in `docs/ato/rights-issues.md`): pre-CGT
+//! originals and non-renounceable-offer retail premiums (an unfranked
+//! dividend — entered as income, see `docs/ato/retail-premiums.md`).
 
 use crate::entities::corporate_action::{
-    self, ActionKind, as_acquired_quantity, split_adjusted_quantity,
+    self, ActionKind, SplitEvent, as_acquired_quantity, split_adjusted_quantity,
 };
 use crate::entities::trade::{self, Trade, TradeType};
 use crate::infra::decimal::parse_dec;
@@ -120,6 +122,83 @@ pub fn router() -> Router<SqlitePool> {
     Router::new().route("/corporate_actions/{id}/exercise", post(exercise))
 }
 
+/// Units of the listing held when the issue's record date arrived, in
+/// record-date units. Trades dated before the record date count (one dated on
+/// it is ex-rights — the same half-open convention as splits/bonus issues);
+/// each quantity is re-based to record-date units across any
+/// splits/consolidations so buys, sells, prior usage, and the cap all
+/// compare in one basis.
+pub(crate) async fn db_held_at_record_date(
+    conn: &mut sqlx::SqliteConnection,
+    listing_id: i64,
+    record_date: NaiveDate,
+    splits: &[SplitEvent],
+) -> Result<Decimal, sqlx::Error> {
+    let held_rows = sqlx::query(
+        "SELECT trade_type, date, quantity FROM trades \
+         WHERE listing_id = ? AND date < ?",
+    )
+    .bind(listing_id)
+    .bind(record_date)
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut held = Decimal::ZERO;
+    for row in &held_rows {
+        let trade_date: NaiveDate = row.try_get("date")?;
+        let qty = parse_dec("quantity", row.try_get("quantity")?)?;
+        let in_record_units = split_adjusted_quantity(qty, splits, trade_date, Some(record_date));
+        match row.try_get::<TradeType, _>("trade_type")? {
+            TradeType::Buy | TradeType::DRP => held += in_record_units,
+            TradeType::Sell => held -= in_record_units,
+        }
+    }
+    Ok(held)
+}
+
+/// The entitlement a holding earns under the issue's terms. Fractional
+/// entitlements round up to a whole unit (registry practice), so the cap is
+/// never tighter than the offer's own rounding.
+pub(crate) fn entitled_units(
+    held: Decimal,
+    rights_units: Decimal,
+    rights_held_units: Decimal,
+) -> Decimal {
+    (held.max(Decimal::ZERO) * rights_units / rights_held_units).ceil()
+}
+
+/// Rights already used against the action, in record-date units: exercised
+/// units (trades linked via `rights_action_id`, re-based across any splits
+/// between the record date and each exercise) plus rights sold or lapsed
+/// (`rights_sales.units`, stored in record-date rights units). The exercise
+/// and sell-rights operations both validate against this, so their combined
+/// usage can never exceed the entitlement.
+pub(crate) async fn db_rights_used(
+    conn: &mut sqlx::SqliteConnection,
+    action_id: i64,
+    record_date: NaiveDate,
+    splits: &[SplitEvent],
+) -> Result<Decimal, sqlx::Error> {
+    let prior_rows = sqlx::query("SELECT date, quantity FROM trades WHERE rights_action_id = ?")
+        .bind(action_id)
+        .fetch_all(&mut *conn)
+        .await?;
+    let mut used = Decimal::ZERO;
+    for row in &prior_rows {
+        let trade_date: NaiveDate = row.try_get("date")?;
+        let qty = parse_dec("quantity", row.try_get("quantity")?)?;
+        used += as_acquired_quantity(qty, splits, record_date, trade_date);
+    }
+    let sold_units: Vec<String> =
+        sqlx::query_scalar("SELECT units FROM rights_sales WHERE rights_action_id = ?")
+            .bind(action_id)
+            .fetch_all(&mut *conn)
+            .await?;
+    for units in sold_units {
+        used += parse_dec("units", units)?;
+    }
+    Ok(used)
+}
+
 /// Create the Buy trade for a rights exercise, atomically.
 pub async fn db_exercise(
     pool: &SqlitePool,
@@ -159,48 +238,15 @@ pub async fn db_exercise(
         return Err(ExerciseError::BeforeRecordDate);
     }
 
-    // Entitlement: units held when the record date arrived. Trades dated
-    // before the record date count (one dated on it is ex-rights — the same
-    // half-open convention as splits/bonus issues); each quantity is re-based
-    // to record-date units across any splits/consolidations so buys, sells,
-    // prior exercises, and the cap all compare in one basis.
     let splits = corporate_action::db_splits_for_listing(&mut *tx, action.listing_id).await?;
-    let held_rows = sqlx::query(
-        "SELECT trade_type, date, quantity FROM trades \
-         WHERE listing_id = ? AND date < ?",
-    )
-    .bind(action.listing_id)
-    .bind(record_date)
-    .fetch_all(&mut *tx)
-    .await?;
-    let mut held = Decimal::ZERO;
-    for row in &held_rows {
-        let trade_date: NaiveDate = row.try_get("date")?;
-        let qty = parse_dec("quantity", row.try_get("quantity")?)?;
-        let in_record_units = split_adjusted_quantity(qty, &splits, trade_date, Some(record_date));
-        match row.try_get::<TradeType, _>("trade_type")? {
-            TradeType::Buy | TradeType::DRP => held += in_record_units,
-            TradeType::Sell => held -= in_record_units,
-        }
-    }
+    let held = db_held_at_record_date(&mut *tx, action.listing_id, record_date, &splits).await?;
+    let entitled = entitled_units(held, rights_units, rights_held_units);
 
-    // Fractional entitlements round up to a whole unit (registry practice),
-    // so the cap is never tighter than the offer's own rounding.
-    let entitled = (held.max(Decimal::ZERO) * rights_units / rights_held_units).ceil();
-
-    // Prior exercises against this action, re-based to record-date units.
-    let prior_rows = sqlx::query("SELECT date, quantity FROM trades WHERE rights_action_id = ?")
-        .bind(action_id)
-        .fetch_all(&mut *tx)
-        .await?;
-    let mut exercised = Decimal::ZERO;
-    for row in &prior_rows {
-        let trade_date: NaiveDate = row.try_get("date")?;
-        let qty = parse_dec("quantity", row.try_get("quantity")?)?;
-        exercised += as_acquired_quantity(qty, &splits, record_date, trade_date);
-    }
-    exercised += as_acquired_quantity(body.units, &splits, record_date, body.date);
-    if exercised > entitled {
+    // Rights already used against this action (prior exercises + rights
+    // sales) plus this exercise, re-based to record-date units.
+    let mut used = db_rights_used(&mut *tx, action_id, record_date, &splits).await?;
+    used += as_acquired_quantity(body.units, &splits, record_date, body.date);
+    if used > entitled {
         return Err(ExerciseError::ExceedsEntitlement);
     }
 

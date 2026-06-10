@@ -254,7 +254,9 @@ async function viewEntityList(entity) {
   ]);
 
   const toolbar = el('div', { class: 'toolbar' });
-  if (!entity.readonly) {
+  // deleteOnly: rows are created by an operation and immutable — no New or
+  // Edit, but Delete stays as the undo path (e.g. rights sales).
+  if (!entity.readonly && !entity.deleteOnly) {
     toolbar.appendChild(el('a', { href: '#/e/' + entity.slug + '/new' },
       el('button', { class: 'primary' }, '+ New ' + entity.title.replace(/s$/, ''))));
   }
@@ -278,8 +280,10 @@ async function viewEntityList(entity) {
         td.appendChild(el('a', { href: '#/attachments/' + entity.attachOwner + '/' + row.id },
           el('button', { class: 'link small' }, 'Attachments')));
       }
-      td.appendChild(el('a', { href: '#/e/' + entity.slug + '/edit/' + keyPath },
-        el('button', { class: 'link small' }, 'Edit')));
+      if (!entity.deleteOnly) {
+        td.appendChild(el('a', { href: '#/e/' + entity.slug + '/edit/' + keyPath },
+          el('button', { class: 'link small' }, 'Edit')));
+      }
       td.appendChild(el('button', {
         class: 'link small danger',
         onclick: function () { deleteEntity(entity, keyPath, row); },

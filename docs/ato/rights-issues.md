@@ -165,11 +165,17 @@ date you acquired the right or option)**.
 
 If you do not (or cannot) take up a right or entitlement and the company pays
 you an amount based on the clearing price achieved when the equivalent shares
-are issued to other subscribers, that payment is a **retail premium**. Retail
-premiums are **unfranked dividends, or alternatively ordinary income, and
-should not be treated as capital gains**; recipients are not eligible to claim
-the CGT discount on them. (In this system a retail premium is entered as
-unfranked dividend income, not as a corporate action.)
+are issued to other subscribers, that payment is a **retail premium**. The
+treatment depends on the offer (see [`retail-premiums.md`](retail-premiums.md),
+QC 21832, retrieved 2026-06-10): under a **renounceable** rights offer the
+premium is a **capital gain, not a dividend** (TR 2017/4) — the rights are
+taken to have been acquired when the original shares were acquired, so the
+gain can be a discount capital gain; under a **non-renounceable** entitlement
+offer it is an **unfranked dividend** (TR 2012/1). (In this system a
+renounceable-offer retail premium is entered with the sell-rights operation,
+premium as proceeds; a non-renounceable one as unfranked dividend income. An
+earlier revision of this file described all retail premiums as unfranked
+dividends — superseded.)
 
 ---
 
@@ -184,9 +190,19 @@ rights (nil for rights issued free; the purchased-rights case folds that cost
 into the parcel via the trade's brokerage column, which is part of the cost
 base in every report).
 
-Out of scope (not modelled): the rights themselves as standalone disposable
-CGT assets — selling or letting rights lapse (Example 39's $50 gain on sale of
-free rights, with its deemed acquisition date inherited from the original
-shares) is not representable; pre-CGT original shares (the market-value uplift
-rule); employee share scheme rights; retail premiums (entered as unfranked
-dividend income).
+Selling or letting the rights lapse is the **sell-rights operation**
+(`POST /corporate_actions/:id/sell_rights`): a disposal of the rights
+themselves, recorded against the issue with per-parcel anchoring — each sold
+right takes its **original parcel's acquisition date** for the 12-month
+discount (free rights are deemed acquired with the original shares, per this
+page), a **nil cost base** for rights issued free, or the carried amount paid
+to acquire the rights for purchased rights (so nil proceeds on a paid right —
+a lapse — realises a capital loss). Example 39's post-CGT half (the $50 gain)
+is reproduced in `src/ato_examples.rs`. A **retail premium** under a
+renounceable offer is the same disposal with the premium as proceeds (TR
+2017/4 — see [`retail-premiums.md`](retail-premiums.md)).
+
+Out of scope (not modelled): pre-CGT original shares (the market-value uplift
+rule, and Example 39's pre-CGT half); employee share scheme rights;
+non-renounceable-offer retail premiums (an unfranked dividend — entered as
+income, TR 2012/1).

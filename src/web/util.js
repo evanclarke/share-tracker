@@ -316,6 +316,8 @@ const COLUMN_KINDS = (function () {
     'ess_discount_assessable', 'ess_taxed_upfront_reduction', 'ess_foreign_source_discount',
     // Inheritance cost-base components.
     'lpr_expenditure',
+    // Rights sales: the carried cost of purchased rights.
+    'rights_cost',
     // Investment-expense line items + the tax-summary deduction aggregates.
     'amount', 'gross_amount', 'gross_assessable_investment_income',
     'deductions_loan_interest', 'deductions_management_fee', 'deductions_advice_fee',
@@ -328,7 +330,7 @@ const COLUMN_KINDS = (function () {
     'average_price', 'fx_rate', 'amount_per_security', 'cost_base_adjustment', 'rate',
     'price', 'current_price', 'reinvestment_price', 'exercise_price', 'amount_per_unit',
     'buyback_price', 'buyback_dividend', 'buyback_franking_credit', 'buyback_market_value',
-    'market_value_per_share', 'deductible_percentage',
+    'market_value_per_share', 'deductible_percentage', 'proceeds_per_right',
   ]);
   // A derived per-unit figure: show at least 4 dp, never cent-rounded.
   set('rate4', ['avg_cost_base_per_unit']);

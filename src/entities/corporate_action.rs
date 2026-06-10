@@ -642,9 +642,10 @@ pub enum WriteError {
     /// scrip-for-scrip exchange, demerger, or worthless-shares recognise trades
     /// (`trades.rights_action_id` / `trades.buyback_action_id` /
     /// `trades.scrip_action_id` / `trades.demerger_action_id` /
-    /// `trades.worthless_action_id`): editing it would retroactively change the
-    /// terms those trades were created and validated against. Delete the
-    /// referencing trades first. Mapped to `422`.
+    /// `trades.worthless_action_id`), or by rights sales
+    /// (`rights_sales.rights_action_id`): editing it would retroactively change
+    /// the terms those rows were created and validated against. Delete the
+    /// referencing rows first. Mapped to `422`.
     ReferencedByTrade,
 }
 
@@ -660,8 +661,8 @@ impl From<WriteError> for ApiError {
             // Frozen while exercise/participation trades reference it → 422.
             WriteError::ReferencedByTrade => ApiError::unprocessable(
                 "this corporate action is referenced by rights-exercise, buy-back, \
-                 scrip-for-scrip, demerger, or worthless-shares trades and cannot be \
-                 edited — delete those trades first",
+                 scrip-for-scrip, demerger, or worthless-shares trades or by rights sales \
+                 and cannot be edited — delete those rows first",
             ),
             // Unknown listing/currency FK or enum CHECK violation → 422.
             WriteError::Db(err) => err.into(),
@@ -778,7 +779,8 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
         "SELECT EXISTS(SELECT 1 FROM trades \
                        WHERE rights_action_id = ?1 OR buyback_action_id = ?1 \
                           OR scrip_action_id = ?1 OR demerger_action_id = ?1 \
-                          OR worthless_action_id = ?1)",
+                          OR worthless_action_id = ?1) \
+             OR EXISTS(SELECT 1 FROM rights_sales WHERE rights_action_id = ?1)",
     )
     .bind(action.id)
     .fetch_one(&mut *tx)

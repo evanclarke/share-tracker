@@ -25,13 +25,10 @@
 //!   partly paid bonus shares and call payments (and pre-CGT original
 //!   shares), which are not modelled; Example 35's post-CGT parcel is
 //!   reproduced below.
-//! - `docs/ato/rights-issues.md` Example 39 (Shanti, sale of rights) — selling
-//!   the rights themselves (a capital gain whose deemed acquisition date is
-//!   inherited from the original shares) is not modelled; only exercising is
-//!   (TODO "Corporate actions", RightsIssue). Example 40's post-CGT half is
-//!   reproduced below; its pre-CGT half (rights over the 1 June 1985 shares,
-//!   whose cost base includes the rights' market value) turns on pre-CGT
-//!   originals, which are not modelled.
+//! - `docs/ato/rights-issues.md` Examples 39–40 (Shanti) — each example's
+//!   post-CGT half is reproduced below (39 via the sell-rights operation, 40
+//!   via the exercise operation); both pre-CGT halves (the rights over the
+//!   1 June 1985 shares) turn on pre-CGT originals, which are not modelled.
 //! - `docs/ato/takeovers-and-scrip-for-scrip.md` Examples 26–28 (Desiree,
 //!   Gunther, Stephanie) — none matches the modelled case (the full-rollover,
 //!   single-replacement-class exchange, TODO "Corporate actions",
@@ -72,7 +69,7 @@
 use crate::entities::trade::{Trade, TradeType};
 use crate::reports::net_capital_gain::NetCapitalGainYear;
 use crate::reports::portfolio::HoldingOverview;
-use crate::reports::realised_gains::RealisedGainLoss;
+use crate::reports::realised_gains::{DisposalSource, RealisedGainLoss};
 use crate::reports::tax_summary::TaxYearSummary;
 use crate::{app, infra::scheduler};
 use axum::body::Body;
@@ -886,6 +883,88 @@ async fn bonus_shares_example_35_chris_fully_paid_bonus_shares() {
     // The bonus issue itself is no CGT event.
     let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net-capital-gain").await;
     assert!(years.iter().all(|y| y.net_capital_gain == Decimal::ZERO));
+}
+
+/// `docs/ato/rights-issues.md` (Guide to CGT, QC 64895) — "Example 39: Sale
+/// of rights".
+///
+/// > Shanti owns 2,000 shares in ZAC Ltd. She bought 1,000 shares on
+/// > 1 June 1985 and 1,000 shares on 1 December 1996. On 1 July 1998, ZAC Ltd
+/// > granted each of its shareholders one right for each four shares owned to
+/// > acquire shares in the company for $1.80 each. Shanti therefore received
+/// > 500 rights in total. At that time, shares in ZAC Ltd were worth $2. Each
+/// > right was therefore worth 20 cents. Shanti decided that she did not wish
+/// > to buy any more shares in ZAC Ltd, so she sold all her rights for
+/// > 20 cents each […] Only those rights issued for the shares she bought on
+/// > 1 December 1996 are subject to CGT. As Shanti did not pay anything for
+/// > the rights, she has made a **$50 taxable capital gain** on their sale.
+///
+/// The pre-CGT half (the $50 received for the rights over the 1 June 1985
+/// shares, disregarded as pre-CGT) turns on pre-CGT originals, which are not
+/// modelled — so this test enters only the post-CGT 1,000-share parcel and
+/// asserts the ATO's figures for it: a $50 capital gain (nil cost base — the
+/// rights were free), with the original shares untouched. The rights are
+/// taken to have been acquired with the original shares (1 December 1996,
+/// > 12 months before the sale), so under current law the gain is
+/// discount-eligible (`docs/ato/retail-premiums.md` states the same rule; the
+/// example predates the 1999 discount, so the ATO's stated figure is the
+/// gross $50).
+#[tokio::test]
+async fn rights_issues_example_39_shanti_sale_of_rights() {
+    let pool = test_pool().await;
+    put_listing(&pool, 1, "ZAC").await;
+    put_buy(&pool, 1, 1, "1996-12-01", "1000", "2", "0").await;
+    // One right per four shares owned, exercise price $1.80, record 1 July 1998.
+    api_put(
+        &pool,
+        "/corporate_actions/1",
+        json!({
+            "action_type": "RightsIssue",
+            "listing_id": 1,
+            "date": "1998-07-01",
+            "rights_units": "1",
+            "rights_held_units": "4",
+            "exercise_price": "1.80",
+            "currency": "AUD",
+        }),
+    )
+    .await;
+    // Shanti sells the 250 rights her post-CGT shares earned, at 20 cents.
+    let sale: Value = api_post(
+        &pool,
+        "/corporate_actions/1/sell_rights",
+        json!({
+            "date": "1998-07-15",
+            "units": "250",
+            "proceeds_per_right": "0.20",
+            "allocations": [{ "purchase_trade_id": 1, "units": "250" }],
+        }),
+        StatusCode::CREATED,
+    )
+    .await;
+    assert_eq!(sale["units"], "250");
+
+    // "she has made a $50 taxable capital gain on their sale" — nil cost
+    // base, proceeds 250 × $0.20 = $50.
+    let gains: Vec<RealisedGainLoss> = api_get(&pool, "/portfolio/realised-gains").await;
+    assert_eq!(gains.len(), 1);
+    assert_eq!(gains[0].source, DisposalSource::RightsSale);
+    assert_eq!(gains[0].proceeds, dec("50"));
+    assert_eq!(
+        gains[0].cost_base,
+        dec("0"),
+        "Shanti paid nothing for the rights"
+    );
+    assert_eq!(gains[0].capital_gain_loss, dec("50"));
+    // Deemed acquired with the 1 December 1996 shares — > 12 months.
+    assert_eq!(gains[0].discount_eligible_gain, dec("50"));
+
+    // Selling the rights does not touch the original shares.
+    let parcels: Vec<crate::reports::open_parcels::OpenParcel> =
+        api_get(&pool, "/portfolio/open-parcels").await;
+    assert_eq!(parcels.len(), 1);
+    assert_eq!(parcels[0].remaining_quantity, dec("1000"));
+    assert_eq!(parcels[0].remaining_cost_base, dec("2000"));
 }
 
 /// `docs/ato/rights-issues.md` (Guide to CGT, QC 64895) — "Example 40: Rights

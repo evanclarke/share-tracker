@@ -291,8 +291,10 @@ export function wireIncomeEntry(form, existing) {
 // form, and the buy-back Participate action: a list of (purchase-parcel
 // select, decimal quantity) rows with add/remove buttons. Returns the
 // section element to append to the form and a `read()` harvesting the rows
-// as [{ purchase_trade_id, quantity_allocated }] (blank rows skipped). The
-// three callers differ only in labels and hint text.
+// as [{ purchase_trade_id, quantity_allocated }] (blank rows skipped; the
+// quantity key is `labels.qtyField` when a caller's API names it differently,
+// e.g. the sell-rights action's `units`). The callers differ only in labels
+// and hint text.
 export function allocationEditor(parcelOptions, existingAllocs, labels) {
   labels = Object.assign({
     heading: 'Parcel allocations',
@@ -325,7 +327,11 @@ export function allocationEditor(parcelOptions, existingAllocs, labels) {
     list.querySelectorAll('.alloc-row').forEach(function (r) {
       const pid = r.querySelector('[name="alloc_purchase"]').value;
       const qty = (r.querySelector('[name="alloc_qty"]').value || '').trim();
-      if (pid !== '' && qty !== '') allocs.push({ purchase_trade_id: Number(pid), quantity_allocated: qty });
+      if (pid !== '' && qty !== '') {
+        const a = { purchase_trade_id: Number(pid) };
+        a[labels.qtyField || 'quantity_allocated'] = qty;
+        allocs.push(a);
+      }
     });
     return allocs;
   }

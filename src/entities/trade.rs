@@ -387,6 +387,13 @@ pub enum UpsertError {
     /// clock, which a free-form edit would corrupt. Edit the inheritance
     /// (`PUT /inheritances/:id`) instead (see `entities::inheritance`).
     InheritedParcelTrade,
+    /// The existing trade is an original parcel anchoring a rights sale
+    /// (`rights_sale_allocations.purchase_trade_id`): its date and quantity
+    /// are what the sale's record-date anchoring caps were validated against,
+    /// which a free-form edit could silently break. Delete the rights sale
+    /// (`DELETE /rights_sales/:id`) and re-enter it after the edit (see
+    /// `entities::rights_sale`).
+    RightsAnchorParcel,
     /// A supplied statement total failed the cross-check (see
     /// `check_statement_total`): it doesn't reconcile with the trade's own
     /// figures, or the trade and brokerage currencies differ so there is no
@@ -468,6 +475,19 @@ pub async fn db_upsert(pool: &SqlitePool, trade: &Trade) -> Result<(), UpsertErr
         if inheritance.is_some() {
             return Err(UpsertError::InheritedParcelTrade);
         }
+    }
+    // A parcel anchoring a rights sale is immutable too: the sale's
+    // record-date anchoring caps were validated against this trade's date and
+    // quantity. Its provenance lives on the allocation rows, so it is guarded
+    // by a lookup rather than a column.
+    let anchors_rights: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM rights_sale_allocations WHERE purchase_trade_id = ?)",
+    )
+    .bind(trade.id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if anchors_rights {
+        return Err(UpsertError::RightsAnchorParcel);
     }
     // A transfer's network-fee disposal Sell is immutable here too: its
     // provenance lives on the transfer (transfers.fee_sale_trade_id), not on
@@ -579,7 +599,8 @@ pub enum DeleteOutcome {
     Deleted,
     NotFound,
     /// The trade is still referenced — as the purchase parcel of a Sell's
-    /// allocation (or a Sell with allocations), by an AMIT adjustment, or as a
+    /// allocation (or a Sell with allocations), as a parcel anchoring a
+    /// rights sale, by an AMIT adjustment, or as a
     /// distribution's reinvestment trade — or it belongs to a scrip-for-scrip
     /// exchange or demerger group, which is only ever deleted as a whole (via
     /// `DELETE /sells` on the group's closing Sell), or it is an ESS vest Buy
@@ -640,6 +661,7 @@ pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<DeleteOutcome, sqlx
     let referenced: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM parcel_allocations \
                        WHERE purchase_trade_id = ?1 OR sale_trade_id = ?1) \
+             OR EXISTS(SELECT 1 FROM rights_sale_allocations WHERE purchase_trade_id = ?1) \
              OR EXISTS(SELECT 1 FROM amit_adjustments WHERE trade_id = ?1) \
              OR EXISTS(SELECT 1 FROM income \
                        WHERE reinvestment_trade_id = ?1 OR buyback_trade_id = ?1)",
@@ -870,6 +892,10 @@ impl From<UpsertError> for ApiError {
             UpsertError::InheritedParcelTrade => ApiError::unprocessable(
                 "this trade is an inherited parcel and cannot be edited here — edit its \
                  inheritance (PUT /inheritances/:id) instead",
+            ),
+            UpsertError::RightsAnchorParcel => ApiError::unprocessable(
+                "this parcel anchors a rights sale and cannot be edited — delete the rights \
+                 sale, edit, then re-enter it",
             ),
             UpsertError::Db(err) => err.into(),
         }
