@@ -50,7 +50,8 @@ indexation inside the deceased's cost base must be recalculated out.
 Shares inherited from a deceased estate enter the portfolio as parcels whose
 **first-element cost base is not what was paid on any market** — it is the
 deceased's cost base at death (post-CGT assets) or market value at death
-(pre-CGT assets), with the acquisition-date rules in s 115-30 governing the
-12-month discount clock. The project currently has no entry path that
-distinguishes an inherited parcel from an ordinary Buy; the user must enter a
-synthetic Buy with the correct figures manually.
+(pre-CGT assets), with the acquisition-date rules in s 115-30 (mirrored in
+[`inherited-assets-cgt-discount.md`](inherited-assets-cgt-discount.md))
+governing the 12-month discount clock. Modelled as the `inheritances` entity:
+its entry path records which rule produced the figure plus any LPR
+expenditure, and creates the provenance-linked parcel Buy.

@@ -1,0 +1,1061 @@
+//! Inherited share parcels — the beneficiary's entry path for a parcel
+//! passing from a deceased estate (REQUIREMENTS 2026-06-10;
+//! `docs/ato/inherited-assets-cost-base.md` QC 66053,
+//! `docs/ato/inherited-assets-cgt-discount.md` QC 69713 / s 115-30).
+//!
+//! The transfer from the estate is not a CGT event. `PUT /inheritances/:id`
+//! records the inheritance facts and creates the parcel in one transaction: a
+//! provenance-linked Buy (`trades.inheritance_id`) dated the date of death,
+//! carrying the whole cost base — the first element per the recorded QC 66053
+//! rule plus any LPR expenditure — on the brokerage column with price 0 (the
+//! rollover convention), so the parcel flows through every report and
+//! write-time capacity check like any Buy. Settlement is the date of death:
+//! an estate transmission is not market-settled.
+//!
+//! The 12-month discount clock follows s 115-30:
+//! - [`CostBaseRule::DeceasedCostBase`] (the deceased acquired the asset on or
+//!   after 20 September 1985): the first element is the deceased's cost base
+//!   on the day they died, and the clock runs from the **deceased's
+//!   acquisition date**, carried as the Buy's `deemed_acquisition_date`.
+//! - [`CostBaseRule::MarketValueAtDeath`] (a pre-CGT asset in the deceased's
+//!   hands): the first element is the user-supplied market value on the day
+//!   the deceased died, and the clock runs from the **date of death** — the
+//!   Buy's own date, no deemed date.
+//!
+//! The deemed acquisition date also picks the AUD translation month of a
+//! non-AUD cost base (the standard `ParcelRow::acquired()` rule), mirroring
+//! the rollover treatment: a carried deceased's cost base translates at the
+//! deceased's acquisition month, a market-value-at-death figure at the death
+//! month. LPR expenditure translates with the parcel; its own incurral date
+//! is provenance only (indexation, where it would matter, is not modelled).
+//!
+//! The linked Buy is immutable individually (`PUT`/`DELETE /trades` → 422):
+//! editing and deleting go through the inheritance, and both are refused
+//! while the parcel is drawn on by a Sell allocation or AMIT adjustment.
+
+use crate::infra::decimal::row_dec;
+use crate::infra::http::ApiError;
+use axum::{
+    Json, Router,
+    extract::{Path, State},
+    http::StatusCode,
+    routing::get,
+};
+use chrono::NaiveDate;
+use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
+use sqlx::{Row, SqlitePool};
+
+/// Which QC 66053 rule produced the inheritance's first-element cost base.
+/// Serialized verbatim to JSON and to the CHECK-constrained TEXT
+/// `cost_base_rule` column.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, sqlx::Type)]
+pub enum CostBaseRule {
+    /// The deceased acquired the asset on or after 20 September 1985: the
+    /// beneficiary's first element is the deceased's cost base on the day
+    /// they died, and the discount clock runs from the deceased's
+    /// acquisition (s 115-30).
+    DeceasedCostBase,
+    /// A pre-CGT asset in the deceased's hands: the first element is the
+    /// asset's market value on the day the deceased died (user-supplied),
+    /// and the discount clock runs from the date of death (s 115-30).
+    MarketValueAtDeath,
+}
+
+/// Start of CGT: an asset the deceased acquired before this date is pre-CGT,
+/// so the [`CostBaseRule::MarketValueAtDeath`] rule applies and their
+/// acquisition date is not recorded.
+const CGT_START: NaiveDate = match NaiveDate::from_ymd_opt(1985, 9, 20) {
+    Some(d) => d,
+    None => unreachable!(),
+};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Inheritance {
+    pub id: i64,
+    pub listing_id: i64,
+    pub holding_account_id: i64,
+    /// Units inherited, in date-of-death terms.
+    pub quantity: Decimal,
+    pub date_of_death: NaiveDate,
+    pub cost_base_rule: CostBaseRule,
+    /// The whole-parcel first-element cost base per the rule, in `currency`.
+    pub cost_base: Decimal,
+    /// LPR expenditure the beneficiary may include in the cost base
+    /// (QC 66053 — e.g. conveyancing on the transfer, legal costs of proving
+    /// the will). Added to the linked Buy's cost base.
+    pub lpr_expenditure: Decimal,
+    /// When the LPR incurred the expenditure (on or after the date of death);
+    /// recorded with the figure, provenance only.
+    pub lpr_expenditure_date: Option<NaiveDate>,
+    /// The deceased's acquisition date — required with
+    /// [`CostBaseRule::DeceasedCostBase`] (it starts the discount clock),
+    /// absent with [`CostBaseRule::MarketValueAtDeath`].
+    pub deceased_acquisition_date: Option<NaiveDate>,
+    pub currency: String,
+    /// Manual foreign-per-AUD fallback rate (same convention as
+    /// `trades.fx_rate`). 1 for AUD.
+    pub fx_rate: Decimal,
+}
+
+impl sqlx::FromRow<'_, sqlx::sqlite::SqliteRow> for Inheritance {
+    fn from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
+        Ok(Inheritance {
+            id: row.try_get("id")?,
+            listing_id: row.try_get("listing_id")?,
+            holding_account_id: row.try_get("holding_account_id")?,
+            quantity: row_dec(row, "quantity")?,
+            date_of_death: row.try_get("date_of_death")?,
+            cost_base_rule: row.try_get("cost_base_rule")?,
+            cost_base: row_dec(row, "cost_base")?,
+            lpr_expenditure: row_dec(row, "lpr_expenditure")?,
+            lpr_expenditure_date: row.try_get("lpr_expenditure_date")?,
+            deceased_acquisition_date: row.try_get("deceased_acquisition_date")?,
+            currency: row.try_get("currency")?,
+            fx_rate: row_dec(row, "fx_rate")?,
+        })
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct InheritanceBody {
+    pub listing_id: i64,
+    /// Defaults to the seeded default holding account when omitted.
+    #[serde(default = "crate::entities::holding_account::default_holding_account_id")]
+    pub holding_account_id: i64,
+    pub quantity: Decimal,
+    pub date_of_death: NaiveDate,
+    pub cost_base_rule: CostBaseRule,
+    pub cost_base: Decimal,
+    /// Absent/null means no LPR expenditure.
+    #[serde(default)]
+    pub lpr_expenditure: Option<Decimal>,
+    #[serde(default)]
+    pub lpr_expenditure_date: Option<NaiveDate>,
+    #[serde(default)]
+    pub deceased_acquisition_date: Option<NaiveDate>,
+    #[serde(default = "default_currency")]
+    pub currency: String,
+    /// Absent/null means 1 (the AUD case).
+    #[serde(default)]
+    pub fx_rate: Option<Decimal>,
+}
+
+fn default_currency() -> String {
+    "AUD".to_string()
+}
+
+pub fn router() -> Router<SqlitePool> {
+    Router::new().route("/inheritances", get(list)).route(
+        "/inheritances/{id}",
+        get(get_one).put(upsert).delete(delete),
+    )
+}
+
+#[derive(Debug)]
+pub enum UpsertError {
+    Db(sqlx::Error),
+    /// The inherited unit count must be positive — there is no parcel
+    /// otherwise.
+    QuantityNotPositive,
+    /// The cost base and LPR expenditure are amounts spent: negative values
+    /// are data-entry errors.
+    NegativeAmount,
+    /// `deceased_acquisition_date` must be present exactly when the rule is
+    /// `DeceasedCostBase` (it starts the discount clock); a pre-CGT asset's
+    /// clock runs from the date of death and the date is not recorded.
+    RuleAcquisitionDateMismatch,
+    /// A `DeceasedCostBase` inheritance with the deceased's acquisition
+    /// before 20 September 1985 — that is the pre-CGT case, which takes the
+    /// `MarketValueAtDeath` rule instead.
+    DeceasedAcquisitionPreCgt,
+    /// The deceased cannot have acquired the asset after they died.
+    DeceasedAcquisitionAfterDeath,
+    /// `lpr_expenditure_date` must be present exactly when a non-zero
+    /// `lpr_expenditure` is recorded (the figure is dated when the LPR
+    /// incurred it).
+    LprExpenditureDateMismatch,
+    /// LPR expenditure is incurred administering the estate — it cannot
+    /// pre-date the death.
+    LprExpenditureBeforeDeath,
+    /// The linked Buy is drawn on by a Sell allocation or AMIT adjustment —
+    /// editing the inheritance under it could invalidate those dependants.
+    /// Remove them first.
+    ParcelDrawnOn,
+}
+
+impl From<sqlx::Error> for UpsertError {
+    fn from(e: sqlx::Error) -> Self {
+        UpsertError::Db(e)
+    }
+}
+
+impl From<UpsertError> for ApiError {
+    fn from(e: UpsertError) -> Self {
+        match e {
+            UpsertError::QuantityNotPositive => {
+                ApiError::unprocessable("the inherited quantity must be greater than zero")
+            }
+            UpsertError::NegativeAmount => {
+                ApiError::unprocessable("the cost base and LPR expenditure must not be negative")
+            }
+            UpsertError::RuleAcquisitionDateMismatch => ApiError::unprocessable(
+                "the deceased's acquisition date is required with the DeceasedCostBase rule \
+                 (it starts the 12-month discount clock) and must be omitted with \
+                 MarketValueAtDeath (a pre-CGT asset's clock runs from the date of death)",
+            ),
+            UpsertError::DeceasedAcquisitionPreCgt => ApiError::unprocessable(
+                "the deceased acquired the asset before 20 September 1985 — that is a pre-CGT \
+                 asset, so record it under the MarketValueAtDeath rule",
+            ),
+            UpsertError::DeceasedAcquisitionAfterDeath => ApiError::unprocessable(
+                "the deceased's acquisition date cannot be after the date of death",
+            ),
+            UpsertError::LprExpenditureDateMismatch => ApiError::unprocessable(
+                "a non-zero LPR expenditure needs the date the LPR incurred it (and a date \
+                 needs a non-zero expenditure)",
+            ),
+            UpsertError::LprExpenditureBeforeDeath => ApiError::unprocessable(
+                "the LPR expenditure date cannot be before the date of death",
+            ),
+            UpsertError::ParcelDrawnOn => ApiError::unprocessable(
+                "the inherited parcel is drawn on by a sale allocation or AMIT adjustment — \
+                 remove those first",
+            ),
+            UpsertError::Db(err) => err.into(),
+        }
+    }
+}
+
+pub async fn db_list(pool: &SqlitePool) -> Result<Vec<Inheritance>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT id, listing_id, holding_account_id, quantity, date_of_death, cost_base_rule, \
+         cost_base, lpr_expenditure, lpr_expenditure_date, deceased_acquisition_date, currency, \
+         fx_rate \
+         FROM inheritances ORDER BY date_of_death, id",
+    )
+    .fetch_all(pool)
+    .await
+}
+
+pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<Inheritance>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT id, listing_id, holding_account_id, quantity, date_of_death, cost_base_rule, \
+         cost_base, lpr_expenditure, lpr_expenditure_date, deceased_acquisition_date, currency, \
+         fx_rate \
+         FROM inheritances WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+}
+
+/// The id of the inheritance's linked Buy (`trades.inheritance_id`), if the
+/// inheritance has been recorded.
+async fn linked_buy_id(
+    tx: &mut sqlx::SqliteConnection,
+    inheritance_id: i64,
+) -> Result<Option<i64>, sqlx::Error> {
+    sqlx::query_scalar("SELECT id FROM trades WHERE inheritance_id = ?")
+        .bind(inheritance_id)
+        .fetch_optional(tx)
+        .await
+}
+
+/// Whether anything draws on the linked Buy: a Sell allocation consuming its
+/// units or an AMIT adjustment covering them. While true, the inheritance is
+/// frozen — an edit or delete could invalidate those dependants.
+async fn buy_drawn_on(tx: &mut sqlx::SqliteConnection, buy_id: i64) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM parcel_allocations WHERE purchase_trade_id = ?1) \
+             OR EXISTS(SELECT 1 FROM amit_adjustments WHERE trade_id = ?1)",
+    )
+    .bind(buy_id)
+    .fetch_one(tx)
+    .await
+}
+
+fn validate(inh: &Inheritance) -> Result<(), UpsertError> {
+    if inh.quantity <= Decimal::ZERO {
+        return Err(UpsertError::QuantityNotPositive);
+    }
+    if inh.cost_base < Decimal::ZERO || inh.lpr_expenditure < Decimal::ZERO {
+        return Err(UpsertError::NegativeAmount);
+    }
+    match (inh.cost_base_rule, inh.deceased_acquisition_date) {
+        (CostBaseRule::DeceasedCostBase, Some(acquired)) => {
+            if acquired < CGT_START {
+                return Err(UpsertError::DeceasedAcquisitionPreCgt);
+            }
+            if acquired > inh.date_of_death {
+                return Err(UpsertError::DeceasedAcquisitionAfterDeath);
+            }
+        }
+        (CostBaseRule::MarketValueAtDeath, None) => {}
+        _ => return Err(UpsertError::RuleAcquisitionDateMismatch),
+    }
+    match inh.lpr_expenditure_date {
+        Some(incurred) => {
+            if inh.lpr_expenditure == Decimal::ZERO {
+                return Err(UpsertError::LprExpenditureDateMismatch);
+            }
+            if incurred < inh.date_of_death {
+                return Err(UpsertError::LprExpenditureBeforeDeath);
+            }
+        }
+        None => {
+            if inh.lpr_expenditure != Decimal::ZERO {
+                return Err(UpsertError::LprExpenditureDateMismatch);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Create or update an inheritance and its linked Buy, atomically. The Buy
+/// carries the whole cost base (first element + LPR expenditure) on the
+/// brokerage column with price 0, and the s 115-30 discount clock as its
+/// deemed acquisition date (post-CGT rule only). An edit is refused while
+/// the parcel is drawn on (the linked Buy keeps its id across edits).
+pub async fn db_upsert(pool: &SqlitePool, inh: &Inheritance) -> Result<(), UpsertError> {
+    validate(inh)?;
+
+    let mut tx = pool.begin().await?;
+
+    let existing_buy = linked_buy_id(&mut tx, inh.id).await?;
+    if let Some(buy_id) = existing_buy {
+        if buy_drawn_on(&mut tx, buy_id).await? {
+            return Err(UpsertError::ParcelDrawnOn);
+        }
+    }
+
+    sqlx::query(
+        "INSERT INTO inheritances \
+         (id, listing_id, holding_account_id, quantity, date_of_death, cost_base_rule, \
+          cost_base, lpr_expenditure, lpr_expenditure_date, deceased_acquisition_date, \
+          currency, fx_rate) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+         ON CONFLICT(id) DO UPDATE SET \
+             listing_id                = excluded.listing_id, \
+             holding_account_id        = excluded.holding_account_id, \
+             quantity                  = excluded.quantity, \
+             date_of_death             = excluded.date_of_death, \
+             cost_base_rule            = excluded.cost_base_rule, \
+             cost_base                 = excluded.cost_base, \
+             lpr_expenditure           = excluded.lpr_expenditure, \
+             lpr_expenditure_date      = excluded.lpr_expenditure_date, \
+             deceased_acquisition_date = excluded.deceased_acquisition_date, \
+             currency                  = excluded.currency, \
+             fx_rate                   = excluded.fx_rate",
+    )
+    .bind(inh.id)
+    .bind(inh.listing_id)
+    .bind(inh.holding_account_id)
+    .bind(inh.quantity.to_string())
+    .bind(inh.date_of_death)
+    .bind(inh.cost_base_rule)
+    .bind(inh.cost_base.to_string())
+    .bind(inh.lpr_expenditure.to_string())
+    .bind(inh.lpr_expenditure_date)
+    .bind(inh.deceased_acquisition_date)
+    .bind(&inh.currency)
+    .bind(inh.fx_rate.to_string())
+    .execute(&mut *tx)
+    .await?;
+
+    // The parcel Buy: dated and settled on the date of death, the whole cost
+    // base (first element + LPR expenditure) on the brokerage column with
+    // price 0, and the s 115-30 clock as the deemed acquisition date. The
+    // deemed date equals the rule pairing validated above: the deceased's
+    // acquisition under DeceasedCostBase, none (the death date itself) under
+    // MarketValueAtDeath.
+    let total_cost_base = inh.cost_base + inh.lpr_expenditure;
+    let buy_id = match existing_buy {
+        Some(id) => id,
+        None => {
+            sqlx::query_scalar("SELECT COALESCE(MAX(id), 0) + 1 FROM trades")
+                .fetch_one(&mut *tx)
+                .await?
+        }
+    };
+    sqlx::query(
+        "INSERT INTO trades \
+         (id, trade_type, date, settlement_date, listing_id, average_price, quantity, \
+          currency, brokerage, gst_on_brokerage, brokerage_currency, fx_rate, \
+          holding_account_id, inheritance_id, deemed_acquisition_date) \
+         VALUES (?, 'Buy', ?, ?, ?, '0', ?, ?, ?, '0', ?, ?, ?, ?, ?) \
+         ON CONFLICT(id) DO UPDATE SET \
+             date                    = excluded.date, \
+             settlement_date         = excluded.settlement_date, \
+             listing_id              = excluded.listing_id, \
+             quantity                = excluded.quantity, \
+             currency                = excluded.currency, \
+             brokerage               = excluded.brokerage, \
+             brokerage_currency      = excluded.brokerage_currency, \
+             fx_rate                 = excluded.fx_rate, \
+             holding_account_id      = excluded.holding_account_id, \
+             deemed_acquisition_date = excluded.deemed_acquisition_date",
+    )
+    .bind(buy_id)
+    .bind(inh.date_of_death)
+    .bind(inh.date_of_death)
+    .bind(inh.listing_id)
+    .bind(inh.quantity.to_string())
+    .bind(&inh.currency)
+    .bind(total_cost_base.to_string())
+    .bind(&inh.currency)
+    .bind(inh.fx_rate.to_string())
+    .bind(inh.holding_account_id)
+    .bind(inh.id)
+    .bind(inh.deceased_acquisition_date)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Outcome of a delete request, so the handler can map to the right status.
+#[derive(Debug, PartialEq)]
+pub enum DeleteOutcome {
+    Deleted,
+    NotFound,
+    /// The linked Buy is drawn on by a Sell allocation or AMIT adjustment —
+    /// deleting the parcel would orphan those dependants. Remove them first
+    /// (mapped to 422).
+    ParcelDrawnOn,
+}
+
+/// Delete an inheritance and its linked Buy together, in one transaction.
+pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<DeleteOutcome, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+
+    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM inheritances WHERE id = ?)")
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await?;
+    if !exists {
+        return Ok(DeleteOutcome::NotFound);
+    }
+    if let Some(buy_id) = linked_buy_id(&mut tx, id).await? {
+        if buy_drawn_on(&mut tx, buy_id).await? {
+            return Ok(DeleteOutcome::ParcelDrawnOn);
+        }
+        // The Buy goes first: it carries the FK to the inheritance.
+        sqlx::query("DELETE FROM trades WHERE id = ?")
+            .bind(buy_id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    sqlx::query("DELETE FROM inheritances WHERE id = ?")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+
+    tx.commit().await?;
+    Ok(DeleteOutcome::Deleted)
+}
+
+async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<Inheritance>>, ApiError> {
+    db_list(&pool).await.map(Json).map_err(ApiError::from)
+}
+
+async fn get_one(
+    State(pool): State<SqlitePool>,
+    Path(id): Path<i64>,
+) -> Result<Json<Inheritance>, ApiError> {
+    db_get(&pool, id)
+        .await
+        .map_err(ApiError::from)?
+        .map(Json)
+        .ok_or(ApiError::NotFound)
+}
+
+async fn upsert(
+    State(pool): State<SqlitePool>,
+    Path(id): Path<i64>,
+    Json(body): Json<InheritanceBody>,
+) -> Result<StatusCode, ApiError> {
+    let inh = Inheritance {
+        id,
+        listing_id: body.listing_id,
+        holding_account_id: body.holding_account_id,
+        quantity: body.quantity,
+        date_of_death: body.date_of_death,
+        cost_base_rule: body.cost_base_rule,
+        cost_base: body.cost_base,
+        lpr_expenditure: body.lpr_expenditure.unwrap_or(Decimal::ZERO),
+        lpr_expenditure_date: body.lpr_expenditure_date,
+        deceased_acquisition_date: body.deceased_acquisition_date,
+        currency: body.currency,
+        fx_rate: body.fx_rate.unwrap_or(Decimal::ONE),
+    };
+    db_upsert(&pool, &inh).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn delete(
+    State(pool): State<SqlitePool>,
+    Path(id): Path<i64>,
+) -> Result<StatusCode, ApiError> {
+    match db_delete(&pool, id).await? {
+        DeleteOutcome::Deleted => Ok(StatusCode::NO_CONTENT),
+        DeleteOutcome::NotFound => Err(ApiError::not_found("no inheritance with that id")),
+        DeleteOutcome::ParcelDrawnOn => Err(ApiError::unprocessable(
+            "the inherited parcel is drawn on by a sale allocation or AMIT adjustment — \
+             remove those first",
+        )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::entities::sell::{self, AllocationInput, SellBody};
+    use crate::entities::trade::{self, TradeType};
+    use crate::test_support::{self, dec, test_pool, ymd};
+    use axum::{body::Body, http::Request};
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    async fn insert_listing(pool: &SqlitePool, id: i64, currency: &str) {
+        test_support::listing(id)
+            .ticker(&format!("INH{id}"))
+            .name(&format!("Inherited {id}"))
+            .currency(currency)
+            .insert(pool)
+            .await;
+    }
+
+    /// A post-CGT inheritance: the deceased acquired 2020-02-01, died
+    /// 2025-01-10, their $3,000 cost base carries over, plus $200 of LPR
+    /// conveyancing incurred 2025-03-01.
+    fn post_cgt(id: i64) -> Inheritance {
+        Inheritance {
+            id,
+            listing_id: 1,
+            holding_account_id: 1,
+            quantity: dec("100"),
+            date_of_death: ymd(2025, 1, 10),
+            cost_base_rule: CostBaseRule::DeceasedCostBase,
+            cost_base: dec("3000"),
+            lpr_expenditure: dec("200"),
+            lpr_expenditure_date: Some(ymd(2025, 3, 1)),
+            deceased_acquisition_date: Some(ymd(2020, 2, 1)),
+            currency: "AUD".to_string(),
+            fx_rate: Decimal::ONE,
+        }
+    }
+
+    /// A pre-CGT inheritance: the deceased held since before 20 Sep 1985, so
+    /// the first element is the (user-supplied) market value at death and no
+    /// acquisition date is recorded.
+    fn pre_cgt(id: i64) -> Inheritance {
+        Inheritance {
+            cost_base_rule: CostBaseRule::MarketValueAtDeath,
+            cost_base: dec("5000"),
+            lpr_expenditure: Decimal::ZERO,
+            lpr_expenditure_date: None,
+            deceased_acquisition_date: None,
+            ..post_cgt(id)
+        }
+    }
+
+    async fn linked_buy(pool: &SqlitePool, inheritance_id: i64) -> trade::Trade {
+        let id: i64 = sqlx::query_scalar("SELECT id FROM trades WHERE inheritance_id = ?")
+            .bind(inheritance_id)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        trade::db_get(pool, id).await.unwrap().unwrap()
+    }
+
+    /// An AUD Sell of `qty` units of listing 1 at `price`, fully allocated to
+    /// the `buy_id` parcel.
+    fn sell_body(buy_id: i64, date: NaiveDate, qty: &str, price: &str) -> SellBody {
+        SellBody {
+            brokerage_includes_gst: false,
+            statement_total: None,
+            date,
+            settlement_date: Some(date),
+            listing_id: 1,
+            average_price: dec(price),
+            quantity: dec(qty),
+            currency: "AUD".to_string(),
+            brokerage: Decimal::ZERO,
+            gst_on_brokerage: Decimal::ZERO,
+            brokerage_currency: "AUD".to_string(),
+            fx_rate: Decimal::ONE,
+            contract_note_ref: None,
+            holding_account_id: 1,
+            allocations: vec![AllocationInput {
+                purchase_trade_id: buy_id,
+                quantity_allocated: dec(qty),
+            }],
+        }
+    }
+
+    // DB-level tests
+
+    /// The post-CGT entry path: one Buy dated (and settled) the date of
+    /// death, price 0, the whole cost base (deceased's $3,000 + $200 LPR) on
+    /// the brokerage column, and the discount clock anchored to the
+    /// deceased's acquisition (s 115-30).
+    #[tokio::test]
+    async fn post_cgt_inheritance_creates_the_parcel_buy() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AUD").await;
+
+        db_upsert(&pool, &post_cgt(1)).await.unwrap();
+
+        let buy = linked_buy(&pool, 1).await;
+        assert_eq!(buy.trade_type, TradeType::Buy);
+        assert_eq!(buy.date, ymd(2025, 1, 10));
+        assert_eq!(buy.settlement_date, ymd(2025, 1, 10), "not market-settled");
+        assert_eq!(buy.listing_id, 1);
+        assert_eq!(buy.quantity, dec("100"));
+        assert_eq!(buy.average_price, Decimal::ZERO);
+        assert_eq!(
+            buy.brokerage,
+            dec("3200"),
+            "first element + LPR expenditure"
+        );
+        assert_eq!(buy.gst_on_brokerage, Decimal::ZERO);
+        assert_eq!(buy.deemed_acquisition_date, Some(ymd(2020, 2, 1)));
+        assert_eq!(buy.inheritance_id, Some(1));
+        assert_eq!(buy.holding_account_id, 1);
+    }
+
+    /// The pre-CGT entry path: the market value at death is the cost base and
+    /// the clock runs from the date of death — the Buy's own date, no deemed
+    /// date.
+    #[tokio::test]
+    async fn pre_cgt_inheritance_clock_runs_from_death() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AUD").await;
+
+        db_upsert(&pool, &pre_cgt(1)).await.unwrap();
+
+        let buy = linked_buy(&pool, 1).await;
+        assert_eq!(buy.date, ymd(2025, 1, 10));
+        assert_eq!(buy.deemed_acquisition_date, None);
+        assert_eq!(buy.brokerage, dec("5000"));
+    }
+
+    /// A non-AUD inheritance keeps its currency and manual FX fallback on the
+    /// Buy, like every other parcel.
+    #[tokio::test]
+    async fn foreign_currency_inheritance_carries_currency_and_fx() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "USD").await;
+
+        db_upsert(
+            &pool,
+            &Inheritance {
+                currency: "USD".to_string(),
+                fx_rate: dec("1.5"),
+                ..post_cgt(1)
+            },
+        )
+        .await
+        .unwrap();
+
+        let buy = linked_buy(&pool, 1).await;
+        assert_eq!(buy.currency, "USD");
+        assert_eq!(buy.brokerage_currency, "USD");
+        assert_eq!(buy.fx_rate, dec("1.5"));
+    }
+
+    #[tokio::test]
+    async fn invalid_inheritances_are_rejected_and_nothing_persisted() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AUD").await;
+
+        // Zero quantity.
+        let mut inh = post_cgt(1);
+        inh.quantity = Decimal::ZERO;
+        assert!(matches!(
+            db_upsert(&pool, &inh).await,
+            Err(UpsertError::QuantityNotPositive)
+        ));
+
+        // Negative cost base.
+        let mut inh = post_cgt(1);
+        inh.cost_base = dec("-1");
+        assert!(matches!(
+            db_upsert(&pool, &inh).await,
+            Err(UpsertError::NegativeAmount)
+        ));
+
+        // DeceasedCostBase without the deceased's acquisition date.
+        let mut inh = post_cgt(1);
+        inh.deceased_acquisition_date = None;
+        assert!(matches!(
+            db_upsert(&pool, &inh).await,
+            Err(UpsertError::RuleAcquisitionDateMismatch)
+        ));
+
+        // MarketValueAtDeath with one.
+        let mut inh = pre_cgt(1);
+        inh.deceased_acquisition_date = Some(ymd(1980, 1, 1));
+        assert!(matches!(
+            db_upsert(&pool, &inh).await,
+            Err(UpsertError::RuleAcquisitionDateMismatch)
+        ));
+
+        // A pre-20-Sep-1985 acquisition under the post-CGT rule.
+        let mut inh = post_cgt(1);
+        inh.deceased_acquisition_date = Some(ymd(1985, 9, 19));
+        assert!(matches!(
+            db_upsert(&pool, &inh).await,
+            Err(UpsertError::DeceasedAcquisitionPreCgt)
+        ));
+
+        // Acquired after death.
+        let mut inh = post_cgt(1);
+        inh.deceased_acquisition_date = Some(ymd(2025, 1, 11));
+        assert!(matches!(
+            db_upsert(&pool, &inh).await,
+            Err(UpsertError::DeceasedAcquisitionAfterDeath)
+        ));
+
+        // LPR expenditure without its date, and a date without expenditure.
+        let mut inh = post_cgt(1);
+        inh.lpr_expenditure_date = None;
+        assert!(matches!(
+            db_upsert(&pool, &inh).await,
+            Err(UpsertError::LprExpenditureDateMismatch)
+        ));
+        let mut inh = post_cgt(1);
+        inh.lpr_expenditure = Decimal::ZERO;
+        assert!(matches!(
+            db_upsert(&pool, &inh).await,
+            Err(UpsertError::LprExpenditureDateMismatch)
+        ));
+
+        // LPR expenditure dated before the death.
+        let mut inh = post_cgt(1);
+        inh.lpr_expenditure_date = Some(ymd(2024, 12, 31));
+        assert!(matches!(
+            db_upsert(&pool, &inh).await,
+            Err(UpsertError::LprExpenditureBeforeDeath)
+        ));
+
+        let inheritances: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM inheritances")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(inheritances, 0);
+        let trades: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM trades")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(trades, 0, "no parcel Buy persisted");
+    }
+
+    /// Editing an undrawn inheritance updates the linked Buy in place (same
+    /// trade id, no duplicate parcel).
+    #[tokio::test]
+    async fn edit_updates_the_linked_buy_in_place() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AUD").await;
+        db_upsert(&pool, &post_cgt(1)).await.unwrap();
+        let before = linked_buy(&pool, 1).await;
+
+        let mut edited = post_cgt(1);
+        edited.quantity = dec("150");
+        edited.cost_base = dec("4000");
+        db_upsert(&pool, &edited).await.unwrap();
+
+        let after = linked_buy(&pool, 1).await;
+        assert_eq!(after.id, before.id, "the Buy keeps its id");
+        assert_eq!(after.quantity, dec("150"));
+        assert_eq!(after.brokerage, dec("4200"));
+        let buys: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM trades WHERE inheritance_id IS NOT NULL")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(buys, 1, "no duplicate parcel");
+    }
+
+    /// Sell some of the parcel: the inheritance is frozen (edit and delete
+    /// both refused) until the sale is removed.
+    #[tokio::test]
+    async fn drawn_on_parcel_freezes_edit_and_delete() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AUD").await;
+        db_upsert(&pool, &post_cgt(1)).await.unwrap();
+        let buy = linked_buy(&pool, 1).await;
+
+        sell::db_upsert_sell(&pool, 50, &sell_body(buy.id, ymd(2025, 6, 1), "30", "40"))
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            db_upsert(&pool, &post_cgt(1)).await,
+            Err(UpsertError::ParcelDrawnOn)
+        ));
+        assert_eq!(
+            db_delete(&pool, 1).await.unwrap(),
+            DeleteOutcome::ParcelDrawnOn
+        );
+
+        // Removing the sale unfreezes both.
+        assert_eq!(
+            sell::db_delete_sell(&pool, 50).await.unwrap(),
+            sell::DeleteOutcome::Deleted
+        );
+        db_upsert(&pool, &post_cgt(1)).await.unwrap();
+        assert_eq!(db_delete(&pool, 1).await.unwrap(), DeleteOutcome::Deleted);
+        assert!(db_get(&pool, 1).await.unwrap().is_none());
+        assert!(
+            trade::db_get(&pool, buy.id).await.unwrap().is_none(),
+            "the parcel Buy goes with the inheritance"
+        );
+    }
+
+    /// The linked Buy is immutable individually — PUT /trades rejects it and
+    /// DELETE /trades refuses it; the inheritance is the write path.
+    #[tokio::test]
+    async fn linked_buy_is_immutable_individually() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AUD").await;
+        db_upsert(&pool, &post_cgt(1)).await.unwrap();
+        let buy = linked_buy(&pool, 1).await;
+
+        let mut edited = buy.clone();
+        edited.quantity = dec("999");
+        assert!(matches!(
+            trade::db_upsert(&pool, &edited).await,
+            Err(trade::UpsertError::InheritedParcelTrade)
+        ));
+        assert_eq!(
+            trade::db_delete(&pool, buy.id).await.unwrap(),
+            trade::DeleteOutcome::Referenced
+        );
+    }
+
+    /// The parcel is subject to the same write-time capacity check as any
+    /// Buy: a Sell drawing more than the inherited units is rejected.
+    #[tokio::test]
+    async fn capacity_check_applies_like_any_buy() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AUD").await;
+        db_upsert(&pool, &post_cgt(1)).await.unwrap();
+        let buy = linked_buy(&pool, 1).await;
+
+        let result =
+            sell::db_upsert_sell(&pool, 50, &sell_body(buy.id, ymd(2025, 6, 1), "101", "40")).await;
+        assert!(matches!(
+            result,
+            Err(sell::SellError::PurchaseQuantityExceeded)
+        ));
+    }
+
+    // Report flow-through
+
+    /// The parcel flows through the open-parcels report like any Buy: the
+    /// whole cost base (first element + LPR expenditure) and the s 115-30
+    /// acquisition date (the deceased's, under the post-CGT rule).
+    #[tokio::test]
+    async fn parcel_flows_through_open_parcels() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AUD").await;
+        db_upsert(&pool, &post_cgt(1)).await.unwrap();
+
+        let parcels = crate::reports::open_parcels::db_open_parcels(&pool)
+            .await
+            .unwrap();
+        assert_eq!(parcels.len(), 1);
+        let p = &parcels[0];
+        assert_eq!(
+            p.acquisition_date,
+            ymd(2020, 2, 1),
+            "the deceased's acquisition starts the clock"
+        );
+        assert_eq!(p.remaining_quantity, dec("100"));
+        assert_eq!(p.original_cost_base, dec("3200"));
+    }
+
+    /// s 115-30 post-CGT case: a sale within 12 months of the death but more
+    /// than 12 months after the deceased's acquisition is discount-eligible —
+    /// the beneficiary is treated as having owned the asset since the
+    /// deceased acquired it (docs/ato/inherited-assets-cgt-discount.md).
+    #[tokio::test]
+    async fn post_cgt_gain_discounts_off_the_deceaseds_acquisition() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AUD").await;
+        db_upsert(&pool, &post_cgt(1)).await.unwrap();
+        let buy = linked_buy(&pool, 1).await;
+
+        // 2025-06-01: under 5 months after the 2025-01-10 death, over 5 years
+        // after the deceased's 2020-02-01 acquisition. 100 × $40 = $4,000
+        // proceeds against the $3,200 inherited cost base.
+        sell::db_upsert_sell(&pool, 50, &sell_body(buy.id, ymd(2025, 6, 1), "100", "40"))
+            .await
+            .unwrap();
+
+        let realised = crate::reports::realised_gains::db_realised_gains(&pool)
+            .await
+            .unwrap();
+        assert_eq!(realised.len(), 1);
+        let g = &realised[0];
+        assert_eq!(g.cost_base, dec("3200"));
+        assert_eq!(g.capital_gain_loss, dec("800"));
+        assert_eq!(g.discount_eligible_gain, dec("800"));
+        assert_eq!(g.non_discountable_gain, Decimal::ZERO);
+    }
+
+    /// s 115-30 pre-CGT case: the clock runs from the date of death — a sale
+    /// within 12 months of the death is non-discountable, one after is
+    /// discount-eligible.
+    #[tokio::test]
+    async fn pre_cgt_gain_discounts_off_the_death() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AUD").await;
+        db_upsert(&pool, &pre_cgt(1)).await.unwrap();
+        let buy = linked_buy(&pool, 1).await;
+
+        // $5,000 market value at death over 100 units = $50/unit cost base.
+        // 30 units at $60 on 2025-06-01 (< 12 months after the 2025-01-10
+        // death): $300 gain, non-discountable.
+        sell::db_upsert_sell(&pool, 50, &sell_body(buy.id, ymd(2025, 6, 1), "30", "60"))
+            .await
+            .unwrap();
+        // 30 more on 2026-02-01 (> 12 months after the death): discountable.
+        sell::db_upsert_sell(&pool, 51, &sell_body(buy.id, ymd(2026, 2, 1), "30", "60"))
+            .await
+            .unwrap();
+
+        let realised = crate::reports::realised_gains::db_realised_gains(&pool)
+            .await
+            .unwrap();
+        assert_eq!(realised.len(), 2);
+        let within = realised.iter().find(|g| g.sale_trade_id == 50).unwrap();
+        assert_eq!(within.capital_gain_loss, dec("300"));
+        assert_eq!(within.non_discountable_gain, dec("300"));
+        assert_eq!(within.discount_eligible_gain, Decimal::ZERO);
+        let after = realised.iter().find(|g| g.sale_trade_id == 51).unwrap();
+        assert_eq!(after.capital_gain_loss, dec("300"));
+        assert_eq!(after.discount_eligible_gain, dec("300"));
+        assert_eq!(after.non_discountable_gain, Decimal::ZERO);
+    }
+
+    // API-level tests
+
+    #[tokio::test]
+    async fn api_round_trip() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AUD").await;
+        let app = || router().with_state(pool.clone());
+
+        let body = serde_json::json!({
+            "listing_id": 1,
+            "quantity": "100",
+            "date_of_death": "2025-01-10",
+            "cost_base_rule": "DeceasedCostBase",
+            "cost_base": "3000",
+            "lpr_expenditure": "200",
+            "lpr_expenditure_date": "2025-03-01",
+            "deceased_acquisition_date": "2020-02-01"
+        });
+        let resp = app()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/inheritances/1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        // The omitted fields took their defaults (account 1, AUD, fx 1).
+        let resp = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/inheritances/1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let got: Inheritance = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(got.holding_account_id, 1);
+        assert_eq!(got.currency, "AUD");
+        assert_eq!(got.fx_rate, Decimal::ONE);
+        assert_eq!(got.cost_base_rule, CostBaseRule::DeceasedCostBase);
+
+        // List.
+        let resp = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/inheritances")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // DELETE removes it and its Buy; a second DELETE is 404.
+        let resp = app()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/inheritances/1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let resp = app()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/inheritances/1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn api_invalid_inheritance_returns_422_with_reason() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AUD").await;
+
+        // The post-CGT rule without the deceased's acquisition date.
+        let body = serde_json::json!({
+            "listing_id": 1,
+            "quantity": "100",
+            "date_of_death": "2025-01-10",
+            "cost_base_rule": "DeceasedCostBase",
+            "cost_base": "3000"
+        });
+        let resp = router()
+            .with_state(pool)
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/inheritances/1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let detail = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(detail.contains("acquisition date"), "detail: {detail}");
+    }
+}

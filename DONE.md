@@ -589,3 +589,14 @@ Smaller:
   - Done: entity round-trip / non-trust 422 (DB + API with detail) / negative 422 / omitted-stays-NULL in `entities::income`; flagged / same-FY-action-clears / other-FY and other-listing don't clear / NULL-or-zero omitted / entitlement-date-governs-FY / API in `reports::e4_cross_check`; `web::tests::income_tax_deferred_e4_ui_present`; `domain::tax_year` boundary test
 - [x] Docs: `docs/SCHEMA.md`, `docs/API.md` (report + 422 + Response codes), README
   - Done: SCHEMA income column; API.md income **Tax-deferred amount** paragraph, the new report section, and the 422 Response-codes entry; README Features line; the project note in `docs/ato/cgt-non-assessable-payments.md` updated to point at the field + report
+
+## Inherited share parcels (2026-06-10)
+
+(REQUIREMENTS 2026-06-10; `docs/ato/inherited-assets-cost-base.md`, QC 66053.)
+
+- [x] Mirror the s 115-30 discount-clock rule for inherited assets into `docs/ato/` (confirm from the ATO source: post-CGT asset → discount period runs from the deceased's acquisition; pre-CGT asset → from the date of death) and index it in `OVERVIEW.md` — read before implementing (`docs/ato/inherited-assets-cgt-discount.md`, QC 69713 "How CGT applies to inherited assets" — the rule confirmed verbatim)
+- [x] Entry path for an inherited parcel: listing, holding account, units, date of death, cost base (recording which rule produced it), deceased's acquisition date (post-CGT case), LPR expenditure dated when incurred; provenance visible (not a market Buy) (`inheritances` entity, migration 0005; PUT creates the `trades.inheritance_id`-linked Buy atomically)
+- [x] The parcel flows through every report and write-time capacity check like a Buy; the discount clock follows the mirrored s 115-30 rule (the Buy carries `deemed_acquisition_date` = deceased's acquisition for post-CGT; pre-CGT runs from the death date itself)
+- [x] Web UI via the existing config-driven entity/action patterns (`ENTITIES` entry with `typeField` = cost_base_rule field groups)
+- [x] Tests: cost-base and discount-clock cases (post-CGT and pre-CGT deceased); `ato_examples.rs` acceptance test for any representable worked example (the QC 66053 Maria/Antonio LPR-expenditure example; its other two examples classify deductibility only — noted in the `ato_examples.rs` header)
+- [x] Docs: `docs/SCHEMA.md`, `docs/API.md`, README Features; Known limitations: estate/LPR side not modelled, market value at death is user-supplied

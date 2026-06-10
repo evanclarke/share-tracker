@@ -21,6 +21,7 @@ pub mod exchange;
 pub mod exchange_holiday;
 pub mod holding_account;
 pub mod income;
+pub mod inheritance;
 pub mod investment_expense;
 pub mod listing;
 pub mod mic_registry;
@@ -60,6 +61,7 @@ pub fn router() -> Router<SqlitePool> {
         .merge(drp_reinvestment::router())
         .merge(ess_statement::router())
         .merge(ess_vest::router())
+        .merge(inheritance::router())
         .merge(transfer::router())
         .merge(worthless::router())
         .merge(attachment::router())

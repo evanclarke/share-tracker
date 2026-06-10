@@ -167,6 +167,7 @@ impl TradeBuilder {
                 holding_account_id: 1,
                 transfer_id: None,
                 ess_statement_id: None,
+                inheritance_id: None,
             },
             settlement_overridden: false,
         }

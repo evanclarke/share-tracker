@@ -500,6 +500,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn inheritance_ui_present() {
+        let js = app_js_body().await;
+        // The inheritance CRUD screen drives /inheritances.
+        assert!(js.contains("/inheritances"));
+        assert!(js.contains("Inheritances"));
+        // The form shows only the chosen cost-base rule's fields: the
+        // deceased's acquisition date belongs to the post-CGT rule alone, and
+        // the per-rule labels rename the cost-base figure.
+        assert!(js.contains("cost_base_rule"));
+        assert!(js.contains("DeceasedCostBase"));
+        assert!(js.contains("MarketValueAtDeath"));
+        assert!(js.contains("deceased_acquisition_date"));
+        assert!(js.contains("Deceased’s cost base at death"));
+        assert!(js.contains("Market value at death"));
+        // The LPR expenditure pair, classified as money so it formats.
+        assert!(js.contains("lpr_expenditure"));
+        assert!(js.contains("lpr_expenditure_date"));
+        assert!(js.contains("'lpr_expenditure'"));
+    }
+
+    #[tokio::test]
     async fn parcel_allocation_ui_present() {
         let js = app_js_body().await;
         // Allocations are entered as part of a Sell (PUT /sells/:id).

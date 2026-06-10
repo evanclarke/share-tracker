@@ -314,6 +314,8 @@ const COLUMN_KINDS = (function () {
     'taxed_upfront_eligible', 'taxed_upfront_not_eligible', 'deferral_discount',
     'pre_2009_cessation_discount', 'foreign_source_discount', 'tfn_withholding',
     'ess_discount_assessable', 'ess_taxed_upfront_reduction', 'ess_foreign_source_discount',
+    // Inheritance cost-base components.
+    'lpr_expenditure',
     // Investment-expense line items + the tax-summary deduction aggregates.
     'amount', 'gross_amount', 'gross_assessable_investment_income',
     'deductions_loan_interest', 'deductions_management_fee', 'deductions_advice_fee',
@@ -366,7 +368,7 @@ export function columnKinds(cols) {
 const LABEL_ACRONYMS = {
   id: 'ID', aud: 'AUD', fx: 'FX', mic: 'MIC', isin: 'ISIN', drp: 'DRP',
   cgt: 'CGT', amit: 'AMIT', amma: 'AMMA', gst: 'GST', lic: 'LIC', fito: 'FITO',
-  tfn: 'TFN',
+  tfn: 'TFN', lpr: 'LPR',
 };
 
 // Default humaniser so a field with no explicit COLUMN_LABELS entry never

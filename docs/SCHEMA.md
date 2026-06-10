@@ -92,7 +92,23 @@ trades
 ├── holding_account_id INTEGER FK→holding_accounts.id  The account the trade sits in (defaults to the seeded default account when omitted from a write)
 ├── transfer_id       INTEGER FK→transfers.id (nullable)  Transfer trades only (the transfer-out Sell + every transfer-in Buy): the transfer that created them, set by PUT /transfers/:id. The trades carrying one transfer id form the transfer group: each is immutable via PUT /sells, PUT/DELETE /trades, and DELETE /sells; DELETE /transfers/:id removes the whole group (with the transfer record), restoring the pre-transfer holding
 ├── ess_statement_id  INTEGER FK→ess_statements.id (nullable)  ESS vest Buys only: the ESS statement whose discount this parcel resets the cost base for, set by POST /ess_statements/:id/vest. The Buy is immutable via PUT /trades and never deleted individually — DELETE /ess_statements/:id removes it (refused while it is drawn on by a Sell allocation or AMIT adjustment), and the statement is frozen against edits while it exists
-└── worthless_action_id INTEGER FK→corporate_actions.id (nullable)  Worthless-shares recognise closing Sells only: the WorthlessShares action recognised, set by POST /corporate_actions/:id/recognise. The Sell is immutable via PUT /sells and PUT/DELETE /trades; DELETE /sells removes it and restores the holding; the action is frozen while it exists. Unlike scrip_action_id/demerger_action_id it does NOT exclude the Sell from the realised-gains report — its nil proceeds recognise the capital loss
+├── worthless_action_id INTEGER FK→corporate_actions.id (nullable)  Worthless-shares recognise closing Sells only: the WorthlessShares action recognised, set by POST /corporate_actions/:id/recognise. The Sell is immutable via PUT /sells and PUT/DELETE /trades; DELETE /sells removes it and restores the holding; the action is frozen while it exists. Unlike scrip_action_id/demerger_action_id it does NOT exclude the Sell from the realised-gains report — its nil proceeds recognise the capital loss
+└── inheritance_id    INTEGER FK→inheritances.id (nullable)  Inherited-parcel Buys only: the inheritance that created them, set by PUT /inheritances/:id. The Buy carries the inheritance's cost base (on the brokerage column, price 0) and s 115-30 discount clock (deemed_acquisition_date), so it is immutable via PUT/DELETE /trades — it is edited and deleted through its inheritance, both refused while a Sell allocation or AMIT adjustment draws on it
+
+inheritances                 Inherited share parcels from a deceased estate — not a CGT event on transfer (docs/ato/inherited-assets-cost-base.md QC 66053, docs/ato/inherited-assets-cgt-discount.md QC 69713 / s 115-30)
+├── id                        INTEGER PK
+├── listing_id                INTEGER FK→listings.id
+├── holding_account_id        INTEGER FK→holding_accounts.id  Defaults to the seeded default account
+├── quantity                  TEXT (decimal)  Units inherited, in date-of-death terms (> 0, validated at write time)
+├── date_of_death             TEXT          The linked Buy is dated (and settled) on it — an estate transmission is not market-settled
+├── cost_base_rule            TEXT          DeceasedCostBase | MarketValueAtDeath (CHECK) — which QC 66053 rule produced the first-element figure: the deceased's cost base at death (asset acquired by the deceased on/after 20 Sep 1985) or the market value at death (pre-CGT asset; the user supplies the valuation)
+├── cost_base                 TEXT (decimal)  The whole-parcel first-element cost base per that rule, in `currency`
+├── lpr_expenditure           TEXT (decimal)  LPR expenditure the beneficiary may include (conveyancing on transfer, legal costs of proving the will) — added to the linked Buy's cost base
+├── lpr_expenditure_date      TEXT (nullable)  When the LPR incurred it (on or after the death; present exactly when lpr_expenditure is non-zero — validated at write time). Provenance only: indexation, where the date would matter, is not modelled
+├── deceased_acquisition_date TEXT (nullable)  CHECK: present exactly when cost_base_rule = DeceasedCostBase, and not after date_of_death; ≥ 20 Sep 1985 validated at write time. Starts the s 115-30 discount clock, carried as the Buy's deemed_acquisition_date; a pre-CGT asset's clock runs from the date of death instead
+├── currency                  TEXT FK→currencies.code  Default AUD
+└── fx_rate                   TEXT (decimal)  Manual foreign-per-AUD fallback (same convention as trades.fx_rate)
+                    The entry path (PUT /inheritances/:id) upserts this row and its linked Buy atomically; like transfers, no report reads this table directly — the parcel side lives on the Buy
 
 income
 ├── id                        INTEGER PK
@@ -275,13 +291,15 @@ exchanges ──< listings ──< trades >────────────�
                        listings ──< corporate_actions
                        listings ──< transfers
                        listings ──< ess_statements
+                       listings ──< inheritances
                        listings ──< investment_expenses (nullable; portfolio-wide expense leaves it NULL)
-                       holding_accounts ──< trades, income, amma_statements, drp_enrolments, ess_statements
+                       holding_accounts ──< trades, income, amma_statements, drp_enrolments, ess_statements, inheritances
                        holding_accounts ──< investment_expenses (nullable; portfolio-wide expense leaves it NULL)
                        holding_accounts ──< transfers (from_account_id + to_account_id)
                        transfers ──< trades (transfer_id)
                        transfers >── trades (fee_sale_trade_id; the crypto network-fee disposal Sell)
                        ess_statements ──< trades (ess_statement_id; the cost-base-reset vest Buy)
+                       inheritances ──< trades (inheritance_id; the inherited-parcel Buy)
                        trades (DRP) ──< income (reinvestment_trade_id)
                        corporate_actions (RightsIssue) ──< trades (rights_action_id)
                        corporate_actions (BuyBack) ──< trades (buyback_action_id)
@@ -296,7 +314,7 @@ exchanges ──< listings ──< trades >────────────�
                        trades, parcel_allocations, income, amma_statements, amit_adjustments,
                        corporate_actions, closing_prices ──> report_snapshots.stale (staleness triggers)
 
-currencies ──< exchanges, listings, trades (currency + brokerage_currency), income, amma_statements, corporate_actions, ess_statements, investment_expenses
+currencies ──< exchanges, listings, trades (currency + brokerage_currency), income, amma_statements, corporate_actions, ess_statements, investment_expenses, inheritances
 ```
 
 Each `attachments` row belongs to exactly one activity via one of three nullable foreign keys (`trade_id` / `income_id` / `amma_statement_id`), with a `CHECK` enforcing that exactly one is set — a real foreign key keeps referential integrity to the owning row, and `ON DELETE CASCADE` removes an activity's attachments when it is deleted. File contents live in the `content` BLOB so the weekly DB backup captures the documents with no separate file store.
@@ -307,7 +325,7 @@ Each `attachments` row belongs to exactly one activity via one of three nullable
 
 `mic_registry` is standalone reference data (no foreign keys), keyed by `mic`. It is populated from the ISO 10383 list and used only to validate curated `exchanges` (see the [exchange MIC validation report](API.md#exchange-mic-validation)); it is *not* the operational exchange table and carries no currency/timezone/settlement data.
 
-`currencies` is reference data keyed by `code` (it has no outgoing foreign keys). It is populated from the ISO 4217 (SIX Group) and ISO 24165 (DTIF) feeds and seeded with a baseline of common currencies (the seed migration), and is the recognised list that **every** currency code in the model is foreign-keyed to: `exchanges.currency`, `listings.currency`, `trades.currency`, `trades.brokerage_currency`, `income.currency`, `amma_statements.currency`, `corporate_actions.currency`, `ess_statements.currency`, and `investment_expenses.currency` all reference `currencies.code`, so an unrecognised currency is rejected at write time. `minor_units` is informational only — stored amounts remain arbitrary-precision Decimal and are never rounded to it. A Crypto listing's ticker is additionally validated against the `DigitalToken` rows at write time (matched on `code` or `short_name`).
+`currencies` is reference data keyed by `code` (it has no outgoing foreign keys). It is populated from the ISO 4217 (SIX Group) and ISO 24165 (DTIF) feeds and seeded with a baseline of common currencies (the seed migration), and is the recognised list that **every** currency code in the model is foreign-keyed to: `exchanges.currency`, `listings.currency`, `trades.currency`, `trades.brokerage_currency`, `income.currency`, `amma_statements.currency`, `corporate_actions.currency`, `ess_statements.currency`, `investment_expenses.currency`, and `inheritances.currency` all reference `currencies.code`, so an unrecognised currency is rejected at write time. `minor_units` is informational only — stored amounts remain arbitrary-precision Decimal and are never rounded to it. A Crypto listing's ticker is additionally validated against the `DigitalToken` rows at write time (matched on `code` or `short_name`).
 
 `listings.exchange_mic` is nullable for exactly the Crypto security type (CHECK-enforced both ways): a crypto asset trades on no MIC-coded venue, settles same-day, and has no holiday calendar. Because `UNIQUE(exchange_mic, ticker)` treats NULLs as distinct, a partial unique index makes exchange-less listings unique by ticker.
 

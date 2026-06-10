@@ -50,6 +50,12 @@
 //! - `docs/ato/amma-statement-guidance-notes.md` running example ("In our example,
 //!   this is $155") — the underlying Part C component table is not included in
 //!   the mirrored copy, so the example is not reproducible from the doc alone.
+//! - `docs/ato/inherited-assets-cost-base.md` "Example: legal costs incurred to
+//!   prove the validity of a will" (Annie) and "Example: legal costs incurred
+//!   prior to the deceased's death" (Cassie) — both classify *whether* an
+//!   LPR's legal costs are includable in the cost base, a judgement made
+//!   before entry; the includable figure enters as the inheritance's LPR
+//!   expenditure, exercised by the Maria/Antonio test below.
 //! - "Guide to foreign income tax offset rules 2025" Example 16 (Anna,
 //!   ato.gov.au law view SAV/FOROFFSET/00004) — the FITO offset-limit
 //!   calculation compares personal income-tax liabilities with and without the
@@ -1439,4 +1445,59 @@ async fn worthless_shares_example_dave_capital_loss_on_dissolution() {
     let holdings: Vec<HoldingOverview> =
         api_post(&pool, "/portfolio/overview", json!({}), StatusCode::OK).await;
     assert!(holdings.iter().all(|h| h.quantity == Decimal::ZERO));
+}
+
+/// `docs/ato/inherited-assets-cost-base.md` (QC 66053) — "Example: transfer of
+/// an asset from executor (LPR) to beneficiary" (Maria/Antonio), together with
+/// the s 115-30 discount-clock rule in
+/// `docs/ato/inherited-assets-cgt-discount.md` (QC 69713).
+///
+/// > Maria died on 13 October 2024 … \[the executor\] transferred the land to
+/// > Maria's beneficiary, Antonio, and paid the conveyancing fee of $5,000
+/// > upon payment of all debts and tax. … The first element of Antonio's cost
+/// > base is Maria's cost base on the date of her death. Antonio can include
+/// > the $5,000 the executor spent on the conveyancing in his cost base.
+///
+/// The example states no figure for Maria's own cost base (and no acquisition
+/// date beyond the asset being post-CGT in her hands — her cost base carries
+/// over), so the test supplies stand-ins: a $300,000 cost base acquired
+/// 1 May 2010. The asserted structure is the ATO's: the parcel's cost base is
+/// the deceased's cost base at death **plus the $5,000 LPR conveyancing**,
+/// and (s 115-30) the discount clock runs from Maria's acquisition, not the
+/// death or transfer. The land is entered as 1 unit, per the property
+/// convention above.
+#[tokio::test]
+async fn inherited_assets_example_maria_antonio_lpr_expenditure() {
+    let pool = test_pool().await;
+    put_listing(&pool, 1, "LAND").await;
+
+    api_put(
+        &pool,
+        "/inheritances/1",
+        json!({
+            "listing_id": 1,
+            "quantity": "1",
+            "date_of_death": "2024-10-13",
+            "cost_base_rule": "DeceasedCostBase",
+            "cost_base": "300000",
+            "lpr_expenditure": "5000",
+            // "upon payment of all debts and tax" — after the death.
+            "lpr_expenditure_date": "2025-02-01",
+            "deceased_acquisition_date": "2010-05-01",
+        }),
+    )
+    .await;
+
+    // Antonio's parcel: Maria's $300,000 cost base at death + the $5,000
+    // conveyancing, acquired (for the 12-month discount clock) when Maria
+    // acquired it.
+    let parcels: Vec<crate::reports::open_parcels::OpenParcel> =
+        api_get(&pool, "/portfolio/open-parcels").await;
+    assert_eq!(parcels.len(), 1);
+    assert_eq!(parcels[0].original_cost_base, dec("305000"));
+    assert_eq!(parcels[0].remaining_quantity, dec("1"));
+    assert_eq!(
+        parcels[0].acquisition_date,
+        chrono::NaiveDate::from_ymd_opt(2010, 5, 1).unwrap()
+    );
 }

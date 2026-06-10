@@ -109,6 +109,40 @@ export const ENTITIES = [
     desc: 'Moves between holding accounts (e.g. vested plan shares to a personal account) — not a CGT event.',
   },
   {
+    slug: 'inheritances', title: 'Inheritances', group: 'Activity', api: '/inheritances',
+    desc: 'Inherited parcels from a deceased estate — receiving them is not a CGT event. Recording one creates the parcel Buy at the date of death: the cost base per the chosen rule plus any legal-personal-representative (LPR) expenditure, with the 12-month discount clock per s 115-30. The parcel then flows through every report like a Buy; edit or delete it here (not under Trades) — refused while a sale or AMIT adjustment draws on it. The estate/LPR side (assets the executor sells) is not modelled.',
+    keyFields: [int('id', 'ID', { auto: true })],
+    fields: [
+      sel('cost_base_rule', 'Cost base rule', ['DeceasedCostBase', 'MarketValueAtDeath'], { required: true }),
+      fk('listing_id', 'Listing', 'listings', { required: true }),
+      fk('holding_account_id', 'Holding account', 'holdingAccounts', { required: true, default: '1' }),
+      dec('quantity', 'Units inherited', { required: true, default: '' }),
+      dt('date_of_death', 'Date of death', { required: true }),
+      dec('cost_base', 'Cost base', { required: true, default: '' }),
+      dt('deceased_acquisition_date', 'Deceased’s acquisition date', { optional: true, default: '', hint: 'Starts the 12-month discount clock (s 115-30). Must be on or after 20 September 1985 — earlier means the asset was pre-CGT in their hands, so record it under Market value at death.' }),
+      dec('lpr_expenditure', 'LPR expenditure', { optional: true, default: '', hint: 'Executor costs you can include — e.g. conveyancing on the transfer, legal costs of proving the will. Added to the parcel’s cost base.' }),
+      dt('lpr_expenditure_date', 'LPR expenditure date', { optional: true, default: '', hint: 'When the LPR incurred it (on or after the death). Required with a non-zero expenditure.' }),
+      fk('currency', 'Currency', 'currencies', { required: true, encode: 'string', default: 'AUD' }),
+      dec('fx_rate', 'Manual FX rate', { default: '1', hint: 'Foreign units per AUD; fallback used only when no ATO rate exists. 1 for AUD.' }),
+    ],
+    typeField: 'cost_base_rule',
+    fieldGroups: {
+      DeceasedCostBase: ['deceased_acquisition_date'],
+      MarketValueAtDeath: [],
+    },
+    typeDescs: {
+      DeceasedCostBase: 'The deceased acquired the asset on or after 20 September 1985: your first-element cost base is the deceased’s cost base on the day they died, and the discount clock runs from the deceased’s acquisition date.',
+      MarketValueAtDeath: 'The deceased acquired the asset before 20 September 1985 (pre-CGT in their hands): your first-element cost base is the asset’s market value on the day they died (you supply the valuation figure), and the discount clock runs from the date of death.',
+    },
+    typeLabels: {
+      cost_base: {
+        DeceasedCostBase: 'Deceased’s cost base at death',
+        MarketValueAtDeath: 'Market value at death',
+      },
+    },
+    columns: ['id', 'listing_id', 'holding_account_id', 'quantity', 'date_of_death', 'cost_base_rule', 'cost_base', 'lpr_expenditure', 'deceased_acquisition_date', 'currency'],
+  },
+  {
     slug: 'income', title: 'Income', group: 'Activity', api: '/income',
     desc: 'Dividends and trust distributions. The form captures what the payment advice prints — amount, franking treatment, the per-share figures — and the advanced toggle reveals the full tax-component breakdown; a DRP statement’s reinvestment can be entered in the same form.',
     keyFields: [int('id', 'ID', { auto: true })],

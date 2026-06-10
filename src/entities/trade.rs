@@ -146,6 +146,13 @@ pub struct Trade {
     /// from the realised-gains report — its nil proceeds recognise the capital
     /// loss (see `docs/ato/worthless-shares.md`).
     pub worthless_action_id: Option<i64>,
+    /// Provenance link from an inherited-parcel Buy back to its `inheritances`
+    /// row (`None` for every other trade). Set only by `PUT /inheritances/:id`
+    /// (`entities::inheritance`): the Buy carries the inheritance's cost base
+    /// and s 115-30 discount clock, so it is rejected by `PUT`/`DELETE
+    /// /trades` — edit or delete the inheritance instead (refused while the
+    /// parcel is drawn on by a Sell allocation or AMIT adjustment).
+    pub inheritance_id: Option<i64>,
 }
 
 impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for Trade {
@@ -178,6 +185,7 @@ impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for Trade {
             transfer_id: row.try_get("transfer_id")?,
             ess_statement_id: row.try_get("ess_statement_id")?,
             worthless_action_id: row.try_get("worthless_action_id")?,
+            inheritance_id: row.try_get("inheritance_id")?,
         })
     }
 }
@@ -307,7 +315,7 @@ pub async fn db_list(pool: &SqlitePool) -> Result<Vec<Trade>, sqlx::Error> {
          fx_rate, contract_note_ref, statement_total, \
          residual_brought_forward, residual_carried_forward, residual_paid_out, rights_action_id, \
          buyback_action_id, scrip_action_id, demerger_action_id, deemed_acquisition_date, \
-         holding_account_id, transfer_id, ess_statement_id, worthless_action_id \
+         holding_account_id, transfer_id, ess_statement_id, worthless_action_id, inheritance_id \
          FROM trades ORDER BY date, id",
     )
     .fetch_all(pool)
@@ -321,7 +329,7 @@ pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<Trade>, sqlx::E
          fx_rate, contract_note_ref, statement_total, \
          residual_brought_forward, residual_carried_forward, residual_paid_out, rights_action_id, \
          buyback_action_id, scrip_action_id, demerger_action_id, deemed_acquisition_date, \
-         holding_account_id, transfer_id, ess_statement_id, worthless_action_id \
+         holding_account_id, transfer_id, ess_statement_id, worthless_action_id, inheritance_id \
          FROM trades WHERE id = ?",
     )
     .bind(id)
@@ -374,6 +382,11 @@ pub enum UpsertError {
     /// quantity and taxing-point market value. Delete the statement (which
     /// removes the vest) and re-vest instead (see `entities::ess_vest`).
     EssVestTrade,
+    /// The existing trade is an inherited-parcel Buy (`inheritance_id` set):
+    /// its figures carry the inheritance's cost base and s 115-30 discount
+    /// clock, which a free-form edit would corrupt. Edit the inheritance
+    /// (`PUT /inheritances/:id`) instead (see `entities::inheritance`).
+    InheritedParcelTrade,
     /// A supplied statement total failed the cross-check (see
     /// `check_statement_total`): it doesn't reconcile with the trade's own
     /// figures, or the trade and brokerage currencies differ so there is no
@@ -423,16 +436,17 @@ pub async fn db_upsert(pool: &SqlitePool, trade: &Trade) -> Result<(), UpsertErr
         Option<i64>,
         Option<i64>,
         Option<i64>,
+        Option<i64>,
     );
     let existing_action: Option<ProvenanceRow> = sqlx::query_as(
         "SELECT rights_action_id, buyback_action_id, scrip_action_id, demerger_action_id, \
-                transfer_id, ess_statement_id \
+                transfer_id, ess_statement_id, inheritance_id \
          FROM trades WHERE id = ?",
     )
     .bind(trade.id)
     .fetch_optional(&mut *tx)
     .await?;
-    if let Some((rights, buyback, scrip, demerger, transfer, ess)) = existing_action {
+    if let Some((rights, buyback, scrip, demerger, transfer, ess, inheritance)) = existing_action {
         if rights.is_some() {
             return Err(UpsertError::RightsExerciseTrade);
         }
@@ -450,6 +464,9 @@ pub async fn db_upsert(pool: &SqlitePool, trade: &Trade) -> Result<(), UpsertErr
         }
         if ess.is_some() {
             return Err(UpsertError::EssVestTrade);
+        }
+        if inheritance.is_some() {
+            return Err(UpsertError::InheritedParcelTrade);
         }
     }
     // A transfer's network-fee disposal Sell is immutable here too: its
@@ -583,6 +600,7 @@ struct DeleteGuard {
     transfer_id: Option<i64>,
     ess_statement_id: Option<i64>,
     worthless_action_id: Option<i64>,
+    inheritance_id: Option<i64>,
 }
 
 pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<DeleteOutcome, sqlx::Error> {
@@ -590,7 +608,7 @@ pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<DeleteOutcome, sqlx
 
     let guard: Option<DeleteGuard> = sqlx::query_as(
         "SELECT scrip_action_id, demerger_action_id, transfer_id, ess_statement_id, \
-                worthless_action_id \
+                worthless_action_id, inheritance_id \
          FROM trades WHERE id = ?",
     )
     .bind(id)
@@ -606,12 +624,15 @@ pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<DeleteOutcome, sqlx
     // An ESS vest Buy is likewise only ever removed via DELETE
     // /ess_statements/:id (which deletes the statement and its vest together). A
     // worthless-shares recognise closing Sell is removed via DELETE /sells
-    // (which restores the holding).
+    // (which restores the holding). An inherited-parcel Buy is removed via
+    // DELETE /inheritances/:id (which deletes the inheritance and its Buy
+    // together).
     if guard.scrip_action_id.is_some()
         || guard.demerger_action_id.is_some()
         || guard.transfer_id.is_some()
         || guard.ess_statement_id.is_some()
         || guard.worthless_action_id.is_some()
+        || guard.inheritance_id.is_some()
     {
         return Ok(DeleteOutcome::Referenced);
     }
@@ -802,6 +823,7 @@ async fn upsert(
         holding_account_id: body.holding_account_id,
         transfer_id: None,
         ess_statement_id: None,
+        inheritance_id: None,
     };
     db_upsert(&pool, &trade).await?;
     Ok(StatusCode::NO_CONTENT)
@@ -844,6 +866,10 @@ impl From<UpsertError> for ApiError {
             UpsertError::EssVestTrade => ApiError::unprocessable(
                 "this trade is an ESS vest and cannot be edited — delete the ESS statement \
                  and re-vest instead",
+            ),
+            UpsertError::InheritedParcelTrade => ApiError::unprocessable(
+                "this trade is an inherited parcel and cannot be edited here — edit its \
+                 inheritance (PUT /inheritances/:id) instead",
             ),
             UpsertError::Db(err) => err.into(),
         }

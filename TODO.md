@@ -4,17 +4,6 @@ Items are only marked done when a passing test exists for them.
 
 Completed and decided (out-of-scope / not-reproducible) sections are archived in [DONE.md](DONE.md) to keep this list focused on active work. When a section here is fully done, move it to DONE.md rather than leaving it — see CLAUDE.md.
 
-## Inherited share parcels (2026-06-10)
-
-(REQUIREMENTS 2026-06-10; `docs/ato/inherited-assets-cost-base.md`, QC 66053.)
-
-- [ ] Mirror the s 115-30 discount-clock rule for inherited assets into `docs/ato/` (confirm from the ATO source: post-CGT asset → discount period runs from the deceased's acquisition; pre-CGT asset → from the date of death) and index it in `OVERVIEW.md` — read before implementing
-- [ ] Entry path for an inherited parcel: listing, holding account, units, date of death, cost base (recording which rule produced it), deceased's acquisition date (post-CGT case), LPR expenditure dated when incurred; provenance visible (not a market Buy)
-- [ ] The parcel flows through every report and write-time capacity check like a Buy; the discount clock follows the mirrored s 115-30 rule
-- [ ] Web UI via the existing config-driven entity/action patterns
-- [ ] Tests: cost-base and discount-clock cases (post-CGT and pre-CGT deceased); `ato_examples.rs` acceptance test for any representable worked example
-- [ ] Docs: `docs/SCHEMA.md`, `docs/API.md`, README Features; Known limitations: estate/LPR side not modelled, market value at death is user-supplied
-
 ## Renounceable rights — selling, lapsing, retail premiums (2026-06-10)
 
 (REQUIREMENTS 2026-06-10; `docs/ato/rights-issues.md` already documents the sold/lapsed treatment. Supersedes the README line saying selling/lapsing rights is not modelled — update that text as part of this work.)
