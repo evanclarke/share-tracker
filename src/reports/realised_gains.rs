@@ -189,6 +189,10 @@ fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sq
     let mut sale_discount_gain: HashMap<i64, Decimal> = HashMap::new();
     let mut sale_non_discount_gain: HashMap<i64, Decimal> = HashMap::new();
     let mut sale_loss: HashMap<i64, Decimal> = HashMap::new();
+    // Running (quantity, sale-costs share) already handed to earlier
+    // allocations of each sale, for the cumulative-difference pro-rating
+    // below.
+    let mut sale_costs_assigned: HashMap<i64, (Decimal, Decimal)> = HashMap::new();
 
     for alloc in &data.allocations {
         let sale_id = alloc.sale_trade_id;
@@ -201,10 +205,21 @@ fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sq
             continue;
         };
 
-        // Proceeds for this allocation: pro-rate sale brokerage+gst by qty_alloc / sale_qty
+        // Proceeds for this allocation: pro-rate sale brokerage+gst by
+        // qty_alloc / sale_qty, as a cumulative difference — each share is the
+        // cumulative entitlement minus what earlier allocations already took —
+        // so the shares sum exactly to the total: any division remainder
+        // (e.g. a third of $10) lands on the sale's last allocation instead
+        // of each share rounding independently.
         let sale_costs = sale.brokerage + sale.gst_on_brokerage;
         let alloc_proceeds = if sale.quantity > Decimal::ZERO {
-            sale.average_price * qty_alloc - sale_costs * qty_alloc / sale.quantity
+            let (qty_so_far, costs_so_far) = sale_costs_assigned
+                .entry(sale_id)
+                .or_insert((Decimal::ZERO, Decimal::ZERO));
+            *qty_so_far += qty_alloc;
+            let alloc_costs = sale_costs * *qty_so_far / sale.quantity - *costs_so_far;
+            *costs_so_far += alloc_costs;
+            sale.average_price * qty_alloc - alloc_costs
         } else {
             Decimal::ZERO
         };
@@ -488,6 +503,41 @@ mod tests {
         let result = compute_realised_gains(&data).unwrap();
         assert_eq!(result[0].cost_base, Decimal::from(2000));
         assert_eq!(result[0].proceeds, Decimal::from(2500));
+    }
+
+    #[test]
+    fn pure_brokerage_shares_sum_exactly_across_allocations() {
+        let d = |y, m, day| NaiveDate::from_ymd_opt(y, m, day).unwrap();
+        // $10 brokerage over three 1-unit allocations of a 3-unit sale: each
+        // independent share would be the non-terminating 10/3, so the three
+        // would sum to 9.999…, not 10. The cumulative-difference pro-rating
+        // hands the remainder to the last allocation, so total proceeds come
+        // out exactly 3 × $4 − $10 = $2. (The $4 price keeps each
+        // `price × qty − share` subtraction inside Decimal's 28-digit
+        // mantissa; a larger price would re-round there and mask what this
+        // test asserts — the shares themselves summing exactly.)
+        let mut sell = mem_sell(4, d(2025, 6, 1), 3, 4, "AUD");
+        sell.brokerage = Decimal::from(10);
+        let data = ReportData {
+            sells: [(4, sell)].into(),
+            buys: [
+                (1, mem_buy(1, d(2024, 1, 1), 1, 1, "AUD")),
+                (2, mem_buy(2, d(2024, 2, 1), 1, 1, "AUD")),
+                (3, mem_buy(3, d(2024, 3, 1), 1, 1, "AUD")),
+            ]
+            .into(),
+            allocations: vec![mem_alloc(4, 1, 1), mem_alloc(4, 2, 1), mem_alloc(4, 3, 1)],
+            ..ReportData::default()
+        };
+
+        let result = compute_realised_gains(&data).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].proceeds, Decimal::from(2));
+        assert_eq!(result[0].cost_base, Decimal::from(3));
+        assert_eq!(result[0].capital_gain_loss, Decimal::from(-1));
+        // Each allocation's net (4 − share) fell below its $1 cost: the three
+        // per-allocation losses likewise sum exactly to the $1 total.
+        assert_eq!(result[0].capital_loss, Decimal::ONE);
     }
 
     // DB-level tests
