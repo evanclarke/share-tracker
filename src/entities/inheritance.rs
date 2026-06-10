@@ -323,10 +323,10 @@ pub async fn db_upsert(pool: &SqlitePool, inh: &Inheritance) -> Result<(), Upser
     let mut tx = pool.begin().await?;
 
     let existing_buy = linked_buy_id(&mut tx, inh.id).await?;
-    if let Some(buy_id) = existing_buy {
-        if buy_drawn_on(&mut tx, buy_id).await? {
-            return Err(UpsertError::ParcelDrawnOn);
-        }
+    if let Some(buy_id) = existing_buy
+        && buy_drawn_on(&mut tx, buy_id).await?
+    {
+        return Err(UpsertError::ParcelDrawnOn);
     }
 
     sqlx::query(

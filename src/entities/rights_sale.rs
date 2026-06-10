@@ -254,9 +254,9 @@ pub async fn db_sell_rights(
 
     // Total cap, shared with the exercise operation: every right used against
     // the action — exercised or sold — comes out of one entitlement.
-    let held = db_held_at_record_date(&mut *tx, action.listing_id, record_date, &splits).await?;
+    let held = db_held_at_record_date(&mut tx, action.listing_id, record_date, &splits).await?;
     let entitled = entitled_units(held, rights_units, rights_held_units);
-    let used = db_rights_used(&mut *tx, action_id, record_date, &splits).await? + body.units;
+    let used = db_rights_used(&mut tx, action_id, record_date, &splits).await? + body.units;
     if used > entitled {
         return Err(SellRightsError::ExceedsEntitlement);
     }

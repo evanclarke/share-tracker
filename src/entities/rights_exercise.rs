@@ -239,12 +239,12 @@ pub async fn db_exercise(
     }
 
     let splits = corporate_action::db_splits_for_listing(&mut *tx, action.listing_id).await?;
-    let held = db_held_at_record_date(&mut *tx, action.listing_id, record_date, &splits).await?;
+    let held = db_held_at_record_date(&mut tx, action.listing_id, record_date, &splits).await?;
     let entitled = entitled_units(held, rights_units, rights_held_units);
 
     // Rights already used against this action (prior exercises + rights
     // sales) plus this exercise, re-based to record-date units.
-    let mut used = db_rights_used(&mut *tx, action_id, record_date, &splits).await?;
+    let mut used = db_rights_used(&mut tx, action_id, record_date, &splits).await?;
     used += as_acquired_quantity(body.units, &splits, record_date, body.date);
     if used > entitled {
         return Err(ExerciseError::ExceedsEntitlement);
