@@ -1,3 +1,4 @@
+use crate::infra::http::ApiError;
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -72,6 +73,17 @@ pub enum UpsertError {
 impl From<sqlx::Error> for UpsertError {
     fn from(e: sqlx::Error) -> Self {
         UpsertError::Db(e)
+    }
+}
+
+impl From<UpsertError> for ApiError {
+    fn from(e: UpsertError) -> Self {
+        match e {
+            UpsertError::UnrecognisedDigitalToken => ApiError::unprocessable(
+                "a Crypto listing's ticker must be a recognised digital-token code",
+            ),
+            UpsertError::Db(err) => err.into(),
+        }
     }
 }
 
@@ -153,29 +165,22 @@ pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<bool, sqlx::Error> 
     Ok(result.rows_affected() > 0)
 }
 
-async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<Listing>>, StatusCode> {
-    db_list(&pool)
-        .await
-        .map(Json)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<Listing>>, ApiError> {
+    Ok(Json(db_list(&pool).await?))
 }
 
 async fn get_one(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
-) -> Result<Json<Listing>, StatusCode> {
-    db_get(&pool, id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .map(Json)
-        .ok_or(StatusCode::NOT_FOUND)
+) -> Result<Json<Listing>, ApiError> {
+    db_get(&pool, id).await?.map(Json).ok_or(ApiError::NotFound)
 }
 
 async fn upsert(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
     Json(body): Json<ListingBody>,
-) -> Result<StatusCode, (StatusCode, String)> {
+) -> Result<StatusCode, ApiError> {
     let listing = Listing {
         id,
         exchange_mic: body.exchange_mic,
@@ -187,27 +192,16 @@ async fn upsert(
         amit: body.amit,
         preference: body.preference,
     };
-    db_upsert(&pool, &listing)
-        .await
-        .map(|_| StatusCode::NO_CONTENT)
-        .map_err(|e| match e {
-            UpsertError::UnrecognisedDigitalToken => (
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "a Crypto listing's ticker must be a recognised digital-token code".to_string(),
-            ),
-            UpsertError::Db(err) => crate::infra::http::write_error_body(&err),
-        })
+    db_upsert(&pool, &listing).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn delete(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
-) -> Result<StatusCode, (StatusCode, String)> {
-    db_delete(&pool, id)
-        .await
-        .map(|found| if found { StatusCode::NO_CONTENT } else { StatusCode::NOT_FOUND })
-        // Deleting a listing still referenced by trades/income violates an FK → 422.
-        .map_err(|e| crate::infra::http::write_error_body(&e))
+) -> Result<StatusCode, ApiError> {
+    // Deleting a listing still referenced by trades/income violates an FK → 422.
+    if db_delete(&pool, id).await? { Ok(StatusCode::NO_CONTENT) } else { Err(ApiError::NotFound) }
 }
 
 #[cfg(test)]

@@ -36,10 +36,11 @@
 //! market-dependent metrics rather than a silently wrong figure; the OVERALL
 //! row does the same unless every open holding is priced.
 
+use crate::infra::http::ApiError;
 use crate::entities::closing_price::{self, SharedFetcher};
 use crate::infra::decimal::parse_dec;
 use crate::infra::fx::to_aud;
-use axum::{Extension, Json, Router, extract::State, http::StatusCode, routing::post};
+use axum::{Extension, Json, Router, extract::State, routing::post};
 use chrono::{Months, NaiveDate};
 use rust_decimal::{Decimal, MathematicalOps};
 use serde::{Deserialize, Serialize};
@@ -494,7 +495,7 @@ async fn performance_handler(
     State(pool): State<SqlitePool>,
     fetcher: Option<Extension<SharedFetcher>>,
     body: Option<Json<PerformanceRequest>>,
-) -> Result<Json<Vec<HoldingPerformance>>, StatusCode> {
+) -> Result<Json<Vec<HoldingPerformance>>, ApiError> {
     let req = body.map(|Json(req)| req).unwrap_or_default();
     let as_of = req.as_of_date.unwrap_or_else(|| chrono::Local::now().date_naive());
 
@@ -502,7 +503,7 @@ async fn performance_handler(
     // override (when requested); an explicit price always wins.
     let held = closing_price::db_held_listing_ids(&pool, Some(as_of))
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(ApiError::from)?;
     let live = closing_price::resolve_live_prices(
         &pool,
         fetcher.as_ref().map(|f| f.0.as_ref()),
@@ -511,7 +512,7 @@ async fn performance_handler(
         held,
     )
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .map_err(ApiError::from)?;
 
     // The effective AUD price per listing feeding the valuation: explicit
     // overrides plus the successful live quotes.
@@ -524,7 +525,7 @@ async fn performance_handler(
 
     let mut rows = db_performance(&pool, &prices, as_of)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(ApiError::from)?;
 
     // Carry each live price's as-of time, and surface a live-fetch failure on
     // an open holding (left unvalued by db_performance) as its reason.
@@ -548,6 +549,7 @@ async fn performance_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::StatusCode;
     use crate::entities::{income, listing, parcel_allocation, trade};
     use crate::infra::db;
     use axum::{body::Body, http::Request};

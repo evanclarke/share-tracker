@@ -355,11 +355,8 @@ fn next_run(cron: &Cron, now: DateTime<Local>) -> Option<(DateTime<Local>, Durat
 async fn list(
     State(pool): State<SqlitePool>,
     Extension(registry): Extension<JobRegistry>,
-) -> Result<Json<Vec<JobStatus>>, StatusCode> {
-    let mut last = db_last_runs(&pool).await.map_err(|e| {
-        tracing::error!("failed to load job runs: {e}");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+) -> Result<Json<Vec<JobStatus>>, crate::infra::http::ApiError> {
+    let mut last = db_last_runs(&pool).await?;
 
     let mut names: Vec<String> = registry.keys().cloned().collect();
     names.sort();

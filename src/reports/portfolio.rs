@@ -1,7 +1,8 @@
+use crate::infra::http::ApiError;
 use crate::domain::cost_base;
 use crate::entities::closing_price::{self, SharedFetcher};
 use crate::infra::decimal::parse_dec;
-use axum::{Extension, Json, Router, extract::State, http::StatusCode, routing::post};
+use axum::{Extension, Json, Router, extract::State, routing::post};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -215,11 +216,11 @@ async fn overview(
     State(pool): State<SqlitePool>,
     fetcher: Option<Extension<SharedFetcher>>,
     body: Option<Json<OverviewRequest>>,
-) -> Result<Json<Vec<HoldingOverview>>, StatusCode> {
+) -> Result<Json<Vec<HoldingOverview>>, ApiError> {
     let req = body.map(|Json(req)| req).unwrap_or_default();
     let mut holdings = db_holdings(&pool, None)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(ApiError::from)?;
 
     // Live-fetch a current price for every held listing without an explicit
     // override (when requested); an explicit price always wins.
@@ -231,7 +232,7 @@ async fn overview(
         holdings.iter().map(|h| h.listing_id),
     )
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .map_err(ApiError::from)?;
 
     for h in &mut holdings {
         if let Some(&price) = req.prices.get(&h.listing_id) {
@@ -255,6 +256,7 @@ async fn overview(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::StatusCode;
     use crate::{infra::db, entities::{amma, amit_adjustment, corporate_action, listing, parcel_allocation, trade}};
     use axum::{body::Body, http::Request};
     use chrono::NaiveDate;

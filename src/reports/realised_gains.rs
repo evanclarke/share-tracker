@@ -1,6 +1,7 @@
+use crate::infra::http::ApiError;
 use crate::domain::cost_base;
 use crate::infra::decimal::parse_dec;
-use axum::{Json, Router, extract::State, http::StatusCode, routing::get};
+use axum::{Json, Router, extract::State, routing::get};
 use chrono::{Months, NaiveDate};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -291,16 +292,17 @@ pub async fn db_realised_gains(pool: &SqlitePool) -> Result<Vec<RealisedGainLoss
 
 async fn realised_gains_handler(
     State(pool): State<SqlitePool>,
-) -> Result<Json<Vec<RealisedGainLoss>>, StatusCode> {
+) -> Result<Json<Vec<RealisedGainLoss>>, ApiError> {
     db_realised_gains(&pool)
         .await
         .map(Json)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(ApiError::from)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::StatusCode;
     use crate::{infra::db, entities::{amma, amit_adjustment, corporate_action, listing, parcel_allocation, rba_fx_rate, trade}};
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;

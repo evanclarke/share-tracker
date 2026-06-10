@@ -7,8 +7,8 @@
 //! when chaining unused losses across its year series (losses carry forward
 //! indefinitely, per `docs/ato/cgt-using-capital-losses.md`). Absent row = zero.
 
+use crate::infra::http::ApiError;
 use crate::infra::decimal::parse_dec;
-use crate::infra::http::write_error_body;
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -90,36 +90,34 @@ pub async fn db_opening_capital_loss(pool: &SqlitePool) -> Result<Decimal, sqlx:
     Ok(db_get(pool, 1).await?.map_or(Decimal::ZERO, |s| s.opening_capital_loss))
 }
 
-async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<CgtSettings>>, StatusCode> {
+async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<CgtSettings>>, ApiError> {
     db_list(&pool)
         .await
         .map(Json)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(ApiError::from)
 }
 
 async fn get_one(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
-) -> Result<Json<CgtSettings>, StatusCode> {
+) -> Result<Json<CgtSettings>, ApiError> {
     db_get(&pool, id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(ApiError::from)?
         .map(Json)
-        .ok_or(StatusCode::NOT_FOUND)
+        .ok_or(ApiError::NotFound)
 }
 
 async fn upsert(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
     Json(body): Json<CgtSettingsBody>,
-) -> Result<StatusCode, (StatusCode, String)> {
+) -> Result<StatusCode, ApiError> {
     // A negative opening loss is meaningless (losses are stored as positive
     // amounts); reject at write time so the report never consumes one.
     if body.opening_capital_loss < Decimal::ZERO {
-        return Err((
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "the opening capital loss cannot be negative (losses are stored as positive amounts)"
-                .to_string(),
+        return Err(ApiError::unprocessable(
+            "the opening capital loss cannot be negative (losses are stored as positive amounts)",
         ));
     }
     let settings = CgtSettings { id, opening_capital_loss: body.opening_capital_loss };
@@ -127,17 +125,17 @@ async fn upsert(
         .await
         .map(|_| StatusCode::NO_CONTENT)
         // id != 1 violates the singleton CHECK → 422.
-        .map_err(|e| write_error_body(&e))
+        .map_err(ApiError::from)
 }
 
 async fn delete(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
-) -> Result<StatusCode, (StatusCode, String)> {
+) -> Result<StatusCode, ApiError> {
     db_delete(&pool, id)
         .await
         .map(|found| if found { StatusCode::NO_CONTENT } else { StatusCode::NOT_FOUND })
-        .map_err(|e| write_error_body(&e))
+        .map_err(ApiError::from)
 }
 
 #[cfg(test)]

@@ -1,8 +1,9 @@
+use crate::infra::http::ApiError;
 use crate::infra::decimal::parse_dec;
 use crate::infra::fx::to_aud;
 use crate::reports::{export, franking};
 use axum::{
-    Json, Router, extract::State, http::StatusCode, response::Response, routing::get,
+    Json, Router, extract::State, response::Response, routing::get,
 };
 use chrono::{Datelike, NaiveDate};
 use rust_decimal::Decimal;
@@ -500,27 +501,28 @@ pub async fn db_tax_summary(pool: &SqlitePool) -> Result<Vec<TaxYearSummary>, sq
 
 async fn tax_summary_handler(
     State(pool): State<SqlitePool>,
-) -> Result<Json<Vec<TaxYearSummary>>, StatusCode> {
+) -> Result<Json<Vec<TaxYearSummary>>, ApiError> {
     db_tax_summary(&pool)
         .await
         .map(Json)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(ApiError::from)
 }
 
 /// The same per-year rows as the JSON report, as a downloadable tax-return-ready CSV.
 async fn tax_summary_export_handler(
     State(pool): State<SqlitePool>,
-) -> Result<Response, StatusCode> {
+) -> Result<Response, ApiError> {
     let rows = db_tax_summary(&pool)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(ApiError::from)?;
     export::csv_response("tax-summary.csv", CSV_HEADER, &rows)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(ApiError::from)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::StatusCode;
     use crate::{infra::db, entities::{amma, ess_statement, income, investment_expense, listing, rba_fx_rate, trade}};
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;

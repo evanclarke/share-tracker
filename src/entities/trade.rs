@@ -1,3 +1,4 @@
+use crate::infra::http::ApiError;
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -717,36 +718,34 @@ pub(crate) async fn auto_settlement_date(
     Ok(settlement)
 }
 
-async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<Trade>>, StatusCode> {
+async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<Trade>>, ApiError> {
     db_list(&pool)
         .await
         .map(Json)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(ApiError::from)
 }
 
 async fn get_one(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
-) -> Result<Json<Trade>, StatusCode> {
+) -> Result<Json<Trade>, ApiError> {
     db_get(&pool, id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(ApiError::from)?
         .map(Json)
-        .ok_or(StatusCode::NOT_FOUND)
+        .ok_or(ApiError::NotFound)
 }
 
 async fn upsert(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
     Json(body): Json<TradeBody>,
-) -> Result<StatusCode, (StatusCode, String)> {
+) -> Result<StatusCode, ApiError> {
     // Sells must be created via PUT /sells/{id} so they are persisted together
     // with a full set of parcel allocations (no uncovered Sell can exist).
     if body.trade_type == TradeType::Sell {
-        return Err((
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "a Sell must be created via PUT /sells/:id so it carries its parcel allocations"
-                .to_string(),
+        return Err(ApiError::unprocessable(
+            "a Sell must be created via PUT /sells/:id so it carries its parcel allocations",
         ));
     }
     // DRP trades are only ever created via POST /income/:id/reinvest, which
@@ -756,18 +755,14 @@ async fn upsert(
     // and editing a reinvest-created DRP through this endpoint would silently
     // zero its residual columns (the form doesn't carry them). Reject both.
     if body.trade_type == TradeType::DRP {
-        return Err((
-            StatusCode::UNPROCESSABLE_ENTITY,
+        return Err(ApiError::unprocessable(
             "a DRP trade is created via POST /income/:id/reinvest so it stays linked to its \
-             distribution and residual chain"
-                .to_string(),
+             distribution and residual chain",
         ));
     }
     let settlement_date = match body.settlement_date {
         Some(d) => d,
-        None => auto_settlement_date(&pool, id, body.listing_id, body.date)
-            .await
-            .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, String::new()))?,
+        None => auto_settlement_date(&pool, id, body.listing_id, body.date).await?,
     };
     // A GST-inclusive brokerage entry is split here, at the API boundary, so
     // the stored columns (and `Trade` itself) are always ex-GST + GST.
@@ -802,62 +797,51 @@ async fn upsert(
         transfer_id: None,
         ess_statement_id: None,
     };
-    db_upsert(&pool, &trade)
-        .await
-        .map(|_| StatusCode::NO_CONTENT)
-        .map_err(|e| match e {
-            UpsertError::Db(err) => crate::infra::http::write_error_body(&err),
+    db_upsert(&pool, &trade).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+impl From<UpsertError> for ApiError {
+    fn from(e: UpsertError) -> Self {
+        match e {
             // The cross-check rejection says what the trade adds up to, so a
             // typo is findable without re-deriving the figure by hand.
             UpsertError::StatementTotal(detail) => {
-                (StatusCode::UNPROCESSABLE_ENTITY, statement_total_detail(&detail))
+                ApiError::unprocessable(statement_total_detail(&detail))
             }
-            UpsertError::QuantityBelowAllocated => (
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "the new quantity is below what Sell allocations already draw from this parcel"
-                    .to_string(),
+            UpsertError::QuantityBelowAllocated => ApiError::unprocessable(
+                "the new quantity is below what Sell allocations already draw from this parcel",
             ),
-            UpsertError::QuantityBelowAmitAdjustment => (
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "the new quantity is below a linked AMIT adjustment's covered quantity".to_string(),
+            UpsertError::QuantityBelowAmitAdjustment => ApiError::unprocessable(
+                "the new quantity is below a linked AMIT adjustment's covered quantity",
             ),
-            UpsertError::RightsExerciseTrade => (
-                StatusCode::UNPROCESSABLE_ENTITY,
+            UpsertError::RightsExerciseTrade => ApiError::unprocessable(
                 "this trade is a rights exercise and cannot be edited — delete it and \
-                 re-exercise instead"
-                    .to_string(),
+                 re-exercise instead",
             ),
-            UpsertError::BuyBackTrade => (
-                StatusCode::UNPROCESSABLE_ENTITY,
+            UpsertError::BuyBackTrade => ApiError::unprocessable(
                 "this trade is a buy-back participation and cannot be edited — delete it and \
-                 re-participate instead"
-                    .to_string(),
+                 re-participate instead",
             ),
-            UpsertError::ScripExchangeTrade => (
-                StatusCode::UNPROCESSABLE_ENTITY,
+            UpsertError::ScripExchangeTrade => ApiError::unprocessable(
                 "this trade belongs to a scrip-for-scrip exchange and cannot be edited — \
-                 delete the group and re-exchange instead"
-                    .to_string(),
+                 delete the group and re-exchange instead",
             ),
-            UpsertError::DemergerTrade => (
-                StatusCode::UNPROCESSABLE_ENTITY,
+            UpsertError::DemergerTrade => ApiError::unprocessable(
                 "this trade belongs to a demerger and cannot be edited — delete the group and \
-                 re-demerge instead"
-                    .to_string(),
+                 re-demerge instead",
             ),
-            UpsertError::TransferTrade => (
-                StatusCode::UNPROCESSABLE_ENTITY,
+            UpsertError::TransferTrade => ApiError::unprocessable(
                 "this trade belongs to a holding-account transfer and cannot be edited — \
-                 delete the transfer and re-transfer instead"
-                    .to_string(),
+                 delete the transfer and re-transfer instead",
             ),
-            UpsertError::EssVestTrade => (
-                StatusCode::UNPROCESSABLE_ENTITY,
+            UpsertError::EssVestTrade => ApiError::unprocessable(
                 "this trade is an ESS vest and cannot be edited — delete the ESS statement \
-                 and re-vest instead"
-                    .to_string(),
+                 and re-vest instead",
             ),
-        })
+            UpsertError::Db(err) => err.into(),
+        }
+    }
 }
 
 /// Human-readable body for a statement-total 422 (shown by the web UI).
@@ -877,19 +861,14 @@ pub(crate) fn statement_total_detail(e: &StatementTotalError) -> String {
 async fn delete(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
-) -> Result<StatusCode, (StatusCode, String)> {
-    match db_delete(&pool, id).await {
-        Ok(DeleteOutcome::Deleted) => Ok(StatusCode::NO_CONTENT),
-        Ok(DeleteOutcome::NotFound) => {
-            Err((StatusCode::NOT_FOUND, "no trade with that id".to_string()))
-        }
-        Ok(DeleteOutcome::Referenced) => Err((
-            StatusCode::UNPROCESSABLE_ENTITY,
+) -> Result<StatusCode, ApiError> {
+    match db_delete(&pool, id).await? {
+        DeleteOutcome::Deleted => Ok(StatusCode::NO_CONTENT),
+        DeleteOutcome::NotFound => Err(ApiError::not_found("no trade with that id")),
+        DeleteOutcome::Referenced => Err(ApiError::unprocessable(
             "this trade is referenced by a sale allocation, AMIT adjustment, reinvestment, or \
-             a scrip-for-scrip/demerger group — remove those first (e.g. delete the Sell)"
-                .to_string(),
+             a scrip-for-scrip/demerger group — remove those first (e.g. delete the Sell)",
         )),
-        Err(_) => Err((StatusCode::INTERNAL_SERVER_ERROR, String::new())),
     }
 }
 

@@ -16,6 +16,7 @@
 //! creating a second Buy. The created Buy is immutable (`PUT /trades` → 422) and
 //! never deleted individually; `DELETE /ess_statements/:id` removes it.
 
+use crate::infra::http::ApiError;
 use crate::entities::trade::{self, Trade};
 use axum::{
     Json, Router,
@@ -124,25 +125,23 @@ pub async fn db_vest(pool: &SqlitePool, statement_id: i64) -> Result<Trade, Vest
 async fn vest(
     State(pool): State<SqlitePool>,
     Path(statement_id): Path<i64>,
-) -> Result<(StatusCode, Json<Trade>), (StatusCode, String)> {
-    match db_vest(&pool, statement_id).await {
-        Ok(trade) => Ok((StatusCode::CREATED, Json(trade))),
-        Err(VestError::StatementNotFound) => {
-            Err((StatusCode::NOT_FOUND, "no ESS statement with that id".to_string()))
-        }
-        Err(VestError::AlreadyVested) => Err((
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "this ESS statement has already been vested — delete it first to redo it".to_string(),
-        )),
-        Err(VestError::NothingToVest) => Err((
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "the ESS statement's quantity and per-share market value must both be greater \
-             than zero to create the vest parcel"
-                .to_string(),
-        )),
-        Err(VestError::Db(e)) => {
-            tracing::error!(error = %e, "ess vest failed");
-            Err((StatusCode::INTERNAL_SERVER_ERROR, String::new()))
+) -> Result<(StatusCode, Json<Trade>), ApiError> {
+    let trade = db_vest(&pool, statement_id).await?;
+    Ok((StatusCode::CREATED, Json(trade)))
+}
+
+impl From<VestError> for ApiError {
+    fn from(e: VestError) -> Self {
+        match e {
+            VestError::StatementNotFound => ApiError::not_found("no ESS statement with that id"),
+            VestError::AlreadyVested => ApiError::unprocessable(
+                "this ESS statement has already been vested — delete it first to redo it",
+            ),
+            VestError::NothingToVest => ApiError::unprocessable(
+                "the ESS statement's quantity and per-share market value must both be greater \
+                 than zero to create the vest parcel",
+            ),
+            VestError::Db(err) => err.into(),
         }
     }
 }

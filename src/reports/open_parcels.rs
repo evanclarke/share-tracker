@@ -1,6 +1,7 @@
+use crate::infra::http::ApiError;
 use crate::domain::cost_base;
 use crate::infra::decimal::parse_dec;
-use axum::{Json, Router, extract::State, http::StatusCode, routing::get};
+use axum::{Json, Router, extract::State, routing::get};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -179,16 +180,17 @@ pub async fn db_open_parcels(pool: &SqlitePool) -> Result<Vec<OpenParcel>, sqlx:
 
 async fn open_parcels_handler(
     State(pool): State<SqlitePool>,
-) -> Result<Json<Vec<OpenParcel>>, StatusCode> {
+) -> Result<Json<Vec<OpenParcel>>, ApiError> {
     db_open_parcels(&pool)
         .await
         .map(Json)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(ApiError::from)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::StatusCode;
     use crate::{
         entities::{amit_adjustment, amma, corporate_action, listing, parcel_allocation, trade},
         infra::db,

@@ -40,6 +40,7 @@
 //! replacement share classes, pre-CGT originals, and exchanges that would
 //! crystallise a capital loss (the law does not allow rolling over a loss).
 
+use crate::infra::http::ApiError;
 use crate::entities::corporate_action::{
     self, ActionKind, RocEvent, sold_in_acquired_units, split_adjusted_quantity,
 };
@@ -363,33 +364,39 @@ pub async fn db_exchange(pool: &SqlitePool, action_id: i64) -> Result<Exchange, 
 async fn exchange(
     State(pool): State<SqlitePool>,
     Path(action_id): Path<i64>,
-) -> Result<(StatusCode, Json<Exchange>), (StatusCode, String)> {
-    let unprocessable = |msg: &str| Err((StatusCode::UNPROCESSABLE_ENTITY, msg.to_string()));
-    match db_exchange(&pool, action_id).await {
-        Ok(exchange) => Ok((StatusCode::CREATED, Json(exchange))),
-        Err(ExchangeError::ActionNotFound) => {
-            Err((StatusCode::NOT_FOUND, "no corporate action with that id".to_string()))
-        }
-        Err(ExchangeError::NotAScripForScrip) => {
-            unprocessable("that corporate action is not a scrip-for-scrip exchange")
-        }
-        Err(ExchangeError::AlreadyExchanged) => unprocessable(
-            "this exchange has already been applied — delete its closing Sell first to redo it",
-        ),
-        Err(ExchangeError::NothingHeld) => {
-            unprocessable("nothing of the original listing is held at the exchange date")
-        }
-        Err(ExchangeError::TradedOnOrAfterExchangeDate) => unprocessable(
-            "the original listing has a trade dated on or after the exchange date — \
-             fix that trade before exchanging",
-        ),
-        Err(ExchangeError::Sell(e)) => {
-            tracing::warn!(error = ?e, "scrip-for-scrip exchange rejected by a sell invariant");
-            unprocessable("the exchange's parcel allocations are invalid")
-        }
-        Err(ExchangeError::Db(e)) => {
-            tracing::error!(error = %e, "scrip-for-scrip exchange failed");
-            Err((StatusCode::INTERNAL_SERVER_ERROR, String::new()))
+) -> Result<(StatusCode, Json<Exchange>), ApiError> {
+    let exchange = db_exchange(&pool, action_id).await?;
+    Ok((StatusCode::CREATED, Json(exchange)))
+}
+
+impl From<ExchangeError> for ApiError {
+    fn from(e: ExchangeError) -> Self {
+        match e {
+            ExchangeError::ActionNotFound => {
+                ApiError::not_found("no corporate action with that id")
+            }
+            ExchangeError::NotAScripForScrip => {
+                ApiError::unprocessable("that corporate action is not a scrip-for-scrip exchange")
+            }
+            ExchangeError::AlreadyExchanged => ApiError::unprocessable(
+                "this exchange has already been applied — delete its closing Sell first to redo \
+                 it",
+            ),
+            ExchangeError::NothingHeld => ApiError::unprocessable(
+                "nothing of the original listing is held at the exchange date",
+            ),
+            ExchangeError::TradedOnOrAfterExchangeDate => ApiError::unprocessable(
+                "the original listing has a trade dated on or after the exchange date — \
+                 fix that trade before exchanging",
+            ),
+            ExchangeError::Sell(err) => {
+                tracing::warn!(
+                    error = ?err,
+                    "scrip-for-scrip exchange rejected by a sell invariant"
+                );
+                ApiError::unprocessable("the exchange's parcel allocations are invalid")
+            }
+            ExchangeError::Db(err) => err.into(),
         }
     }
 }

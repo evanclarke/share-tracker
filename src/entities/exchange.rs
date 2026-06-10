@@ -1,3 +1,4 @@
+use crate::infra::http::ApiError;
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -93,29 +94,29 @@ pub async fn db_delete(pool: &SqlitePool, mic: &str) -> Result<bool, sqlx::Error
     Ok(result.rows_affected() > 0)
 }
 
-async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<Exchange>>, StatusCode> {
+async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<Exchange>>, ApiError> {
     db_list(&pool)
         .await
         .map(Json)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(ApiError::from)
 }
 
 async fn get_one(
     State(pool): State<SqlitePool>,
     Path(mic): Path<String>,
-) -> Result<Json<Exchange>, StatusCode> {
+) -> Result<Json<Exchange>, ApiError> {
     db_get(&pool, &mic)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(ApiError::from)?
         .map(Json)
-        .ok_or(StatusCode::NOT_FOUND)
+        .ok_or(ApiError::NotFound)
 }
 
 async fn upsert(
     State(pool): State<SqlitePool>,
     Path(mic): Path<String>,
     Json(body): Json<ExchangeBody>,
-) -> Result<StatusCode, (StatusCode, String)> {
+) -> Result<StatusCode, ApiError> {
     let exchange = Exchange {
         mic,
         name: body.name,
@@ -128,18 +129,18 @@ async fn upsert(
     db_upsert(&pool, &exchange)
         .await
         .map(|_| StatusCode::NO_CONTENT)
-        .map_err(|e| crate::infra::http::write_error_body(&e))
+        .map_err(ApiError::from)
 }
 
 async fn delete(
     State(pool): State<SqlitePool>,
     Path(mic): Path<String>,
-) -> Result<StatusCode, (StatusCode, String)> {
+) -> Result<StatusCode, ApiError> {
     db_delete(&pool, &mic)
         .await
         .map(|found| if found { StatusCode::NO_CONTENT } else { StatusCode::NOT_FOUND })
         // Deleting an exchange still referenced by listings/holidays violates an FK → 422.
-        .map_err(|e| crate::infra::http::write_error_body(&e))
+        .map_err(ApiError::from)
 }
 
 #[cfg(test)]

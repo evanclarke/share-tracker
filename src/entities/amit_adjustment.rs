@@ -1,3 +1,4 @@
+use crate::infra::http::ApiError;
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -5,7 +6,6 @@ use axum::{
     routing::get,
 };
 use crate::infra::decimal::{parse_dec, row_dec};
-use crate::infra::http::write_error_body;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
@@ -196,63 +196,68 @@ where
     Ok(map)
 }
 
-async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<AmitAdjustment>>, StatusCode> {
+async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<AmitAdjustment>>, ApiError> {
     db_list(&pool)
         .await
         .map(Json)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(ApiError::from)
 }
 
 async fn get_one(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
-) -> Result<Json<AmitAdjustment>, StatusCode> {
+) -> Result<Json<AmitAdjustment>, ApiError> {
     db_get(&pool, id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(ApiError::from)?
         .map(Json)
-        .ok_or(StatusCode::NOT_FOUND)
+        .ok_or(ApiError::NotFound)
 }
 
 async fn upsert(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
     Json(body): Json<AmitAdjustmentBody>,
-) -> Result<StatusCode, (StatusCode, String)> {
+) -> Result<StatusCode, ApiError> {
     let adj = AmitAdjustment {
         id,
         amma_statement_id: body.amma_statement_id,
         trade_id: body.trade_id,
         quantity: body.quantity,
     };
-    let unprocessable = |msg: &str| Err((StatusCode::UNPROCESSABLE_ENTITY, msg.to_string()));
-    match db_upsert(&pool, &adj).await {
-        Ok(()) => Ok(StatusCode::NO_CONTENT),
-        Err(UpsertError::TradeNotBuyOrDrp) => {
-            unprocessable("the adjusted trade is not a Buy or DRP parcel")
+    db_upsert(&pool, &adj).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+impl From<UpsertError> for ApiError {
+    fn from(e: UpsertError) -> Self {
+        match e {
+            UpsertError::TradeNotBuyOrDrp => {
+                ApiError::unprocessable("the adjusted trade is not a Buy or DRP parcel")
+            }
+            UpsertError::ListingMismatch => ApiError::unprocessable(
+                "the trade's listing differs from the AMMA statement's listing",
+            ),
+            UpsertError::HoldingAccountMismatch => ApiError::unprocessable(
+                "the trade sits in a different holding account from the AMMA statement — \
+                 a statement only adjusts its own account's parcels",
+            ),
+            UpsertError::QuantityExceedsTrade => {
+                ApiError::unprocessable("the adjusted quantity exceeds the trade's quantity")
+            }
+            UpsertError::Db(err) => err.into(),
         }
-        Err(UpsertError::ListingMismatch) => {
-            unprocessable("the trade's listing differs from the AMMA statement's listing")
-        }
-        Err(UpsertError::HoldingAccountMismatch) => unprocessable(
-            "the trade sits in a different holding account from the AMMA statement — \
-             a statement only adjusts its own account's parcels",
-        ),
-        Err(UpsertError::QuantityExceedsTrade) => {
-            unprocessable("the adjusted quantity exceeds the trade's quantity")
-        }
-        Err(UpsertError::Db(e)) => Err(write_error_body(&e)),
     }
 }
 
 async fn delete(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
-) -> Result<StatusCode, (StatusCode, String)> {
+) -> Result<StatusCode, ApiError> {
     db_delete(&pool, id)
         .await
         .map(|found| if found { StatusCode::NO_CONTENT } else { StatusCode::NOT_FOUND })
-        .map_err(|e| write_error_body(&e))
+        .map_err(ApiError::from)
 }
 
 #[cfg(test)]

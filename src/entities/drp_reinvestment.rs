@@ -29,6 +29,7 @@
 //! A distribution may be reinvested at most once — re-posting is rejected
 //! rather than creating a second trade.
 
+use crate::infra::http::ApiError;
 use crate::entities::{
     drp_enrolment::ResidualHandling,
     trade::{self, Trade},
@@ -81,6 +82,27 @@ pub enum ReinvestError {
 impl From<sqlx::Error> for ReinvestError {
     fn from(e: sqlx::Error) -> Self {
         ReinvestError::Db(e)
+    }
+}
+
+impl From<ReinvestError> for ApiError {
+    fn from(e: ReinvestError) -> Self {
+        match e {
+            ReinvestError::IncomeNotFound => ApiError::not_found("no distribution with that id"),
+            ReinvestError::NotEnrolled { account, ticker, date } => {
+                ApiError::unprocessable(format!(
+                    "account '{account}' is not enrolled in a DRP for {ticker} at {date} \
+                     — enrol it on the DRP enrolments screen first"
+                ))
+            }
+            ReinvestError::AlreadyReinvested => ApiError::unprocessable(
+                "this distribution already has a reinvestment trade — delete it first to redo it",
+            ),
+            ReinvestError::NonPositivePrice => {
+                ApiError::unprocessable("the reinvestment price must be greater than zero")
+            }
+            ReinvestError::Db(err) => err.into(),
+        }
     }
 }
 
@@ -269,33 +291,9 @@ async fn reinvest(
     State(pool): State<SqlitePool>,
     Path(income_id): Path<i64>,
     Json(body): Json<ReinvestBody>,
-) -> Result<(StatusCode, Json<Trade>), (StatusCode, String)> {
-    match db_reinvest(&pool, income_id, &body).await {
-        Ok(trade) => Ok((StatusCode::CREATED, Json(trade))),
-        Err(ReinvestError::IncomeNotFound) => {
-            Err((StatusCode::NOT_FOUND, "no distribution with that id".to_string()))
-        }
-        Err(ReinvestError::NotEnrolled { account, ticker, date }) => Err((
-            StatusCode::UNPROCESSABLE_ENTITY,
-            format!(
-                "account '{account}' is not enrolled in a DRP for {ticker} at {date} \
-                 — enrol it on the DRP enrolments screen first"
-            ),
-        )),
-        Err(ReinvestError::AlreadyReinvested) => Err((
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "this distribution already has a reinvestment trade — delete it first to redo it"
-                .to_string(),
-        )),
-        Err(ReinvestError::NonPositivePrice) => Err((
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "the reinvestment price must be greater than zero".to_string(),
-        )),
-        Err(ReinvestError::Db(e)) => {
-            tracing::error!(error = %e, "drp reinvestment failed");
-            Err((StatusCode::INTERNAL_SERVER_ERROR, String::new()))
-        }
-    }
+) -> Result<(StatusCode, Json<Trade>), ApiError> {
+    let trade = db_reinvest(&pool, income_id, &body).await?;
+    Ok((StatusCode::CREATED, Json(trade)))
 }
 
 #[cfg(test)]

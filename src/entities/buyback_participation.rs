@@ -29,6 +29,7 @@
 //! adjustments where the participating shareholder is itself a company, and
 //! shares held on revenue account.
 
+use crate::infra::http::ApiError;
 use crate::entities::corporate_action::{self, ActionKind};
 use crate::entities::income::{self, Income};
 use crate::entities::sell::{self, AllocationInput, SellBody};
@@ -104,6 +105,32 @@ impl From<sell::SellError> for ParticipationError {
         match e {
             sell::SellError::Db(err) => ParticipationError::Db(err),
             other => ParticipationError::Sell(other),
+        }
+    }
+}
+
+impl From<ParticipationError> for ApiError {
+    fn from(e: ParticipationError) -> Self {
+        match e {
+            ParticipationError::ActionNotFound => {
+                ApiError::not_found("no corporate action with that id")
+            }
+            ParticipationError::NotABuyBack => {
+                ApiError::unprocessable("that corporate action is not a buy-back")
+            }
+            ParticipationError::NonPositiveUnits => {
+                ApiError::unprocessable("the number of units participated must be greater than zero")
+            }
+            ParticipationError::BeforeBuyBackDate => {
+                ApiError::unprocessable("the participation date is before the buy-back date")
+            }
+            ParticipationError::Sell(err) => {
+                tracing::warn!(error = ?err, "buy-back participation rejected by a sell invariant");
+                ApiError::unprocessable(
+                    "the holding cannot cover the units participated (over-allocated parcels)",
+                )
+            }
+            ParticipationError::Db(err) => err.into(),
         }
     }
 }
@@ -238,33 +265,9 @@ async fn participate(
     State(pool): State<SqlitePool>,
     Path(action_id): Path<i64>,
     Json(body): Json<ParticipationBody>,
-) -> Result<(StatusCode, Json<Participation>), (StatusCode, String)> {
-    let unprocessable = |msg: &str| Err((StatusCode::UNPROCESSABLE_ENTITY, msg.to_string()));
-    match db_participate(&pool, action_id, &body).await {
-        Ok(participation) => Ok((StatusCode::CREATED, Json(participation))),
-        Err(ParticipationError::ActionNotFound) => {
-            Err((StatusCode::NOT_FOUND, "no corporate action with that id".to_string()))
-        }
-        Err(ParticipationError::NotABuyBack) => {
-            unprocessable("that corporate action is not a buy-back")
-        }
-        Err(ParticipationError::NonPositiveUnits) => {
-            unprocessable("the number of units participated must be greater than zero")
-        }
-        Err(ParticipationError::BeforeBuyBackDate) => {
-            unprocessable("the participation date is before the buy-back date")
-        }
-        Err(ParticipationError::Sell(e)) => {
-            tracing::warn!(error = ?e, "buy-back participation rejected by a sell invariant");
-            unprocessable(
-                "the holding cannot cover the units participated (over-allocated parcels)",
-            )
-        }
-        Err(ParticipationError::Db(e)) => {
-            tracing::error!(error = %e, "buy-back participation failed");
-            Err((StatusCode::INTERNAL_SERVER_ERROR, String::new()))
-        }
-    }
+) -> Result<(StatusCode, Json<Participation>), ApiError> {
+    let participation = db_participate(&pool, action_id, &body).await?;
+    Ok((StatusCode::CREATED, Json(participation)))
 }
 
 #[cfg(test)]

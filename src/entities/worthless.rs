@@ -34,6 +34,7 @@
 //! closes the whole holding), worthless *financial instruments* other than
 //! shares, and the 18-month later-recovery timing rule.
 
+use crate::infra::http::ApiError;
 use crate::entities::corporate_action::{self, ActionKind, sold_in_acquired_units, split_adjusted_quantity};
 use crate::entities::sell::{self, AllocationInput, SellBody};
 use crate::entities::trade::{self, Trade};
@@ -252,34 +253,39 @@ pub async fn db_recognise(pool: &SqlitePool, action_id: i64) -> Result<Recognise
 async fn recognise(
     State(pool): State<SqlitePool>,
     Path(action_id): Path<i64>,
-) -> Result<(StatusCode, Json<Recognise>), (StatusCode, String)> {
-    let unprocessable = |msg: &str| Err((StatusCode::UNPROCESSABLE_ENTITY, msg.to_string()));
-    match db_recognise(&pool, action_id).await {
-        Ok(recognise) => Ok((StatusCode::CREATED, Json(recognise))),
-        Err(RecogniseError::ActionNotFound) => {
-            Err((StatusCode::NOT_FOUND, "no corporate action with that id".to_string()))
-        }
-        Err(RecogniseError::NotWorthlessShares) => {
-            unprocessable("that corporate action is not a worthless-shares event")
-        }
-        Err(RecogniseError::AlreadyRecognised) => unprocessable(
-            "this worthless-shares loss has already been recognised — \
-             delete its closing Sell first to redo it",
-        ),
-        Err(RecogniseError::NothingHeld) => {
-            unprocessable("nothing of the listing is held at the event date")
-        }
-        Err(RecogniseError::TradedOnOrAfterEventDate) => unprocessable(
-            "the listing has a trade dated on or after the event date — \
-             fix that trade before recognising",
-        ),
-        Err(RecogniseError::Sell(e)) => {
-            tracing::warn!(error = ?e, "worthless-shares recognise rejected by a sell invariant");
-            unprocessable("the recognise's parcel allocations are invalid")
-        }
-        Err(RecogniseError::Db(e)) => {
-            tracing::error!(error = %e, "worthless-shares recognise failed");
-            Err((StatusCode::INTERNAL_SERVER_ERROR, String::new()))
+) -> Result<(StatusCode, Json<Recognise>), ApiError> {
+    let recognise = db_recognise(&pool, action_id).await?;
+    Ok((StatusCode::CREATED, Json(recognise)))
+}
+
+impl From<RecogniseError> for ApiError {
+    fn from(e: RecogniseError) -> Self {
+        match e {
+            RecogniseError::ActionNotFound => {
+                ApiError::not_found("no corporate action with that id")
+            }
+            RecogniseError::NotWorthlessShares => {
+                ApiError::unprocessable("that corporate action is not a worthless-shares event")
+            }
+            RecogniseError::AlreadyRecognised => ApiError::unprocessable(
+                "this worthless-shares loss has already been recognised — \
+                 delete its closing Sell first to redo it",
+            ),
+            RecogniseError::NothingHeld => {
+                ApiError::unprocessable("nothing of the listing is held at the event date")
+            }
+            RecogniseError::TradedOnOrAfterEventDate => ApiError::unprocessable(
+                "the listing has a trade dated on or after the event date — \
+                 fix that trade before recognising",
+            ),
+            RecogniseError::Sell(err) => {
+                tracing::warn!(
+                    error = ?err,
+                    "worthless-shares recognise rejected by a sell invariant"
+                );
+                ApiError::unprocessable("the recognise's parcel allocations are invalid")
+            }
+            RecogniseError::Db(err) => err.into(),
         }
     }
 }

@@ -27,10 +27,10 @@
 //! flagged stale). Past dates whose prices have been backfilled are generated
 //! on demand through the same endpoint.
 
+use crate::infra::http::ApiError;
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
-    http::StatusCode,
     routing::{get, post},
 };
 use chrono::{DateTime, Duration, NaiveDate, Utc};
@@ -440,27 +440,27 @@ struct GenerateBody {
 async fn list(
     State(pool): State<SqlitePool>,
     Query(params): Query<ListParams>,
-) -> Result<Json<Vec<SnapshotMeta>>, StatusCode> {
+) -> Result<Json<Vec<SnapshotMeta>>, ApiError> {
     db_list(&pool, params.report, params.from, params.to)
         .await
         .map(Json)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(ApiError::from)
 }
 
-async fn series(State(pool): State<SqlitePool>) -> Result<Json<Vec<SeriesPoint>>, StatusCode> {
-    db_series(&pool).await.map(Json).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+async fn series(State(pool): State<SqlitePool>) -> Result<Json<Vec<SeriesPoint>>, ApiError> {
+    db_series(&pool).await.map(Json).map_err(ApiError::from)
 }
 
 async fn get_one(
     State(pool): State<SqlitePool>,
     Path((report, date)): Path<(String, NaiveDate)>,
-) -> Result<Json<Snapshot>, StatusCode> {
-    let report = ReportKind::from_slug(&report).ok_or(StatusCode::NOT_FOUND)?;
+) -> Result<Json<Snapshot>, ApiError> {
+    let report = ReportKind::from_slug(&report).ok_or(ApiError::NotFound)?;
     db_get(&pool, report, date)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(ApiError::from)?
         .map(Json)
-        .ok_or(StatusCode::NOT_FOUND)
+        .ok_or(ApiError::NotFound)
 }
 
 /// Generate (or regenerate a stale) day's snapshots on demand — e.g. a past
@@ -470,24 +470,22 @@ async fn get_one(
 async fn generate_handler(
     State(pool): State<SqlitePool>,
     body: Option<Json<GenerateBody>>,
-) -> Result<Json<Vec<SnapshotMeta>>, (StatusCode, String)> {
+) -> Result<Json<Vec<SnapshotMeta>>, ApiError> {
     let now = Utc::now();
     let date = match body.and_then(|Json(b)| b.date) {
         Some(date) => date,
         None => latest_snapshot_date(&pool, now)
-            .await
-            .map_err(generate_error)?
-            .ok_or((StatusCode::UNPROCESSABLE_ENTITY, "nothing is held".to_string()))?,
+            .await?
+            .ok_or_else(|| ApiError::unprocessable("nothing is held"))?,
     };
-    generate(&pool, date, now).await.map(Json).map_err(generate_error)
+    Ok(Json(generate(&pool, date, now).await?))
 }
 
-fn generate_error(e: GenerateError) -> (StatusCode, String) {
-    match e {
-        GenerateError::Unprocessable(msg) => (StatusCode::UNPROCESSABLE_ENTITY, msg),
-        GenerateError::Db(msg) => {
-            tracing::error!("snapshot generation failed: {msg}");
-            (StatusCode::INTERNAL_SERVER_ERROR, String::new())
+impl From<GenerateError> for ApiError {
+    fn from(e: GenerateError) -> Self {
+        match e {
+            GenerateError::Unprocessable(msg) => ApiError::Unprocessable(msg),
+            GenerateError::Db(msg) => ApiError::internal(msg),
         }
     }
 }
@@ -503,6 +501,7 @@ pub fn router() -> Router<SqlitePool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::StatusCode;
     use crate::entities::{corporate_action, income, listing, trade};
     use crate::infra::db;
     use axum::{body::Body, http::Request};

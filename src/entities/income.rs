@@ -1,3 +1,4 @@
+use crate::infra::http::ApiError;
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -349,29 +350,29 @@ pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<DeleteOutcome, sqlx
     Ok(DeleteOutcome::Deleted)
 }
 
-async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<Income>>, StatusCode> {
+async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<Income>>, ApiError> {
     db_list(&pool)
         .await
         .map(Json)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(ApiError::from)
 }
 
 async fn get_one(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
-) -> Result<Json<Income>, StatusCode> {
+) -> Result<Json<Income>, ApiError> {
     db_get(&pool, id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(ApiError::from)?
         .map(Json)
-        .ok_or(StatusCode::NOT_FOUND)
+        .ok_or(ApiError::NotFound)
 }
 
 async fn upsert(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
     Json(body): Json<IncomeBody>,
-) -> Result<StatusCode, (StatusCode, String)> {
+) -> Result<StatusCode, ApiError> {
     let income = Income {
         id,
         listing_id: body.listing_id,
@@ -394,49 +395,42 @@ async fn upsert(
         amount_per_security: body.amount_per_security,
         securities_held: body.securities_held,
     };
-    db_upsert(&pool, &income)
-        .await
-        .map(|_| StatusCode::NO_CONTENT)
-        .map_err(|e| match e {
-            UpsertError::Db(err) => crate::infra::http::write_error_body(&err),
+    db_upsert(&pool, &income).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+impl From<UpsertError> for ApiError {
+    fn from(e: UpsertError) -> Self {
+        match e {
             // Managed by the buy-back participation → 422.
-            UpsertError::BuyBackIncome => (
-                StatusCode::UNPROCESSABLE_ENTITY,
+            UpsertError::BuyBackIncome => ApiError::unprocessable(
                 "this income row is a buy-back dividend component and cannot be edited — \
-                 it is managed by the buy-back participation"
-                    .to_string(),
+                 it is managed by the buy-back participation",
             ),
             // The cross-check rejection says what the statement figures
             // multiply to, so a typo is findable without a calculator.
-            UpsertError::PerShare(detail) => {
-                (StatusCode::UNPROCESSABLE_ENTITY, per_share_detail(&detail))
-            }
-            UpsertError::EntitlementDateOnNonTrust => (
-                StatusCode::UNPROCESSABLE_ENTITY,
+            UpsertError::PerShare(detail) => ApiError::unprocessable(per_share_detail(&detail)),
+            UpsertError::EntitlementDateOnNonTrust => ApiError::unprocessable(
                 "entitlement_date only applies to trust distributions — a dividend is \
-                 assessed when paid; tick trust income or clear the entitlement date"
-                    .to_string(),
+                 assessed when paid; tick trust income or clear the entitlement date",
             ),
-        })
+            UpsertError::Db(err) => err.into(),
+        }
+    }
 }
 
 async fn delete(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
-) -> Result<StatusCode, (StatusCode, String)> {
-    match db_delete(&pool, id).await {
-        Ok(DeleteOutcome::Deleted) => Ok(StatusCode::NO_CONTENT),
-        Ok(DeleteOutcome::NotFound) => {
-            Err((StatusCode::NOT_FOUND, "no income with that id".to_string()))
-        }
+) -> Result<StatusCode, ApiError> {
+    match db_delete(&pool, id).await? {
+        DeleteOutcome::Deleted => Ok(StatusCode::NO_CONTENT),
+        DeleteOutcome::NotFound => Err(ApiError::not_found("no income with that id")),
         // Managed by the buy-back participation → 422.
-        Ok(DeleteOutcome::BuyBackIncome) => Err((
-            StatusCode::UNPROCESSABLE_ENTITY,
+        DeleteOutcome::BuyBackIncome => Err(ApiError::unprocessable(
             "this income row is a buy-back dividend component — delete the buy-back Sell \
-             instead, which removes it too"
-                .to_string(),
+             instead, which removes it too",
         )),
-        Err(_) => Err((StatusCode::INTERNAL_SERVER_ERROR, String::new())),
     }
 }
 

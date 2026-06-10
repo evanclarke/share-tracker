@@ -13,7 +13,7 @@
 //! every holding account belongs to the same taxpayer, so taxpayer-level
 //! reports (tax summary, net capital gain) aggregate across all of them.
 
-use crate::infra::http::write_error_body;
+use crate::infra::http::ApiError;
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -126,53 +126,48 @@ pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<DeleteOutcome, sqlx
     Ok(DeleteOutcome::Deleted)
 }
 
-async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<HoldingAccount>>, StatusCode> {
+async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<HoldingAccount>>, ApiError> {
     db_list(&pool)
         .await
         .map(Json)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(ApiError::from)
 }
 
 async fn get_one(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
-) -> Result<Json<HoldingAccount>, StatusCode> {
+) -> Result<Json<HoldingAccount>, ApiError> {
     db_get(&pool, id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(ApiError::from)?
         .map(Json)
-        .ok_or(StatusCode::NOT_FOUND)
+        .ok_or(ApiError::NotFound)
 }
 
 async fn upsert(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
     Json(body): Json<HoldingAccountBody>,
-) -> Result<StatusCode, (StatusCode, String)> {
+) -> Result<StatusCode, ApiError> {
     db_upsert(&pool, &HoldingAccount { id, name: body.name })
         .await
         .map(|_| StatusCode::NO_CONTENT)
         // A duplicate name violates the UNIQUE constraint → 422.
-        .map_err(|e| write_error_body(&e))
+        .map_err(ApiError::from)
 }
 
 async fn delete(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
-) -> Result<StatusCode, (StatusCode, String)> {
-    match db_delete(&pool, id).await {
-        Ok(DeleteOutcome::Deleted) => Ok(StatusCode::NO_CONTENT),
-        Ok(DeleteOutcome::NotFound) => {
-            Err((StatusCode::NOT_FOUND, "no holding account with that id".to_string()))
-        }
-        Ok(DeleteOutcome::Referenced) => Err((
-            StatusCode::UNPROCESSABLE_ENTITY,
+) -> Result<StatusCode, ApiError> {
+    match db_delete(&pool, id).await? {
+        DeleteOutcome::Deleted => Ok(StatusCode::NO_CONTENT),
+        DeleteOutcome::NotFound => Err(ApiError::not_found("no holding account with that id")),
+        DeleteOutcome::Referenced => Err(ApiError::unprocessable(
             "this account still has trades, income, AMMA statements, DRP enrolments, or \
              transfers — reassign or delete those first (and the default account cannot be \
-             deleted)"
-                .to_string(),
+             deleted)",
         )),
-        Err(_) => Err((StatusCode::INTERNAL_SERVER_ERROR, String::new())),
     }
 }
 
@@ -221,10 +216,10 @@ mod tests {
         let err = db_upsert(&pool, &HoldingAccount { id: 3, name: "Plan".into() })
             .await
             .unwrap_err();
-        assert_eq!(
-            crate::infra::http::write_error_body(&err).0,
-            StatusCode::UNPROCESSABLE_ENTITY
-        );
+        assert!(matches!(
+            crate::infra::http::ApiError::from(err),
+            crate::infra::http::ApiError::Unprocessable(_)
+        ));
     }
 
     #[tokio::test]

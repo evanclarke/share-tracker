@@ -19,7 +19,8 @@
 //! transaction. Deleting a period record means "it never existed" and settles
 //! nothing.
 
-use crate::infra::{decimal::parse_dec, http::write_error_body};
+use crate::infra::http::ApiError;
+use crate::infra::decimal::parse_dec;
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -214,29 +215,29 @@ pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<bool, sqlx::Error> 
     Ok(result.rows_affected() > 0)
 }
 
-async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<DrpEnrolment>>, StatusCode> {
+async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<DrpEnrolment>>, ApiError> {
     db_list(&pool)
         .await
         .map(Json)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(ApiError::from)
 }
 
 async fn get_one(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
-) -> Result<Json<DrpEnrolment>, StatusCode> {
+) -> Result<Json<DrpEnrolment>, ApiError> {
     db_get(&pool, id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(ApiError::from)?
         .map(Json)
-        .ok_or(StatusCode::NOT_FOUND)
+        .ok_or(ApiError::NotFound)
 }
 
 async fn upsert(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
     Json(body): Json<DrpEnrolmentBody>,
-) -> Result<StatusCode, (StatusCode, String)> {
+) -> Result<StatusCode, ApiError> {
     let period = DrpEnrolment {
         id,
         listing_id: body.listing_id,
@@ -245,31 +246,34 @@ async fn upsert(
         unenrolment_date: body.unenrolment_date,
         residual_handling: body.residual_handling,
     };
-    match db_upsert(&pool, &period).await {
-        Ok(()) => Ok(StatusCode::NO_CONTENT),
-        Err(UpsertError::EmptyPeriod) => Err((
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "the unenrolment date must be after the enrolment date".to_string(),
-        )),
-        Err(UpsertError::Overlap) => Err((
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "this period overlaps an existing enrolment for the same listing and account \
-             (a listing can have at most one open period per account)"
-                .to_string(),
-        )),
-        // A bad listing_id violates the FK to listings → 422 via the shared map.
-        Err(UpsertError::Db(e)) => Err(write_error_body(&e)),
+    db_upsert(&pool, &period).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+impl From<UpsertError> for ApiError {
+    fn from(e: UpsertError) -> Self {
+        match e {
+            UpsertError::EmptyPeriod => ApiError::unprocessable(
+                "the unenrolment date must be after the enrolment date",
+            ),
+            UpsertError::Overlap => ApiError::unprocessable(
+                "this period overlaps an existing enrolment for the same listing and account \
+                 (a listing can have at most one open period per account)",
+            ),
+            // A bad listing_id violates the FK to listings → 422 via the shared map.
+            UpsertError::Db(err) => err.into(),
+        }
     }
 }
 
 async fn delete(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
-) -> Result<StatusCode, (StatusCode, String)> {
+) -> Result<StatusCode, ApiError> {
     db_delete(&pool, id)
         .await
         .map(|found| if found { StatusCode::NO_CONTENT } else { StatusCode::NOT_FOUND })
-        .map_err(|e| write_error_body(&e))
+        .map_err(ApiError::from)
 }
 
 #[cfg(test)]

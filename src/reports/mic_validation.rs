@@ -1,4 +1,5 @@
-use axum::{Json, Router, extract::State, http::StatusCode, routing::get};
+use crate::infra::http::ApiError;
+use axum::{Json, Router, extract::State, routing::get};
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 
@@ -55,13 +56,14 @@ pub async fn db_validate(pool: &SqlitePool) -> Result<Vec<ExchangeMicStatus>, sq
     Ok(out)
 }
 
-async fn report(State(pool): State<SqlitePool>) -> Result<Json<Vec<ExchangeMicStatus>>, StatusCode> {
-    db_validate(&pool).await.map(Json).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+async fn report(State(pool): State<SqlitePool>) -> Result<Json<Vec<ExchangeMicStatus>>, ApiError> {
+    db_validate(&pool).await.map(Json).map_err(ApiError::from)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::StatusCode;
     use crate::entities::{exchange, mic_registry};
     use crate::infra::db;
     use axum::{body::Body, http::Request};

@@ -22,6 +22,7 @@
 //!   content type and a download filename.
 //! - `DELETE /attachments/{id}` removes one attachment.
 
+use crate::infra::http::ApiError;
 use std::fmt::Write as _;
 
 use axum::{
@@ -36,7 +37,6 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::{QueryBuilder, Sqlite, SqlitePool};
 
-use crate::infra::http::write_error_body;
 
 /// Per-file upload ceiling (25 MB). Enforced explicitly so an oversized upload is
 /// rejected with `413`; the route's body limit is set a little higher so this
@@ -211,29 +211,29 @@ pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<bool, sqlx::Error> 
 async fn list(
     State(pool): State<SqlitePool>,
     Query(q): Query<ListQuery>,
-) -> Result<Json<Vec<Attachment>>, StatusCode> {
+) -> Result<Json<Vec<Attachment>>, ApiError> {
     db_list(&pool, &q)
         .await
         .map(Json)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(ApiError::from)
 }
 
 async fn get_one(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
-) -> Result<Json<Attachment>, StatusCode> {
+) -> Result<Json<Attachment>, ApiError> {
     db_get(&pool, id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(ApiError::from)?
         .map(Json)
-        .ok_or(StatusCode::NOT_FOUND)
+        .ok_or(ApiError::NotFound)
 }
 
 async fn upload(
     State(pool): State<SqlitePool>,
     mut multipart: Multipart,
-) -> Result<Response, (StatusCode, String)> {
-    let bad_request = |msg: &str| (StatusCode::BAD_REQUEST, msg.to_string());
+) -> Result<Response, ApiError> {
+    let bad_request = |msg: &str| ApiError::bad_request(msg);
     let mut trade_id: Option<i64> = None;
     let mut income_id: Option<i64> = None;
     let mut amma_statement_id: Option<i64> = None;
@@ -257,10 +257,12 @@ async fn upload(
                     .bytes()
                     .await
                     .map_err(|_| bad_request("the uploaded file could not be read"))?;
-                let content_type = declared.as_deref().and_then(ContentType::from_mime).ok_or((
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    "the file's content type is not a supported attachment type".to_string(),
-                ))?;
+                let content_type =
+                    declared.as_deref().and_then(ContentType::from_mime).ok_or_else(|| {
+                        ApiError::unprocessable(
+                            "the file's content type is not a supported attachment type",
+                        )
+                    })?;
                 file = Some((filename, content_type, bytes.to_vec()));
             }
             // Ignore unknown fields, but drain the body to keep the stream sane.
@@ -273,21 +275,17 @@ async fn upload(
     // Exactly one owner must be set.
     let owners = trade_id.is_some() as u8 + income_id.is_some() as u8 + amma_statement_id.is_some() as u8;
     if owners != 1 {
-        return Err((
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "attach to exactly one of a trade, income, or AMMA statement".to_string(),
+        return Err(ApiError::unprocessable(
+            "attach to exactly one of a trade, income, or AMMA statement",
         ));
     }
 
-    let (filename, content_type, content) = file.ok_or((
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "no file was included in the upload".to_string(),
-    ))?;
+    let (filename, content_type, content) =
+        file.ok_or_else(|| ApiError::unprocessable("no file was included in the upload"))?;
     if content.len() > MAX_UPLOAD_BYTES {
-        return Err((
-            StatusCode::PAYLOAD_TOO_LARGE,
-            format!("the file exceeds the {MAX_UPLOAD_BYTES}-byte upload limit"),
-        ));
+        return Err(ApiError::PayloadTooLarge(format!(
+            "the file exceeds the {MAX_UPLOAD_BYTES}-byte upload limit"
+        )));
     }
 
     let new = NewAttachment {
@@ -302,38 +300,38 @@ async fn upload(
     };
 
     // A bad owner id violates the FK to the activity table → client error (422).
-    let id = db_insert(&pool, &new).await.map_err(|e| write_error_body(&e))?;
+    let id = db_insert(&pool, &new).await.map_err(ApiError::from)?;
     let stored = db_get(&pool, id)
-        .await
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, String::new()))?
-        .ok_or((StatusCode::INTERNAL_SERVER_ERROR, String::new()))?;
+        .await?
+        .ok_or_else(|| ApiError::internal("the stored attachment row vanished".to_string()))?;
     Ok((StatusCode::CREATED, Json(stored)).into_response())
 }
 
 async fn read_owner_field(
     field: axum::extract::multipart::Field<'_>,
-) -> Result<Option<i64>, (StatusCode, String)> {
+) -> Result<Option<i64>, ApiError> {
     let text = field
         .text()
         .await
-        .map_err(|_| (StatusCode::BAD_REQUEST, "an owner field could not be read".to_string()))?;
+        .map_err(|_| ApiError::bad_request("an owner field could not be read"))?;
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return Ok(None);
     }
-    trimmed.parse::<i64>().map(Some).map_err(|_| {
-        (StatusCode::UNPROCESSABLE_ENTITY, "an owner id is not a valid integer".to_string())
-    })
+    trimmed
+        .parse::<i64>()
+        .map(Some)
+        .map_err(|_| ApiError::unprocessable("an owner id is not a valid integer"))
 }
 
 async fn download(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
-) -> Result<Response, StatusCode> {
+) -> Result<Response, ApiError> {
     let (content_type, filename, bytes) = db_get_content(&pool, id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .map_err(ApiError::from)?
+        .ok_or(ApiError::NotFound)?;
     // Strip any quotes from the filename so it can't break out of the header.
     let safe_name = filename.replace(['"', '\\'], "");
     Response::builder()
@@ -343,17 +341,17 @@ async fn download(
             format!("attachment; filename=\"{safe_name}\""),
         )
         .body(Body::from(bytes))
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(ApiError::internal)
 }
 
 async fn delete(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
-) -> Result<StatusCode, (StatusCode, String)> {
+) -> Result<StatusCode, ApiError> {
     db_delete(&pool, id)
         .await
         .map(|found| if found { StatusCode::NO_CONTENT } else { StatusCode::NOT_FOUND })
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, String::new()))
+        .map_err(ApiError::from)
 }
 
 #[cfg(test)]

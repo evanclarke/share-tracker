@@ -11,10 +11,10 @@
 //! `minor_units` is informational only: stored monetary amounts remain
 //! arbitrary-precision Decimal and are never rounded to a currency's minor unit.
 
+use crate::infra::http::ApiError;
 use axum::{
     Json, Router,
     extract::{Path, State},
-    http::StatusCode,
     routing::{get, post},
 };
 use quick_xml::events::Event;
@@ -364,19 +364,19 @@ async fn fetch(url: &str, basic_auth: Option<(&str, &str)>) -> Result<String, Im
     resp.text().await.map_err(|e| ImportError::Fetch(e.to_string()))
 }
 
-async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<Currency>>, StatusCode> {
-    db_list(&pool).await.map(Json).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<Currency>>, ApiError> {
+    db_list(&pool).await.map(Json).map_err(ApiError::from)
 }
 
 async fn get_one(
     State(pool): State<SqlitePool>,
     Path(code): Path<String>,
-) -> Result<Json<Currency>, StatusCode> {
+) -> Result<Json<Currency>, ApiError> {
     db_get(&pool, &code)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(ApiError::from)?
         .map(Json)
-        .ok_or(StatusCode::NOT_FOUND)
+        .ok_or(ApiError::NotFound)
 }
 
 /// Manually trigger the import. With a non-empty request body, imports that body
@@ -386,31 +386,36 @@ async fn get_one(
 async fn import(
     State(pool): State<SqlitePool>,
     body: String,
-) -> Result<Json<ImportSummary>, (StatusCode, String)> {
+) -> Result<Json<ImportSummary>, ApiError> {
     let result = if body.trim().is_empty() {
         run_import(&pool).await
     } else {
         import_from_content(&pool, &body).await
     };
-    result.map(Json).map_err(|e| match e {
-        ImportError::Parse(msg) => {
-            tracing::warn!(%msg, "currency import rejected malformed feed");
-            (StatusCode::UNPROCESSABLE_ENTITY, format!("the currency feed is malformed: {msg}"))
+    Ok(Json(result?))
+}
+
+impl From<ImportError> for ApiError {
+    fn from(e: ImportError) -> Self {
+        match e {
+            ImportError::Parse(msg) => {
+                tracing::warn!(%msg, "currency import rejected malformed feed");
+                ApiError::unprocessable(format!("the currency feed is malformed: {msg}"))
+            }
+            // The upstream fetch error is logged when the response is built.
+            ImportError::Fetch(msg) => ApiError::bad_gateway(
+                "could not fetch the currency feed from its source",
+                msg,
+            ),
+            ImportError::Db(err) => err.into(),
         }
-        ImportError::Fetch(msg) => {
-            tracing::warn!(%msg, "currency feed fetch failed");
-            (StatusCode::BAD_GATEWAY, "could not fetch the currency feed from its source".to_string())
-        }
-        ImportError::Db(e) => {
-            tracing::error!(error = %e, "currency import db error");
-            (StatusCode::INTERNAL_SERVER_ERROR, String::new())
-        }
-    })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::StatusCode;
     use crate::infra::db;
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;

@@ -1,3 +1,4 @@
+use crate::infra::http::ApiError;
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -240,29 +241,29 @@ pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<bool, sqlx::Error> 
     Ok(result.rows_affected() > 0)
 }
 
-async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<AmmaStatement>>, StatusCode> {
+async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<AmmaStatement>>, ApiError> {
     db_list(&pool)
         .await
         .map(Json)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(ApiError::from)
 }
 
 async fn get_one(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
-) -> Result<Json<AmmaStatement>, StatusCode> {
+) -> Result<Json<AmmaStatement>, ApiError> {
     db_get(&pool, id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(ApiError::from)?
         .map(Json)
-        .ok_or(StatusCode::NOT_FOUND)
+        .ok_or(ApiError::NotFound)
 }
 
 async fn upsert(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
     Json(body): Json<AmmaStatementBody>,
-) -> Result<StatusCode, (StatusCode, String)> {
+) -> Result<StatusCode, ApiError> {
     let stmt = AmmaStatement {
         id,
         listing_id: body.listing_id,
@@ -291,18 +292,18 @@ async fn upsert(
     db_upsert(&pool, &stmt)
         .await
         .map(|_| StatusCode::NO_CONTENT)
-        .map_err(|e| crate::infra::http::write_error_body(&e))
+        .map_err(ApiError::from)
 }
 
 async fn delete(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
-) -> Result<StatusCode, (StatusCode, String)> {
+) -> Result<StatusCode, ApiError> {
     db_delete(&pool, id)
         .await
         .map(|found| if found { StatusCode::NO_CONTENT } else { StatusCode::NOT_FOUND })
         // Deleting a statement still referenced by AMIT adjustments violates an FK → 422.
-        .map_err(|e| crate::infra::http::write_error_body(&e))
+        .map_err(ApiError::from)
 }
 
 #[cfg(test)]

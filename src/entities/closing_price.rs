@@ -35,10 +35,10 @@
 //!   never a silent zero or a skipped row — and is replaced by a later
 //!   successful re-run.
 
+use crate::infra::http::ApiError;
 use axum::{
     Extension, Json, Router,
     extract::{Query, State},
-    http::StatusCode,
     routing::{get, post},
 };
 use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveTime, Utc};
@@ -748,11 +748,11 @@ pub struct BackfillSummary {
 async fn list(
     State(pool): State<SqlitePool>,
     Query(params): Query<ListParams>,
-) -> Result<Json<Vec<ClosingPrice>>, StatusCode> {
+) -> Result<Json<Vec<ClosingPrice>>, ApiError> {
     db_list(&pool, params.listing_id, params.from, params.to)
         .await
         .map(Json)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(ApiError::from)
 }
 
 /// Re-fetch one (listing, date) on demand — typically to replace an errored
@@ -762,11 +762,11 @@ async fn fetch_one(
     State(pool): State<SqlitePool>,
     Extension(fetcher): Extension<SharedFetcher>,
     Json(body): Json<FetchBody>,
-) -> Result<Json<ClosingPrice>, (StatusCode, String)> {
+) -> Result<Json<ClosingPrice>, ApiError> {
     let market = load_market(&pool, body.listing_id)
         .await
         .map_err(internal)?
-        .ok_or((StatusCode::NOT_FOUND, "no such listing".to_string()))?;
+        .ok_or_else(|| ApiError::not_found("no such listing"))?;
     validate_complete_trading_day(&market, body.price_date)?;
 
     fetch_and_store(&pool, fetcher.as_ref(), &market, &[body.price_date])
@@ -786,23 +786,20 @@ async fn backfill(
     State(pool): State<SqlitePool>,
     Extension(fetcher): Extension<SharedFetcher>,
     Json(body): Json<BackfillBody>,
-) -> Result<Json<BackfillSummary>, (StatusCode, String)> {
+) -> Result<Json<BackfillSummary>, ApiError> {
     let market = load_market(&pool, body.listing_id)
         .await
         .map_err(internal)?
-        .ok_or((StatusCode::NOT_FOUND, "no such listing".to_string()))?;
+        .ok_or_else(|| ApiError::not_found("no such listing"))?;
     if body.from > body.to {
-        return Err((StatusCode::UNPROCESSABLE_ENTITY, "from is after to".to_string()));
+        return Err(ApiError::unprocessable("from is after to"));
     }
     // Clamp the range to days whose close is final.
     let latest = market
         .latest_complete_trading_day(Utc::now())
         .map_err(unprocessable)?
         .filter(|latest| *latest >= body.from)
-        .ok_or((
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "range contains no complete trading day".to_string(),
-        ))?;
+        .ok_or_else(|| ApiError::unprocessable("range contains no complete trading day"))?;
     let to = body.to.min(latest);
 
     let mut trading_days: Vec<NaiveDate> = Vec::new();
@@ -831,27 +828,23 @@ async fn backfill(
 fn validate_complete_trading_day(
     market: &Market,
     date: NaiveDate,
-) -> Result<(), (StatusCode, String)> {
+) -> Result<(), ApiError> {
     let latest = market.latest_complete_trading_day(Utc::now()).map_err(unprocessable)?;
     if latest.is_none_or(|latest| date > latest) {
-        return Err((
-            StatusCode::UNPROCESSABLE_ENTITY,
-            format!("the close of {date} is not final yet"),
-        ));
+        return Err(ApiError::unprocessable(format!("the close of {date} is not final yet")));
     }
     if !market.is_trading_day(date) {
-        return Err((StatusCode::UNPROCESSABLE_ENTITY, format!("{date} is not a trading day")));
+        return Err(ApiError::unprocessable(format!("{date} is not a trading day")));
     }
     Ok(())
 }
 
-fn internal(e: impl std::fmt::Display) -> (StatusCode, String) {
-    tracing::error!("closing-price request failed: {e}");
-    (StatusCode::INTERNAL_SERVER_ERROR, String::new())
+fn internal(e: impl std::fmt::Display) -> ApiError {
+    ApiError::internal(e.to_string())
 }
 
-fn unprocessable(e: impl std::fmt::Display) -> (StatusCode, String) {
-    (StatusCode::UNPROCESSABLE_ENTITY, e.to_string())
+fn unprocessable(e: impl std::fmt::Display) -> ApiError {
+    ApiError::unprocessable(e.to_string())
 }
 
 pub fn router() -> Router<SqlitePool> {
@@ -936,7 +929,7 @@ mod tests {
     use super::*;
     use crate::entities::{exchange_holiday, parcel_allocation, trade};
     use crate::infra::db;
-    use axum::{body::Body, http::Request};
+    use axum::{body::Body, http::Request, http::StatusCode};
     use http_body_util::BodyExt;
     use std::sync::Mutex;
     use tower::ServiceExt;

@@ -33,6 +33,7 @@ Modules are grouped into four folders; `main.rs`, `app.rs`, and the migrations l
   - `infra/logging.rs` — tracing subscriber init; reads `RUST_LOG`, defaults to `info`
   - `infra/decimal.rs` — `parse_dec` and `FromRow` decimal helpers
   - `infra/fx.rs` — `to_aud` AUD conversion via the ATO/RBA reference rate (per-trade `fx_rate` fallback); reports use it to convert non-AUD cost base/proceeds
+  - `infra/http.rs` — `ApiError`, the one error type every handler returns (`Result<_, ApiError>` + `?`): `Internal` responds 500 with an empty body and logs the wrapped error via `tracing::error!` when the response is built — never `map_err(|_| StatusCode::…)`, which swallows the cause; `Unprocessable`/`BadRequest`/`not_found(msg)` carry the plain-text reason the web UI shows. `From<sqlx::Error>` classifies DB constraint violations as 422 with the rephrased constraint message. Per-entity error enums stay and convert via `impl From<EntityError> for ApiError` beside the enum — handlers never match error variants themselves
   - `infra/scheduler.rs` — maintenance-job registry, cron parsing/spawn, inspection routes
 - `src/domain/` — domain calculations shared by entities and reports, where divergence between callers would be a correctness bug. `domain/cost_base.rs` is *the* adjusted-cost-base pipeline (initial cost → AMIT reduction floored at nil per CGT event E10 → return-of-capital per-unit reduction floored at nil per G1, split-aware → AUD conversion at the acquisition month via `CostBase::into_aud`), carrying the ATO citations; the realised/unrealised/portfolio/open-parcels reports and the scrip-exchange/demerger/transfer operations all call it — never re-implement the pipeline inline
 - `src/entities/<entity>.rs` — one file per domain entity, CRUD + write-time invariants (see pattern below). `entities::router()` (in `entities/mod.rs`) merges them all
@@ -45,7 +46,7 @@ Each entity in `src/entities/<entity>.rs` follows this structure:
 1. Model struct — derives `Serialize`, `Deserialize`, `sqlx::FromRow`
 2. Input body struct — for PUT endpoints; omits the primary key (comes from URL path)
 3. `pub db_*` functions — `db_list`, `db_get`, `db_upsert`, `db_delete`
-4. Private axum handlers — call the `db_*` functions, map errors to `StatusCode`
+4. Private axum handlers — call the `db_*` functions and return `Result<_, infra::http::ApiError>` (entity errors convert via their `From<EntityError> for ApiError` impl)
 5. `pub fn router() -> Router<SqlitePool>` — registers the entity's routes
 6. Inline `#[cfg(test)]` module — DB-level tests and API-level tests via `tower::ServiceExt::oneshot`
 

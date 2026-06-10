@@ -6,6 +6,7 @@
 //! [`exchange_holidays_for_listing`], which the trade/sell settlement logic uses
 //! to look up the holiday set for a listing's exchange.
 
+use crate::infra::http::ApiError;
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -154,61 +155,62 @@ pub(crate) async fn exchange_holidays_for_listing(
     Ok(dates.into_iter().collect())
 }
 
-async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<ExchangeHoliday>>, StatusCode> {
+async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<ExchangeHoliday>>, ApiError> {
     db_list(&pool)
         .await
         .map(Json)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(ApiError::from)
 }
 
 async fn list_for_exchange(
     State(pool): State<SqlitePool>,
     Path(mic): Path<String>,
-) -> Result<Json<Vec<ExchangeHoliday>>, StatusCode> {
+) -> Result<Json<Vec<ExchangeHoliday>>, ApiError> {
     db_list_for_exchange(&pool, &mic)
         .await
         .map(Json)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(ApiError::from)
 }
 
 async fn get_one(
     State(pool): State<SqlitePool>,
     Path((mic, date)): Path<(String, String)>,
-) -> Result<Json<ExchangeHoliday>, StatusCode> {
-    let date: NaiveDate = date.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+) -> Result<Json<ExchangeHoliday>, ApiError> {
+    let date: NaiveDate =
+        date.parse().map_err(|_| ApiError::bad_request("the holiday date is not a valid date"))?;
     db_get(&pool, &mic, date)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(ApiError::from)?
         .map(Json)
-        .ok_or(StatusCode::NOT_FOUND)
+        .ok_or(ApiError::NotFound)
 }
 
 async fn upsert(
     State(pool): State<SqlitePool>,
     Path((mic, date)): Path<(String, String)>,
     Json(body): Json<ExchangeHolidayBody>,
-) -> Result<StatusCode, (StatusCode, String)> {
+) -> Result<StatusCode, ApiError> {
     let holiday_date: NaiveDate = date
         .parse()
-        .map_err(|_| (StatusCode::BAD_REQUEST, "the holiday date is not a valid date".to_string()))?;
+        .map_err(|_| ApiError::bad_request("the holiday date is not a valid date"))?;
     let holiday = ExchangeHoliday { mic, holiday_date, name: body.name };
     db_upsert(&pool, &holiday)
         .await
         .map(|_| StatusCode::NO_CONTENT)
-        .map_err(|e| crate::infra::http::write_error_body(&e))
+        .map_err(ApiError::from)
 }
 
 async fn delete(
     State(pool): State<SqlitePool>,
     Path((mic, date)): Path<(String, String)>,
-) -> Result<StatusCode, (StatusCode, String)> {
+) -> Result<StatusCode, ApiError> {
     let date: NaiveDate = date
         .parse()
-        .map_err(|_| (StatusCode::BAD_REQUEST, "the holiday date is not a valid date".to_string()))?;
+        .map_err(|_| ApiError::bad_request("the holiday date is not a valid date"))?;
     db_delete(&pool, &mic, date)
         .await
         .map(|found| if found { StatusCode::NO_CONTENT } else { StatusCode::NOT_FOUND })
-        .map_err(|e| crate::infra::http::write_error_body(&e))
+        .map_err(ApiError::from)
 }
 
 #[cfg(test)]

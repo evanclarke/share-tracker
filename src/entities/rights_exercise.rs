@@ -27,6 +27,7 @@
 //! the rights themselves, pre-CGT originals, and retail premiums (entered as
 //! unfranked dividend income).
 
+use crate::infra::http::ApiError;
 use crate::entities::corporate_action::{
     self, ActionKind, as_acquired_quantity, split_adjusted_quantity,
 };
@@ -85,6 +86,33 @@ pub enum ExerciseError {
 impl From<sqlx::Error> for ExerciseError {
     fn from(e: sqlx::Error) -> Self {
         ExerciseError::Db(e)
+    }
+}
+
+impl From<ExerciseError> for ApiError {
+    fn from(e: ExerciseError) -> Self {
+        match e {
+            ExerciseError::ActionNotFound => {
+                ApiError::not_found("no corporate action with that id")
+            }
+            ExerciseError::NotARightsIssue => {
+                ApiError::unprocessable("that corporate action is not a rights issue")
+            }
+            ExerciseError::NonPositiveUnits => {
+                ApiError::unprocessable("the number of units exercised must be greater than zero")
+            }
+            ExerciseError::NegativeRightsCost => {
+                ApiError::unprocessable("the rights cost cannot be negative")
+            }
+            ExerciseError::BeforeRecordDate => {
+                ApiError::unprocessable("the exercise date is before the issue's record date")
+            }
+            ExerciseError::ExceedsEntitlement => ApiError::unprocessable(
+                "the units exercised exceed the entitlement earned by the holding at the record \
+                 date",
+            ),
+            ExerciseError::Db(err) => err.into(),
+        }
     }
 }
 
@@ -208,33 +236,9 @@ async fn exercise(
     State(pool): State<SqlitePool>,
     Path(action_id): Path<i64>,
     Json(body): Json<ExerciseBody>,
-) -> Result<(StatusCode, Json<Trade>), (StatusCode, String)> {
-    let unprocessable = |msg: &str| Err((StatusCode::UNPROCESSABLE_ENTITY, msg.to_string()));
-    match db_exercise(&pool, action_id, &body).await {
-        Ok(trade) => Ok((StatusCode::CREATED, Json(trade))),
-        Err(ExerciseError::ActionNotFound) => {
-            Err((StatusCode::NOT_FOUND, "no corporate action with that id".to_string()))
-        }
-        Err(ExerciseError::NotARightsIssue) => {
-            unprocessable("that corporate action is not a rights issue")
-        }
-        Err(ExerciseError::NonPositiveUnits) => {
-            unprocessable("the number of units exercised must be greater than zero")
-        }
-        Err(ExerciseError::NegativeRightsCost) => {
-            unprocessable("the rights cost cannot be negative")
-        }
-        Err(ExerciseError::BeforeRecordDate) => {
-            unprocessable("the exercise date is before the issue's record date")
-        }
-        Err(ExerciseError::ExceedsEntitlement) => unprocessable(
-            "the units exercised exceed the entitlement earned by the holding at the record date",
-        ),
-        Err(ExerciseError::Db(e)) => {
-            tracing::error!(error = %e, "rights exercise failed");
-            Err((StatusCode::INTERNAL_SERVER_ERROR, String::new()))
-        }
-    }
+) -> Result<(StatusCode, Json<Trade>), ApiError> {
+    let trade = db_exercise(&pool, action_id, &body).await?;
+    Ok((StatusCode::CREATED, Json(trade)))
 }
 
 #[cfg(test)]

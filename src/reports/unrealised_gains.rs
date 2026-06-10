@@ -1,7 +1,8 @@
+use crate::infra::http::ApiError;
 use crate::domain::cost_base;
 use crate::entities::closing_price::{self, SharedFetcher};
 use crate::infra::decimal::parse_dec;
-use axum::{Extension, Json, Router, extract::State, http::StatusCode, routing::post};
+use axum::{Extension, Json, Router, extract::State, routing::post};
 use chrono::{Months, NaiveDate};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -214,13 +215,13 @@ async fn unrealised_gains_handler(
     State(pool): State<SqlitePool>,
     fetcher: Option<Extension<SharedFetcher>>,
     body: Option<Json<UnrealisedGainsRequest>>,
-) -> Result<Json<Vec<UnrealisedGain>>, StatusCode> {
+) -> Result<Json<Vec<UnrealisedGain>>, ApiError> {
     let req = body.map(|Json(req)| req).unwrap_or_default();
     let as_of_date = req.as_of_date.unwrap_or_else(|| chrono::Local::now().date_naive());
 
     let mut gains = db_unrealised_gains(&pool, as_of_date)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(ApiError::from)?;
 
     let live = closing_price::resolve_live_prices(
         &pool,
@@ -230,7 +231,7 @@ async fn unrealised_gains_handler(
         gains.iter().map(|g| g.listing_id),
     )
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .map_err(ApiError::from)?;
 
     for g in &mut gains {
         if let Some(&price) = req.prices.get(&g.listing_id) {
@@ -256,6 +257,7 @@ async fn unrealised_gains_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::StatusCode;
     use crate::{infra::db, entities::{amma, amit_adjustment, corporate_action, listing, parcel_allocation, trade}};
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;

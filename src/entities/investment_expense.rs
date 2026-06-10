@@ -15,6 +15,7 @@
 //! investment income, converting a non-AUD amount to AUD via the ATO rate for the
 //! month of `date_incurred` (failing loudly when no rate exists).
 
+use crate::infra::http::ApiError;
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -177,29 +178,29 @@ pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<bool, sqlx::Error> 
     Ok(rows > 0)
 }
 
-async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<InvestmentExpense>>, StatusCode> {
+async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<InvestmentExpense>>, ApiError> {
     db_list(&pool)
         .await
         .map(Json)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(ApiError::from)
 }
 
 async fn get_one(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
-) -> Result<Json<InvestmentExpense>, StatusCode> {
+) -> Result<Json<InvestmentExpense>, ApiError> {
     db_get(&pool, id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(ApiError::from)?
         .map(Json)
-        .ok_or(StatusCode::NOT_FOUND)
+        .ok_or(ApiError::NotFound)
 }
 
 async fn upsert(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
     Json(body): Json<InvestmentExpenseBody>,
-) -> Result<StatusCode, (StatusCode, String)> {
+) -> Result<StatusCode, ApiError> {
     let e = InvestmentExpense {
         id,
         date_incurred: body.date_incurred,
@@ -217,19 +218,17 @@ async fn upsert(
         .map(|_| StatusCode::NO_CONTENT)
         // Unknown currency/listing/account (FK) or a bad enum value (CHECK)
         // surface as 422 with the offending constraint named.
-        .map_err(|err| crate::infra::http::write_error_body(&err))
+        .map_err(ApiError::from)
 }
 
 async fn delete(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
-) -> Result<StatusCode, (StatusCode, String)> {
-    match db_delete(&pool, id).await {
-        Ok(true) => Ok(StatusCode::NO_CONTENT),
-        Ok(false) => {
-            Err((StatusCode::NOT_FOUND, "no investment expense with that id".to_string()))
-        }
-        Err(_) => Err((StatusCode::INTERNAL_SERVER_ERROR, String::new())),
+) -> Result<StatusCode, ApiError> {
+    if db_delete(&pool, id).await? {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError::not_found("no investment expense with that id"))
     }
 }
 

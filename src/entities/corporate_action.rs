@@ -121,8 +121,8 @@
 //! `ActionKind` is the extension point for future corporate actions, each
 //! widening the enum and its CHECK.
 
+use crate::infra::http::ApiError;
 use crate::infra::decimal::{parse_dec, row_dec, row_opt_dec};
-use crate::infra::http::write_error_body;
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -616,6 +616,21 @@ impl From<sqlx::Error> for WriteError {
     }
 }
 
+impl From<WriteError> for ApiError {
+    fn from(e: WriteError) -> Self {
+        match e {
+            // Frozen while exercise/participation trades reference it → 422.
+            WriteError::ReferencedByTrade => ApiError::unprocessable(
+                "this corporate action is referenced by rights-exercise, buy-back, \
+                 scrip-for-scrip, demerger, or worthless-shares trades and cannot be \
+                 edited — delete those trades first",
+            ),
+            // Unknown listing/currency FK or enum CHECK violation → 422.
+            WriteError::Db(err) => err.into(),
+        }
+    }
+}
+
 pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<(), WriteError> {
     // Spread the variant's payload over the per-type columns; the other
     // types' columns are NULL (the table CHECKs require exactly this shape).
@@ -1008,62 +1023,50 @@ pub fn per_unit_reduction(
     Ok(total)
 }
 
-async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<CorporateAction>>, StatusCode> {
+async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<CorporateAction>>, ApiError> {
     db_list(&pool)
         .await
         .map(Json)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(ApiError::from)
 }
 
 async fn get_one(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
-) -> Result<Json<CorporateAction>, StatusCode> {
+) -> Result<Json<CorporateAction>, ApiError> {
     db_get(&pool, id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(ApiError::from)?
         .map(Json)
-        .ok_or(StatusCode::NOT_FOUND)
+        .ok_or(ApiError::NotFound)
 }
 
 async fn upsert(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
     Json(body): Json<CorporateActionBody>,
-) -> Result<StatusCode, (StatusCode, String)> {
+) -> Result<StatusCode, ApiError> {
     let (listing_id, date) = (body.listing_id, body.date);
-    let kind = body.kind().ok_or((
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "the corporate-action terms are missing or do not match the action type".to_string(),
-    ))?;
+    let kind = body.kind().ok_or_else(|| {
+        ApiError::unprocessable(
+            "the corporate-action terms are missing or do not match the action type",
+        )
+    })?;
     let action = CorporateAction { id, listing_id, date, kind };
-    db_upsert(&pool, &action)
-        .await
-        .map(|_| StatusCode::NO_CONTENT)
-        .map_err(|e| match e {
-            // Unknown listing/currency FK or enum CHECK violation → 422.
-            WriteError::Db(err) => write_error_body(&err),
-            // Frozen while exercise/participation trades reference it → 422.
-            WriteError::ReferencedByTrade => (
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "this corporate action is referenced by rights-exercise, buy-back, \
-                 scrip-for-scrip, demerger, or worthless-shares trades and cannot be \
-                 edited — delete those trades first"
-                    .to_string(),
-            ),
-        })
+    db_upsert(&pool, &action).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn delete(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
-) -> Result<StatusCode, (StatusCode, String)> {
+) -> Result<StatusCode, ApiError> {
     db_delete(&pool, id)
         .await
         .map(|found| if found { StatusCode::NO_CONTENT } else { StatusCode::NOT_FOUND })
         // Deleting an action still referenced by rights-exercise trades
         // violates the trades.rights_action_id FK → 422 (delete those first).
-        .map_err(|e| write_error_body(&e))
+        .map_err(ApiError::from)
 }
 
 #[cfg(test)]

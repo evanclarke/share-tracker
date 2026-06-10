@@ -1,5 +1,6 @@
+use crate::infra::http::ApiError;
 use crate::entities::exchange_holiday::{coverage_span_for, window_outside_coverage};
-use axum::{Json, Router, extract::State, http::StatusCode, routing::get};
+use axum::{Json, Router, extract::State, routing::get};
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
@@ -95,13 +96,14 @@ pub async fn db_coverage_alerts(
 
 async fn report(
     State(pool): State<SqlitePool>,
-) -> Result<Json<Vec<SettlementCoverageAlert>>, StatusCode> {
-    db_coverage_alerts(&pool).await.map(Json).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+) -> Result<Json<Vec<SettlementCoverageAlert>>, ApiError> {
+    db_coverage_alerts(&pool).await.map(Json).map_err(ApiError::from)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::StatusCode;
     use crate::entities::{exchange, listing, trade};
     use crate::infra::db;
     use axum::{body::Body, http::Request};

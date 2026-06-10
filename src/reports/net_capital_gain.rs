@@ -23,11 +23,12 @@
 //!     discount-eligible gain. Any unused loss is carried forward into the next
 //!     year in the series.
 
+use crate::infra::http::ApiError;
 use crate::infra::decimal::parse_dec;
 use crate::infra::fx::to_aud;
 use crate::reports::export;
 use axum::{
-    Json, Router, extract::State, http::StatusCode, response::Response, routing::get,
+    Json, Router, extract::State, response::Response, routing::get,
 };
 use chrono::{Datelike, Months, NaiveDate};
 use rust_decimal::Decimal;
@@ -474,27 +475,28 @@ pub async fn db_net_capital_gain(pool: &SqlitePool) -> Result<Vec<NetCapitalGain
 
 async fn net_capital_gain_handler(
     State(pool): State<SqlitePool>,
-) -> Result<Json<Vec<NetCapitalGainYear>>, StatusCode> {
+) -> Result<Json<Vec<NetCapitalGainYear>>, ApiError> {
     db_net_capital_gain(&pool)
         .await
         .map(Json)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(ApiError::from)
 }
 
 /// The same per-year rows as the JSON report, as a downloadable tax-return-ready CSV.
 async fn net_capital_gain_export_handler(
     State(pool): State<SqlitePool>,
-) -> Result<Response, StatusCode> {
+) -> Result<Response, ApiError> {
     let rows = db_net_capital_gain(&pool)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(ApiError::from)?;
     export::csv_response("net-capital-gain.csv", CSV_HEADER, &rows)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(ApiError::from)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::StatusCode;
     use crate::{
         entities::{amit_adjustment, amma, cgt_settings, corporate_action, listing, parcel_allocation, rba_fx_rate, trade},
         infra::db,

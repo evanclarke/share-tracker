@@ -33,6 +33,7 @@
 //! Buy is consumed by later allocations, AMIT adjustments, or income links).
 //! A recorded transfer is immutable — delete it and re-transfer instead.
 
+use crate::infra::http::ApiError;
 use crate::entities::corporate_action::{self, RocEvent, as_acquired_quantity};
 use crate::entities::sell::{self, AllocationInput, SellBody};
 use crate::entities::trade::{self, Trade};
@@ -138,6 +139,38 @@ impl From<sell::SellError> for TransferError {
         match e {
             sell::SellError::Db(err) => TransferError::Db(err),
             other => TransferError::Sell(other),
+        }
+    }
+}
+
+impl From<TransferError> for ApiError {
+    fn from(e: TransferError) -> Self {
+        match e {
+            TransferError::SameAccount => ApiError::unprocessable(
+                "the source and destination accounts are the same — nothing to move",
+            ),
+            TransferError::AlreadyExists => ApiError::unprocessable(
+                "a transfer with that id already exists and is immutable — delete it to \
+                 re-transfer",
+            ),
+            TransferError::NothingToTransfer => {
+                ApiError::unprocessable("a transfer must move at least one parcel")
+            }
+            TransferError::ListingMismatch => ApiError::unprocessable(
+                "a selected parcel does not belong to the transfer's listing",
+            ),
+            TransferError::FeeMarketPriceMissing => ApiError::unprocessable(
+                "a network fee was specified without a positive per-unit market value for the \
+                 fee crypto — the disposal needs its capital proceeds",
+            ),
+            TransferError::Sell(err) => {
+                tracing::warn!(error = ?err, "transfer rejected by a sell invariant");
+                ApiError::unprocessable(
+                    "the selected parcels are invalid: missing, over-allocated, not a Buy/DRP, \
+                     or held in a different account from the source",
+                )
+            }
+            TransferError::Db(err) => err.into(),
         }
     }
 }
@@ -548,78 +581,46 @@ pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<DeleteOutcome, sqlx
     Ok(DeleteOutcome::Deleted)
 }
 
-async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<Transfer>>, StatusCode> {
+async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<Transfer>>, ApiError> {
     db_list(&pool)
         .await
         .map(Json)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(ApiError::from)
 }
 
 async fn get_one(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
-) -> Result<Json<Transfer>, StatusCode> {
+) -> Result<Json<Transfer>, ApiError> {
     db_get(&pool, id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(ApiError::from)?
         .map(Json)
-        .ok_or(StatusCode::NOT_FOUND)
+        .ok_or(ApiError::NotFound)
 }
 
 async fn upsert(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
     Json(body): Json<TransferBody>,
-) -> Result<(StatusCode, Json<TransferGroup>), (StatusCode, String)> {
-    let unprocessable = |msg: &str| Err((StatusCode::UNPROCESSABLE_ENTITY, msg.to_string()));
-    match db_transfer(&pool, id, &body).await {
-        // 201 with the created group (like the scrip exchange): the client
-        // needs the created trade ids, which a bare 204 would hide.
-        Ok(group) => Ok((StatusCode::CREATED, Json(group))),
-        Err(TransferError::SameAccount) => {
-            unprocessable("the source and destination accounts are the same — nothing to move")
-        }
-        Err(TransferError::AlreadyExists) => unprocessable(
-            "a transfer with that id already exists and is immutable — delete it to re-transfer",
-        ),
-        Err(TransferError::NothingToTransfer) => {
-            unprocessable("a transfer must move at least one parcel")
-        }
-        Err(TransferError::ListingMismatch) => {
-            unprocessable("a selected parcel does not belong to the transfer's listing")
-        }
-        Err(TransferError::FeeMarketPriceMissing) => unprocessable(
-            "a network fee was specified without a positive per-unit market value for the fee \
-             crypto — the disposal needs its capital proceeds",
-        ),
-        Err(TransferError::Sell(e)) => {
-            tracing::warn!(error = ?e, "transfer rejected by a sell invariant");
-            unprocessable(
-                "the selected parcels are invalid: missing, over-allocated, not a Buy/DRP, \
-                 or held in a different account from the source",
-            )
-        }
-        Err(TransferError::Db(e)) => Err(crate::infra::http::write_error_body(&e)),
-    }
+) -> Result<(StatusCode, Json<TransferGroup>), ApiError> {
+    // 201 with the created group (like the scrip exchange): the client
+    // needs the created trade ids, which a bare 204 would hide.
+    let group = db_transfer(&pool, id, &body).await?;
+    Ok((StatusCode::CREATED, Json(group)))
 }
 
 async fn delete(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
-) -> Result<StatusCode, (StatusCode, String)> {
-    match db_delete(&pool, id).await {
-        Ok(DeleteOutcome::Deleted) => Ok(StatusCode::NO_CONTENT),
-        Ok(DeleteOutcome::NotFound) => Err((StatusCode::NOT_FOUND, "no transfer with that id".to_string())),
-        Ok(DeleteOutcome::TransferInReferenced) => Err((
-            StatusCode::UNPROCESSABLE_ENTITY,
+) -> Result<StatusCode, ApiError> {
+    match db_delete(&pool, id).await? {
+        DeleteOutcome::Deleted => Ok(StatusCode::NO_CONTENT),
+        DeleteOutcome::NotFound => Err(ApiError::not_found("no transfer with that id")),
+        DeleteOutcome::TransferInReferenced => Err(ApiError::unprocessable(
             "a transferred-in parcel is consumed by a later sale, AMIT adjustment, or income \
-             link — remove those first"
-                .to_string(),
+             link — remove those first",
         )),
-        Err(e) => {
-            tracing::error!(error = %e, "transfer delete failed");
-            Err((StatusCode::INTERNAL_SERVER_ERROR, String::new()))
-        }
     }
 }
 

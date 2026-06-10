@@ -17,6 +17,7 @@
 //! transaction — **refused** (422) while that Buy is drawn on by a Sell
 //! allocation or AMIT adjustment.
 
+use crate::infra::http::ApiError;
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -270,29 +271,29 @@ pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<DeleteOutcome, sqlx
     Ok(DeleteOutcome::Deleted)
 }
 
-async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<EssStatement>>, StatusCode> {
+async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<EssStatement>>, ApiError> {
     db_list(&pool)
         .await
         .map(Json)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(ApiError::from)
 }
 
 async fn get_one(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
-) -> Result<Json<EssStatement>, StatusCode> {
+) -> Result<Json<EssStatement>, ApiError> {
     db_get(&pool, id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(ApiError::from)?
         .map(Json)
-        .ok_or(StatusCode::NOT_FOUND)
+        .ok_or(ApiError::NotFound)
 }
 
 async fn upsert(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
     Json(body): Json<EssStatementBody>,
-) -> Result<StatusCode, (StatusCode, String)> {
+) -> Result<StatusCode, ApiError> {
     let s = EssStatement {
         id,
         listing_id: body.listing_id,
@@ -308,33 +309,33 @@ async fn upsert(
         tfn_withholding: body.tfn_withholding,
         currency: body.currency,
     };
-    db_upsert(&pool, &s).await.map(|_| StatusCode::NO_CONTENT).map_err(|e| match e {
-        UpsertError::Db(err) => crate::infra::http::write_error_body(&err),
-        UpsertError::Vested => (
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "this ESS statement has been vested and cannot be edited — delete it \
-             (which removes the vest Buy) and re-enter instead"
-                .to_string(),
-        ),
-    })
+    db_upsert(&pool, &s).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+impl From<UpsertError> for ApiError {
+    fn from(e: UpsertError) -> Self {
+        match e {
+            UpsertError::Vested => ApiError::unprocessable(
+                "this ESS statement has been vested and cannot be edited — delete it \
+                 (which removes the vest Buy) and re-enter instead",
+            ),
+            UpsertError::Db(err) => err.into(),
+        }
+    }
 }
 
 async fn delete(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
-) -> Result<StatusCode, (StatusCode, String)> {
-    match db_delete(&pool, id).await {
-        Ok(DeleteOutcome::Deleted) => Ok(StatusCode::NO_CONTENT),
-        Ok(DeleteOutcome::NotFound) => {
-            Err((StatusCode::NOT_FOUND, "no ESS statement with that id".to_string()))
-        }
-        Ok(DeleteOutcome::VestDrawnOn) => Err((
-            StatusCode::UNPROCESSABLE_ENTITY,
+) -> Result<StatusCode, ApiError> {
+    match db_delete(&pool, id).await? {
+        DeleteOutcome::Deleted => Ok(StatusCode::NO_CONTENT),
+        DeleteOutcome::NotFound => Err(ApiError::not_found("no ESS statement with that id")),
+        DeleteOutcome::VestDrawnOn => Err(ApiError::unprocessable(
             "this ESS statement's vest Buy is drawn on by a sale allocation or AMIT \
-             adjustment — remove those first"
-                .to_string(),
+             adjustment — remove those first",
         )),
-        Err(_) => Err((StatusCode::INTERNAL_SERVER_ERROR, String::new())),
     }
 }
 

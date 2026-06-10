@@ -10,6 +10,7 @@
 //! `PUT /sells/{id}` is an upsert: it replaces the Sell trade row and *all* of
 //! its parcel allocations with the submitted set.
 
+use crate::infra::http::ApiError;
 use crate::entities::trade::{self, TradeType};
 use axum::{
     Json, Router,
@@ -121,6 +122,55 @@ pub enum SellError {
 impl From<sqlx::Error> for SellError {
     fn from(e: sqlx::Error) -> Self {
         SellError::Db(e)
+    }
+}
+
+impl From<SellError> for ApiError {
+    fn from(e: SellError) -> Self {
+        match e {
+            SellError::AllocationMismatch => {
+                ApiError::unprocessable("the parcel allocations do not sum to the sell quantity")
+            }
+            SellError::PurchaseParcelMissing => {
+                ApiError::unprocessable("an allocated purchase parcel does not exist")
+            }
+            SellError::PurchaseTradeNotBuyOrDrp => {
+                ApiError::unprocessable("an allocated parcel is not a Buy or DRP trade")
+            }
+            SellError::PurchaseQuantityExceeded => {
+                ApiError::unprocessable("the allocations exceed a purchase parcel's available quantity")
+            }
+            SellError::BuyBackSell => ApiError::unprocessable(
+                "this Sell is a buy-back participation and cannot be edited — \
+                 delete it and re-participate instead",
+            ),
+            SellError::ScripExchangeSell => ApiError::unprocessable(
+                "this Sell is a scrip-for-scrip exchange closing Sell and cannot be edited — \
+                 delete it and re-exchange instead",
+            ),
+            SellError::DemergerSell => ApiError::unprocessable(
+                "this Sell is a demerger closing Sell and cannot be edited — \
+                 delete it and re-demerge instead",
+            ),
+            SellError::TransferSell => ApiError::unprocessable(
+                "this Sell is a holding-account transfer-out and cannot be edited — \
+                 delete the transfer and re-transfer instead",
+            ),
+            SellError::WorthlessSell => ApiError::unprocessable(
+                "this Sell is a worthless-shares recognise closing Sell and cannot be edited — \
+                 delete it and re-recognise instead",
+            ),
+            SellError::PurchaseInDifferentAccount => ApiError::unprocessable(
+                "an allocated parcel is held in a different holding account from the Sell — \
+                 transfer it first or fix the Sell's account",
+            ),
+            // The cross-check rejection says what the Sell nets to, so a typo
+            // is findable without re-deriving the figure by hand.
+            SellError::StatementTotal(detail) => {
+                ApiError::unprocessable(trade::statement_total_detail(&detail))
+            }
+            SellError::Db(err) => err.into(),
+        }
     }
 }
 
@@ -526,88 +576,28 @@ async fn upsert(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
     Json(body): Json<SellBody>,
-) -> Result<StatusCode, (StatusCode, String)> {
-    let unprocessable = |msg: &str| Err((StatusCode::UNPROCESSABLE_ENTITY, msg.to_string()));
-    match db_upsert_sell(&pool, id, &body).await {
-        Ok(()) => Ok(StatusCode::NO_CONTENT),
-        Err(SellError::AllocationMismatch) => {
-            unprocessable("the parcel allocations do not sum to the sell quantity")
-        }
-        Err(SellError::PurchaseParcelMissing) => {
-            unprocessable("an allocated purchase parcel does not exist")
-        }
-        Err(SellError::PurchaseTradeNotBuyOrDrp) => {
-            unprocessable("an allocated parcel is not a Buy or DRP trade")
-        }
-        Err(SellError::PurchaseQuantityExceeded) => {
-            unprocessable("the allocations exceed a purchase parcel's available quantity")
-        }
-        Err(SellError::BuyBackSell) => unprocessable(
-            "this Sell is a buy-back participation and cannot be edited — \
-             delete it and re-participate instead",
-        ),
-        Err(SellError::ScripExchangeSell) => unprocessable(
-            "this Sell is a scrip-for-scrip exchange closing Sell and cannot be edited — \
-             delete it and re-exchange instead",
-        ),
-        Err(SellError::DemergerSell) => unprocessable(
-            "this Sell is a demerger closing Sell and cannot be edited — \
-             delete it and re-demerge instead",
-        ),
-        Err(SellError::TransferSell) => unprocessable(
-            "this Sell is a holding-account transfer-out and cannot be edited — \
-             delete the transfer and re-transfer instead",
-        ),
-        Err(SellError::WorthlessSell) => unprocessable(
-            "this Sell is a worthless-shares recognise closing Sell and cannot be edited — \
-             delete it and re-recognise instead",
-        ),
-        Err(SellError::PurchaseInDifferentAccount) => unprocessable(
-            "an allocated parcel is held in a different holding account from the Sell — \
-             transfer it first or fix the Sell's account",
-        ),
-        // The cross-check rejection says what the Sell nets to, so a typo is
-        // findable without re-deriving the figure by hand.
-        Err(SellError::StatementTotal(detail)) => Err((
-            StatusCode::UNPROCESSABLE_ENTITY,
-            trade::statement_total_detail(&detail),
-        )),
-        Err(SellError::Db(e)) => {
-            tracing::error!(error = %e, "sell upsert failed");
-            Err((StatusCode::INTERNAL_SERVER_ERROR, String::new()))
-        }
-    }
+) -> Result<StatusCode, ApiError> {
+    db_upsert_sell(&pool, id, &body).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn delete(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
-) -> Result<StatusCode, (StatusCode, String)> {
-    match db_delete_sell(&pool, id).await {
-        Ok(DeleteOutcome::Deleted) => Ok(StatusCode::NO_CONTENT),
-        Ok(DeleteOutcome::NotFound) => {
-            Err((StatusCode::NOT_FOUND, "no sell with that id".to_string()))
-        }
-        Ok(DeleteOutcome::NotASell) => Err((
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "that trade is not a Sell — a Buy/DRP parcel cannot be deleted through this endpoint"
-                .to_string(),
+) -> Result<StatusCode, ApiError> {
+    match db_delete_sell(&pool, id).await? {
+        DeleteOutcome::Deleted => Ok(StatusCode::NO_CONTENT),
+        DeleteOutcome::NotFound => Err(ApiError::not_found("no sell with that id")),
+        DeleteOutcome::NotASell => Err(ApiError::unprocessable(
+            "that trade is not a Sell — a Buy/DRP parcel cannot be deleted through this endpoint",
         )),
-        Ok(DeleteOutcome::ReplacementReferenced) => Err((
-            StatusCode::UNPROCESSABLE_ENTITY,
+        DeleteOutcome::ReplacementReferenced => Err(ApiError::unprocessable(
             "a replacement parcel created by this exchange/demerger is consumed by a later \
-             sale or AMIT adjustment — remove those first"
-                .to_string(),
+             sale or AMIT adjustment — remove those first",
         )),
-        Ok(DeleteOutcome::TransferSell) => Err((
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "this Sell belongs to a holding-account transfer — delete the transfer instead"
-                .to_string(),
+        DeleteOutcome::TransferSell => Err(ApiError::unprocessable(
+            "this Sell belongs to a holding-account transfer — delete the transfer instead",
         )),
-        Err(e) => {
-            tracing::error!(error = %e, "sell delete failed");
-            Err((StatusCode::INTERNAL_SERVER_ERROR, String::new()))
-        }
     }
 }
 

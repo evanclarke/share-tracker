@@ -1,7 +1,7 @@
+use crate::infra::http::ApiError;
 use axum::{
     Json, Router,
     extract::{Path, State},
-    http::StatusCode,
     routing::get,
 };
 use crate::infra::decimal::row_dec;
@@ -199,27 +199,28 @@ pub async fn db_upsert(pool: &SqlitePool, allocation: &ParcelAllocation) -> Resu
     Ok(())
 }
 
-async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<ParcelAllocation>>, StatusCode> {
+async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<ParcelAllocation>>, ApiError> {
     db_list(&pool)
         .await
         .map(Json)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(ApiError::from)
 }
 
 async fn get_one(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
-) -> Result<Json<ParcelAllocation>, StatusCode> {
+) -> Result<Json<ParcelAllocation>, ApiError> {
     db_get(&pool, id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(ApiError::from)?
         .map(Json)
-        .ok_or(StatusCode::NOT_FOUND)
+        .ok_or(ApiError::NotFound)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::StatusCode;
     use crate::{infra::db, entities::{listing, trade}};
     use axum::{body::Body, http::Request};
     use chrono::NaiveDate;
