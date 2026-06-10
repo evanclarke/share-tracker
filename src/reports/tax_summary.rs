@@ -1,3 +1,4 @@
+use crate::domain::tax_year::tax_year_for;
 use crate::infra::decimal::parse_dec;
 use crate::infra::fx::FxRates;
 use crate::infra::http::ApiError;
@@ -298,11 +299,7 @@ pub async fn db_tax_summary(pool: &SqlitePool) -> Result<Vec<TaxYearSummary>, sq
             Some(d) if trust_income => d,
             _ => date_paid,
         };
-        let tax_year = if assessed.month() >= 7 {
-            assessed.year() + 1
-        } else {
-            assessed.year()
-        };
+        let tax_year = tax_year_for(assessed);
 
         // Amounts are denominated in the record's currency; convert to AUD via the
         // ATO rate for the month of the assessment date (the entitlement date when
@@ -391,11 +388,7 @@ pub async fn db_tax_summary(pool: &SqlitePool) -> Result<Vec<TaxYearSummary>, sq
     let mut ess_eligible_by_year: HashMap<i32, Decimal> = HashMap::new();
     for row in &ess_rows {
         let taxing_point: NaiveDate = row.try_get("taxing_point_date")?;
-        let tax_year = if taxing_point.month() >= 7 {
-            taxing_point.year() + 1
-        } else {
-            taxing_point.year()
-        };
+        let tax_year = tax_year_for(taxing_point);
 
         let currency: String = row.try_get("currency")?;
         let d = taxing_point;
@@ -438,11 +431,7 @@ pub async fn db_tax_summary(pool: &SqlitePool) -> Result<Vec<TaxYearSummary>, sq
     // deduction is visible.
     for row in &expense_rows {
         let date_incurred: NaiveDate = row.try_get("date_incurred")?;
-        let tax_year = if date_incurred.month() >= 7 {
-            date_incurred.year() + 1
-        } else {
-            date_incurred.year()
-        };
+        let tax_year = tax_year_for(date_incurred);
         let currency: String = row.try_get("currency")?;
         let amount = aud_field(&fx, row, "amount", &currency, date_incurred)?;
         let expense_type: String = row.try_get("expense_type")?;

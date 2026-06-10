@@ -328,6 +328,7 @@ pub fn income(id: i64, listing_id: i64, date_paid: NaiveDate) -> IncomeBuilder {
             holding_account_id: 1,
             amount_per_security: None,
             securities_held: None,
+            tax_deferred_amount: None,
         },
     }
 }

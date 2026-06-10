@@ -60,6 +60,15 @@ pub struct Income {
     pub amount_per_security: Option<Decimal>,
     /// See `amount_per_security` — the statement's securities-held count.
     pub securities_held: Option<Decimal>,
+    /// Non-AMIT trust statements only: the statement's "tax-deferred amount" —
+    /// a non-assessable payment that is a CGT event E4 cost-base reduction
+    /// (`docs/ato/cgt-non-assessable-payments.md`). Informational: the E4
+    /// reduction itself is entered as a `ReturnOfCapital` corporate action and
+    /// no calculation reads this figure — the E4 cross-check report
+    /// (`reports::e4_cross_check`) flags a row whose non-zero amount has no
+    /// matching same-FY action. Trust rows only, never negative (`422`
+    /// otherwise, mirrored by a schema CHECK).
+    pub tax_deferred_amount: Option<Decimal>,
 }
 
 impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for Income {
@@ -85,6 +94,7 @@ impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for Income {
             holding_account_id: row.try_get("holding_account_id")?,
             amount_per_security: row_opt_dec(row, "amount_per_security")?,
             securities_held: row_opt_dec(row, "securities_held")?,
+            tax_deferred_amount: row_opt_dec(row, "tax_deferred_amount")?,
         })
     }
 }
@@ -128,6 +138,9 @@ pub struct IncomeBody {
     pub amount_per_security: Option<Decimal>,
     #[serde(default)]
     pub securities_held: Option<Decimal>,
+    /// See `Income::tax_deferred_amount` — trust rows only, ≥ 0.
+    #[serde(default)]
+    pub tax_deferred_amount: Option<Decimal>,
 }
 
 fn default_currency() -> String {
@@ -146,7 +159,7 @@ pub async fn db_list(pool: &SqlitePool) -> Result<Vec<Income>, sqlx::Error> {
          foreign_source_income, foreign_tax_paid, tfn_withholding_tax, franking_credits, \
          lic_capital_gain_deduction, conduit_foreign_income, trust_income, entitlement_date, \
          reinvestment_trade_id, currency, buyback_trade_id, holding_account_id, \
-         amount_per_security, securities_held \
+         amount_per_security, securities_held, tax_deferred_amount \
          FROM income ORDER BY date_paid, id",
     )
     .fetch_all(pool)
@@ -159,7 +172,7 @@ pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<Income>, sqlx::
          foreign_source_income, foreign_tax_paid, tfn_withholding_tax, franking_credits, \
          lic_capital_gain_deduction, conduit_foreign_income, trust_income, entitlement_date, \
          reinvestment_trade_id, currency, buyback_trade_id, holding_account_id, \
-         amount_per_security, securities_held \
+         amount_per_security, securities_held, tax_deferred_amount \
          FROM income WHERE id = ?",
     )
     .bind(id)
@@ -182,6 +195,15 @@ pub enum UpsertError {
     /// assessment year of trust distributions (`docs/ato/trust-income-timing.md`).
     /// Mapped to `422`.
     EntitlementDateOnNonTrust,
+    /// A `tax_deferred_amount` was supplied on a non-trust row. Tax-deferred
+    /// amounts are a unit-trust statement concept (CGT event E4,
+    /// `docs/ato/cgt-non-assessable-payments.md`) — a company's equivalent is
+    /// a return of capital, entered as the corporate action directly. Mapped
+    /// to `422`.
+    TaxDeferredOnNonTrust,
+    /// A negative `tax_deferred_amount` — the statement figure is a payment
+    /// received, never below zero. Mapped to `422`.
+    TaxDeferredNegative,
 }
 
 impl From<sqlx::Error> for UpsertError {
@@ -247,6 +269,14 @@ pub async fn db_upsert(pool: &SqlitePool, income: &Income) -> Result<(), UpsertE
     if income.entitlement_date.is_some() && !income.trust_income {
         return Err(UpsertError::EntitlementDateOnNonTrust);
     }
+    if let Some(td) = income.tax_deferred_amount {
+        if !income.trust_income {
+            return Err(UpsertError::TaxDeferredOnNonTrust);
+        }
+        if td < Decimal::ZERO {
+            return Err(UpsertError::TaxDeferredNegative);
+        }
+    }
 
     let mut tx = pool.begin().await?;
 
@@ -269,8 +299,8 @@ pub async fn db_upsert(pool: &SqlitePool, income: &Income) -> Result<(), UpsertE
           foreign_source_income, foreign_tax_paid, tfn_withholding_tax, franking_credits, \
           lic_capital_gain_deduction, conduit_foreign_income, trust_income, entitlement_date, \
           reinvestment_trade_id, currency, holding_account_id, amount_per_security, \
-          securities_held) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+          securities_held, tax_deferred_amount) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT(id) DO UPDATE SET \
              listing_id                 = excluded.listing_id, \
              date_paid                  = excluded.date_paid, \
@@ -289,7 +319,8 @@ pub async fn db_upsert(pool: &SqlitePool, income: &Income) -> Result<(), UpsertE
              currency                   = excluded.currency, \
              holding_account_id         = excluded.holding_account_id, \
              amount_per_security        = excluded.amount_per_security, \
-             securities_held            = excluded.securities_held",
+             securities_held            = excluded.securities_held, \
+             tax_deferred_amount        = excluded.tax_deferred_amount",
     )
     .bind(income.id)
     .bind(income.listing_id)
@@ -310,6 +341,7 @@ pub async fn db_upsert(pool: &SqlitePool, income: &Income) -> Result<(), UpsertE
     .bind(income.holding_account_id)
     .bind(income.amount_per_security.map(|d| d.to_string()))
     .bind(income.securities_held.map(|d| d.to_string()))
+    .bind(income.tax_deferred_amount.map(|d| d.to_string()))
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -391,6 +423,7 @@ async fn upsert(
         holding_account_id: body.holding_account_id,
         amount_per_security: body.amount_per_security,
         securities_held: body.securities_held,
+        tax_deferred_amount: body.tax_deferred_amount,
     };
     db_upsert(&pool, &income).await?;
     Ok(StatusCode::NO_CONTENT)
@@ -410,6 +443,15 @@ impl From<UpsertError> for ApiError {
             UpsertError::EntitlementDateOnNonTrust => ApiError::unprocessable(
                 "entitlement_date only applies to trust distributions — a dividend is \
                  assessed when paid; tick trust income or clear the entitlement date",
+            ),
+            UpsertError::TaxDeferredOnNonTrust => ApiError::unprocessable(
+                "tax_deferred_amount only applies to trust distributions — a company's \
+                 non-assessable payment is entered as a ReturnOfCapital corporate action \
+                 instead; tick trust income or clear the tax-deferred amount",
+            ),
+            UpsertError::TaxDeferredNegative => ApiError::unprocessable(
+                "tax_deferred_amount cannot be negative — it is a payment received per \
+                 the trust's statement",
             ),
             UpsertError::Db(err) => err.into(),
         }
@@ -515,6 +557,7 @@ mod tests {
             buyback_trade_id: None,
             amount_per_security: None,
             securities_held: None,
+            tax_deferred_amount: None,
         };
         db_upsert(&pool, &dist).await.unwrap();
         let got = db_get(&pool, 2).await.unwrap().unwrap();
@@ -550,6 +593,7 @@ mod tests {
             buyback_trade_id: None,
             amount_per_security: None,
             securities_held: None,
+            tax_deferred_amount: None,
         };
         db_upsert(&pool, &inc).await.unwrap();
         let got = db_get(&pool, 3).await.unwrap().unwrap();
@@ -968,6 +1012,85 @@ mod tests {
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         assert!(detail.contains("trust distributions"), "detail: {detail}");
         assert!(db_get(&pool, 1).await.unwrap().is_none());
+    }
+
+    // Tax-deferred amount (CGT event E4 cross-check,
+    // docs/ato/cgt-non-assessable-payments.md): trust rows only, ≥ 0.
+
+    #[tokio::test]
+    async fn db_tax_deferred_amount_round_trips_on_trust_row() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        let mut dist = dividend_income();
+        dist.trust_income = true;
+        dist.tax_deferred_amount = Some("120.505".parse().unwrap());
+        db_upsert(&pool, &dist).await.unwrap();
+        let got = db_get(&pool, 1).await.unwrap().unwrap();
+        assert_eq!(got.tax_deferred_amount, Some("120.505".parse().unwrap()));
+    }
+
+    #[tokio::test]
+    async fn db_tax_deferred_amount_on_non_trust_rejected() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        let mut div = dividend_income();
+        div.tax_deferred_amount = Some("50".parse().unwrap());
+        let err = db_upsert(&pool, &div).await.unwrap_err();
+        assert!(matches!(err, UpsertError::TaxDeferredOnNonTrust));
+        assert!(db_get(&pool, 1).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn db_negative_tax_deferred_amount_rejected() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        let mut dist = dividend_income();
+        dist.trust_income = true;
+        dist.tax_deferred_amount = Some("-1".parse().unwrap());
+        let err = db_upsert(&pool, &dist).await.unwrap_err();
+        assert!(matches!(err, UpsertError::TaxDeferredNegative));
+        assert!(db_get(&pool, 1).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn api_tax_deferred_amount_on_dividend_returns_422_with_detail() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        let (status, detail) = put_income(
+            &pool,
+            1,
+            serde_json::json!({
+                "listing_id": 1,
+                "date_paid": "2025-03-15",
+                "franked_amount": "70",
+                "tax_deferred_amount": "50"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(detail.contains("trust distributions"), "detail: {detail}");
+        assert!(db_get(&pool, 1).await.unwrap().is_none());
+    }
+
+    /// Omitted = NULL — the statement didn't report one, nothing to check.
+    #[tokio::test]
+    async fn api_omitted_tax_deferred_amount_stays_null() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        let (status, _) = put_income(
+            &pool,
+            1,
+            serde_json::json!({
+                "listing_id": 1,
+                "date_paid": "2025-03-15",
+                "unfranked_amount": "100",
+                "trust_income": true
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let got = db_get(&pool, 1).await.unwrap().unwrap();
+        assert_eq!(got.tax_deferred_amount, None);
     }
 
     #[tokio::test]

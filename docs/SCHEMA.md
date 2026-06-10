@@ -114,7 +114,8 @@ income
 ├── buyback_trade_id          INTEGER FK→trades.id (nullable)  Buy-back dividend components only: the participation Sell this row was created with (the row is managed by the participation — PUT/DELETE /income reject it; DELETE /sells on the Sell removes it)
 ├── holding_account_id        INTEGER FK→holding_accounts.id  The account the distribution was paid to — decides whose DRP enrolment applies and where a reinvestment trade lands (defaults to the seeded default account)
 ├── amount_per_security       TEXT (decimal, nullable)  Optional statement cross-check, supplied only together with securities_held: their product, cent-rounded, must equal franked + unfranked + foreign source income (422 otherwise). Informational/validation-only — no report uses it (mirrors trades.statement_total)
-└── securities_held           TEXT (decimal, nullable)  See amount_per_security — the statement's securities-held count
+├── securities_held           TEXT (decimal, nullable)  See amount_per_security — the statement's securities-held count
+└── tax_deferred_amount       TEXT (decimal, nullable)  Non-AMIT trust statements only (CHECK: NULL unless trust_income and the value is ≥ 0; non-trust/negative writes also rejected 422): the statement's tax-deferred amount — a CGT event E4 cost-base reduction (docs/ato/cgt-non-assessable-payments.md). Informational: the reduction itself is entered as a ReturnOfCapital corporate action and no calculation reads this figure — the E4 cross-check report flags a row whose non-zero amount has no same-FY action on the listing
 
 investment_expenses          Deductible investment expenses — the cost of earning assessable investment income (interest on borrowed money, management/adviser fees, account-keeping fees, subscriptions). The tax summary nets these against gross assessable investment income per financial year
 ├── id                    INTEGER PK

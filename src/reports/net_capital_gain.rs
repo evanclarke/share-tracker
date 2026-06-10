@@ -23,6 +23,7 @@
 //!     discount-eligible gain. Any unused loss is carried forward into the next
 //!     year in the series.
 
+use crate::domain::tax_year::tax_year_for;
 use crate::infra::decimal::parse_dec;
 use crate::infra::fx::FxRates;
 use crate::infra::http::ApiError;
@@ -120,15 +121,6 @@ struct GrossBuckets {
     e10: Decimal,
     /// Gross CGT event G1 gains folded into the buckets above (informational).
     g1: Decimal,
-}
-
-/// Australian tax year for a dividend/sale date: July–December fall in the next FY.
-fn tax_year_for(date: NaiveDate) -> i32 {
-    if date.month() >= 7 {
-        date.year() + 1
-    } else {
-        date.year()
-    }
 }
 
 /// Read a TEXT decimal column and convert it to AUD via the pre-loaded ATO

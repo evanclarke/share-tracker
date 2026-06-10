@@ -36,3 +36,8 @@ If the unit or interest is not in an AMIT, the CGT event is E4, and if the unit 
 > the net-capital-gain report (`g1_gains`). The non-AMIT unit-trust case (**E4**) is not
 > distinguished from G1 — both reduce cost base and gain on the excess; the E4 timing nuance
 > (adjustment at sale based on the income year's payments) is not separately modelled.
+> A trust income row can additionally record the statement's **tax-deferred amount**
+> (`income.tax_deferred_amount`, informational), and the E4 cross-check report
+> (`src/reports/e4_cross_check.rs`, `GET /reports/e4_cross_check`) flags every row whose
+> non-zero amount has no same-FY `ReturnOfCapital` action on the listing — connecting the
+> statement entry to the cost-base-reduction obligation without changing the G1-style model.

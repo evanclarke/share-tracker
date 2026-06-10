@@ -97,7 +97,7 @@ const INCOME_ADVANCED_FIELDS = [
   'ex_date', 'franked_amount', 'unfranked_amount', 'foreign_source_income',
   'foreign_tax_paid', 'tfn_withholding_tax', 'franking_credits',
   'lic_capital_gain_deduction', 'conduit_foreign_income', 'trust_income',
-  'entitlement_date', 'currency', 'holding_account_id',
+  'entitlement_date', 'tax_deferred_amount', 'currency', 'holding_account_id',
 ];
 
 // Classify a stored row for the simple form: which franking-selector mode
@@ -111,8 +111,8 @@ function incomeSimpleShape(existing) {
   const nz = function (v) { return v != null && !decEq(String(v), '0'); };
   if (existing.ex_date != null || nz(existing.foreign_source_income) || nz(existing.foreign_tax_paid)
     || nz(existing.tfn_withholding_tax) || nz(existing.lic_capital_gain_deduction)
-    || nz(existing.conduit_foreign_income) || existing.currency !== 'AUD'
-    || existing.holding_account_id !== 1) return null;
+    || nz(existing.conduit_foreign_income) || existing.tax_deferred_amount != null
+    || existing.currency !== 'AUD' || existing.holding_account_id !== 1) return null;
   const franked = nz(existing.franked_amount), credits = nz(existing.franking_credits);
   if (!franked && !credits) {
     return { mode: existing.trust_income ? 'Trust' : 'Unfranked', amount: String(existing.unfranked_amount) };
@@ -264,9 +264,10 @@ export function wireIncomeEntry(form, existing) {
       body.unfranked_amount = mode === 'FullyFranked' ? '0' : amount;
       body.franking_credits = mode === 'FullyFranked' ? frankingCreditFor(amount) : '0';
       body.trust_income = mode === 'Trust';
-      // Only a trust row may carry an entitlement date (the server rejects
-      // it otherwise) — clear a value left behind by switching modes.
-      if (mode !== 'Trust') body.entitlement_date = null;
+      // Only a trust row may carry an entitlement date or tax-deferred
+      // amount (the server rejects them otherwise) — clear values left
+      // behind by switching modes.
+      if (mode !== 'Trust') { body.entitlement_date = null; body.tax_deferred_amount = null; }
     },
     afterSave: async function (id) {
       if (!drpFlag || !drpFlag.checked) return null;

@@ -4,16 +4,6 @@ Items are only marked done when a passing test exists for them.
 
 Completed and decided (out-of-scope / not-reproducible) sections are archived in [DONE.md](DONE.md) to keep this list focused on active work. When a section here is fully done, move it to DONE.md rather than leaving it — see CLAUDE.md.
 
-## Non-AMIT trust tax-deferred amounts — CGT event E4 cross-check (2026-06-10)
-
-(REQUIREMENTS 2026-06-10; `docs/ato/cgt-non-assessable-payments.md` (E4), `docs/ato/amit-cost-base-adjustments.md` (AMIT treatment unchanged).)
-
-- [ ] Migration: optional informational `tax_deferred_amount` (TEXT decimal, ≥ 0) on `income`; trust rows only (422 otherwise); no calculation uses it — the E4 reduction itself stays the `ReturnOfCapital` corporate action
-- [ ] Non-blocking report (pattern: settlement-holiday coverage): trust income rows with a non-zero `tax_deferred_amount` whose listing has no `ReturnOfCapital` action dated in the row's FY; entering the action clears the flag
-- [ ] Web UI: advanced income field + standard `REPORTS` entry
-- [ ] Tests: flagged / cleared-by-action / omitted cases; the 422; report API test
-- [ ] Docs: `docs/SCHEMA.md`, `docs/API.md` (report + 422 + Response codes), README
-
 ## Inherited share parcels (2026-06-10)
 
 (REQUIREMENTS 2026-06-10; `docs/ato/inherited-assets-cost-base.md`, QC 66053.)

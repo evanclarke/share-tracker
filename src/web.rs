@@ -439,7 +439,23 @@ mod tests {
         assert!(js.contains("Entitlement date"));
         assert!(js.contains("applyEntitlement"));
         assert!(js.contains("presently entitled"));
-        assert!(js.contains("if (mode !== 'Trust') body.entitlement_date = null;"));
+        assert!(
+            js.contains("if (mode !== 'Trust') { body.entitlement_date = null; body.tax_deferred_amount = null; }")
+        );
+    }
+
+    #[tokio::test]
+    async fn income_tax_deferred_e4_ui_present() {
+        let js = app_js_body().await;
+        // The tax-deferred amount joins the advanced income fields (CGT event
+        // E4, docs/ato/cgt-non-assessable-payments.md) and is cleared when
+        // simple mode switches away from Trust (asserted above with the
+        // entitlement date); the cross-check report screen drives
+        // GET /reports/e4_cross_check.
+        assert!(js.contains("tax_deferred_amount"));
+        assert!(js.contains("Tax-deferred amount"));
+        assert!(js.contains("/reports/e4_cross_check"));
+        assert!(js.contains("Tax-Deferred E4 Cross-Check"));
     }
 
     #[tokio::test]

@@ -128,6 +128,7 @@ export const ENTITIES = [
       dec('conduit_foreign_income', 'Conduit foreign income'),
       bool('trust_income', 'Trust income'),
       dt('entitlement_date', 'Entitlement date', { optional: true, hint: 'Trust distributions only: the date you became presently entitled — usually the distribution period’s end on the statement. Trust income is assessed in this date’s financial year even when the cash arrives later (a June distribution paid in July belongs to the year just ended). Leave empty to assess by the pay date.' }),
+      dec('tax_deferred_amount', 'Tax-deferred amount', { optional: true, default: '', hint: 'Non-AMIT trust statements only: the statement’s tax-deferred amount — a CGT event E4 cost-base reduction. Recording it changes nothing by itself: enter the reduction as a Return of capital corporate action on the listing; the E4 cross-check report flags rows still missing one.' }),
       fk('currency', 'Currency', 'currencies', { required: true, encode: 'string', default: 'AUD' }),
       fk('holding_account_id', 'Holding account', 'holdingAccounts', { required: true, default: '1', hint: 'The account the distribution was paid to — decides whose DRP enrolment applies.' }),
     ],
@@ -338,6 +339,7 @@ export const REPORTS = [
   { slug: 'tax-summary', title: 'Tax Summary', api: '/portfolio/tax-summary', method: 'GET', export: true, desc: 'Income aggregated by Australian financial year.' },
   { slug: 'exchange-mic-validation', title: 'Exchange MIC Validation', api: '/reports/exchange_mic_validation', method: 'GET', statusField: 'registry_status', desc: 'Curated exchanges checked against the ISO MIC registry.' },
   { slug: 'settlement-holiday-coverage', title: 'Settlement Holiday Coverage', api: '/reports/settlement_holiday_coverage', method: 'GET', statusField: 'coverage_status', desc: 'Trades whose settlement window falls outside the seeded exchange-holiday calendars (settlement may have skipped weekends only).' },
+  { slug: 'e4-cross-check', title: 'Tax-Deferred E4 Cross-Check', api: '/reports/e4_cross_check', method: 'GET', desc: 'Trust income rows whose statement reported a tax-deferred amount (a CGT event E4 cost-base reduction) with no Return of capital corporate action on the listing in the same financial year — enter the action to clear a row.' },
   { slug: 'snapshots', title: 'Snapshots', custom: 'snapshots', api: '/report_snapshots', desc: 'Stored daily results of the price-dependent reports (portfolio overview, unrealised gains, performance), valued at the stored closing prices, with a time-series graph. A back-dated fact marks affected snapshots stale; regenerate them here.' },
 ];
 
