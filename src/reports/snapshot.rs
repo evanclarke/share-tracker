@@ -40,7 +40,7 @@ use sqlx::{QueryBuilder, Row, SqlitePool};
 use std::collections::HashMap;
 
 use crate::entities::closing_price::{self, Market, PriceStatus};
-use crate::infra::fx::to_aud;
+use crate::infra::fx::FxRates;
 use crate::reports::{performance, portfolio, unrealised_gains};
 
 /// The price-dependent reports that are snapshotted daily.
@@ -307,6 +307,9 @@ async fn aud_prices_for(
 
     let mut prices = HashMap::new();
     let mut blockers: Vec<String> = Vec::new();
+    // every imported ATO FX rate — per-listing conversions below are map
+    // lookups, not one DB round-trip each
+    let fx = FxRates::load(pool).await?;
     for market in &markets {
         let ticker = &market.listing.ticker;
         let Some(valuation_day) = market.latest_trading_day_on_or_before(date) else {
@@ -327,7 +330,7 @@ async fn aud_prices_for(
         match closing_price::db_get_one(pool, market.listing.id, valuation_day).await? {
             Some(row) if row.status == PriceStatus::Ok => {
                 let price = row.price.expect("ok row carries a price (schema CHECK)");
-                match to_aud(pool, price, &market.listing.currency, valuation_day, None).await {
+                match fx.to_aud(price, &market.listing.currency, valuation_day, None) {
                     Ok(aud) => {
                         prices.insert(market.listing.id, aud);
                     }

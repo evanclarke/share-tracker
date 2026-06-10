@@ -24,7 +24,7 @@
 //!     year in the series.
 
 use crate::infra::decimal::parse_dec;
-use crate::infra::fx::to_aud;
+use crate::infra::fx::FxRates;
 use crate::infra::http::ApiError;
 use crate::reports::export;
 use axum::{Json, Router, extract::State, response::Response, routing::get};
@@ -131,18 +131,19 @@ fn tax_year_for(date: NaiveDate) -> i32 {
     }
 }
 
-/// Read a TEXT decimal column and convert it to AUD via the ATO rate for `currency`
-/// and the month of `date`. AMMA records carry no manual fx override, so a non-AUD
-/// amount with no ATO rate fails loudly (the `FxError` surfaces as a decode error).
-async fn aud_field(
-    pool: &SqlitePool,
+/// Read a TEXT decimal column and convert it to AUD via the pre-loaded ATO
+/// rate for `currency` and the month of `date`. AMMA records carry no manual
+/// fx override, so a non-AUD amount with no ATO rate fails loudly (the
+/// `FxError` surfaces as a decode error).
+fn aud_field(
+    fx: &FxRates,
     row: &sqlx::sqlite::SqliteRow,
     field: &str,
     currency: &str,
     date: NaiveDate,
 ) -> Result<Decimal, sqlx::Error> {
     let value = parse_dec(field, row.try_get(field)?)?;
-    Ok(to_aud(pool, value, currency, date, None).await?)
+    Ok(fx.to_aud(value, currency, date, None)?)
 }
 
 /// CGT event E10 gains: when the cumulative AMIT cost base reductions applied to a
@@ -159,7 +160,10 @@ async fn aud_field(
 /// rate (matching how the cost base itself is converted in the realised report), then
 /// classified as discount-eligible when the units were held more than 12 months as at
 /// the statement's `tax_year_end_date`.
-async fn e10_gains(pool: &SqlitePool) -> Result<Vec<(i32, Decimal, bool)>, sqlx::Error> {
+async fn e10_gains(
+    pool: &SqlitePool,
+    fx: &FxRates,
+) -> Result<Vec<(i32, Decimal, bool)>, sqlx::Error> {
     let rows = sqlx::query(
         "SELECT aa.trade_id, aa.quantity AS adj_qty, \
                 t.date AS trade_date, t.deemed_acquisition_date, \
@@ -202,7 +206,7 @@ async fn e10_gains(pool: &SqlitePool) -> Result<Vec<(i32, Decimal, bool)>, sqlx:
             let reduction = adj_qty * cba;
             if reduction > remaining {
                 let excess = reduction - remaining;
-                let excess_aud = to_aud(pool, excess, &currency, acquired, Some(fx_rate)).await?;
+                let excess_aud = fx.to_aud(excess, &currency, acquired, Some(fx_rate))?;
                 let discount_eligible = year_end > acquired + Months::new(12);
                 out.push((year_end.year(), excess_aud, discount_eligible));
                 remaining = Decimal::ZERO;
@@ -232,7 +236,10 @@ async fn e10_gains(pool: &SqlitePool) -> Result<Vec<(i32, Decimal, bool)>, sqlx:
 /// date. Independent of the AMIT E10 walk above: E10 applies to trust units, G1
 /// to company shares, so the two reduction chains never share a parcel in
 /// practice.
-async fn g1_gains(pool: &SqlitePool) -> Result<Vec<(i32, Decimal, bool)>, sqlx::Error> {
+async fn g1_gains(
+    pool: &SqlitePool,
+    fx: &FxRates,
+) -> Result<Vec<(i32, Decimal, bool)>, sqlx::Error> {
     let rows = sqlx::query(
         "SELECT ca.date AS action_date, ca.amount_per_unit, ca.currency AS action_currency, \
                 ca.listing_id, \
@@ -342,7 +349,7 @@ async fn g1_gains(pool: &SqlitePool) -> Result<Vec<(i32, Decimal, bool)>, sqlx::
                     });
                 if held > Decimal::ZERO && trade_qty > Decimal::ZERO {
                     let gain = excess * held / trade_qty;
-                    let gain_aud = to_aud(pool, gain, &action_currency, action_date, None).await?;
+                    let gain_aud = fx.to_aud(gain, &action_currency, action_date, None)?;
                     let discount_eligible = action_date > acquired + Months::new(12);
                     out.push((tax_year_for(action_date), gain_aud, discount_eligible));
                 }
@@ -360,6 +367,10 @@ pub async fn db_net_capital_gain(
     pool: &SqlitePool,
 ) -> Result<Vec<NetCapitalGainYear>, sqlx::Error> {
     let mut buckets: HashMap<i32, GrossBuckets> = HashMap::new();
+
+    // Every imported ATO FX rate — the AMMA/E10/G1 conversions below are map
+    // lookups, not one DB round-trip each.
+    let fx = FxRates::load(pool).await?;
 
     // Realised parcel gains (already AUD), bucketed by the sale's tax year.
     let realised = super::realised_gains::db_realised_gains(pool).await?;
@@ -386,10 +397,10 @@ pub async fn db_net_capital_gain(
         let d = year_end;
         // AMMA discount-method gains are the already-halved "discounted capital gain"
         // line; gross up ×2 to the pre-discount gain before netting losses.
-        let discount_net = aud_field(pool, row, "cgt_discount_gains", &currency, d).await?;
-        let indexation = aud_field(pool, row, "cgt_indexation_gains", &currency, d).await?;
-        let other = aud_field(pool, row, "cgt_other_gains", &currency, d).await?;
-        let losses = aud_field(pool, row, "capital_losses_applied", &currency, d).await?;
+        let discount_net = aud_field(&fx, row, "cgt_discount_gains", &currency, d)?;
+        let indexation = aud_field(&fx, row, "cgt_indexation_gains", &currency, d)?;
+        let other = aud_field(&fx, row, "cgt_other_gains", &currency, d)?;
+        let losses = aud_field(&fx, row, "capital_losses_applied", &currency, d)?;
 
         let b = buckets.entry(year_end.year()).or_default();
         b.discount_eligible += discount_net * Decimal::from(2);
@@ -401,7 +412,7 @@ pub async fn db_net_capital_gain(
     // base — are ordinary capital gains: they enter the buckets (discount-eligible or
     // not, per the holding period at year end), so losses can offset them and the
     // discount applies to the eligible portion.
-    for (tax_year, amount, discount_eligible) in e10_gains(pool).await? {
+    for (tax_year, amount, discount_eligible) in e10_gains(pool, &fx).await? {
         let b = buckets.entry(tax_year).or_default();
         if discount_eligible {
             b.discount_eligible += amount;
@@ -414,7 +425,7 @@ pub async fn db_net_capital_gain(
     // CGT event G1 gains — return-of-capital payments in excess of a parcel's
     // cost base — are likewise ordinary capital gains entering the buckets
     // (discount-eligible or not, per the holding period at the payment date).
-    for (tax_year, amount, discount_eligible) in g1_gains(pool).await? {
+    for (tax_year, amount, discount_eligible) in g1_gains(pool, &fx).await? {
         let b = buckets.entry(tax_year).or_default();
         if discount_eligible {
             b.discount_eligible += amount;

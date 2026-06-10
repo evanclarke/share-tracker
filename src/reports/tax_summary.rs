@@ -1,5 +1,5 @@
 use crate::infra::decimal::parse_dec;
-use crate::infra::fx::to_aud;
+use crate::infra::fx::FxRates;
 use crate::infra::http::ApiError;
 use crate::reports::{export, franking};
 use axum::{Json, Router, extract::State, response::Response, routing::get};
@@ -210,29 +210,33 @@ fn fito_de_minimis_aud() -> Decimal {
     Decimal::from(1000)
 }
 
-/// Read a TEXT decimal column from `row` and convert it to AUD via the ATO rate
-/// for `currency` and the month of `date`. Income and AMMA records carry no manual
-/// fx override, so a non-AUD amount with no ATO rate fails loudly (the `FxError`
-/// surfaces as a decode error) rather than being passed through or zeroed.
-async fn aud_field(
-    pool: &SqlitePool,
+/// Read a TEXT decimal column from `row` and convert it to AUD via the
+/// pre-loaded ATO rate for `currency` and the month of `date`. Income and
+/// AMMA records carry no manual fx override, so a non-AUD amount with no ATO
+/// rate fails loudly (the `FxError` surfaces as a decode error) rather than
+/// being passed through or zeroed.
+fn aud_field(
+    fx: &FxRates,
     row: &sqlx::sqlite::SqliteRow,
     field: &str,
     currency: &str,
     date: NaiveDate,
 ) -> Result<Decimal, sqlx::Error> {
     let value = parse_dec(field, row.try_get(field)?)?;
-    Ok(to_aud(pool, value, currency, date, None).await?)
+    Ok(fx.to_aud(value, currency, date, None)?)
 }
 
 pub async fn db_tax_summary(pool: &SqlitePool) -> Result<Vec<TaxYearSummary>, sqlx::Error> {
+    // One read transaction for the income-side inputs (and the FX rates that
+    // convert them), so they come from a single consistent snapshot.
+    let mut tx = pool.begin().await?;
     let income_rows = sqlx::query(
         "SELECT listing_id, date_paid, ex_date, franked_amount, unfranked_amount, \
          foreign_source_income, foreign_tax_paid, tfn_withholding_tax, franking_credits, \
          lic_capital_gain_deduction, currency, trust_income, entitlement_date \
          FROM income",
     )
-    .fetch_all(pool)
+    .fetch_all(&mut *tx)
     .await?;
 
     let amma_rows = sqlx::query(
@@ -242,7 +246,7 @@ pub async fn db_tax_summary(pool: &SqlitePool) -> Result<Vec<TaxYearSummary>, sq
          capital_losses_applied, tfn_withholding_tax, currency \
          FROM amma_statements",
     )
-    .fetch_all(pool)
+    .fetch_all(&mut *tx)
     .await?;
 
     let ess_rows = sqlx::query(
@@ -251,14 +255,19 @@ pub async fn db_tax_summary(pool: &SqlitePool) -> Result<Vec<TaxYearSummary>, sq
          tfn_withholding, currency \
          FROM ess_statements",
     )
-    .fetch_all(pool)
+    .fetch_all(&mut *tx)
     .await?;
 
     let expense_rows = sqlx::query(
         "SELECT date_incurred, expense_type, amount, currency FROM investment_expenses",
     )
-    .fetch_all(pool)
+    .fetch_all(&mut *tx)
     .await?;
+
+    // every imported ATO FX rate — per-field conversions below are map
+    // lookups, not one DB round-trip each
+    let fx = FxRates::load(&mut *tx).await?;
+    tx.commit().await?;
 
     let mut map: HashMap<i32, TaxYearSummary> = HashMap::new();
 
@@ -299,14 +308,13 @@ pub async fn db_tax_summary(pool: &SqlitePool) -> Result<Vec<TaxYearSummary>, sq
         // ATO rate for the month of the assessment date (the entitlement date when
         // it governs, otherwise date_paid) before aggregating.
         let currency: String = row.try_get("currency")?;
-        let franked = aud_field(pool, row, "franked_amount", &currency, assessed).await?;
-        let unfranked = aud_field(pool, row, "unfranked_amount", &currency, assessed).await?;
-        let foreign_income =
-            aud_field(pool, row, "foreign_source_income", &currency, assessed).await?;
-        let foreign_tax = aud_field(pool, row, "foreign_tax_paid", &currency, assessed).await?;
-        let tfn_wht = aud_field(pool, row, "tfn_withholding_tax", &currency, assessed).await?;
-        let fc = aud_field(pool, row, "franking_credits", &currency, assessed).await?;
-        let lic = aud_field(pool, row, "lic_capital_gain_deduction", &currency, assessed).await?;
+        let franked = aud_field(&fx, row, "franked_amount", &currency, assessed)?;
+        let unfranked = aud_field(&fx, row, "unfranked_amount", &currency, assessed)?;
+        let foreign_income = aud_field(&fx, row, "foreign_source_income", &currency, assessed)?;
+        let foreign_tax = aud_field(&fx, row, "foreign_tax_paid", &currency, assessed)?;
+        let tfn_wht = aud_field(&fx, row, "tfn_withholding_tax", &currency, assessed)?;
+        let fc = aud_field(&fx, row, "franking_credits", &currency, assessed)?;
+        let lic = aud_field(&fx, row, "lic_capital_gain_deduction", &currency, assessed)?;
 
         if fc > Decimal::ZERO {
             let ex_date: Option<NaiveDate> = row.try_get("ex_date")?;
@@ -338,20 +346,19 @@ pub async fn db_tax_summary(pool: &SqlitePool) -> Result<Vec<TaxYearSummary>, sq
         // statement's only period anchor) before aggregating.
         let currency: String = row.try_get("currency")?;
         let d = tax_year_end_date;
-        let interest = aud_field(pool, row, "australian_interest", &currency, d).await?;
-        let div_unfranked =
-            aud_field(pool, row, "australian_dividends_unfranked", &currency, d).await?;
-        let franked_div = aud_field(pool, row, "franked_dividends", &currency, d).await?;
-        let fc = aud_field(pool, row, "franking_credits", &currency, d).await?;
-        let rent = aud_field(pool, row, "net_rent", &currency, d).await?;
-        let foreign_inc = aud_field(pool, row, "foreign_income", &currency, d).await?;
-        let foreign_tax = aud_field(pool, row, "foreign_tax_credits", &currency, d).await?;
-        let other = aud_field(pool, row, "other_income", &currency, d).await?;
-        let cgt_disc = aud_field(pool, row, "cgt_discount_gains", &currency, d).await?;
-        let cgt_idx = aud_field(pool, row, "cgt_indexation_gains", &currency, d).await?;
-        let cgt_other = aud_field(pool, row, "cgt_other_gains", &currency, d).await?;
-        let cap_losses = aud_field(pool, row, "capital_losses_applied", &currency, d).await?;
-        let tfn_wht = aud_field(pool, row, "tfn_withholding_tax", &currency, d).await?;
+        let interest = aud_field(&fx, row, "australian_interest", &currency, d)?;
+        let div_unfranked = aud_field(&fx, row, "australian_dividends_unfranked", &currency, d)?;
+        let franked_div = aud_field(&fx, row, "franked_dividends", &currency, d)?;
+        let fc = aud_field(&fx, row, "franking_credits", &currency, d)?;
+        let rent = aud_field(&fx, row, "net_rent", &currency, d)?;
+        let foreign_inc = aud_field(&fx, row, "foreign_income", &currency, d)?;
+        let foreign_tax = aud_field(&fx, row, "foreign_tax_credits", &currency, d)?;
+        let other = aud_field(&fx, row, "other_income", &currency, d)?;
+        let cgt_disc = aud_field(&fx, row, "cgt_discount_gains", &currency, d)?;
+        let cgt_idx = aud_field(&fx, row, "cgt_indexation_gains", &currency, d)?;
+        let cgt_other = aud_field(&fx, row, "cgt_other_gains", &currency, d)?;
+        let cap_losses = aud_field(&fx, row, "capital_losses_applied", &currency, d)?;
+        let tfn_wht = aud_field(&fx, row, "tfn_withholding_tax", &currency, d)?;
 
         let s = map
             .entry(tax_year)
@@ -392,12 +399,12 @@ pub async fn db_tax_summary(pool: &SqlitePool) -> Result<Vec<TaxYearSummary>, sq
 
         let currency: String = row.try_get("currency")?;
         let d = taxing_point;
-        let eligible = aud_field(pool, row, "taxed_upfront_eligible", &currency, d).await?;
-        let not_eligible = aud_field(pool, row, "taxed_upfront_not_eligible", &currency, d).await?;
-        let deferral = aud_field(pool, row, "deferral_discount", &currency, d).await?;
-        let pre_2009 = aud_field(pool, row, "pre_2009_cessation_discount", &currency, d).await?;
-        let foreign = aud_field(pool, row, "foreign_source_discount", &currency, d).await?;
-        let tfn = aud_field(pool, row, "tfn_withholding", &currency, d).await?;
+        let eligible = aud_field(&fx, row, "taxed_upfront_eligible", &currency, d)?;
+        let not_eligible = aud_field(&fx, row, "taxed_upfront_not_eligible", &currency, d)?;
+        let deferral = aud_field(&fx, row, "deferral_discount", &currency, d)?;
+        let pre_2009 = aud_field(&fx, row, "pre_2009_cessation_discount", &currency, d)?;
+        let foreign = aud_field(&fx, row, "foreign_source_discount", &currency, d)?;
+        let tfn = aud_field(&fx, row, "tfn_withholding", &currency, d)?;
 
         let s = map
             .entry(tax_year)
@@ -437,7 +444,7 @@ pub async fn db_tax_summary(pool: &SqlitePool) -> Result<Vec<TaxYearSummary>, sq
             date_incurred.year()
         };
         let currency: String = row.try_get("currency")?;
-        let amount = aud_field(pool, row, "amount", &currency, date_incurred).await?;
+        let amount = aud_field(&fx, row, "amount", &currency, date_incurred)?;
         let expense_type: String = row.try_get("expense_type")?;
 
         let s = map

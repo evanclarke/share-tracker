@@ -37,8 +37,8 @@
 //! row does the same unless every open holding is priced.
 
 use crate::entities::closing_price::{self, SharedFetcher};
-use crate::infra::decimal::parse_dec;
-use crate::infra::fx::to_aud;
+use crate::infra::decimal::{parse_dec, row_dec};
+use crate::infra::fx::FxRates;
 use crate::infra::http::ApiError;
 use axum::{Extension, Json, Router, extract::State, routing::post};
 use chrono::{Months, NaiveDate};
@@ -151,6 +151,36 @@ struct TradeFlow {
     fx_rate: Decimal,
     deemed: Option<NaiveDate>,
     group: Option<(GroupKind, i64)>,
+}
+
+impl sqlx::FromRow<'_, sqlx::sqlite::SqliteRow> for TradeFlow {
+    fn from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
+        // An internal-movement Sell and its replacement Buys share a group:
+        // the carried cost flows between them instead of external cash.
+        let transfer_id: Option<i64> = row.try_get("transfer_id")?;
+        let scrip_id: Option<i64> = row.try_get("scrip_action_id")?;
+        let demerger_id: Option<i64> = row.try_get("demerger_action_id")?;
+        let group = transfer_id
+            .map(|id| (GroupKind::Transfer, id))
+            .or(scrip_id.map(|id| (GroupKind::Scrip, id)))
+            .or(demerger_id.map(|id| (GroupKind::Demerger, id)));
+        let trade_type: String = row.try_get("trade_type")?;
+        Ok(TradeFlow {
+            id: row.try_get("id")?,
+            listing_id: row.try_get("listing_id")?,
+            account_id: row.try_get("holding_account_id")?,
+            is_sell: trade_type == "Sell",
+            date: row.try_get("date")?,
+            quantity: row_dec(row, "quantity")?,
+            price: row_dec(row, "average_price")?,
+            brokerage: row_dec(row, "brokerage")?,
+            gst: row_dec(row, "gst_on_brokerage")?,
+            currency: row.try_get("currency")?,
+            fx_rate: row_dec(row, "fx_rate")?,
+            deemed: row.try_get("deemed_acquisition_date")?,
+            group,
+        })
+    }
 }
 
 /// Annualised money-weighted rate of return (as a fraction, e.g. 0.10 = 10%
@@ -274,14 +304,16 @@ pub async fn db_performance(
     prices: &HashMap<i64, Decimal>,
     as_of: NaiveDate,
 ) -> Result<Vec<HoldingPerformance>, sqlx::Error> {
-    let trade_rows = sqlx::query(
+    // One read transaction: every input below comes from the same snapshot.
+    let mut tx = pool.begin().await?;
+    let trades: Vec<TradeFlow> = sqlx::query_as(
         "SELECT id, listing_id, holding_account_id, trade_type, date, quantity, \
          average_price, brokerage, gst_on_brokerage, currency, fx_rate, \
          deemed_acquisition_date, transfer_id, scrip_action_id, demerger_action_id \
          FROM trades WHERE date <= ?",
     )
     .bind(as_of)
-    .fetch_all(pool)
+    .fetch_all(&mut *tx)
     .await?;
 
     let income_rows = sqlx::query(
@@ -290,38 +322,12 @@ pub async fn db_performance(
          tfn_withholding_tax, currency FROM income WHERE date_paid <= ?",
     )
     .bind(as_of)
-    .fetch_all(pool)
+    .fetch_all(&mut *tx)
     .await?;
 
-    if trade_rows.is_empty() && income_rows.is_empty() {
+    if trades.is_empty() && income_rows.is_empty() {
+        // Nothing to report; the dropped transaction was read-only.
         return Ok(vec![]);
-    }
-
-    let mut trades = Vec::with_capacity(trade_rows.len());
-    for row in &trade_rows {
-        let transfer_id: Option<i64> = row.try_get("transfer_id")?;
-        let scrip_id: Option<i64> = row.try_get("scrip_action_id")?;
-        let demerger_id: Option<i64> = row.try_get("demerger_action_id")?;
-        let group = transfer_id
-            .map(|id| (GroupKind::Transfer, id))
-            .or(scrip_id.map(|id| (GroupKind::Scrip, id)))
-            .or(demerger_id.map(|id| (GroupKind::Demerger, id)));
-        let trade_type: String = row.try_get("trade_type")?;
-        trades.push(TradeFlow {
-            id: row.try_get("id")?,
-            listing_id: row.try_get("listing_id")?,
-            account_id: row.try_get("holding_account_id")?,
-            is_sell: trade_type == "Sell",
-            date: row.try_get("date")?,
-            quantity: parse_dec("quantity", row.try_get("quantity")?)?,
-            price: parse_dec("average_price", row.try_get("average_price")?)?,
-            brokerage: parse_dec("brokerage", row.try_get("brokerage")?)?,
-            gst: parse_dec("gst_on_brokerage", row.try_get("gst_on_brokerage")?)?,
-            currency: row.try_get("currency")?,
-            fx_rate: parse_dec("fx_rate", row.try_get("fx_rate")?)?,
-            deemed: row.try_get("deemed_acquisition_date")?,
-            group,
-        });
     }
 
     // Units sold out of each purchase parcel by as_of (with sale dates, so the
@@ -332,7 +338,7 @@ pub async fn db_performance(
          WHERE s.date <= ?",
     )
     .bind(as_of)
-    .fetch_all(pool)
+    .fetch_all(&mut *tx)
     .await?;
     let mut qty_sold: HashMap<i64, Vec<(NaiveDate, Decimal)>> = HashMap::new();
     for row in &alloc_rows {
@@ -343,14 +349,18 @@ pub async fn db_performance(
         ));
     }
 
-    let split_events = crate::entities::corporate_action::db_share_split_events(pool).await?;
+    let split_events = crate::entities::corporate_action::db_share_split_events(&mut *tx).await?;
     let ticker_rows = sqlx::query("SELECT id, ticker FROM listings")
-        .fetch_all(pool)
+        .fetch_all(&mut *tx)
         .await?;
     let mut tickers: HashMap<i64, String> = HashMap::new();
     for row in &ticker_rows {
         tickers.insert(row.try_get("id")?, row.try_get("ticker")?);
     }
+    // every imported ATO FX rate — per-row conversions below are map lookups,
+    // not one DB round-trip each
+    let fx = FxRates::load(&mut *tx).await?;
+    tx.commit().await?;
 
     let mut holdings: BTreeMap<(i64, i64), Acc> = BTreeMap::new();
     let mut overall = Acc::default();
@@ -365,7 +375,7 @@ pub async fn db_performance(
         // Convert at the acquisition month — the deemed acquisition month for a
         // rollover/transfer-created parcel, preserving the original AUD cost.
         let acquired = t.deemed.unwrap_or(t.date);
-        let cost = to_aud(pool, cost, &t.currency, acquired, Some(t.fx_rate)).await?;
+        let cost = fx.to_aud(cost, &t.currency, acquired, Some(t.fx_rate))?;
         let acc = holdings.entry((t.listing_id, t.account_id)).or_default();
         acc.invested += cost;
         acc.flows.push((t.date, -cost));
@@ -405,7 +415,7 @@ pub async fn db_performance(
             acc.flows.push((t.date, carried));
         } else {
             let net = t.price * t.quantity - t.brokerage - t.gst;
-            let net = to_aud(pool, net, &t.currency, t.date, Some(t.fx_rate)).await?;
+            let net = fx.to_aud(net, &t.currency, t.date, Some(t.fx_rate))?;
             let acc = holdings.entry((t.listing_id, t.account_id)).or_default();
             acc.proceeds += net;
             acc.flows.push((t.date, net));
@@ -434,7 +444,7 @@ pub async fn db_performance(
         let currency: String = row.try_get("currency")?;
         // Income rows carry no manual fx override: a non-AUD amount with no
         // ATO rate fails loudly (same as the tax summary).
-        let cash = to_aud(pool, cash, &currency, date_paid, None).await?;
+        let cash = fx.to_aud(cash, &currency, date_paid, None)?;
         let acc = holdings.entry((listing_id, account_id)).or_default();
         acc.income += cash;
         acc.flows.push((date_paid, cash));

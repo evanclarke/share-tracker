@@ -1,6 +1,7 @@
-use crate::domain::cost_base;
+use crate::domain::cost_base::{self, ParcelRow};
 use crate::entities::closing_price::{self, SharedFetcher};
 use crate::infra::decimal::parse_dec;
+use crate::infra::fx::FxRates;
 use crate::infra::http::ApiError;
 use axum::{Extension, Json, Router, extract::State, routing::post};
 use chrono::NaiveDate;
@@ -77,16 +78,20 @@ pub async fn db_holdings(
     as_of: Option<NaiveDate>,
 ) -> Result<Vec<HoldingOverview>, sqlx::Error> {
     let cutoff = crate::infra::date::as_of_or_open(as_of);
-    let trade_rows = sqlx::query(
-        "SELECT id, listing_id, holding_account_id, date, quantity, average_price, brokerage, \
-         gst_on_brokerage, currency, fx_rate, deemed_acquisition_date \
-         FROM trades WHERE trade_type IN ('Buy', 'DRP') AND date <= ?",
-    )
+    // One read transaction: every input below comes from the same snapshot,
+    // so an interleaved write can't yield e.g. an allocation whose parcel is
+    // missing from the same read.
+    let mut tx = pool.begin().await?;
+    let trade_rows: Vec<ParcelRow> = sqlx::query_as(&format!(
+        "SELECT {} FROM trades WHERE trade_type IN ('Buy', 'DRP') AND date <= ?",
+        ParcelRow::COLUMNS
+    ))
     .bind(cutoff)
-    .fetch_all(pool)
+    .fetch_all(&mut *tx)
     .await?;
 
     if trade_rows.is_empty() {
+        // Nothing held; the dropped transaction was read-only.
         return Ok(vec![]);
     }
 
@@ -98,7 +103,7 @@ pub async fn db_holdings(
          WHERE s.date <= ?",
     )
     .bind(cutoff)
-    .fetch_all(pool)
+    .fetch_all(&mut *tx)
     .await?;
 
     let mut qty_sold: HashMap<i64, Vec<(NaiveDate, Decimal)>> = HashMap::new();
@@ -113,36 +118,30 @@ pub async fn db_holdings(
     // total AMIT cost base reduction per purchase parcel (statements for
     // years ending after `as_of` excluded)
     let cba_reduction =
-        crate::entities::amit_adjustment::db_cost_base_reductions_up_to(pool, as_of).await?;
+        crate::entities::amit_adjustment::db_cost_base_reductions_up_to(&mut *tx, as_of).await?;
     // return-of-capital payments (CGT event G1) per listing
-    let roc_events = crate::entities::corporate_action::db_return_of_capital_events(pool).await?;
+    let roc_events =
+        crate::entities::corporate_action::db_return_of_capital_events(&mut *tx).await?;
     // share splits/consolidations per listing (quantity re-basing)
-    let split_events = crate::entities::corporate_action::db_share_split_events(pool).await?;
+    let split_events = crate::entities::corporate_action::db_share_split_events(&mut *tx).await?;
+    // every imported ATO FX rate — per-parcel conversions below are map
+    // lookups, not one DB round-trip each
+    let fx = FxRates::load(&mut *tx).await?;
+    tx.commit().await?;
 
     let mut holding_qty: HashMap<(i64, i64), Decimal> = HashMap::new();
     let mut holding_cost_base: HashMap<(i64, i64), Decimal> = HashMap::new();
 
-    for row in &trade_rows {
-        let trade_id: i64 = row.try_get("id")?;
-        let listing_id: i64 = row.try_get("listing_id")?;
-        let account_id: i64 = row.try_get("holding_account_id")?;
-        let trade_date: NaiveDate = row.try_get("date")?;
-        let qty = parse_dec("quantity", row.try_get("quantity")?)?;
-        let price = parse_dec("average_price", row.try_get("average_price")?)?;
-        let brok = parse_dec("brokerage", row.try_get("brokerage")?)?;
-        let gst = parse_dec("gst_on_brokerage", row.try_get("gst_on_brokerage")?)?;
-        let currency: String = row.try_get("currency")?;
-        let fx_rate = parse_dec("fx_rate", row.try_get("fx_rate")?)?;
-
-        let splits = split_events.get(&listing_id).map_or(&[][..], |v| v);
+    for t in &trade_rows {
+        let splits = split_events.get(&t.listing_id).map_or(&[][..], |v| v);
         // Internal cost-base arithmetic stays in the parcel's as-acquired units;
         // each sale's allocated quantity is re-based back across any splits.
         let sold = crate::entities::corporate_action::sold_in_acquired_units(
-            qty_sold.get(&trade_id).map_or(&[][..], |v| v),
+            qty_sold.get(&t.id).map_or(&[][..], |v| v),
             splits,
-            trade_date,
+            t.date,
         );
-        let remaining = qty - sold;
+        let remaining = t.quantity - sold;
         if remaining <= Decimal::ZERO {
             continue;
         }
@@ -152,38 +151,28 @@ pub async fn db_holdings(
         // acquisition month so holdings aggregate in AUD. `up_to` is the
         // report's as-of date: payments after it haven't happened yet in
         // this view.
-        let deemed: Option<NaiveDate> = row.try_get("deemed_acquisition_date")?;
-        let acquired = deemed.unwrap_or(trade_date);
         let remaining_cost = cost_base::adjusted_cost_base(
-            &cost_base::Parcel {
-                quantity: qty,
-                average_price: price,
-                brokerage: brok,
-                gst_on_brokerage: gst,
-                currency: &currency,
-                trade_date,
-            },
+            &t.parcel(),
             remaining,
-            *cba_reduction.get(&trade_id).unwrap_or(&Decimal::ZERO),
-            roc_events.get(&listing_id).map_or(&[][..], |v| v),
+            *cba_reduction.get(&t.id).unwrap_or(&Decimal::ZERO),
+            roc_events.get(&t.listing_id).map_or(&[][..], |v| v),
             splits,
             as_of,
         )?
-        .into_aud(pool, &currency, acquired, Some(fx_rate))
-        .await?
+        .into_aud_with(&fx, &t.currency, t.acquired(), Some(t.fx_rate))?
         .adjusted;
 
         // The holding's quantity is reported in the unit basis of `as_of`
         // (live view: current units, after every recorded split) so market
         // value lines up with a price as of that date.
         let remaining_now = crate::entities::corporate_action::split_adjusted_quantity(
-            remaining, splits, trade_date, as_of,
+            remaining, splits, t.date, as_of,
         );
         *holding_qty
-            .entry((listing_id, account_id))
+            .entry((t.listing_id, t.holding_account_id))
             .or_insert(Decimal::ZERO) += remaining_now;
         *holding_cost_base
-            .entry((listing_id, account_id))
+            .entry((t.listing_id, t.holding_account_id))
             .or_insert(Decimal::ZERO) += remaining_cost;
     }
 

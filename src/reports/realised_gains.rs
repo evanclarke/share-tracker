@@ -1,11 +1,13 @@
-use crate::domain::cost_base;
-use crate::infra::decimal::parse_dec;
+use crate::domain::cost_base::{self, ParcelRow};
+use crate::entities::corporate_action::{RocEvent, SplitEvent};
+use crate::infra::decimal::row_dec;
+use crate::infra::fx::FxRates;
 use crate::infra::http::ApiError;
 use axum::{Json, Router, extract::State, routing::get};
 use chrono::{Months, NaiveDate};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use sqlx::{Row, SqlitePool};
+use sqlx::{Row, SqlitePool, sqlite::SqliteRow};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -42,7 +44,85 @@ pub fn router() -> Router<SqlitePool> {
     Router::new().route("/portfolio/realised-gains", get(realised_gains_handler))
 }
 
-pub async fn db_realised_gains(pool: &SqlitePool) -> Result<Vec<RealisedGainLoss>, sqlx::Error> {
+/// A realisable Sell as the report reads it from `trades`. Each trade carries
+/// its own currency and manual `fx_rate` fallback so its amounts convert to
+/// AUD via the ATO reference rate (see `infra::fx`); proceeds and cost base
+/// convert independently — a buy and the sell that closes it may settle in
+/// different months at different rates — so totals are never aggregated
+/// across mixed currencies.
+struct SellInfo {
+    id: i64,
+    listing_id: i64,
+    holding_account_id: i64,
+    date: NaiveDate,
+    quantity: Decimal,
+    average_price: Decimal,
+    brokerage: Decimal,
+    gst_on_brokerage: Decimal,
+    currency: String,
+    fx_rate: Decimal,
+}
+
+impl sqlx::FromRow<'_, SqliteRow> for SellInfo {
+    fn from_row(row: &SqliteRow) -> Result<Self, sqlx::Error> {
+        Ok(SellInfo {
+            id: row.try_get("id")?,
+            listing_id: row.try_get("listing_id")?,
+            holding_account_id: row.try_get("holding_account_id")?,
+            date: row.try_get("date")?,
+            quantity: row_dec(row, "quantity")?,
+            average_price: row_dec(row, "average_price")?,
+            brokerage: row_dec(row, "brokerage")?,
+            gst_on_brokerage: row_dec(row, "gst_on_brokerage")?,
+            currency: row.try_get("currency")?,
+            fx_rate: row_dec(row, "fx_rate")?,
+        })
+    }
+}
+
+/// One parcel-allocation row: `quantity_allocated` units of the sale (in the
+/// sale date's unit basis) came from the purchase parcel.
+struct Allocation {
+    sale_trade_id: i64,
+    purchase_trade_id: i64,
+    quantity_allocated: Decimal,
+}
+
+impl sqlx::FromRow<'_, SqliteRow> for Allocation {
+    fn from_row(row: &SqliteRow) -> Result<Self, sqlx::Error> {
+        Ok(Allocation {
+            sale_trade_id: row.try_get("sale_trade_id")?,
+            purchase_trade_id: row.try_get("purchase_trade_id")?,
+            quantity_allocated: row_dec(row, "quantity_allocated")?,
+        })
+    }
+}
+
+/// Everything the realised-gains computation consumes, read in one go by
+/// [`load_report_data`] so [`compute_realised_gains`] is a pure function over
+/// in-memory data.
+#[derive(Default)]
+struct ReportData {
+    sells: HashMap<i64, SellInfo>,
+    buys: HashMap<i64, ParcelRow>,
+    allocations: Vec<Allocation>,
+    /// Cumulative AMIT cost-base reduction per purchase parcel.
+    cba_reduction: HashMap<i64, Decimal>,
+    /// Return-of-capital payments (CGT event G1) per listing.
+    roc_events: HashMap<i64, Vec<RocEvent>>,
+    /// Share splits/consolidations per listing (quantity re-basing).
+    split_events: HashMap<i64, Vec<SplitEvent>>,
+    /// Every imported ATO FX rate, so per-allocation conversions are map
+    /// lookups instead of one DB round-trip each.
+    fx: FxRates,
+}
+
+/// Reads the report's inputs on one read transaction, so the whole report
+/// sees a single consistent snapshot — an interleaved write can never yield
+/// an allocation whose sale or parcel is missing from the same read.
+async fn load_report_data(pool: &SqlitePool) -> Result<ReportData, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+
     // A scrip-for-scrip exchange or demerger closing Sell (scrip_action_id /
     // demerger_action_id set) is not a realised gain or loss: the rollover
     // disregards the gain on the original shares
@@ -51,133 +131,73 @@ pub async fn db_realised_gains(pool: &SqlitePool) -> Result<Vec<RealisedGainLoss
     // transfer-out Sell (transfer_id set) is not even a disposal — the same
     // beneficial owner holds the shares before and after, so it is no CGT
     // event at all. Their allocations are skipped with them (the sale id is
-    // absent from sell_map).
-    let sell_rows = sqlx::query(
+    // absent from `sells`).
+    let sells: Vec<SellInfo> = sqlx::query_as(
         "SELECT id, listing_id, holding_account_id, date, quantity, average_price, brokerage, \
          gst_on_brokerage, currency, fx_rate \
          FROM trades WHERE trade_type = 'Sell' \
            AND scrip_action_id IS NULL AND demerger_action_id IS NULL AND transfer_id IS NULL",
     )
-    .fetch_all(pool)
+    .fetch_all(&mut *tx)
     .await?;
-
-    if sell_rows.is_empty() {
-        return Ok(vec![]);
+    if sells.is_empty() {
+        // Nothing to report; the dropped transaction was read-only.
+        return Ok(ReportData::default());
     }
 
-    let buy_rows = sqlx::query(
-        "SELECT id, listing_id, date, quantity, average_price, brokerage, gst_on_brokerage, \
-         currency, fx_rate, deemed_acquisition_date \
-         FROM trades WHERE trade_type IN ('Buy', 'DRP')",
-    )
-    .fetch_all(pool)
+    let buys: Vec<ParcelRow> = sqlx::query_as(&format!(
+        "SELECT {} FROM trades WHERE trade_type IN ('Buy', 'DRP')",
+        ParcelRow::COLUMNS
+    ))
+    .fetch_all(&mut *tx)
     .await?;
 
-    let alloc_rows = sqlx::query(
+    let allocations: Vec<Allocation> = sqlx::query_as(
         "SELECT sale_trade_id, purchase_trade_id, quantity_allocated FROM parcel_allocations",
     )
-    .fetch_all(pool)
+    .fetch_all(&mut *tx)
     .await?;
 
-    if alloc_rows.is_empty() {
-        return Ok(vec![]);
-    }
-
-    // Each trade carries its own currency, trade date, and manual `fx_rate`
-    // fallback so its amounts can be converted to AUD via the ATO reference rate
-    // (see `infra::fx`). Proceeds and cost base are converted independently — a
-    // buy and the sell that closes it may settle in different months at different
-    // rates — so totals are never aggregated across mixed currencies.
-    struct SellInfo {
-        listing_id: i64,
-        holding_account_id: i64,
-        date: NaiveDate,
-        quantity: Decimal,
-        average_price: Decimal,
-        brokerage: Decimal,
-        gst_on_brokerage: Decimal,
-        currency: String,
-        fx_rate: Decimal,
-    }
-
-    struct BuyInfo {
-        listing_id: i64,
-        date: NaiveDate,
-        /// The CGT acquisition date: a scrip-for-scrip replacement parcel
-        /// carries the consumed parcel's acquisition date (the rollover's
-        /// combined holding period), every other parcel its own trade date.
-        /// Drives the 12-month discount clock and the AUD translation month
-        /// of the cost base; split/return-of-capital applicability stays on
-        /// the actual `date`.
-        acquired: NaiveDate,
-        quantity: Decimal,
-        average_price: Decimal,
-        brokerage: Decimal,
-        gst_on_brokerage: Decimal,
-        currency: String,
-        fx_rate: Decimal,
-    }
-
-    let mut sell_map: HashMap<i64, SellInfo> = HashMap::new();
-    for row in &sell_rows {
-        let id: i64 = row.try_get("id")?;
-        sell_map.insert(
-            id,
-            SellInfo {
-                listing_id: row.try_get("listing_id")?,
-                holding_account_id: row.try_get("holding_account_id")?,
-                date: row.try_get("date")?,
-                quantity: parse_dec("quantity", row.try_get("quantity")?)?,
-                average_price: parse_dec("average_price", row.try_get("average_price")?)?,
-                brokerage: parse_dec("brokerage", row.try_get("brokerage")?)?,
-                gst_on_brokerage: parse_dec("gst_on_brokerage", row.try_get("gst_on_brokerage")?)?,
-                currency: row.try_get("currency")?,
-                fx_rate: parse_dec("fx_rate", row.try_get("fx_rate")?)?,
-            },
-        );
-    }
-
-    let mut buy_map: HashMap<i64, BuyInfo> = HashMap::new();
-    for row in &buy_rows {
-        let id: i64 = row.try_get("id")?;
-        let date: NaiveDate = row.try_get("date")?;
-        let deemed: Option<NaiveDate> = row.try_get("deemed_acquisition_date")?;
-        buy_map.insert(
-            id,
-            BuyInfo {
-                listing_id: row.try_get("listing_id")?,
-                date,
-                acquired: deemed.unwrap_or(date),
-                quantity: parse_dec("quantity", row.try_get("quantity")?)?,
-                average_price: parse_dec("average_price", row.try_get("average_price")?)?,
-                brokerage: parse_dec("brokerage", row.try_get("brokerage")?)?,
-                gst_on_brokerage: parse_dec("gst_on_brokerage", row.try_get("gst_on_brokerage")?)?,
-                currency: row.try_get("currency")?,
-                fx_rate: parse_dec("fx_rate", row.try_get("fx_rate")?)?,
-            },
-        );
-    }
-
-    let cba_reduction = crate::entities::amit_adjustment::db_cost_base_reductions(pool).await?;
-    let roc_events = crate::entities::corporate_action::db_return_of_capital_events(pool).await?;
+    let cba_reduction = crate::entities::amit_adjustment::db_cost_base_reductions(&mut *tx).await?;
+    let roc_events =
+        crate::entities::corporate_action::db_return_of_capital_events(&mut *tx).await?;
     // share splits/consolidations per listing (quantity re-basing)
-    let split_events = crate::entities::corporate_action::db_share_split_events(pool).await?;
+    let split_events = crate::entities::corporate_action::db_share_split_events(&mut *tx).await?;
+    let fx = FxRates::load(&mut *tx).await?;
+    tx.commit().await?;
 
+    Ok(ReportData {
+        sells: sells.into_iter().map(|s| (s.id, s)).collect(),
+        buys: buys.into_iter().map(|b| (b.id, b)).collect(),
+        allocations,
+        cba_reduction,
+        roc_events,
+        split_events,
+        fx,
+    })
+}
+
+pub async fn db_realised_gains(pool: &SqlitePool) -> Result<Vec<RealisedGainLoss>, sqlx::Error> {
+    compute_realised_gains(&load_report_data(pool).await?)
+}
+
+/// The gain/loss computation: a pure function over [`ReportData`], so the
+/// arithmetic is unit-testable without a database.
+fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sqlx::Error> {
     let mut sale_proceeds: HashMap<i64, Decimal> = HashMap::new();
     let mut sale_cost_base: HashMap<i64, Decimal> = HashMap::new();
     let mut sale_discount_gain: HashMap<i64, Decimal> = HashMap::new();
     let mut sale_non_discount_gain: HashMap<i64, Decimal> = HashMap::new();
     let mut sale_loss: HashMap<i64, Decimal> = HashMap::new();
 
-    for row in &alloc_rows {
-        let sale_id: i64 = row.try_get("sale_trade_id")?;
-        let buy_id: i64 = row.try_get("purchase_trade_id")?;
-        let qty_alloc = parse_dec("quantity_allocated", row.try_get("quantity_allocated")?)?;
+    for alloc in &data.allocations {
+        let sale_id = alloc.sale_trade_id;
+        let qty_alloc = alloc.quantity_allocated;
 
-        let Some(sale) = sell_map.get(&sale_id) else {
+        let Some(sale) = data.sells.get(&sale_id) else {
             continue;
         };
-        let Some(buy) = buy_map.get(&buy_id) else {
+        let Some(buy) = data.buys.get(&alloc.purchase_trade_id) else {
             continue;
         };
 
@@ -190,21 +210,22 @@ pub async fn db_realised_gains(pool: &SqlitePool) -> Result<Vec<RealisedGainLoss
         };
         // Convert to AUD at the sale's rate (ATO rate for the sale month, else the
         // sale's manual fx_rate) before aggregating.
-        let alloc_proceeds = crate::infra::fx::to_aud(
-            pool,
+        let alloc_proceeds = data.fx.to_aud(
             alloc_proceeds,
             &sale.currency,
             sale.date,
             Some(sale.fx_rate),
-        )
-        .await?;
+        )?;
 
         // The allocated quantity is in the *sale date's* unit basis; the
         // purchase parcel's quantity and per-unit cost are as transacted. A
         // share split/consolidation between them (TD 2000/10) re-bases the
         // allocation back to as-acquired units so the cost-base pro-rating
         // spreads the unchanged total over the converted unit count.
-        let splits = split_events.get(&buy.listing_id).map_or(&[][..], |v| v);
+        let splits = data
+            .split_events
+            .get(&buy.listing_id)
+            .map_or(&[][..], |v| v);
         let qty_alloc_acquired = crate::entities::corporate_action::as_acquired_quantity(
             qty_alloc, splits, buy.date, sale.date,
         );
@@ -215,22 +236,17 @@ pub async fn db_realised_gains(pool: &SqlitePool) -> Result<Vec<RealisedGainLoss
         // payments after the sale don't touch these units — they were no
         // longer held.
         let alloc_cost = cost_base::adjusted_cost_base(
-            &cost_base::Parcel {
-                quantity: buy.quantity,
-                average_price: buy.average_price,
-                brokerage: buy.brokerage,
-                gst_on_brokerage: buy.gst_on_brokerage,
-                currency: &buy.currency,
-                trade_date: buy.date,
-            },
+            &buy.parcel(),
             qty_alloc_acquired,
-            *cba_reduction.get(&buy_id).unwrap_or(&Decimal::ZERO),
-            roc_events.get(&buy.listing_id).map_or(&[][..], |v| v),
+            *data
+                .cba_reduction
+                .get(&alloc.purchase_trade_id)
+                .unwrap_or(&Decimal::ZERO),
+            data.roc_events.get(&buy.listing_id).map_or(&[][..], |v| v),
             splits,
             Some(sale.date),
         )?
-        .into_aud(pool, &buy.currency, buy.acquired, Some(buy.fx_rate))
-        .await?
+        .into_aud_with(&data.fx, &buy.currency, buy.acquired(), Some(buy.fx_rate))?
         .adjusted;
 
         let alloc_gain = alloc_proceeds - alloc_cost;
@@ -245,7 +261,7 @@ pub async fn db_realised_gains(pool: &SqlitePool) -> Result<Vec<RealisedGainLoss
         // (recorded as a positive amount). The net-capital-gain report nets these
         // buckets across sales and AMMA gains.
         if alloc_gain > Decimal::ZERO {
-            if sale.date > buy.acquired + Months::new(12) {
+            if sale.date > buy.acquired() + Months::new(12) {
                 *sale_discount_gain.entry(sale_id).or_insert(Decimal::ZERO) += alloc_gain;
             } else {
                 *sale_non_discount_gain
@@ -260,7 +276,7 @@ pub async fn db_realised_gains(pool: &SqlitePool) -> Result<Vec<RealisedGainLoss
     let mut result: Vec<RealisedGainLoss> = sale_proceeds
         .keys()
         .filter_map(|&sale_id| {
-            let sale = sell_map.get(&sale_id)?;
+            let sale = data.sells.get(&sale_id)?;
             let proceeds = sale_proceeds[&sale_id];
             let cost_base = sale_cost_base[&sale_id];
             let discount_gain = sale_discount_gain
@@ -441,6 +457,126 @@ mod tests {
         )
         .await
         .unwrap();
+    }
+
+    // Pure-computation tests: `compute_realised_gains` over in-memory
+    // `ReportData` — no pool. The arithmetic seam the load/compute split
+    // exists for.
+
+    fn mem_sell(id: i64, date: NaiveDate, qty: i64, price: i64, currency: &str) -> SellInfo {
+        SellInfo {
+            id,
+            listing_id: 1,
+            holding_account_id: 1,
+            date,
+            quantity: Decimal::from(qty),
+            average_price: Decimal::from(price),
+            brokerage: Decimal::ZERO,
+            gst_on_brokerage: Decimal::ZERO,
+            currency: currency.to_string(),
+            fx_rate: Decimal::ONE,
+        }
+    }
+
+    fn mem_buy(id: i64, date: NaiveDate, qty: i64, price: i64, currency: &str) -> ParcelRow {
+        ParcelRow {
+            id,
+            listing_id: 1,
+            holding_account_id: 1,
+            date,
+            quantity: Decimal::from(qty),
+            average_price: Decimal::from(price),
+            brokerage: Decimal::ZERO,
+            gst_on_brokerage: Decimal::ZERO,
+            currency: currency.to_string(),
+            fx_rate: Decimal::ONE,
+            deemed_acquisition_date: None,
+        }
+    }
+
+    fn mem_alloc(sale: i64, buy: i64, qty: i64) -> Allocation {
+        Allocation {
+            sale_trade_id: sale,
+            purchase_trade_id: buy,
+            quantity_allocated: Decimal::from(qty),
+        }
+    }
+
+    #[test]
+    fn pure_mixed_eligibility_and_identity_without_a_pool() {
+        let d = |y, m, day| NaiveDate::from_ymd_opt(y, m, day).unwrap();
+        // Old parcel (>12mo, gain 500), new parcel (≤12mo, gain 250) — same
+        // facts as `db_two_parcels_mixed_eligibility`, straight from memory.
+        let data = ReportData {
+            sells: [(3, mem_sell(3, d(2025, 6, 1), 150, 15, "AUD"))].into(),
+            buys: [
+                (1, mem_buy(1, d(2023, 1, 1), 100, 10, "AUD")),
+                (2, mem_buy(2, d(2025, 1, 1), 50, 10, "AUD")),
+            ]
+            .into(),
+            allocations: vec![mem_alloc(3, 1, 100), mem_alloc(3, 2, 50)],
+            ..ReportData::default()
+        };
+
+        let result = compute_realised_gains(&data).unwrap();
+        assert_eq!(result.len(), 1);
+        let r = &result[0];
+        assert_eq!(r.proceeds, Decimal::from(2250));
+        assert_eq!(r.cost_base, Decimal::from(1500));
+        assert_eq!(r.capital_gain_loss, Decimal::from(750));
+        assert_eq!(r.discount_eligible_gain, Decimal::from(500));
+        assert_eq!(r.non_discountable_gain, Decimal::from(250));
+        assert_eq!(r.capital_loss, Decimal::ZERO);
+        assert_eq!(
+            r.capital_gain_loss,
+            r.discount_eligible_gain + r.non_discountable_gain - r.capital_loss
+        );
+    }
+
+    #[test]
+    fn pure_fx_conversion_uses_the_preloaded_rates() {
+        let d = |y, m, day| NaiveDate::from_ymd_opt(y, m, day).unwrap();
+        // USD buy at 0.50 (cost 1000 USD → 2000 AUD), USD sell at 0.60
+        // (proceeds 1500 USD → 2500 AUD): gain 500 AUD, from the map alone.
+        let data = ReportData {
+            sells: [(2, mem_sell(2, d(2025, 6, 1), 100, 15, "USD"))].into(),
+            buys: [(1, mem_buy(1, d(2024, 1, 15), 100, 10, "USD"))].into(),
+            allocations: vec![mem_alloc(2, 1, 100)],
+            fx: crate::infra::fx::FxRates::from_rates([
+                ("USD", "2024-01", "0.50".parse().unwrap()),
+                ("USD", "2025-06", "0.60".parse().unwrap()),
+            ]),
+            ..ReportData::default()
+        };
+
+        let result = compute_realised_gains(&data).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].cost_base, Decimal::from(2000));
+        assert_eq!(result[0].proceeds, Decimal::from(2500));
+        assert_eq!(result[0].capital_gain_loss, Decimal::from(500));
+    }
+
+    #[test]
+    fn pure_manual_override_fallback_when_no_ato_rate() {
+        let d = |y, m, day| NaiveDate::from_ymd_opt(y, m, day).unwrap();
+        // With no ATO rate loaded for either month, both legs must fall back
+        // to their trade's manual fx_rate (never an unconverted or zeroed
+        // figure — the missing-rate-and-no-override case errors, asserted in
+        // `infra::fx`'s tests).
+        let mut sell = mem_sell(2, d(2025, 6, 1), 100, 15, "USD");
+        sell.fx_rate = "0.60".parse().unwrap();
+        let mut buy = mem_buy(1, d(2024, 1, 15), 100, 10, "USD");
+        buy.fx_rate = "0.50".parse().unwrap();
+        let data = ReportData {
+            sells: [(2, sell)].into(),
+            buys: [(1, buy)].into(),
+            allocations: vec![mem_alloc(2, 1, 100)],
+            ..ReportData::default()
+        };
+        // No ATO rates loaded: both legs use the trades' manual overrides.
+        let result = compute_realised_gains(&data).unwrap();
+        assert_eq!(result[0].cost_base, Decimal::from(2000));
+        assert_eq!(result[0].proceeds, Decimal::from(2500));
     }
 
     // DB-level tests

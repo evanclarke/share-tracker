@@ -15,7 +15,8 @@
 
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
-use sqlx::SqlitePool;
+use sqlx::{Row, SqlitePool};
+use std::collections::HashMap;
 
 use crate::infra::decimal::parse_dec;
 
@@ -97,13 +98,118 @@ pub async fn resolve_rate(
         return Ok(Decimal::ONE);
     }
     let month = date.format("%Y-%m").to_string();
-    if let Some(rate) = lookup_ato_rate(pool, currency, &month).await? {
+    let ato_rate = lookup_ato_rate(pool, currency, &month).await?;
+    pick_rate(ato_rate, currency, month, manual_override)
+}
+
+/// The shared precedence rule (used by both the DB-lookup path and the
+/// pre-loaded [`FxRates`] map): the ATO rate for the month wins, the manual
+/// override is the fallback, and neither means a loud [`FxError::MissingRate`].
+fn pick_rate(
+    ato_rate: Option<Decimal>,
+    currency: &str,
+    month: String,
+    manual_override: Option<Decimal>,
+) -> Result<Decimal, FxError> {
+    if let Some(rate) = ato_rate {
         return Ok(rate);
     }
     manual_override.ok_or(FxError::MissingRate {
         currency: currency.to_string(),
         month,
     })
+}
+
+/// Apply a resolved foreign-per-AUD rate: `AUD = foreign / rate`, passing
+/// amounts through unchanged at rate 1 (AUD and parity rates) so an exact
+/// value is never reshaped by a divide.
+pub fn apply_rate(amount: Decimal, rate: Decimal) -> Decimal {
+    if rate == Decimal::ONE {
+        amount
+    } else {
+        amount / rate
+    }
+}
+
+/// Every imported ATO/RBA reference rate, pre-loaded into memory.
+///
+/// Report loops convert one amount per row; resolving each conversion with a
+/// DB round-trip (the [`to_aud`] path) is an N+1. Loading the whole
+/// `rba_fx_rates` table once — it is small (one row per currency-month) — lets
+/// the rest of the report run as pure computation over in-memory data, and a
+/// load inside the report's read transaction sees the same snapshot as the
+/// report's other queries.
+#[derive(Debug, Clone, Default)]
+pub struct FxRates {
+    /// (currency, 'YYYY-MM') → foreign currency units per 1 AUD.
+    rates: HashMap<(String, String), Decimal>,
+}
+
+impl FxRates {
+    /// Load every `rba_fx_rates` row. Executor-generic so it can run on a
+    /// report's read transaction as well as the pool.
+    pub async fn load<'e, E>(executor: E) -> Result<FxRates, sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+    {
+        let rows = sqlx::query("SELECT currency, month, rate FROM rba_fx_rates")
+            .fetch_all(executor)
+            .await?;
+        let mut rates = HashMap::new();
+        for row in &rows {
+            let currency: String = row.try_get("currency")?;
+            let month: String = row.try_get("month")?;
+            let rate = parse_dec("rate", row.try_get("rate")?)?;
+            rates.insert((currency, month), rate);
+        }
+        Ok(FxRates { rates })
+    }
+
+    /// Build a rate map directly — for pool-free unit tests of report
+    /// computations.
+    #[cfg(test)]
+    pub fn from_rates<'a>(rates: impl IntoIterator<Item = (&'a str, &'a str, Decimal)>) -> FxRates {
+        FxRates {
+            rates: rates
+                .into_iter()
+                .map(|(currency, month, rate)| ((currency.to_string(), month.to_string()), rate))
+                .collect(),
+        }
+    }
+
+    /// [`resolve_rate`], over the pre-loaded map: AUD resolves to 1, the ATO
+    /// rate for the month of `date` takes precedence, `manual_override` is the
+    /// fallback, and neither fails loudly.
+    pub fn resolve_rate(
+        &self,
+        currency: &str,
+        date: NaiveDate,
+        manual_override: Option<Decimal>,
+    ) -> Result<Decimal, FxError> {
+        if currency.eq_ignore_ascii_case("AUD") {
+            return Ok(Decimal::ONE);
+        }
+        let month = date.format("%Y-%m").to_string();
+        let ato_rate = self
+            .rates
+            .get(&(currency.to_string(), month.clone()))
+            .copied();
+        pick_rate(ato_rate, currency, month, manual_override)
+    }
+
+    /// [`to_aud`], over the pre-loaded map.
+    pub fn to_aud(
+        &self,
+        amount: Decimal,
+        currency: &str,
+        date: NaiveDate,
+        manual_override: Option<Decimal>,
+    ) -> Result<Decimal, FxError> {
+        Ok(apply_rate(
+            amount,
+            self.resolve_rate(currency, date, manual_override)?,
+        ))
+    }
 }
 
 /// Convert `amount` (denominated in `currency`) to AUD for `date`.
@@ -120,13 +226,10 @@ pub async fn to_aud(
     date: NaiveDate,
     manual_override: Option<Decimal>,
 ) -> Result<Decimal, FxError> {
-    let rate = resolve_rate(pool, currency, date, manual_override).await?;
-    // Pass amounts through unchanged at rate 1 (AUD and parity rates) so an exact
-    // value is never reshaped by a divide.
-    if rate == Decimal::ONE {
-        return Ok(amount);
-    }
-    Ok(amount / rate)
+    Ok(apply_rate(
+        amount,
+        resolve_rate(pool, currency, date, manual_override).await?,
+    ))
 }
 
 #[cfg(test)]
@@ -240,6 +343,79 @@ mod tests {
             }
             other => panic!("expected MissingRate, got {other:?}"),
         }
+    }
+
+    // FxRates: the pre-loaded map must resolve exactly like the DB-lookup path.
+
+    async fn loaded_rates(pool: &SqlitePool) -> FxRates {
+        FxRates::load(pool).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn fx_rates_aud_passes_through_without_a_rate() {
+        let pool = test_pool().await;
+        let rates = loaded_rates(&pool).await;
+        let aud = rates
+            .to_aud("1234.56".parse().unwrap(), "AUD", date(2024, 1, 15), None)
+            .unwrap();
+        assert_eq!(aud, "1234.56".parse::<Decimal>().unwrap());
+    }
+
+    #[tokio::test]
+    async fn fx_rates_ato_rate_takes_precedence_and_is_month_scoped() {
+        let pool = test_pool().await;
+        rba_fx_rate::db_import_rate(&pool, "USD", "2024-01", "0.50".parse().unwrap())
+            .await
+            .unwrap();
+        let rates = loaded_rates(&pool).await;
+        // The ATO rate wins over the override in its own month…
+        let aud = rates
+            .to_aud(
+                Decimal::from(1000),
+                "USD",
+                date(2024, 1, 15),
+                Some("0.80".parse().unwrap()),
+            )
+            .unwrap();
+        assert_eq!(aud, Decimal::from(2000));
+        // …and a different month falls back to the override.
+        let aud = rates
+            .to_aud(
+                Decimal::from(1000),
+                "USD",
+                date(2024, 2, 15),
+                Some("0.40".parse().unwrap()),
+            )
+            .unwrap();
+        assert_eq!(aud, Decimal::from(2500));
+    }
+
+    #[tokio::test]
+    async fn fx_rates_fails_loudly_when_neither_rate_nor_override() {
+        let pool = test_pool().await;
+        let rates = loaded_rates(&pool).await;
+        let err = rates
+            .to_aud(Decimal::from(1000), "USD", date(2024, 1, 15), None)
+            .unwrap_err();
+        match err {
+            FxError::MissingRate { currency, month } => {
+                assert_eq!(currency, "USD");
+                assert_eq!(month, "2024-01");
+            }
+            other => panic!("expected MissingRate, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fx_rates_load_propagates_malformed_stored_rate() {
+        let pool = test_pool().await;
+        sqlx::query(
+            "INSERT INTO rba_fx_rates (currency, month, rate) VALUES ('USD', '2024-01', 'oops')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert!(FxRates::load(&pool).await.is_err());
     }
 
     #[tokio::test]

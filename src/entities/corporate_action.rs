@@ -877,15 +877,19 @@ pub struct RocEvent {
 /// All ReturnOfCapital actions keyed by listing, each list sorted by payment
 /// date (then id). Shared by the portfolio/unrealised/realised/open-parcels
 /// reports to reduce affected parcels' cost bases, and by the net-capital-gain
-/// report's G1 walk.
-pub async fn db_return_of_capital_events(
-    pool: &SqlitePool,
-) -> Result<HashMap<i64, Vec<RocEvent>>, sqlx::Error> {
+/// report's G1 walk. Generic over the executor so reports can run it on their
+/// read transaction.
+pub async fn db_return_of_capital_events<'e, E>(
+    executor: E,
+) -> Result<HashMap<i64, Vec<RocEvent>>, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
     let rows = sqlx::query(
         "SELECT listing_id, date, amount_per_unit, currency FROM corporate_actions \
          WHERE action_type = 'ReturnOfCapital' ORDER BY listing_id, date, id",
     )
-    .fetch_all(pool)
+    .fetch_all(executor)
     .await?;
 
     let mut map: HashMap<i64, Vec<RocEvent>> = HashMap::new();
@@ -937,16 +941,20 @@ fn split_event_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<SplitEvent, sql
 /// All quantity re-basing actions (ShareSplit + BonusIssue, each expressed as
 /// its equivalent split) keyed by listing, each list sorted by event date
 /// (then id). The reports use these to re-base parcel quantities between unit
-/// bases.
-pub async fn db_share_split_events(
-    pool: &SqlitePool,
-) -> Result<HashMap<i64, Vec<SplitEvent>>, sqlx::Error> {
+/// bases. Generic over the executor so reports can run it on their read
+/// transaction.
+pub async fn db_share_split_events<'e, E>(
+    executor: E,
+) -> Result<HashMap<i64, Vec<SplitEvent>>, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
     let rows = sqlx::query(
         "SELECT listing_id, action_type, date, split_new_units, split_old_units, \
                 bonus_units, bonus_held_units FROM corporate_actions \
          WHERE action_type IN ('ShareSplit', 'BonusIssue') ORDER BY listing_id, date, id",
     )
-    .fetch_all(pool)
+    .fetch_all(executor)
     .await?;
 
     let mut map: HashMap<i64, Vec<SplitEvent>> = HashMap::new();

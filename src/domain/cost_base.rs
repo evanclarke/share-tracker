@@ -23,17 +23,19 @@
 //!    via `corporate_action::as_acquired_quantity` /
 //!    `sold_in_acquired_units` before calling, and per-unit payments are
 //!    re-based inside `corporate_action::per_unit_reduction`.
-//! 5. **AUD conversion at the acquisition month** ([`CostBase::into_aud`]) —
-//!    reports take the Australian-tax view, so the cost base converts at the
-//!    ATO reference rate for the parcel's (possibly deemed) acquisition
-//!    month. A rollover replacement parcel converts at its *deemed*
-//!    acquisition month, carrying the original AUD cost base over.
+//! 5. **AUD conversion at the acquisition month**
+//!    ([`CostBase::into_aud_with`]) — reports take the Australian-tax view,
+//!    so the cost base converts at the ATO reference rate for the parcel's
+//!    (possibly deemed) acquisition month. A rollover replacement parcel
+//!    converts at its *deemed* acquisition month, carrying the original AUD
+//!    cost base over.
 
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
-use sqlx::SqlitePool;
+use sqlx::{Row, sqlite::SqliteRow};
 
 use crate::entities::corporate_action::{RocEvent, SplitEvent, per_unit_reduction};
+use crate::infra::decimal::row_dec;
 use crate::infra::fx;
 
 /// The facts of a Buy/DRP parcel as transacted, in its native currency and
@@ -56,8 +58,76 @@ pub struct Parcel<'a> {
     pub trade_date: NaiveDate,
 }
 
+/// A Buy/DRP trade row as every cost-base report reads it — one `FromRow`
+/// mapping (TEXT decimal columns via the `infra::decimal` helpers) instead of
+/// a per-report field-by-field copy. Select [`ParcelRow::COLUMNS`] from
+/// `trades`.
+#[derive(Debug, Clone)]
+pub struct ParcelRow {
+    pub id: i64,
+    pub listing_id: i64,
+    pub holding_account_id: i64,
+    /// The actual trade date — drives split and return-of-capital
+    /// applicability (see [`Parcel::trade_date`]).
+    pub date: NaiveDate,
+    pub quantity: Decimal,
+    pub average_price: Decimal,
+    pub brokerage: Decimal,
+    pub gst_on_brokerage: Decimal,
+    pub currency: String,
+    pub fx_rate: Decimal,
+    /// Set on a rollover replacement parcel (scrip-for-scrip, demerger): the
+    /// consumed parcel's acquisition date, carried so the combined holding
+    /// period drives the discount clock and the AUD translation month.
+    pub deemed_acquisition_date: Option<NaiveDate>,
+}
+
+impl ParcelRow {
+    /// The column list matching the `FromRow` mapping, for single-table
+    /// queries against `trades`.
+    pub const COLUMNS: &'static str = "id, listing_id, holding_account_id, date, quantity, \
+         average_price, brokerage, gst_on_brokerage, currency, fx_rate, deemed_acquisition_date";
+
+    /// The CGT acquisition date: the deemed date where set (rollover
+    /// replacement parcels), else the trade date. Drives the 12-month
+    /// discount clock and the AUD translation month of the cost base.
+    pub fn acquired(&self) -> NaiveDate {
+        self.deemed_acquisition_date.unwrap_or(self.date)
+    }
+
+    /// The row as [`adjusted_cost_base`]'s input.
+    pub fn parcel(&self) -> Parcel<'_> {
+        Parcel {
+            quantity: self.quantity,
+            average_price: self.average_price,
+            brokerage: self.brokerage,
+            gst_on_brokerage: self.gst_on_brokerage,
+            currency: &self.currency,
+            trade_date: self.date,
+        }
+    }
+}
+
+impl sqlx::FromRow<'_, SqliteRow> for ParcelRow {
+    fn from_row(row: &SqliteRow) -> Result<Self, sqlx::Error> {
+        Ok(ParcelRow {
+            id: row.try_get("id")?,
+            listing_id: row.try_get("listing_id")?,
+            holding_account_id: row.try_get("holding_account_id")?,
+            date: row.try_get("date")?,
+            quantity: row_dec(row, "quantity")?,
+            average_price: row_dec(row, "average_price")?,
+            brokerage: row_dec(row, "brokerage")?,
+            gst_on_brokerage: row_dec(row, "gst_on_brokerage")?,
+            currency: row.try_get("currency")?,
+            fx_rate: row_dec(row, "fx_rate")?,
+            deemed_acquisition_date: row.try_get("deemed_acquisition_date")?,
+        })
+    }
+}
+
 /// The cost-base breakdown of some or all of a parcel's units, produced by
-/// [`adjusted_cost_base`]. Native currency until [`CostBase::into_aud`].
+/// [`adjusted_cost_base`]. Native currency until [`CostBase::into_aud_with`].
 #[derive(Debug, Clone, Copy)]
 pub struct CostBase {
     /// Whole-parcel initial cost base: price × quantity + brokerage + GST.
@@ -125,27 +195,34 @@ impl CostBase {
     /// reference rate for the parcel's acquisition month (`acquired` — the
     /// deemed acquisition date for a rollover replacement parcel, so the
     /// original AUD cost base carries over), with the trade's manual
-    /// `fx_override` as fallback. The rate is resolved once and applied to
-    /// all components so the breakdown stays internally consistent.
-    pub async fn into_aud(
+    /// `fx_override` as fallback. Takes pre-loaded rates ([`fx::FxRates`]) so
+    /// a report loop's per-parcel conversion is a map lookup, not a DB
+    /// round-trip. The rate is resolved once and applied to all components so
+    /// the breakdown stays internally consistent.
+    pub fn into_aud_with(
         self,
-        pool: &SqlitePool,
+        rates: &fx::FxRates,
         currency: &str,
         acquired: NaiveDate,
         fx_override: Option<Decimal>,
     ) -> Result<CostBase, fx::FxError> {
-        let rate = fx::resolve_rate(pool, currency, acquired, fx_override).await?;
-        // Pass through unchanged at rate 1 (AUD and parity rates) so an exact
-        // value is never reshaped by a divide — same convention as `fx::to_aud`.
+        let rate = rates.resolve_rate(currency, acquired, fx_override)?;
+        Ok(self.at_rate(rate))
+    }
+
+    /// Apply a resolved foreign-per-AUD rate to every component (same
+    /// pass-through-at-1 convention as `fx::apply_rate`) so the breakdown
+    /// stays internally consistent.
+    fn at_rate(self, rate: Decimal) -> CostBase {
         if rate == Decimal::ONE {
-            return Ok(self);
+            return self;
         }
-        Ok(CostBase {
+        CostBase {
             initial_cost: self.initial_cost / rate,
             amit_reduction: self.amit_reduction / rate,
             roc_reduction: self.roc_reduction / rate,
             adjusted: self.adjusted / rate,
-        })
+        }
     }
 }
 
@@ -333,9 +410,8 @@ mod tests {
         assert_eq!(cb.adjusted, Decimal::ZERO);
     }
 
-    #[tokio::test]
-    async fn into_aud_passes_aud_through_unchanged() {
-        let pool = db::init(":memory:").await.unwrap();
+    #[test]
+    fn into_aud_with_passes_aud_through_unchanged() {
         let cb = adjusted_cost_base(
             &parcel(100, 10),
             Decimal::from(100),
@@ -346,20 +422,22 @@ mod tests {
         )
         .unwrap();
         let aud = cb
-            .into_aud(&pool, "AUD", date(2024, 1, 1), None)
-            .await
+            .into_aud_with(&fx::FxRates::default(), "AUD", date(2024, 1, 1), None)
             .unwrap();
         assert_eq!(aud.adjusted, Decimal::from(1000));
         assert_eq!(aud.initial_cost, Decimal::from(1000));
     }
 
+    /// The rates load from the `rba_fx_rates` table exactly as the async
+    /// lookup path read them (same import, same month key).
     #[tokio::test]
-    async fn into_aud_converts_every_component_at_the_acquisition_month_rate() {
+    async fn into_aud_with_converts_every_component_at_the_acquisition_month_rate() {
         let pool = db::init(":memory:").await.unwrap();
         // A$1 = 0.50 USD in the acquisition month.
         rba_fx_rate::db_import_rate(&pool, "USD", "2024-01", "0.50".parse().unwrap())
             .await
             .unwrap();
+        let rates = fx::FxRates::load(&pool).await.unwrap();
         let p = Parcel {
             currency: "USD",
             ..parcel(100, 10)
@@ -372,8 +450,7 @@ mod tests {
         let cb = adjusted_cost_base(&p, Decimal::from(100), Decimal::from(5), &[roc], &[], None)
             .unwrap();
         let aud = cb
-            .into_aud(&pool, "USD", date(2024, 1, 15), None)
-            .await
+            .into_aud_with(&rates, "USD", date(2024, 1, 15), None)
             .unwrap();
         // Every component is USD / 0.50: 1000 → 2000, 5 → 10, 50 → 100,
         // (1000 − 5 − 50) → 1890.
@@ -381,24 +458,11 @@ mod tests {
         assert_eq!(aud.amit_reduction, Decimal::from(10));
         assert_eq!(aud.roc_reduction, Decimal::from(100));
         assert_eq!(aud.adjusted, Decimal::from(1890));
-    }
-
-    #[tokio::test]
-    async fn into_aud_fails_loudly_without_a_rate_or_override() {
-        let pool = db::init(":memory:").await.unwrap();
-        let cb = adjusted_cost_base(
-            &parcel(100, 10),
-            Decimal::from(100),
-            Decimal::ZERO,
-            &[],
-            &[],
-            None,
-        )
-        .unwrap();
-        let err = cb
-            .into_aud(&pool, "USD", date(2024, 1, 15), None)
-            .await
-            .unwrap_err();
-        assert!(matches!(err, fx::FxError::MissingRate { .. }));
+        // A month with no rate falls back to the override; none means a loud
+        // failure, never a silently unconverted figure.
+        assert!(matches!(
+            cb.into_aud_with(&rates, "USD", date(2025, 1, 15), None),
+            Err(fx::FxError::MissingRate { .. })
+        ));
     }
 }
