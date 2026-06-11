@@ -16,6 +16,7 @@ pub const TAXPAYER_BASIS: &str = "individual resident: 50% CGT discount; 50% LIC
 pub mod e4_cross_check;
 pub mod export;
 pub mod franking;
+pub mod franking_at_risk;
 pub mod mic_validation;
 pub mod net_capital_gain;
 pub mod open_parcels;
@@ -27,6 +28,7 @@ pub mod settlement_coverage;
 pub mod snapshot;
 pub mod tax_summary;
 pub mod unrealised_gains;
+pub mod wash_sales;
 
 /// Merge every report's routes into a single router.
 pub fn router() -> Router<SqlitePool> {
@@ -41,5 +43,7 @@ pub fn router() -> Router<SqlitePool> {
         .merge(mic_validation::router())
         .merge(settlement_coverage::router())
         .merge(e4_cross_check::router())
+        .merge(wash_sales::router())
+        .merge(franking_at_risk::router())
         .merge(snapshot::router())
 }

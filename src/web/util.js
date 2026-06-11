@@ -318,6 +318,8 @@ const COLUMN_KINDS = (function () {
     'lpr_expenditure',
     // Rights sales: the carried cost of purchased rights.
     'rights_cost',
+    // Franking at-risk report credit columns.
+    'credits_attached', 'credits_at_risk', 'credits_denied', 'additional_credits_at_risk',
     // Investment-expense line items + the tax-summary deduction aggregates.
     'amount', 'gross_amount', 'gross_assessable_investment_income',
     'deductions_loan_interest', 'deductions_management_fee', 'deductions_advice_fee',
@@ -340,6 +342,9 @@ const COLUMN_KINDS = (function () {
     'split_new_units', 'split_old_units', 'bonus_units', 'bonus_held_units',
     'rights_units', 'rights_held_units', 'scrip_new_units', 'scrip_old_units',
     'demerger_new_units', 'demerger_held_units',
+    // Wash-sale and franking at-risk report unit columns.
+    'buy_quantity', 'entitled_units', 'disqualified_units',
+    'disqualified_units_now', 'disqualified_units_after_sale',
   ]);
   return k;
 })();

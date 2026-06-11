@@ -626,6 +626,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn wash_sales_report_ui_present() {
+        let js = app_js_body().await;
+        // The Wash Sales report view drives POST /reports/wash_sales with a
+        // configurable window field (blank = the 30-day default).
+        assert!(js.contains("'wash-sales'"));
+        assert!(js.contains("/reports/wash_sales"));
+        assert!(js.contains("window_days"));
+    }
+
+    #[tokio::test]
+    async fn franking_at_risk_ui_present() {
+        let js = app_js_body().await;
+        // The Franking At-Risk view drives GET /reports/franking_at_risk and
+        // badges its status field; the what-if view drives the
+        // contemplated-sale endpoint with listing/date/units params.
+        assert!(js.contains("'franking-at-risk'"));
+        assert!(js.contains("/reports/franking_at_risk"));
+        assert!(js.contains("'franking-what-if'"));
+        assert!(js.contains("/reports/franking_at_risk/what-if"));
+        // Surfaced in the Sell flow: the Sells list and the Sell form link to
+        // the foresight reports.
+        assert!(js.contains("function sellForesightLinks()"));
+        assert!(js.contains("#/r/franking-what-if"));
+        assert!(js.contains("#/r/wash-sales"));
+    }
+
+    #[tokio::test]
     async fn gains_report_ui_present() {
         let js = app_js_body().await;
         assert!(js.contains("/portfolio/unrealised-gains"));

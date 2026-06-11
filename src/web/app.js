@@ -480,8 +480,24 @@ async function viewSellsList() {
   setMain(el('div', null, [
     el('h2', null, 'Sells'),
     el('p', { class: 'view-desc' }, 'Sell trades, each persisted atomically with parcel allocations that must sum exactly to the sell quantity.'),
+    sellForesightLinks(),
     toolbar, table,
   ]));
+}
+
+// Foresight reports surfaced in the Sell flow: what a contemplated sale
+// would do to franking credits, and the wash-sale pattern a loss Sell plus
+// nearby Buy creates.
+function sellForesightLinks() {
+  return el('p', { class: 'hint' }, [
+    'Before selling: ',
+    el('a', { href: '#/r/franking-what-if' }, 'check the franking credits a sale would put at risk'),
+    ' · ',
+    el('a', { href: '#/r/wash-sales' }, 'review wash-sale flags'),
+    ' · ',
+    el('a', { href: '#/r/parcel-optimiser' }, 'compare parcel selections'),
+    '.',
+  ]);
 }
 
 async function viewSellForm(id) {
@@ -528,6 +544,7 @@ async function viewSellForm(id) {
 
   setMain(el('div', null, [
     el('h2', null, editing ? 'Edit Sell' : 'New Sell'),
+    sellForesightLinks(),
     el('div', { class: 'card' }, form),
   ]));
 }

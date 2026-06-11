@@ -4,16 +4,6 @@ Items are only marked done when a passing test exists for them.
 
 Completed and decided (out-of-scope / not-reproducible) sections are archived in [DONE.md](DONE.md) to keep this list focused on active work. When a section here is fully done, move it to DONE.md rather than leaving it — see CLAUDE.md.
 
-## Compliance alert reports — wash sales and franking at-risk foresight (2026-06-10)
-
-(REQUIREMENTS 2026-06-10; non-blocking, pattern: MIC validation / settlement coverage.)
-
-- [ ] Mirror the ATO wash-sale guidance (TR 2008/1 / current ATO page) into `docs/ato/` + `OVERVIEW.md` — read before implementing
-- [ ] Wash-sale report: every loss-realising Sell with a Buy of the same listing within a configurable window (default 30 days), either side, across all holding accounts; writes never rejected
-- [ ] Franking at-risk foresight report: each dividend whose credits are denied by the 45-day walk (with the failing window/dates), plus a contemplated-sale mode reusing the holding-period walk; surfaced near the Sell flow in the UI
-- [ ] Tests: window edges; cross-account detection; denied-credit explanation matches the tax summary's denial
-- [ ] Docs: `docs/API.md` (both reports), README Features
-
 ## Tax-return label mapping on the CSV exports (2026-06-10)
 
 (REQUIREMENTS 2026-06-10.)

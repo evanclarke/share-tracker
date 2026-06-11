@@ -232,7 +232,7 @@ pub async fn db_tax_summary(pool: &SqlitePool) -> Result<Vec<TaxYearSummary>, sq
     // convert them), so they come from a single consistent snapshot.
     let mut tx = pool.begin().await?;
     let income_rows = sqlx::query(
-        "SELECT listing_id, date_paid, ex_date, franked_amount, unfranked_amount, \
+        "SELECT date_paid, franked_amount, unfranked_amount, \
          foreign_source_income, foreign_tax_paid, tfn_withholding_tax, franking_credits, \
          lic_capital_gain_deduction, currency, trust_income, entitlement_date \
          FROM income",
@@ -268,23 +268,16 @@ pub async fn db_tax_summary(pool: &SqlitePool) -> Result<Vec<TaxYearSummary>, sq
     // every imported ATO FX rate — per-field conversions below are map
     // lookups, not one DB round-trip each
     let fx = FxRates::load(&mut *tx).await?;
-    tx.commit().await?;
-
-    let mut map: HashMap<i32, TaxYearSummary> = HashMap::new();
 
     // Per-dividend candidates for the franking holding-period rule, and the
     // year's total attached credits (income + AMMA, AUD) for the
-    // small-shareholder exemption test.
-    struct FrankedDividend {
-        tax_year: i32,
-        listing_id: i64,
-        /// Ex-dividend date; falls back to the payment date when not recorded
-        /// (a dividend is never paid before its shares go ex-dividend).
-        ex_date: NaiveDate,
-        credits_aud: Decimal,
-    }
-    let mut franked_dividends: Vec<FrankedDividend> = Vec::new();
-    let mut attached_credits_by_year: HashMap<i32, Decimal> = HashMap::new();
+    // small-shareholder exemption test — the loader shared with the franking
+    // at-risk report, so the two reports can never disagree about them.
+    let (franked_dividends, attached_credits_by_year) =
+        franking::db_franked_dividends(&mut tx, &fx).await?;
+    tx.commit().await?;
+
+    let mut map: HashMap<i32, TaxYearSummary> = HashMap::new();
 
     for row in &income_rows {
         let date_paid: NaiveDate = row.try_get("date_paid")?;
@@ -312,17 +305,6 @@ pub async fn db_tax_summary(pool: &SqlitePool) -> Result<Vec<TaxYearSummary>, sq
         let tfn_wht = aud_field(&fx, row, "tfn_withholding_tax", &currency, assessed)?;
         let fc = aud_field(&fx, row, "franking_credits", &currency, assessed)?;
         let lic = aud_field(&fx, row, "lic_capital_gain_deduction", &currency, assessed)?;
-
-        if fc > Decimal::ZERO {
-            let ex_date: Option<NaiveDate> = row.try_get("ex_date")?;
-            franked_dividends.push(FrankedDividend {
-                tax_year,
-                listing_id: row.try_get("listing_id")?,
-                ex_date: ex_date.unwrap_or(date_paid),
-                credits_aud: fc,
-            });
-            *attached_credits_by_year.entry(tax_year).or_default() += fc;
-        }
 
         let s = map
             .entry(tax_year)
@@ -373,11 +355,11 @@ pub async fn db_tax_summary(pool: &SqlitePool) -> Result<Vec<TaxYearSummary>, sq
         s.franking_credits += fc;
         s.foreign_tax_offsets += foreign_tax;
         s.tfn_withholding_tax += tfn_wht;
-        // AMMA credits count toward the small-shareholder threshold but are
+        // AMMA credits count toward the small-shareholder threshold (in
+        // `attached_credits_by_year`, via `db_franked_dividends`) but are
         // never themselves denied: the holding-period rule needs a
         // per-distribution ex-date, which an annual AMMA statement doesn't
         // carry.
-        *attached_credits_by_year.entry(tax_year).or_default() += fc;
     }
 
     // ESS discounts (docs/ato/employee-share-schemes.md): the assessable

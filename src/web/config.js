@@ -426,6 +426,23 @@ export const REPORTS = [
   { slug: 'exchange-mic-validation', title: 'Exchange MIC Validation', api: '/reports/exchange_mic_validation', method: 'GET', statusField: 'registry_status', desc: 'Curated exchanges checked against the ISO MIC registry.' },
   { slug: 'settlement-holiday-coverage', title: 'Settlement Holiday Coverage', api: '/reports/settlement_holiday_coverage', method: 'GET', statusField: 'coverage_status', desc: 'Trades whose settlement window falls outside the seeded exchange-holiday calendars (settlement may have skipped weekends only).' },
   { slug: 'e4-cross-check', title: 'Tax-Deferred E4 Cross-Check', api: '/reports/e4_cross_check', method: 'GET', desc: 'Trust income rows whose statement reported a tax-deferred amount (a CGT event E4 cost-base reduction) with no Return of capital corporate action on the listing in the same financial year — enter the action to clear a row.' },
+  {
+    slug: 'wash-sales', title: 'Wash Sales', api: '/reports/wash_sales', method: 'POST',
+    desc: 'Loss-realising Sells with a Buy of the same listing within the window either side, across all holding accounts — the sell-and-repurchase pattern the ATO warns may have the loss cancelled under Part IVA (TR 2008/1). Advisory only: nothing is rejected and the loss still counts in every CGT report; whether a flag matters depends on the facts (a market-driven repurchase days later survived the ATO’s own example).',
+    params: [
+      int('window_days', 'Window (days either side)', { default: '30', hint: 'TR 2008/1 has no statutory window — 24 hours apart has failed and 3 days apart has passed. 30 days is a review convention; blank = 30.' }),
+    ],
+  },
+  { slug: 'franking-at-risk', title: 'Franking At-Risk', api: '/reports/franking_at_risk', method: 'GET', statusField: 'status', desc: 'Each dividend whose shares fail the 45-day (90 for preference) at-risk holding-period walk: the failing qualification window, the entitled and disqualified units, and the credits denied — or shielded by the year’s under-$5,000 small-shareholder exemption. Denied rows are exactly what the Tax Summary subtracts as franking_credits_denied.' },
+  {
+    slug: 'franking-what-if', title: 'Franking Sale What-If', api: '/reports/franking_at_risk/what-if', method: 'POST', statusField: 'status',
+    desc: 'Before recording a Sell: which dividends’ franking credits the contemplated sale would put at risk under the 45-day rule. Each row shows the additional credits at stake and the qualification window end — selling after that date cannot disqualify the dividend. Nothing is written.',
+    params: [
+      fk('listing_id', 'Listing', 'listings', { required: true }),
+      dt('sale_date', 'Contemplated sale date', { required: true }),
+      dec('units', 'Units to sell', { required: true, default: '' }),
+    ],
+  },
   { slug: 'snapshots', title: 'Snapshots', custom: 'snapshots', api: '/report_snapshots', desc: 'Stored daily results of the price-dependent reports (portfolio overview, unrealised gains, performance), valued at the stored closing prices, with a time-series graph. A back-dated fact marks affected snapshots stale; regenerate them here.' },
 ];
 

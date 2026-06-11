@@ -13,10 +13,13 @@
 //! attached credits — unless the small-shareholder exemption applies (total
 //! attached franking credits in the income year below A$5,000).
 
+use crate::domain::tax_year::tax_year_for;
 use crate::infra::decimal::parse_dec;
-use chrono::{Duration, NaiveDate};
+use crate::infra::fx::FxRates;
+use chrono::{Datelike, Duration, NaiveDate};
 use rust_decimal::Decimal;
 use sqlx::{Row, SqlitePool};
+use std::collections::HashMap;
 
 /// Small-shareholder exemption threshold (A$): with total franking credits in
 /// an income year below this, the holding-period rule doesn't apply at all.
@@ -60,6 +63,22 @@ pub async fn holding_period_test(
     listing_id: i64,
     ex_date: NaiveDate,
 ) -> Result<HoldingPeriodTest, sqlx::Error> {
+    holding_period_test_with_sale(pool, listing_id, ex_date, None).await
+}
+
+/// [`holding_period_test`] with an optional contemplated Sell of
+/// `(date, units)` injected into the walk — the franking at-risk report's
+/// what-if mode, answering "which credits would *this* sale disqualify?"
+/// without writing anything. The hypothetical sale takes its place in date
+/// order after any recorded trades of the same day (as the newest trade id
+/// would), with its units in its own date's basis; a sale dated after the
+/// qualification window is ignored — it can no longer affect entitlement.
+pub async fn holding_period_test_with_sale(
+    pool: &SqlitePool,
+    listing_id: i64,
+    ex_date: NaiveDate,
+    contemplated_sale: Option<(NaiveDate, Decimal)>,
+) -> Result<HoldingPeriodTest, sqlx::Error> {
     let preference: bool = sqlx::query_scalar("SELECT preference FROM listings WHERE id = ?")
         .bind(listing_id)
         .fetch_one(pool)
@@ -99,6 +118,37 @@ pub async fn holding_period_test(
     // caller uses) is basis-invariant.
     let splits = crate::entities::corporate_action::db_splits_for_listing(pool, listing_id).await?;
 
+    struct Event {
+        sell: bool,
+        date: NaiveDate,
+        qty: Decimal,
+    }
+    let mut events = rows
+        .iter()
+        .map(|row| {
+            let trade_type: String = row.try_get("trade_type")?;
+            Ok(Event {
+                sell: trade_type == "Sell",
+                date: row.try_get("date")?,
+                qty: parse_dec("quantity", row.try_get("quantity")?)?,
+            })
+        })
+        .collect::<Result<Vec<_>, sqlx::Error>>()?;
+    if let Some((date, units)) = contemplated_sale
+        && date <= window_end
+    {
+        // After same-day recorded trades, where the newest id would sort.
+        let pos = events.partition_point(|e| e.date <= date);
+        events.insert(
+            pos,
+            Event {
+                sell: true,
+                date,
+                qty: units,
+            },
+        );
+    }
+
     struct Parcel {
         acquired: NaiveDate,
         qty: Decimal,
@@ -109,12 +159,10 @@ pub async fn holding_period_test(
     let mut entitled_units = Decimal::ZERO;
     let mut disqualified_units = Decimal::ZERO;
 
-    for row in &rows {
-        let trade_type: String = row.try_get("trade_type")?;
-        let date: NaiveDate = row.try_get("date")?;
-        let qty = parse_dec("quantity", row.try_get("quantity")?)?;
+    for event in &events {
+        let date = event.date;
         let qty = crate::entities::corporate_action::split_adjusted_quantity(
-            qty,
+            event.qty,
             &splits,
             date,
             Some(window_end),
@@ -131,7 +179,7 @@ pub async fn holding_period_test(
             snapshotted = true;
         }
 
-        if trade_type == "Sell" {
+        if event.sell {
             // LIFO: a sale disposes of the most recently acquired shares first.
             let mut remaining = qty;
             while remaining > Decimal::ZERO {
@@ -170,6 +218,91 @@ pub async fn holding_period_test(
         entitled_units,
         disqualified_units,
     })
+}
+
+/// One franked dividend (an `income` row with attached credits) as the
+/// holding-period rule sees it. Loaded by [`db_franked_dividends`], which the
+/// tax summary (denying the credits) and the franking at-risk report
+/// (explaining the denial) share — so the two can never disagree about which
+/// dividends are candidates or what year/amount they count for.
+pub struct FrankedDividend {
+    /// The `income` row id.
+    pub income_id: i64,
+    pub tax_year: i32,
+    pub listing_id: i64,
+    pub date_paid: NaiveDate,
+    /// Ex-dividend date; falls back to the payment date when not recorded
+    /// (a dividend is never paid before its shares go ex-dividend).
+    pub ex_date: NaiveDate,
+    /// Attached franking credits, converted to AUD at the assessment month.
+    pub credits_aud: Decimal,
+}
+
+/// Load every franked dividend (income rows with attached credits, assessed
+/// per the tax summary's year-attribution rules) and each financial year's
+/// total attached credits in AUD for the small-shareholder exemption test.
+/// AMMA franking credits count toward the year's attached total but are never
+/// themselves candidates: the holding-period rule needs a per-distribution
+/// ex-date, which an annual AMMA statement doesn't carry.
+pub async fn db_franked_dividends(
+    conn: &mut sqlx::SqliteConnection,
+    fx: &FxRates,
+) -> Result<(Vec<FrankedDividend>, HashMap<i32, Decimal>), sqlx::Error> {
+    let mut dividends = Vec::new();
+    let mut attached_by_year: HashMap<i32, Decimal> = HashMap::new();
+
+    let income_rows = sqlx::query(
+        "SELECT id, listing_id, date_paid, ex_date, franking_credits, currency, \
+         trust_income, entitlement_date \
+         FROM income",
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    for row in &income_rows {
+        let date_paid: NaiveDate = row.try_get("date_paid")?;
+        // Trust income is assessed in the year of *present entitlement*, not
+        // payment (docs/ato/trust-income-timing.md); dividends go by date_paid
+        // — the same attribution the tax summary applies to every component.
+        let trust_income: bool = row.try_get("trust_income")?;
+        let entitlement_date: Option<NaiveDate> = row.try_get("entitlement_date")?;
+        let assessed = match entitlement_date {
+            Some(d) if trust_income => d,
+            _ => date_paid,
+        };
+        let currency: String = row.try_get("currency")?;
+        let credits = parse_dec("franking_credits", row.try_get("franking_credits")?)?;
+        let credits_aud = fx.to_aud(credits, &currency, assessed, None)?;
+        if credits_aud <= Decimal::ZERO {
+            continue;
+        }
+        let tax_year = tax_year_for(assessed);
+        let ex_date: Option<NaiveDate> = row.try_get("ex_date")?;
+        dividends.push(FrankedDividend {
+            income_id: row.try_get("id")?,
+            tax_year,
+            listing_id: row.try_get("listing_id")?,
+            date_paid,
+            ex_date: ex_date.unwrap_or(date_paid),
+            credits_aud,
+        });
+        *attached_by_year.entry(tax_year).or_default() += credits_aud;
+    }
+
+    let amma_rows =
+        sqlx::query("SELECT tax_year_end_date, franking_credits, currency FROM amma_statements")
+            .fetch_all(&mut *conn)
+            .await?;
+    for row in &amma_rows {
+        let tax_year_end_date: NaiveDate = row.try_get("tax_year_end_date")?;
+        let currency: String = row.try_get("currency")?;
+        let credits = parse_dec("franking_credits", row.try_get("franking_credits")?)?;
+        let credits_aud = fx.to_aud(credits, &currency, tax_year_end_date, None)?;
+        *attached_by_year
+            .entry(tax_year_end_date.year())
+            .or_default() += credits_aud;
+    }
+
+    Ok((dividends, attached_by_year))
 }
 
 #[cfg(test)]
