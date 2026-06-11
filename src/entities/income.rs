@@ -1203,22 +1203,24 @@ mod tests {
     async fn db_amit_notional_components_rejected() {
         let pool = test_pool().await;
         insert_amit_listing(&pool).await;
-        let cases: [(&str, fn(&mut Income)); 3] = [
-            ("franking_credits", |i| {
-                i.franking_credits = Decimal::from(30);
-            }),
-            ("lic_capital_gain_deduction", |i| {
-                i.lic_capital_gain_deduction = Decimal::from(5);
-            }),
-            ("conduit_foreign_income", |i| {
-                i.conduit_foreign_income = Decimal::from(3);
-            }),
+        let base = || {
+            let mut d = dividend_income();
+            d.trust_income = true;
+            d.franking_credits = Decimal::ZERO;
+            d
+        };
+        let mut with_credits = base();
+        with_credits.franking_credits = Decimal::from(30);
+        let mut with_lic = base();
+        with_lic.lic_capital_gain_deduction = Decimal::from(5);
+        let mut with_cfi = base();
+        with_cfi.conduit_foreign_income = Decimal::from(3);
+        let cases = [
+            ("franking_credits", with_credits),
+            ("lic_capital_gain_deduction", with_lic),
+            ("conduit_foreign_income", with_cfi),
         ];
-        for (field, set) in cases {
-            let mut dist = dividend_income();
-            dist.trust_income = true;
-            dist.franking_credits = Decimal::ZERO;
-            set(&mut dist);
+        for (field, dist) in cases {
             let err = db_upsert(&pool, &dist).await.unwrap_err();
             assert!(
                 matches!(err, UpsertError::AmitNotionalComponent(f) if f == field),
