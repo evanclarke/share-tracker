@@ -2,6 +2,9 @@ mod app;
 // API-level acceptance tests reproducing the worked examples in the ATO docs.
 #[cfg(test)]
 mod ato_examples;
+// Tests pinning documentation-only requirements (Known-limitations entries).
+#[cfg(test)]
+mod doc_checks;
 mod domain;
 mod entities;
 mod infra;
