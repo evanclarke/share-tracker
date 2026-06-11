@@ -4,16 +4,6 @@ Items are only marked done when a passing test exists for them.
 
 Completed and decided (out-of-scope / not-reproducible) sections are archived in [DONE.md](DONE.md) to keep this list focused on active work. When a section here is fully done, move it to DONE.md rather than leaving it — see CLAUDE.md.
 
-## Interest income (2026-06-10)
-
-(REQUIREMENTS 2026-06-10. The `income` entity is listing-keyed, so interest needs its own entity.)
-
-- [ ] New entity `interest_income` (standard module pattern + migration): date paid, amount, currency (AUD default; ATO-rate conversion at the month paid), TFN withholding, optional `holding_account_id`, source description
-- [ ] Tax summary: `interest_income` line per FY, included in `gross_assessable_investment_income` (and so netted by deductions); TFN amount joins the existing withholding line; CSV export updated
-- [ ] Web UI: `ENTITIES` entry
-- [ ] Tests: entity CRUD; FY aggregation + FX conversion + fail-loudly; gross/net identity
-- [ ] Docs: `docs/SCHEMA.md` (incl. Relationships), `docs/API.md`, README Features
-
 ## Operational hardening — restore, off-disk backups, localhost default (2026-06-10)
 
 (REQUIREMENTS 2026-06-10.)

@@ -33,7 +33,7 @@ carry this mapping as their second header row; the full per-column table is in
 | 10L | Gross interest (include TFN amounts withheld in the gross figure) |
 | 10M | TFN amounts withheld from gross interest (show cents) |
 
-(Not yet exported — recorded for the planned `interest_income` entity.)
+(Exported by the tax summary: `interest_income` → 10L; its TFN amount withheld joins the combined `tfn_withholding_tax` column → 10M.)
 
 ## Question 11 — Dividends
 

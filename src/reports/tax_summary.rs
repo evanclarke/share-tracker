@@ -16,6 +16,10 @@ pub struct TaxYearSummary {
     pub tax_year: i32,
     /// Assessable dividend income: franked_amount + unfranked_amount from income records.
     pub dividends_assessable: Decimal,
+    /// Gross interest from interest-income records (question 10 label L —
+    /// includes any TFN amount withheld; the withheld amount itself joins
+    /// `tfn_withholding_tax`).
+    pub interest_income: Decimal,
     /// Assessable foreign source income (conduit foreign income excluded).
     pub foreign_source_income: Decimal,
     /// LIC capital gain deduction from income records.
@@ -81,8 +85,8 @@ pub struct TaxYearSummary {
     pub ess_foreign_source_discount: Decimal,
     /// Gross assessable investment income for the year (AUD): the sum of the
     /// report's existing assessable income lines — `dividends_assessable`
-    /// (franked + unfranked) + `foreign_source_income` + the six AMMA income
-    /// components (`amma_australian_interest`, `amma_dividends_unfranked`,
+    /// (franked + unfranked) + `interest_income` + `foreign_source_income` +
+    /// the six AMMA income components (`amma_australian_interest`, `amma_dividends_unfranked`,
     /// `amma_franked_dividends`, `amma_net_rent`, `amma_foreign_income`,
     /// `amma_other_income`). It deliberately excludes the franking-credit
     /// gross-up and FITO (carried as offset lines), conduit foreign income
@@ -129,6 +133,7 @@ pub fn router() -> Router<SqlitePool> {
 const CSV_HEADER: &[&str] = &[
     "tax_year",
     "dividends_assessable",
+    "interest_income",
     "foreign_source_income",
     "lic_capital_gain_deduction",
     "amma_australian_interest",
@@ -172,6 +177,7 @@ const CSV_HEADER: &[&str] = &[
 const CSV_ATO_LABELS: &[&str] = &[
     export::ATO_LABELS_MARKER, // tax_year
     "11S + 11T",               // dividends_assessable (unfranked + franked)
+    "10L",                     // interest_income (gross, incl. TFN withheld)
     "20E + 20M",               // foreign_source_income
     "D8",                      // lic_capital_gain_deduction (claimed at D8)
     "13U",                     // amma_australian_interest
@@ -188,7 +194,7 @@ const CSV_ATO_LABELS: &[&str] = &[
     "",                        // franking_credits_denied (informational)
     "20O",                     // foreign_tax_offsets
     "",                        // foreign_tax_offset_excess (informational)
-    "11V / 13R / 12C",         // tfn_withholding_tax
+    "10M / 11V / 13R / 12C",   // tfn_withholding_tax
     "12B",                     // ess_discount_assessable
     "",                        // ess_taxed_upfront_reduction (inside 12B vs 12D)
     "12A",                     // ess_foreign_source_discount
@@ -208,6 +214,7 @@ fn zero_summary(tax_year: i32) -> TaxYearSummary {
     TaxYearSummary {
         tax_year,
         dividends_assessable: Decimal::ZERO,
+        interest_income: Decimal::ZERO,
         foreign_source_income: Decimal::ZERO,
         lic_capital_gain_deduction: Decimal::ZERO,
         amma_australian_interest: Decimal::ZERO,
@@ -283,6 +290,11 @@ pub async fn db_tax_summary(pool: &SqlitePool) -> Result<Vec<TaxYearSummary>, sq
     .fetch_all(&mut *tx)
     .await?;
 
+    let interest_rows =
+        sqlx::query("SELECT date_paid, amount, tfn_withholding_tax, currency FROM interest_income")
+            .fetch_all(&mut *tx)
+            .await?;
+
     let amma_rows = sqlx::query(
         "SELECT tax_year_end_date, australian_interest, australian_dividends_unfranked, \
          franked_dividends, franking_credits, net_rent, foreign_income, foreign_tax_credits, \
@@ -357,6 +369,23 @@ pub async fn db_tax_summary(pool: &SqlitePool) -> Result<Vec<TaxYearSummary>, sq
         s.lic_capital_gain_deduction += lic;
         s.franking_credits += fc;
         s.foreign_tax_offsets += foreign_tax;
+        s.tfn_withholding_tax += tfn_wht;
+    }
+
+    // Interest (docs/ato/tax-return-labels-2026.md question 10): assessed when
+    // paid/credited; the gross amount (10L) is its own line and the TFN amount
+    // withheld (10M) joins the combined withholding line.
+    for row in &interest_rows {
+        let date_paid: NaiveDate = row.try_get("date_paid")?;
+        let tax_year = tax_year_for(date_paid);
+        let currency: String = row.try_get("currency")?;
+        let amount = aud_field(&fx, row, "amount", &currency, date_paid)?;
+        let tfn_wht = aud_field(&fx, row, "tfn_withholding_tax", &currency, date_paid)?;
+
+        let s = map
+            .entry(tax_year)
+            .or_insert_with(|| zero_summary(tax_year));
+        s.interest_income += amount;
         s.tfn_withholding_tax += tfn_wht;
     }
 
@@ -519,6 +548,7 @@ pub async fn db_tax_summary(pool: &SqlitePool) -> Result<Vec<TaxYearSummary>, sq
     // last so every income, AMMA and deduction line is already aggregated.
     for s in map.values_mut() {
         s.gross_assessable_investment_income = s.dividends_assessable
+            + s.interest_income
             + s.foreign_source_income
             + s.amma_australian_interest
             + s.amma_dividends_unfranked
@@ -555,7 +585,9 @@ async fn tax_summary_export_handler(State(pool): State<SqlitePool>) -> Result<Re
 mod tests {
     use super::*;
     use crate::{
-        entities::{amma, ess_statement, income, investment_expense, rba_fx_rate, trade},
+        entities::{
+            amma, ess_statement, income, interest_income, investment_expense, rba_fx_rate, trade,
+        },
         test_support::{self, test_pool},
     };
     use axum::http::StatusCode;
@@ -1385,7 +1417,8 @@ mod tests {
         assert_eq!(label_of("amma_australian_interest"), "13U");
         assert_eq!(label_of("foreign_source_income"), "20E + 20M");
         assert_eq!(label_of("foreign_tax_offsets"), "20O");
-        assert_eq!(label_of("tfn_withholding_tax"), "11V / 13R / 12C");
+        assert_eq!(label_of("interest_income"), "10L");
+        assert_eq!(label_of("tfn_withholding_tax"), "10M / 11V / 13R / 12C");
         assert_eq!(label_of("ess_discount_assessable"), "12B");
         assert_eq!(label_of("ess_foreign_source_discount"), "12A");
         assert_eq!(label_of("lic_capital_gain_deduction"), "D8");
@@ -1718,6 +1751,166 @@ mod tests {
         e.currency = "USD".to_string();
         investment_expense::db_upsert(&pool, &e).await.unwrap();
         assert!(db_tax_summary(&pool).await.is_err());
+    }
+
+    // Interest income (docs/ato/tax-return-labels-2026.md question 10): the
+    // gross interest (10L) is its own per-FY line inside gross assessable
+    // investment income; the TFN amount withheld (10M) joins the combined
+    // withholding line.
+
+    fn make_interest(id: i64, date: NaiveDate, amount: Decimal) -> interest_income::InterestIncome {
+        interest_income::InterestIncome {
+            id,
+            date_paid: date,
+            amount,
+            tfn_withholding_tax: Decimal::ZERO,
+            currency: "AUD".to_string(),
+            source: None,
+            holding_account_id: None,
+        }
+    }
+
+    /// Interest is attributed to the financial year of the payment date (a
+    /// July date belongs to the next FY), independently per year.
+    #[tokio::test]
+    async fn db_interest_aggregated_by_financial_year() {
+        let pool = test_pool().await;
+        // June 2024 → FY2024; July 2024 → FY2025.
+        interest_income::db_upsert(
+            &pool,
+            &make_interest(
+                1,
+                NaiveDate::from_ymd_opt(2024, 6, 30).unwrap(),
+                Decimal::from(100),
+            ),
+        )
+        .await
+        .unwrap();
+        interest_income::db_upsert(
+            &pool,
+            &make_interest(
+                2,
+                NaiveDate::from_ymd_opt(2024, 7, 1).unwrap(),
+                Decimal::from(200),
+            ),
+        )
+        .await
+        .unwrap();
+
+        let result = db_tax_summary(&pool).await.unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].tax_year, 2024);
+        assert_eq!(result[0].interest_income, Decimal::from(100));
+        assert_eq!(result[1].tax_year, 2025);
+        assert_eq!(result[1].interest_income, Decimal::from(200));
+        // Interest is not lumped into the dividend line.
+        assert_eq!(result[0].dividends_assessable, Decimal::ZERO);
+    }
+
+    /// The gross/net identity holds with interest in it: gross assessable
+    /// investment income includes the interest line, and net subtracts the
+    /// deductions from that gross.
+    #[tokio::test]
+    async fn db_interest_included_in_gross_and_net_assessable() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        let mut div = make_income(1, 1, NaiveDate::from_ymd_opt(2024, 3, 15).unwrap());
+        div.unfranked_amount = Decimal::from(100);
+        income::db_upsert(&pool, &div).await.unwrap();
+        interest_income::db_upsert(
+            &pool,
+            &make_interest(
+                1,
+                NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+                Decimal::from(80),
+            ),
+        )
+        .await
+        .unwrap();
+        investment_expense::db_upsert(
+            &pool,
+            &make_expense(
+                1,
+                NaiveDate::from_ymd_opt(2024, 5, 1).unwrap(),
+                ExpenseType::LoanInterest,
+                Decimal::from(30),
+            ),
+        )
+        .await
+        .unwrap();
+
+        let result = db_tax_summary(&pool).await.unwrap();
+        assert_eq!(result.len(), 1);
+        let s = &result[0];
+        assert_eq!(s.interest_income, Decimal::from(80));
+        // Gross = 100 dividends + 80 interest; net = gross − 30 deductions.
+        assert_eq!(s.gross_assessable_investment_income, Decimal::from(180));
+        assert_eq!(s.net_assessable_investment_income, Decimal::from(150));
+    }
+
+    /// The TFN amount withheld from interest joins the combined withholding
+    /// line, while the gross interest line keeps the full (gross) figure.
+    #[tokio::test]
+    async fn db_interest_tfn_withholding_joins_the_withholding_line() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        let mut div = make_income(1, 1, NaiveDate::from_ymd_opt(2024, 3, 15).unwrap());
+        div.tfn_withholding_tax = Decimal::from(5);
+        income::db_upsert(&pool, &div).await.unwrap();
+        let mut int = make_interest(
+            1,
+            NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+            Decimal::from(100),
+        );
+        int.tfn_withholding_tax = Decimal::from(47);
+        interest_income::db_upsert(&pool, &int).await.unwrap();
+
+        let result = db_tax_summary(&pool).await.unwrap();
+        assert_eq!(result[0].tfn_withholding_tax, Decimal::from(52)); // 5 + 47
+        assert_eq!(result[0].interest_income, Decimal::from(100)); // stays gross
+    }
+
+    /// A non-AUD interest amount converts to AUD via the ATO rate for the
+    /// month paid — both the gross and the withheld amount.
+    #[tokio::test]
+    async fn db_non_aud_interest_converted_to_aud() {
+        let pool = test_pool().await;
+        // A$1 = 0.50 USD for Mar 2024 → AUD = USD / 0.50.
+        rba_fx_rate::db_import_rate(&pool, "USD", "2024-03", "0.50".parse().unwrap())
+            .await
+            .unwrap();
+        let mut int = make_interest(
+            1,
+            NaiveDate::from_ymd_opt(2024, 3, 15).unwrap(),
+            Decimal::from(100),
+        );
+        int.currency = "USD".to_string();
+        int.tfn_withholding_tax = Decimal::from(10);
+        interest_income::db_upsert(&pool, &int).await.unwrap();
+
+        let result = db_tax_summary(&pool).await.unwrap();
+        assert_eq!(result[0].interest_income, Decimal::from(200)); // 100 / 0.50
+        assert_eq!(result[0].tfn_withholding_tax, Decimal::from(20)); // 10 / 0.50
+    }
+
+    /// A non-AUD interest amount with no ATO rate fails loudly (no silent zero).
+    #[tokio::test]
+    async fn db_non_aud_interest_without_rate_fails_loudly() {
+        let pool = test_pool().await;
+        let mut int = make_interest(
+            1,
+            NaiveDate::from_ymd_opt(2024, 3, 15).unwrap(),
+            Decimal::from(100),
+        );
+        int.currency = "USD".to_string();
+        interest_income::db_upsert(&pool, &int).await.unwrap();
+        assert!(db_tax_summary(&pool).await.is_err());
+    }
+
+    /// The interest line ships in the CSV export.
+    #[tokio::test]
+    async fn db_csv_header_carries_interest_column() {
+        assert!(CSV_HEADER.contains(&"interest_income"));
     }
 
     /// The new deduction columns ship in the CSV export.

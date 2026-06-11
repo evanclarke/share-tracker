@@ -478,6 +478,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn interest_income_ui_present() {
+        let js = app_js_body().await;
+        // The Interest Income CRUD screen drives the /interest_income API,
+        // with the gross amount (incl. TFN withheld) and the withheld amount.
+        assert!(js.contains("/interest_income"));
+        assert!(js.contains("Interest Income"));
+        assert!(js.contains("Gross amount"));
+        // The tax-summary interest column is classified as money so it
+        // formats automatically when the report response carries it.
+        assert!(js.contains("interest_income"));
+    }
+
+    #[tokio::test]
     async fn investment_expenses_ui_present() {
         let js = app_js_body().await;
         // The Investment Expenses CRUD screen drives the /investment_expenses API,

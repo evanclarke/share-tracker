@@ -210,6 +210,19 @@ An unreferenced trade edits and deletes freely.
 
 **Tax-deferred amount (non-AMIT trust distributions):** a `trust_income` record can optionally carry `tax_deferred_amount` (decimal, ≥ 0) — the statement's tax-deferred amount, which for a non-AMIT unit trust is a CGT event E4 cost-base reduction (`docs/ato/cgt-non-assessable-payments.md`). The field is **informational**: no calculation reads it, and recording it changes nothing by itself — the reduction is entered as a `ReturnOfCapital` [corporate action](#corporate-actions) on the listing, exactly as before. Its purpose is the [E4 cross-check report](#tax-deferred-e4-cross-check), which flags every row whose non-zero amount has no same-FY action, so a faithfully keyed statement can't silently leave the cost base overstated. Supplying it on a non-trust row returns `422` (a company's non-assessable payment is entered as the corporate action directly; also CHECK-enforced in the schema), as does a negative value.
 
+## Interest income
+
+Interest income (`docs/ato/tax-return-labels-2026.md`, question 10 — Gross interest): bank, term-deposit, or broker-cash interest. Interest has no listing, so it is its own entity rather than an [income](#income) record. The [tax summary](#tax-summary) reports the year's gross as its `interest_income` line, includes it in gross assessable investment income, and joins the TFN amount withheld to the combined withholding line.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/interest_income` | List all interest income records |
+| `GET` | `/interest_income/:id` | Get one interest income record |
+| `PUT` | `/interest_income/:id` | Create or update an interest income record |
+| `DELETE` | `/interest_income/:id` | Delete an interest income record |
+
+Fields: `date_paid` (its month sets the financial year and the ATO FX conversion month), `amount` (the **gross** interest including any TFN amount withheld — the return's 10L convention), `tfn_withholding_tax` (the withheld amount, 10M), `currency` (defaults to AUD), an optional free-text `source` description (e.g. the bank account — informational only), and an optional `holding_account_id` link for interest paid on a portfolio account such as a broker cash account (NULL for an ordinary bank account; informational only). `PUT` returns `422` for an unrecognised `currency` or `holding_account_id`.
+
 ## Investment expenses
 
 Deductible investment expenses (`docs/ato/investment-income-deductions.md`, `docs/ato/dividend-income-deductions.md`): the cost of earning assessable investment income — interest on money borrowed to buy income-producing shares, management/adviser fees, account-keeping fees, and subscriptions. The [tax summary](#tax-summary) nets these against gross assessable investment income per Australian financial year.
@@ -892,7 +905,9 @@ Returns one record per Australian financial year (identified by the calendar yea
 
 **Employee share scheme discount** (`docs/ato/employee-share-schemes.md`): [ESS statements](#ess-statements) are aggregated by `taxing_point_date` (July = next FY) into `ess_discount_assessable` — the Item 12 assessable discount (labels D + E + F + G) **net of** the applied $1,000 taxed-upfront reduction — reported separately from dividend/trust income and in AUD (foreign-currency statements converted via the ATO rate for the taxing-point month; no rate ⇒ fails loudly with `500`). `ess_taxed_upfront_reduction` surfaces the reduction applied (`min(A$1,000, the year's taxed-upfront-eligible discount)`); like the FITO cap, the tool applies the de-minimis but the **≤A$180,000 adjusted-taxable-income eligibility test is the user's responsibility** (an ineligible taxpayer adds the reduction back). `ess_foreign_source_discount` is the foreign-source portion (label A), a memo already within `ess_discount_assessable`. The ESS TFN amounts withheld join the existing `tfn_withholding_tax` line.
 
-**Investment-expense deductions** (`docs/ato/investment-income-deductions.md`, `docs/ato/dividend-income-deductions.md`): [investment expenses](#investment-expenses) are aggregated by `date_incurred` (July = next FY) into per-type lines — `deductions_loan_interest`, `deductions_management_fee`, `deductions_advice_fee`, `deductions_account_keeping_fee`, `deductions_subscription`, `deductions_other` — and `deductions_total`, each the recorded post-apportionment deductible amount in AUD (foreign-currency expenses converted via the ATO rate for the month incurred; no rate ⇒ fails loudly with `500`). `gross_assessable_investment_income` sums the report's existing assessable income lines (`dividends_assessable` + `foreign_source_income` + the six AMMA income components), and `net_assessable_investment_income` = `gross_assessable_investment_income − deductions_total`. The gross figures are retained unchanged. The gross deliberately excludes the franking-credit gross-up and FITO (offset lines), conduit foreign income (NANE), the ESS discount (employment income), and capital gains (the [net capital gain](#net-capital-gain) report); the LIC capital gain deduction is distinct and is not folded into the net figure.
+**Interest income** (`docs/ato/tax-return-labels-2026.md`, question 10): [interest income](#interest-income) records are aggregated by `date_paid` (July = next FY) into `interest_income` — the year's gross interest in AUD (foreign-currency amounts converted via the ATO rate for the month paid; no rate ⇒ fails loudly with `500`). The gross figure includes any TFN amount withheld (the 10L convention); the withheld amount itself joins the existing `tfn_withholding_tax` line.
+
+**Investment-expense deductions** (`docs/ato/investment-income-deductions.md`, `docs/ato/dividend-income-deductions.md`): [investment expenses](#investment-expenses) are aggregated by `date_incurred` (July = next FY) into per-type lines — `deductions_loan_interest`, `deductions_management_fee`, `deductions_advice_fee`, `deductions_account_keeping_fee`, `deductions_subscription`, `deductions_other` — and `deductions_total`, each the recorded post-apportionment deductible amount in AUD (foreign-currency expenses converted via the ATO rate for the month incurred; no rate ⇒ fails loudly with `500`). `gross_assessable_investment_income` sums the report's existing assessable income lines (`dividends_assessable` + `interest_income` + `foreign_source_income` + the six AMMA income components), and `net_assessable_investment_income` = `gross_assessable_investment_income − deductions_total`. The gross figures are retained unchanged. The gross deliberately excludes the franking-credit gross-up and FITO (offset lines), conduit foreign income (NANE), the ESS discount (employment income), and capital gains (the [net capital gain](#net-capital-gain) report); the LIC capital gain deduction is distinct and is not folded into the net figure.
 
 ```
 GET /portfolio/tax-summary/export
@@ -905,6 +920,7 @@ The label row's first cell is `ato_labels_2026`, naming the form year the mappin
 | Column | Label | Meaning |
 |--------|-------|---------|
 | `dividends_assessable` | `11S + 11T` | The single column is unfranked (11S) + franked (11T) dividends summed; split per the underlying income records |
+| `interest_income` | `10L` | Gross interest, including any TFN amount withheld (the withheld amount is inside the `tfn_withholding_tax` column) |
 | `foreign_source_income`, `amma_foreign_income` | `20E + 20M` | Assessable foreign source income (20E gross; 20M is its net-of-expenses counterpart — with no foreign-side expenses recorded the two are equal) |
 | `lic_capital_gain_deduction` | `D8` | The 50% LIC capital gain deduction is claimed at question D8 *Dividend deductions* |
 | `amma_australian_interest`, `amma_dividends_unfranked`, `amma_net_rent`, `amma_other_income` | `13U` | Non-primary production trust income components |
@@ -912,7 +928,7 @@ The label row's first cell is `ato_labels_2026`, naming the form year the mappin
 | `amma_cgt_*`, `amma_capital_losses_applied` | `18 (working)` | Inputs to question 18 — the [net-capital-gain export](#net-capital-gain) carries the final 18H/18A/18V figures |
 | `franking_credits` | `11U / 13Q` | Claimable credits from direct dividends (11U) and trust distributions (13Q), summed |
 | `foreign_tax_offsets` | `20O` | FITO within the A$1,000 de-minimis (the excess column is unlabelled — claimable only per the taxpayer's own offset-limit calculation) |
-| `tfn_withholding_tax` | `11V / 13R / 12C` | TFN credits from dividends, trust distributions, and ESS discounts, summed |
+| `tfn_withholding_tax` | `10M / 11V / 13R / 12C` | TFN credits from interest, dividends, trust distributions, and ESS discounts, summed |
 | `ess_discount_assessable` | `12B` | *Total assessable discount amount*, already net of the applied $1,000 taxed-upfront reduction |
 | `ess_foreign_source_discount` | `12A` | Foreign-source ESS discount memo (for the question 20 FITO claim) |
 | `deductions_*`, `deductions_total` | `D7 / D8` | Expenses of earning interest income at D7, dividend/distribution income at D8 — the per-type split between the two questions is the taxpayer's, per where the income belongs |

@@ -174,6 +174,20 @@ export const ENTITIES = [
     attachOwner: 'income_id',
   },
   {
+    slug: 'interest_income', title: 'Interest Income', group: 'Activity', api: '/interest_income',
+    desc: 'Interest income — bank, term-deposit, or broker-cash interest (it has no listing, so it isn’t an Income row). Enter the gross amount as the statement shows it, including any TFN amount withheld; the tax summary reports the year’s gross interest (question 10 label L), counts it in gross assessable investment income, and joins the TFN amount to the withholding line (label M).',
+    keyFields: [int('id', 'ID', { auto: true })],
+    fields: [
+      dt('date_paid', 'Date paid', { required: true, hint: 'Sets the financial year the interest falls in and the ATO FX month for a non-AUD amount.' }),
+      dec('amount', 'Gross amount', { required: true, hint: 'Include any TFN amount withheld — the gross figure is declared; the withheld amount is entered below.' }),
+      dec('tfn_withholding_tax', 'TFN withholding tax'),
+      fk('currency', 'Currency', 'currencies', { required: true, encode: 'string', default: 'AUD' }),
+      txt('source', 'Source', { optional: true, default: '', hint: 'Where the interest came from, e.g. the bank account or term deposit.' }),
+      fk('holding_account_id', 'Holding account', 'holdingAccounts', { optional: true, default: '', hint: 'Optional — leave blank for interest from outside the portfolio’s accounts (an ordinary bank account).' }),
+    ],
+    columns: ['id', 'date_paid', 'amount', 'tfn_withholding_tax', 'currency', 'source', 'holding_account_id'],
+  },
+  {
     slug: 'investment_expenses', title: 'Investment Expenses', group: 'Activity', api: '/investment_expenses',
     desc: 'Deductible investment expenses — the cost of earning assessable investment income: interest on money borrowed to buy income-producing shares, management/adviser fees, account-keeping fees, and subscriptions. Enter the amount as the deductible figure (post-apportionment — the portion you have determined is income-producing); the tax summary nets these against gross assessable investment income per financial year. Brokerage is not an expense here (it forms the CGT cost base on the trade) and the LIC capital gain deduction is its own income field.',
     keyFields: [int('id', 'ID', { auto: true })],
