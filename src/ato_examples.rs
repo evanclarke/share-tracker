@@ -52,6 +52,12 @@
 //!   LPR's legal costs are includable in the cost base, a judgement made
 //!   before entry; the includable figure enters as the inheritance's LPR
 //!   expenditure, exercised by the Maria/Antonio test below.
+//! - `docs/ato/crypto-cgt.md` "Example: market value of old crypto asset
+//!   determines its disposal proceeds" (Katrina's Coin A → Coin D swap) —
+//!   operationally identical to the "new asset" example reproduced below:
+//!   either way the swap is entered as a manual Sell at the swap's market
+//!   value, and which side supplies that valuation is a judgement made
+//!   before entry, so the example would exercise nothing new.
 //! - "Guide to foreign income tax offset rules 2025" Example 16 (Anna,
 //!   ato.gov.au law view SAV/FOROFFSET/00004) — the FITO offset-limit
 //!   calculation compares personal income-tax liabilities with and without the
