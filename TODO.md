@@ -4,15 +4,6 @@ Items are only marked done when a passing test exists for them.
 
 Completed and decided (out-of-scope / not-reproducible) sections are archived in [DONE.md](DONE.md) to keep this list focused on active work. When a section here is fully done, move it to DONE.md rather than leaving it — see CLAUDE.md.
 
-## Tax-return label mapping on the CSV exports (2026-06-10)
-
-(REQUIREMENTS 2026-06-10.)
-
-- [ ] Verify the current year's myTax/paper labels from the ATO instructions and mirror the label reference into `docs/ato/` (+ `OVERVIEW.md`), recording which year's form the mapping targets
-- [ ] Carry the mapping on the exports themselves (second header row or label column) without changing existing columns; document the full mapping in `docs/API.md`
-- [ ] Tests: export carries the labels; existing column assertions unchanged
-- [ ] Docs: `docs/API.md`, README
-
 ## Interest income (2026-06-10)
 
 (REQUIREMENTS 2026-06-10. The `income` entity is listing-keyed, so interest needs its own entity.)

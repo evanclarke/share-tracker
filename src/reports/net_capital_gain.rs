@@ -119,6 +119,29 @@ const CSV_HEADER: &[&str] = &[
     "taxpayer_basis",
 ];
 
+/// ATO tax-return label per `CSV_HEADER` column (same order), exported as the
+/// second header row. Labels are from the **2026** individual tax return
+/// (`docs/ato/tax-return-labels-2026.md` — re-verify when the form year
+/// changes; the first cell names the form year). `18H (component)` = the two
+/// gross-gain columns sum to label 18H; `18 (working)` = an intermediate step
+/// of question 18's calculation with no label of its own; empty =
+/// informational. The full mapping rationale is in `docs/API.md`.
+const CSV_ATO_LABELS: &[&str] = &[
+    export::ATO_LABELS_MARKER, // tax_year
+    "18H (component)",         // discount_eligible_gains
+    "18H (component)",         // other_gains
+    "18 (working)",            // capital_losses
+    "18V (prior year)",        // capital_loss_brought_forward
+    "18 (working)",            // net_discount_eligible_gain
+    "18 (working)",            // net_other_gain
+    "18 (working)",            // cgt_discount
+    "18A",                     // net_capital_gain
+    "18V",                     // capital_loss_carried_forward
+    "",                        // cgt_event_e10_gain (informational)
+    "",                        // cgt_event_g1_gain (informational)
+    "",                        // taxpayer_basis
+];
+
 /// Gross gains and losses accumulated for one tax year before netting.
 #[derive(Default, Clone)]
 struct GrossBuckets {
@@ -512,7 +535,8 @@ async fn net_capital_gain_export_handler(
     State(pool): State<SqlitePool>,
 ) -> Result<Response, ApiError> {
     let rows = db_net_capital_gain(&pool).await.map_err(ApiError::from)?;
-    export::csv_response("net-capital-gain.csv", CSV_HEADER, &rows).map_err(ApiError::from)
+    export::csv_response("net-capital-gain.csv", CSV_HEADER, CSV_ATO_LABELS, &rows)
+        .map_err(ApiError::from)
 }
 
 // ---------------------------------------------------------------------------
@@ -1938,6 +1962,11 @@ mod tests {
         let mut lines = csv.lines();
         // Header names every NetCapitalGainYear field, in declaration order.
         assert_eq!(lines.next().unwrap(), CSV_HEADER.join(","));
+        // Second header row: the ATO tax-return label per column, first cell
+        // naming the form year the mapping targets.
+        let labels = lines.next().unwrap();
+        assert_eq!(labels, CSV_ATO_LABELS.join(","));
+        assert!(labels.starts_with(&format!("{},", export::ATO_LABELS_MARKER)));
         let fields: Vec<&str> = lines.next().unwrap().split(',').collect();
         assert_eq!(fields.len(), CSV_HEADER.len());
         assert_eq!(fields[0], "2025"); // tax_year
@@ -1964,7 +1993,33 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let csv = String::from_utf8(bytes.to_vec()).unwrap();
-        assert_eq!(csv, CSV_HEADER.join(",") + "\n");
+        assert_eq!(
+            csv,
+            CSV_HEADER.join(",") + "\n" + &CSV_ATO_LABELS.join(",") + "\n"
+        );
+    }
+
+    /// Each exported column's tax-return label sits under its column (same
+    /// index in both rows): the headline figures map per
+    /// docs/ato/tax-return-labels-2026.md.
+    #[tokio::test]
+    async fn db_ato_labels_align_with_their_columns() {
+        assert_eq!(CSV_HEADER.len(), CSV_ATO_LABELS.len());
+        let label_of = |col: &str| {
+            let i = CSV_HEADER.iter().position(|c| *c == col).unwrap();
+            CSV_ATO_LABELS[i]
+        };
+        assert_eq!(label_of("net_capital_gain"), "18A");
+        assert_eq!(label_of("capital_loss_carried_forward"), "18V");
+        assert_eq!(label_of("capital_loss_brought_forward"), "18V (prior year)");
+        // 18H (total current year capital gains) is the sum of the two gross
+        // gain columns — both marked as its components.
+        assert_eq!(label_of("discount_eligible_gains"), "18H (component)");
+        assert_eq!(label_of("other_gains"), "18H (component)");
+        // Informational columns report at no label.
+        assert_eq!(label_of("cgt_event_e10_gain"), "");
+        assert_eq!(label_of("cgt_event_g1_gain"), "");
+        assert_eq!(label_of("taxpayer_basis"), "");
     }
 
     /// A scrip-for-scrip rollover produces no net capital gain in the

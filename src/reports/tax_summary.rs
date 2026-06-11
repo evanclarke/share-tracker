@@ -161,6 +161,49 @@ const CSV_HEADER: &[&str] = &[
     "taxpayer_basis",
 ];
 
+/// ATO tax-return label per `CSV_HEADER` column (same order), exported as the
+/// second header row. Labels are from the **2026** individual tax return
+/// (`docs/ato/tax-return-labels-2026.md` — re-verify when the form year
+/// changes; the first cell names the form year). Empty = the column reports at
+/// no label (informational or a derived total); `18 (working)` = an input to
+/// question 18's net-capital-gain calculation, whose final 18H/18A/18V figures
+/// the net-capital-gain export carries. The full mapping rationale is in
+/// `docs/API.md`.
+const CSV_ATO_LABELS: &[&str] = &[
+    export::ATO_LABELS_MARKER, // tax_year
+    "11S + 11T",               // dividends_assessable (unfranked + franked)
+    "20E + 20M",               // foreign_source_income
+    "D8",                      // lic_capital_gain_deduction (claimed at D8)
+    "13U",                     // amma_australian_interest
+    "13U",                     // amma_dividends_unfranked
+    "13C",                     // amma_franked_dividends
+    "13U",                     // amma_net_rent
+    "20E + 20M",               // amma_foreign_income
+    "13U",                     // amma_other_income
+    "18 (working)",            // amma_cgt_discount_gains
+    "18 (working)",            // amma_cgt_indexation_gains
+    "18 (working)",            // amma_cgt_other_gains
+    "18 (working)",            // amma_capital_losses_applied
+    "11U / 13Q",               // franking_credits
+    "",                        // franking_credits_denied (informational)
+    "20O",                     // foreign_tax_offsets
+    "",                        // foreign_tax_offset_excess (informational)
+    "11V / 13R / 12C",         // tfn_withholding_tax
+    "12B",                     // ess_discount_assessable
+    "",                        // ess_taxed_upfront_reduction (inside 12B vs 12D)
+    "12A",                     // ess_foreign_source_discount
+    "",                        // gross_assessable_investment_income (derived)
+    "D7 / D8",                 // deductions_loan_interest
+    "D7 / D8",                 // deductions_management_fee
+    "D7 / D8",                 // deductions_advice_fee
+    "D7 / D8",                 // deductions_account_keeping_fee
+    "D7 / D8",                 // deductions_subscription
+    "D7 / D8",                 // deductions_other
+    "D7 / D8",                 // deductions_total
+    "",                        // net_assessable_investment_income (derived)
+    "",                        // taxpayer_basis
+];
+
 fn zero_summary(tax_year: i32) -> TaxYearSummary {
     TaxYearSummary {
         tax_year,
@@ -504,7 +547,8 @@ async fn tax_summary_handler(
 /// The same per-year rows as the JSON report, as a downloadable tax-return-ready CSV.
 async fn tax_summary_export_handler(State(pool): State<SqlitePool>) -> Result<Response, ApiError> {
     let rows = db_tax_summary(&pool).await.map_err(ApiError::from)?;
-    export::csv_response("tax-summary.csv", CSV_HEADER, &rows).map_err(ApiError::from)
+    export::csv_response("tax-summary.csv", CSV_HEADER, CSV_ATO_LABELS, &rows)
+        .map_err(ApiError::from)
 }
 
 #[cfg(test)]
@@ -1313,11 +1357,43 @@ mod tests {
         let mut lines = csv.lines();
         // Header names every TaxYearSummary field, in declaration order.
         assert_eq!(lines.next().unwrap(), CSV_HEADER.join(","));
+        // Second header row: the ATO tax-return label per column, first cell
+        // naming the form year the mapping targets.
+        let labels = lines.next().unwrap();
+        assert_eq!(labels, CSV_ATO_LABELS.join(","));
+        assert!(labels.starts_with(&format!("{},", export::ATO_LABELS_MARKER)));
         // One record per tax year, decimal figures rendered exactly.
         let row = lines.next().unwrap();
         assert!(row.starts_with("2024,100,"));
         assert!(row.contains(",30.50,")); // franking_credits keeps its precision
         assert_eq!(lines.next(), None);
+    }
+
+    /// Each exported column's tax-return label sits under its column (same
+    /// index in both rows): the headline figures map per
+    /// docs/ato/tax-return-labels-2026.md.
+    #[tokio::test]
+    async fn db_ato_labels_align_with_their_columns() {
+        assert_eq!(CSV_HEADER.len(), CSV_ATO_LABELS.len());
+        let label_of = |col: &str| {
+            let i = CSV_HEADER.iter().position(|c| *c == col).unwrap();
+            CSV_ATO_LABELS[i]
+        };
+        assert_eq!(label_of("dividends_assessable"), "11S + 11T");
+        assert_eq!(label_of("franking_credits"), "11U / 13Q");
+        assert_eq!(label_of("amma_franked_dividends"), "13C");
+        assert_eq!(label_of("amma_australian_interest"), "13U");
+        assert_eq!(label_of("foreign_source_income"), "20E + 20M");
+        assert_eq!(label_of("foreign_tax_offsets"), "20O");
+        assert_eq!(label_of("tfn_withholding_tax"), "11V / 13R / 12C");
+        assert_eq!(label_of("ess_discount_assessable"), "12B");
+        assert_eq!(label_of("ess_foreign_source_discount"), "12A");
+        assert_eq!(label_of("lic_capital_gain_deduction"), "D8");
+        assert_eq!(label_of("deductions_total"), "D7 / D8");
+        // Informational/derived columns report at no label.
+        assert_eq!(label_of("franking_credits_denied"), "");
+        assert_eq!(label_of("net_assessable_investment_income"), "");
+        assert_eq!(label_of("taxpayer_basis"), "");
     }
 
     // ESS discount (docs/ato/employee-share-schemes.md): the assessable
@@ -1670,6 +1746,9 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let csv = String::from_utf8(bytes.to_vec()).unwrap();
-        assert_eq!(csv, CSV_HEADER.join(",") + "\n");
+        assert_eq!(
+            csv,
+            CSV_HEADER.join(",") + "\n" + &CSV_ATO_LABELS.join(",") + "\n"
+        );
     }
 }

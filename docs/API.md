@@ -843,7 +843,17 @@ Response fields: `tax_year`, `discount_eligible_gains`, `other_gains`, `capital_
 GET /portfolio/net-capital-gain/export
 ```
 
-The same per-year records as a downloadable tax-return-ready CSV (`Content-Type: text/csv; charset=utf-8`, `Content-Disposition: attachment; filename="net-capital-gain.csv"`): a header row naming the columns (the response fields above, in that order), then one record per financial year. An empty report still returns the header row.
+The same per-year records as a downloadable tax-return-ready CSV (`Content-Type: text/csv; charset=utf-8`, `Content-Disposition: attachment; filename="net-capital-gain.csv"`): a header row naming the columns (the response fields above, in that order), a **second header row carrying each column's ATO tax-return label**, then one record per financial year. An empty report still returns both header rows.
+
+The label row's first cell is `ato_labels_2026`, naming the form year the mapping targets — the **Individual tax return 2026** (paper supplementary section; myTax shows the same labels). Labels shift year to year; the verified reference is `docs/ato/tax-return-labels-2026.md`. The mapping (columns not listed report at no label — intermediate workings or informational figures):
+
+| Column | Label | Meaning |
+|--------|-------|---------|
+| `discount_eligible_gains` + `other_gains` | `18H (component)` | The two gross-gain columns **sum** to label 18H, *Total current year capital gains* (AMMA discount gains already grossed up ×2 in `discount_eligible_gains`) |
+| `capital_losses`, `net_discount_eligible_gain`, `net_other_gain`, `cgt_discount` | `18 (working)` | Steps of question 18's calculation with no label of their own |
+| `capital_loss_brought_forward` | `18V (prior year)` | Equals label 18V from the **previous** year's return |
+| `net_capital_gain` | `18A` | *Net capital gain* |
+| `capital_loss_carried_forward` | `18V` | *Net capital losses carried forward to later income years* |
 
 ### Pre-sale what-if
 
@@ -888,7 +898,26 @@ Returns one record per Australian financial year (identified by the calendar yea
 GET /portfolio/tax-summary/export
 ```
 
-The same per-year records as a downloadable tax-return-ready CSV (`Content-Type: text/csv; charset=utf-8`, `Content-Disposition: attachment; filename="tax-summary.csv"`): a header row naming the columns (the response fields, in field order, from `tax_year` through `taxpayer_basis`), then one record per financial year. An empty report still returns the header row.
+The same per-year records as a downloadable tax-return-ready CSV (`Content-Type: text/csv; charset=utf-8`, `Content-Disposition: attachment; filename="tax-summary.csv"`): a header row naming the columns (the response fields, in field order, from `tax_year` through `taxpayer_basis`), a **second header row carrying each column's ATO tax-return label**, then one record per financial year. An empty report still returns both header rows.
+
+The label row's first cell is `ato_labels_2026`, naming the form year the mapping targets — the **Individual tax return 2026** (paper return + supplementary section; myTax shows the same labels). Labels shift year to year; the verified reference is `docs/ato/tax-return-labels-2026.md`. The mapping:
+
+| Column | Label | Meaning |
+|--------|-------|---------|
+| `dividends_assessable` | `11S + 11T` | The single column is unfranked (11S) + franked (11T) dividends summed; split per the underlying income records |
+| `foreign_source_income`, `amma_foreign_income` | `20E + 20M` | Assessable foreign source income (20E gross; 20M is its net-of-expenses counterpart — with no foreign-side expenses recorded the two are equal) |
+| `lic_capital_gain_deduction` | `D8` | The 50% LIC capital gain deduction is claimed at question D8 *Dividend deductions* |
+| `amma_australian_interest`, `amma_dividends_unfranked`, `amma_net_rent`, `amma_other_income` | `13U` | Non-primary production trust income components |
+| `amma_franked_dividends` | `13C` | *Franked distributions from trusts* — on the return 13C **includes** the attached franking credits; this column is the statement's franked-distribution component |
+| `amma_cgt_*`, `amma_capital_losses_applied` | `18 (working)` | Inputs to question 18 — the [net-capital-gain export](#net-capital-gain) carries the final 18H/18A/18V figures |
+| `franking_credits` | `11U / 13Q` | Claimable credits from direct dividends (11U) and trust distributions (13Q), summed |
+| `foreign_tax_offsets` | `20O` | FITO within the A$1,000 de-minimis (the excess column is unlabelled — claimable only per the taxpayer's own offset-limit calculation) |
+| `tfn_withholding_tax` | `11V / 13R / 12C` | TFN credits from dividends, trust distributions, and ESS discounts, summed |
+| `ess_discount_assessable` | `12B` | *Total assessable discount amount*, already net of the applied $1,000 taxed-upfront reduction |
+| `ess_foreign_source_discount` | `12A` | Foreign-source ESS discount memo (for the question 20 FITO claim) |
+| `deductions_*`, `deductions_total` | `D7 / D8` | Expenses of earning interest income at D7, dividend/distribution income at D8 — the per-type split between the two questions is the taxpayer's, per where the income belongs |
+
+Unlabelled columns are informational or derived: `franking_credits_denied` and `foreign_tax_offset_excess` (amounts *excluded* from the claimable lines), `ess_taxed_upfront_reduction` (already inside 12B), `gross_assessable_investment_income` / `net_assessable_investment_income` (derived totals), `taxpayer_basis`.
 
 ### Exchange MIC validation
 
