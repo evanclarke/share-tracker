@@ -58,6 +58,20 @@
 //!   either way the swap is entered as a manual Sell at the swap's market
 //!   value, and which side supplies that valuation is a judgement made
 //!   before entry, so the example would exercise nothing new.
+//! - `docs/ato/forex-common-transactions.md` scenario 1 (Tom) and the FRE 2
+//!   tail of scenario 2 (Lisa's $1,075 forex realisation loss) — both are
+//!   Div 775 forex realisation outcomes on the contract-to-settlement window
+//!   (under Tom's and Lisa's elections out of the 12-month rule, revenue
+//!   amounts), and the forex measures are not modelled; Lisa's CGT side
+//!   (cost base and proceeds translated at the trade dates) is reproduced
+//!   below.
+//! - `docs/ato/forex-cgt-12-month-rule.md` (Art Ltd, Eleanor) — the default
+//!   12-month-rule integration of the settlement-window forex movement (a
+//!   cost-base adjustment on an acquisition; a CGT event K10/K11 capital
+//!   gain/loss on a disposal) is not modelled: trades convert at the monthly
+//!   rate of the trade date, so a same-rate-month T+2 settlement nets to nil
+//!   by construction, and the K10/K11 events have no entry or computation
+//!   path (noted in `docs/ato/OVERVIEW.md`, "FX conversion granularity").
 //! - "Guide to foreign income tax offset rules 2025" Example 16 (Anna,
 //!   ato.gov.au law view SAV/FOROFFSET/00004) — the FITO offset-limit
 //!   calculation compares personal income-tax liabilities with and without the
@@ -1747,4 +1761,233 @@ async fn inherited_assets_example_maria_antonio_lpr_expenditure() {
         parcels[0].acquisition_date,
         chrono::NaiveDate::from_ymd_opt(2010, 5, 1).unwrap()
     );
+}
+
+/// `docs/ato/cgt-event-timing.md` (QC 66016) — "Example: contract of sale" (Sue).
+///
+/// > In June 2024, Sue entered into a contract to sell land she owned. The
+/// > contract settled in October 2024. Sue made the capital gain in the
+/// > 2023–24 income year (the year she entered into the contract), not the
+/// > 2024–25 income year (the year settlement took place).
+///
+/// A Sell's `date` is the contract date and `settlement_date` is recorded
+/// separately, so the FY-keyed reports must bucket the gain by the contract
+/// date alone. The example states no prices; stand-ins give a $500 gain
+/// (held > 12 months, so it is also discount-eligible — incidental to the
+/// timing rule under test). The land is entered as 1 unit, per the property
+/// convention above.
+#[tokio::test]
+async fn cgt_event_timing_example_sue_contract_date_not_settlement() {
+    let pool = test_pool().await;
+    put_listing(&pool, 1, "LND").await;
+    put_buy(&pool, 1, 1, "2022-05-01", "1", "1000", "0").await;
+
+    // Contracted June 2024, settled October 2024.
+    api_put(
+        &pool,
+        "/sells/2",
+        json!({
+            "date": "2024-06-14",
+            "settlement_date": "2024-10-15",
+            "listing_id": 1,
+            "average_price": "1500",
+            "quantity": "1",
+            "currency": "AUD",
+            "brokerage": "0",
+            "gst_on_brokerage": "0",
+            "brokerage_currency": "AUD",
+            "fx_rate": "1",
+            "allocations": [
+                { "purchase_trade_id": 1, "quantity_allocated": "1" }
+            ],
+        }),
+    )
+    .await;
+
+    // The gain belongs to FY2023–24 (the contract year) — and no FY2024–25
+    // row exists at all, the settlement date having contributed nothing.
+    let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net-capital-gain").await;
+    assert_eq!(years.len(), 1, "one FY only — the contract year");
+    assert_eq!(years[0].tax_year, 2024, "FY ending 30 June 2024");
+    assert_eq!(years[0].discount_eligible_gains, dec("500"));
+}
+
+/// `docs/ato/forex-common-transactions.md` (QC 18322) — "Example: scenario 2"
+/// (Lisa), the CGT side.
+///
+/// > Lisa acquires shares in a US company as a capital investment for a cost
+/// > of US$15,000 on 1 July 2004 when the exchange rate is A$1.00 = US$0.50.
+/// > The cost base of the shares to Lisa is A$30,000 … On 1 March 2005 Lisa
+/// > enters into a contract to sell the shares for US$20,000 when the
+/// > exchange rate is A$1.00 = US$0.60. The capital proceeds for the disposal
+/// > of the shares on that date is equivalent to A$33,333 … Lisa makes a gain
+/// > of A$3,333 on the disposal of the shares ($33,333 − $30,000).
+///
+/// Cost base and proceeds each translate at their own trade date's rate
+/// (s 960-50(6) item 5), never as a US$ gain converted once. The conversion
+/// here uses the monthly ATO/RBA rate for each trade month, seeded to the
+/// example's rates, and the trades' own `fx_rate` is left at 1 to prove the
+/// fallback is not what converts. The ATO's figures are whole-dollar
+/// rounded; the system keeps the exact decimals (US$20,000 / 0.60 =
+/// A$33,333.33…). Lisa's separate $1,075 FRE 2 forex realisation loss on the
+/// settlement window is the forex measures' side, not modelled (see the
+/// module header). Held 1 July 2004 → 1 March 2005 (8 months): no discount.
+#[tokio::test]
+async fn forex_example_lisa_usd_share_cost_base_and_proceeds() {
+    let pool = test_pool().await;
+
+    // The example's exchange rates, as the ATO/RBA monthly reference rate
+    // (USD per 1 AUD) for each trade's month.
+    sqlx::query(
+        "INSERT INTO rba_fx_rates (currency, month, rate) VALUES
+            ('USD', '2004-07', '0.50'), ('USD', '2005-03', '0.60')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // A US company: a USD listing on the seeded XNYS exchange.
+    api_put(
+        &pool,
+        "/listings/1",
+        json!({
+            "exchange_mic": "XNYS",
+            "ticker": "USC",
+            "name": "US Company",
+            "isin": null,
+            "security_type": "Share",
+            "currency": "USD",
+            "amit": false,
+        }),
+    )
+    .await;
+
+    // US$15,000 on 1 July 2004: 1,000 shares at US$15.
+    api_put(
+        &pool,
+        "/trades/1",
+        json!({
+            "trade_type": "Buy",
+            "date": "2004-07-01",
+            "settlement_date": "2004-07-06",
+            "listing_id": 1,
+            "average_price": "15",
+            "quantity": "1000",
+            "currency": "USD",
+            "brokerage": "0",
+            "gst_on_brokerage": "0",
+            "brokerage_currency": "USD",
+            "fx_rate": "1",
+        }),
+    )
+    .await;
+
+    // Sold for US$20,000 by the 1 March 2005 contract; settled 15 March 2005
+    // (the example's settlement date — it must not affect the CGT figures).
+    api_put(
+        &pool,
+        "/sells/2",
+        json!({
+            "date": "2005-03-01",
+            "settlement_date": "2005-03-15",
+            "listing_id": 1,
+            "average_price": "20",
+            "quantity": "1000",
+            "currency": "USD",
+            "brokerage": "0",
+            "gst_on_brokerage": "0",
+            "brokerage_currency": "USD",
+            "fx_rate": "1",
+            "allocations": [
+                { "purchase_trade_id": 1, "quantity_allocated": "1000" }
+            ],
+        }),
+    )
+    .await;
+
+    let gains: Vec<RealisedGainLoss> = api_get(&pool, "/portfolio/realised-gains").await;
+    assert_eq!(gains.len(), 1);
+    let g = &gains[0];
+    assert_eq!(g.cost_base, dec("30000"), "US$15,000 / 0.50");
+    assert_eq!(
+        g.proceeds.round_dp(2),
+        dec("33333.33"),
+        "US$20,000 / 0.60 — the ATO states A$33,333"
+    );
+    assert_eq!(
+        g.capital_gain_loss.round_dp(2),
+        dec("3333.33"),
+        "the ATO states A$3,333"
+    );
+    assert_eq!(g.discount_eligible_gain, Decimal::ZERO, "held 8 months");
+    assert_eq!(g.capital_loss, Decimal::ZERO);
+}
+
+/// `docs/ato/ess-30-day-rule.md` (QC 23058) — "Example 11" (Wyatt), the
+/// 30-day rule.
+///
+/// > On 20 July 2019, Wyatt sells the 400 shares he acquired under the
+/// > tax-deferred scheme, for a total of $1,518. … As the sale is within
+/// > 30 days of the deferred taxing point \[23 June 2019\], the taxing point
+/// > now becomes 20 July 2019 in accordance with the 30-day rule. … the
+/// > discount on the shares is $1,518. Due to the 30-day rule, Wyatt must
+/// > include his discount on his 2020 tax return, not his 2019 tax return.
+///
+/// The 30-day rule is entered as the employer's *amended* ESS statement —
+/// taxing point 20 July 2019, market value the $1,518 sale total — never the
+/// superseded original (23 June 2019, $1,400), which would book the discount
+/// in the wrong FY and a spurious $118 capital gain. Vesting the amended
+/// statement resets the cost base to $1,518 at the sale date, so the
+/// same-day sale realises exactly nil capital gain alongside the FY2020
+/// discount.
+#[tokio::test]
+async fn ess_30_day_rule_example_wyatt_taxing_point_moves_to_the_sale() {
+    let pool = test_pool().await;
+    put_listing(&pool, 1, "PPL").await; // Pepper Pines Ltd
+
+    // The amended statement: 400 shares, taxing point 20 July 2019, market
+    // value $1,518 total ($3.795 per share), all deferral-scheme discount
+    // (label F — no $1,000 taxed-upfront reduction applies).
+    api_put(
+        &pool,
+        "/ess_statements/1",
+        json!({
+            "listing_id": 1,
+            "taxing_point_date": "2019-07-20",
+            "quantity": "400",
+            "market_value_per_share": "3.795",
+            "deferral_discount": "1518",
+            "currency": "AUD",
+        }),
+    )
+    .await;
+
+    // Vest at the moved taxing point: the cost-base-reset Buy.
+    let vest: Trade = api_post(
+        &pool,
+        "/ess_statements/1/vest",
+        json!({}),
+        StatusCode::CREATED,
+    )
+    .await;
+    assert_eq!(vest.date, "2019-07-20".parse().unwrap());
+    assert_eq!(vest.average_price, dec("3.795"));
+
+    // The on-market sale the same day, for the same $1,518.
+    put_sell(&pool, 100, 1, "2019-07-20", "400", "3.795", "0", vest.id).await;
+
+    // The discount lands in FY2019–20 (Wyatt's 2020 return), label F, with
+    // no taxed-upfront reduction.
+    let years: Vec<TaxYearSummary> = api_get(&pool, "/portfolio/tax-summary").await;
+    assert_eq!(years.len(), 1, "no FY2019 income remains once amended");
+    assert_eq!(years[0].tax_year, 2020);
+    assert_eq!(years[0].ess_discount_assessable, dec("1518"));
+    assert_eq!(years[0].ess_taxed_upfront_reduction, Decimal::ZERO);
+
+    // The CGT side: cost base reset to the sale-date market value, so the
+    // sale realises exactly nil gain and nil loss.
+    let gains: Vec<RealisedGainLoss> = api_get(&pool, "/portfolio/realised-gains").await;
+    assert_eq!(gains.len(), 1);
+    assert_eq!(gains[0].capital_gain_loss, Decimal::ZERO);
+    assert_eq!(gains[0].capital_loss, Decimal::ZERO);
 }
