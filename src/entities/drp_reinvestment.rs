@@ -3,9 +3,21 @@
 //! Given a distribution (an `income` row) on a DRP-enrolled holding and the
 //! reinvestment price, this creates the reinvestment Trade (type `DRP`) and
 //! links it back to the distribution (`income.reinvestment_trade_id`) in one
-//! transaction. The reinvestable cash plus any residual brought forward from
-//! the holding's previous reinvestment is spent on whole shares; the leftover
-//! is carried forward or paid out per the enrolment period's residual handling.
+//! transaction. By default the reinvestable cash plus any residual brought
+//! forward from the holding's previous reinvestment is spent on whole shares;
+//! the leftover is carried forward or paid out per the enrolment period's
+//! residual handling.
+//!
+//! A broker plan that allots **fractional shares** (e.g. a US broker DRP)
+//! states the allotted units on its statement and leaves no residual. For
+//! those, the body's optional `units` is the broker's stated figure and is
+//! authoritative: the trade takes exactly that quantity, cross-checked
+//! against the available cash — `units × price` must agree with it to within
+//! one unit-step at the units' stated precision (a figure stated to 3
+//! decimals must be within 0.001 × price), which is the property any
+//! broker-computed allotment has regardless of its rounding direction. The
+//! sub-step difference is statement rounding, not cash: the residual columns
+//! record zero (brought-forward cash, if any, is spent into the purchase).
 //!
 //! Enrolment is checked as at the distribution's ex date (registry practice:
 //! DRP participation is fixed at the record date), falling back to the pay
@@ -50,6 +62,13 @@ use sqlx::{Row, SqlitePool};
 pub struct ReinvestBody {
     /// Per-share price the distribution is reinvested at.
     pub reinvestment_price: Decimal,
+    /// Optional broker-stated fractional allotment. When present it is
+    /// authoritative — the trade takes exactly this quantity — and
+    /// `units × reinvestment_price` is cross-checked against the available
+    /// cash to within one unit-step at the stated precision. Omitted: whole
+    /// shares with residual carry (the registry default).
+    #[serde(default)]
+    pub units: Option<Decimal>,
     /// Optional foreign-per-AUD override for the created DRP trade (defaults to
     /// 1; reports prefer the ATO rate and fall back to this — see `infra::fx`).
     #[serde(default)]
@@ -77,6 +96,15 @@ pub enum ReinvestError {
     AlreadyReinvested,
     /// The reinvestment price is not strictly positive.
     NonPositivePrice,
+    /// The stated units are not strictly positive.
+    NonPositiveUnits,
+    /// The stated units don't spend the available cash at the given price:
+    /// `units × price` differs from it by a full unit-step (at the units'
+    /// stated precision) or more. Carries both figures for the rejection.
+    UnitsCashMismatch {
+        cost: Decimal,
+        available: Decimal,
+    },
 }
 
 impl From<sqlx::Error> for ReinvestError {
@@ -102,6 +130,16 @@ impl From<ReinvestError> for ApiError {
             ),
             ReinvestError::NonPositivePrice => {
                 ApiError::unprocessable("the reinvestment price must be greater than zero")
+            }
+            ReinvestError::NonPositiveUnits => {
+                ApiError::unprocessable("the stated units must be greater than zero")
+            }
+            ReinvestError::UnitsCashMismatch { cost, available } => {
+                ApiError::unprocessable(format!(
+                    "the stated units at the reinvestment price spend {cost}, but the \
+                     reinvestable cash (including any residual brought forward) is {available} \
+                     — they must agree to within one unit-step at the stated precision"
+                ))
             }
             ReinvestError::Db(err) => err.into(),
         }
@@ -132,6 +170,11 @@ pub async fn db_reinvest(
 ) -> Result<Trade, ReinvestError> {
     if body.reinvestment_price <= Decimal::ZERO {
         return Err(ReinvestError::NonPositivePrice);
+    }
+    if let Some(units) = body.units
+        && units <= Decimal::ZERO
+    {
+        return Err(ReinvestError::NonPositiveUnits);
     }
 
     let mut tx = pool.begin().await?;
@@ -236,14 +279,30 @@ pub async fn db_reinvest(
         None => Decimal::ZERO,
     };
 
-    // Spend the available cash on whole shares; the leftover is carried or paid out.
     let available = cash + residual_bf;
-    let quantity = (available / body.reinvestment_price).floor();
-    let cost = quantity * body.reinvestment_price;
-    let leftover = available - cost;
-    let (carried, paid_out) = match handling {
-        ResidualHandling::CarryForward => (leftover, Decimal::ZERO),
-        ResidualHandling::PayOut => (Decimal::ZERO, leftover),
+    let (quantity, carried, paid_out) = match body.units {
+        // Broker-stated fractional allotment: the statement's figure is
+        // authoritative, cross-checked to within one unit-step at its stated
+        // precision (any broker rounding direction lands inside that). The
+        // sub-step difference is statement rounding, not a residual.
+        Some(units) => {
+            let cost = units * body.reinvestment_price;
+            let step = Decimal::new(1, units.scale());
+            if (available - cost).abs() >= step * body.reinvestment_price {
+                return Err(ReinvestError::UnitsCashMismatch { cost, available });
+            }
+            (units, Decimal::ZERO, Decimal::ZERO)
+        }
+        // Registry default: spend the available cash on whole shares; the
+        // leftover is carried or paid out per the period's handling.
+        None => {
+            let quantity = (available / body.reinvestment_price).floor();
+            let leftover = available - quantity * body.reinvestment_price;
+            match handling {
+                ResidualHandling::CarryForward => (quantity, leftover, Decimal::ZERO),
+                ResidualHandling::PayOut => (quantity, Decimal::ZERO, leftover),
+            }
+        }
     };
 
     // DRP units are issued by the registry, not market-settled, so the
@@ -379,8 +438,17 @@ mod tests {
     fn body(price: &str) -> ReinvestBody {
         ReinvestBody {
             reinvestment_price: price.parse().unwrap(),
+            units: None,
             fx_rate: None,
             date: None,
+        }
+    }
+
+    /// Body with the broker's stated fractional allotment.
+    fn body_units(price: &str, units: &str) -> ReinvestBody {
+        ReinvestBody {
+            units: Some(units.parse().unwrap()),
+            ..body(price)
         }
     }
 
@@ -531,6 +599,198 @@ mod tests {
         let trade = db_reinvest(&pool, 1, &body("9")).await.unwrap();
         assert_eq!(trade.quantity, Decimal::from(1));
         assert_eq!(trade.residual_carried_forward, Decimal::ZERO);
+    }
+
+    /// Broker-stated fractional allotment: the statement's units are taken
+    /// exactly — including trailing zeros, so the stored quantity reads back
+    /// as stated — and the residual columns record zero.
+    #[tokio::test]
+    async fn explicit_units_take_the_statements_fractional_allotment() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "USD").await;
+        enrol(&pool, 1, ResidualHandling::CarryForward).await;
+        // $68.47 cash at $136.94 → the statement says 0.500 shares.
+        insert_distribution(&pool, 1, 1, "68.47".parse().unwrap(), Decimal::ZERO).await;
+
+        let trade = db_reinvest(&pool, 1, &body_units("136.94", "0.500"))
+            .await
+            .unwrap();
+        assert_eq!(trade.trade_type, TradeType::DRP);
+        assert_eq!(trade.quantity, "0.500".parse::<Decimal>().unwrap());
+        assert_eq!(trade.average_price, "136.94".parse::<Decimal>().unwrap());
+        assert_eq!(trade.residual_brought_forward, Decimal::ZERO);
+        assert_eq!(trade.residual_carried_forward, Decimal::ZERO);
+        assert_eq!(trade.residual_paid_out, Decimal::ZERO);
+
+        // The stated figure is stored exactly as stated (scale preserved).
+        let stored: String = sqlx::query_scalar("SELECT quantity FROM trades WHERE id = ?")
+            .bind(trade.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(stored, "0.500");
+
+        let inc = income::db_get(&pool, 1).await.unwrap().unwrap();
+        assert_eq!(inc.reinvestment_trade_id, Some(trade.id));
+    }
+
+    /// The cross-check tolerates the statement's own rounding: a real broker
+    /// price (not the derived cash ÷ units) leaves `units × price` within one
+    /// unit-step of the cash, and that passes.
+    #[tokio::test]
+    async fn explicit_units_tolerate_sub_step_statement_rounding() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "USD").await;
+        enrol(&pool, 1, ResidualHandling::CarryForward).await;
+        // 0.501 × 137.05 = 68.66205 vs $68.66 cash — off by $0.00205,
+        // well inside one 0.001 unit-step (0.001 × 137.05 = $0.13705).
+        insert_distribution(&pool, 1, 1, "68.66".parse().unwrap(), Decimal::ZERO).await;
+
+        let trade = db_reinvest(&pool, 1, &body_units("137.05", "0.501"))
+            .await
+            .unwrap();
+        assert_eq!(trade.quantity, "0.501".parse::<Decimal>().unwrap());
+        assert_eq!(trade.residual_carried_forward, Decimal::ZERO);
+        assert_eq!(trade.residual_paid_out, Decimal::ZERO);
+    }
+
+    /// Units that don't spend the cash are rejected and nothing persists: a
+    /// full unit-step (at the stated precision) or more off is a data error,
+    /// not rounding.
+    #[tokio::test]
+    async fn explicit_units_cash_mismatch_is_rejected() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "USD").await;
+        enrol(&pool, 1, ResidualHandling::CarryForward).await;
+        insert_distribution(&pool, 1, 1, "68.66".parse().unwrap(), Decimal::ZERO).await;
+
+        // 0.600 × 137.05 = 82.23 — $13.57 off the $68.66 cash.
+        let err = db_reinvest(&pool, 1, &body_units("137.05", "0.600"))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ReinvestError::UnitsCashMismatch { .. }));
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM trades")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(n, 0);
+
+        // The boundary is exclusive: exactly one unit-step off still rejects
+        // (a broker-computed figure is always strictly inside the step)...
+        insert_distribution(&pool, 2, 1, Decimal::from(60), Decimal::ZERO).await;
+        let err = db_reinvest(&pool, 2, &body_units("100", "0.5")) // step 0.1 → tolerance $10
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ReinvestError::UnitsCashMismatch { .. }));
+        // ...while just inside it passes (coarser stated precision, looser check).
+        insert_distribution(&pool, 3, 1, "59.99".parse().unwrap(), Decimal::ZERO).await;
+        let trade = db_reinvest(&pool, 3, &body_units("100", "0.5"))
+            .await
+            .unwrap();
+        assert_eq!(trade.quantity, "0.5".parse::<Decimal>().unwrap());
+    }
+
+    #[tokio::test]
+    async fn non_positive_units_are_rejected() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "USD").await;
+        enrol(&pool, 1, ResidualHandling::CarryForward).await;
+        insert_distribution(&pool, 1, 1, Decimal::from(100), Decimal::ZERO).await;
+        for units in ["0", "-0.5"] {
+            let err = db_reinvest(&pool, 1, &body_units("9", units))
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, ReinvestError::NonPositiveUnits),
+                "units {units}"
+            );
+        }
+    }
+
+    /// Explicit units go through the same enrolment gate as the default path.
+    #[tokio::test]
+    async fn explicit_units_still_require_enrolment() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "USD").await;
+        insert_distribution(&pool, 1, 1, "68.47".parse().unwrap(), Decimal::ZERO).await;
+        let err = db_reinvest(&pool, 1, &body_units("136.94", "0.500"))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ReinvestError::NotEnrolled { .. }));
+    }
+
+    /// A residual carried forward by an earlier whole-share reinvestment in
+    /// the period is part of the available cash an explicit-units allotment
+    /// spends: it's recorded as brought forward, and nothing is carried on —
+    /// the broker spent the lot.
+    #[tokio::test]
+    async fn explicit_units_spend_the_brought_forward_residual() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AUD").await;
+        enrol(&pool, 1, ResidualHandling::CarryForward).await;
+
+        // Whole-share first: $100 at $9 → 11 shares, $1 carried.
+        insert_distribution(&pool, 1, 1, Decimal::from(100), Decimal::ZERO).await;
+        let first = db_reinvest(&pool, 1, &body("9")).await.unwrap();
+        assert_eq!(first.residual_carried_forward, Decimal::ONE);
+
+        // Fractional next: $8 cash + $1 brought forward = $9 = 0.5 × $18.
+        insert_distribution(&pool, 2, 1, Decimal::from(8), Decimal::ZERO).await;
+        let second = db_reinvest(&pool, 2, &body_units("18", "0.5"))
+            .await
+            .unwrap();
+        assert_eq!(second.quantity, "0.5".parse::<Decimal>().unwrap());
+        assert_eq!(second.residual_brought_forward, Decimal::ONE);
+        assert_eq!(second.residual_carried_forward, Decimal::ZERO);
+        assert_eq!(second.residual_paid_out, Decimal::ZERO);
+    }
+
+    /// Live-data check (REQUIREMENTS 2026-06-12): the nine Morgan Stanley ICE
+    /// dividend reinvestments from the statement archive — entered as plain
+    /// Buys priced net-cash ÷ units while reinvest was whole-share-only — go
+    /// through the reinvest operation with the statements' exact fractional
+    /// units. Figures are the live rows: foreign source income, US
+    /// withholding, the stated units, and the derived per-share price.
+    #[tokio::test]
+    async fn morgan_stanley_ice_fractional_statements_reproduce() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "USD").await;
+        enrol(&pool, 1, ResidualHandling::CarryForward).await;
+
+        // (pay date, gross, US tax withheld, stated units, price)
+        let statements = [
+            ("2024-04-01", "80.55", "12.08", "0.500", "136.94000000"),
+            ("2024-06-28", "80.78", "12.12", "0.501", "137.04590818"),
+            ("2024-09-30", "81.00", "12.15", "0.434", "158.64055300"),
+            ("2024-12-31", "81.20", "12.18", "0.465", "148.43010753"),
+            ("2025-03-31", "111.31", "16.70", "0.539", "175.52875696"),
+            ("2025-06-30", "111.57", "16.74", "0.522", "181.66666667"),
+            ("2025-09-30", "111.82", "16.77", "0.565", "168.23008850"),
+            ("2025-12-31", "112.09", "16.81", "0.582", "163.62542955"),
+            ("2026-03-31", "148.78", "22.32", "0.811", "155.89395808"),
+        ];
+        for (i, (date, gross, withheld, units, price)) in statements.iter().enumerate() {
+            let id = i as i64 + 1;
+            test_support::income(id, 1, date.parse().unwrap())
+                .with(|inc| {
+                    inc.foreign_source_income = gross.parse().unwrap();
+                    inc.foreign_tax_paid = withheld.parse().unwrap();
+                })
+                .insert(&pool)
+                .await;
+            let trade = db_reinvest(&pool, id, &body_units(price, units))
+                .await
+                .unwrap_or_else(|e| panic!("statement {date}: {e:?}"));
+            assert_eq!(trade.trade_type, TradeType::DRP, "statement {date}");
+            let stored: String = sqlx::query_scalar("SELECT quantity FROM trades WHERE id = ?")
+                .bind(trade.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(&stored, units, "statement {date}: exact stated units");
+            assert_eq!(trade.residual_carried_forward, Decimal::ZERO);
+            assert_eq!(trade.residual_paid_out, Decimal::ZERO);
+        }
     }
 
     #[tokio::test]
@@ -858,6 +1118,63 @@ mod tests {
         let trade: Trade = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(trade.trade_type, TradeType::DRP);
         assert_eq!(trade.quantity, Decimal::from(11));
+    }
+
+    #[tokio::test]
+    async fn api_reinvest_with_units_returns_201_with_fractional_trade() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "USD").await;
+        enrol(&pool, 1, ResidualHandling::CarryForward).await;
+        insert_distribution(&pool, 1, 1, "68.47".parse().unwrap(), Decimal::ZERO).await;
+
+        let resp = router()
+            .with_state(pool.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/income/1/reinvest")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"reinvestment_price":"136.94","units":"0.500"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let trade: Trade = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(trade.trade_type, TradeType::DRP);
+        assert_eq!(trade.quantity, "0.500".parse::<Decimal>().unwrap());
+    }
+
+    /// The units/cash mismatch rejection carries both figures so the user can
+    /// see what the entry computes to.
+    #[tokio::test]
+    async fn api_reinvest_units_mismatch_returns_422_with_figures() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "USD").await;
+        enrol(&pool, 1, ResidualHandling::CarryForward).await;
+        insert_distribution(&pool, 1, 1, "68.66".parse().unwrap(), Decimal::ZERO).await;
+        let resp = router()
+            .with_state(pool)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/income/1/reinvest")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"reinvestment_price":"137.05","units":"0.600"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        assert!(text.contains("82.23000"), "body: {text}"); // 0.600 × 137.05
+        assert!(text.contains("68.66"), "body: {text}");
     }
 
     #[tokio::test]

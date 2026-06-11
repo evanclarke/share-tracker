@@ -442,6 +442,11 @@ mod tests {
         assert!(js.contains("'/income/' + id + '/reinvest'"));
         assert!(js.contains("reinvestment_price"));
         assert!(js.contains("Retry from the row’s Reinvest action"));
+        // A fractional broker plan enters the statement's exact units; blank
+        // keeps the whole-share default (the field is omitted from the body).
+        assert!(js.contains("drp_units"));
+        assert!(js.contains("Units allotted (fractional plans)"));
+        assert!(js.contains("body.units = drpUnitsInput.value.trim()"));
         // The generic form honours the wireForm hook's submit extensions.
         assert!(js.contains("transformBody"));
         assert!(js.contains("afterSave"));
@@ -865,6 +870,9 @@ mod tests {
         ] {
             assert!(js.contains(endpoint), "missing action endpoint {endpoint}");
         }
+        // The reinvest action form takes a fractional plan's stated units
+        // (optional — blank keeps the whole-share default).
+        assert!(js.contains("dec('units', 'Units allotted (fractional plans)'"));
     }
 
     #[tokio::test]

@@ -212,17 +212,21 @@ export function wireIncomeEntry(form, existing) {
   updateProductHint();
 
   // DRP tick: only for a distribution not yet reinvested.
-  let drpFlag = null, priceInput = null, drpDateInput = null, drpFxInput = null;
+  let drpFlag = null, priceInput = null, drpUnitsInput = null, drpDateInput = null, drpFxInput = null;
   if (!existing || existing.reinvestment_trade_id == null) {
     drpFlag = el('input', { id: 'f_simple_drp', name: 'simple_drp', type: 'checkbox' });
     priceInput = el('input', { id: 'f_drp_price', name: 'drp_price', type: 'text' });
     priceInput.setAttribute('inputmode', 'decimal');
+    drpUnitsInput = el('input', { id: 'f_drp_units', name: 'drp_units', type: 'text' });
+    drpUnitsInput.setAttribute('inputmode', 'decimal');
     drpDateInput = el('input', { id: 'f_drp_date', name: 'drp_date', type: 'date' });
     drpFxInput = el('input', { id: 'f_drp_fx', name: 'drp_fx', type: 'text', value: '1' });
     drpFxInput.setAttribute('inputmode', 'decimal');
     const drpFields = el('div', null, [
       el('div', { class: 'field' }, [el('label', { for: 'f_drp_price' }, 'Reinvestment price *'), priceInput,
         el('div', { class: 'hint' }, 'Per-unit DRP price from the statement; whole units and the carried residual are computed server-side.')]),
+      el('div', { class: 'field' }, [el('label', { for: 'f_drp_units' }, 'Units allotted (fractional plans)'), drpUnitsInput,
+        el('div', { class: 'hint' }, 'Leave blank for a whole-share registry DRP. For a broker plan that allots fractional shares, enter the statement’s exact units — taken verbatim, cross-checked against the reinvestable cash, no residual.')]),
       el('div', { class: 'field' }, [el('label', { for: 'f_drp_date' }, 'Reinvestment trade date'), drpDateInput,
         el('div', { class: 'hint' }, 'Optional; defaults to the pay date.')]),
       el('div', { class: 'field' }, [el('label', { for: 'f_drp_fx' }, 'Reinvestment FX rate'), drpFxInput]),
@@ -272,6 +276,7 @@ export function wireIncomeEntry(form, existing) {
     afterSave: async function (id) {
       if (!drpFlag || !drpFlag.checked) return null;
       const body = { reinvestment_price: priceInput.value.trim() };
+      if (drpUnitsInput.value.trim() !== '') body.units = drpUnitsInput.value.trim();
       if (drpDateInput.value) body.date = drpDateInput.value;
       if (drpFxInput.value.trim() !== '') body.fx_rate = drpFxInput.value.trim();
       try {

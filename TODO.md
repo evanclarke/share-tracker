@@ -4,15 +4,6 @@ Items are only marked done when a passing test exists for them.
 
 Completed and decided (out-of-scope / not-reproducible) sections are archived in [DONE.md](DONE.md) to keep this list focused on active work. When a section here is fully done, move it to DONE.md rather than leaving it — see CLAUDE.md.
 
-## Fractional-share DRP reinvestment (2026-06-12)
-
-(REQUIREMENTS 2026-06-12: Morgan Stanley reinvests ICE dividends in fractional shares (0.500, 0.434, …) with no residual; the whole-share-only reinvest forced nine plain-Buy workarounds priced net-cash ÷ units.)
-
-- [ ] Reinvest accepts the statement's fractional allotment — explicit `units` (broker figure authoritative, price cross-checked against reinvestable cash) or a per-enrolment whole/fractional mode; the stated units must be representable exactly
-- [ ] Whole-share floor + residual carry stays the default; all existing whole-share tests unchanged
-- [ ] Live-data check: the nine ICE plain-Buy reinvestments are re-enterable through the reinvest operation with the statements' exact fractional units
-- [ ] Docs sync: `docs/API.md` DRP reinvestment section, `docs/SCHEMA.md` if a column is added, README DRP feature bullet, web UI reinvest form
-
 ## ESS statement AUD override (2026-06-12)
 
 (REQUIREMENTS 2026-06-12: employer statements convert at release-date spot, the tax summary at the RBA monthly rate — $65–214/yr apart in the live data; the ATO prefill carries the employer's AUD figure.)
