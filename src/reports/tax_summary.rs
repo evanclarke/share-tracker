@@ -1,5 +1,5 @@
 use crate::domain::tax_year::tax_year_for;
-use crate::infra::decimal::parse_dec;
+use crate::infra::decimal::{parse_dec, row_opt_dec};
 use crate::infra::fx::FxRates;
 use crate::infra::http::ApiError;
 use crate::reports::{export, franking};
@@ -280,6 +280,22 @@ fn aud_field(
     Ok(fx.to_aud(value, currency, date, None)?)
 }
 
+/// AUD figure for an ESS discount label: the statement-AUD override column
+/// (`aud_<field>` — the employer's stated AUD figure, used verbatim) when
+/// present, otherwise the label converted like any other field.
+fn aud_label(
+    fx: &FxRates,
+    row: &sqlx::sqlite::SqliteRow,
+    field: &str,
+    currency: &str,
+    date: NaiveDate,
+) -> Result<Decimal, sqlx::Error> {
+    match row_opt_dec(row, &format!("aud_{field}"))? {
+        Some(stated) => Ok(stated),
+        None => aud_field(fx, row, field, currency, date),
+    }
+}
+
 pub async fn db_tax_summary(pool: &SqlitePool) -> Result<Vec<TaxYearSummary>, sqlx::Error> {
     // One read transaction for the income-side inputs (and the FX rates that
     // convert them), so they come from a single consistent snapshot.
@@ -318,7 +334,9 @@ pub async fn db_tax_summary(pool: &SqlitePool) -> Result<Vec<TaxYearSummary>, sq
     let ess_rows = sqlx::query(
         "SELECT taxing_point_date, taxed_upfront_eligible, taxed_upfront_not_eligible, \
          deferral_discount, pre_2009_cessation_discount, foreign_source_discount, \
-         tfn_withholding, currency \
+         tfn_withholding, currency, aud_taxed_upfront_eligible, \
+         aud_taxed_upfront_not_eligible, aud_deferral_discount, \
+         aud_pre_2009_cessation_discount, aud_foreign_source_discount \
          FROM ess_statements",
     )
     .fetch_all(&mut *tx)
@@ -456,11 +474,15 @@ pub async fn db_tax_summary(pool: &SqlitePool) -> Result<Vec<TaxYearSummary>, sq
 
         let currency: String = row.try_get("currency")?;
         let d = taxing_point;
-        let eligible = aud_field(&fx, row, "taxed_upfront_eligible", &currency, d)?;
-        let not_eligible = aud_field(&fx, row, "taxed_upfront_not_eligible", &currency, d)?;
-        let deferral = aud_field(&fx, row, "deferral_discount", &currency, d)?;
-        let pre_2009 = aud_field(&fx, row, "pre_2009_cessation_discount", &currency, d)?;
-        let foreign = aud_field(&fx, row, "foreign_source_discount", &currency, d)?;
+        // Each discount label prefers the statement-AUD override (the
+        // employer's stated AUD figure, converted at the release-date spot
+        // rate — what the ATO prefill carries) and falls back to the RBA
+        // monthly conversion when absent.
+        let eligible = aud_label(&fx, row, "taxed_upfront_eligible", &currency, d)?;
+        let not_eligible = aud_label(&fx, row, "taxed_upfront_not_eligible", &currency, d)?;
+        let deferral = aud_label(&fx, row, "deferral_discount", &currency, d)?;
+        let pre_2009 = aud_label(&fx, row, "pre_2009_cessation_discount", &currency, d)?;
+        let foreign = aud_label(&fx, row, "foreign_source_discount", &currency, d)?;
         let tfn = aud_field(&fx, row, "tfn_withholding", &currency, d)?;
 
         let s = map
@@ -599,7 +621,7 @@ mod tests {
             amma, ess_statement, income, interest_income, investment_expense, listing, rba_fx_rate,
             trade,
         },
-        test_support::{self, test_pool},
+        test_support::{self, test_pool, ymd},
     };
     use axum::http::StatusCode;
     use axum::{body::Body, http::Request};
@@ -1679,6 +1701,108 @@ mod tests {
         // 1000 / 0.50 = 2000 assessable; foreign memo 2000; not 4000.
         assert_eq!(result[0].ess_discount_assessable, Decimal::from(2000));
         assert_eq!(result[0].ess_foreign_source_discount, Decimal::from(2000));
+    }
+
+    /// A statement-AUD override is reported verbatim — the employer's stated
+    /// AUD figure (release-date spot), not the RBA monthly conversion — while
+    /// labels without an override keep converting via the RBA rate.
+    #[tokio::test]
+    async fn db_ess_statement_aud_override_reported_verbatim() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        // A$1 = 0.50 USD for Sep 2024 → RBA conversion would double the figure.
+        rba_fx_rate::db_import_rate(&pool, "USD", "2024-09", "0.50".parse().unwrap())
+            .await
+            .unwrap();
+        let mut e = make_ess(1, 1, NaiveDate::from_ymd_opt(2024, 9, 1).unwrap());
+        e.currency = "USD".to_string();
+        e.deferral_discount = Decimal::from(1000); // USD; RBA would say 2000 AUD
+        e.aud_deferral_discount = Some("1403.40".parse().unwrap()); // employer's AUD figure
+        e.foreign_source_discount = Decimal::from(1000); // no override → RBA converts
+        ess_statement::db_upsert(&pool, &e).await.unwrap();
+
+        let result = db_tax_summary(&pool).await.unwrap();
+        // The override verbatim, not 2000; the un-overridden memo still converts.
+        assert_eq!(
+            result[0].ess_discount_assessable,
+            "1403.40".parse::<Decimal>().unwrap()
+        );
+        assert_eq!(result[0].ess_foreign_source_discount, Decimal::from(2000));
+    }
+
+    /// The $1,000 taxed-upfront reduction is computed on the overridden AUD
+    /// eligible figure when one is stated.
+    #[tokio::test]
+    async fn db_ess_aud_override_drives_the_taxed_upfront_reduction() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        rba_fx_rate::db_import_rate(&pool, "USD", "2024-09", "0.50".parse().unwrap())
+            .await
+            .unwrap();
+        let mut e = make_ess(1, 1, NaiveDate::from_ymd_opt(2024, 9, 1).unwrap());
+        e.currency = "USD".to_string();
+        e.taxed_upfront_eligible = Decimal::from(1000); // USD; RBA would say 2000 AUD
+        e.aud_taxed_upfront_eligible = Some(Decimal::from(800)); // employer's AUD figure
+        ess_statement::db_upsert(&pool, &e).await.unwrap();
+
+        let result = db_tax_summary(&pool).await.unwrap();
+        // Eligible = 800 (the override), under the cap → reduced by all of it
+        // (the RBA figure of 2000 would have capped the reduction at 1,000).
+        assert_eq!(result[0].ess_taxed_upfront_reduction, Decimal::from(800));
+        assert_eq!(result[0].ess_discount_assessable, Decimal::ZERO);
+    }
+
+    /// Live-data acceptance (REQUIREMENTS 2026-06-12, ESS statement AUD
+    /// override): the real RSU release facts with the employer's stated AUD
+    /// figures entered as statement-AUD overrides reproduce the ATO ESS
+    /// statements exactly — FY2022 10,572; FY2023 9,443; FY2024 11,731;
+    /// FY2025 13,526 (the figures the prefilled return carries) — while the
+    /// year whose annual employer statement hasn't been issued yet (FY2026)
+    /// keeps the RBA monthly conversion.
+    #[tokio::test]
+    async fn db_ess_aud_overrides_reproduce_the_employer_ess_statements() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        // (taxing point, USD deferral discount, employer-stated AUD figure)
+        let releases: [(NaiveDate, &str, Option<&str>); 5] = [
+            (ymd(2022, 2, 7), "7533.12", Some("10572")),
+            (ymd(2023, 2, 6), "6499.20", Some("9443")),
+            (ymd(2024, 2, 5), "7605.00", Some("11731")),
+            (ymd(2025, 2, 12), "8513.94", Some("13526")),
+            (ymd(2026, 2, 12), "7903.48", None), // annual statement not yet issued
+        ];
+        for (i, (taxing_point, usd, aud)) in releases.iter().enumerate() {
+            let month = format!("{}", taxing_point.format("%Y-%m"));
+            rba_fx_rate::db_import_rate(&pool, "USD", &month, "0.64".parse().unwrap())
+                .await
+                .unwrap();
+            let mut e = make_ess(i as i64 + 1, 1, *taxing_point);
+            e.currency = "USD".to_string();
+            e.deferral_discount = usd.parse().unwrap();
+            e.aud_deferral_discount = aud.map(|a| a.parse().unwrap());
+            ess_statement::db_upsert(&pool, &e).await.unwrap();
+        }
+
+        let result = db_tax_summary(&pool).await.unwrap();
+        let by_year: HashMap<i32, &TaxYearSummary> =
+            result.iter().map(|s| (s.tax_year, s)).collect();
+        for (fy, expected) in [
+            (2022, "10572"),
+            (2023, "9443"),
+            (2024, "11731"),
+            (2025, "13526"),
+        ] {
+            assert_eq!(
+                by_year[&fy].ess_discount_assessable,
+                expected.parse::<Decimal>().unwrap(),
+                "FY{fy} must equal the ATO ESS statement verbatim"
+            );
+        }
+        // FY2026 has no override → RBA conversion (7903.48 / 0.64).
+        assert_eq!(
+            by_year[&2026].ess_discount_assessable,
+            "12349.1875".parse::<Decimal>().unwrap()
+        );
     }
 
     /// A non-AUD ESS statement with no ATO rate fails loudly (no silent zero).

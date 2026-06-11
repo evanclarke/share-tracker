@@ -4,14 +4,6 @@ Items are only marked done when a passing test exists for them.
 
 Completed and decided (out-of-scope / not-reproducible) sections are archived in [DONE.md](DONE.md) to keep this list focused on active work. When a section here is fully done, move it to DONE.md rather than leaving it — see CLAUDE.md.
 
-## ESS statement AUD override (2026-06-12)
-
-(REQUIREMENTS 2026-06-12: employer statements convert at release-date spot, the tax summary at the RBA monthly rate — $65–214/yr apart in the live data; the ATO prefill carries the employer's AUD figure.)
-
-- [ ] `ess_statements` gains optional statement-AUD discount amounts (at minimum the total assessable discount); tax summary reports them verbatim when present, RBA-converts as today when absent
-- [ ] Live-data check: with the employer AUD figures entered, `ess_discount_assessable` equals the ATO ESS statements exactly (FY2022 10,572; FY2023 9,443; FY2024 11,731; FY2025 13,526)
-- [ ] Docs sync: `docs/SCHEMA.md` ess_statements block, `docs/API.md` ESS section + Tax summary, web UI ESS form fields
-
 ## statement_total tolerance for cent-rounded contract notes (2026-06-12)
 
 (REQUIREMENTS 2026-06-12: contract notes print the consideration cent-rounded; 3 of 41 archive notes were rejected by the exact comparison and entered without the cross-check.)

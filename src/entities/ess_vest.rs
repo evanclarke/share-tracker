@@ -281,12 +281,18 @@ mod tests {
             trade::db_delete(&pool, trade.id).await.unwrap(),
             trade::DeleteOutcome::Referenced
         );
-        // The statement is frozen while vested.
-        let s = ess_statement::db_get(&pool, 1).await.unwrap().unwrap();
+        // The vest-side fields are frozen while vested…
+        let mut s = ess_statement::db_get(&pool, 1).await.unwrap().unwrap();
+        s.quantity = Decimal::from(999);
         assert!(matches!(
             ess_statement::db_upsert(&pool, &s).await,
             Err(ess_statement::UpsertError::Vested)
         ));
+        // …but the income side stays editable (the employer's annual ESS
+        // statement arrives after the vest is recorded).
+        let mut s = ess_statement::db_get(&pool, 1).await.unwrap().unwrap();
+        s.deferral_discount = Decimal::from(700);
+        ess_statement::db_upsert(&pool, &s).await.unwrap();
 
         // Deleting the statement removes the vest Buy too.
         assert_eq!(

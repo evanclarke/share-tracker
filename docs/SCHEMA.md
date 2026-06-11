@@ -199,8 +199,13 @@ ess_statements               Employee share scheme statements — the income sid
 ├── pre_2009_cessation_discount TEXT (decimal)  Pre-1 July 2009 cessation discounts assessable this year (label G)
 ├── foreign_source_discount     TEXT (decimal)  Item 12 label A: the foreign-source portion of the above discounts (a memo already within them; surfaced by the tax summary for the FITO calc, not added on top)
 ├── tfn_withholding             TEXT (decimal)  Item 12 label C: TFN amounts withheld from the discounts; folded into the tax summary's TFN line
-└── currency                    TEXT FK→currencies.code   ISO 4217; tax summary converts to AUD by taxing_point_date month (default AUD)
-                             The assessable discount (D+E+F+G − the applied $1,000 reduction) reaches the tax summary; the vest Buy is created by POST /ess_statements/:id/vest (entities::ess_vest)
+├── currency                    TEXT FK→currencies.code   ISO 4217; tax summary converts to AUD by taxing_point_date month (default AUD)
+├── aud_taxed_upfront_eligible      TEXT (decimal, nullable)  Statement-AUD override for label D: the employer statement's stated AUD figure (release-date spot rate — what the ATO prefill carries); when present the tax summary reports it verbatim instead of RBA-converting, when absent behaviour is unchanged. Only accepted on a non-AUD statement (422 otherwise)
+├── aud_taxed_upfront_not_eligible  TEXT (decimal, nullable)  Statement-AUD override for label E (same semantics)
+├── aud_deferral_discount           TEXT (decimal, nullable)  Statement-AUD override for label F (same semantics; the RSU case)
+├── aud_pre_2009_cessation_discount TEXT (decimal, nullable)  Statement-AUD override for label G (same semantics)
+└── aud_foreign_source_discount     TEXT (decimal, nullable)  Statement-AUD override for the label A memo (same semantics)
+                             The assessable discount (D+E+F+G − the applied $1,000 reduction) reaches the tax summary; the vest Buy is created by POST /ess_statements/:id/vest (entities::ess_vest). While the vest Buy exists, the fields it was created from (listing, account, taxing point, quantity, market value, currency) are frozen — the income-side fields (discount labels, TFN withheld, statement-AUD overrides) stay editable, since the employer's annual ESS statement arrives after the vest
 
 parcel_allocations           Links sell parcels to the purchase parcels they consume
 ├── id                   INTEGER PK

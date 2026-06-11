@@ -541,6 +541,11 @@ mod tests {
         assert!(js.contains("taxed_upfront_eligible"));
         assert!(js.contains("deferral_discount"));
         assert!(js.contains("market_value_per_share"));
+        // The statement-AUD override fields (the employer's stated AUD figures,
+        // reported verbatim by the tax summary when present).
+        assert!(js.contains("aud_deferral_discount"));
+        assert!(js.contains("aud_taxed_upfront_eligible"));
+        assert!(js.contains("Statement AUD: deferral discount (F)"));
         // The Vest action (creates the cost-base-reset Buy) is reachable from a
         // statement row and posts to the vest endpoint.
         assert!(js.contains("#/ess-vest/"));

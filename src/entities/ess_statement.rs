@@ -17,7 +17,7 @@
 //! transaction — **refused** (422) while that Buy is drawn on by a Sell
 //! allocation or AMIT adjustment.
 
-use crate::infra::decimal::row_dec;
+use crate::infra::decimal::{row_dec, row_opt_dec};
 use crate::infra::http::ApiError;
 use axum::{
     Json, Router,
@@ -64,6 +64,18 @@ pub struct EssStatement {
     /// converts non-AUD amounts to AUD via the ATO rate for this currency and
     /// the month of `taxing_point_date` (see `infra::fx::to_aud`). Defaults to AUD.
     pub currency: String,
+    /// Statement-AUD overrides, one per discount label: the employer's annual
+    /// Employee share scheme statement (and the ATO prefill) states each label
+    /// in AUD at the release-date spot rate, which differs from the RBA monthly
+    /// rate. When present the tax summary reports the figure verbatim for that
+    /// label; absent, the label converts via the RBA rate as usual. Only
+    /// accepted on a non-AUD statement (422 otherwise — two AUD figures for the
+    /// same label could silently disagree).
+    pub aud_taxed_upfront_eligible: Option<Decimal>,
+    pub aud_taxed_upfront_not_eligible: Option<Decimal>,
+    pub aud_deferral_discount: Option<Decimal>,
+    pub aud_pre_2009_cessation_discount: Option<Decimal>,
+    pub aud_foreign_source_discount: Option<Decimal>,
 }
 
 impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for EssStatement {
@@ -82,6 +94,11 @@ impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for EssStatement {
             foreign_source_discount: row_dec(row, "foreign_source_discount")?,
             tfn_withholding: row_dec(row, "tfn_withholding")?,
             currency: row.try_get("currency")?,
+            aud_taxed_upfront_eligible: row_opt_dec(row, "aud_taxed_upfront_eligible")?,
+            aud_taxed_upfront_not_eligible: row_opt_dec(row, "aud_taxed_upfront_not_eligible")?,
+            aud_deferral_discount: row_opt_dec(row, "aud_deferral_discount")?,
+            aud_pre_2009_cessation_discount: row_opt_dec(row, "aud_pre_2009_cessation_discount")?,
+            aud_foreign_source_discount: row_opt_dec(row, "aud_foreign_source_discount")?,
         })
     }
 }
@@ -110,6 +127,16 @@ pub struct EssStatementBody {
     pub tfn_withholding: Decimal,
     #[serde(default = "default_currency")]
     pub currency: String,
+    #[serde(default)]
+    pub aud_taxed_upfront_eligible: Option<Decimal>,
+    #[serde(default)]
+    pub aud_taxed_upfront_not_eligible: Option<Decimal>,
+    #[serde(default)]
+    pub aud_deferral_discount: Option<Decimal>,
+    #[serde(default)]
+    pub aud_pre_2009_cessation_discount: Option<Decimal>,
+    #[serde(default)]
+    pub aud_foreign_source_discount: Option<Decimal>,
 }
 
 fn default_currency() -> String {
@@ -126,7 +153,8 @@ pub fn router() -> Router<SqlitePool> {
 const COLUMNS: &str = "id, listing_id, holding_account_id, taxing_point_date, quantity, \
      market_value_per_share, taxed_upfront_eligible, taxed_upfront_not_eligible, \
      deferral_discount, pre_2009_cessation_discount, foreign_source_discount, \
-     tfn_withholding, currency";
+     tfn_withholding, currency, aud_taxed_upfront_eligible, aud_taxed_upfront_not_eligible, \
+     aud_deferral_discount, aud_pre_2009_cessation_discount, aud_foreign_source_discount";
 
 pub async fn db_list(pool: &SqlitePool) -> Result<Vec<EssStatement>, sqlx::Error> {
     sqlx::query_as(&format!(
@@ -148,11 +176,18 @@ pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<EssStatement>, 
 #[derive(Debug)]
 pub enum UpsertError {
     Db(sqlx::Error),
-    /// The statement already has a vest Buy (`trades.ess_statement_id`): its
-    /// quantity and market value drive that Buy, so a free-form edit would
-    /// desync it. Delete the statement (which removes the vest) and re-enter, or
-    /// delete just the vest path is not offered — re-create instead. Mapped to 422.
+    /// The statement already has a vest Buy (`trades.ess_statement_id`) and the
+    /// edit changes a field that Buy was created from (listing, account, taxing
+    /// point, quantity, market value, or currency), which would desync it.
+    /// Income-side fields (the discount labels, TFN withheld, the statement-AUD
+    /// overrides) stay editable — the employer's annual ESS statement arrives
+    /// after the vest is recorded. Delete the statement (which removes the vest)
+    /// and re-enter to change the vest side. Mapped to 422.
     Vested,
+    /// A statement-AUD override was supplied on a statement already denominated
+    /// in AUD — the label amount *is* the AUD figure, and a second one could
+    /// silently disagree with it. Mapped to 422.
+    AudOverrideOnAudStatement,
 }
 
 impl From<sqlx::Error> for UpsertError {
@@ -162,18 +197,52 @@ impl From<sqlx::Error> for UpsertError {
 }
 
 pub async fn db_upsert(pool: &SqlitePool, s: &EssStatement) -> Result<(), UpsertError> {
+    // A statement-AUD override restates a label the statement already gives in
+    // AUD — reject the contradiction before touching the row.
+    let has_override = s.aud_taxed_upfront_eligible.is_some()
+        || s.aud_taxed_upfront_not_eligible.is_some()
+        || s.aud_deferral_discount.is_some()
+        || s.aud_pre_2009_cessation_discount.is_some()
+        || s.aud_foreign_source_discount.is_some();
+    if has_override && s.currency == "AUD" {
+        return Err(UpsertError::AudOverrideOnAudStatement);
+    }
+
     let mut tx = pool.begin().await?;
 
-    // Frozen while its vest exists: the Buy carries this statement's quantity
-    // and taxing-point market value, so editing them would desync it. (A new id
-    // has no vest, so an insert always passes.)
-    let vested: bool =
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM trades WHERE ess_statement_id = ?)")
+    // While its vest exists, the fields the Buy was created from (listing,
+    // account, taxing point, quantity, market value, currency) are frozen —
+    // editing them would desync the Buy. The income side (discount labels, TFN
+    // withheld, statement-AUD overrides) stays editable: the employer's annual
+    // ESS statement arrives after the vest is recorded. (A new id has no vest,
+    // so an insert always passes.)
+    let existing: Option<EssStatement> = {
+        let vested: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM trades WHERE ess_statement_id = ?)")
+                .bind(s.id)
+                .fetch_one(&mut *tx)
+                .await?;
+        if vested {
+            sqlx::query_as(&format!(
+                "SELECT {COLUMNS} FROM ess_statements WHERE id = ?"
+            ))
             .bind(s.id)
-            .fetch_one(&mut *tx)
-            .await?;
-    if vested {
-        return Err(UpsertError::Vested);
+            .fetch_optional(&mut *tx)
+            .await?
+        } else {
+            None
+        }
+    };
+    if let Some(old) = existing {
+        let vest_side_unchanged = old.listing_id == s.listing_id
+            && old.holding_account_id == s.holding_account_id
+            && old.taxing_point_date == s.taxing_point_date
+            && old.quantity == s.quantity
+            && old.market_value_per_share == s.market_value_per_share
+            && old.currency == s.currency;
+        if !vest_side_unchanged {
+            return Err(UpsertError::Vested);
+        }
     }
 
     sqlx::query(
@@ -181,21 +250,28 @@ pub async fn db_upsert(pool: &SqlitePool, s: &EssStatement) -> Result<(), Upsert
          (id, listing_id, holding_account_id, taxing_point_date, quantity, \
           market_value_per_share, taxed_upfront_eligible, taxed_upfront_not_eligible, \
           deferral_discount, pre_2009_cessation_discount, foreign_source_discount, \
-          tfn_withholding, currency) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+          tfn_withholding, currency, aud_taxed_upfront_eligible, \
+          aud_taxed_upfront_not_eligible, aud_deferral_discount, \
+          aud_pre_2009_cessation_discount, aud_foreign_source_discount) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT(id) DO UPDATE SET \
-             listing_id                  = excluded.listing_id, \
-             holding_account_id          = excluded.holding_account_id, \
-             taxing_point_date           = excluded.taxing_point_date, \
-             quantity                    = excluded.quantity, \
-             market_value_per_share      = excluded.market_value_per_share, \
-             taxed_upfront_eligible      = excluded.taxed_upfront_eligible, \
-             taxed_upfront_not_eligible  = excluded.taxed_upfront_not_eligible, \
-             deferral_discount           = excluded.deferral_discount, \
-             pre_2009_cessation_discount = excluded.pre_2009_cessation_discount, \
-             foreign_source_discount     = excluded.foreign_source_discount, \
-             tfn_withholding             = excluded.tfn_withholding, \
-             currency                    = excluded.currency",
+             listing_id                      = excluded.listing_id, \
+             holding_account_id              = excluded.holding_account_id, \
+             taxing_point_date               = excluded.taxing_point_date, \
+             quantity                        = excluded.quantity, \
+             market_value_per_share          = excluded.market_value_per_share, \
+             taxed_upfront_eligible          = excluded.taxed_upfront_eligible, \
+             taxed_upfront_not_eligible      = excluded.taxed_upfront_not_eligible, \
+             deferral_discount               = excluded.deferral_discount, \
+             pre_2009_cessation_discount     = excluded.pre_2009_cessation_discount, \
+             foreign_source_discount         = excluded.foreign_source_discount, \
+             tfn_withholding                 = excluded.tfn_withholding, \
+             currency                        = excluded.currency, \
+             aud_taxed_upfront_eligible      = excluded.aud_taxed_upfront_eligible, \
+             aud_taxed_upfront_not_eligible  = excluded.aud_taxed_upfront_not_eligible, \
+             aud_deferral_discount           = excluded.aud_deferral_discount, \
+             aud_pre_2009_cessation_discount = excluded.aud_pre_2009_cessation_discount, \
+             aud_foreign_source_discount     = excluded.aud_foreign_source_discount",
     )
     .bind(s.id)
     .bind(s.listing_id)
@@ -210,6 +286,11 @@ pub async fn db_upsert(pool: &SqlitePool, s: &EssStatement) -> Result<(), Upsert
     .bind(s.foreign_source_discount.to_string())
     .bind(s.tfn_withholding.to_string())
     .bind(&s.currency)
+    .bind(s.aud_taxed_upfront_eligible.map(|d| d.to_string()))
+    .bind(s.aud_taxed_upfront_not_eligible.map(|d| d.to_string()))
+    .bind(s.aud_deferral_discount.map(|d| d.to_string()))
+    .bind(s.aud_pre_2009_cessation_discount.map(|d| d.to_string()))
+    .bind(s.aud_foreign_source_discount.map(|d| d.to_string()))
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -308,6 +389,11 @@ async fn upsert(
         foreign_source_discount: body.foreign_source_discount,
         tfn_withholding: body.tfn_withholding,
         currency: body.currency,
+        aud_taxed_upfront_eligible: body.aud_taxed_upfront_eligible,
+        aud_taxed_upfront_not_eligible: body.aud_taxed_upfront_not_eligible,
+        aud_deferral_discount: body.aud_deferral_discount,
+        aud_pre_2009_cessation_discount: body.aud_pre_2009_cessation_discount,
+        aud_foreign_source_discount: body.aud_foreign_source_discount,
     };
     db_upsert(&pool, &s).await?;
     Ok(StatusCode::NO_CONTENT)
@@ -317,8 +403,15 @@ impl From<UpsertError> for ApiError {
     fn from(e: UpsertError) -> Self {
         match e {
             UpsertError::Vested => ApiError::unprocessable(
-                "this ESS statement has been vested and cannot be edited — delete it \
-                 (which removes the vest Buy) and re-enter instead",
+                "this ESS statement has been vested: the fields its vest Buy was created \
+                 from (listing, account, taxing point, quantity, market value, currency) \
+                 cannot change — delete the statement (which removes the vest Buy) and \
+                 re-enter instead; the discount labels and statement-AUD overrides stay \
+                 editable",
+            ),
+            UpsertError::AudOverrideOnAudStatement => ApiError::unprocessable(
+                "statement-AUD override amounts are only accepted on a non-AUD statement \
+                 — an AUD statement's discount labels are already the AUD figures",
             ),
             UpsertError::Db(err) => err.into(),
         }
@@ -390,6 +483,40 @@ mod tests {
         );
     }
 
+    /// Statement-AUD overrides round-trip with precision and absent ones stay
+    /// NULL/None.
+    #[tokio::test]
+    async fn db_round_trips_statement_aud_overrides() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        let mut s = sample(1);
+        s.currency = "USD".to_string();
+        s.aud_deferral_discount = Some("10572.45".parse().unwrap());
+        db_upsert(&pool, &s).await.unwrap();
+        let got = db_get(&pool, 1).await.unwrap().unwrap();
+        assert_eq!(
+            got.aud_deferral_discount,
+            Some("10572.45".parse::<Decimal>().unwrap())
+        );
+        assert_eq!(got.aud_taxed_upfront_eligible, None);
+        assert_eq!(got.aud_foreign_source_discount, None);
+    }
+
+    /// An override on a statement already denominated in AUD is rejected — two
+    /// AUD figures for the same label could silently disagree.
+    #[tokio::test]
+    async fn db_aud_override_on_aud_statement_rejected() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        let mut s = sample(1); // currency AUD
+        s.aud_deferral_discount = Some(Decimal::from(600));
+        assert!(matches!(
+            db_upsert(&pool, &s).await,
+            Err(UpsertError::AudOverrideOnAudStatement)
+        ));
+        assert!(db_get(&pool, 1).await.unwrap().is_none());
+    }
+
     #[tokio::test]
     async fn db_get_missing_returns_none() {
         let pool = test_pool().await;
@@ -419,6 +546,31 @@ mod tests {
             "listing_id": 1,
             "taxing_point_date": "2024-09-01",
             "currency": "ZZZ"
+        });
+        let resp = router()
+            .with_state(pool)
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/ess_statements/1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn api_aud_override_on_aud_statement_rejected_422() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        let body = serde_json::json!({
+            "listing_id": 1,
+            "taxing_point_date": "2024-09-01",
+            "currency": "AUD",
+            "aud_deferral_discount": "600"
         });
         let resp = router()
             .with_state(pool)
