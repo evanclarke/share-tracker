@@ -862,3 +862,46 @@ Two scope cuts surfaced by the archive entry; document in Known limitations (no 
   (gross interest, 10L) regardless of source; foreign broker-cash/money-market income (the archive's
   USD Treasury Liquidity Fund dividends, ~$12–17/yr) strictly belongs at 20E assessable foreign
   source income — state the 10L simplification
+
+## FX conversion granularity — spot-rate override for one-off capital transactions (2026-06-12)
+
+Every non-AUD trade converts at the monthly RBA rate, and the per-trade `fx_rate` is only a
+*fallback* — once the monthly rate is imported it takes precedence, so a deliberate spot rate can
+never win. ATO guidance (`docs/ato/forex-average-rates.md`, QC 18020) permits average rates only
+where they are a **reasonable approximation of the spot rates** at the statutory translation
+times, and its Examples 5 and 7 state an average rate is **not appropriate for a one-off purchase
+or sale of a large capital asset** — the spot rate at the transaction date should be used
+(`docs/ato/forex-common-transactions.md` Lisa translates each leg at the day's rate). The monthly
+simplification is fine as the default; it must stop being compulsory.
+
+- A trade (Buy, DRP, Sell) can carry an explicit **spot-rate override** that wins over the
+  imported monthly RBA rate everywhere the trade's amounts convert to AUD (cost base, proceeds,
+  every report and the snapshot pipeline) — whether by promoting `fx_rate` from fallback to
+  override via an explicit flag, or a separate column, is design-open; entry must be deliberate
+  (the silent fallback semantics of `fx_rate` must not simply flip, which would change the meaning
+  of existing rows)
+- Absent an override, behaviour is unchanged: monthly RBA rate first, `fx_rate` fallback, loud
+  failure when neither exists
+- The FX conversion documentation states the rule honestly: monthly rates are the ATO-published
+  convenience default, reasonable for recurring/small amounts; a one-off large foreign disposal
+  should carry the transaction-date spot rate per QC 18020
+
+## Settlement-window forex on foreign-currency trades — CGT events K10/K11 (2026-06-12)
+
+Under the default forex 12-month rule (`docs/ato/forex-cgt-12-month-rule.md`, QC 17062), the
+currency movement between a foreign-currency trade's contract date and its settlement payment is
+not ignored: on an **acquisition** it adjusts the parcel's cost base (Art Ltd example); on a
+**disposal** it is a separate **non-discountable capital gain (CGT event K10) or capital loss
+(K11)** (Eleanor example). The system computes neither — trades convert at the trade-date monthly
+rate, so a same-rate-month T+2 settlement nets to nil by construction, but a settlement crossing a
+rate month (or entered with spot rates) silently drops the forex component.
+
+- Decide the scope explicitly: either **model it** — for a non-AUD trade, compute the forex
+  movement between the trade-date and settlement-date translations of the consideration; fold it
+  into the parcel's cost base on a Buy/DRP, and surface it as a separate non-discountable
+  K10 gain / K11 capital loss feeding the realised-gains and net-capital-gain reports on a Sell —
+  or **resolve it out of scope** as a Known limitation stating that settlement-window forex
+  outcomes are the taxpayer's manual adjustment, with the OVERVIEW.md citation
+- Whichever way it resolves, the decision must note the interaction with the spot-rate override
+  above (with monthly rates and same-month T+2 settlement the component is nil by construction;
+  spot-rate-per-leg entry is what makes it visible)
