@@ -287,9 +287,12 @@ pub(crate) struct StatementTotalCheck<'a> {
 /// Cross-check an optionally supplied statement total against the trade's
 /// own figures: quantity × price + brokerage + GST for a Buy/DRP (amount
 /// payable), quantity × price − brokerage − GST for a Sell (net proceeds
-/// receivable — the statement nets costs out). Comparison is numeric
-/// (`Decimal` equality ignores trailing zeros: 1234.50 matches 1234.5).
-/// `None` means the statement total wasn't recorded — nothing to check.
+/// receivable — the statement nets costs out). Contract notes print the
+/// consideration rounded to the cent, so the total also passes when it
+/// equals the computed figure rounded to 2 dp (half away from zero, as
+/// statements round). Comparison is numeric (`Decimal` equality ignores
+/// trailing zeros: 1234.50 matches 1234.5). `None` means the statement
+/// total wasn't recorded — nothing to check.
 pub(crate) fn check_statement_total(c: StatementTotalCheck) -> Result<(), StatementTotalError> {
     let Some(total) = c.statement_total else {
         return Ok(());
@@ -302,7 +305,9 @@ pub(crate) fn check_statement_total(c: StatementTotalCheck) -> Result<(), Statem
         TradeType::Buy | TradeType::DRP => c.quantity * c.average_price + costs,
         TradeType::Sell => c.quantity * c.average_price - costs,
     };
-    if total != expected {
+    let cent_rounded =
+        expected.round_dp_with_strategy(2, rust_decimal::RoundingStrategy::MidpointAwayFromZero);
+    if total != expected && total != cent_rounded {
         return Err(StatementTotalError::TotalMismatch { expected });
     }
     Ok(())
@@ -2075,6 +2080,72 @@ mod tests {
         );
         assert!(
             db_get(&pool, 2).await.unwrap().is_none(),
+            "nothing persisted"
+        );
+    }
+
+    /// Contract notes print the consideration rounded to the cent, so a
+    /// total equal to the computed figure cent-rounded (half away from
+    /// zero) passes too. The figures are the three archive contract notes
+    /// the exact comparison rejected (live trades 19, 16, 21):
+    /// 1,302 × 37.585914 + 8.64 + 0.86 = 48,946.360028 → note 48,946.36;
+    /// 562 × 73.259875 + 8.64 + 0.86 = 41,181.54975 → note 41,181.55;
+    /// 0.02413796 × 3,983.77 + 3.84 = 100.000080… → note 100.00.
+    /// A mismatch at the cent itself still rejects with the computed
+    /// (unrounded) figure in the detail, and an exact .5-mil residue
+    /// rounds away from zero, not to even.
+    #[tokio::test]
+    async fn api_statement_total_accepts_cent_rounded_contract_note_totals() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        let buy = |qty: &str, price: &str, brokerage: &str, gst: &str, total: &str| {
+            serde_json::json!({
+                "trade_type": "Buy",
+                "date": "2024-03-01",
+                "listing_id": 1,
+                "average_price": price,
+                "quantity": qty,
+                "currency": "AUD",
+                "brokerage": brokerage,
+                "gst_on_brokerage": gst,
+                "brokerage_currency": "AUD",
+                "fx_rate": "1",
+                "statement_total": total
+            })
+        };
+
+        // Trade 19: HNDQ 1 Mar 2024 contract note 1404967.
+        let hndq = buy("1302", "37.585914", "8.64", "0.86", "48946.36");
+        let (status, _) = put_trade_json(&pool, 1, hndq).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        // Trade 16: VDHG 8 Apr 2026 contract note 4518597 (…54975 → .55).
+        let vdhg = buy("562", "73.259875", "8.64", "0.86", "41181.55");
+        let (status, _) = put_trade_json(&pool, 2, vdhg).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        // Trade 21: ETH 22 Sep 2021 card purchase (…0080… → 100.00).
+        let eth = buy("0.02413796", "3983.77", "3.84", "0", "100.00");
+        let (status, _) = put_trade_json(&pool, 3, eth).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        // An exact midpoint rounds half away from zero (100.005 → 100.01),
+        // not banker's-to-even (100.00).
+        let mid = buy("1", "100.005", "0", "0", "100.01");
+        let (status, _) = put_trade_json(&pool, 4, mid).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let even = buy("1", "100.005", "0", "0", "100.00");
+        let (status, _) = put_trade_json(&pool, 5, even).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+
+        // Off by a whole cent still rejects, computed figure in the body.
+        let wrong = buy("1302", "37.585914", "8.64", "0.86", "48946.37");
+        let (status, detail) = put_trade_json(&pool, 6, wrong).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            detail.contains("48946.360028"),
+            "detail must carry the computed figure: {detail}"
+        );
+        assert!(
+            db_get(&pool, 6).await.unwrap().is_none(),
             "nothing persisted"
         );
     }

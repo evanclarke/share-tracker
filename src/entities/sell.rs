@@ -1117,6 +1117,46 @@ mod tests {
         assert!(!trade_exists(&pool, 3).await);
     }
 
+    /// The cent-rounding tolerance applies to a Sell's net proceeds too:
+    /// 33 × 14.906273 − 9.95 = 481.957009, so a contract note printing
+    /// 481.96 is accepted; a whole cent off (481.95 — what truncation
+    /// would give) still rejects and persists nothing.
+    #[tokio::test]
+    async fn db_sell_statement_total_accepts_cent_rounded_net_proceeds() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
+
+        let mut body = sell_body(
+            "33".parse().unwrap(),
+            vec![AllocationInput {
+                purchase_trade_id: 1,
+                quantity_allocated: "33".parse().unwrap(),
+            }],
+        );
+        body.average_price = "14.906273".parse().unwrap();
+        body.brokerage = "9.05".parse().unwrap();
+        body.gst_on_brokerage = "0.90".parse().unwrap();
+        body.statement_total = Some("481.96".parse().unwrap());
+        db_upsert_sell(&pool, 2, &body).await.unwrap();
+        assert_eq!(
+            trade::db_get(&pool, 2)
+                .await
+                .unwrap()
+                .unwrap()
+                .statement_total,
+            Some("481.96".parse().unwrap())
+        );
+
+        body.statement_total = Some("481.95".parse().unwrap());
+        let err = db_upsert_sell(&pool, 3, &body).await.unwrap_err();
+        assert!(matches!(
+            err,
+            SellError::StatementTotal(trade::StatementTotalError::TotalMismatch { .. })
+        ));
+        assert!(!trade_exists(&pool, 3).await);
+    }
+
     #[tokio::test]
     async fn api_sell_statement_total_mismatch_returns_422_with_detail() {
         let pool = test_pool().await;
