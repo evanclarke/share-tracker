@@ -51,21 +51,47 @@ pub async fn init(db_path: &str) -> Result<SqlitePool, sqlx::Error> {
     Ok(pool)
 }
 
-/// Destination filename for a backup taken now: `<file>-YYYY-MM-DD-HHMMSS.db`.
-/// The time component (down to the second) keeps each weekly backup distinct —
-/// the backup job runs weekly, so a date-only name would collide across runs.
-pub fn backup_path(db_path: &str) -> String {
-    backup_path_at(db_path, Local::now())
+/// Destination filename for a backup taken now: `<file>-YYYY-MM-DD-HHMMSS.db`,
+/// placed in `backup_dir` when configured (so backups can land on another
+/// volume) or beside the database file otherwise. The time component (down to
+/// the second) keeps each weekly backup distinct — the backup job runs weekly,
+/// so a date-only name would collide across runs.
+pub fn backup_path(db_path: &str, backup_dir: Option<&str>) -> String {
+    backup_path_at(db_path, backup_dir, Local::now())
 }
 
-fn backup_path_at(db_path: &str, at: DateTime<Local>) -> String {
+fn backup_path_at(db_path: &str, backup_dir: Option<&str>, at: DateTime<Local>) -> String {
     let ts = at.format("%Y-%m-%d-%H%M%S");
     let stem = db_path.strip_suffix(".db").unwrap_or(db_path);
-    format!("{stem}-{ts}.db")
+    match backup_dir {
+        None => format!("{stem}-{ts}.db"),
+        Some(dir) => {
+            // Only the filename moves to the configured dir; the db's own
+            // directory component is dropped.
+            let name = Path::new(stem)
+                .file_name()
+                .map(|f| f.to_string_lossy().into_owned())
+                .unwrap_or_else(|| stem.to_string());
+            Path::new(dir)
+                .join(format!("{name}-{ts}.db"))
+                .to_string_lossy()
+                .into_owned()
+        }
+    }
 }
 
-pub async fn backup(pool: &SqlitePool, db_path: &str) -> Result<(), sqlx::Error> {
-    backup_to(pool, &backup_path(db_path)).await
+pub async fn backup(
+    pool: &SqlitePool,
+    db_path: &str,
+    backup_dir: Option<&str>,
+) -> Result<(), sqlx::Error> {
+    // A configured backup dir may not exist yet (fresh volume / first run);
+    // create it rather than failing the weekly job. The beside-the-DB default
+    // needs no such step — the database file's directory already exists.
+    if let Some(dir) = backup_dir {
+        std::fs::create_dir_all(dir).map_err(sqlx::Error::Io)?;
+    }
+    backup_to(pool, &backup_path(db_path, backup_dir)).await
 }
 
 /// Write a backup to a specific destination, skipping if it already exists. With
@@ -114,7 +140,7 @@ mod tests {
         // Capture the destination before backing up: `backup` computes its own
         // timestamp internally, so re-deriving the path afterwards could land in
         // a later second and miss the file. Drive `backup_to` with the same dest.
-        let dest = backup_path(&db_path);
+        let dest = backup_path(&db_path, None);
         backup_to(&pool, &dest).await.unwrap();
 
         assert!(Path::new(&dest).exists());
@@ -127,8 +153,101 @@ mod tests {
         // Date-only naming (`-2026-06-01.db`) would collide across weekly runs;
         // the filename must carry the time component down to the second.
         assert_eq!(
-            backup_path_at("share-tracker.db", at),
+            backup_path_at("share-tracker.db", None, at),
             "share-tracker-2026-06-01-143005.db"
+        );
+    }
+
+    #[test]
+    fn backup_path_honours_backup_dir() {
+        use chrono::TimeZone;
+        let at = Local.with_ymd_and_hms(2026, 6, 1, 14, 30, 5).unwrap();
+        // With a configured dir only the filename is kept — the db's own
+        // directory component must not be re-rooted under the backup dir.
+        assert_eq!(
+            backup_path_at("/data/share-tracker.db", Some("/mnt/backups"), at),
+            "/mnt/backups/share-tracker-2026-06-01-143005.db"
+        );
+    }
+
+    #[tokio::test]
+    async fn backup_lands_in_configured_dir() {
+        let db_dir = tempfile::tempdir().unwrap();
+        let backup_dir = tempfile::tempdir().unwrap();
+        let db_path = db_dir.path().join("test.db").to_string_lossy().to_string();
+        let pool = init(&db_path).await.unwrap();
+
+        // A not-yet-existing subdirectory must be created, not fail the job.
+        let dest_dir = backup_dir
+            .path()
+            .join("weekly")
+            .to_string_lossy()
+            .to_string();
+        backup(&pool, &db_path, Some(&dest_dir)).await.unwrap();
+
+        let made_backup = std::fs::read_dir(&dest_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .any(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                name.starts_with("test-") && name.ends_with(".db")
+            });
+        assert!(made_backup, "expected a timestamped backup in {dest_dir}");
+        // And nothing beside the database file.
+        let beside_db = std::fs::read_dir(db_dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .any(|e| e.file_name().to_string_lossy().starts_with("test-"));
+        assert!(!beside_db, "backup must not also land beside the db");
+    }
+
+    #[tokio::test]
+    async fn restore_round_trip_recovers_pre_mutation_state() {
+        // Proves the README's documented restore procedure: back up, mutate the
+        // live db, stop the server, bring the backup into service as the
+        // database, restart — the pre-mutation state is back. The procedure
+        // replaces the db file in place with the server process exited; an
+        // in-process test can't get that (sqlx's sqlite workers tear down
+        // asynchronously after `close()` and their close-time WAL checkpoint
+        // races a same-path copy), so the restored copy opens at a fresh path —
+        // which still proves the substance: the backup is a complete, openable
+        // database holding exactly the pre-mutation state.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db").to_string_lossy().to_string();
+        let pool = init(&db_path).await.unwrap();
+        sqlx::query("INSERT INTO holding_accounts (id, name) VALUES (100, 'keep')")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let dest = backup_path(&db_path, None);
+        backup_to(&pool, &dest).await.unwrap();
+
+        // Mutate after the backup: this row must be gone after the restore.
+        sqlx::query("INSERT INTO holding_accounts (id, name) VALUES (101, 'lose')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        pool.close().await;
+
+        // Restore: the backup becomes the database file and the server restarts
+        // (init runs migrations against it, exactly like a normal startup).
+        let restored_path = dir.path().join("restored.db").to_string_lossy().to_string();
+        std::fs::copy(&dest, &restored_path).unwrap();
+        let restored = init(&restored_path).await.unwrap();
+
+        let names: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM holding_accounts WHERE name IN ('keep', 'lose')")
+                .fetch_all(&restored)
+                .await
+                .unwrap();
+        assert!(
+            names.contains(&"keep".to_string()),
+            "pre-backup row survives"
+        );
+        assert!(
+            !names.contains(&"lose".to_string()),
+            "post-backup mutation must be gone after restore"
         );
     }
 
@@ -243,7 +362,7 @@ mod tests {
 
         // Fixed destination so this exercises the skip-if-exists guard directly
         // rather than depending on two `backup` calls landing in the same second.
-        let dest = backup_path(&db_path);
+        let dest = backup_path(&db_path, None);
         backup_to(&pool, &dest).await.unwrap();
         let mtime1 = std::fs::metadata(&dest).unwrap().modified().unwrap();
 

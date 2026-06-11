@@ -4,16 +4,6 @@ Items are only marked done when a passing test exists for them.
 
 Completed and decided (out-of-scope / not-reproducible) sections are archived in [DONE.md](DONE.md) to keep this list focused on active work. When a section here is fully done, move it to DONE.md rather than leaving it — see CLAUDE.md.
 
-## Operational hardening — restore, off-disk backups, localhost default (2026-06-10)
-
-(REQUIREMENTS 2026-06-10.)
-
-- [ ] `--backup-dir` option (default: beside the DB, as today) so backups can land on another volume; scheduler/backup job honours it
-- [ ] Document the restore procedure in the README and prove it with a test (backup → mutate → restore → assert pre-mutation state)
-- [ ] Default `--host` changes to `127.0.0.1`; `0.0.0.0` remains opt-in and the README security note inverts accordingly
-- [ ] Tests: backup lands in the configured dir; restore round-trip; default-bind assertion
-- [ ] Docs: README flags table + Scheduled maintenance section
-
 ## Scheduler timezone support (2026-06-10)
 
 (Per-entry timezones in `schedule.cron` so market-close-driven jobs are expressed in the market's own timezone instead of Sydney-local approximations — the Sydney↔New York offset swings 14–16h across DST transitions, shifting the 11:30 price-import's margin over the NYSE close by two hours over the year. `chrono-tz` is already a dependency; `croner`'s `find_next_occurrence` is generic over `chrono::TimeZone`.)

@@ -5,9 +5,14 @@ use clap::Parser;
 pub struct Args {
     #[arg(long, default_value = "share-tracker.db")]
     pub db: String,
-    /// IP address to bind. Defaults to `0.0.0.0` (all interfaces, reachable from
-    /// other machines on the network); use `127.0.0.1` to restrict to localhost.
-    #[arg(long, default_value = "0.0.0.0")]
+    /// Directory the scheduled/triggered backups are written to. Defaults to
+    /// beside the database file; set it to put backups on another volume so a
+    /// disk failure can't take the database and its backups together.
+    #[arg(long)]
+    pub backup_dir: Option<String>,
+    /// IP address to bind. Defaults to `127.0.0.1` (localhost only — the server
+    /// has no authentication); use `0.0.0.0` to expose it to the network.
+    #[arg(long, default_value = "127.0.0.1")]
     pub host: String,
     #[arg(long, default_value_t = 3000)]
     pub port: u16,
@@ -33,17 +38,31 @@ mod tests {
     }
 
     #[test]
-    fn default_host_is_all_interfaces() {
+    fn default_host_is_localhost_only() {
+        // The server has no authentication, so the safe default is to listen
+        // on the loopback interface only; exposing it is the explicit opt-in.
         let args = Args::parse_from(["share-tracker"]);
-        assert_eq!(args.host, "0.0.0.0");
+        assert_eq!(args.host, "127.0.0.1");
         // The default must parse to a bindable address.
         assert!(args.host.parse::<std::net::IpAddr>().is_ok());
     }
 
     #[test]
     fn custom_host() {
-        let args = Args::parse_from(["share-tracker", "--host", "127.0.0.1"]);
-        assert_eq!(args.host, "127.0.0.1");
+        let args = Args::parse_from(["share-tracker", "--host", "0.0.0.0"]);
+        assert_eq!(args.host, "0.0.0.0");
+    }
+
+    #[test]
+    fn default_backup_dir_is_none() {
+        let args = Args::parse_from(["share-tracker"]);
+        assert_eq!(args.backup_dir, None);
+    }
+
+    #[test]
+    fn custom_backup_dir() {
+        let args = Args::parse_from(["share-tracker", "--backup-dir", "/mnt/backups"]);
+        assert_eq!(args.backup_dir.as_deref(), Some("/mnt/backups"));
     }
 
     #[test]

@@ -33,7 +33,12 @@ async fn main() {
     // price-import job and the on-demand live valuation in the router.
     let fetcher: entities::closing_price::SharedFetcher =
         std::sync::Arc::new(entities::closing_price::YahooFetcher::default());
-    let registry = scheduler::registry(pool.clone(), args.db.clone(), fetcher.clone());
+    let registry = scheduler::registry(
+        pool.clone(),
+        args.db.clone(),
+        args.backup_dir.clone(),
+        fetcher.clone(),
+    );
     scheduler::spawn(registry.clone(), pool.clone(), &schedule).expect("invalid schedule");
 
     let app = app::router(pool.clone(), registry, fetcher);

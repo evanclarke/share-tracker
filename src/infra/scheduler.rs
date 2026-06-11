@@ -125,6 +125,7 @@ impl std::error::Error for ScheduleError {}
 pub fn registry(
     pool: SqlitePool,
     db_path: String,
+    backup_dir: Option<String>,
     fetcher: crate::entities::closing_price::SharedFetcher,
 ) -> JobRegistry {
     let mut jobs: HashMap<String, Job> = HashMap::new();
@@ -135,8 +136,9 @@ pub fn registry(
         Arc::new(move || {
             let pool = backup_pool.clone();
             let db_path = db_path.clone();
+            let backup_dir = backup_dir.clone();
             Box::pin(async move {
-                crate::infra::db::backup(&pool, &db_path)
+                crate::infra::db::backup(&pool, &db_path, backup_dir.as_deref())
                     .await
                     .map_err(|e| e.to_string())
             })
@@ -439,7 +441,7 @@ mod tests {
         let db_path = dir.path().join("test.db").to_string_lossy().to_string();
         let pool = db::init(&db_path).await.unwrap();
         (
-            registry(pool.clone(), db_path.clone(), stub_fetcher()),
+            registry(pool.clone(), db_path.clone(), None, stub_fetcher()),
             pool,
             dir,
             db_path,
@@ -544,7 +546,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("t.db").to_string_lossy().to_string();
         let pool = db::init(&db_path).await.unwrap();
-        let reg = registry(pool.clone(), db_path.clone(), stub_fetcher());
+        let reg = registry(pool.clone(), db_path.clone(), None, stub_fetcher());
         let app = router().with_state(pool).layer(Extension(reg));
 
         let resp = app
@@ -575,6 +577,39 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn backup_job_honours_configured_backup_dir() {
+        // The --backup-dir option must reach the scheduled backup job: with a
+        // dir configured, the job writes there, not beside the database file.
+        let db_dir = tempfile::tempdir().unwrap();
+        let backup_dir = tempfile::tempdir().unwrap();
+        let db_path = db_dir.path().join("t.db").to_string_lossy().to_string();
+        let pool = db::init(&db_path).await.unwrap();
+        let reg = registry(
+            pool.clone(),
+            db_path,
+            Some(backup_dir.path().to_string_lossy().into_owned()),
+            stub_fetcher(),
+        );
+
+        let job = reg.get("backup").unwrap();
+        run_job(&pool, "backup", job).await.unwrap();
+
+        let in_backup_dir = std::fs::read_dir(backup_dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .any(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                name.starts_with("t-") && name.ends_with(".db")
+            });
+        assert!(in_backup_dir, "backup job must write to the configured dir");
+        let beside_db = std::fs::read_dir(db_dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .any(|e| e.file_name().to_string_lossy().starts_with("t-"));
+        assert!(!beside_db, "backup must not also land beside the db");
+    }
+
     #[tracing_test::traced_test]
     #[tokio::test]
     async fn run_job_logs_started_and_finished() {
@@ -594,7 +629,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("t.db").to_string_lossy().to_string();
         let pool = db::init(&db_path).await.unwrap();
-        let reg = registry(pool.clone(), db_path, stub_fetcher());
+        let reg = registry(pool.clone(), db_path, None, stub_fetcher());
         let app = router().with_state(pool).layer(Extension(reg));
 
         let resp = app
@@ -618,7 +653,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("t.db").to_string_lossy().to_string();
         let pool = db::init(&db_path).await.unwrap();
-        let reg = registry(pool.clone(), db_path, stub_fetcher());
+        let reg = registry(pool.clone(), db_path, None, stub_fetcher());
         let app = router().with_state(pool).layer(Extension(reg));
 
         let resp = app
@@ -640,7 +675,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("t.db").to_string_lossy().to_string();
         let pool = db::init(&db_path).await.unwrap();
-        let reg = registry(pool.clone(), db_path, stub_fetcher());
+        let reg = registry(pool.clone(), db_path, None, stub_fetcher());
         let app = router().with_state(pool).layer(Extension(reg));
 
         let resp = app

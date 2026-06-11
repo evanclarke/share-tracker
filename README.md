@@ -51,17 +51,18 @@ A personal Australian share portfolio tracker with a REST JSON API. Records trad
 
 ```bash
 cargo build --release
-./target/release/share-tracker [--db share-tracker.db] [--host 0.0.0.0] [--port 3000] [--schedule schedule.cron]
+./target/release/share-tracker [--db share-tracker.db] [--backup-dir /mnt/backups] [--host 127.0.0.1] [--port 3000] [--schedule schedule.cron]
 ```
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--db` | `share-tracker.db` | SQLite database file path |
-| `--host` | `0.0.0.0` | IP address to bind. `0.0.0.0` listens on all interfaces (reachable from other machines); use `127.0.0.1` to restrict to localhost |
+| `--backup-dir` | beside the database file | Directory the scheduled/triggered backups are written to (created if missing). Point it at another volume so a disk failure can't take the database and its backups together |
+| `--host` | `127.0.0.1` | IP address to bind. The default listens on localhost only; pass `0.0.0.0` to listen on all interfaces (reachable from other machines) |
 | `--port` | `3000` | HTTP port to listen on |
 | `--schedule` | built-in `schedule.cron` | Path to a cron file overriding the built-in maintenance schedule |
 
-> **Note:** the default `--host 0.0.0.0` makes the server reachable from other machines on the network, and it has no authentication. Run it only on trusted networks, or pass `--host 127.0.0.1` to keep it local.
+> **Note:** the server has no authentication, so the default `--host 127.0.0.1` keeps it reachable from this machine only. Passing `--host 0.0.0.0` exposes it to every machine on the network — do that only on trusted networks.
 
 The database is created automatically on first run. Migrations are applied in order at startup.
 
@@ -79,7 +80,18 @@ Recurring maintenance jobs — the database backup, the RBA FX rate import, the 
 0 12 * * *     report-snapshot # daily, once the day's last close has been imported
 ```
 
-A schedule line naming an unknown job is rejected at startup; a registered job with no schedule line is allowed but logged as a `WARN` (it will then only run via its endpoint). Jobs run only at their scheduled times (not at startup); after each run (and at startup) the next scheduled run is logged at INFO. The backup writes `<stem>-YYYY-MM-DD-HHMMSS.db` beside the main database file (the date-time component keeps each weekly run distinct; skipped only if a file with that exact name already exists). Any job can be run on demand with `POST /jobs/{name}` (see the [HTTP API](docs/API.md#jobs)).
+A schedule line naming an unknown job is rejected at startup; a registered job with no schedule line is allowed but logged as a `WARN` (it will then only run via its endpoint). Jobs run only at their scheduled times (not at startup); after each run (and at startup) the next scheduled run is logged at INFO. The backup writes `<stem>-YYYY-MM-DD-HHMMSS.db` beside the main database file, or into `--backup-dir` when set (the date-time component keeps each weekly run distinct; skipped only if a file with that exact name already exists). Any job can be run on demand with `POST /jobs/{name}` (see the [HTTP API](docs/API.md#jobs)).
+
+### Restoring from a backup
+
+Each backup file is a complete, standalone SQLite database (written with `VACUUM INTO`). To restore one:
+
+1. **Stop the server** — the database file must not be in use.
+2. **Replace the database file with the backup**, e.g. `cp share-tracker-2026-06-07-000000.db share-tracker.db` (keep a copy of the backup — restore from a copy, not your only one).
+3. **Delete the stale WAL sidecars** if present: `rm -f share-tracker.db-wal share-tracker.db-shm`. They belong to the replaced database; leaving them would let SQLite replay post-backup changes over the restored file.
+4. **Restart the server.** Pending migrations (if the backup predates an upgrade) are applied at startup as usual.
+
+Everything recorded after the backup was taken is gone after a restore — re-enter it manually. The restore round-trip (backup → mutate → restore → pre-mutation state) is proven by `restore_round_trip_recovers_pre_mutation_state` in `src/infra/db.rs`.
 
 Logging is controlled by the `RUST_LOG` environment variable (default: `info`).
 
