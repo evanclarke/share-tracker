@@ -31,5 +31,8 @@ sha2 = "0.10"
 [dev-dependencies]
 http-body-util = "0.1"
 tempfile = "3"
+# test-util enables tokio's paused virtual clock (#[tokio::test(start_paused)]),
+# used to drive the scheduler's capped-sleep loop deterministically in tests.
+tokio = { version = "1", features = ["test-util"] }
 tower = { version = "0.5", features = ["util"] }
 tracing-test = "0.2"

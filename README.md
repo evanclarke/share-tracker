@@ -68,19 +68,20 @@ The database is created automatically on first run. Migrations are applied in or
 
 ### Scheduled maintenance
 
-Recurring maintenance jobs — the database backup, the RBA FX rate import, the ISO MIC registry import, the currencies import, the closing-price collection, and the daily report snapshot — are scheduled from a cron file rather than hard-coded intervals. Each line is a 5-field Vixie cron expression (`min hour dom mon dow`) followed by a job name; `#` starts a comment. The built-in default is embedded in the binary (`schedule.cron`); pass `--schedule <path>` to use your own file instead:
+Recurring maintenance jobs — the database backup, the RBA FX rate import, the ISO MIC registry import, the currencies import, the closing-price collection, and the daily report snapshot — are scheduled from a cron file rather than hard-coded intervals. Each line is a 5-field Vixie cron expression (`min hour dom mon dow`), optionally followed by an IANA timezone (e.g. `America/New_York`), then the job name; `#` starts a comment. Without a timezone the expression is in local server time; with one, it fires on that zone's wall clock — the price imports use this so each run keeps a fixed margin over its market's close regardless of DST transitions at either end. The built-in default is embedded in the binary (`schedule.cron`); pass `--schedule <path>` to use your own file instead:
 
 ```
 0 0 * * 0   backup          # weekly, Sunday 00:00
 0 2 * * 1   rba-fx-import   # weekly, Monday 02:00
 0 3 1 * *   mic-import      # monthly, 1st at 03:00 (ISO publishes monthly)
 0 4 1 * *   currency-import # monthly, 1st at 04:00 (ISO 4217 + ISO 24165 / DTIF)
-30 17 * * 1-5  price-import # weekdays, after the ASX close
-30 11 * * *    price-import # daily, after the NYSE close + crypto UTC cut-off
+30 17 * * 1-5   Australia/Sydney   price-import  # after the 16:00 ASX close
+30 17 * * 1-5   America/New_York   price-import  # after the 16:00 NYSE close
+30 0  * * *     UTC                price-import  # after the crypto UTC daily cut-off
 0 12 * * *     report-snapshot # daily, once the day's last close has been imported
 ```
 
-A schedule line naming an unknown job is rejected at startup; a registered job with no schedule line is allowed but logged as a `WARN` (it will then only run via its endpoint). Jobs run only at their scheduled times (not at startup); after each run (and at startup) the next scheduled run is logged at INFO. The backup writes `<stem>-YYYY-MM-DD-HHMMSS.db` beside the main database file, or into `--backup-dir` when set (the date-time component keeps each weekly run distinct; skipped only if a file with that exact name already exists). Any job can be run on demand with `POST /jobs/{name}` (see the [HTTP API](docs/API.md#jobs)).
+A schedule line naming an unknown job or an unknown timezone is rejected at startup; a registered job with no schedule line is allowed but logged as a `WARN` (it will then only run via its endpoint). Jobs run only at their scheduled times (not at startup); after each run (and at startup) the next scheduled run is logged at INFO, in the entry's timezone. In a zone's DST gap (a job scheduled inside the skipped hour) the job fires at the first valid instant after the gap; in a DST fold (the repeated hour) it fires once, at the first occurrence. Timer sleeps are capped at an hour and the target recomputed after each, so a clock shift mid-wait (DST, NTP, suspend) re-anchors the fire time to the schedule's wall-clock target. The backup writes `<stem>-YYYY-MM-DD-HHMMSS.db` beside the main database file, or into `--backup-dir` when set (the date-time component keeps each weekly run distinct; skipped only if a file with that exact name already exists). Any job can be run on demand with `POST /jobs/{name}` (see the [HTTP API](docs/API.md#jobs)).
 
 ### Restoring from a backup
 

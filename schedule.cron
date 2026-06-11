@@ -1,23 +1,26 @@
-# Maintenance task schedule — 5-field Vixie cron: min hour dom mon dow
-# Trigger any job immediately with: POST /jobs/<name>
-# Times are local server time. Override this file with --schedule <path>.
+# Maintenance task schedule — 5-field Vixie cron (min hour dom mon dow),
+# optionally followed by an IANA timezone, then the job name. Without a
+# timezone the expression is local server time; an unknown timezone name is
+# rejected at startup. Trigger any job immediately with: POST /jobs/<name>.
+# Override this file with --schedule <path>.
 
 0 0 * * 0   backup          # weekly, Sunday 00:00
 0 2 * * 1   rba-fx-import   # weekly, Monday 02:00
 0 3 1 * *   mic-import      # monthly, 1st at 03:00 (ISO publishes monthly)
 0 4 1 * *   currency-import # monthly, 1st at 04:00 (ISO 4217 + ISO 24165 / DTIF)
 
-# Closing prices, twice daily: each run stores the latest complete trading day
-# per held listing and skips days already stored ok, so the two runs cover the
-# different market closes between them (assuming a Sydney server clock):
-# 17:30 catches the 16:00 ASX close; 11:30 catches the prior NYSE close
-# (06:00-08:00 Sydney) and the crypto UTC-midnight cut-off (10:00-11:00 Sydney).
-30 17 * * 1-5  price-import # weekdays, after the ASX close
-30 11 * * *    price-import # daily, after the NYSE close + crypto UTC cut-off
+# Closing prices, once per market close, each entry pinned to its market's own
+# timezone so a DST transition at either end can't shift the run's margin over
+# the close (the Sydney<->New York offset swings 14-16h across the year). Each
+# run stores the latest complete trading day per held listing and skips days
+# already stored ok, so the three runs cover their own markets between them.
+30 17 * * 1-5   Australia/Sydney   price-import  # after the 16:00 ASX close
+30 17 * * 1-5   America/New_York   price-import  # after the 16:00 NYSE close
+30 0  * * *     UTC                price-import  # after the crypto UTC daily cut-off
 
-# Report snapshots, daily after the 11:30 price import: stores the
-# price-dependent reports for the latest date every held listing can be
-# valued at with final prices (typically yesterday once the prior NYSE close
-# and crypto UTC cut-off are in). Skips a date already stored fresh;
-# regenerates it when flagged stale.
+# Report snapshots, daily at 12:00 local (assumed near Sydney time): stores the
+# price-dependent reports for the latest date every held listing can be valued
+# at with final prices — typically yesterday, once the NYSE and crypto runs
+# above have landed (07:30-09:30 and 10:30-11:30 Sydney respectively). Skips a
+# date already stored fresh; regenerates it when flagged stale.
 0 12 * * *     report-snapshot

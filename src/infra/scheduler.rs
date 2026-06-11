@@ -1,10 +1,11 @@
 //! Cron-driven scheduler for recurring maintenance jobs.
 //!
 //! Job *schedules* live in a declarative cron file (5-field Vixie cron:
-//! `min hour dom mon dow`) rather than in code — see `schedule.cron`. This
-//! module owns a registry mapping a job name to the work it performs, parses a
-//! schedule, and spawns one background task per scheduled entry. Jobs fire only
-//! at their cron times (no run-on-startup); any job can be run on demand via
+//! `min hour dom mon dow`, optionally followed by an IANA timezone before the
+//! job name) rather than in code — see `schedule.cron`. This module owns a
+//! registry mapping a job name to the work it performs, parses a schedule, and
+//! spawns one background task per scheduled entry. Jobs fire only at their cron
+//! times (no run-on-startup); any job can be run on demand via
 //! `POST /jobs/{name}`.
 //!
 //! Each spawned task logs the next scheduled run at INFO after every run (and at
@@ -16,7 +17,8 @@ use axum::{
     http::StatusCode,
     routing::{get, post},
 };
-use chrono::{DateTime, Local};
+use chrono::{DateTime, Local, TimeZone, Utc};
+use chrono_tz::Tz;
 use croner::Cron;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
@@ -255,10 +257,21 @@ async fn run_job(pool: &SqlitePool, name: &str, job: &Job) -> Result<(), String>
     result
 }
 
-/// Parse a cron schedule file into `(cron, job_name)` entries. Lines are
-/// `<min> <hour> <dom> <mon> <dow> <job-name>`; `#` starts a comment and blank
-/// lines are ignored.
-fn parse(schedule: &str) -> Result<Vec<(Cron, String)>, ScheduleError> {
+/// One parsed schedule line: when to fire, in which timezone (`None` = the
+/// server's local timezone), and which registered job to run.
+#[derive(Debug)]
+struct ScheduleEntry {
+    cron: Cron,
+    tz: Option<Tz>,
+    name: String,
+}
+
+/// Parse a cron schedule file. Lines are
+/// `<min> <hour> <dom> <mon> <dow> [timezone] <job-name>`; the optional
+/// timezone is an IANA name (e.g. `America/New_York`) pinning the cron
+/// expression to that zone — absent, the expression is server-local time.
+/// `#` starts a comment and blank lines are ignored.
+fn parse(schedule: &str) -> Result<Vec<ScheduleEntry>, ScheduleError> {
     let mut entries = Vec::new();
 
     for (idx, raw) in schedule.lines().enumerate() {
@@ -269,23 +282,39 @@ fn parse(schedule: &str) -> Result<Vec<(Cron, String)>, ScheduleError> {
         }
 
         let fields: Vec<&str> = content.split_whitespace().collect();
-        if fields.len() < 6 {
-            return Err(ScheduleError::Parse {
-                line,
-                msg: format!(
-                    "expected 5 cron fields followed by a job name, got {} field(s)",
-                    fields.len()
-                ),
-            });
-        }
+        let (tz, name) = match fields.len() {
+            6 => (None, fields[5]),
+            7 => {
+                let tz = fields[5].parse::<Tz>().map_err(|_| ScheduleError::Parse {
+                    line,
+                    msg: format!(
+                        "unknown timezone {:?} (expected an IANA name like Australia/Sydney)",
+                        fields[5]
+                    ),
+                })?;
+                (Some(tz), fields[6])
+            }
+            n => {
+                return Err(ScheduleError::Parse {
+                    line,
+                    msg: format!(
+                        "expected 5 cron fields, an optional IANA timezone, \
+                         and a job name, got {n} field(s)"
+                    ),
+                });
+            }
+        };
 
         let expr = fields[..5].join(" ");
-        let name = fields[5].to_string();
         let cron = Cron::from_str(&expr).map_err(|e| ScheduleError::Parse {
             line,
             msg: format!("invalid cron {expr:?}: {e}"),
         })?;
-        entries.push((cron, name));
+        entries.push(ScheduleEntry {
+            cron,
+            tz,
+            name: name.to_string(),
+        });
     }
 
     Ok(entries)
@@ -299,11 +328,11 @@ pub fn spawn(registry: JobRegistry, pool: SqlitePool, schedule: &str) -> Result<
 
     // Validate all names up front so a bad file fails fast at startup rather
     // than spawning a partial set of tasks.
-    for (idx, (_, name)) in entries.iter().enumerate() {
-        if !registry.contains_key(name) {
+    for (idx, entry) in entries.iter().enumerate() {
+        if !registry.contains_key(&entry.name) {
             return Err(ScheduleError::UnknownJob {
                 line: idx + 1,
-                name: name.clone(),
+                name: entry.name.clone(),
             });
         }
     }
@@ -311,7 +340,7 @@ pub fn spawn(registry: JobRegistry, pool: SqlitePool, schedule: &str) -> Result<
     // A registered job with no schedule line never runs automatically (only via
     // POST /jobs/{name}). That is usually an oversight, so warn rather than fail.
     for name in registry.keys() {
-        if !entries.iter().any(|(_, scheduled)| scheduled == name) {
+        if !entries.iter().any(|entry| &entry.name == name) {
             tracing::warn!(
                 job = %name,
                 "registered job has no schedule entry; it will only run via POST /jobs/{name}"
@@ -319,32 +348,76 @@ pub fn spawn(registry: JobRegistry, pool: SqlitePool, schedule: &str) -> Result<
         }
     }
 
-    for (cron, name) in entries {
-        let job = registry[&name].clone();
+    for entry in entries {
+        let job = registry[&entry.name].clone();
         let pool = pool.clone();
-        tokio::spawn(async move {
-            loop {
-                let (next, delay) = match next_run(&cron, Local::now()) {
-                    Some(pair) => pair,
-                    None => {
-                        tracing::error!(job = %name, "cannot compute next run, stopping");
-                        return;
-                    }
-                };
-                tracing::info!(
-                    job = %name,
-                    next_run = %next.format("%Y-%m-%d %H:%M:%S %Z"),
-                    "next run scheduled"
-                );
-                tokio::time::sleep(delay).await;
-                if let Err(e) = run_job(&pool, &name, &job).await {
-                    tracing::warn!(job = %name, "job failed: {e}");
-                }
+        // The two arms differ only in the timezone type the clock yields
+        // (`DateTime<Tz>` vs `DateTime<Local>`), so each instantiates the same
+        // generic loop.
+        match entry.tz {
+            Some(tz) => {
+                tokio::spawn(run_entry(pool, entry.name, job, entry.cron, move || {
+                    Utc::now().with_timezone(&tz)
+                }));
             }
-        });
+            None => {
+                tokio::spawn(run_entry(pool, entry.name, job, entry.cron, Local::now));
+            }
+        }
     }
 
     Ok(())
+}
+
+/// Cap on any single timer sleep. Timer sleeps are monotonic, so a wall-clock
+/// shift mid-sleep (a DST transition in the entry's timezone, an NTP step, a
+/// laptop resume) would otherwise make the job fire offset from its wall-clock
+/// target. Sleeping at most this long and recomputing the target after each
+/// chunk re-anchors to the wall clock within an hour of any shift.
+const MAX_SLEEP: Duration = Duration::from_secs(60 * 60);
+
+/// The scheduled loop for one schedule entry: log the next run, sleep to it in
+/// capped chunks (recomputing the target after each chunk — see `MAX_SLEEP`),
+/// run the job, repeat. `now` supplies the current time in the entry's
+/// timezone — a per-entry IANA zone, or `Local` for entries without one.
+async fn run_entry<Z>(
+    pool: SqlitePool,
+    name: String,
+    job: Job,
+    cron: Cron,
+    now: impl Fn() -> DateTime<Z> + Send + 'static,
+) where
+    Z: TimeZone + Send + 'static,
+    Z::Offset: std::fmt::Display + Send,
+{
+    loop {
+        let (next, mut delay) = match next_run(&cron, now()) {
+            Some(pair) => pair,
+            None => {
+                tracing::error!(job = %name, "cannot compute next run, stopping");
+                return;
+            }
+        };
+        tracing::info!(
+            job = %name,
+            next_run = %next.format("%Y-%m-%d %H:%M:%S %Z"),
+            "next run scheduled"
+        );
+        while delay > MAX_SLEEP {
+            tokio::time::sleep(MAX_SLEEP).await;
+            delay = match next_run(&cron, now()) {
+                Some((_, recomputed)) => recomputed,
+                None => {
+                    tracing::error!(job = %name, "cannot compute next run, stopping");
+                    return;
+                }
+            };
+        }
+        tokio::time::sleep(delay).await;
+        if let Err(e) = run_job(&pool, &name, &job).await {
+            tracing::warn!(job = %name, "job failed: {e}");
+        }
+    }
 }
 
 /// Compute the next scheduled fire time at or after `now` and the exact delay to
@@ -353,11 +426,13 @@ pub fn spawn(registry: JobRegistry, pool: SqlitePool, schedule: &str) -> Result<
 /// the recomputed next run would still be the same instant and the loop would
 /// busy-spin until the clock crossed the boundary. Returns `None` only if the
 /// cron pattern has no future occurrence.
-fn next_run(cron: &Cron, now: DateTime<Local>) -> Option<(DateTime<Local>, Duration)> {
+fn next_run<Z: TimeZone>(cron: &Cron, now: DateTime<Z>) -> Option<(DateTime<Z>, Duration)> {
     let next = cron.find_next_occurrence(&now, false).ok()?;
     // `next` is strictly after `now`, so the difference is non-negative; the
     // fallback only guards against clock skew between this read and the diff.
-    let delay = (next - now).to_std().unwrap_or(Duration::from_secs(1));
+    let delay = (next.clone() - now)
+        .to_std()
+        .unwrap_or(Duration::from_secs(1));
     Some((next, delay))
 }
 
@@ -453,7 +528,36 @@ mod tests {
         let schedule = "# a comment\n\n0 0 * * *   backup   # trailing comment\n";
         let entries = parse(schedule).unwrap();
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].1, "backup");
+        assert_eq!(entries[0].name, "backup");
+        assert_eq!(entries[0].tz, None);
+    }
+
+    #[test]
+    fn parse_accepts_timezone_field() {
+        let entries = parse("30 16 * * 1-5  America/New_York  price-import\n").unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].tz, Some(chrono_tz::America::New_York));
+        assert_eq!(entries[0].name, "price-import");
+    }
+
+    #[test]
+    fn parse_rejects_unknown_timezone() {
+        // A non-IANA zone name (here a bare city) must fail at startup with the
+        // line number, not silently fall back to local time.
+        let err = parse("# comment\n0 0 * * *   Sydney   backup\n").unwrap_err();
+        match err {
+            ScheduleError::Parse { line, msg } => {
+                assert_eq!(line, 2);
+                assert!(msg.contains("unknown timezone"), "{msg}");
+            }
+            other => panic!("expected Parse error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_rejects_extra_fields() {
+        let err = parse("0 0 * * *   UTC   backup   extra\n").unwrap_err();
+        assert!(matches!(err, ScheduleError::Parse { line: 1, .. }));
     }
 
     #[test]
@@ -514,14 +618,164 @@ mod tests {
         // REQUIREMENTS specifies weekly backups: the committed schedule's backup
         // entry must parse and fire exactly 7 days apart.
         let entries = parse(include_str!("../../schedule.cron")).unwrap();
-        let (cron, _) = entries
+        let entry = entries
             .iter()
-            .find(|(_, name)| name == "backup")
+            .find(|e| e.name == "backup")
             .expect("backup must be scheduled");
         let from = Local.with_ymd_and_hms(2026, 6, 1, 12, 0, 0).unwrap();
-        let first = cron.find_next_occurrence(&from, false).unwrap();
-        let second = cron.find_next_occurrence(&first, false).unwrap();
+        let first = entry.cron.find_next_occurrence(&from, false).unwrap();
+        let second = entry.cron.find_next_occurrence(&first, false).unwrap();
         assert_eq!(second - first, chrono::Duration::days(7));
+    }
+
+    #[test]
+    fn price_imports_are_scheduled_in_market_timezones() {
+        // Each committed price-import entry is pinned to its market's zone so a
+        // DST transition at either end can't shift the run's margin over that
+        // market's close.
+        let entries = parse(include_str!("../../schedule.cron")).unwrap();
+        let zones: Vec<Option<Tz>> = entries
+            .iter()
+            .filter(|e| e.name == "price-import")
+            .map(|e| e.tz)
+            .collect();
+        assert_eq!(zones.len(), 3, "ASX, NYSE, and crypto-UTC runs expected");
+        assert!(zones.contains(&Some(chrono_tz::Australia::Sydney)));
+        assert!(zones.contains(&Some(chrono_tz::America::New_York)));
+        assert!(zones.contains(&Some(chrono_tz::UTC)));
+    }
+
+    #[test]
+    fn next_occurrence_computed_in_entry_timezone() {
+        // 16:30 weekdays in New York, evaluated from a UTC instant: 2026-06-11
+        // (a Thursday) 18:00 UTC is 14:00 EDT, so the next fire is 16:30 EDT
+        // = 20:30 UTC the same day — not 16:30 in UTC or server-local time.
+        let tz: Tz = "America/New_York".parse().unwrap();
+        let cron = Cron::from_str("30 16 * * 1-5").unwrap();
+        let now = Utc
+            .with_ymd_and_hms(2026, 6, 11, 18, 0, 0)
+            .unwrap()
+            .with_timezone(&tz);
+        let (next, delay) = next_run(&cron, now).unwrap();
+        assert_eq!(next, Utc.with_ymd_and_hms(2026, 6, 11, 20, 30, 0).unwrap());
+        assert_eq!(delay, Duration::from_secs(2 * 3600 + 30 * 60));
+        // The "next run scheduled" log line formats this value with %Z, which
+        // renders the entry zone's abbreviation.
+        assert_eq!(
+            next.format("%Y-%m-%d %H:%M:%S %Z").to_string(),
+            "2026-06-11 16:30:00 EDT"
+        );
+    }
+
+    #[test]
+    fn dst_gap_fires_at_first_valid_instant_after_gap() {
+        // Sydney springs forward on 2026-10-04: 02:00 AEST → 03:00 AEDT, so
+        // 02:30 does not exist that day. The occurrence lands on the first
+        // valid instant after the gap (03:00 AEDT) — the day is neither
+        // skipped nor an error.
+        let tz: Tz = "Australia/Sydney".parse().unwrap();
+        let cron = Cron::from_str("30 2 * * *").unwrap();
+        let now = tz.with_ymd_and_hms(2026, 10, 4, 1, 0, 0).unwrap();
+        let (next, _) = next_run(&cron, now).unwrap();
+        assert_eq!(next, tz.with_ymd_and_hms(2026, 10, 4, 3, 0, 0).unwrap());
+        assert_eq!(next.format("%Z").to_string(), "AEDT");
+        // The following day, 02:30 exists again.
+        let (after, _) = next_run(&cron, next).unwrap();
+        assert_eq!(after, tz.with_ymd_and_hms(2026, 10, 5, 2, 30, 0).unwrap());
+    }
+
+    #[test]
+    fn dst_fold_fires_once_at_first_occurrence() {
+        // Sydney falls back on 2026-04-05: 03:00 AEDT → 02:00 AEST, so 02:30
+        // occurs twice. The job fires once, at the first (AEDT) occurrence,
+        // and not again in the repeated hour.
+        let tz: Tz = "Australia/Sydney".parse().unwrap();
+        let cron = Cron::from_str("30 2 * * *").unwrap();
+        let now = tz.with_ymd_and_hms(2026, 4, 5, 1, 0, 0).unwrap();
+        let (next, _) = next_run(&cron, now).unwrap();
+        let first = tz
+            .with_ymd_and_hms(2026, 4, 5, 2, 30, 0)
+            .earliest()
+            .unwrap();
+        assert_eq!(next, first);
+        assert_eq!(next.format("%Z").to_string(), "AEDT");
+        // After the first occurrence, the next fire is the following day —
+        // not the second (AEST) 02:30 of the fold.
+        let (after, _) = next_run(&cron, next).unwrap();
+        assert_eq!(after, tz.with_ymd_and_hms(2026, 4, 6, 2, 30, 0).unwrap());
+    }
+
+    #[tokio::test]
+    async fn capped_sleep_reanchors_after_wall_clock_shift() {
+        // The wall-clock target is 03:30, three and a half hours of wall time
+        // away — but the wall clock jumps +1h mid-sleep (as a DST
+        // spring-forward or an NTP step would), so the target arrives after
+        // only 2.5h of monotonic time. A single uncapped 3.5h monotonic sleep
+        // would fire an hour late on the wall clock; the capped loop recomputes
+        // every MAX_SLEEP and re-anchors, firing exactly at 03:30 wall time.
+        //
+        // The pool is created before pausing the clock: under the paused clock
+        // tokio auto-advances past sqlx's acquire timeout while the sqlite
+        // worker thread is still opening the database, failing pool init.
+        let pool = db::init(":memory:").await.unwrap();
+        tokio::time::pause();
+        let t0 = Utc.with_ymd_and_hms(2026, 6, 1, 0, 0, 0).unwrap();
+        let start = tokio::time::Instant::now();
+        let clock = move || {
+            let elapsed = tokio::time::Instant::now() - start;
+            let mut now = t0 + chrono::Duration::from_std(elapsed).unwrap();
+            if elapsed >= Duration::from_secs(90 * 60) {
+                now += chrono::Duration::hours(1); // the wall-clock shift
+            }
+            now
+        };
+
+        let fired_at = Arc::new(std::sync::Mutex::new(Vec::<DateTime<Utc>>::new()));
+        let fired = fired_at.clone();
+        let job: Job = Arc::new(move || {
+            let fired = fired.clone();
+            let now = clock();
+            Box::pin(async move {
+                fired.lock().unwrap().push(now);
+                Ok(())
+            })
+        });
+
+        let cron = Cron::from_str("30 3 1 6 *").unwrap(); // 03:30 on 2026-06-01
+        tokio::spawn(run_entry(pool, "fake".to_string(), job, cron, clock));
+        // Paused time auto-advances through the loop's sleeps; run well past
+        // the target, then check the fire time against the shifted wall clock.
+        tokio::time::sleep(Duration::from_secs(4 * 3600)).await;
+
+        let fired = fired_at.lock().unwrap();
+        assert_eq!(fired.len(), 1, "job must fire exactly once");
+        // Tokio's paused clock rounds each auto-advanced sleep up by 1ms, so
+        // allow a few ms of slack — the failure mode being guarded against is
+        // firing a whole hour late on the wall clock.
+        let target = Utc.with_ymd_and_hms(2026, 6, 1, 3, 30, 0).unwrap();
+        let off_by = (fired[0] - target).num_milliseconds().abs();
+        assert!(
+            off_by < 1000,
+            "fired at {} — {off_by}ms from the wall-clock target {target}",
+            fired[0]
+        );
+    }
+
+    #[tracing_test::traced_test]
+    #[tokio::test]
+    async fn next_run_log_shows_timezone() {
+        let (reg, pool, _dir, _path) = test_registry().await;
+        spawn(reg, pool, "0 0 * * *   Pacific/Auckland   backup\n").unwrap();
+        // The spawned task logs its first "next run scheduled" before any
+        // await; yield so it gets to run.
+        for _ in 0..50 {
+            tokio::task::yield_now().await;
+        }
+        assert!(logs_contain("next run scheduled"));
+        assert!(
+            logs_contain("NZST") || logs_contain("NZDT"),
+            "the next-run log line must carry the entry timezone's %Z name"
+        );
     }
 
     #[tracing_test::traced_test]
