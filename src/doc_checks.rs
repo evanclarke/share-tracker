@@ -18,6 +18,25 @@ fn known_limitations() -> &'static str {
         .expect("split always yields at least one part")
 }
 
+/// Docs-sync pin for the AMIT cash-only income rows (REQUIREMENTS
+/// 2026-06-12): the Income section documents the cash-only rule and its 422s,
+/// the Tax summary section documents the exclusion, the cross-check report
+/// has its own section, and the README surfaces both features.
+#[test]
+fn amit_cash_only_rows_documented() {
+    // Income section: the cash-only rule and the write-time validation.
+    assert!(API_MD.contains("**AMIT cash distributions (cash-only rows):**"));
+    assert!(API_MD.contains("the AMMA statement's attribution is the only assessable record"));
+    // Tax summary section: the whole-row exclusion.
+    assert!(API_MD.contains("**AMIT listing are excluded entirely**"));
+    // The cross-check report's own section.
+    assert!(API_MD.contains("### AMIT cash cross-check"));
+    assert!(API_MD.contains("GET /reports/amit_cash_cross_check"));
+    // README features.
+    assert!(README_MD.contains("cash-only income rows"));
+    assert!(README_MD.contains("**AMIT cash cross-check**"));
+}
+
 #[test]
 fn known_limitations_document_gifts_at_market_value() {
     let limitations = known_limitations();

@@ -14,7 +14,10 @@ use std::collections::HashMap;
 pub struct TaxYearSummary {
     /// Australian tax year: the calendar year in which June 30 falls (e.g. 2024 = FY2023/24).
     pub tax_year: i32,
-    /// Assessable dividend income: franked_amount + unfranked_amount from income records.
+    /// Assessable dividend income: franked_amount + unfranked_amount from
+    /// income records. Rows on an AMIT listing are excluded entirely (every
+    /// component): an AMIT's cash advice only funds the DRP chain — the AMMA
+    /// statement is the assessable record, reported on the `amma_*` lines.
     pub dividends_assessable: Decimal,
     /// Gross interest from interest-income records (question 10 label L —
     /// includes any TFN amount withheld; the withheld amount itself joins
@@ -281,11 +284,18 @@ pub async fn db_tax_summary(pool: &SqlitePool) -> Result<Vec<TaxYearSummary>, sq
     // One read transaction for the income-side inputs (and the FX rates that
     // convert them), so they come from a single consistent snapshot.
     let mut tx = pool.begin().await?;
+    // An AMIT listing's cash rows are excluded outright: for an AMIT the AMMA
+    // attribution is the only assessable record — the cash advice exists to
+    // drive the DRP chain, and counting its cash alongside the AMMA components
+    // would double the year's income (write-time validation already keeps the
+    // notional components off these rows, `entities::income`).
     let income_rows = sqlx::query(
-        "SELECT date_paid, franked_amount, unfranked_amount, \
-         foreign_source_income, foreign_tax_paid, tfn_withholding_tax, franking_credits, \
-         lic_capital_gain_deduction, currency, trust_income, entitlement_date \
-         FROM income",
+        "SELECT i.date_paid, i.franked_amount, i.unfranked_amount, \
+         i.foreign_source_income, i.foreign_tax_paid, i.tfn_withholding_tax, \
+         i.franking_credits, i.lic_capital_gain_deduction, i.currency, i.trust_income, \
+         i.entitlement_date \
+         FROM income i JOIN listings l ON l.id = i.listing_id \
+         WHERE NOT l.amit",
     )
     .fetch_all(&mut *tx)
     .await?;
@@ -586,7 +596,8 @@ mod tests {
     use super::*;
     use crate::{
         entities::{
-            amma, ess_statement, income, interest_income, investment_expense, rba_fx_rate, trade,
+            amma, ess_statement, income, interest_income, investment_expense, listing, rba_fx_rate,
+            trade,
         },
         test_support::{self, test_pool},
     };
@@ -967,6 +978,139 @@ mod tests {
         assert_eq!(s.tfn_withholding_tax, Decimal::from(7)); // 5 income + 2 amma
         assert_eq!(s.amma_australian_interest, Decimal::from(8));
         assert_eq!(s.amma_cgt_discount_gains, Decimal::from(100));
+    }
+
+    // AMIT cash distributions (REQUIREMENTS 2026-06-12): cash rows on an AMIT
+    // listing fund the DRP chain only — the AMMA statement is the assessable
+    // record, so every component of the cash row is excluded from the summary.
+
+    /// An AMIT cash row contributes nothing to any income line, while the
+    /// fund's AMMA components and a non-AMIT dividend in the same year report
+    /// as before.
+    #[tokio::test]
+    async fn db_amit_cash_rows_excluded_from_every_income_line() {
+        let pool = test_pool().await;
+        test_support::listing(1)
+            .ticker("VDHG")
+            .amit(true)
+            .insert(&pool)
+            .await;
+        insert_listing(&pool, 2).await;
+
+        // AMIT quarterly cash distribution: gross cash + source withholding.
+        let mut cash = make_income(1, 1, NaiveDate::from_ymd_opt(2024, 1, 15).unwrap());
+        cash.trust_income = true;
+        cash.unfranked_amount = Decimal::from(1000);
+        cash.foreign_source_income = Decimal::from(10);
+        cash.foreign_tax_paid = Decimal::from(2);
+        cash.tfn_withholding_tax = Decimal::from(5);
+        income::db_upsert(&pool, &cash).await.unwrap();
+
+        // The fund's AMMA attribution for the same FY.
+        let mut a = make_amma(1, 1, NaiveDate::from_ymd_opt(2024, 6, 30).unwrap());
+        a.franked_dividends = Decimal::from(300);
+        a.franking_credits = Decimal::from(120);
+        a.foreign_income = Decimal::from(40);
+        a.foreign_tax_credits = Decimal::from(6);
+        amma::db_upsert(&pool, &a).await.unwrap();
+
+        // A non-AMIT franked dividend in the same FY still counts in full.
+        let mut div = make_income(2, 2, NaiveDate::from_ymd_opt(2024, 3, 15).unwrap());
+        div.franked_amount = Decimal::from(70);
+        div.franking_credits = Decimal::from(30);
+        income::db_upsert(&pool, &div).await.unwrap();
+
+        let result = db_tax_summary(&pool).await.unwrap();
+        assert_eq!(result.len(), 1);
+        let s = &result[0];
+        assert_eq!(s.tax_year, 2024);
+        // Only the PLS-style ordinary dividend; the $1,010 AMIT cash is gone.
+        assert_eq!(s.dividends_assessable, Decimal::from(70));
+        assert_eq!(s.foreign_source_income, Decimal::ZERO);
+        // Credits/offsets/withholding come from the dividend and the AMMA only.
+        assert_eq!(s.franking_credits, Decimal::from(150)); // 30 + 120
+        assert_eq!(s.foreign_tax_offsets, Decimal::from(6)); // AMMA only
+        assert_eq!(s.tfn_withholding_tax, Decimal::ZERO);
+        // The AMMA attribution is unchanged by the exclusion.
+        assert_eq!(s.amma_franked_dividends, Decimal::from(300));
+        assert_eq!(s.amma_foreign_income, Decimal::from(40));
+        // Gross assessable = dividend + AMMA components, no cash.
+        assert_eq!(
+            s.gross_assessable_investment_income,
+            Decimal::from(70 + 300 + 40)
+        );
+    }
+
+    /// Rows entered before the write-time validation existed may carry
+    /// notional components (simulated by flipping the listing to AMIT after
+    /// the insert): the report-level exclusion drops the whole row, so legacy
+    /// credits can neither be claimed nor count toward the small-shareholder
+    /// threshold.
+    #[tokio::test]
+    async fn db_legacy_amit_rows_with_components_fully_excluded() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        let mut cash = make_income(1, 1, NaiveDate::from_ymd_opt(2024, 1, 15).unwrap());
+        cash.trust_income = true;
+        cash.unfranked_amount = Decimal::from(1000);
+        cash.franking_credits = Decimal::from(6000); // over the $5,000 threshold
+        income::db_upsert(&pool, &cash).await.unwrap();
+        let mut l = test_support::listing(1).ticker("TST1").build();
+        l.amit = true;
+        listing::db_upsert(&pool, &l).await.unwrap();
+
+        let result = db_tax_summary(&pool).await.unwrap();
+        assert!(result.is_empty());
+    }
+
+    /// Legacy AMIT credits don't count toward the A$5,000 small-shareholder
+    /// threshold either: a short-held non-AMIT dividend under the threshold
+    /// on its own keeps its credits even with a 6,000-credit AMIT row in the
+    /// same year.
+    #[tokio::test]
+    async fn db_amit_credits_do_not_count_toward_franking_threshold() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        insert_listing(&pool, 2).await;
+        // Short at-risk holding: bought and sold around the ex-date.
+        insert_trade(
+            &pool,
+            1,
+            2,
+            trade::TradeType::Buy,
+            NaiveDate::from_ymd_opt(2025, 3, 1).unwrap(),
+            1000,
+        )
+        .await;
+        insert_trade(
+            &pool,
+            2,
+            2,
+            trade::TradeType::Sell,
+            NaiveDate::from_ymd_opt(2025, 4, 10).unwrap(),
+            1000,
+        )
+        .await;
+        let mut div = make_income(1, 2, NaiveDate::from_ymd_opt(2025, 4, 8).unwrap());
+        div.ex_date = Some(NaiveDate::from_ymd_opt(2025, 3, 14).unwrap());
+        div.franked_amount = Decimal::from(7000);
+        div.franking_credits = Decimal::from(3000);
+        income::db_upsert(&pool, &div).await.unwrap();
+        // Legacy AMIT row with credits (listing flipped to AMIT post-insert).
+        let mut cash = make_income(2, 1, NaiveDate::from_ymd_opt(2025, 1, 15).unwrap());
+        cash.trust_income = true;
+        cash.unfranked_amount = Decimal::from(1000);
+        cash.franking_credits = Decimal::from(6000);
+        income::db_upsert(&pool, &cash).await.unwrap();
+        let mut l = test_support::listing(1).ticker("TST1").build();
+        l.amit = true;
+        listing::db_upsert(&pool, &l).await.unwrap();
+
+        let result = db_tax_summary(&pool).await.unwrap();
+        assert_eq!(result.len(), 1);
+        // Under the threshold without the AMIT credits → exemption holds.
+        assert_eq!(result[0].franking_credits, Decimal::from(3000));
+        assert_eq!(result[0].franking_credits_denied, Decimal::ZERO);
     }
 
     #[tokio::test]

@@ -204,6 +204,24 @@ pub enum UpsertError {
     /// A negative `tax_deferred_amount` — the statement figure is a payment
     /// received, never below zero. Mapped to `422`.
     TaxDeferredNegative,
+    /// The row's listing is an AMIT (`listings.amit`) but `trust_income` is
+    /// false. An AMIT is an attribution managed investment *trust* — its cash
+    /// distribution advice is entered as a trust row (cash-only: the AMMA
+    /// statement is the assessable record). Mapped to `422`.
+    AmitNonTrust,
+    /// A non-zero notional tax component (`franking_credits`,
+    /// `lic_capital_gain_deduction`, or `conduit_foreign_income`) on an AMIT
+    /// listing's row. An AMIT cash advice is not a tax document — the fund's
+    /// attribution (credits, LIC deduction, CFI) is reported by its AMMA
+    /// statement, and the tax summary reads it from there alone; a value here
+    /// would be stored but never used. Carries the offending field name.
+    /// Mapped to `422`.
+    AmitNotionalComponent(&'static str),
+    /// A `tax_deferred_amount` on an AMIT listing's row. An AMIT's cost-base
+    /// movement is the AMMA statement's `cost_base_adjustment` (entered as
+    /// AMIT adjustments, CGT event E10) — the E4 tax-deferred mechanism is
+    /// for non-AMIT trusts. Mapped to `422`.
+    AmitTaxDeferred,
 }
 
 impl From<sqlx::Error> for UpsertError {
@@ -291,6 +309,36 @@ pub async fn db_upsert(pool: &SqlitePool, income: &Income) -> Result<(), UpsertE
             .await?;
     if existing_buyback.flatten().is_some() {
         return Err(UpsertError::BuyBackIncome);
+    }
+
+    // AMIT listings take cash-only income rows: the row funds the DRP chain
+    // (cash components, source withholding) but the AMMA statement is the only
+    // assessable record, so the notional tax components must be entered there
+    // — a value here would be stored and silently never reported. An unknown
+    // listing falls through to the INSERT's FK rejection.
+    let listing_amit: Option<bool> = sqlx::query_scalar("SELECT amit FROM listings WHERE id = ?")
+        .bind(income.listing_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+    if listing_amit == Some(true) {
+        if !income.trust_income {
+            return Err(UpsertError::AmitNonTrust);
+        }
+        for (field, value) in [
+            ("franking_credits", income.franking_credits),
+            (
+                "lic_capital_gain_deduction",
+                income.lic_capital_gain_deduction,
+            ),
+            ("conduit_foreign_income", income.conduit_foreign_income),
+        ] {
+            if value != Decimal::ZERO {
+                return Err(UpsertError::AmitNotionalComponent(field));
+            }
+        }
+        if income.tax_deferred_amount.is_some() {
+            return Err(UpsertError::AmitTaxDeferred);
+        }
     }
 
     sqlx::query(
@@ -452,6 +500,21 @@ impl From<UpsertError> for ApiError {
             UpsertError::TaxDeferredNegative => ApiError::unprocessable(
                 "tax_deferred_amount cannot be negative — it is a payment received per \
                  the trust's statement",
+            ),
+            UpsertError::AmitNonTrust => ApiError::unprocessable(
+                "this listing is an AMIT — its distributions are trust income; tick \
+                 trust income (the cash row funds DRP reinvestment, while the fund's \
+                 AMMA statement carries the assessable figures)",
+            ),
+            UpsertError::AmitNotionalComponent(field) => ApiError::unprocessable(format!(
+                "{field} cannot be entered on an AMIT distribution — the cash advice \
+                 is not a tax record; the fund's attributed components belong on its \
+                 AMMA statement, which the tax summary reads instead"
+            )),
+            UpsertError::AmitTaxDeferred => ApiError::unprocessable(
+                "tax_deferred_amount does not apply to an AMIT — its cost-base \
+                 movement is the AMMA statement's cost_base_adjustment, entered as \
+                 AMIT adjustments (CGT event E10), not an E4 tax-deferred amount",
             ),
             UpsertError::Db(err) => err.into(),
         }
@@ -1091,6 +1154,127 @@ mod tests {
         assert_eq!(status, StatusCode::NO_CONTENT);
         let got = db_get(&pool, 1).await.unwrap().unwrap();
         assert_eq!(got.tax_deferred_amount, None);
+    }
+
+    // AMIT cash-only rows (REQUIREMENTS 2026-06-12): an AMIT listing's income
+    // row funds the DRP chain but the AMMA statement is the only assessable
+    // record — notional tax components are rejected at write time so they
+    // can't be stored and silently never reported.
+
+    async fn insert_amit_listing(pool: &SqlitePool) {
+        test_support::listing(1)
+            .ticker("VDHG")
+            .amit(true)
+            .insert(pool)
+            .await;
+    }
+
+    /// The cash side stays fully recordable: gross components, source
+    /// withholding (both reduce DRP-reinvestable cash), ex date, and the
+    /// per-share cross-check pair.
+    #[tokio::test]
+    async fn db_amit_cash_only_row_accepted() {
+        let pool = test_pool().await;
+        insert_amit_listing(&pool).await;
+        let mut dist = dividend_income();
+        dist.trust_income = true;
+        dist.franking_credits = Decimal::ZERO;
+        dist.foreign_source_income = Decimal::from(10);
+        dist.foreign_tax_paid = Decimal::from(2);
+        dist.tfn_withholding_tax = Decimal::from(1);
+        db_upsert(&pool, &dist).await.unwrap();
+        let got = db_get(&pool, 1).await.unwrap().unwrap();
+        assert_eq!(got.foreign_tax_paid, Decimal::from(2));
+        assert_eq!(got.tfn_withholding_tax, Decimal::from(1));
+    }
+
+    #[tokio::test]
+    async fn db_amit_non_trust_row_rejected() {
+        let pool = test_pool().await;
+        insert_amit_listing(&pool).await;
+        let mut div = dividend_income();
+        div.franking_credits = Decimal::ZERO;
+        let err = db_upsert(&pool, &div).await.unwrap_err();
+        assert!(matches!(err, UpsertError::AmitNonTrust));
+        assert!(db_get(&pool, 1).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn db_amit_notional_components_rejected() {
+        let pool = test_pool().await;
+        insert_amit_listing(&pool).await;
+        let cases: [(&str, fn(&mut Income)); 3] = [
+            ("franking_credits", |i| {
+                i.franking_credits = Decimal::from(30);
+            }),
+            ("lic_capital_gain_deduction", |i| {
+                i.lic_capital_gain_deduction = Decimal::from(5);
+            }),
+            ("conduit_foreign_income", |i| {
+                i.conduit_foreign_income = Decimal::from(3);
+            }),
+        ];
+        for (field, set) in cases {
+            let mut dist = dividend_income();
+            dist.trust_income = true;
+            dist.franking_credits = Decimal::ZERO;
+            set(&mut dist);
+            let err = db_upsert(&pool, &dist).await.unwrap_err();
+            assert!(
+                matches!(err, UpsertError::AmitNotionalComponent(f) if f == field),
+                "expected AmitNotionalComponent({field}), got {err:?}"
+            );
+        }
+        assert!(db_get(&pool, 1).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn db_amit_tax_deferred_amount_rejected() {
+        let pool = test_pool().await;
+        insert_amit_listing(&pool).await;
+        let mut dist = dividend_income();
+        dist.trust_income = true;
+        dist.franking_credits = Decimal::ZERO;
+        dist.tax_deferred_amount = Some("50".parse().unwrap());
+        let err = db_upsert(&pool, &dist).await.unwrap_err();
+        assert!(matches!(err, UpsertError::AmitTaxDeferred));
+        assert!(db_get(&pool, 1).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn api_amit_franking_credits_return_422_with_detail() {
+        let pool = test_pool().await;
+        insert_amit_listing(&pool).await;
+        let (status, detail) = put_income(
+            &pool,
+            1,
+            serde_json::json!({
+                "listing_id": 1,
+                "date_paid": "2024-03-15",
+                "unfranked_amount": "100",
+                "franking_credits": "30",
+                "trust_income": true
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(detail.contains("AMMA"), "detail: {detail}");
+        assert!(db_get(&pool, 1).await.unwrap().is_none());
+    }
+
+    /// Non-AMIT listings are untouched by the AMIT validation: a dividend with
+    /// credits and a trust row with a tax-deferred amount both still pass.
+    #[tokio::test]
+    async fn db_non_amit_rows_unaffected_by_amit_validation() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        db_upsert(&pool, &dividend_income()).await.unwrap();
+        let mut trust = dividend_income();
+        trust.id = 2;
+        trust.trust_income = true;
+        trust.tax_deferred_amount = Some("40".parse().unwrap());
+        db_upsert(&pool, &trust).await.unwrap();
+        assert!(db_get(&pool, 2).await.unwrap().is_some());
     }
 
     #[tokio::test]

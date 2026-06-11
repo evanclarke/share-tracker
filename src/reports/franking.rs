@@ -251,10 +251,14 @@ pub async fn db_franked_dividends(
     let mut dividends = Vec::new();
     let mut attached_by_year: HashMap<i32, Decimal> = HashMap::new();
 
+    // AMIT listings' cash rows carry no attributable credits (write-time
+    // validated; the fund's credits arrive via its AMMA statement below), so
+    // they are excluded here just as the tax summary excludes them.
     let income_rows = sqlx::query(
-        "SELECT id, listing_id, date_paid, ex_date, franking_credits, currency, \
-         trust_income, entitlement_date \
-         FROM income",
+        "SELECT i.id, i.listing_id, i.date_paid, i.ex_date, i.franking_credits, \
+         i.currency, i.trust_income, i.entitlement_date \
+         FROM income i JOIN listings l ON l.id = i.listing_id \
+         WHERE NOT l.amit",
     )
     .fetch_all(&mut *conn)
     .await?;

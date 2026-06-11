@@ -321,6 +321,8 @@ const COLUMN_KINDS = (function () {
     'rights_cost',
     // Franking at-risk report credit columns.
     'credits_attached', 'credits_at_risk', 'credits_denied', 'additional_credits_at_risk',
+    // AMIT cash cross-check report.
+    'cash_total_aud',
     // Investment-expense line items + the tax-summary deduction aggregates.
     'amount', 'gross_amount', 'gross_assessable_investment_income',
     'deductions_loan_interest', 'deductions_management_fee', 'deductions_advice_fee',
@@ -410,6 +412,7 @@ const COLUMN_LABELS = {
   unrealised_gain_loss: 'Unrealised gain/loss (AUD)',
   net_capital_gain: 'Net capital gain (AUD)',
   avg_cost_base_per_unit: 'Average cost base per unit (AUD)',
+  cash_total_aud: 'Cash total (AUD)',
 };
 
 // The friendly heading for a column: an explicit override, else humanised.

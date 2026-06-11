@@ -478,6 +478,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn amit_cash_cross_check_ui_present() {
+        let js = app_js_body().await;
+        // The cross-check report screen drives GET /reports/amit_cash_cross_check
+        // (AMIT cash rows are cash-only — the AMMA is the assessable record —
+        // so a missing AMMA must be visible, not silent), and its AUD cash
+        // column is classified money with an explicit (AUD) heading.
+        assert!(js.contains("/reports/amit_cash_cross_check"));
+        assert!(js.contains("AMIT Cash Cross-Check"));
+        assert!(js.contains("cash_total_aud"));
+        assert!(js.contains("Cash total (AUD)"));
+    }
+
+    #[tokio::test]
     async fn interest_income_ui_present() {
         let js = app_js_body().await;
         // The Interest Income CRUD screen drives the /interest_income API,

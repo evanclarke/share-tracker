@@ -13,6 +13,7 @@ use sqlx::SqlitePool;
 /// (scope decision, 2026-06-07). Kept comma-free so it stays a single CSV field.
 pub const TAXPAYER_BASIS: &str = "individual resident: 50% CGT discount; 50% LIC deduction";
 
+pub mod amit_cash_cross_check;
 pub mod e4_cross_check;
 pub mod export;
 pub mod franking;
@@ -43,6 +44,7 @@ pub fn router() -> Router<SqlitePool> {
         .merge(mic_validation::router())
         .merge(settlement_coverage::router())
         .merge(e4_cross_check::router())
+        .merge(amit_cash_cross_check::router())
         .merge(wash_sales::router())
         .merge(franking_at_risk::router())
         .merge(snapshot::router())
