@@ -792,3 +792,73 @@ modelling):
 - **The indexation method**: for assets acquired before 21 September 1999 an individual may
   index the cost base (frozen at Sep 1999) instead of the 50% discount; the discount is almost
   always better for individuals and indexation is not modelled — state it
+
+## AMIT cash distributions — assessable-income double-count (2026-06-12)
+
+Found entering the full 2020–2026 statement archive: an AMIT fund's (VDHG, HNDQ) quarterly
+distribution must be entered as an `income` row to drive the DRP reinvestment machinery, but every
+income row's cash components land in the tax summary's `dividends_assessable` line — while the
+fund's AMMA statement attributes the same income to 13U/13C/18/20E. With both entered (both are
+needed: the cash rows for the DRP chain, the AMMA for the return figures) the year's assessable
+dividends are inflated by the full trust cash (~$12k–22k per FY in the live data). For an AMIT the
+**AMMA attribution is the only assessable record**; the cash advice is not a tax document.
+
+- An AMIT distribution income row must be recordable as **cash-only**: it funds DRP reinvestment
+  (and the per-share cross-check, ex-date enrolment check, residual chain) but contributes
+  **nothing** to the tax summary's income lines (`dividends_assessable`,
+  `gross_assessable_investment_income`, withholding, credits) — the listing's existing `amit` flag
+  or an explicit income kind may drive the exclusion; write-time-validated, not report-special-cased
+- A non-blocking cross-check report (pattern: E4 cross-check) flags every FY with AMIT cash rows
+  whose listing has **no AMMA statement covering that year** — cash-only entry must not let a
+  missing AMMA silently drop the income from the return — and conversely an AMMA year with no cash
+  rows is fine (fund held without DRP)
+- Non-AMIT trust and ordinary dividend rows are unchanged
+
+## Fractional-share DRP reinvestment (2026-06-12)
+
+`POST /income/:id/reinvest` spends the distribution on **whole shares** only — correct for ASX
+registries (Computershare/MUFG; all 26 archive advices reproduce exactly) but wrong for US broker
+DRPs: Morgan Stanley reinvests ICE dividends in fractional shares (0.500, 0.434, …) with no residual
+carry. Those nine reinvestments had to be entered as plain Buys (price = net cash ÷ units), losing
+the income→trade link and the DRP trade type.
+
+- The reinvest operation accepts the statement's **fractional allotment**: an optional explicit
+  `units` (the broker's stated figure, authoritative) with the price cross-checked against the
+  reinvestable cash, or a per-enrolment whole/fractional mode — design open, but the registry
+  statement's units must be representable exactly
+- Whole-share behaviour (floor + residual carry) stays the default and is unchanged for existing
+  enrolments
+
+## ESS statement AUD override (2026-06-12)
+
+Employer ESS statements convert the discount at the **release-date spot rate** (e.g. 1.4034 for
+Feb-2022); the tax summary converts the recorded foreign-currency discount at the **RBA monthly
+rate** — the live data differs by $65–214/yr (0.6–2.3%). The ATO-prefilled return carries the
+employer statement's AUD figure, so the tool's figure disagrees with what the user must lodge.
+
+- `ess_statements` gains optional statement-AUD amounts for the discount labels (at minimum the
+  total assessable discount); when present the tax summary reports them verbatim instead of
+  converting, when absent behaviour is unchanged (RBA monthly conversion)
+
+## statement_total tolerance for cent-rounded contract notes (2026-06-12)
+
+The `statement_total` cross-check compares exactly against `quantity × price ± brokerage + GST`,
+but contract notes print the consideration **rounded to the cent**: 3 of 41 archive notes
+(e.g. 1,302 × 37.585914 = 48,936.860028, note says 48,936.86) were rejected with `422` and had to
+be entered without the cross-check.
+
+- The cross-check passes when the supplied total equals the computed figure **rounded to the cent**
+  (half away from zero, as statements round); an exact match keeps passing; mismatches beyond the
+  sub-cent still reject with the computed figure in the body
+
+## Known-limitation documentation — RSU dividend equivalents, foreign broker interest (2026-06-12)
+
+Two scope cuts surfaced by the archive entry; document in Known limitations (no modelling):
+
+- **Dividend equivalents on unvested RSUs**: employer plans accrue dividend equivalents on unvested
+  grants (the archive's release confirmations show $77.88–$193.44); they are ordinary income when
+  paid and are not modelled — enterable manually as income if paid out in cash
+- **Foreign broker-cash interest classification**: interest income is reported at question 10
+  (gross interest, 10L) regardless of source; foreign broker-cash/money-market income (the archive's
+  USD Treasury Liquidity Fund dividends, ~$12–17/yr) strictly belongs at 20E assessable foreign
+  source income — state the 10L simplification
