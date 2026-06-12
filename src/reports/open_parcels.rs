@@ -63,7 +63,7 @@ pub async fn db_open_parcels(pool: &SqlitePool) -> Result<Vec<OpenParcel>, sqlx:
     let raw_rows = sqlx::query(
         "SELECT t.id, t.listing_id, t.holding_account_id, l.ticker, t.date, t.quantity, \
          t.average_price, t.brokerage, t.gst_on_brokerage, t.currency, t.fx_rate, \
-         t.deemed_acquisition_date \
+         t.spot_fx_rate, t.deemed_acquisition_date \
          FROM trades t JOIN listings l ON l.id = t.listing_id \
          WHERE t.trade_type IN ('Buy', 'DRP')",
     )
@@ -141,7 +141,7 @@ pub async fn db_open_parcels(pool: &SqlitePool) -> Result<Vec<OpenParcel>, sqlx:
             splits,
             None,
         )?
-        .into_aud_with(&fx, &t.currency, t.acquired(), Some(t.fx_rate))?;
+        .into_aud_with(&fx, &t.currency, t.acquired(), t.fx_override())?;
 
         // The remaining quantity is reported in current units — after every
         // recorded split/consolidation — so it reconciles with a broker
@@ -442,6 +442,40 @@ mod tests {
         assert_eq!(
             parcels[0].remaining_cost_base,
             "2021.890".parse::<Decimal>().unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn db_spot_fx_rate_wins_over_monthly_rate() {
+        let pool = test_pool().await;
+        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 10).unwrap();
+        insert_listing(&pool, 1, "VTS").await;
+        // A monthly rate exists (0.50), but the parcel carries a deliberate
+        // transaction-date spot rate (0.40) that must win (QC 18020):
+        // USD 1000 / 0.40 = AUD 2500, not / 0.50 = 2000.
+        crate::entities::rba_fx_rate::db_import_rate(
+            &pool,
+            "USD",
+            "2024-01",
+            "0.50".parse().unwrap(),
+        )
+        .await
+        .unwrap();
+        test_support::buy(1, 1)
+            .date(buy_date)
+            .qty(Decimal::from(100))
+            .price(Decimal::from(10))
+            .currency("USD")
+            .spot_fx_rate("0.40".parse().unwrap())
+            .insert(&pool)
+            .await;
+
+        let parcels = db_open_parcels(&pool).await.unwrap();
+        assert_eq!(parcels.len(), 1);
+        assert_eq!(
+            parcels[0].remaining_cost_base,
+            Decimal::from(2500),
+            "the deliberate spot rate converts, not the monthly rate"
         );
     }
 

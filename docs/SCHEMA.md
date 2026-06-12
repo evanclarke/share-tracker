@@ -79,6 +79,7 @@ trades
 ├── brokerage_includes_gst INTEGER CHECK (0,1)  Records that the brokerage amount was *entered* GST-inclusive and server-split; persisted only so the entry form round-trips (the money columns are already split — nothing else reads it). 0 on operation-created trades
 ├── brokerage_currency TEXT FK→currencies.code
 ├── fx_rate           TEXT (decimal)  Manual foreign-per-AUD override; fallback when no ATO rate exists (1.0 for AUD trades)
+├── spot_fx_rate      TEXT (decimal, nullable)  Deliberate transaction-date spot rate (same foreign-per-AUD convention): when set it wins over the monthly RBA rate everywhere this trade converts to AUD (QC 18020 — an average rate is not appropriate for a one-off purchase/sale of a large capital asset). NULL = unchanged default (monthly rate first, fx_rate fallback). Write-time validated: positive, non-AUD trades only (422 otherwise); carried onto scrip/demerger/transfer replacement Buys with fx_rate
 ├── contract_note_ref TEXT (nullable)
 ├── statement_total   TEXT (decimal, nullable)  The broker statement's net transaction total in the brokerage currency, for cross-referencing against the contract note. Validated at write time (quantity × price + brokerage + GST for a Buy/DRP, − for a Sell; only when the trade and brokerage currencies match); informational-only after that — no report or calculation uses it. NULL on operation-created trades
 ├── residual_brought_forward TEXT (decimal)  DRP trades only: leftover cash carried in from the prior reinvestment (else 0)

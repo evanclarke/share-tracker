@@ -48,6 +48,9 @@ pub struct SellBody {
     pub brokerage_includes_gst: bool,
     pub brokerage_currency: String,
     pub fx_rate: Decimal,
+    /// Optional deliberate spot-rate override; see `trade::Trade::spot_fx_rate`.
+    #[serde(default)]
+    pub spot_fx_rate: Option<Decimal>,
     #[serde(default)]
     pub contract_note_ref: Option<String>,
     /// Optional statement cross-check (net proceeds — quantity × price minus
@@ -117,6 +120,10 @@ pub enum SellError {
     /// `trade::check_statement_total`): for a Sell it must equal the net
     /// proceeds, quantity × price − brokerage − GST.
     StatementTotal(trade::StatementTotalError),
+    /// A supplied spot-rate override was rejected (see
+    /// `trade::validate_spot_fx_rate`): non-positive, or on an AUD Sell where
+    /// it could never apply.
+    SpotFxRate(trade::SpotFxRateError),
 }
 
 impl From<sqlx::Error> for SellError {
@@ -168,6 +175,9 @@ impl From<SellError> for ApiError {
             // is findable without re-deriving the figure by hand.
             SellError::StatementTotal(detail) => {
                 ApiError::unprocessable(trade::statement_total_detail(&detail))
+            }
+            SellError::SpotFxRate(detail) => {
+                ApiError::unprocessable(trade::spot_fx_rate_detail(&detail))
             }
             SellError::Db(err) => err.into(),
         }
@@ -435,16 +445,20 @@ pub(crate) async fn upsert_sell_in_tx(
         brokerage_currency: &body.brokerage_currency,
     })
     .map_err(SellError::StatementTotal)?;
+    // A deliberate spot-rate override must be usable: positive, and on a
+    // Sell whose amounts actually convert.
+    trade::validate_spot_fx_rate(&body.currency, body.spot_fx_rate)
+        .map_err(SellError::SpotFxRate)?;
 
     // Upsert the Sell trade row.
     sqlx::query(
         "INSERT INTO trades \
          (id, trade_type, date, settlement_date, listing_id, average_price, quantity, \
           currency, brokerage, gst_on_brokerage, brokerage_includes_gst, brokerage_currency, \
-          fx_rate, contract_note_ref, statement_total, \
+          fx_rate, spot_fx_rate, contract_note_ref, statement_total, \
           buyback_action_id, scrip_action_id, demerger_action_id, holding_account_id, transfer_id, \
           worthless_action_id) \
-         VALUES (?, 'Sell', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+         VALUES (?, 'Sell', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT(id) DO UPDATE SET \
              trade_type             = 'Sell', \
              date                   = excluded.date, \
@@ -458,6 +472,7 @@ pub(crate) async fn upsert_sell_in_tx(
              brokerage_includes_gst = excluded.brokerage_includes_gst, \
              brokerage_currency     = excluded.brokerage_currency, \
              fx_rate                = excluded.fx_rate, \
+             spot_fx_rate           = excluded.spot_fx_rate, \
              contract_note_ref      = excluded.contract_note_ref, \
              statement_total        = excluded.statement_total, \
              buyback_action_id      = excluded.buyback_action_id, \
@@ -479,6 +494,7 @@ pub(crate) async fn upsert_sell_in_tx(
     .bind(body.brokerage_includes_gst)
     .bind(&body.brokerage_currency)
     .bind(body.fx_rate.to_string())
+    .bind(body.spot_fx_rate.map(|d| d.to_string()))
     .bind(&body.contract_note_ref)
     .bind(body.statement_total.map(|d| d.to_string()))
     .bind(buyback_action_id)
@@ -646,6 +662,7 @@ mod tests {
             gst_on_brokerage: Decimal::ZERO,
             brokerage_currency: "AUD".to_string(),
             fx_rate: Decimal::ONE,
+            spot_fx_rate: None,
             contract_note_ref: None,
             allocations,
         }
@@ -1241,5 +1258,67 @@ mod tests {
             detail.contains("sum to the sell quantity"),
             "detail: {detail}"
         );
+    }
+
+    // Spot-rate override (QC 18020): the Sell write path shares
+    // trade::validate_spot_fx_rate, and a valid override persists.
+
+    #[tokio::test]
+    async fn api_sell_spot_fx_rate_persists_and_aud_is_422() {
+        use http_body_util::BodyExt;
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
+        sqlx::query("UPDATE trades SET currency = 'USD' WHERE id = 1")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let put = |pool: SqlitePool, currency: &'static str| async move {
+            let body = serde_json::json!({
+                "date": "2024-06-03",
+                "listing_id": 1,
+                "average_price": "15",
+                "quantity": "100",
+                "currency": currency,
+                "brokerage": "0",
+                "gst_on_brokerage": "0",
+                "brokerage_currency": currency,
+                "fx_rate": "1",
+                "spot_fx_rate": "0.6543",
+                "allocations": [ { "purchase_trade_id": 1, "quantity_allocated": "100" } ]
+            });
+            router()
+                .with_state(pool)
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri("/sells/2")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+        };
+
+        // An AUD Sell with a spot override is rejected with the reason…
+        let resp = put(pool.clone(), "AUD").await;
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let detail = String::from_utf8(
+            resp.into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(detail.contains("non-AUD"), "detail: {detail}");
+
+        // …and a USD Sell persists it.
+        let resp = put(pool.clone(), "USD").await;
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let got = trade::db_get(&pool, 2).await.unwrap().unwrap();
+        assert_eq!(got.spot_fx_rate, Some("0.6543".parse().unwrap()));
     }
 }

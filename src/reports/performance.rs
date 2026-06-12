@@ -41,7 +41,7 @@
 
 use crate::entities::closing_price::{self, SharedFetcher};
 use crate::infra::decimal::{parse_dec, row_dec};
-use crate::infra::fx::FxRates;
+use crate::infra::fx::{FxOverride, FxRates};
 use crate::infra::http::ApiError;
 use axum::{Extension, Json, Router, extract::State, routing::post};
 use chrono::{Months, NaiveDate};
@@ -152,6 +152,7 @@ struct TradeFlow {
     gst: Decimal,
     currency: String,
     fx_rate: Decimal,
+    spot_fx_rate: Option<Decimal>,
     deemed: Option<NaiveDate>,
     group: Option<(GroupKind, i64)>,
 }
@@ -180,9 +181,18 @@ impl sqlx::FromRow<'_, sqlx::sqlite::SqliteRow> for TradeFlow {
             gst: row_dec(row, "gst_on_brokerage")?,
             currency: row.try_get("currency")?,
             fx_rate: row_dec(row, "fx_rate")?,
+            spot_fx_rate: crate::infra::decimal::row_opt_dec(row, "spot_fx_rate")?,
             deemed: row.try_get("deemed_acquisition_date")?,
             group,
         })
+    }
+}
+
+impl TradeFlow {
+    /// The trade's per-record FX rate: its deliberate spot override when set,
+    /// else its `fx_rate` fallback (see `infra::fx::FxOverride`).
+    fn fx_override(&self) -> FxOverride {
+        FxOverride::from_trade(self.fx_rate, self.spot_fx_rate)
     }
 }
 
@@ -311,7 +321,7 @@ pub async fn db_performance(
     let mut tx = pool.begin().await?;
     let trades: Vec<TradeFlow> = sqlx::query_as(
         "SELECT id, listing_id, holding_account_id, trade_type, date, quantity, \
-         average_price, brokerage, gst_on_brokerage, currency, fx_rate, \
+         average_price, brokerage, gst_on_brokerage, currency, fx_rate, spot_fx_rate, \
          deemed_acquisition_date, transfer_id, scrip_action_id, demerger_action_id \
          FROM trades WHERE date <= ?",
     )
@@ -378,7 +388,7 @@ pub async fn db_performance(
         // Convert at the acquisition month — the deemed acquisition month for a
         // rollover/transfer-created parcel, preserving the original AUD cost.
         let acquired = t.deemed.unwrap_or(t.date);
-        let cost = fx.to_aud(cost, &t.currency, acquired, Some(t.fx_rate))?;
+        let cost = fx.to_aud(cost, &t.currency, acquired, t.fx_override())?;
         let acc = holdings.entry((t.listing_id, t.account_id)).or_default();
         acc.invested += cost;
         acc.flows.push((t.date, -cost));
@@ -417,7 +427,7 @@ pub async fn db_performance(
             let carried = group_costs.get(&key).copied().unwrap_or(Decimal::ZERO);
             let mut inflow = carried;
             if !t.price.is_zero() {
-                let cash = fx.to_aud(t.price * t.quantity, &t.currency, t.date, Some(t.fx_rate))?;
+                let cash = fx.to_aud(t.price * t.quantity, &t.currency, t.date, t.fx_override())?;
                 inflow += cash;
                 overall.proceeds += cash;
                 overall.flows.push((t.date, cash));
@@ -427,7 +437,7 @@ pub async fn db_performance(
             acc.flows.push((t.date, inflow));
         } else {
             let net = t.price * t.quantity - t.brokerage - t.gst;
-            let net = fx.to_aud(net, &t.currency, t.date, Some(t.fx_rate))?;
+            let net = fx.to_aud(net, &t.currency, t.date, t.fx_override())?;
             let acc = holdings.entry((t.listing_id, t.account_id)).or_default();
             acc.proceeds += net;
             acc.flows.push((t.date, net));
@@ -456,7 +466,7 @@ pub async fn db_performance(
         let currency: String = row.try_get("currency")?;
         // Income rows carry no manual fx override: a non-AUD amount with no
         // ATO rate fails loudly (same as the tax summary).
-        let cash = fx.to_aud(cash, &currency, date_paid, None)?;
+        let cash = fx.to_aud(cash, &currency, date_paid, FxOverride::None)?;
         let acc = holdings.entry((listing_id, account_id)).or_default();
         acc.income += cash;
         acc.flows.push((date_paid, cash));

@@ -68,10 +68,11 @@
 //! - `docs/ato/forex-cgt-12-month-rule.md` (Art Ltd, Eleanor) — the default
 //!   12-month-rule integration of the settlement-window forex movement (a
 //!   cost-base adjustment on an acquisition; a CGT event K10/K11 capital
-//!   gain/loss on a disposal) is not modelled: trades convert at the monthly
-//!   rate of the trade date, so a same-rate-month T+2 settlement nets to nil
-//!   by construction, and the K10/K11 events have no entry or computation
-//!   path (noted in `docs/ato/OVERVIEW.md`, "FX conversion granularity").
+//!   gain/loss on a disposal) is resolved out of scope as a Known limitation
+//!   (`docs/API.md`, pinned by `src/doc_checks.rs`): trades convert at the
+//!   monthly rate of the trade date, so a same-rate-month T+2 settlement nets
+//!   to nil by construction; per-leg `spot_fx_rate` entry is what makes the
+//!   movement visible, and it stays the taxpayer's manual adjustment.
 //! - "Guide to foreign income tax offset rules 2025" Example 16 (Anna,
 //!   ato.gov.au law view SAV/FOROFFSET/00004) — the FITO offset-limit
 //!   calculation compares personal income-tax liabilities with and without the
@@ -1921,6 +1922,107 @@ async fn forex_example_lisa_usd_share_cost_base_and_proceeds() {
     );
     assert_eq!(g.discount_eligible_gain, Decimal::ZERO, "held 8 months");
     assert_eq!(g.capital_loss, Decimal::ZERO);
+}
+
+/// `docs/ato/forex-common-transactions.md` (QC 18322) Lisa again — entered
+/// with per-trade **spot-rate overrides** instead of seeded monthly rates.
+///
+/// `docs/ato/forex-average-rates.md` (QC 18020, Examples 5 and 7) permits an
+/// average rate only where it reasonably approximates the spot rates at the
+/// translation times, and says it is **not** appropriate for a one-off
+/// purchase or sale of a large capital asset — the transaction-date spot
+/// rate should be used. Here the imported monthly averages deliberately
+/// differ from the example's day rates (0.55 and 0.65 vs Lisa's 0.50 and
+/// 0.60): each trade's `spot_fx_rate` must win, reproducing the ATO's
+/// figures exactly as the monthly-rate variant above does when the months
+/// happen to match.
+#[tokio::test]
+async fn forex_example_lisa_via_spot_rate_overrides() {
+    let pool = test_pool().await;
+
+    // Monthly averages that do NOT match the example's day rates: if the
+    // monthly rate converted, cost base and proceeds would both be wrong.
+    sqlx::query(
+        "INSERT INTO rba_fx_rates (currency, month, rate) VALUES
+            ('USD', '2004-07', '0.55'), ('USD', '2005-03', '0.65')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    api_put(
+        &pool,
+        "/listings/1",
+        json!({
+            "exchange_mic": "XNYS",
+            "ticker": "USC",
+            "name": "US Company",
+            "isin": null,
+            "security_type": "Share",
+            "currency": "USD",
+            "amit": false,
+        }),
+    )
+    .await;
+
+    // US$15,000 on 1 July 2004 at the day's rate A$1.00 = US$0.50.
+    api_put(
+        &pool,
+        "/trades/1",
+        json!({
+            "trade_type": "Buy",
+            "date": "2004-07-01",
+            "settlement_date": "2004-07-06",
+            "listing_id": 1,
+            "average_price": "15",
+            "quantity": "1000",
+            "currency": "USD",
+            "brokerage": "0",
+            "gst_on_brokerage": "0",
+            "brokerage_currency": "USD",
+            "fx_rate": "1",
+            "spot_fx_rate": "0.50",
+        }),
+    )
+    .await;
+
+    // US$20,000 by the 1 March 2005 contract at the day's rate US$0.60.
+    api_put(
+        &pool,
+        "/sells/2",
+        json!({
+            "date": "2005-03-01",
+            "settlement_date": "2005-03-15",
+            "listing_id": 1,
+            "average_price": "20",
+            "quantity": "1000",
+            "currency": "USD",
+            "brokerage": "0",
+            "gst_on_brokerage": "0",
+            "brokerage_currency": "USD",
+            "fx_rate": "1",
+            "spot_fx_rate": "0.60",
+            "allocations": [
+                { "purchase_trade_id": 1, "quantity_allocated": "1000" }
+            ],
+        }),
+    )
+    .await;
+
+    let gains: Vec<RealisedGainLoss> = api_get(&pool, "/portfolio/realised-gains").await;
+    assert_eq!(gains.len(), 1);
+    let g = &gains[0];
+    assert_eq!(g.cost_base, dec("30000"), "US$15,000 / 0.50, not / 0.55");
+    assert_eq!(
+        g.proceeds.round_dp(2),
+        dec("33333.33"),
+        "US$20,000 / 0.60, not / 0.65 — the ATO states A$33,333"
+    );
+    assert_eq!(
+        g.capital_gain_loss.round_dp(2),
+        dec("3333.33"),
+        "the ATO states A$3,333"
+    );
 }
 
 /// `docs/ato/ess-30-day-rule.md` (QC 23058) — "Example 11" (Wyatt), the

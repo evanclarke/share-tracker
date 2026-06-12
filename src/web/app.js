@@ -444,6 +444,7 @@ const SELL_FIELDS = [
   dec('gst_on_brokerage', 'GST on brokerage'),
   fk('brokerage_currency', 'Brokerage currency', 'currencies', { required: true, encode: 'string' }),
   dec('fx_rate', 'Manual FX rate', { default: '1' }),
+  dec('spot_fx_rate', 'Spot FX rate override', { optional: true, default: '', hint: 'Optional deliberate transaction-date spot rate (foreign units per AUD): when set it wins over the monthly RBA rate everywhere this trade converts to AUD. Use for a one-off purchase/sale of a large foreign asset (QC 18020); leave blank for the monthly default. Non-AUD trades only.' }),
   txt('contract_note_ref', 'Contract note ref', { optional: true }),
   dec('statement_total', 'Statement total', { optional: true, default: '', hint: 'Optional cross-check in the brokerage currency: quantity × price − brokerage − GST (net proceeds). Rejected if it does not reconcile.' }),
   fk('holding_account_id', 'Holding account', 'holdingAccounts', { required: true, default: '1', hint: 'Allocations may only consume parcels held in this account.' }),

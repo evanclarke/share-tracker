@@ -270,6 +270,7 @@ pub async fn db_transfer(
         carried_cost_base: Decimal,
         currency: String,
         fx_rate: Decimal,
+        spot_fx_rate: Option<Decimal>,
         deemed_acquisition_date: NaiveDate,
     }
 
@@ -277,7 +278,7 @@ pub async fn db_transfer(
     for alloc in &body.allocations {
         let parcel = sqlx::query(
             "SELECT date, listing_id, quantity, average_price, brokerage, gst_on_brokerage, \
-                    currency, fx_rate, deemed_acquisition_date \
+                    currency, fx_rate, spot_fx_rate, deemed_acquisition_date \
              FROM trades WHERE id = ?",
         )
         .bind(alloc.purchase_trade_id)
@@ -301,6 +302,7 @@ pub async fn db_transfer(
         let gst = parse_dec("gst_on_brokerage", parcel.try_get("gst_on_brokerage")?)?;
         let currency: String = parcel.try_get("currency")?;
         let fx_rate = parse_dec("fx_rate", parcel.try_get("fx_rate")?)?;
+        let spot_fx_rate = crate::infra::decimal::row_opt_dec(&parcel, "spot_fx_rate")?;
         let deemed: Option<NaiveDate> = parcel.try_get("deemed_acquisition_date")?;
 
         // The moved units' share of the parcel's remaining reduced cost base,
@@ -333,6 +335,7 @@ pub async fn db_transfer(
             carried_cost_base,
             currency,
             fx_rate,
+            spot_fx_rate,
             // Chain through an earlier rollover/transfer: the discount clock
             // always runs from the first acquisition.
             deemed_acquisition_date: deemed.unwrap_or(date),
@@ -363,6 +366,7 @@ pub async fn db_transfer(
         gst_on_brokerage: Decimal::ZERO,
         brokerage_currency: listing_currency.clone(),
         fx_rate: Decimal::ONE,
+        spot_fx_rate: None,
         contract_note_ref: None,
         holding_account_id: body.from_account_id,
         allocations: body
@@ -397,8 +401,8 @@ pub async fn db_transfer(
             "INSERT INTO trades \
              (id, trade_type, date, settlement_date, listing_id, average_price, quantity, \
               currency, brokerage, gst_on_brokerage, brokerage_currency, fx_rate, \
-              holding_account_id, transfer_id, deemed_acquisition_date) \
-             VALUES (?, 'Buy', ?, ?, ?, '0', ?, ?, ?, '0', ?, ?, ?, ?, ?)",
+              spot_fx_rate, holding_account_id, transfer_id, deemed_acquisition_date) \
+             VALUES (?, 'Buy', ?, ?, ?, '0', ?, ?, ?, '0', ?, ?, ?, ?, ?, ?)",
         )
         .bind(buy_id)
         .bind(body.date)
@@ -409,6 +413,7 @@ pub async fn db_transfer(
         .bind(t.carried_cost_base.to_string())
         .bind(&t.currency)
         .bind(t.fx_rate.to_string())
+        .bind(t.spot_fx_rate.map(|d| d.to_string()))
         .bind(body.to_account_id)
         .bind(id)
         .bind(t.deemed_acquisition_date)
@@ -465,6 +470,7 @@ pub async fn db_transfer(
             gst_on_brokerage: Decimal::ZERO,
             brokerage_currency: listing_currency,
             fx_rate: body.fee_fx_rate.unwrap_or(Decimal::ONE),
+            spot_fx_rate: None,
             contract_note_ref: None,
             holding_account_id: body.from_account_id,
             allocations: body
@@ -696,6 +702,7 @@ mod tests {
             .price(price.parse().unwrap())
             .currency("USD")
             .fx_rate(dec("1.5"))
+            .spot_fx_rate(dec("1.4034"))
             .account(2)
             .insert(pool)
             .await;
@@ -759,6 +766,10 @@ mod tests {
         assert_eq!(t.brokerage, dec("12000"));
         assert_eq!(t.currency, "USD");
         assert_eq!(t.fx_rate, dec("1.5"));
+        // The vest's deliberate spot override carries over too, so the AUD
+        // cost base is unchanged by the move (the spot rate keeps winning at
+        // the deemed acquisition month).
+        assert_eq!(t.spot_fx_rate, Some(dec("1.4034")));
         assert_eq!(t.deemed_acquisition_date, Some(d(2023, 3, 1)));
         assert_eq!(t.transfer_id, Some(1));
     }
@@ -1070,6 +1081,7 @@ mod tests {
                 gst_on_brokerage: Decimal::ZERO,
                 brokerage_currency: "AUD".to_string(),
                 fx_rate: Decimal::ONE,
+                spot_fx_rate: None,
                 contract_note_ref: None,
                 holding_account_id: 2,
                 allocations: vec![AllocationInput {
@@ -1132,6 +1144,7 @@ mod tests {
                 gst_on_brokerage: Decimal::ZERO,
                 brokerage_currency: "USD".to_string(),
                 fx_rate: dec("1.5"),
+                spot_fx_rate: None,
                 contract_note_ref: None,
                 holding_account_id: 2,
                 allocations: vec![AllocationInput {
@@ -1225,6 +1238,7 @@ mod tests {
                 gst_on_brokerage: Decimal::ZERO,
                 brokerage_currency: "USD".to_string(),
                 fx_rate: dec("1.5"),
+                spot_fx_rate: None,
                 contract_note_ref: None,
                 holding_account_id: 1,
                 allocations: vec![AllocationInput {
@@ -1277,6 +1291,7 @@ mod tests {
                 gst_on_brokerage: Decimal::ZERO,
                 brokerage_currency: "USD".to_string(),
                 fx_rate: Decimal::ONE,
+                spot_fx_rate: None,
                 contract_note_ref: None,
                 holding_account_id: 2,
                 allocations: vec![AllocationInput {

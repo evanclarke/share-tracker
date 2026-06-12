@@ -586,6 +586,7 @@ mod tests {
             gst_on_brokerage: Decimal::ZERO,
             brokerage_currency: "AUD".to_string(),
             fx_rate: Decimal::ONE,
+            spot_fx_rate: None,
             contract_note_ref: None,
             holding_account_id: 1,
             allocations: vec![AllocationInput {

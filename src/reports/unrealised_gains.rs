@@ -151,7 +151,7 @@ pub async fn db_unrealised_gains(
             splits,
             Some(as_of_date),
         )?
-        .into_aud_with(&fx, &t.currency, t.acquired(), Some(t.fx_rate))?
+        .into_aud_with(&fx, &t.currency, t.acquired(), t.fx_override())?
         .adjusted;
 
         // Quantities are reported in the unit basis of `as_of_date` (splits up

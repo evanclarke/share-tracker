@@ -227,6 +227,7 @@ pub async fn db_recognise(pool: &SqlitePool, action_id: i64) -> Result<Recognise
         gst_on_brokerage: Decimal::ZERO,
         brokerage_currency: listing_currency,
         fx_rate: Decimal::ONE,
+        spot_fx_rate: None,
         contract_note_ref: None,
         allocations,
     };
@@ -432,6 +433,7 @@ mod tests {
                 gst_on_brokerage: Decimal::ZERO,
                 brokerage_currency: "AUD".to_string(),
                 fx_rate: Decimal::ONE,
+                spot_fx_rate: None,
                 contract_note_ref: None,
                 allocations: vec![AllocationInput {
                     purchase_trade_id: 1,
@@ -572,6 +574,7 @@ mod tests {
                 gst_on_brokerage: Decimal::ZERO,
                 brokerage_currency: "AUD".to_string(),
                 fx_rate: Decimal::ONE,
+                spot_fx_rate: None,
                 contract_note_ref: None,
                 allocations: vec![AllocationInput {
                     purchase_trade_id: 1,

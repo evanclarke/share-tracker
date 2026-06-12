@@ -15,7 +15,7 @@
 
 use crate::domain::tax_year::tax_year_for;
 use crate::infra::decimal::parse_dec;
-use crate::infra::fx::FxRates;
+use crate::infra::fx::{FxOverride, FxRates};
 use chrono::{Datelike, Duration, NaiveDate};
 use rust_decimal::Decimal;
 use sqlx::{Row, SqlitePool};
@@ -275,7 +275,7 @@ pub async fn db_franked_dividends(
         };
         let currency: String = row.try_get("currency")?;
         let credits = parse_dec("franking_credits", row.try_get("franking_credits")?)?;
-        let credits_aud = fx.to_aud(credits, &currency, assessed, None)?;
+        let credits_aud = fx.to_aud(credits, &currency, assessed, FxOverride::None)?;
         if credits_aud <= Decimal::ZERO {
             continue;
         }
@@ -300,7 +300,7 @@ pub async fn db_franked_dividends(
         let tax_year_end_date: NaiveDate = row.try_get("tax_year_end_date")?;
         let currency: String = row.try_get("currency")?;
         let credits = parse_dec("franking_credits", row.try_get("franking_credits")?)?;
-        let credits_aud = fx.to_aud(credits, &currency, tax_year_end_date, None)?;
+        let credits_aud = fx.to_aud(credits, &currency, tax_year_end_date, FxOverride::None)?;
         *attached_by_year
             .entry(tax_year_end_date.year())
             .or_default() += credits_aud;

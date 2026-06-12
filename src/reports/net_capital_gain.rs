@@ -26,7 +26,7 @@
 
 use crate::domain::tax_year::tax_year_for;
 use crate::infra::decimal::parse_dec;
-use crate::infra::fx::FxRates;
+use crate::infra::fx::{FxOverride, FxRates};
 use crate::infra::http::ApiError;
 use crate::reports::export;
 use crate::reports::parcel_optimiser::{self, DisposalTotals, HypotheticalAllocation, Strategy};
@@ -166,7 +166,7 @@ fn aud_field(
     date: NaiveDate,
 ) -> Result<Decimal, sqlx::Error> {
     let value = parse_dec(field, row.try_get(field)?)?;
-    Ok(fx.to_aud(value, currency, date, None)?)
+    Ok(fx.to_aud(value, currency, date, FxOverride::None)?)
 }
 
 /// CGT event E10 gains: when the cumulative AMIT cost base reductions applied to a
@@ -192,6 +192,7 @@ async fn e10_gains(
                 t.date AS trade_date, t.deemed_acquisition_date, \
                 t.quantity AS trade_qty, t.average_price, \
                 t.brokerage, t.gst_on_brokerage, t.currency AS trade_currency, t.fx_rate, \
+                t.spot_fx_rate, \
                 a.cost_base_adjustment, a.tax_year_end_date \
          FROM amit_adjustments aa \
          JOIN trades t ON t.id = aa.trade_id \
@@ -217,6 +218,8 @@ async fn e10_gains(
         let acquired = deemed.unwrap_or(trade_date);
         let currency: String = rows[i].try_get("trade_currency")?;
         let fx_rate = parse_dec("fx_rate", rows[i].try_get("fx_rate")?)?;
+        let spot_fx_rate = crate::infra::decimal::row_opt_dec(&rows[i], "spot_fx_rate")?;
+        let fx_override = FxOverride::from_trade(fx_rate, spot_fx_rate);
         let mut remaining = price * trade_qty + brok + gst;
 
         while i < rows.len() && rows[i].try_get::<i64, _>("trade_id")? == trade_id {
@@ -229,7 +232,7 @@ async fn e10_gains(
             let reduction = adj_qty * cba;
             if reduction > remaining {
                 let excess = reduction - remaining;
-                let excess_aud = fx.to_aud(excess, &currency, acquired, Some(fx_rate))?;
+                let excess_aud = fx.to_aud(excess, &currency, acquired, fx_override)?;
                 let discount_eligible = year_end > acquired + Months::new(12);
                 out.push((year_end.year(), excess_aud, discount_eligible));
                 remaining = Decimal::ZERO;
@@ -372,7 +375,8 @@ async fn g1_gains(
                     });
                 if held > Decimal::ZERO && trade_qty > Decimal::ZERO {
                     let gain = excess * held / trade_qty;
-                    let gain_aud = fx.to_aud(gain, &action_currency, action_date, None)?;
+                    let gain_aud =
+                        fx.to_aud(gain, &action_currency, action_date, FxOverride::None)?;
                     let discount_eligible = action_date > acquired + Months::new(12);
                     out.push((tax_year_for(action_date), gain_aud, discount_eligible));
                 }

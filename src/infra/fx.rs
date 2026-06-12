@@ -7,11 +7,15 @@
 //! (foreign-per-AUD), so `AUD = foreign / rate`.
 //!
 //! [`to_aud`] converts an amount for a given currency and date: AUD passes through
-//! unchanged, the ATO rate for the amount's month is used when available, and the
-//! caller's manual override (e.g. a trade's `fx_rate`) is the fallback when no ATO
-//! rate exists. When neither is available it fails loudly rather than substituting
-//! a default — a silently unconverted or zeroed amount would corrupt a financial
-//! total without failing the request.
+//! unchanged, and the caller's per-record rate ([`FxOverride`]) interacts with the
+//! ATO monthly rate per the one precedence rule in [`pick_rate`]: a deliberate
+//! spot-rate override wins outright (QC 18020 — an average rate is not a
+//! reasonable approximation for a one-off purchase or sale of a large capital
+//! asset), otherwise the ATO rate for the amount's month is used when available,
+//! with the trade's `fx_rate` as the fallback when no ATO rate exists. When none
+//! is available it fails loudly rather than substituting a default — a silently
+//! unconverted or zeroed amount would corrupt a financial total without failing
+//! the request.
 
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
@@ -19,6 +23,39 @@ use sqlx::{Row, SqlitePool};
 use std::collections::HashMap;
 
 use crate::infra::decimal::parse_dec;
+
+/// The per-record manual rate a conversion carries (foreign-per-AUD, same
+/// convention as the ATO rate), distinguishing how it interacts with the
+/// imported monthly rate — the distinction `Option<Decimal>` couldn't make.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FxOverride {
+    /// No per-record rate (income, AMMA statements, live quotes, …): the ATO
+    /// monthly rate is the only source, missing means a loud failure.
+    #[default]
+    None,
+    /// A trade's `fx_rate`: used only when no ATO rate exists for the
+    /// (currency, month) — the ATO rate takes precedence once imported.
+    Fallback(Decimal),
+    /// A trade's `spot_fx_rate`: a deliberate transaction-date spot rate that
+    /// wins over the ATO monthly rate. QC 18020 (Examples 5/7,
+    /// `docs/ato/forex-average-rates.md`) permits average rates only where
+    /// they reasonably approximate the spot rates at the translation times,
+    /// and says they are not appropriate for a one-off purchase or sale of a
+    /// large capital asset.
+    Spot(Decimal),
+}
+
+impl FxOverride {
+    /// The override a trade row carries: its deliberate `spot_fx_rate` when
+    /// set, else its `fx_rate` fallback. Every trade-amount conversion goes
+    /// through this so no caller can re-derive the precedence differently.
+    pub fn from_trade(fx_rate: Decimal, spot_fx_rate: Option<Decimal>) -> FxOverride {
+        match spot_fx_rate {
+            Some(spot) => FxOverride::Spot(spot),
+            None => FxOverride::Fallback(fx_rate),
+        }
+    }
+}
 
 /// Why a required AUD conversion could not be performed.
 #[derive(Debug)]
@@ -79,9 +116,9 @@ async fn lookup_ato_rate(
 }
 
 /// Resolve the foreign-per-AUD rate to apply when converting `currency` for
-/// `date`. AUD always resolves to 1. Otherwise the ATO rate for the month of
-/// `date` takes precedence; `manual_override` is used only when no ATO rate exists
-/// for that (currency, month). Fails loudly when neither is available.
+/// `date`. AUD always resolves to 1. Otherwise [`pick_rate`] arbitrates
+/// between the record's [`FxOverride`] and the ATO rate for the month of
+/// `date`. Fails loudly when no rate is available.
 ///
 /// Public so a caller converting several amounts at the same (currency, month)
 /// — e.g. `domain::cost_base` converting a cost-base breakdown — can resolve
@@ -92,29 +129,36 @@ pub async fn resolve_rate(
     pool: &SqlitePool,
     currency: &str,
     date: NaiveDate,
-    manual_override: Option<Decimal>,
+    manual: FxOverride,
 ) -> Result<Decimal, FxError> {
     if currency.eq_ignore_ascii_case("AUD") {
         return Ok(Decimal::ONE);
     }
     let month = date.format("%Y-%m").to_string();
     let ato_rate = lookup_ato_rate(pool, currency, &month).await?;
-    pick_rate(ato_rate, currency, month, manual_override)
+    pick_rate(ato_rate, currency, month, manual)
 }
 
 /// The shared precedence rule (used by both the DB-lookup path and the
-/// pre-loaded [`FxRates`] map): the ATO rate for the month wins, the manual
-/// override is the fallback, and neither means a loud [`FxError::MissingRate`].
+/// pre-loaded [`FxRates`] map): a deliberate spot override wins outright, the
+/// ATO rate for the month is next, a fallback override is used only when no
+/// ATO rate exists, and none means a loud [`FxError::MissingRate`].
 fn pick_rate(
     ato_rate: Option<Decimal>,
     currency: &str,
     month: String,
-    manual_override: Option<Decimal>,
+    manual: FxOverride,
 ) -> Result<Decimal, FxError> {
+    if let FxOverride::Spot(rate) = manual {
+        return Ok(rate);
+    }
     if let Some(rate) = ato_rate {
         return Ok(rate);
     }
-    manual_override.ok_or(FxError::MissingRate {
+    if let FxOverride::Fallback(rate) = manual {
+        return Ok(rate);
+    }
+    Err(FxError::MissingRate {
         currency: currency.to_string(),
         month,
     })
@@ -177,14 +221,14 @@ impl FxRates {
         }
     }
 
-    /// [`resolve_rate`], over the pre-loaded map: AUD resolves to 1, the ATO
-    /// rate for the month of `date` takes precedence, `manual_override` is the
-    /// fallback, and neither fails loudly.
+    /// [`resolve_rate`], over the pre-loaded map: AUD resolves to 1, otherwise
+    /// [`pick_rate`] arbitrates between `manual` and the ATO rate for the
+    /// month of `date`, failing loudly when no rate is available.
     pub fn resolve_rate(
         &self,
         currency: &str,
         date: NaiveDate,
-        manual_override: Option<Decimal>,
+        manual: FxOverride,
     ) -> Result<Decimal, FxError> {
         if currency.eq_ignore_ascii_case("AUD") {
             return Ok(Decimal::ONE);
@@ -194,7 +238,7 @@ impl FxRates {
             .rates
             .get(&(currency.to_string(), month.clone()))
             .copied();
-        pick_rate(ato_rate, currency, month, manual_override)
+        pick_rate(ato_rate, currency, month, manual)
     }
 
     /// [`to_aud`], over the pre-loaded map.
@@ -203,11 +247,11 @@ impl FxRates {
         amount: Decimal,
         currency: &str,
         date: NaiveDate,
-        manual_override: Option<Decimal>,
+        manual: FxOverride,
     ) -> Result<Decimal, FxError> {
         Ok(apply_rate(
             amount,
-            self.resolve_rate(currency, date, manual_override)?,
+            self.resolve_rate(currency, date, manual)?,
         ))
     }
 }
@@ -215,20 +259,20 @@ impl FxRates {
 /// Convert `amount` (denominated in `currency`) to AUD for `date`.
 ///
 /// `AUD = foreign / rate`, where the rate is foreign currency units per 1 AUD.
-/// AUD amounts pass through unchanged (rate = 1). The ATO rate for the month of
-/// `date` is preferred; `manual_override` (e.g. a trade's `fx_rate`, the same
-/// foreign-per-AUD convention) is the fallback when no ATO rate exists. Fails
-/// loudly via [`FxError`] when neither a rate nor an override is available.
+/// AUD amounts pass through unchanged (rate = 1). `manual` and the ATO rate
+/// for the month of `date` are arbitrated by [`pick_rate`] — a spot override
+/// wins, the ATO rate is next, a fallback override is used only when no ATO
+/// rate exists. Fails loudly via [`FxError`] when no rate is available.
 pub async fn to_aud(
     pool: &SqlitePool,
     amount: Decimal,
     currency: &str,
     date: NaiveDate,
-    manual_override: Option<Decimal>,
+    manual: FxOverride,
 ) -> Result<Decimal, FxError> {
     Ok(apply_rate(
         amount,
-        resolve_rate(pool, currency, date, manual_override).await?,
+        resolve_rate(pool, currency, date, manual).await?,
     ))
 }
 
@@ -251,7 +295,7 @@ mod tests {
             "1234.56".parse().unwrap(),
             "AUD",
             date(2024, 1, 15),
-            None,
+            FxOverride::None,
         )
         .await
         .unwrap();
@@ -265,9 +309,15 @@ mod tests {
         rba_fx_rate::db_import_rate(&pool, "USD", "2024-01", "0.50".parse().unwrap())
             .await
             .unwrap();
-        let aud = to_aud(&pool, Decimal::from(1000), "USD", date(2024, 1, 15), None)
-            .await
-            .unwrap();
+        let aud = to_aud(
+            &pool,
+            Decimal::from(1000),
+            "USD",
+            date(2024, 1, 15),
+            FxOverride::None,
+        )
+        .await
+        .unwrap();
         assert_eq!(aud, Decimal::from(2000));
     }
 
@@ -283,7 +333,7 @@ mod tests {
             Decimal::from(1000),
             "USD",
             date(2024, 1, 15),
-            Some("0.80".parse().unwrap()),
+            FxOverride::Fallback("0.80".parse().unwrap()),
         )
         .await
         .unwrap();
@@ -299,7 +349,7 @@ mod tests {
             Decimal::from(800),
             "USD",
             date(2024, 1, 15),
-            Some("0.80".parse().unwrap()),
+            FxOverride::Fallback("0.80".parse().unwrap()),
         )
         .await
         .unwrap();
@@ -318,7 +368,7 @@ mod tests {
             Decimal::from(1000),
             "USD",
             date(2024, 1, 15),
-            Some("0.40".parse().unwrap()),
+            FxOverride::Fallback("0.40".parse().unwrap()),
         )
         .await
         .unwrap();
@@ -329,9 +379,15 @@ mod tests {
     #[tokio::test]
     async fn fails_loudly_when_neither_rate_nor_override() {
         let pool = test_pool().await;
-        let err = to_aud(&pool, Decimal::from(1000), "USD", date(2024, 1, 15), None)
-            .await
-            .unwrap_err();
+        let err = to_aud(
+            &pool,
+            Decimal::from(1000),
+            "USD",
+            date(2024, 1, 15),
+            FxOverride::None,
+        )
+        .await
+        .unwrap_err();
         match err {
             FxError::MissingRate { currency, month } => {
                 assert_eq!(currency, "USD");
@@ -352,7 +408,12 @@ mod tests {
         let pool = test_pool().await;
         let rates = loaded_rates(&pool).await;
         let aud = rates
-            .to_aud("1234.56".parse().unwrap(), "AUD", date(2024, 1, 15), None)
+            .to_aud(
+                "1234.56".parse().unwrap(),
+                "AUD",
+                date(2024, 1, 15),
+                FxOverride::None,
+            )
             .unwrap();
         assert_eq!(aud, "1234.56".parse::<Decimal>().unwrap());
     }
@@ -370,7 +431,7 @@ mod tests {
                 Decimal::from(1000),
                 "USD",
                 date(2024, 1, 15),
-                Some("0.80".parse().unwrap()),
+                FxOverride::Fallback("0.80".parse().unwrap()),
             )
             .unwrap();
         assert_eq!(aud, Decimal::from(2000));
@@ -380,7 +441,7 @@ mod tests {
                 Decimal::from(1000),
                 "USD",
                 date(2024, 2, 15),
-                Some("0.40".parse().unwrap()),
+                FxOverride::Fallback("0.40".parse().unwrap()),
             )
             .unwrap();
         assert_eq!(aud, Decimal::from(2500));
@@ -391,7 +452,12 @@ mod tests {
         let pool = test_pool().await;
         let rates = loaded_rates(&pool).await;
         let err = rates
-            .to_aud(Decimal::from(1000), "USD", date(2024, 1, 15), None)
+            .to_aud(
+                Decimal::from(1000),
+                "USD",
+                date(2024, 1, 15),
+                FxOverride::None,
+            )
             .unwrap_err();
         match err {
             FxError::MissingRate { currency, month } => {
@@ -423,9 +489,86 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        let err = to_aud(&pool, Decimal::from(1000), "USD", date(2024, 1, 15), None)
-            .await
-            .unwrap_err();
+        let err = to_aud(
+            &pool,
+            Decimal::from(1000),
+            "USD",
+            date(2024, 1, 15),
+            FxOverride::None,
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(err, FxError::Db(_)));
+    }
+
+    // Spot override (QC 18020): a deliberate transaction-date spot rate wins
+    // over the imported monthly rate — and still converts when no monthly
+    // rate exists (it is first in precedence, not merely a fallback).
+
+    #[tokio::test]
+    async fn spot_override_wins_over_ato_rate() {
+        let pool = test_pool().await;
+        rba_fx_rate::db_import_rate(&pool, "USD", "2024-01", "0.50".parse().unwrap())
+            .await
+            .unwrap();
+        // 1000 / 0.40 = 2500, not 1000 / 0.50 = 2000.
+        let aud = to_aud(
+            &pool,
+            Decimal::from(1000),
+            "USD",
+            date(2024, 1, 15),
+            FxOverride::Spot("0.40".parse().unwrap()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(aud, Decimal::from(2500));
+    }
+
+    #[tokio::test]
+    async fn spot_override_converts_when_no_ato_rate_exists() {
+        let pool = test_pool().await;
+        let aud = to_aud(
+            &pool,
+            Decimal::from(1000),
+            "USD",
+            date(2024, 1, 15),
+            FxOverride::Spot("0.40".parse().unwrap()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(aud, Decimal::from(2500));
+    }
+
+    #[tokio::test]
+    async fn fx_rates_spot_override_wins_over_ato_rate() {
+        let pool = test_pool().await;
+        rba_fx_rate::db_import_rate(&pool, "USD", "2024-01", "0.50".parse().unwrap())
+            .await
+            .unwrap();
+        let rates = loaded_rates(&pool).await;
+        // The pre-loaded map applies the same precedence as the DB path.
+        let aud = rates
+            .to_aud(
+                Decimal::from(1000),
+                "USD",
+                date(2024, 1, 15),
+                FxOverride::Spot("0.40".parse().unwrap()),
+            )
+            .unwrap();
+        assert_eq!(aud, Decimal::from(2500));
+    }
+
+    #[test]
+    fn from_trade_maps_spot_over_fallback() {
+        let fx_rate: Decimal = "0.80".parse().unwrap();
+        let spot: Decimal = "0.40".parse().unwrap();
+        assert_eq!(
+            FxOverride::from_trade(fx_rate, Some(spot)),
+            FxOverride::Spot(spot)
+        );
+        assert_eq!(
+            FxOverride::from_trade(fx_rate, None),
+            FxOverride::Fallback(fx_rate)
+        );
     }
 }

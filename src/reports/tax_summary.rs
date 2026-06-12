@@ -1,6 +1,6 @@
 use crate::domain::tax_year::tax_year_for;
 use crate::infra::decimal::{parse_dec, row_opt_dec};
-use crate::infra::fx::FxRates;
+use crate::infra::fx::{FxOverride, FxRates};
 use crate::infra::http::ApiError;
 use crate::reports::{export, franking};
 use axum::{Json, Router, extract::State, response::Response, routing::get};
@@ -277,7 +277,7 @@ fn aud_field(
     date: NaiveDate,
 ) -> Result<Decimal, sqlx::Error> {
     let value = parse_dec(field, row.try_get(field)?)?;
-    Ok(fx.to_aud(value, currency, date, None)?)
+    Ok(fx.to_aud(value, currency, date, FxOverride::None)?)
 }
 
 /// AUD figure for an ESS discount label: the statement-AUD override column

@@ -733,3 +733,91 @@ Section note: documentation-only sections are still test-pinned (CLAUDE.md: an i
 
 - [x] Known limitations: dividend equivalents on unvested RSU grants are ordinary income when paid and are not modelled — enterable manually as income if paid out in cash — documented as the "RSU dividend equivalents" Known-limitations entry (ordinary income when paid per TD 2017/26 — remuneration, s 6-5, not a dividend and not ESS discount; a cash payout is enterable manually as an income row), citing the new mirror `docs/ato/ess-dividend-equivalents.md` (TD 2017/26, retrieved 2026-06-12, indexed in `docs/ato/OVERVIEW.md`) and surfaced in the README scope-cuts paragraph. Pinned by `doc_checks::known_limitations_document_rsu_dividend_equivalents`
 - [x] Known limitations: interest income reports at question 10 (10L) regardless of source; foreign broker-cash/money-market income strictly belongs at 20E — state the simplification — documented as the "Foreign broker-cash interest classification" Known-limitations entry (all interest at 10L; foreign broker cash / money-market sweep income strictly belongs at 20E per `docs/ato/tax-return-labels-2026.md`; the taxpayer reclassifies when lodging), cross-linked from the tax summary's Interest income paragraph and surfaced in the README scope-cuts paragraph. Pinned by `doc_checks::known_limitations_document_foreign_broker_interest_classification`
+
+## FX conversion granularity — spot-rate override for one-off capital transactions (2026-06-12)
+
+(REQUIREMENTS 2026-06-12: QC 18020 Examples 5/7 — an average rate is not a reasonable
+approximation for a one-off purchase/sale of a large capital asset; today the monthly RBA rate is
+compulsory because the per-trade `fx_rate` is fallback-only. Sources: `docs/ato/forex-average-rates.md`,
+`docs/ato/forex-common-transactions.md`.)
+
+- [x] A trade (Buy, DRP, Sell) can carry an explicit spot-rate override that wins over the
+      imported monthly RBA rate everywhere the trade's amounts convert to AUD (cost base,
+      proceeds, every report and the snapshot pipeline). Design-open: promote `fx_rate` via an
+      explicit flag, or a separate column — but entry must be deliberate; the silent fallback
+      semantics of existing `fx_rate` rows must not flip — resolved as a **separate nullable
+      column** `trades.spot_fx_rate` (migration `0010_spot_fx_rate.sql`; existing `fx_rate` rows
+      keep their fallback meaning untouched, and entering the override is always deliberate).
+      The one precedence rule lives in `infra::fx`: the new `FxOverride` enum
+      (`None`/`Fallback`/`Spot`) replaces the old `Option<Decimal>` override parameter on
+      `resolve_rate`/`to_aud`/`FxRates`, and `pick_rate` arbitrates spot > monthly ATO rate >
+      fallback > loud failure — every conversion path (cost-base pipeline `ParcelRow::fx_override`,
+      realised/unrealised/portfolio/open-parcels/performance/net-capital-gain-E10 reports, and
+      the snapshot pipeline through them) goes through it, so no caller can re-derive precedence.
+      Write-time validation (`trade::validate_spot_fx_rate`, shared by `PUT /trades` and
+      `PUT /sells`) rejects a non-positive rate or one on an AUD trade with 422; the
+      scrip-for-scrip exchange, demerger, and transfer operations carry a consumed parcel's
+      override onto its replacement Buys so the carried AUD cost base is unchanged. Tests:
+      `infra::fx::tests::{spot_override_wins_over_ato_rate, spot_override_converts_when_no_ato_rate_exists,
+      fx_rates_spot_override_wins_over_ato_rate, from_trade_maps_spot_over_fallback}`,
+      `trade::tests::{db_spot_fx_rate_round_trips_with_precision, db_spot_fx_rate_on_aud_trade_is_refused,
+      db_non_positive_spot_fx_rate_is_refused, api_put_trade_with_spot_fx_rate_persists_and_aud_is_422}`,
+      `sell::tests::api_sell_spot_fx_rate_persists_and_aud_is_422`,
+      `open_parcels::tests::db_spot_fx_rate_wins_over_monthly_rate`,
+      `realised_gains::tests::pure_spot_override_wins_over_preloaded_rates`,
+      `scrip_exchange::tests::exchange_carries_spot_fx_rate_onto_replacement`,
+      `demerger::tests::demerge_carries_spot_fx_rate_onto_replacements`,
+      `transfer::tests::transfer_moves_parcel_preserving_cost_base_and_acquisition_date`, and the
+      end-to-end ATO worked example `ato_examples::forex_example_lisa_via_spot_rate_overrides`
+      (Lisa's figures reproduced with deliberately conflicting monthly rates imported)
+- [x] Absent an override, behaviour is unchanged: monthly RBA rate first, `fx_rate` fallback,
+      loud failure when neither exists (all pre-existing FX tests pass unmodified) — `NULL`
+      `spot_fx_rate` maps to `FxOverride::Fallback(fx_rate)` with the identical precedence; every
+      pre-existing FX/report test passes with no behavioural change (signatures only:
+      `None`→`FxOverride::None`, `Some(x)`→`FxOverride::Fallback(x)`), incl.
+      `realised_gains::tests::pure_manual_override_fallback_when_no_ato_rate` and the
+      monthly-rate Lisa example `ato_examples::forex_example_lisa_usd_share_cost_base_and_proceeds`
+- [x] Docs sync: `docs/API.md` FX conversion section states the rule honestly (monthly = the
+      ATO-published convenience default, reasonable for recurring/small amounts; a one-off large
+      foreign disposal should carry the transaction-date spot rate per QC 18020); `docs/SCHEMA.md`
+      for any new column/flag; README FX bullet; web UI trade/Sell forms expose the override —
+      API.md FX conversion section rewritten as the four-step precedence list with the QC 18020
+      honesty note, Trades/Sells sections document the field and its 422s, Response-codes 422 row
+      extended; SCHEMA.md trades table gains the `spot_fx_rate` row; README AUD-conversion bullet
+      states the override and the convenience-default framing; `docs/ato/OVERVIEW.md` "FX
+      conversion granularity" finding marked resolved; web UI: `spot_fx_rate` field on the trades
+      and Sell forms (optional, hint carries the QC 18020 guidance), trades-list column,
+      rate-classified in `COLUMN_KINDS`. Pinned by `doc_checks::fx_spot_rate_override_documented`
+      and `web::tests::spot_fx_rate_override_ui_present`
+
+## Settlement-window forex on foreign-currency trades — CGT events K10/K11 (2026-06-12)
+
+(REQUIREMENTS 2026-06-12: under the default forex 12-month rule the contract-to-settlement
+currency movement adjusts the cost base on an acquisition and is a separate non-discountable
+K10 gain / K11 capital loss on a disposal — QC 17062, Art Ltd and Eleanor examples; the system
+computes neither. Source: `docs/ato/forex-cgt-12-month-rule.md`. NEEDS DECISION: model it, or
+resolve out of scope as a Known limitation.)
+
+- [x] Decide the scope explicitly: either model it — for a non-AUD trade, compute the forex
+      movement between the trade-date and settlement-date translations of the consideration,
+      folding it into the parcel's cost base on a Buy/DRP and surfacing it as a separate
+      non-discountable K10 gain / K11 capital loss feeding the realised-gains and
+      net-capital-gain reports on a Sell — or resolve it out of scope as a Known-limitations
+      entry stating settlement-window forex outcomes are the taxpayer's manual adjustment
+      (doc-only resolution is test-pinned via `src/doc_checks.rs`, citing
+      `docs/ato/forex-cgt-12-month-rule.md`) — **decided 2026-06-12: out of scope as a Known
+      limitation.** Modelling would need a second translation of the consideration at the
+      settlement date plus a new non-discountable K10/K11 gain/loss line through the
+      realised-gains and net-capital-gain reports, for a component that is nil by construction
+      for every monthly-rate-entered trade settling inside its rate month (all of the live
+      data); the omission is stated instead. New Known-limitations entry "Settlement-window
+      forex on foreign-currency trades — CGT events K10/K11" in `docs/API.md` (the rule per
+      QC 17062 with the Art Ltd/Eleanor examples, outcomes the taxpayer's manual adjustment),
+      surfaced in the README scope-cuts paragraph, cross-referenced from
+      `docs/ato/OVERVIEW.md` (index row + "FX conversion granularity" finding) and the
+      `src/ato_examples.rs` module header. Pinned by
+      `doc_checks::known_limitations_document_settlement_window_forex_k10_k11`
+- [x] The resolution notes the interaction with the spot-rate override above: with monthly rates
+      and a same-rate-month T+2 settlement the component is nil by construction; per-leg spot
+      rates are what make it visible — stated in the Known-limitations entry (both halves) and
+      asserted by the same doc_checks test ("nil by construction", "per-leg spot rates")

@@ -188,7 +188,7 @@ pub async fn db_exchange(pool: &SqlitePool, action_id: i64) -> Result<Exchange, 
     // units internally; allocations re-based across splits).
     let parcel_rows = sqlx::query(
         "SELECT id, date, quantity, average_price, brokerage, gst_on_brokerage, currency, \
-                fx_rate, deemed_acquisition_date, holding_account_id \
+                fx_rate, spot_fx_rate, deemed_acquisition_date, holding_account_id \
          FROM trades WHERE listing_id = ? AND trade_type IN ('Buy', 'DRP') ORDER BY date, id",
     )
     .bind(action.listing_id)
@@ -243,6 +243,7 @@ pub async fn db_exchange(pool: &SqlitePool, action_id: i64) -> Result<Exchange, 
         carried_cost_base: Decimal,
         currency: String,
         fx_rate: Decimal,
+        spot_fx_rate: Option<Decimal>,
         deemed_acquisition_date: NaiveDate,
         /// A replacement parcel stays in the account of the parcel it
         /// substitutes.
@@ -259,6 +260,7 @@ pub async fn db_exchange(pool: &SqlitePool, action_id: i64) -> Result<Exchange, 
         let gst = parse_dec("gst_on_brokerage", row.try_get("gst_on_brokerage")?)?;
         let currency: String = row.try_get("currency")?;
         let fx_rate = parse_dec("fx_rate", row.try_get("fx_rate")?)?;
+        let spot_fx_rate = crate::infra::decimal::row_opt_dec(row, "spot_fx_rate")?;
         let deemed: Option<NaiveDate> = row.try_get("deemed_acquisition_date")?;
         let holding_account_id: i64 = row.try_get("holding_account_id")?;
 
@@ -309,6 +311,7 @@ pub async fn db_exchange(pool: &SqlitePool, action_id: i64) -> Result<Exchange, 
             new_quantity: at_date_units * new_units / old_units,
             currency,
             fx_rate,
+            spot_fx_rate,
             carried_cost_base,
             // Chain through an earlier exchange: the clock always runs from
             // the first acquisition in the rollover chain.
@@ -352,6 +355,7 @@ pub async fn db_exchange(pool: &SqlitePool, action_id: i64) -> Result<Exchange, 
         gst_on_brokerage: Decimal::ZERO,
         brokerage_currency: sell_currency,
         fx_rate: Decimal::ONE,
+        spot_fx_rate: None,
         contract_note_ref: None,
         allocations: replacements
             .iter()
@@ -384,8 +388,8 @@ pub async fn db_exchange(pool: &SqlitePool, action_id: i64) -> Result<Exchange, 
             "INSERT INTO trades \
              (id, trade_type, date, settlement_date, listing_id, average_price, quantity, \
               currency, brokerage, gst_on_brokerage, brokerage_currency, fx_rate, \
-              scrip_action_id, deemed_acquisition_date, holding_account_id) \
-             VALUES (?, 'Buy', ?, ?, ?, '0', ?, ?, ?, '0', ?, ?, ?, ?, ?)",
+              spot_fx_rate, scrip_action_id, deemed_acquisition_date, holding_account_id) \
+             VALUES (?, 'Buy', ?, ?, ?, '0', ?, ?, ?, '0', ?, ?, ?, ?, ?, ?)",
         )
         .bind(buy_id)
         .bind(action.date)
@@ -396,6 +400,7 @@ pub async fn db_exchange(pool: &SqlitePool, action_id: i64) -> Result<Exchange, 
         .bind(r.carried_cost_base.to_string())
         .bind(&r.currency)
         .bind(r.fx_rate.to_string())
+        .bind(r.spot_fx_rate.map(|d| d.to_string()))
         .bind(action_id)
         .bind(r.deemed_acquisition_date)
         .bind(r.holding_account_id)
@@ -584,6 +589,7 @@ mod tests {
                 gst_on_brokerage: Decimal::ZERO,
                 brokerage_currency: "AUD".to_string(),
                 fx_rate: Decimal::ONE,
+                spot_fx_rate: None,
                 contract_note_ref: None,
                 allocations: vec![AllocationInput {
                     purchase_trade_id: parcel_id,
@@ -946,6 +952,7 @@ mod tests {
                 gst_on_brokerage: Decimal::ZERO,
                 brokerage_currency: "AUD".to_string(),
                 fx_rate: Decimal::ONE,
+                spot_fx_rate: None,
                 contract_note_ref: None,
                 allocations: vec![AllocationInput {
                     purchase_trade_id: 1,
@@ -1007,6 +1014,7 @@ mod tests {
                 gst_on_brokerage: Decimal::ZERO,
                 brokerage_currency: "AUD".to_string(),
                 fx_rate: Decimal::ONE,
+                spot_fx_rate: None,
                 contract_note_ref: None,
                 allocations: vec![AllocationInput {
                     purchase_trade_id: ex.replacements[0].id,
@@ -1164,5 +1172,32 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    /// A consumed parcel's deliberate spot-rate override carries onto its
+    /// replacement Buy (like `fx_rate` and the deemed acquisition date), so
+    /// the AUD cost base is unchanged by the exchange — the spot rate keeps
+    /// winning at the deemed acquisition month.
+    #[tokio::test]
+    async fn exchange_carries_spot_fx_rate_onto_replacement() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "OLD").await;
+        insert_listing(&pool, 2, "NEW").await;
+        test_support::buy(1, 1)
+            .date(d(2020, 10, 1))
+            .settlement(d(2020, 10, 1))
+            .qty(dec("1000"))
+            .price(dec("1.50"))
+            .currency("USD")
+            .fx_rate(dec("0.70"))
+            .spot_fx_rate(dec("0.6543"))
+            .insert(&pool)
+            .await;
+        insert_scrip(&pool, 10, d(2024, 7, 1)).await;
+
+        let ex = db_exchange(&pool, 10).await.unwrap();
+        assert_eq!(ex.replacements.len(), 1);
+        assert_eq!(ex.replacements[0].fx_rate, dec("0.70"));
+        assert_eq!(ex.replacements[0].spot_fx_rate, Some(dec("0.6543")));
     }
 }

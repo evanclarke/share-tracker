@@ -38,7 +38,7 @@ implementation — see "How this maps to open TODO items" at the end.
 | [`inherited-assets-cgt-discount.md`](inherited-assets-cgt-discount.md) | **Inherited assets — CGT discount clock** (QC 69713, retrieved 2026-06-10): for the 12-month discount the beneficiary is treated as having owned an inherited asset since **the deceased acquired it** (asset acquired by the deceased on/after 20 Sep 1985) or since **the deceased died** (pre-CGT asset in the deceased's hands) — the ATO's statement of the s 115-30 acquisition-time rule. Indexation alternative only if death pre-21 Sep 1999 (not modelled). Modelled via `trades.deemed_acquisition_date` on the inheritance entry path's Buy. |
 | [`cgt-event-timing.md`](cgt-event-timing.md) | **CGT event timing** (QC 66016, retrieved 2026-06-12): with a contract of sale the CGT event happens **when the contract is entered into, not at settlement** — the gain belongs to the contract year even when settlement falls in the next FY. Worked example (Sue) — reproduced in `src/ato_examples.rs` (a Sell's `date` is the contract date; `settlement_date` never shifts the FY). |
 | [`forex-common-transactions.md`](forex-common-transactions.md) | **Foreign-currency share trades** (QC 18322, retrieved 2026-06-12): the cost base of foreign-currency shares is the AUD value **at the time of acquisition** and the capital proceeds the AUD value **at the time of the sale contract** (s 960-50(6) item 5); the contract-to-settlement currency movement is a separate forex realisation gain/loss. Worked examples (Tom, Lisa — Lisa's CGT side reproduced in `src/ato_examples.rs`). |
-| [`forex-cgt-12-month-rule.md`](forex-cgt-12-month-rule.md) | **Capital assets and the forex 12-month rule** (QC 17062, retrieved 2026-06-12): under the default 12-month rule the contract-to-settlement forex gain/loss on a foreign-currency CGT-asset trade is folded into the asset — **adjusting the cost base** on an acquisition, or a separate **non-discountable capital gain (K10) / capital loss (K11)** on a disposal. Worked examples (Art Ltd, Eleanor). **Not modelled** — settlement-window forex outcomes are not computed (a T+2 share settlement inside one rate month nets to nil under the monthly-rate simplification). |
+| [`forex-cgt-12-month-rule.md`](forex-cgt-12-month-rule.md) | **Capital assets and the forex 12-month rule** (QC 17062, retrieved 2026-06-12): under the default 12-month rule the contract-to-settlement forex gain/loss on a foreign-currency CGT-asset trade is folded into the asset — **adjusting the cost base** on an acquisition, or a separate **non-discountable capital gain (K10) / capital loss (K11)** on a disposal. Worked examples (Art Ltd, Eleanor). **Not modelled** — settlement-window forex outcomes are not computed (a T+2 share settlement inside one rate month nets to nil under the monthly-rate simplification); resolved as a Known limitation in `docs/API.md`. |
 | [`forex-average-rates.md`](forex-average-rates.md) | **Average-rate translation** (QC 18020, retrieved 2026-06-12): average rates over a chosen period (≤ 12 months) may be used only where they **reasonably approximate the spot rates** at the statutory translation times — fine for recurring income (Examples 1–4, 6), but **not appropriate for a one-off purchase or sale of a large capital asset** (Examples 5, 7). Bears directly on this project's monthly-RBA-rate conversion of trade cost base/proceeds (see "How this maps to open TODO items"). |
 | [`crypto-cgt.md`](crypto-cgt.md) | **Crypto assets as CGT assets** (QC 69952 + QC 69949, retrieved 2026-06-07): investment crypto is a CGT asset — each crypto asset is a **separate CGT asset**, valued in **Australian dollars**, with losses netted before the discount and the **50% discount after 12 months**, exactly like shares. A crypto-to-crypto **swap is a CGT event** at the market value of the asset received (or of the asset given up when the new one has no market value). Worked examples (Katrina ×2; the first reproduced in `src/ato_examples.rs` as a manual Sell + Buy at market value). **Transferring crypto between your own wallets is not a disposal** (retrieved 2026-06-08), but if the holding reduces to cover an on-chain **network fee** that fee is a disposal with CGT consequences. Modelled as the exchange-less `Crypto` listing security type, the network fee an optional disposal on the holding-account transfer. |
 
@@ -95,16 +95,17 @@ implementation — see "How this maps to open TODO items" at the end.
   the $1,000 taxed-upfront reduction and its ≤A$180,000 income test (applied as a de-minimis with
   the test flagged as the user's responsibility, like the FITO cap), and the cost-base-reset CGT
   treatment the vesting operation's Buy implements.
-- **FX conversion granularity** (review finding 2026-06-12, no TODO item yet):
+- **FX conversion granularity** (resolved 2026-06-12):
   [`forex-average-rates.md`](forex-average-rates.md) Examples 5 and 7 say an average rate is **not**
   a reasonable approximation for a one-off purchase/sale of a large capital asset — the spot rate at
-  the transaction date should be used — while this project converts every trade at the **monthly**
-  RBA rate, and the per-trade `fx_rate` is only a *fallback* (the monthly rate takes precedence once
-  imported), so a deliberate spot rate cannot win. For small parcels the monthly rate is arguably
-  still a reasonable approximation; for a large one-off foreign disposal it conflicts with the ATO's
-  stated position. Related: [`forex-cgt-12-month-rule.md`](forex-cgt-12-month-rule.md) — the
-  contract-to-settlement forex movement (cost-base adjustment on a buy; CGT event K10/K11 on a
-  sell) is not modelled at all.
+  the transaction date should be used. Implemented as the per-trade `spot_fx_rate` **override**: when
+  set it wins over the monthly RBA rate everywhere the trade converts to AUD; absent it, the monthly
+  rate (with the `fx_rate` fallback) remains the default, which the API docs now describe as the
+  ATO-published convenience default for recurring/small amounts. Related:
+  [`forex-cgt-12-month-rule.md`](forex-cgt-12-month-rule.md) — the contract-to-settlement forex
+  movement (cost-base adjustment on a buy; CGT event K10/K11 on a sell) is **not** modelled, resolved
+  as a Known limitation (`docs/API.md`): nil by construction under same-rate-month monthly-rate
+  entry, the taxpayer's manual adjustment where per-leg spot rates make it visible.
 - **Deductible investment expenses** (TODO "Deductible investment expenses"):
   [`investment-income-deductions.md`](investment-income-deductions.md) and
   [`dividend-income-deductions.md`](dividend-income-deductions.md) document the deductible expense

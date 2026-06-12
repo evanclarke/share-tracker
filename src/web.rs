@@ -406,6 +406,21 @@ mod tests {
         );
     }
 
+    /// The deliberate spot-rate override (QC 18020) ships on both the trades
+    /// (Buy/DRP) and Sell forms, shows as a trades-list column, and is
+    /// display-classified as a rate (full precision, never cent-rounded).
+    #[tokio::test]
+    async fn spot_fx_rate_override_ui_present() {
+        let js = app_js_body().await;
+        // Two field declarations: the trades config entry and SELL_FIELDS.
+        assert_eq!(js.matches("dec('spot_fx_rate'").count(), 2);
+        assert!(js.contains("Spot FX rate override"));
+        assert!(js.contains("wins over the monthly RBA rate"));
+        // Trades list column, classified as a rate in COLUMN_KINDS.
+        assert!(js.contains("'fx_rate', 'spot_fx_rate', 'holding_account_id'"));
+        assert!(js.contains("'average_price', 'fx_rate', 'spot_fx_rate'"));
+    }
+
     #[tokio::test]
     async fn income_ui_present() {
         let js = app_js_body().await;

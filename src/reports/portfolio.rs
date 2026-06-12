@@ -159,7 +159,7 @@ pub async fn db_holdings(
             splits,
             as_of,
         )?
-        .into_aud_with(&fx, &t.currency, t.acquired(), Some(t.fx_rate))?
+        .into_aud_with(&fx, &t.currency, t.acquired(), t.fx_override())?
         .adjusted;
 
         // The holding's quantity is reported in the unit basis of `as_of`

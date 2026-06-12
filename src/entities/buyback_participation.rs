@@ -203,6 +203,7 @@ pub async fn db_participate(
         gst_on_brokerage: Decimal::ZERO,
         brokerage_currency: currency.clone(),
         fx_rate: body.fx_rate.unwrap_or(Decimal::ONE),
+        spot_fx_rate: None,
         contract_note_ref: None,
         allocations: body
             .allocations
@@ -583,6 +584,7 @@ mod tests {
             gst_on_brokerage: Decimal::ZERO,
             brokerage_currency: "AUD".to_string(),
             fx_rate: Decimal::ONE,
+            spot_fx_rate: None,
             contract_note_ref: None,
             allocations: vec![AllocationInput {
                 purchase_trade_id: 1,

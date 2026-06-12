@@ -76,6 +76,9 @@ pub struct ParcelRow {
     pub gst_on_brokerage: Decimal,
     pub currency: String,
     pub fx_rate: Decimal,
+    /// Deliberate transaction-date spot-rate override: when set it wins over
+    /// the ATO monthly rate (see `infra::fx::FxOverride`).
+    pub spot_fx_rate: Option<Decimal>,
     /// Set on a rollover replacement parcel (scrip-for-scrip, demerger): the
     /// consumed parcel's acquisition date, carried so the combined holding
     /// period drives the discount clock and the AUD translation month.
@@ -86,13 +89,20 @@ impl ParcelRow {
     /// The column list matching the `FromRow` mapping, for single-table
     /// queries against `trades`.
     pub const COLUMNS: &'static str = "id, listing_id, holding_account_id, date, quantity, \
-         average_price, brokerage, gst_on_brokerage, currency, fx_rate, deemed_acquisition_date";
+         average_price, brokerage, gst_on_brokerage, currency, fx_rate, spot_fx_rate, \
+         deemed_acquisition_date";
 
     /// The CGT acquisition date: the deemed date where set (rollover
     /// replacement parcels), else the trade date. Drives the 12-month
     /// discount clock and the AUD translation month of the cost base.
     pub fn acquired(&self) -> NaiveDate {
         self.deemed_acquisition_date.unwrap_or(self.date)
+    }
+
+    /// The parcel's per-record FX rate: its deliberate spot override when
+    /// set, else its `fx_rate` fallback (see [`fx::FxOverride`]).
+    pub fn fx_override(&self) -> fx::FxOverride {
+        fx::FxOverride::from_trade(self.fx_rate, self.spot_fx_rate)
     }
 
     /// The row as [`adjusted_cost_base`]'s input.
@@ -121,6 +131,7 @@ impl sqlx::FromRow<'_, SqliteRow> for ParcelRow {
             gst_on_brokerage: row_dec(row, "gst_on_brokerage")?,
             currency: row.try_get("currency")?,
             fx_rate: row_dec(row, "fx_rate")?,
+            spot_fx_rate: crate::infra::decimal::row_opt_dec(row, "spot_fx_rate")?,
             deemed_acquisition_date: row.try_get("deemed_acquisition_date")?,
         })
     }
@@ -194,8 +205,10 @@ impl CostBase {
     /// Step 5 of the pipeline: convert every figure to AUD at the ATO
     /// reference rate for the parcel's acquisition month (`acquired` — the
     /// deemed acquisition date for a rollover replacement parcel, so the
-    /// original AUD cost base carries over), with the trade's manual
-    /// `fx_override` as fallback. Takes pre-loaded rates ([`fx::FxRates`]) so
+    /// original AUD cost base carries over), arbitrated against the trade's
+    /// per-record rate per `infra::fx::pick_rate` (a deliberate spot override
+    /// wins; the `fx_rate` fallback applies only when no ATO rate exists).
+    /// Takes pre-loaded rates ([`fx::FxRates`]) so
     /// a report loop's per-parcel conversion is a map lookup, not a DB
     /// round-trip. The rate is resolved once and applied to all components so
     /// the breakdown stays internally consistent.
@@ -204,7 +217,7 @@ impl CostBase {
         rates: &fx::FxRates,
         currency: &str,
         acquired: NaiveDate,
-        fx_override: Option<Decimal>,
+        fx_override: fx::FxOverride,
     ) -> Result<CostBase, fx::FxError> {
         let rate = rates.resolve_rate(currency, acquired, fx_override)?;
         Ok(self.at_rate(rate))
@@ -422,7 +435,12 @@ mod tests {
         )
         .unwrap();
         let aud = cb
-            .into_aud_with(&fx::FxRates::default(), "AUD", date(2024, 1, 1), None)
+            .into_aud_with(
+                &fx::FxRates::default(),
+                "AUD",
+                date(2024, 1, 1),
+                fx::FxOverride::None,
+            )
             .unwrap();
         assert_eq!(aud.adjusted, Decimal::from(1000));
         assert_eq!(aud.initial_cost, Decimal::from(1000));
@@ -450,7 +468,7 @@ mod tests {
         let cb = adjusted_cost_base(&p, Decimal::from(100), Decimal::from(5), &[roc], &[], None)
             .unwrap();
         let aud = cb
-            .into_aud_with(&rates, "USD", date(2024, 1, 15), None)
+            .into_aud_with(&rates, "USD", date(2024, 1, 15), fx::FxOverride::None)
             .unwrap();
         // Every component is USD / 0.50: 1000 → 2000, 5 → 10, 50 → 100,
         // (1000 − 5 − 50) → 1890.
@@ -461,7 +479,7 @@ mod tests {
         // A month with no rate falls back to the override; none means a loud
         // failure, never a silently unconverted figure.
         assert!(matches!(
-            cb.into_aud_with(&rates, "USD", date(2025, 1, 15), None),
+            cb.into_aud_with(&rates, "USD", date(2025, 1, 15), fx::FxOverride::None),
             Err(fx::FxError::MissingRate { .. })
         ));
     }

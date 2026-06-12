@@ -1,0 +1,22 @@
+-- Deliberate transaction-date spot-rate override for a trade's AUD conversion
+-- (REQUIREMENTS 2026-06-12, QC 18020 Examples 5/7: an average rate is not a
+-- reasonable approximation for a one-off purchase or sale of a large capital
+-- asset — the spot rate at the transaction date should be used; see
+-- docs/ato/forex-average-rates.md, docs/ato/forex-common-transactions.md).
+--
+-- Same foreign-per-AUD convention as fx_rate (AUD = foreign / rate). When set,
+-- this rate wins over the imported monthly RBA rate everywhere the trade's
+-- amounts convert to AUD (cost base, proceeds, every report and the snapshot
+-- pipeline). NULL — every existing row — keeps the unchanged default
+-- behaviour: monthly RBA rate first, fx_rate as fallback, loud failure when
+-- neither exists. A separate column (rather than a flag promoting fx_rate)
+-- keeps the silent fallback semantics of existing fx_rate values from
+-- flipping: entering a spot override is always a deliberate act.
+--
+-- Write-time validation (trade/sell upsert) rejects a non-positive value or a
+-- spot rate on an AUD trade (where it could never apply) with 422.
+--
+-- No new snapshot-staleness triggers needed: the trades_stale_snapshots_*
+-- triggers (0001_schema.sql) fire on every trades INSERT/UPDATE/DELETE, which
+-- covers edits to this column.
+ALTER TABLE trades ADD COLUMN spot_fx_rate TEXT;

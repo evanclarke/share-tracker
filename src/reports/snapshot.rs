@@ -40,7 +40,7 @@ use sqlx::{QueryBuilder, Row, SqlitePool};
 use std::collections::HashMap;
 
 use crate::entities::closing_price::{self, Market, PriceStatus};
-use crate::infra::fx::FxRates;
+use crate::infra::fx::{FxOverride, FxRates};
 use crate::reports::{performance, portfolio, unrealised_gains};
 
 /// The price-dependent reports that are snapshotted daily.
@@ -330,7 +330,12 @@ async fn aud_prices_for(
         match closing_price::db_get_one(pool, market.listing.id, valuation_day).await? {
             Some(row) if row.status == PriceStatus::Ok => {
                 let price = row.price.expect("ok row carries a price (schema CHECK)");
-                match fx.to_aud(price, &market.listing.currency, valuation_day, None) {
+                match fx.to_aud(
+                    price,
+                    &market.listing.currency,
+                    valuation_day,
+                    FxOverride::None,
+                ) {
                     Ok(aud) => {
                         prices.insert(market.listing.id, aud);
                     }

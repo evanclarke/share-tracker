@@ -132,3 +132,72 @@ fn known_limitations_document_indexation_method() {
     assert!(README_MD.contains("indexation method"));
     assert!(README_MD.contains("50% discount is used throughout"));
 }
+
+/// Docs-sync pin for the FX spot-rate override (REQUIREMENTS 2026-06-12, QC
+/// 18020): the FX conversion section states the precedence rule honestly —
+/// spot override first, monthly RBA rate as the ATO-published convenience
+/// default, `fx_rate` fallback, loud failure — and says when the ATO expects
+/// a spot rate; the Trades section documents the field and its 422s; the
+/// README surfaces the override; and the cited ATO mirrors carry their QC
+/// headers.
+#[test]
+fn fx_spot_rate_override_documented() {
+    // The FX conversion section: full precedence and the honesty note.
+    assert!(API_MD.contains("**`spot_fx_rate` override**"));
+    assert!(API_MD.contains("monthly rate is the ATO-published convenience default"));
+    assert!(
+        API_MD.contains(
+            "**not appropriate for a one-off purchase or sale of a large capital asset**"
+        )
+    );
+    assert!(API_MD.contains("used only when no ATO rate has been imported"));
+    // The Trades section: deliberate entry, the 422s, and the rollover carry.
+    assert!(
+        API_MD
+            .contains("rejected with `422` when non-positive or supplied on an AUD-currency trade")
+    );
+    assert!(API_MD.contains("carry a consumed parcel's override onto its replacement Buys"));
+    // Cited mirrors carry their QC headers.
+    assert!(API_MD.contains("docs/ato/forex-average-rates.md"));
+    assert!(include_str!("../docs/ato/forex-average-rates.md").contains("QC 18020"));
+    assert!(API_MD.contains("docs/ato/forex-common-transactions.md"));
+    assert!(include_str!("../docs/ato/forex-common-transactions.md").contains("QC 18322"));
+    // README features bullet.
+    assert!(README_MD.contains("transaction-date spot-rate override"));
+    assert!(README_MD.contains("QC 18020"));
+}
+
+/// Doc-only resolution pin for settlement-window forex — CGT events K10/K11
+/// (REQUIREMENTS 2026-06-12, NEEDS DECISION resolved 2026-06-12 as out of
+/// scope): the Known-limitations entry states the rule (cost-base adjustment
+/// on an acquisition, non-discountable K10 gain / K11 loss on a disposal),
+/// that outcomes are the taxpayer's manual adjustment, and the interaction
+/// with the spot-rate override (nil by construction under same-rate-month
+/// monthly rates; per-leg spot rates make the movement visible); cites the
+/// QC 17062 mirror; and the README surfaces it.
+#[test]
+fn known_limitations_document_settlement_window_forex_k10_k11() {
+    let limitations = known_limitations();
+    assert!(
+        limitations.contains(
+            "**Settlement-window forex on foreign-currency trades — CGT events K10/K11**"
+        )
+    );
+    assert!(
+        limitations.contains(
+            "non-discountable capital gain (CGT event K10) or capital loss (CGT event K11)"
+        )
+    );
+    assert!(limitations.contains("the taxpayer's manual adjustment"));
+    // The spot-override interaction, both halves.
+    assert!(limitations.contains("nil by construction"));
+    assert!(limitations.contains("per-leg spot rates"));
+    // Cites the mirrored ATO guidance (QC 17062) and its worked examples.
+    assert!(limitations.contains("docs/ato/forex-cgt-12-month-rule.md"));
+    assert!(limitations.contains("Art Ltd"));
+    assert!(limitations.contains("Eleanor"));
+    let mirror = include_str!("../docs/ato/forex-cgt-12-month-rule.md");
+    assert!(mirror.contains("QC 17062"));
+    // Surfaced in the README too.
+    assert!(README_MD.contains("CGT events K10/K11"));
+}

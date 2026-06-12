@@ -1,6 +1,6 @@
 use crate::domain::tax_year::tax_year_for;
 use crate::infra::decimal::parse_dec;
-use crate::infra::fx::FxRates;
+use crate::infra::fx::{FxOverride, FxRates};
 use crate::infra::http::ApiError;
 use axum::{Json, Router, extract::State, routing::get};
 use chrono::{Datelike, NaiveDate};
@@ -91,7 +91,7 @@ pub async fn db_amit_cash_alerts(pool: &SqlitePool) -> Result<Vec<AmitCashAlert>
         let dec = |col: &str| -> Result<Decimal, sqlx::Error> { parse_dec(col, row.try_get(col)?) };
         let gross =
             dec("franked_amount")? + dec("unfranked_amount")? + dec("foreign_source_income")?;
-        let gross_aud = fx.to_aud(gross, &currency, assessed, None)?;
+        let gross_aud = fx.to_aud(gross, &currency, assessed, FxOverride::None)?;
         let ticker: String = row.try_get("ticker")?;
         let entry = by_year
             .entry((ticker, listing_id, tax_year))

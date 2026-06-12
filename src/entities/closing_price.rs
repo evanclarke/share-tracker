@@ -694,7 +694,7 @@ pub async fn fetch_live_aud_prices(
                     quote.price,
                     &quote.currency,
                     quote.as_of.date_naive(),
-                    None,
+                    crate::infra::fx::FxOverride::None,
                 )
                 .await
                 {

@@ -153,6 +153,7 @@ impl TradeBuilder {
                 brokerage_includes_gst: false,
                 brokerage_currency: "AUD".to_string(),
                 fx_rate: Decimal::ONE,
+                spot_fx_rate: None,
                 contract_note_ref: None,
                 statement_total: None,
                 residual_brought_forward: Decimal::ZERO,
@@ -209,6 +210,13 @@ impl TradeBuilder {
 
     pub fn fx_rate(mut self, fx_rate: Decimal) -> Self {
         self.t.fx_rate = fx_rate;
+        self
+    }
+
+    /// Sets the deliberate transaction-date spot-rate override (wins over the
+    /// ATO monthly rate; see `infra::fx::FxOverride`).
+    pub fn spot_fx_rate(mut self, spot: Decimal) -> Self {
+        self.t.spot_fx_rate = Some(spot);
         self
     }
 

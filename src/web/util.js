@@ -332,7 +332,8 @@ const COLUMN_KINDS = (function () {
   set('rate', [
     // Per-unit prices/rates entered from statements — rounding them would
     // break reconciliation, so they keep their precision.
-    'average_price', 'fx_rate', 'amount_per_security', 'cost_base_adjustment', 'rate',
+    'average_price', 'fx_rate', 'spot_fx_rate', 'amount_per_security', 'cost_base_adjustment',
+    'rate',
     'price', 'current_price', 'reinvestment_price', 'exercise_price', 'amount_per_unit',
     'buyback_price', 'buyback_dividend', 'buyback_franking_credit', 'buyback_market_value',
     'market_value_per_share', 'deductible_percentage', 'proceeds_per_right',

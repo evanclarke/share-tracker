@@ -1,7 +1,7 @@
 use crate::domain::cost_base::{self, ParcelRow};
 use crate::entities::corporate_action::{RocEvent, SplitEvent};
 use crate::infra::decimal::{row_dec, row_opt_dec};
-use crate::infra::fx::FxRates;
+use crate::infra::fx::{FxOverride, FxRates};
 use crate::infra::http::ApiError;
 use axum::{Json, Router, extract::State, routing::get};
 use chrono::{Months, NaiveDate};
@@ -76,6 +76,7 @@ struct SellInfo {
     gst_on_brokerage: Decimal,
     currency: String,
     fx_rate: Decimal,
+    spot_fx_rate: Option<Decimal>,
     /// Set on a partial-rollover scrip-for-scrip closing Sell (its action has
     /// a cash component): the `(numerator, denominator)` of the cash side's
     /// market-value share of each allocated parcel's reduced cost base —
@@ -110,8 +111,17 @@ impl sqlx::FromRow<'_, SqliteRow> for SellInfo {
             gst_on_brokerage: row_dec(row, "gst_on_brokerage")?,
             currency: row.try_get("currency")?,
             fx_rate: row_dec(row, "fx_rate")?,
+            spot_fx_rate: row_opt_dec(row, "spot_fx_rate")?,
             scrip_cash_apportionment,
         })
+    }
+}
+
+impl SellInfo {
+    /// The sale's per-record FX rate: its deliberate spot override when set,
+    /// else its `fx_rate` fallback (see `infra::fx::FxOverride`).
+    fn fx_override(&self) -> FxOverride {
+        FxOverride::from_trade(self.fx_rate, self.spot_fx_rate)
     }
 }
 
@@ -231,7 +241,7 @@ async fn load_report_data(pool: &SqlitePool) -> Result<ReportData, sqlx::Error> 
     // sale id is absent from `sells`).
     let sells: Vec<SellInfo> = sqlx::query_as(
         "SELECT t.id, t.listing_id, t.holding_account_id, t.date, t.quantity, t.average_price, \
-         t.brokerage, t.gst_on_brokerage, t.currency, t.fx_rate, \
+         t.brokerage, t.gst_on_brokerage, t.currency, t.fx_rate, t.spot_fx_rate, \
          ca.scrip_cash_per_unit, ca.scrip_market_value, ca.scrip_new_units, ca.scrip_old_units \
          FROM trades t LEFT JOIN corporate_actions ca ON ca.id = t.scrip_action_id \
          WHERE t.trade_type = 'Sell' \
@@ -341,13 +351,14 @@ fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sq
         } else {
             Decimal::ZERO
         };
-        // Convert to AUD at the sale's rate (ATO rate for the sale month, else the
-        // sale's manual fx_rate) before aggregating.
+        // Convert to AUD at the sale's rate (the sale's deliberate spot
+        // override when set, else the ATO rate for the sale month, else the
+        // sale's manual fx_rate fallback) before aggregating.
         let alloc_proceeds = data.fx.to_aud(
             alloc_proceeds,
             &sale.currency,
             sale.date,
-            Some(sale.fx_rate),
+            sale.fx_override(),
         )?;
 
         // The allocated quantity is in the *sale date's* unit basis; the
@@ -379,7 +390,7 @@ fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sq
             splits,
             Some(sale.date),
         )?
-        .into_aud_with(&data.fx, &buy.currency, buy.acquired(), Some(buy.fx_rate))?
+        .into_aud_with(&data.fx, &buy.currency, buy.acquired(), buy.fx_override())?
         .adjusted;
 
         // A partial-rollover scrip closing Sell realises only the cash
@@ -486,11 +497,14 @@ fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sq
                 sale.proceeds_per_right * alloc.units,
                 &sale.currency,
                 sale.date,
-                Some(sale.fx_rate),
+                FxOverride::Fallback(sale.fx_rate),
             )?;
-            let alloc_cost =
-                data.fx
-                    .to_aud(alloc_cost, &sale.currency, sale.date, Some(sale.fx_rate))?;
+            let alloc_cost = data.fx.to_aud(
+                alloc_cost,
+                &sale.currency,
+                sale.date,
+                FxOverride::Fallback(sale.fx_rate),
+            )?;
 
             let alloc_gain = alloc_proceeds - alloc_cost;
             proceeds += alloc_proceeds;
@@ -604,6 +618,7 @@ mod tests {
             gst_on_brokerage: Decimal::ZERO,
             currency: currency.to_string(),
             fx_rate: Decimal::ONE,
+            spot_fx_rate: None,
             scrip_cash_apportionment: None,
         }
     }
@@ -620,6 +635,7 @@ mod tests {
             gst_on_brokerage: Decimal::ZERO,
             currency: currency.to_string(),
             fx_rate: Decimal::ONE,
+            spot_fx_rate: None,
             deemed_acquisition_date: None,
         }
     }
@@ -707,6 +723,33 @@ mod tests {
         let result = compute_realised_gains(&data).unwrap();
         assert_eq!(result[0].cost_base, Decimal::from(2000));
         assert_eq!(result[0].proceeds, Decimal::from(2500));
+    }
+
+    #[test]
+    fn pure_spot_override_wins_over_preloaded_rates() {
+        let d = |y, m, day| NaiveDate::from_ymd_opt(y, m, day).unwrap();
+        // Both legs carry deliberate spot rates (QC 18020); the loaded
+        // monthly rates would give different figures and must lose: cost
+        // 1000 USD / 0.40 = 2500 AUD, proceeds 1500 USD / 0.75 = 2000 AUD.
+        let mut sell = mem_sell(2, d(2025, 6, 1), 100, 15, "USD");
+        sell.spot_fx_rate = Some("0.75".parse().unwrap());
+        let mut buy = mem_buy(1, d(2024, 1, 15), 100, 10, "USD");
+        buy.spot_fx_rate = Some("0.40".parse().unwrap());
+        let data = ReportData {
+            sells: [(2, sell)].into(),
+            buys: [(1, buy)].into(),
+            allocations: vec![mem_alloc(2, 1, 100)],
+            fx: crate::infra::fx::FxRates::from_rates([
+                ("USD", "2024-01", "0.50".parse().unwrap()),
+                ("USD", "2025-06", "0.60".parse().unwrap()),
+            ]),
+            ..ReportData::default()
+        };
+
+        let result = compute_realised_gains(&data).unwrap();
+        assert_eq!(result[0].cost_base, Decimal::from(2500));
+        assert_eq!(result[0].proceeds, Decimal::from(2000));
+        assert_eq!(result[0].capital_gain_loss, Decimal::from(-500));
     }
 
     #[test]
