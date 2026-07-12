@@ -6,7 +6,7 @@ use axum::{
     http::StatusCode,
     routing::get,
 };
-use chrono::NaiveDate;
+use chrono::{Datelike, NaiveDate};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
@@ -15,6 +15,11 @@ use sqlx::{Row, SqlitePool};
 pub struct AmmaStatement {
     pub id: i64,
     pub listing_id: i64,
+    /// End of the Australian financial year the statement attributes — always a
+    /// 30 June date, enforced at write time. Every AMMA-keyed report buckets the
+    /// statement into the FY identified by this date's calendar year (the
+    /// `domain::tax_year` convention), so any other date would land the
+    /// statement in the wrong year silently.
     pub tax_year_end_date: NaiveDate,
     pub units_held: Decimal,
     pub date_received: NaiveDate,
@@ -136,6 +141,35 @@ fn default_currency() -> String {
     "AUD".to_string()
 }
 
+#[derive(Debug)]
+pub enum UpsertError {
+    /// `tax_year_end_date` is not a 30 June date (carries the rejected date).
+    /// An AMMA statement attributes a full Australian financial year, and every
+    /// AMMA-keyed report buckets it into the FY named by this date's calendar
+    /// year — a mid-year date would silently land in the wrong FY. Mapped to `422`.
+    NotFinancialYearEnd(NaiveDate),
+    Db(sqlx::Error),
+}
+
+impl From<sqlx::Error> for UpsertError {
+    fn from(err: sqlx::Error) -> Self {
+        UpsertError::Db(err)
+    }
+}
+
+impl From<UpsertError> for ApiError {
+    fn from(err: UpsertError) -> Self {
+        match err {
+            UpsertError::NotFinancialYearEnd(date) => ApiError::unprocessable(format!(
+                "tax_year_end_date {date} is not a 30 June date — an AMMA statement \
+                 covers the Australian financial year ending 30 June, and reports \
+                 attribute it to the year of that date"
+            )),
+            UpsertError::Db(err) => err.into(),
+        }
+    }
+}
+
 pub fn router() -> Router<SqlitePool> {
     Router::new().route("/amma_statements", get(list)).route(
         "/amma_statements/{id}",
@@ -172,7 +206,13 @@ pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<AmmaStatement>,
     .await
 }
 
-pub async fn db_upsert(pool: &SqlitePool, stmt: &AmmaStatement) -> Result<(), sqlx::Error> {
+pub async fn db_upsert(pool: &SqlitePool, stmt: &AmmaStatement) -> Result<(), UpsertError> {
+    // The FY-end date must actually be a financial-year end: reports bucket the
+    // statement by this date's calendar year, which matches domain::tax_year's
+    // rule only for January–June dates — in practice, 30 June.
+    if (stmt.tax_year_end_date.month(), stmt.tax_year_end_date.day()) != (6, 30) {
+        return Err(UpsertError::NotFinancialYearEnd(stmt.tax_year_end_date));
+    }
     sqlx::query(
         "INSERT INTO amma_statements \
          (id, listing_id, tax_year_end_date, units_held, date_received, \
@@ -503,6 +543,64 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// `tax_year_end_date` must be a 30 June FY end: reports bucket the statement
+    /// by that date's calendar year, so e.g. 2024-12-31 would silently land in
+    /// FY2024 while `domain::tax_year::tax_year_for` puts December in FY2025
+    /// (2026-07-12 review: the 30 June assumption was never validated).
+    #[tokio::test]
+    async fn api_non_june_30_year_end_returns_422() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        for date in ["2024-12-31", "2024-06-29", "2024-07-01"] {
+            let body = serde_json::json!({
+                "listing_id": 1,
+                "tax_year_end_date": date,
+                "date_received": "2024-08-15"
+            });
+            let resp = router()
+                .with_state(pool.clone())
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri("/amma_statements/1")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{date} must be rejected"
+            );
+            let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+            let detail = String::from_utf8(bytes.to_vec()).unwrap();
+            assert!(
+                detail.contains(date) && detail.contains("30 June"),
+                "{date}: detail must carry the date and the rule, got: {detail}"
+            );
+            assert!(
+                db_get(&pool, 1).await.unwrap().is_none(),
+                "{date}: nothing persisted"
+            );
+        }
+    }
+
+    /// 30 June is accepted for any year — the rule pins the day, not the year.
+    #[tokio::test]
+    async fn db_june_30_of_any_year_accepted() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        for (id, year) in [(1, 2019), (2, 2025)] {
+            let stmt = test_support::amma(id, 1)
+                .with(|a| a.tax_year_end_date = NaiveDate::from_ymd_opt(year, 6, 30).unwrap())
+                .build();
+            db_upsert(&pool, &stmt).await.unwrap();
+        }
+        assert_eq!(db_list(&pool).await.unwrap().len(), 2);
     }
 
     #[tokio::test]

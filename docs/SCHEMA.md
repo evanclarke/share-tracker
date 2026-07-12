@@ -159,7 +159,7 @@ investment_expenses          Deductible investment expenses — the cost of earn
 amma_statements              Annual AMIT Member Annual (AMMA) statements
 ├── id                              INTEGER PK
 ├── listing_id                      INTEGER FK→listings.id
-├── tax_year_end_date               DATE         e.g. 2024-06-30 for FY2024
+├── tax_year_end_date               DATE         Always a 30 June date (write-time 422 otherwise) — e.g. 2024-06-30 for FY2024; reports bucket by its calendar year
 ├── units_held                      TEXT (decimal)
 ├── date_received                   DATE
 ├── australian_interest             TEXT (decimal)

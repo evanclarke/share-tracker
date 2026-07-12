@@ -1132,3 +1132,26 @@ month; the E10 excess uses the buy-month rate, consistent with the cost base), a
 bites; the FX-conversion section cross-links it; the README scope-cuts line surfaces it; and
 the `cost_base.rs` module doc (step 5) and `into_aud_with` doc comment state the deliberate
 choice at the code. Pinned by `doc_checks::known_limitations_document_cost_base_fx_timing`.
+
+## AMMA tax_year_end_date is assumed to be 30 June but never validated (2026-07-12 review, integrity)
+
+Every AMMA-keyed report buckets the statement by `tax_year_end_date.year()`
+(`src/reports/tax_summary.rs:422`, `src/reports/net_capital_gain.rs:477`,
+`src/reports/franking.rs:305`), which equals the Australian FY only when the date is in
+January–June (in practice, 30 June). Nothing validates that at write time
+(`src/entities/amma.rs`), so a statement keyed e.g. `2024-12-31` lands in FY2024 while
+`domain::tax_year::tax_year_for` — the rule CLAUDE.md says every FY-keyed report must use — would
+put it in FY2025.
+
+- [x] Either validate at write time that `tax_year_end_date` is a 30 June date (422 otherwise),
+      or bucket AMMA rows through `tax_year_for` everywhere; pick one and pin it with a test
+
+Closed 2026-07-13. Picked write-time validation: an AMMA statement attributes a full Australian
+financial year, so a non-30-June `tax_year_end_date` is bad data, not a bucketing edge case —
+rejecting it keeps the reports' `.year()` bucketing provably equal to `tax_year_for`.
+`amma::db_upsert` rejects any date that is not 30 June (of any year) with a new
+`UpsertError::NotFinancialYearEnd` → 422 naming the rejected date and the rule. Pinned by
+`amma::tests::api_non_june_30_year_end_returns_422` (2024-12-31 / 2024-06-29 / 2024-07-01 all
+rejected, nothing persisted) and `db_june_30_of_any_year_accepted` (the rule pins the day, not
+the year). docs/API.md (AMMA section paragraph + Response codes 422 list) and docs/SCHEMA.md
+(column note) updated (994 tests).

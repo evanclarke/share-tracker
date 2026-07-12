@@ -8,19 +8,6 @@ The sections below come from the **2026-07-12 code review** (a full pass over th
 domain pipeline, infra, and migrations for programming and domain issues). Each section records one
 finding; sections land in DONE.md as they are fixed.
 
-## AMMA tax_year_end_date is assumed to be 30 June but never validated (2026-07-12 review, integrity)
-
-Every AMMA-keyed report buckets the statement by `tax_year_end_date.year()`
-(`src/reports/tax_summary.rs:422`, `src/reports/net_capital_gain.rs:477`,
-`src/reports/franking.rs:305`), which equals the Australian FY only when the date is in
-January–June (in practice, 30 June). Nothing validates that at write time
-(`src/entities/amma.rs`), so a statement keyed e.g. `2024-12-31` lands in FY2024 while
-`domain::tax_year::tax_year_for` — the rule CLAUDE.md says every FY-keyed report must use — would
-put it in FY2025.
-
-- [ ] Either validate at write time that `tax_year_end_date` is a 30 June date (422 otherwise),
-      or bucket AMMA rows through `tax_year_for` everywhere; pick one and pin it with a test
-
 ## Scheduler nits: wrong line number in UnknownJob; no overlap guard (2026-07-12 review, programming)
 
 - `spawn` reports `ScheduleError::UnknownJob { line: idx + 1 }` where `idx` indexes the *parsed
