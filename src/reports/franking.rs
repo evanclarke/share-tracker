@@ -8,17 +8,21 @@
 //! which shares were sold — regardless of the specific parcel allocation
 //! chosen for CGT. See `docs/ato/you-and-your-shares-dividends.md` (Examples 6–7).
 //!
-//! The tax summary uses [`holding_period_test`] to work out, per dividend, how
-//! many entitled units fail the test and denies the proportional share of the
-//! attached credits — unless the small-shareholder exemption applies (total
-//! attached franking credits in the income year below A$5,000).
+//! The tax summary loads every listing's walk inputs once via
+//! [`HoldingWalks::load`] (inside its own read transaction, so the walks see
+//! the same snapshot as the rest of the report) and runs
+//! [`HoldingWalks::test`] per dividend to work out how many entitled units
+//! fail the test, denying the proportional share of the attached credits —
+//! unless the small-shareholder exemption applies (total attached franking
+//! credits in the income year below A$5,000).
 
 use crate::domain::tax_year::tax_year_for;
+use crate::entities::corporate_action::{self, SplitEvent};
 use crate::infra::decimal::parse_dec;
 use crate::infra::fx::{FxOverride, FxRates};
 use chrono::{Datelike, Duration, NaiveDate};
 use rust_decimal::Decimal;
-use sqlx::{Row, SqlitePool};
+use sqlx::{Row, SqliteConnection};
 use std::collections::HashMap;
 
 /// Small-shareholder exemption threshold (A$): with total franking credits in
@@ -48,176 +52,236 @@ impl HoldingPeriodTest {
     }
 }
 
-/// Run the holding-period test for a dividend on `listing_id` whose shares
-/// went ex-dividend on `ex_date` (the caller falls back to the payment date
-/// when no ex-date was recorded).
-///
-/// Walks the listing's trade history (trade dates; LIFO stack of acquisition
-/// parcels). Units held when the shares go ex-dividend are the entitled units;
-/// an entitled unit sold within the qualification period with fewer than the
-/// required at-risk days (both the acquisition and disposal day excluded) is
-/// disqualified. Anything still held at the end of the qualification period
-/// has necessarily accrued the required days, so later sales are irrelevant.
-pub async fn holding_period_test(
-    pool: &SqlitePool,
-    listing_id: i64,
-    ex_date: NaiveDate,
-) -> Result<HoldingPeriodTest, sqlx::Error> {
-    holding_period_test_with_sale(pool, listing_id, ex_date, None).await
+/// One trade in a listing's walk history, its quantity in its own day's unit
+/// basis (re-based per dividend at walk time).
+#[derive(Clone, Copy)]
+struct Event {
+    sell: bool,
+    date: NaiveDate,
+    qty: Decimal,
 }
 
-/// [`holding_period_test`] with an optional contemplated Sell of
-/// `(date, units)` injected into the walk — the franking at-risk report's
-/// what-if mode, answering "which credits would *this* sale disqualify?"
-/// without writing anything. The hypothetical sale takes its place in date
-/// order after any recorded trades of the same day (as the newest trade id
-/// would), with its units in its own date's basis; a sale dated after the
-/// qualification window is ignored — it can no longer affect entitlement.
-pub async fn holding_period_test_with_sale(
-    pool: &SqlitePool,
-    listing_id: i64,
-    ex_date: NaiveDate,
-    contemplated_sale: Option<(NaiveDate, Decimal)>,
-) -> Result<HoldingPeriodTest, sqlx::Error> {
-    let preference: bool = sqlx::query_scalar("SELECT preference FROM listings WHERE id = ?")
-        .bind(listing_id)
-        .fetch_one(pool)
+/// One listing's walk inputs: the preference flag (90 vs 45 required at-risk
+/// days), its trade history in (date, id) order, and its split events.
+struct ListingWalk {
+    preference: bool,
+    events: Vec<Event>,
+    splits: Vec<SplitEvent>,
+}
+
+/// Every listing's holding-period-walk inputs, loaded once by
+/// [`HoldingWalks::load`] so a report testing many dividends batches the
+/// per-listing lookups (preference, trades, splits) instead of re-querying
+/// per dividend — and, because it loads on the caller's connection, reads
+/// them from the same snapshot as the rest of the report's inputs.
+pub struct HoldingWalks {
+    listings: HashMap<i64, ListingWalk>,
+}
+
+impl HoldingWalks {
+    /// Load every listing's walk inputs in three batched queries. Callers run
+    /// this inside their read transaction, so a trade committed after the
+    /// snapshot can never change a denial computed from the snapshot's facts.
+    pub async fn load(conn: &mut SqliteConnection) -> Result<Self, sqlx::Error> {
+        let mut listings = sqlx::query("SELECT id, preference FROM listings")
+            .fetch_all(&mut *conn)
+            .await?
+            .iter()
+            .map(|row| {
+                Ok((
+                    row.try_get("id")?,
+                    ListingWalk {
+                        preference: row.try_get("preference")?,
+                        events: Vec::new(),
+                        splits: Vec::new(),
+                    },
+                ))
+            })
+            .collect::<Result<HashMap<i64, ListingWalk>, sqlx::Error>>()?;
+
+        // A demerger never disposes of the head shares — the closing Sell and
+        // head replacement Buys (demerger-group trades on the action's own head
+        // listing) are a modelling artifact, so they are excluded here: the
+        // original acquisition parcels stay in the stack with their at-risk days
+        // running, and a dividend going ex shortly after the demerger is not
+        // spuriously disqualified. The demerged-entity Buys (group trades on the
+        // *other* listing) are included — they are the only record of those
+        // holdings. A holding-account transfer likewise never changes beneficial
+        // ownership, so its transfer-out Sell / transfer-in Buys are excluded the
+        // same way: the original parcels keep their at-risk clock running.
+        let rows = sqlx::query(
+            "SELECT t.listing_id, t.trade_type, t.date, t.quantity FROM trades t \
+             LEFT JOIN corporate_actions ca ON ca.id = t.demerger_action_id \
+             WHERE (t.demerger_action_id IS NULL OR ca.listing_id <> t.listing_id) \
+               AND t.transfer_id IS NULL \
+             ORDER BY t.date, t.id",
+        )
+        .fetch_all(&mut *conn)
         .await?;
-    let required_days: i64 = if preference { 90 } else { 45 };
-    // Qualification period ends `required_days` after the ex-dividend day;
-    // trades beyond it cannot affect entitlement.
-    let window_end = ex_date + Duration::days(required_days);
-
-    // A demerger never disposes of the head shares — the closing Sell and
-    // head replacement Buys (demerger-group trades on the action's own head
-    // listing) are a modelling artifact, so they are excluded here: the
-    // original acquisition parcels stay in the stack with their at-risk days
-    // running, and a dividend going ex shortly after the demerger is not
-    // spuriously disqualified. The demerged-entity Buys (group trades on the
-    // *other* listing) are included — they are the only record of those
-    // holdings. A holding-account transfer likewise never changes beneficial
-    // ownership, so its transfer-out Sell / transfer-in Buys are excluded the
-    // same way: the original parcels keep their at-risk clock running.
-    let rows = sqlx::query(
-        "SELECT t.trade_type, t.date, t.quantity FROM trades t \
-         LEFT JOIN corporate_actions ca ON ca.id = t.demerger_action_id \
-         WHERE t.listing_id = ? AND t.date <= ? \
-           AND (t.demerger_action_id IS NULL OR ca.listing_id <> t.listing_id) \
-           AND t.transfer_id IS NULL \
-         ORDER BY t.date, t.id",
-    )
-    .bind(listing_id)
-    .bind(window_end)
-    .fetch_all(pool)
-    .await?;
-
-    // Each trade's quantity is in its own day's unit basis; a share
-    // split/consolidation (TD 2000/10) between trades would make them
-    // incomparable, so every quantity is normalised to the basis at the end of
-    // the qualification window. The entitled/disqualified ratio (all the
-    // caller uses) is basis-invariant.
-    let splits = crate::entities::corporate_action::db_splits_for_listing(pool, listing_id).await?;
-
-    struct Event {
-        sell: bool,
-        date: NaiveDate,
-        qty: Decimal,
-    }
-    let mut events = rows
-        .iter()
-        .map(|row| {
+        for row in &rows {
+            let listing_id: i64 = row.try_get("listing_id")?;
             let trade_type: String = row.try_get("trade_type")?;
-            Ok(Event {
+            let event = Event {
                 sell: trade_type == "Sell",
                 date: row.try_get("date")?,
                 qty: parse_dec("quantity", row.try_get("quantity")?)?,
-            })
-        })
-        .collect::<Result<Vec<_>, sqlx::Error>>()?;
-    if let Some((date, units)) = contemplated_sale
-        && date <= window_end
-    {
-        // After same-day recorded trades, where the newest id would sort.
-        let pos = events.partition_point(|e| e.date <= date);
-        events.insert(
-            pos,
-            Event {
-                sell: true,
-                date,
-                qty: units,
-            },
-        );
-    }
-
-    struct Parcel {
-        acquired: NaiveDate,
-        qty: Decimal,
-        entitled: bool,
-    }
-    let mut stack: Vec<Parcel> = Vec::new();
-    let mut snapshotted = false;
-    let mut entitled_units = Decimal::ZERO;
-    let mut disqualified_units = Decimal::ZERO;
-
-    for event in &events {
-        let date = event.date;
-        let qty = crate::entities::corporate_action::split_adjusted_quantity(
-            event.qty,
-            &splits,
-            date,
-            Some(window_end),
-        );
-
-        // Everything still held immediately before the first trade on or after
-        // the ex-date is entitled to the dividend (acquiring on or after the
-        // ex-date no longer carries the entitlement).
-        if !snapshotted && date >= ex_date {
-            for p in &mut stack {
-                p.entitled = true;
-                entitled_units += p.qty;
+            };
+            if let Some(l) = listings.get_mut(&listing_id) {
+                l.events.push(event);
             }
-            snapshotted = true;
         }
 
-        if event.sell {
-            // LIFO: a sale disposes of the most recently acquired shares first.
-            let mut remaining = qty;
-            while remaining > Decimal::ZERO {
-                let Some(top) = stack.last_mut() else { break };
-                let take = remaining.min(top.qty);
-                if top.entitled {
-                    // At-risk days exclude both the acquisition and disposal day.
-                    let at_risk = (date - top.acquired).num_days() - 1;
-                    if at_risk < required_days {
-                        disqualified_units += take;
+        for (listing_id, splits) in corporate_action::db_share_split_events(&mut *conn).await? {
+            if let Some(l) = listings.get_mut(&listing_id) {
+                l.splits = splits;
+            }
+        }
+
+        Ok(Self { listings })
+    }
+
+    /// At-risk days the listing's shares must accrue to keep the credits:
+    /// 90 for preference shares, 45 otherwise.
+    pub fn required_days(&self, listing_id: i64) -> i64 {
+        match self.listings.get(&listing_id) {
+            Some(l) if l.preference => 90,
+            _ => 45,
+        }
+    }
+
+    /// Run the holding-period test for a dividend on `listing_id` whose shares
+    /// went ex-dividend on `ex_date` (the caller falls back to the payment date
+    /// when no ex-date was recorded).
+    ///
+    /// Walks the listing's trade history (trade dates; LIFO stack of acquisition
+    /// parcels). Units held when the shares go ex-dividend are the entitled units;
+    /// an entitled unit sold within the qualification period with fewer than the
+    /// required at-risk days (both the acquisition and disposal day excluded) is
+    /// disqualified. Anything still held at the end of the qualification period
+    /// has necessarily accrued the required days, so later sales are irrelevant.
+    pub fn test(&self, listing_id: i64, ex_date: NaiveDate) -> HoldingPeriodTest {
+        self.test_with_sale(listing_id, ex_date, None)
+    }
+
+    /// [`Self::test`] with an optional contemplated Sell of `(date, units)`
+    /// injected into the walk — the franking at-risk report's what-if mode,
+    /// answering "which credits would *this* sale disqualify?" without
+    /// writing anything. The hypothetical sale takes its place in date order
+    /// after any recorded trades of the same day (as the newest trade id
+    /// would), with its units in its own date's basis; a sale dated after the
+    /// qualification window is ignored — it can no longer affect entitlement.
+    pub fn test_with_sale(
+        &self,
+        listing_id: i64,
+        ex_date: NaiveDate,
+        contemplated_sale: Option<(NaiveDate, Decimal)>,
+    ) -> HoldingPeriodTest {
+        // A listing with no loaded walk holds nothing: nothing entitled,
+        // nothing disqualified (income rows FK to listings, so this is only
+        // reachable with a made-up what-if listing id).
+        let Some(listing) = self.listings.get(&listing_id) else {
+            return HoldingPeriodTest {
+                entitled_units: Decimal::ZERO,
+                disqualified_units: Decimal::ZERO,
+            };
+        };
+        let required_days = self.required_days(listing_id);
+        // Qualification period ends `required_days` after the ex-dividend day;
+        // trades beyond it cannot affect entitlement.
+        let window_end = ex_date + Duration::days(required_days);
+
+        let in_window = listing.events.partition_point(|e| e.date <= window_end);
+        let mut events = listing.events[..in_window].to_vec();
+        if let Some((date, units)) = contemplated_sale
+            && date <= window_end
+        {
+            // After same-day recorded trades, where the newest id would sort.
+            let pos = events.partition_point(|e| e.date <= date);
+            events.insert(
+                pos,
+                Event {
+                    sell: true,
+                    date,
+                    qty: units,
+                },
+            );
+        }
+
+        struct Parcel {
+            acquired: NaiveDate,
+            qty: Decimal,
+            entitled: bool,
+        }
+        let mut stack: Vec<Parcel> = Vec::new();
+        let mut snapshotted = false;
+        let mut entitled_units = Decimal::ZERO;
+        let mut disqualified_units = Decimal::ZERO;
+
+        for event in &events {
+            let date = event.date;
+            // Each trade's quantity is in its own day's unit basis; a share
+            // split/consolidation (TD 2000/10) between trades would make them
+            // incomparable, so every quantity is normalised to the basis at the
+            // end of the qualification window. The entitled/disqualified ratio
+            // (all the caller uses) is basis-invariant.
+            let qty = corporate_action::split_adjusted_quantity(
+                event.qty,
+                &listing.splits,
+                date,
+                Some(window_end),
+            );
+
+            // Everything still held immediately before the first trade on or after
+            // the ex-date is entitled to the dividend (acquiring on or after the
+            // ex-date no longer carries the entitlement).
+            if !snapshotted && date >= ex_date {
+                for p in &mut stack {
+                    p.entitled = true;
+                    entitled_units += p.qty;
+                }
+                snapshotted = true;
+            }
+
+            if event.sell {
+                // LIFO: a sale disposes of the most recently acquired shares first.
+                let mut remaining = qty;
+                while remaining > Decimal::ZERO {
+                    let Some(top) = stack.last_mut() else { break };
+                    let take = remaining.min(top.qty);
+                    if top.entitled {
+                        // At-risk days exclude both the acquisition and disposal day.
+                        let at_risk = (date - top.acquired).num_days() - 1;
+                        if at_risk < required_days {
+                            disqualified_units += take;
+                        }
+                    }
+                    top.qty -= take;
+                    remaining -= take;
+                    if top.qty.is_zero() {
+                        stack.pop();
                     }
                 }
-                top.qty -= take;
-                remaining -= take;
-                if top.qty.is_zero() {
-                    stack.pop();
-                }
+            } else {
+                // Buy or DRP: a new acquisition parcel (entitled only if it is
+                // still held when the snapshot above fires).
+                stack.push(Parcel {
+                    acquired: date,
+                    qty,
+                    entitled: false,
+                });
             }
-        } else {
-            // Buy or DRP: a new acquisition parcel (entitled only if it is
-            // still held when the snapshot above fires).
-            stack.push(Parcel {
-                acquired: date,
-                qty,
-                entitled: false,
-            });
+        }
+        if !snapshotted {
+            // No trade on or after the ex-date: everything held is entitled (and
+            // qualified — nothing was sold within the qualification period).
+            entitled_units = stack.iter().map(|p| p.qty).sum();
+        }
+
+        HoldingPeriodTest {
+            entitled_units,
+            disqualified_units,
         }
     }
-    if !snapshotted {
-        // No trade on or after the ex-date: everything held is entitled (and
-        // qualified — nothing was sold within the qualification period).
-        entitled_units = stack.iter().map(|p| p.qty).sum();
-    }
-
-    Ok(HoldingPeriodTest {
-        entitled_units,
-        disqualified_units,
-    })
 }
 
 /// One franked dividend (an `income` row with attached credits) as the
@@ -245,7 +309,7 @@ pub struct FrankedDividend {
 /// themselves candidates: the holding-period rule needs a per-distribution
 /// ex-date, which an annual AMMA statement doesn't carry.
 pub async fn db_franked_dividends(
-    conn: &mut sqlx::SqliteConnection,
+    conn: &mut SqliteConnection,
     fx: &FxRates,
 ) -> Result<(Vec<FrankedDividend>, HashMap<i32, Decimal>), sqlx::Error> {
     let mut dividends = Vec::new();
@@ -314,6 +378,14 @@ mod tests {
     use super::*;
     use crate::entities::{listing, trade};
     use crate::test_support::{self, test_pool};
+    use sqlx::SqlitePool;
+
+    /// Load the walk inputs once, as the reports do — tests then run one or
+    /// more in-memory walks against the same load.
+    async fn walks(pool: &SqlitePool) -> HoldingWalks {
+        let mut conn = pool.acquire().await.unwrap();
+        HoldingWalks::load(&mut conn).await.unwrap()
+    }
 
     async fn insert_listing(pool: &SqlitePool, id: i64, preference: bool) {
         test_support::listing(id)
@@ -350,9 +422,7 @@ mod tests {
         insert_listing(&pool, 1, false).await;
         // Acquired the day before ex-date and never sold: entitled and qualified.
         insert_trade(&pool, 1, 1, trade::TradeType::Buy, d("2025-03-13"), 100).await;
-        let t = holding_period_test(&pool, 1, d("2025-03-14"))
-            .await
-            .unwrap();
+        let t = walks(&pool).await.test(1, d("2025-03-14"));
         assert_eq!(t.entitled_units, Decimal::from(100));
         assert_eq!(t.disqualified_units, Decimal::ZERO);
     }
@@ -365,9 +435,7 @@ mod tests {
         // days (both end days excluded), under 45.
         insert_trade(&pool, 1, 1, trade::TradeType::Buy, d("2025-03-01"), 1000).await;
         insert_trade(&pool, 2, 1, trade::TradeType::Sell, d("2025-04-10"), 1000).await;
-        let t = holding_period_test(&pool, 1, d("2025-03-14"))
-            .await
-            .unwrap();
+        let t = walks(&pool).await.test(1, d("2025-03-14"));
         assert_eq!(t.entitled_units, Decimal::from(1000));
         assert_eq!(t.disqualified_units, Decimal::from(1000));
         assert_eq!(t.denied(Decimal::from(5600)), Decimal::from(5600));
@@ -380,18 +448,14 @@ mod tests {
         // Bought 1 Mar. Sold 46 days later (16 Apr): exactly 45 at-risk days → qualifies.
         insert_trade(&pool, 1, 1, trade::TradeType::Buy, d("2025-03-01"), 100).await;
         insert_trade(&pool, 2, 1, trade::TradeType::Sell, d("2025-04-16"), 100).await;
-        let t = holding_period_test(&pool, 1, d("2025-03-02"))
-            .await
-            .unwrap();
+        let t = walks(&pool).await.test(1, d("2025-03-02"));
         assert_eq!(t.disqualified_units, Decimal::ZERO);
 
         // Same shape sold one day earlier (44 at-risk days) → disqualified.
         insert_listing(&pool, 2, false).await;
         insert_trade(&pool, 3, 2, trade::TradeType::Buy, d("2025-03-01"), 100).await;
         insert_trade(&pool, 4, 2, trade::TradeType::Sell, d("2025-04-15"), 100).await;
-        let t = holding_period_test(&pool, 2, d("2025-03-02"))
-            .await
-            .unwrap();
+        let t = walks(&pool).await.test(2, d("2025-03-02"));
         assert_eq!(t.disqualified_units, Decimal::from(100));
     }
 
@@ -422,9 +486,7 @@ mod tests {
         .await
         .unwrap();
         insert_trade(&pool, 2, 1, trade::TradeType::Sell, d("2025-04-03"), 200).await;
-        let t = holding_period_test(&pool, 1, d("2025-03-14"))
-            .await
-            .unwrap();
+        let t = walks(&pool).await.test(1, d("2025-03-14"));
         assert_eq!(t.entitled_units, Decimal::from(200));
         // Held since 2024 → well over 45 at-risk days: nothing disqualified.
         assert_eq!(t.disqualified_units, Decimal::ZERO);
@@ -448,9 +510,7 @@ mod tests {
         .await
         .unwrap();
         insert_trade(&pool, 4, 2, trade::TradeType::Sell, d("2025-04-03"), 200).await;
-        let t = holding_period_test(&pool, 2, d("2025-03-14"))
-            .await
-            .unwrap();
+        let t = walks(&pool).await.test(2, d("2025-03-14"));
         assert_eq!(t.entitled_units, Decimal::from(200));
         assert_eq!(t.disqualified_units, Decimal::from(200));
     }
@@ -465,13 +525,37 @@ mod tests {
         insert_trade(&pool, 1, 1, trade::TradeType::Buy, d("2024-03-14"), 10000).await;
         insert_trade(&pool, 2, 1, trade::TradeType::Buy, d("2025-03-04"), 4000).await;
         insert_trade(&pool, 3, 1, trade::TradeType::Sell, d("2025-04-03"), 4000).await;
-        let t = holding_period_test(&pool, 1, d("2025-03-14"))
-            .await
-            .unwrap();
+        let t = walks(&pool).await.test(1, d("2025-03-14"));
         assert_eq!(t.entitled_units, Decimal::from(14000));
         assert_eq!(t.disqualified_units, Decimal::from(4000));
         // Denied proportionally, multiply-before-divide: 7000 × 4000 / 14000 = 2000 exact.
         assert_eq!(t.denied(Decimal::from(7000)), Decimal::from(2000));
+    }
+
+    /// One [`HoldingWalks::load`] answers every dividend of a listing: two
+    /// ex-dates run against the same loaded inputs, each with its own
+    /// entitlement snapshot and qualification window.
+    #[tokio::test]
+    async fn db_one_load_answers_multiple_dividends_on_one_listing() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, false).await;
+        // Long-held 10,000; 4,000 bought 10 days before the March ex-date and
+        // sold 20 days after it (29 at-risk days).
+        insert_trade(&pool, 1, 1, trade::TradeType::Buy, d("2024-03-14"), 10000).await;
+        insert_trade(&pool, 2, 1, trade::TradeType::Buy, d("2025-03-04"), 4000).await;
+        insert_trade(&pool, 3, 1, trade::TradeType::Sell, d("2025-04-03"), 4000).await;
+
+        let w = walks(&pool).await;
+        // August 2024 ex-date: only the long-held parcel is entitled, and the
+        // 2025 sale is far outside its qualification window — fully qualified.
+        let aug = w.test(1, d("2024-08-14"));
+        assert_eq!(aug.entitled_units, Decimal::from(10000));
+        assert_eq!(aug.disqualified_units, Decimal::ZERO);
+        // March 2025 ex-date (Jessica's shape) from the same load: the recent
+        // 4,000 are deemed sold under LIFO and disqualified.
+        let mar = w.test(1, d("2025-03-14"));
+        assert_eq!(mar.entitled_units, Decimal::from(14000));
+        assert_eq!(mar.disqualified_units, Decimal::from(4000));
     }
 
     #[tokio::test]
@@ -501,13 +585,9 @@ mod tests {
             )
             .await;
         }
-        let ordinary = holding_period_test(&pool, 1, d("2025-03-14"))
-            .await
-            .unwrap();
+        let ordinary = walks(&pool).await.test(1, d("2025-03-14"));
         assert_eq!(ordinary.disqualified_units, Decimal::ZERO);
-        let preference = holding_period_test(&pool, 2, d("2025-03-14"))
-            .await
-            .unwrap();
+        let preference = walks(&pool).await.test(2, d("2025-03-14"));
         assert_eq!(preference.disqualified_units, Decimal::from(100));
     }
 
@@ -520,9 +600,7 @@ mod tests {
         insert_trade(&pool, 1, 1, trade::TradeType::Buy, d("2024-01-10"), 100).await;
         insert_trade(&pool, 2, 1, trade::TradeType::Buy, d("2025-03-09"), 50).await;
         insert_trade(&pool, 3, 1, trade::TradeType::Sell, d("2025-03-12"), 50).await;
-        let t = holding_period_test(&pool, 1, d("2025-03-14"))
-            .await
-            .unwrap();
+        let t = walks(&pool).await.test(1, d("2025-03-14"));
         assert_eq!(t.entitled_units, Decimal::from(100));
         assert_eq!(t.disqualified_units, Decimal::ZERO);
     }
@@ -536,9 +614,7 @@ mod tests {
         insert_trade(&pool, 1, 1, trade::TradeType::Buy, d("2024-01-10"), 100).await;
         insert_trade(&pool, 2, 1, trade::TradeType::Buy, d("2025-03-19"), 50).await;
         insert_trade(&pool, 3, 1, trade::TradeType::Sell, d("2025-03-24"), 50).await;
-        let t = holding_period_test(&pool, 1, d("2025-03-14"))
-            .await
-            .unwrap();
+        let t = walks(&pool).await.test(1, d("2025-03-14"));
         assert_eq!(t.entitled_units, Decimal::from(100));
         assert_eq!(t.disqualified_units, Decimal::ZERO);
     }
@@ -552,9 +628,7 @@ mod tests {
         insert_trade(&pool, 1, 1, trade::TradeType::Buy, d("2024-01-10"), 100).await;
         insert_trade(&pool, 2, 1, trade::TradeType::DRP, d("2025-03-04"), 10).await;
         insert_trade(&pool, 3, 1, trade::TradeType::Sell, d("2025-04-03"), 10).await;
-        let t = holding_period_test(&pool, 1, d("2025-03-14"))
-            .await
-            .unwrap();
+        let t = walks(&pool).await.test(1, d("2025-03-14"));
         assert_eq!(t.entitled_units, Decimal::from(110));
         assert_eq!(t.disqualified_units, Decimal::from(10));
     }
@@ -594,16 +668,12 @@ mod tests {
             .unwrap();
 
         // The head shares were never disposed of: nothing is disqualified.
-        let t = holding_period_test(&pool, 1, d("2025-03-14"))
-            .await
-            .unwrap();
+        let t = walks(&pool).await.test(1, d("2025-03-14"));
         assert_eq!(t.entitled_units, Decimal::from(1000));
         assert_eq!(t.disqualified_units, Decimal::ZERO);
 
         // The demerged listing's walk sees the demerged-entity parcel.
-        let t = holding_period_test(&pool, 2, d("2025-05-10"))
-            .await
-            .unwrap();
+        let t = walks(&pool).await.test(2, d("2025-05-10"));
         assert_eq!(t.entitled_units, Decimal::from(200));
         assert_eq!(t.disqualified_units, Decimal::ZERO);
     }

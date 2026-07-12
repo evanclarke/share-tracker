@@ -363,6 +363,12 @@ pub async fn db_tax_summary(pool: &SqlitePool) -> Result<Vec<TaxYearSummary>, sq
     // at-risk report, so the two reports can never disagree about them.
     let (franked_dividends, attached_credits_by_year) =
         franking::db_franked_dividends(&mut tx, &fx).await?;
+    // The holding-period walks' inputs (listing preference, trades, splits)
+    // load on the same transaction, so the denials below are computed from the
+    // same snapshot as every other line — a trade committed after this point
+    // can't change the outcome — and each dividend's walk below is a pure
+    // in-memory pass, not more queries.
+    let walks = franking::HoldingWalks::load(&mut tx).await?;
     tx.commit().await?;
 
     let mut map: HashMap<i32, TaxYearSummary> = HashMap::new();
@@ -558,7 +564,7 @@ pub async fn db_tax_summary(pool: &SqlitePool) -> Result<Vec<TaxYearSummary>, sq
         if attached < franking::small_shareholder_threshold_aud() {
             continue;
         }
-        let test = franking::holding_period_test(pool, div.listing_id, div.ex_date).await?;
+        let test = walks.test(div.listing_id, div.ex_date);
         let denied = test.denied(div.credits_aud);
         if denied > Decimal::ZERO {
             let s = map
@@ -1238,6 +1244,40 @@ mod tests {
         assert_eq!(result[0].dividends_assessable, Decimal::from(13066));
         assert_eq!(result[0].franking_credits, Decimal::ZERO);
         assert_eq!(result[0].franking_credits_denied, Decimal::from(5600));
+    }
+
+    /// Two franked dividends on one listing in one year: each gets its own
+    /// walk over the single pre-loaded input set. The March dividend loses
+    /// the credits on the short-held parcel while the August dividend (whose
+    /// qualification window the sale post-dates) keeps every credit.
+    #[tokio::test]
+    async fn db_two_dividends_on_one_listing_denied_independently() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        insert_trade(&pool, 1, 1, trade::TradeType::Buy, ymd(2024, 3, 14), 10000).await;
+        insert_trade(&pool, 2, 1, trade::TradeType::Buy, ymd(2025, 3, 4), 4000).await;
+        insert_trade(&pool, 3, 1, trade::TradeType::Sell, ymd(2025, 4, 3), 4000).await;
+
+        // Ex 14 Aug 2024: its qualification window closed months before the
+        // April 2025 sale — nothing denied.
+        let mut aug = make_income(1, 1, ymd(2024, 8, 28));
+        aug.ex_date = Some(ymd(2024, 8, 14));
+        aug.franking_credits = Decimal::from(3000);
+        income::db_upsert(&pool, &aug).await.unwrap();
+        // Ex 14 Mar 2025: LIFO deems the recent 4,000 units sold at 29
+        // at-risk days — 4,000/14,000 of its 7,000 credits denied.
+        let mut mar = make_income(2, 1, ymd(2025, 3, 28));
+        mar.ex_date = Some(ymd(2025, 3, 14));
+        mar.franking_credits = Decimal::from(7000);
+        income::db_upsert(&pool, &mar).await.unwrap();
+
+        let result = db_tax_summary(&pool).await.unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].tax_year, 2025);
+        // The year's attached A$10,000 is over the small-shareholder
+        // threshold, so the rule applies to both — only March's walk denies.
+        assert_eq!(result[0].franking_credits_denied, Decimal::from(2000));
+        assert_eq!(result[0].franking_credits, Decimal::from(8000));
     }
 
     /// Same short holding, but total attached credits under $5,000: the

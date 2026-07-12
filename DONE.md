@@ -1023,3 +1023,30 @@ commits before the pure `net_years` computation. The what-if handler reads its i
 same way, with allocation validation and the scenario walk running purely after the commit.
 No endpoint/schema change, so no doc updates. Covered by the existing net-capital-gain,
 what-if, realised-gains, open-parcels, and parcel-optimiser fixtures (983 tests pass).
+
+## Tax summary: franking holding-period test runs post-commit, per dividend (2026-07-12 review, programming)
+
+`db_tax_summary` reads its inputs on one transaction, commits it, then calls
+`franking::holding_period_test(pool, …)` **per franked dividend**
+(`src/reports/tax_summary.rs:551-565`), each call issuing three more queries (listing preference,
+trade walk, splits) on the raw pool. That both breaks the single-snapshot rule (a trade written
+after the commit changes the denial outcome for a summary computed from older facts) and is an
+N+1 on a report that already pre-loads everything else.
+
+- [x] Run the holding-period walks inside the same read transaction as the rest of the report
+      (thread a `&mut SqliteConnection` through `holding_period_test`, which
+      `franking_at_risk` can share), and batch the per-listing lookups (preference, trades,
+      splits) instead of re-querying per dividend
+- [x] Existing denial tests keep passing; add one covering two dividends on one listing reusing
+      the loaded walk
+
+Closed 2026-07-13: the per-dividend async `holding_period_test`/`holding_period_test_with_sale`
+functions are replaced by `franking::HoldingWalks` — `HoldingWalks::load(&mut SqliteConnection)`
+batch-loads every listing's walk inputs (preference flag, artifact-excluded trade history, split
+events) in three queries on the caller's connection, and `test`/`test_with_sale` run the LIFO
+walk purely in memory. `db_tax_summary` and both `franking_at_risk` paths (report + what-if) load
+the walks inside the same read transaction as their other inputs, so the denial is computed from
+the one snapshot and no queries run per dividend. No endpoint/schema change, so no doc updates.
+New tests: `franking::tests::db_one_load_answers_multiple_dividends_on_one_listing` and
+`tax_summary::tests::db_two_dividends_on_one_listing_denied_independently`; all existing denial
+tests pass unchanged (985 tests).

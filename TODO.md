@@ -8,22 +8,6 @@ The sections below come from the **2026-07-12 code review** (a full pass over th
 domain pipeline, infra, and migrations for programming and domain issues). Each section records one
 finding; sections land in DONE.md as they are fixed.
 
-## Tax summary: franking holding-period test runs post-commit, per dividend (2026-07-12 review, programming)
-
-`db_tax_summary` reads its inputs on one transaction, commits it, then calls
-`franking::holding_period_test(pool, …)` **per franked dividend**
-(`src/reports/tax_summary.rs:551-565`), each call issuing three more queries (listing preference,
-trade walk, splits) on the raw pool. That both breaks the single-snapshot rule (a trade written
-after the commit changes the denial outcome for a summary computed from older facts) and is an
-N+1 on a report that already pre-loads everything else.
-
-- [ ] Run the holding-period walks inside the same read transaction as the rest of the report
-      (thread a `&mut SqliteConnection` through `holding_period_test`, which
-      `franking_at_risk` can share), and batch the per-listing lookups (preference, trades,
-      splits) instead of re-querying per dividend
-- [ ] Existing denial tests keep passing; add one covering two dividends on one listing reusing
-      the loaded walk
-
 ## No positivity/sanity validation on ordinary trade, Sell, allocation, and income amounts (2026-07-12 review, integrity)
 
 The linked operations validate their inputs (`units <= 0` rejected in buy-back, rights exercise,

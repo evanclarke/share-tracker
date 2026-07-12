@@ -5,7 +5,7 @@
 //! holding-period rule silently: credits just come out lower. This report
 //! explains each denial — the dividend, its qualification window, and the
 //! entitled/disqualified units from the same walk
-//! (`franking::holding_period_test`) the tax summary denies by — and a
+//! (`franking::HoldingWalks::test`) the tax summary denies by — and a
 //! what-if mode injects a contemplated Sell into that walk so disposals can
 //! be timed to keep the credits (selling after a dividend's window end can
 //! no longer disqualify it). See `docs/ato/you-and-your-shares-dividends.md`.
@@ -96,26 +96,17 @@ pub fn router() -> Router<SqlitePool> {
         .route("/reports/franking_at_risk/what-if", post(what_if))
 }
 
-/// Listing facts the alerts carry: ticker, and the preference flag that sets
-/// the required at-risk days (90 vs 45).
-async fn listing_facts(
+/// Tickers for the alerts to carry (the required at-risk days come from the
+/// loaded walks themselves).
+async fn listing_tickers(
     conn: &mut sqlx::SqliteConnection,
-) -> Result<HashMap<i64, (String, bool)>, sqlx::Error> {
-    let rows = sqlx::query("SELECT id, ticker, preference FROM listings")
+) -> Result<HashMap<i64, String>, sqlx::Error> {
+    let rows = sqlx::query("SELECT id, ticker FROM listings")
         .fetch_all(conn)
         .await?;
     rows.iter()
-        .map(|r| {
-            Ok((
-                r.try_get("id")?,
-                (r.try_get("ticker")?, r.try_get("preference")?),
-            ))
-        })
+        .map(|r| Ok((r.try_get("id")?, r.try_get("ticker")?)))
         .collect()
-}
-
-fn required_days(preference: bool) -> i64 {
-    if preference { 90 } else { 45 }
 }
 
 /// Every franked dividend whose entitled shares fail the holding-period walk,
@@ -123,24 +114,27 @@ fn required_days(preference: bool) -> i64 {
 /// attached totals come from the loader shared with the tax summary
 /// (`franking::db_franked_dividends`), and the denial arithmetic is the same
 /// `HoldingPeriodTest::denied` — so a row here with status `denied` is
-/// exactly what the tax summary's `franking_credits_denied` carries.
+/// exactly what the tax summary's `franking_credits_denied` carries. The walk
+/// inputs load on the same read transaction as the dividends, and every
+/// dividend's walk reuses that one load.
 pub async fn db_franking_at_risk(
     pool: &SqlitePool,
 ) -> Result<Vec<FrankingAtRiskAlert>, sqlx::Error> {
     let mut tx = pool.begin().await?;
     let fx = FxRates::load(&mut *tx).await?;
     let (dividends, attached_by_year) = franking::db_franked_dividends(&mut tx, &fx).await?;
-    let listings = listing_facts(&mut tx).await?;
+    let tickers = listing_tickers(&mut tx).await?;
+    let walks = franking::HoldingWalks::load(&mut tx).await?;
     tx.commit().await?;
 
     let mut alerts = Vec::new();
     for div in &dividends {
-        let test = franking::holding_period_test(pool, div.listing_id, div.ex_date).await?;
+        let test = walks.test(div.listing_id, div.ex_date);
         if test.disqualified_units.is_zero() {
             continue;
         }
-        let (ticker, preference) = listings.get(&div.listing_id).cloned().unwrap_or_default();
-        let days = required_days(preference);
+        let ticker = tickers.get(&div.listing_id).cloned().unwrap_or_default();
+        let days = walks.required_days(div.listing_id);
         let at_risk = test.denied(div.credits_aud);
         let exempt = attached_by_year[&div.tax_year] < franking::small_shareholder_threshold_aud();
         alerts.push(FrankingAtRiskAlert {
@@ -180,25 +174,24 @@ pub async fn db_franking_what_if(
     let mut tx = pool.begin().await?;
     let fx = FxRates::load(&mut *tx).await?;
     let (dividends, attached_by_year) = franking::db_franked_dividends(&mut tx, &fx).await?;
-    let listings = listing_facts(&mut tx).await?;
+    let tickers = listing_tickers(&mut tx).await?;
+    let walks = franking::HoldingWalks::load(&mut tx).await?;
     tx.commit().await?;
 
     let mut alerts = Vec::new();
     for div in dividends.iter().filter(|d| d.listing_id == req.listing_id) {
-        let base = franking::holding_period_test(pool, div.listing_id, div.ex_date).await?;
-        let with_sale = franking::holding_period_test_with_sale(
-            pool,
+        let base = walks.test(div.listing_id, div.ex_date);
+        let with_sale = walks.test_with_sale(
             div.listing_id,
             div.ex_date,
             Some((req.sale_date, req.units)),
-        )
-        .await?;
+        );
         let additional = with_sale.denied(div.credits_aud) - base.denied(div.credits_aud);
         if additional <= Decimal::ZERO {
             continue;
         }
-        let (ticker, preference) = listings.get(&div.listing_id).cloned().unwrap_or_default();
-        let days = required_days(preference);
+        let ticker = tickers.get(&div.listing_id).cloned().unwrap_or_default();
+        let days = walks.required_days(div.listing_id);
         let exempt = attached_by_year[&div.tax_year] < franking::small_shareholder_threshold_aud();
         alerts.push(FrankingWhatIfAlert {
             income_id: div.income_id,
