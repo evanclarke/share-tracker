@@ -427,6 +427,12 @@ mod tests {
         assert!(js.contains("/income"));
         // Reinvest-distribution action drives POST /income/:id/reinvest.
         assert!(js.contains("/reinvest"));
+        // A reinvested row offers Undo reinvest instead, driving
+        // DELETE /income/:id/reinvest through the generic `del` row action
+        // (confirm + DELETE + list refresh).
+        assert!(js.contains("Undo reinvest"));
+        assert!(js.contains("del: '/income/' + row.id + '/reinvest'"));
+        assert!(js.contains("await api('DELETE', a.del)"));
     }
 
     #[tokio::test]

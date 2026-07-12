@@ -944,3 +944,53 @@ listings (its capacity re-check even fetches splits for the *new* listing).
       db_listing_change_under_amit_adjustment_is_refused_until_unlinked,
       api_listing_change_on_consumed_parcel_returns_422_with_reason}`. docs/API.md Sells + Trades
       422 causes and the Response codes table updated
+
+## PUT /trades can silently rewrite a reinvest-created DRP (2026-07-12 review, integrity)
+
+The `PUT /trades/:id` handler rejects a body with `trade_type = DRP`
+(`src/entities/trade.rs:869-874`), but nothing stops a **Buy body targeting an existing DRP row**
+created by `POST /income/:id/reinvest`: `db_upsert` checks every provenance column except the
+reinvestment link, which lives on `income.reinvestment_trade_id`, not on the trade. The write
+re-types the trade to Buy and (because the body's residual fields default to 0) silently zeroes
+the residual carry-forward chain, while the income row keeps pointing at it. `DELETE /trades`
+already guards this exact reference (`src/entities/trade.rs:727-737`); the upsert path doesn't.
+
+Related: `PUT /income/:id` accepts an arbitrary client-supplied `reinvestment_trade_id`
+(`src/entities/income.rs:130`, bound at 387) with no validation that the trade exists as a DRP of
+the same listing/account — and an income edit that omits the field silently clears an existing
+link.
+
+- [x] `trade::db_upsert` rejects (422) an update to a trade referenced by
+      `income.reinvestment_trade_id` (mirror the delete guard's message: delete the reinvestment
+      via the income row instead) — `UpsertError::ReinvestmentTrade`, guarded by lookup beside
+      the transfer-fee guard (the link lives on the income row, invisible to the
+      provenance-column check); the 422 points at `DELETE /income/:id/reinvest`
+- [x] Decide the `PUT /income` contract for `reinvestment_trade_id` (reject client-set values, or
+      validate the target is an unclaimed DRP trade of the same listing) and enforce it —
+      RESOLVED: **client-set values are rejected by ignoring the field** (the
+      `buyback_trade_id` pattern: only reinvest-created DRP trades can exist — `PUT /trades`
+      refuses free-form DRPs — so there is never a valid unclaimed target to validate);
+      `IncomeBody` no longer carries the field and `income::db_upsert` never writes the column
+      (absent from both the INSERT list and the ON CONFLICT SET), so an insert starts unlinked
+      and an edit preserves an existing link instead of silently clearing it. The undo that
+      contract requires is the new inverse operation `DELETE /income/:id/reinvest`
+      (`drp_reinvestment::db_unreinvest`): deletes the DRP trade + clears the link in one
+      transaction; 422 while the trade is drawn on (Sell allocation / AMIT adjustment) or is not
+      the (listing, account) residual chain's tail (undo is LIFO — a later trade's
+      residual_brought_forward came from this chain); `DELETE /income/:id` on a reinvested row is
+      refused (422) so an orphaned DRP trade can never exist. Web UI: reinvested income rows get
+      an **Undo reinvest** row action (generic confirm-and-DELETE `del` row-action support in
+      app.js)
+- [x] Tests: a Buy body over a reinvest-created DRP is rejected; the income-side rule is pinned —
+      `trade::tests::{db_upsert_over_reinvestment_trade_is_refused,
+      api_put_buy_body_over_reinvestment_drp_returns_422}`;
+      `income::tests::{db_upsert_never_writes_the_reinvestment_link,
+      api_reinvestment_link_is_not_client_writable, api_delete_reinvested_income_returns_422}`;
+      `drp_reinvestment::tests::{unreinvest_deletes_the_trade_clears_the_link_and_allows_redo,
+      unreinvest_without_a_reinvestment_is_rejected, unreinvest_missing_income_is_not_found,
+      unreinvest_is_refused_while_the_trade_is_drawn_on,
+      unreinvest_is_lifo_a_mid_chain_trade_is_refused, api_unreinvest_round_trip_and_rejections}`;
+      `web::tests::income_ui_present` covers the Undo reinvest action. docs/API.md (Trades DRP
+      paragraph, Income provenance note + endpoint table, DRP reinvestment undo section, Response
+      codes), docs/SCHEMA.md `reinvestment_trade_id` note, and the README DRP feature bullet
+      updated

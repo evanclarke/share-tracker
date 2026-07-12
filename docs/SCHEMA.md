@@ -126,7 +126,7 @@ income
 ├── conduit_foreign_income    TEXT (decimal)  Excluded from assessable income
 ├── trust_income              BOOLEAN
 ├── entitlement_date          DATE (nullable)  Trust distributions only (CHECK: NULL unless trust_income; non-trust writes also rejected 422): the date the holder became presently entitled — usually the distribution period's end. Trust income is assessed in the year of present entitlement regardless of payment (ATO QC 23087, docs/ato/trust-income-timing.md), so when set the tax summary attributes every component of the row (FY bucket and AUD-conversion month) by this date; absent, date_paid behaviour is unchanged
-├── reinvestment_trade_id     INTEGER FK→trades.id (nullable, for DRP linkage)
+├── reinvestment_trade_id     INTEGER FK→trades.id (nullable, for DRP linkage)  Read-only provenance managed by the reinvest operation: set by POST /income/:id/reinvest, cleared by DELETE /income/:id/reinvest — PUT /income never writes it (an edit preserves the link); while set, the DRP trade is frozen (PUT/DELETE /trades reject it) and DELETE /income is refused
 ├── currency                  TEXT FK→currencies.code   ISO 4217; tax summary converts to AUD by date_paid month — entitlement_date month when that governs (default AUD)
 ├── buyback_trade_id          INTEGER FK→trades.id (nullable)  Buy-back dividend components only: the participation Sell this row was created with (the row is managed by the participation — PUT/DELETE /income reject it; DELETE /sells on the Sell removes it)
 ├── holding_account_id        INTEGER FK→holding_accounts.id  The account the distribution was paid to — decides whose DRP enrolment applies and where a reinvestment trade lands (defaults to the seeded default account)

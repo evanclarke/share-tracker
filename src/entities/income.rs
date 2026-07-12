@@ -34,6 +34,16 @@ pub struct Income {
     /// `date_paid`. Rejected (`422`) on a non-trust row — a dividend is always
     /// assessed by payment.
     pub entitlement_date: Option<NaiveDate>,
+    /// Provenance link to the DRP trade this distribution was reinvested
+    /// into, managed solely by the reinvest operation: set by
+    /// `POST /income/:id/reinvest`, cleared by `DELETE /income/:id/reinvest`
+    /// (`entities::drp_reinvestment`). Read-only through CRUD — `PUT /income`
+    /// carries no such field and [`db_upsert`] never writes the column (an
+    /// edit preserves an existing link), so a client can neither forge a link
+    /// to an arbitrary trade nor silently orphan the DRP trade by omission.
+    /// While set, the linked trade is frozen (`trade::db_upsert`/`db_delete`
+    /// reject it) and `DELETE /income/:id` is refused — undo the reinvestment
+    /// first.
     pub reinvestment_trade_id: Option<i64>,
     /// ISO 4217 currency the amounts are denominated in. The tax summary converts
     /// non-AUD amounts to AUD via the ATO rate for this currency and the month of
@@ -126,8 +136,9 @@ pub struct IncomeBody {
     /// See `Income::entitlement_date` — trust rows only.
     #[serde(default)]
     pub entitlement_date: Option<NaiveDate>,
-    #[serde(default)]
-    pub reinvestment_trade_id: Option<i64>,
+    // No `reinvestment_trade_id`: the DRP link is provenance managed by the
+    // reinvest operation (see `Income::reinvestment_trade_id`) — a body value
+    // is ignored, and an edit preserves an existing link.
     #[serde(default = "default_currency")]
     pub currency: String,
     /// Defaults to the seeded default holding account when omitted.
@@ -341,14 +352,18 @@ pub async fn db_upsert(pool: &SqlitePool, income: &Income) -> Result<(), UpsertE
         }
     }
 
+    // `reinvestment_trade_id` is deliberately absent from both the column
+    // list (a new row starts unlinked) and the ON CONFLICT SET (an edit
+    // preserves an existing link): the DRP link is written only by the
+    // reinvest operation, in its own transaction.
     sqlx::query(
         "INSERT INTO income \
          (id, listing_id, date_paid, ex_date, franked_amount, unfranked_amount, \
           foreign_source_income, foreign_tax_paid, tfn_withholding_tax, franking_credits, \
           lic_capital_gain_deduction, conduit_foreign_income, trust_income, entitlement_date, \
-          reinvestment_trade_id, currency, holding_account_id, amount_per_security, \
+          currency, holding_account_id, amount_per_security, \
           securities_held, tax_deferred_amount) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT(id) DO UPDATE SET \
              listing_id                 = excluded.listing_id, \
              date_paid                  = excluded.date_paid, \
@@ -363,7 +378,6 @@ pub async fn db_upsert(pool: &SqlitePool, income: &Income) -> Result<(), UpsertE
              conduit_foreign_income     = excluded.conduit_foreign_income, \
              trust_income               = excluded.trust_income, \
              entitlement_date           = excluded.entitlement_date, \
-             reinvestment_trade_id      = excluded.reinvestment_trade_id, \
              currency                   = excluded.currency, \
              holding_account_id         = excluded.holding_account_id, \
              amount_per_security        = excluded.amount_per_security, \
@@ -384,7 +398,6 @@ pub async fn db_upsert(pool: &SqlitePool, income: &Income) -> Result<(), UpsertE
     .bind(income.conduit_foreign_income.to_string())
     .bind(income.trust_income)
     .bind(income.entitlement_date)
-    .bind(income.reinvestment_trade_id)
     .bind(&income.currency)
     .bind(income.holding_account_id)
     .bind(income.amount_per_security.map(|d| d.to_string()))
@@ -406,20 +419,27 @@ pub enum DeleteOutcome {
     /// side. Delete the Sell via `DELETE /sells/:id` instead (which removes
     /// this row too). Mapped to `422`.
     BuyBackIncome,
+    /// The row has a reinvestment trade (`reinvestment_trade_id` set) —
+    /// deleting it alone would orphan the DRP trade (a parcel with no funding
+    /// distribution, invisible to `trade::db_delete`'s reinvestment guard).
+    /// Undo the reinvestment first (`DELETE /income/:id/reinvest`). Mapped to
+    /// `422`.
+    ReinvestedIncome,
 }
 
 pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<DeleteOutcome, sqlx::Error> {
     let mut tx = pool.begin().await?;
 
-    let buyback: Option<Option<i64>> =
-        sqlx::query_scalar("SELECT buyback_trade_id FROM income WHERE id = ?")
+    let links: Option<(Option<i64>, Option<i64>)> =
+        sqlx::query_as("SELECT buyback_trade_id, reinvestment_trade_id FROM income WHERE id = ?")
             .bind(id)
             .fetch_optional(&mut *tx)
             .await?;
-    match buyback {
+    match links {
         None => return Ok(DeleteOutcome::NotFound),
-        Some(Some(_)) => return Ok(DeleteOutcome::BuyBackIncome),
-        Some(None) => {}
+        Some((Some(_), _)) => return Ok(DeleteOutcome::BuyBackIncome),
+        Some((_, Some(_))) => return Ok(DeleteOutcome::ReinvestedIncome),
+        Some((None, None)) => {}
     }
 
     sqlx::query("DELETE FROM income WHERE id = ?")
@@ -465,7 +485,9 @@ async fn upsert(
         conduit_foreign_income: body.conduit_foreign_income,
         trust_income: body.trust_income,
         entitlement_date: body.entitlement_date,
-        reinvestment_trade_id: body.reinvestment_trade_id,
+        // Provenance links are never client-settable; db_upsert doesn't
+        // write them anyway (an edit preserves an existing DRP link).
+        reinvestment_trade_id: None,
         currency: body.currency,
         buyback_trade_id: None,
         holding_account_id: body.holding_account_id,
@@ -532,6 +554,11 @@ async fn delete(
         DeleteOutcome::BuyBackIncome => Err(ApiError::unprocessable(
             "this income row is a buy-back dividend component — delete the buy-back Sell \
              instead, which removes it too",
+        )),
+        // Deleting the distribution alone would orphan its DRP trade → 422.
+        DeleteOutcome::ReinvestedIncome => Err(ApiError::unprocessable(
+            "this distribution has a reinvestment trade — undo the reinvestment first \
+             (DELETE /income/:id/reinvest), then delete the row",
         )),
     }
 }
@@ -631,36 +658,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn db_drp_reinvestment_linkage() {
+    async fn db_upsert_never_writes_the_reinvestment_link() {
+        // The DRP link is provenance managed by the reinvest operation:
+        // db_upsert must neither set it on insert (a forged link) nor clear
+        // it on update (orphaning the DRP trade) — whatever the struct says.
         let pool = test_pool().await;
         insert_test_listing(&pool).await;
         let trade_id = insert_test_trade(&pool).await;
-        let inc = Income {
-            holding_account_id: 1,
-            id: 3,
-            listing_id: 1,
-            date_paid: NaiveDate::from_ymd_opt(2024, 3, 15).unwrap(),
-            ex_date: None,
-            franked_amount: Decimal::from(140),
-            unfranked_amount: Decimal::from(60),
-            foreign_source_income: Decimal::ZERO,
-            foreign_tax_paid: Decimal::ZERO,
-            tfn_withholding_tax: Decimal::ZERO,
-            franking_credits: Decimal::from(60),
-            lic_capital_gain_deduction: Decimal::ZERO,
-            conduit_foreign_income: Decimal::ZERO,
-            trust_income: false,
-            entitlement_date: None,
-            reinvestment_trade_id: Some(trade_id),
-            currency: "AUD".to_string(),
-            buyback_trade_id: None,
-            amount_per_security: None,
-            securities_held: None,
-            tax_deferred_amount: None,
-        };
+        let mut inc = test_support::income(3, 1, NaiveDate::from_ymd_opt(2024, 3, 15).unwrap())
+            .with(|i| i.reinvestment_trade_id = Some(trade_id))
+            .build();
         db_upsert(&pool, &inc).await.unwrap();
         let got = db_get(&pool, 3).await.unwrap().unwrap();
-        assert_eq!(got.reinvestment_trade_id, Some(trade_id));
+        assert_eq!(
+            got.reinvestment_trade_id, None,
+            "a client-supplied link must not be stored"
+        );
+
+        // Link it the way the reinvest operation does, then re-upsert with
+        // the field absent (None) — the link must survive the edit.
+        sqlx::query("UPDATE income SET reinvestment_trade_id = ? WHERE id = 3")
+            .bind(trade_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        inc.reinvestment_trade_id = None;
+        inc.franked_amount = Decimal::from(140);
+        db_upsert(&pool, &inc).await.unwrap();
+        let got = db_get(&pool, 3).await.unwrap().unwrap();
+        assert_eq!(
+            got.reinvestment_trade_id,
+            Some(trade_id),
+            "an edit must preserve the existing link"
+        );
         assert_eq!(got.franked_amount, Decimal::from(140));
     }
 
@@ -755,6 +785,97 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn api_reinvestment_link_is_not_client_writable() {
+        // The DRP link is provenance: a body value is ignored (not stored,
+        // not an error), and an edit of a reinvested row preserves the
+        // existing link even though the body never carries the field.
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        let trade_id = insert_test_trade(&pool).await;
+        let app = router().with_state(pool.clone());
+
+        let put = |body: serde_json::Value| {
+            Request::builder()
+                .method("PUT")
+                .uri("/income/1")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap()
+        };
+        let resp = app
+            .clone()
+            .oneshot(put(serde_json::json!({
+                "listing_id": 1,
+                "date_paid": "2024-03-15",
+                "franked_amount": 70.0,
+                "reinvestment_trade_id": trade_id
+            })))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let got = db_get(&pool, 1).await.unwrap().unwrap();
+        assert_eq!(
+            got.reinvestment_trade_id, None,
+            "a client-supplied link must be ignored"
+        );
+
+        // Link it the way the reinvest operation does, then edit the row —
+        // the link must survive (the old contract silently cleared it).
+        sqlx::query("UPDATE income SET reinvestment_trade_id = ? WHERE id = 1")
+            .bind(trade_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let resp = app
+            .oneshot(put(serde_json::json!({
+                "listing_id": 1,
+                "date_paid": "2024-03-15",
+                "franked_amount": 75.0
+            })))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let got = db_get(&pool, 1).await.unwrap().unwrap();
+        assert_eq!(got.reinvestment_trade_id, Some(trade_id));
+        assert_eq!(got.franked_amount, Decimal::from(75));
+    }
+
+    #[tokio::test]
+    async fn api_delete_reinvested_income_returns_422() {
+        // Deleting the distribution alone would orphan its DRP trade — the
+        // reinvestment must be undone first (DELETE /income/:id/reinvest).
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        let trade_id = insert_test_trade(&pool).await;
+        db_upsert(&pool, &dividend_income()).await.unwrap();
+        sqlx::query("UPDATE income SET reinvestment_trade_id = ? WHERE id = 1")
+            .bind(trade_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let resp = router()
+            .with_state(pool.clone())
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/income/1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let text = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(text.contains("undo the reinvestment"), "body: {text}");
+        assert!(
+            db_get(&pool, 1).await.unwrap().is_some(),
+            "reinvested row must remain"
+        );
     }
 
     #[tokio::test]

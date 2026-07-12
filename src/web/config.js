@@ -170,7 +170,12 @@ export const ENTITIES = [
     wireForm: wireIncomeEntry,
     columns: ['id', 'listing_id', 'date_paid', 'franked_amount', 'unfranked_amount', 'franking_credits', 'currency', 'holding_account_id', 'reinvestment_trade_id'],
     rowActions: function (row) {
-      return row.reinvestment_trade_id == null ? [{ label: 'Reinvest', href: '#/reinvest/' + row.id }] : [];
+      return row.reinvestment_trade_id == null
+        ? [{ label: 'Reinvest', href: '#/reinvest/' + row.id }]
+        : [{
+          label: 'Undo reinvest', del: '/income/' + row.id + '/reinvest',
+          confirm: 'Undo this reinvestment? The linked DRP trade is deleted and the distribution can be reinvested again.',
+        }];
     },
     attachOwner: 'income_id',
   },

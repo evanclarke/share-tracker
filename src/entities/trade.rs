@@ -450,6 +450,17 @@ pub enum UpsertError {
     /// clock, which a free-form edit would corrupt. Edit the inheritance
     /// (`PUT /inheritances/:id`) instead (see `entities::inheritance`).
     InheritedParcelTrade,
+    /// The existing trade is a DRP reinvestment — a distribution links to it
+    /// via `income.reinvestment_trade_id`. Its quantity, price, and residual
+    /// columns were computed from that distribution's cash and the enrolment
+    /// period's residual chain, and a free-form body (which carries zero
+    /// residuals) would silently re-type it and wipe the chain while the
+    /// income row keeps pointing at it. Undo the reinvestment via its
+    /// distribution (`DELETE /income/:id/reinvest`) and re-reinvest instead.
+    /// The provenance lives on the income row, not on the trade, so it is
+    /// guarded by a lookup rather than a column (symmetric with `db_delete`'s
+    /// reinvestment guard).
+    ReinvestmentTrade,
     /// The existing trade is an original parcel anchoring a rights sale
     /// (`rights_sale_allocations.purchase_trade_id`): its date and quantity
     /// are what the sale's record-date anchoring caps were validated against,
@@ -572,6 +583,19 @@ pub async fn db_upsert(pool: &SqlitePool, trade: &Trade) -> Result<(), UpsertErr
             .await?;
     if is_transfer_fee {
         return Err(UpsertError::TransferTrade);
+    }
+    // A reinvest-created DRP is immutable here for the same reason: its link
+    // lives on the income row (income.reinvestment_trade_id), which the
+    // provenance-column check above can't see, so a Buy body would silently
+    // re-type it and zero its residual chain. Guarded by lookup, like the
+    // delete path.
+    let is_reinvestment: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM income WHERE reinvestment_trade_id = ?)")
+            .bind(trade.id)
+            .fetch_one(&mut *tx)
+            .await?;
+    if is_reinvestment {
+        return Err(UpsertError::ReinvestmentTrade);
     }
 
     // The listing is frozen while dependants draw on the parcel: a Sell
@@ -994,6 +1018,11 @@ impl From<UpsertError> for ApiError {
                 "this trade is an inherited parcel and cannot be edited here — edit its \
                  inheritance (PUT /inheritances/:id) instead",
             ),
+            UpsertError::ReinvestmentTrade => ApiError::unprocessable(
+                "this trade is a DRP reinvestment and cannot be edited — undo the \
+                 reinvestment via its distribution (DELETE /income/:id/reinvest) and \
+                 re-reinvest instead",
+            ),
             UpsertError::RightsAnchorParcel => ApiError::unprocessable(
                 "this parcel anchors a rights sale and cannot be edited — delete the rights \
                  sale, edit, then re-enter it",
@@ -1296,6 +1325,87 @@ mod tests {
             db_get(&pool, 1).await.unwrap().is_some(),
             "reinvestment trade must remain"
         );
+    }
+
+    #[tokio::test]
+    async fn db_upsert_over_reinvestment_trade_is_refused() {
+        // A Buy body targeting a reinvest-created DRP would re-type it and
+        // zero its residual chain while the income row keeps pointing at it —
+        // the link lives on income.reinvestment_trade_id, which the
+        // provenance-column check can't see, so it needs its own guard.
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        let mut drp = buy_trade();
+        drp.trade_type = TradeType::DRP;
+        drp.residual_carried_forward = dec("1.23");
+        db_upsert(&pool, &drp).await.unwrap();
+        sqlx::query(
+            "INSERT INTO income (id, listing_id, date_paid, reinvestment_trade_id) \
+             VALUES (1, 1, '2024-03-15', 1)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let err = db_upsert(&pool, &buy_trade()).await.unwrap_err();
+        assert!(
+            matches!(err, UpsertError::ReinvestmentTrade),
+            "expected ReinvestmentTrade, got: {err:?}"
+        );
+        let kept = db_get(&pool, 1).await.unwrap().unwrap();
+        assert_eq!(kept.trade_type, TradeType::DRP, "trade must stay a DRP");
+        assert_eq!(
+            kept.residual_carried_forward,
+            dec("1.23"),
+            "residual chain must be untouched"
+        );
+    }
+
+    #[tokio::test]
+    async fn api_put_buy_body_over_reinvestment_drp_returns_422() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        let mut drp = buy_trade();
+        drp.trade_type = TradeType::DRP;
+        db_upsert(&pool, &drp).await.unwrap();
+        sqlx::query(
+            "INSERT INTO income (id, listing_id, date_paid, reinvestment_trade_id) \
+             VALUES (1, 1, '2024-03-15', 1)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let body = serde_json::json!({
+            "trade_type": "Buy",
+            "date": "2024-01-15",
+            "listing_id": 1,
+            "average_price": 100.0,
+            "quantity": 10.0,
+            "currency": "AUD",
+            "brokerage": 9.95,
+            "gst_on_brokerage": 0.995,
+            "brokerage_currency": "AUD",
+            "fx_rate": 1.0
+        });
+        let resp = router()
+            .with_state(pool.clone())
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/trades/1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let trade_type: String = sqlx::query_scalar("SELECT trade_type FROM trades WHERE id = 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(trade_type, "DRP", "the reinvestment DRP must be untouched");
     }
 
     #[tokio::test]

@@ -380,8 +380,26 @@ async function viewEntityList(entity) {
     const actions = entity.readonly ? null : function (row) {
       const keyPath = entity.keyFields.map(function (kf) { return row[kf.name]; }).join('/');
       const td = el('td', { class: 'actions' });
+      // A row action is a link (`href`) or an API DELETE (`del` + `confirm`)
+      // — e.g. income's Undo reinvest, which drives DELETE /income/:id/reinvest.
       (entity.rowActions ? entity.rowActions(row) : []).forEach(function (a) {
-        td.appendChild(el('a', { href: a.href }, el('button', { class: 'link small' }, a.label)));
+        if (a.del) {
+          td.appendChild(el('button', {
+            class: 'link small danger',
+            onclick: async function () {
+              if (!confirm(a.confirm)) return;
+              try {
+                await api('DELETE', a.del);
+                toast(a.label + ': done.');
+                viewEntityList(entity);
+              } catch (e) {
+                toast(e.message, true);
+              }
+            },
+          }, a.label));
+        } else {
+          td.appendChild(el('a', { href: a.href }, el('button', { class: 'link small' }, a.label)));
+        }
       });
       if (entity.attachOwner) {
         td.appendChild(el('a', { href: '#/attachments/' + entity.attachOwner + '/' + row.id },

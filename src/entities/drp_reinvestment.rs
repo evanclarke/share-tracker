@@ -40,6 +40,16 @@
 //!
 //! A distribution may be reinvested at most once — re-posting is rejected
 //! rather than creating a second trade.
+//!
+//! The inverse operation, `DELETE /income/:id/reinvest`, undoes a
+//! reinvestment: it deletes the DRP trade and clears the distribution's link
+//! in one transaction (the only path that clears it — `PUT /income` never
+//! touches the link, and `DELETE /income` is refused while it is set, so an
+//! orphaned DRP trade can't exist). Refused while the trade is drawn on (a
+//! Sell allocation or AMIT adjustment references it) or while a later DRP
+//! trade exists for the same listing and holding account — the chain reads
+//! residuals back from the most recent prior trade, so undo runs
+//! last-in-first-out.
 
 use crate::entities::{
     drp_enrolment::ResidualHandling,
@@ -105,6 +115,17 @@ pub enum ReinvestError {
         cost: Decimal,
         available: Decimal,
     },
+    /// Undo requested on a distribution with no reinvestment trade.
+    NotReinvested,
+    /// Undo refused: the DRP trade is drawn on by a Sell allocation or an
+    /// AMIT adjustment — deleting it would orphan those dependants. Remove
+    /// them first (e.g. delete the Sell via `DELETE /sells/:id`).
+    ReinvestmentConsumed,
+    /// Undo refused: a later DRP trade exists for the same listing and
+    /// holding account. Its `residual_brought_forward` was read from this
+    /// chain, so removing a mid-chain trade would falsify it — undo the later
+    /// reinvestments first (LIFO).
+    ReinvestmentNotChainTail,
 }
 
 impl From<sqlx::Error> for ReinvestError {
@@ -126,7 +147,8 @@ impl From<ReinvestError> for ApiError {
                      — enrol it on the DRP enrolments screen first"
             )),
             ReinvestError::AlreadyReinvested => ApiError::unprocessable(
-                "this distribution already has a reinvestment trade — delete it first to redo it",
+                "this distribution already has a reinvestment trade — undo it first \
+                 (DELETE /income/:id/reinvest) to redo it",
             ),
             ReinvestError::NonPositivePrice => {
                 ApiError::unprocessable("the reinvestment price must be greater than zero")
@@ -141,13 +163,24 @@ impl From<ReinvestError> for ApiError {
                      — they must agree to within one unit-step at the stated precision"
                 ))
             }
+            ReinvestError::NotReinvested => {
+                ApiError::unprocessable("this distribution has no reinvestment trade to undo")
+            }
+            ReinvestError::ReinvestmentConsumed => ApiError::unprocessable(
+                "the reinvestment trade is drawn on by a Sell allocation or AMIT adjustment \
+                 — remove those first (e.g. delete the Sell via DELETE /sells/:id)",
+            ),
+            ReinvestError::ReinvestmentNotChainTail => ApiError::unprocessable(
+                "a later DRP reinvestment for this listing and holding account brought this \
+                 trade's residual forward — undo the later reinvestments first",
+            ),
             ReinvestError::Db(err) => err.into(),
         }
     }
 }
 
 pub fn router() -> Router<SqlitePool> {
-    Router::new().route("/income/{id}/reinvest", post(reinvest))
+    Router::new().route("/income/{id}/reinvest", post(reinvest).delete(unreinvest))
 }
 
 /// Cash actually received from a distribution and therefore available to
@@ -348,6 +381,76 @@ pub async fn db_reinvest(
         .ok_or_else(|| ReinvestError::Db(sqlx::Error::RowNotFound))
 }
 
+/// Undo a reinvestment: delete the DRP trade and clear the distribution's
+/// link, atomically. The inverse of [`db_reinvest`] — after it the
+/// distribution can be reinvested again.
+pub async fn db_unreinvest(pool: &SqlitePool, income_id: i64) -> Result<(), ReinvestError> {
+    let mut tx = pool.begin().await?;
+
+    let link: Option<Option<i64>> =
+        sqlx::query_scalar("SELECT reinvestment_trade_id FROM income WHERE id = ?")
+            .bind(income_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    let trade_id = match link {
+        None => return Err(ReinvestError::IncomeNotFound),
+        Some(None) => return Err(ReinvestError::NotReinvested),
+        Some(Some(id)) => id,
+    };
+
+    // The trade must not be drawn on: a Sell allocation or AMIT adjustment
+    // referencing it would be orphaned by the delete (the same dependants
+    // `trade::db_delete` guards).
+    let consumed: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM parcel_allocations WHERE purchase_trade_id = ?1) \
+             OR EXISTS(SELECT 1 FROM amit_adjustments WHERE trade_id = ?1)",
+    )
+    .bind(trade_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if consumed {
+        return Err(ReinvestError::ReinvestmentConsumed);
+    }
+
+    // Undo is last-in-first-out: a later DRP trade for the same listing and
+    // account read its residual_brought_forward back from the chain this
+    // trade is part of (see the module doc), so a mid-chain trade can't be
+    // removed. Ordered by (date, id), matching db_reinvest's chain lookup.
+    let (listing_id, holding_account_id, date): (i64, i64, NaiveDate) =
+        sqlx::query_as("SELECT listing_id, holding_account_id, date FROM trades WHERE id = ?")
+            .bind(trade_id)
+            .fetch_one(&mut *tx)
+            .await?;
+    let has_later: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM trades \
+                       WHERE listing_id = ? AND holding_account_id = ? AND trade_type = 'DRP' \
+                         AND (date > ? OR (date = ? AND id > ?)))",
+    )
+    .bind(listing_id)
+    .bind(holding_account_id)
+    .bind(date)
+    .bind(date)
+    .bind(trade_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if has_later {
+        return Err(ReinvestError::ReinvestmentNotChainTail);
+    }
+
+    // Clear the link before deleting the trade so the FK never dangles.
+    sqlx::query("UPDATE income SET reinvestment_trade_id = NULL WHERE id = ?")
+        .bind(income_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM trades WHERE id = ?")
+        .bind(trade_id)
+        .execute(&mut *tx)
+        .await?;
+
+    tx.commit().await?;
+    Ok(())
+}
+
 async fn reinvest(
     State(pool): State<SqlitePool>,
     Path(income_id): Path<i64>,
@@ -355,6 +458,14 @@ async fn reinvest(
 ) -> Result<(StatusCode, Json<Trade>), ApiError> {
     let trade = db_reinvest(&pool, income_id, &body).await?;
     Ok((StatusCode::CREATED, Json(trade)))
+}
+
+async fn unreinvest(
+    State(pool): State<SqlitePool>,
+    Path(income_id): Path<i64>,
+) -> Result<StatusCode, ApiError> {
+    db_unreinvest(&pool, income_id).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[cfg(test)]
@@ -1218,6 +1329,206 @@ mod tests {
             )
             .await
             .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    // ---- unreinvest (DELETE /income/:id/reinvest) ----
+
+    #[tokio::test]
+    async fn unreinvest_deletes_the_trade_clears_the_link_and_allows_redo() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AUD").await;
+        enrol(&pool, 1, ResidualHandling::CarryForward).await;
+        insert_distribution(&pool, 1, 1, Decimal::from(100), Decimal::ZERO).await;
+        let trade = db_reinvest(&pool, 1, &body("9")).await.unwrap();
+
+        db_unreinvest(&pool, 1).await.unwrap();
+
+        assert!(
+            crate::entities::trade::db_get(&pool, trade.id)
+                .await
+                .unwrap()
+                .is_none(),
+            "DRP trade must be deleted"
+        );
+        let inc = income::db_get(&pool, 1).await.unwrap().unwrap();
+        assert_eq!(inc.reinvestment_trade_id, None, "link must be cleared");
+
+        // The undo is a true inverse: the distribution reinvests again, at a
+        // corrected price this time.
+        let redo = db_reinvest(&pool, 1, &body("10")).await.unwrap();
+        assert_eq!(redo.quantity, Decimal::from(10));
+        assert_eq!(
+            income::db_get(&pool, 1)
+                .await
+                .unwrap()
+                .unwrap()
+                .reinvestment_trade_id,
+            Some(redo.id)
+        );
+    }
+
+    #[tokio::test]
+    async fn unreinvest_without_a_reinvestment_is_rejected() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AUD").await;
+        insert_distribution(&pool, 1, 1, Decimal::from(100), Decimal::ZERO).await;
+        let err = db_unreinvest(&pool, 1).await.unwrap_err();
+        assert!(
+            matches!(err, ReinvestError::NotReinvested),
+            "expected NotReinvested, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn unreinvest_missing_income_is_not_found() {
+        let pool = test_pool().await;
+        let err = db_unreinvest(&pool, 99).await.unwrap_err();
+        assert!(
+            matches!(err, ReinvestError::IncomeNotFound),
+            "expected IncomeNotFound, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn unreinvest_is_refused_while_the_trade_is_drawn_on() {
+        // A Sell allocation consuming the DRP parcel would be orphaned by the
+        // undo — refused, and nothing changes.
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AUD").await;
+        enrol(&pool, 1, ResidualHandling::CarryForward).await;
+        insert_distribution(&pool, 1, 1, Decimal::from(100), Decimal::ZERO).await;
+        let trade = db_reinvest(&pool, 1, &body("9")).await.unwrap();
+        crate::entities::sell::db_upsert_sell(
+            &pool,
+            50,
+            &crate::entities::sell::SellBody {
+                date: "2024-06-03".parse().unwrap(),
+                settlement_date: Some("2024-06-05".parse().unwrap()),
+                listing_id: 1,
+                average_price: Decimal::from(12),
+                quantity: Decimal::from(5),
+                currency: "AUD".to_string(),
+                brokerage: Decimal::ZERO,
+                gst_on_brokerage: Decimal::ZERO,
+                brokerage_includes_gst: false,
+                brokerage_currency: "AUD".to_string(),
+                fx_rate: Decimal::ONE,
+                spot_fx_rate: None,
+                contract_note_ref: None,
+                statement_total: None,
+                holding_account_id: 1,
+                allocations: vec![crate::entities::sell::AllocationInput {
+                    purchase_trade_id: trade.id,
+                    quantity_allocated: Decimal::from(5),
+                }],
+            },
+        )
+        .await
+        .unwrap();
+
+        let err = db_unreinvest(&pool, 1).await.unwrap_err();
+        assert!(
+            matches!(err, ReinvestError::ReinvestmentConsumed),
+            "expected ReinvestmentConsumed, got: {err:?}"
+        );
+        assert!(
+            crate::entities::trade::db_get(&pool, trade.id)
+                .await
+                .unwrap()
+                .is_some(),
+            "trade must remain"
+        );
+        assert_eq!(
+            income::db_get(&pool, 1)
+                .await
+                .unwrap()
+                .unwrap()
+                .reinvestment_trade_id,
+            Some(trade.id),
+            "link must remain"
+        );
+    }
+
+    #[tokio::test]
+    async fn unreinvest_is_lifo_a_mid_chain_trade_is_refused() {
+        // Reinvest twice: the second trade brought the first's carried
+        // residual forward, so the first can only be undone after the second.
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AUD").await;
+        enrol(&pool, 1, ResidualHandling::CarryForward).await;
+        insert_distribution_dated(
+            &pool,
+            1,
+            1,
+            "2024-03-31",
+            None,
+            Decimal::from(100),
+            Decimal::ZERO,
+        )
+        .await;
+        insert_distribution_dated(
+            &pool,
+            2,
+            1,
+            "2024-06-30",
+            None,
+            Decimal::from(100),
+            Decimal::ZERO,
+        )
+        .await;
+        db_reinvest(&pool, 1, &body("9")).await.unwrap();
+        let second = db_reinvest(&pool, 2, &body("9")).await.unwrap();
+        // The chain is real: the second reinvestment picked up the first's $1.
+        assert_eq!(second.residual_brought_forward, Decimal::ONE);
+
+        let err = db_unreinvest(&pool, 1).await.unwrap_err();
+        assert!(
+            matches!(err, ReinvestError::ReinvestmentNotChainTail),
+            "expected ReinvestmentNotChainTail, got: {err:?}"
+        );
+
+        // Undoing in LIFO order works: the tail first, then the first one.
+        db_unreinvest(&pool, 2).await.unwrap();
+        db_unreinvest(&pool, 1).await.unwrap();
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM trades")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(n, 0, "both DRP trades undone");
+    }
+
+    #[tokio::test]
+    async fn api_unreinvest_round_trip_and_rejections() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AUD").await;
+        enrol(&pool, 1, ResidualHandling::CarryForward).await;
+        insert_distribution(&pool, 1, 1, Decimal::from(100), Decimal::ZERO).await;
+        db_reinvest(&pool, 1, &body("9")).await.unwrap();
+
+        let del = |uri: &str| {
+            Request::builder()
+                .method("DELETE")
+                .uri(uri)
+                .body(Body::empty())
+                .unwrap()
+        };
+        let app = router().with_state(pool.clone());
+        let resp = app
+            .clone()
+            .oneshot(del("/income/1/reinvest"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        // Nothing left to undo → 422; unknown income → 404.
+        let resp = app
+            .clone()
+            .oneshot(del("/income/1/reinvest"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let resp = app.oneshot(del("/income/99/reinvest")).await.unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 }

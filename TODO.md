@@ -8,28 +8,6 @@ The sections below come from the **2026-07-12 code review** (a full pass over th
 domain pipeline, infra, and migrations for programming and domain issues). Each section records one
 finding; sections land in DONE.md as they are fixed.
 
-## PUT /trades can silently rewrite a reinvest-created DRP (2026-07-12 review, integrity)
-
-The `PUT /trades/:id` handler rejects a body with `trade_type = DRP`
-(`src/entities/trade.rs:869-874`), but nothing stops a **Buy body targeting an existing DRP row**
-created by `POST /income/:id/reinvest`: `db_upsert` checks every provenance column except the
-reinvestment link, which lives on `income.reinvestment_trade_id`, not on the trade. The write
-re-types the trade to Buy and (because the body's residual fields default to 0) silently zeroes
-the residual carry-forward chain, while the income row keeps pointing at it. `DELETE /trades`
-already guards this exact reference (`src/entities/trade.rs:727-737`); the upsert path doesn't.
-
-Related: `PUT /income/:id` accepts an arbitrary client-supplied `reinvestment_trade_id`
-(`src/entities/income.rs:130`, bound at 387) with no validation that the trade exists as a DRP of
-the same listing/account — and an income edit that omits the field silently clears an existing
-link.
-
-- [ ] `trade::db_upsert` rejects (422) an update to a trade referenced by
-      `income.reinvestment_trade_id` (mirror the delete guard's message: delete the reinvestment
-      via the income row instead)
-- [ ] Decide the `PUT /income` contract for `reinvestment_trade_id` (reject client-set values, or
-      validate the target is an unclaimed DRP trade of the same listing) and enforce it
-- [ ] Tests: a Buy body over a reinvest-created DRP is rejected; the income-side rule is pinned
-
 ## Net-capital-gain report reads without a transaction (2026-07-12 review, programming)
 
 `db_net_capital_gain` / `gross_buckets` / `e10_gains` / `g1_gains`
