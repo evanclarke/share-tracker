@@ -71,11 +71,19 @@ const PAGE_SIZE = 50;
 // `opts.statusField` renders that column as a status badge; `opts.labels`
 // ({col: {id → label}}, from fkLabelMaps) shows the label instead of the raw
 // foreign-key id — filtering and sorting follow the label, and the id moves to
-// the tooltip.
+// the tooltip. `opts.expand`, if given, is a synchronous `row => childSpec`
+// (`{ rows, cols, opts }`, or a falsy value/empty `rows` for a childless row):
+// a leading toggle column shows ▸/▾ for a row with children, and an expanded
+// row's children render as a nested `filterableTable` in a full-width detail
+// row underneath — `childSpec.opts` may itself carry `expand`, so a report
+// with a two-level breakdown (year → disposal → parcel) nests by recursion.
+// An "Expand all"/"Collapse all" pair sits above the table whenever any
+// caller supplies `expand`.
 function filterableTable(rows, cols, opts) {
   opts = opts || {};
   const statusField = opts.statusField;
   const actions = opts.actions;
+  const expand = opts.expand;
   const labels = opts.labels || {};
   // Display kinds are derived from the column names alone (COLUMN_KINDS), so
   // every caller of filterableTable gets money rounding / rate precision with
@@ -98,8 +106,31 @@ function filterableTable(rows, cols, opts) {
   let sortDir = 1; // 1 = ascending, -1 = descending
   const filters = {}; // column → lowercased substring; absent/empty = no filter
   let page = 0; // zero-based current page within the filtered/sorted result set
+  // Rows currently shown expanded (row object identity is stable across
+  // sort/filter/page re-renders, so a plain Set works as the key). Only
+  // meaningful when `expand` is set.
+  const expandedRows = new Set();
 
   const container = el('div');
+
+  if (expand) {
+    container.appendChild(el('div', { class: 'expand-all-bar' }, [
+      el('button', {
+        type: 'button', class: 'small link',
+        onclick: function () {
+          rows.forEach(function (row) {
+            const spec = expand(row);
+            if (spec && spec.rows && spec.rows.length) expandedRows.add(row);
+          });
+          renderBody();
+        },
+      }, 'Expand all'),
+      el('button', {
+        type: 'button', class: 'small link',
+        onclick: function () { expandedRows.clear(); renderBody(); },
+      }, 'Collapse all'),
+    ]));
+  }
 
   // Header row: click-to-sort column titles, shown as friendly labels
   // (columnLabel) while sorting/filtering stay keyed by the raw column name.
@@ -117,6 +148,7 @@ function filterableTable(rows, cols, opts) {
     });
     return th;
   });
+  if (expand) headCells.unshift(el('th', { class: 'expand-col' }, ''));
   if (actions) headCells.push(el('th', null, 'Actions'));
 
   // Filter row: one input per column, AND-combined.
@@ -132,6 +164,7 @@ function filterableTable(rows, cols, opts) {
     });
     return el('th', { class: 'filter-cell' }, input);
   });
+  if (expand) filterCells.unshift(el('th', { class: 'filter-cell' }));
   if (actions) filterCells.push(el('th', { class: 'filter-cell' }));
 
   const tbody = el('tbody');
@@ -189,7 +222,7 @@ function filterableTable(rows, cols, opts) {
     tbody.innerHTML = '';
     const vr = visibleRows();
     if (vr.length === 0) {
-      const span = cols.length + (actions ? 1 : 0);
+      const span = cols.length + (expand ? 1 : 0) + (actions ? 1 : 0);
       const filtered = Object.keys(filters).length > 0;
       tbody.appendChild(el('tr', null, el('td', { colspan: span, class: 'empty' },
         filtered ? 'No matching records.' : 'No records.')));
@@ -225,8 +258,31 @@ function filterableTable(rows, cols, opts) {
         }
         return el('td', { class: numeric[c] ? 'num' : null, title: title }, text);
       });
+
+      let childSpec = null;
+      if (expand) {
+        childSpec = expand(row);
+        const hasChildren = !!(childSpec && childSpec.rows && childSpec.rows.length);
+        const toggle = hasChildren
+          ? el('button', {
+            type: 'button', class: 'expand-toggle',
+            onclick: function () {
+              if (expandedRows.has(row)) expandedRows.delete(row); else expandedRows.add(row);
+              renderBody();
+            },
+          }, expandedRows.has(row) ? '▾' : '▸')
+          : null;
+        tds.unshift(el('td', { class: 'expand-col' }, toggle));
+      }
       if (actions) tds.push(actions(row) || el('td'));
       tbody.appendChild(el('tr', null, tds));
+
+      if (expand && childSpec && childSpec.rows && childSpec.rows.length && expandedRows.has(row)) {
+        const span = cols.length + 1 + (actions ? 1 : 0);
+        const childTable = filterableTable(childSpec.rows, childSpec.cols, childSpec.opts || {});
+        tbody.appendChild(el('tr', { class: 'detail-row' },
+          el('td', { colspan: span, class: 'detail-cell' }, childTable)));
+      }
     });
   }
 
@@ -234,12 +290,63 @@ function filterableTable(rows, cols, opts) {
   return container;
 }
 
+// Collects every `columns` list declared across an `expand` config chain
+// (parent's own columns are not included — the caller already has those),
+// so `dataTable` can fetch every descendant level's FK label maps up front:
+// `filterableTable`'s `opts.expand` callback is synchronous, so no report
+// table can await a label fetch lazily when a row first expands.
+function expandColumns(expandCfg) {
+  if (!expandCfg) return [];
+  return (expandCfg.columns || []).concat(expandColumns(expandCfg.expand));
+}
+
+// Builds the synchronous `row => childSpec` `filterableTable` expects from a
+// declarative `expand` config (see config.js REPORTS entries): `key` reads a
+// nested array field on the row itself (e.g. a disposal's `parcels`); `from`
+// + `matchOn` instead reads a sibling array from the same multi-`tables`
+// response object (`context`), filtered to the rows matching this row's
+// `matchOn` field (`matchOn: null` = every sibling row belongs to the single
+// parent, as the what-if's one hypothetical disposal does). `labels` is the
+// FK-label-map set already fetched for every level, shared unchanged down
+// the recursion — every column name maps to the same source regardless of
+// nesting depth.
+function buildExpand(expandCfg, labels, context) {
+  return function (row) {
+    let childRows;
+    if (expandCfg.key) {
+      childRows = row[expandCfg.key] || [];
+    } else if (expandCfg.from) {
+      const all = (context && context[expandCfg.from]) || [];
+      childRows = expandCfg.matchOn
+        ? all.filter(function (r) { return r[expandCfg.matchOn] === row[expandCfg.matchOn]; })
+        : all;
+    } else {
+      childRows = [];
+    }
+    if (!childRows.length) return null;
+    const childOpts = { statusField: expandCfg.statusField, labels: labels };
+    if (expandCfg.expand) childOpts.expand = buildExpand(expandCfg.expand, labels, context);
+    return { rows: childRows, cols: expandCfg.columns || Object.keys(childRows[0]), opts: childOpts };
+  };
+}
+
 // Report tables: read-only, no actions column. Foreign-key id columns render
 // the referenced row's name (per FK_COLUMN_SOURCES), same as the entity lists.
-async function dataTable(rows, columns, statusField) {
+// `expandCfg` (a REPORTS `expand` entry) turns each row into a expand-to-a-
+// child-table row (see `buildExpand`); `context` is the whole multi-`tables`
+// response object, needed only for an expand config's `from` sibling lookup.
+async function dataTable(rows, columns, statusField, expandCfg, context) {
   if (!rows || rows.length === 0) return el('div', { class: 'empty' }, 'No records.');
-  const cols = columns || Object.keys(rows[0]);
-  return filterableTable(rows, cols, { statusField: statusField, labels: await columnLabelMaps(cols) });
+  // A `key` expand reads its children from a nested field on the row itself
+  // (e.g. `parcels`) — excluded from the parent's own columns, whether
+  // `columns` was explicit or (as every report passes) auto-derived from the
+  // first row's keys.
+  let cols = columns || Object.keys(rows[0]);
+  if (expandCfg && expandCfg.key) cols = cols.filter(function (c) { return c !== expandCfg.key; });
+  const labels = await columnLabelMaps(cols.concat(expandColumns(expandCfg)));
+  const opts = { statusField: statusField, labels: labels };
+  if (expandCfg) opts.expand = buildExpand(expandCfg, labels, context);
+  return filterableTable(rows, cols, opts);
 }
 
 // ---- entity list view -------------------------------------------------
@@ -1160,11 +1267,19 @@ async function viewReport(report) {
         const v = rows[t.key];
         const arr = Array.isArray(v) ? v : (v == null ? [] : [v]);
         result.appendChild(el('h3', null, t.title));
-        result.appendChild(await dataTable(arr, null, report.statusField));
+        // `rows` (the whole response object) is threaded through as the
+        // `context` an `expand.from` sibling lookup reads (e.g. the parcel
+        // optimiser's `strategies` table expanding from its `allocations`).
+        // `t.columns`, when given, overrides the auto-derived column list —
+        // e.g. to drop a flattened field with no business in this table
+        // (the what-if's `years` rows flatten in `NetCapitalGainYear`'s
+        // `disposals`, always empty here since the drilldown belongs to the
+        // main report, not the hypothetical dry-run).
+        result.appendChild(await dataTable(arr, t.columns || null, report.statusField, t.expand, rows));
       }
       return;
     }
-    result.appendChild(await dataTable(rows, null, report.statusField));
+    result.appendChild(await dataTable(rows, null, report.statusField, report.expand));
   }
 
   if (report.method === 'GET') {

@@ -50,6 +50,36 @@ pub struct RealisedGainLoss {
     /// Total capital losses from this sale's allocations (those whose proceeds fell
     /// below their cost base), as a positive amount. Always ≥ 0.
     pub capital_loss: Decimal,
+    /// The individual parcel allocations behind this disposal's totals — the
+    /// same per-allocation figures the totals above are summed from, so a UI
+    /// can drill into which parcel contributed what. Sorted by acquisition
+    /// date then purchase trade id.
+    pub parcels: Vec<ParcelDetail>,
+}
+
+/// One parcel's share of a realised disposal — the per-allocation figures
+/// `compute_realised_gains` sums into the disposal's totals, surfaced so a UI
+/// can show which parcel contributed what. Mirrors
+/// `parcel_optimiser::HypotheticalAllocation`'s field set (the hypothetical
+/// equivalent), but for an actually-recorded allocation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParcelDetail {
+    /// The Buy/DRP trade (or, for a rights sale, the parcel that earned the
+    /// rights) this allocation drew from.
+    pub purchase_trade_id: i64,
+    /// Original/deemed acquisition date — the discount-clock anchor
+    /// (`ParcelRow::acquired()`).
+    pub acquisition_date: NaiveDate,
+    /// Units allocated from this parcel (sale-date unit basis).
+    pub units: Decimal,
+    /// Adjusted cost base of the allocated units, AUD.
+    pub cost_base: Decimal,
+    /// This allocation's share of the proceeds, AUD.
+    pub proceeds: Decimal,
+    /// proceeds − cost_base (positive = gain, negative = loss).
+    pub capital_gain_loss: Decimal,
+    /// Held strictly more than 12 months at the sale date (50% CGT discount).
+    pub discount_eligible: bool,
 }
 
 // Per-sale identity: capital_gain_loss == discount_eligible_gain
@@ -317,6 +347,10 @@ fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sq
     let mut sale_discount_gain: HashMap<i64, Decimal> = HashMap::new();
     let mut sale_non_discount_gain: HashMap<i64, Decimal> = HashMap::new();
     let mut sale_loss: HashMap<i64, Decimal> = HashMap::new();
+    // Per-sale parcel breakdown: the same per-allocation figures computed
+    // below, kept instead of only being summed into the totals above, so the
+    // report can surface which parcel contributed what.
+    let mut sale_parcels: HashMap<i64, Vec<ParcelDetail>> = HashMap::new();
     // Running (quantity, sale-costs share) already handed to earlier
     // allocations of each sale, for the cumulative-difference pro-rating
     // below.
@@ -414,8 +448,9 @@ fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sq
         // non-discountable ("other" method); a negative result is a capital loss
         // (recorded as a positive amount). The net-capital-gain report nets these
         // buckets across sales and AMMA gains.
+        let discount_eligible = sale.date > buy.acquired() + Months::new(12);
         if alloc_gain > Decimal::ZERO {
-            if sale.date > buy.acquired() + Months::new(12) {
+            if discount_eligible {
                 *sale_discount_gain.entry(sale_id).or_insert(Decimal::ZERO) += alloc_gain;
             } else {
                 *sale_non_discount_gain
@@ -425,6 +460,16 @@ fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sq
         } else if alloc_gain < Decimal::ZERO {
             *sale_loss.entry(sale_id).or_insert(Decimal::ZERO) += -alloc_gain;
         }
+
+        sale_parcels.entry(sale_id).or_default().push(ParcelDetail {
+            purchase_trade_id: alloc.purchase_trade_id,
+            acquisition_date: buy.acquired(),
+            units: qty_alloc,
+            cost_base: alloc_cost,
+            proceeds: alloc_proceeds,
+            capital_gain_loss: alloc_gain,
+            discount_eligible,
+        });
     }
 
     let mut result: Vec<RealisedGainLoss> = sale_proceeds
@@ -442,6 +487,12 @@ fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sq
                 .copied()
                 .unwrap_or(Decimal::ZERO);
             let loss = sale_loss.get(&sale_id).copied().unwrap_or(Decimal::ZERO);
+            let mut parcels = sale_parcels.get(&sale_id).cloned().unwrap_or_default();
+            parcels.sort_by(|a, b| {
+                a.acquisition_date
+                    .cmp(&b.acquisition_date)
+                    .then(a.purchase_trade_id.cmp(&b.purchase_trade_id))
+            });
             Some(RealisedGainLoss {
                 source: DisposalSource::Sell,
                 sale_trade_id: sale_id,
@@ -454,6 +505,7 @@ fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sq
                 discount_eligible_gain: discount_gain,
                 non_discountable_gain: non_discount_gain,
                 capital_loss: loss,
+                parcels,
             })
         })
         .collect();
@@ -469,6 +521,7 @@ fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sq
         let mut discount_gain = Decimal::ZERO;
         let mut non_discount_gain = Decimal::ZERO;
         let mut loss = Decimal::ZERO;
+        let mut parcels: Vec<ParcelDetail> = Vec::new();
         // rights_cost apportioned by units as a cumulative difference, so the
         // per-allocation shares sum exactly to the total (any division
         // remainder lands on the last allocation).
@@ -509,8 +562,9 @@ fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sq
             let alloc_gain = alloc_proceeds - alloc_cost;
             proceeds += alloc_proceeds;
             cost_base += alloc_cost;
+            let discount_eligible = sale.date > buy.acquired() + Months::new(12);
             if alloc_gain > Decimal::ZERO {
-                if sale.date > buy.acquired() + Months::new(12) {
+                if discount_eligible {
                     discount_gain += alloc_gain;
                 } else {
                     non_discount_gain += alloc_gain;
@@ -518,7 +572,21 @@ fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sq
             } else if alloc_gain < Decimal::ZERO {
                 loss += -alloc_gain;
             }
+            parcels.push(ParcelDetail {
+                purchase_trade_id: alloc.purchase_trade_id,
+                acquisition_date: buy.acquired(),
+                units: alloc.units,
+                cost_base: alloc_cost,
+                proceeds: alloc_proceeds,
+                capital_gain_loss: alloc_gain,
+                discount_eligible,
+            });
         }
+        parcels.sort_by(|a, b| {
+            a.acquisition_date
+                .cmp(&b.acquisition_date)
+                .then(a.purchase_trade_id.cmp(&b.purchase_trade_id))
+        });
         result.push(RealisedGainLoss {
             source: DisposalSource::RightsSale,
             sale_trade_id: sale.id,
@@ -531,6 +599,7 @@ fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sq
             discount_eligible_gain: discount_gain,
             non_discountable_gain: non_discount_gain,
             capital_loss: loss,
+            parcels,
         });
     }
 
@@ -1103,6 +1172,39 @@ mod tests {
             result[0].discount_eligible_gain + result[0].non_discountable_gain
                 - result[0].capital_loss
         );
+
+        // Per-parcel breakdown: one entry per allocation, sorted oldest first,
+        // each carrying the same figures the totals above are summed from.
+        assert_eq!(result[0].parcels.len(), 2);
+        let old = &result[0].parcels[0];
+        assert_eq!(old.purchase_trade_id, 1);
+        assert_eq!(old.acquisition_date, old_date);
+        assert_eq!(old.units, Decimal::from(100));
+        assert_eq!(old.cost_base, Decimal::from(1000));
+        assert_eq!(old.proceeds, Decimal::from(1500));
+        assert_eq!(old.capital_gain_loss, Decimal::from(500));
+        assert!(old.discount_eligible);
+        let new = &result[0].parcels[1];
+        assert_eq!(new.purchase_trade_id, 2);
+        assert_eq!(new.acquisition_date, new_date);
+        assert_eq!(new.units, Decimal::from(50));
+        assert_eq!(new.cost_base, Decimal::from(500));
+        assert_eq!(new.proceeds, Decimal::from(750));
+        assert_eq!(new.capital_gain_loss, Decimal::from(250));
+        assert!(!new.discount_eligible);
+
+        // The parcels reconcile exactly to the disposal's totals.
+        let parcel_cost_base: Decimal = result[0].parcels.iter().map(|p| p.cost_base).sum();
+        let parcel_proceeds: Decimal = result[0].parcels.iter().map(|p| p.proceeds).sum();
+        assert_eq!(parcel_cost_base, result[0].cost_base);
+        assert_eq!(parcel_proceeds, result[0].proceeds);
+        let discount_from_parcels: Decimal = result[0]
+            .parcels
+            .iter()
+            .filter(|p| p.discount_eligible && p.capital_gain_loss > Decimal::ZERO)
+            .map(|p| p.capital_gain_loss)
+            .sum();
+        assert_eq!(discount_from_parcels, result[0].discount_eligible_gain);
     }
 
     #[tokio::test]
@@ -2329,11 +2431,28 @@ mod tests {
         assert_eq!(rights.cost_base, Decimal::ZERO);
         assert_eq!(rights.capital_gain_loss, Decimal::from(50));
         assert_eq!(rights.discount_eligible_gain, Decimal::from(50));
+        // The rights sale's single anchoring allocation surfaces as one
+        // parcel, taking the anchor parcel's acquisition date (not the
+        // rights issue's record date) as its discount-clock anchor.
+        assert_eq!(rights.parcels.len(), 1);
+        assert_eq!(rights.parcels[0].purchase_trade_id, 1);
+        assert_eq!(
+            rights.parcels[0].acquisition_date,
+            NaiveDate::from_ymd_opt(2023, 1, 15).unwrap()
+        );
+        assert_eq!(rights.parcels[0].units, Decimal::from(250));
+        assert_eq!(rights.parcels[0].proceeds, Decimal::from(50));
+        assert_eq!(rights.parcels[0].cost_base, Decimal::ZERO);
+        assert!(rights.parcels[0].discount_eligible);
         let sell = result
             .iter()
             .find(|r| r.source == DisposalSource::Sell)
             .unwrap();
         assert_eq!(sell.sale_trade_id, 2);
         assert_eq!(sell.capital_gain_loss, Decimal::from(100));
+        assert_eq!(sell.parcels.len(), 1);
+        assert_eq!(sell.parcels[0].purchase_trade_id, 1);
+        assert_eq!(sell.parcels[0].units, Decimal::from(100));
+        assert_eq!(sell.parcels[0].capital_gain_loss, Decimal::from(100));
     }
 }

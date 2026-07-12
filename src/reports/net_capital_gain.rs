@@ -88,6 +88,17 @@ pub struct NetCapitalGainYear {
     /// here is the Australian-resident-individual rate; other entity types are
     /// not modelled.
     pub taxpayer_basis: String,
+    /// This tax year's realised disposals (ordinary Sells and rights
+    /// sales/lapses), each carrying its own per-parcel breakdown — so a UI can
+    /// drill from the year's totals down to the disposals and parcels behind
+    /// them. Excludes the AMMA-attributed and E10/G1 gains folded into the
+    /// totals above (they have no parcel-allocation record to drill into).
+    /// Left empty on the what-if's scenario rows (`ScenarioYear`) — that
+    /// drilldown belongs to this report, not the hypothetical dry-run. Not
+    /// carried into the CSV export (`NetCapitalGainYearCsv` — nested rows
+    /// don't fit a flat CSV record).
+    #[serde(default)]
+    pub disposals: Vec<super::realised_gains::RealisedGainLoss>,
 }
 
 pub fn router() -> Router<SqlitePool> {
@@ -393,16 +404,41 @@ async fn g1_gains(
 pub async fn db_net_capital_gain(
     pool: &SqlitePool,
 ) -> Result<Vec<NetCapitalGainYear>, sqlx::Error> {
-    let buckets = gross_buckets(pool).await?;
+    let realised = super::realised_gains::db_realised_gains(pool).await?;
+    let buckets = gross_buckets(pool, &realised).await?;
     let opening = crate::entities::cgt_settings::db_opening_capital_loss(pool).await?;
-    Ok(net_years(buckets, opening))
+
+    // Group the already-fetched disposals by tax year so each year row can
+    // carry the disposals (and, within them, the parcels) that its gross
+    // gains were summed from — the drilldown data `gross_buckets` only reads
+    // aggregated totals from.
+    let mut disposals_by_year: HashMap<i32, Vec<super::realised_gains::RealisedGainLoss>> =
+        HashMap::new();
+    for r in realised {
+        disposals_by_year
+            .entry(tax_year_for(r.sale_date))
+            .or_default()
+            .push(r);
+    }
+
+    let mut years = net_years(buckets, opening);
+    for year in &mut years {
+        year.disposals = disposals_by_year.remove(&year.tax_year).unwrap_or_default();
+    }
+    Ok(years)
 }
 
 /// Accumulate the gross per-year buckets from every recorded source:
 /// realised disposals, AMMA CGT components, and the E10/G1 excess gains.
 /// Shared by the report and the what-if (which injects a hypothetical
-/// disposal's buckets before netting).
-async fn gross_buckets(pool: &SqlitePool) -> Result<HashMap<i32, GrossBuckets>, sqlx::Error> {
+/// disposal's buckets before netting). `realised` is fetched once by the
+/// caller — both callers also need the same rows for their own purposes (the
+/// report to attach each year's `disposals`, the what-if's totals having
+/// already come from `parcel_optimiser` directly).
+async fn gross_buckets(
+    pool: &SqlitePool,
+    realised: &[super::realised_gains::RealisedGainLoss],
+) -> Result<HashMap<i32, GrossBuckets>, sqlx::Error> {
     let mut buckets: HashMap<i32, GrossBuckets> = HashMap::new();
 
     // Every imported ATO FX rate — the AMMA/E10/G1 conversions below are map
@@ -410,8 +446,7 @@ async fn gross_buckets(pool: &SqlitePool) -> Result<HashMap<i32, GrossBuckets>, 
     let fx = FxRates::load(pool).await?;
 
     // Realised parcel gains (already AUD), bucketed by the sale's tax year.
-    let realised = super::realised_gains::db_realised_gains(pool).await?;
-    for r in &realised {
+    for r in realised {
         let b = buckets.entry(tax_year_for(r.sale_date)).or_default();
         b.discount_eligible += r.discount_eligible_gain;
         b.other += r.non_discountable_gain;
@@ -518,6 +553,10 @@ fn net_years(
                 cgt_event_e10_gain: b.e10,
                 cgt_event_g1_gain: b.g1,
                 taxpayer_basis: crate::reports::TAXPAYER_BASIS.to_string(),
+                // Attached by the caller (`db_net_capital_gain` groups the
+                // already-fetched realised rows by tax year); left empty here
+                // and on every what-if scenario row.
+                disposals: Vec::new(),
             };
             brought_forward = carried_forward;
             year
@@ -534,13 +573,61 @@ async fn net_capital_gain_handler(
         .map_err(ApiError::from)
 }
 
+/// Flat CSV projection of [`NetCapitalGainYear`] — every field except
+/// `disposals`. The `csv` crate rejects a struct with a nested sequence field
+/// (`Vec<RealisedGainLoss>`), so the JSON report's nested drilldown is dropped
+/// here; the export stays exactly the flat per-year record it was before the
+/// drilldown was added — same `CSV_HEADER`/`CSV_ATO_LABELS`, unchanged.
+#[derive(Serialize)]
+struct NetCapitalGainYearCsv {
+    tax_year: i32,
+    discount_eligible_gains: Decimal,
+    other_gains: Decimal,
+    capital_losses: Decimal,
+    capital_loss_brought_forward: Decimal,
+    net_discount_eligible_gain: Decimal,
+    net_other_gain: Decimal,
+    cgt_discount: Decimal,
+    net_capital_gain: Decimal,
+    capital_loss_carried_forward: Decimal,
+    cgt_event_e10_gain: Decimal,
+    cgt_event_g1_gain: Decimal,
+    taxpayer_basis: String,
+}
+
+impl From<&NetCapitalGainYear> for NetCapitalGainYearCsv {
+    fn from(y: &NetCapitalGainYear) -> Self {
+        NetCapitalGainYearCsv {
+            tax_year: y.tax_year,
+            discount_eligible_gains: y.discount_eligible_gains,
+            other_gains: y.other_gains,
+            capital_losses: y.capital_losses,
+            capital_loss_brought_forward: y.capital_loss_brought_forward,
+            net_discount_eligible_gain: y.net_discount_eligible_gain,
+            net_other_gain: y.net_other_gain,
+            cgt_discount: y.cgt_discount,
+            net_capital_gain: y.net_capital_gain,
+            capital_loss_carried_forward: y.capital_loss_carried_forward,
+            cgt_event_e10_gain: y.cgt_event_e10_gain,
+            cgt_event_g1_gain: y.cgt_event_g1_gain,
+            taxpayer_basis: y.taxpayer_basis.clone(),
+        }
+    }
+}
+
 /// The same per-year rows as the JSON report, as a downloadable tax-return-ready CSV.
 async fn net_capital_gain_export_handler(
     State(pool): State<SqlitePool>,
 ) -> Result<Response, ApiError> {
     let rows = db_net_capital_gain(&pool).await.map_err(ApiError::from)?;
-    export::csv_response("net-capital-gain.csv", CSV_HEADER, CSV_ATO_LABELS, &rows)
-        .map_err(ApiError::from)
+    let csv_rows: Vec<NetCapitalGainYearCsv> = rows.iter().map(Into::into).collect();
+    export::csv_response(
+        "net-capital-gain.csv",
+        CSV_HEADER,
+        CSV_ATO_LABELS,
+        &csv_rows,
+    )
+    .map_err(ApiError::from)
 }
 
 // ---------------------------------------------------------------------------
@@ -694,7 +781,12 @@ async fn what_if_handler(
     // a year with no recorded activity still yields a row (with the correct
     // brought-forward chain from earlier years).
     let tax_year = tax_year_for(req.date);
-    let buckets = gross_buckets(&pool).await.map_err(ApiError::from)?;
+    let realised = super::realised_gains::db_realised_gains(&pool)
+        .await
+        .map_err(ApiError::from)?;
+    let buckets = gross_buckets(&pool, &realised)
+        .await
+        .map_err(ApiError::from)?;
     let opening = crate::entities::cgt_settings::db_opening_capital_loss(&pool)
         .await
         .map_err(ApiError::from)?;
@@ -1373,6 +1465,20 @@ mod tests {
         assert_eq!(r[0].tax_year, 2024);
         assert_eq!(r[0].discount_eligible_gains, Decimal::from(700));
         assert_eq!(r[0].net_capital_gain, Decimal::from(350));
+
+        // The year's `disposals` drilldown carries the one realised Sell (and
+        // its parcel breakdown) that fed the discount-eligible bucket — the
+        // AMMA-attributed $200 gross gain has no parcel-allocation record, so
+        // it stays folded into the year's totals only.
+        assert_eq!(r[0].disposals.len(), 1);
+        assert_eq!(r[0].disposals[0].sale_trade_id, 2);
+        assert_eq!(r[0].disposals[0].capital_gain_loss, Decimal::from(500));
+        assert_eq!(r[0].disposals[0].parcels.len(), 1);
+        assert_eq!(r[0].disposals[0].parcels[0].purchase_trade_id, 1);
+        assert_eq!(
+            r[0].disposals[0].parcels[0].capital_gain_loss,
+            Decimal::from(500)
+        );
     }
 
     /// A rights sale's gain enters the year's buckets through the realised

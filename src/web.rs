@@ -712,6 +712,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn expandable_parcel_detail_ui_present() {
+        let js = app_js_body().await;
+        // filterableTable's generic expand-to-a-child-table option, and the
+        // Expand all / Collapse all control every expandable table gets.
+        assert!(js.contains("opts.expand"));
+        assert!(js.contains("Expand all"));
+        assert!(js.contains("Collapse all"));
+        // The Realised Gains report expands each disposal to its `parcels`
+        // breakdown; the Net Capital Gain report expands each year to its
+        // `disposals`, each of which nests its own `parcels` in turn.
+        assert!(js.contains("'parcels'"));
+        assert!(js.contains("'disposals'"));
+        // The parcel optimiser / pre-sale what-if fold their sibling
+        // `allocations` table into the same inline expansion, matched back to
+        // the parent row by `matchOn`.
+        assert!(js.contains("matchOn"));
+        assert!(js.contains("'strategy'"));
+        // Both drilldown-bearing reports are still driven by their existing
+        // API paths — the feature is additive, not a new endpoint.
+        assert!(js.contains("/portfolio/realised-gains"));
+        assert!(js.contains("/portfolio/net-capital-gain"));
+        // The toggle/detail-row/expand-all styling ships in the bundle too.
+        let css = body_string(get("/static/style.css").await).await;
+        assert!(css.contains(".expand-toggle"));
+        assert!(css.contains(".expand-all-bar"));
+        assert!(css.contains("td.detail-cell"));
+    }
+
+    #[tokio::test]
     async fn tax_summary_ui_present() {
         let js = app_js_body().await;
         assert!(js.contains("/portfolio/tax-summary"));

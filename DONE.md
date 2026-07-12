@@ -821,3 +821,48 @@ resolve out of scope as a Known limitation.)
       and a same-rate-month T+2 settlement the component is nil by construction; per-leg spot
       rates are what make it visible — stated in the Known-limitations entry (both halves) and
       asserted by the same doc_checks test ("nil by construction", "per-leg spot rates")
+
+## Expandable per-parcel CGT detail in the CGT reports (2026-07-12)
+- [x] Realised Gains report: each disposal row carries a nested `parcels` breakdown (purchase trade,
+      acquisition date, units, cost base, proceeds, gain/loss, discount-eligible) computed from the
+      existing per-allocation loop in `compute_realised_gains` — the same figures already summed
+      into the disposal's totals, not a new computation. New `ParcelDetail` struct
+      (`reports/realised_gains.rs`), mirroring `parcel_optimiser::HypotheticalAllocation`'s field
+      set. Covers both ordinary Sells and rights sales/lapses. Tested by
+      `db_two_parcels_mixed_eligibility` (extended: asserts per-parcel figures and that they
+      reconcile exactly to the disposal's totals) and `db_rights_sale_flows_into_the_report`
+      (extended: asserts the rights-sale and ordinary-Sell parcel breakdowns)
+- [x] Net Capital Gain report: each financial-year row carries its nested `disposals` (each with its
+      own `parcels`) — `db_net_capital_gain` fetches the realised rows once, groups them by tax
+      year, and attaches them after `net_years`; `gross_buckets` takes the realised rows as a
+      parameter instead of re-fetching them. AMMA-attributed and CGT event E10/G1 gains have no
+      parcel-allocation record and stay in the year's aggregate fields only. CSV export stays flat
+      via a `NetCapitalGainYearCsv` projection struct (the `csv` crate rejects a nested `Vec`
+      field); `CSV_HEADER`/`CSV_ATO_LABELS` and their drift tests are unchanged. Tested by
+      `db_realised_and_amma_combined_in_one_year` (extended: asserts the year's `disposals` and
+      their `parcels`, and that the AMMA-only gain has no disposal of its own) plus the existing
+      passing CSV export tests (unchanged column count/order)
+- [x] Web UI: `filterableTable` (`app.js`) supports a generic, composable `opts.expand` (a
+      synchronous `row => childSpec` returning `{ rows, cols, opts }`; a child's own `opts.expand`
+      recurses, giving the two-level Net Capital Gain nesting for free) rendering a leading ▸/▾
+      toggle column and a full-width nested-table detail row, plus an "Expand all" / "Collapse all"
+      control shown whenever a table supplies `expand`
+- [x] Realised Gains and Net Capital Gain report views wired to the new expand option via `REPORTS`
+      config (`config.js`): `expand: { key: 'parcels', … }` and the two-level
+      `expand: { key: 'disposals', …, expand: { key: 'parcels', … } }`; `dataTable`/`buildExpand`
+      (`app.js`) turn the declarative config into `filterableTable`'s `opts.expand`, pre-fetching
+      every level's FK label maps up front (the expand callback must stay synchronous)
+- [x] Parcel Optimiser and Pre-Sale What-If: folded their existing sibling `allocations` tables into
+      the same inline expand-under-the-row UI (frontend-only, no backend change — both responses
+      already carried the per-parcel allocations) — `expand: { from: 'allocations', matchOn:
+      'strategy', … }` for the optimiser's `strategies` table, `matchOn: null` for the what-if's
+      single `hypothetical` disposal. The what-if's `years` table needed an explicit `columns` list
+      to exclude the flattened-in `NetCapitalGainYear.disposals` field (always empty on a
+      scenario row), which surfaced a small general gap — `tables` entries now support an optional
+      `columns` override, same as entity list configs
+- [x] Docs: `docs/API.md` response shapes updated for `parcels` (realised gains) and `disposals`
+      (net capital gain, noting the CSV export excludes it); README Features entries for the
+      realised gains, net capital gain, parcel optimiser, and pre-sale what-if reports note the
+      web UI drill-down. Tested end-to-end via `scripts/ui-check.sh` against a seeded Buy/Buy/Sell
+      fixture — the toggle, Expand-all bar, and correct aggregate figures render on both reports —
+      plus a new `web::tests::expandable_parcel_detail_ui_present` bundle-presence test

@@ -412,14 +412,40 @@ export const REPORTS = [
       dec('price', 'Price per unit (AUD)', { optional: true, default: '', hint: 'Blank = the live price from the price source.' }),
     ],
     tables: [
-      { key: 'strategies', title: 'Strategies' },
-      { key: 'allocations', title: 'Per-parcel allocations' },
+      {
+        key: 'strategies', title: 'Strategies',
+        // Each strategy row expands to its own per-parcel allocations (the
+        // sibling `allocations` array, matched back by `strategy`) instead of
+        // a separate flat table alongside it.
+        expand: {
+          from: 'allocations', matchOn: 'strategy',
+          columns: ['purchase_trade_id', 'acquisition_date', 'units', 'cost_base', 'proceeds', 'capital_gain_loss', 'discount_eligible'],
+        },
+      },
     ],
   },
   { slug: 'unrealised-gains', title: 'Unrealised Gains', api: '/portfolio/unrealised-gains', method: 'POST', prices: true, asOfDate: true, desc: 'Per-holding (listing × holding account) unrealised gain/loss vs cost base.' },
-  { slug: 'realised-gains', title: 'Realised Gains', api: '/portfolio/realised-gains', method: 'GET', desc: 'Per-disposal capital gain/loss split into CGT buckets — ordinary sales plus rights sales/lapses (source column).' },
+  {
+    slug: 'realised-gains', title: 'Realised Gains', api: '/portfolio/realised-gains', method: 'GET',
+    desc: 'Per-disposal capital gain/loss split into CGT buckets — ordinary sales plus rights sales/lapses (source column). Expand a disposal for the individual parcels sold and each one’s own CGT outcome.',
+    expand: {
+      key: 'parcels',
+      columns: ['purchase_trade_id', 'acquisition_date', 'units', 'cost_base', 'proceeds', 'capital_gain_loss', 'discount_eligible'],
+    },
+  },
   { slug: 'performance', title: 'Performance', api: '/portfolio/performance', method: 'POST', prices: true, asOfDate: true, desc: 'Investment performance per holding and overall: total return, money-weighted return (% p.a.), trailing-12-month income yield.' },
-  { slug: 'net-capital-gain', title: 'Net Capital Gain', api: '/portfolio/net-capital-gain', method: 'GET', export: true, desc: 'Assessable net capital gain per financial year.' },
+  {
+    slug: 'net-capital-gain', title: 'Net Capital Gain', api: '/portfolio/net-capital-gain', method: 'GET', export: true,
+    desc: 'Assessable net capital gain per financial year. Expand a year for its realised disposals, and a disposal for its per-parcel breakdown.',
+    expand: {
+      key: 'disposals',
+      columns: ['source', 'sale_trade_id', 'listing_id', 'sale_date', 'proceeds', 'cost_base', 'capital_gain_loss', 'discount_eligible_gain', 'non_discountable_gain', 'capital_loss'],
+      expand: {
+        key: 'parcels',
+        columns: ['purchase_trade_id', 'acquisition_date', 'units', 'cost_base', 'proceeds', 'capital_gain_loss', 'discount_eligible'],
+      },
+    },
+  },
   {
     slug: 'net-capital-gain-what-if', title: 'Pre-Sale What-If', api: '/portfolio/net-capital-gain/what-if', method: 'POST',
     desc: 'Dry-run a hypothetical disposal through the Net Capital Gain report: the disposal year’s figures with and without it, using a Parcel Optimiser strategy to pick the parcels (the API also accepts explicit allocations). Nothing is written, and the whole-of-income tax estimate is out of scope — this is the CGT-side delta only.',
@@ -437,9 +463,29 @@ export const REPORTS = [
       ], { required: true, default: 'min_gain', hint: 'How the sold units are drawn from the open parcels — compare the candidates on the Parcel Optimiser screen.' }),
     ],
     tables: [
-      { key: 'years', title: 'The year, without and with the disposal' },
-      { key: 'hypothetical', title: 'Hypothetical disposal' },
-      { key: 'allocations', title: 'Its per-parcel allocations' },
+      {
+        key: 'years', title: 'The year, without and with the disposal',
+        // Explicit column list: `ScenarioYear` flattens in `NetCapitalGainYear`,
+        // whose `disposals` drilldown is always empty here (it belongs to the
+        // main report, not this hypothetical dry-run) — excluded rather than
+        // shown as a permanently-blank column.
+        columns: [
+          'scenario', 'tax_year', 'discount_eligible_gains', 'other_gains', 'capital_losses',
+          'capital_loss_brought_forward', 'net_discount_eligible_gain', 'net_other_gain',
+          'cgt_discount', 'net_capital_gain', 'capital_loss_carried_forward',
+          'cgt_event_e10_gain', 'cgt_event_g1_gain', 'taxpayer_basis',
+        ],
+      },
+      {
+        key: 'hypothetical', title: 'Hypothetical disposal',
+        // The single hypothetical disposal's per-parcel allocations (the
+        // sibling `allocations` array; `matchOn: null` = every row belongs to
+        // this one disposal) expand inline instead of a separate flat table.
+        expand: {
+          from: 'allocations', matchOn: null,
+          columns: ['purchase_trade_id', 'acquisition_date', 'units', 'cost_base', 'proceeds', 'capital_gain_loss', 'discount_eligible'],
+        },
+      },
     ],
   },
   { slug: 'tax-summary', title: 'Tax Summary', api: '/portfolio/tax-summary', method: 'GET', export: true, desc: 'Income aggregated by Australian financial year.' },
