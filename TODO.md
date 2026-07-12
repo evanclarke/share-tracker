@@ -8,25 +8,6 @@ The sections below come from the **2026-07-12 code review** (a full pass over th
 domain pipeline, infra, and migrations for programming and domain issues). Each section records one
 finding; sections land in DONE.md as they are fixed.
 
-## Cost-base FX timing: AMIT/ROC reductions convert at the acquisition-month rate (2026-07-12 review, domain — decide)
-
-`CostBase::into_aud_with` (`src/domain/cost_base.rs:204-239`) deliberately resolves **one** rate —
-the parcel's acquisition month — and applies it to every component, including the AMIT
-(`amit_reduction`) and return-of-capital (`roc_reduction`) reductions that happened in later,
-possibly very different rate months. The translation rules (s 960-50; `docs/ato/
-forex-common-transactions.md` translates each leg at its own transaction time) point at
-translating each reduction at the rate of the period/payment it belongs to. The codebase is also
-internally split: `g1_gains` converts a payment's *excess* at the **payment month**
-(`src/reports/net_capital_gain.rs:389-390`) while the same payment's *reduction* inside the cost
-base converts at the acquisition month.
-
-In practice this only bites on non-AUD holdings with non-AUD ROC/AMMA reductions (none in the
-live data — E10/G1 events are on AUD funds), so it may be acceptable to resolve out of scope.
-
-- [ ] Decide explicitly: convert each reduction at its own event/period month (extending the
-      pipeline to carry per-event rates), or record the single-rate simplification as a Known
-      limitation with the citation, noting the g1_gains asymmetry either way
-
 ## AMMA tax_year_end_date is assumed to be 30 June but never validated (2026-07-12 review, integrity)
 
 Every AMMA-keyed report buckets the statement by `tax_year_end_date.year()`

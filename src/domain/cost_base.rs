@@ -28,7 +28,12 @@
 //!    so the cost base converts at the ATO reference rate for the parcel's
 //!    (possibly deemed) acquisition month. A rollover replacement parcel
 //!    converts at its *deemed* acquisition month, carrying the original AUD
-//!    cost base over.
+//!    cost base over. The acquisition-month rate deliberately covers the
+//!    whole breakdown, including the AMIT/ROC reductions from later rate
+//!    months — a documented simplification of the s 960-50(6) per-transaction
+//!    translation timing (`docs/ato/forex-common-transactions.md`, QC 18322;
+//!    see Known limitations in `docs/API.md`), material only for a non-AUD
+//!    holding receiving non-AUD reductions.
 
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
@@ -211,7 +216,9 @@ impl CostBase {
     /// Takes pre-loaded rates ([`fx::FxRates`]) so
     /// a report loop's per-parcel conversion is a map lookup, not a DB
     /// round-trip. The rate is resolved once and applied to all components so
-    /// the breakdown stays internally consistent.
+    /// the breakdown stays internally consistent — deliberately including the
+    /// AMIT/ROC reductions from later rate months (the documented cost-base
+    /// FX-timing simplification; see the module doc, step 5).
     pub fn into_aud_with(
         self,
         rates: &fx::FxRates,

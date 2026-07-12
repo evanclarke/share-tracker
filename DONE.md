@@ -1102,3 +1102,33 @@ zero price/costs, same-day settlement, fractional quantity),
 `interest_income::tests::api_negative_amounts_rejected_422`. docs/API.md updated: Trades and
 Sells sanity-rule paragraphs, Income "No negative amounts", Interest income 422 causes, and the
 Response codes 422 list (991 tests).
+
+## Cost-base FX timing: AMIT/ROC reductions convert at the acquisition-month rate (2026-07-12 review, domain — decide)
+
+`CostBase::into_aud_with` (`src/domain/cost_base.rs:204-239`) deliberately resolves **one** rate —
+the parcel's acquisition month — and applies it to every component, including the AMIT
+(`amit_reduction`) and return-of-capital (`roc_reduction`) reductions that happened in later,
+possibly very different rate months. The translation rules (s 960-50; `docs/ato/
+forex-common-transactions.md` translates each leg at its own transaction time) point at
+translating each reduction at the rate of the period/payment it belongs to. The codebase is also
+internally split: `g1_gains` converts a payment's *excess* at the **payment month**
+(`src/reports/net_capital_gain.rs:389-390`) while the same payment's *reduction* inside the cost
+base converts at the acquisition month.
+
+In practice this only bites on non-AUD holdings with non-AUD ROC/AMMA reductions (none in the
+live data — E10/G1 events are on AUD funds), so it may be acceptable to resolve out of scope.
+
+- [x] Decide explicitly: convert each reduction at its own event/period month (extending the
+      pipeline to carry per-event rates), or record the single-rate simplification as a Known
+      limitation with the citation, noting the g1_gains asymmetry either way
+
+Closed 2026-07-13. Decided: the single-rate simplification stays, recorded as a Known limitation
+rather than extending the pipeline — per-event rates would restructure how AMIT reductions are
+aggregated (a single cumulative scalar today) for a case that does not arise in the live data.
+The `docs/API.md` Known-limitations entry states the rule, the s 960-50(6) citation (QC 18322,
+`docs/ato/forex-common-transactions.md` — Lisa's per-leg translation), the g1_gains asymmetry
+(the same payment's excess converts at the payment month, its reduction at the acquisition
+month; the E10 excess uses the buy-month rate, consistent with the cost base), and when it
+bites; the FX-conversion section cross-links it; the README scope-cuts line surfaces it; and
+the `cost_base.rs` module doc (step 5) and `into_aud_with` doc comment state the deliberate
+choice at the code. Pinned by `doc_checks::known_limitations_document_cost_base_fx_timing`.

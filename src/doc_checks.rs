@@ -167,6 +167,47 @@ fn fx_spot_rate_override_documented() {
     assert!(README_MD.contains("QC 18020"));
 }
 
+/// Doc-only resolution pin for cost-base FX timing (2026-07-12 review,
+/// decided 2026-07-13 as a documented limitation): `CostBase::into_aud_with`
+/// converts the whole breakdown — including AMIT (E10) and return-of-capital
+/// (G1) reductions from later rate months — at the parcel's acquisition-month
+/// rate, a deliberate simplification of the s 960-50(6) per-transaction
+/// translation timing. The Known-limitations entry states the rule, the
+/// g1_gains asymmetry (a payment's excess converts at the payment month while
+/// its reduction converts at the acquisition month), and when it bites (a
+/// non-AUD holding with non-AUD reductions — none in practice); cites the
+/// QC 18322 mirror; is cross-linked from the FX-conversion section; and the
+/// README surfaces it.
+#[test]
+fn known_limitations_document_cost_base_fx_timing() {
+    let limitations = known_limitations();
+    assert!(limitations.contains(
+        "**Cost-base FX timing — AMIT/return-of-capital reductions convert at the \
+         acquisition-month rate**"
+    ));
+    assert!(limitations.contains("**one rate: the parcel's (possibly deemed) acquisition month**"));
+    // The strict rule and its citation.
+    assert!(limitations.contains("s 960-50(6) translation rules"));
+    assert!(limitations.contains("docs/ato/forex-common-transactions.md"));
+    assert!(include_str!("../docs/ato/forex-common-transactions.md").contains("QC 18322"));
+    // The g1_gains asymmetry, both halves.
+    assert!(limitations.contains("converts at the **payment month**"));
+    assert!(limitations.contains("converts at the **acquisition month**"));
+    // When it bites.
+    assert!(
+        limitations
+            .contains("**non-AUD holding receiving non-AUD AMIT/return-of-capital reductions**")
+    );
+    // Cross-linked from the FX-conversion section.
+    assert!(API_MD.contains(
+        "including the AMIT/return-of-capital reductions that arose in later rate months \
+         (see [Known limitations](#known-limitations))"
+    ));
+    // Surfaced in the README too.
+    assert!(README_MD.contains("cost-base reductions convert at the acquisition-month rate"));
+    assert!(README_MD.contains("s 960-50 translation timing"));
+}
+
 /// Doc-only resolution pin for settlement-window forex — CGT events K10/K11
 /// (REQUIREMENTS 2026-06-12, NEEDS DECISION resolved 2026-06-12 as out of
 /// scope): the Known-limitations entry states the rule (cost-base adjustment
