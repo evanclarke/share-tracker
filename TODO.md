@@ -8,23 +8,6 @@ The sections below come from the **2026-07-12 code review** (a full pass over th
 domain pipeline, infra, and migrations for programming and domain issues). Each section records one
 finding; sections land in DONE.md as they are fixed.
 
-## Net-capital-gain report reads without a transaction (2026-07-12 review, programming)
-
-`db_net_capital_gain` / `gross_buckets` / `e10_gains` / `g1_gains`
-(`src/reports/net_capital_gain.rs:404-511`) run many separate queries directly on the pool: the
-realised-gains rows come from `db_realised_gains`'s own (correct) snapshot, then AMMA rows, AMIT
-adjustments, ROC/split events, allocations, FX rates, and the opening loss are each read at later
-instants. CLAUDE.md's report rule requires one `pool.begin()` read transaction per multi-query
-report so an interleaved write can't produce inconsistent inputs (e.g. an AMMA row arriving
-between the realised read and the E10 walk double- or under-counting a year). The what-if handler
-(`what_if_handler`) has the same shape.
-
-- [ ] Restructure the report to read every input on one read transaction (likely: extend
-      `realised_gains::load_report_data`-style loading, or take a `&mut SqliteConnection` through
-      `gross_buckets`/`e10_gains`/`g1_gains`), keeping the computation pure
-- [ ] Same for the what-if path
-- [ ] A test proving the report still reproduces its fixtures (existing tests should carry this)
-
 ## Tax summary: franking holding-period test runs post-commit, per dividend (2026-07-12 review, programming)
 
 `db_tax_summary` reads its inputs on one transaction, commits it, then calls

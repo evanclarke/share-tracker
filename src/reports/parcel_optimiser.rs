@@ -90,7 +90,20 @@ pub async fn db_candidate_parcels(
     listing_id: i64,
     holding_account_id: Option<i64>,
 ) -> Result<Vec<CandidateParcel>, sqlx::Error> {
-    let mut parcels: Vec<CandidateParcel> = open_parcels::db_open_parcels(pool)
+    let mut tx = pool.begin().await?;
+    let parcels = db_candidate_parcels_on(&mut tx, listing_id, holding_account_id).await?;
+    tx.commit().await?;
+    Ok(parcels)
+}
+
+/// The same candidates read on the caller's own connection, for the what-if,
+/// which folds them into its wider single-snapshot read transaction.
+pub async fn db_candidate_parcels_on(
+    conn: &mut sqlx::SqliteConnection,
+    listing_id: i64,
+    holding_account_id: Option<i64>,
+) -> Result<Vec<CandidateParcel>, sqlx::Error> {
+    let mut parcels: Vec<CandidateParcel> = open_parcels::db_open_parcels_on(conn)
         .await?
         .iter()
         .filter(|p| {

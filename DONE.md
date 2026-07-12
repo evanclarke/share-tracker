@@ -994,3 +994,32 @@ link.
       paragraph, Income provenance note + endpoint table, DRP reinvestment undo section, Response
       codes), docs/SCHEMA.md `reinvestment_trade_id` note, and the README DRP feature bullet
       updated
+
+## Net-capital-gain report reads without a transaction (2026-07-12 review, programming)
+
+`db_net_capital_gain` / `gross_buckets` / `e10_gains` / `g1_gains`
+(`src/reports/net_capital_gain.rs:404-511`) run many separate queries directly on the pool: the
+realised-gains rows come from `db_realised_gains`'s own (correct) snapshot, then AMMA rows, AMIT
+adjustments, ROC/split events, allocations, FX rates, and the opening loss are each read at later
+instants. CLAUDE.md's report rule requires one `pool.begin()` read transaction per multi-query
+report so an interleaved write can't produce inconsistent inputs (e.g. an AMMA row arriving
+between the realised read and the E10 walk double- or under-counting a year). The what-if handler
+(`what_if_handler`) has the same shape.
+
+- [x] Restructure the report to read every input on one read transaction (likely: extend
+      `realised_gains::load_report_data`-style loading, or take a `&mut SqliteConnection` through
+      `gross_buckets`/`e10_gains`/`g1_gains`), keeping the computation pure
+- [x] Same for the what-if path
+- [x] A test proving the report still reproduces its fixtures (existing tests should carry this)
+
+Closed 2026-07-13: `db_net_capital_gain` now opens one read transaction and threads a
+`&mut SqliteConnection` through everything it reads — `realised_gains::db_realised_gains_on`
+(the internal `load_report_data` now runs on the caller's connection; the standalone
+`db_realised_gains` keeps its own tx), `gross_buckets`, `e10_gains`, `g1_gains`,
+`FxRates::load`, and `cgt_settings::db_opening_capital_loss` (made executor-generic) — then
+commits before the pure `net_years` computation. The what-if handler reads its inputs
+(candidate parcels via the new `parcel_optimiser::db_candidate_parcels_on` /
+`open_parcels::db_open_parcels_on`, realised rows, buckets, opening loss) on one transaction the
+same way, with allocation validation and the scenario walk running purely after the commit.
+No endpoint/schema change, so no doc updates. Covered by the existing net-capital-gain,
+what-if, realised-gains, open-parcels, and parcel-optimiser fixtures (983 tests pass).

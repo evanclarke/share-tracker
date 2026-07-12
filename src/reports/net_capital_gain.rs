@@ -204,7 +204,7 @@ fn aud_field(
 /// classified as discount-eligible when the units were held more than 12 months as at
 /// the statement's `tax_year_end_date`.
 async fn e10_gains(
-    pool: &SqlitePool,
+    conn: &mut sqlx::SqliteConnection,
     fx: &FxRates,
 ) -> Result<Vec<(i32, Decimal, bool)>, sqlx::Error> {
     let rows = sqlx::query(
@@ -219,7 +219,7 @@ async fn e10_gains(
          JOIN amma_statements a ON a.id = aa.amma_statement_id \
          ORDER BY aa.trade_id, a.tax_year_end_date, a.id",
     )
-    .fetch_all(pool)
+    .fetch_all(conn)
     .await?;
 
     let mut out = Vec::new();
@@ -283,7 +283,7 @@ async fn e10_gains(
 /// to company shares, so the two reduction chains never share a parcel in
 /// practice.
 async fn g1_gains(
-    pool: &SqlitePool,
+    conn: &mut sqlx::SqliteConnection,
     fx: &FxRates,
 ) -> Result<Vec<(i32, Decimal, bool)>, sqlx::Error> {
     let rows = sqlx::query(
@@ -300,7 +300,7 @@ async fn g1_gains(
          WHERE ca.action_type = 'ReturnOfCapital' \
          ORDER BY t.id, ca.date, ca.id",
     )
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await?;
 
     if rows.is_empty() {
@@ -311,7 +311,7 @@ async fn g1_gains(
     // *post-split* unit, so its whole-parcel equivalent scales by the split
     // ratio between acquisition and the payment date (TD 2000/10); sold units
     // are re-based back to as-acquired units the same way.
-    let split_events = crate::entities::corporate_action::db_share_split_events(pool).await?;
+    let split_events = crate::entities::corporate_action::db_share_split_events(&mut *conn).await?;
 
     // Units sold out of each parcel, with the sale date — a unit sold before a
     // payment was not held for it.
@@ -319,7 +319,7 @@ async fn g1_gains(
         "SELECT pa.purchase_trade_id, pa.quantity_allocated, s.date AS sale_date \
          FROM parcel_allocations pa JOIN trades s ON s.id = pa.sale_trade_id",
     )
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await?;
     let mut sold: HashMap<i64, Vec<(NaiveDate, Decimal)>> = HashMap::new();
     for row in &alloc_rows {
@@ -413,9 +413,15 @@ async fn g1_gains(
 pub async fn db_net_capital_gain(
     pool: &SqlitePool,
 ) -> Result<Vec<NetCapitalGainYear>, sqlx::Error> {
-    let realised = super::realised_gains::db_realised_gains(pool).await?;
-    let buckets = gross_buckets(pool, &realised).await?;
-    let opening = crate::entities::cgt_settings::db_opening_capital_loss(pool).await?;
+    // One read transaction across every input — the realised rows, the
+    // AMMA/E10/G1 walks, the FX table, and the opening loss — so the whole
+    // report sees a single consistent snapshot (an interleaved write can't
+    // e.g. land an AMMA row between the realised read and the E10 walk).
+    let mut tx = pool.begin().await?;
+    let realised = super::realised_gains::db_realised_gains_on(&mut tx).await?;
+    let buckets = gross_buckets(&mut tx, &realised).await?;
+    let opening = crate::entities::cgt_settings::db_opening_capital_loss(&mut *tx).await?;
+    tx.commit().await?;
 
     // Group the already-fetched disposals by tax year so each year row can
     // carry the disposals (and, within them, the parcels) that its gross
@@ -443,16 +449,17 @@ pub async fn db_net_capital_gain(
 /// disposal's buckets before netting). `realised` is fetched once by the
 /// caller — both callers also need the same rows for their own purposes (the
 /// report to attach each year's `disposals`, the what-if's totals having
-/// already come from `parcel_optimiser` directly).
+/// already come from `parcel_optimiser` directly). Runs on the caller's read
+/// transaction, the same snapshot the realised rows came from.
 async fn gross_buckets(
-    pool: &SqlitePool,
+    conn: &mut sqlx::SqliteConnection,
     realised: &[super::realised_gains::RealisedGainLoss],
 ) -> Result<HashMap<i32, GrossBuckets>, sqlx::Error> {
     let mut buckets: HashMap<i32, GrossBuckets> = HashMap::new();
 
     // Every imported ATO FX rate — the AMMA/E10/G1 conversions below are map
     // lookups, not one DB round-trip each.
-    let fx = FxRates::load(pool).await?;
+    let fx = FxRates::load(&mut *conn).await?;
 
     // Realised parcel gains (already AUD), bucketed by the sale's tax year.
     for r in realised {
@@ -475,7 +482,7 @@ async fn gross_buckets(
          cgt_other_gains, currency \
          FROM amma_statements",
     )
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await?;
 
     for row in &amma_rows {
@@ -497,7 +504,7 @@ async fn gross_buckets(
     // base — are ordinary capital gains: they enter the buckets (discount-eligible or
     // not, per the holding period at year end), so losses can offset them and the
     // discount applies to the eligible portion.
-    for (tax_year, amount, discount_eligible) in e10_gains(pool, &fx).await? {
+    for (tax_year, amount, discount_eligible) in e10_gains(&mut *conn, &fx).await? {
         let b = buckets.entry(tax_year).or_default();
         if discount_eligible {
             b.discount_eligible += amount;
@@ -510,7 +517,7 @@ async fn gross_buckets(
     // CGT event G1 gains — return-of-capital payments in excess of a parcel's
     // cost base — are likewise ordinary capital gains entering the buckets
     // (discount-eligible or not, per the holding period at the payment date).
-    for (tax_year, amount, discount_eligible) in g1_gains(pool, &fx).await? {
+    for (tax_year, amount, discount_eligible) in g1_gains(&mut *conn, &fx).await? {
         let b = buckets.entry(tax_year).or_default();
         if discount_eligible {
             b.discount_eligible += amount;
@@ -719,10 +726,25 @@ async fn what_if_handler(
         ));
     }
 
+    // One read transaction across every input — the candidate parcels, the
+    // realised rows, the AMMA/E10/G1 walks, and the opening loss — so the
+    // dry-run works from a single consistent snapshot, exactly like the
+    // report proper. Everything after the commit is pure computation.
+    let mut tx = pool.begin().await.map_err(ApiError::from)?;
     let parcels =
-        parcel_optimiser::db_candidate_parcels(&pool, req.listing_id, req.holding_account_id)
+        parcel_optimiser::db_candidate_parcels_on(&mut tx, req.listing_id, req.holding_account_id)
             .await
             .map_err(ApiError::from)?;
+    let realised = super::realised_gains::db_realised_gains_on(&mut tx)
+        .await
+        .map_err(ApiError::from)?;
+    let buckets = gross_buckets(&mut tx, &realised)
+        .await
+        .map_err(ApiError::from)?;
+    let opening = crate::entities::cgt_settings::db_opening_capital_loss(&mut *tx)
+        .await
+        .map_err(ApiError::from)?;
+    tx.commit().await.map_err(ApiError::from)?;
 
     // Exactly one of explicit allocations / a named strategy.
     let picks: Vec<(i64, Decimal)> = match (&req.allocations, req.strategy) {
@@ -794,16 +816,6 @@ async fn what_if_handler(
     // a year with no recorded activity still yields a row (with the correct
     // brought-forward chain from earlier years).
     let tax_year = tax_year_for(req.date);
-    let realised = super::realised_gains::db_realised_gains(&pool)
-        .await
-        .map_err(ApiError::from)?;
-    let buckets = gross_buckets(&pool, &realised)
-        .await
-        .map_err(ApiError::from)?;
-    let opening = crate::entities::cgt_settings::db_opening_capital_loss(&pool)
-        .await
-        .map_err(ApiError::from)?;
-
     let mut without = buckets.clone();
     without.entry(tax_year).or_default();
     let mut with = buckets;

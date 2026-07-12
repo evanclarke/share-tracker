@@ -60,6 +60,17 @@ pub async fn db_open_parcels(pool: &SqlitePool) -> Result<Vec<OpenParcel>, sqlx:
     // so an interleaved write can't yield e.g. an allocation whose parcel is
     // missing from the same read.
     let mut tx = pool.begin().await?;
+    let parcels = db_open_parcels_on(&mut tx).await?;
+    tx.commit().await?;
+    Ok(parcels)
+}
+
+/// The same report read on the caller's own connection, for callers (the
+/// parcel optimiser, and through it the what-if) that fold the open parcels
+/// into a wider single-snapshot read transaction.
+pub async fn db_open_parcels_on(
+    conn: &mut sqlx::SqliteConnection,
+) -> Result<Vec<OpenParcel>, sqlx::Error> {
     let raw_rows = sqlx::query(
         "SELECT t.id, t.listing_id, t.holding_account_id, l.ticker, t.date, t.quantity, \
          t.average_price, t.brokerage, t.gst_on_brokerage, t.currency, t.fx_rate, \
@@ -67,7 +78,7 @@ pub async fn db_open_parcels(pool: &SqlitePool) -> Result<Vec<OpenParcel>, sqlx:
          FROM trades t JOIN listings l ON l.id = t.listing_id \
          WHERE t.trade_type IN ('Buy', 'DRP')",
     )
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut *conn)
     .await?;
     // The shared trade-row mapping plus this report's joined ticker column.
     let trade_rows: Vec<(ParcelRow, String)> = raw_rows
@@ -76,7 +87,7 @@ pub async fn db_open_parcels(pool: &SqlitePool) -> Result<Vec<OpenParcel>, sqlx:
         .collect::<Result<_, sqlx::Error>>()?;
 
     if trade_rows.is_empty() {
-        // Nothing held; the dropped transaction was read-only.
+        // Nothing held.
         return Ok(vec![]);
     }
 
@@ -86,7 +97,7 @@ pub async fn db_open_parcels(pool: &SqlitePool) -> Result<Vec<OpenParcel>, sqlx:
         "SELECT pa.purchase_trade_id, pa.quantity_allocated, s.date AS sale_date \
          FROM parcel_allocations pa JOIN trades s ON s.id = pa.sale_trade_id",
     )
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut *conn)
     .await?;
 
     let mut qty_sold: HashMap<i64, Vec<(NaiveDate, Decimal)>> = HashMap::new();
@@ -98,15 +109,15 @@ pub async fn db_open_parcels(pool: &SqlitePool) -> Result<Vec<OpenParcel>, sqlx:
         ));
     }
 
-    let cba_reduction = crate::entities::amit_adjustment::db_cost_base_reductions(&mut *tx).await?;
+    let cba_reduction =
+        crate::entities::amit_adjustment::db_cost_base_reductions(&mut *conn).await?;
     let roc_events =
-        crate::entities::corporate_action::db_return_of_capital_events(&mut *tx).await?;
+        crate::entities::corporate_action::db_return_of_capital_events(&mut *conn).await?;
     // share splits/consolidations per listing (quantity re-basing)
-    let split_events = crate::entities::corporate_action::db_share_split_events(&mut *tx).await?;
+    let split_events = crate::entities::corporate_action::db_share_split_events(&mut *conn).await?;
     // every imported ATO FX rate — per-parcel conversions below are map
     // lookups, not one DB round-trip each
-    let fx = FxRates::load(&mut *tx).await?;
-    tx.commit().await?;
+    let fx = FxRates::load(&mut *conn).await?;
 
     let mut parcels = Vec::new();
     for (t, ticker) in &trade_rows {

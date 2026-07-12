@@ -250,12 +250,13 @@ struct ReportData {
     fx: FxRates,
 }
 
-/// Reads the report's inputs on one read transaction, so the whole report
-/// sees a single consistent snapshot — an interleaved write can never yield
-/// an allocation whose sale or parcel is missing from the same read.
-async fn load_report_data(pool: &SqlitePool) -> Result<ReportData, sqlx::Error> {
-    let mut tx = pool.begin().await?;
-
+/// Reads the report's inputs on the caller's connection. Callers run this
+/// inside one read transaction (`db_realised_gains` opens its own; the
+/// net-capital-gain report passes its wider snapshot through
+/// [`db_realised_gains_on`]) so the whole report sees a single consistent
+/// snapshot — an interleaved write can never yield an allocation whose sale
+/// or parcel is missing from the same read.
+async fn load_report_data(conn: &mut sqlx::SqliteConnection) -> Result<ReportData, sqlx::Error> {
     // An all-scrip scrip-for-scrip exchange or demerger closing Sell
     // (scrip_action_id / demerger_action_id set) is not a realised gain or
     // loss: the rollover disregards the gain on the original shares
@@ -278,7 +279,7 @@ async fn load_report_data(pool: &SqlitePool) -> Result<ReportData, sqlx::Error> 
            AND (t.scrip_action_id IS NULL OR ca.scrip_cash_per_unit IS NOT NULL) \
            AND t.demerger_action_id IS NULL AND t.transfer_id IS NULL",
     )
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut *conn)
     .await?;
 
     let rights_sales: Vec<RightsSaleInfo> = sqlx::query_as(
@@ -286,11 +287,11 @@ async fn load_report_data(pool: &SqlitePool) -> Result<ReportData, sqlx::Error> 
                 rs.proceeds_per_right, rs.rights_cost, ca.currency, rs.fx_rate \
          FROM rights_sales rs JOIN corporate_actions ca ON ca.id = rs.rights_action_id",
     )
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut *conn)
     .await?;
 
     if sells.is_empty() && rights_sales.is_empty() {
-        // Nothing to report; the dropped transaction was read-only.
+        // Nothing to report.
         return Ok(ReportData::default());
     }
 
@@ -298,29 +299,29 @@ async fn load_report_data(pool: &SqlitePool) -> Result<ReportData, sqlx::Error> 
         "SELECT rights_sale_id, purchase_trade_id, units FROM rights_sale_allocations \
          ORDER BY id",
     )
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut *conn)
     .await?;
 
     let buys: Vec<ParcelRow> = sqlx::query_as(&format!(
         "SELECT {} FROM trades WHERE trade_type IN ('Buy', 'DRP')",
         ParcelRow::COLUMNS
     ))
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut *conn)
     .await?;
 
     let allocations: Vec<Allocation> = sqlx::query_as(
         "SELECT sale_trade_id, purchase_trade_id, quantity_allocated FROM parcel_allocations",
     )
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut *conn)
     .await?;
 
-    let cba_reduction = crate::entities::amit_adjustment::db_cost_base_reductions(&mut *tx).await?;
+    let cba_reduction =
+        crate::entities::amit_adjustment::db_cost_base_reductions(&mut *conn).await?;
     let roc_events =
-        crate::entities::corporate_action::db_return_of_capital_events(&mut *tx).await?;
+        crate::entities::corporate_action::db_return_of_capital_events(&mut *conn).await?;
     // share splits/consolidations per listing (quantity re-basing)
-    let split_events = crate::entities::corporate_action::db_share_split_events(&mut *tx).await?;
-    let fx = FxRates::load(&mut *tx).await?;
-    tx.commit().await?;
+    let split_events = crate::entities::corporate_action::db_share_split_events(&mut *conn).await?;
+    let fx = FxRates::load(&mut *conn).await?;
 
     Ok(ReportData {
         sells: sells.into_iter().map(|s| (s.id, s)).collect(),
@@ -336,7 +337,19 @@ async fn load_report_data(pool: &SqlitePool) -> Result<ReportData, sqlx::Error> 
 }
 
 pub async fn db_realised_gains(pool: &SqlitePool) -> Result<Vec<RealisedGainLoss>, sqlx::Error> {
-    compute_realised_gains(&load_report_data(pool).await?)
+    let mut tx = pool.begin().await?;
+    let data = load_report_data(&mut tx).await?;
+    tx.commit().await?;
+    compute_realised_gains(&data)
+}
+
+/// The same report read on the caller's own connection, for reports (the
+/// net-capital-gain report and its what-if) that fold the realised rows into
+/// a wider single-snapshot read transaction.
+pub async fn db_realised_gains_on(
+    conn: &mut sqlx::SqliteConnection,
+) -> Result<Vec<RealisedGainLoss>, sqlx::Error> {
+    compute_realised_gains(&load_report_data(conn).await?)
 }
 
 /// The gain/loss computation: a pure function over [`ReportData`], so the

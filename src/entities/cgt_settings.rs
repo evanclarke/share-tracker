@@ -87,10 +87,17 @@ pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<bool, sqlx::Error> 
 
 /// The opening carried-forward capital loss, or zero when no settings row exists.
 /// Used by the net-capital-gain report as the starting loss balance.
-pub async fn db_opening_capital_loss(pool: &SqlitePool) -> Result<Decimal, sqlx::Error> {
-    Ok(db_get(pool, 1)
-        .await?
-        .map_or(Decimal::ZERO, |s| s.opening_capital_loss))
+/// Executor-generic so it can run on a pool or inside the report's own read
+/// transaction.
+pub async fn db_opening_capital_loss<'e, E>(executor: E) -> Result<Decimal, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
+    let settings: Option<CgtSettings> =
+        sqlx::query_as("SELECT id, opening_capital_loss FROM cgt_settings WHERE id = 1")
+            .fetch_optional(executor)
+            .await?;
+    Ok(settings.map_or(Decimal::ZERO, |s| s.opening_capital_loss))
 }
 
 async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<CgtSettings>>, ApiError> {
