@@ -5,30 +5,8 @@ Items are only marked done when a passing test exists for them.
 Completed and decided (out-of-scope / not-reproducible) sections are archived in [DONE.md](DONE.md) to keep this list focused on active work. When a section here is fully done, move it to DONE.md rather than leaving it — see CLAUDE.md.
 
 The sections below come from the **2026-07-12 code review** (a full pass over the reports, entities,
-domain pipeline, infra, and migrations for programming and domain issues). Nothing is fixed yet —
-each section records one finding.
-
-## AMMA capital-losses-applied double-count in the loss pool (2026-07-12 review, domain)
-
-`gross_buckets` (`src/reports/net_capital_gain.rs:475-481`) adds each AMMA statement's
-`capital_losses_applied` into the **taxpayer's own capital-loss pool** (`b.losses`), where it
-offsets other gains and carries forward. Per the mirrored guidance
-(`docs/ato/amma-statement-guidance-notes.md`, lines 82–89), the attributed CGT amounts on an AMMA
-are **already reduced** for capital losses applied *at the trust level*, and the losses-applied
-figure is a disclosure/disclaimer item — a trust cannot distribute capital losses to members, so
-the investor must not apply them again. Counting them a second time inflates the loss pool and
-understates `net_capital_gain` in any year an AMMA reports losses applied. The tax summary's
-`amma_capital_losses_applied` CSV label `18 (working)` (`src/reports/tax_summary.rs:195`)
-propagates the same reading.
-
-- [ ] Re-verify the treatment against the live ATO AMMA guidance (the trustee reporting notes and
-      the Personal investors' guide gross-up worksheet: double the discounted gain, apply the
-      *investor's own* losses, halve) and mirror anything newly relied on into `docs/ato/`
-- [ ] If confirmed: stop feeding `capital_losses_applied` into `GrossBuckets.losses`; keep the
-      column stored and reported as informational (like `tax_free_amount`), fix the CSV label, and
-      update `docs/API.md` / README where the netting order is described
-- [ ] Adjust the existing `net_capital_gain` tests that assert the old treatment, and add a test
-      pinning that an AMMA losses-applied figure does not offset unrelated realised gains
+domain pipeline, infra, and migrations for programming and domain issues). Each section records one
+finding; sections land in DONE.md as they are fixed.
 
 ## Sell allocations: listing and acquisition-date invariants missing (2026-07-12 review, domain + integrity)
 

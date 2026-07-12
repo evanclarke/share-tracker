@@ -866,3 +866,42 @@ resolve out of scope as a Known limitation.)
       web UI drill-down. Tested end-to-end via `scripts/ui-check.sh` against a seeded Buy/Buy/Sell
       fixture — the toggle, Expand-all bar, and correct aggregate figures render on both reports —
       plus a new `web::tests::expandable_parcel_detail_ui_present` bundle-presence test
+
+## AMMA capital-losses-applied double-count in the loss pool (2026-07-12 review, domain)
+
+`gross_buckets` (`src/reports/net_capital_gain.rs:475-481`) adds each AMMA statement's
+`capital_losses_applied` into the **taxpayer's own capital-loss pool** (`b.losses`), where it
+offsets other gains and carries forward. Per the mirrored guidance
+(`docs/ato/amma-statement-guidance-notes.md`, lines 82–89), the attributed CGT amounts on an AMMA
+are **already reduced** for capital losses applied *at the trust level*, and the losses-applied
+figure is a disclosure/disclaimer item — a trust cannot distribute capital losses to members, so
+the investor must not apply them again. Counting them a second time inflates the loss pool and
+understates `net_capital_gain` in any year an AMMA reports losses applied. The tax summary's
+`amma_capital_losses_applied` CSV label `18 (working)` (`src/reports/tax_summary.rs:195`)
+propagates the same reading.
+
+- [x] Re-verify the treatment against the live ATO AMMA guidance (the trustee reporting notes and
+      the Personal investors' guide gross-up worksheet: double the discounted gain, apply the
+      *investor's own* losses, halve) and mirror anything newly relied on into `docs/ato/` —
+      confirmed against the Personal investors guide to CGT 2025 Part C (QC 104651): Step 4
+      applies only the investor's own current-year and carried-forward losses; mirrored as
+      `docs/ato/personal-investors-guide-managed-fund-distributions.md` (indexed in OVERVIEW.md)
+- [x] If confirmed: stop feeding `capital_losses_applied` into `GrossBuckets.losses`; keep the
+      column stored and reported as informational (like `tax_free_amount`), fix the CSV label, and
+      update `docs/API.md` / README where the netting order is described — `gross_buckets` no
+      longer reads the column; the tax summary keeps its informational `amma_capital_losses_applied`
+      line with CSV label `""`; `docs/API.md` (netting step 2 + label table), `docs/SCHEMA.md`
+      (column note), and the struct/module docs all state the trust-level rationale
+- [x] Adjust the existing `net_capital_gain` tests that assert the old treatment, and add a test
+      pinning that an AMMA losses-applied figure does not offset unrelated realised gains —
+      `db_amma_indexation_other_gains_and_losses` split into
+      `db_amma_indexation_and_other_gains_are_non_discountable` +
+      `db_amma_trust_level_losses_applied_never_enter_the_loss_pool` (a $1,000 losses-applied
+      figure offsets neither the statement's own gains nor an unrelated realised gain, and does
+      not carry forward); the tax-summary label-alignment test pins the `""` label. Bonus: the
+      mirrored doc's worked examples are now representable, so `src/ato_examples.rs` gains
+      `pig_managed_funds_example_26_bob_fund_gains_and_tax_deferred` (18H $303 / 18A $203 + the
+      E4 cost-base half), `pig_managed_funds_example_27_ilena_own_loss_against_fund_gains`
+      (own $100 loss → 18H $220 / 18A $60) and
+      `pig_managed_funds_example_28_miriam_amit_cost_base_net_amount` (signed AMIT cost base net
+      amount, both directions)

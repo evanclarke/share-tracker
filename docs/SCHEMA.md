@@ -173,7 +173,7 @@ amma_statements              Annual AMIT Member Annual (AMMA) statements
 ├── cgt_discount_gains              TEXT (decimal)
 ├── cgt_indexation_gains            TEXT (decimal)
 ├── cgt_other_gains                 TEXT (decimal)
-├── capital_losses_applied          TEXT (decimal)
+├── capital_losses_applied          TEXT (decimal)  Informational only — trust-level losses the statement's CGT gains are already net of; not the member's loss (no calculation reads it)
 ├── tax_deferred_amount             TEXT (decimal)  Informational only — not a cost-base driver (reflected in cost_base_adjustment)
 ├── tax_free_amount                 TEXT (decimal)  Informational only — not a cost-base driver (reflected in cost_base_adjustment)
 ├── cost_base_adjustment            TEXT (decimal)  Per-unit AMIT cost base net amount; sole cost-base driver (+ reduces, − increases)

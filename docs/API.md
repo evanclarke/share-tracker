@@ -859,7 +859,7 @@ Returns one record per Australian financial year (identified by the calendar yea
 The assessable net capital gain is computed the ATO way:
 
 1. Total the year's gross capital gains, split into **discount-eligible** (realised parcels held > 12 months + AMMA discount-method gains grossed up ×2 — the AMMA `cgt_discount_gains` value is the already-halved "discounted capital gain", so doubling it restores the gross gain + any **CGT event E10/G1** gain whose parcel was held > 12 months at the event date) and **non-discountable** (realised parcels held ≤ 12 months + AMMA indexation-method and other-method gains, neither of which gets the discount + any CGT event E10/G1 gain held ≤ 12 months).
-2. Total the year's capital losses: realised losses + AMMA `capital_losses_applied`, **plus the net capital loss brought forward from earlier years** — unused losses chain across the year series indefinitely (per the ATO), starting from the entered [opening carried-forward loss](#cgt-settings) (losses from before the first recorded year).
+2. Total the year's capital losses: realised losses, **plus the net capital loss brought forward from earlier years** — unused losses chain across the year series indefinitely (per the ATO), starting from the entered [opening carried-forward loss](#cgt-settings) (losses from before the first recorded year). An AMMA statement's `capital_losses_applied` is deliberately **not** counted: those losses were applied at the *trust* level before attribution — the statement's CGT amounts are already net of them, and a trust cannot distribute capital losses to members, so only the investor's own losses enter the netting (`docs/ato/amma-statement-guidance-notes.md`; `docs/ato/personal-investors-guide-managed-fund-distributions.md`, Step 4).
 3. Apply losses against non-discountable gains first, then discount-eligible gains (taxpayer-favourable: the 50% discount falls on the largest possible remaining gain). Losses always apply before the discount.
 4. **Net capital gain** = remaining non-discountable gain + 50% of the remaining discount-eligible gain. Unused losses are carried forward into the next year in the series.
 
@@ -944,7 +944,7 @@ The label row's first cell is `ato_labels_2026`, naming the form year the mappin
 | `lic_capital_gain_deduction` | `D8` | The 50% LIC capital gain deduction is claimed at question D8 *Dividend deductions* |
 | `amma_australian_interest`, `amma_dividends_unfranked`, `amma_net_rent`, `amma_other_income` | `13U` | Non-primary production trust income components |
 | `amma_franked_dividends` | `13C` | *Franked distributions from trusts* — on the return 13C **includes** the attached franking credits; this column is the statement's franked-distribution component |
-| `amma_cgt_*`, `amma_capital_losses_applied` | `18 (working)` | Inputs to question 18 — the [net-capital-gain export](#net-capital-gain) carries the final 18H/18A/18V figures |
+| `amma_cgt_*` | `18 (working)` | Inputs to question 18 — the [net-capital-gain export](#net-capital-gain) carries the final 18H/18A/18V figures |
 | `franking_credits` | `11U / 13Q` | Claimable credits from direct dividends (11U) and trust distributions (13Q), summed |
 | `foreign_tax_offsets` | `20O` | FITO within the A$1,000 de-minimis (the excess column is unlabelled — claimable only per the taxpayer's own offset-limit calculation) |
 | `tfn_withholding_tax` | `10M / 11V / 13R / 12C` | TFN credits from interest, dividends, trust distributions, and ESS discounts, summed |
@@ -952,7 +952,7 @@ The label row's first cell is `ato_labels_2026`, naming the form year the mappin
 | `ess_foreign_source_discount` | `12A` | Foreign-source ESS discount memo (for the question 20 FITO claim) |
 | `deductions_*`, `deductions_total` | `D7 / D8` | Expenses of earning interest income at D7, dividend/distribution income at D8 — the per-type split between the two questions is the taxpayer's, per where the income belongs |
 
-Unlabelled columns are informational or derived: `franking_credits_denied` and `foreign_tax_offset_excess` (amounts *excluded* from the claimable lines), `ess_taxed_upfront_reduction` (already inside 12B), `gross_assessable_investment_income` / `net_assessable_investment_income` (derived totals), `taxpayer_basis`.
+Unlabelled columns are informational or derived: `franking_credits_denied` and `foreign_tax_offset_excess` (amounts *excluded* from the claimable lines), `ess_taxed_upfront_reduction` (already inside 12B), `amma_capital_losses_applied` (trust-level losses the AMMA's gains are already net of — not a loss of the taxpayer's, so it feeds no question-18 figure), `gross_assessable_investment_income` / `net_assessable_investment_income` (derived totals), `taxpayer_basis`.
 
 ### Exchange MIC validation
 

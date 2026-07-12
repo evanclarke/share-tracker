@@ -2093,3 +2093,224 @@ async fn ess_30_day_rule_example_wyatt_taxing_point_moves_to_the_sale() {
     assert_eq!(gains[0].capital_gain_loss, Decimal::ZERO);
     assert_eq!(gains[0].capital_loss, Decimal::ZERO);
 }
+
+/// `docs/ato/personal-investors-guide-managed-fund-distributions.md` —
+/// Example 26 (Bob, OZ Investments Fund).
+///
+/// > The fund gave him a statement showing his distribution included the
+/// > following capital gains: $100 calculated using the discount method
+/// > (grossed-up amount $200), $75 calculated using the indexation method,
+/// > $28 calculated using the 'other' method. … Bob writes the following at
+/// > question 18 in his supplementary tax return: $303 at label H, $203 at
+/// > label A.
+///
+/// The statement's discount line is the already-halved figure, grossed up ×2
+/// into 18H; with no losses the discount halves it straight back, so 18A is
+/// the $203 the statement components sum to. Bob's $105 tax-deferred amount
+/// (the fund is not an AMIT) is a CGT event E4 cost-base reduction, entered
+/// as a ReturnOfCapital action: cost base $1,200 → $1,095. (The reduced-cost-
+/// base side, $1,050 → $945, is not modelled — reduced cost base equals cost
+/// base under the elements-1–2 Known limitation.)
+#[tokio::test]
+async fn pig_managed_funds_example_26_bob_fund_gains_and_tax_deferred() {
+    let pool = test_pool().await;
+    put_listing(&pool, 1, "OZI").await;
+    // Bob's unit holding, entered as one unit carrying the $1,200 cost base.
+    put_buy(&pool, 1, 1, "2023-10-01", "1", "1200", "0").await;
+    // The fund's statement for 2024–25.
+    api_put(
+        &pool,
+        "/amma_statements/1",
+        json!({
+            "listing_id": 1,
+            "tax_year_end_date": "2025-06-30",
+            "date_received": "2025-05-31",
+            "units_held": "1",
+            "cgt_discount_gains": "100",
+            "cgt_indexation_gains": "75",
+            "cgt_other_gains": "28",
+        }),
+    )
+    .await;
+    // The $105 tax-deferred (non-assessable) amount — CGT event E4, entered
+    // as a return of capital of $105 per unit on the distribution date.
+    api_put(
+        &pool,
+        "/corporate_actions/1",
+        json!({
+            "action_type": "ReturnOfCapital",
+            "listing_id": 1,
+            "date": "2025-05-31",
+            "amount_per_unit": "105",
+            "currency": "AUD",
+        }),
+    )
+    .await;
+
+    let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net-capital-gain").await;
+    assert_eq!(years.len(), 1);
+    assert_eq!(years[0].tax_year, 2025);
+    // 18H = grossed-up discount gain + indexation + 'other' = 200 + 103 = 303.
+    assert_eq!(years[0].discount_eligible_gains, dec("200"));
+    assert_eq!(years[0].other_gains, dec("103"));
+    assert_eq!(
+        years[0].discount_eligible_gains + years[0].other_gains,
+        dec("303"),
+        "label 18H: total current year capital gains"
+    );
+    // No losses: the 50% discount takes the $200 back to $100 → 18A = $203.
+    assert_eq!(years[0].capital_losses, Decimal::ZERO);
+    assert_eq!(years[0].cgt_discount, dec("100"));
+    assert_eq!(
+        years[0].net_capital_gain,
+        dec("203"),
+        "label 18A: net capital gain"
+    );
+
+    // The tax-deferred amount is not income or a gain — it reduces the cost
+    // base of Bob's units: $1,200 − $105 = $1,095.
+    let holdings: Vec<HoldingOverview> =
+        api_post(&pool, "/portfolio/overview", json!({}), StatusCode::OK).await;
+    assert_eq!(holdings.len(), 1);
+    assert_eq!(holdings[0].total_cost_base, dec("1095"));
+}
+
+/// `docs/ato/personal-investors-guide-managed-fund-distributions.md` —
+/// Example 27 (Ilena, XYZ Managed Fund): a capital loss of the investor's own
+/// against fund-distributed gains.
+///
+/// > Her distribution included: $65 discounted capital gain, $50 capital gain
+/// > calculated using the 'other' method, $40 capital gain calculated using
+/// > the indexation method. … Ilena has no other capital gain but made a
+/// > capital loss of $100 when she sold some shares during the income year.
+/// > … Ilena writes the following at question 18 in her supplementary tax
+/// > return: $220 at label H, $60 at label A.
+///
+/// The worksheet: gross up $65 × 2 = $130; 18H = 130 + 50 + 40 = $220; her
+/// own $100 loss goes against the indexation + 'other' gains first ($90),
+/// the remaining $10 against the grossed-up discount gain ($130 → $120);
+/// 50% discount → $60 at 18A. Only Ilena's own loss enters the netting — the
+/// fund's trust-level netting is already inside the statement figures.
+#[tokio::test]
+async fn pig_managed_funds_example_27_ilena_own_loss_against_fund_gains() {
+    let pool = test_pool().await;
+    put_listing(&pool, 1, "XYZ").await;
+    put_listing(&pool, 2, "SHR").await; // the shares she sells at a loss
+    // The fund's statement for 2024–25.
+    api_put(
+        &pool,
+        "/amma_statements/1",
+        json!({
+            "listing_id": 1,
+            "tax_year_end_date": "2025-06-30",
+            "date_received": "2025-04-30",
+            "units_held": "1",
+            "cgt_discount_gains": "65",
+            "cgt_other_gains": "50",
+            "cgt_indexation_gains": "40",
+        }),
+    )
+    .await;
+    // Ilena's own $100 capital loss on some shares sold during the year.
+    put_buy(&pool, 1, 2, "2024-08-01", "100", "6", "0").await;
+    put_sell(&pool, 2, 2, "2025-03-01", "100", "5", "0", 1).await;
+
+    let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net-capital-gain").await;
+    assert_eq!(years.len(), 1);
+    assert_eq!(years[0].tax_year, 2025);
+    // 18H = grossed-up discount gain (65 × 2) + 'other' + indexation = 220.
+    assert_eq!(years[0].discount_eligible_gains, dec("130"));
+    assert_eq!(years[0].other_gains, dec("90"));
+    assert_eq!(
+        years[0].discount_eligible_gains + years[0].other_gains,
+        dec("220"),
+        "label 18H: total current year capital gains"
+    );
+    // Her own loss: $90 against the non-discountable gains, $10 against the
+    // grossed-up discount gain, then the 50% discount → $60 at 18A.
+    assert_eq!(years[0].capital_losses, dec("100"));
+    assert_eq!(years[0].net_other_gain, Decimal::ZERO);
+    assert_eq!(years[0].net_discount_eligible_gain, dec("120"));
+    assert_eq!(years[0].cgt_discount, dec("60"));
+    assert_eq!(
+        years[0].net_capital_gain,
+        dec("60"),
+        "label 18A: net capital gain"
+    );
+    assert_eq!(years[0].capital_loss_carried_forward, Decimal::ZERO);
+}
+
+/// `docs/ato/personal-investors-guide-managed-fund-distributions.md` —
+/// Example 28 (Miriam, Exponential Growth Fund): the AMIT cost base net
+/// amount, in both directions.
+///
+/// > Her units have a cost base of $55 each. The fund attributes $13 of
+/// > assessable income per unit … but only pays a cash dividend amount of $3
+/// > per unit … resulting in a shortfall AMIT cost base net amount of $10 per
+/// > unit [which] is used to increase the cost base … to $65. Alternatively
+/// > … the excess of $10 reduces the tax cost base of her units … to $45.
+///
+/// The AMMA per-unit `cost_base_adjustment` is signed: positive reduces the
+/// cost base (excess), negative increases it (shortfall).
+#[tokio::test]
+async fn pig_managed_funds_example_28_miriam_amit_cost_base_net_amount() {
+    let pool = test_pool().await;
+    // Two funds carry the example's two alternatives, one unit each at $55.
+    put_listing(&pool, 1, "EGF").await;
+    put_listing(&pool, 2, "EGF2").await;
+    put_buy(&pool, 1, 1, "2024-07-15", "1", "55", "0").await;
+    put_buy(&pool, 2, 2, "2024-07-15", "1", "55", "0").await;
+    // Shortfall: attribution exceeds cash → the net amount increases the cost
+    // base (a negative adjustment).
+    api_put(
+        &pool,
+        "/amma_statements/1",
+        json!({
+            "listing_id": 1,
+            "tax_year_end_date": "2025-06-30",
+            "date_received": "2025-07-31",
+            "units_held": "1",
+            "cost_base_adjustment": "-10",
+        }),
+    )
+    .await;
+    api_put(
+        &pool,
+        "/amit_adjustments/1",
+        json!({ "amma_statement_id": 1, "trade_id": 1, "quantity": "1" }),
+    )
+    .await;
+    // Excess: cash exceeds attribution → the net amount reduces the cost base.
+    api_put(
+        &pool,
+        "/amma_statements/2",
+        json!({
+            "listing_id": 2,
+            "tax_year_end_date": "2025-06-30",
+            "date_received": "2025-07-31",
+            "units_held": "1",
+            "cost_base_adjustment": "10",
+        }),
+    )
+    .await;
+    api_put(
+        &pool,
+        "/amit_adjustments/2",
+        json!({ "amma_statement_id": 2, "trade_id": 2, "quantity": "1" }),
+    )
+    .await;
+
+    let holdings: Vec<HoldingOverview> =
+        api_post(&pool, "/portfolio/overview", json!({}), StatusCode::OK).await;
+    assert_eq!(holdings.len(), 2);
+    assert_eq!(
+        holdings[0].total_cost_base,
+        dec("65"),
+        "shortfall: $55 + $10 increase"
+    );
+    assert_eq!(
+        holdings[1].total_cost_base,
+        dec("45"),
+        "excess: $55 − $10 reduction"
+    );
+}

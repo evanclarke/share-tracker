@@ -12,11 +12,16 @@
 //!     - non-discountable gains (realised parcels held ≤ 12 months, plus AMMA
 //!       indexation-method and other-method gains, neither of which gets the 50%
 //!       discount).
-//!  2. Total the year's capital losses: realised losses + AMMA capital losses
-//!     applied, plus the net capital loss brought forward from earlier years
-//!     (losses carry forward indefinitely, per `docs/ato/cgt-using-capital-losses.md`).
-//!     The chain starts from the entered opening carried-forward loss in
-//!     `cgt_settings` (losses from before the first year in the system).
+//!  2. Total the year's capital losses: realised losses, plus the net capital
+//!     loss brought forward from earlier years (losses carry forward
+//!     indefinitely, per `docs/ato/cgt-using-capital-losses.md`). The chain
+//!     starts from the entered opening carried-forward loss in `cgt_settings`
+//!     (losses from before the first year in the system). An AMMA statement's
+//!     `capital_losses_applied` is *not* a loss of the taxpayer's: trust-level
+//!     losses are already netted inside the attributed gains and cannot flow
+//!     to members (`docs/ato/amma-statement-guidance-notes.md`,
+//!     `docs/ato/personal-investors-guide-managed-fund-distributions.md`
+//!     Step 4 — only the investor's own losses enter the worksheet).
 //!  3. Apply losses against gains in the taxpayer-favourable order — non-discountable
 //!     gains first, then discount-eligible gains — so the 50% discount falls on the
 //!     largest possible remaining gain.
@@ -52,8 +57,12 @@ pub struct NetCapitalGainYear {
     /// Gross non-discountable capital gains (realised parcels held ≤ 12 months +
     /// AMMA indexation-method + AMMA other-method gains).
     pub other_gains: Decimal,
-    /// Capital losses arising this year (realised losses + AMMA capital losses
-    /// applied), as a positive amount. Excludes the brought-forward balance.
+    /// Capital losses arising this year (realised losses), as a positive
+    /// amount. Excludes the brought-forward balance. An AMMA's
+    /// `capital_losses_applied` is deliberately not counted: those losses were
+    /// applied at the *trust* level before attribution — the statement's gains
+    /// are already net of them, and a trust cannot distribute capital losses
+    /// to members (`docs/ato/personal-investors-guide-managed-fund-distributions.md`).
     pub capital_losses: Decimal,
     /// Net capital loss brought forward from earlier years (unused losses chained
     /// from prior years in the series, seeded by the `cgt_settings` opening
@@ -454,10 +463,16 @@ async fn gross_buckets(
     }
 
     // AMMA-attributed CGT components, converted to AUD via the ATO rate for the
-    // month of tax_year_end_date (the statement's only period anchor).
+    // month of tax_year_end_date (the statement's only period anchor). The
+    // statement's `capital_losses_applied` is deliberately not read here: the
+    // attributed gains are already net of the losses the trust applied at its
+    // own level, and trust losses cannot flow to members — counting them again
+    // would double-deduct (`docs/ato/amma-statement-guidance-notes.md`;
+    // `docs/ato/personal-investors-guide-managed-fund-distributions.md` Step 4
+    // applies only the investor's own losses).
     let amma_rows = sqlx::query(
         "SELECT tax_year_end_date, cgt_discount_gains, cgt_indexation_gains, \
-         cgt_other_gains, capital_losses_applied, currency \
+         cgt_other_gains, currency \
          FROM amma_statements",
     )
     .fetch_all(pool)
@@ -472,12 +487,10 @@ async fn gross_buckets(
         let discount_net = aud_field(&fx, row, "cgt_discount_gains", &currency, d)?;
         let indexation = aud_field(&fx, row, "cgt_indexation_gains", &currency, d)?;
         let other = aud_field(&fx, row, "cgt_other_gains", &currency, d)?;
-        let losses = aud_field(&fx, row, "capital_losses_applied", &currency, d)?;
 
         let b = buckets.entry(year_end.year()).or_default();
         b.discount_eligible += discount_net * Decimal::from(2);
         b.other += indexation + other;
-        b.losses += losses;
     }
 
     // CGT event E10 gains — excess AMIT cost base reductions over a parcel's cost
@@ -1410,23 +1423,68 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn db_amma_indexation_other_gains_and_losses() {
+    async fn db_amma_indexation_and_other_gains_are_non_discountable() {
         let pool = test_pool().await;
-        // Indexation 30 + other 20 = 50 non-discountable; capital losses applied 10.
-        // Loss hits non-discountable first → net_other = 40, NCG = 40.
+        // Indexation 30 + other 20 = 50 non-discountable, taxed in full.
         insert_listing(&pool, 1, "VAF").await;
         let mut a = make_amma(1, 1, NaiveDate::from_ymd_opt(2024, 6, 30).unwrap());
         a.cgt_indexation_gains = Decimal::from(30);
         a.cgt_other_gains = Decimal::from(20);
-        a.capital_losses_applied = Decimal::from(10);
         amma::db_upsert(&pool, &a).await.unwrap();
 
         let r = db_net_capital_gain(&pool).await.unwrap();
         assert_eq!(r.len(), 1);
         assert_eq!(r[0].other_gains, Decimal::from(50));
-        assert_eq!(r[0].capital_losses, Decimal::from(10));
-        assert_eq!(r[0].net_other_gain, Decimal::from(40));
-        assert_eq!(r[0].net_capital_gain, Decimal::from(40));
+        assert_eq!(r[0].net_other_gain, Decimal::from(50));
+        assert_eq!(r[0].net_capital_gain, Decimal::from(50));
+    }
+
+    #[tokio::test]
+    async fn db_amma_trust_level_losses_applied_never_enter_the_loss_pool() {
+        let pool = test_pool().await;
+        // The AMMA's capital_losses_applied is the trust's own netting,
+        // disclosed for transparency — the attributed gains are already net of
+        // it and a trust cannot distribute losses to members
+        // (docs/ato/personal-investors-guide-managed-fund-distributions.md,
+        // Step 4: only the investor's own losses are applied). It must offset
+        // nothing: not the statement's own gains, not unrelated realised
+        // gains, and it must not carry forward.
+        insert_listing(&pool, 1, "VAF").await;
+        let mut a = make_amma(1, 1, NaiveDate::from_ymd_opt(2024, 6, 30).unwrap());
+        a.cgt_indexation_gains = Decimal::from(30);
+        a.cgt_other_gains = Decimal::from(20);
+        a.capital_losses_applied = Decimal::from(1000);
+        amma::db_upsert(&pool, &a).await.unwrap();
+        // An unrelated realised gain in the same year: buy 10 → sell 15.
+        insert_trade(
+            &pool,
+            1,
+            trade::TradeType::Buy,
+            1,
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
+        insert_trade(
+            &pool,
+            2,
+            trade::TradeType::Sell,
+            1,
+            NaiveDate::from_ymd_opt(2024, 5, 1).unwrap(),
+            Decimal::from(100),
+            Decimal::from(15),
+        )
+        .await;
+        allocate(&pool, 1, 2, 1, Decimal::from(100)).await;
+
+        let r = db_net_capital_gain(&pool).await.unwrap();
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].capital_losses, Decimal::ZERO);
+        assert_eq!(r[0].other_gains, Decimal::from(550)); // 500 realised + 50 AMMA
+        assert_eq!(r[0].net_other_gain, Decimal::from(550));
+        assert_eq!(r[0].net_capital_gain, Decimal::from(550));
+        assert_eq!(r[0].capital_loss_carried_forward, Decimal::ZERO);
     }
 
     #[tokio::test]

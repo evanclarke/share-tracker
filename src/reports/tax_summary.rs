@@ -45,7 +45,12 @@ pub struct TaxYearSummary {
     pub amma_cgt_indexation_gains: Decimal,
     /// AMMA attributed CGT other gains.
     pub amma_cgt_other_gains: Decimal,
-    /// AMMA capital losses applied.
+    /// Informational: capital losses the trust applied *at its own level*
+    /// before attributing the CGT amounts above (disclosed on the AMMA per the
+    /// trustee guidance notes). Not a loss of the taxpayer's — the attributed
+    /// gains are already net of it, and trust losses cannot flow to members —
+    /// so no calculation reads it
+    /// (`docs/ato/personal-investors-guide-managed-fund-distributions.md`).
     pub amma_capital_losses_applied: Decimal,
     /// Claimable franking credits (income + AMMA). Credits attached to a
     /// dividend whose shares fail the 45-day at-risk holding-period rule (90
@@ -192,7 +197,7 @@ const CSV_ATO_LABELS: &[&str] = &[
     "18 (working)",            // amma_cgt_discount_gains
     "18 (working)",            // amma_cgt_indexation_gains
     "18 (working)",            // amma_cgt_other_gains
-    "18 (working)",            // amma_capital_losses_applied
+    "",                        // amma_capital_losses_applied (trust-level, informational)
     "11U / 13Q",               // franking_credits
     "",                        // franking_credits_denied (informational)
     "20O",                     // foreign_tax_offsets
@@ -1592,6 +1597,10 @@ mod tests {
         // Informational/derived columns report at no label.
         assert_eq!(label_of("franking_credits_denied"), "");
         assert_eq!(label_of("net_assessable_investment_income"), "");
+        // Trust-level losses the AMMA's gains are already net of — not the
+        // taxpayer's loss, so it feeds no question-18 figure
+        // (docs/ato/personal-investors-guide-managed-fund-distributions.md).
+        assert_eq!(label_of("amma_capital_losses_applied"), "");
         assert_eq!(label_of("taxpayer_basis"), "");
     }
 
