@@ -1604,6 +1604,21 @@ mod tests {
             );
         }
 
+        // A pre-CGT-dated Sell is rejected through the same shared check
+        // (REQUIREMENTS 2026-07-13): pre-CGT holdings are outside CGT and
+        // not modelled, and the check runs before the parcel-date checks so
+        // the rejection explains the actual rule.
+        let mut pre_cgt = base.clone();
+        pre_cgt["date"] = "1985-09-19".into();
+        pre_cgt["settlement_date"] = "1985-09-19".into();
+        let (status, detail) = put_sell_json(&pool, 2, pre_cgt).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            detail.contains("dated before 20 September 1985"),
+            "detail: {detail}"
+        );
+        assert!(!trade_exists(&pool, 2).await);
+
         // A zero-quantity Sell (with the matching empty allocation set) is
         // rejected as not-positive, not as an allocation mismatch.
         let mut zero_qty = base.clone();

@@ -1,14 +1,18 @@
-//! Interest income: bank / term-deposit / broker-cash interest (ATO question
-//! 10 — Gross interest, docs/ato/tax-return-labels-2026.md). Interest has no
-//! listing, so it is its own entity rather than an `income` row.
+//! Interest income: bank / term-deposit / broker-cash interest
+//! (docs/ato/tax-return-labels-2026.md). Interest has no listing, so it is
+//! its own entity rather than an `income` row.
 //!
-//! `amount` is the gross interest including any TFN amount withheld (the 10L
-//! convention); `tfn_withholding_tax` is the withheld amount (10M). The tax
-//! summary (`reports::tax_summary`) totals the gross per Australian financial
-//! year as its `interest_income` line, includes it in gross assessable
-//! investment income, and joins the TFN amount to the combined withholding
-//! line, converting a non-AUD amount to AUD via the ATO rate for the month of
-//! `date_paid` (failing loudly when no rate exists).
+//! `amount` is the gross interest including any amount withheld;
+//! `foreign_source` classifies the row by payer. The tax summary
+//! (`reports::tax_summary`) totals Australian-source gross per Australian
+//! financial year as its `interest_income` line (question 10 label 10L, with
+//! `tfn_withholding_tax` joining the combined withholding line, 10M), and
+//! foreign-source gross as its `foreign_interest_income` line (question 20
+//! label 20E — assessable foreign source income, with `foreign_tax_paid`
+//! joining the FITO line, 20O). Both classifications count in gross
+//! assessable investment income, converting a non-AUD amount to AUD via the
+//! ATO rate for the month of `date_paid` (failing loudly when no rate
+//! exists).
 
 use crate::infra::decimal::row_dec;
 use crate::infra::http::ApiError;
@@ -29,11 +33,21 @@ pub struct InterestIncome {
     /// Date paid/credited: its month sets the ATO FX conversion month and the
     /// Australian financial year the interest is assessed in.
     pub date_paid: NaiveDate,
-    /// Gross interest (including any TFN amount withheld), in `currency`.
+    /// Gross interest (including any amount withheld), in `currency`.
     pub amount: Decimal,
     /// TFN amount withheld from the gross interest; joins the tax summary's
-    /// combined TFN withholding line.
+    /// combined TFN withholding line. Australian-source rows only — TFN
+    /// amounts are withheld by Australian investment bodies.
     pub tfn_withholding_tax: Decimal,
+    /// Whether the payer is foreign (e.g. a US broker's cash / money-market
+    /// sweep fund): a foreign-source row is assessable foreign source income
+    /// (label 20E) on the tax summary's `foreign_interest_income` line, not
+    /// Australian gross interest (10L). Defaults to false (Australian).
+    pub foreign_source: bool,
+    /// Foreign tax withheld from the gross amount, in `currency`; joins the
+    /// tax summary's FITO line (capped at the A$1,000 de-minimis,
+    /// docs/ato/fito-limit.md). Foreign-source rows only.
+    pub foreign_tax_paid: Decimal,
     /// ISO 4217 currency the amounts are denominated in. The tax summary
     /// converts a non-AUD amount to AUD via the ATO rate for this currency and
     /// the month of `date_paid` (see `infra::fx::to_aud`). Defaults to AUD.
@@ -54,6 +68,8 @@ impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for InterestIncome {
             date_paid: row.try_get("date_paid")?,
             amount: row_dec(row, "amount")?,
             tfn_withholding_tax: row_dec(row, "tfn_withholding_tax")?,
+            foreign_source: row.try_get("foreign_source")?,
+            foreign_tax_paid: row_dec(row, "foreign_tax_paid")?,
             currency: row.try_get("currency")?,
             source: row.try_get("source")?,
             holding_account_id: row.try_get("holding_account_id")?,
@@ -68,6 +84,10 @@ pub struct InterestIncomeBody {
     pub amount: Decimal,
     #[serde(default)]
     pub tfn_withholding_tax: Decimal,
+    #[serde(default)]
+    pub foreign_source: bool,
+    #[serde(default)]
+    pub foreign_tax_paid: Decimal,
     #[serde(default = "default_currency")]
     pub currency: String,
     #[serde(default)]
@@ -87,8 +107,8 @@ pub fn router() -> Router<SqlitePool> {
     )
 }
 
-const COLUMNS: &str =
-    "id, date_paid, amount, tfn_withholding_tax, currency, source, holding_account_id";
+const COLUMNS: &str = "id, date_paid, amount, tfn_withholding_tax, foreign_source, \
+     foreign_tax_paid, currency, source, holding_account_id";
 
 pub async fn db_list(pool: &SqlitePool) -> Result<Vec<InterestIncome>, sqlx::Error> {
     sqlx::query_as(&format!(
@@ -110,11 +130,19 @@ pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<InterestIncome>
 #[derive(Debug)]
 pub enum UpsertError {
     Db(sqlx::Error),
-    /// A negative `amount` or `tfn_withholding_tax` (carries the field name):
-    /// interest figures are the statement's positive (or zero) amounts — a
-    /// negative would silently reduce the year's gross-interest line. Mapped
-    /// to `422`.
+    /// A negative `amount`, `tfn_withholding_tax`, or `foreign_tax_paid`
+    /// (carries the field name): interest figures are the statement's
+    /// positive (or zero) amounts — a negative would silently reduce the
+    /// year's gross-interest line. Mapped to `422`.
     NegativeAmount(&'static str),
+    /// `foreign_tax_paid` on an Australian-source row: foreign tax is only
+    /// withheld by a foreign payer, and silently accepting it would claim a
+    /// FITO the row can't support. Mapped to `422`.
+    ForeignTaxOnAustralianSource,
+    /// `tfn_withholding_tax` on a foreign-source row: TFN amounts are
+    /// withheld by Australian investment bodies — foreign withholding belongs
+    /// in `foreign_tax_paid`. Mapped to `422`.
+    TfnWithholdingOnForeignSource,
 }
 
 impl From<sqlx::Error> for UpsertError {
@@ -130,6 +158,16 @@ impl From<UpsertError> for ApiError {
                 "{field} cannot be negative — interest figures are the statement's own \
                  positive (or zero) amounts"
             )),
+            UpsertError::ForeignTaxOnAustralianSource => ApiError::unprocessable(
+                "foreign_tax_paid only applies to a foreign-source interest row — mark the \
+                 row foreign_source (an Australian payer withholds TFN amounts, entered as \
+                 tfn_withholding_tax)",
+            ),
+            UpsertError::TfnWithholdingOnForeignSource => ApiError::unprocessable(
+                "tfn_withholding_tax only applies to an Australian-source interest row — TFN \
+                 amounts are withheld by Australian investment bodies; foreign withholding is \
+                 entered as foreign_tax_paid",
+            ),
             // Unknown currency/account (FK) surfaces as 422 with the
             // offending constraint named.
             UpsertError::Db(err) => err.into(),
@@ -141,19 +179,32 @@ pub async fn db_upsert(pool: &SqlitePool, i: &InterestIncome) -> Result<(), Upse
     for (field, value) in [
         ("amount", i.amount),
         ("tfn_withholding_tax", i.tfn_withholding_tax),
+        ("foreign_tax_paid", i.foreign_tax_paid),
     ] {
         if value < Decimal::ZERO {
             return Err(UpsertError::NegativeAmount(field));
         }
     }
+    // Withholding must match the source classification, or the tax summary
+    // would claim an offset the row can't support (FITO needs a foreign
+    // payer; a TFN amount needs an Australian one).
+    if !i.foreign_source && i.foreign_tax_paid > Decimal::ZERO {
+        return Err(UpsertError::ForeignTaxOnAustralianSource);
+    }
+    if i.foreign_source && i.tfn_withholding_tax > Decimal::ZERO {
+        return Err(UpsertError::TfnWithholdingOnForeignSource);
+    }
     sqlx::query(
         "INSERT INTO interest_income \
-         (id, date_paid, amount, tfn_withholding_tax, currency, source, holding_account_id) \
-         VALUES (?, ?, ?, ?, ?, ?, ?) \
+         (id, date_paid, amount, tfn_withholding_tax, foreign_source, foreign_tax_paid, \
+          currency, source, holding_account_id) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT(id) DO UPDATE SET \
              date_paid           = excluded.date_paid, \
              amount              = excluded.amount, \
              tfn_withholding_tax = excluded.tfn_withholding_tax, \
+             foreign_source      = excluded.foreign_source, \
+             foreign_tax_paid    = excluded.foreign_tax_paid, \
              currency            = excluded.currency, \
              source              = excluded.source, \
              holding_account_id  = excluded.holding_account_id",
@@ -162,6 +213,8 @@ pub async fn db_upsert(pool: &SqlitePool, i: &InterestIncome) -> Result<(), Upse
     .bind(i.date_paid)
     .bind(i.amount.to_string())
     .bind(i.tfn_withholding_tax.to_string())
+    .bind(i.foreign_source)
+    .bind(i.foreign_tax_paid.to_string())
     .bind(&i.currency)
     .bind(&i.source)
     .bind(i.holding_account_id)
@@ -204,6 +257,8 @@ async fn upsert(
         date_paid: body.date_paid,
         amount: body.amount,
         tfn_withholding_tax: body.tfn_withholding_tax,
+        foreign_source: body.foreign_source,
+        foreign_tax_paid: body.foreign_tax_paid,
         currency: body.currency,
         source: body.source,
         holding_account_id: body.holding_account_id,
@@ -239,6 +294,8 @@ mod tests {
             date_paid: NaiveDate::from_ymd_opt(2024, 3, 15).unwrap(),
             amount: Decimal::from(250),
             tfn_withholding_tax: Decimal::ZERO,
+            foreign_source: false,
+            foreign_tax_paid: Decimal::ZERO,
             currency: "AUD".to_string(),
             source: Some("savings account".to_string()),
             holding_account_id: None,
@@ -261,6 +318,28 @@ mod tests {
         assert_eq!(got.date_paid, NaiveDate::from_ymd_opt(2024, 3, 15).unwrap());
         assert_eq!(got.source.as_deref(), Some("savings account"));
         assert_eq!(got.holding_account_id, None);
+    }
+
+    /// A foreign-source row (docs/ato/tax-return-labels-2026.md, question 20)
+    /// round-trips its classification and foreign tax withheld — the inputs
+    /// the tax summary's 20E / FITO routing reads.
+    #[tokio::test]
+    async fn db_foreign_source_round_trips() {
+        let pool = test_pool().await;
+        let mut i = sample(1);
+        i.foreign_source = true;
+        i.foreign_tax_paid = "37.50".parse().unwrap();
+        i.currency = "USD".to_string();
+        db_upsert(&pool, &i).await.unwrap();
+        let got = db_get(&pool, 1).await.unwrap().unwrap();
+        assert!(got.foreign_source);
+        assert_eq!(got.foreign_tax_paid, "37.50".parse::<Decimal>().unwrap());
+        // Existing rows / omitted fields stay Australian-source with no
+        // foreign tax (the pre-migration behaviour).
+        db_upsert(&pool, &sample(2)).await.unwrap();
+        let got = db_get(&pool, 2).await.unwrap().unwrap();
+        assert!(!got.foreign_source);
+        assert_eq!(got.foreign_tax_paid, Decimal::ZERO);
     }
 
     #[tokio::test]
@@ -349,6 +428,15 @@ mod tests {
                     "tfn_withholding_tax": "-1"
                 }),
             ),
+            (
+                "foreign_tax_paid",
+                serde_json::json!({
+                    "date_paid": "2024-03-15",
+                    "amount": "250",
+                    "foreign_source": true,
+                    "foreign_tax_paid": "-1"
+                }),
+            ),
         ] {
             let resp = router()
                 .with_state(pool.clone())
@@ -377,6 +465,55 @@ mod tests {
                 db_get(&pool, 1).await.unwrap().is_none(),
                 "negative {field}: nothing persisted"
             );
+        }
+    }
+
+    /// Withholding must match the source classification: foreign tax needs a
+    /// foreign-source row (else the FITO line would claim an offset the row
+    /// can't support) and a TFN amount needs an Australian one. Both reject
+    /// 422 with the correcting field named, and nothing is persisted.
+    #[tokio::test]
+    async fn api_withholding_source_mismatch_rejected_422() {
+        let pool = test_pool().await;
+        for (needle, body) in [
+            (
+                "foreign_tax_paid only applies to a foreign-source interest row",
+                serde_json::json!({
+                    "date_paid": "2024-03-15",
+                    "amount": "250",
+                    "foreign_tax_paid": "10"
+                }),
+            ),
+            (
+                "tfn_withholding_tax only applies to an Australian-source interest row",
+                serde_json::json!({
+                    "date_paid": "2024-03-15",
+                    "amount": "250",
+                    "foreign_source": true,
+                    "tfn_withholding_tax": "10"
+                }),
+            ),
+        ] {
+            let resp = router()
+                .with_state(pool.clone())
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri("/interest_income/1")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+            let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+            let detail = String::from_utf8(bytes.to_vec()).unwrap();
+            assert!(
+                detail.contains(needle),
+                "expected '{needle}', got: {detail}"
+            );
+            assert!(db_get(&pool, 1).await.unwrap().is_none());
         }
     }
 

@@ -843,14 +843,17 @@ async fn cgt_non_assessable_payments_example_45_rob_return_of_capital() {
 /// > acquisition date before 20 September 1985, and 6,000 ordinary shares
 /// > with a cost base of $0.50 each with an acquisition date on 30 April 1988.
 ///
-/// (The pre-CGT exemption for the 1984 parcel is not modelled — the assertion
-/// on that parcel covers the quantity conversion and preserved acquisition
-/// date the determination states.)
+/// (The pre-CGT exemption for John's 1984 parcel is not modelled, and a
+/// pre-CGT-dated trade is rejected at write time — see Known limitations —
+/// so that parcel is entered with the first post-CGT date, 20 September
+/// 1985, as a stand-in: the conversion arithmetic is date-independent, and
+/// the assertion on that parcel covers the quantity conversion and preserved
+/// acquisition date the determination states.)
 #[tokio::test]
 async fn td_2000_10_example_1_john_share_split() {
     let pool = test_pool().await;
     put_listing(&pool, 1, "XYZ").await;
-    put_buy(&pool, 1, 1, "1984-09-15", "2000", "1", "0").await;
+    put_buy(&pool, 1, 1, "1985-09-20", "2000", "1", "0").await;
     put_buy(&pool, 2, 1, "1988-04-30", "3000", "1", "0").await;
     // The 2-for-1 conversion (100,000 → 200,000 shares), as a corporate action.
     api_put(
@@ -869,9 +872,10 @@ async fn td_2000_10_example_1_john_share_split() {
     let parcels: Vec<crate::reports::open_parcels::OpenParcel> =
         api_get(&pool, "/portfolio/open-parcels").await;
     assert_eq!(parcels.len(), 2);
-    // 2,000 → 4,000 shares, acquisition date still September 1984.
+    // 2,000 → 4,000 shares, acquisition date preserved across the split
+    // (the stand-in for the determination's September 1984 date).
     assert_eq!(parcels[0].remaining_quantity, dec("4000"));
-    assert_eq!(parcels[0].acquisition_date.to_string(), "1984-09-15");
+    assert_eq!(parcels[0].acquisition_date.to_string(), "1985-09-20");
     // 3,000 → 6,000 shares with a cost base of $0.50 each, still 30 April 1988.
     assert_eq!(parcels[1].remaining_quantity, dec("6000"));
     assert_eq!(parcels[1].acquisition_date.to_string(), "1988-04-30");
@@ -894,11 +898,15 @@ async fn td_2000_10_example_1_john_share_split() {
 /// > John would now have 1,000 ordinary shares with an acquisition date before
 /// > 20 September 1985, and 1,500 ordinary shares with a cost base of $2.00
 /// > each with an acquisition date on 30 April 1988.
+///
+/// (As in Example 1, John's pre-CGT parcel is entered with the first
+/// post-CGT date as a stand-in — a pre-CGT-dated trade is rejected at write
+/// time.)
 #[tokio::test]
 async fn td_2000_10_example_2_john_share_consolidation() {
     let pool = test_pool().await;
     put_listing(&pool, 1, "XYZ").await;
-    put_buy(&pool, 1, 1, "1984-09-15", "2000", "1", "0").await;
+    put_buy(&pool, 1, 1, "1985-09-20", "2000", "1", "0").await;
     put_buy(&pool, 2, 1, "1988-04-30", "3000", "1", "0").await;
     // The 1-for-2 consolidation (100,000 → 50,000 shares).
     api_put(
@@ -919,7 +927,7 @@ async fn td_2000_10_example_2_john_share_consolidation() {
     assert_eq!(parcels.len(), 2);
     // 2,000 → 1,000 shares, acquisition date preserved.
     assert_eq!(parcels[0].remaining_quantity, dec("1000"));
-    assert_eq!(parcels[0].acquisition_date.to_string(), "1984-09-15");
+    assert_eq!(parcels[0].acquisition_date.to_string(), "1985-09-20");
     // 3,000 → 1,500 shares with a cost base of $2.00 each.
     assert_eq!(parcels[1].remaining_quantity, dec("1500"));
     assert_eq!(
@@ -948,15 +956,17 @@ async fn td_2000_10_example_2_john_share_consolidation() {
 ///
 /// The 400 bonus shares on 400 held are a 1-for-1 issue applied per parcel.
 /// The ATO treats the first parcel (1 June 1985) as pre-CGT and exempt; the
-/// pre-CGT exemption is not modelled here, so this test asserts only the
-/// figures the ATO states for the post-CGT parcel — 600 shares, unchanged
-/// $300 cost base (50 cents each), acquisition date still 27 May 1986 — plus
-/// that the issue itself is no CGT event.
+/// pre-CGT exemption is not modelled here and a pre-CGT-dated trade is
+/// rejected at write time (see Known limitations), so that parcel is entered
+/// with the first post-CGT date, 20 September 1985, as a stand-in and this
+/// test asserts only the figures the ATO states for the post-CGT parcel —
+/// 600 shares, unchanged $300 cost base (50 cents each), acquisition date
+/// still 27 May 1986 — plus that the issue itself is no CGT event.
 #[tokio::test]
 async fn bonus_shares_example_35_chris_fully_paid_bonus_shares() {
     let pool = test_pool().await;
     put_listing(&pool, 1, "MAC").await;
-    put_buy(&pool, 1, 1, "1985-06-01", "100", "1", "0").await;
+    put_buy(&pool, 1, 1, "1985-09-20", "100", "1", "0").await;
     put_buy(&pool, 2, 1, "1986-05-27", "300", "1", "0").await;
     // The 1-for-1 bonus issue from the capital profits reserve.
     api_put(
@@ -976,9 +986,10 @@ async fn bonus_shares_example_35_chris_fully_paid_bonus_shares() {
         api_get(&pool, "/portfolio/open-parcels").await;
     assert_eq!(parcels.len(), 2);
     // 100 → 200 shares, acquisition date preserved (the ATO's pre-CGT
-    // exemption for this parcel is out of scope).
+    // exemption for this parcel is out of scope; its 1 June 1985 date is
+    // entered as the first post-CGT day, the stand-in explained above).
     assert_eq!(parcels[0].remaining_quantity, dec("200"));
-    assert_eq!(parcels[0].acquisition_date.to_string(), "1985-06-01");
+    assert_eq!(parcels[0].acquisition_date.to_string(), "1985-09-20");
     // 300 → 600 shares at 50 cents: the $300 cost base is unchanged.
     assert_eq!(parcels[1].remaining_quantity, dec("600"));
     assert_eq!(parcels[1].acquisition_date.to_string(), "1986-05-27");

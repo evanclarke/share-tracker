@@ -306,7 +306,7 @@ const COLUMN_KINDS = (function () {
     'discount_eligible_gains', 'net_discount_eligible_gain', 'other_gains', 'net_other_gain',
     'capital_losses', 'capital_loss_brought_forward', 'capital_loss_carried_forward',
     'cgt_discount', 'net_capital_gain', 'dividends_assessable', 'interest_income',
-    'franking_credits_denied',
+    'foreign_interest_income', 'franking_credits_denied',
     'foreign_tax_offsets', 'foreign_tax_offset_excess',
     'amma_australian_interest', 'amma_dividends_unfranked', 'amma_franked_dividends',
     'amma_net_rent', 'amma_foreign_income', 'amma_other_income', 'amma_cgt_discount_gains',

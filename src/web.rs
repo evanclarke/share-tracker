@@ -524,9 +524,15 @@ mod tests {
         assert!(js.contains("/interest_income"));
         assert!(js.contains("Interest Income"));
         assert!(js.contains("Gross amount"));
-        // The tax-summary interest column is classified as money so it
-        // formats automatically when the report response carries it.
+        // The foreign-source classification (REQUIREMENTS 2026-07-13): the
+        // form carries the flag and the foreign tax withheld field.
+        assert!(js.contains("foreign_source"));
+        assert!(js.contains("Foreign tax paid"));
+        // The tax-summary interest columns (Australian 10L and foreign 20E)
+        // are classified as money so they format automatically when the
+        // report response carries them.
         assert!(js.contains("interest_income"));
+        assert!(js.contains("foreign_interest_income"));
     }
 
     #[tokio::test]

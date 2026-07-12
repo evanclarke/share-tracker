@@ -64,11 +64,11 @@ pub enum CostBaseRule {
 
 /// Start of CGT: an asset the deceased acquired before this date is pre-CGT,
 /// so the [`CostBaseRule::MarketValueAtDeath`] rule applies and their
-/// acquisition date is not recorded.
-const CGT_START: NaiveDate = match NaiveDate::from_ymd_opt(1985, 9, 20) {
-    Some(d) => d,
-    None => unreachable!(),
-};
+/// acquisition date is not recorded. A death before it makes the parcel
+/// pre-CGT in the *beneficiary's* hands too (the s 115-30 clock deems
+/// acquisition at the death), which is not modelled. Shared with the trade
+/// write paths, which reject any pre-CGT-dated trade.
+use super::trade::CGT_START;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Inheritance {
@@ -169,6 +169,11 @@ pub enum UpsertError {
     /// before 20 September 1985 — that is the pre-CGT case, which takes the
     /// `MarketValueAtDeath` rule instead.
     DeceasedAcquisitionPreCgt,
+    /// A death before 20 September 1985: the beneficiary is treated as
+    /// having owned the asset since (at latest) the death, so the parcel is
+    /// pre-CGT in the beneficiary's own hands — outside CGT and not
+    /// modelled.
+    DeathPreCgt,
     /// The deceased cannot have acquired the asset after they died.
     DeceasedAcquisitionAfterDeath,
     /// `lpr_expenditure_date` must be present exactly when a non-zero
@@ -210,6 +215,10 @@ impl From<UpsertError> for ApiError {
             ),
             UpsertError::DeceasedAcquisitionAfterDeath => ApiError::unprocessable(
                 "the deceased's acquisition date cannot be after the date of death",
+            ),
+            UpsertError::DeathPreCgt => ApiError::unprocessable(
+                "the date of death is before 20 September 1985 — the inherited parcel is \
+                 pre-CGT in the beneficiary's own hands, which is outside CGT and not modelled",
             ),
             UpsertError::LprExpenditureDateMismatch => ApiError::unprocessable(
                 "a non-zero LPR expenditure needs the date the LPR incurred it (and a date \
@@ -281,6 +290,11 @@ fn validate(inh: &Inheritance) -> Result<(), UpsertError> {
     }
     if inh.cost_base < Decimal::ZERO || inh.lpr_expenditure < Decimal::ZERO {
         return Err(UpsertError::NegativeAmount);
+    }
+    // Checked before the per-rule acquisition checks so a pre-CGT death gets
+    // this message (not misdirected advice to switch cost-base rules).
+    if inh.date_of_death < CGT_START {
+        return Err(UpsertError::DeathPreCgt);
     }
     match (inh.cost_base_rule, inh.deceased_acquisition_date) {
         (CostBaseRule::DeceasedCostBase, Some(acquired)) => {
@@ -718,6 +732,24 @@ mod tests {
         assert!(matches!(
             db_upsert(&pool, &inh).await,
             Err(UpsertError::DeceasedAcquisitionAfterDeath)
+        ));
+
+        // A death before 20 Sep 1985 (REQUIREMENTS 2026-07-13): the parcel
+        // would be pre-CGT in the beneficiary's own hands (the s 115-30
+        // clock deems acquisition at the death at latest) — outside CGT and
+        // not modelled, whichever cost-base rule was chosen.
+        let mut inh = pre_cgt(1);
+        inh.date_of_death = ymd(1985, 9, 19);
+        assert!(matches!(
+            db_upsert(&pool, &inh).await,
+            Err(UpsertError::DeathPreCgt)
+        ));
+        let mut inh = post_cgt(1);
+        inh.date_of_death = ymd(1985, 9, 19);
+        inh.lpr_expenditure_date = Some(ymd(1985, 10, 1));
+        assert!(matches!(
+            db_upsert(&pool, &inh).await,
+            Err(UpsertError::DeathPreCgt)
         ));
 
         // LPR expenditure without its date, and a date without expenditure.

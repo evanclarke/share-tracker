@@ -1155,3 +1155,57 @@ rejecting it keeps the reports' `.year()` bucketing provably equal to `tax_year_
 rejected, nothing persisted) and `db_june_30_of_any_year_accepted` (the rule pins the day, not
 the year). docs/API.md (AMMA section paragraph + Response codes 422 list) and docs/SCHEMA.md
 (column note) updated (994 tests).
+
+## Foreign broker-cash interest reports at 20E (REQUIREMENTS 2026-07-13, known-limitations review)
+
+Resolves the "Foreign broker-cash interest classification" Known limitation (2026-06-12):
+`docs/ato/tax-return-labels-2026.md` puts interest-like income from a foreign payer at question
+20 (20E assessable foreign source income, foreign tax withheld via the 20O FITO), not question
+10 (10L) — previously the tax summary reported every interest row at 10L and told the taxpayer
+to reclassify manually.
+
+- [x] `interest_income` rows carry the payer classification and foreign tax withheld: migration
+      `0011_interest_income_foreign_source.sql` adds `foreign_source` (0/1, CHECK, default 0 so
+      existing rows keep their Australian-source meaning) and `foreign_tax_paid` (never negative
+      and foreign-source-only by CHECK). Write-time invariants reject a negative
+      `foreign_tax_paid`, foreign tax on an Australian-source row, and a TFN amount on a
+      foreign-source row, each 422 naming the correcting field
+      (`interest_income::tests::{db_foreign_source_round_trips,
+      api_negative_amounts_rejected_422, api_withholding_source_mismatch_rejected_422}`)
+- [x] The tax summary routes a foreign-source row to the new `foreign_interest_income` line
+      (label `20E + 20M`, never 10L), joins its foreign tax to `foreign_tax_offsets` under the
+      A$1,000 FITO de-minimis, and counts both interest classifications in gross assessable
+      investment income; AUD conversion by the month paid as before
+      (`tax_summary::tests::{db_foreign_source_interest_reports_at_20e_with_fito,
+      db_foreign_interest_tax_subject_to_fito_cap, db_non_aud_foreign_interest_converted_to_aud,
+      db_ato_labels_align_with_their_columns, db_csv_header_carries_interest_column}`)
+- [x] Web UI: the Interest Income form carries the foreign-source flag and foreign-tax field,
+      and the new report column is money-classified (`web::tests::interest_income_ui_present`)
+- [x] Docs: SCHEMA.md columns, API.md interest-income + tax-summary sections and the CSV label
+      mapping, README feature line; the Known-limitations entry removed and its pin test
+      replaced by `doc_checks::docs_document_foreign_interest_source_classification`
+
+## Pre-CGT entry rejected at write time (REQUIREMENTS 2026-07-13, known-limitations review)
+
+Hardens the "Pre-CGT holdings" Known limitation (2026-06-10) from documentation into an
+enforced invariant: the entry said pre-CGT parcels "should not be entered" because every report
+would wrongly compute a capital gain or loss on them — now they cannot be.
+
+- [x] Any trade or Sell dated before 20 September 1985 is rejected 422 through the shared
+      `trade::check_amounts` (`AmountsError::PreCgtDate`; `CGT_START` now lives in `trade` and
+      is shared with the inheritance module). The first CGT day itself stays accepted
+      (`trade::tests::api_pre_cgt_dated_trade_rejected_422`,
+      `sell::tests::api_degenerate_sell_amounts_are_rejected_per_shape`)
+- [x] An inheritance whose date of death is before 20 September 1985 is rejected 422 under
+      either cost-base rule — the parcel would be pre-CGT in the *beneficiary's* hands
+      (s 115-30 deems acquisition at the death at latest); checked before the per-rule
+      acquisition checks so the rejection explains the actual rule
+      (`inheritance::tests` DeathPreCgt cases)
+- [x] Docs: the Known-limitations entry now records the write-time enforcement (pinned by
+      `doc_checks::known_limitations_document_pre_cgt_holdings`), the Trades section states the
+      new core-figure rule, the Inheritances section and the Response-codes 422 list carry the
+      new rejections, and the README scope-cuts line says entry is rejected. TD 2000/10
+      Examples 1–2 and bonus-shares Example 35 (whose facts include a pre-CGT parcel alongside a
+      post-CGT one) enter that parcel with the first post-CGT date, 20 September 1985, as a
+      stand-in — the quantity/cost-base re-basing under test is date-independent, and each test
+      documents the substitution

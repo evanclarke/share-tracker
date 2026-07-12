@@ -905,3 +905,47 @@ rate month (or entered with spot rates) silently drops the forex component.
 - Whichever way it resolves, the decision must note the interaction with the spot-rate override
   above (with monthly rates and same-month T+2 settlement the component is nil by construction;
   spot-rate-per-leg entry is what makes it visible)
+
+## Known-limitations review against the ATO reference docs (2026-07-13)
+
+A pass over the `docs/API.md` Known-limitations list asking which entries the ATO guidance
+mirrored in `docs/ato/` can actually resolve. Most entries stay deliberate scope decisions
+(taxpayer entity types, one taxpayer, cost-base elements 3–5, the indexation method, K10/K11
+settlement forex — decided 2026-06-12, cost-base FX timing — decided 2026-07-13, unvested ESS
+grants, the estate/LPR side of inheritances). Two resolve into work:
+
+### Foreign broker-cash interest reports at 20E
+
+`docs/ato/tax-return-labels-2026.md` gives the exact treatment the limitation deferred:
+interest-like income from a foreign payer (a US broker's Treasury liquidity / money-market sweep
+fund) is assessable foreign source income (question 20, label 20E), not Australian gross
+interest (question 10, label 10L), and foreign tax withheld from it is claimed via the question
+20 FITO (20O).
+
+- An interest-income row records whether its payer is foreign (`foreign_source`, defaulting to
+  Australian so existing rows keep their meaning) and any foreign tax withheld
+  (`foreign_tax_paid`)
+- The tax summary reports foreign-source interest on its own `foreign_interest_income` line
+  mapped to 20E (never 10L), with the foreign tax joining the FITO line under the existing
+  A$1,000 de-minimis; both classifications count in gross assessable investment income
+- Withholding must match the classification at write time: foreign tax on an Australian-source
+  row (or a TFN amount on a foreign-source row) is rejected 422 — otherwise the FITO line could
+  claim an offset the row can't support
+- The Known-limitations entry is removed; entity docs, tax-summary docs, CSV label mapping, and
+  the web UI form/columns carry the classification
+
+### Pre-CGT holdings cannot be entered
+
+The limitation warned "pre-CGT holdings are not modelled and should not be entered — the system
+would wrongly compute a capital gain or loss on such a parcel". Enforce it at write time (the
+data-integrity rule: invariants are enforced on write, not hoped for):
+
+- Any trade or Sell dated before 20 September 1985 is rejected 422 via the shared core-figure
+  check, naming the pre-CGT rule
+- An inheritance whose date of death is before 20 September 1985 is rejected 422: the parcel
+  would be pre-CGT in the beneficiary's own hands (s 115-30 deems acquisition at the death at
+  latest), whichever cost-base rule was chosen
+- The ATO worked examples that include a pre-CGT parcel alongside a post-CGT one (TD 2000/10
+  Examples 1–2, bonus shares Example 35) enter that parcel with the first post-CGT date as a
+  stand-in — the re-basing arithmetic under test is date-independent, and each test notes the
+  substitution

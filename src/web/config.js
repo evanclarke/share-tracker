@@ -181,17 +181,19 @@ export const ENTITIES = [
   },
   {
     slug: 'interest_income', title: 'Interest Income', group: 'Activity', api: '/interest_income',
-    desc: 'Interest income — bank, term-deposit, or broker-cash interest (it has no listing, so it isn’t an Income row). Enter the gross amount as the statement shows it, including any TFN amount withheld; the tax summary reports the year’s gross interest (question 10 label L), counts it in gross assessable investment income, and joins the TFN amount to the withholding line (label M).',
+    desc: 'Interest income — bank, term-deposit, or broker-cash interest (it has no listing, so it isn’t an Income row). Enter the gross amount as the statement shows it, including any amount withheld. An Australian-source row reports as the year’s gross interest (question 10 label L, TFN withholding joining the withholding line, label M); a foreign-source row (e.g. a foreign broker’s cash or money-market sweep fund) reports as assessable foreign source income instead (question 20 label E, its foreign tax withheld joining the FITO line). Both count in gross assessable investment income.',
     keyFields: [int('id', 'ID', { auto: true })],
     fields: [
       dt('date_paid', 'Date paid', { required: true, hint: 'Sets the financial year the interest falls in and the ATO FX month for a non-AUD amount.' }),
-      dec('amount', 'Gross amount', { required: true, hint: 'Include any TFN amount withheld — the gross figure is declared; the withheld amount is entered below.' }),
-      dec('tfn_withholding_tax', 'TFN withholding tax'),
+      dec('amount', 'Gross amount', { required: true, hint: 'Include any amount withheld — the gross figure is declared; the withheld amount is entered below.' }),
+      dec('tfn_withholding_tax', 'TFN withholding tax', { hint: 'Australian-source rows only — TFN amounts are withheld by Australian investment bodies.' }),
+      bool('foreign_source', 'Foreign source', { hint: 'Tick for interest from a foreign payer (e.g. a US broker’s money-market fund): it reports at 20E assessable foreign source income, not 10L gross interest.' }),
+      dec('foreign_tax_paid', 'Foreign tax paid', { hint: 'Foreign-source rows only — tax the foreign payer withheld; joins the FITO line (A$1,000 de-minimis applies).' }),
       fk('currency', 'Currency', 'currencies', { required: true, encode: 'string', default: 'AUD' }),
       txt('source', 'Source', { optional: true, default: '', hint: 'Where the interest came from, e.g. the bank account or term deposit.' }),
       fk('holding_account_id', 'Holding account', 'holdingAccounts', { optional: true, default: '', hint: 'Optional — leave blank for interest from outside the portfolio’s accounts (an ordinary bank account).' }),
     ],
-    columns: ['id', 'date_paid', 'amount', 'tfn_withholding_tax', 'currency', 'source', 'holding_account_id'],
+    columns: ['id', 'date_paid', 'amount', 'tfn_withholding_tax', 'foreign_source', 'foreign_tax_paid', 'currency', 'source', 'holding_account_id'],
   },
   {
     slug: 'investment_expenses', title: 'Investment Expenses', group: 'Activity', api: '/investment_expenses',

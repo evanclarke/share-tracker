@@ -62,12 +62,17 @@ fn known_limitations_document_gifts_at_market_value() {
 fn known_limitations_document_pre_cgt_holdings() {
     let limitations = known_limitations();
     // Pre-CGT holdings (acquired before 20 September 1985) are outside CGT and
-    // not modelled — the system would wrongly compute gains on such a parcel.
+    // not modelled — and since 2026-07-13 the limitation is enforced at write
+    // time: a pre-CGT-dated trade (or an inheritance from a pre-CGT death) is
+    // rejected 422 rather than wrongly computing gains on the parcel.
     assert!(limitations.contains("**Pre-CGT holdings**"));
     assert!(limitations.contains("before **20 September 1985** is outside CGT"));
     assert!(limitations.contains("pre-CGT holdings are not modelled"));
+    assert!(limitations.contains("enforced at write time 2026-07-13"));
+    assert!(limitations.contains("**cannot be entered**"));
     assert!(README_MD.contains("pre-CGT holdings"));
     assert!(README_MD.contains("acquired before 20 September 1985"));
+    assert!(README_MD.contains("rejected at write time"));
 }
 
 /// Known-limitation pin (REQUIREMENTS 2026-06-12): dividend equivalents on
@@ -90,29 +95,33 @@ fn known_limitations_document_rsu_dividend_equivalents() {
     assert!(README_MD.contains("ordinary income when paid"));
 }
 
-/// Known-limitation pin (REQUIREMENTS 2026-06-12): interest income reports at
-/// question 10 (10L) regardless of source; foreign broker-cash/money-market
-/// income strictly belongs at 20E — the simplification is stated.
+/// Resolved-limitation pin (REQUIREMENTS 2026-07-13; formerly the
+/// "Foreign broker-cash interest classification" Known limitation, 2026-06-12):
+/// interest income is classified by payer — Australian-source at question 10
+/// (10L), foreign-source (broker-cash/money-market income) at 20E assessable
+/// foreign source income with its foreign tax joining the FITO — and the
+/// limitation entry is gone from Known limitations.
 #[test]
-fn known_limitations_document_foreign_broker_interest_classification() {
+fn docs_document_foreign_interest_source_classification() {
+    // The limitation no longer exists — the classification is a feature.
     let limitations = known_limitations();
-    assert!(limitations.contains("**Foreign broker-cash interest classification**"));
-    assert!(
-        limitations
-            .contains("at question 10** (gross interest, label **10L**) regardless of source")
-    );
-    assert!(limitations.contains("belonging at label **20E**"));
-    // Cites the mirrored label reference, which carries both labels.
-    assert!(limitations.contains("docs/ato/tax-return-labels-2026.md"));
+    assert!(!limitations.contains("**Foreign broker-cash interest classification**"));
+    // The interest-income entity section documents the 20E routing…
+    assert!(API_MD.contains(
+        "instead reports as assessable foreign source income on the `foreign_interest_income` \
+         line (question 20, label 20E)"
+    ));
+    // …and the label mapping carries the foreign interest column at 20E.
+    assert!(API_MD.contains("| `interest_income` | `10L` | Australian gross interest"));
+    assert!(API_MD.contains(
+        "| `foreign_interest_income`, `foreign_source_income`, `amma_foreign_income` | `20E + 20M`"
+    ));
+    // The mirrored label reference carries both labels.
     let labels = include_str!("../docs/ato/tax-return-labels-2026.md");
     assert!(labels.contains("| 10L | Gross interest"));
     assert!(labels.contains("| 20E | Assessable foreign source income"));
-    // The tax-summary section cross-links the limitation from its interest line.
-    assert!(API_MD.contains(
-        "foreign broker-cash interest strictly belongs at 20E instead (see [Known limitations](#known-limitations))"
-    ));
     // Surfaced in the README too.
-    assert!(README_MD.contains("foreign broker-cash interest"));
+    assert!(README_MD.contains("**foreign-source** row"));
     assert!(README_MD.contains("20E assessable foreign source income"));
 }
 

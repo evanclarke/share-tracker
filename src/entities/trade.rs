@@ -310,11 +310,23 @@ pub(crate) fn spot_fx_rate_detail(e: &SpotFxRateError) -> &'static str {
     }
 }
 
+/// Start of CGT, 20 September 1985: an asset acquired before this date is
+/// pre-CGT — outside CGT entirely — and pre-CGT holdings are not modelled
+/// (docs/API.md Known limitations), so a trade dated before it is rejected
+/// rather than wrongly computing a capital gain or loss on the parcel.
+/// Shared with the inheritance entry path (`entities::inheritance`), whose
+/// pre-CGT interactions anchor on the same date.
+pub(crate) const CGT_START: NaiveDate = match NaiveDate::from_ymd_opt(1985, 9, 20) {
+    Some(d) => d,
+    None => unreachable!(),
+};
+
 /// Why a trade's core figures were rejected (all map to 422): a degenerate
 /// value — zero/negative quantity, a negative price or cost, a non-positive
-/// FX rate, or a settlement before the trade date — corrupts every
-/// downstream report without failing anything, so it is rejected at write
-/// time. Shared by the trade and Sell write paths so the two can't drift.
+/// FX rate, a settlement before the trade date, or a pre-CGT trade date —
+/// corrupts every downstream report without failing anything, so it is
+/// rejected at write time. Shared by the trade and Sell write paths so the
+/// two can't drift.
 #[derive(Debug, PartialEq)]
 pub(crate) enum AmountsError {
     /// Zero or negative quantity: a trade of nothing (or of negative units)
@@ -332,6 +344,10 @@ pub(crate) enum AmountsError {
     FxRateNotPositive,
     /// Settlement dated before the trade itself.
     SettlementBeforeTrade,
+    /// Dated before the start of CGT (20 September 1985): a pre-CGT holding
+    /// is outside CGT and not modelled — every report would wrongly compute
+    /// a capital gain or loss on it (see [`CGT_START`]).
+    PreCgtDate,
 }
 
 /// The core figures every trade/Sell write must satisfy, gathered for
@@ -370,6 +386,9 @@ pub(crate) fn check_amounts(c: &AmountsCheck) -> Result<(), AmountsError> {
     if c.settlement_date < c.date {
         return Err(AmountsError::SettlementBeforeTrade);
     }
+    if c.date < CGT_START {
+        return Err(AmountsError::PreCgtDate);
+    }
     Ok(())
 }
 
@@ -384,6 +403,10 @@ pub(crate) fn amounts_detail(e: &AmountsError) -> &'static str {
             "fx_rate must be a positive foreign-per-AUD rate (1 for an AUD trade)"
         }
         AmountsError::SettlementBeforeTrade => "settlement_date cannot be before the trade date",
+        AmountsError::PreCgtDate => {
+            "the trade is dated before 20 September 1985 — a pre-CGT holding is outside CGT \
+             and not modelled, so recording it would wrongly compute a capital gain or loss"
+        }
     }
 }
 
@@ -2394,6 +2417,45 @@ mod tests {
         fine["quantity"] = "0.00000001".into();
         fine["settlement_date"] = "2024-01-15".into();
         let (status, _) = put_trade_json(&pool, 1, fine).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+
+    /// A trade dated before the start of CGT (20 September 1985) is rejected
+    /// 422: a pre-CGT holding is outside CGT and not modelled, so recording
+    /// one would wrongly compute a capital gain or loss on it (REQUIREMENTS
+    /// 2026-07-13 — the former documentation-only Known limitation, enforced).
+    /// The first CGT day itself stays accepted.
+    #[tokio::test]
+    async fn api_pre_cgt_dated_trade_rejected_422() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        let base = serde_json::json!({
+            "trade_type": "Buy",
+            "date": "1985-09-19",
+            "settlement_date": "1985-09-19",
+            "listing_id": 1,
+            "average_price": "100",
+            "quantity": "10",
+            "currency": "AUD",
+            "brokerage": "0",
+            "gst_on_brokerage": "0",
+            "brokerage_currency": "AUD",
+            "fx_rate": "1"
+        });
+        let (status, detail) = put_trade_json(&pool, 1, base.clone()).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            detail.contains("dated before 20 September 1985")
+                && detail.contains("pre-CGT holding is outside CGT"),
+            "detail must explain the pre-CGT rule, got: {detail}"
+        );
+        assert!(db_get(&pool, 1).await.unwrap().is_none());
+
+        // 20 September 1985 — the first day inside CGT — is accepted.
+        let mut first_cgt_day = base;
+        first_cgt_day["date"] = "1985-09-20".into();
+        first_cgt_day["settlement_date"] = "1985-09-20".into();
+        let (status, _) = put_trade_json(&pool, 1, first_cgt_day).await;
         assert_eq!(status, StatusCode::NO_CONTENT);
     }
 
