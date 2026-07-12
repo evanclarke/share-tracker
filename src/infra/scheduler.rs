@@ -31,9 +31,27 @@ use std::{
 type JobFuture = Pin<Box<dyn Future<Output = Result<(), String>> + Send>>;
 type Job = Arc<dyn Fn() -> JobFuture + Send + Sync>;
 
+/// A registered job: the work plus a per-job lock serialising its execution.
+/// `run_job` holds the lock for the whole run, so a manual trigger can never
+/// overlap the scheduled run (or a second trigger) of the same job — a
+/// concurrent caller waits and runs after.
+pub struct RegisteredJob {
+    work: Job,
+    lock: tokio::sync::Mutex<()>,
+}
+
+impl RegisteredJob {
+    fn new(work: Job) -> Arc<Self> {
+        Arc::new(Self {
+            work,
+            lock: tokio::sync::Mutex::new(()),
+        })
+    }
+}
+
 /// Job-name → work. Shared between the spawned schedule tasks and the HTTP
 /// trigger handler (injected as an axum `Extension`).
-pub type JobRegistry = Arc<HashMap<String, Job>>;
+pub type JobRegistry = Arc<HashMap<String, Arc<RegisteredJob>>>;
 
 /// A job's last run, surfaced by `GET /jobs` and the Jobs UI. Every registered
 /// job appears in the list; the `last_*` fields are `None` until the job has run
@@ -130,12 +148,12 @@ pub fn registry(
     backup_dir: Option<String>,
     fetcher: crate::entities::closing_price::SharedFetcher,
 ) -> JobRegistry {
-    let mut jobs: HashMap<String, Job> = HashMap::new();
+    let mut jobs: HashMap<String, Arc<RegisteredJob>> = HashMap::new();
 
     let backup_pool = pool.clone();
     jobs.insert(
         "backup".to_string(),
-        Arc::new(move || {
+        RegisteredJob::new(Arc::new(move || {
             let pool = backup_pool.clone();
             let db_path = db_path.clone();
             let backup_dir = backup_dir.clone();
@@ -144,13 +162,13 @@ pub fn registry(
                     .await
                     .map_err(|e| e.to_string())
             })
-        }),
+        })),
     );
 
     let mic_pool = pool.clone();
     jobs.insert(
         "mic-import".to_string(),
-        Arc::new(move || {
+        RegisteredJob::new(Arc::new(move || {
             let pool = mic_pool.clone();
             Box::pin(async move {
                 match crate::entities::mic_registry::run_import(&pool).await {
@@ -161,13 +179,13 @@ pub fn registry(
                     Err(e) => Err(format!("{e:?}")),
                 }
             })
-        }),
+        })),
     );
 
     let currency_pool = pool.clone();
     jobs.insert(
         "currency-import".to_string(),
-        Arc::new(move || {
+        RegisteredJob::new(Arc::new(move || {
             let pool = currency_pool.clone();
             Box::pin(async move {
                 match crate::entities::currencies::run_import(&pool).await {
@@ -178,14 +196,14 @@ pub fn registry(
                     Err(e) => Err(format!("{e:?}")),
                 }
             })
-        }),
+        })),
     );
 
     let price_pool = pool.clone();
     let price_fetcher = fetcher;
     jobs.insert(
         "price-import".to_string(),
-        Arc::new(move || {
+        RegisteredJob::new(Arc::new(move || {
             let pool = price_pool.clone();
             let fetcher = price_fetcher.clone();
             Box::pin(async move {
@@ -196,24 +214,24 @@ pub fn registry(
                 )
                 .await
             })
-        }),
+        })),
     );
 
     let snapshot_pool = pool.clone();
     jobs.insert(
         "report-snapshot".to_string(),
-        Arc::new(move || {
+        RegisteredJob::new(Arc::new(move || {
             let pool = snapshot_pool.clone();
             Box::pin(async move {
                 crate::reports::snapshot::run_snapshot_job(&pool, chrono::Utc::now()).await
             })
-        }),
+        })),
     );
 
     let fx_pool = pool.clone();
     jobs.insert(
         "rba-fx-import".to_string(),
-        Arc::new(move || {
+        RegisteredJob::new(Arc::new(move || {
             let pool = fx_pool.clone();
             Box::pin(async move {
                 match crate::entities::rba_fx_rate::run_import(&pool).await {
@@ -228,7 +246,7 @@ pub fn registry(
                     Err(e) => Err(format!("{e:?}")),
                 }
             })
-        }),
+        })),
     );
 
     Arc::new(jobs)
@@ -241,10 +259,15 @@ pub fn registry(
 /// and so every run persists its last-run record (timestamps, success, error)
 /// to `job_runs` for the Jobs UI. A failure to record the run is logged but does
 /// not change the job's own result.
-async fn run_job(pool: &SqlitePool, name: &str, job: &Job) -> Result<(), String> {
+///
+/// The per-job lock is held for the whole run, serialising executions of the
+/// same job: a manual trigger overlapping the scheduled run (or another
+/// trigger) waits for the in-flight run to finish instead of racing it.
+async fn run_job(pool: &SqlitePool, name: &str, job: &RegisteredJob) -> Result<(), String> {
+    let _running = job.lock.lock().await;
     let started_at = chrono::Utc::now().to_rfc3339();
     tracing::info!(job = %name, "job started");
-    let result = job().await;
+    let result = (job.work)().await;
     let finished_at = chrono::Utc::now().to_rfc3339();
     tracing::info!(job = %name, ok = result.is_ok(), "job finished");
 
@@ -258,9 +281,12 @@ async fn run_job(pool: &SqlitePool, name: &str, job: &Job) -> Result<(), String>
 }
 
 /// One parsed schedule line: when to fire, in which timezone (`None` = the
-/// server's local timezone), and which registered job to run.
+/// server's local timezone), and which registered job to run. `line` is the
+/// 1-based line number in the schedule file (comments and blank lines count),
+/// so validation errors point at the real line.
 #[derive(Debug)]
 struct ScheduleEntry {
+    line: usize,
     cron: Cron,
     tz: Option<Tz>,
     name: String,
@@ -311,6 +337,7 @@ fn parse(schedule: &str) -> Result<Vec<ScheduleEntry>, ScheduleError> {
             msg: format!("invalid cron {expr:?}: {e}"),
         })?;
         entries.push(ScheduleEntry {
+            line,
             cron,
             tz,
             name: name.to_string(),
@@ -328,10 +355,10 @@ pub fn spawn(registry: JobRegistry, pool: SqlitePool, schedule: &str) -> Result<
 
     // Validate all names up front so a bad file fails fast at startup rather
     // than spawning a partial set of tasks.
-    for (idx, entry) in entries.iter().enumerate() {
+    for entry in &entries {
         if !registry.contains_key(&entry.name) {
             return Err(ScheduleError::UnknownJob {
-                line: idx + 1,
+                line: entry.line,
                 name: entry.name.clone(),
             });
         }
@@ -383,7 +410,7 @@ const MAX_SLEEP: Duration = Duration::from_secs(60 * 60);
 async fn run_entry<Z>(
     pool: SqlitePool,
     name: String,
-    job: Job,
+    job: Arc<RegisteredJob>,
     cron: Cron,
     now: impl Fn() -> DateTime<Z> + Send + 'static,
 ) where
@@ -732,14 +759,14 @@ mod tests {
 
         let fired_at = Arc::new(std::sync::Mutex::new(Vec::<DateTime<Utc>>::new()));
         let fired = fired_at.clone();
-        let job: Job = Arc::new(move || {
+        let job = RegisteredJob::new(Arc::new(move || {
             let fired = fired.clone();
             let now = clock();
             Box::pin(async move {
                 fired.lock().unwrap().push(now);
                 Ok(())
             })
-        });
+        }));
 
         let cron = Cron::from_str("30 3 1 6 *").unwrap(); // 03:30 on 2026-06-01
         tokio::spawn(run_entry(pool, "fake".to_string(), job, cron, clock));
@@ -793,6 +820,60 @@ mod tests {
         let (reg, pool, _dir, _path) = test_registry().await;
         let err = spawn(reg, pool, "0 0 * * *   no-such-job\n").unwrap_err();
         assert!(matches!(err, ScheduleError::UnknownJob { .. }));
+    }
+
+    #[tokio::test]
+    async fn unknown_job_error_reports_file_line_not_entry_index() {
+        // Comments and blank lines shift parsed-entry indexes away from file
+        // lines: `no-such-job` is the 2nd parsed entry but sits on file line 5.
+        // The error must point at line 5, where the user will look.
+        let (reg, pool, _dir, _path) = test_registry().await;
+        let schedule = "# weekly maintenance\n\n0 0 * * 0   backup\n# bad line below\n0 1 * * *   no-such-job\n";
+        let err = spawn(reg, pool, schedule).unwrap_err();
+        match err {
+            ScheduleError::UnknownJob { line, name } => {
+                assert_eq!(line, 5);
+                assert_eq!(name, "no-such-job");
+            }
+            other => panic!("expected UnknownJob error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_runs_of_same_job_serialise() {
+        // Two run_job calls for the same job (e.g. a manual trigger overlapping
+        // the scheduled run) must never execute the work concurrently: the
+        // second waits on the per-job lock and runs after the first finishes.
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        let pool = db::init(":memory:").await.unwrap();
+        let active = Arc::new(AtomicUsize::new(0));
+        let overlapped = Arc::new(AtomicBool::new(false));
+        let runs = Arc::new(AtomicUsize::new(0));
+        let (a, o, r) = (active.clone(), overlapped.clone(), runs.clone());
+        let job = RegisteredJob::new(Arc::new(move || {
+            let (a, o, r) = (a.clone(), o.clone(), r.clone());
+            Box::pin(async move {
+                if a.fetch_add(1, Ordering::SeqCst) > 0 {
+                    o.store(true, Ordering::SeqCst);
+                }
+                tokio::time::sleep(Duration::from_millis(30)).await;
+                a.fetch_sub(1, Ordering::SeqCst);
+                r.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+        }));
+
+        let (r1, r2) = tokio::join!(
+            run_job(&pool, "same-job", &job),
+            run_job(&pool, "same-job", &job),
+        );
+        r1.unwrap();
+        r2.unwrap();
+        assert_eq!(runs.load(Ordering::SeqCst), 2, "both runs must complete");
+        assert!(
+            !overlapped.load(Ordering::SeqCst),
+            "the second run must wait for the first, not execute concurrently"
+        );
     }
 
     #[tokio::test]

@@ -158,7 +158,7 @@ Recurring maintenance jobs scheduled from the cron file (see [Scheduled maintena
 
 `GET /jobs` returns a JSON array (sorted by job name); each element is `{ "name", "last_started_at", "last_finished_at", "last_success", "last_error" }`. The four `last_*` fields are `null` for a job that has never run; otherwise they carry the RFC 3339 start/finish timestamps, a boolean success flag, and the error text (`null` on success) of the job's most recent run. Every run — scheduled or manual — upserts the job's `job_runs` row, so this reflects the latest run only.
 
-`POST /jobs/:name` runs the job synchronously and returns `204 No Content` on success, `404 Not Found` if no job has that name, or `500 Internal Server Error` if the job fails. Either way the run is recorded (see `GET /jobs`). Registered jobs are `backup`, `rba-fx-import`, `mic-import`, `currency-import`, `price-import` (see [Closing prices](#closing-prices); scheduled twice daily — after the ASX close and after the NYSE close / crypto UTC-midnight cut-off — each run skips days already stored ok, so the runs are idempotent), and `report-snapshot` (see [Report snapshots](#report-snapshots); daily after the second price import, skipping a date already stored fresh).
+`POST /jobs/:name` runs the job synchronously and returns `204 No Content` on success, `404 Not Found` if no job has that name, or `500 Internal Server Error` if the job fails. Either way the run is recorded (see `GET /jobs`). Runs of the same job are serialised: a trigger that overlaps an in-flight run of that job (scheduled or manual) waits for it to finish and then runs — the same job never executes concurrently. Registered jobs are `backup`, `rba-fx-import`, `mic-import`, `currency-import`, `price-import` (see [Closing prices](#closing-prices); scheduled twice daily — after the ASX close and after the NYSE close / crypto UTC-midnight cut-off — each run skips days already stored ok, so the runs are idempotent), and `report-snapshot` (see [Report snapshots](#report-snapshots); daily after the second price import, skipping a date already stored fresh).
 
 ## Trades
 
@@ -539,7 +539,7 @@ Sells `units` into the `BuyBack`, creating both sides of the split atomically:
 
 The created rows carry provenance links (`trades.buyback_action_id`, `income.buyback_trade_id`) that keep the split consistent: the Sell is rejected by `PUT /sells/:id` (`422`) and removed — together with its income row — by `DELETE /sells/:id`; the income row is rejected by `PUT`/`DELETE /income/:id` (`422`); and the action itself returns `422` on `PUT`/`DELETE` while participation trades reference it.
 
-Returns `201 Created` with `{ "trade": …, "income": …|null }` as JSON, `404 Not Found` if no corporate action has that id, or `422 Unprocessable Entity` if the action is not a `BuyBack`, `units` is not positive, the participation date precedes the buy-back date, or a Sell-side invariant fails.
+Returns `201 Created` with `{ "trade": …, "income": …|null }` as JSON, `404 Not Found` if no corporate action has that id, or `422 Unprocessable Entity` if the action is not a `BuyBack`, `units` is not positive, the participation date precedes the buy-back date, or a Sell-side invariant fails — a Sell-side rejection carries the same per-invariant body as [`PUT /sells/:id`](#sells) (allocation mismatch, over-allocation, wrong holding account, …), so the response says which invariant failed.
 
 ### Exchanging a scrip-for-scrip takeover
 

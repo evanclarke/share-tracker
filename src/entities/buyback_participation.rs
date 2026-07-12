@@ -124,12 +124,11 @@ impl From<ParticipationError> for ApiError {
             ParticipationError::BeforeBuyBackDate => {
                 ApiError::unprocessable("the participation date is before the buy-back date")
             }
-            ParticipationError::Sell(err) => {
-                tracing::warn!(error = ?err, "buy-back participation rejected by a sell invariant");
-                ApiError::unprocessable(
-                    "the holding cannot cover the units participated (over-allocated parcels)",
-                )
-            }
+            // Sell-side invariants keep their own per-variant 422 bodies so
+            // the caller sees which invariant failed (allocation mismatch,
+            // wrong holding account, over-allocation, ...), not a collapsed
+            // generic message.
+            ParticipationError::Sell(err) => err.into(),
             ParticipationError::Db(err) => err.into(),
         }
     }
@@ -747,6 +746,79 @@ mod tests {
         assert_eq!(v["income"]["franked_amount"], "1400.00");
         assert_eq!(v["income"]["franking_credits"], "600.00");
         assert_eq!(v["income"]["buyback_trade_id"], v["trade"]["id"]);
+    }
+
+    /// Each Sell-side rejection keeps its own 422 body: the response says
+    /// which invariant failed (allocation mismatch, wrong holding account,
+    /// over-allocation), not a collapsed generic message.
+    #[tokio::test]
+    async fn api_sell_side_rejections_carry_their_own_422_bodies() {
+        use crate::entities::holding_account::{self, HoldingAccount};
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        holding_account::db_upsert(
+            &pool,
+            &HoldingAccount {
+                id: 2,
+                name: "Personal CHESS".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        insert_buy(&pool, 1, d(2020, 1, 15), "10000", "6.00").await;
+        insert_buyback(&pool, 10, d(2024, 7, 1)).await;
+
+        let cases = [
+            // Allocations that don't sum to the units.
+            (
+                serde_json::json!({
+                    "date": "2024-07-10",
+                    "units": "1000",
+                    "allocations": [ { "purchase_trade_id": 1, "quantity_allocated": "600" } ],
+                }),
+                "do not sum to the sell quantity",
+            ),
+            // Over-allocating the parcel.
+            (
+                serde_json::json!({
+                    "date": "2024-07-10",
+                    "units": "10001",
+                    "allocations": [ { "purchase_trade_id": 1, "quantity_allocated": "10001" } ],
+                }),
+                "exceed a purchase parcel's available quantity",
+            ),
+            // The parcel sits in a different holding account.
+            (
+                serde_json::json!({
+                    "date": "2024-07-10",
+                    "units": "1000",
+                    "holding_account_id": 2,
+                    "allocations": [ { "purchase_trade_id": 1, "quantity_allocated": "1000" } ],
+                }),
+                "different holding account",
+            ),
+        ];
+        for (body, expected_text) in cases {
+            let resp = router()
+                .with_state(pool.clone())
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/corporate_actions/10/participate")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+            let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+            let text = String::from_utf8(bytes.to_vec()).unwrap();
+            assert!(
+                text.contains(expected_text),
+                "expected the 422 body to say {expected_text:?}, got {text:?}"
+            );
+        }
     }
 
     async fn api_participate_expecting(

@@ -1209,3 +1209,35 @@ would wrongly compute a capital gain or loss on them — now they cannot be.
       post-CGT one) enter that parcel with the first post-CGT date, 20 September 1985, as a
       stand-in — the quantity/cost-base re-basing under test is date-independent, and each test
       documents the substitution
+
+## Scheduler nits: wrong line number in UnknownJob; no overlap guard (2026-07-12 review, programming)
+
+- `spawn` reports `ScheduleError::UnknownJob { line: idx + 1 }` where `idx` indexes the *parsed
+  entries*, not the schedule file — comments and blank lines shift the reported line
+  (`src/infra/scheduler.rs:331-338`; `parse` carries the real line number but drops it)
+- [x] Carry the source line through `ScheduleEntry` so the error points at the real line; test
+      with a schedule containing comments
+      (`scheduler::tests::unknown_job_error_reports_file_line_not_entry_index`)
+- Nothing prevents the same job running concurrently: `POST /jobs/{name}` executes inline in the
+  handler and can overlap the scheduled run (or a second manual trigger) — e.g. two simultaneous
+  `backup`s race the same destination second, two `price-import`s double-fetch
+- [x] Serialise per-job execution (a per-job async mutex around `run_job`, or reject a trigger
+      while the job is running with 409) and test it — done with a per-job `tokio::sync::Mutex`
+      inside `RegisteredJob`, held by `run_job` for the whole run, so both the scheduled loop and
+      the manual trigger serialise (an overlapping trigger waits, then runs; no API shape change)
+      (`scheduler::tests::concurrent_runs_of_same_job_serialise`; API.md Jobs section + the
+      CLAUDE.md scheduler rule document the behaviour)
+
+## Buy-back participation collapses all Sell-side rejections into one message (2026-07-12 review, UX)
+
+`ParticipationError::Sell` maps every sell invariant failure to the generic "the holding cannot
+cover the units participated (over-allocated parcels)"
+(`src/entities/buyback_participation.rs:127-132`), so e.g. an allocation in the wrong holding
+account (`PurchaseInDifferentAccount`) or an allocation-sum mismatch is misreported. This
+contradicts the useful-error-messages convention (every 422 says which invariant failed).
+
+- [x] Pass the underlying `SellError`'s own 422 body through (it already has one per variant) and
+      assert the distinct texts in tests — `ParticipationError::Sell(err)` now delegates to
+      `From<SellError> for ApiError` (`err.into()`), and the participate section of API.md says
+      Sell-side rejections carry the same per-invariant bodies as `PUT /sells/:id`
+      (`buyback_participation::tests::api_sell_side_rejections_carry_their_own_422_bodies`)
