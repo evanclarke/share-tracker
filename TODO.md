@@ -8,30 +8,6 @@ The sections below come from the **2026-07-12 code review** (a full pass over th
 domain pipeline, infra, and migrations for programming and domain issues). Each section records one
 finding; sections land in DONE.md as they are fixed.
 
-## Sell allocations: listing and acquisition-date invariants missing (2026-07-12 review, domain + integrity)
-
-`upsert_sell_in_tx` (`src/entities/sell.rs:515-598`) validates that each allocated parcel exists,
-is a Buy/DRP, sits in the right holding account, and is not over-allocated — but never that:
-
-- the parcel's `listing_id` equals the Sell's `listing_id` (it is read at
-  `src/entities/sell.rs:546` and used only for the splits lookup), so a Sell of listing A can
-  consume parcels of listing B and the CGT reports will happily cost them cross-listing
-- the parcel's trade date is on or before the sale date, so a Sell can draw on a parcel acquired
-  *after* it, producing a negative holding period (the discount test just says "not eligible" and
-  the reports emit nonsense figures instead of rejecting the entry)
-
-Similarly, `trade::db_upsert` (`src/entities/trade.rs:476+`) lets an existing Buy's `listing_id`
-be edited while Sell allocations reference it, silently re-associating those allocations across
-listings (its capacity re-check even fetches splits for the *new* listing).
-
-- [ ] Reject (422) an allocation whose parcel belongs to a different listing than the Sell, in the
-      shared transactional core so every caller (sells, buy-back, scrip, demerger, transfer,
-      worthless) inherits it
-- [ ] Reject (422) an allocation whose parcel is dated after the sale date
-- [ ] Reject (422, or validate against the allocations) editing a Buy's `listing_id` while
-      allocations/AMIT adjustments reference it
-- [ ] Tests for each rejection and message text
-
 ## PUT /trades can silently rewrite a reinvest-created DRP (2026-07-12 review, integrity)
 
 The `PUT /trades/:id` handler rejects a body with `trade_type = DRP`

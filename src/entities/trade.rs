@@ -405,6 +405,12 @@ pub enum UpsertError {
     /// quantity, breaking that adjustment's `quantity <= trade.quantity`
     /// invariant (see `amit_adjustment::db_upsert`).
     QuantityBelowAmitAdjustment,
+    /// The edit changes the trade's `listing_id` while Sell allocations or
+    /// AMIT adjustments draw on this parcel: accepting it would silently
+    /// re-associate those dependants to the new listing, costing them
+    /// cross-listing in every CGT report. Remove the dependants first (e.g.
+    /// delete the Sell via `DELETE /sells/:id`).
+    ListingChangeReferenced,
     /// The existing trade is a rights exercise (`rights_action_id` set): its
     /// figures were validated against the rights issue's entitlement, which a
     /// free-form edit could exceed. Delete it and re-exercise instead (see
@@ -501,6 +507,7 @@ pub async fn db_upsert(pool: &SqlitePool, trade: &Trade) -> Result<(), UpsertErr
     // break. (The INSERT below never sets any provenance column, so a normal
     // trade can't become one either.)
     type ProvenanceRow = (
+        i64,
         Option<i64>,
         Option<i64>,
         Option<i64>,
@@ -510,14 +517,16 @@ pub async fn db_upsert(pool: &SqlitePool, trade: &Trade) -> Result<(), UpsertErr
         Option<i64>,
     );
     let existing_action: Option<ProvenanceRow> = sqlx::query_as(
-        "SELECT rights_action_id, buyback_action_id, scrip_action_id, demerger_action_id, \
-                transfer_id, ess_statement_id, inheritance_id \
+        "SELECT listing_id, rights_action_id, buyback_action_id, scrip_action_id, \
+                demerger_action_id, transfer_id, ess_statement_id, inheritance_id \
          FROM trades WHERE id = ?",
     )
     .bind(trade.id)
     .fetch_optional(&mut *tx)
     .await?;
-    if let Some((rights, buyback, scrip, demerger, transfer, ess, inheritance)) = existing_action {
+    let existing_listing_id = existing_action.as_ref().map(|row| row.0);
+    if let Some((_, rights, buyback, scrip, demerger, transfer, ess, inheritance)) = existing_action
+    {
         if rights.is_some() {
             return Err(UpsertError::RightsExerciseTrade);
         }
@@ -563,6 +572,24 @@ pub async fn db_upsert(pool: &SqlitePool, trade: &Trade) -> Result<(), UpsertErr
             .await?;
     if is_transfer_fee {
         return Err(UpsertError::TransferTrade);
+    }
+
+    // The listing is frozen while dependants draw on the parcel: a Sell
+    // allocation or AMIT adjustment references this trade by id, so changing
+    // its listing would silently re-associate them to the new security. (This
+    // also keeps the capacity re-check below honest — its split re-basing
+    // looks up the trade's listing.)
+    if existing_listing_id.is_some_and(|existing| existing != trade.listing_id) {
+        let referenced: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM parcel_allocations WHERE purchase_trade_id = ?1) \
+                 OR EXISTS(SELECT 1 FROM amit_adjustments WHERE trade_id = ?1)",
+        )
+        .bind(trade.id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if referenced {
+            return Err(UpsertError::ListingChangeReferenced);
+        }
     }
 
     // Sum is computed in Decimal (the column is TEXT; SQL SUM would coerce to
@@ -934,6 +961,10 @@ impl From<UpsertError> for ApiError {
             ),
             UpsertError::QuantityBelowAmitAdjustment => ApiError::unprocessable(
                 "the new quantity is below a linked AMIT adjustment's covered quantity",
+            ),
+            UpsertError::ListingChangeReferenced => ApiError::unprocessable(
+                "the listing cannot be changed while Sell allocations or AMIT adjustments \
+                 reference this parcel — remove them first",
             ),
             UpsertError::RightsExerciseTrade => ApiError::unprocessable(
                 "this trade is a rights exercise and cannot be edited — delete it and \
@@ -1370,6 +1401,55 @@ mod tests {
             db_get(&pool, 1).await.unwrap().unwrap().quantity,
             Decimal::from(8)
         );
+    }
+
+    /// A Buy's listing is frozen while Sell allocations draw on the parcel:
+    /// changing it would silently re-associate those allocations (and their
+    /// CGT costing) to the new listing.
+    #[tokio::test]
+    async fn db_listing_change_on_allocated_parcel_is_refused() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        test_support::listing(2).ticker("VGS").insert(&pool).await;
+        db_upsert(&pool, &buy_trade()).await.unwrap(); // listing 1
+        insert_sell_consuming(&pool, 2, 1, Decimal::from(5)).await;
+
+        let mut moved = buy_trade();
+        moved.listing_id = 2;
+        let err = db_upsert(&pool, &moved).await.unwrap_err();
+        assert!(
+            matches!(err, UpsertError::ListingChangeReferenced),
+            "expected ListingChangeReferenced, got: {err:?}"
+        );
+        assert_eq!(db_get(&pool, 1).await.unwrap().unwrap().listing_id, 1);
+    }
+
+    /// The same freeze applies while an AMIT adjustment covers the parcel —
+    /// and lifts once nothing references it.
+    #[tokio::test]
+    async fn db_listing_change_under_amit_adjustment_is_refused_until_unlinked() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        test_support::listing(2).ticker("VGS").insert(&pool).await;
+        db_upsert(&pool, &buy_trade()).await.unwrap(); // listing 1
+        insert_amit_adjustment_covering(&pool, 1, Decimal::from(8)).await;
+
+        let mut moved = buy_trade();
+        moved.listing_id = 2;
+        let err = db_upsert(&pool, &moved).await.unwrap_err();
+        assert!(
+            matches!(err, UpsertError::ListingChangeReferenced),
+            "expected ListingChangeReferenced, got: {err:?}"
+        );
+        assert_eq!(db_get(&pool, 1).await.unwrap().unwrap().listing_id, 1);
+
+        // With the adjustment removed the listing edits freely again.
+        sqlx::query("DELETE FROM amit_adjustments WHERE trade_id = 1")
+            .execute(&pool)
+            .await
+            .unwrap();
+        db_upsert(&pool, &moved).await.unwrap();
+        assert_eq!(db_get(&pool, 1).await.unwrap().unwrap().listing_id, 2);
     }
 
     #[tokio::test]
@@ -1937,6 +2017,36 @@ mod tests {
             db_get(&pool, 1).await.unwrap().unwrap().quantity,
             Decimal::from(10)
         );
+    }
+
+    #[tokio::test]
+    async fn api_listing_change_on_consumed_parcel_returns_422_with_reason() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        test_support::listing(2).ticker("VGS").insert(&pool).await;
+        db_upsert(&pool, &buy_trade()).await.unwrap(); // listing 1
+        insert_sell_consuming(&pool, 2, 1, Decimal::from(5)).await;
+
+        let body = serde_json::json!({
+            "trade_type": "Buy",
+            "date": "2024-01-15",
+            "settlement_date": "2024-01-17",
+            "listing_id": 2,
+            "average_price": "100",
+            "quantity": "10",
+            "currency": "AUD",
+            "brokerage": "9.95",
+            "gst_on_brokerage": "0.995",
+            "brokerage_currency": "AUD",
+            "fx_rate": "1"
+        });
+        let (status, detail) = put_trade_json(&pool, 1, body).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            detail.contains("listing cannot be changed"),
+            "detail: {detail}"
+        );
+        assert_eq!(db_get(&pool, 1).await.unwrap().unwrap().listing_id, 1);
     }
 
     #[tokio::test]

@@ -77,6 +77,15 @@ pub enum SellError {
     PurchaseTradeNotBuyOrDrp,
     /// Allocating these parcels would exceed a purchase parcel's quantity.
     PurchaseQuantityExceeded,
+    /// An allocation consumes a parcel of a different listing from the
+    /// Sell's: a sale can only dispose of units of the security actually
+    /// sold — a cross-listing allocation would be costed against the wrong
+    /// security in every CGT report.
+    PurchaseListingMismatch,
+    /// An allocation consumes a parcel dated after the sale date: units
+    /// cannot be sold before they were acquired (a negative holding period
+    /// would corrupt the discount test and the gains reports).
+    PurchaseAfterSale,
     /// The existing trade is a buy-back participation Sell
     /// (`buyback_action_id` set): its figures derive from the buy-back's
     /// terms and it carries a linked dividend-component income row, so
@@ -147,6 +156,12 @@ impl From<SellError> for ApiError {
             SellError::PurchaseQuantityExceeded => ApiError::unprocessable(
                 "the allocations exceed a purchase parcel's available quantity",
             ),
+            SellError::PurchaseListingMismatch => ApiError::unprocessable(
+                "an allocated parcel belongs to a different listing than the Sell",
+            ),
+            SellError::PurchaseAfterSale => {
+                ApiError::unprocessable("an allocated parcel is dated after the sale date")
+            }
             SellError::BuyBackSell => ApiError::unprocessable(
                 "this Sell is a buy-back participation and cannot be edited — \
                  delete it and re-participate instead",
@@ -544,6 +559,16 @@ pub(crate) async fn upsert_sell_in_tx(
         }
         let purchase_date: NaiveDate = purchase_row.try_get("date")?;
         let purchase_listing: i64 = purchase_row.try_get("listing_id")?;
+        // A sale disposes of units of the security actually sold, and only
+        // units that existed on the sale date. (Every operation-constructed
+        // Sell satisfies both by construction — it selects its parcels from
+        // the action's own listing, dated before the event.)
+        if purchase_listing != body.listing_id {
+            return Err(SellError::PurchaseListingMismatch);
+        }
+        if purchase_date > body.date {
+            return Err(SellError::PurchaseAfterSale);
+        }
         let purchase_qty: Decimal = purchase_row
             .try_get::<String, _>("quantity")?
             .parse()
@@ -789,6 +814,70 @@ mod tests {
         assert!(matches!(err, SellError::PurchaseTradeNotBuyOrDrp));
     }
 
+    /// A Sell can only consume parcels of its own listing: a cross-listing
+    /// allocation would be costed against the wrong security in the CGT
+    /// reports, so it is rejected and rolled back.
+    #[tokio::test]
+    async fn db_allocation_from_different_listing_is_rejected() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        insert_listing(&pool, 2).await;
+        // The parcel belongs to listing 2; the Sell (sell_body) is on listing 1.
+        insert_buy(&pool, 1, 2, Decimal::from(100)).await;
+
+        let body = sell_body(
+            Decimal::from(100),
+            vec![AllocationInput {
+                purchase_trade_id: 1,
+                quantity_allocated: Decimal::from(100),
+            }],
+        );
+        let err = db_upsert_sell(&pool, 2, &body).await.unwrap_err();
+        assert!(matches!(err, SellError::PurchaseListingMismatch));
+        assert!(!trade_exists(&pool, 2).await);
+    }
+
+    /// A Sell cannot draw on a parcel acquired after the sale date — units
+    /// can't be sold before they exist (a negative holding period would
+    /// corrupt the discount test). The boundary is inclusive: a same-day
+    /// acquisition is fine.
+    #[tokio::test]
+    async fn db_allocation_of_parcel_dated_after_sale_is_rejected() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        // Parcel dated after the Sell's 2024-06-03…
+        test_support::buy(1, 1)
+            .date(NaiveDate::from_ymd_opt(2024, 6, 4).unwrap())
+            .insert(&pool)
+            .await;
+
+        let body = sell_body(
+            Decimal::from(100),
+            vec![AllocationInput {
+                purchase_trade_id: 1,
+                quantity_allocated: Decimal::from(100),
+            }],
+        );
+        let err = db_upsert_sell(&pool, 2, &body).await.unwrap_err();
+        assert!(matches!(err, SellError::PurchaseAfterSale));
+        assert!(!trade_exists(&pool, 2).await);
+
+        // …while a same-day parcel is sellable.
+        test_support::buy(1, 1)
+            .date(NaiveDate::from_ymd_opt(2024, 6, 3).unwrap())
+            .insert(&pool)
+            .await;
+        let body = sell_body(
+            Decimal::from(100),
+            vec![AllocationInput {
+                purchase_trade_id: 1,
+                quantity_allocated: Decimal::from(100),
+            }],
+        );
+        db_upsert_sell(&pool, 2, &body).await.unwrap();
+        assert!(trade_exists(&pool, 2).await);
+    }
+
     /// A Sell may only dispose of parcels its own holding account holds: an
     /// allocation against another account's parcel is rejected (and rolled
     /// back), while the same Sell entered in the parcel's account succeeds.
@@ -885,6 +974,90 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    /// PUT the JSON body to /sells/{id}, returning the status and response
+    /// body text (the 422s carry their reason there).
+    async fn put_sell_json(
+        pool: &SqlitePool,
+        id: i64,
+        body: serde_json::Value,
+    ) -> (StatusCode, String) {
+        let resp = router()
+            .with_state(pool.clone())
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/sells/{id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = http_body_util::BodyExt::collect(resp.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
+        (status, String::from_utf8(bytes.to_vec()).unwrap())
+    }
+
+    #[tokio::test]
+    async fn api_cross_listing_allocation_returns_422_with_reason() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        insert_listing(&pool, 2).await;
+        insert_buy(&pool, 1, 2, Decimal::from(100)).await; // listing 2 parcel
+
+        let body = serde_json::json!({
+            "date": "2024-06-03",
+            "listing_id": 1,
+            "average_price": "15",
+            "quantity": "100",
+            "currency": "AUD",
+            "brokerage": "0",
+            "gst_on_brokerage": "0",
+            "brokerage_currency": "AUD",
+            "fx_rate": "1",
+            "allocations": [ { "purchase_trade_id": 1, "quantity_allocated": "100" } ]
+        });
+        let (status, detail) = put_sell_json(&pool, 2, body).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            detail.contains("different listing than the Sell"),
+            "detail: {detail}"
+        );
+    }
+
+    #[tokio::test]
+    async fn api_allocation_after_sale_date_returns_422_with_reason() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        // Parcel acquired the day after the sale below.
+        test_support::buy(1, 1)
+            .date(NaiveDate::from_ymd_opt(2024, 6, 4).unwrap())
+            .insert(&pool)
+            .await;
+
+        let body = serde_json::json!({
+            "date": "2024-06-03",
+            "listing_id": 1,
+            "average_price": "15",
+            "quantity": "100",
+            "currency": "AUD",
+            "brokerage": "0",
+            "gst_on_brokerage": "0",
+            "brokerage_currency": "AUD",
+            "fx_rate": "1",
+            "allocations": [ { "purchase_trade_id": 1, "quantity_allocated": "100" } ]
+        });
+        let (status, detail) = put_sell_json(&pool, 2, body).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            detail.contains("dated after the sale date"),
+            "detail: {detail}"
+        );
     }
 
     async fn apply_split(pool: &SqlitePool, id: i64, listing_id: i64, date: NaiveDate) {
