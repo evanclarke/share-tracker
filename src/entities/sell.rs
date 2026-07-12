@@ -133,6 +133,16 @@ pub enum SellError {
     /// `trade::validate_spot_fx_rate`): non-positive, or on an AUD Sell where
     /// it could never apply.
     SpotFxRate(trade::SpotFxRateError),
+    /// A degenerate core figure was rejected (see `trade::check_amounts`):
+    /// non-positive quantity or FX rate, negative price/brokerage/GST, or a
+    /// settlement before the sale date.
+    Amounts(trade::AmountsError),
+    /// An allocation's `quantity_allocated` is zero or negative. A negative
+    /// allocation would pass both the sum check and the per-parcel capacity
+    /// check while quietly increasing another parcel's capacity (e.g. −5 on
+    /// parcel A and +105 on parcel B "sums" to a 100-unit Sell), and a zero
+    /// one is a no-op row.
+    AllocationNotPositive,
 }
 
 impl From<sqlx::Error> for SellError {
@@ -194,6 +204,11 @@ impl From<SellError> for ApiError {
             SellError::SpotFxRate(detail) => {
                 ApiError::unprocessable(trade::spot_fx_rate_detail(&detail))
             }
+            SellError::Amounts(detail) => ApiError::unprocessable(trade::amounts_detail(&detail)),
+            SellError::AllocationNotPositive => ApiError::unprocessable(
+                "each parcel allocation must be for a positive quantity — a zero or negative \
+                 allocation would quietly shift capacity between parcels",
+            ),
             SellError::Db(err) => err.into(),
         }
     }
@@ -434,7 +449,17 @@ pub(crate) async fn upsert_sell_in_tx(
     transfer_id: Option<i64>,
     worthless_action_id: Option<i64>,
 ) -> Result<(), SellError> {
-    // Allocations must account for the whole sale — no more, no less.
+    // Every allocation must be a positive draw on its parcel — a negative one
+    // would pass the sum and capacity checks while quietly shifting capacity
+    // between parcels — and together they must account for the whole sale,
+    // no more, no less.
+    if body
+        .allocations
+        .iter()
+        .any(|a| a.quantity_allocated <= Decimal::ZERO)
+    {
+        return Err(SellError::AllocationNotPositive);
+    }
     let allocated: Decimal = body.allocations.iter().map(|a| a.quantity_allocated).sum();
     if allocated != body.quantity {
         return Err(SellError::AllocationMismatch);
@@ -449,6 +474,18 @@ pub(crate) async fn upsert_sell_in_tx(
         body.brokerage,
         body.gst_on_brokerage,
     );
+    // Degenerate core figures (zero/negative quantity, negative costs, …)
+    // are rejected on the Sell path exactly as on the trade path.
+    trade::check_amounts(&trade::AmountsCheck {
+        quantity: body.quantity,
+        average_price: body.average_price,
+        brokerage,
+        gst_on_brokerage,
+        fx_rate: body.fx_rate,
+        date: body.date,
+        settlement_date,
+    })
+    .map_err(SellError::Amounts)?;
     trade::check_statement_total(trade::StatementTotalCheck {
         statement_total: body.statement_total,
         trade_type: TradeType::Sell,
@@ -1431,6 +1468,150 @@ mod tests {
             detail.contains("sum to the sell quantity"),
             "detail: {detail}"
         );
+    }
+
+    /// A zero or negative allocation is rejected outright: −5 on parcel A and
+    /// +105 on parcel B "sums" to a 100-unit Sell and passes the per-parcel
+    /// capacity check, quietly increasing parcel A's capacity (2026-07-12
+    /// review). Nothing is persisted.
+    #[tokio::test]
+    async fn db_zero_or_negative_allocation_is_rejected() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
+        insert_buy(&pool, 2, 1, Decimal::from(105)).await;
+
+        // The exact review scenario: −5 + 105 = 100.
+        let negative = sell_body(
+            Decimal::from(100),
+            vec![
+                AllocationInput {
+                    purchase_trade_id: 1,
+                    quantity_allocated: Decimal::from(-5),
+                },
+                AllocationInput {
+                    purchase_trade_id: 2,
+                    quantity_allocated: Decimal::from(105),
+                },
+            ],
+        );
+        let err = db_upsert_sell(&pool, 3, &negative).await.unwrap_err();
+        assert!(
+            matches!(err, SellError::AllocationNotPositive),
+            "expected AllocationNotPositive, got: {err:?}"
+        );
+        assert!(!trade_exists(&pool, 3).await);
+        assert_eq!(count_allocations(&pool, 3).await, 0);
+
+        // A zero allocation is a no-op row — rejected too.
+        let zero = sell_body(
+            Decimal::from(100),
+            vec![
+                AllocationInput {
+                    purchase_trade_id: 1,
+                    quantity_allocated: Decimal::ZERO,
+                },
+                AllocationInput {
+                    purchase_trade_id: 2,
+                    quantity_allocated: Decimal::from(100),
+                },
+            ],
+        );
+        let err = db_upsert_sell(&pool, 3, &zero).await.unwrap_err();
+        assert!(matches!(err, SellError::AllocationNotPositive));
+        assert!(!trade_exists(&pool, 3).await);
+    }
+
+    #[tokio::test]
+    async fn api_negative_allocation_returns_422_with_reason() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
+        insert_buy(&pool, 2, 1, Decimal::from(105)).await;
+
+        let body = serde_json::json!({
+            "date": "2024-06-03",
+            "listing_id": 1,
+            "average_price": "15",
+            "quantity": "100",
+            "currency": "AUD",
+            "brokerage": "0",
+            "gst_on_brokerage": "0",
+            "brokerage_currency": "AUD",
+            "fx_rate": "1",
+            "allocations": [
+                { "purchase_trade_id": 1, "quantity_allocated": "-5" },
+                { "purchase_trade_id": 2, "quantity_allocated": "105" }
+            ]
+        });
+        let (status, detail) = put_sell_json(&pool, 3, body).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(detail.contains("positive quantity"), "detail: {detail}");
+        assert!(!trade_exists(&pool, 3).await);
+    }
+
+    /// The Sell path shares trade::check_amounts: degenerate core figures
+    /// (zero quantity, negative price/costs, non-positive fx_rate, settlement
+    /// before the sale date) are rejected with the same per-shape 422s.
+    #[tokio::test]
+    async fn api_degenerate_sell_amounts_are_rejected_per_shape() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
+
+        let base = serde_json::json!({
+            "date": "2024-06-03",
+            "listing_id": 1,
+            "average_price": "15",
+            "quantity": "100",
+            "currency": "AUD",
+            "brokerage": "0",
+            "gst_on_brokerage": "0",
+            "brokerage_currency": "AUD",
+            "fx_rate": "1",
+            "allocations": [ { "purchase_trade_id": 1, "quantity_allocated": "100" } ]
+        });
+        for (field, value, expected) in [
+            ("average_price", "-15", "average_price cannot be negative"),
+            ("brokerage", "-1", "brokerage cannot be negative"),
+            (
+                "gst_on_brokerage",
+                "-0.1",
+                "gst_on_brokerage cannot be negative",
+            ),
+            ("fx_rate", "0", "fx_rate must be a positive"),
+            (
+                "settlement_date",
+                "2024-06-02",
+                "settlement_date cannot be before the trade date",
+            ),
+        ] {
+            let mut body = base.clone();
+            body[field] = value.into();
+            let (status, detail) = put_sell_json(&pool, 2, body).await;
+            assert_eq!(
+                status,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{field}={value} must be rejected"
+            );
+            assert!(
+                detail.contains(expected),
+                "{field}={value}: detail must explain the rule, got: {detail}"
+            );
+            assert!(
+                !trade_exists(&pool, 2).await,
+                "{field}={value}: rolled back"
+            );
+        }
+
+        // A zero-quantity Sell (with the matching empty allocation set) is
+        // rejected as not-positive, not as an allocation mismatch.
+        let mut zero_qty = base.clone();
+        zero_qty["quantity"] = "0".into();
+        zero_qty["allocations"] = serde_json::json!([]);
+        let (status, detail) = put_sell_json(&pool, 2, zero_qty).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(detail.contains("quantity must be positive"), "{detail}");
     }
 
     // Spot-rate override (QC 18020): the Sell write path shares

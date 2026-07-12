@@ -310,6 +310,83 @@ pub(crate) fn spot_fx_rate_detail(e: &SpotFxRateError) -> &'static str {
     }
 }
 
+/// Why a trade's core figures were rejected (all map to 422): a degenerate
+/// value — zero/negative quantity, a negative price or cost, a non-positive
+/// FX rate, or a settlement before the trade date — corrupts every
+/// downstream report without failing anything, so it is rejected at write
+/// time. Shared by the trade and Sell write paths so the two can't drift.
+#[derive(Debug, PartialEq)]
+pub(crate) enum AmountsError {
+    /// Zero or negative quantity: a trade of nothing (or of negative units)
+    /// has no meaning, and a negative parcel/sale silently skews holdings.
+    QuantityNotPositive,
+    /// Negative unit price (zero is legitimate — e.g. a worthless-shares
+    /// closing Sell at nil proceeds).
+    PriceNegative,
+    /// Negative brokerage.
+    BrokerageNegative,
+    /// Negative GST on brokerage.
+    GstNegative,
+    /// Zero or negative fallback FX rate: the rate divides the amount
+    /// (AUD = foreign / rate), so it can never be a real exchange rate.
+    FxRateNotPositive,
+    /// Settlement dated before the trade itself.
+    SettlementBeforeTrade,
+}
+
+/// The core figures every trade/Sell write must satisfy, gathered for
+/// [`check_amounts`]. Named fields keep the adjacent `Decimal` amounts from
+/// being transposed at the call site (mirrors [`StatementTotalCheck`]).
+pub(crate) struct AmountsCheck {
+    pub quantity: Decimal,
+    pub average_price: Decimal,
+    pub brokerage: Decimal,
+    pub gst_on_brokerage: Decimal,
+    pub fx_rate: Decimal,
+    pub date: NaiveDate,
+    pub settlement_date: NaiveDate,
+}
+
+/// Validate a trade's core figures: quantity > 0, price ≥ 0, brokerage and
+/// GST ≥ 0, fx_rate > 0, settlement on or after the trade date. Brokerage is
+/// checked post-GST-split (see [`resolve_brokerage`]), so a negative
+/// GST-inclusive entry is caught through its negative parts.
+pub(crate) fn check_amounts(c: &AmountsCheck) -> Result<(), AmountsError> {
+    if c.quantity <= Decimal::ZERO {
+        return Err(AmountsError::QuantityNotPositive);
+    }
+    if c.average_price < Decimal::ZERO {
+        return Err(AmountsError::PriceNegative);
+    }
+    if c.brokerage < Decimal::ZERO {
+        return Err(AmountsError::BrokerageNegative);
+    }
+    if c.gst_on_brokerage < Decimal::ZERO {
+        return Err(AmountsError::GstNegative);
+    }
+    if c.fx_rate <= Decimal::ZERO {
+        return Err(AmountsError::FxRateNotPositive);
+    }
+    if c.settlement_date < c.date {
+        return Err(AmountsError::SettlementBeforeTrade);
+    }
+    Ok(())
+}
+
+/// Human-readable body for an amounts 422 (shown by the web UI).
+pub(crate) fn amounts_detail(e: &AmountsError) -> &'static str {
+    match e {
+        AmountsError::QuantityNotPositive => "quantity must be positive",
+        AmountsError::PriceNegative => "average_price cannot be negative",
+        AmountsError::BrokerageNegative => "brokerage cannot be negative",
+        AmountsError::GstNegative => "gst_on_brokerage cannot be negative",
+        AmountsError::FxRateNotPositive => {
+            "fx_rate must be a positive foreign-per-AUD rate (1 for an AUD trade)"
+        }
+        AmountsError::SettlementBeforeTrade => "settlement_date cannot be before the trade date",
+    }
+}
+
 /// Why a supplied statement total failed to reconcile (both map to 422).
 #[derive(Debug, PartialEq)]
 pub(crate) enum StatementTotalError {
@@ -477,6 +554,10 @@ pub enum UpsertError {
     /// `validate_spot_fx_rate`): non-positive, or on an AUD trade where it
     /// could never apply.
     SpotFxRate(SpotFxRateError),
+    /// A degenerate core figure was rejected (see [`check_amounts`]):
+    /// non-positive quantity or FX rate, negative price/brokerage/GST, or a
+    /// settlement before the trade date.
+    Amounts(AmountsError),
 }
 
 impl From<sqlx::Error> for UpsertError {
@@ -491,6 +572,19 @@ impl From<sqlx::Error> for UpsertError {
 /// — the quantity already allocated to Sells, or any linked AMIT adjustment's
 /// covered quantity.
 pub async fn db_upsert(pool: &SqlitePool, trade: &Trade) -> Result<(), UpsertError> {
+    // Degenerate figures (zero/negative quantity, negative costs, …) corrupt
+    // every downstream report without failing anything — rejected before
+    // anything else runs.
+    check_amounts(&AmountsCheck {
+        quantity: trade.quantity,
+        average_price: trade.average_price,
+        brokerage: trade.brokerage,
+        gst_on_brokerage: trade.gst_on_brokerage,
+        fx_rate: trade.fx_rate,
+        date: trade.date,
+        settlement_date: trade.settlement_date,
+    })
+    .map_err(UpsertError::Amounts)?;
     // The statement total (when recorded) must reconcile with the trade's own
     // figures — a mismatch is a data-entry error against the contract note,
     // caught before anything is written.
@@ -980,6 +1074,7 @@ impl From<UpsertError> for ApiError {
             UpsertError::SpotFxRate(detail) => {
                 ApiError::unprocessable(spot_fx_rate_detail(&detail))
             }
+            UpsertError::Amounts(detail) => ApiError::unprocessable(amounts_detail(&detail)),
             UpsertError::QuantityBelowAllocated => ApiError::unprocessable(
                 "the new quantity is below what Sell allocations already draw from this parcel",
             ),
@@ -2231,6 +2326,75 @@ mod tests {
         let status = resp.status();
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         (status, String::from_utf8(bytes.to_vec()).unwrap())
+    }
+
+    /// Degenerate core figures are rejected with 422 per shape — a zero or
+    /// negative quantity, a negative price, negative brokerage or GST, a
+    /// non-positive fx_rate, or a settlement before the trade date — and
+    /// nothing is persisted. (2026-07-12 review: the plain CRUD path accepted
+    /// them all, silently corrupting every downstream report.)
+    #[tokio::test]
+    async fn api_degenerate_trade_amounts_are_rejected_per_shape() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        let base = serde_json::json!({
+            "trade_type": "Buy",
+            "date": "2024-01-15",
+            "listing_id": 1,
+            "average_price": "100",
+            "quantity": "10",
+            "currency": "AUD",
+            "brokerage": "9.95",
+            "gst_on_brokerage": "0.995",
+            "brokerage_currency": "AUD",
+            "fx_rate": "1"
+        });
+        for (field, value, expected) in [
+            ("quantity", "0", "quantity must be positive"),
+            ("quantity", "-5", "quantity must be positive"),
+            ("average_price", "-1", "average_price cannot be negative"),
+            ("brokerage", "-9.95", "brokerage cannot be negative"),
+            (
+                "gst_on_brokerage",
+                "-0.995",
+                "gst_on_brokerage cannot be negative",
+            ),
+            ("fx_rate", "0", "fx_rate must be a positive"),
+            ("fx_rate", "-1.5", "fx_rate must be a positive"),
+            (
+                "settlement_date",
+                "2024-01-14",
+                "settlement_date cannot be before the trade date",
+            ),
+        ] {
+            let mut body = base.clone();
+            body[field] = value.into();
+            let (status, detail) = put_trade_json(&pool, 1, body).await;
+            assert_eq!(
+                status,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{field}={value} must be rejected"
+            );
+            assert!(
+                detail.contains(expected),
+                "{field}={value}: detail must explain the rule, got: {detail}"
+            );
+            assert!(
+                db_get(&pool, 1).await.unwrap().is_none(),
+                "{field}={value}: nothing persisted"
+            );
+        }
+
+        // Boundary values stay accepted: zero price, zero costs, a same-day
+        // settlement, and a fractional quantity are all legitimate entries.
+        let mut fine = base.clone();
+        fine["average_price"] = "0".into();
+        fine["brokerage"] = "0".into();
+        fine["gst_on_brokerage"] = "0".into();
+        fine["quantity"] = "0.00000001".into();
+        fine["settlement_date"] = "2024-01-15".into();
+        let (status, _) = put_trade_json(&pool, 1, fine).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
     }
 
     #[test]

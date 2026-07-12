@@ -107,7 +107,45 @@ pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<InterestIncome>
     .await
 }
 
-pub async fn db_upsert(pool: &SqlitePool, i: &InterestIncome) -> Result<(), sqlx::Error> {
+#[derive(Debug)]
+pub enum UpsertError {
+    Db(sqlx::Error),
+    /// A negative `amount` or `tfn_withholding_tax` (carries the field name):
+    /// interest figures are the statement's positive (or zero) amounts — a
+    /// negative would silently reduce the year's gross-interest line. Mapped
+    /// to `422`.
+    NegativeAmount(&'static str),
+}
+
+impl From<sqlx::Error> for UpsertError {
+    fn from(e: sqlx::Error) -> Self {
+        UpsertError::Db(e)
+    }
+}
+
+impl From<UpsertError> for ApiError {
+    fn from(e: UpsertError) -> Self {
+        match e {
+            UpsertError::NegativeAmount(field) => ApiError::unprocessable(format!(
+                "{field} cannot be negative — interest figures are the statement's own \
+                 positive (or zero) amounts"
+            )),
+            // Unknown currency/account (FK) surfaces as 422 with the
+            // offending constraint named.
+            UpsertError::Db(err) => err.into(),
+        }
+    }
+}
+
+pub async fn db_upsert(pool: &SqlitePool, i: &InterestIncome) -> Result<(), UpsertError> {
+    for (field, value) in [
+        ("amount", i.amount),
+        ("tfn_withholding_tax", i.tfn_withholding_tax),
+    ] {
+        if value < Decimal::ZERO {
+            return Err(UpsertError::NegativeAmount(field));
+        }
+    }
     sqlx::query(
         "INSERT INTO interest_income \
          (id, date_paid, amount, tfn_withholding_tax, currency, source, holding_account_id) \
@@ -173,8 +211,6 @@ async fn upsert(
     db_upsert(&pool, &i)
         .await
         .map(|_| StatusCode::NO_CONTENT)
-        // Unknown currency/account (FK) surfaces as 422 with the offending
-        // constraint named.
         .map_err(ApiError::from)
 }
 
@@ -291,6 +327,57 @@ mod tests {
         );
         assert_eq!(got.currency, "AUD"); // defaulted
         assert_eq!(got.source.as_deref(), Some("term deposit"));
+    }
+
+    /// A negative gross amount or TFN withholding is rejected with 422 naming
+    /// the field, and nothing is persisted (2026-07-12 review: negatives were
+    /// accepted, silently reducing the year's gross-interest line). Zero
+    /// stays fine (the withholding default).
+    #[tokio::test]
+    async fn api_negative_amounts_rejected_422() {
+        let pool = test_pool().await;
+        for (field, body) in [
+            (
+                "amount",
+                serde_json::json!({ "date_paid": "2024-03-15", "amount": "-250" }),
+            ),
+            (
+                "tfn_withholding_tax",
+                serde_json::json!({
+                    "date_paid": "2024-03-15",
+                    "amount": "250",
+                    "tfn_withholding_tax": "-1"
+                }),
+            ),
+        ] {
+            let resp = router()
+                .with_state(pool.clone())
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri("/interest_income/1")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "negative {field} must be rejected"
+            );
+            let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+            let detail = String::from_utf8(bytes.to_vec()).unwrap();
+            assert!(
+                detail.contains(field) && detail.contains("cannot be negative"),
+                "negative {field}: detail must name the field, got: {detail}"
+            );
+            assert!(
+                db_get(&pool, 1).await.unwrap().is_none(),
+                "negative {field}: nothing persisted"
+            );
+        }
     }
 
     #[tokio::test]

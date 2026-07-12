@@ -8,27 +8,6 @@ The sections below come from the **2026-07-12 code review** (a full pass over th
 domain pipeline, infra, and migrations for programming and domain issues). Each section records one
 finding; sections land in DONE.md as they are fixed.
 
-## No positivity/sanity validation on ordinary trade, Sell, allocation, and income amounts (2026-07-12 review, integrity)
-
-The linked operations validate their inputs (`units <= 0` rejected in buy-back, rights exercise,
-ESS vest, DRP reinvest, inheritance…), but the plain CRUD paths accept degenerate values, and the
-schema has no CHECKs on them (`migrations/0001_schema.sql:369+`, `:444`):
-
-- `PUT /trades` / `PUT /sells`: zero or negative `quantity` and `average_price`, negative
-  brokerage/GST, and a `settlement_date` before the trade date are all accepted
-- Sell `allocations`: a zero or **negative** `quantity_allocated` passes both the sum check and
-  the per-parcel capacity check (e.g. −5 on parcel A and +105 on parcel B "sums" to a 100-unit
-  Sell), quietly increasing another parcel's capacity
-- `PUT /income` / `PUT /interest_income`: negative amounts accepted on every money column
-
-A negative or zero quantity corrupts every downstream report without failing anything, which is
-exactly what the write-time-invariant rule exists to prevent.
-
-- [ ] Decide the exact rule set (quantity > 0, price ≥ 0, brokerage/GST ≥ 0, allocation units > 0,
-      income components ≥ 0, settlement ≥ trade date) and enforce it at write time with clear 422
-      bodies
-- [ ] Tests per rejected shape; docs/API.md 422 causes updated
-
 ## Cost-base FX timing: AMIT/ROC reductions convert at the acquisition-month rate (2026-07-12 review, domain — decide)
 
 `CostBase::into_aud_with` (`src/domain/cost_base.rs:204-239`) deliberately resolves **one** rate —

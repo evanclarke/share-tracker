@@ -233,6 +233,12 @@ pub enum UpsertError {
     /// AMIT adjustments, CGT event E10) — the E4 tax-deferred mechanism is
     /// for non-AMIT trusts. Mapped to `422`.
     AmitTaxDeferred,
+    /// A negative money figure (carries the field name). Every income figure
+    /// — cash and notional components, withholding, and the per-share
+    /// cross-check figures — is the statement's own amount, never below
+    /// zero; a negative would silently reduce the year's totals in every
+    /// report. Mapped to `422`.
+    NegativeAmount(&'static str),
 }
 
 impl From<sqlx::Error> for UpsertError {
@@ -294,6 +300,32 @@ pub(crate) fn per_share_detail(e: &PerShareError) -> String {
 }
 
 pub async fn db_upsert(pool: &SqlitePool, income: &Income) -> Result<(), UpsertError> {
+    // No money figure on the row may be negative: statements report positive
+    // (or zero) amounts, and a negative would silently reduce the year's
+    // totals in every report. Checked before the per-share cross-check so a
+    // negative per-share figure gets the clearer message.
+    for (field, value) in [
+        ("franked_amount", Some(income.franked_amount)),
+        ("unfranked_amount", Some(income.unfranked_amount)),
+        ("foreign_source_income", Some(income.foreign_source_income)),
+        ("foreign_tax_paid", Some(income.foreign_tax_paid)),
+        ("tfn_withholding_tax", Some(income.tfn_withholding_tax)),
+        ("franking_credits", Some(income.franking_credits)),
+        (
+            "lic_capital_gain_deduction",
+            Some(income.lic_capital_gain_deduction),
+        ),
+        (
+            "conduit_foreign_income",
+            Some(income.conduit_foreign_income),
+        ),
+        ("amount_per_security", income.amount_per_security),
+        ("securities_held", income.securities_held),
+    ] {
+        if value.is_some_and(|v| v < Decimal::ZERO) {
+            return Err(UpsertError::NegativeAmount(field));
+        }
+    }
     check_per_share(income).map_err(UpsertError::PerShare)?;
     if income.entitlement_date.is_some() && !income.trust_income {
         return Err(UpsertError::EntitlementDateOnNonTrust);
@@ -538,6 +570,10 @@ impl From<UpsertError> for ApiError {
                  movement is the AMMA statement's cost_base_adjustment, entered as \
                  AMIT adjustments (CGT event E10), not an E4 tax-deferred amount",
             ),
+            UpsertError::NegativeAmount(field) => ApiError::unprocessable(format!(
+                "{field} cannot be negative — income figures are the statement's own \
+                 positive (or zero) amounts"
+            )),
             UpsertError::Db(err) => err.into(),
         }
     }
@@ -1147,6 +1183,66 @@ mod tests {
             Some("0.89891492".parse::<Decimal>().unwrap())
         );
         assert_eq!(inc.securities_held, Some(Decimal::from(866)));
+    }
+
+    /// Every money column rejects a negative value with 422 naming the field,
+    /// and nothing is persisted (2026-07-12 review: negatives were accepted on
+    /// every money column, silently reducing the year's totals).
+    #[tokio::test]
+    async fn api_negative_amount_on_any_money_column_returns_422() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        for field in [
+            "franked_amount",
+            "unfranked_amount",
+            "foreign_source_income",
+            "foreign_tax_paid",
+            "tfn_withholding_tax",
+            "franking_credits",
+            "lic_capital_gain_deduction",
+            "conduit_foreign_income",
+            "amount_per_security",
+            "securities_held",
+        ] {
+            let mut body = serde_json::json!({
+                "listing_id": 1,
+                "date_paid": "2024-03-15",
+                "unfranked_amount": "100",
+                // The per-share pair must come together; keep the partner
+                // present so only the negativity rule is under test.
+                "amount_per_security": "1",
+                "securities_held": "100"
+            });
+            body[field] = "-1".into();
+            let (status, detail) = put_income(&pool, 1, body).await;
+            assert_eq!(
+                status,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "negative {field} must be rejected"
+            );
+            assert!(
+                detail.contains(field) && detail.contains("cannot be negative"),
+                "negative {field}: detail must name the field, got: {detail}"
+            );
+            assert!(
+                db_get(&pool, 1).await.unwrap().is_none(),
+                "negative {field}: nothing persisted"
+            );
+        }
+
+        // Zero components stay accepted (a fully unfranked dividend has a
+        // zero franked_amount — the defaults).
+        let (status, _) = put_income(
+            &pool,
+            1,
+            serde_json::json!({
+                "listing_id": 1,
+                "date_paid": "2024-03-15",
+                "unfranked_amount": "100"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
     }
 
     // Entitlement date (trust present-entitlement timing,

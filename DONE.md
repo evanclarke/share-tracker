@@ -1050,3 +1050,55 @@ the one snapshot and no queries run per dividend. No endpoint/schema change, so 
 New tests: `franking::tests::db_one_load_answers_multiple_dividends_on_one_listing` and
 `tax_summary::tests::db_two_dividends_on_one_listing_denied_independently`; all existing denial
 tests pass unchanged (985 tests).
+
+## No positivity/sanity validation on ordinary trade, Sell, allocation, and income amounts (2026-07-12 review, integrity)
+
+The linked operations validate their inputs (`units <= 0` rejected in buy-back, rights exercise,
+ESS vest, DRP reinvest, inheritance…), but the plain CRUD paths accept degenerate values, and the
+schema has no CHECKs on them (`migrations/0001_schema.sql:369+`, `:444`):
+
+- `PUT /trades` / `PUT /sells`: zero or negative `quantity` and `average_price`, negative
+  brokerage/GST, and a `settlement_date` before the trade date are all accepted
+- Sell `allocations`: a zero or **negative** `quantity_allocated` passes both the sum check and
+  the per-parcel capacity check (e.g. −5 on parcel A and +105 on parcel B "sums" to a 100-unit
+  Sell), quietly increasing another parcel's capacity
+- `PUT /income` / `PUT /interest_income`: negative amounts accepted on every money column
+
+A negative or zero quantity corrupts every downstream report without failing anything, which is
+exactly what the write-time-invariant rule exists to prevent.
+
+- [x] Decide the exact rule set (quantity > 0, price ≥ 0, brokerage/GST ≥ 0, allocation units > 0,
+      income components ≥ 0, settlement ≥ trade date) and enforce it at write time with clear 422
+      bodies
+- [x] Tests per rejected shape; docs/API.md 422 causes updated
+
+Closed 2026-07-13. Decided rule set, enforced in Rust at write time (each rejection is a 422
+naming the rule; no schema rebuild — the checks live where every write path already runs):
+
+- Trades and Sells (`trade::check_amounts`, shared by `trade::db_upsert` and
+  `sell::upsert_sell_in_tx` so the two paths can't drift): `quantity > 0`; `average_price ≥ 0`
+  (zero stays legal — the worthless-shares closing Sell has nil proceeds); `brokerage ≥ 0` and
+  `gst_on_brokerage ≥ 0` (checked post-GST-split, so a negative inclusive entry is caught);
+  `fx_rate > 0` (it divides the amount — zero would blow up AUD conversion);
+  `settlement_date ≥ date`. Residual columns were left out: they are operation-managed
+  (free-form DRP bodies are already rejected at the API).
+- Sell allocations (`SellError::AllocationNotPositive`): every `quantity_allocated > 0`,
+  killing the −5/+105 capacity-shift shape before the sum/capacity checks run.
+- Income (`income::UpsertError::NegativeAmount`, field-naming 422): all eight money components
+  ≥ 0, plus the optional `amount_per_security`/`securities_held` pair (checked before the
+  per-share cross-check so a negative gets the clearer message). `tax_deferred_amount` already
+  had its own check.
+- Interest income (`interest_income::UpsertError::NegativeAmount`): `amount ≥ 0`,
+  `tfn_withholding_tax ≥ 0`.
+
+Operation-constructed trades/Sells (scrip, demerger, transfer, worthless, buy-back) satisfy the
+rules by construction and keep passing. Tests per rejected shape:
+`trade::tests::api_degenerate_trade_amounts_are_rejected_per_shape` (incl. boundary positives:
+zero price/costs, same-day settlement, fractional quantity),
+`sell::tests::db_zero_or_negative_allocation_is_rejected` (the exact −5/+105 review scenario),
+`api_negative_allocation_returns_422_with_reason`,
+`api_degenerate_sell_amounts_are_rejected_per_shape`,
+`income::tests::api_negative_amount_on_any_money_column_returns_422`,
+`interest_income::tests::api_negative_amounts_rejected_422`. docs/API.md updated: Trades and
+Sells sanity-rule paragraphs, Income "No negative amounts", Interest income 422 causes, and the
+Response codes 422 list (991 tests).
