@@ -287,3 +287,21 @@ fn known_limitations_document_settlement_window_forex_k10_k11() {
     // Surfaced in the README too.
     assert!(README_MD.contains("CGT events K10/K11"));
 }
+
+/// Docs-sync pin (REQUIREMENTS 2026-07-13, lossless GST-inclusive
+/// round-trip): the Trades section states the read/write round-trip
+/// semantics explicitly — with the flag set, `brokerage` is the one
+/// GST-inclusive amount on both reads and writes, and a verbatim GET → PUT
+/// re-splits to the identical stored pair — and the Sells section carries
+/// the same contract for flagged Sells.
+#[test]
+fn gst_inclusive_round_trip_semantics_documented() {
+    assert!(
+        API_MD.contains("**Reads present the same shape writes expect (lossless round-trip):**")
+    );
+    assert!(API_MD.contains("**on both reads and writes**"));
+    assert!(API_MD.contains("re-splits the same amount to the **identical stored pair**"));
+    // The Sells section states it for flagged Sells as well.
+    assert!(API_MD.contains("and the lossless GST-inclusive round-trip"));
+    assert!(API_MD.contains("re-`PUT`ting that body to `PUT /sells/:id`"));
+}

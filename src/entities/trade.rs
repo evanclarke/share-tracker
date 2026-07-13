@@ -37,13 +37,16 @@ pub struct Trade {
     /// the entered inclusive amount is split at write time (see
     /// `split_gst_inclusive`) before it lands here, so the cost-base
     /// arithmetic (`brokerage + gst_on_brokerage`) holds unconditionally.
+    /// On the wire, though, a flagged trade reads back with `brokerage` as
+    /// the one GST-inclusive amount — the same shape the write path expects
+    /// — so a GET → PUT round-trip is lossless (see [`Trade::present`]).
     pub brokerage: Decimal,
     pub gst_on_brokerage: Decimal,
     /// Records that the brokerage amount was *entered* GST-inclusive and
-    /// server-split. Persisted only so the entry form can round-trip the
-    /// trade (re-presenting `brokerage + gst_on_brokerage` as one inclusive
-    /// amount); the stored money columns are already split, so nothing else
-    /// reads it.
+    /// server-split. Persisted so reads can re-present `brokerage` as the
+    /// inclusive amount (see [`Trade::present`]) and so a re-PUT keeps the
+    /// same split semantics; the stored money columns are already split, so
+    /// nothing else reads it.
     pub brokerage_includes_gst: bool,
     pub brokerage_currency: String,
     /// Manual foreign-per-AUD override (same convention as the ATO rate: AUD =
@@ -199,6 +202,27 @@ impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for Trade {
     }
 }
 
+impl Trade {
+    /// The wire presentation of a trade (`GET /trades`, `GET /trades/:id`):
+    /// identical to the stored row, except that a GST-inclusive entry
+    /// (`brokerage_includes_gst`) re-presents `brokerage` as the one
+    /// inclusive amount — the stored ex-GST brokerage and GST recombined,
+    /// exactly what was entered. That is the same shape a flagged write
+    /// expects, so PUTting a response body back verbatim re-splits it to
+    /// the identical stored pair: the GET → PUT round-trip is lossless
+    /// (REQUIREMENTS 2026-07-13). `gst_on_brokerage` stays the derived
+    /// component (informational on reads; a flagged write ignores it), and
+    /// unflagged trades read back as stored. Applies only at the HTTP
+    /// boundary — internal callers of `db_get`/`db_list` keep the stored
+    /// ex-GST split.
+    fn present(mut self) -> Self {
+        if self.brokerage_includes_gst {
+            self.brokerage += self.gst_on_brokerage;
+        }
+        self
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct TradeBody {
     pub trade_type: TradeType,
@@ -211,6 +235,8 @@ pub struct TradeBody {
     pub currency: String,
     /// GST-inclusive when `brokerage_includes_gst` is set (the server splits
     /// it; any supplied `gst_on_brokerage` is ignored), ex-GST otherwise.
+    /// Reads present the same shape (see [`Trade::present`]), so a GET → PUT
+    /// round-trip is lossless.
     pub brokerage: Decimal,
     #[serde(default)]
     pub gst_on_brokerage: Decimal,
@@ -1002,7 +1028,8 @@ pub(crate) async fn auto_settlement_date(
 }
 
 async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<Trade>>, ApiError> {
-    db_list(&pool).await.map(Json).map_err(ApiError::from)
+    let trades = db_list(&pool).await?;
+    Ok(Json(trades.into_iter().map(Trade::present).collect()))
 }
 
 async fn get_one(
@@ -1012,7 +1039,7 @@ async fn get_one(
     db_get(&pool, id)
         .await
         .map_err(ApiError::from)?
-        .map(Json)
+        .map(|t| Json(t.present()))
         .ok_or(ApiError::NotFound)
 }
 
@@ -2543,6 +2570,92 @@ mod tests {
         assert_eq!(t.gst_on_brokerage, d("0.995"));
         assert!(!t.brokerage_includes_gst);
         assert_eq!(t.statement_total, None);
+    }
+
+    /// GET the JSON body of /trades/{id} as raw bytes (the exact wire shape a
+    /// round-trip client would re-PUT) plus its parsed `Trade`.
+    async fn get_trade_raw(pool: &SqlitePool, id: i64) -> (Vec<u8>, Trade) {
+        let resp = router()
+            .with_state(pool.clone())
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/trades/{id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let trade = serde_json::from_slice(&bytes).unwrap();
+        (bytes.to_vec(), trade)
+    }
+
+    /// Lossless GST-inclusive round-trip (REQUIREMENTS 2026-07-13): with the
+    /// flag set, `brokerage` on the wire is the same GST-inclusive amount on
+    /// reads and writes — GET re-presents the stored split recombined
+    /// (0.90 + 0.09 reads back as the 0.99 entered), and PUTting the response
+    /// body back verbatim re-splits it to the identical stored pair instead
+    /// of shrinking the brokerage by the GST each pass.
+    #[tokio::test]
+    async fn api_gst_inclusive_get_put_round_trip_is_lossless() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        let body = serde_json::json!({
+            "trade_type": "Buy",
+            "date": "2024-01-15",
+            "listing_id": 1,
+            "average_price": "100",
+            "quantity": "10",
+            "currency": "AUD",
+            "brokerage": "0.99",
+            "brokerage_includes_gst": true,
+            "brokerage_currency": "AUD",
+            "fx_rate": "1",
+            // Round-trips too, and re-validates against the re-split figures.
+            "statement_total": "1000.99"
+        });
+        let (status, _) = put_trade_json(&pool, 1, body).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        // Two full GET → PUT-verbatim passes: the stored split never moves.
+        for pass in 1..=2 {
+            let (raw, seen) = get_trade_raw(&pool, 1).await;
+            assert_eq!(seen.brokerage, d("0.99"), "read is inclusive (pass {pass})");
+            assert_eq!(
+                seen.gst_on_brokerage,
+                d("0.09"),
+                "derived GST (pass {pass})"
+            );
+            assert!(seen.brokerage_includes_gst);
+
+            let body: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+            let (status, detail) = put_trade_json(&pool, 1, body).await;
+            assert_eq!(status, StatusCode::NO_CONTENT, "pass {pass}: {detail}");
+            let t = db_get(&pool, 1).await.unwrap().unwrap();
+            assert_eq!(t.brokerage, d("0.90"), "stored ex-GST (pass {pass})");
+            assert_eq!(t.gst_on_brokerage, d("0.09"), "stored GST (pass {pass})");
+            assert_eq!(t.statement_total, Some(d("1000.99")));
+        }
+
+        // An unflagged trade reads back exactly as stored — no recombination.
+        let body = serde_json::json!({
+            "trade_type": "Buy",
+            "date": "2024-01-15",
+            "listing_id": 1,
+            "average_price": "100",
+            "quantity": "10",
+            "currency": "AUD",
+            "brokerage": "9.95",
+            "gst_on_brokerage": "0.995",
+            "brokerage_currency": "AUD",
+            "fx_rate": "1"
+        });
+        let (status, _) = put_trade_json(&pool, 2, body).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (_, seen) = get_trade_raw(&pool, 2).await;
+        assert_eq!(seen.brokerage, d("9.95"));
+        assert_eq!(seen.gst_on_brokerage, d("0.995"));
     }
 
     /// The statement total must reconcile with quantity × price + brokerage +

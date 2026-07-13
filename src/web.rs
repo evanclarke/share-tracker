@@ -388,10 +388,12 @@ mod tests {
         assert!(js.contains("Brokerage includes GST"));
         assert!(js.contains("wireGstBrokerage"));
         assert!(js.contains("Brokerage (GST-inclusive)"));
-        // …re-presenting a flagged trade's split pair as the one inclusive
-        // amount via exact decimal-string addition (money — no float drift).
-        assert!(js.contains("addDecimalStrings"));
-        assert!(js.contains("BigInt"));
+        // …and since the API reads a flagged trade's `brokerage` back as the
+        // one GST-inclusive amount (the lossless round-trip contract), the
+        // form fills the field straight from the row — the old client-side
+        // recombination of the split pair is gone (it would double-count the
+        // GST on top of the server's re-presentation).
+        assert!(!js.contains("addDecimalStrings(existing.brokerage"));
         // The statement-total cross-check field ships on both forms and shows
         // as a column in the trades and Sells lists.
         assert!(js.contains("statement_total"));

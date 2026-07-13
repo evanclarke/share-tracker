@@ -71,17 +71,14 @@ export function readFieldValue(f, formEl) {
 // ---- GST-inclusive brokerage wiring ------------------------------------
 // Shared by the Buy/DRP trade form and the Sell form: ticking "Brokerage
 // includes GST" hides the GST field (the server derives GST as 1/11 of the
-// inclusive amount, rounded to the cent) and relabels brokerage; editing a
-// flagged trade re-presents the stored ex-GST brokerage + GST as the one
-// inclusive amount that was originally entered.
-export function wireGstBrokerage(form, existing) {
+// inclusive amount, rounded to the cent) and relabels brokerage. A flagged
+// trade's `brokerage` already reads back from the API as the one
+// GST-inclusive amount (the lossless round-trip contract — docs/API.md), so
+// the generic field fill re-presents it with no client-side recombination.
+export function wireGstBrokerage(form) {
   const flag = form.querySelector('[name="brokerage_includes_gst"]');
-  const brokInput = form.querySelector('[name="brokerage"]');
   const brokLabel = form.querySelector('label[for="f_brokerage"]');
   const gstWrap = form.querySelector('[name="gst_on_brokerage"]').closest('.field');
-  if (existing && existing.brokerage_includes_gst) {
-    brokInput.value = addDecimalStrings(existing.brokerage, existing.gst_on_brokerage);
-  }
   function apply() {
     gstWrap.style.display = flag.checked ? 'none' : '';
     brokLabel.textContent = flag.checked ? 'Brokerage (GST-inclusive)' : 'Brokerage';

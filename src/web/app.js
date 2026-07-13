@@ -639,7 +639,7 @@ async function viewSellForm(id) {
   for (const f of SELL_FIELDS) {
     form.appendChild(await buildFieldInput(f, existing ? existing[f.name] : null, false));
   }
-  wireGstBrokerage(form, existing);
+  wireGstBrokerage(form);
 
   // Allocations: the shared editor, pre-filled with the existing rows.
   const allocEditor = allocationEditor(await loadOptions('buyParcels'), existingAllocs, {

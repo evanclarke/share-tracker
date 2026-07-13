@@ -40,7 +40,9 @@ pub struct SellBody {
     pub currency: String,
     /// GST-inclusive when `brokerage_includes_gst` is set (the server splits
     /// it; any supplied `gst_on_brokerage` is ignored), ex-GST otherwise —
-    /// same contract as `trade::TradeBody`.
+    /// same contract as `trade::TradeBody`. A flagged Sell also reads back
+    /// (via `GET /trades/:id`) with `brokerage` as the inclusive amount, so
+    /// the GET → PUT round-trip is lossless (see `trade::Trade::present`).
     pub brokerage: Decimal,
     #[serde(default)]
     pub gst_on_brokerage: Decimal,
@@ -1425,6 +1427,70 @@ mod tests {
             detail.contains("1490.05"),
             "detail must carry the net proceeds: {detail}"
         );
+    }
+
+    /// Lossless GST-inclusive round-trip on the Sell path (REQUIREMENTS
+    /// 2026-07-13): a flagged Sell reads back via `GET /trades/:id` with
+    /// `brokerage` as the one inclusive amount, and re-PUTting that response
+    /// body (plus its allocations) to `PUT /sells/:id` re-splits it to the
+    /// identical stored pair — the brokerage never shrinks by the GST.
+    #[tokio::test]
+    async fn api_gst_inclusive_sell_get_put_round_trip_is_lossless() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
+
+        let body = serde_json::json!({
+            "date": "2024-06-03",
+            "listing_id": 1,
+            "average_price": "15",
+            "quantity": "100",
+            "currency": "AUD",
+            "brokerage": "0.99",
+            "brokerage_includes_gst": true,
+            "brokerage_currency": "AUD",
+            "fx_rate": "1",
+            "allocations": [ { "purchase_trade_id": 1, "quantity_allocated": "100" } ]
+        });
+        let (status, _) = put_sell_json(&pool, 2, body).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        // Two full read → re-PUT passes: the stored split never moves.
+        for pass in 1..=2 {
+            // A Sell reads back the way any API client reads it: GET /trades/:id.
+            let resp = trade::router()
+                .with_state(pool.clone())
+                .oneshot(
+                    Request::builder()
+                        .uri("/trades/2")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let bytes = http_body_util::BodyExt::collect(resp.into_body())
+                .await
+                .unwrap()
+                .to_bytes();
+            let mut body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            let read_brokerage: Decimal = body["brokerage"].as_str().unwrap().parse().unwrap();
+            assert_eq!(
+                read_brokerage,
+                "0.99".parse::<Decimal>().unwrap(),
+                "read is inclusive (pass {pass})"
+            );
+
+            // Re-PUT the body verbatim, plus the allocations PUT /sells needs.
+            body["allocations"] =
+                serde_json::json!([{ "purchase_trade_id": 1, "quantity_allocated": "100" }]);
+            let (status, detail) = put_sell_json(&pool, 2, body).await;
+            assert_eq!(status, StatusCode::NO_CONTENT, "pass {pass}: {detail}");
+            let t = trade::db_get(&pool, 2).await.unwrap().unwrap();
+            assert_eq!(t.brokerage, "0.90".parse::<Decimal>().unwrap());
+            assert_eq!(t.gst_on_brokerage, "0.09".parse::<Decimal>().unwrap());
+            assert!(t.brokerage_includes_gst);
+        }
     }
 
     #[tokio::test]
