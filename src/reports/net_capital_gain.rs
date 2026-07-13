@@ -767,13 +767,14 @@ async fn what_if_handler(
                     )));
                 }
                 let Some(left) = remaining.get_mut(&a.purchase_trade_id) else {
+                    let in_account = match req.holding_account_id {
+                        Some(h) => format!(" in {}", super::account_label(&pool, h).await?),
+                        None => String::new(),
+                    };
                     return Err(ApiError::Unprocessable(format!(
-                        "parcel {} is not an open parcel of listing {}{}",
+                        "parcel {} is not an open parcel of {}{in_account}",
                         a.purchase_trade_id,
-                        req.listing_id,
-                        req.holding_account_id
-                            .map(|h| format!(" in holding account {h}"))
-                            .unwrap_or_default()
+                        super::listing_label(&pool, req.listing_id).await?
                     )));
                 };
                 if a.units > *left {
@@ -798,8 +799,8 @@ async fn what_if_handler(
             let open: Decimal = parcels.iter().map(|p| p.remaining_quantity).sum();
             if req.units > open {
                 return Err(ApiError::Unprocessable(format!(
-                    "only {open} unit(s) of listing {} are open",
-                    req.listing_id
+                    "only {open} unit(s) of {} are open",
+                    super::listing_label(&pool, req.listing_id).await?
                 )));
             }
             // The per-unit price the strategy's gain orderings see.
@@ -2622,7 +2623,10 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-        assert!(String::from_utf8(body).unwrap().contains("99"));
+        let msg = String::from_utf8(body).unwrap();
+        assert!(msg.contains("99"), "{msg}");
+        // The rejection names the listing by ticker, never a raw id.
+        assert!(msg.contains("VAS"), "{msg}");
 
         // Strategy mode with more units than are open.
         let (status, _) = post_what_if(

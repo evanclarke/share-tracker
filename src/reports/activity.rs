@@ -190,6 +190,19 @@ pub async fn db_activity(
     })
     .collect::<Result<_, sqlx::Error>>()?;
     let fx = FxRates::load(&mut *tx).await?;
+    // Names for the detail texts: accounts and (scrip/demerger counterpart)
+    // listings read as names/tickers, never raw foreign-key ids.
+    let account_names: HashMap<i64, String> =
+        sqlx::query_as("SELECT id, name FROM holding_accounts")
+            .fetch_all(&mut *tx)
+            .await?
+            .into_iter()
+            .collect();
+    let tickers: HashMap<i64, String> = sqlx::query_as("SELECT id, ticker FROM listings")
+        .fetch_all(&mut *tx)
+        .await?
+        .into_iter()
+        .collect();
     // The summary comes from the same snapshot as the ledger.
     let holdings: Vec<HoldingOverview> = portfolio::db_holdings_on(&mut tx, None)
         .await?
@@ -198,10 +211,16 @@ pub async fn db_activity(
         .collect();
     tx.commit().await?;
 
+    let account = |id: i64| {
+        account_names
+            .get(&id)
+            .map_or_else(|| format!("account {id}"), |n| format!("account '{n}'"))
+    };
+
     let mut rows: Vec<Proto> = Vec::new();
 
     for a in &actions {
-        let (event, detail, rebase) = describe_action(a);
+        let (event, detail, rebase) = describe_action(a, &tickers);
         rows.push(Proto {
             date: a.date,
             rank: 0,
@@ -224,15 +243,10 @@ pub async fn db_activity(
             .iter()
             .find(|tr| tr.transfer_id == Some(t.id) && tr.trade_type == TradeType::Sell)
             .map(|tr| tr.quantity);
+        let (from, to) = (account(t.from_account_id), account(t.to_account_id));
         let mut detail = match moved {
-            Some(q) => format!(
-                "{q} unit(s) from account {} to account {}",
-                t.from_account_id, t.to_account_id
-            ),
-            None => format!(
-                "from account {} to account {}",
-                t.from_account_id, t.to_account_id
-            ),
+            Some(q) => format!("{q} unit(s) from {from} to {to}"),
+            None => format!("from {from} to {to}"),
         };
         if let Some(fee_sell) = t.fee_sale_trade_id {
             detail.push_str(&format!(" (network fee disposal: trade #{fee_sell})"));
@@ -501,7 +515,18 @@ fn trade_event(t: &Trade, fee_sale_ids: &HashSet<i64>) -> String {
 }
 
 /// Event label, detail text, and any unit re-basing for a corporate action.
-fn describe_action(a: &CorporateAction) -> (String, String, Option<(Decimal, Decimal)>) {
+/// `tickers` names the scrip/demerger counterpart listing — details read as
+/// tickers, never raw foreign-key ids.
+fn describe_action(
+    a: &CorporateAction,
+    tickers: &HashMap<i64, String>,
+) -> (String, String, Option<(Decimal, Decimal)>) {
+    let ticker = |id: i64| {
+        tickers
+            .get(&id)
+            .cloned()
+            .unwrap_or_else(|| format!("listing {id}"))
+    };
     match &a.kind {
         ActionKind::ReturnOfCapital {
             amount_per_unit,
@@ -565,7 +590,8 @@ fn describe_action(a: &CorporateAction) -> (String, String, Option<(Decimal, Dec
             ..
         } => {
             let mut detail = format!(
-                "{scrip_new_units} unit(s) of listing {scrip_listing_id} per {scrip_old_units} held"
+                "{scrip_new_units} unit(s) of {} per {scrip_old_units} held",
+                ticker(*scrip_listing_id)
             );
             if let (Some(cash), Some(cur)) = (scrip_cash_per_unit, scrip_cash_currency) {
                 detail.push_str(&format!(" plus {cash} {cur} cash per unit"));
@@ -580,8 +606,9 @@ fn describe_action(a: &CorporateAction) -> (String, String, Option<(Decimal, Dec
         } => (
             "Demerger".to_string(),
             format!(
-                "{demerger_new_units} unit(s) of listing {demerger_listing_id} per \
-                 {demerger_held_units} held; {demerger_cost_base_pct}% of cost base"
+                "{demerger_new_units} unit(s) of {} per \
+                 {demerger_held_units} held; {demerger_cost_base_pct}% of cost base",
+                ticker(*demerger_listing_id)
             ),
             None,
         ),
@@ -803,7 +830,11 @@ mod tests {
         let (events, holdings) = db_activity(&pool, 1).await.unwrap().unwrap();
         assert_eq!(events.len(), 2, "buy + one transfer row, no group trades");
         assert_eq!(events[1].event, "Transfer between accounts");
-        assert_eq!(events[1].detail, "40 unit(s) from account 1 to account 2");
+        // Accounts are named, never raw foreign-key ids.
+        assert_eq!(
+            events[1].detail,
+            "40 unit(s) from account 'Default' to account 'Personal'"
+        );
         assert_eq!(events[1].quantity, None);
         assert_eq!(
             events[1].units_after,
@@ -842,6 +873,7 @@ mod tests {
     async fn db_statement_rows_present_and_labelled() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "VAF").await;
+        insert_listing(&pool, 2, "NEW").await;
         test_support::buy(1, 1).insert(&pool).await;
         corporate_action::db_upsert(
             &pool,
@@ -868,6 +900,24 @@ mod tests {
                     rights_held_units: dec("4"),
                     exercise_price: dec("5"),
                     currency: "AUD".to_string(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+        corporate_action::db_upsert(
+            &pool,
+            &corporate_action::CorporateAction {
+                id: 3,
+                listing_id: 1,
+                date: ymd(2024, 12, 1),
+                kind: ActionKind::ScripForScrip {
+                    scrip_listing_id: 2,
+                    scrip_new_units: dec("2"),
+                    scrip_old_units: dec("1"),
+                    scrip_cash_per_unit: None,
+                    scrip_market_value: None,
+                    scrip_cash_currency: None,
                 },
             },
         )
@@ -922,6 +972,11 @@ mod tests {
         assert_eq!(
             by_event("Rights issue").detail,
             "1-for-4, exercisable at 5 AUD"
+        );
+        // The counterpart listing is named by ticker, never a raw id.
+        assert_eq!(
+            by_event("Scrip-for-scrip takeover").detail,
+            "2 unit(s) of NEW per 1 held"
         );
         let amma = by_event("AMMA statement");
         assert_eq!(amma.date, ymd(2024, 6, 30));

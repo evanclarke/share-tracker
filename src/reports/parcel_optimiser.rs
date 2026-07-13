@@ -355,8 +355,9 @@ async fn optimiser_handler(
     let open: Decimal = parcels.iter().map(|p| p.remaining_quantity).sum();
     if req.units > open {
         return Err(ApiError::Unprocessable(format!(
-            "only {open} unit(s) of listing {} are open in holding account {}",
-            req.listing_id, req.holding_account_id
+            "only {open} unit(s) of {} are open in {}",
+            super::listing_label(&pool, req.listing_id).await?,
+            super::account_label(&pool, req.holding_account_id).await?
         )));
     }
 
@@ -380,14 +381,14 @@ async fn optimiser_handler(
                 Some(Ok(v)) => (v.aud_price, Some(v.as_of.clone())),
                 Some(Err(reason)) => {
                     return Err(ApiError::Unprocessable(format!(
-                        "no live price for listing {}: {reason} — supply a price",
-                        req.listing_id
+                        "no live price for {}: {reason} — supply a price",
+                        super::listing_label(&pool, req.listing_id).await?
                     )));
                 }
                 None => {
                     return Err(ApiError::Unprocessable(format!(
-                        "no live price for listing {} — supply a price",
-                        req.listing_id
+                        "no live price for {} — supply a price",
+                        super::listing_label(&pool, req.listing_id).await?
                     )));
                 }
             }
@@ -725,6 +726,9 @@ mod tests {
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         let msg = String::from_utf8(body).unwrap();
         assert!(msg.contains("only 400"), "{msg}");
+        // The rejection names the listing and account, never raw ids.
+        assert!(msg.contains("OPT"), "{msg}");
+        assert!(msg.contains("account 'Default'"), "{msg}");
     }
 
     #[tokio::test]
