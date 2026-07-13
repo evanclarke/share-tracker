@@ -1012,3 +1012,12 @@ pile of CLI flags.
   - Unknown keys and invalid TOML fail startup loudly — a typo must not silently fall back to a
     default (this is a financial-records server; starting against the wrong database is worse
     than not starting)
+
+## Release notes from the commits between tags (2026-07-13)
+
+Each published release's notes are generated from the commit history at build time: every commit
+subject between the previous release tag and the commit being released (newest first, each with
+its abbreviated SHA), followed by a full-changelog compare link. The first release — no previous
+tag — lists every commit. GitHub's `--generate-notes` is built from merged pull requests, which a
+commit-directly-to-main solo workflow doesn't have, so the notes must come from the commits
+themselves.

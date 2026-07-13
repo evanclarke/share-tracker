@@ -352,6 +352,77 @@ mod freebsd_packaging {
         // The release tag points at the built commit, not a branch head.
         assert!(RELEASE_YML.contains(r#"--target "$GITHUB_SHA""#));
         assert!(RELEASE_YML.contains("share-tracker-*.pkg"));
+        // Release notes come from the commits between tags, not the PR-based
+        // --generate-notes (empty on a direct-to-main repo). The notes script
+        // needs the previous tag, so the checkout must be full-history.
+        assert!(RELEASE_YML.contains(r#"sh scripts/release-notes.sh "$VERSION""#));
+        assert!(RELEASE_YML.contains("--notes-file notes.md"));
+        assert!(RELEASE_YML.contains("fetch-depth: 0"));
+        assert!(!RELEASE_YML.contains("--generate-notes"));
+    }
+
+    /// Executable check of `scripts/release-notes.sh` in a scratch git repo:
+    /// the notes list exactly the commits after the previous tag (newest
+    /// first, abbreviated SHA), link the tag-to-tag compare, exclude the
+    /// release's own tag when re-run, and fall back to "Initial release."
+    /// with the full history when no tag exists yet.
+    #[test]
+    fn release_notes_script_lists_commits_between_tags() {
+        let script = concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/release-notes.sh");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir.path())
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .output()
+                .expect("git runs");
+            assert!(out.status.success(), "git {args:?}: {out:?}");
+        };
+        let notes = |version: &str| {
+            let out = std::process::Command::new("sh")
+                .args([script, version])
+                .current_dir(dir.path())
+                .output()
+                .expect("script runs");
+            assert!(out.status.success(), "release-notes.sh: {out:?}");
+            String::from_utf8(out.stdout).expect("utf-8 notes")
+        };
+
+        git(&["init", "-q"]);
+        git(&[
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "Ancient pre-tag work",
+        ]);
+
+        // No tag yet: first-release mode lists the whole history.
+        let first = notes("0.1.0");
+        assert!(first.contains("Initial release."));
+        assert!(first.contains("- Ancient pre-tag work ("));
+
+        git(&["tag", "v0.1.0"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "Add feature X"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "Fix feature X"]);
+
+        let body = notes("0.2.0");
+        assert!(body.contains("## Changes since v0.1.0"));
+        assert!(body.contains("- Add feature X ("));
+        assert!(body.contains("- Fix feature X ("));
+        // Only the commits after the previous tag appear.
+        assert!(!body.contains("Ancient pre-tag work"));
+        // Compare link spans previous tag to this release's tag.
+        assert!(body.contains("/compare/v0.1.0...v0.2.0"));
+
+        // Re-run after this release's tag exists (e.g. a retried job): the
+        // notes still diff against the previous tag, not the release itself.
+        git(&["tag", "v0.2.0"]);
+        assert_eq!(notes("0.2.0"), body);
     }
 
     /// Every path the plist packages is staged by the build script, and vice

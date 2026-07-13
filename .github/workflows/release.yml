@@ -63,17 +63,25 @@ jobs:
     needs: [version, package]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history + tags: the release notes span previous-tag..HEAD.
+          fetch-depth: 0
       - uses: actions/download-artifact@v4
         with:
           name: freebsd-pkg
-      # --target tags the exact commit this package was built from.
+      # Notes come from the commits between tags (scripts/release-notes.sh) —
+      # GitHub's auto-generated notes are PR-based and yield nothing on a
+      # direct-to-main repo. --target tags the exact commit this package was
+      # built from.
       - env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.version.outputs.version }}
         run: |
+          sh scripts/release-notes.sh "$VERSION" > notes.md
           gh release create "v$VERSION" \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
             --title "v$VERSION" \
-            --generate-notes \
+            --notes-file notes.md \
             share-tracker-*.pkg
