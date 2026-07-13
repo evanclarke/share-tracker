@@ -1,0 +1,4 @@
+{
+  "//": "Marks src/web as ES modules so `node --test src/web/` parses them exactly as the browser's <script type=module> does. Not served; not an npm package — there are no dependencies and no build step.",
+  "type": "module"
+}

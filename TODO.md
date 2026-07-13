@@ -10,16 +10,6 @@ findings are all closed in DONE.md), except where a section's heading names anot
 (e.g. REQUIREMENTS). Each section records one finding; sections land in DONE.md as they are fixed
 or decided.
 
-## Frontend: executed tests for the pure JS helpers + CI smoke check
-~3,100 lines of JS include hand-rolled BigInt decimal arithmetic (`roundDecimalStr`,
-half-away-from-zero rounding, `decStrEq` in `web/util.js`) and the allocation editor — money-adjacent
-logic — yet the UI test strategy only asserts strings appear in the served bundle;
-`scripts/ui-check.sh` is manual-only.
-- [ ] Unit tests for the pure helpers in `util.js` (rounding, thousands grouping, min-dp padding, decimal equality, numericDisplay kinds) runnable with `node --test` and no build step; include edge cases (negative values, dp increase/decrease, carry on round-up, zero)
-- [ ] Run the JS unit tests in CI (one extra ci.yml step; document the required Node version)
-- [ ] CI smoke test via `scripts/ui-check.sh` (or an equivalent headless check): server starts on a temp DB, key hash routes render without JS errors — catches a broken module route or load-time exception that string-presence tests can't
-- [ ] Decide and record how the JS test files are excluded from the served-bundle route table (they must not become servable modules)
-
 ## Append-only audit trail for financial writes
 Every entity is PUT-upsert-in-place and hard DELETE: an accidental edit to a historical Buy silently
 changes prior-year cost bases and tax figures, with the weekly backup as the only recourse and no way

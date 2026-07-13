@@ -74,6 +74,16 @@ cargo build --release
 
 The database is created automatically on first run. Migrations are applied in order at startup.
 
+### Tests
+
+`cargo test` runs the Rust suite. The web frontend's pure JS helpers (the money-adjacent decimal-string arithmetic in `src/web/util.js`) have their own unit tests beside the modules (`src/web/*.test.js`), run with Node's built-in test runner — no build step and no `npm install`; **Node 22 or newer** is required:
+
+```bash
+node --test 'src/web/*.test.js'
+```
+
+`scripts/ui-smoke.sh` is a headless end-to-end smoke check: it starts the server on a temp database seeded from the demo fixture, renders key routes in headless Chrome, and asserts each view drew real data — catching a broken static-module route or a load-time JS exception that neither test suite can. CI runs all three on every push.
+
 ### Configuration file
 
 Every flag except `--config` can instead be set in a TOML configuration file, so a service manager doesn't need a pile of CLI flags. Precedence is **CLI flag > config-file value > built-in default**. The file is loaded from `/usr/local/etc/share-tracker.toml` when present (where the FreeBSD package installs it); `--config PATH` points somewhere else. Every key is optional:

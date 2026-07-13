@@ -21,7 +21,9 @@
 #   scripts/ui-check.sh --seed demo '#/e/trades' '#/r/open-parcels'
 #   scripts/ui-check.sh --seed demo --screenshot --out shots '#/r/overview'
 #
-# Env overrides: CHROME (browser binary path), ST_BIN (server binary path).
+# Env overrides: CHROME (browser binary path), ST_BIN (server binary path),
+# CHROME_FLAGS (extra whitespace-separated Chrome flags, e.g. --no-sandbox on
+# CI runners that restrict unprivileged user namespaces).
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -132,6 +134,9 @@ fi
 # --- render each route -------------------------------------------------------
 chrome_common=(--headless=new --disable-gpu --no-first-run --no-default-browser-check
                --user-data-dir="$profile" --virtual-time-budget="$budget")
+# Deliberately unquoted: CHROME_FLAGS is whitespace-separated flags.
+# shellcheck disable=SC2206
+[ -n "${CHROME_FLAGS:-}" ] && chrome_common+=(${CHROME_FLAGS})
 
 # Hard ceiling for a single render: the virtual-time budget plus slack for
 # startup. A render that blocks (e.g. a stalled live-price fetch keeping the

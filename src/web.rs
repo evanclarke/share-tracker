@@ -12,6 +12,14 @@
 //! talks to the existing JSON API, so `/` is the only HTML entry point (deep
 //! links use `#/...` fragments, which never reach the server) and no SPA
 //! fallback route is needed.
+//!
+//! The pure JS helpers are unit-tested by `src/web/*.test.js`, executed with
+//! `node --test 'src/web/*.test.js'` (Node 22+, no build step —
+//! `src/web/package.json` marks the tree as ES modules so Node parses the
+//! files exactly as the browser does). Test files are never servable: this
+//! `JS_MODULES` allowlist is the only route table, and the
+//! `js_test_files_are_not_served_and_every_module_is` test pins that no
+//! `*.test.js` file is listed on it (and that every non-test module is).
 use axum::{
     Router,
     http::header,
@@ -131,6 +139,34 @@ mod tests {
                 assert!(
                     JS_MODULES.iter().any(|(p, _)| *p == route),
                     "{path} imports {module}, but {route} is not served"
+                );
+            }
+        }
+    }
+
+    // The recorded decision on how JS test files stay out of the served
+    // bundle: `JS_MODULES` is an explicit allowlist (nothing under `src/web/`
+    // is served unless listed), unit tests live beside the modules as
+    // `src/web/*.test.js` (run by `node --test`, never by the server), and
+    // this test keeps the two sets partitioned — a test file on the route
+    // table, or a new module missing from it, fails here.
+    #[test]
+    fn js_test_files_are_not_served_and_every_module_is() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/web");
+        for entry in std::fs::read_dir(dir).expect("src/web exists") {
+            let name = entry.expect("readable dir entry").file_name();
+            let name = name.to_str().expect("utf-8 filename");
+            if !name.ends_with(".js") {
+                continue;
+            }
+            let route = format!("/static/{name}");
+            let served = JS_MODULES.iter().any(|(p, _)| *p == route);
+            if name.ends_with(".test.js") {
+                assert!(!served, "{name} is a test file and must not be served");
+            } else {
+                assert!(
+                    served,
+                    "{name} is not in JS_MODULES — add its (route, include_str!) pair"
                 );
             }
         }

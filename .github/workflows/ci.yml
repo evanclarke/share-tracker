@@ -15,9 +15,21 @@ jobs:
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
+      # The frontend's pure JS helpers (money-adjacent decimal arithmetic in
+      # src/web/util.js) are unit-tested with Node's built-in runner — no npm
+      # install, no build step. Node 22+ (the glob needs >=21).
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: node --test 'src/web/*.test.js'
       # Keep the tree rustfmt-clean; fix locally with `cargo fmt`.
       - run: cargo fmt --check
       # Keep the tree clippy-clean: lint everything (incl. tests) and fail on any
       # warning. Intentional exceptions carry an in-code #[allow] with a reason.
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
+      # Headless UI smoke check on the runner's preinstalled Chrome: the SPA
+      # boots and key routes render seeded data end-to-end — catches a broken
+      # module route or load-time JS exception that the served-bundle string
+      # assertions in src/web.rs can't.
+      - run: scripts/ui-smoke.sh

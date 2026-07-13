@@ -87,7 +87,7 @@ export function cellText(v) {
 
 // Round a decimal string to `dp` places, half away from zero. Exact; returns
 // null for a non-decimal input (the caller then falls back to verbatim text).
-function roundDecimalStr(value, dp) {
+export function roundDecimalStr(value, dp) {
   let s = String(value).trim();
   let neg = false;
   if (s[0] === '+') s = s.slice(1);
@@ -110,7 +110,7 @@ function roundDecimalStr(value, dp) {
 }
 
 // Thousands-group the integer part of a signed/decimal plain decimal string.
-function groupThousands(s) {
+export function groupThousands(s) {
   let neg = '';
   if (s[0] === '-') { neg = '-'; s = s.slice(1); }
   const dot = s.indexOf('.');
@@ -121,7 +121,7 @@ function groupThousands(s) {
 
 // Pad to at least `dp` fractional places without rounding (derived per-unit
 // figures show ≥4 dp; entered rates keep their own precision).
-function padMinDp(s, dp) {
+export function padMinDp(s, dp) {
   s = String(s);
   const dot = s.indexOf('.');
   const curDp = dot < 0 ? 0 : s.length - dot - 1;
@@ -131,7 +131,7 @@ function padMinDp(s, dp) {
 
 // Numeric equality of two decimal strings (1234.5 == 1234.50), used to decide
 // whether money rounding actually dropped precision (→ original on tooltip).
-function decStrEq(a, b) {
+export function decStrEq(a, b) {
   const ra = roundDecimalStr(a, 12), rb = roundDecimalStr(b, 12);
   return ra != null && ra === rb;
 }
@@ -440,9 +440,13 @@ export function addDecimalStrings(a, b) {
   const dp = function (s) { const i = s.indexOf('.'); return i < 0 ? 0 : s.length - i - 1; };
   const scale = Math.max(dp(a), dp(b));
   const scaled = function (s) { return BigInt(s.replace('.', '') + '0'.repeat(scale - dp(s))); };
-  if (scale === 0) return (scaled(a) + scaled(b)).toString();
-  const sum = (scaled(a) + scaled(b)).toString().padStart(scale + 1, '0');
-  return (sum.slice(0, -scale) + '.' + sum.slice(-scale)).replace(/(\.\d*?)0+$/, '$1').replace(/\.$/, '');
+  let sum = scaled(a) + scaled(b);
+  if (scale === 0) return sum.toString();
+  const neg = sum < 0n;
+  if (neg) sum = -sum; // pad/split on the magnitude — a '-' would break padStart
+  const digits = sum.toString().padStart(scale + 1, '0');
+  const abs = (digits.slice(0, -scale) + '.' + digits.slice(-scale)).replace(/(\.\d*?)0+$/, '$1').replace(/\.$/, '');
+  return (neg && abs !== '0' ? '-' : '') + abs;
 }
 
 // Exact decimal-string arithmetic for the non-negative money figures the

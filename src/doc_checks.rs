@@ -306,6 +306,26 @@ fn gst_inclusive_round_trip_semantics_documented() {
     assert!(API_MD.contains("re-`PUT`ting that body to `PUT /sells/:id`"));
 }
 
+/// Pins the frontend test strategy (2026-07-13 improvement review): the JS
+/// unit tests and the headless UI smoke check are CI steps, not manual-only
+/// tools, and the README documents how to run them and the required Node
+/// version. The exclusion of `*.test.js` files from the served bundle is
+/// pinned in `web.rs` (`js_test_files_are_not_served_and_every_module_is`).
+#[test]
+fn frontend_tests_run_in_ci() {
+    const CI_YML: &str = include_str!("../.github/workflows/ci.yml");
+    // The Node unit-test step, on a pinned Node version.
+    assert!(CI_YML.contains("node --test 'src/web/*.test.js'"));
+    assert!(CI_YML.contains("node-version: '22'"));
+    // The headless smoke-check step.
+    assert!(CI_YML.contains("scripts/ui-smoke.sh"));
+    // README: how to run them, and the Node version requirement.
+    assert!(README_MD.contains("### Tests"));
+    assert!(README_MD.contains("node --test 'src/web/*.test.js'"));
+    assert!(README_MD.contains("**Node 22 or newer**"));
+    assert!(README_MD.contains("scripts/ui-smoke.sh"));
+}
+
 /// Pins for the FreeBSD packaging + versioned-release pipeline (REQUIREMENTS
 /// 2026-07-13). The release workflow and package skeleton are plain text CI
 /// consumes, so these tests keep their load-bearing pieces from silently
