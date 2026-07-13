@@ -10,17 +10,6 @@ findings are all closed in DONE.md), except where a section's heading names anot
 (e.g. REQUIREMENTS). Each section records one finding; sections land in DONE.md as they are fixed
 or decided.
 
-## Backup pipeline hardening: verify, prune, offsite
-The weekly backup is a bare `VACUUM INTO` (`infra/db.rs::backup_to`) with no verification that the
-produced file is a restorable database, no retention policy (dated files accumulate forever), and —
-unless `--backup-dir` is set — the backup lands beside the live DB on the same disk. For
-irreplaceable multi-year tax records this is the weakest operational link.
-- [ ] Verify each fresh backup: open the produced file and run `PRAGMA integrity_check` (and check the migrations table is present/complete); a failed check fails the backup job loudly (job error recorded + ERROR log), and the bad file is not left looking like a good backup
-- [ ] Retention/pruning: keep a bounded set (e.g. last N weekly backups plus longer-lived monthly keepers), pruning only files matching the backup filename pattern in the backup destination — never anything else
-- [ ] Off-machine copy: an rsync/rclone hook or documented step so a disk failure can't take the DB and all backups together (decide: in-scope job step vs documented external setup; record the decision here either way)
-- [ ] Restore drill: a test that restores from a freshly produced backup file and runs a real query (e.g. row counts match the source) — proving the backup artefact actually restores, not just that the file exists
-- [ ] Docs: README/API.md updated for any new job behaviour, retention policy, and `POST /jobs/backup` semantics changes
-
 ## Proactive job-failure and data-staleness surfacing in the UI
 A failing price import or RBA FX import is only visible if the Jobs page is opened; meanwhile
 valuations silently go stale (yfinance is an unofficial API and will break eventually). `job_runs`

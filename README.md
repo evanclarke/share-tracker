@@ -85,7 +85,7 @@ Recurring maintenance jobs — the database backup, the RBA FX rate import, the 
 0 12 * * *     report-snapshot # daily, once the day's last close has been imported
 ```
 
-A schedule line naming an unknown job or an unknown timezone is rejected at startup; a registered job with no schedule line is allowed but logged as a `WARN` (it will then only run via its endpoint). Jobs run only at their scheduled times (not at startup); after each run (and at startup) the next scheduled run is logged at INFO, in the entry's timezone. In a zone's DST gap (a job scheduled inside the skipped hour) the job fires at the first valid instant after the gap; in a DST fold (the repeated hour) it fires once, at the first occurrence. Timer sleeps are capped at an hour and the target recomputed after each, so a clock shift mid-wait (DST, NTP, suspend) re-anchors the fire time to the schedule's wall-clock target. The backup writes `<stem>-YYYY-MM-DD-HHMMSS.db` beside the main database file, or into `--backup-dir` when set (the date-time component keeps each weekly run distinct; skipped only if a file with that exact name already exists). Any job can be run on demand with `POST /jobs/{name}` (see the [HTTP API](docs/API.md#jobs)).
+A schedule line naming an unknown job or an unknown timezone is rejected at startup; a registered job with no schedule line is allowed but logged as a `WARN` (it will then only run via its endpoint). Jobs run only at their scheduled times (not at startup); after each run (and at startup) the next scheduled run is logged at INFO, in the entry's timezone. In a zone's DST gap (a job scheduled inside the skipped hour) the job fires at the first valid instant after the gap; in a DST fold (the repeated hour) it fires once, at the first occurrence. Timer sleeps are capped at an hour and the target recomputed after each, so a clock shift mid-wait (DST, NTP, suspend) re-anchors the fire time to the schedule's wall-clock target. The backup writes `<stem>-YYYY-MM-DD-HHMMSS.db` beside the main database file, or into `--backup-dir` when set (the date-time component keeps each weekly run distinct; skipped only if a file with that exact name already exists). Each fresh backup is **verified** before the job reports success: the produced file is opened and must pass `PRAGMA integrity_check`, and its applied migrations must match the live database's. A file that fails verification is quarantined by renaming it to `<name>.db.bad` — never left looking like a good backup — and the run fails loudly: the reason is logged at ERROR and recorded as the run's error (`GET /jobs`). After a verified backup the destination is **pruned** to a bounded set: the **newest 8 backups** are kept, plus the **first backup of each calendar month for the 12 most recent months** that have one (with the weekly schedule, roughly two months of every backup plus a year of monthlies). Pruning deletes only files matching the backup filename pattern for this database (`<stem>-YYYY-MM-DD-HHMMSS.db`) in the backup destination — the live database, its WAL sidecars, quarantined `.bad` files, and anything else are never touched. Any job can be run on demand with `POST /jobs/{name}` (see the [HTTP API](docs/API.md#jobs)).
 
 ### Restoring from a backup
 
@@ -96,7 +96,18 @@ Each backup file is a complete, standalone SQLite database (written with `VACUUM
 3. **Delete the stale WAL sidecars** if present: `rm -f share-tracker.db-wal share-tracker.db-shm`. They belong to the replaced database; leaving them would let SQLite replay post-backup changes over the restored file.
 4. **Restart the server.** Pending migrations (if the backup predates an upgrade) are applied at startup as usual.
 
-Everything recorded after the backup was taken is gone after a restore — re-enter it manually. The restore round-trip (backup → mutate → restore → pre-mutation state) is proven by `restore_round_trip_recovers_pre_mutation_state` in `src/infra/db.rs`.
+Everything recorded after the backup was taken is gone after a restore — re-enter it manually. The restore round-trip (backup → mutate → restore → pre-mutation state) is proven by `restore_round_trip_recovers_pre_mutation_state` in `src/infra/db.rs`, and the full job-path drill (verified backup → restore → every table's row count matches the source) by `restore_drill_backup_restores_with_matching_row_counts` beside it.
+
+### Off-machine copies
+
+`--backup-dir` can put backups on a different volume, but a machine-level failure (dead disk controller, theft, fire) still takes the database and every backup together. Copying backups off the machine is **deliberately a documented external step, not a job inside the server**: an in-process uploader would embed remote credentials and provider-specific configuration in a local tax tool, and existing sync tools already do the job well. Point one at the backup directory, scheduled shortly after the weekly backup (Sunday 00:00), e.g.:
+
+```
+# crontab: mirror the backup directory to cloud storage, Sundays at 00:30
+30 0 * * 0  rclone sync /mnt/backups remote:share-tracker-backups
+```
+
+`rclone sync` (or `rsync --delete` to another machine) mirrors deletions, so the offsite copy inherits the local retention policy; use `rclone copy` instead if the remote should keep every backup ever uploaded. Verify the offsite copy occasionally by downloading one file and following [Restoring from a backup](#restoring-from-a-backup) against a scratch `--db` path.
 
 Logging is controlled by the `RUST_LOG` environment variable (default: `info`).
 

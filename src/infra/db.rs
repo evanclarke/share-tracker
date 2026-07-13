@@ -1,9 +1,13 @@
-use chrono::{DateTime, Local};
+use chrono::{DateTime, Local, NaiveDateTime};
 use sqlx::{
-    SqlitePool,
-    sqlite::{SqliteConnectOptions, SqliteJournalMode},
+    Connection, SqlitePool,
+    sqlite::{SqliteConnectOptions, SqliteConnection, SqliteJournalMode},
 };
-use std::{path::Path, str::FromStr};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+    str::FromStr,
+};
 
 pub async fn init(db_path: &str) -> Result<SqlitePool, sqlx::Error> {
     let url = if db_path == ":memory:" {
@@ -80,24 +84,68 @@ fn backup_path_at(db_path: &str, backup_dir: Option<&str>, at: DateTime<Local>) 
     }
 }
 
+/// Why a backup run failed. `Verification` marks a produced file that is not a
+/// restorable copy of the live database — the file has been quarantined
+/// (renamed `<name>.bad`) so it can never be mistaken for a good backup.
+#[derive(Debug)]
+pub enum BackupError {
+    Db(sqlx::Error),
+    Io(std::io::Error),
+    Verification { path: String, reason: String },
+}
+
+impl std::fmt::Display for BackupError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            BackupError::Db(e) => write!(f, "backup failed: {e}"),
+            BackupError::Io(e) => write!(f, "backup failed: {e}"),
+            BackupError::Verification { path, reason } => {
+                write!(f, "backup verification failed for {path}: {reason}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for BackupError {}
+
+impl From<sqlx::Error> for BackupError {
+    fn from(e: sqlx::Error) -> Self {
+        BackupError::Db(e)
+    }
+}
+
+impl From<std::io::Error> for BackupError {
+    fn from(e: std::io::Error) -> Self {
+        BackupError::Io(e)
+    }
+}
+
 pub async fn backup(
     pool: &SqlitePool,
     db_path: &str,
     backup_dir: Option<&str>,
-) -> Result<(), sqlx::Error> {
+) -> Result<(), BackupError> {
     // A configured backup dir may not exist yet (fresh volume / first run);
     // create it rather than failing the weekly job. The beside-the-DB default
     // needs no such step — the database file's directory already exists.
     if let Some(dir) = backup_dir {
-        std::fs::create_dir_all(dir).map_err(sqlx::Error::Io)?;
+        std::fs::create_dir_all(dir)?;
     }
-    backup_to(pool, &backup_path(db_path, backup_dir)).await
+    backup_to(pool, &backup_path(db_path, backup_dir)).await?;
+    // Prune only after the fresh backup verified: a failed run must never
+    // shrink the set of known-good backups.
+    let deleted = prune_backups(db_path, backup_dir)?;
+    if !deleted.is_empty() {
+        tracing::info!(pruned = deleted.len(), "backup retention pruning complete");
+    }
+    Ok(())
 }
 
 /// Write a backup to a specific destination, skipping if it already exists. With
 /// a per-second timestamped name a collision only happens for two runs in the
-/// same second, so in practice each weekly run writes a fresh file.
-async fn backup_to(pool: &SqlitePool, dest: &str) -> Result<(), sqlx::Error> {
+/// same second, so in practice each weekly run writes a fresh file. A freshly
+/// written file is verified before the backup counts as complete.
+async fn backup_to(pool: &SqlitePool, dest: &str) -> Result<(), BackupError> {
     if Path::new(dest).exists() {
         tracing::debug!(path = dest, "backup already exists, skipping");
     } else {
@@ -106,9 +154,163 @@ async fn backup_to(pool: &SqlitePool, dest: &str) -> Result<(), sqlx::Error> {
             .bind(dest)
             .execute(pool)
             .await?;
-        tracing::info!(path = dest, "backup complete");
+        verify_or_quarantine(pool, dest).await?;
+        tracing::info!(path = dest, "backup complete and verified");
     }
     Ok(())
+}
+
+/// Check that a freshly written backup is a restorable copy: it must open, pass
+/// `PRAGMA integrity_check`, and carry exactly the successful migrations the
+/// live database has. A truncated or corrupted copy fails here, on the machine
+/// that still has the original — not at restore time, when it may not.
+async fn verify_backup(pool: &SqlitePool, dest: &str) -> Result<(), String> {
+    let opts = SqliteConnectOptions::from_str(&format!("sqlite:{dest}"))
+        .map_err(|e| e.to_string())?
+        .read_only(true);
+    let mut conn = SqliteConnection::connect_with(&opts)
+        .await
+        .map_err(|e| format!("cannot open backup: {e}"))?;
+
+    let checks: Vec<String> = sqlx::query_scalar("PRAGMA integrity_check")
+        .fetch_all(&mut conn)
+        .await
+        .map_err(|e| format!("integrity check failed to run: {e}"))?;
+    if checks != ["ok"] {
+        return Err(format!("integrity check failed: {}", checks.join("; ")));
+    }
+
+    let migrations = "SELECT version FROM _sqlx_migrations WHERE success = TRUE ORDER BY version";
+    let live: Vec<i64> = sqlx::query_scalar(migrations)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| format!("cannot read the live database's migrations: {e}"))?;
+    let backed_up: Vec<i64> = sqlx::query_scalar(migrations)
+        .fetch_all(&mut conn)
+        .await
+        .map_err(|e| format!("migrations table check failed: {e}"))?;
+    if backed_up != live {
+        return Err(format!(
+            "migrations incomplete: backup has {backed_up:?}, live database has {live:?}"
+        ));
+    }
+    Ok(())
+}
+
+/// Verify `dest`; on failure quarantine it by renaming to `<dest>.bad` — kept
+/// for diagnosis but no longer matching the backup naming pattern, so it can
+/// neither be restored by mistake nor counted by pruning — log at ERROR, and
+/// fail the backup.
+async fn verify_or_quarantine(pool: &SqlitePool, dest: &str) -> Result<(), BackupError> {
+    let Err(reason) = verify_backup(pool, dest).await else {
+        return Ok(());
+    };
+    let quarantined = format!("{dest}.bad");
+    match std::fs::rename(dest, &quarantined) {
+        Ok(()) => tracing::error!(
+            path = dest,
+            quarantined,
+            reason,
+            "backup verification failed; file quarantined"
+        ),
+        Err(e) => tracing::error!(
+            path = dest,
+            reason,
+            "backup verification failed; could not quarantine the bad file: {e}"
+        ),
+    }
+    Err(BackupError::Verification {
+        path: dest.to_string(),
+        reason,
+    })
+}
+
+/// Retention policy: the newest `KEEP_RECENT` backups always survive, and the
+/// first backup taken in each calendar month survives for the `KEEP_MONTHLY`
+/// most recent months that have one (long-lived monthly keepers). With the
+/// weekly schedule that is roughly two months of every backup plus a year of
+/// monthlies.
+const KEEP_RECENT: usize = 8;
+const KEEP_MONTHLY: usize = 12;
+
+/// The timestamp embedded in a backup filename, if `name` matches this
+/// database's backup naming pattern (`<stem>-YYYY-MM-DD-HHMMSS.db`) exactly.
+/// Pruning candidates are selected by this — anything else is never touched.
+fn backup_timestamp(name: &str, stem: &str) -> Option<NaiveDateTime> {
+    let ts = name
+        .strip_prefix(stem)?
+        .strip_prefix('-')?
+        .strip_suffix(".db")?;
+    NaiveDateTime::parse_from_str(ts, "%Y-%m-%d-%H%M%S").ok()
+}
+
+/// Delete backups of this database that fall outside the retention policy
+/// (see `KEEP_RECENT` / `KEEP_MONTHLY`), returning the deleted paths. Only
+/// regular files matching the backup naming pattern in the backup destination
+/// are candidates: the live database, its WAL sidecars, quarantined `.bad`
+/// files, and any other file are never deleted.
+fn prune_backups(db_path: &str, backup_dir: Option<&str>) -> Result<Vec<PathBuf>, std::io::Error> {
+    let stem_path = db_path.strip_suffix(".db").unwrap_or(db_path);
+    let stem = Path::new(stem_path)
+        .file_name()
+        .map(|f| f.to_string_lossy().into_owned())
+        .unwrap_or_else(|| stem_path.to_string());
+    let dir = match backup_dir {
+        Some(dir) => PathBuf::from(dir),
+        None => match Path::new(db_path).parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+            _ => PathBuf::from("."),
+        },
+    };
+
+    let mut backups: Vec<(NaiveDateTime, PathBuf)> = Vec::new();
+    for entry in std::fs::read_dir(&dir)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if let Some(ts) = backup_timestamp(&name, &stem) {
+            backups.push((ts, entry.path()));
+        }
+    }
+    backups.sort_by(|a, b| b.0.cmp(&a.0)); // newest first
+
+    let mut keep: HashSet<&Path> = backups
+        .iter()
+        .take(KEEP_RECENT)
+        .map(|(_, path)| path.as_path())
+        .collect();
+
+    // Monthly keepers: the *first* backup of a month, so a keeper is stable —
+    // later runs in the same month never displace it. Sorted newest-first the
+    // months come out grouped, so dedup yields the distinct months in order.
+    let mut months: Vec<String> = backups
+        .iter()
+        .map(|(ts, _)| ts.format("%Y-%m").to_string())
+        .collect();
+    months.dedup();
+    months.truncate(KEEP_MONTHLY);
+    for month in &months {
+        let first_of_month = backups
+            .iter()
+            .filter(|(ts, _)| ts.format("%Y-%m").to_string() == *month)
+            .last(); // newest-first, so last = oldest in the month
+        if let Some((_, path)) = first_of_month {
+            keep.insert(path.as_path());
+        }
+    }
+
+    let mut deleted = Vec::new();
+    for (_, path) in &backups {
+        if keep.contains(path.as_path()) {
+            continue;
+        }
+        std::fs::remove_file(path)?;
+        tracing::info!(path = %path.display(), "pruned backup outside retention policy");
+        deleted.push(path.clone());
+    }
+    Ok(deleted)
 }
 
 #[cfg(test)]
@@ -370,5 +572,322 @@ mod tests {
         let mtime2 = std::fs::metadata(&dest).unwrap().modified().unwrap();
 
         assert_eq!(mtime1, mtime2);
+    }
+
+    #[tokio::test]
+    async fn fresh_backup_is_verified_in_place() {
+        // The happy path: backup_to writes, verifies, and leaves the verified
+        // file under its backup name — no quarantine artefact.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db").to_string_lossy().to_string();
+        let pool = init(&db_path).await.unwrap();
+
+        let dest = backup_path(&db_path, None);
+        backup_to(&pool, &dest).await.unwrap();
+
+        assert!(Path::new(&dest).exists());
+        assert!(!Path::new(&format!("{dest}.bad")).exists());
+        verify_backup(&pool, &dest).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn verification_quarantines_corrupt_file() {
+        // A produced file that is not a database (as a torn write / full disk
+        // could leave) must fail the backup loudly and be renamed `<name>.bad`
+        // so nothing — a human restore or the pruner — mistakes it for a good
+        // backup.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db").to_string_lossy().to_string();
+        let pool = init(&db_path).await.unwrap();
+
+        let dest = dir
+            .path()
+            .join("test-2026-01-04-000000.db")
+            .to_string_lossy()
+            .to_string();
+        std::fs::write(&dest, b"this is not a sqlite database at all").unwrap();
+
+        let err = verify_or_quarantine(&pool, &dest).await.unwrap_err();
+        assert!(
+            matches!(err, BackupError::Verification { .. }),
+            "expected a Verification error, got {err:?}"
+        );
+        assert!(
+            !Path::new(&dest).exists(),
+            "the bad file must not keep its backup name"
+        );
+        assert!(
+            Path::new(&format!("{dest}.bad")).exists(),
+            "the bad file is quarantined for diagnosis, not deleted"
+        );
+    }
+
+    #[tokio::test]
+    async fn verification_rejects_backup_missing_migrations() {
+        // A structurally valid SQLite file that lacks the applied migrations is
+        // not a restorable copy of this database.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db").to_string_lossy().to_string();
+        let pool = init(&db_path).await.unwrap();
+
+        let empty = dir.path().join("empty.db").to_string_lossy().to_string();
+        let opts = SqliteConnectOptions::from_str(&format!("sqlite:{empty}"))
+            .unwrap()
+            .create_if_missing(true);
+        let plain = SqlitePool::connect_with(opts).await.unwrap();
+        sqlx::query("CREATE TABLE t (x INTEGER)")
+            .execute(&plain)
+            .await
+            .unwrap();
+        plain.close().await;
+
+        let reason = verify_backup(&pool, &empty).await.unwrap_err();
+        assert!(
+            reason.contains("migrations"),
+            "reason must name the migrations check: {reason}"
+        );
+    }
+
+    /// Touch an empty file named as a backup of `test.db` taken at `ts`.
+    fn fake_backup(dir: &Path, ts: &str) -> PathBuf {
+        let path = dir.join(format!("test-{ts}.db"));
+        std::fs::write(&path, b"").unwrap();
+        path
+    }
+
+    #[test]
+    fn prune_keeps_recent_and_first_of_month_keepers() {
+        // Four weekly backups in each of Jan–May 2026. Newest KEEP_RECENT (8)
+        // survive (all of May + April); each month's *first* backup survives as
+        // its monthly keeper; every other file is pruned.
+        let dir = tempfile::tempdir().unwrap();
+        let mut all = Vec::new();
+        for month in 1..=5 {
+            for day in ["01", "08", "15", "22"] {
+                all.push(fake_backup(
+                    dir.path(),
+                    &format!("2026-{month:02}-{day}-000000"),
+                ));
+            }
+        }
+
+        let dir_str = dir.path().to_string_lossy().to_string();
+        let deleted = prune_backups("test.db", Some(&dir_str)).unwrap();
+
+        let survives = |ts: &str| dir.path().join(format!("test-{ts}.db")).exists();
+        // The newest 8: all four May runs and all four April runs.
+        for day in ["01", "08", "15", "22"] {
+            assert!(survives(&format!("2026-05-{day}-000000")));
+            assert!(survives(&format!("2026-04-{day}-000000")));
+        }
+        // Monthly keepers for the older months: the first run of each month.
+        for month in 1..=3 {
+            assert!(survives(&format!("2026-{month:02}-01-000000")));
+            for day in ["08", "15", "22"] {
+                assert!(
+                    !survives(&format!("2026-{month:02}-{day}-000000")),
+                    "2026-{month:02}-{day} is neither recent nor a keeper"
+                );
+            }
+        }
+        assert_eq!(deleted.len(), 9, "3 old months × 3 non-keeper runs");
+    }
+
+    #[test]
+    fn prune_drops_monthly_keepers_beyond_the_cap() {
+        // One backup per month for 14 months: the 12 most recent months keep
+        // their keeper, the 2 oldest are pruned even though each is its
+        // month's first backup.
+        let dir = tempfile::tempdir().unwrap();
+        let months: Vec<String> = (0..14)
+            .map(|i| format!("{}-{:02}", 2025 + (i / 12), 1 + (i % 12)))
+            .collect();
+        for month in &months {
+            fake_backup(dir.path(), &format!("{month}-01-000000"));
+        }
+
+        let dir_str = dir.path().to_string_lossy().to_string();
+        let deleted = prune_backups("test.db", Some(&dir_str)).unwrap();
+
+        let survives = |month: &str| {
+            dir.path()
+                .join(format!("test-{month}-01-000000.db"))
+                .exists()
+        };
+        assert!(!survives("2025-01"), "oldest month rolls off");
+        assert!(!survives("2025-02"), "second-oldest month rolls off");
+        for month in &months[2..] {
+            assert!(survives(month), "{month} is within the 12 kept months");
+        }
+        assert_eq!(deleted.len(), 2);
+    }
+
+    #[test]
+    fn prune_never_touches_non_matching_files() {
+        // Alongside enough pattern-matched backups that pruning really deletes
+        // something, every non-matching file — the live db, WAL sidecars, a
+        // quarantined .bad file, another database's backups, a malformed
+        // timestamp, a subdirectory — survives untouched.
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..14 {
+            let month = format!("{}-{:02}", 2025 + (i / 12), 1 + (i % 12));
+            fake_backup(dir.path(), &format!("{month}-01-000000"));
+        }
+        let bystanders = [
+            "test.db",
+            "test.db-wal",
+            "test.db-shm",
+            "other-2025-01-01-000000.db",
+            "test-2025-01-01-000000.db.bad",
+            "test-garbage.db",
+            "test-2025-13-40-000000.db", // month 13, day 40: not a timestamp
+        ];
+        for name in bystanders {
+            std::fs::write(dir.path().join(name), b"").unwrap();
+        }
+        std::fs::create_dir(dir.path().join("test-2027-01-01-000000.db")).unwrap();
+
+        let dir_str = dir.path().to_string_lossy().to_string();
+        let deleted = prune_backups("test.db", Some(&dir_str)).unwrap();
+
+        assert!(!deleted.is_empty(), "pruning must actually have run");
+        for name in bystanders {
+            assert!(
+                dir.path().join(name).exists(),
+                "{name} must never be pruned"
+            );
+        }
+        assert!(
+            dir.path().join("test-2027-01-01-000000.db").is_dir(),
+            "a directory is never a pruning candidate, even name-matched"
+        );
+    }
+
+    #[tokio::test]
+    async fn prune_beside_db_spares_the_live_database() {
+        // With no --backup-dir, backups (and so pruning) live beside the db
+        // file: the pruner must work on the db's own directory and never touch
+        // the live database or its sidecars.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db").to_string_lossy().to_string();
+        let pool = init(&db_path).await.unwrap();
+        for i in 0..14 {
+            let month = format!("{}-{:02}", 2020 + (i / 12), 1 + (i % 12));
+            fake_backup(dir.path(), &format!("{month}-01-000000"));
+        }
+
+        let deleted = prune_backups(&db_path, None).unwrap();
+
+        assert_eq!(deleted.len(), 2, "the two oldest monthly keepers roll off");
+        assert!(Path::new(&db_path).exists(), "live db must survive");
+        let row: (i64,) = sqlx::query_as("SELECT 1").fetch_one(&pool).await.unwrap();
+        assert_eq!(row.0, 1, "live db still serves queries after pruning");
+    }
+
+    #[tokio::test]
+    async fn backup_job_prunes_old_backups() {
+        // The full backup() path (as the scheduled/triggered job runs it):
+        // after the fresh verified backup, files outside the retention policy
+        // are pruned from the backup destination.
+        let db_dir = tempfile::tempdir().unwrap();
+        let backup_dir = tempfile::tempdir().unwrap();
+        let db_path = db_dir.path().join("test.db").to_string_lossy().to_string();
+        let pool = init(&db_path).await.unwrap();
+        // 13 pre-existing monthly backups; with the fresh backup that is 14
+        // distinct months, so the two oldest keepers roll off.
+        for i in 0..13 {
+            let month = format!("{}-{:02}", 2025 + (i / 12), 1 + (i % 12));
+            fake_backup(backup_dir.path(), &format!("{month}-01-000000"));
+        }
+
+        let dir_str = backup_dir.path().to_string_lossy().to_string();
+        backup(&pool, &db_path, Some(&dir_str)).await.unwrap();
+
+        let survives = |month: &str| {
+            backup_dir
+                .path()
+                .join(format!("test-{month}-01-000000.db"))
+                .exists()
+        };
+        assert!(!survives("2025-01"));
+        assert!(!survives("2025-02"));
+        assert!(survives("2025-03"));
+        let this_month = Local::now().format("%Y-%m").to_string();
+        let fresh = std::fs::read_dir(backup_dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                backup_timestamp(&name, "test")
+                    .is_some_and(|ts| ts.format("%Y-%m").to_string() == this_month)
+            })
+            .count();
+        assert_eq!(fresh, 1, "the fresh verified backup survives pruning");
+    }
+
+    #[tokio::test]
+    async fn restore_drill_backup_restores_with_matching_row_counts() {
+        // The restore drill: a backup produced by the real job path (write +
+        // verify + prune) restores into a working database whose every table
+        // has the same row count as the source — proving the artefact actually
+        // restores, not merely that a file exists.
+        let db_dir = tempfile::tempdir().unwrap();
+        let backup_dir = tempfile::tempdir().unwrap();
+        let db_path = db_dir.path().join("test.db").to_string_lossy().to_string();
+        let pool = init(&db_path).await.unwrap();
+        for id in 100..110 {
+            sqlx::query("INSERT INTO holding_accounts (id, name) VALUES (?, ?)")
+                .bind(id)
+                .bind(format!("account {id}"))
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+
+        let dir_str = backup_dir.path().to_string_lossy().to_string();
+        backup(&pool, &db_path, Some(&dir_str)).await.unwrap();
+        let produced = std::fs::read_dir(backup_dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .find(|e| backup_timestamp(&e.file_name().to_string_lossy(), "test").is_some())
+            .expect("the job produced a backup")
+            .path();
+
+        // Restore per the README procedure (from a copy) and start up on it.
+        let restored_path = db_dir
+            .path()
+            .join("restored.db")
+            .to_string_lossy()
+            .to_string();
+        std::fs::copy(&produced, &restored_path).unwrap();
+        let restored = init(&restored_path).await.unwrap();
+
+        let tables: Vec<String> = sqlx::query_scalar(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert!(!tables.is_empty());
+        for table in &tables {
+            let count = |p: &SqlitePool| {
+                let sql = format!("SELECT COUNT(*) FROM \"{table}\"");
+                let p = p.clone();
+                async move {
+                    sqlx::query_scalar::<_, i64>(&sql)
+                        .fetch_one(&p)
+                        .await
+                        .unwrap()
+                }
+            };
+            let (source, drilled) = (count(&pool).await, count(&restored).await);
+            assert_eq!(source, drilled, "row count differs for table {table}");
+        }
+        let (accounts,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM holding_accounts WHERE id >= 100")
+                .fetch_one(&restored)
+                .await
+                .unwrap();
+        assert_eq!(accounts, 10, "the drill data made the round trip");
     }
 }

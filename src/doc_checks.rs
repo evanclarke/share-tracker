@@ -217,6 +217,42 @@ fn known_limitations_document_cost_base_fx_timing() {
     assert!(README_MD.contains("s 960-50 translation timing"));
 }
 
+/// Docs-sync pin for the backup pipeline hardening (2026-07-13 improvement
+/// review): the README documents verification (integrity check + migrations
+/// match, `.bad` quarantine), the retention policy (newest 8 + 12 monthly
+/// keepers, pattern-matched files only), and — the recorded decision for the
+/// off-machine copy — that offsite sync is a documented external step, not an
+/// in-scope job step; the jobs API documents the backup job's failure
+/// semantics.
+#[test]
+fn backup_pipeline_documented() {
+    // Verification + quarantine.
+    assert!(README_MD.contains("must pass `PRAGMA integrity_check`"));
+    assert!(README_MD.contains("applied migrations must match the live database's"));
+    assert!(README_MD.contains("quarantined by renaming it to `<name>.db.bad`"));
+    assert!(README_MD.contains("never left looking like a good backup"));
+    // Retention policy, and its only-pattern-matched-files deletion scope.
+    assert!(README_MD.contains("**newest 8 backups**"));
+    assert!(
+        README_MD.contains("**first backup of each calendar month for the 12 most recent months**")
+    );
+    assert!(README_MD.contains(
+        "Pruning deletes only files matching the backup filename pattern for this database"
+    ));
+    // The off-machine copy decision: documented external setup, not a job step.
+    assert!(README_MD.contains("### Off-machine copies"));
+    assert!(
+        README_MD.contains("deliberately a documented external step, not a job inside the server")
+    );
+    assert!(README_MD.contains("rclone sync /mnt/backups"));
+    // The jobs API documents the backup job's verify/prune/failure semantics.
+    assert!(API_MD.contains("`POST /jobs/backup` returns `500`"));
+    assert!(API_MD.contains("quarantined as `<name>.db.bad`"));
+    assert!(API_MD.contains(
+        "the newest 8 backups plus the first backup of each of the 12 most recent months"
+    ));
+}
+
 /// Doc-only resolution pin for settlement-window forex — CGT events K10/K11
 /// (REQUIREMENTS 2026-06-12, NEEDS DECISION resolved 2026-06-12 as out of
 /// scope): the Known-limitations entry states the rule (cost-base adjustment
