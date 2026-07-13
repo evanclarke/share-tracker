@@ -454,7 +454,7 @@ pub async fn db_activity(
         });
     }
 
-    rows.sort_by(|a, b| (a.date, a.rank, a.src, a.id).cmp(&(b.date, b.rank, b.src, b.id)));
+    rows.sort_by_key(|r| (r.date, r.rank, r.src, r.id));
 
     let mut balance = Decimal::ZERO;
     let events = rows

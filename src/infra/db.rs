@@ -274,7 +274,7 @@ fn prune_backups(db_path: &str, backup_dir: Option<&str>) -> Result<Vec<PathBuf>
             backups.push((ts, entry.path()));
         }
     }
-    backups.sort_by(|a, b| b.0.cmp(&a.0)); // newest first
+    backups.sort_by_key(|(ts, _)| std::cmp::Reverse(*ts)); // newest first
 
     let mut keep: HashSet<&Path> = backups
         .iter()
@@ -292,10 +292,10 @@ fn prune_backups(db_path: &str, backup_dir: Option<&str>) -> Result<Vec<PathBuf>
     months.dedup();
     months.truncate(KEEP_MONTHLY);
     for month in &months {
+        // newest-first, so the rearmost match = oldest in the month
         let first_of_month = backups
             .iter()
-            .filter(|(ts, _)| ts.format("%Y-%m").to_string() == *month)
-            .last(); // newest-first, so last = oldest in the month
+            .rfind(|(ts, _)| ts.format("%Y-%m").to_string() == *month);
         if let Some((_, path)) = first_of_month {
             keep.insert(path.as_path());
         }

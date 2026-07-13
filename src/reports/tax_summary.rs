@@ -99,9 +99,9 @@ pub struct TaxYearSummary {
     pub ess_foreign_source_discount: Decimal,
     /// Gross assessable investment income for the year (AUD): the sum of the
     /// report's existing assessable income lines — `dividends_assessable`
-    /// (franked + unfranked) + `interest_income` + `foreign_interest_income`
-    /// + `foreign_source_income` +
-    /// the six AMMA income components (`amma_australian_interest`, `amma_dividends_unfranked`,
+    /// (franked + unfranked) + `interest_income` + `foreign_interest_income` +
+    /// `foreign_source_income` + the six AMMA income components
+    /// (`amma_australian_interest`, `amma_dividends_unfranked`,
     /// `amma_franked_dividends`, `amma_net_rent`, `amma_foreign_income`,
     /// `amma_other_income`). It deliberately excludes the franking-credit
     /// gross-up and FITO (carried as offset lines), conduit foreign income
