@@ -50,6 +50,7 @@ jobs:
           # needs protoc (same reason ci.yml installs protobuf-compiler).
           prepare: pkg install -y rust protobuf
           run: |
+            set -e
             sh pkg/freebsd/build-pkg.sh
             sh pkg/freebsd/smoke-test.sh
       - uses: actions/upload-artifact@v4

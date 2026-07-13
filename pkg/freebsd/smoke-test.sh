@@ -5,6 +5,9 @@
 # server starts against the installed config and answers HTTP. Run as root on
 # a FreeBSD host (CI: the release workflow's VM, right after build-pkg.sh).
 
+# In the body, not only the shebang — `sh smoke-test.sh` ignores shebang flags.
+set -eu
+
 cd "$(dirname "$0")/../.."
 VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
 
@@ -16,6 +19,14 @@ pkg add "share-tracker-$VERSION.pkg"
 
 # The rc script parses and knows its rcvar.
 /usr/local/etc/rc.d/share_tracker rcvar >/dev/null
+
+# post-install created the service user and activated the sample configs
+# (the manifest scripts re-implement @sample — see manifest.ucl). Without
+# these checks a failed copy would go unnoticed: the server falls back to
+# built-in defaults when the config file is absent and still answers HTTP.
+pw usershow share_tracker >/dev/null
+[ -f /usr/local/etc/share-tracker.toml ]
+[ -f /usr/local/etc/share-tracker.cron ]
 
 # The server starts and answers HTTP. The @sample config installed to
 # /usr/local/etc/share-tracker.toml is loaded for real (including the shipped

@@ -361,14 +361,8 @@ mod freebsd_packaging {
         for (plist_entry, staged) in [
             ("bin/share-tracker", "$STAGE/usr/local/bin/"),
             ("etc/rc.d/share_tracker", "$STAGE/usr/local/etc/rc.d/"),
-            (
-                "@sample etc/share-tracker.toml.sample",
-                "share-tracker.toml.sample",
-            ),
-            (
-                "@sample etc/share-tracker.cron.sample",
-                "share-tracker.cron.sample",
-            ),
+            ("etc/share-tracker.toml.sample", "share-tracker.toml.sample"),
+            ("etc/share-tracker.cron.sample", "share-tracker.cron.sample"),
         ] {
             assert!(PLIST.contains(plist_entry), "plist lists {plist_entry}");
             assert!(BUILD_SH.contains(staged), "build-pkg.sh stages {staged}");
@@ -383,8 +377,37 @@ mod freebsd_packaging {
         assert_eq!(installs, entries);
     }
 
+    /// The plist must stay free of ports keywords: `pkg create` resolves
+    /// `@sample` & co. from the ports tree (`/usr/ports/Keywords/*.ucl`),
+    /// which the release VM doesn't have — an unknown keyword made pkg create
+    /// emit nothing while still "succeeding" (the first v0.2.0 run). The
+    /// sample→live copy semantics live in the manifest's own scripts instead,
+    /// and both scripts hard-fail on any missed step.
+    #[test]
+    fn sample_configs_activate_without_ports_keywords() {
+        assert!(!PLIST.contains('@'), "plist uses no ports keywords");
+        // Manifest scripts re-implement @sample: copy into place on first
+        // install, remove on deinstall only while unmodified.
+        assert!(MANIFEST.contains("post-install"));
+        assert!(MANIFEST.contains(r#"cp -p "/usr/local/etc/$f.sample" "/usr/local/etc/$f""#));
+        assert!(MANIFEST.contains("pre-deinstall"));
+        assert!(MANIFEST.contains(r#"cmp -s "/usr/local/etc/$f.sample" "/usr/local/etc/$f""#));
+        // Both shipped configs go through that activation loop.
+        assert!(MANIFEST.contains("for f in share-tracker.toml share-tracker.cron"));
+        // The scripts enforce -eu in the body (`sh script.sh` drops shebang
+        // flags) and build-pkg.sh refuses to "succeed" without the artifact.
+        assert!(BUILD_SH.contains("\nset -eu\n"));
+        assert!(SMOKE_SH.contains("\nset -eu\n"));
+        assert!(BUILD_SH.contains(r#"[ -f "$OUT/share-tracker-$VERSION.pkg" ]"#));
+        // The smoke test proves activation happened: without these, a failed
+        // copy goes unnoticed because the server answers HTTP on defaults.
+        assert!(SMOKE_SH.contains("[ -f /usr/local/etc/share-tracker.toml ]"));
+        assert!(SMOKE_SH.contains("[ -f /usr/local/etc/share-tracker.cron ]"));
+        assert!(SMOKE_SH.contains("pw usershow share_tracker"));
+    }
+
     /// The rc script points the server at the config file the package
-    /// installs (the `@sample` copy of `share-tracker.toml.sample`, whose
+    /// installs (the activated copy of `share-tracker.toml.sample`, whose
     /// parseability is pinned in `infra::config`), and the smoke test proves
     /// the service pieces before anything is released.
     #[test]

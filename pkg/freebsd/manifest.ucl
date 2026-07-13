@@ -20,11 +20,30 @@ scripts: {
   # Create the non-login service user and its data directory. The user, the
   # database, and the backups deliberately survive pkg delete — removing the
   # package must never remove financial records.
+  #
+  # The sample→live config copy re-implements the ports `@sample` plist
+  # keyword (keyword definitions ship with the ports tree, which the release
+  # VM doesn't have, and `pkg create` fails on unknown keywords): first
+  # install copies each .sample into place; deinstall (and so the deinstall
+  # half of an upgrade) removes the live copy only while it still matches its
+  # sample, so an edited config survives upgrades and pkg delete.
   post-install: <<EOD
 if ! pw usershow share_tracker >/dev/null 2>&1; then
   pw useradd share_tracker -c "share-tracker daemon" -d /var/db/share-tracker -s /usr/sbin/nologin -h -
 fi
 mkdir -p /var/db/share-tracker/backups
 chown -R share_tracker:share_tracker /var/db/share-tracker
+for f in share-tracker.toml share-tracker.cron; do
+  if [ ! -f "/usr/local/etc/$f" ]; then
+    cp -p "/usr/local/etc/$f.sample" "/usr/local/etc/$f"
+  fi
+done
+EOD
+  pre-deinstall: <<EOD
+for f in share-tracker.toml share-tracker.cron; do
+  if cmp -s "/usr/local/etc/$f.sample" "/usr/local/etc/$f"; then
+    rm "/usr/local/etc/$f"
+  fi
+done
 EOD
 }

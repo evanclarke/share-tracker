@@ -6,6 +6,11 @@
 #
 # Usage: pkg/freebsd/build-pkg.sh [output-dir]   (default: repo root)
 
+# Set in the body, not only the shebang: `sh build-pkg.sh` (how CI invokes it)
+# ignores shebang flags, and an unnoticed failed step here once shipped the
+# smoke test a package that was never built.
+set -eu
+
 cd "$(dirname "$0")/../.."
 OUT="${1:-.}"
 
@@ -32,4 +37,10 @@ install -m 0644 schedule.cron "$STAGE/usr/local/etc/share-tracker.cron.sample"
 sed "s/__VERSION__/$VERSION/" pkg/freebsd/manifest.ucl > /tmp/+MANIFEST
 pkg create -M /tmp/+MANIFEST -p pkg/freebsd/plist -r "$STAGE" -o "$OUT"
 
+# pkg create can report success while emitting nothing (seen with a plist it
+# only warned about) — the artifact existing is the real success condition.
+[ -f "$OUT/share-tracker-$VERSION.pkg" ] || {
+  echo "pkg create produced no $OUT/share-tracker-$VERSION.pkg" >&2
+  exit 1
+}
 echo "built $OUT/share-tracker-$VERSION.pkg"

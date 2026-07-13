@@ -139,7 +139,7 @@ sysrc share_tracker_enable=YES
 service share_tracker start
 ```
 
-Installing creates a non-login `share_tracker` service user and `/var/db/share-tracker` (database + backups) owned by it, and places the configuration at `/usr/local/etc/share-tracker.toml` and the maintenance schedule at `/usr/local/etc/share-tracker.cron` (both installed as `@sample` files: first install copies them into place, upgrades preserve your edits). The service runs under [daemon(8)](https://man.freebsd.org/cgi/man.cgi?daemon(8)) — restarted if it crashes, logs to syslog under the `share-tracker` tag. `share_tracker_config` and `share_tracker_user` can be overridden in `rc.conf`. Deinstalling the package never removes the database, backups, or edited config — financial records survive `pkg delete`.
+Installing creates a non-login `share_tracker` service user and `/var/db/share-tracker` (database + backups) owned by it, and places the configuration at `/usr/local/etc/share-tracker.toml` and the maintenance schedule at `/usr/local/etc/share-tracker.cron` (both activated from shipped `.sample` files: first install copies them into place, upgrades and deinstalls preserve your edits — the same semantics as the ports `@sample` keyword, implemented in the manifest's own scripts). The service runs under [daemon(8)](https://man.freebsd.org/cgi/man.cgi?daemon(8)) — restarted if it crashes, logs to syslog under the `share-tracker` tag. `share_tracker_config` and `share_tracker_user` can be overridden in `rc.conf`. Deinstalling the package never removes the database, backups, or edited config — financial records survive `pkg delete`.
 
 The package skeleton lives in [`pkg/freebsd/`](pkg/freebsd/); `pkg/freebsd/build-pkg.sh` builds the same package locally on any FreeBSD host.
 
