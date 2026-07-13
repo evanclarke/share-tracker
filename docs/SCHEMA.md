@@ -306,8 +306,9 @@ report_snapshots             Stored daily results of the price-dependent reports
 ├── stale         INTEGER          0 | 1 (CHECK): 1 = a back-dated fact was recorded after generation, set by the staleness triggers (below) in the same transaction as the fact; cleared by regeneration
 └── rows_json     TEXT             The report's response rows as JSON; money values inside are Decimal strings (the API's serialisation), kept in TEXT — never a REAL/float
 
-job_runs                     Last run of each scheduled/on-demand maintenance job (one row per job, upserted each run)
-├── name        TEXT PK          Registry job name (e.g. backup, rba-fx-import)
+job_runs                     Run history of the scheduled/on-demand maintenance jobs (one row per run, appended each run; pruned to the newest 20 per job in the same write)
+├── id          INTEGER PK       Autoincrement — run order (newest run = highest id); indexed with name for per-job lookups
+├── name        TEXT             Registry job name (e.g. backup, rba-fx-import)
 ├── started_at  TEXT             RFC 3339 timestamp the run began
 ├── finished_at TEXT             RFC 3339 timestamp the run ended
 ├── success     INTEGER          1 if the run succeeded, 0 if it failed
@@ -361,7 +362,7 @@ Each `attachments` row belongs to exactly one activity via one of three nullable
 
 `report_snapshots` has no foreign keys of its own (`report` is an in-code enum, the rows are a JSON payload), but every dated fact table writes to it through **staleness triggers** (0001_schema.sql): inserting, updating, or deleting a row in `trades`, `parcel_allocations` (dated by its sale trade), `income` (by `date_paid`), `amma_statements` / `amit_adjustments` (by the statement's `tax_year_end_date`), or `corporate_actions` sets `stale = 1` on every snapshot dated on or after the fact — an update from the earlier of the old and new dates — atomically with the fact write, so no write path (entity CRUD, Sells, transfers, corporate-action operations, DRP reinvestment) can bypass the invalidation. Revising a stored ok closing price (or erroring it out) likewise stales snapshots from its date, since they were valued at it. `rights_sales` / `rights_sale_allocations` and `interest_income` are the deliberate exceptions: no snapshotted report reads them (a rights sale changes no holding quantity and no parcel cost base — its effect is confined to the live-computed CGT reports; interest reaches only the tax summary, which is not snapshotted), so they carry no trigger set.
 
-`rba_fx_rates` is standalone reference data (no foreign keys); it is looked up by `(currency, month)`. `job_runs` is likewise standalone: it is keyed by the in-code job name (not a foreign key), and each scheduled or manual run upserts the job's row so only its last run is kept. `cgt_settings` is also standalone: a singleton row (`CHECK (id = 1)`) holding the entered opening carried-forward capital loss consumed by the [net capital gain report](API.md#net-capital-gain).
+`rba_fx_rates` is standalone reference data (no foreign keys); it is looked up by `(currency, month)`. `job_runs` is likewise standalone: `name` is the in-code job name (not a foreign key), and each scheduled or manual run appends a row, pruning that job's history to the newest 20 rows in the same transaction — so an intermittent failure that later succeeds stays visible (surfaced by `GET /jobs` and the [health report](API.md#health)) without the table growing unboundedly. `cgt_settings` is also standalone: a singleton row (`CHECK (id = 1)`) holding the entered opening carried-forward capital loss consumed by the [net capital gain report](API.md#net-capital-gain).
 
 `mic_registry` is standalone reference data (no foreign keys), keyed by `mic`. It is populated from the ISO 10383 list and used only to validate curated `exchanges` (see the [exchange MIC validation report](API.md#exchange-mic-validation)); it is *not* the operational exchange table and carries no currency/timezone/settlement data.
 

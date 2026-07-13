@@ -836,6 +836,31 @@ mod tests {
         assert!(js.contains("last_finished_at"));
         assert!(js.contains("last_success"));
         assert!(js.contains("last_error"));
+        // Each job row expands to its stored run history (GET /jobs `runs`),
+        // so a flapping job's intermittent failures are diagnosable in the UI.
+        assert!(js.contains("j.runs"));
+        assert!(js.contains("r.success ? 'ok' : 'failed'"));
+    }
+
+    #[tokio::test]
+    async fn health_banner_ui_present() {
+        let js = app_js_body().await;
+        // The cross-view banner is driven by the health/freshness endpoint…
+        assert!(js.contains("refreshHealthBanner"));
+        assert!(js.contains("/reports/health"));
+        // …surfacing stale prices, stale FX, and failed jobs, linking to the
+        // Jobs page…
+        assert!(js.contains("prices_stale"));
+        assert!(js.contains("fx_stale"));
+        assert!(js.contains("failed_jobs"));
+        assert!(js.contains("'#/jobs'"));
+        // …and refreshes on every route render so it appears on the main views.
+        assert!(js.contains("refreshHealthBanner(); // deliberately not awaited"));
+        // The strip's host element ships in the page shell with its styles.
+        let index = body_string(get("/").await).await;
+        assert!(index.contains("id=\"health-banner\""));
+        let css = body_string(get("/static/style.css").await).await;
+        assert!(css.contains("#health-banner"));
     }
 
     #[tokio::test]

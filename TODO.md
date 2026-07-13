@@ -10,17 +10,6 @@ findings are all closed in DONE.md), except where a section's heading names anot
 (e.g. REQUIREMENTS). Each section records one finding; sections land in DONE.md as they are fixed
 or decided.
 
-## Proactive job-failure and data-staleness surfacing in the UI
-A failing price import or RBA FX import is only visible if the Jobs page is opened; meanwhile
-valuations silently go stale (yfinance is an unofficial API and will break eventually). `job_runs`
-keeps only the last run per job (`scheduler::db_record_run` overwrites), so an intermittent failure
-that later succeeds leaves no trace.
-- [ ] Health/freshness endpoint: latest closing-price date, latest RBA FX rate month, and any job whose last run errored, in one read (report-style, single read transaction)
-- [ ] Web UI banner/strip on the main views driven by that endpoint: show stale price/FX data (threshold-based, e.g. prices older than N business days) and any failed job, linking to the Jobs page
-- [ ] Bounded per-job run history (e.g. last 20 runs per job, pruned in the same write) so flapping jobs are diagnosable; `GET /jobs` exposes it; migration extends/replaces the single-row `job_runs` shape without dropping data
-- [ ] Tests: staleness thresholds (fresh vs stale), failed-job surfacing, history bound enforced, UI binding asserted in the served bundle
-- [ ] Docs: SCHEMA.md for the run-history shape; API.md for the new endpoint(s)
-
 ## Frontend: executed tests for the pure JS helpers + CI smoke check
 ~3,100 lines of JS include hand-rolled BigInt decimal arithmetic (`roundDecimalStr`,
 half-away-from-zero rounding, `decStrEq` in `web/util.js`) and the allocation editor — money-adjacent

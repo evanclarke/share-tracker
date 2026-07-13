@@ -31,6 +31,20 @@ body {
 #topbar h1 { margin: 0; font-size: 18px; font-weight: 600; }
 #topbar .subtitle { color: #aab3c0; font-size: 12px; }
 
+/* Cross-view health strip: stale price/FX data and failed jobs, populated by
+   refreshHealthBanner in app.js from GET /reports/health. */
+#health-banner {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 8px 20px;
+  background: #fdf3d7;
+  color: var(--warn);
+  border-bottom: 1px solid var(--warn);
+  font-size: 13px;
+}
+#health-banner a { color: var(--warn); font-weight: 600; white-space: nowrap; }
+
 #layout { display: flex; align-items: flex-start; }
 
 #nav {

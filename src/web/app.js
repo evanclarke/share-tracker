@@ -932,6 +932,43 @@ async function viewAttachments(ownerField, ownerId) {
   setMain(container);
 }
 
+// ---- health banner ------------------------------------------------------
+// Cross-view strip driven by GET /reports/health: stale closing prices or RBA
+// FX rates (the staleness thresholds live server-side) and any job whose
+// latest run failed, each linking to the Jobs page. Refreshed on every route
+// render, so fixing the cause (e.g. re-running the failed job) clears it on
+// the next navigation. A failing health fetch hides the banner rather than
+// breaking the app — the Jobs page remains the manual fallback.
+async function refreshHealthBanner() {
+  const banner = document.getElementById('health-banner');
+  try {
+    const h = await api('GET', '/reports/health');
+    const problems = [];
+    if (h.prices_stale) {
+      problems.push('Closing prices are stale — latest is ' + h.latest_price_date
+        + '; check the price-import job.');
+    }
+    if (h.fx_stale) {
+      problems.push('RBA FX rates are stale — latest month is ' + h.latest_fx_month
+        + '; check the rba-fx-import job.');
+    }
+    (h.failed_jobs || []).forEach(function (j) {
+      problems.push("Job '" + j.name + "' failed" + (j.error ? ': ' + j.error : '') + '.');
+    });
+    if (problems.length === 0) {
+      banner.hidden = true;
+      banner.innerHTML = '';
+      return;
+    }
+    banner.innerHTML = '';
+    banner.appendChild(el('span', null, '⚠ ' + problems.join(' ')));
+    banner.appendChild(el('a', { href: '#/jobs' }, 'Open Jobs →'));
+    banner.hidden = false;
+  } catch (e) {
+    banner.hidden = true;
+  }
+}
+
 // ---- maintenance jobs -------------------------------------------------
 const JOB_DESC = {
   'backup': 'Copy the database to a dated backup file beside it (skipped if today\'s already exists).',
@@ -954,11 +991,31 @@ async function viewJobs() {
       last_run: j.last_finished_at || '',
       status: j.last_started_at == null ? 'never' : (j.last_success ? 'ok' : 'failed'),
       error: j.last_error || '',
+      _runs: j.runs || [],
     };
   });
   const cols = ['job', 'description', 'last_run', 'status', 'error'];
   const table = filterableTable(rows, cols, {
     statusField: 'status',
+    // Expand a job to its stored run history (the server keeps a bounded
+    // number of recent runs per job), so a flapping job — an intermittent
+    // failure that later succeeded — is diagnosable from here.
+    expand: function (row) {
+      if (!row._runs.length) return null;
+      const runs = row._runs.map(function (r) {
+        return {
+          started_at: r.started_at,
+          finished_at: r.finished_at,
+          status: r.success ? 'ok' : 'failed',
+          error: r.error || '',
+        };
+      });
+      return {
+        rows: runs,
+        cols: ['started_at', 'finished_at', 'status', 'error'],
+        opts: { statusField: 'status' },
+      };
+    },
     actions: function (row) {
       const btn = el('button', { class: 'small primary' }, 'Run now');
       btn.addEventListener('click', async function () {
@@ -979,7 +1036,7 @@ async function viewJobs() {
   });
   setMain(el('div', null, [
     el('h2', null, 'Jobs'),
-    el('p', { class: 'view-desc' }, 'Trigger scheduled maintenance jobs on demand, and see when each last ran (and any error). Each also runs automatically on its cron schedule; running here is for retries or missed runs.'),
+    el('p', { class: 'view-desc' }, 'Trigger scheduled maintenance jobs on demand, and see when each last ran (and any error). Expand a job to see its recent run history. Each also runs automatically on its cron schedule; running here is for retries or missed runs.'),
     table,
   ]));
 }
@@ -1389,6 +1446,7 @@ async function viewReport(report) {
 
 // ---- router -----------------------------------------------------------
 async function render() {
+  refreshHealthBanner(); // deliberately not awaited: the view renders in parallel
   const hash = (location.hash || '').replace(/^#/, '');
   const parts = hash.split('/').filter(Boolean);
   try {

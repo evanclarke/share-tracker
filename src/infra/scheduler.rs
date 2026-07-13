@@ -53,9 +53,11 @@ impl RegisteredJob {
 /// trigger handler (injected as an axum `Extension`).
 pub type JobRegistry = Arc<HashMap<String, Arc<RegisteredJob>>>;
 
-/// A job's last run, surfaced by `GET /jobs` and the Jobs UI. Every registered
-/// job appears in the list; the `last_*` fields are `None` until the job has run
-/// at least once (no `job_runs` row yet).
+/// A job's status, surfaced by `GET /jobs` and the Jobs UI. Every registered
+/// job appears in the list; the `last_*` fields are `None` (and `runs` empty)
+/// until the job has run at least once. `runs` is the job's stored run history,
+/// most recent first, bounded to [`JOB_RUN_HISTORY_LIMIT`] entries — the
+/// `last_*` fields duplicate `runs[0]` for at-a-glance reading.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct JobStatus {
     pub name: String,
@@ -63,9 +65,19 @@ pub struct JobStatus {
     pub last_finished_at: Option<String>,
     pub last_success: Option<bool>,
     pub last_error: Option<String>,
+    pub runs: Vec<JobRunRecord>,
 }
 
-/// One persisted run record from `job_runs` (the last run of a single job).
+/// One stored run of a job, as exposed in a `JobStatus`'s `runs` history.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobRunRecord {
+    pub started_at: String,
+    pub finished_at: String,
+    pub success: bool,
+    pub error: Option<String>,
+}
+
+/// One persisted run row from `job_runs`.
 #[derive(sqlx::FromRow)]
 struct JobRun {
     name: String,
@@ -75,8 +87,15 @@ struct JobRun {
     error: Option<String>,
 }
 
-/// Upsert the last-run record for `name`. One row per job (keyed by name), so a
-/// new run overwrites the previous record rather than accumulating history.
+/// Bound on the stored run history per job: recording a run prunes that job's
+/// rows to the newest this-many in the same transaction, so an intermittent
+/// (flapping) failure stays diagnosable from `GET /jobs` without the table
+/// growing unboundedly.
+pub const JOB_RUN_HISTORY_LIMIT: u32 = 20;
+
+/// Append a run record for `name` and prune the job's history to the newest
+/// [`JOB_RUN_HISTORY_LIMIT`] rows, atomically — history accumulates per run
+/// (unlike the old one-row-per-job upsert) but stays bounded.
 async fn db_record_run(
     pool: &SqlitePool,
     name: &str,
@@ -85,33 +104,50 @@ async fn db_record_run(
     success: bool,
     error: Option<&str>,
 ) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
     sqlx::query(
         "INSERT INTO job_runs (name, started_at, finished_at, success, error) \
-         VALUES (?, ?, ?, ?, ?) \
-         ON CONFLICT(name) DO UPDATE SET \
-             started_at = excluded.started_at, \
-             finished_at = excluded.finished_at, \
-             success = excluded.success, \
-             error = excluded.error",
+         VALUES (?, ?, ?, ?, ?)",
     )
     .bind(name)
     .bind(started_at)
     .bind(finished_at)
     .bind(success)
     .bind(error)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+    sqlx::query(
+        "DELETE FROM job_runs WHERE name = ?1 AND id NOT IN \
+             (SELECT id FROM job_runs WHERE name = ?1 ORDER BY id DESC LIMIT ?2)",
+    )
+    .bind(name)
+    .bind(JOB_RUN_HISTORY_LIMIT)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
     Ok(())
 }
 
-/// Load every job's last run, keyed by job name.
-async fn db_last_runs(pool: &SqlitePool) -> Result<HashMap<String, JobRun>, sqlx::Error> {
+/// Load every job's stored run history, keyed by job name, each job's runs
+/// most recent first.
+async fn db_run_histories(
+    pool: &SqlitePool,
+) -> Result<HashMap<String, Vec<JobRunRecord>>, sqlx::Error> {
     let rows = sqlx::query_as::<_, JobRun>(
-        "SELECT name, started_at, finished_at, success, error FROM job_runs",
+        "SELECT name, started_at, finished_at, success, error FROM job_runs ORDER BY id DESC",
     )
     .fetch_all(pool)
     .await?;
-    Ok(rows.into_iter().map(|r| (r.name.clone(), r)).collect())
+    let mut histories: HashMap<String, Vec<JobRunRecord>> = HashMap::new();
+    for r in rows {
+        histories.entry(r.name).or_default().push(JobRunRecord {
+            started_at: r.started_at,
+            finished_at: r.finished_at,
+            success: r.success,
+            error: r.error,
+        });
+    }
+    Ok(histories)
 }
 
 /// Why a schedule file was rejected. Carries the 1-based line number so a bad
@@ -463,33 +499,30 @@ fn next_run<Z: TimeZone>(cron: &Cron, now: DateTime<Z>) -> Option<(DateTime<Z>, 
     Some((next, delay))
 }
 
-/// List every registered job (sorted) with its last run. Jobs that have never
-/// run carry `None` in the `last_*` fields.
+/// List every registered job (sorted) with its bounded run history (most
+/// recent first). Jobs that have never run carry `None` in the `last_*` fields
+/// and an empty `runs`.
 async fn list(
     State(pool): State<SqlitePool>,
     Extension(registry): Extension<JobRegistry>,
 ) -> Result<Json<Vec<JobStatus>>, crate::infra::http::ApiError> {
-    let mut last = db_last_runs(&pool).await?;
+    let mut histories = db_run_histories(&pool).await?;
 
     let mut names: Vec<String> = registry.keys().cloned().collect();
     names.sort();
     let statuses = names
         .into_iter()
-        .map(|name| match last.remove(&name) {
-            Some(run) => JobStatus {
+        .map(|name| {
+            let runs = histories.remove(&name).unwrap_or_default();
+            let last = runs.first();
+            JobStatus {
                 name,
-                last_started_at: Some(run.started_at),
-                last_finished_at: Some(run.finished_at),
-                last_success: Some(run.success),
-                last_error: run.error,
-            },
-            None => JobStatus {
-                name,
-                last_started_at: None,
-                last_finished_at: None,
-                last_success: None,
-                last_error: None,
-            },
+                last_started_at: last.map(|r| r.started_at.clone()),
+                last_finished_at: last.map(|r| r.finished_at.clone()),
+                last_success: last.map(|r| r.success),
+                last_error: last.and_then(|r| r.error.clone()),
+                runs,
+            }
         })
         .collect();
     Ok(Json(statuses))
@@ -1054,9 +1087,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn record_run_persists_failure_with_error() {
-        // A failed run stores success = 0 and the error text; a later success for
-        // the same job overwrites it (one row per job).
+    async fn record_run_keeps_history_latest_first() {
+        // A failed run stores success = 0 and the error text; a later success
+        // for the same job becomes the latest run while the failure stays in
+        // the history (an intermittent failure leaves a trace).
         let (_reg, pool, _dir, _path) = test_registry().await;
         db_record_run(
             &pool,
@@ -1068,11 +1102,6 @@ mod tests {
         )
         .await
         .unwrap();
-        let runs = db_last_runs(&pool).await.unwrap();
-        let run = runs.get("backup").unwrap();
-        assert!(!run.success);
-        assert_eq!(run.error.as_deref(), Some("boom"));
-
         db_record_run(
             &pool,
             "backup",
@@ -1083,10 +1112,150 @@ mod tests {
         )
         .await
         .unwrap();
-        let runs = db_last_runs(&pool).await.unwrap();
-        let run = runs.get("backup").unwrap();
-        assert!(run.success);
-        assert!(run.error.is_none());
-        assert_eq!(run.started_at, "2026-06-02T00:00:00Z");
+
+        let histories = db_run_histories(&pool).await.unwrap();
+        let runs = histories.get("backup").unwrap();
+        assert_eq!(runs.len(), 2);
+        assert!(runs[0].success);
+        assert!(runs[0].error.is_none());
+        assert_eq!(runs[0].started_at, "2026-06-02T00:00:00Z");
+        assert!(!runs[1].success);
+        assert_eq!(runs[1].error.as_deref(), Some("boom"));
+    }
+
+    #[tokio::test]
+    async fn run_history_is_pruned_to_the_limit_per_job() {
+        // Recording a run prunes that job's history to the newest
+        // JOB_RUN_HISTORY_LIMIT rows in the same write; other jobs' histories
+        // are untouched.
+        let (_reg, pool, _dir, _path) = test_registry().await;
+        db_record_run(
+            &pool,
+            "other",
+            "2026-05-01T00:00:00Z",
+            "2026-05-01T00:00:01Z",
+            true,
+            None,
+        )
+        .await
+        .unwrap();
+        let extra = 5;
+        for i in 0..(JOB_RUN_HISTORY_LIMIT + extra) {
+            let started = format!("2026-06-01T00:{i:02}:00Z");
+            let finished = format!("2026-06-01T00:{i:02}:01Z");
+            db_record_run(&pool, "backup", &started, &finished, true, None)
+                .await
+                .unwrap();
+        }
+
+        let histories = db_run_histories(&pool).await.unwrap();
+        let runs = histories.get("backup").unwrap();
+        assert_eq!(runs.len(), JOB_RUN_HISTORY_LIMIT as usize);
+        // The newest runs survive; the oldest `extra` were pruned.
+        assert_eq!(
+            runs[0].started_at,
+            format!("2026-06-01T00:{:02}:00Z", JOB_RUN_HISTORY_LIMIT + extra - 1)
+        );
+        assert_eq!(
+            runs.last().unwrap().started_at,
+            format!("2026-06-01T00:{extra:02}:00Z")
+        );
+        assert_eq!(histories.get("other").unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn list_jobs_exposes_run_history() {
+        // GET /jobs carries each job's stored history (most recent first) in
+        // `runs`, with the `last_*` fields mirroring the newest entry.
+        let (reg, pool, _dir, _path) = test_registry().await;
+        db_record_run(
+            &pool,
+            "backup",
+            "2026-06-01T00:00:00Z",
+            "2026-06-01T00:00:01Z",
+            false,
+            Some("boom"),
+        )
+        .await
+        .unwrap();
+        db_record_run(
+            &pool,
+            "backup",
+            "2026-06-02T00:00:00Z",
+            "2026-06-02T00:00:01Z",
+            true,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let app = router().with_state(pool).layer(Extension(reg));
+        let resp = app
+            .oneshot(Request::builder().uri("/jobs").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let statuses: Vec<JobStatus> = serde_json::from_slice(&body).unwrap();
+        let backup = statuses.iter().find(|s| s.name == "backup").unwrap();
+        assert_eq!(backup.runs.len(), 2);
+        assert!(backup.runs[0].success);
+        assert_eq!(backup.runs[1].error.as_deref(), Some("boom"));
+        assert_eq!(backup.last_success, Some(true));
+        assert_eq!(
+            backup.last_started_at.as_deref(),
+            Some("2026-06-02T00:00:00Z")
+        );
+        // A never-run job has an empty history.
+        let never = statuses.iter().find(|s| s.name == "rba-fx-import").unwrap();
+        assert!(never.runs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn migration_0012_preserves_the_old_single_row_records() {
+        // 0012 rebuilt job_runs from the one-row-per-job upsert shape into the
+        // append-per-run history shape. Each job's previously stored last run
+        // must survive as its first history row — recreate the old shape,
+        // apply the migration file, and check nothing was dropped.
+        use sqlx::Connection;
+        let mut conn = sqlx::SqliteConnection::connect(":memory:").await.unwrap();
+        sqlx::raw_sql(
+            "CREATE TABLE job_runs (
+                 name        TEXT PRIMARY KEY,
+                 started_at  TEXT    NOT NULL,
+                 finished_at TEXT    NOT NULL,
+                 success     INTEGER NOT NULL,
+                 error       TEXT
+             );
+             INSERT INTO job_runs VALUES
+                 ('backup', '2026-06-01T00:00:00Z', '2026-06-01T00:00:01Z', 0, 'boom'),
+                 ('price-import', '2026-06-02T00:00:00Z', '2026-06-02T00:00:01Z', 1, NULL);",
+        )
+        .execute(&mut conn)
+        .await
+        .unwrap();
+
+        sqlx::raw_sql(include_str!("../../migrations/0012_job_run_history.sql"))
+            .execute(&mut conn)
+            .await
+            .unwrap();
+
+        let rows: Vec<(String, String, bool, Option<String>)> =
+            sqlx::query_as("SELECT name, started_at, success, error FROM job_runs ORDER BY name")
+                .fetch_all(&mut conn)
+                .await
+                .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows[0],
+            (
+                "backup".to_string(),
+                "2026-06-01T00:00:00Z".to_string(),
+                false,
+                Some("boom".to_string())
+            )
+        );
+        assert_eq!(rows[1].0, "price-import");
+        assert!(rows[1].2);
     }
 }
