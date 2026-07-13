@@ -1,0 +1,30 @@
+# FreeBSD package manifest (UCL). __VERSION__ is substituted with Cargo.toml's
+# version by build-pkg.sh — the pkg version, the binary's --version, and the
+# release tag all come from that single source.
+name: "share-tracker"
+version: "__VERSION__"
+origin: "local/share-tracker"
+comment: "Australian share portfolio tracker"
+www: "https://github.com/evanclarke/share-tracker"
+maintainer: "evan@evanclarke.com"
+prefix: "/usr/local"
+categories: ["finance"]
+licenses: ["MIT"]
+desc: <<EOD
+Records facts about investing activity (trades, income, corporate actions,
+AMMA and ESS statements) in SQLite and materialises portfolio, CGT and
+income reports with the Australian tax view. Serves a web UI and JSON API
+on localhost.
+EOD
+scripts: {
+  # Create the non-login service user and its data directory. The user, the
+  # database, and the backups deliberately survive pkg delete — removing the
+  # package must never remove financial records.
+  post-install: <<EOD
+if ! pw usershow share_tracker >/dev/null 2>&1; then
+  pw useradd share_tracker -c "share-tracker daemon" -d /var/db/share-tracker -s /usr/sbin/nologin -h -
+fi
+mkdir -p /var/db/share-tracker/backups
+chown -R share_tracker:share_tracker /var/db/share-tracker
+EOD
+}

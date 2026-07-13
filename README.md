@@ -56,20 +56,37 @@ Deliberate scope cuts are documented in [Known limitations](docs/API.md#known-li
 
 ```bash
 cargo build --release
-./target/release/share-tracker [--db share-tracker.db] [--backup-dir /mnt/backups] [--host 127.0.0.1] [--port 3000] [--schedule schedule.cron]
+./target/release/share-tracker [--config share-tracker.toml] [--db share-tracker.db] [--backup-dir /mnt/backups] [--host 127.0.0.1] [--port 3000] [--schedule schedule.cron]
 ```
 
 | Flag | Default | Description |
 |------|---------|-------------|
+| `--config` | `/usr/local/etc/share-tracker.toml` if it exists | Path to a TOML [configuration file](#configuration-file). An explicitly given path must exist |
 | `--db` | `share-tracker.db` | SQLite database file path |
 | `--backup-dir` | beside the database file | Directory the scheduled/triggered backups are written to (created if missing). Point it at another volume so a disk failure can't take the database and its backups together |
 | `--host` | `127.0.0.1` | IP address to bind. The default listens on localhost only; pass `0.0.0.0` to listen on all interfaces (reachable from other machines) |
 | `--port` | `3000` | HTTP port to listen on |
 | `--schedule` | built-in `schedule.cron` | Path to a cron file overriding the built-in maintenance schedule |
 
+`--version` prints the version (from `Cargo.toml`, the single source of truth for [release numbering](#releases-and-versioning)).
+
 > **Note:** the server has no authentication, so the default `--host 127.0.0.1` keeps it reachable from this machine only. Passing `--host 0.0.0.0` exposes it to every machine on the network — do that only on trusted networks.
 
 The database is created automatically on first run. Migrations are applied in order at startup.
+
+### Configuration file
+
+Every flag except `--config` can instead be set in a TOML configuration file, so a service manager doesn't need a pile of CLI flags. Precedence is **CLI flag > config-file value > built-in default**. The file is loaded from `/usr/local/etc/share-tracker.toml` when present (where the FreeBSD package installs it); `--config PATH` points somewhere else. Every key is optional:
+
+```toml
+db = "/var/db/share-tracker/share-tracker.db"
+backup_dir = "/var/db/share-tracker/backups"
+host = "127.0.0.1"
+port = 3000
+schedule = "/usr/local/etc/share-tracker.cron"
+```
+
+An unknown key or invalid TOML aborts startup with the reason — a typo never silently falls back to a default (starting against the wrong database is worse than not starting). The full annotated example lives at [`pkg/freebsd/share-tracker.toml.sample`](pkg/freebsd/share-tracker.toml.sample).
 
 ### Scheduled maintenance
 
@@ -111,6 +128,24 @@ Everything recorded after the backup was taken is gone after a restore — re-en
 `rclone sync` (or `rsync --delete` to another machine) mirrors deletions, so the offsite copy inherits the local retention policy; use `rclone copy` instead if the remote should keep every backup ever uploaded. Verify the offsite copy occasionally by downloading one file and following [Restoring from a backup](#restoring-from-a-backup) against a scratch `--db` path.
 
 Logging is controlled by the `RUST_LOG` environment variable (default: `info`).
+
+## Installing on FreeBSD
+
+Each release ships a FreeBSD package (built on FreeBSD 15.1 amd64 — the pkg ABI must match the installing host's major version). Download the `.pkg` from the [releases page](https://github.com/evanclarke/share-tracker/releases) and:
+
+```sh
+pkg add ./share-tracker-<version>.pkg
+sysrc share_tracker_enable=YES
+service share_tracker start
+```
+
+Installing creates a non-login `share_tracker` service user and `/var/db/share-tracker` (database + backups) owned by it, and places the configuration at `/usr/local/etc/share-tracker.toml` and the maintenance schedule at `/usr/local/etc/share-tracker.cron` (both installed as `@sample` files: first install copies them into place, upgrades preserve your edits). The service runs under [daemon(8)](https://man.freebsd.org/cgi/man.cgi?daemon(8)) — restarted if it crashes, logs to syslog under the `share-tracker` tag. `share_tracker_config` and `share_tracker_user` can be overridden in `rc.conf`. Deinstalling the package never removes the database, backups, or edited config — financial records survive `pkg delete`.
+
+The package skeleton lives in [`pkg/freebsd/`](pkg/freebsd/); `pkg/freebsd/build-pkg.sh` builds the same package locally on any FreeBSD host.
+
+## Releases and versioning
+
+`Cargo.toml`'s `version` is the single source of truth: the binary's `--version`, the pkg version, and the release tag all derive from it. On every push to `main`, the [release workflow](.github/workflows/release.yml) checks whether a release exists for the current version; if not, it builds the package natively in a FreeBSD 15.1 VM, installs and smoke-tests it inside the VM (`pkg/freebsd/smoke-test.sh`: version check, rc-script load, server answers HTTP), then publishes release `v<version>` with the `.pkg` attached — tagging the exact commit the package was built from. **Cutting a release = bumping `version` in `Cargo.toml`** (and `cargo build` once so `Cargo.lock` follows) and pushing to `main`; a push without a version bump publishes nothing.
 
 ## Documentation
 

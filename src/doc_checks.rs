@@ -305,3 +305,115 @@ fn gst_inclusive_round_trip_semantics_documented() {
     assert!(API_MD.contains("and the lossless GST-inclusive round-trip"));
     assert!(API_MD.contains("re-`PUT`ting that body to `PUT /sells/:id`"));
 }
+
+/// Pins for the FreeBSD packaging + versioned-release pipeline (REQUIREMENTS
+/// 2026-07-13). The release workflow and package skeleton are plain text CI
+/// consumes, so these tests keep their load-bearing pieces from silently
+/// drifting apart: the version flows Cargo.toml → build-pkg.sh → manifest,
+/// every file the plist packages is staged, and the rc script drives the
+/// config file the package installs.
+mod freebsd_packaging {
+    use super::README_MD;
+
+    const RELEASE_YML: &str = include_str!("../.github/workflows/release.yml");
+    const BUILD_SH: &str = include_str!("../pkg/freebsd/build-pkg.sh");
+    const SMOKE_SH: &str = include_str!("../pkg/freebsd/smoke-test.sh");
+    const MANIFEST: &str = include_str!("../pkg/freebsd/manifest.ucl");
+    const PLIST: &str = include_str!("../pkg/freebsd/plist");
+    const RC_SCRIPT: &str = include_str!("../pkg/freebsd/share_tracker");
+
+    /// The version number has one source of truth: Cargo.toml. The build
+    /// script reads it from there and substitutes the manifest's placeholder;
+    /// the binary's --version comes from the same place (pinned in
+    /// `infra::args`); the workflow reads it the same way for the tag.
+    #[test]
+    fn version_flows_from_cargo_toml_alone() {
+        let extract = r#"sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml"#;
+        assert!(BUILD_SH.contains(extract));
+        assert!(SMOKE_SH.contains(extract));
+        assert!(RELEASE_YML.contains(extract));
+        assert!(MANIFEST.contains(r#"version: "__VERSION__""#));
+        assert!(BUILD_SH.contains("sed \"s/__VERSION__/$VERSION/\""));
+    }
+
+    /// The workflow releases on push to main only when the version has no
+    /// release yet, builds in a FreeBSD 15.1 VM (pkg ABI matches the
+    /// deployment host), smoke-tests the installed package, and tags the
+    /// exact commit that produced the pkg.
+    #[test]
+    fn release_workflow_shape() {
+        assert!(RELEASE_YML.contains("branches: [main]"));
+        assert!(RELEASE_YML.contains(r#"gh release view "v$version""#));
+        assert!(RELEASE_YML.contains("vmactions/freebsd-vm"));
+        assert!(RELEASE_YML.contains(r#"release: "15.1""#));
+        assert!(RELEASE_YML.contains("pkg install -y rust protobuf"));
+        assert!(RELEASE_YML.contains("sh pkg/freebsd/build-pkg.sh"));
+        assert!(RELEASE_YML.contains("sh pkg/freebsd/smoke-test.sh"));
+        // The release tag points at the built commit, not a branch head.
+        assert!(RELEASE_YML.contains(r#"--target "$GITHUB_SHA""#));
+        assert!(RELEASE_YML.contains("share-tracker-*.pkg"));
+    }
+
+    /// Every path the plist packages is staged by the build script, and vice
+    /// versa nothing is staged that the plist would silently drop.
+    #[test]
+    fn plist_matches_staged_files() {
+        for (plist_entry, staged) in [
+            ("bin/share-tracker", "$STAGE/usr/local/bin/"),
+            ("etc/rc.d/share_tracker", "$STAGE/usr/local/etc/rc.d/"),
+            (
+                "@sample etc/share-tracker.toml.sample",
+                "share-tracker.toml.sample",
+            ),
+            (
+                "@sample etc/share-tracker.cron.sample",
+                "share-tracker.cron.sample",
+            ),
+        ] {
+            assert!(PLIST.contains(plist_entry), "plist lists {plist_entry}");
+            assert!(BUILD_SH.contains(staged), "build-pkg.sh stages {staged}");
+        }
+        // Four install lines in the script, four plist entries — a new staged
+        // file must appear in both.
+        let installs = BUILD_SH
+            .lines()
+            .filter(|l| l.starts_with("install "))
+            .count();
+        let entries = PLIST.lines().filter(|l| !l.trim().is_empty()).count();
+        assert_eq!(installs, entries);
+    }
+
+    /// The rc script points the server at the config file the package
+    /// installs (the `@sample` copy of `share-tracker.toml.sample`, whose
+    /// parseability is pinned in `infra::config`), and the smoke test proves
+    /// the service pieces before anything is released.
+    #[test]
+    fn rc_script_and_smoke_test_drive_the_installed_config() {
+        assert!(RC_SCRIPT.contains("rcvar=share_tracker_enable"));
+        assert!(
+            RC_SCRIPT.contains(": ${share_tracker_config:=\"/usr/local/etc/share-tracker.toml\"}")
+        );
+        assert!(RC_SCRIPT.contains("--config ${share_tracker_config}"));
+        // daemon(8) supervision: restart on exit, logs to syslog.
+        assert!(RC_SCRIPT.contains("command=\"/usr/sbin/daemon\""));
+        // Install creates the service user the rc script runs as.
+        assert!(MANIFEST.contains("pw useradd share_tracker"));
+        assert!(RC_SCRIPT.contains(": ${share_tracker_user:=\"share_tracker\"}"));
+        // Smoke test: installed version agrees, rc script loads, HTTP answers.
+        assert!(SMOKE_SH.contains("grep -qx \"share-tracker $VERSION\""));
+        assert!(SMOKE_SH.contains("/usr/local/etc/rc.d/share_tracker rcvar"));
+        assert!(SMOKE_SH.contains("http://127.0.0.1:3999/reports/health"));
+    }
+
+    /// README documents installing the package, the configuration file, and
+    /// how a release is cut.
+    #[test]
+    fn readme_documents_packaging_and_versioning() {
+        assert!(README_MD.contains("## Installing on FreeBSD"));
+        assert!(README_MD.contains("sysrc share_tracker_enable=YES"));
+        assert!(README_MD.contains("### Configuration file"));
+        assert!(README_MD.contains("**CLI flag > config-file value > built-in default**"));
+        assert!(README_MD.contains("## Releases and versioning"));
+        assert!(README_MD.contains("**Cutting a release = bumping `version` in `Cargo.toml`**"));
+    }
+}

@@ -1,0 +1,4 @@
+bin/share-tracker
+etc/rc.d/share_tracker
+@sample etc/share-tracker.toml.sample
+@sample etc/share-tracker.cron.sample

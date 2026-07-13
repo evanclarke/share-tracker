@@ -1,6 +1,6 @@
 [package]
 name = "share-tracker"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 
 [dependencies]
@@ -27,6 +27,7 @@ croner = "3.0.1"
 csv = "1"
 quick-xml = "0.37"
 sha2 = "0.10"
+toml = "1.1.2"
 
 [dev-dependencies]
 http-body-util = "0.1"

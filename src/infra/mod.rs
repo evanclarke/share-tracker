@@ -2,6 +2,7 @@
 //! helpers, AUD FX conversion, and the maintenance-job scheduler. No domain logic
 //! lives here.
 pub mod args;
+pub mod config;
 pub mod date;
 pub mod db;
 pub mod decimal;

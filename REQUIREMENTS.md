@@ -981,3 +981,34 @@ each row dated and labelled (including how an operation-created trade came to be
 buy-back, scrip exchange, demerger, ESS vest, inheritance, transfer network fee), with a running
 units-held balance, and finishing with a final holding summary: units held, cost base, and current
 market value (live-priced by default; an explicit price wins).
+
+## FreeBSD packaging, versioned releases, and a configuration file (2026-07-13)
+
+The server is deployed on a FreeBSD 15.1 (amd64) host. Pushing to GitHub must produce an
+installable FreeBSD package without manual build steps, releases must carry proper version
+numbers, and the server must be configurable from a file so the rc.d service does not need a
+pile of CLI flags.
+
+- Versioned releases from CI
+  - `Cargo.toml`'s `version` is the single source of truth for the version number; the binary
+    reports it via `--version`
+  - On push to `main`, when no release exists yet for the current version, CI builds the
+    FreeBSD package, tags the commit that produced it as `vX.Y.Z`, and publishes a GitHub
+    release with the `.pkg` attached; a push without a version bump publishes nothing (CI
+    still runs)
+- FreeBSD package
+  - Built natively in a FreeBSD 15.1 VM so the pkg ABI matches the deployment host; contains
+    the release binary, an rc.d service script (`share_tracker`, daemon(8)-supervised under a
+    dedicated non-login user created on install), and a `@sample` configuration file at
+    `/usr/local/etc/share-tracker.toml.sample` (preserved user edits on upgrade)
+  - The freshly built package is installed and smoke-tested inside the VM (service script
+    loads, `--version` runs, the server starts and answers over HTTP) before anything is
+    released
+- Configuration file
+  - A TOML file controlling the DB path, backup directory, bind host, port, and schedule path
+  - Loaded automatically from `/usr/local/etc/share-tracker.toml` when present; `--config PATH`
+    overrides the location and must exist when given; CLI flags override config-file values;
+    built-in defaults (today's behaviour) apply when neither is set
+  - Unknown keys and invalid TOML fail startup loudly — a typo must not silently fall back to a
+    default (this is a financial-records server; starting against the wrong database is worse
+    than not starting)

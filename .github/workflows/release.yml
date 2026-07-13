@@ -1,0 +1,78 @@
+name: Release
+
+# Versioned FreeBSD releases: Cargo.toml's `version` is the single source of
+# truth. On every push to main, if no release exists yet for that version, the
+# package is built natively in a FreeBSD VM (so the pkg ABI matches the
+# deployment host), installed and smoke-tested inside the VM, and published as
+# release v<version> — tagging the exact commit that produced the pkg. A push
+# without a version bump publishes nothing (CI still runs via ci.yml).
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      new-release: ${{ steps.version.outputs.new-release }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if gh release view "v$version" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "release v$version already exists; nothing to publish"
+            echo "new-release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "new-release=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  package:
+    needs: version
+    if: needs.version.outputs.new-release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and smoke-test the FreeBSD package
+        uses: vmactions/freebsd-vm@v1
+        with:
+          release: "15.1"
+          usesh: true
+          # rust for the build; protobuf because yfinance-rs's build script
+          # needs protoc (same reason ci.yml installs protobuf-compiler).
+          prepare: pkg install -y rust protobuf
+          run: |
+            sh pkg/freebsd/build-pkg.sh
+            sh pkg/freebsd/smoke-test.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: freebsd-pkg
+          path: share-tracker-*.pkg
+          if-no-files-found: error
+
+  release:
+    needs: [version, package]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: freebsd-pkg
+      # --target tags the exact commit this package was built from.
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          gh release create "v$VERSION" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "v$VERSION" \
+            --generate-notes \
+            share-tracker-*.pkg

@@ -1,0 +1,29 @@
+# share-tracker configuration.
+#
+# The FreeBSD package installs this as /usr/local/etc/share-tracker.toml on
+# first install (upgrades preserve your edits). The server loads that path
+# automatically; --config PATH points it elsewhere, and CLI flags override
+# individual values. A setting left out falls back to the built-in default.
+# Unknown keys are an error: the server refuses to start rather than silently
+# ignore a typo.
+
+# SQLite database file. The package creates /var/db/share-tracker owned by the
+# share_tracker service user.
+db = "/var/db/share-tracker/share-tracker.db"
+
+# Directory the weekly backup job writes its verified backups to. Put this on
+# a different volume than `db` if you can, so one disk failure can't take the
+# database and its backups together.
+backup_dir = "/var/db/share-tracker/backups"
+
+# Bind address. The server has no authentication: keep 127.0.0.1 (localhost
+# only) unless the network is trusted — "0.0.0.0" exposes it.
+host = "127.0.0.1"
+
+# HTTP port.
+port = 3000
+
+# Cron schedule for the recurring maintenance jobs (backups, price and FX
+# imports). The package installs the default schedule at this path; edit it to
+# change run times.
+schedule = "/usr/local/etc/share-tracker.cron"

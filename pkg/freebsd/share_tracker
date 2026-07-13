@@ -1,0 +1,32 @@
+#!/bin/sh
+#
+# PROVIDE: share_tracker
+# REQUIRE: NETWORKING DAEMON
+# KEYWORD: shutdown
+#
+# Add these lines to /etc/rc.conf.local or /etc/rc.conf to enable share-tracker:
+#
+# share_tracker_enable (bool):  Set to "YES" to enable. Default "NO".
+# share_tracker_config (path):  Config file. Default "/usr/local/etc/share-tracker.toml".
+# share_tracker_user (user):    User to run as. Default "share_tracker".
+
+. /etc/rc.subr
+
+name=share_tracker
+rcvar=share_tracker_enable
+
+load_rc_config $name
+
+: ${share_tracker_enable:="NO"}
+: ${share_tracker_config:="/usr/local/etc/share-tracker.toml"}
+: ${share_tracker_user:="share_tracker"}
+
+pidfile="/var/run/${name}.pid"
+procname="/usr/local/bin/share-tracker"
+command="/usr/sbin/daemon"
+# daemon(8) supervises the server: -r restarts it if it exits, -P writes the
+# supervisor pidfile (as root, before -u drops to the service user), and -S
+# sends the server's stdout/stderr (tracing logs) to syslog under -T's tag.
+command_args="-S -T share-tracker -P ${pidfile} -r -u ${share_tracker_user} ${procname} --config ${share_tracker_config}"
+
+run_rc_command "$1"
