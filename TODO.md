@@ -6,8 +6,9 @@ Completed and decided (out-of-scope / not-reproducible) sections are archived in
 
 The sections below come from the **2026-07-13 improvement review** (a whole-project pass for
 operational and test-strategy gaps, as distinct from the 2026-07-12 programming/domain review whose
-findings are all closed in DONE.md). Each section records one finding; sections land in DONE.md as
-they are fixed or decided.
+findings are all closed in DONE.md), except where a section's heading names another source
+(e.g. REQUIREMENTS). Each section records one finding; sections land in DONE.md as they are fixed
+or decided.
 
 ## Backup pipeline hardening: verify, prune, offsite
 The weekly backup is a bare `VACUUM INTO` (`infra/db.rs::backup_to`) with no verification that the
@@ -68,3 +69,16 @@ and handlers. Not a defect — a maintainability nice-to-have.
 Currently handled correctly: the server binds `127.0.0.1` by default and exposing it is an explicit
 `--host` opt-in documented as unauthenticated. Only matters if the server is ever exposed.
 - [ ] If/when exposure is wanted: add an auth layer (e.g. a bearer token/basic-auth middleware over the whole router) before recommending `--host 0.0.0.0` for anything but a trusted LAN; until then this section records the decision that localhost-only is the accepted posture
+
+## Lossless trade round-trip for GST-inclusive brokerage (REQUIREMENTS 2026-07-13)
+Found scripting against the API during the 2026-07-13 crypto reconciliation: on a trade stored with
+`brokerage_includes_gst` set, `GET /trades/:id` returns the stored ex-GST split (`brokerage` +
+`gst_on_brokerage`) alongside the flag, but `PUT /trades/:id` with the flag set interprets
+`brokerage` as the one GST-inclusive amount and re-splits it — so a faithful GET→edit→PUT
+round-trip silently shrinks the brokerage by the GST each pass (0.99 stored → read back 0.90 +
+0.09 → re-split 0.82 + 0.08), with no 422. The web form escapes only because `wireGstBrokerage`
+recombines the pair before saving; every other API client hits silent data corruption.
+- [ ] Decide and implement the lossless shape (design-open per REQUIREMENTS): either reads present `brokerage` as the same GST-inclusive amount the write path expects when the flag is set (updating the web form in the same step so it doesn't double-recombine), or the write path accepts the stored split pair as-is when supplied intact — either way the read/write asymmetry goes
+- [ ] Cover both write paths that share `resolve_brokerage` — `PUT /trades/:id` and `PUT /sells/:id` — so a flagged Sell round-trips losslessly too
+- [ ] Regression test: PUT a GST-inclusive trade, GET it, PUT the response body back verbatim, assert the stored `brokerage`/`gst_on_brokerage` are unchanged (and the same for a flagged Sell)
+- [ ] Docs: `docs/API.md`'s GST-inclusive brokerage section states the round-trip semantics explicitly

@@ -950,6 +950,28 @@ data-integrity rule: invariants are enforced on write, not hoped for):
   stand-in — the re-basing arithmetic under test is date-independent, and each test notes the
   substitution
 
+## Lossless trade round-trip for GST-inclusive brokerage (2026-07-13)
+
+Found scripting against the API during the crypto reconciliation: on a trade stored with
+`brokerage_includes_gst` set, `GET /trades/:id` returns the stored **ex-GST split**
+(`brokerage` + `gst_on_brokerage`) alongside the flag, but `PUT /trades/:id` with the flag set
+interprets `brokerage` as the **one GST-inclusive amount** and re-splits it. So a faithful
+GET→edit→PUT round-trip — the natural way any API client edits a row — silently shrinks the
+brokerage by the GST each time (0.99 stored → read back as 0.90 + 0.09 → re-split to 0.82 + 0.08).
+The web form escapes only because it recombines the pair before saving; every other client hits a
+silent data corruption with no 422.
+
+- A trade read back and PUT back unchanged must store identical values — the round-trip is
+  lossless for every field, including the GST-inclusive brokerage case
+- How is design-open: make reads present `brokerage` as the same GST-inclusive amount the write
+  path expects when the flag is set (the web form recombining today shows the read contract
+  already means "form value", but it must then be changed in the same step so it doesn't
+  double-recombine), or make the write path accept the stored split pair as-is when it is
+  supplied intact — either way the asymmetry goes
+- Whichever shape wins, a regression test PUTs a GST-inclusive trade, GETs it, PUTs the response
+  body back verbatim, and asserts the stored brokerage/GST are unchanged
+- `docs/API.md`'s GST-inclusive brokerage section states the round-trip semantics explicitly
+
 ## Listing activity ledger (2026-07-13)
 
 A per-listing report showing all recorded activity for one listing in chronological order — buys,
