@@ -323,6 +323,8 @@ const COLUMN_KINDS = (function () {
     'credits_attached', 'credits_at_risk', 'credits_denied', 'additional_credits_at_risk',
     // AMIT cash cross-check report.
     'cash_total_aud',
+    // Listing activity ledger: the row's own money figure in AUD.
+    'amount_aud',
     // Investment-expense line items + the tax-summary deduction aggregates.
     'amount', 'gross_amount', 'gross_assessable_investment_income',
     'deductions_loan_interest', 'deductions_management_fee', 'deductions_advice_fee',
@@ -349,6 +351,8 @@ const COLUMN_KINDS = (function () {
     // Wash-sale and franking at-risk report unit columns.
     'buy_quantity', 'entitled_units', 'disqualified_units',
     'disqualified_units_now', 'disqualified_units_after_sale',
+    // Listing activity ledger: running units-held balance.
+    'units_after',
   ]);
   return k;
 })();
@@ -414,6 +418,8 @@ const COLUMN_LABELS = {
   net_capital_gain: 'Net capital gain (AUD)',
   avg_cost_base_per_unit: 'Average cost base per unit (AUD)',
   cash_total_aud: 'Cash total (AUD)',
+  amount_aud: 'Amount (AUD)',
+  units_after: 'Units after',
 };
 
 // The friendly heading for a column: an explicit override, else humanised.

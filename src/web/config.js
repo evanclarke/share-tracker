@@ -409,6 +409,18 @@ export const REPORTS = [
   { slug: 'overview', title: 'Portfolio Overview', api: '/portfolio/overview', method: 'POST', prices: true, desc: 'Open holdings per listing and holding account, with optional market value.' },
   { slug: 'open-parcels', title: 'Open Parcels', api: '/portfolio/open-parcels', method: 'GET', desc: 'Every open parcel: acquisition date, original cost base, AMIT and return-of-capital reductions, remaining quantity and adjusted cost base (AUD).' },
   {
+    slug: 'activity', title: 'Listing Activity', api: '/portfolio/activity', method: 'POST',
+    desc: 'Everything ever recorded against one listing, in date order — trades labelled with the operation that created them, transfers, income, corporate actions, statements — with a running units-held balance, ending in the final holding summary per account (units held, cost base, market value).',
+    params: [
+      fk('listing_id', 'Listing', 'listings', { required: true }),
+      dec('price', 'Current price per unit (AUD)', { optional: true, default: '', hint: 'Blank = the live price from the price source; a fetch failure leaves the summary unvalued (never zero).' }),
+    ],
+    tables: [
+      { key: 'events', title: 'Activity' },
+      { key: 'holdings', title: 'Holding summary' },
+    ],
+  },
+  {
     slug: 'parcel-optimiser', title: 'Parcel Optimiser', api: '/portfolio/parcel-optimiser', method: 'POST',
     desc: 'Candidate parcel selections for a contemplated sale — which parcels a sale comes from is your choice, and it changes the tax outcome. Each strategy shows its per-parcel allocations and the resulting gross gain / discountable split. Nothing is recorded: enter the chosen allocations on the real Sell.',
     params: [

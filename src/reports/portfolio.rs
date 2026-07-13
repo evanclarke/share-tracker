@@ -77,21 +77,33 @@ pub async fn db_holdings(
     pool: &SqlitePool,
     as_of: Option<NaiveDate>,
 ) -> Result<Vec<HoldingOverview>, sqlx::Error> {
-    let cutoff = crate::infra::date::as_of_or_open(as_of);
-    // One read transaction: every input below comes from the same snapshot,
-    // so an interleaved write can't yield e.g. an allocation whose parcel is
+    // One read transaction: every input comes from the same snapshot, so an
+    // interleaved write can't yield e.g. an allocation whose parcel is
     // missing from the same read.
     let mut tx = pool.begin().await?;
+    let holdings = db_holdings_on(&mut tx, as_of).await?;
+    tx.commit().await?;
+    Ok(holdings)
+}
+
+/// The same holdings read on the caller's own connection, for reports (the
+/// listing activity ledger) that fold the overview into their wider
+/// single-snapshot read transaction.
+pub async fn db_holdings_on(
+    conn: &mut sqlx::SqliteConnection,
+    as_of: Option<NaiveDate>,
+) -> Result<Vec<HoldingOverview>, sqlx::Error> {
+    let cutoff = crate::infra::date::as_of_or_open(as_of);
     let trade_rows: Vec<ParcelRow> = sqlx::query_as(&format!(
         "SELECT {} FROM trades WHERE trade_type IN ('Buy', 'DRP') AND date <= ?",
         ParcelRow::COLUMNS
     ))
     .bind(cutoff)
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut *conn)
     .await?;
 
     if trade_rows.is_empty() {
-        // Nothing held; the dropped transaction was read-only.
+        // Nothing held.
         return Ok(vec![]);
     }
 
@@ -103,7 +115,7 @@ pub async fn db_holdings(
          WHERE s.date <= ?",
     )
     .bind(cutoff)
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut *conn)
     .await?;
 
     let mut qty_sold: HashMap<i64, Vec<(NaiveDate, Decimal)>> = HashMap::new();
@@ -118,16 +130,15 @@ pub async fn db_holdings(
     // total AMIT cost base reduction per purchase parcel (statements for
     // years ending after `as_of` excluded)
     let cba_reduction =
-        crate::entities::amit_adjustment::db_cost_base_reductions_up_to(&mut *tx, as_of).await?;
+        crate::entities::amit_adjustment::db_cost_base_reductions_up_to(&mut *conn, as_of).await?;
     // return-of-capital payments (CGT event G1) per listing
     let roc_events =
-        crate::entities::corporate_action::db_return_of_capital_events(&mut *tx).await?;
+        crate::entities::corporate_action::db_return_of_capital_events(&mut *conn).await?;
     // share splits/consolidations per listing (quantity re-basing)
-    let split_events = crate::entities::corporate_action::db_share_split_events(&mut *tx).await?;
+    let split_events = crate::entities::corporate_action::db_share_split_events(&mut *conn).await?;
     // every imported ATO FX rate — per-parcel conversions below are map
     // lookups, not one DB round-trip each
-    let fx = FxRates::load(&mut *tx).await?;
-    tx.commit().await?;
+    let fx = FxRates::load(&mut *conn).await?;
 
     let mut holding_qty: HashMap<(i64, i64), Decimal> = HashMap::new();
     let mut holding_cost_base: HashMap<(i64, i64), Decimal> = HashMap::new();

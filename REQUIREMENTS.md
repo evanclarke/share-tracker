@@ -949,3 +949,13 @@ data-integrity rule: invariants are enforced on write, not hoped for):
   Examples 1–2, bonus shares Example 35) enter that parcel with the first post-CGT date as a
   stand-in — the re-basing arithmetic under test is date-independent, and each test notes the
   substitution
+
+## Listing activity ledger (2026-07-13)
+
+A per-listing report showing all recorded activity for one listing in chronological order — buys,
+sells, DRP reinvestments, transfers between accounts, dividends/distributions, corporate actions,
+AMMA and ESS statements, rights sales, DRP enrolment changes, listing-scoped investment expenses —
+each row dated and labelled (including how an operation-created trade came to be: rights exercise,
+buy-back, scrip exchange, demerger, ESS vest, inheritance, transfer network fee), with a running
+units-held balance, and finishing with a final holding summary: units held, cost base, and current
+market value (live-priced by default; an explicit price wins).

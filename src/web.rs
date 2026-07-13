@@ -759,6 +759,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn listing_activity_report_ui_present() {
+        let js = app_js_body().await;
+        // The Listing Activity report drives POST /portfolio/activity through
+        // the generic params-form + titled-tables report machinery: the
+        // chronological ledger, then the final holding summary.
+        assert!(js.contains("/portfolio/activity"));
+        assert!(js.contains("Listing Activity"));
+        assert!(js.contains("'events'"));
+        assert!(js.contains("'holdings'"));
+        // The ledger's numeric columns are classified/labelled for display.
+        assert!(js.contains("'amount_aud'"));
+        assert!(js.contains("'units_after'"));
+        assert!(js.contains("Amount (AUD)"));
+    }
+
+    #[tokio::test]
     async fn performance_report_ui_present() {
         let js = app_js_body().await;
         // The Performance report view drives POST /portfolio/performance with

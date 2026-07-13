@@ -1241,3 +1241,43 @@ contradicts the useful-error-messages convention (every 422 says which invariant
       `From<SellError> for ApiError` (`err.into()`), and the participate section of API.md says
       Sell-side rejections carry the same per-invariant bodies as `PUT /sells/:id`
       (`buyback_participation::tests::api_sell_side_rejections_carry_their_own_422_bodies`)
+
+## Listing activity ledger report
+Requirement (REQUIREMENTS.md 2026-07-13): one view of everything that ever happened to a listing,
+in date order, ending in what is held now and what it is worth.
+- [x] `POST /portfolio/activity` — `{ listing_id, price? }` → `events`, the listing's full history in
+  chronological order: every trade labelled with its provenance (plain Buy/Sell, DRP reinvestment,
+  rights exercise, buy-back, scrip exchange, demerger, worthless shares, ESS vest, inheritance,
+  transfer network fee), transfers as one row (their group trades collapse into it), income,
+  corporate actions, AMMA and ESS statements, rights sales, DRP enrolment periods, and
+  listing-scoped investment expenses — each with signed units, a running `units_after` balance
+  (splits/bonus issues re-base it), and the row's own money figure in AUD; all inputs read on one
+  read transaction; 404 for an unknown listing — `reports/activity.rs`: the ledger assembles typed
+  entity rows (`query_as` reuses each entity's own `FromRow` decimal parsing) on one `pool.begin()`
+  with `FxRates` pre-loaded; trade provenance labels via the provenance columns + the transfer's
+  `fee_sale_trade_id`; a trade's amount is its whole consideration converted with
+  `FxOverride::from_trade` (the cost-base pipeline's convention), income by the tax summary's
+  governing month, a rights sale with its `fx_rate` fallback
+  (`reports::activity::tests::{db_ledger_is_chronological_with_running_balance,
+  db_statement_rows_present_and_labelled, db_non_aud_trade_amount_converted_to_aud,
+  db_unknown_listing_is_none, db_no_activity_is_empty_ledger, api_activity_unknown_listing_404}`)
+- [x] `holdings` — the final holding summary per holding account (units held, cost base, market
+  value): the portfolio-overview rows for the listing, live-priced by default with an explicit
+  `price` override winning, degrading gracefully when no price is obtainable —
+  `portfolio::db_holdings` gained a `db_holdings_on(conn, as_of)` split (mirroring
+  `db_open_parcels_on`) so the summary reads on the ledger's own transaction; valuation mirrors the
+  overview handler (`reports::activity::tests::{api_activity_with_price_values_summary,
+  api_activity_live_values_summary, api_activity_without_price_degrades_gracefully}`)
+- [x] Running balance reconciles: the last event's `units_after` equals the holding summary's total
+  quantity (splits re-base, transfers net out, operation-created trades included) — same-date
+  ordering puts a corporate action before the day's trades (a trade dated on a conversion date is
+  already post-split, TD 2000/10)
+  (`reports::activity::tests::{db_ledger_is_chronological_with_running_balance,
+  db_same_date_split_applies_before_trade, db_transfer_collapses_to_one_row}`)
+- [x] Web UI: Listing Activity report (params form + Activity/Holding-summary tables) through the
+  generic config-driven report machinery, with the new columns classified/labelled — one `REPORTS`
+  entry with `params` + two `tables`; `amount_aud` classified money / labelled "Amount (AUD)",
+  `units_after` quantity / "Units after" (`web::tests::listing_activity_report_ui_present`)
+- [x] Docs: API.md section (+ Response codes checked: 200/404 already covered generically, no new
+  codes) and README feature bullet — API.md "Listing activity" under Portfolio reports documents
+  the row kinds, field semantics, and the single-snapshot read; README gains the ledger bullet

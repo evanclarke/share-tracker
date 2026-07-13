@@ -805,6 +805,34 @@ A [transfer's](#transfers) transfer-in parcel likewise reports the moved parcel'
 
 Sorted by `listing_id`, then `holding_account_id`, then `acquisition_date`, then `trade_id`.
 
+### Listing activity
+
+```
+POST /portfolio/activity
+```
+
+Everything ever recorded against **one listing**, in chronological order, ending in the final holding summary (units held, cost base, current value). Request body:
+
+```json
+{ "listing_id": 1, "price": "12.50" }
+```
+
+`listing_id` (required) must exist (`404` otherwise). `price` (optional) is the current per-unit price in AUD for the holding summary; absent, it is live-fetched per the [live-valuation rules](#live-valuation), degrading per holding (`price_unavailable`) when no quote is obtainable — the ledger itself never needs a price.
+
+Response: `listing_id`, `events` (the ledger), and `holdings` (the final summary). Every input is read on one read transaction, so the ledger and the summary come from a single consistent snapshot.
+
+**`events`** — one row per recorded fact, sorted by date (a corporate action orders before same-dated trades: a trade dated on a split's conversion date is already in post-split units). Row kinds:
+
+- every **trade**, labelled with the operation that created it — a plain `Buy`/`Sell`, `DRP reinvestment`, or `Buy (rights exercise)`, `Sell (buy-back)`, `Buy/Sell (scrip exchange)`, `Buy/Sell (demerger)`, `Sell (worthless shares)`, `Buy (ESS vest)`, `Buy (inheritance)`, `Sell (transfer network fee)` — **except** a [transfer](#transfers) group's own Sell/Buys, which collapse into the transfer's one row (a transfer is not a disposal and nets to nothing)
+- **transfers between accounts** (one row: moved units, source and destination accounts, any network-fee disposal noted)
+- **income** (`Dividend`, `Trust distribution`, `Dividend (buy-back component)`, with franking credits and any reinvestment link in the detail)
+- **corporate actions** (return of capital, share split/consolidation, bonus issue, rights issue, buy-back offer, scrip-for-scrip takeover, demerger, worthless shares — each with its per-unit amount / ratio / terms)
+- **AMMA statements** (dated by their 30 June year end), **ESS statements** (dated by the taxing point), **rights sales/lapses**, **DRP enrolment/unenrolment**, and **listing-scoped [investment expenses](#investment-expenses)**
+
+Fields per row: `date`, `event`, `detail` (human-readable specifics in the record's own currency), `holding_account_id` (nullable — corporate actions and transfers span accounts), `quantity` (nullable: the row's signed unit effect, in its own date's unit basis), `units_after` (the whole-listing running balance after the row — a split/bonus issue re-bases it in place, a transfer leaves it unchanged; the last row's balance equals the holding summary's total quantity), and `amount_aud` (nullable: the row's own money figure in AUD — a trade's whole consideration `quantity × price ± brokerage and GST` converted with the trade's own [FX precedence](#fx-conversion); an income row's gross cash converted by the month the [tax summary](#tax-summary) uses; a rights sale's proceeds; an expense's deductible amount — absent where the row has no single amount, e.g. a per-unit return of capital).
+
+**`holdings`** — the [overview](#overview)'s rows for the listing, one per holding account (`quantity`, `avg_cost_base_per_unit`, `total_cost_base`, and the `current_price` / `market_value` / `price_as_of` / `price_unavailable` valuation fields). An explicit `price` wins over the live fetch, exactly as in the overview.
+
 ### Parcel-selection optimiser
 
 ```

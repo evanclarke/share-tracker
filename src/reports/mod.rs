@@ -13,6 +13,7 @@ use sqlx::SqlitePool;
 /// (scope decision, 2026-06-07). Kept comma-free so it stays a single CSV field.
 pub const TAXPAYER_BASIS: &str = "individual resident: 50% CGT discount; 50% LIC deduction";
 
+pub mod activity;
 pub mod amit_cash_cross_check;
 pub mod e4_cross_check;
 pub mod export;
@@ -34,6 +35,7 @@ pub mod wash_sales;
 /// Merge every report's routes into a single router.
 pub fn router() -> Router<SqlitePool> {
     portfolio::router()
+        .merge(activity::router())
         .merge(open_parcels::router())
         .merge(performance::router())
         .merge(unrealised_gains::router())
