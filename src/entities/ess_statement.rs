@@ -157,17 +157,17 @@ const COLUMNS: &str = "id, listing_id, holding_account_id, taxing_point_date, qu
      aud_deferral_discount, aud_pre_2009_cessation_discount, aud_foreign_source_discount";
 
 pub async fn db_list(pool: &SqlitePool) -> Result<Vec<EssStatement>, sqlx::Error> {
-    sqlx::query_as(&format!(
+    sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {COLUMNS} FROM ess_statements ORDER BY taxing_point_date, id"
-    ))
+    )))
     .fetch_all(pool)
     .await
 }
 
 pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<EssStatement>, sqlx::Error> {
-    sqlx::query_as(&format!(
+    sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {COLUMNS} FROM ess_statements WHERE id = ?"
-    ))
+    )))
     .bind(id)
     .fetch_optional(pool)
     .await
@@ -223,9 +223,9 @@ pub async fn db_upsert(pool: &SqlitePool, s: &EssStatement) -> Result<(), Upsert
                 .fetch_one(&mut *tx)
                 .await?;
         if vested {
-            sqlx::query_as(&format!(
+            sqlx::query_as(sqlx::AssertSqlSafe(format!(
                 "SELECT {COLUMNS} FROM ess_statements WHERE id = ?"
-            ))
+            )))
             .bind(s.id)
             .fetch_optional(&mut *tx)
             .await?

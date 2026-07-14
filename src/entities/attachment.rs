@@ -161,9 +161,9 @@ pub async fn db_list(pool: &SqlitePool, q: &ListQuery) -> Result<Vec<Attachment>
 }
 
 pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<Attachment>, sqlx::Error> {
-    sqlx::query_as(&format!(
+    sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {METADATA_COLS} FROM attachments WHERE id = ?"
-    ))
+    )))
     .bind(id)
     .fetch_optional(pool)
     .await

@@ -94,10 +94,10 @@ pub async fn db_holdings_on(
     as_of: Option<NaiveDate>,
 ) -> Result<Vec<HoldingOverview>, sqlx::Error> {
     let cutoff = crate::infra::date::as_of_or_open(as_of);
-    let trade_rows: Vec<ParcelRow> = sqlx::query_as(&format!(
+    let trade_rows: Vec<ParcelRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {} FROM trades WHERE trade_type IN ('Buy', 'DRP') AND date <= ?",
         ParcelRow::COLUMNS
-    ))
+    )))
     .bind(cutoff)
     .fetch_all(&mut *conn)
     .await?;

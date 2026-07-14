@@ -330,11 +330,11 @@ impl PriceFetcher for YahooFetcher {
                 .await
                 .map_err(|e| format!("yahoo fetch for {symbol} failed: {e}"))?;
             Ok(candles
-                .iter()
+                .into_iter()
                 .map(|c| FetchedClose {
                     date: c.ts.with_timezone(&tz).date_naive(),
-                    price: clean_price(c.close.amount()),
-                    currency: c.close.currency().to_string(),
+                    price: clean_price(c.ohlc.close.into_inner()),
+                    currency: c.currency.to_string(),
                 })
                 .collect())
         })
@@ -357,8 +357,8 @@ impl PriceFetcher for YahooFetcher {
                 .as_of
                 .ok_or_else(|| format!("yahoo quote for {symbol} carries no timestamp"))?;
             Ok(LatestQuote {
-                price: clean_price(price.amount()),
-                currency: price.currency().to_string(),
+                price: clean_price(price.into_inner()),
+                currency: quote.currency.to_string(),
                 as_of,
             })
         })

@@ -507,9 +507,9 @@ mod tests {
                     sqlx::query(stmt).execute(&pool).await.unwrap();
                 }
             }
-            sqlx::query(&format!(
+            sqlx::query(sqlx::AssertSqlSafe(format!(
                 "UPDATE {table} SET {column} = {new_value} WHERE id = {id}"
-            ))
+            )))
             .execute(&pool)
             .await
             .unwrap();
@@ -543,10 +543,12 @@ mod tests {
             ("corporate_actions", 10, 2),
             ("listings", 2, 2),
         ] {
-            sqlx::query(&format!("DELETE FROM {table} WHERE id = {id}"))
-                .execute(&pool)
-                .await
-                .unwrap();
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "DELETE FROM {table} WHERE id = {id}"
+            )))
+            .execute(&pool)
+            .await
+            .unwrap();
             assert_eq!(
                 history_count(&pool, table, id).await,
                 expected,

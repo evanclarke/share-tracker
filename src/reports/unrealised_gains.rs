@@ -72,10 +72,10 @@ pub async fn db_unrealised_gains(
     // so an interleaved write can't yield e.g. an allocation whose parcel is
     // missing from the same read.
     let mut tx = pool.begin().await?;
-    let trade_rows: Vec<ParcelRow> = sqlx::query_as(&format!(
+    let trade_rows: Vec<ParcelRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {} FROM trades WHERE trade_type IN ('Buy', 'DRP') AND date <= ?",
         ParcelRow::COLUMNS
-    ))
+    )))
     .bind(as_of_date)
     .fetch_all(&mut *tx)
     .await?;

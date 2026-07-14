@@ -101,18 +101,18 @@ const COLUMNS: &str =
     "id, listing_id, holding_account_id, enrolment_date, unenrolment_date, residual_handling";
 
 pub async fn db_list(pool: &SqlitePool) -> Result<Vec<DrpEnrolment>, sqlx::Error> {
-    sqlx::query_as(&format!(
+    sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {COLUMNS} FROM drp_enrolments \
          ORDER BY listing_id, holding_account_id, enrolment_date, id"
-    ))
+    )))
     .fetch_all(pool)
     .await
 }
 
 pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<DrpEnrolment>, sqlx::Error> {
-    sqlx::query_as(&format!(
+    sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {COLUMNS} FROM drp_enrolments WHERE id = ?"
-    ))
+    )))
     .bind(id)
     .fetch_optional(pool)
     .await

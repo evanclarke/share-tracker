@@ -674,9 +674,9 @@ const COLUMNS: &str = "id, action_type, listing_id, date, amount_per_unit, curre
                        demerger_held_units, demerger_cost_base_pct, worthless_event";
 
 pub async fn db_list(pool: &SqlitePool) -> Result<Vec<CorporateAction>, sqlx::Error> {
-    sqlx::query_as(&format!(
+    sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {COLUMNS} FROM corporate_actions ORDER BY id"
-    ))
+    )))
     .fetch_all(pool)
     .await
 }
@@ -691,9 +691,9 @@ pub async fn db_get_tx<'e, E>(executor: E, id: i64) -> Result<Option<CorporateAc
 where
     E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
 {
-    sqlx::query_as(&format!(
+    sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {COLUMNS} FROM corporate_actions WHERE id = ?"
-    ))
+    )))
     .bind(id)
     .fetch_optional(executor)
     .await
@@ -1831,16 +1831,16 @@ mod tests {
                 _ => ("bonus_units, bonus_held_units", "'1', '10'"),
             };
             // Insert a valid row, then try to smuggle the stray columns in.
-            sqlx::query(&format!(
+            sqlx::query(sqlx::AssertSqlSafe(format!(
                 "INSERT INTO corporate_actions (id, action_type, listing_id, date, {base_cols}) \
                  VALUES (1, '{action_type}', 1, '2024-11-30', {base_vals})"
-            ))
+            )))
             .execute(&pool)
             .await
             .unwrap();
-            let result = sqlx::query(&format!(
+            let result = sqlx::query(sqlx::AssertSqlSafe(format!(
                 "UPDATE corporate_actions SET {stray_cols} WHERE id = 1"
-            ))
+            )))
             .execute(&pool)
             .await;
             assert!(

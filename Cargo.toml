@@ -14,7 +14,7 @@ serde = { version = "1", features = ["derive"] }
 # in table order rather than alphabetically.
 serde_json = { version = "1", features = ["preserve_order"] }
 rust_decimal = { version = "1", features = ["maths"] }
-sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "chrono", "migrate"] }
+sqlx = { version = "0.9", features = ["runtime-tokio", "sqlite", "chrono", "migrate"] }
 # Only the features the server uses: the multi-thread runtime + the
 # #[tokio::main]/#[tokio::test]/select! macros, the TCP listener (net),
 # graceful-shutdown signal handling, and the scheduler's sleep (time).
@@ -25,13 +25,13 @@ reqwest = "0.13.4"
 # Closing-price fetcher (Yahoo Finance, unofficial API). Maintains the
 # cookie/crumb workarounds for us; NOTE: its build.rs needs `protoc` on the
 # build machine (brew install protobuf / apt protobuf-compiler — see ci.yml).
-yfinance-rs = "0.8"
+yfinance-rs = "0.9"
 croner = "3.0.1"
 csv = "1"
 # 0.41+: RUSTSEC-2026-0194 / the NsReader namespace-allocation advisory are
 # fixed there (cargo deny check advisories pins this floor).
 quick-xml = "0.41"
-sha2 = "0.10"
+sha2 = "0.11"
 toml = "1.1.2"
 
 [dev-dependencies]

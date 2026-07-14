@@ -111,17 +111,17 @@ const COLUMNS: &str = "id, date_paid, amount, tfn_withholding_tax, foreign_sourc
      foreign_tax_paid, currency, source, holding_account_id";
 
 pub async fn db_list(pool: &SqlitePool) -> Result<Vec<InterestIncome>, sqlx::Error> {
-    sqlx::query_as(&format!(
+    sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {COLUMNS} FROM interest_income ORDER BY date_paid, id"
-    ))
+    )))
     .fetch_all(pool)
     .await
 }
 
 pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<InterestIncome>, sqlx::Error> {
-    sqlx::query_as(&format!(
+    sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {COLUMNS} FROM interest_income WHERE id = ?"
-    ))
+    )))
     .bind(id)
     .fetch_optional(pool)
     .await

@@ -874,7 +874,7 @@ mod tests {
                 let sql = format!("SELECT COUNT(*) FROM \"{table}\"");
                 let p = p.clone();
                 async move {
-                    sqlx::query_scalar::<_, i64>(&sql)
+                    sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(sql))
                         .fetch_one(&p)
                         .await
                         .unwrap()

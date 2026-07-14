@@ -85,9 +85,9 @@ async fn sum_allocated(
     trade_id: i64,
     exclude_id: i64,
 ) -> Result<Decimal, sqlx::Error> {
-    let rows: Vec<String> = sqlx::query_scalar(&format!(
+    let rows: Vec<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
         "SELECT quantity_allocated FROM parcel_allocations WHERE {column} = ? AND id != ?"
-    ))
+    )))
     .bind(trade_id)
     .bind(exclude_id)
     .fetch_all(pool)

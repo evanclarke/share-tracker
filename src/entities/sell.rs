@@ -316,7 +316,7 @@ pub async fn db_delete_sell(pool: &SqlitePool, id: i64) -> Result<DeleteOutcome,
     if let Some((column, action_id)) = group {
         // The replacement Buys go with the closing Sell — but not while
         // anything still draws on them.
-        let replacement_referenced: bool = sqlx::query_scalar(&format!(
+        let replacement_referenced: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
             "SELECT EXISTS(\
                  SELECT 1 FROM trades t \
                  WHERE t.{column} = ?1 AND t.id <> ?2 \
@@ -325,7 +325,7 @@ pub async fn db_delete_sell(pool: &SqlitePool, id: i64) -> Result<DeleteOutcome,
                      OR EXISTS(SELECT 1 FROM amit_adjustments WHERE trade_id = t.id) \
                      OR EXISTS(SELECT 1 FROM income \
                                WHERE reinvestment_trade_id = t.id OR buyback_trade_id = t.id)))",
-        ))
+        )))
         .bind(action_id)
         .bind(id)
         .fetch_one(&mut *tx)
@@ -333,9 +333,9 @@ pub async fn db_delete_sell(pool: &SqlitePool, id: i64) -> Result<DeleteOutcome,
         if replacement_referenced {
             return Ok(DeleteOutcome::ReplacementReferenced);
         }
-        sqlx::query(&format!(
+        sqlx::query(sqlx::AssertSqlSafe(format!(
             "DELETE FROM trades WHERE {column} = ? AND id <> ?"
-        ))
+        )))
         .bind(action_id)
         .bind(id)
         .execute(&mut *tx)

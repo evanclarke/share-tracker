@@ -302,10 +302,10 @@ async fn load_report_data(conn: &mut sqlx::SqliteConnection) -> Result<ReportDat
     .fetch_all(&mut *conn)
     .await?;
 
-    let buys: Vec<ParcelRow> = sqlx::query_as(&format!(
+    let buys: Vec<ParcelRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {} FROM trades WHERE trade_type IN ('Buy', 'DRP')",
         ParcelRow::COLUMNS
-    ))
+    )))
     .fetch_all(&mut *conn)
     .await?;
 
