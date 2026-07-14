@@ -6,6 +6,7 @@
 
 const API_MD: &str = include_str!("../docs/API.md");
 const README_MD: &str = include_str!("../README.md");
+const SCHEMA_MD: &str = include_str!("../docs/SCHEMA.md");
 
 /// The body of the `# Known limitations` section of `docs/API.md`.
 fn known_limitations() -> &'static str {
@@ -17,6 +18,33 @@ fn known_limitations() -> &'static str {
         .split("\n# ")
         .next()
         .expect("split always yields at least one part")
+}
+
+/// Docs-sync pin for the append-only audit trail (2026-07-13 improvement
+/// review): the schema documents the table, its scope decision (which tables
+/// are audited and why the rest are not), and the keep-forever retention
+/// decision; the API documents the inspection endpoint; the README surfaces
+/// the feature and cites the ATO record-keeping guidance it aligns with.
+#[test]
+fn row_history_audit_trail_documented() {
+    // SCHEMA.md: the table and both recorded decisions.
+    assert!(SCHEMA_MD.contains("row_history"));
+    assert!(SCHEMA_MD.contains("**append-only audit trail**"));
+    assert!(SCHEMA_MD.contains("scope decision 2026-07-14"));
+    assert!(SCHEMA_MD.contains("Retention (decision 2026-07-14): entries are kept forever"));
+    assert!(SCHEMA_MD.contains("deliberately has no pruning job"));
+    // API.md: the inspection endpoint, its section, and its 422.
+    assert!(API_MD.contains("### Row history"));
+    assert!(API_MD.contains("POST /reports/row_history"));
+    assert!(API_MD.contains("a row-history request naming a table that is not audited"));
+    // README: the feature line and the ATO citation.
+    assert!(README_MD.contains("**Append-only audit trail**"));
+    assert!(README_MD.contains("docs/ato/cgt-keeping-records-shares.md"));
+    assert!(
+        include_str!("../docs/ato/cgt-keeping-records-shares.md")
+            .contains("keeping-records-of-shares-and-units"),
+        "the cited ATO mirror carries its source header"
+    );
 }
 
 /// Docs-sync pin for the AMIT cash-only income rows (REQUIREMENTS

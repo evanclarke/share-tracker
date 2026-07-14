@@ -1,0 +1,610 @@
+//! Row-history inspection: the read side of the append-only audit trail
+//! (migration `0013_row_history.sql`; aligns with the ATO record-keeping
+//! guidance mirrored in `docs/ato/cgt-keeping-records-shares.md`).
+//!
+//! Database triggers record the prior row on every UPDATE and DELETE of an
+//! audited table into `row_history`; this report returns one row's entries so
+//! an accidental edit to a historical fact can be noticed and reconstructed.
+//! Read-only — the trail itself is written by the triggers alone and is
+//! append-only (enforced in the schema), so there is nothing here to write.
+
+use crate::infra::http::ApiError;
+use axum::{Json, Router, extract::State, routing::post};
+use serde::Deserialize;
+use serde_json::{Map, Value};
+use sqlx::{Row, SqlitePool};
+
+/// The audited tables, exactly as migration 0013 enumerates them in the
+/// `row_history.table_name` CHECK and its per-table trigger pairs — a test
+/// pins the three lists to each other, and the web UI's table picker is
+/// asserted against this list too.
+pub const AUDITED_TABLES: [&str; 17] = [
+    "trades",
+    "parcel_allocations",
+    "income",
+    "interest_income",
+    "amma_statements",
+    "amit_adjustments",
+    "ess_statements",
+    "transfers",
+    "corporate_actions",
+    "inheritances",
+    "rights_sales",
+    "rights_sale_allocations",
+    "investment_expenses",
+    "drp_enrolments",
+    "cgt_settings",
+    "attachments",
+    "listings",
+];
+
+#[derive(Debug, Deserialize)]
+pub struct RowHistoryRequest {
+    /// One of [`AUDITED_TABLES`]; anything else is rejected 422.
+    pub table: String,
+    /// The audited row's `id`. A row with no recorded history (never updated
+    /// or deleted since the trail began) returns an empty array.
+    pub row_id: i64,
+}
+
+pub fn router() -> Router<SqlitePool> {
+    Router::new().route("/reports/row_history", post(report))
+}
+
+/// One (table, row)'s audit entries, newest first. Each entry flattens the
+/// stored old-row JSON behind its own three fields (`history_id`,
+/// `operation`, `changed_at`), so a set of entries renders as one table
+/// whose remaining columns are the audited table's own — including `id`,
+/// which is the audited row's id (= the request's `row_id`).
+pub async fn db_row_history(
+    pool: &SqlitePool,
+    table: &str,
+    row_id: i64,
+) -> Result<Vec<Map<String, Value>>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT id, operation, changed_at, old_row FROM row_history \
+         WHERE table_name = ? AND row_id = ? ORDER BY id DESC",
+    )
+    .bind(table)
+    .bind(row_id)
+    .fetch_all(pool)
+    .await?;
+
+    rows.iter()
+        .map(|row| {
+            let mut entry = Map::new();
+            entry.insert("history_id".into(), row.try_get::<i64, _>("id")?.into());
+            entry.insert(
+                "operation".into(),
+                row.try_get::<String, _>("operation")?.into(),
+            );
+            entry.insert(
+                "changed_at".into(),
+                row.try_get::<String, _>("changed_at")?.into(),
+            );
+            let old_row: String = row.try_get("old_row")?;
+            // Propagate a malformed stored JSON loudly (the same contract as
+            // the TEXT decimal columns) — a silently dropped audit entry
+            // would defeat the trail's purpose.
+            let old_row: Map<String, Value> =
+                serde_json::from_str(&old_row).map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
+            entry.extend(old_row);
+            Ok(entry)
+        })
+        .collect()
+}
+
+async fn report(
+    State(pool): State<SqlitePool>,
+    Json(req): Json<RowHistoryRequest>,
+) -> Result<Json<Vec<Map<String, Value>>>, ApiError> {
+    if !AUDITED_TABLES.contains(&req.table.as_str()) {
+        return Err(ApiError::Unprocessable(format!(
+            "'{}' is not an audited table (one of: {})",
+            req.table,
+            AUDITED_TABLES.join(", ")
+        )));
+    }
+    db_row_history(&pool, &req.table, req.row_id)
+        .await
+        .map(Json)
+        .map_err(ApiError::from)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::entities::{sell, trade};
+    use crate::test_support::{self, allocate, test_pool, ymd};
+    use axum::http::StatusCode;
+    use axum::{body::Body, http::Request};
+    use http_body_util::BodyExt;
+    use rust_decimal::Decimal;
+    use tower::ServiceExt;
+
+    async fn history_count(pool: &SqlitePool, table: &str, row_id: i64) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM row_history WHERE table_name = ? AND row_id = ?")
+            .bind(table)
+            .bind(row_id)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn insert_records_no_history() {
+        let pool = test_pool().await;
+        test_support::listing(1).insert(&pool).await;
+        test_support::buy(1, 1).insert(&pool).await;
+        let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM row_history")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(total, 0, "an INSERT must not write history");
+    }
+
+    #[tokio::test]
+    async fn update_records_the_prior_row() {
+        let pool = test_pool().await;
+        test_support::listing(1).insert(&pool).await;
+        test_support::buy(1, 1)
+            .qty(Decimal::from(100))
+            .insert(&pool)
+            .await;
+
+        // Edit the quantity through the entity's own upsert (the real write
+        // path: INSERT .. ON CONFLICT DO UPDATE fires the UPDATE trigger).
+        let mut edited = trade::db_get(&pool, 1).await.unwrap().unwrap();
+        edited.quantity = Decimal::from(150);
+        trade::db_upsert(&pool, &edited).await.unwrap();
+
+        let entries = db_row_history(&pool, "trades", 1).await.unwrap();
+        assert_eq!(entries.len(), 1);
+        let e = &entries[0];
+        assert_eq!(e["operation"], "UPDATE");
+        assert_eq!(e["quantity"], "100", "old_row holds the prior value");
+        assert!(
+            e["changed_at"].as_str().unwrap().ends_with('Z'),
+            "changed_at is an RFC 3339 UTC timestamp: {:?}",
+            e["changed_at"]
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_records_the_prior_row() {
+        let pool = test_pool().await;
+        test_support::listing(1).insert(&pool).await;
+        test_support::buy(1, 1)
+            .qty(Decimal::from(100))
+            .insert(&pool)
+            .await;
+        trade::db_delete(&pool, 1).await.unwrap();
+
+        let entries = db_row_history(&pool, "trades", 1).await.unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["operation"], "DELETE");
+        assert_eq!(entries[0]["quantity"], "100");
+        assert_eq!(entries[0]["id"], 1, "old_row carries the deleted row's id");
+    }
+
+    #[tokio::test]
+    async fn entries_come_newest_first() {
+        let pool = test_pool().await;
+        test_support::listing(1).insert(&pool).await;
+        test_support::buy(1, 1)
+            .qty(Decimal::from(100))
+            .insert(&pool)
+            .await;
+        for qty in [150i64, 200] {
+            let mut edited = trade::db_get(&pool, 1).await.unwrap().unwrap();
+            edited.quantity = Decimal::from(qty);
+            trade::db_upsert(&pool, &edited).await.unwrap();
+        }
+
+        let entries = db_row_history(&pool, "trades", 1).await.unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0]["quantity"], "150", "newest entry first");
+        assert_eq!(entries[1]["quantity"], "100");
+    }
+
+    /// A 422-rejected write rolls back atomically: the rejected transaction's
+    /// history rows vanish with it, and previously recorded history survives
+    /// unchanged. Driven through PUT /sells, whose allocation validation
+    /// rejects *after* the trade UPDATE has executed inside the transaction.
+    #[tokio::test]
+    async fn rejected_write_leaves_history_unchanged() {
+        let pool = test_pool().await;
+        test_support::listing(1).insert(&pool).await;
+        test_support::buy(1, 1)
+            .qty(Decimal::from(100))
+            .insert(&pool)
+            .await;
+        test_support::sell(2, 1)
+            .qty(Decimal::from(50))
+            .insert(&pool)
+            .await;
+        allocate(&pool, 1, 2, 1, Decimal::from(50)).await;
+
+        // One legitimate edit so pre-existing history is at stake too.
+        let mut edited = trade::db_get(&pool, 2).await.unwrap().unwrap();
+        edited.average_price = Decimal::from(11);
+        trade::db_upsert(&pool, &edited).await.unwrap();
+        let before = db_row_history(&pool, "trades", 2).await.unwrap();
+        assert_eq!(before.len(), 1);
+
+        // Re-PUT the sell with allocations that do not sum to its quantity.
+        let body = serde_json::json!({
+            "date": ymd(2024, 6, 3), "listing_id": 1, "average_price": "12",
+            "quantity": "50", "currency": "AUD", "brokerage": "0",
+            "brokerage_currency": "AUD", "fx_rate": "1",
+            "allocations": [{ "purchase_trade_id": 1, "quantity_allocated": "10" }],
+        });
+        let resp = sell::router()
+            .with_state(pool.clone())
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/sells/2")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        let after = db_row_history(&pool, "trades", 2).await.unwrap();
+        assert_eq!(
+            after, before,
+            "a rejected write must leave history exactly as it was"
+        );
+    }
+
+    #[tokio::test]
+    async fn history_is_append_only() {
+        let pool = test_pool().await;
+        test_support::listing(1).insert(&pool).await;
+        test_support::buy(1, 1).insert(&pool).await;
+        trade::db_delete(&pool, 1).await.unwrap();
+
+        for sql in [
+            "UPDATE row_history SET operation = 'UPDATE'",
+            "DELETE FROM row_history",
+        ] {
+            let err = sqlx::query(sql).execute(&pool).await.unwrap_err();
+            assert!(
+                err.to_string().contains("append-only"),
+                "{sql} must abort: {err}"
+            );
+        }
+    }
+
+    /// Deleting a parent cascade-deletes its children (an attachment dies
+    /// with its trade), and the cascade fires the child's DELETE trigger too
+    /// — the audit trail records the attachment it took along.
+    #[tokio::test]
+    async fn cascade_delete_records_child_history() {
+        let pool = test_pool().await;
+        test_support::listing(1).insert(&pool).await;
+        test_support::buy(1, 1).insert(&pool).await;
+        sqlx::query(
+            "INSERT INTO attachments (id, trade_id, filename, content_type, byte_size, \
+             checksum, uploaded_at, content) \
+             VALUES (7, 1, 'note.pdf', 'application/pdf', 4, 'abcd', \
+             '2024-01-01T00:00:00Z', X'25504446')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        trade::db_delete(&pool, 1).await.unwrap();
+
+        let entries = db_row_history(&pool, "attachments", 7).await.unwrap();
+        assert_eq!(entries.len(), 1);
+        let e = &entries[0];
+        assert_eq!(e["operation"], "DELETE");
+        assert_eq!(e["filename"], "note.pdf");
+        assert_eq!(e["checksum"], "abcd");
+        assert!(
+            !e.contains_key("content"),
+            "the BLOB itself is excluded from the old row"
+        );
+    }
+
+    #[tokio::test]
+    async fn api_returns_flattened_entries_and_rejects_unknown_table() {
+        let pool = test_pool().await;
+        test_support::listing(1).insert(&pool).await;
+        test_support::buy(1, 1)
+            .qty(Decimal::from(100))
+            .insert(&pool)
+            .await;
+        let mut edited = trade::db_get(&pool, 1).await.unwrap().unwrap();
+        edited.quantity = Decimal::from(150);
+        trade::db_upsert(&pool, &edited).await.unwrap();
+
+        let post = |body: String| {
+            let pool = pool.clone();
+            async move {
+                router()
+                    .with_state(pool)
+                    .oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri("/reports/row_history")
+                            .header("content-type", "application/json")
+                            .body(Body::from(body))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap()
+            }
+        };
+
+        let resp = post(r#"{"table": "trades", "row_id": 1}"#.to_string()).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let entries: Vec<Map<String, Value>> = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["operation"], "UPDATE");
+        assert_eq!(entries[0]["quantity"], "100");
+
+        // A row with no recorded history is an empty trail, not an error.
+        let resp = post(r#"{"table": "trades", "row_id": 999}"#.to_string()).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(String::from_utf8_lossy(&bytes), "[]");
+
+        // Unknown table: rejected with the audited list, never interpolated
+        // into SQL.
+        let resp = post(r#"{"table": "sqlite_master", "row_id": 1}"#.to_string()).await;
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let msg = String::from_utf8_lossy(&bytes);
+        assert!(msg.contains("not an audited table"), "{msg}");
+    }
+
+    /// Every audited table is wired end to end: an UPDATE and a DELETE on a
+    /// real row of each table leave history entries. Exercised straight in
+    /// SQL (the trigger layer is what's under test) over one row per table,
+    /// built respecting the FK graph.
+    #[tokio::test]
+    async fn every_audited_table_records_update_and_delete() {
+        let pool = test_pool().await;
+        test_support::listing(1).insert(&pool).await;
+        test_support::listing(2).ticker("OTH").insert(&pool).await;
+        test_support::buy(1, 1).insert(&pool).await;
+        test_support::sell(2, 1)
+            .qty(Decimal::from(5))
+            .insert(&pool)
+            .await;
+        allocate(&pool, 1, 2, 1, Decimal::from(5)).await;
+        test_support::income(3, 1, ymd(2024, 1, 5))
+            .insert(&pool)
+            .await;
+        test_support::amma(4, 1).insert(&pool).await;
+        test_support::ess_statement(5, 1, ymd(2024, 1, 5))
+            .insert(&pool)
+            .await;
+        sqlx::query("INSERT INTO holding_accounts (id, name) VALUES (2, 'other')")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // (table, insert-if-any, id, editable column, new value)
+        let cases: Vec<(&str, Option<&str>, i64, &str, &str)> = vec![
+            ("trades", None, 1, "quantity", "'42'"),
+            ("parcel_allocations", None, 1, "quantity_allocated", "'4'"),
+            ("income", None, 3, "unfranked_amount", "'9'"),
+            (
+                "interest_income",
+                Some(
+                    "INSERT INTO interest_income (id, date_paid, amount) VALUES (6, '2024-01-01', '5')",
+                ),
+                6,
+                "amount",
+                "'6'",
+            ),
+            ("amma_statements", None, 4, "units_held", "'7'"),
+            (
+                "amit_adjustments",
+                Some(
+                    "INSERT INTO amit_adjustments (id, amma_statement_id, trade_id, quantity) VALUES (8, 4, 1, '1')",
+                ),
+                8,
+                "quantity",
+                "'2'",
+            ),
+            ("ess_statements", None, 5, "quantity", "'3'"),
+            (
+                "transfers",
+                Some(
+                    "INSERT INTO transfers (id, listing_id, date, from_account_id, to_account_id) VALUES (9, 1, '2024-01-01', 1, 2)",
+                ),
+                9,
+                "date",
+                "'2024-01-02'",
+            ),
+            (
+                "corporate_actions",
+                Some(
+                    "INSERT INTO corporate_actions (id, action_type, listing_id, date, amount_per_unit, currency) VALUES (10, 'ReturnOfCapital', 1, '2024-01-01', '1', 'AUD')",
+                ),
+                10,
+                "amount_per_unit",
+                "'2'",
+            ),
+            (
+                "inheritances",
+                Some(
+                    "INSERT INTO inheritances (id, listing_id, quantity, date_of_death, cost_base_rule, cost_base, deceased_acquisition_date) VALUES (11, 1, '10', '2024-01-01', 'DeceasedCostBase', '100', '2020-01-01')",
+                ),
+                11,
+                "cost_base",
+                "'110'",
+            ),
+            (
+                "rights_sales",
+                Some(
+                    "INSERT INTO corporate_actions (id, action_type, listing_id, date, rights_units, rights_held_units, exercise_price, currency) VALUES (12, 'RightsIssue', 1, '2024-01-01', '1', '10', '1', 'AUD'); \
+                      INSERT INTO rights_sales (id, rights_action_id, date, units) VALUES (13, 12, '2024-01-02', '5')",
+                ),
+                13,
+                "units",
+                "'4'",
+            ),
+            (
+                "rights_sale_allocations",
+                Some(
+                    "INSERT INTO rights_sale_allocations (id, rights_sale_id, purchase_trade_id, units) VALUES (14, 13, 1, '5')",
+                ),
+                14,
+                "units",
+                "'4'",
+            ),
+            (
+                "investment_expenses",
+                Some(
+                    "INSERT INTO investment_expenses (id, date_incurred, expense_type, amount) VALUES (15, '2024-01-01', 'ManagementFee', '10')",
+                ),
+                15,
+                "amount",
+                "'11'",
+            ),
+            (
+                "drp_enrolments",
+                Some(
+                    "INSERT INTO drp_enrolments (id, listing_id, enrolment_date) VALUES (16, 1, '2024-01-01')",
+                ),
+                16,
+                "enrolment_date",
+                "'2024-01-02'",
+            ),
+            (
+                "cgt_settings",
+                Some("INSERT INTO cgt_settings (id, opening_capital_loss) VALUES (1, '0')"),
+                1,
+                "opening_capital_loss",
+                "'5'",
+            ),
+            (
+                "attachments",
+                Some(
+                    "INSERT INTO attachments (id, trade_id, filename, content_type, byte_size, checksum, uploaded_at, content) VALUES (17, 1, 'a.pdf', 'application/pdf', 1, 'x', '2024-01-01T00:00:00Z', X'00')",
+                ),
+                17,
+                "filename",
+                "'b.pdf'",
+            ),
+            ("listings", None, 2, "name", "'Renamed'"),
+        ];
+        assert_eq!(cases.len(), AUDITED_TABLES.len());
+
+        for (table, setup, id, column, new_value) in cases {
+            assert!(AUDITED_TABLES.contains(&table), "{table} not in the const");
+            if let Some(setup) = setup {
+                for stmt in setup.split(';') {
+                    sqlx::query(stmt).execute(&pool).await.unwrap();
+                }
+            }
+            sqlx::query(&format!(
+                "UPDATE {table} SET {column} = {new_value} WHERE id = {id}"
+            ))
+            .execute(&pool)
+            .await
+            .unwrap();
+            let updates = history_count(&pool, table, id).await;
+            assert_eq!(updates, 1, "{table}: UPDATE must record one entry");
+        }
+
+        // Deletes, children before parents so FKs allow them; each leaves a
+        // DELETE entry on top of the one UPDATE entry (expected 2), except
+        // the two rows deleted only to clear FK paths — the Sell trade and
+        // the RightsIssue action were never updated, so their trail is the
+        // single DELETE entry (expected 1).
+        for (table, id, expected) in [
+            ("attachments", 17i64, 2i64),
+            ("rights_sale_allocations", 14, 2),
+            ("rights_sales", 13, 2),
+            ("corporate_actions", 12, 1),
+            ("amit_adjustments", 8, 2),
+            ("parcel_allocations", 1, 2),
+            ("trades", 2, 1),
+            ("investment_expenses", 15, 2),
+            ("drp_enrolments", 16, 2),
+            ("inheritances", 11, 2),
+            ("interest_income", 6, 2),
+            ("transfers", 9, 2),
+            ("income", 3, 2),
+            ("amma_statements", 4, 2),
+            ("ess_statements", 5, 2),
+            ("cgt_settings", 1, 2),
+            ("trades", 1, 2),
+            ("corporate_actions", 10, 2),
+            ("listings", 2, 2),
+        ] {
+            sqlx::query(&format!("DELETE FROM {table} WHERE id = {id}"))
+                .execute(&pool)
+                .await
+                .unwrap();
+            assert_eq!(
+                history_count(&pool, table, id).await,
+                expected,
+                "{table} {id}: DELETE must be recorded"
+            );
+        }
+    }
+
+    /// The three copies of the audited-table list — the Rust const, the
+    /// migration's CHECK constraint, and the migration's trigger pairs —
+    /// cannot drift apart.
+    #[test]
+    fn audited_tables_match_migration_check_and_triggers() {
+        let sql = include_str!("../../migrations/0013_row_history.sql");
+        for table in AUDITED_TABLES {
+            assert!(
+                sql.contains(&format!("'{table}'")),
+                "{table} missing from the table_name CHECK"
+            );
+            for op in ["update", "delete"] {
+                let trigger = format!("CREATE TRIGGER {table}_row_history_{op} ");
+                assert!(sql.contains(&trigger), "{table} lacks its {op} trigger");
+            }
+        }
+        assert_eq!(
+            sql.matches("CREATE TRIGGER").count(),
+            AUDITED_TABLES.len() * 2 + 2,
+            "one UPDATE + one DELETE trigger per audited table, plus the two \
+             append-only guards on row_history itself — nothing extra, nothing missing"
+        );
+    }
+
+    /// The migration is purely additive: it creates the trail and its
+    /// triggers but touches no existing row — line-level pin that no
+    /// statement alters, drops, updates, deletes, or inserts into anything
+    /// but row_history (the global no-DROP/no-REAL migration tests apply on
+    /// top of this).
+    #[test]
+    fn migration_0013_preserves_existing_data() {
+        let sql = include_str!("../../migrations/0013_row_history.sql");
+        for line in sql.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("--") {
+                continue;
+            }
+            let upper = trimmed.to_uppercase();
+            for forbidden in ["ALTER ", "DROP ", "UPDATE ", "DELETE FROM"] {
+                assert!(
+                    !upper.starts_with(forbidden),
+                    "0013 must not start a {forbidden} statement: {trimmed}"
+                );
+            }
+            if upper.starts_with("INSERT INTO") {
+                assert!(
+                    upper.starts_with("INSERT INTO ROW_HISTORY"),
+                    "0013 may only insert into row_history: {trimmed}"
+                );
+            }
+        }
+    }
+}

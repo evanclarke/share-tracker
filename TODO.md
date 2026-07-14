@@ -10,17 +10,6 @@ findings are all closed in DONE.md), except where a section's heading names anot
 (e.g. REQUIREMENTS). Each section records one finding; sections land in DONE.md as they are fixed
 or decided.
 
-## Append-only audit trail for financial writes
-Every entity is PUT-upsert-in-place and hard DELETE: an accidental edit to a historical Buy silently
-changes prior-year cost bases and tax figures, with the weekly backup as the only recourse and no way
-to notice it happened. Aligns with the ATO record-keeping guidance already mirrored
-(`docs/ato/cgt-keeping-records-shares.md`).
-- [ ] Trigger-maintained history tables recording the old row + timestamp + operation on UPDATE and DELETE for the financial fact tables (trades, sells, parcel allocations, income, AMMA statements, transfers, corporate actions, …) — enforced in the database per the data-integrity convention, so no write path can bypass it
-- [ ] Read-only endpoint (and UI view) to inspect an entity row's history
-- [ ] Decide retention (likely: keep forever; it's the audit trail) and whether reference-data tables (exchanges, listings, FX rates) are in scope — record the decision here
-- [ ] Tests: an UPDATE and a DELETE each leave a history row with the prior values; history survives the entity's own 422-rejected writes unchanged; migration preserves existing data
-- [ ] Docs: SCHEMA.md (history tables + Relationships), API.md (history endpoint)
-
 ## CI supply-chain checks
 CI runs fmt/clippy/test but nothing watches dependencies, and the binary talks to the internet
 (`reqwest`, `yfinance-rs`, `quick-xml`).

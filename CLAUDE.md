@@ -21,6 +21,7 @@
 - Every field in the data model must be used by a calculation or endpoint, or carry a comment marking it informational-only. Don't leave stored fields silently unused
 - Migrations must never drop data: no destructive schema changes — migrate existing rows forward (e.g. the holding-accounts migration moved every row to the seeded default account)
 - A field that holds a limited set of values is an enum: CHECK-constrained in the database (and a typed enum where parsed in Rust), never a free-text column
+- Every UPDATE/DELETE of an audited table is recorded by the append-only audit trail (`row_history`, migration 0013; inspected via `POST /reports/row_history` and the web UI's Row History screen). The audited-table list lives in three places a test pins together: the migration's CHECK + trigger pairs, `reports::row_history::AUDITED_TABLES`, and the UI table picker in `config.js`. A migration that adds a column to an audited table must DROP and re-CREATE that table's two `*_row_history_*` triggers with the new column list; a new financial fact table needs its own trigger pair plus entries in all three lists. Never UPDATE or DELETE `row_history` itself (its own triggers abort the write) — retention is keep-forever by decision
 
 # Project structure
 Modules are grouped into four folders; `main.rs`, `app.rs`, and the migrations live at the `src` root.

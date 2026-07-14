@@ -268,6 +268,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn row_history_ui_present() {
+        let js = app_js_body().await;
+        // The audit-trail screen is one generic params-report entry driving
+        // the row-history endpoint (no bespoke view)…
+        assert!(js.contains("'row-history'"));
+        assert!(js.contains("/reports/row_history"));
+        // …whose table picker names every audited table — checked against
+        // the Rust const the endpoint validates with, so a table added to
+        // the trigger set cannot be forgotten here (an extra/mistyped UI
+        // option is caught by the endpoint's own 422).
+        for table in crate::reports::row_history::AUDITED_TABLES {
+            assert!(
+                js.contains(&format!("'{table}'")),
+                "table picker missing {table}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn timestamps_render_local_with_utc_tooltip() {
         let js = app_js_body().await;
         // RFC 3339 UTC server timestamps (fetched_at, generated_at,

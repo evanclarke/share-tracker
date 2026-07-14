@@ -27,6 +27,7 @@ pub mod parcel_optimiser;
 pub mod performance;
 pub mod portfolio;
 pub mod realised_gains;
+pub mod row_history;
 pub mod settlement_coverage;
 pub mod snapshot;
 pub mod tax_summary;
@@ -80,6 +81,7 @@ pub fn router() -> Router<SqlitePool> {
         .merge(e4_cross_check::router())
         .merge(amit_cash_cross_check::router())
         .merge(wash_sales::router())
+        .merge(row_history::router())
         .merge(franking_at_risk::router())
         .merge(health::router())
         .merge(snapshot::router())
