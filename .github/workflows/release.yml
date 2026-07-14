@@ -20,7 +20,7 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       new-release: ${{ steps.version.outputs.new-release }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - id: version
         env:
           GH_TOKEN: ${{ github.token }}
@@ -40,7 +40,7 @@ jobs:
     if: needs.version.outputs.new-release == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Build and smoke-test the FreeBSD package
         uses: vmactions/freebsd-vm@v1
         with:
@@ -53,7 +53,7 @@ jobs:
             set -e
             sh pkg/freebsd/build-pkg.sh
             sh pkg/freebsd/smoke-test.sh
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: freebsd-pkg
           path: share-tracker-*.pkg
@@ -63,11 +63,11 @@ jobs:
     needs: [version, package]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # Full history + tags: the release notes span previous-tag..HEAD.
           fetch-depth: 0
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: freebsd-pkg
       # Notes come from the commits between tags (scripts/release-notes.sh) —
