@@ -22,6 +22,13 @@ jobs:
         with:
           node-version: '22'
       - run: node --test 'src/web/*.test.js'
+      # Supply-chain gate: fail on known RustSec advisories against the
+      # dependency tree. deny.toml records the temporary-ignore policy for an
+      # advisory with no upstream fix; the local equivalent is
+      # `cargo deny check advisories` (cargo install cargo-deny --locked).
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories
       # Keep the tree rustfmt-clean; fix locally with `cargo fmt`.
       - run: cargo fmt --check
       # Keep the tree clippy-clean: lint everything (incl. tests) and fail on any

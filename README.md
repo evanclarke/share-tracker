@@ -85,6 +85,19 @@ node --test 'src/web/*.test.js'
 
 `scripts/ui-smoke.sh` is a headless end-to-end smoke check: it starts the server on a temp database seeded from the demo fixture, renders key routes in headless Chrome, and asserts each view drew real data — catching a broken static-module route or a load-time JS exception that neither test suite can. CI runs all three on every push.
 
+### Supply-chain checks
+
+The server talks to the internet (Yahoo Finance, the RBA/ISO feeds), so its dependency tree is watched, not just its own code. CI fails on any known [RustSec](https://rustsec.org) advisory against the dependency tree via `cargo deny check advisories` (configured by [`deny.toml`](deny.toml)). The local equivalent:
+
+```bash
+cargo install cargo-deny --locked   # or: brew install cargo-deny
+cargo deny check advisories
+```
+
+Dependency updates arrive without manual attention: [Dependabot](.github/dependabot.yml) raises a weekly grouped PR for Cargo dependencies (and one for GitHub Actions), and alert-driven security PRs fire as soon as an advisory lands.
+
+**Policy for an advisory with no upstream fix yet** (decided 2026-07-14): the advisory goes on the temporary ignore list in `deny.toml` with the reason waiting is acceptable and an `# expires: YYYY-MM-DD` date. A test (`doc_checks::advisory_ignores_expire`) fails the suite once that date passes, so every ignore is re-justified or removed on a deadline — never permanent. An unmaintained dependency kept indefinitely is a replacement task in TODO.md, not an open-ended ignore.
+
 ### Configuration file
 
 Every flag except `--config` can instead be set in a TOML configuration file, so a service manager doesn't need a pile of CLI flags. Precedence is **CLI flag > config-file value > built-in default**. The file is loaded from `/usr/local/etc/share-tracker.toml` when present (where the FreeBSD package installs it); `--config PATH` points somewhere else. Every key is optional:

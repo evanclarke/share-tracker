@@ -162,6 +162,10 @@ pub fn parse_iso4217(content: &str) -> Result<Vec<Currency>, ImportError> {
 
     let mut in_entry = false;
     let mut cur_tag: Option<Vec<u8>> = None;
+    // A field's text accumulates across events: since quick-xml 0.38 an entity
+    // reference (`&amp;`) is its own GeneralRef event splitting the Text around
+    // it, so a field is only complete at its End tag.
+    let mut pending = String::new();
     let (mut name, mut ccy, mut nbr, mut minor) = (
         None::<String>,
         None::<String>,
@@ -182,23 +186,21 @@ pub fn parse_iso4217(content: &str) -> Result<Vec<Currency>, ImportError> {
                     (name, ccy, nbr, minor) = (None, None, None, None);
                 } else if in_entry {
                     cur_tag = Some(tag.to_vec());
+                    pending.clear();
                 }
             }
-            Ok(Event::Text(t)) if in_entry => {
-                if let Some(tag) = &cur_tag {
-                    let text = t
-                        .unescape()
-                        .map_err(|e| ImportError::Parse(e.to_string()))?
-                        .trim()
-                        .to_string();
-                    match tag.as_slice() {
-                        b"CcyNm" => name = Some(text),
-                        b"Ccy" => ccy = Some(text),
-                        b"CcyNbr" => nbr = Some(text),
-                        b"CcyMnrUnts" => minor = Some(text),
-                        _ => {}
-                    }
-                }
+            Ok(Event::Text(t)) if in_entry && cur_tag.is_some() => {
+                pending.push_str(
+                    &t.xml10_content()
+                        .map_err(|e| ImportError::Parse(e.to_string()))?,
+                );
+            }
+            Ok(Event::GeneralRef(r)) if in_entry && cur_tag.is_some() => {
+                let entity = r.decode().map_err(|e| ImportError::Parse(e.to_string()))?;
+                let raw = format!("&{entity};");
+                let resolved = quick_xml::escape::unescape(&raw)
+                    .map_err(|e| ImportError::Parse(format!("unresolvable reference: {e}")))?;
+                pending.push_str(&resolved);
             }
             Ok(Event::End(e)) => {
                 let qname = e.name();
@@ -228,7 +230,16 @@ pub fn parse_iso4217(content: &str) -> Result<Vec<Currency>, ImportError> {
                         });
                     }
                 } else if cur_tag.as_deref() == Some(tag) {
+                    let text = pending.trim().to_string();
+                    match tag {
+                        b"CcyNm" => name = Some(text),
+                        b"Ccy" => ccy = Some(text),
+                        b"CcyNbr" => nbr = Some(text),
+                        b"CcyMnrUnts" => minor = Some(text),
+                        _ => {}
+                    }
                     cur_tag = None;
+                    pending.clear();
                 }
             }
             _ => {}
@@ -609,6 +620,28 @@ mod tests {
         assert!(matches!(
             parse_iso4217(xml).unwrap_err(),
             ImportError::Parse(_)
+        ));
+    }
+
+    /// quick-xml ≥0.38 delivers an entity reference (`&amp;`) as its own
+    /// event between the Text pieces around it — the field must reassemble to
+    /// the full unescaped name, not keep only the fragment after the entity.
+    #[test]
+    fn parse_iso4217_reassembles_names_split_by_entity_references() {
+        let xml = "<ISO_4217><CcyTbl><CcyNtry><CcyNm>Trinidad &amp; Tobago Dollar</CcyNm>\
+            <Ccy>TTD</Ccy><CcyNbr>780</CcyNbr><CcyMnrUnts>2</CcyMnrUnts></CcyNtry>\
+            </CcyTbl></ISO_4217>";
+        let parsed = parse_iso4217(xml).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].name, "Trinidad & Tobago Dollar");
+        assert_eq!(parsed[0].code, "TTD");
+
+        // An unresolvable reference fails loudly rather than dropping text.
+        let bad = "<ISO_4217><CcyTbl><CcyNtry><CcyNm>Bad &bogus; Name</CcyNm>\
+            <Ccy>BAD</Ccy></CcyNtry></CcyTbl></ISO_4217>";
+        assert!(matches!(
+            parse_iso4217(bad).unwrap_err(),
+            ImportError::Parse(msg) if msg.contains("unresolvable reference")
         ));
     }
 

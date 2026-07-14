@@ -28,7 +28,9 @@ reqwest = "0.13.4"
 yfinance-rs = "0.8"
 croner = "3.0.1"
 csv = "1"
-quick-xml = "0.37"
+# 0.41+: RUSTSEC-2026-0194 / the NsReader namespace-allocation advisory are
+# fixed there (cargo deny check advisories pins this floor).
+quick-xml = "0.41"
 sha2 = "0.10"
 toml = "1.1.2"
 

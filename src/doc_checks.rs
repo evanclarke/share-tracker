@@ -7,6 +7,7 @@
 const API_MD: &str = include_str!("../docs/API.md");
 const README_MD: &str = include_str!("../README.md");
 const SCHEMA_MD: &str = include_str!("../docs/SCHEMA.md");
+const DENY_TOML: &str = include_str!("../deny.toml");
 
 /// The body of the `# Known limitations` section of `docs/API.md`.
 fn known_limitations() -> &'static str {
@@ -352,6 +353,87 @@ fn frontend_tests_run_in_ci() {
     assert!(README_MD.contains("node --test 'src/web/*.test.js'"));
     assert!(README_MD.contains("**Node 22 or newer**"));
     assert!(README_MD.contains("scripts/ui-smoke.sh"));
+}
+
+/// Pins the supply-chain checks (2026-07-13 improvement review): the RustSec
+/// advisory gate (`cargo deny check advisories`) is a CI step driven by the
+/// committed `deny.toml`, Dependabot keeps the Cargo and GitHub Actions
+/// dependencies patched with weekly grouped PRs, and the README documents the
+/// local equivalent and the recorded no-upstream-fix policy.
+#[test]
+fn supply_chain_checks_run_in_ci() {
+    const CI_YML: &str = include_str!("../.github/workflows/ci.yml");
+    assert!(CI_YML.contains("EmbarkStudios/cargo-deny-action"));
+    assert!(CI_YML.contains("command: check advisories"));
+    // Dependabot: weekly grouped version updates for both ecosystems.
+    const DEPENDABOT_YML: &str = include_str!("../.github/dependabot.yml");
+    assert!(DEPENDABOT_YML.contains("package-ecosystem: cargo"));
+    assert!(DEPENDABOT_YML.contains("package-ecosystem: github-actions"));
+    assert!(DEPENDABOT_YML.contains("interval: weekly"));
+    assert!(DEPENDABOT_YML.contains("groups:"));
+    // deny.toml: the advisories config and the recorded policy.
+    assert!(DENY_TOML.contains("[advisories]"));
+    assert!(DENY_TOML.contains("Policy for an advisory with no upstream fix"));
+    assert!(DENY_TOML.contains("temporary by construction, never"));
+    // README: the section, the local equivalent, and the policy decision.
+    assert!(README_MD.contains("### Supply-chain checks"));
+    assert!(README_MD.contains("cargo deny check advisories"));
+    assert!(README_MD.contains("cargo install cargo-deny --locked"));
+    assert!(README_MD.contains("**Policy for an advisory with no upstream fix yet**"));
+    assert!(README_MD.contains("never permanent"));
+}
+
+/// Executable half of the deny.toml ignore policy (decided 2026-07-14): every
+/// advisory ignore entry carries a RustSec id, a non-empty reason, and — on
+/// the same line, per the format the file documents — an
+/// `# expires: YYYY-MM-DD` comment whose date has not yet passed. Once an
+/// expiry passes this test fails, so the entry must be re-justified with a
+/// new date or removed: an ignore cannot become permanent by inattention.
+#[test]
+fn advisory_ignores_expire() {
+    let value: toml::Value = toml::from_str(DENY_TOML).expect("deny.toml parses as TOML");
+    let ignore = value["advisories"]["ignore"]
+        .as_array()
+        .expect("advisories.ignore is an array");
+    for entry in ignore {
+        let id = entry
+            .get("id")
+            .and_then(|v| v.as_str())
+            .expect("ignore entry has a string id");
+        assert!(id.starts_with("RUSTSEC-"), "id {id:?} is a RustSec id");
+        let reason = entry
+            .get("reason")
+            .and_then(|v| v.as_str())
+            .unwrap_or_else(|| panic!("ignore entry {id} carries no reason"));
+        assert!(
+            !reason.trim().is_empty(),
+            "ignore entry {id} has an empty reason"
+        );
+    }
+    // One entry per line (the documented format), so each entry's line-end
+    // expiry comment is attributable; comment lines (the format example)
+    // don't count.
+    let entry_lines: Vec<&str> = DENY_TOML
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('#') && l.contains("RUSTSEC-"))
+        .collect();
+    assert_eq!(
+        entry_lines.len(),
+        ignore.len(),
+        "each advisories.ignore entry sits on its own line with its expiry comment"
+    );
+    let today = chrono::Local::now().date_naive();
+    for line in entry_lines {
+        let expires = line.split("# expires: ").nth(1).unwrap_or_else(|| {
+            panic!("ignore entry lacks an `# expires: YYYY-MM-DD` comment: {line}")
+        });
+        let date = chrono::NaiveDate::parse_from_str(expires.trim(), "%Y-%m-%d")
+            .unwrap_or_else(|e| panic!("expiry {expires:?} is not YYYY-MM-DD ({e}): {line}"));
+        assert!(
+            date >= today,
+            "advisory ignore expired on {date}: {line}\nre-justify it with a new expiry or remove it"
+        );
+    }
 }
 
 /// Pins for the FreeBSD packaging + versioned-release pipeline (REQUIREMENTS

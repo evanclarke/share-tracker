@@ -10,13 +10,6 @@ findings are all closed in DONE.md), except where a section's heading names anot
 (e.g. REQUIREMENTS). Each section records one finding; sections land in DONE.md as they are fixed
 or decided.
 
-## CI supply-chain checks
-CI runs fmt/clippy/test but nothing watches dependencies, and the binary talks to the internet
-(`reqwest`, `yfinance-rs`, `quick-xml`).
-- [ ] `cargo audit` (or `cargo deny check advisories`) as a CI step failing on known RustSec advisories; document the local equivalent
-- [ ] Dependabot (or Renovate) config for Cargo so security patches in the HTTP/TLS stack arrive without manual attention
-- [ ] Decide how advisory failures with no upstream fix are handled (temporary ignore list with expiry + reason) — record the policy
-
 ## Split `trade.rs` non-test code (honourable mention)
 `entities/trade.rs` carries ~1,180 lines of non-test code mixing the model, write-time invariants,
 and handlers. Not a defect — a maintainability nice-to-have.

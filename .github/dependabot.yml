@@ -1,0 +1,22 @@
+# Keep dependencies patched without manual attention: the binary talks to the
+# internet (reqwest / yfinance-rs / quick-xml), so security fixes in the
+# HTTP/TLS stack must arrive promptly. Weekly version-update PRs are grouped
+# into one PR per ecosystem to keep the noise fit for a solo project;
+# Dependabot security updates (alert-driven PRs) are separate and fire as
+# soon as an advisory lands, regardless of this schedule.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+    groups:
+      cargo-dependencies:
+        patterns: ["*"]
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns: ["*"]

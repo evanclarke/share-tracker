@@ -1,0 +1,25 @@
+# Supply-chain advisory gate: `cargo deny check advisories` fails on any known
+# RustSec advisory (vulnerability, unmaintained, unsound, yanked) against the
+# dependency tree. CI runs it on every push (.github/workflows/ci.yml); the
+# local equivalent is
+#
+#   cargo install cargo-deny --locked   # or: brew install cargo-deny
+#   cargo deny check advisories
+#
+# Policy for an advisory with no upstream fix yet (decided 2026-07-14): the
+# check is not left red while waiting — the advisory goes on the temporary
+# ignore list below, one entry per line, carrying the reason waiting is
+# acceptable and an expiry date:
+#
+#   { id = "RUSTSEC-0000-0000", reason = "why waiting is acceptable" }, # expires: 2026-01-31
+#
+# The expiry is enforced by a test (doc_checks::advisory_ignores_expire): once
+# the date passes, the suite fails and the entry must be re-justified with a
+# new expiry or removed. Ignores are temporary by construction, never
+# permanent — an unmaintained dependency we decide to keep indefinitely is a
+# replacement task in TODO.md, not an open-ended ignore here.
+
+[advisories]
+version = 2
+ignore = [
+]
