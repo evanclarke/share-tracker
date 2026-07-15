@@ -1054,3 +1054,28 @@ view is always empty — the paperwork exists but is not discoverable from the t
   income row's) — enumerate the provenance links at implementation time
 - Docs per the standard sync rule (`docs/API.md` if the list endpoint gains the option; the
   README/API Attachments feature text mentions linked documents)
+
+## Wash-sale report excludes crypto transfer network-fee disposals (2026-07-15)
+
+Found reviewing the wash-sales report against the live data: every crypto wallet transfer whose
+network fee realised a small loss is flagged, because the fee disposal is an ordinary Sell (no
+`transfer_id` — deliberately, so the gains reports count it) and crypto Buys of the same listing
+routinely fall inside the ±30-day window. The TR 2008/1 fact pattern is purposive
+(`docs/ato/wash-sales.md`): Part IVA needs a disposal whose sole or dominant purpose was the tax
+benefit of the loss, with economic exposure effectively unchanged. A network-fee disposal fails
+that on every para 13 indicator — the disposal is compelled by the transfer (an obvious dominant
+non-tax purpose), its timing follows the transfer rather than a derived gain or year-end, and the
+fee units are gone for good (a real economic cost, never re-acquired). The report already applies
+the same no-purposive-act reasoning on the Buy side (transfer-in/scrip/demerger/inheritance Buys
+never match); the Sell side gets the symmetric exclusion.
+
+- A loss-realising Sell that is a transfer's network-fee disposal (referenced by
+  `transfers.fee_sale_trade_id`) is never a wash-sale candidate; its loss still counts in every
+  CGT report, unchanged
+- Genuine Sells keep flagging exactly as today, including ordinary crypto Sells near a re-buy
+- The exclusion and its TR 2008/1 rationale are recorded in `docs/ato/wash-sales.md`'s
+  "How this maps to the project" section and the report's module docs; `docs/API.md`'s wash-sales
+  entry states the exclusion
+- Tested: a transfer with a fee disposal realising a loss, plus a Buy of the same listing inside
+  the window, produces no alert — while an ordinary loss Sell of the same listing in the same
+  window still flags
