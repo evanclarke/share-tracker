@@ -246,7 +246,7 @@ export const ENTITIES = [
   },
   {
     slug: 'ess_statements', title: 'ESS Statements', group: 'Activity', api: '/ess_statements',
-    desc: 'Employee share scheme statements: the assessable discount on ESS interests (declared at Item 12 in the year of the taxing point), split by scheme type. The taxed-upfront-eligible discount is reduced by up to $1,000 per year in the tax summary (the ≤$180,000 income test is your responsibility). Use the row’s Vest action to create the cost-base-reset Buy for the vested shares.',
+    desc: 'Employee share scheme statements: the assessable discount on ESS interests (declared at Item 12 in the year of the taxing point), split by scheme type. The taxed-upfront-eligible discount is reduced by up to $1,000 per year in the tax summary (the ≤$180,000 income test is your responsibility). Use the row’s Vest action to create the cost-base-reset Buy for the vested shares — once vested the action is replaced by the linked Buy in the Vest trade column (delete the statement to redo it).',
     keyFields: [int('id', 'ID', { auto: true })],
     fields: [
       fk('listing_id', 'Listing', 'listings', { required: true }),
@@ -267,8 +267,12 @@ export const ENTITIES = [
       dec('aud_pre_2009_cessation_discount', 'Statement AUD: pre-2009 cessation (G)', { optional: true, default: '' }),
       dec('aud_foreign_source_discount', 'Statement AUD: foreign-source (A)', { optional: true, default: '' }),
     ],
-    columns: ['id', 'listing_id', 'holding_account_id', 'taxing_point_date', 'quantity', 'market_value_per_share', 'deferral_discount', 'taxed_upfront_eligible', 'currency'],
-    rowActions: function (row) { return [{ label: 'Vest', href: '#/ess-vest/' + row.id }]; },
+    columns: ['id', 'listing_id', 'holding_account_id', 'taxing_point_date', 'quantity', 'market_value_per_share', 'deferral_discount', 'taxed_upfront_eligible', 'currency', 'vest_trade_id'],
+    // Vest only while unvested — a second vest is rejected by the API (422),
+    // so a vested row (vest_trade_id set) shows the linked Buy instead.
+    rowActions: function (row) {
+      return row.vest_trade_id == null ? [{ label: 'Vest', href: '#/ess-vest/' + row.id }] : [];
+    },
     attachOwner: 'ess_statement_id',
   },
   {

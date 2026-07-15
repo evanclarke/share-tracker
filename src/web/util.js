@@ -237,7 +237,7 @@ const FK_COLUMN_SOURCES = {
   holding_account_id: 'holdingAccounts', account_id: 'holdingAccounts',
   from_account_id: 'holdingAccounts', to_account_id: 'holdingAccounts',
   trade_id: 'trades', sale_trade_id: 'trades', purchase_trade_id: 'trades',
-  reinvestment_trade_id: 'trades',
+  reinvestment_trade_id: 'trades', vest_trade_id: 'trades',
   amma_statement_id: 'amma',
 };
 

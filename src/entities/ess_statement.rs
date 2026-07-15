@@ -76,6 +76,12 @@ pub struct EssStatement {
     pub aud_deferral_discount: Option<Decimal>,
     pub aud_pre_2009_cessation_discount: Option<Decimal>,
     pub aud_foreign_source_discount: Option<Decimal>,
+    /// Read-only: the id of the statement's vest Buy (the trade whose
+    /// `ess_statement_id` links back here), `None` while unvested. Derived on
+    /// read — not a stored column, ignored on write — so the web UI can offer
+    /// the Vest action only on unvested rows.
+    #[serde(default)]
+    pub vest_trade_id: Option<i64>,
 }
 
 impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for EssStatement {
@@ -99,6 +105,7 @@ impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for EssStatement {
             aud_deferral_discount: row_opt_dec(row, "aud_deferral_discount")?,
             aud_pre_2009_cessation_discount: row_opt_dec(row, "aud_pre_2009_cessation_discount")?,
             aud_foreign_source_discount: row_opt_dec(row, "aud_foreign_source_discount")?,
+            vest_trade_id: row.try_get("vest_trade_id")?,
         })
     }
 }
@@ -150,11 +157,15 @@ pub fn router() -> Router<SqlitePool> {
     )
 }
 
-const COLUMNS: &str = "id, listing_id, holding_account_id, taxing_point_date, quantity, \
+/// The SELECT list `EssStatement::from_row` maps — includes the derived
+/// `vest_trade_id` back-link, so any query producing an `EssStatement` must
+/// select this, never `*`.
+pub(crate) const COLUMNS: &str = "id, listing_id, holding_account_id, taxing_point_date, quantity, \
      market_value_per_share, taxed_upfront_eligible, taxed_upfront_not_eligible, \
      deferral_discount, pre_2009_cessation_discount, foreign_source_discount, \
      tfn_withholding, currency, aud_taxed_upfront_eligible, aud_taxed_upfront_not_eligible, \
-     aud_deferral_discount, aud_pre_2009_cessation_discount, aud_foreign_source_discount";
+     aud_deferral_discount, aud_pre_2009_cessation_discount, aud_foreign_source_discount, \
+     (SELECT id FROM trades WHERE trades.ess_statement_id = ess_statements.id) AS vest_trade_id";
 
 pub async fn db_list(pool: &SqlitePool) -> Result<Vec<EssStatement>, sqlx::Error> {
     sqlx::query_as(sqlx::AssertSqlSafe(format!(
@@ -394,6 +405,7 @@ async fn upsert(
         aud_deferral_discount: body.aud_deferral_discount,
         aud_pre_2009_cessation_discount: body.aud_pre_2009_cessation_discount,
         aud_foreign_source_discount: body.aud_foreign_source_discount,
+        vest_trade_id: None, // derived on read; never written
     };
     db_upsert(&pool, &s).await?;
     Ok(StatusCode::NO_CONTENT)
@@ -515,6 +527,40 @@ mod tests {
             Err(UpsertError::AudOverrideOnAudStatement)
         ));
         assert!(db_get(&pool, 1).await.unwrap().is_none());
+    }
+
+    /// `vest_trade_id` is derived from the vest Buy's back-link: `None` while
+    /// unvested, the Buy's id once vested — so the UI can gate the Vest action.
+    #[tokio::test]
+    async fn vest_trade_id_reflects_the_vest_buy() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        db_upsert(&pool, &sample(1)).await.unwrap();
+        assert_eq!(db_get(&pool, 1).await.unwrap().unwrap().vest_trade_id, None);
+
+        let vest = crate::entities::ess_vest::db_vest(&pool, 1).await.unwrap();
+        assert_eq!(
+            db_get(&pool, 1).await.unwrap().unwrap().vest_trade_id,
+            Some(vest.id)
+        );
+        let listed = db_list(&pool).await.unwrap();
+        assert_eq!(listed[0].vest_trade_id, Some(vest.id));
+
+        // The field is present in the JSON the list endpoint serves (the UI
+        // reads it straight off the row).
+        let resp = router()
+            .with_state(pool)
+            .oneshot(
+                Request::builder()
+                    .uri("/ess_statements")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let items: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(items[0]["vest_trade_id"], serde_json::json!(vest.id));
     }
 
     #[tokio::test]

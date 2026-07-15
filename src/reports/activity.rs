@@ -149,11 +149,13 @@ pub async fn db_activity(
             .bind(listing_id)
             .fetch_all(&mut *tx)
             .await?;
-    let esses: Vec<EssStatement> =
-        sqlx::query_as("SELECT * FROM ess_statements WHERE listing_id = ?")
-            .bind(listing_id)
-            .fetch_all(&mut *tx)
-            .await?;
+    let esses: Vec<EssStatement> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT {} FROM ess_statements WHERE listing_id = ?",
+        crate::entities::ess_statement::COLUMNS
+    )))
+    .bind(listing_id)
+    .fetch_all(&mut *tx)
+    .await?;
     let enrolments: Vec<DrpEnrolment> =
         sqlx::query_as("SELECT * FROM drp_enrolments WHERE listing_id = ?")
             .bind(listing_id)

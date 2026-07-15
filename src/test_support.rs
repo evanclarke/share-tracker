@@ -385,6 +385,7 @@ pub fn ess_statement(id: i64, listing_id: i64, taxing_point: NaiveDate) -> EssSt
             aud_deferral_discount: None,
             aud_pre_2009_cessation_discount: None,
             aud_foreign_source_discount: None,
+            vest_trade_id: None,
         },
     }
 }

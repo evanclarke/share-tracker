@@ -634,6 +634,10 @@ mod tests {
         // statement row and posts to the vest endpoint.
         assert!(js.contains("#/ess-vest/"));
         assert!(js.contains("/ess_statements/' + id + '/vest"));
+        // …but only while unvested: a vested row (vest_trade_id set) offers no
+        // Vest action, and the vest_trade_id column names the linked Buy.
+        assert!(js.contains("row.vest_trade_id == null"));
+        assert!(js.contains("vest_trade_id: 'trades'"));
         // The new tax-summary ESS columns are classified as money so they format.
         assert!(js.contains("ess_discount_assessable"));
     }
