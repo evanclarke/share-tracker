@@ -194,6 +194,7 @@ export const ENTITIES = [
       fk('holding_account_id', 'Holding account', 'holdingAccounts', { optional: true, default: '', hint: 'Optional — leave blank for interest from outside the portfolio’s accounts (an ordinary bank account).' }),
     ],
     columns: ['id', 'date_paid', 'amount', 'tfn_withholding_tax', 'foreign_source', 'foreign_tax_paid', 'currency', 'source', 'holding_account_id'],
+    attachOwner: 'interest_income_id',
   },
   {
     slug: 'investment_expenses', title: 'Investment Expenses', group: 'Activity', api: '/investment_expenses',
@@ -268,6 +269,7 @@ export const ENTITIES = [
     ],
     columns: ['id', 'listing_id', 'holding_account_id', 'taxing_point_date', 'quantity', 'market_value_per_share', 'deferral_discount', 'taxed_upfront_eligible', 'currency'],
     rowActions: function (row) { return [{ label: 'Vest', href: '#/ess-vest/' + row.id }]; },
+    attachOwner: 'ess_statement_id',
   },
   {
     slug: 'amit_adjustments', title: 'AMIT Adjustments', group: 'Activity', api: '/amit_adjustments',

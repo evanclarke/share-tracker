@@ -875,10 +875,26 @@ mod tests {
     async fn attachments_ui_present() {
         let js = app_js_body().await;
         // The attachments view lists/uploads/downloads via the /attachments API,
-        // reached from the Trade/Income/AMMA row "Attachments" action.
+        // reached from the Trade/Income/AMMA/ESS-statement/Interest-income row
+        // "Attachments" action.
         assert!(js.contains("viewAttachments"));
         assert!(js.contains("/attachments"));
         assert!(js.contains("attachOwner"));
+        // Every attachable owner is wired: the entity config carries its owner
+        // field and the view can name the owning row.
+        for owner in [
+            "'trade_id'",
+            "'income_id'",
+            "'amma_statement_id'",
+            "'ess_statement_id'",
+            "'interest_income_id'",
+        ] {
+            assert!(js.contains(&format!("attachOwner: {owner}")), "{owner}");
+        }
+        assert!(js.contains("ess_statement_id: { noun: 'ESS statement'"));
+        assert!(js.contains("interest_income_id: { noun: 'interest income'"));
+        // Plain-text records are attachable; the file picker offers .txt.
+        assert!(js.contains(".pdf,.png,.jpg,.jpeg,.txt"));
         // The checksum is stored integrity metadata, not a user-facing column.
         assert!(!js.contains("'checksum'"));
     }

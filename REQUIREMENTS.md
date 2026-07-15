@@ -1021,3 +1021,16 @@ its abbreviated SHA), followed by a full-changelog compare link. The first relea
 tag — lists every commit. GitHub's `--generate-notes` is built from merged pull requests, which a
 commit-directly-to-main solo workflow doesn't have, so the notes must come from the commits
 themselves.
+
+## Attachment coverage: more owners, plain-text files (2026-07-15)
+
+The document archive holds records the attachments feature could not yet store against their
+entries (found while attaching the archive to the recorded activity):
+
+- Plain-text records (crypto exchange trade records, registry DRP advices, an early plain-text
+  ESS statement) are valid supporting documents — `.txt` uploads (`text/plain`) join the accepted
+  attachment content types
+- An annual employee share scheme statement documents an `ess_statements` row, and a broker
+  statement whose only activity is cash interest documents an `interest_income` row — both entity
+  types accept attachments exactly like trades, income, and AMMA statements (upload, list,
+  download, delete, cascade on owner delete, audit trail, web UI Attachments action)

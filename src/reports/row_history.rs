@@ -579,6 +579,25 @@ mod tests {
             "one UPDATE + one DELETE trigger per audited table, plus the two \
              append-only guards on row_history itself — nothing extra, nothing missing"
         );
+
+        // 0014 rebuilt the attachments table (new owner columns + text/plain),
+        // which dropped its trigger pair with the old table — the *live*
+        // attachments triggers come from 0014 and must carry the expanded
+        // column list.
+        let sql14 = include_str!("../../migrations/0014_attachment_owner_expansion.sql");
+        for op in ["update", "delete"] {
+            assert!(
+                sql14.contains(&format!("CREATE TRIGGER attachments_row_history_{op}")),
+                "0014 must re-create the attachments {op} trigger"
+            );
+        }
+        for col in ["ess_statement_id", "interest_income_id"] {
+            assert_eq!(
+                sql14.matches(&format!("'{col}', OLD.{col}")).count(),
+                2,
+                "both re-created attachments triggers must record {col}"
+            );
+        }
     }
 
     /// The migration is purely additive: it creates the trail and its

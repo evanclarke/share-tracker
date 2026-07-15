@@ -844,15 +844,19 @@ async function viewAction(action, id) {
 }
 
 // ---- document attachments ---------------------------------------------
-// Reached from a Trade / Income / AMMA row's "Attachments" action. Lists the
-// activity's attachments (metadata only — never the blob), uploads a new file
-// via multipart/form-data (POST /attachments), and links each row to its
-// download (GET /attachments/:id/content). The owner field name (trade_id /
-// income_id / amma_statement_id) is carried in the route.
+// Reached from a Trade / Income / AMMA / ESS statement / Interest income
+// row's "Attachments" action. Lists the activity's attachments (metadata only
+// — never the blob), uploads a new file via multipart/form-data
+// (POST /attachments), and links each row to its download
+// (GET /attachments/:id/content). The owner field name (trade_id / income_id /
+// amma_statement_id / ess_statement_id / interest_income_id) is carried in
+// the route.
 const ATTACH_OWNER = {
   trade_id: { noun: 'trade', api: '/trades', name: function (o, listing) { return describeTrade(o, listing); } },
   income_id: { noun: 'distribution', api: '/income', name: function (o, listing) { return listing(o.listing_id) + ' on ' + o.date_paid; } },
   amma_statement_id: { noun: 'AMMA statement', api: '/amma_statements', name: function (o, listing) { return listing(o.listing_id) + ' FY' + o.tax_year_end_date; } },
+  ess_statement_id: { noun: 'ESS statement', api: '/ess_statements', name: function (o, listing) { return listing(o.listing_id) + ' taxing point ' + o.taxing_point_date; } },
+  interest_income_id: { noun: 'interest income', api: '/interest_income', name: function (o) { return (o.source ? o.source + ' ' : '') + 'on ' + o.date_paid; } },
 };
 
 async function viewAttachments(ownerField, ownerId) {
@@ -897,11 +901,12 @@ async function viewAttachments(ownerField, ownerId) {
 
   // Upload form: a single file input posted as multipart/form-data. The
   // browser sets the multipart boundary and the part's Content-Type; the
-  // server validates it against the allowlist (pdf/png/jpeg) and the 25 MB cap.
-  const fileInput = el('input', { type: 'file', name: 'file', required: true, accept: '.pdf,.png,.jpg,.jpeg' });
+  // server validates it against the allowlist (pdf/png/jpeg/txt) and the
+  // 25 MB cap.
+  const fileInput = el('input', { type: 'file', name: 'file', required: true, accept: '.pdf,.png,.jpg,.jpeg,.txt' });
   const uploadForm = el('form', { class: 'card' }, [
     el('div', { class: 'field' }, [el('label', null, 'Add a file'), fileInput]),
-    el('p', { class: 'hint' }, 'Accepted: PDF, PNG, JPEG. Max 25 MB. Stored in the database.'),
+    el('p', { class: 'hint' }, 'Accepted: PDF, PNG, JPEG, TXT. Max 25 MB. Stored in the database.'),
     el('div', { class: 'form-actions' }, [el('button', { type: 'submit', class: 'primary' }, 'Upload')]),
   ]);
   uploadForm.addEventListener('submit', async function (ev) {

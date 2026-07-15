@@ -1,16 +1,19 @@
-//! Document attachments for an activity (Trade, Income, or AMMA Statement).
+//! Document attachments for an activity (Trade, Income, AMMA Statement, ESS
+//! Statement, or Interest Income record).
 //!
 //! A user attaches a supporting file — a trade confirmation / contract note PDF,
-//! a dividend statement, an AMMA statement scan — to exactly one activity. The
-//! bytes are stored in the database as a BLOB (the `content` column) so the
-//! existing weekly DB backup captures the documents too; there is no separate
-//! file store to back up.
+//! a dividend statement, an AMMA statement scan, an annual ESS statement, a
+//! plain-text exchange record — to exactly one activity. The bytes are stored in
+//! the database as a BLOB (the `content` column) so the existing weekly DB
+//! backup captures the documents too; there is no separate file store to back
+//! up.
 //!
-//! Ownership is three nullable FK columns (`trade_id` / `income_id` /
-//! `amma_statement_id`) with a DB CHECK that exactly one is set, rather than a
-//! polymorphic `type` + `id` pair — that way referential integrity to the owning
-//! activity is enforced by a real foreign key, and `ON DELETE CASCADE` removes an
-//! activity's attachments when it is deleted (no orphaned blobs).
+//! Ownership is five nullable FK columns (`trade_id` / `income_id` /
+//! `amma_statement_id` / `ess_statement_id` / `interest_income_id`) with a DB
+//! CHECK that exactly one is set, rather than a polymorphic `type` + `id` pair —
+//! that way referential integrity to the owning activity is enforced by a real
+//! foreign key, and `ON DELETE CASCADE` removes an activity's attachments when
+//! it is deleted (no orphaned blobs).
 //!
 //! The payload is binary, so this module does not follow the JSON-CRUD
 //! convention used by the other entities:
@@ -56,6 +59,9 @@ pub enum ContentType {
     #[sqlx(rename = "image/jpeg")]
     #[serde(rename = "image/jpeg")]
     Jpeg,
+    #[sqlx(rename = "text/plain")]
+    #[serde(rename = "text/plain")]
+    Txt,
 }
 
 impl ContentType {
@@ -66,6 +72,7 @@ impl ContentType {
             "application/pdf" => Some(ContentType::Pdf),
             "image/png" => Some(ContentType::Png),
             "image/jpeg" => Some(ContentType::Jpeg),
+            "text/plain" => Some(ContentType::Txt),
             _ => None,
         }
     }
@@ -76,6 +83,7 @@ impl ContentType {
             ContentType::Pdf => "application/pdf",
             ContentType::Png => "image/png",
             ContentType::Jpeg => "image/jpeg",
+            ContentType::Txt => "text/plain",
         }
     }
 }
@@ -88,6 +96,8 @@ pub struct Attachment {
     pub trade_id: Option<i64>,
     pub income_id: Option<i64>,
     pub amma_statement_id: Option<i64>,
+    pub ess_statement_id: Option<i64>,
+    pub interest_income_id: Option<i64>,
     pub filename: String,
     pub content_type: ContentType,
     pub byte_size: i64,
@@ -100,6 +110,8 @@ pub struct NewAttachment<'a> {
     pub trade_id: Option<i64>,
     pub income_id: Option<i64>,
     pub amma_statement_id: Option<i64>,
+    pub ess_statement_id: Option<i64>,
+    pub interest_income_id: Option<i64>,
     pub filename: String,
     pub content_type: ContentType,
     pub checksum: String,
@@ -107,15 +119,18 @@ pub struct NewAttachment<'a> {
     pub content: &'a [u8],
 }
 
-/// Owner filter for the list endpoint (`?trade_id=`/`?income_id=`/`?amma_statement_id=`).
+/// Owner filter for the list endpoint (`?trade_id=`/`?income_id=`/
+/// `?amma_statement_id=`/`?ess_statement_id=`/`?interest_income_id=`).
 #[derive(Debug, Default, Deserialize)]
 pub struct ListQuery {
     pub trade_id: Option<i64>,
     pub income_id: Option<i64>,
     pub amma_statement_id: Option<i64>,
+    pub ess_statement_id: Option<i64>,
+    pub interest_income_id: Option<i64>,
 }
 
-const METADATA_COLS: &str = "id, trade_id, income_id, amma_statement_id, filename, content_type, byte_size, checksum, uploaded_at";
+const METADATA_COLS: &str = "id, trade_id, income_id, amma_statement_id, ess_statement_id, interest_income_id, filename, content_type, byte_size, checksum, uploaded_at";
 
 pub fn router() -> Router<SqlitePool> {
     Router::new()
@@ -145,6 +160,8 @@ pub async fn db_list(pool: &SqlitePool, q: &ListQuery) -> Result<Vec<Attachment>
         ("trade_id", q.trade_id),
         ("income_id", q.income_id),
         ("amma_statement_id", q.amma_statement_id),
+        ("ess_statement_id", q.ess_statement_id),
+        ("interest_income_id", q.interest_income_id),
     ]
     .into_iter()
     .filter_map(|(col, val)| val.map(|v| (col, v)))
@@ -183,12 +200,14 @@ pub async fn db_get_content(
 pub async fn db_insert(pool: &SqlitePool, att: &NewAttachment<'_>) -> Result<i64, sqlx::Error> {
     let row: (i64,) = sqlx::query_as(
         "INSERT INTO attachments \
-         (trade_id, income_id, amma_statement_id, filename, content_type, byte_size, checksum, uploaded_at, content) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
+         (trade_id, income_id, amma_statement_id, ess_statement_id, interest_income_id, filename, content_type, byte_size, checksum, uploaded_at, content) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
     )
     .bind(att.trade_id)
     .bind(att.income_id)
     .bind(att.amma_statement_id)
+    .bind(att.ess_statement_id)
+    .bind(att.interest_income_id)
     .bind(&att.filename)
     .bind(att.content_type)
     .bind(att.content.len() as i64)
@@ -234,6 +253,8 @@ async fn upload(
     let mut trade_id: Option<i64> = None;
     let mut income_id: Option<i64> = None;
     let mut amma_statement_id: Option<i64> = None;
+    let mut ess_statement_id: Option<i64> = None;
+    let mut interest_income_id: Option<i64> = None;
     let mut file: Option<(String, ContentType, Vec<u8>)> = None;
 
     while let Some(field) = multipart
@@ -247,6 +268,8 @@ async fn upload(
             Some("trade_id") => trade_id = read_owner_field(field).await?,
             Some("income_id") => income_id = read_owner_field(field).await?,
             Some("amma_statement_id") => amma_statement_id = read_owner_field(field).await?,
+            Some("ess_statement_id") => ess_statement_id = read_owner_field(field).await?,
+            Some("interest_income_id") => interest_income_id = read_owner_field(field).await?,
             Some("file") => {
                 let filename = field.file_name().unwrap_or("attachment").to_string();
                 let declared = field.content_type().map(str::to_string);
@@ -272,11 +295,14 @@ async fn upload(
     }
 
     // Exactly one owner must be set.
-    let owners =
-        trade_id.is_some() as u8 + income_id.is_some() as u8 + amma_statement_id.is_some() as u8;
+    let owners = trade_id.is_some() as u8
+        + income_id.is_some() as u8
+        + amma_statement_id.is_some() as u8
+        + ess_statement_id.is_some() as u8
+        + interest_income_id.is_some() as u8;
     if owners != 1 {
         return Err(ApiError::unprocessable(
-            "attach to exactly one of a trade, income, or AMMA statement",
+            "attach to exactly one of a trade, income record, AMMA statement, ESS statement, or interest income record",
         ));
     }
 
@@ -292,6 +318,8 @@ async fn upload(
         trade_id,
         income_id,
         amma_statement_id,
+        ess_statement_id,
+        interest_income_id,
         filename,
         content_type,
         checksum: checksum_hex(&content),
@@ -404,6 +432,27 @@ mod tests {
         id
     }
 
+    async fn insert_ess_statement(pool: &SqlitePool) -> i64 {
+        insert_listing(pool).await;
+        let (id,): (i64,) = sqlx::query_as(
+            "INSERT INTO ess_statements (listing_id, taxing_point_date) VALUES (1, '2024-02-01') RETURNING id",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        id
+    }
+
+    async fn insert_interest_income(pool: &SqlitePool) -> i64 {
+        let (id,): (i64,) = sqlx::query_as(
+            "INSERT INTO interest_income (date_paid, amount) VALUES ('2024-03-01', '10') RETURNING id",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        id
+    }
+
     fn push_field(body: &mut Vec<u8>, name: &str, value: &str) {
         body.extend_from_slice(
             format!("--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n")
@@ -457,6 +506,8 @@ mod tests {
                 trade_id: Some(trade_id),
                 income_id: None,
                 amma_statement_id: None,
+                ess_statement_id: None,
+                interest_income_id: None,
                 filename: "conf.pdf".to_string(),
                 content_type: ContentType::Pdf,
                 checksum: checksum_hex(content),
@@ -534,11 +585,137 @@ mod tests {
         let trade_id = insert_trade(&pool).await;
         let mut body = Vec::new();
         push_field(&mut body, "trade_id", &trade_id.to_string());
-        push_file(&mut body, "notes.txt", "text/plain", b"hello");
+        push_file(&mut body, "export.zip", "application/zip", b"PK");
         finish(&mut body);
 
         let resp = post_multipart(pool, body).await;
         assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn api_upload_accepts_text_plain() {
+        let pool = test_pool().await;
+        let trade_id = insert_trade(&pool).await;
+        let content = b"BTC buy 0.0151848 on 2021-10-03";
+        let mut body = Vec::new();
+        push_field(&mut body, "trade_id", &trade_id.to_string());
+        // A charset parameter (as browsers send for .txt files) must not defeat
+        // the allowlist match.
+        push_file(
+            &mut body,
+            "record.txt",
+            "text/plain; charset=utf-8",
+            content,
+        );
+        finish(&mut body);
+
+        let resp = post_multipart(pool.clone(), body).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let meta: Attachment = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(meta.content_type, ContentType::Txt);
+
+        // Downloads carry the stored text/plain content type.
+        let dl = router()
+            .with_state(pool)
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/attachments/{}/content", meta.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            dl.headers().get(header::CONTENT_TYPE).unwrap(),
+            "text/plain"
+        );
+        let dl_bytes = dl.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&dl_bytes[..], content);
+    }
+
+    #[tokio::test]
+    async fn api_upload_to_ess_statement_and_interest_income_owners() {
+        let pool = test_pool().await;
+        let ess_id = insert_ess_statement(&pool).await;
+        let interest_id = insert_interest_income(&pool).await;
+
+        for (field, id, name) in [
+            ("ess_statement_id", ess_id, "ess.pdf"),
+            ("interest_income_id", interest_id, "interest.pdf"),
+        ] {
+            let mut body = Vec::new();
+            push_field(&mut body, field, &id.to_string());
+            push_file(&mut body, name, "application/pdf", b"%PDF");
+            finish(&mut body);
+            let resp = post_multipart(pool.clone(), body).await;
+            assert_eq!(resp.status(), StatusCode::CREATED, "{field} upload");
+        }
+
+        // Each owner filter returns exactly its own attachment.
+        for (query, expected) in [
+            (format!("ess_statement_id={ess_id}"), "ess.pdf"),
+            (format!("interest_income_id={interest_id}"), "interest.pdf"),
+        ] {
+            let resp = router()
+                .with_state(pool.clone())
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/attachments?{query}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+            let items: Vec<Attachment> = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(items.len(), 1, "?{query}");
+            assert_eq!(items[0].filename, expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn deleting_new_owner_rows_cascades_to_attachments() {
+        let pool = test_pool().await;
+        let ess_id = insert_ess_statement(&pool).await;
+        let interest_id = insert_interest_income(&pool).await;
+        for (e, i) in [(Some(ess_id), None), (None, Some(interest_id))] {
+            db_insert(
+                &pool,
+                &NewAttachment {
+                    trade_id: None,
+                    income_id: None,
+                    amma_statement_id: None,
+                    ess_statement_id: e,
+                    interest_income_id: i,
+                    filename: "x.pdf".to_string(),
+                    content_type: ContentType::Pdf,
+                    checksum: checksum_hex(b"x"),
+                    uploaded_at: "2024-01-01T00:00:00Z".to_string(),
+                    content: b"x",
+                },
+            )
+            .await
+            .unwrap();
+        }
+
+        sqlx::query("DELETE FROM ess_statements WHERE id = ?")
+            .bind(ess_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM interest_income WHERE id = ?")
+            .bind(interest_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let remaining = db_list(&pool, &ListQuery::default()).await.unwrap();
+        assert!(
+            remaining.is_empty(),
+            "ON DELETE CASCADE should remove both attachments"
+        );
     }
 
     #[tokio::test]
@@ -609,6 +786,8 @@ mod tests {
                     trade_id: t,
                     income_id: i,
                     amma_statement_id: None,
+                    ess_statement_id: None,
+                    interest_income_id: None,
                     filename: name.to_string(),
                     content_type: ContentType::Pdf,
                     checksum: checksum_hex(b"x"),
@@ -654,6 +833,8 @@ mod tests {
                 trade_id: Some(trade_id),
                 income_id: None,
                 amma_statement_id: None,
+                ess_statement_id: None,
+                interest_income_id: None,
                 filename: "x.pdf".to_string(),
                 content_type: ContentType::Pdf,
                 checksum: checksum_hex(b"x"),
@@ -702,6 +883,8 @@ mod tests {
                 trade_id: Some(trade_id),
                 income_id: None,
                 amma_statement_id: None,
+                ess_statement_id: None,
+                interest_income_id: None,
                 filename: "x.pdf".to_string(),
                 content_type: ContentType::Pdf,
                 checksum: checksum_hex(b"x"),
@@ -771,7 +954,7 @@ mod tests {
         let trade_id = insert_trade(&pool).await;
         let err = sqlx::query(
             "INSERT INTO attachments (trade_id, filename, content_type, byte_size, checksum, uploaded_at, content) \
-             VALUES (?, 'x.txt', 'text/plain', 1, 'abc', '2024-01-01T00:00:00Z', X'00')",
+             VALUES (?, 'x.zip', 'application/zip', 1, 'abc', '2024-01-01T00:00:00Z', X'00')",
         )
         .bind(trade_id)
         .execute(&pool)
