@@ -1375,3 +1375,27 @@ entity types (ESS statements, interest income) had no attachment path.
 - [x] ESS statements and interest income records own attachments like trades/income/AMMA statements: two new nullable FK owner columns (`ess_statement_id`, `interest_income_id`, ON DELETE CASCADE) in the exactly-one-owner CHECK, `POST /attachments` owner fields, `?ess_statement_id=`/`?interest_income_id=` list filters, and the web UI Attachments action on both entity screens (`attachOwner` config + `ATTACH_OWNER` naming map) — tests `attachment::tests::api_upload_to_ess_statement_and_interest_income_owners`, `deleting_new_owner_rows_cascades_to_attachments`, `web::tests::attachments_ui_present` (pins all five owner wirings + the `.txt` file-picker accept)
 - [x] Migration `0014_attachment_owner_expansion.sql` rebuilds the table via the rename pattern (both rules live in table-level CHECKs SQLite can't ALTER; ids and rows copied verbatim — verified against a copy of the live DB) and re-creates the two `attachments_row_history_*` triggers with the expanded column list per the audited-table rule — pinned by `row_history::tests::audited_tables_match_migration_check_and_triggers` (extended to assert 0014 re-creates both triggers recording the new columns)
 - [x] Docs: API.md Attachments section (five owners, `text/plain` in the allowlist, web-frontend Attachments-action list) and SCHEMA.md (attachments columns + CHECK, Relationships line, five-FK prose) updated in the same change
+
+## DRP trades show the funding distribution's attachments (REQUIREMENTS 2026-07-15)
+Every DRP statement in the archive is attached to the income row it was entered from (the Reinvest
+action creates the DRP trade *from* that row, and the one advice documents both the distribution
+and the reinvestment), so a DRP trade's own Attachments view is always empty today — the paperwork
+exists but is not discoverable from the trade.
+- [x] A DRP trade's Attachments view also lists the linked income row's attachments (traversing `reinvestment_trade_id`), clearly labelled as the income row's documents: download works from there, upload from the trade's view still attaches to the trade, delete stays on the owning record's view. Attachments stay single-owner — a read-time traversal (web UI or a list-endpoint option, design-open), no data-model change
+- [x] The same rule for the other provenance-created trades whose source record owns attachments (an ESS vest Buy shows its `ess_statements` row's attachments; a buy-back Sell its income row's) — enumerate the provenance links at implementation time
+- [x] Docs: `docs/API.md` if the list endpoint gains the linked-owner option; the Attachments feature text mentions linked documents
+
+Implemented as a list-endpoint option (the design-open choice): `GET /attachments?trade_id=…&include_linked=true`
+(`attachment::db_list_with_linked`) also returns the linked source record's attachments — the enumerated
+provenance links are `income.reinvestment_trade_id` (DRP funding distribution), `income.buyback_trade_id`
+(buy-back participation Sell's dividend row), and `trades.ess_statement_id` (ESS vest Buy's annual statement);
+the other provenance-created trades trace to records that cannot own attachments. Ownership unchanged (rows
+carry their true owner's FK); `include_linked` without a lone `trade_id` filter → 422. The web UI's trade
+Attachments view passes the flag, labels linked rows ("distribution #N (linked)" via an attached-to column
+shown only when a linked row exists), and offers an "Owner's attachments" link instead of Delete on linked
+rows. Tests: `entities::attachment::tests::api_list_include_linked_returns_drp_funding_income_attachments` /
+`…_buyback_income_attachments` / `…_ess_statement_attachments` / `…_requires_a_lone_trade_filter`,
+`web::tests::attachments_trade_view_lists_linked_source_documents`, and
+`doc_checks::linked_attachments_documented` (API.md documents the option, all three links, and the feature text).
+Verified end-to-end: real reinvest flow on a scratch DB, advice uploaded to the income row, shown labelled on
+the DRP trade's UI view with download working and no Delete; the income row's own view unchanged.

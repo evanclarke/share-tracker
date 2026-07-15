@@ -860,7 +860,15 @@ const ATTACH_OWNER = {
 };
 
 async function viewAttachments(ownerField, ownerId) {
-  const rows = await api('GET', '/attachments?' + ownerField + '=' + encodeURIComponent(ownerId));
+  // A trade's view also lists the documents of the record the trade was
+  // created from (a DRP trade's funding distribution, a buy-back Sell's
+  // dividend income row, an ESS vest Buy's annual statement): the server
+  // traverses the provenance link when include_linked is set. Ownership is
+  // unchanged — a linked row is labelled with its owning record, downloads
+  // from here, and is deleted from that record's own Attachments view.
+  const isTrade = ownerField === 'trade_id';
+  const rows = await api('GET', '/attachments?' + ownerField + '=' + encodeURIComponent(ownerId)
+    + (isTrade ? '&include_linked=true' : ''));
   // Name the owning activity (e.g. "DRP 45 XASX:VDHG on 2024-12-20"), not a
   // bare "trade #5"; the id stays as secondary detail.
   const ownerSpec = ATTACH_OWNER[ownerField];
@@ -871,8 +879,29 @@ async function viewAttachments(ownerField, ownerId) {
       ownerName = ownerSpec.noun + ' ' + ownerSpec.name(owner, await listingNamer()) + ' (#' + ownerId + ')';
     } catch (e) { /* fall back to the noun + id wording */ }
   }
-  // checksum is stored integrity metadata, not user-facing — not a column here.
-  const cols = ['id', 'filename', 'content_type', 'byte_size', 'uploaded_at'];
+
+  // On a trade's view, a row whose trade_id is null is a linked document —
+  // find which owner field carries it.
+  function linkedOwner(row) {
+    if (!isTrade || row.trade_id !== null) return null;
+    for (const field in ATTACH_OWNER) {
+      if (field !== 'trade_id' && row[field] !== null && row[field] !== undefined) {
+        return { field: field, id: row[field] };
+      }
+    }
+    return null;
+  }
+  const anyLinked = rows.some(function (r) { return linkedOwner(r) !== null; });
+  rows.forEach(function (r) {
+    const link = linkedOwner(r);
+    r.attached_to = link ? ATTACH_OWNER[link.field].noun + ' #' + link.id + ' (linked)' : 'this trade';
+  });
+
+  // checksum is stored integrity metadata, not user-facing — not a column
+  // here. The attached-to column appears only when a linked document is
+  // present, so the plain single-owner view stays uncluttered.
+  const cols = ['id', 'filename', 'content_type', 'byte_size', 'uploaded_at']
+    .concat(anyLinked ? ['attached_to'] : []);
 
   const container = el('div');
   function refresh() { viewAttachments(ownerField, ownerId); }
@@ -883,18 +912,26 @@ async function viewAttachments(ownerField, ownerId) {
   } else {
     table = filterableTable(rows, cols, {
       actions: function (row) {
-        return el('td', { class: 'actions' }, [
+        const link = linkedOwner(row);
+        const actions = [
           el('a', { href: '/attachments/' + row.id + '/content', target: '_blank' },
             el('button', { class: 'link small' }, 'Download')),
-          el('button', {
+        ];
+        if (link) {
+          // Delete stays on the owning record's view — link to it instead.
+          actions.push(el('a', { href: '#/attachments/' + link.field + '/' + link.id },
+            el('button', { class: 'link small' }, "Owner's attachments")));
+        } else {
+          actions.push(el('button', {
             class: 'link small danger',
             onclick: async function () {
               if (!confirm('Delete this attachment?')) return;
               try { await api('DELETE', '/attachments/' + row.id); toast('Deleted.'); refresh(); }
               catch (e) { toast(e.message, true); }
             },
-          }, 'Delete'),
-        ]);
+          }, 'Delete'));
+        }
+        return el('td', { class: 'actions' }, actions);
       },
     });
   }
@@ -931,7 +968,8 @@ async function viewAttachments(ownerField, ownerId) {
 
   container.appendChild(el('h2', null, 'Attachments'));
   container.appendChild(el('p', { class: 'view-desc' },
-    'Files attached to ' + ownerName + '. Stored in the database.'));
+    'Files attached to ' + ownerName + '. Stored in the database.'
+    + (anyLinked ? ' Rows marked (linked) belong to the record this trade was created from; uploads here attach to the trade, and a linked document is deleted from its own record\'s view.' : '')));
   container.appendChild(uploadForm);
   container.appendChild(table);
   setMain(container);

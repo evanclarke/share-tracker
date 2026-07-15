@@ -20,7 +20,10 @@
 //! - `POST /attachments` takes `multipart/form-data` (the file plus the target
 //!   owner field) and returns `201` with the stored metadata.
 //! - `GET /attachments` and `GET /attachments/{id}` return metadata only (never
-//!   the blob); the list filters by owner (`?trade_id=` etc.).
+//!   the blob); the list filters by owner (`?trade_id=` etc.). A trade filter
+//!   can add `include_linked=true` to also return the attachments of the
+//!   record the trade was created from (see [`db_list_with_linked`]) —
+//!   ownership is unchanged, the traversal is read-time only.
 //! - `GET /attachments/{id}/content` streams the raw bytes with the stored
 //!   content type and a download filename.
 //! - `DELETE /attachments/{id}` removes one attachment.
@@ -121,6 +124,9 @@ pub struct NewAttachment<'a> {
 
 /// Owner filter for the list endpoint (`?trade_id=`/`?income_id=`/
 /// `?amma_statement_id=`/`?ess_statement_id=`/`?interest_income_id=`).
+/// `include_linked=true` (valid only with a lone `trade_id` filter) also
+/// returns the linked source record's attachments — see
+/// [`db_list_with_linked`].
 #[derive(Debug, Default, Deserialize)]
 pub struct ListQuery {
     pub trade_id: Option<i64>,
@@ -128,6 +134,7 @@ pub struct ListQuery {
     pub amma_statement_id: Option<i64>,
     pub ess_statement_id: Option<i64>,
     pub interest_income_id: Option<i64>,
+    pub include_linked: Option<bool>,
 }
 
 const METADATA_COLS: &str = "id, trade_id, income_id, amma_statement_id, ess_statement_id, interest_income_id, filename, content_type, byte_size, checksum, uploaded_at";
@@ -175,6 +182,36 @@ pub async fn db_list(pool: &SqlitePool, q: &ListQuery) -> Result<Vec<Attachment>
     }
     qb.push(" ORDER BY id");
     qb.build_query_as::<Attachment>().fetch_all(pool).await
+}
+
+/// A trade's own attachments plus the attachments of the record the trade was
+/// created from — a read-time traversal of the provenance links, so the
+/// paperwork attached to the source record is discoverable from the trade
+/// without any data-model change (attachments stay single-owner). The linked
+/// sources are every provenance-created trade whose source record can own
+/// attachments:
+/// - a DRP trade's funding distribution (`income.reinvestment_trade_id`)
+/// - a buy-back participation Sell's dividend income row (`income.buyback_trade_id`)
+/// - an ESS vest Buy's annual statement (`trades.ess_statement_id`)
+///
+/// The other provenance-created trades (transfers, rights exercises, scrip
+/// exchanges, demergers, inheritances, worthless-shares sells) trace to
+/// records that cannot own attachments, so there is nothing to traverse.
+pub async fn db_list_with_linked(
+    pool: &SqlitePool,
+    trade_id: i64,
+) -> Result<Vec<Attachment>, sqlx::Error> {
+    sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT {METADATA_COLS} FROM attachments \
+         WHERE trade_id = ?1 \
+            OR income_id IN (SELECT id FROM income \
+                             WHERE reinvestment_trade_id = ?1 OR buyback_trade_id = ?1) \
+            OR ess_statement_id IN (SELECT ess_statement_id FROM trades WHERE id = ?1) \
+         ORDER BY id"
+    )))
+    .bind(trade_id)
+    .fetch_all(pool)
+    .await
 }
 
 pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<Attachment>, sqlx::Error> {
@@ -231,6 +268,29 @@ async fn list(
     State(pool): State<SqlitePool>,
     Query(q): Query<ListQuery>,
 ) -> Result<Json<Vec<Attachment>>, ApiError> {
+    if q.include_linked.unwrap_or(false) {
+        // The linked traversal is defined from a trade only; combining it
+        // with another owner filter has no meaning, so reject rather than
+        // silently ignore either parameter.
+        let other_owner = q.income_id.is_some()
+            || q.amma_statement_id.is_some()
+            || q.ess_statement_id.is_some()
+            || q.interest_income_id.is_some();
+        let Some(trade_id) = q.trade_id else {
+            return Err(ApiError::unprocessable(
+                "include_linked lists a trade's linked documents — it requires a trade_id filter",
+            ));
+        };
+        if other_owner {
+            return Err(ApiError::unprocessable(
+                "include_linked cannot be combined with an owner filter other than trade_id",
+            ));
+        }
+        return db_list_with_linked(&pool, trade_id)
+            .await
+            .map(Json)
+            .map_err(ApiError::from);
+    }
     db_list(&pool, &q).await.map(Json).map_err(ApiError::from)
 }
 
@@ -451,6 +511,55 @@ mod tests {
         .await
         .unwrap();
         id
+    }
+
+    /// Insert an attachment owned by exactly one of a trade, income row, or
+    /// ESS statement (the owners the linked-traversal tests exercise).
+    async fn insert_owned(
+        pool: &SqlitePool,
+        trade_id: Option<i64>,
+        income_id: Option<i64>,
+        ess_statement_id: Option<i64>,
+        name: &str,
+    ) -> i64 {
+        db_insert(
+            pool,
+            &NewAttachment {
+                trade_id,
+                income_id,
+                amma_statement_id: None,
+                ess_statement_id,
+                interest_income_id: None,
+                filename: name.to_string(),
+                content_type: ContentType::Pdf,
+                checksum: checksum_hex(b"x"),
+                uploaded_at: "2024-01-01T00:00:00Z".to_string(),
+                content: b"x",
+            },
+        )
+        .await
+        .unwrap()
+    }
+
+    async fn get_list(pool: SqlitePool, query: &str) -> Response {
+        router()
+            .with_state(pool)
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/attachments?{query}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    async fn list_filenames(pool: SqlitePool, query: &str) -> Vec<String> {
+        let resp = get_list(pool, query).await;
+        assert_eq!(resp.status(), StatusCode::OK, "?{query}");
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let items: Vec<Attachment> = serde_json::from_slice(&bytes).unwrap();
+        items.into_iter().map(|a| a.filename).collect()
     }
 
     fn push_field(body: &mut Vec<u8>, name: &str, value: &str) {
@@ -716,6 +825,137 @@ mod tests {
             remaining.is_empty(),
             "ON DELETE CASCADE should remove both attachments"
         );
+    }
+
+    #[tokio::test]
+    async fn api_list_include_linked_returns_drp_funding_income_attachments() {
+        let pool = test_pool().await;
+        insert_listing(&pool).await;
+        // A DRP trade whose funding distribution links to it via
+        // income.reinvestment_trade_id — the reinvest operation's shape.
+        let (drp_id,): (i64,) = sqlx::query_as(
+            "INSERT INTO trades (trade_type, date, settlement_date, listing_id, average_price, quantity, currency, brokerage_currency) \
+             VALUES ('DRP', '2024-01-01', '2024-01-01', 1, '1', '1', 'AUD', 'AUD') RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let (income_id,): (i64,) = sqlx::query_as(
+            "INSERT INTO income (listing_id, date_paid, reinvestment_trade_id) \
+             VALUES (1, '2024-01-01', ?) RETURNING id",
+        )
+        .bind(drp_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        // The DRP advice is attached to the income row; the trade has one
+        // document of its own too.
+        insert_owned(&pool, None, Some(income_id), None, "drp-advice.pdf").await;
+        insert_owned(&pool, Some(drp_id), None, None, "own.pdf").await;
+
+        // Without the flag: only the trade's own attachment (unchanged).
+        let own = list_filenames(pool.clone(), &format!("trade_id={drp_id}")).await;
+        assert_eq!(own, ["own.pdf"]);
+
+        // With the flag: the income row's document appears too, still owned
+        // by the income row (its income_id is set, trade_id null).
+        let resp = get_list(
+            pool.clone(),
+            &format!("trade_id={drp_id}&include_linked=true"),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let items: Vec<Attachment> = serde_json::from_slice(&bytes).unwrap();
+        let names: Vec<&str> = items.iter().map(|a| a.filename.as_str()).collect();
+        assert_eq!(names, ["drp-advice.pdf", "own.pdf"]);
+        let advice = &items[0];
+        assert_eq!(advice.income_id, Some(income_id));
+        assert_eq!(advice.trade_id, None);
+
+        // include_linked=false is the plain filter.
+        let own = list_filenames(
+            pool.clone(),
+            &format!("trade_id={drp_id}&include_linked=false"),
+        )
+        .await;
+        assert_eq!(own, ["own.pdf"]);
+
+        // The income row's own view is unaffected by the traversal.
+        let income_view = list_filenames(pool, &format!("income_id={income_id}")).await;
+        assert_eq!(income_view, ["drp-advice.pdf"]);
+    }
+
+    #[tokio::test]
+    async fn api_list_include_linked_returns_buyback_income_attachments() {
+        let pool = test_pool().await;
+        insert_listing(&pool).await;
+        // A buy-back participation Sell whose dividend-component income row
+        // links to it via income.buyback_trade_id.
+        let (sell_id,): (i64,) = sqlx::query_as(
+            "INSERT INTO trades (trade_type, date, settlement_date, listing_id, average_price, quantity, currency, brokerage_currency) \
+             VALUES ('Sell', '2024-03-01', '2024-03-01', 1, '1', '1', 'AUD', 'AUD') RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let (income_id,): (i64,) = sqlx::query_as(
+            "INSERT INTO income (listing_id, date_paid, buyback_trade_id) \
+             VALUES (1, '2024-03-01', ?) RETURNING id",
+        )
+        .bind(sell_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        insert_owned(&pool, None, Some(income_id), None, "buyback-statement.pdf").await;
+
+        let names = list_filenames(pool, &format!("trade_id={sell_id}&include_linked=true")).await;
+        assert_eq!(names, ["buyback-statement.pdf"]);
+    }
+
+    #[tokio::test]
+    async fn api_list_include_linked_returns_ess_statement_attachments() {
+        let pool = test_pool().await;
+        // An ESS vest Buy links to its statement via trades.ess_statement_id.
+        let ess_id = insert_ess_statement(&pool).await;
+        let (buy_id,): (i64,) = sqlx::query_as(
+            "INSERT INTO trades (trade_type, date, settlement_date, listing_id, average_price, quantity, currency, brokerage_currency, ess_statement_id) \
+             VALUES ('Buy', '2024-02-01', '2024-02-01', 1, '1', '1', 'AUD', 'AUD', ?) RETURNING id",
+        )
+        .bind(ess_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        insert_owned(&pool, None, None, Some(ess_id), "ess-annual.pdf").await;
+
+        let names = list_filenames(
+            pool.clone(),
+            &format!("trade_id={buy_id}&include_linked=true"),
+        )
+        .await;
+        assert_eq!(names, ["ess-annual.pdf"]);
+
+        // A trade with no provenance link returns only its own attachments —
+        // the NULL ess_statement_id must not match anything.
+        let plain_id = insert_trade(&pool).await;
+        let names = list_filenames(pool, &format!("trade_id={plain_id}&include_linked=true")).await;
+        assert!(names.is_empty());
+    }
+
+    #[tokio::test]
+    async fn api_list_include_linked_requires_a_lone_trade_filter() {
+        let pool = test_pool().await;
+        let trade_id = insert_trade(&pool).await;
+        let income_id = insert_income(&pool).await;
+        // No trade_id at all, and combined with another owner filter — both 422.
+        for query in [
+            "include_linked=true".to_string(),
+            format!("income_id={income_id}&include_linked=true"),
+            format!("trade_id={trade_id}&income_id={income_id}&include_linked=true"),
+        ] {
+            let resp = get_list(pool.clone(), &query).await;
+            assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY, "?{query}");
+        }
     }
 
     #[tokio::test]

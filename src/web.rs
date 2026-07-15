@@ -904,6 +904,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn attachments_trade_view_lists_linked_source_documents() {
+        let js = app_js_body().await;
+        // A trade's attachments view asks the server to traverse the
+        // provenance link (DRP funding distribution / buy-back income row /
+        // ESS vest statement) so the source record's paperwork shows up…
+        assert!(js.contains("include_linked=true"));
+        // …only on trade views — the flag is gated on the owner field.
+        assert!(js.contains("ownerField === 'trade_id'"));
+        // Linked rows are labelled with their owning record and offer a link
+        // to that record's own Attachments view instead of Delete (delete
+        // stays with the owner).
+        assert!(js.contains("linkedOwner"));
+        assert!(js.contains("(linked)"));
+        assert!(js.contains("Owner's attachments"));
+    }
+
+    #[tokio::test]
     async fn jobs_ui_present() {
         let js = app_js_body().await;
         // The maintenance view lists and triggers jobs via the /jobs endpoints.

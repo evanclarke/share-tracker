@@ -48,6 +48,28 @@ fn row_history_audit_trail_documented() {
     );
 }
 
+/// Docs-sync pin for linked attachments on provenance-created trades
+/// (REQUIREMENTS 2026-07-15): the Attachments section documents the
+/// `include_linked` list option, enumerates the three traversed provenance
+/// links, and states that ownership is unchanged; the web-UI feature text
+/// mentions linked documents; the 422 catalogue covers the option's misuse.
+#[test]
+fn linked_attachments_documented() {
+    // The list-endpoint option and its linked-documents explainer.
+    assert!(API_MD.contains("include_linked=true"));
+    assert!(API_MD.contains("**Linked documents:**"));
+    // All three provenance links are enumerated.
+    assert!(API_MD.contains("`income.reinvestment_trade_id`"));
+    assert!(API_MD.contains("`income.buyback_trade_id`"));
+    assert!(API_MD.contains("`trades.ess_statement_id`"));
+    // Attachments stay single-owner; the traversal is read-time only.
+    assert!(API_MD.contains("Ownership is unchanged"));
+    // The web-UI feature text mentions linked documents.
+    assert!(API_MD.contains("linked documents](#attachments)"));
+    // The 422 catalogue covers misuse of the option.
+    assert!(API_MD.contains("an attachment list combining `include_linked`"));
+}
+
 /// Docs-sync pin for the AMIT cash-only income rows (REQUIREMENTS
 /// 2026-06-12): the Income section documents the cash-only rule and its 422s,
 /// the Tax summary section documents the exclusion, the cross-check report
