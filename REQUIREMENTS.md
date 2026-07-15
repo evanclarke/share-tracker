@@ -1034,3 +1034,23 @@ entries (found while attaching the archive to the recorded activity):
   statement whose only activity is cash interest documents an `interest_income` row — both entity
   types accept attachments exactly like trades, income, and AMMA statements (upload, list,
   download, delete, cascade on owner delete, audit trail, web UI Attachments action)
+
+## DRP trades show the funding distribution's attachments (2026-07-15)
+
+Found reviewing the trades screen: every DRP statement in the archive is attached to the income
+row it was entered from (the Reinvest action creates the DRP trade *from* that row, and the one
+advice documents both the distribution and the reinvestment), so a DRP trade's own Attachments
+view is always empty — the paperwork exists but is not discoverable from the trade.
+
+- A DRP trade's Attachments view also lists the attachments of the income row linked to it via
+  `reinvestment_trade_id`, clearly labelled as the income row's documents: download works from
+  there; upload from the trade's view still attaches to the trade, and delete stays on the owning
+  record's view
+- No data-model change: attachments stay single-owner; this is a read-time traversal of the
+  existing provenance link — whether the traversal lives in the web UI or as a list-endpoint
+  option (e.g. `GET /attachments?trade_id=…&include_linked=…`) is design-open
+- The same rule extends to the other provenance-created trades whose source record owns
+  attachments (an ESS vest Buy shows its `ess_statements` row's attachments; a buy-back Sell its
+  income row's) — enumerate the provenance links at implementation time
+- Docs per the standard sync rule (`docs/API.md` if the list endpoint gains the option; the
+  README/API Attachments feature text mentions linked documents)
