@@ -1399,3 +1399,14 @@ rows. Tests: `entities::attachment::tests::api_list_include_linked_returns_drp_f
 `doc_checks::linked_attachments_documented` (API.md documents the option, all three links, and the feature text).
 Verified end-to-end: real reinvest flow on a scratch DB, advice uploaded to the income row, shown labelled on
 the DRP trade's UI view with download working and no Delete; the income row's own view unchanged.
+
+## Wash-sale report excludes crypto transfer network-fee disposals (REQUIREMENTS 2026-07-15)
+A transfer's network-fee disposal is an ordinary loss-realising Sell (no `transfer_id`, so the
+gains reports count it — correctly), so the wash-sales report flags it whenever a Buy of the same
+crypto lands inside the ±30-day window. TR 2008/1 is purposive: the fee disposal is compelled by
+the transfer, timed by it, and the fee units are never re-acquired — no Part IVA fact pattern.
+Symmetric with the report's existing Buy-side provenance exclusions.
+- [x] `db_wash_sales` never treats a Sell referenced by `transfers.fee_sale_trade_id` as a wash-sale candidate; the fee disposal's loss still counts in realised-gains / net-capital-gain / performance, unchanged — a `HashSet` of `fee_sale_trade_id`s filters the loss-Sell candidates before matching; the loss rows themselves come from `db_realised_gains` untouched
+- [x] Genuine Sells keep flagging: an ordinary loss Sell of the same listing near a re-buy still alerts (including crypto)
+- [x] Tests: a fee-bearing transfer whose fee disposal realises a loss + a Buy of the listing inside the window → no alert; an ordinary loss Sell in the same window → alert; fee-Sell loss still present in the realised-gains report — `wash_sales::tests::db_transfer_fee_disposal_is_not_a_wash_sale_candidate` (one fixture covers all three: the fee disposal's $50 loss is asserted in realised gains, and the only alert pairs the ordinary $500 loss Sell with the re-buy)
+- [x] Docs: the exclusion + TR 2008/1 rationale in `docs/ato/wash-sales.md` "How this maps to the project", the `reports/wash_sales.rs` module docs, and `docs/API.md`'s wash-sales section

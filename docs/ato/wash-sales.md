@@ -88,3 +88,15 @@ never rejected and the flagged loss is still counted by every CGT report.
 Whether Part IVA could apply is a facts-and-circumstances judgment for the
 taxpayer/adviser; the report only makes the pattern visible instead of letting
 it be discovered at audit time.
+
+One class of loss Sell is excluded as a candidate outright: a **transfer's
+network-fee disposal** (`transfers.fee_sale_trade_id` — the crypto burned to
+pay an on-chain fee, a genuine disposal per `crypto-cgt.md` whose loss stays
+in every CGT report). It fails the ruling's purposive test on every para 13
+indicator: the disposal is compelled by the transfer (an obvious dominant
+non-tax purpose), its timing follows the transfer rather than a derived gain
+or the end of the income year, and the fee units are gone for good — a real
+economic cost, never re-acquired, so exposure is not reinstated. This is the
+Sell-side counterpart of the Buy-side provenance exclusions above (transfer-in,
+scrip, demerger, and inheritance Buys never match, for the same
+no-purposive-act reason).

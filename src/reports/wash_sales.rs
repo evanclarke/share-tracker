@@ -10,6 +10,13 @@
 //! only. Writes are never rejected, the flagged loss still counts in every
 //! CGT report, and whether Part IVA could apply is a facts-and-circumstances
 //! judgment the report leaves to the taxpayer.
+//!
+//! One class of loss Sell is excluded as a candidate outright: a transfer's
+//! network-fee disposal (`transfers.fee_sale_trade_id`). Its loss is genuine
+//! and stays in every CGT report, but the disposal is compelled by the
+//! transfer (an obvious dominant non-tax purpose), timed by it rather than by
+//! a derived gain or year-end, and the fee units are never re-acquired — no
+//! TR 2008/1 fact pattern, symmetric with the Buy-side provenance exclusions.
 
 use crate::infra::decimal::row_dec;
 use crate::infra::http::ApiError;
@@ -19,6 +26,7 @@ use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
+use std::collections::HashSet;
 
 /// Review window when none is requested: a Buy within 30 days either side of
 /// the loss Sell is flagged. A convention for review, not an ATO bright line
@@ -68,6 +76,10 @@ pub fn router() -> Router<SqlitePool> {
 /// transfer-ins, scrip-for-scrip replacements, demerger Buys, and inheritance
 /// Buys (no purposive re-acquisition by the taxpayer). Rights-exercise and
 /// ESS Buys do match — they are genuine new acquisitions of the same listing.
+/// Symmetrically on the Sell side, a transfer's network-fee disposal
+/// (`transfers.fee_sale_trade_id`) is never a candidate: the disposal is
+/// compelled by the transfer, not chosen to harvest its loss (which still
+/// counts in every CGT report).
 /// Date-pattern only: the Buy a Sell drew its own allocations from can match
 /// (the dates speak for themselves either way) — the report surfaces the
 /// pattern, it does not judge purpose.
@@ -75,11 +87,25 @@ pub async fn db_wash_sales(
     pool: &SqlitePool,
     window_days: i64,
 ) -> Result<Vec<WashSaleAlert>, sqlx::Error> {
-    let losses: Vec<_> = realised_gains::db_realised_gains(pool)
+    let mut losses: Vec<_> = realised_gains::db_realised_gains(pool)
         .await?
         .into_iter()
         .filter(|r| r.source == DisposalSource::Sell && r.capital_loss > Decimal::ZERO)
         .collect();
+    if losses.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // A transfer's network-fee disposal is compelled by the transfer, not
+    // entered into for its loss — never a candidate (see the module docs).
+    let fee_sale_ids: HashSet<i64> = sqlx::query_scalar(
+        "SELECT fee_sale_trade_id FROM transfers WHERE fee_sale_trade_id IS NOT NULL",
+    )
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .collect();
+    losses.retain(|r| !fee_sale_ids.contains(&r.sale_trade_id));
     if losses.is_empty() {
         return Ok(Vec::new());
     }
@@ -422,6 +448,81 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    /// A transfer's network-fee disposal realises a genuine loss (still in
+    /// the realised-gains report) but is compelled by the transfer, not
+    /// chosen to harvest the loss — never a wash-sale candidate, while an
+    /// ordinary loss Sell of the same listing in the same window still flags.
+    #[tokio::test]
+    async fn db_transfer_fee_disposal_is_not_a_wash_sale_candidate() {
+        let pool = test_pool().await;
+        // The ordinary loss Sell (trade 2, loss $500) on 2025-06-10.
+        loss_sale_fixture(&pool, ymd(2025, 6, 10)).await;
+        holding_account::db_upsert(
+            &pool,
+            &holding_account::HoldingAccount {
+                id: 2,
+                name: "Second wallet".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        // A second parcel: 100 @ $15. Transferring 50 units two days after
+        // the loss Sell burns a 10-unit network fee worth $10/unit — a fee
+        // disposal realising a $50 loss (10 × ($15 − $10)).
+        test_support::buy(3, 1)
+            .date(ymd(2024, 1, 10))
+            .qty(Decimal::from(100))
+            .price(Decimal::from(15))
+            .insert(&pool)
+            .await;
+        let group = crate::entities::transfer::db_transfer(
+            &pool,
+            1,
+            &crate::entities::transfer::TransferBody {
+                listing_id: 1,
+                date: ymd(2025, 6, 12),
+                from_account_id: 1,
+                to_account_id: 2,
+                allocations: vec![crate::entities::sell::AllocationInput {
+                    purchase_trade_id: 3,
+                    quantity_allocated: Decimal::from(50),
+                }],
+                fee_allocations: vec![crate::entities::sell::AllocationInput {
+                    purchase_trade_id: 3,
+                    quantity_allocated: Decimal::from(10),
+                }],
+                fee_market_price: Some(Decimal::from(10)),
+                fee_fx_rate: None,
+            },
+        )
+        .await
+        .unwrap();
+        let fee_sale_id = group.fee_sale.expect("a fee Sell was created").id;
+        // A re-buy of the listing inside the window of both loss Sells.
+        test_support::buy(100, 1)
+            .date(ymd(2025, 6, 15))
+            .qty(Decimal::from(100))
+            .price(Decimal::from(10))
+            .insert(&pool)
+            .await;
+
+        // The fee disposal's loss is real and stays in the realised-gains
+        // report — the exclusion is wash-sale candidacy only.
+        let fee_row = realised_gains::db_realised_gains(&pool)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|r| r.sale_trade_id == fee_sale_id)
+            .expect("the fee disposal reaches the realised-gains report");
+        assert_eq!(fee_row.capital_loss, Decimal::from(50));
+
+        // Only the ordinary loss Sell pairs with the re-buy.
+        let alerts = db_wash_sales(&pool, DEFAULT_WINDOW_DAYS).await.unwrap();
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].sale_trade_id, 2);
+        assert_eq!(alerts[0].buy_trade_id, 100);
     }
 
     #[tokio::test]
