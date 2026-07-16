@@ -650,6 +650,11 @@ mod freebsd_packaging {
         assert!(RC_SCRIPT.contains("pidfile=\"/var/run/${name}/${name}.pid\""));
         assert!(RC_SCRIPT.contains("start_precmd=\"share_tracker_precmd\""));
         assert!(RC_SCRIPT.contains("install -d -o \"${share_tracker_user}\" \"/var/run/${name}\""));
+        // The pidfile holds the daemon(8) supervisor's pid, so procname must
+        // stay at its rc.subr default ($command = daemon): overriding it to
+        // the server binary made check_pidfile reject the pid and status/stop
+        // report "not running" while the service kept running.
+        assert!(!RC_SCRIPT.contains("procname="));
         // Install creates the service user the rc script runs as.
         assert!(MANIFEST.contains("pw useradd share_tracker"));
         assert!(RC_SCRIPT.contains(": ${share_tracker_user:=\"share_tracker\"}"));
@@ -662,7 +667,13 @@ mod freebsd_packaging {
         assert!(SMOKE_SH.contains("service share_tracker onestart"));
         assert!(SMOKE_SH.contains("http://127.0.0.1:3000/reports/health"));
         assert!(SMOKE_SH.contains("[ -s /var/run/share_tracker/share_tracker.pid ]"));
-        assert!(SMOKE_SH.contains("service share_tracker onestop"));
+        // Stop must be bounded (an unbounded onestop once wedged the release
+        // VM for 20 minutes) and must genuinely succeed — no `|| true`.
+        assert!(SMOKE_SH.contains("\ntimeout 30 service share_tracker onestop\n"));
+        // On failure the smoke test surfaces the server's own output (it
+        // goes to syslog under daemon -S, invisible in the CI log) by
+        // re-running the service invocation with output to a file.
+        assert!(SMOKE_SH.contains("-o /tmp/svc-diag.log"));
     }
 
     /// README documents installing the package, the configuration file, and

@@ -32,9 +32,18 @@ pw usershow share_tracker >/dev/null
 # /usr/local/etc/share-tracker.toml is loaded for real (including the shipped
 # schedule file); only the database path and port are overridden so the test
 # never touches the service data directory.
+# Teardown must be bounded: an unbounded `service onestop` once wedged the
+# release VM for 20 minutes after a failed check. The pkill fallbacks kill
+# the daemon(8) supervisor by pidfile even if rc has lost track of it.
+stop_service() {
+  timeout 30 service share_tracker onestop >/dev/null 2>&1 || true
+  pkill -F /var/run/share_tracker/share_tracker.pid 2>/dev/null || true
+  pkill -F /tmp/svc-diag.pid 2>/dev/null || true
+}
+
 /usr/local/bin/share-tracker --db /tmp/smoke.db --port 3999 &
 SERVER_PID=$!
-trap 'kill $SERVER_PID 2>/dev/null || true; service share_tracker onestop >/dev/null 2>&1 || true' EXIT
+trap 'kill $SERVER_PID 2>/dev/null || true; stop_service' EXIT
 
 ok=""
 for _ in $(seq 1 30); do
@@ -59,9 +68,25 @@ for _ in $(seq 1 30); do
   fi
   sleep 1
 done
-[ -n "$ok" ] || { echo "service did not answer /reports/health" >&2; exit 1; }
-# daemon(8) wrote the supervisor pidfile, and the rc script can stop by it.
+if [ -z "$ok" ]; then
+  # The server's output went to syslog (daemon -S); surface everything we
+  # can into this log, then re-run the exact service invocation with output
+  # to a file so its startup error is visible here.
+  echo "service did not answer /reports/health; diagnostics:" >&2
+  service share_tracker onestatus || true
+  ps -axww | grep -v grep | grep -e share-tracker -e daemon || true
+  ls -la /var/db/share-tracker /var/run/share_tracker || true
+  grep -h share-tracker /var/log/messages /var/log/daemon.log 2>/dev/null | tail -n 40 || true
+  /usr/sbin/daemon -u share_tracker -P /tmp/svc-diag.pid -o /tmp/svc-diag.log \
+    /usr/local/bin/share-tracker --config /usr/local/etc/share-tracker.toml || true
+  sleep 5
+  echo "--- server output under daemon(8) as the service user:" >&2
+  cat /tmp/svc-diag.log >&2 2>/dev/null || true
+  exit 1
+fi
+# daemon(8) wrote the supervisor pidfile, and stop must genuinely stop it —
+# unbounded (it once hung CI) and silent "not running" are both failures.
 [ -s /var/run/share_tracker/share_tracker.pid ]
-service share_tracker onestop
+timeout 30 service share_tracker onestop
 
 echo "smoke test passed: share-tracker $VERSION installs and serves"

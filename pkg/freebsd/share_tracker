@@ -22,7 +22,6 @@ load_rc_config $name
 : ${share_tracker_user:="share_tracker"}
 
 pidfile="/var/run/${name}/${name}.pid"
-procname="/usr/local/bin/share-tracker"
 command="/usr/sbin/daemon"
 # daemon(8) supervises the server: -r restarts it if it exits, -P writes the
 # supervisor pidfile, and -S sends the server's stdout/stderr (tracing logs)
@@ -30,6 +29,10 @@ command="/usr/sbin/daemon"
 # opening the -P pidfile (FreeBSD 14+), so the pidfile must live in a
 # directory the service user can write; /var/run itself is root-only and
 # cleared at boot, so the precmd (re)creates the subdirectory every start.
+# The pidfile holds the supervisor's pid, so procname stays at its rc.subr
+# default ($command, i.e. daemon): status/stop must match the supervisor —
+# naming the server binary instead made check_pidfile reject the pid and
+# status/stop report "not running" while the service kept running.
 command_args="-S -T share-tracker -P ${pidfile} -r -u ${share_tracker_user} ${procname} --config ${share_tracker_config}"
 start_precmd="share_tracker_precmd"
 
