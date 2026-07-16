@@ -41,6 +41,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      # Cargo cache across releases: without it every release cold-compiled
+      # the whole dependency tree in the VM (~9 of the ~11 build minutes for
+      # crates that hadn't changed). The VM is fresh each run, so the cache
+      # travels as a tarball in the workdir: restored here on the host,
+      # unpacked inside the VM before the build, re-packed after (the
+      # copyback rsync brings it home). A version bump touches Cargo.lock, so
+      # each release saves under a new key and restore-keys picks the newest
+      # previous one; a stale or evicted cache only costs time — cargo
+      # rebuilds anything whose fingerprint doesn't match (including after a
+      # rust pkg upgrade in the VM), never reuses it wrongly.
+      - uses: actions/cache@v5
+        with:
+          path: vm-cargo-cache.tar.zst
+          key: freebsd-15.1-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: freebsd-15.1-cargo-
       - name: Build and smoke-test the FreeBSD package
         uses: vmactions/freebsd-vm@v1
         with:
@@ -51,8 +66,10 @@ jobs:
           prepare: pkg install -y rust protobuf
           run: |
             set -e
+            [ -f vm-cargo-cache.tar.zst ] && tar -x --zstd -f vm-cargo-cache.tar.zst -C /
             sh pkg/freebsd/build-pkg.sh
             sh pkg/freebsd/smoke-test.sh
+            tar -c --zstd -f vm-cargo-cache.tar.zst -C / tmp/share-tracker-target root/.cargo/registry
       - uses: actions/upload-artifact@v7
         with:
           name: freebsd-pkg
