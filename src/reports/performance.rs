@@ -91,6 +91,11 @@ pub struct HoldingPerformance {
     /// explicitly supplied price, or a stored snapshot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub price_as_of: Option<String>,
+    /// The AUD conversion of this row's price used an earlier month's FX rate
+    /// because the valuation month's is not published yet
+    /// (`infra::fx::resolve_valuation_rate`): the valuation is provisional.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fx_provisional: bool,
     /// Why a live price could not be obtained for an open holding: its
     /// market-dependent metrics are left unknown with the reason rather than
     /// silently zeroed.
@@ -317,6 +322,7 @@ fn build_row(
         money_weighted_return_pct,
         income_yield_pct,
         price_as_of: None,
+        fx_provisional: false,
         price_unavailable: None,
     }
 }
@@ -582,7 +588,10 @@ async fn performance_handler(
             continue;
         };
         match live.get(&listing_id) {
-            Some(Ok(v)) => row.price_as_of = Some(v.as_of.clone()),
+            Some(Ok(v)) => {
+                row.price_as_of = Some(v.as_of.clone());
+                row.fx_provisional = v.fx_provisional;
+            }
             Some(Err(reason))
                 if row.market_value.is_none()
                     && row.quantity_held.is_some_and(|q| q > Decimal::ZERO) =>

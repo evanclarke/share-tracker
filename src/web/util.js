@@ -420,6 +420,7 @@ const COLUMN_LABELS = {
   cash_total_aud: 'Cash total (AUD)',
   amount_aud: 'Amount (AUD)',
   units_after: 'Units after',
+  fx_provisional: 'Provisional FX',
 };
 
 // The friendly heading for a column: an explicit override, else humanised.

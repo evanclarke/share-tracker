@@ -583,11 +583,47 @@ async fn fetch_and_store(
     Ok((ok, errored))
 }
 
+/// How many trading days back one collection run looks, so a day missed
+/// outright (host down, provider outage) or stored errored is re-attempted by
+/// the following runs instead of becoming a permanent hole. Ok rows are never
+/// re-fetched, so the runs stay idempotent and the lookback costs nothing
+/// once the window is filled.
+pub const COLLECTION_LOOKBACK_TRADING_DAYS: usize = 7;
+
+/// The listing's last [`COLLECTION_LOOKBACK_TRADING_DAYS`] trading days ending
+/// at its latest complete trading day at `now`, oldest first. `None` when the
+/// market has no complete trading day (calendar misconfiguration).
+fn lookback_trading_days(
+    market: &Market,
+    now: DateTime<Utc>,
+) -> Result<Option<Vec<NaiveDate>>, String> {
+    let Some(latest) = market.latest_complete_trading_day(now)? else {
+        return Ok(None);
+    };
+    let mut days = Vec::with_capacity(COLLECTION_LOOKBACK_TRADING_DAYS);
+    let mut candidate = latest;
+    // 366-day guard as in latest_trading_day_on_or_before: a calendar seeded
+    // with a year of holidays must not loop forever.
+    for _ in 0..366 {
+        if market.is_trading_day(candidate) {
+            days.push(candidate);
+            if days.len() == COLLECTION_LOOKBACK_TRADING_DAYS {
+                break;
+            }
+        }
+        candidate -= Duration::days(1);
+    }
+    days.reverse();
+    Ok(Some(days))
+}
+
 /// One scheduled collection run: for every listing with a non-zero holding,
-/// store the latest complete trading day's closing price unless it is already
-/// stored ok. A non-trading day stores no row and is not an error; a failed
-/// fetch stores an errored row and fails the job (so the Jobs UI shows it),
-/// without stopping the other listings.
+/// store the closing price of every trading day in the lookback window whose
+/// stored row is missing or errored (one provider call spanning the window;
+/// days already stored ok are never re-fetched). A non-trading day stores no
+/// row and is not an error; a failed fetch stores an errored row and fails
+/// the job (so the Jobs UI shows it), without stopping the other listings —
+/// and is re-attempted by later runs while it stays in the window.
 pub async fn run_collection(
     pool: &SqlitePool,
     fetcher: &dyn PriceFetcher,
@@ -605,30 +641,36 @@ pub async fn run_collection(
             .map_err(|e| e.to_string())?
             .ok_or_else(|| format!("listing {listing_id} disappeared during collection"))?;
 
-        let target = match market.latest_complete_trading_day(now) {
-            Ok(Some(date)) => date,
+        let days = match lookback_trading_days(&market, now) {
+            Ok(Some(days)) => days,
             Ok(None) => continue,
             Err(e) => {
                 failures.push(e);
                 continue;
             }
         };
-        let already_ok = db_get_one(pool, listing_id, target)
+        let (Some(&from), Some(&to)) = (days.first(), days.last()) else {
+            continue;
+        };
+        let already_ok = db_ok_dates(pool, listing_id, from, to)
             .await
-            .map_err(|e| e.to_string())?
-            .is_some_and(|row| row.status == PriceStatus::Ok);
-        if already_ok {
+            .map_err(|e| e.to_string())?;
+        let needed: Vec<NaiveDate> = days
+            .into_iter()
+            .filter(|d| !already_ok.contains(d))
+            .collect();
+        if needed.is_empty() {
             skipped += 1;
             continue;
         }
 
-        let (ok, errored) = fetch_and_store(pool, fetcher, &market, &[target])
+        let (ok, errored) = fetch_and_store(pool, fetcher, &market, &needed)
             .await
             .map_err(|e| e.to_string())?;
         stored += ok;
         if errored > 0 {
             failures.push(format!(
-                "{} ({}): fetch failed for {target}, errored row stored",
+                "{} ({}): fetch failed for {errored} day(s) in {from}..{to}, errored rows stored",
                 market.listing.ticker, listing_id
             ));
         }
@@ -660,6 +702,10 @@ pub struct LiveValuation {
     pub aud_price: Decimal,
     /// The provider's quote timestamp, RFC 3339 UTC.
     pub as_of: String,
+    /// The AUD conversion used an earlier month's FX rate because the quote
+    /// month's rate is not published yet (`infra::fx::resolve_valuation_rate`):
+    /// the valuation is provisional and the reports annotate the row.
+    pub fx_provisional: bool,
 }
 
 /// Fetch the latest live quote for each listing and convert it to AUD. Returns
@@ -685,22 +731,24 @@ pub async fn fetch_live_aud_prices(
                 quote.currency, market.listing.currency
             )),
             Ok(quote) => {
-                // Convert the quote-currency price to AUD via the standard FX
-                // rules (ATO monthly rate for the quote's month, no manual
-                // override). A missing rate is surfaced as the row's reason,
-                // never a silent or zeroed value.
-                match crate::infra::fx::to_aud(
+                // Convert the quote-currency price to AUD at the valuation
+                // rate for the quote's month: the ATO monthly rate when
+                // published, else the bounded earlier-month fallback flagged
+                // provisional on the row (early in a month the rate cannot
+                // exist yet — a flagged valuation beats an unvalued holding).
+                // A gap beyond the fallback bound is surfaced as the row's
+                // reason, never a silent or zeroed value.
+                match crate::infra::fx::resolve_valuation_rate(
                     pool,
-                    quote.price,
                     &quote.currency,
                     quote.as_of.date_naive(),
-                    crate::infra::fx::FxOverride::None,
                 )
                 .await
                 {
-                    Ok(aud_price) => Ok(LiveValuation {
-                        aud_price,
+                    Ok(vr) => Ok(LiveValuation {
+                        aud_price: crate::infra::fx::apply_rate(quote.price, vr.rate),
                         as_of: quote.as_of.to_rfc3339(),
+                        fx_provisional: vr.provisional,
                     }),
                     Err(e) => Err(e.to_string()),
                 }
@@ -1257,50 +1305,136 @@ mod tests {
 
     // --- scheduled collection ---
 
+    /// The 7-trading-day lookback window ending Friday 2026-06-05 on the ASX
+    /// calendar (no seeded holiday falls inside it), oldest first.
+    fn asx_lookback_week() -> Vec<NaiveDate> {
+        vec![
+            ymd(2026, 5, 28),
+            ymd(2026, 5, 29),
+            ymd(2026, 6, 1),
+            ymd(2026, 6, 2),
+            ymd(2026, 6, 3),
+            ymd(2026, 6, 4),
+            ymd(2026, 6, 5),
+        ]
+    }
+
+    /// Store an ok row directly (as an earlier successful run would have).
+    async fn seed_ok_price(pool: &SqlitePool, listing_id: i64, date: NaiveDate) {
+        sqlx::query(
+            "INSERT INTO closing_prices (listing_id, price_date, price, source, fetched_at, status, error) \
+             VALUES (?, ?, '10', 'stub', '2026-06-01T00:00:00Z', 'ok', NULL)",
+        )
+        .bind(listing_id)
+        .bind(date)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
     #[tokio::test]
     async fn collection_stores_price_per_held_listing_and_skips_non_held() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
         insert_listing(&pool, 2, "IDLE", "XASX", "AUD").await;
         insert_buy(&pool, 1, 1, "100").await;
+        // The earlier window days are already stored ok; only Friday is new.
+        for &d in asx_lookback_week().iter().rev().skip(1) {
+            seed_ok_price(&pool, 1, d).await;
+        }
         let fetcher = StubFetcher::default().with_close(1, ymd(2026, 6, 5), "62.48", "AUD");
 
         run_collection(&pool, &fetcher, friday_evening_sydney())
             .await
             .unwrap();
 
-        let rows = db_list(&pool, None, None, None).await.unwrap();
-        assert_eq!(rows.len(), 1, "only the held listing is collected");
-        let row = &rows[0];
-        assert_eq!(row.listing_id, 1);
-        assert_eq!(row.price_date, ymd(2026, 6, 5));
+        let row = db_get_one(&pool, 1, ymd(2026, 6, 5))
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(row.price, Some("62.48".parse().unwrap()));
         assert_eq!(row.status, PriceStatus::Ok);
         assert_eq!(row.source, "stub");
         assert!(row.error.is_none());
+        let rows = db_list(&pool, Some(2), None, None).await.unwrap();
+        assert!(rows.is_empty(), "the non-held listing is not collected");
+        assert_eq!(
+            fetcher.calls(),
+            vec![(1, ymd(2026, 6, 5), ymd(2026, 6, 5))],
+            "only the missing day is fetched"
+        );
     }
 
     #[tokio::test]
-    async fn collection_skips_a_day_already_stored_ok() {
+    async fn collection_skips_days_already_stored_ok() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
         insert_buy(&pool, 1, 1, "100").await;
-        let fetcher = StubFetcher::default().with_close(1, ymd(2026, 6, 5), "62.48", "AUD");
+        let mut fetcher = StubFetcher::default();
+        for &d in &asx_lookback_week() {
+            fetcher = fetcher.with_close(1, d, "62.48", "AUD");
+        }
         run_collection(&pool, &fetcher, friday_evening_sydney())
             .await
             .unwrap();
-        assert_eq!(fetcher.calls().len(), 1);
+        assert_eq!(
+            fetcher.calls().len(),
+            1,
+            "one provider call spans the window"
+        );
+        assert_eq!(db_list(&pool, None, None, None).await.unwrap().len(), 7);
 
-        // A second run (same evening) finds the ok row and does not re-fetch.
+        // A second run (same evening) finds every window day ok: no re-fetch.
         run_collection(&pool, &fetcher, friday_evening_sydney())
             .await
             .unwrap();
         assert_eq!(fetcher.calls().len(), 1, "no second provider call");
-        assert_eq!(db_list(&pool, None, None, None).await.unwrap().len(), 1);
+        assert_eq!(db_list(&pool, None, None, None).await.unwrap().len(), 7);
+    }
+
+    /// The lookback self-heals: a day stored errored (and a day missed
+    /// outright) is re-attempted by the next run — with the days already ok
+    /// never re-fetched — so the daily runs are each other's retries.
+    #[tokio::test]
+    async fn collection_backfills_missing_and_errored_days_in_the_lookback() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
+        insert_buy(&pool, 1, 1, "100").await;
+        // Window state: Wed errored, Thu missing, Fri missing; the rest ok.
+        for &d in &asx_lookback_week()[..4] {
+            seed_ok_price(&pool, 1, d).await;
+        }
+        sqlx::query(
+            "INSERT INTO closing_prices (listing_id, price_date, price, source, fetched_at, status, error) \
+             VALUES (1, '2026-06-03', NULL, 'stub', '2026-06-03T08:00:00Z', 'error', 'provider down')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let fetcher = StubFetcher::default()
+            .with_close(1, ymd(2026, 6, 3), "64.91", "AUD")
+            .with_close(1, ymd(2026, 6, 4), "63.10", "AUD")
+            .with_close(1, ymd(2026, 6, 5), "62.48", "AUD");
+        run_collection(&pool, &fetcher, friday_evening_sydney())
+            .await
+            .unwrap();
+
+        // One call spanning exactly the days that needed work.
+        assert_eq!(fetcher.calls(), vec![(1, ymd(2026, 6, 3), ymd(2026, 6, 5))]);
+        for (d, price) in [
+            (ymd(2026, 6, 3), "64.91"),
+            (ymd(2026, 6, 4), "63.10"),
+            (ymd(2026, 6, 5), "62.48"),
+        ] {
+            let row = db_get_one(&pool, 1, d).await.unwrap().unwrap();
+            assert_eq!(row.status, PriceStatus::Ok, "{d}");
+            assert_eq!(row.price, Some(price.parse().unwrap()), "{d}");
+        }
     }
 
     #[tokio::test]
-    async fn collection_failure_stores_errored_row_and_fails_the_job() {
+    async fn collection_failure_stores_errored_rows_and_fails_the_job() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
         insert_buy(&pool, 1, 1, "100").await;
@@ -1314,16 +1448,16 @@ mod tests {
         let rows = db_list(&pool, None, None, None).await.unwrap();
         assert_eq!(
             rows.len(),
-            1,
-            "the failure is recorded, never silently missing"
+            7,
+            "every attempted window day is recorded, never silently missing"
         );
-        assert_eq!(rows[0].status, PriceStatus::Error);
-        assert!(rows[0].price.is_none());
+        assert!(rows.iter().all(|r| r.status == PriceStatus::Error));
+        assert!(rows.iter().all(|r| r.price.is_none()));
         assert!(rows[0].error.as_deref().unwrap().contains("provider down"));
     }
 
     #[tokio::test]
-    async fn collection_replaces_an_errored_row_once_the_provider_recovers() {
+    async fn collection_replaces_errored_rows_once_the_provider_recovers() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
         insert_buy(&pool, 1, 1, "100").await;
@@ -1335,18 +1469,18 @@ mod tests {
         .await
         .unwrap_err();
 
-        let fetcher = StubFetcher::default().with_close(1, ymd(2026, 6, 5), "62.48", "AUD");
+        let mut fetcher = StubFetcher::default();
+        for &d in &asx_lookback_week() {
+            fetcher = fetcher.with_close(1, d, "62.48", "AUD");
+        }
         run_collection(&pool, &fetcher, friday_evening_sydney())
             .await
             .unwrap();
 
-        let row = db_get_one(&pool, 1, ymd(2026, 6, 5))
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(row.status, PriceStatus::Ok);
-        assert_eq!(row.price, Some("62.48".parse().unwrap()));
-        assert!(row.error.is_none());
+        let rows = db_list(&pool, None, None, None).await.unwrap();
+        assert_eq!(rows.len(), 7);
+        assert!(rows.iter().all(|r| r.status == PriceStatus::Ok));
+        assert!(rows.iter().all(|r| r.error.is_none()));
     }
 
     #[tokio::test]
@@ -1354,8 +1488,11 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "ICE", "XNYS", "USD").await;
         insert_buy(&pool, 1, 1, "10").await;
-        // Provider quotes AUD for a USD listing — wrong symbol mapping; the
-        // price must not be stored as if it were USD.
+        // Only Friday is missing; the provider quotes AUD for a USD listing —
+        // wrong symbol mapping; the price must not be stored as if it were USD.
+        for &d in asx_lookback_week().iter().rev().skip(1) {
+            seed_ok_price(&pool, 1, d).await;
+        }
         let fetcher = StubFetcher::default().with_close(1, ymd(2026, 6, 5), "141.50", "AUD");
 
         // 21:00 UTC Friday = 17:00 New York, after the close.
@@ -1375,6 +1512,11 @@ mod tests {
         let pool = test_pool().await;
         insert_crypto_listing(&pool, 1, "BTC").await;
         insert_buy(&pool, 1, 1, "0.5").await;
+        // Crypto trades every day: the lookback is the 7 calendar days ending
+        // Saturday 2026-06-06; all but Saturday already stored ok.
+        for i in 1..7 {
+            seed_ok_price(&pool, 1, ymd(2026, 6, 6) - Duration::days(i)).await;
+        }
         let fetcher = StubFetcher::default().with_close(1, ymd(2026, 6, 6), "86378.35", "AUD");
 
         // Sunday 01:30 UTC: Saturday 2026-06-06 is a complete crypto day.
@@ -1387,6 +1529,7 @@ mod tests {
             .unwrap();
         assert_eq!(row.status, PriceStatus::Ok);
         assert_eq!(row.price, Some("86378.35".parse().unwrap()));
+        assert_eq!(fetcher.calls(), vec![(1, ymd(2026, 6, 6), ymd(2026, 6, 6))]);
     }
 
     // --- backfill ---

@@ -228,9 +228,16 @@ mod tests {
         assert!(js.contains("/report_snapshots"));
         assert!(js.contains("/report_snapshots/generate"));
         assert!(js.contains("#/r/snapshots"));
-        // …with stale snapshots badged and regenerable per row.
-        assert!(js.contains("m.stale ? 'stale' : 'ok'"));
+        // …with stale/provisional snapshots badged and regenerable per row.
+        assert!(js.contains("m.stale ? 'stale' : (m.provisional ? 'provisional' : 'ok')"));
         assert!(js.contains("Regenerate"));
+        // The bulk repair buttons drive the two regeneration endpoints, and
+        // the detail view explains a provisional snapshot.
+        assert!(js.contains("/report_snapshots/regenerate_all"));
+        assert!(js.contains("/report_snapshots/regenerate_provisional"));
+        assert!(js.contains("Regenerate all"));
+        assert!(js.contains("Regenerate provisional"));
+        assert!(js.contains("snap.provisional"));
         // The time-series graph is built as inline SVG (no build step, no
         // chart library) from the series endpoint: market value and
         // unrealised gain over the stored snapshot dates.
@@ -242,10 +249,14 @@ mod tests {
         assert!(js.contains("unrealised_gain"));
         // The report-snapshot job is described in the Jobs view.
         assert!(js.contains("report-snapshot"));
+        // The graph marks provisional points distinctly from stale ones.
+        assert!(js.contains("p.provisional ? ' provisional' : ''"));
         // The chart styles ship in the bundle too.
         let css = body_string(get("/static/style.css").await).await;
         assert!(css.contains(".series-chart"));
         assert!(css.contains(".badge.stale"));
+        assert!(css.contains(".badge.provisional"));
+        assert!(css.contains("circle.provisional"));
     }
 
     #[tokio::test]
@@ -860,6 +871,10 @@ mod tests {
         assert!(js.contains("price_as_of"));
         assert!(js.contains("price_unavailable"));
         assert!(js.contains("had no live price"));
+        // …and a count of holdings valued at a provisional (fallback-month)
+        // FX rate, so a flagged valuation is never silently presented.
+        assert!(js.contains("fx_provisional"));
+        assert!(js.contains("valued at a provisional FX rate"));
         // The "as at" line styling ships in the bundle.
         let css = body_string(get("/static/style.css").await).await;
         assert!(css.contains(".hint.as-at"));

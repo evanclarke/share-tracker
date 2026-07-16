@@ -60,6 +60,39 @@ pub struct ImportSummary {
     pub skipped: usize,
 }
 
+/// What the manual import endpoint returns: the import summary plus the
+/// provisional-snapshot true-up that followed it (absent when the import
+/// added no new rows, so no snapshot could have improved).
+#[derive(Debug, Serialize)]
+pub struct ImportOutcome {
+    #[serde(flatten)]
+    pub summary: ImportSummary,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snapshot_true_up: Option<crate::reports::snapshot::RegenerateSummary>,
+}
+
+/// After an import added new (currency, month) rows, regenerate the stored
+/// provisional snapshots in the same run, so a newly published real rate
+/// replaces the fallback valuations without waiting for the daily snapshot
+/// job. Shared by the scheduled `rba-fx-import` job and the manual
+/// `POST /rba_fx_rates/import`. `None` when nothing was inserted.
+pub async fn true_up_provisional_snapshots(
+    pool: &SqlitePool,
+    summary: &ImportSummary,
+) -> Result<Option<crate::reports::snapshot::RegenerateSummary>, sqlx::Error> {
+    if summary.inserted == 0 {
+        return Ok(None);
+    }
+    let true_up =
+        crate::reports::snapshot::regenerate_provisional(pool, chrono::Utc::now()).await?;
+    tracing::info!(
+        regenerated = true_up.regenerated.len(),
+        blocked = true_up.blocked.len(),
+        "provisional-snapshot true-up after FX import"
+    );
+    Ok(Some(true_up))
+}
+
 pub fn router() -> Router<SqlitePool> {
     Router::new()
         .route("/rba_fx_rates", get(list))
@@ -225,17 +258,23 @@ async fn get_one(
 /// Manually trigger the import. With a non-empty request body, imports that body
 /// (a downloaded F11 CSV — useful for retries when the RBA endpoint is
 /// unreachable); with an empty body, fetches from the RBA. Both share
-/// `import_from_content`.
+/// `import_from_content`, and both true up provisional snapshots when new
+/// rates landed.
 async fn import(
     State(pool): State<SqlitePool>,
     body: String,
-) -> Result<Json<ImportSummary>, ApiError> {
+) -> Result<Json<ImportOutcome>, ApiError> {
     let result = if body.trim().is_empty() {
         run_import(&pool).await
     } else {
         import_from_content(&pool, &body).await
     };
-    Ok(Json(result?))
+    let summary = result?;
+    let snapshot_true_up = true_up_provisional_snapshots(&pool, &summary).await?;
+    Ok(Json(ImportOutcome {
+        summary,
+        snapshot_true_up,
+    }))
 }
 
 impl From<ImportError> for ApiError {
@@ -538,6 +577,104 @@ mod tests {
             }
         );
         assert_eq!(db_list(&pool).await.unwrap().len(), 5);
+    }
+
+    /// A successful import that lands new rates regenerates the stored
+    /// provisional snapshots in the same run (the manual endpoint here; the
+    /// weekly `rba-fx-import` job shares `true_up_provisional_snapshots`), so
+    /// a fallback-valued snapshot is finalised the moment its real rate
+    /// arrives.
+    #[tokio::test]
+    async fn api_import_regenerates_provisional_snapshots_in_the_same_run() {
+        let pool = test_pool().await;
+        let june4 = chrono::NaiveDate::from_ymd_opt(2026, 6, 4).unwrap();
+        // A USD holding valued for 2026-06-04 while only May's rate exists:
+        // the snapshot generates provisional.
+        crate::test_support::listing(1)
+            .ticker("ICE")
+            .name("ICE")
+            .mic("XNYS")
+            .security_type(crate::entities::listing::SecurityType::Share)
+            .currency("USD")
+            .insert(&pool)
+            .await;
+        crate::test_support::buy(1, 1)
+            .date(chrono::NaiveDate::from_ymd_opt(2024, 1, 15).unwrap())
+            .settlement(chrono::NaiveDate::from_ymd_opt(2024, 1, 17).unwrap())
+            .qty("10".parse().unwrap())
+            .price("100".parse().unwrap())
+            .currency("USD")
+            .insert(&pool)
+            .await;
+        db_import_rate(&pool, "USD", "2024-01", "2".parse().unwrap())
+            .await
+            .unwrap();
+        db_import_rate(&pool, "USD", "2026-05", "2".parse().unwrap())
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO closing_prices (listing_id, price_date, price, source, fetched_at, status, error) \
+             VALUES (1, '2026-06-04', '141.50', 'test', '2026-06-05T08:00:00Z', 'ok', NULL)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        crate::reports::snapshot::generate(&pool, june4, chrono::Utc::now())
+            .await
+            .unwrap();
+        let metas = crate::reports::snapshot::db_list(&pool, None, None, None)
+            .await
+            .unwrap();
+        assert!(metas.iter().all(|m| m.provisional), "setup: provisional");
+
+        // The import lands June's real rate; the response reports the true-up
+        // and the stored snapshots are final afterwards.
+        let resp = router()
+            .with_state(pool.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/rba_fx_rates/import")
+                    .body(Body::from("Title,A$1=USD\n30-Jun-2026,2.5\n"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let outcome: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(outcome["inserted"], 1);
+        assert_eq!(
+            outcome["snapshot_true_up"]["regenerated"],
+            serde_json::json!(["2026-06-04"])
+        );
+        let metas = crate::reports::snapshot::db_list(&pool, None, None, None)
+            .await
+            .unwrap();
+        assert!(
+            metas.iter().all(|m| !m.provisional),
+            "finalised by the true-up"
+        );
+
+        // A re-import with nothing new performs no true-up.
+        let resp = router()
+            .with_state(pool.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/rba_fx_rates/import")
+                    .body(Body::from("Title,A$1=USD\n30-Jun-2026,2.5\n"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let outcome: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(outcome["inserted"], 0);
+        assert!(
+            outcome.get("snapshot_true_up").is_none(),
+            "no new rates, no true-up"
+        );
     }
 
     #[tokio::test]

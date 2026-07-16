@@ -12,15 +12,17 @@
 # Closing prices, once per market close, each entry pinned to its market's own
 # timezone so a DST transition at either end can't shift the run's margin over
 # the close (the Sydney<->New York offset swings 14-16h across the year). Each
-# run stores the latest complete trading day per held listing and skips days
-# already stored ok, so the three runs cover their own markets between them.
+# run stores, per held listing, every trading day in the last 7 whose row is
+# missing or errored (days already stored ok are never re-fetched), so the
+# three runs cover their own markets between them and backfill outages.
 30 17 * * 1-5   Australia/Sydney   price-import  # after the 16:00 ASX close
 30 17 * * 1-5   America/New_York   price-import  # after the 16:00 NYSE close
 30 0  * * *     UTC                price-import  # after the crypto UTC daily cut-off
 
 # Report snapshots, daily at 12:00 local (assumed near Sydney time): stores the
-# price-dependent reports for the latest date every held listing can be valued
-# at with final prices — typically yesterday, once the NYSE and crypto runs
-# above have landed (07:30-09:30 and 10:30-11:30 Sydney respectively). Skips a
-# date already stored fresh; regenerates it when flagged stale.
+# price-dependent reports for every missing date in a 14-day window up to the
+# latest date every held listing can be valued at with final prices — typically
+# yesterday, once the NYSE and crypto runs above have landed (07:30-09:30 and
+# 10:30-11:30 Sydney respectively). Regenerates stale or provisional window
+# dates; a blocked date is skipped (reported) and retried on later runs.
 0 12 * * *     report-snapshot

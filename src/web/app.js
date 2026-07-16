@@ -1018,8 +1018,8 @@ const JOB_DESC = {
   'rba-fx-import': 'Fetch the RBA F11 monthly FX rates and import any new months.',
   'mic-import': 'Fetch and refresh the ISO 10383 MIC registry.',
   'currency-import': 'Fetch ISO 4217 fiat and ISO 24165 token currencies.',
-  'price-import': 'Store the latest complete trading day\'s closing price for every held listing (skips days already stored).',
-  'report-snapshot': 'Store the price-dependent reports\' results for the latest date the whole portfolio can be valued at with final prices (skips a date already stored fresh).',
+  'price-import': 'Store the closing price of every trading day in the last 7 whose row is missing or errored, for every held listing (days already stored ok are never re-fetched, so runs are idempotent and outages self-heal).',
+  'report-snapshot': 'Store the price-dependent reports\' results for every missing date in the last 14 days up to the latest the whole portfolio can be valued at with final prices, regenerating stale or provisional ones; a blocked date is skipped (reported) and retried next run.',
 };
 
 async function viewJobs() {
@@ -1215,7 +1215,8 @@ function seriesChart(points) {
     label.textContent = points[i].snapshot_date;
     chart.appendChild(label);
   });
-  // One line + point markers per series; a stale snapshot's point is hollow.
+  // One line + point markers per series; a stale snapshot's point is hollow,
+  // a provisional one's (valued at a fallback-month FX rate) has a dashed ring.
   [['market_value', 'line-mv'], ['unrealised_gain', 'line-ug']].forEach(function (s) {
     const field = s[0], klass = s[1];
     const path = points.map(function (p, i) { return x(xs[i]) + ',' + y(Number(p[field])); }).join(' ');
@@ -1223,10 +1224,11 @@ function seriesChart(points) {
     points.forEach(function (p, i) {
       const dot = svgEl('circle', {
         cx: x(xs[i]), cy: y(Number(p[field])), r: 3,
-        class: klass + (p.stale ? ' stale' : ''),
+        class: klass + (p.stale ? ' stale' : '') + (p.provisional ? ' provisional' : ''),
       });
       const tip = svgEl('title');
-      tip.textContent = p.snapshot_date + ': ' + p[field] + (p.stale ? ' (stale)' : '');
+      tip.textContent = p.snapshot_date + ': ' + p[field]
+        + (p.stale ? ' (stale)' : '') + (p.provisional ? ' (provisional)' : '');
       dot.appendChild(tip);
       chart.appendChild(dot);
     });
@@ -1237,7 +1239,7 @@ function seriesChart(points) {
       el('span', { class: 'legend-mv' }, '— market value'),
       ' ',
       el('span', { class: 'legend-ug' }, '— unrealised gain'),
-      ' (AUD; hollow points are stale snapshots)',
+      ' (AUD; hollow points are stale snapshots, dashed rings provisional FX)',
     ]),
   ]);
 }
@@ -1271,12 +1273,45 @@ async function viewSnapshots() {
     }
   });
 
+  // Bulk repair: regenerate the whole series (after back-dated edits), or
+  // just the provisional dates (the manual counterpart of the true-up that
+  // runs after an FX import). Blocked dates are reported; the rest still
+  // regenerate.
+  function bulkButton(label, path) {
+    const btn = el('button', { type: 'button' }, label);
+    btn.addEventListener('click', async function () {
+      btn.disabled = true;
+      btn.textContent = 'Regenerating…';
+      try {
+        const summary = await api('POST', path);
+        let msg = 'Regenerated ' + summary.regenerated.length + ' date(s).';
+        if (summary.blocked.length > 0) {
+          msg += ' Blocked: ' + summary.blocked.map(function (b) {
+            return b.date + ' (' + b.reason + ')';
+          }).join('; ');
+        }
+        toast(msg, summary.blocked.length > 0);
+      } catch (e) {
+        toast(e.message, true);
+      }
+      viewSnapshots();
+    });
+    return btn;
+  }
+  genForm.appendChild(el('div', { class: 'form-actions' }, [
+    bulkButton('Regenerate all', '/report_snapshots/regenerate_all'),
+    ' ',
+    bulkButton('Regenerate provisional', '/report_snapshots/regenerate_provisional'),
+  ]));
+
   const rows = metas.slice().reverse().map(function (m) {
     return {
       date: m.snapshot_date,
       report: m.report,
       generated_at: m.generated_at,
-      status: m.stale ? 'stale' : 'ok',
+      // Stale wins the badge: regenerating fixes it, and re-flags provisional
+      // if the real FX rate is still missing.
+      status: m.stale ? 'stale' : (m.provisional ? 'provisional' : 'ok'),
     };
   });
   const table = filterableTable(rows, ['date', 'report', 'generated_at', 'status'], {
@@ -1303,10 +1338,13 @@ async function viewSnapshots() {
     el('h2', null, 'Snapshots'),
     el('p', { class: 'view-desc' },
       'Daily stored results of the price-dependent reports, valued at the stored closing prices '
-      + '(AUD-converted), written by the report-snapshot job after the day\'s last close. '
+      + '(AUD-converted), written by the report-snapshot job after the day\'s last close — each '
+      + 'run also backfills missing dates in the last 14 days. '
       + 'A back-dated fact marks every snapshot dated on or after it stale — the stored result '
-      + 'keeps showing, flagged, until regenerated. A day whose price fetches failed has no '
-      + 'snapshot at all until the price re-run succeeds.'),
+      + 'keeps showing, flagged, until regenerated. A snapshot valued while the month\'s FX rate '
+      + 'was unpublished is provisional (an earlier month\'s rate was used) and is finalised '
+      + 'automatically when the RBA import lands the real rate. A day whose price fetches failed '
+      + 'has no snapshot at all until the price re-run succeeds.'),
     el('div', { class: 'card' }, [
       el('h3', null, 'Market value and unrealised gain over time'),
       seriesChart(series),
@@ -1328,6 +1366,10 @@ async function viewSnapshotDetail(report, date) {
   if (snap.stale) {
     header.appendChild(el('p', { class: 'hint warn' },
       'Stale: a back-dated fact was recorded after this snapshot was generated. The rows below are the stored (pre-fact) result — regenerate from the Snapshots view.'));
+  }
+  if (snap.provisional) {
+    header.appendChild(el('p', { class: 'hint warn' },
+      'Provisional: the valuation month\'s FX rate was not published at generation, so an earlier month\'s rate was used. It is finalised automatically once the RBA import lands the real rate (or regenerate provisional from the Snapshots view).'));
   }
   setMain(el('div', null, [header, await dataTable(snap.rows)]));
 }
@@ -1352,12 +1394,13 @@ async function viewReport(report) {
   // could not value.
   function asAtSummary(rows) {
     const asOf = [];
-    let unavailable = 0;
+    let unavailable = 0, provisional = 0;
     (rows || []).forEach(function (r) {
       if (r && r.price_as_of) asOf.push(r.price_as_of);
       if (r && r.price_unavailable) unavailable += 1;
+      if (r && r.fx_provisional) provisional += 1;
     });
-    if (asOf.length === 0 && unavailable === 0) return null;
+    if (asOf.length === 0 && unavailable === 0 && provisional === 0) return null;
     const line = el('p', { class: 'hint as-at' });
     if (asOf.length > 0) {
       asOf.sort();
@@ -1367,9 +1410,14 @@ async function viewReport(report) {
         : 'Live prices as at ' + fmtLocalTimestamp(lo) + ' – ' + fmtLocalTimestamp(hi);
       line.appendChild(el('span', { title: utcTooltip(hi) }, text));
     }
+    if (provisional > 0) {
+      line.appendChild(el('span', { class: 'warn' },
+        (asOf.length > 0 ? ' · ' : '') + provisional
+        + ' holding(s) valued at a provisional FX rate (the valuation month\'s rate is not published yet)'));
+    }
     if (unavailable > 0) {
       line.appendChild(el('span', { class: 'warn' },
-        (asOf.length > 0 ? ' · ' : '') + unavailable + ' holding(s) had no live price'));
+        (asOf.length > 0 || provisional > 0 ? ' · ' : '') + unavailable + ' holding(s) had no live price'));
     }
     return line;
   }

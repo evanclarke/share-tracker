@@ -31,6 +31,11 @@ pub struct UnrealisedGain {
     /// supplied price or a stored snapshot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub price_as_of: Option<String>,
+    /// The AUD conversion of this row's price used an earlier month's FX rate
+    /// because the valuation month's is not published yet
+    /// (`infra::fx::resolve_valuation_rate`): the valuation is provisional.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fx_provisional: bool,
     /// Why a live price could not be obtained: the row is left unvalued with
     /// the reason rather than silently zeroed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -199,6 +204,7 @@ pub async fn db_unrealised_gains(
                 unrealised_gain_loss: None,
                 cgt_discount_eligible_quantity: cgt_eligible,
                 price_as_of: None,
+                fx_provisional: false,
                 price_unavailable: None,
             }
         })
@@ -244,6 +250,7 @@ async fn unrealised_gains_handler(
                     g.market_value = Some(g.quantity * v.aud_price);
                     g.unrealised_gain_loss = Some(g.quantity * v.aud_price - g.total_cost_base);
                     g.price_as_of = Some(v.as_of.clone());
+                    g.fx_provisional = v.fx_provisional;
                 }
                 Err(reason) => g.price_unavailable = Some(reason.clone()),
             }

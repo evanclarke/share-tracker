@@ -70,6 +70,37 @@ fn linked_attachments_documented() {
     assert!(API_MD.contains("an attachment list combining `include_linked`"));
 }
 
+/// Docs-sync pin for provisional snapshots, the job catch-up windows, and
+/// the bulk regeneration controls (REQUIREMENTS 2026-07-16): the schema
+/// documents the `provisional` column, the API documents the flag in
+/// responses, the two regeneration endpoints, the import true-up, the
+/// valuation-only FX fallback rule, and the 422 wording; the README surfaces
+/// the provisional-then-finalised behaviour and both self-healing windows.
+#[test]
+fn provisional_snapshots_and_catchup_documented() {
+    // SCHEMA.md: the provisional column, distinct from stale.
+    assert!(SCHEMA_MD.contains("provisional   INTEGER"));
+    assert!(SCHEMA_MD.contains("used a fallback-month FX rate"));
+    assert!(SCHEMA_MD.contains("Distinct from stale"));
+    // API.md: the flag in list/series responses, the endpoints, the true-up,
+    // and the fallback rule (valuation-only, bounded, never a tax figure).
+    assert!(API_MD.contains("`stale`, `provisional`"));
+    assert!(API_MD.contains("**Provisional snapshots:**"));
+    assert!(API_MD.contains("/report_snapshots/regenerate_all"));
+    assert!(API_MD.contains("/report_snapshots/regenerate_provisional"));
+    assert!(API_MD.contains("snapshot_true_up"));
+    assert!(API_MD.contains("**Valuation-only fallback:**"));
+    assert!(API_MD.contains("No tax calculation or FY report can reach a fallback-month rate"));
+    assert!(API_MD.contains("`fx_provisional: true`"));
+    // The 422 catalogue reflects the bounded fallback.
+    assert!(API_MD.contains("an FX-rate gap too old for the 2-month valuation fallback"));
+    // README: provisional-then-finalised snapshots and the two lookbacks.
+    assert!(README_MD.contains("flagged **provisional**"));
+    assert!(README_MD.contains("finalised automatically"));
+    assert!(README_MD.contains("self-heals the last 7 trading days"));
+    assert!(README_MD.contains("backfills missing dates over a 14-day window"));
+}
+
 /// Docs-sync pin for the AMIT cash-only income rows (REQUIREMENTS
 /// 2026-06-12): the Income section documents the cash-only rule and its 422s,
 /// the Tax summary section documents the exclusion, the cross-check report

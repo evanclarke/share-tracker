@@ -673,6 +673,7 @@ async fn activity_handler(
                     h.current_price = Some(v.aud_price);
                     h.market_value = Some(h.quantity * v.aud_price);
                     h.price_as_of = Some(v.as_of.clone());
+                    h.fx_provisional = v.fx_provisional;
                 }
                 Err(reason) => h.price_unavailable = Some(reason.clone()),
             }

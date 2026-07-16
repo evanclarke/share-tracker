@@ -270,16 +270,35 @@ pub fn registry(
         RegisteredJob::new(Arc::new(move || {
             let pool = fx_pool.clone();
             Box::pin(async move {
-                match crate::entities::rba_fx_rate::run_import(&pool).await {
+                let summary = match crate::entities::rba_fx_rate::run_import(&pool).await {
                     Ok(s) => {
                         tracing::info!(
                             inserted = s.inserted,
                             skipped = s.skipped,
                             "RBA FX rate import complete"
                         );
-                        Ok(())
+                        s
                     }
-                    Err(e) => Err(format!("{e:?}")),
+                    Err(e) => return Err(format!("{e:?}")),
+                };
+                // New rates may finalise provisional snapshots in this same
+                // run; a blocked true-up date fails the job so the Jobs UI
+                // surfaces it (the import itself succeeded and is idempotent).
+                match crate::entities::rba_fx_rate::true_up_provisional_snapshots(&pool, &summary)
+                    .await
+                {
+                    Ok(None) => Ok(()),
+                    Ok(Some(t)) if t.blocked.is_empty() => Ok(()),
+                    Ok(Some(t)) => Err(format!(
+                        "import ok ({} new rates); provisional snapshot true-up blocked: {}",
+                        summary.inserted,
+                        t.blocked
+                            .iter()
+                            .map(|b| format!("{}: {}", b.date, b.reason))
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    )),
+                    Err(e) => Err(format!("provisional snapshot true-up failed: {e}")),
                 }
             })
         })),

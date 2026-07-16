@@ -306,6 +306,7 @@ report_snapshots             Stored daily results of the price-dependent reports
 ├── snapshot_date TEXT             'YYYY-MM-DD'; part of PK — one stored result per (report, date)
 ├── generated_at  TEXT             RFC 3339 UTC timestamp of the run that produced the stored result
 ├── stale         INTEGER          0 | 1 (CHECK): 1 = a back-dated fact was recorded after generation, set by the staleness triggers (below) in the same transaction as the fact; cleared by regeneration
+├── provisional   INTEGER          0 | 1 (CHECK, 0015): 1 = some price conversion in the generation run used a fallback-month FX rate (the valuation month's RBA rate was not published yet). Distinct from stale (no trigger sets it — FX imports fire none); cleared when regeneration converts every price at a real-month rate (the RBA-import true-up and the snapshot job's window do this automatically)
 └── rows_json     TEXT             The report's response rows as JSON; money values inside are Decimal strings (the API's serialisation), kept in TEXT — never a REAL/float
 
 job_runs                     Run history of the scheduled/on-demand maintenance jobs (one row per run, appended each run; pruned to the newest 20 per job in the same write)

@@ -16,8 +16,20 @@
 //! is available it fails loudly rather than substituting a default — a silently
 //! unconverted or zeroed amount would corrupt a financial total without failing
 //! the request.
+//!
+//! **Valuation-only fallback**: the RBA publishes a month's average rate only
+//! after the month ends, so a *current-month* valuation (a report snapshot, a
+//! live quote) would otherwise be blocked all month. [`resolve_valuation_rate`]
+//! / [`FxRates::resolve_valuation_rate`] substitute the most recent earlier
+//! month's rate — bounded by [`VALUATION_FALLBACK_MONTHS`] — and say so in the
+//! result ([`ValuationRate::provisional`]) so the caller flags the output as
+//! provisional, never silently. Only valuation paths (snapshot generation in
+//! `reports::snapshot`, live-quote conversion in `entities::closing_price`)
+//! may call these; tax calculations and FY reports keep the strict
+//! [`resolve_rate`] rule so no tax figure can ever be computed from a
+//! fallback-month rate.
 
-use chrono::NaiveDate;
+use chrono::{Datelike, NaiveDate};
 use rust_decimal::Decimal;
 use sqlx::{Row, SqlitePool};
 use std::collections::HashMap;
@@ -120,11 +132,11 @@ async fn lookup_ato_rate(
 /// between the record's [`FxOverride`] and the ATO rate for the month of
 /// `date`. Fails loudly when no rate is available.
 ///
-/// Public so a caller converting several amounts at the same (currency, month)
-/// — e.g. `domain::cost_base` converting a cost-base breakdown — can resolve
-/// the rate once instead of one lookup per amount. Apply it as `AUD = foreign
-/// / rate`, passing amounts through unchanged at rate 1 (AUD and parity rates)
-/// so an exact value is never reshaped by a divide, exactly as [`to_aud`] does.
+/// Every production caller now resolves through the pre-loaded [`FxRates`]
+/// (reports) or [`resolve_valuation_rate`] (valuation paths), so this
+/// DB-lookup twin is test-only: the tests pin that both paths resolve
+/// identically.
+#[cfg(test)]
 pub async fn resolve_rate(
     pool: &SqlitePool,
     currency: &str,
@@ -173,6 +185,72 @@ pub fn apply_rate(amount: Decimal, rate: Decimal) -> Decimal {
     } else {
         amount / rate
     }
+}
+
+/// How many months before the valuation month [`resolve_valuation_rate`] may
+/// reach back for a rate. Beyond this the conversion fails loudly, exactly as
+/// the strict path does: the RBA import runs weekly, so a gap this old means
+/// the import has been broken for months and a "provisional" value would be
+/// meaningless.
+pub const VALUATION_FALLBACK_MONTHS: u32 = 2;
+
+/// A foreign-per-AUD rate resolved for *valuation* (never tax): the rate to
+/// apply via [`apply_rate`], plus whether it is an earlier month's substitute.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ValuationRate {
+    pub rate: Decimal,
+    /// The valuation month has no imported rate yet and an earlier month's
+    /// (at most [`VALUATION_FALLBACK_MONTHS`] back) was substituted. The
+    /// caller must surface this — the snapshot `provisional` flag, the live
+    /// row's provisional annotation — never treat the value as final.
+    pub provisional: bool,
+}
+
+/// The valuation month of `date` and its fallback predecessors, newest first:
+/// `['YYYY-MM'; 1 + VALUATION_FALLBACK_MONTHS]`.
+fn valuation_months(date: NaiveDate) -> Vec<String> {
+    let (mut y, mut m) = (date.year(), date.month());
+    let mut months = vec![format!("{y:04}-{m:02}")];
+    for _ in 0..VALUATION_FALLBACK_MONTHS {
+        (y, m) = if m == 1 { (y - 1, 12) } else { (y, m - 1) };
+        months.push(format!("{y:04}-{m:02}"));
+    }
+    months
+}
+
+/// Resolve the rate to *value* an amount of `currency` at `date`: the ATO rate
+/// for the valuation month when imported, else the most recent earlier month's
+/// rate (at most [`VALUATION_FALLBACK_MONTHS`] back, flagged provisional),
+/// else a loud [`FxError::MissingRate`] for the valuation month.
+///
+/// Valuation-only: exactly the snapshot-generation and live-quote paths may
+/// call this. Tax calculations and FY reports must use the strict
+/// [`resolve_rate`] / [`FxRates::resolve_rate`] so no tax figure is ever
+/// computed from a fallback-month rate.
+pub async fn resolve_valuation_rate(
+    pool: &SqlitePool,
+    currency: &str,
+    date: NaiveDate,
+) -> Result<ValuationRate, FxError> {
+    if currency.eq_ignore_ascii_case("AUD") {
+        return Ok(ValuationRate {
+            rate: Decimal::ONE,
+            provisional: false,
+        });
+    }
+    let months = valuation_months(date);
+    for (i, month) in months.iter().enumerate() {
+        if let Some(rate) = lookup_ato_rate(pool, currency, month).await? {
+            return Ok(ValuationRate {
+                rate,
+                provisional: i > 0,
+            });
+        }
+    }
+    Err(FxError::MissingRate {
+        currency: currency.to_string(),
+        month: months.into_iter().next().expect("valuation month present"),
+    })
 }
 
 /// Every imported ATO/RBA reference rate, pre-loaded into memory.
@@ -241,6 +319,34 @@ impl FxRates {
         pick_rate(ato_rate, currency, month, manual)
     }
 
+    /// [`resolve_valuation_rate`], over the pre-loaded map — same valuation-only
+    /// restriction: snapshot generation and live-quote conversion only.
+    pub fn resolve_valuation_rate(
+        &self,
+        currency: &str,
+        date: NaiveDate,
+    ) -> Result<ValuationRate, FxError> {
+        if currency.eq_ignore_ascii_case("AUD") {
+            return Ok(ValuationRate {
+                rate: Decimal::ONE,
+                provisional: false,
+            });
+        }
+        let months = valuation_months(date);
+        for (i, month) in months.iter().enumerate() {
+            if let Some(&rate) = self.rates.get(&(currency.to_string(), month.clone())) {
+                return Ok(ValuationRate {
+                    rate,
+                    provisional: i > 0,
+                });
+            }
+        }
+        Err(FxError::MissingRate {
+            currency: currency.to_string(),
+            month: months.into_iter().next().expect("valuation month present"),
+        })
+    }
+
     /// [`to_aud`], over the pre-loaded map.
     pub fn to_aud(
         &self,
@@ -263,6 +369,12 @@ impl FxRates {
 /// for the month of `date` are arbitrated by [`pick_rate`] — a spot override
 /// wins, the ATO rate is next, a fallback override is used only when no ATO
 /// rate exists. Fails loudly via [`FxError`] when no rate is available.
+///
+/// Test-only, like [`resolve_rate`]: production conversions go through the
+/// pre-loaded [`FxRates`] map (reports load it once per run) or the
+/// valuation-only [`resolve_valuation_rate`]; the tests here pin that the
+/// DB-lookup path and the map resolve identically.
+#[cfg(test)]
 pub async fn to_aud(
     pool: &SqlitePool,
     amount: Decimal,
@@ -556,6 +668,97 @@ mod tests {
             )
             .unwrap();
         assert_eq!(aud, Decimal::from(2500));
+    }
+
+    // Valuation-only fallback: the current month's missing rate falls back to
+    // the most recent earlier month (≤ VALUATION_FALLBACK_MONTHS), flagged
+    // provisional; a real-month rate is not flagged; beyond the bound it fails
+    // loudly like the strict path. Checked on both the DB-lookup path (live
+    // quotes) and the pre-loaded map (snapshot generation).
+
+    #[tokio::test]
+    async fn valuation_rate_prefers_the_real_month_unflagged() {
+        let pool = test_pool().await;
+        rba_fx_rate::db_import_rate(&pool, "USD", "2026-06", "0.50".parse().unwrap())
+            .await
+            .unwrap();
+        rba_fx_rate::db_import_rate(&pool, "USD", "2026-05", "0.40".parse().unwrap())
+            .await
+            .unwrap();
+        let vr = resolve_valuation_rate(&pool, "USD", date(2026, 6, 15))
+            .await
+            .unwrap();
+        assert_eq!(vr.rate, "0.50".parse::<Decimal>().unwrap());
+        assert!(!vr.provisional, "the real month's rate is not provisional");
+
+        let rates = loaded_rates(&pool).await;
+        assert_eq!(
+            rates
+                .resolve_valuation_rate("USD", date(2026, 6, 15))
+                .unwrap(),
+            vr
+        );
+    }
+
+    #[tokio::test]
+    async fn valuation_rate_falls_back_at_most_two_months_flagged_provisional() {
+        let pool = test_pool().await;
+        // Only April's rate exists; June resolves to it (2 months back),
+        // flagged provisional. July (3 months after April) fails loudly.
+        rba_fx_rate::db_import_rate(&pool, "USD", "2026-04", "0.40".parse().unwrap())
+            .await
+            .unwrap();
+        let vr = resolve_valuation_rate(&pool, "USD", date(2026, 6, 15))
+            .await
+            .unwrap();
+        assert_eq!(vr.rate, "0.40".parse::<Decimal>().unwrap());
+        assert!(vr.provisional, "a fallback-month rate must be flagged");
+
+        let err = resolve_valuation_rate(&pool, "USD", date(2026, 7, 1))
+            .await
+            .unwrap_err();
+        match err {
+            FxError::MissingRate { currency, month } => {
+                assert_eq!(currency, "USD");
+                assert_eq!(month, "2026-07", "the error names the valuation month");
+            }
+            other => panic!("expected MissingRate, got {other:?}"),
+        }
+
+        let rates = loaded_rates(&pool).await;
+        assert_eq!(
+            rates
+                .resolve_valuation_rate("USD", date(2026, 6, 15))
+                .unwrap(),
+            vr
+        );
+        assert!(matches!(
+            rates.resolve_valuation_rate("USD", date(2026, 7, 1)),
+            Err(FxError::MissingRate { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn valuation_rate_fallback_crosses_a_year_boundary() {
+        let pool = test_pool().await;
+        rba_fx_rate::db_import_rate(&pool, "USD", "2025-12", "0.40".parse().unwrap())
+            .await
+            .unwrap();
+        let vr = resolve_valuation_rate(&pool, "USD", date(2026, 1, 10))
+            .await
+            .unwrap();
+        assert_eq!(vr.rate, "0.40".parse::<Decimal>().unwrap());
+        assert!(vr.provisional);
+    }
+
+    #[tokio::test]
+    async fn valuation_rate_aud_is_always_final() {
+        let pool = test_pool().await;
+        let vr = resolve_valuation_rate(&pool, "AUD", date(2026, 6, 15))
+            .await
+            .unwrap();
+        assert_eq!(vr.rate, Decimal::ONE);
+        assert!(!vr.provisional);
     }
 
     #[test]

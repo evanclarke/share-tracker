@@ -195,9 +195,14 @@ input[type=checkbox] { width: auto; }
 .series-chart circle.stale { fill: #ffffff; stroke-width: 2; }
 .series-chart circle.line-mv.stale { stroke: var(--accent); }
 .series-chart circle.line-ug.stale { stroke: var(--ok); }
+/* Provisional points (valued at a fallback-month FX rate): dashed ring. */
+.series-chart circle.provisional { stroke-width: 2; stroke-dasharray: 2 1.5; }
+.series-chart circle.line-mv.provisional { stroke: var(--accent); }
+.series-chart circle.line-ug.provisional { stroke: var(--ok); }
 .legend-mv { color: var(--accent); }
 .legend-ug { color: var(--ok); }
 .badge.stale { background: #fdf3e0; color: var(--warn); }
+.badge.provisional { background: #e7effc; color: var(--accent); }
 .hint.warn { color: var(--warn); }
 .hint.as-at { margin: 0 0 10px; }
 .hint.as-at .warn { color: var(--warn); }

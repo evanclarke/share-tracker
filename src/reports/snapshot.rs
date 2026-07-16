@@ -6,8 +6,9 @@
 //!
 //! A snapshot for date D is the report run against the facts recorded *as at
 //! D* (the reports' `as_of` filtering) and valued at D's stored closing
-//! prices, each converted from the listing's quote currency to AUD via the
-//! standard FX rules (`infra::fx::to_aud`, ATO monthly rate). Generation
+//! prices, each converted from the listing's quote currency to AUD at the
+//! valuation FX rate (`infra::fx::resolve_valuation_rate`: the ATO monthly
+//! rate when imported, else the bounded earlier-month fallback). Generation
 //! refuses to run unless **every** listing held on D has a final, ok stored
 //! price for its nearest trading day on or before D — a day whose price
 //! fetches failed therefore has **no** snapshot (missing) until the price
@@ -15,17 +16,30 @@
 //!
 //! Staleness: recording a back-dated fact marks every snapshot dated on or
 //! after the fact stale, atomically with the fact write — enforced by the
-//! `*_stale_snapshots_*` triggers created in migration 0019, so no write path
-//! can bypass it. A stale snapshot keeps showing its stored result (flagged)
+//! `*_stale_snapshots_*` triggers (0001_schema.sql), so no write path can
+//! bypass it. A stale snapshot keeps showing its stored result (flagged)
 //! until regenerated on demand via `POST /report_snapshots/generate`, which
 //! re-runs the reports with the stored prices and the *new* facts.
 //!
-//! The scheduled `report-snapshot` job runs daily after the last relevant
-//! close (see `schedule.cron`): it computes the latest calendar date every
-//! held listing can be valued at with final prices and generates that day's
-//! snapshots, skipping when they already exist fresh (re-generating them when
-//! flagged stale). Past dates whose prices have been backfilled are generated
-//! on demand through the same endpoint.
+//! Provisional (migration 0015, distinct from stale): a snapshot whose run
+//! converted any price at a fallback-month FX rate — the valuation month's
+//! rate was not published yet — is stored flagged `provisional`. Nothing
+//! stales it when the real rate lands (FX imports fire no staleness
+//! triggers); instead the RBA import true-up and the scheduled job's window
+//! regenerate provisional snapshots, and a run whose conversions all used
+//! real-month rates clears the flag.
+//!
+//! The scheduled `report-snapshot` job catches up instead of targeting one
+//! date: each run generates every missing snapshot date in a bounded lookback
+//! window (capped at [`CATCHUP_LOOKBACK_DAYS`], never reaching before the
+//! series' first stored snapshot) up to the latest date every held listing
+//! can be valued at with final prices, and regenerates stale or provisional
+//! snapshots in the window. A date still blocked (missing/errored price) is
+//! skipped with its blocker in the job failure detail and retried on later
+//! runs — a late price delays that date's snapshot, never loses it. Past
+//! dates outside the window are generated on demand via the same endpoint, or
+//! in bulk via `POST /report_snapshots/regenerate_all` /
+//! `POST /report_snapshots/regenerate_provisional`.
 
 use crate::infra::http::ApiError;
 use axum::{
@@ -37,10 +51,10 @@ use chrono::{DateTime, Duration, NaiveDate, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{QueryBuilder, Row, SqlitePool};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::entities::closing_price::{self, Market, PriceStatus};
-use crate::infra::fx::{FxOverride, FxRates};
+use crate::infra::fx::FxRates;
 use crate::reports::{performance, portfolio, unrealised_gains};
 
 /// The price-dependent reports that are snapshotted daily.
@@ -84,6 +98,10 @@ pub struct SnapshotMeta {
     /// A back-dated fact was recorded after generation: the stored result no
     /// longer reflects the books; regenerate on demand.
     pub stale: bool,
+    /// The stored result was valued with a fallback-month FX rate (the
+    /// valuation month's rate was not published at generation); regeneration
+    /// with all real rates clears it.
+    pub provisional: bool,
 }
 
 /// A full snapshot: metadata plus the report's stored response rows.
@@ -93,6 +111,7 @@ pub struct Snapshot {
     pub snapshot_date: NaiveDate,
     pub generated_at: String,
     pub stale: bool,
+    pub provisional: bool,
     /// The report's rows exactly as the live endpoint would have returned
     /// them at generation time (money values are Decimal strings).
     pub rows: serde_json::Value,
@@ -105,6 +124,7 @@ pub struct Snapshot {
 pub struct SeriesPoint {
     pub snapshot_date: NaiveDate,
     pub stale: bool,
+    pub provisional: bool,
     pub market_value: Decimal,
     pub total_cost_base: Decimal,
     pub unrealised_gain: Decimal,
@@ -146,7 +166,8 @@ pub async fn db_list(
     to: Option<NaiveDate>,
 ) -> Result<Vec<SnapshotMeta>, sqlx::Error> {
     let mut qb = QueryBuilder::new(
-        "SELECT report, snapshot_date, generated_at, stale FROM report_snapshots WHERE 1=1",
+        "SELECT report, snapshot_date, generated_at, stale, provisional \
+         FROM report_snapshots WHERE 1=1",
     );
     if let Some(report) = report {
         qb.push(" AND report = ").push_bind(report);
@@ -167,7 +188,7 @@ pub async fn db_get(
     date: NaiveDate,
 ) -> Result<Option<Snapshot>, sqlx::Error> {
     let row = sqlx::query(
-        "SELECT report, snapshot_date, generated_at, stale, rows_json \
+        "SELECT report, snapshot_date, generated_at, stale, provisional, rows_json \
          FROM report_snapshots WHERE report = ? AND snapshot_date = ?",
     )
     .bind(report)
@@ -181,6 +202,7 @@ pub async fn db_get(
             snapshot_date: row.try_get("snapshot_date")?,
             generated_at: row.try_get("generated_at")?,
             stale: row.try_get("stale")?,
+            provisional: row.try_get("provisional")?,
             rows: serde_json::from_str(&rows_json)
                 .map_err(|e| sqlx::Error::Decode(format!("malformed rows_json: {e}").into()))?,
         })
@@ -193,7 +215,7 @@ pub async fn db_get(
 /// so the sums cover the whole portfolio). Oldest first.
 pub async fn db_series(pool: &SqlitePool) -> Result<Vec<SeriesPoint>, sqlx::Error> {
     let rows = sqlx::query(
-        "SELECT snapshot_date, stale, rows_json FROM report_snapshots \
+        "SELECT snapshot_date, stale, provisional, rows_json FROM report_snapshots \
          WHERE report = 'unrealised_gains' ORDER BY snapshot_date",
     )
     .fetch_all(pool)
@@ -207,6 +229,7 @@ pub async fn db_series(pool: &SqlitePool) -> Result<Vec<SeriesPoint>, sqlx::Erro
         let mut point = SeriesPoint {
             snapshot_date: row.try_get("snapshot_date")?,
             stale: row.try_get("stale")?,
+            provisional: row.try_get("provisional")?,
             market_value: Decimal::ZERO,
             total_cost_base: Decimal::ZERO,
             unrealised_gain: Decimal::ZERO,
@@ -291,13 +314,16 @@ pub async fn latest_snapshot_date(
 
 /// AUD price per listing held as at `date`, from the stored closing prices:
 /// each listing is valued at its nearest trading day on or before `date`,
-/// whose stored price must be ok and final. Fails with the full list of
-/// blockers otherwise — a failed-price day must yield no snapshot at all.
+/// whose stored price must be ok and final, converted at the valuation FX
+/// rate. The second return value is the listings whose conversion used a
+/// fallback-month rate — non-empty makes the snapshot provisional. Fails with
+/// the full list of blockers otherwise — a failed-price day must yield no
+/// snapshot at all.
 async fn aud_prices_for(
     pool: &SqlitePool,
     date: NaiveDate,
     now: DateTime<Utc>,
-) -> Result<HashMap<i64, Decimal>, GenerateError> {
+) -> Result<(HashMap<i64, Decimal>, HashSet<i64>), GenerateError> {
     let markets = held_markets(pool, Some(date)).await?;
     if markets.is_empty() {
         return Err(GenerateError::Unprocessable(format!(
@@ -306,6 +332,7 @@ async fn aud_prices_for(
     }
 
     let mut prices = HashMap::new();
+    let mut provisional: HashSet<i64> = HashSet::new();
     let mut blockers: Vec<String> = Vec::new();
     // every imported ATO FX rate — per-listing conversions below are map
     // lookups, not one DB round-trip each
@@ -330,14 +357,15 @@ async fn aud_prices_for(
         match closing_price::db_get_one(pool, market.listing.id, valuation_day).await? {
             Some(row) if row.status == PriceStatus::Ok => {
                 let price = row.price.expect("ok row carries a price (schema CHECK)");
-                match fx.to_aud(
-                    price,
-                    &market.listing.currency,
-                    valuation_day,
-                    FxOverride::None,
-                ) {
-                    Ok(aud) => {
-                        prices.insert(market.listing.id, aud);
+                match fx.resolve_valuation_rate(&market.listing.currency, valuation_day) {
+                    Ok(vr) => {
+                        prices.insert(
+                            market.listing.id,
+                            crate::infra::fx::apply_rate(price, vr.rate),
+                        );
+                        if vr.provisional {
+                            provisional.insert(market.listing.id);
+                        }
                     }
                     Err(e) => blockers.push(format!("{ticker}: {e}")),
                 }
@@ -352,7 +380,7 @@ async fn aud_prices_for(
         }
     }
     if blockers.is_empty() {
-        Ok(prices)
+        Ok((prices, provisional))
     } else {
         Err(GenerateError::Unprocessable(blockers.join("; ")))
     }
@@ -360,18 +388,23 @@ async fn aud_prices_for(
 
 /// Generate (or regenerate) the three snapshots for `date` and store them in
 /// one transaction, replacing any stored result and clearing its stale flag.
+/// The stored `provisional` flag is set iff any price conversion in this run
+/// used a fallback-month FX rate — so regenerating once the real rate is
+/// imported clears it.
 pub async fn generate(
     pool: &SqlitePool,
     date: NaiveDate,
     now: DateTime<Utc>,
 ) -> Result<Vec<SnapshotMeta>, GenerateError> {
-    let prices = aud_prices_for(pool, date, now).await?;
+    let (prices, provisional_ids) = aud_prices_for(pool, date, now).await?;
+    let provisional = !provisional_ids.is_empty();
 
     let mut overview = portfolio::db_holdings(pool, Some(date)).await?;
     for h in &mut overview {
         if let Some(&price) = prices.get(&h.listing_id) {
             h.current_price = Some(price);
             h.market_value = Some(h.quantity * price);
+            h.fx_provisional = provisional_ids.contains(&h.listing_id);
         }
     }
     let mut gains = unrealised_gains::db_unrealised_gains(pool, date).await?;
@@ -380,9 +413,15 @@ pub async fn generate(
             g.current_price = Some(price);
             g.market_value = Some(g.quantity * price);
             g.unrealised_gain_loss = Some(g.quantity * price - g.total_cost_base);
+            g.fx_provisional = provisional_ids.contains(&g.listing_id);
         }
     }
-    let perf = performance::db_performance(pool, &prices, date).await?;
+    let mut perf = performance::db_performance(pool, &prices, date).await?;
+    for row in &mut perf {
+        if let Some(listing_id) = row.listing_id {
+            row.fx_provisional = provisional_ids.contains(&listing_id);
+        }
+    }
 
     let to_json = |kind: ReportKind, value: serde_json::Result<String>| {
         value
@@ -402,16 +441,19 @@ pub async fn generate(
     let mut tx = pool.begin().await?;
     for (kind, rows_json) in &payloads {
         sqlx::query(
-            "INSERT INTO report_snapshots (report, snapshot_date, generated_at, stale, rows_json) \
-             VALUES (?, ?, ?, 0, ?) \
+            "INSERT INTO report_snapshots \
+                 (report, snapshot_date, generated_at, stale, provisional, rows_json) \
+             VALUES (?, ?, ?, 0, ?, ?) \
              ON CONFLICT(report, snapshot_date) DO UPDATE SET \
                  generated_at = excluded.generated_at, \
                  stale = 0, \
+                 provisional = excluded.provisional, \
                  rows_json = excluded.rows_json",
         )
         .bind(kind)
         .bind(date)
         .bind(&generated_at)
+        .bind(provisional)
         .bind(rows_json)
         .execute(&mut *tx)
         .await?;
@@ -425,16 +467,36 @@ pub async fn generate(
             snapshot_date: date,
             generated_at: generated_at.clone(),
             stale: false,
+            provisional,
         })
         .collect())
 }
 
-/// One scheduled run: snapshot the latest fully-valuable date, skipping when
-/// all three reports are already stored fresh for it (a stale or missing one
-/// is (re)generated). Nothing held is a no-op, not an error; a generation
-/// blocker (failed price fetch) fails the job so the Jobs UI shows it.
+/// How far back one scheduled run reaches to backfill missing snapshot dates
+/// and regenerate stale/provisional ones. Dates older than this are repaired
+/// on demand (`generate`, `regenerate_all`) or by the RBA-import true-up
+/// (`regenerate_provisional`), not by the daily job.
+pub const CATCHUP_LOOKBACK_DAYS: i64 = 14;
+
+/// Whether the stored metadata for one date needs (re)generation: anything
+/// short of all three reports stored fresh and final does.
+fn needs_generation(metas: &[&SnapshotMeta]) -> bool {
+    metas.len() < ReportKind::ALL.len() || metas.iter().any(|m| m.stale || m.provisional)
+}
+
+/// One scheduled run: catch up over a bounded window instead of targeting one
+/// date. Every missing snapshot date in the window — including an interior
+/// hole a blocked date left behind — is generated, and every stored snapshot
+/// in it that is stale or provisional is regenerated. The window runs from
+/// the first stored snapshot date, capped at [`CATCHUP_LOOKBACK_DAYS`] before
+/// the latest fully-valuable date (a fresh database starts at the latest date
+/// only), up to that latest date. A date still blocked (missing/errored
+/// price, unconvertible currency) is skipped with its blocker in the job
+/// failure detail — the other dates still generate — and retried on later
+/// runs while it stays in the window. Nothing held (overall, or on an
+/// individual window date) is a no-op, not an error.
 pub async fn run_snapshot_job(pool: &SqlitePool, now: DateTime<Utc>) -> Result<(), String> {
-    let date = match latest_snapshot_date(pool, now).await {
+    let latest = match latest_snapshot_date(pool, now).await {
         Ok(Some(date)) => date,
         Ok(None) => {
             tracing::info!("no holdings — no report snapshot to take");
@@ -442,18 +504,147 @@ pub async fn run_snapshot_job(pool: &SqlitePool, now: DateTime<Utc>) -> Result<(
         }
         Err(e) => return Err(e.to_string()),
     };
-    let existing = db_list(pool, None, Some(date), Some(date))
+    let window_start = latest - Duration::days(CATCHUP_LOOKBACK_DAYS - 1);
+
+    // Every date from the first stored snapshot in the window (a fresh
+    // database starts at the latest date — the job never backfills before
+    // the series began) up to the latest fully-valuable date is a candidate:
+    // missing dates include interior holes a blocked date left behind, so a
+    // hole keeps being retried while it stays in the window.
+    let first_stored: Option<NaiveDate> =
+        sqlx::query_scalar("SELECT MIN(snapshot_date) FROM report_snapshots")
+            .fetch_one(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+    let candidates_from = match first_stored {
+        None => latest,
+        Some(first) => first.max(window_start),
+    };
+    let mut targets: BTreeSet<NaiveDate> = BTreeSet::new();
+    let mut date = candidates_from;
+    while date <= latest {
+        targets.insert(date);
+        date += Duration::days(1);
+    }
+
+    let metas = db_list(pool, None, Some(window_start), Some(latest))
         .await
         .map_err(|e| e.to_string())?;
-    if existing.len() == ReportKind::ALL.len() && existing.iter().all(|m| !m.stale) {
-        tracing::info!(%date, "report snapshots already stored fresh");
-        return Ok(());
+    let mut by_date: HashMap<NaiveDate, Vec<&SnapshotMeta>> = HashMap::new();
+    for m in &metas {
+        by_date.entry(m.snapshot_date).or_default().push(m);
     }
-    generate(pool, date, now)
-        .await
-        .map_err(|e| format!("snapshot for {date}: {e}"))?;
-    tracing::info!(%date, "report snapshots stored");
-    Ok(())
+
+    let mut generated: Vec<NaiveDate> = Vec::new();
+    let mut blockers: Vec<String> = Vec::new();
+    for date in targets {
+        if by_date
+            .get(&date)
+            .is_some_and(|stored| !needs_generation(stored))
+        {
+            continue; // already stored fresh and final (e.g. a second run the same day)
+        }
+        // A window date before the first holding has nothing to snapshot —
+        // skip it silently rather than reporting a permanent blocker.
+        let held = closing_price::db_held_listing_ids(pool, Some(date))
+            .await
+            .map_err(|e| e.to_string())?;
+        if held.is_empty() {
+            continue;
+        }
+        match generate(pool, date, now).await {
+            Ok(_) => generated.push(date),
+            Err(GenerateError::Unprocessable(msg)) => blockers.push(format!("{date}: {msg}")),
+            Err(GenerateError::Db(msg)) => return Err(format!("snapshot for {date}: {msg}")),
+        }
+    }
+
+    if generated.is_empty() && blockers.is_empty() {
+        tracing::info!(%latest, "report snapshots already stored fresh");
+    } else {
+        tracing::info!(
+            ?generated,
+            blocked = blockers.len(),
+            "report snapshots stored"
+        );
+    }
+    if blockers.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("blocked snapshot dates: {}", blockers.join("; ")))
+    }
+}
+
+/// What a bulk regeneration did: the dates regenerated, and the dates that
+/// could not be (with each one's blocker) — a blocked date never aborts the
+/// others.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RegenerateSummary {
+    pub regenerated: Vec<NaiveDate>,
+    pub blocked: Vec<BlockedDate>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BlockedDate {
+    pub date: NaiveDate,
+    pub reason: String,
+}
+
+/// Regenerate each of `dates` with the single-date semantics of [`generate`]
+/// (as-at-date facts, stored prices; nothing stored for a still-blocked
+/// date), collecting per-date blockers instead of aborting.
+async fn regenerate_dates(
+    pool: &SqlitePool,
+    dates: impl IntoIterator<Item = NaiveDate>,
+    now: DateTime<Utc>,
+) -> RegenerateSummary {
+    let mut summary = RegenerateSummary {
+        regenerated: Vec::new(),
+        blocked: Vec::new(),
+    };
+    for date in dates {
+        match generate(pool, date, now).await {
+            Ok(_) => summary.regenerated.push(date),
+            Err(e) => summary.blocked.push(BlockedDate {
+                date,
+                reason: e.to_string(),
+            }),
+        }
+    }
+    summary
+}
+
+/// Regenerate every stored snapshot date across the whole series — the bulk
+/// repair after back-dated edits. Unblocked dates still regenerate when
+/// others are blocked.
+pub async fn regenerate_all(
+    pool: &SqlitePool,
+    now: DateTime<Utc>,
+) -> Result<RegenerateSummary, sqlx::Error> {
+    let dates: Vec<NaiveDate> = sqlx::query_scalar(
+        "SELECT DISTINCT snapshot_date FROM report_snapshots ORDER BY snapshot_date",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(regenerate_dates(pool, dates, now).await)
+}
+
+/// Regenerate every date with a provisional snapshot — the true-up run after
+/// an FX import lands real rates (also exposed manually as
+/// `POST /report_snapshots/regenerate_provisional`). A date whose real rate
+/// has still not been imported regenerates at the same fallback rate and
+/// simply stays provisional.
+pub async fn regenerate_provisional(
+    pool: &SqlitePool,
+    now: DateTime<Utc>,
+) -> Result<RegenerateSummary, sqlx::Error> {
+    let dates: Vec<NaiveDate> = sqlx::query_scalar(
+        "SELECT DISTINCT snapshot_date FROM report_snapshots WHERE provisional = 1 \
+         ORDER BY snapshot_date",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(regenerate_dates(pool, dates, now).await)
 }
 
 // ---------------------------------------------------------------------------
@@ -526,11 +717,36 @@ impl From<GenerateError> for ApiError {
     }
 }
 
+/// Bulk repair: regenerate every stored snapshot date. 200 with the summary —
+/// per-date blockers are reported in it, not as an error, so unblocked dates
+/// still regenerate.
+async fn regenerate_all_handler(
+    State(pool): State<SqlitePool>,
+) -> Result<Json<RegenerateSummary>, ApiError> {
+    Ok(Json(regenerate_all(&pool, Utc::now()).await?))
+}
+
+/// The manual counterpart of the post-import true-up: regenerate only the
+/// provisional snapshot dates. Same summary shape as regenerate-all.
+async fn regenerate_provisional_handler(
+    State(pool): State<SqlitePool>,
+) -> Result<Json<RegenerateSummary>, ApiError> {
+    Ok(Json(regenerate_provisional(&pool, Utc::now()).await?))
+}
+
 pub fn router() -> Router<SqlitePool> {
     Router::new()
         .route("/report_snapshots", get(list))
         .route("/report_snapshots/series", get(series))
         .route("/report_snapshots/generate", post(generate_handler))
+        .route(
+            "/report_snapshots/regenerate_all",
+            post(regenerate_all_handler),
+        )
+        .route(
+            "/report_snapshots/regenerate_provisional",
+            post(regenerate_provisional_handler),
+        )
         .route("/report_snapshots/{report}/{date}", get(get_one))
 }
 
@@ -859,6 +1075,192 @@ mod tests {
         assert_eq!(db_list(&pool, None, None, None).await.unwrap().len(), 3);
     }
 
+    async fn import_rate(pool: &SqlitePool, currency: &str, month: &str, rate: &str) {
+        crate::entities::rba_fx_rate::db_import_rate(pool, currency, month, rate.parse().unwrap())
+            .await
+            .unwrap();
+    }
+
+    async fn provisional_flags(pool: &SqlitePool, date: NaiveDate) -> Vec<bool> {
+        db_list(pool, None, Some(date), Some(date))
+            .await
+            .unwrap()
+            .iter()
+            .map(|m| m.provisional)
+            .collect()
+    }
+
+    /// A snapshot valued while the month's FX rate is unpublished uses the
+    /// fallback-month rate and is stored provisional (with the affected rows
+    /// annotated); once the real rate is imported, the scheduled job
+    /// regenerates it in its window and the flag clears. Distinct from stale:
+    /// importing the rate fires no staleness trigger.
+    #[tokio::test]
+    async fn db_missing_month_rate_makes_snapshot_provisional_until_regenerated() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "ICE", Some("XNYS"), "USD").await;
+        insert_buy(&pool, 1, 1, ymd(2024, 1, 15), "10", "100", "USD").await;
+        import_rate(&pool, "USD", "2024-01", "2").await;
+        // May's rate exists, June's is not published yet.
+        import_rate(&pool, "USD", "2026-05", "2").await;
+        store_price(&pool, 1, ymd(2026, 6, 4), "141.50").await;
+
+        let now = friday_evening_sydney();
+        let metas = generate(&pool, ymd(2026, 6, 4), now).await.unwrap();
+        assert!(metas.iter().all(|m| m.provisional && !m.stale));
+        assert_eq!(
+            provisional_flags(&pool, ymd(2026, 6, 4)).await,
+            vec![true; 3]
+        );
+
+        // The stored rows carry the AUD value converted at May's fallback
+        // rate, annotated per row.
+        let snap = db_get(&pool, ReportKind::UnrealisedGains, ymd(2026, 6, 4))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(snap.provisional);
+        let gains: Vec<unrealised_gains::UnrealisedGain> =
+            serde_json::from_value(snap.rows).unwrap();
+        assert_eq!(gains[0].market_value, Some("707.50".parse().unwrap())); // 10 × 141.50 / 2
+        assert!(gains[0].fx_provisional);
+
+        // The series marks the point provisional for the graph.
+        let series = db_series(&pool).await.unwrap();
+        assert!(series[0].provisional);
+
+        // June's real rate lands (no staleness trigger fires) — the next job
+        // run regenerates the provisional date and finalises it.
+        assert_eq!(stale_flags(&pool, ymd(2026, 6, 4)).await, vec![false; 3]);
+        import_rate(&pool, "USD", "2026-06", "2.5").await;
+        run_snapshot_job(&pool, now).await.unwrap();
+        assert_eq!(
+            provisional_flags(&pool, ymd(2026, 6, 4)).await,
+            vec![false; 3]
+        );
+        let snap = db_get(&pool, ReportKind::UnrealisedGains, ymd(2026, 6, 4))
+            .await
+            .unwrap()
+            .unwrap();
+        let gains: Vec<unrealised_gains::UnrealisedGain> =
+            serde_json::from_value(snap.rows).unwrap();
+        assert_eq!(gains[0].market_value, Some("566.00".parse().unwrap())); // 10 × 141.50 / 2.5
+        assert!(!gains[0].fx_provisional);
+    }
+
+    /// A rate gap beyond the two-month fallback bound still blocks generation
+    /// loudly — a "provisional" value that old would be meaningless.
+    #[tokio::test]
+    async fn db_rate_gap_beyond_fallback_bound_still_blocks() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "ICE", Some("XNYS"), "USD").await;
+        insert_buy(&pool, 1, 1, ymd(2024, 1, 15), "10", "100", "USD").await;
+        import_rate(&pool, "USD", "2026-03", "2").await; // 3 months before June
+        store_price(&pool, 1, ymd(2026, 6, 4), "141.50").await;
+
+        let err = generate(&pool, ymd(2026, 6, 4), friday_evening_sydney())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, GenerateError::Unprocessable(ref msg) if msg.contains("no ATO FX rate")),
+            "{err}"
+        );
+        assert!(db_list(&pool, None, None, None).await.unwrap().is_empty());
+    }
+
+    /// One scheduled run backfills every missing date since the last stored
+    /// snapshot (a crypto holding trades daily, so each calendar day is a
+    /// snapshot date), and a blocked date is skipped — reported, the others
+    /// still stored — then filled by a later run once its price exists.
+    #[tokio::test]
+    async fn db_job_catches_up_missing_dates_and_retries_blocked_ones() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BTC", None, "AUD").await;
+        insert_buy(&pool, 1, 1, ymd(2024, 1, 15), "0.5", "60000", "AUD").await;
+        store_price(&pool, 1, ymd(2026, 6, 3), "99000").await;
+        let now = utc(2026, 6, 7, 1, 30); // latest complete crypto day: 6/6
+        generate(&pool, ymd(2026, 6, 3), now).await.unwrap();
+
+        // Prices exist for 6/4 and 6/6 but 6/5 is missing: the run stores the
+        // two generable dates and fails naming the blocked one.
+        store_price(&pool, 1, ymd(2026, 6, 4), "99100").await;
+        store_price(&pool, 1, ymd(2026, 6, 6), "99545.35").await;
+        let err = run_snapshot_job(&pool, now).await.unwrap_err();
+        assert!(err.contains("2026-06-05"), "{err}");
+        assert!(err.contains("backfill"), "{err}");
+        let dates: Vec<NaiveDate> = db_list(&pool, Some(ReportKind::UnrealisedGains), None, None)
+            .await
+            .unwrap()
+            .iter()
+            .map(|m| m.snapshot_date)
+            .collect();
+        assert_eq!(
+            dates,
+            vec![ymd(2026, 6, 3), ymd(2026, 6, 4), ymd(2026, 6, 6)],
+            "unblocked dates stored; the blocked one is missing, not stale"
+        );
+
+        // The late price lands: the next run fills the hole and succeeds.
+        store_price(&pool, 1, ymd(2026, 6, 5), "99200").await;
+        run_snapshot_job(&pool, now).await.unwrap();
+        assert_eq!(
+            db_list(&pool, Some(ReportKind::UnrealisedGains), None, None)
+                .await
+                .unwrap()
+                .len(),
+            4
+        );
+    }
+
+    /// The catch-up window is bounded: a gap older than the lookback is not
+    /// backfilled by the job (bulk repair is the regenerate-all endpoint's
+    /// job), and a stale snapshot inside the window is regenerated.
+    #[tokio::test]
+    async fn db_job_lookback_window_is_capped_and_regenerates_stale_in_window() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BTC", None, "AUD").await;
+        insert_buy(&pool, 1, 1, ymd(2024, 1, 15), "0.5", "60000", "AUD").await;
+        let now = utc(2026, 6, 7, 1, 30); // latest complete crypto day: 6/6
+        let latest = ymd(2026, 6, 6);
+        let window_start = latest - Duration::days(CATCHUP_LOOKBACK_DAYS - 1); // 5/24
+
+        // Last stored snapshot is a month old; prices exist for every day.
+        store_price(&pool, 1, ymd(2026, 5, 6), "90000").await;
+        let mut d = window_start - Duration::days(3);
+        while d <= latest {
+            store_price(&pool, 1, d, "99000").await;
+            d += Duration::days(1);
+        }
+        generate(&pool, ymd(2026, 5, 6), now).await.unwrap();
+
+        run_snapshot_job(&pool, now).await.unwrap();
+        let dates: Vec<NaiveDate> = db_list(&pool, Some(ReportKind::UnrealisedGains), None, None)
+            .await
+            .unwrap()
+            .iter()
+            .map(|m| m.snapshot_date)
+            .collect();
+        let mut expected = vec![ymd(2026, 5, 6)];
+        let mut d = window_start;
+        while d <= latest {
+            expected.push(d);
+            d += Duration::days(1);
+        }
+        assert_eq!(dates, expected, "backfill starts at the window cap");
+
+        // A back-dated fact stales snapshots inside the window; the next run
+        // regenerates them without being asked.
+        insert_buy(&pool, 2, 1, ymd(2026, 6, 1), "0.1", "95000", "AUD").await;
+        assert_eq!(stale_flags(&pool, ymd(2026, 6, 6)).await, vec![true; 3]);
+        run_snapshot_job(&pool, now).await.unwrap();
+        assert_eq!(stale_flags(&pool, ymd(2026, 6, 6)).await, vec![false; 3]);
+        assert_eq!(
+            stale_flags(&pool, ymd(2026, 6, 1)).await,
+            vec![false; 3],
+            "every stale window date regenerated"
+        );
+    }
+
     /// Nothing held is a job no-op, and on-demand generation refuses a date
     /// whose close is not final yet (prices cannot exist for it).
     #[tokio::test]
@@ -933,6 +1335,10 @@ mod tests {
         assert_eq!(metas.as_array().unwrap().len(), 1);
         assert_eq!(metas[0]["report"], "unrealised_gains");
         assert_eq!(metas[0]["stale"], false);
+        assert_eq!(
+            metas[0]["provisional"], false,
+            "flag present in list metadata"
+        );
 
         // Get one snapshot's stored rows.
         let resp = app
@@ -948,6 +1354,10 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let snap = body_json(resp).await;
         assert_eq!(snap["rows"][0]["market_value"], "6248.00");
+        assert_eq!(
+            snap["provisional"], false,
+            "flag present on the full snapshot"
+        );
 
         // The series feeds the graph: one point per snapshot date, with the
         // portfolio's AUD totals.
@@ -970,6 +1380,10 @@ mod tests {
         assert_eq!(points[1]["market_value"], "6248.00");
         assert_eq!(points[1]["total_cost_base"], "1000");
         assert_eq!(points[1]["unrealised_gain"], "5248.00");
+        assert_eq!(
+            points[0]["provisional"], false,
+            "flag present on series points"
+        );
 
         // Unknown report or date → 404.
         for uri in [
@@ -983,6 +1397,108 @@ mod tests {
                 .unwrap();
             assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{uri}");
         }
+    }
+
+    /// The bulk repair endpoints: regenerate-all re-runs every stored date
+    /// (reporting a blocked one without aborting the rest); regenerate-
+    /// provisional touches only the provisional dates.
+    #[tokio::test]
+    async fn api_regenerate_all_and_provisional() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "ICE", Some("XNYS"), "USD").await;
+        insert_buy(&pool, 1, 1, ymd(2024, 1, 15), "10", "100", "USD").await;
+        import_rate(&pool, "USD", "2024-01", "2").await;
+        import_rate(&pool, "USD", "2026-05", "2").await;
+        let now = friday_evening_sydney();
+        // 6/3 finalised with May's real rate; 6/4 provisional (June missing).
+        store_price(&pool, 1, ymd(2026, 5, 29), "140").await;
+        store_price(&pool, 1, ymd(2026, 6, 4), "141.50").await;
+        generate(&pool, ymd(2026, 5, 29), now).await.unwrap();
+        generate(&pool, ymd(2026, 6, 4), now).await.unwrap();
+        assert_eq!(
+            provisional_flags(&pool, ymd(2026, 5, 29)).await,
+            vec![false; 3]
+        );
+        assert_eq!(
+            provisional_flags(&pool, ymd(2026, 6, 4)).await,
+            vec![true; 3]
+        );
+        let app = app(pool.clone());
+
+        // Regenerate-provisional touches only the provisional date; June's
+        // rate is still missing, so it regenerates and stays provisional.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/report_snapshots/regenerate_provisional")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let summary = body_json(resp).await;
+        assert_eq!(summary["regenerated"], serde_json::json!(["2026-06-04"]));
+        assert_eq!(summary["blocked"].as_array().unwrap().len(), 0);
+        assert_eq!(
+            provisional_flags(&pool, ymd(2026, 6, 4)).await,
+            vec![true; 3]
+        );
+
+        // June's rate lands; regenerate-all re-runs both dates and finalises
+        // the provisional one.
+        import_rate(&pool, "USD", "2026-06", "2.5").await;
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/report_snapshots/regenerate_all")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let summary = body_json(resp).await;
+        assert_eq!(
+            summary["regenerated"],
+            serde_json::json!(["2026-05-29", "2026-06-04"])
+        );
+        assert_eq!(
+            provisional_flags(&pool, ymd(2026, 6, 4)).await,
+            vec![false; 3]
+        );
+
+        // A date whose price row disappears is reported blocked; the other
+        // date still regenerates.
+        sqlx::query("DELETE FROM closing_prices WHERE price_date = '2026-05-29'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/report_snapshots/regenerate_all")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let summary = body_json(resp).await;
+        assert_eq!(summary["regenerated"], serde_json::json!(["2026-06-04"]));
+        assert_eq!(summary["blocked"][0]["date"], "2026-05-29");
+        assert!(
+            summary["blocked"][0]["reason"]
+                .as_str()
+                .unwrap()
+                .contains("backfill")
+        );
     }
 
     #[tokio::test]

@@ -29,6 +29,11 @@ pub struct HoldingOverview {
     /// supplied price or a stored snapshot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub price_as_of: Option<String>,
+    /// The AUD conversion of this holding's price used an earlier month's FX
+    /// rate because the valuation month's is not published yet
+    /// (`infra::fx::resolve_valuation_rate`): the valuation is provisional.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fx_provisional: bool,
     /// Why a live price could not be obtained for this holding: it is left
     /// unvalued (no `current_price`/`market_value`) with the reason, rather
     /// than silently zeroed.
@@ -209,6 +214,7 @@ pub async fn db_holdings_on(
                 current_price: None,
                 market_value: None,
                 price_as_of: None,
+                fx_provisional: false,
                 price_unavailable: None,
             }
         })
@@ -248,6 +254,7 @@ async fn overview(
                     h.current_price = Some(v.aud_price);
                     h.market_value = Some(h.quantity * v.aud_price);
                     h.price_as_of = Some(v.as_of.clone());
+                    h.fx_provisional = v.fx_provisional;
                 }
                 Err(reason) => h.price_unavailable = Some(reason.clone()),
             }
@@ -962,6 +969,91 @@ mod tests {
             Some(as_of.to_rfc3339().as_str())
         );
         assert!(holdings[0].price_unavailable.is_none());
+    }
+
+    /// Early in a month the quote month's ATO rate is not published yet: the
+    /// live conversion values the holding at the most recent earlier month's
+    /// rate and flags the row `fx_provisional` — never silently substituted.
+    /// A rate gap older than the two-month fallback bound still degrades to
+    /// `price_unavailable` instead.
+    #[tokio::test]
+    async fn api_overview_live_early_month_usd_is_valued_provisionally() {
+        use crate::entities::closing_price::test_support::QuoteStub;
+        let pool = test_pool().await;
+        crate::test_support::listing(1)
+            .ticker("ICE")
+            .name("ICE")
+            .mic("XNYS")
+            .security_type(crate::entities::listing::SecurityType::Share)
+            .currency("USD")
+            .insert(&pool)
+            .await;
+        crate::test_support::buy(1, 1)
+            .qty(Decimal::from(10))
+            .price(Decimal::from(100))
+            .currency("USD")
+            .insert(&pool)
+            .await;
+        // Only May's rate is imported; the quote is dated June.
+        crate::entities::rba_fx_rate::db_import_rate(&pool, "USD", "2026-05", "2".parse().unwrap())
+            .await
+            .unwrap();
+        let as_of = chrono::TimeZone::with_ymd_and_hms(&chrono::Utc, 2026, 6, 5, 6, 30, 0).unwrap();
+        let fetcher = QuoteStub::default()
+            .with_quote(1, "141.50", "USD", as_of)
+            .shared();
+
+        let request = || {
+            Request::builder()
+                .method("POST")
+                .uri("/portfolio/overview")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::json!({ "live": true }).to_string()))
+                .unwrap()
+        };
+        let resp = router()
+            .with_state(pool.clone())
+            .layer(axum::Extension(fetcher.clone()))
+            .oneshot(request())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let holdings: Vec<HoldingOverview> = serde_json::from_slice(&bytes).unwrap();
+        // Valued at May's fallback rate (141.50 / 2), flagged provisional.
+        assert_eq!(holdings[0].current_price, Some("70.75".parse().unwrap()));
+        assert!(
+            holdings[0].fx_provisional,
+            "the fallback rate must be flagged"
+        );
+        assert!(holdings[0].price_unavailable.is_none());
+
+        // With the newest rate 3 months old the fallback is out of bounds:
+        // the holding degrades to unvalued-with-reason, exactly as before.
+        sqlx::query("DELETE FROM rba_fx_rates WHERE currency = 'USD'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        crate::entities::rba_fx_rate::db_import_rate(&pool, "USD", "2026-03", "2".parse().unwrap())
+            .await
+            .unwrap();
+        let resp = router()
+            .with_state(pool)
+            .layer(axum::Extension(fetcher))
+            .oneshot(request())
+            .await
+            .unwrap();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let holdings: Vec<HoldingOverview> = serde_json::from_slice(&bytes).unwrap();
+        assert!(holdings[0].current_price.is_none());
+        assert!(!holdings[0].fx_provisional);
+        assert!(
+            holdings[0]
+                .price_unavailable
+                .as_deref()
+                .unwrap()
+                .contains("no ATO FX rate")
+        );
     }
 
     /// An explicit supplied price wins over the live fetch (and is never
