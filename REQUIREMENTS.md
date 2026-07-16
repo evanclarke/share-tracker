@@ -1079,3 +1079,66 @@ never match); the Sell side gets the symmetric exclusion.
 - Tested: a transfer with a fee disposal realising a loss, plus a Buy of the same listing inside
   the window, produces no alert — while an ordinary loss Sell of the same listing in the same
   window still flags
+
+## Report snapshots: provisional FX, catch-up generation, self-healing prices (2026-07-16)
+
+Two structural gaps make the daily `report-snapshot` job fragile in operation. First, snapshot
+valuation converts non-AUD prices at the ATO/RBA monthly rate for the *valuation month* with no
+fallback — but the RBA publishes a month's F11 average only after the month ends and the import
+runs weekly, so with a USD holding every snapshot dated in the current month is blocked (the job
+fails daily) until the rate lands weeks later; the live reports' USD valuations degrade the same
+way each new month. Second, both the price-import and snapshot jobs target only "the latest"
+date: a day missed outright (host down, provider outage) is never backfilled, and a blocked
+snapshot date is never revisited — holes in the series are permanent unless repaired by hand.
+The strategy: value with a clearly-flagged provisional rate rather than fail, true up
+automatically when the real rate arrives, and make both jobs catch up over a bounded window so a
+late input delays a snapshot instead of losing it.
+
+- Provisional FX fallback, valuation-only
+  - A new explicit resolution mode in `infra/fx.rs`: when the valuation month has no imported
+    ATO rate, fall back to the most recent *earlier* month's rate for that currency, bounded
+    (e.g. at most 2 months back — beyond that, fail loudly as today)
+  - Only valuation paths (snapshot generation, live-quote conversion) may use it. Tax
+    calculations and FY reports keep today's strict rule — there must be no code path by which a
+    tax figure is computed from a fallback-month rate
+  - A conversion that used the fallback is distinguishable in the result (the caller must know,
+    to set the provisional flag / annotate the live row) — never silently substituted
+- Provisional snapshots, replaced by a real run when the rate lands
+  - `report_snapshots` gains a `provisional` flag, distinct from `stale`: *stale* means the
+    facts changed after generation; *provisional* means the stored result was valued with a
+    fallback-month FX rate. A snapshot is provisional iff any conversion in its run used the
+    fallback; regeneration with all real rates clears the flag
+  - The flag is visible wherever snapshots surface: the list/get/series API responses and the
+    web UI (snapshot list and the series/graph view mark provisional points, as they do stale)
+  - Migration is additive (new column, no data loss); the snapshot staleness triggers are
+    unaffected
+- The snapshot job catches up instead of targeting one date
+  - Each scheduled run generates every missing snapshot date within a bounded lookback window
+    (from the last stored snapshot date, capped — e.g. 14 calendar days) up to the latest
+    fully-valuable date, and regenerates any stale or provisional snapshot in the window that
+    can now be improved (facts changed; or the real rate now exists)
+  - A date still blocked (missing/errored price) is skipped with its blocker surfaced (job log +
+    job failure detail) and retried on later runs — a late price delays that date's snapshot to
+    the next run rather than leaving a permanent hole
+- Price import self-heals over a lookback window
+  - `run_collection` re-attempts, per held listing, every trading day in a bounded lookback
+    (e.g. the last 7 trading days) whose stored row is missing or errored — not just the latest
+    complete trading day. Runs stay idempotent (ok rows are never re-fetched), so the three
+    existing daily runs become mutual retries and outage backfill; no schedule changes
+- True-up after RBA import
+  - After a successful FX-rate import that added new (currency, month) rows — the weekly
+    `rba-fx-import` job *and* the manual `POST /rba_fx_rates/import` — every provisional
+    snapshot whose valuation now resolves with a real rate is regenerated as part of that same
+    run, so Monday's 02:00 import finalises the prior month's snapshots without waiting for the
+    noon snapshot run
+- Manual regeneration controls
+  - "Regenerate all": one action (API endpoint + web UI button on the snapshots screen) that
+    regenerates every stored snapshot date across the whole series — the bulk repair after
+    back-dated edits; per-date blockers are reported, unblocked dates still regenerate
+  - "Regenerate provisional": same shape, but only the provisional snapshots (the manual
+    counterpart of the post-import true-up)
+  - Both reuse the existing single-date generation semantics (as-at-date facts, stored prices,
+    nothing stored for a still-blocked date)
+- Docs per the standard sync rule: `docs/SCHEMA.md` (the `provisional` column),
+  `docs/API.md` (flag in responses, the two regeneration endpoints, response codes), README
+  features (provisional-then-finalised snapshot behaviour)
