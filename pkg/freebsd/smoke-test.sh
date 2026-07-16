@@ -88,5 +88,12 @@ fi
 # unbounded (it once hung CI) and silent "not running" are both failures.
 [ -s /var/run/share_tracker/share_tracker.pid ]
 timeout 30 service share_tracker onestop
+# stop must take the server down with the supervisor — daemon(8) forwards
+# SIGTERM to the child; a survivor means supervision is miswired.
+sleep 1
+if pgrep -f '/usr/local/bin/share-tracker --config' >/dev/null; then
+  echo "server survived onestop" >&2
+  exit 1
+fi
 
 echo "smoke test passed: share-tracker $VERSION installs and serves"

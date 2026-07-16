@@ -642,11 +642,12 @@ mod freebsd_packaging {
         assert!(RC_SCRIPT.contains("--config ${share_tracker_config}"));
         // daemon(8) supervision: restart on exit, logs to syslog.
         assert!(RC_SCRIPT.contains("command=\"/usr/sbin/daemon\""));
-        // daemon(8) switches to the -u user *before* opening the -P pidfile
-        // (FreeBSD 14+), so the pidfile lives in a service-user-owned
-        // subdirectory the precmd (re)creates each start — /var/run itself is
-        // root-only and cleared at boot. A bare /var/run/<name>.pid fails
-        // "Permission denied" (shipped broken in v0.4.0).
+        // share_tracker_user is rc.subr's ${name}_user convention: the whole
+        // daemon(8) chain runs su(1)'d to the service user, so the pidfile
+        // lives in a service-user-owned subdirectory the precmd (re)creates
+        // each start — /var/run itself is root-only and cleared at boot. A
+        // bare /var/run/<name>.pid fails "Permission denied" (shipped broken
+        // in v0.4.0).
         assert!(RC_SCRIPT.contains("pidfile=\"/var/run/${name}/${name}.pid\""));
         assert!(RC_SCRIPT.contains("start_precmd=\"share_tracker_precmd\""));
         assert!(RC_SCRIPT.contains("install -d -o \"${share_tracker_user}\" \"/var/run/${name}\""));
@@ -655,10 +656,16 @@ mod freebsd_packaging {
         // the server binary made check_pidfile reject the pid and status/stop
         // report "not running" while the service kept running.
         assert!(!RC_SCRIPT.contains("procname="));
-        // daemon(8)'s argv must carry the server binary explicitly — it was
-        // once spelled ${procname}, which expanded empty when procname was
-        // removed, making daemon parse --config as its own (unknown) option.
-        assert!(RC_SCRIPT.contains("${share_tracker_user} /usr/local/bin/share-tracker --config"));
+        // daemon(8)'s argv carries the server binary explicitly (a ${procname}
+        // spelling once expanded empty, so daemon parsed --config as its own
+        // option) and must NOT carry -u: rc.subr's ${name}_user su already
+        // dropped privileges, and an unprivileged daemon -u fails
+        // setusercontext (initgroups EPERM), which -r turns into a respawn
+        // loop that never starts the server (the v0.4.1 release-blocker).
+        assert!(
+            RC_SCRIPT.contains("-r /usr/local/bin/share-tracker --config ${share_tracker_config}")
+        );
+        assert!(!RC_SCRIPT.contains("-u ${share_tracker_user}"));
         // Install creates the service user the rc script runs as.
         assert!(MANIFEST.contains("pw useradd share_tracker"));
         assert!(RC_SCRIPT.contains(": ${share_tracker_user:=\"share_tracker\"}"));
@@ -672,8 +679,10 @@ mod freebsd_packaging {
         assert!(SMOKE_SH.contains("http://127.0.0.1:3000/reports/health"));
         assert!(SMOKE_SH.contains("[ -s /var/run/share_tracker/share_tracker.pid ]"));
         // Stop must be bounded (an unbounded onestop once wedged the release
-        // VM for 20 minutes) and must genuinely succeed — no `|| true`.
+        // VM for 20 minutes), must genuinely succeed — no `|| true` — and
+        // must take the server down with the supervisor.
         assert!(SMOKE_SH.contains("\ntimeout 30 service share_tracker onestop\n"));
+        assert!(SMOKE_SH.contains("server survived onestop"));
         // On failure the smoke test surfaces the server's own output (it
         // goes to syslog under daemon -S, invisible in the CI log) by
         // re-running the service invocation with output to a file.
