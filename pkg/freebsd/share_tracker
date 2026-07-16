@@ -33,7 +33,7 @@ command="/usr/sbin/daemon"
 # default ($command, i.e. daemon): status/stop must match the supervisor —
 # naming the server binary instead made check_pidfile reject the pid and
 # status/stop report "not running" while the service kept running.
-command_args="-S -T share-tracker -P ${pidfile} -r -u ${share_tracker_user} ${procname} --config ${share_tracker_config}"
+command_args="-S -T share-tracker -P ${pidfile} -r -u ${share_tracker_user} /usr/local/bin/share-tracker --config ${share_tracker_config}"
 start_precmd="share_tracker_precmd"
 
 share_tracker_precmd()

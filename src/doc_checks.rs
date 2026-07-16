@@ -655,6 +655,10 @@ mod freebsd_packaging {
         // the server binary made check_pidfile reject the pid and status/stop
         // report "not running" while the service kept running.
         assert!(!RC_SCRIPT.contains("procname="));
+        // daemon(8)'s argv must carry the server binary explicitly — it was
+        // once spelled ${procname}, which expanded empty when procname was
+        // removed, making daemon parse --config as its own (unknown) option.
+        assert!(RC_SCRIPT.contains("${share_tracker_user} /usr/local/bin/share-tracker --config"));
         // Install creates the service user the rc script runs as.
         assert!(MANIFEST.contains("pw useradd share_tracker"));
         assert!(RC_SCRIPT.contains(": ${share_tracker_user:=\"share_tracker\"}"));
