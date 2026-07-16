@@ -34,7 +34,7 @@ pw usershow share_tracker >/dev/null
 # never touches the service data directory.
 /usr/local/bin/share-tracker --db /tmp/smoke.db --port 3999 &
 SERVER_PID=$!
-trap 'kill $SERVER_PID 2>/dev/null || true' EXIT
+trap 'kill $SERVER_PID 2>/dev/null || true; service share_tracker onestop >/dev/null 2>&1 || true' EXIT
 
 ok=""
 for _ in $(seq 1 30); do
@@ -45,5 +45,23 @@ for _ in $(seq 1 30); do
   sleep 1
 done
 [ -n "$ok" ] || { echo "server did not answer /reports/health" >&2; exit 1; }
+
+# The service also starts through the rc script for real — the direct run
+# above can't catch rc plumbing (v0.4.0 shipped a pidfile daemon(8) couldn't
+# write after -u dropped to the service user). onestart runs without
+# enabling the service in rc.conf; the installed config serves port 3000.
+service share_tracker onestart
+ok=""
+for _ in $(seq 1 30); do
+  if fetch -qo /dev/null http://127.0.0.1:3000/reports/health 2>/dev/null; then
+    ok=1
+    break
+  fi
+  sleep 1
+done
+[ -n "$ok" ] || { echo "service did not answer /reports/health" >&2; exit 1; }
+# daemon(8) wrote the supervisor pidfile, and the rc script can stop by it.
+[ -s /var/run/share_tracker/share_tracker.pid ]
+service share_tracker onestop
 
 echo "smoke test passed: share-tracker $VERSION installs and serves"

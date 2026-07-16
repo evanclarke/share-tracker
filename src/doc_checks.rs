@@ -642,6 +642,14 @@ mod freebsd_packaging {
         assert!(RC_SCRIPT.contains("--config ${share_tracker_config}"));
         // daemon(8) supervision: restart on exit, logs to syslog.
         assert!(RC_SCRIPT.contains("command=\"/usr/sbin/daemon\""));
+        // daemon(8) switches to the -u user *before* opening the -P pidfile
+        // (FreeBSD 14+), so the pidfile lives in a service-user-owned
+        // subdirectory the precmd (re)creates each start — /var/run itself is
+        // root-only and cleared at boot. A bare /var/run/<name>.pid fails
+        // "Permission denied" (shipped broken in v0.4.0).
+        assert!(RC_SCRIPT.contains("pidfile=\"/var/run/${name}/${name}.pid\""));
+        assert!(RC_SCRIPT.contains("start_precmd=\"share_tracker_precmd\""));
+        assert!(RC_SCRIPT.contains("install -d -o \"${share_tracker_user}\" \"/var/run/${name}\""));
         // Install creates the service user the rc script runs as.
         assert!(MANIFEST.contains("pw useradd share_tracker"));
         assert!(RC_SCRIPT.contains(": ${share_tracker_user:=\"share_tracker\"}"));
@@ -649,6 +657,12 @@ mod freebsd_packaging {
         assert!(SMOKE_SH.contains("grep -qx \"share-tracker $VERSION\""));
         assert!(SMOKE_SH.contains("/usr/local/etc/rc.d/share_tracker rcvar"));
         assert!(SMOKE_SH.contains("http://127.0.0.1:3999/reports/health"));
+        // …and the service really starts through the rc script (a direct
+        // binary run can't catch rc plumbing like the pidfile bug above).
+        assert!(SMOKE_SH.contains("service share_tracker onestart"));
+        assert!(SMOKE_SH.contains("http://127.0.0.1:3000/reports/health"));
+        assert!(SMOKE_SH.contains("[ -s /var/run/share_tracker/share_tracker.pid ]"));
+        assert!(SMOKE_SH.contains("service share_tracker onestop"));
     }
 
     /// README documents installing the package, the configuration file, and
