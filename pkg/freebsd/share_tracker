@@ -9,6 +9,10 @@
 # share_tracker_enable (bool):  Set to "YES" to enable. Default "NO".
 # share_tracker_config (path):  Config file. Default "/usr/local/etc/share-tracker.toml".
 # share_tracker_user (user):    User to run as. Default "share_tracker".
+# share_tracker_logfile (path): Server log. Default "/var/log/share-tracker.log".
+#                               Rotation is configured in
+#                               /usr/local/etc/newsyslog.conf.d/share-tracker.conf —
+#                               keep the two paths in sync if you change this.
 
 . /etc/rc.subr
 
@@ -20,12 +24,16 @@ load_rc_config $name
 : ${share_tracker_enable:="NO"}
 : ${share_tracker_config:="/usr/local/etc/share-tracker.toml"}
 : ${share_tracker_user:="share_tracker"}
+: ${share_tracker_logfile:="/var/log/share-tracker.log"}
 
 pidfile="/var/run/${name}/${name}.pid"
 command="/usr/sbin/daemon"
 # daemon(8) supervises the server: -r restarts it if it exits, -P writes the
-# supervisor pidfile, and -S sends the server's stdout/stderr (tracing logs)
-# to syslog under -T's tag.
+# supervisor pidfile, and -o appends the server's stdout/stderr (tracing
+# logs) to the log file. -H makes the supervisor close and re-open that file
+# on SIGHUP instead of forwarding the signal — which is what the shipped
+# newsyslog.conf.d/share-tracker.conf sends after rotating, so rotation
+# never restarts the server.
 #
 # The privilege drop is rc.subr's, not daemon's: share_tracker_user is the
 # ${name}_user convention, so run_rc_command su(1)s to the service user
@@ -40,12 +48,17 @@ command="/usr/sbin/daemon"
 # default ($command, i.e. daemon): status/stop must match the supervisor —
 # naming the server binary instead made check_pidfile reject the pid and
 # status/stop report "not running" while the service kept running.
-command_args="-S -T share-tracker -P ${pidfile} -r /usr/local/bin/share-tracker --config ${share_tracker_config}"
+command_args="-H -o ${share_tracker_logfile} -P ${pidfile} -r /usr/local/bin/share-tracker --config ${share_tracker_config}"
 start_precmd="share_tracker_precmd"
 
+# Runs as root (rc.subr's su applies only to the command): recreate the
+# pidfile directory (/var/run is cleared at boot) and make sure the log file
+# exists and is writable by the service user, who opens it via daemon -o.
 share_tracker_precmd()
 {
 	install -d -o "${share_tracker_user}" "/var/run/${name}"
+	[ -f "${share_tracker_logfile}" ] ||
+		install -o "${share_tracker_user}" -m 640 /dev/null "${share_tracker_logfile}"
 }
 
 run_rc_command "$1"

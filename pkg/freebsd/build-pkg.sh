@@ -26,13 +26,16 @@ cargo build --release
 
 STAGE=/tmp/share-tracker-stage
 rm -rf "$STAGE"
-mkdir -p "$STAGE/usr/local/bin" "$STAGE/usr/local/etc/rc.d"
+mkdir -p "$STAGE/usr/local/bin" "$STAGE/usr/local/etc/rc.d" \
+  "$STAGE/usr/local/etc/newsyslog.conf.d"
 install -m 0755 "$CARGO_TARGET_DIR/release/share-tracker" "$STAGE/usr/local/bin/"
 install -m 0755 pkg/freebsd/share_tracker "$STAGE/usr/local/etc/rc.d/"
 install -m 0644 pkg/freebsd/share-tracker.toml.sample "$STAGE/usr/local/etc/"
 # The default cron schedule ships as an editable @sample config file; the
 # sample share-tracker.toml points `schedule` at the installed copy.
 install -m 0644 schedule.cron "$STAGE/usr/local/etc/share-tracker.cron.sample"
+# Log rotation for the server log the rc script points daemon(8) -o at.
+install -m 0644 pkg/freebsd/newsyslog.conf "$STAGE/usr/local/etc/newsyslog.conf.d/share-tracker.conf.sample"
 
 sed "s/__VERSION__/$VERSION/" pkg/freebsd/manifest.ucl > /tmp/+MANIFEST
 pkg create -M /tmp/+MANIFEST -p pkg/freebsd/plist -r "$STAGE" -o "$OUT"

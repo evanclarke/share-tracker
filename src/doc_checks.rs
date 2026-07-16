@@ -586,6 +586,10 @@ mod freebsd_packaging {
             ("etc/rc.d/share_tracker", "$STAGE/usr/local/etc/rc.d/"),
             ("etc/share-tracker.toml.sample", "share-tracker.toml.sample"),
             ("etc/share-tracker.cron.sample", "share-tracker.cron.sample"),
+            (
+                "etc/newsyslog.conf.d/share-tracker.conf.sample",
+                "newsyslog.conf.d/share-tracker.conf.sample",
+            ),
         ] {
             assert!(PLIST.contains(plist_entry), "plist lists {plist_entry}");
             assert!(BUILD_SH.contains(staged), "build-pkg.sh stages {staged}");
@@ -615,8 +619,14 @@ mod freebsd_packaging {
         assert!(MANIFEST.contains(r#"cp -p "/usr/local/etc/$f.sample" "/usr/local/etc/$f""#));
         assert!(MANIFEST.contains("pre-deinstall"));
         assert!(MANIFEST.contains(r#"cmp -s "/usr/local/etc/$f.sample" "/usr/local/etc/$f""#));
-        // Both shipped configs go through that activation loop.
-        assert!(MANIFEST.contains("for f in share-tracker.toml share-tracker.cron"));
+        // Every shipped config goes through that activation loop.
+        assert_eq!(
+            MANIFEST
+                .matches("for f in share-tracker.toml share-tracker.cron newsyslog.conf.d/share-tracker.conf")
+                .count(),
+            2,
+            "install and deinstall loops both cover every sample config"
+        );
         // The scripts enforce -eu in the body (`sh script.sh` drops shebang
         // flags) and build-pkg.sh refuses to "succeed" without the artifact.
         assert!(BUILD_SH.contains("\nset -eu\n"));
@@ -626,6 +636,7 @@ mod freebsd_packaging {
         // copy goes unnoticed because the server answers HTTP on defaults.
         assert!(SMOKE_SH.contains("[ -f /usr/local/etc/share-tracker.toml ]"));
         assert!(SMOKE_SH.contains("[ -f /usr/local/etc/share-tracker.cron ]"));
+        assert!(SMOKE_SH.contains("[ -f /usr/local/etc/newsyslog.conf.d/share-tracker.conf ]"));
         assert!(SMOKE_SH.contains("pw usershow share_tracker"));
     }
 
@@ -640,8 +651,16 @@ mod freebsd_packaging {
             RC_SCRIPT.contains(": ${share_tracker_config:=\"/usr/local/etc/share-tracker.toml\"}")
         );
         assert!(RC_SCRIPT.contains("--config ${share_tracker_config}"));
-        // daemon(8) supervision: restart on exit, logs to syslog.
+        // daemon(8) supervision: restart on exit, log to the server's own
+        // file, and reopen it (-H, instead of forwarding SIGHUP) when the
+        // shipped newsyslog config rotates it — rotation must never restart
+        // the server.
         assert!(RC_SCRIPT.contains("command=\"/usr/sbin/daemon\""));
+        assert!(RC_SCRIPT.contains(": ${share_tracker_logfile:=\"/var/log/share-tracker.log\"}"));
+        assert!(RC_SCRIPT.contains("-H -o ${share_tracker_logfile}"));
+        const NEWSYSLOG: &str = include_str!("../pkg/freebsd/newsyslog.conf");
+        assert!(NEWSYSLOG.contains("/var/log/share-tracker.log"));
+        assert!(NEWSYSLOG.contains("/var/run/share_tracker/share_tracker.pid"));
         // share_tracker_user is rc.subr's ${name}_user convention: the whole
         // daemon(8) chain runs su(1)'d to the service user, so the pidfile
         // lives in a service-user-owned subdirectory the precmd (re)creates
@@ -683,6 +702,15 @@ mod freebsd_packaging {
         // must take the server down with the supervisor.
         assert!(SMOKE_SH.contains("\ntimeout 30 service share_tracker onestop\n"));
         assert!(SMOKE_SH.contains("server survived onestop"));
+        // Rotation is proven end-to-end: force a newsyslog rotation, then
+        // fresh log lines must land in the new file (daemon -H reopened it)
+        // without a new startup banner (the server was not restarted).
+        assert!(SMOKE_SH.contains("newsyslog -F /var/log/share-tracker.log"));
+        assert!(SMOKE_SH.contains("daemon -H reopen failed"));
+        assert!(SMOKE_SH.contains("server restarted on rotation"));
+        // The file gets plain text: logging::init switches ANSI off when
+        // stdout is not a terminal, and the smoke test holds that end-to-end.
+        assert!(SMOKE_SH.contains("ANSI escape codes in log file"));
         // On failure the smoke test surfaces the server's own output (it
         // goes to syslog under daemon -S, invisible in the CI log) by
         // re-running the service invocation with output to a file.
@@ -695,6 +723,8 @@ mod freebsd_packaging {
     fn readme_documents_packaging_and_versioning() {
         assert!(README_MD.contains("## Installing on FreeBSD"));
         assert!(README_MD.contains("sysrc share_tracker_enable=YES"));
+        assert!(README_MD.contains("`/var/log/share-tracker.log`"));
+        assert!(README_MD.contains("newsyslog"));
         assert!(README_MD.contains("### Configuration file"));
         assert!(README_MD.contains("**CLI flag > config-file value > built-in default**"));
         assert!(README_MD.contains("## Releases and versioning"));

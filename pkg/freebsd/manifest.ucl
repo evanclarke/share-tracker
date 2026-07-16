@@ -33,14 +33,14 @@ if ! pw usershow share_tracker >/dev/null 2>&1; then
 fi
 mkdir -p /var/db/share-tracker/backups
 chown -R share_tracker:share_tracker /var/db/share-tracker
-for f in share-tracker.toml share-tracker.cron; do
+for f in share-tracker.toml share-tracker.cron newsyslog.conf.d/share-tracker.conf; do
   if [ ! -f "/usr/local/etc/$f" ]; then
     cp -p "/usr/local/etc/$f.sample" "/usr/local/etc/$f"
   fi
 done
 EOD
   pre-deinstall: <<EOD
-for f in share-tracker.toml share-tracker.cron; do
+for f in share-tracker.toml share-tracker.cron newsyslog.conf.d/share-tracker.conf; do
   if cmp -s "/usr/local/etc/$f.sample" "/usr/local/etc/$f"; then
     rm "/usr/local/etc/$f"
   fi

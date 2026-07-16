@@ -2,3 +2,4 @@ bin/share-tracker
 etc/rc.d/share_tracker
 etc/share-tracker.toml.sample
 etc/share-tracker.cron.sample
+etc/newsyslog.conf.d/share-tracker.conf.sample
