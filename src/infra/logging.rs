@@ -1,3 +1,4 @@
+use std::io::IsTerminal;
 use tracing_subscriber::EnvFilter;
 
 fn build_filter() -> EnvFilter {
@@ -7,6 +8,10 @@ fn build_filter() -> EnvFilter {
 pub fn init() {
     tracing_subscriber::fmt()
         .with_env_filter(build_filter())
+        // Color only when stdout is a terminal. Under daemon(8) stdout is a
+        // pipe into the log file (-o), and tracing's default-on ANSI would
+        // litter it with escape codes.
+        .with_ansi(std::io::stdout().is_terminal())
         .init();
 }
 
