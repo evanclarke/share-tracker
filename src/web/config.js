@@ -271,7 +271,7 @@ export const ENTITIES = [
       dec('aud_pre_2009_cessation_discount', 'Statement AUD: pre-2009 cessation (G)', { optional: true, default: '' }),
       dec('aud_foreign_source_discount', 'Statement AUD: foreign-source (A)', { optional: true, default: '' }),
     ],
-    columns: ['id', 'listing_id', 'holding_account_id', 'taxing_point_date', 'quantity', 'market_value_per_share', 'deferral_discount', 'taxed_upfront_eligible', 'currency', 'vest_trade_id'],
+    columns: ['id', 'listing_id', 'holding_account_id', 'taxing_point_date', 'quantity', 'market_value_per_share', 'deferral_discount', 'aud_deferral_discount', 'taxed_upfront_eligible', 'currency', 'vest_trade_id'],
     // Vest only while unvested — a second vest is rejected by the API (422),
     // so a vested row (vest_trade_id set) shows the linked Buy instead.
     rowActions: function (row) {

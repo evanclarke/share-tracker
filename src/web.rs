@@ -641,6 +641,10 @@ mod tests {
         assert!(js.contains("aud_deferral_discount"));
         assert!(js.contains("aud_taxed_upfront_eligible"));
         assert!(js.contains("Statement AUD: deferral discount (F)"));
+        // The statement-AUD deferral figure (label F) is also a list column,
+        // money-formatted, with a header the humaniser can't produce.
+        assert!(js.contains("'deferral_discount', 'aud_deferral_discount'"));
+        assert!(js.contains("Statement AUD deferral (F)"));
         // The Vest action (creates the cost-base-reset Buy) is reachable from a
         // statement row and posts to the vest endpoint.
         assert!(js.contains("#/ess-vest/"));

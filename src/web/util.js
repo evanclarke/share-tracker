@@ -337,6 +337,8 @@ const COLUMN_KINDS = (function () {
     // ESS statement discount line items + the tax-summary ESS aggregates.
     'taxed_upfront_eligible', 'taxed_upfront_not_eligible', 'deferral_discount',
     'pre_2009_cessation_discount', 'foreign_source_discount', 'tfn_withholding',
+    'aud_taxed_upfront_eligible', 'aud_taxed_upfront_not_eligible', 'aud_deferral_discount',
+    'aud_pre_2009_cessation_discount', 'aud_foreign_source_discount',
     'ess_discount_assessable', 'ess_taxed_upfront_reduction', 'ess_foreign_source_discount',
     // Inheritance cost-base components.
     'lpr_expenditure',
@@ -444,6 +446,9 @@ const COLUMN_LABELS = {
   amount_aud: 'Amount (AUD)',
   units_after: 'Units after',
   fx_provisional: 'Provisional FX',
+  // The employer statement's stated AUD figure for label F (reported verbatim
+  // by the tax summary); the default humaniser would render "Aud …".
+  aud_deferral_discount: 'Statement AUD deferral (F)',
 };
 
 // The friendly heading for a column: an explicit override, else humanised.

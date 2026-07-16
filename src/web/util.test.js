@@ -182,6 +182,9 @@ test('columnKinds maps classified columns and skips the rest', () => {
       quantity: 'quantity',
     },
   );
+  // The ESS statement-AUD override columns format as money (label F is an
+  // ESS Statements list column).
+  assert.deepEqual(columnKinds(['aud_deferral_discount']), { aud_deferral_discount: 'money' });
 });
 
 test('columnLabel: overrides win, humaniser handles _id and acronyms', () => {
@@ -191,6 +194,7 @@ test('columnLabel: overrides win, humaniser handles _id and acronyms', () => {
   assert.equal(columnLabel('fx_rate'), 'FX rate'); // acronym casing kept
   assert.equal(columnLabel('gst_on_brokerage'), 'GST on brokerage');
   assert.equal(columnLabel('date_paid'), 'Date paid');
+  assert.equal(columnLabel('aud_deferral_discount'), 'Statement AUD deferral (F)');
 });
 
 // ---- tradeOrigin ----------------------------------------------------------
