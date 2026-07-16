@@ -14,7 +14,7 @@
 import {
   el, toast, setMain, looksNumeric, isTimestamp, fmtLocalTimestamp, utcTooltip,
   cellText, numericDisplay, columnKinds, columnLabel, columnLabelMaps,
-  fkLabelMaps, api, nextId, loadOptions, listingNamer, describeTrade,
+  fkLabelMaps, api, nextId, loadOptions, listingNamer, describeTrade, tradeOrigin,
 } from './util.js';
 import {
   field, txt, dec, dt, bool, fk,
@@ -354,6 +354,9 @@ async function viewEntityList(entity) {
   setActiveNav(entity.slug);
   let rows = await api('GET', entity.api);
   if (entity.listFilter) rows = rows.filter(entity.listFilter);
+  // Display-only derived columns (e.g. the trades list's Origin) are computed
+  // client-side from fields the API already returns on the row.
+  if (entity.deriveRow) rows.forEach(entity.deriveRow);
 
   const header = el('div', null, [
     el('h2', null, entity.title),
@@ -578,7 +581,10 @@ const SELL_FIELDS = [
 async function viewSellsList() {
   setActiveNav('sells');
   const sells = (await api('GET', '/trades')).filter(function (t) { return t.trade_type === 'Sell'; });
-  const cols = ['id', 'date', 'settlement_date', 'listing_id', 'average_price', 'quantity', 'currency', 'statement_total', 'holding_account_id'];
+  // Transfer-out and other operation-created Sells are labelled like the
+  // Trades list, so a price-0 transfer leg never reads as a real disposal.
+  sells.forEach(function (t) { t.origin = tradeOrigin(t); });
+  const cols = ['id', 'origin', 'date', 'settlement_date', 'listing_id', 'average_price', 'quantity', 'currency', 'statement_total', 'holding_account_id'];
   const toolbar = el('div', { class: 'toolbar' }, [
     el('a', { href: '#/sells/new' }, el('button', { class: 'primary' }, '+ New Sell')),
   ]);

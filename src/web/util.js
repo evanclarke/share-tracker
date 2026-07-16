@@ -208,6 +208,29 @@ export function describeTrade(t, listingName) {
   return t.trade_type + ' ' + t.quantity + ' ' + listingName(t.listing_id) + ' on ' + t.date;
 }
 
+// The operation that created a trade, read off its provenance links ('' for
+// an ordinary trade) — the Origin column on the Trades and Sells lists. The
+// rollover-style Buys (transfer-in, scrip replacement, demerger) carry the
+// moved parcel's cost base on the brokerage column with a zero price, and a
+// rights-exercise Buy carries the rights cost there, so those labels spell it
+// out — a four-figure "brokerage" on a transfer-in is a cost base, not a fee.
+export function tradeOrigin(t) {
+  const costBase = ' (brokerage = carried cost base, not a fee)';
+  if (t.transfer_id != null) {
+    return t.trade_type === 'Sell'
+      ? 'Transfer #' + t.transfer_id + ' out'
+      : 'Transfer #' + t.transfer_id + ' in' + costBase;
+  }
+  if (t.scrip_action_id != null) return 'Scrip exchange' + (t.trade_type === 'Sell' ? '' : costBase);
+  if (t.demerger_action_id != null) return 'Demerger' + costBase;
+  if (t.rights_action_id != null) return 'Rights exercise (brokerage = rights cost)';
+  if (t.ess_statement_id != null) return 'ESS vest';
+  if (t.inheritance_id != null) return 'Inheritance';
+  if (t.buyback_action_id != null) return 'Buy-back';
+  if (t.worthless_action_id != null) return 'Worthless shares';
+  return '';
+}
+
 // Human-readable labels for foreign-key id columns: the stored id keeps
 // driving the API (and edit-form selects), but tables/prose show the
 // referenced row's natural name (e.g. "XNYS:ICE", "CHESS Personal",

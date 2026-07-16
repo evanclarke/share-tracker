@@ -6,7 +6,7 @@
 // list/form/report/action code does the rest. Adding or changing an entity,
 // report, or action means editing the matching entry here, not adding views.
 //
-import { describeTrade } from './util.js';
+import { describeTrade, tradeOrigin } from './util.js';
 import { txt, dec, int, dt, bool, sel, fk, wireGstBrokerage, wireIncomeEntry } from './forms.js';
 
 // ---- entity configuration --------------------------------------------
@@ -96,8 +96,12 @@ export const ENTITIES = [
       dec('statement_total', 'Statement total', { optional: true, default: '', hint: 'Optional cross-check in the brokerage currency: quantity × price + brokerage + GST. Rejected if it does not reconcile.' }),
       fk('holding_account_id', 'Holding account', 'holdingAccounts', { required: true, default: '1' }),
     ],
-    columns: ['id', 'trade_type', 'date', 'settlement_date', 'listing_id', 'average_price', 'quantity', 'currency', 'brokerage', 'statement_total', 'fx_rate', 'spot_fx_rate', 'holding_account_id'],
+    columns: ['id', 'trade_type', 'origin', 'date', 'settlement_date', 'listing_id', 'average_price', 'quantity', 'currency', 'brokerage', 'statement_total', 'fx_rate', 'spot_fx_rate', 'holding_account_id'],
     listFilter: function (row) { return row.trade_type !== 'Sell'; },
+    // Origin labels the operation that created the row (transfer-in, scrip
+    // exchange, …) so a rollover Buy's cost-base-carrying brokerage figure
+    // never reads as a real fee.
+    deriveRow: function (row) { row.origin = tradeOrigin(row); },
     attachOwner: 'trade_id',
     wireForm: wireGstBrokerage,
   },

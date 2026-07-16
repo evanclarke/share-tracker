@@ -725,6 +725,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn trade_origin_labelling_present() {
+        let js = app_js_body().await;
+        // The Trades and Sells lists carry a derived Origin column labelling
+        // the operation that created each row from its provenance links
+        // (tradeOrigin in util.js, wired via the trades config's deriveRow and
+        // the Sells view), so a rollover Buy's cost-base-carrying brokerage
+        // figure — e.g. a transfer-in of a whole ETH parcel — never reads as
+        // a real fee.
+        assert!(js.contains("function tradeOrigin"));
+        assert!(js.contains("deriveRow: function (row) { row.origin = tradeOrigin(row); }"));
+        assert!(js.contains("entity.deriveRow"));
+        assert!(js.contains("t.origin = tradeOrigin(t)"));
+        assert!(js.contains("brokerage = carried cost base, not a fee"));
+    }
+
+    #[tokio::test]
     async fn rights_sales_ui_present() {
         let js = app_js_body().await;
         // The Rights Sales view lists the disposals recorded by the Sell

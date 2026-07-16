@@ -16,7 +16,7 @@ import assert from 'node:assert/strict';
 import {
   roundDecimalStr, groupThousands, padMinDp, decStrEq, numericDisplay,
   addDecimalStrings, decParts, mulToCents, frankingCreditFor, decEq,
-  looksNumeric, columnKinds, columnLabel,
+  looksNumeric, columnKinds, columnLabel, tradeOrigin,
 } from './util.js';
 
 // ---- roundDecimalStr ----------------------------------------------------
@@ -191,4 +191,43 @@ test('columnLabel: overrides win, humaniser handles _id and acronyms', () => {
   assert.equal(columnLabel('fx_rate'), 'FX rate'); // acronym casing kept
   assert.equal(columnLabel('gst_on_brokerage'), 'GST on brokerage');
   assert.equal(columnLabel('date_paid'), 'Date paid');
+});
+
+// ---- tradeOrigin ----------------------------------------------------------
+test('tradeOrigin: transfer legs name the transfer, Buy flags the cost base', () => {
+  // The transfer-in Buy's brokerage column holds the moved parcel's cost
+  // base (transfer.rs), so its label must say the figure is not a fee.
+  assert.equal(
+    tradeOrigin({ trade_type: 'Buy', transfer_id: 3 }),
+    'Transfer #3 in (brokerage = carried cost base, not a fee)',
+  );
+  assert.equal(tradeOrigin({ trade_type: 'Sell', transfer_id: 3 }), 'Transfer #3 out');
+});
+
+test('tradeOrigin: rollover Buys carrying cost base on brokerage say so', () => {
+  assert.equal(
+    tradeOrigin({ trade_type: 'Buy', scrip_action_id: 1 }),
+    'Scrip exchange (brokerage = carried cost base, not a fee)',
+  );
+  assert.equal(tradeOrigin({ trade_type: 'Sell', scrip_action_id: 1 }), 'Scrip exchange');
+  assert.equal(
+    tradeOrigin({ trade_type: 'Buy', demerger_action_id: 2 }),
+    'Demerger (brokerage = carried cost base, not a fee)',
+  );
+  assert.equal(
+    tradeOrigin({ trade_type: 'Buy', rights_action_id: 4 }),
+    'Rights exercise (brokerage = rights cost)',
+  );
+});
+
+test('tradeOrigin: remaining provenance links label plainly', () => {
+  assert.equal(tradeOrigin({ trade_type: 'Buy', ess_statement_id: 9 }), 'ESS vest');
+  assert.equal(tradeOrigin({ trade_type: 'Buy', inheritance_id: 1 }), 'Inheritance');
+  assert.equal(tradeOrigin({ trade_type: 'Sell', buyback_action_id: 5 }), 'Buy-back');
+  assert.equal(tradeOrigin({ trade_type: 'Sell', worthless_action_id: 6 }), 'Worthless shares');
+});
+
+test('tradeOrigin: ordinary trades have no origin (null links included)', () => {
+  assert.equal(tradeOrigin({ trade_type: 'Buy', transfer_id: null, scrip_action_id: null }), '');
+  assert.equal(tradeOrigin({ trade_type: 'Sell' }), '');
 });
