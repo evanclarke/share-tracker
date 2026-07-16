@@ -105,8 +105,9 @@ if grep -q "$(printf '\033')" /var/log/share-tracker.log; then
 fi
 newsyslog -F /var/log/share-tracker.log
 ls /var/log/share-tracker.log.0* >/dev/null
-printf 'POST /jobs/backup HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n' \
-  | nc -N 127.0.0.1 3000 >/dev/null
+# curl, not a hand-rolled request over nc: nc's early half-close makes
+# hyper treat the request as canceled before the handler runs.
+curl -sf -X POST http://127.0.0.1:3000/jobs/backup >/dev/null
 ok=""
 for _ in $(seq 1 15); do
   if grep -q "job started" /var/log/share-tracker.log 2>/dev/null; then
@@ -117,6 +118,9 @@ for _ in $(seq 1 15); do
 done
 [ -n "$ok" ] || {
   echo "no job lines in rotated log (daemon -H reopen failed?)" >&2
+  ls -la /var/log/share-tracker.log* >&2 2>/dev/null || true
+  tail -n 20 /var/log/share-tracker.log >&2 2>/dev/null || true
+  bzcat /var/log/share-tracker.log.0.bz2 2>/dev/null | tail -n 20 >&2 || true
   exit 1
 }
 if grep -q "started, db" /var/log/share-tracker.log; then

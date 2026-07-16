@@ -498,7 +498,9 @@ mod freebsd_packaging {
         assert!(RELEASE_YML.contains(r#"gh release view "v$version""#));
         assert!(RELEASE_YML.contains("vmactions/freebsd-vm"));
         assert!(RELEASE_YML.contains(r#"release: "15.1""#));
-        assert!(RELEASE_YML.contains("pkg install -y rust protobuf"));
+        // curl is the smoke test's POST client — fetch(1) can't POST and a
+        // raw nc request half-closes early (hyper cancels the request).
+        assert!(RELEASE_YML.contains("pkg install -y rust protobuf curl"));
         assert!(RELEASE_YML.contains("sh pkg/freebsd/build-pkg.sh"));
         assert!(RELEASE_YML.contains("sh pkg/freebsd/smoke-test.sh"));
         // The release tag points at the built commit, not a branch head.

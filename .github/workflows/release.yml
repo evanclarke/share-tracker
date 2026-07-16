@@ -62,8 +62,11 @@ jobs:
           release: "15.1"
           usesh: true
           # rust for the build; protobuf because yfinance-rs's build script
-          # needs protoc (same reason ci.yml installs protobuf-compiler).
-          prepare: pkg install -y rust protobuf
+          # needs protoc (same reason ci.yml installs protobuf-compiler);
+          # curl for the smoke test's POST (fetch(1) can't POST, and a raw
+          # request over nc half-closes early, which hyper treats as a
+          # canceled request).
+          prepare: pkg install -y rust protobuf curl
           run: |
             set -e
             [ -f vm-cargo-cache.tar.zst ] && tar -x --zstd -f vm-cargo-cache.tar.zst -C /
