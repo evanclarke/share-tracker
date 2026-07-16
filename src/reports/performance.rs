@@ -215,15 +215,24 @@ fn money_weighted_annual_return(flows: &[(NaiveDate, Decimal)]) -> Option<Decima
         .iter()
         .map(|&(d, a)| (Decimal::from((d - start).num_days()) / year, a))
         .collect();
+    // The NPV's sign, evaluated at the *last* flow date rather than the
+    // first: Σ aᵢ·base^(t_max−tᵢ) = NPV·base^t_max with base^t_max > 0, so the
+    // zeroes and signs — all the bisection uses — are the same. Discounting to
+    // t₀ divides by base^tᵢ, which at the −99.99% bound is 1e-28 for a flow 7
+    // years old — non-zero, but small enough that the division overflows
+    // Decimal (and underflows to a bare `None` just past it). Compounding
+    // forward multiplies by factors that stay ≤ 1 at negative rates; an early
+    // flow that underflows to zero is genuinely negligible there.
+    let t_max = timed
+        .iter()
+        .map(|&(t, _)| t)
+        .fold(Decimal::ZERO, Decimal::max);
     let npv = |rate: Decimal| -> Option<Decimal> {
         let base = Decimal::ONE + rate;
         let mut total = Decimal::ZERO;
         for &(t, amount) in &timed {
-            let discount = base.checked_powd(t)?;
-            if discount.is_zero() {
-                return None;
-            }
-            total += amount / discount;
+            let factor = base.checked_powd(t_max - t)?;
+            total = total.checked_add(amount.checked_mul(factor)?)?;
         }
         Some(total)
     };
@@ -751,6 +760,38 @@ mod tests {
             .unwrap();
         assert_eq!(rows[0].money_weighted_return_pct, Some(Decimal::from(10)));
         assert_eq!(rows[1].money_weighted_return_pct, Some(Decimal::from(10)));
+    }
+
+    /// Regression: a flow exactly 7 years (actual/365) before the valuation
+    /// flow used to panic with "Division overflowed" — at the bisection's
+    /// −99.99% bound the discount factor 0.0001⁷ = 1e-28 is non-zero, and
+    /// dividing any amount above ~$7.92 by it exceeds `Decimal::MAX`.
+    #[test]
+    fn money_weighted_return_survives_a_seven_year_span() {
+        let start = d(2019, 6, 26);
+        let end = start + chrono::Duration::days(7 * 365);
+        let r = money_weighted_annual_return(&[
+            (start, Decimal::from(-10_000)),
+            (end, Decimal::from(5_000)),
+        ])
+        .expect("a rate exists: (1+r)^7 = 0.5");
+        // (1+r)^7 = 0.5 → r = 0.5^(1/7) − 1 ≈ −9.4276% p.a.
+        assert_eq!(r.round_dp(6), "-0.094276".parse().unwrap());
+    }
+
+    /// Flows spanning two decades still get a rate (the old discount-to-t₀
+    /// form underflowed to `None` beyond ~7 years even when it didn't panic).
+    #[test]
+    fn money_weighted_return_survives_a_twenty_year_span() {
+        let start = d(2006, 7, 1);
+        let end = start + chrono::Duration::days(20 * 365);
+        let r = money_weighted_annual_return(&[
+            (start, Decimal::from(-10_000)),
+            (end, Decimal::from(5_000)),
+        ])
+        .expect("a rate exists: (1+r)^20 = 0.5");
+        // (1+r)^20 = 0.5 → r = 0.5^(1/20) − 1 ≈ −3.4064% p.a.
+        assert_eq!(r.round_dp(6), "-0.034064".parse().unwrap());
     }
 
     /// A fully sold holding needs no price: its return is realised, the
