@@ -23,6 +23,7 @@ pub const DEFAULT_PORT: u16 = 3000;
 pub struct ConfigFile {
     pub db: Option<String>,
     pub backup_dir: Option<String>,
+    pub backup_command: Option<String>,
     pub host: Option<String>,
     pub port: Option<u16>,
     pub schedule: Option<String>,
@@ -33,6 +34,7 @@ pub struct ConfigFile {
 pub struct Settings {
     pub db: String,
     pub backup_dir: Option<String>,
+    pub backup_command: Option<String>,
     pub host: String,
     pub port: u16,
     pub schedule: Option<String>,
@@ -44,6 +46,7 @@ impl Settings {
         Settings {
             db: args.db.or(file.db).unwrap_or_else(|| DEFAULT_DB.into()),
             backup_dir: args.backup_dir.or(file.backup_dir),
+            backup_command: args.backup_command.or(file.backup_command),
             host: args
                 .host
                 .or(file.host)
@@ -93,6 +96,7 @@ mod tests {
             Settings {
                 db: "share-tracker.db".into(),
                 backup_dir: None,
+                backup_command: None,
                 host: "127.0.0.1".into(),
                 port: 3000,
                 schedule: None,
@@ -109,6 +113,7 @@ mod tests {
             r#"
             db = "/var/db/share-tracker/share-tracker.db"
             backup_dir = "/var/db/share-tracker/backups"
+            backup_command = "scp {BACKUP_FILE} host:/backups/"
             host = "0.0.0.0"
             port = 8080
             schedule = "/usr/local/etc/share-tracker.cron"
@@ -119,6 +124,10 @@ mod tests {
         assert_eq!(
             settings.backup_dir.as_deref(),
             Some("/var/db/share-tracker/backups")
+        );
+        assert_eq!(
+            settings.backup_command.as_deref(),
+            Some("scp {BACKUP_FILE} host:/backups/")
         );
         assert_eq!(settings.host, "0.0.0.0");
         assert_eq!(settings.port, 8080);
@@ -137,6 +146,21 @@ mod tests {
         assert_eq!(settings.port, 9999);
         // A flag not given still takes the file's value.
         assert_eq!(settings.host, "0.0.0.0");
+    }
+
+    #[test]
+    fn cli_backup_command_overrides_config_file() {
+        let file = parse("backup_command = \"rsync {BACKUP_FILE} old-dest:/\"");
+        let args = Args::parse_from([
+            "share-tracker",
+            "--backup-command",
+            "rsync {BACKUP_FILE} new-dest:/",
+        ]);
+        let settings = Settings::resolve(args, file);
+        assert_eq!(
+            settings.backup_command.as_deref(),
+            Some("rsync {BACKUP_FILE} new-dest:/")
+        );
     }
 
     #[test]
@@ -195,5 +219,15 @@ mod tests {
         assert!(sample.schedule.is_some());
         // The sample points the service at the package's data directory.
         assert_eq!(sample.db.unwrap(), "/var/db/share-tracker/share-tracker.db");
+        // backup_command has no universal safe default (the destination is
+        // site-specific), so the sample documents it commented out rather than
+        // active — assert it stays out of the parsed (active) settings, and
+        // that the documented example line hasn't silently drifted from the
+        // real key name.
+        assert!(sample.backup_command.is_none());
+        assert!(
+            SAMPLE.contains("# backup_command = "),
+            "sample should document backup_command as a commented-out example"
+        );
     }
 }

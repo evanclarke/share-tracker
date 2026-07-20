@@ -300,11 +300,14 @@ fn known_limitations_document_cost_base_fx_timing() {
 }
 
 /// Docs-sync pin for the backup pipeline hardening (2026-07-13 improvement
-/// review): the README documents verification (integrity check + migrations
-/// match, `.bad` quarantine), the retention policy (newest 8 + 12 monthly
-/// keepers, pattern-matched files only), and — the recorded decision for the
-/// off-machine copy — that offsite sync is a documented external step, not an
-/// in-scope job step; the jobs API documents the backup job's failure
+/// review) and the later `--backup-command` off-machine-copy hook: the README
+/// documents verification (integrity check + migrations match, `.bad`
+/// quarantine), the retention policy (newest 8 + 12 monthly keepers,
+/// pattern-matched files only), and — the recorded decision for the
+/// off-machine copy — that the server never embeds remote credentials or
+/// provider-specific upload logic itself, only ever shelling out to an
+/// operator-configured command (`--backup-command`) or leaving it to an
+/// independent cron job; the jobs API documents the backup job's failure
 /// semantics.
 #[test]
 fn backup_pipeline_documented() {
@@ -321,11 +324,16 @@ fn backup_pipeline_documented() {
     assert!(README_MD.contains(
         "Pruning deletes only files matching the backup filename pattern for this database"
     ));
-    // The off-machine copy decision: documented external setup, not a job step.
+    // The off-machine copy decision: no embedded credentials/provider logic —
+    // either the `--backup-command` hook or an independent cron job, both
+    // driven entirely by operator-supplied configuration.
     assert!(README_MD.contains("### Off-machine copies"));
     assert!(
-        README_MD.contains("deliberately a documented external step, not a job inside the server")
+        README_MD
+            .contains("never embeds remote credentials or provider-specific upload logic itself")
     );
+    assert!(README_MD.contains("--backup-command"));
+    assert!(README_MD.contains("{BACKUP_FILE}"));
     assert!(README_MD.contains("rclone sync /mnt/backups"));
     // The jobs API documents the backup job's verify/prune/failure semantics.
     assert!(API_MD.contains("`POST /jobs/backup` returns `500`"));

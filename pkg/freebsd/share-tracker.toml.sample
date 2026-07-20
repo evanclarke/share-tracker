@@ -16,6 +16,15 @@ db = "/var/db/share-tracker/share-tracker.db"
 # database and its backups together.
 backup_dir = "/var/db/share-tracker/backups"
 
+# Command to run after each fresh, verified backup — e.g. to copy it
+# off-machine. {BACKUP_FILE} is replaced with the backup's absolute path; runs
+# via `sh -c`, so ordinary shell syntax works. Commented out by default: there
+# is no universal safe destination, so pick a command for your own setup (scp,
+# rsync, rclone, ...) before enabling it. A failing command fails the backup
+# job (visible at GET /jobs) but never blocks the backup itself or its local
+# pruning.
+# backup_command = "scp {BACKUP_FILE} user@host:/backups/"
+
 # Bind address. The server has no authentication: keep 127.0.0.1 (localhost
 # only) unless the network is trusted — "0.0.0.0" exposes it.
 host = "127.0.0.1"

@@ -19,6 +19,14 @@ pub struct Args {
     /// disk failure can't take the database and its backups together.
     #[arg(long)]
     pub backup_dir: Option<String>,
+    /// Shell command to run after each fresh, verified backup — e.g. to copy it
+    /// off-machine. `{BACKUP_FILE}` in the command is replaced with the
+    /// backup's absolute path, e.g. `scp {BACKUP_FILE} user@host:/backups/`.
+    /// Runs via `sh -c`, so ordinary shell syntax (pipes, redirection,
+    /// multiple args) works. A failing command fails the backup job (recorded
+    /// in `GET /jobs`) but never prevents the backup itself or local pruning.
+    #[arg(long)]
+    pub backup_command: Option<String>,
     /// IP address to bind [default: 127.0.0.1 — localhost only, as the server
     /// has no authentication; use `0.0.0.0` to expose it to the network]
     #[arg(long)]
@@ -44,6 +52,7 @@ mod tests {
         assert_eq!(args.config, None);
         assert_eq!(args.db, None);
         assert_eq!(args.backup_dir, None);
+        assert_eq!(args.backup_command, None);
         assert_eq!(args.host, None);
         assert_eq!(args.port, None);
         assert_eq!(args.schedule, None);
@@ -65,6 +74,19 @@ mod tests {
     fn custom_backup_dir() {
         let args = Args::parse_from(["share-tracker", "--backup-dir", "/mnt/backups"]);
         assert_eq!(args.backup_dir.as_deref(), Some("/mnt/backups"));
+    }
+
+    #[test]
+    fn custom_backup_command() {
+        let args = Args::parse_from([
+            "share-tracker",
+            "--backup-command",
+            "scp {BACKUP_FILE} host:/backups/",
+        ]);
+        assert_eq!(
+            args.backup_command.as_deref(),
+            Some("scp {BACKUP_FILE} host:/backups/")
+        );
     }
 
     #[test]

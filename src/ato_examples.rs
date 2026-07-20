@@ -110,7 +110,13 @@ fn router(pool: &SqlitePool) -> axum::Router {
     let fetcher = crate::entities::closing_price::test_support::QuoteStub::default().shared();
     app::router(
         pool.clone(),
-        scheduler::registry(pool.clone(), ":memory:".to_string(), None, fetcher.clone()),
+        scheduler::registry(
+            pool.clone(),
+            ":memory:".to_string(),
+            None,
+            None,
+            fetcher.clone(),
+        ),
         fetcher,
     )
 }

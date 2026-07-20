@@ -50,6 +50,7 @@ async fn main() {
         pool.clone(),
         settings.db.clone(),
         settings.backup_dir.clone(),
+        settings.backup_command.clone(),
         fetcher.clone(),
     );
     scheduler::spawn(registry.clone(), pool.clone(), &schedule).expect("invalid schedule");

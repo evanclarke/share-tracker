@@ -17,8 +17,9 @@ rust_decimal = { version = "1", features = ["maths"] }
 sqlx = { version = "0.9", features = ["runtime-tokio", "sqlite", "chrono", "migrate"] }
 # Only the features the server uses: the multi-thread runtime + the
 # #[tokio::main]/#[tokio::test]/select! macros, the TCP listener (net),
-# graceful-shutdown signal handling, and the scheduler's sleep (time).
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "time"] }
+# graceful-shutdown signal handling, the scheduler's sleep (time), and running
+# the configured post-backup command (process).
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "time", "process"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 reqwest = "0.13.4"

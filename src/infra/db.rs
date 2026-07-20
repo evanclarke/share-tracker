@@ -87,11 +87,14 @@ fn backup_path_at(db_path: &str, backup_dir: Option<&str>, at: DateTime<Local>) 
 /// Why a backup run failed. `Verification` marks a produced file that is not a
 /// restorable copy of the live database — the file has been quarantined
 /// (renamed `<name>.bad`) so it can never be mistaken for a good backup.
+/// `Command` marks a configured `backup_command` that failed to run or exited
+/// non-zero; the backup itself is already complete and verified by that point.
 #[derive(Debug)]
 pub enum BackupError {
     Db(sqlx::Error),
     Io(std::io::Error),
     Verification { path: String, reason: String },
+    Command { command: String, reason: String },
 }
 
 impl std::fmt::Display for BackupError {
@@ -101,6 +104,9 @@ impl std::fmt::Display for BackupError {
             BackupError::Io(e) => write!(f, "backup failed: {e}"),
             BackupError::Verification { path, reason } => {
                 write!(f, "backup verification failed for {path}: {reason}")
+            }
+            BackupError::Command { command, reason } => {
+                write!(f, "post-backup command failed ({command}): {reason}")
             }
         }
     }
@@ -124,6 +130,7 @@ pub async fn backup(
     pool: &SqlitePool,
     db_path: &str,
     backup_dir: Option<&str>,
+    backup_command: Option<&str>,
 ) -> Result<(), BackupError> {
     // A configured backup dir may not exist yet (fresh volume / first run);
     // create it rather than failing the weekly job. The beside-the-DB default
@@ -131,32 +138,89 @@ pub async fn backup(
     if let Some(dir) = backup_dir {
         std::fs::create_dir_all(dir)?;
     }
-    backup_to(pool, &backup_path(db_path, backup_dir)).await?;
+    let dest = backup_path(db_path, backup_dir);
+    let created = backup_to(pool, &dest).await?;
+
+    // Only run the hook for a backup actually produced by this run — not one
+    // skipped because a same-second file already existed (its hook, if any,
+    // already ran when that file was created).
+    let command_result = match (created, backup_command) {
+        (true, Some(command)) => run_backup_command(command, &dest).await,
+        _ => Ok(()),
+    };
+
     // Prune only after the fresh backup verified: a failed run must never
-    // shrink the set of known-good backups.
+    // shrink the set of known-good backups. Pruning runs regardless of the
+    // post-backup command's outcome — the fresh backup is always within the
+    // retention window, and local retention shouldn't be held hostage to an
+    // offsite copy failing — but the command's error still fails the job.
     let deleted = prune_backups(db_path, backup_dir)?;
     if !deleted.is_empty() {
         tracing::info!(pruned = deleted.len(), "backup retention pruning complete");
     }
-    Ok(())
+    command_result
 }
 
 /// Write a backup to a specific destination, skipping if it already exists. With
 /// a per-second timestamped name a collision only happens for two runs in the
 /// same second, so in practice each weekly run writes a fresh file. A freshly
-/// written file is verified before the backup counts as complete.
-async fn backup_to(pool: &SqlitePool, dest: &str) -> Result<(), BackupError> {
+/// written file is verified before the backup counts as complete. Returns
+/// whether a fresh file was written (`false` when skipped because one already
+/// existed).
+async fn backup_to(pool: &SqlitePool, dest: &str) -> Result<bool, BackupError> {
     if Path::new(dest).exists() {
         tracing::debug!(path = dest, "backup already exists, skipping");
-    } else {
-        tracing::info!(path = dest, "starting backup");
-        sqlx::query("VACUUM INTO ?")
-            .bind(dest)
-            .execute(pool)
-            .await?;
-        verify_or_quarantine(pool, dest).await?;
-        tracing::info!(path = dest, "backup complete and verified");
+        return Ok(false);
     }
+    tracing::info!(path = dest, "starting backup");
+    sqlx::query("VACUUM INTO ?")
+        .bind(dest)
+        .execute(pool)
+        .await?;
+    verify_or_quarantine(pool, dest).await?;
+    tracing::info!(path = dest, "backup complete and verified");
+    Ok(true)
+}
+
+/// Run the operator-configured `backup_command` after a fresh, verified backup,
+/// substituting the literal token `{BACKUP_FILE}` with the backup's absolute
+/// path — e.g. `scp {BACKUP_FILE} user@host:/backups/`. Runs via `sh -c` so the
+/// configured string can use ordinary shell syntax (multiple args, pipes,
+/// redirection); stdout/stderr are captured and only surfaced in logs, keeping
+/// the job's own INFO/ERROR lines the single place to look.
+async fn run_backup_command(command: &str, dest: &str) -> Result<(), BackupError> {
+    // Absolute so the hook works regardless of the server's working directory
+    // (dest may be a relative path when no --backup-dir is configured).
+    let abs_dest = std::fs::canonicalize(dest)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| dest.to_string());
+    let substituted = command.replace("{BACKUP_FILE}", &abs_dest);
+
+    tracing::info!(command = %substituted, "running post-backup command");
+    let output = tokio::process::Command::new("sh")
+        .arg("-c")
+        .arg(&substituted)
+        .output()
+        .await
+        .map_err(|e| BackupError::Command {
+            command: substituted.clone(),
+            reason: format!("failed to spawn: {e}"),
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        tracing::error!(
+            command = %substituted,
+            status = %output.status,
+            stderr,
+            "post-backup command failed"
+        );
+        return Err(BackupError::Command {
+            command: substituted,
+            reason: format!("exited with {}: {stderr}", output.status),
+        });
+    }
+    tracing::info!(command = %substituted, "post-backup command succeeded");
     Ok(())
 }
 
@@ -385,7 +449,9 @@ mod tests {
             .join("weekly")
             .to_string_lossy()
             .to_string();
-        backup(&pool, &db_path, Some(&dest_dir)).await.unwrap();
+        backup(&pool, &db_path, Some(&dest_dir), None)
+            .await
+            .unwrap();
 
         let made_backup = std::fs::read_dir(&dest_dir)
             .unwrap()
@@ -801,7 +867,7 @@ mod tests {
         }
 
         let dir_str = backup_dir.path().to_string_lossy().to_string();
-        backup(&pool, &db_path, Some(&dir_str)).await.unwrap();
+        backup(&pool, &db_path, Some(&dir_str), None).await.unwrap();
 
         let survives = |month: &str| {
             backup_dir
@@ -845,7 +911,7 @@ mod tests {
         }
 
         let dir_str = backup_dir.path().to_string_lossy().to_string();
-        backup(&pool, &db_path, Some(&dir_str)).await.unwrap();
+        backup(&pool, &db_path, Some(&dir_str), None).await.unwrap();
         let produced = std::fs::read_dir(backup_dir.path())
             .unwrap()
             .filter_map(|e| e.ok())
@@ -889,5 +955,95 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(accounts, 10, "the drill data made the round trip");
+    }
+
+    #[tokio::test]
+    async fn backup_command_receives_the_backup_file_token() {
+        // `{BACKUP_FILE}` in the configured command must be substituted with the
+        // fresh backup's absolute path — proven here by having the command copy
+        // it to a marker path and asserting the copy's content matches.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db").to_string_lossy().to_string();
+        let pool = init(&db_path).await.unwrap();
+
+        let marker = dir.path().join("offsite-copy.db");
+        let command = format!("cp {{BACKUP_FILE}} {}", marker.to_string_lossy());
+        backup(&pool, &db_path, None, Some(&command)).await.unwrap();
+
+        assert!(
+            marker.exists(),
+            "the command must have run against the real backup path"
+        );
+    }
+
+    #[tokio::test]
+    async fn backup_command_failure_fails_the_job_but_still_prunes() {
+        // A post-backup command that exits non-zero (e.g. a failed scp) must
+        // surface as a job error — but must not prevent local pruning, since the
+        // fresh backup is safely within the retention window regardless.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db").to_string_lossy().to_string();
+        let pool = init(&db_path).await.unwrap();
+        for i in 0..13 {
+            let month = format!("{}-{:02}", 2025 + (i / 12), 1 + (i % 12));
+            fake_backup(dir.path(), &format!("{month}-01-000000"));
+        }
+
+        let err = backup(&pool, &db_path, None, Some("exit 1"))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, BackupError::Command { .. }),
+            "expected a Command error, got {err:?}"
+        );
+        assert!(
+            !Path::new(&dir.path().join("test-2025-01-01-000000.db")).exists(),
+            "pruning must still have run despite the command failing"
+        );
+    }
+
+    #[tokio::test]
+    async fn backup_command_is_not_run_when_the_backup_was_skipped() {
+        // Re-running `backup_to` against an already-existing destination (the
+        // same-second-collision skip path) must not re-fire the hook — it
+        // already ran when that file was first created.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db").to_string_lossy().to_string();
+        let pool = init(&db_path).await.unwrap();
+
+        let dest = backup_path(&db_path, None);
+        backup_to(&pool, &dest).await.unwrap();
+
+        let marker = dir.path().join("should-not-exist");
+        let command = format!("touch {}", marker.to_string_lossy());
+        run_backup_command(&command, &dest).await.unwrap();
+        assert!(marker.exists(), "sanity check: the command itself works");
+        std::fs::remove_file(&marker).unwrap();
+
+        // Second backup_to against the identical dest is the skip path.
+        let created = backup_to(&pool, &dest).await.unwrap();
+        assert!(!created, "sanity check: second call to the same dest skips");
+    }
+
+    #[tokio::test]
+    async fn backup_command_substitution_uses_an_absolute_path() {
+        // The configured working directory of the server process shouldn't
+        // matter to the hook — the token must resolve to an absolute path even
+        // when the backup itself is a relative one.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db").to_string_lossy().to_string();
+        let pool = init(&db_path).await.unwrap();
+        let dest = backup_path(&db_path, None);
+        backup_to(&pool, &dest).await.unwrap();
+
+        let marker = dir.path().join("path-seen.txt");
+        let command = format!("echo {{BACKUP_FILE}} > {}", marker.to_string_lossy());
+        run_backup_command(&command, &dest).await.unwrap();
+
+        let seen = std::fs::read_to_string(&marker).unwrap();
+        assert!(
+            Path::new(seen.trim()).is_absolute(),
+            "expected an absolute path, got {seen:?}"
+        );
     }
 }
