@@ -18,7 +18,7 @@ jobs:
       # The frontend's pure JS helpers (money-adjacent decimal arithmetic in
       # src/web/util.js) are unit-tested with Node's built-in runner — no npm
       # install, no build step. Node 22+ (the glob needs >=21).
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: '22'
       - run: node --test 'src/web/*.test.js'
