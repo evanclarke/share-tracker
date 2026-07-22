@@ -1493,15 +1493,18 @@ async function viewReport(report) {
   // wins over the live fetch.
   const listings = await api('GET', '/listings');
   const priceForm = el('form', { class: 'card' });
-  priceForm.appendChild(el('h3', null, 'Price overrides (AUD, optional)'));
-  priceForm.appendChild(el('p', { class: 'hint' },
-    'Leave blank to value from the live price source. Enter a price to override that listing.'));
+  const priceDetails = el('details', { class: 'price-overrides' }, [
+    el('summary', null, 'Manual Price Overrides'),
+    el('p', { class: 'hint' },
+      'Leave blank to value from the live price source. Enter a price to override that listing.'),
+  ]);
   listings.forEach(function (l) {
-    priceForm.appendChild(el('div', { class: 'field' }, [
+    priceDetails.appendChild(el('div', { class: 'field' }, [
       el('label', null, l.id + ': ' + l.ticker + ' (' + (l.exchange_mic || 'Crypto') + ')'),
       el('input', { type: 'text', inputmode: 'decimal', 'data-listing': l.id }),
     ]));
   });
+  priceForm.appendChild(priceDetails);
   if (report.asOfDate) {
     priceForm.appendChild(el('div', { class: 'field' }, [
       el('label', null, 'As-of date'),

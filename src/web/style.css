@@ -140,6 +140,11 @@ td.detail-cell table { background: var(--panel); }
   max-width: 720px;
 }
 
+.price-overrides { margin-bottom: 16px; }
+.price-overrides summary { cursor: pointer; font-weight: 600; font-size: 1.17em; margin-bottom: 8px; }
+.price-overrides .hint { margin-top: 8px; }
+.price-overrides .field { margin-top: 12px; }
+
 form .field { margin-bottom: 12px; display: flex; flex-direction: column; gap: 4px; }
 form label { font-weight: 600; font-size: 13px; }
 form .hint { color: var(--muted); font-weight: 400; font-size: 12px; }

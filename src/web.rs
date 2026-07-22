@@ -882,7 +882,7 @@ mod tests {
         // price entry needed), and treats the price form as overrides.
         assert!(js.contains("live: true"));
         assert!(js.contains("function buildBody()"));
-        assert!(js.contains("Price overrides (AUD, optional)"));
+        assert!(js.contains("Manual Price Overrides"));
         assert!(js.contains("Leave blank to value from the live price source"));
         // The per-row as-of times roll up into a freshness "as at …" line, with
         // a count of holdings the live fetch could not value.
