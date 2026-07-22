@@ -119,8 +119,8 @@ export function groupThousands(s) {
   return neg + intPart.replace(/\B(?=(\d{3})+(?!\d))/g, ',') + frac;
 }
 
-// Pad to at least `dp` fractional places without rounding (derived per-unit
-// figures show ≥4 dp; entered rates keep their own precision).
+// Pad to at least `dp` fractional places without rounding (used after
+// rounding to top up short values; entered rates keep their own precision).
 export function padMinDp(s, dp) {
   s = String(s);
   const dot = s.indexOf('.');
@@ -138,15 +138,18 @@ export function decStrEq(a, b) {
 
 // Format a numeric cell for display per its column kind. Returns null when
 // the column has no kind or the value isn't numeric (caller uses cellText);
-// otherwise { text, tip } where tip is the original value when money rounding
-// lost precision (shown on hover), else null.
+// otherwise { text, tip } where tip is the original value when money/rate4
+// rounding lost precision (shown on hover), else null.
 export function numericDisplay(value, kind) {
   if (!kind || !looksNumeric(value)) return null;
   if (kind === 'money') {
     const r = roundDecimalStr(value, 2);
     return { text: groupThousands(r), tip: decStrEq(r, value) ? null : String(value) };
   }
-  if (kind === 'rate4') return { text: padMinDp(String(value), 4), tip: null };
+  if (kind === 'rate4') {
+    const r = roundDecimalStr(value, 4);
+    return { text: padMinDp(r, 4), tip: decStrEq(r, value) ? null : String(value) };
+  }
   return { text: String(value), tip: null }; // rate / quantity: entered precision, verbatim
 }
 
@@ -304,7 +307,8 @@ export async function columnLabelMaps(cols) {
 
 // Display kind per numeric column, looked up by name across every table.
 // 'money' rounds to 2 dp + thousands grouping; 'rate' / 'quantity' keep the
-// entered precision; 'rate4' is a derived per-unit figure shown to ≥4 dp.
+// entered precision; 'rate4' is a derived-or-entered average price rounded
+// to 4 dp (full value on hover when rounding drops precision).
 // Numeric columns absent here (ids, financial years, counts, percentages)
 // display verbatim. Because the map is keyed by column name — shared across
 // the JSON API — a column reused on a new screen classifies once.
@@ -358,15 +362,17 @@ const COLUMN_KINDS = (function () {
   ]);
   set('rate', [
     // Per-unit prices/rates entered from statements — rounding them would
-    // break reconciliation, so they keep their precision.
-    'average_price', 'fx_rate', 'spot_fx_rate', 'amount_per_security', 'cost_base_adjustment',
+    // break reconciliation, so they keep their precision. average_price is
+    // the exception (see rate4 below): it's an average price, so it rounds.
+    'fx_rate', 'spot_fx_rate', 'amount_per_security', 'cost_base_adjustment',
     'rate',
     'price', 'current_price', 'reinvestment_price', 'exercise_price', 'amount_per_unit',
     'buyback_price', 'buyback_dividend', 'buyback_franking_credit', 'buyback_market_value',
     'market_value_per_share', 'deductible_percentage', 'proceeds_per_right',
   ]);
-  // A derived per-unit figure: show at least 4 dp, never cent-rounded.
-  set('rate4', ['avg_cost_base_per_unit']);
+  // Average price figures — derived (avg_cost_base_per_unit) or entered
+  // (average_price) — round to 4 dp for display; never cent-rounded.
+  set('rate4', ['avg_cost_base_per_unit', 'average_price']);
   set('quantity', [
     'quantity', 'quantity_allocated', 'securities_held', 'units_held', 'units',
     'original_quantity', 'remaining_quantity', 'quantity_held', 'cgt_discount_eligible_quantity',

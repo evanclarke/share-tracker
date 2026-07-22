@@ -98,9 +98,13 @@ test('numericDisplay rate/quantity: entered precision verbatim', () => {
   assert.deepEqual(numericDisplay('100', 'quantity'), { text: '100', tip: null });
 });
 
-test('numericDisplay rate4: at least 4 dp, never rounded', () => {
+test('numericDisplay rate4: rounded to 4 dp, full value on hover when lost', () => {
   assert.deepEqual(numericDisplay('1.5', 'rate4'), { text: '1.5000', tip: null });
-  assert.deepEqual(numericDisplay('1.234567', 'rate4'), { text: '1.234567', tip: null });
+  assert.deepEqual(numericDisplay('1.2345', 'rate4'), { text: '1.2345', tip: null });
+  assert.deepEqual(
+    numericDisplay('3.3333333333', 'rate4'),
+    { text: '3.3333', tip: '3.3333333333' },
+  );
 });
 
 test('numericDisplay declines non-numeric values and kindless columns', () => {
@@ -177,7 +181,7 @@ test('columnKinds maps classified columns and skips the rest', () => {
     columnKinds(['total_cost_base', 'average_price', 'avg_cost_base_per_unit', 'quantity', 'id']),
     {
       total_cost_base: 'money',
-      average_price: 'rate',
+      average_price: 'rate4',
       avg_cost_base_per_unit: 'rate4',
       quantity: 'quantity',
     },

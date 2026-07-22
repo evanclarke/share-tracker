@@ -486,7 +486,7 @@ mod tests {
         assert!(js.contains("wins over the monthly RBA rate"));
         // Trades list column, classified as a rate in COLUMN_KINDS.
         assert!(js.contains("'fx_rate', 'spot_fx_rate', 'holding_account_id'"));
-        assert!(js.contains("'average_price', 'fx_rate', 'spot_fx_rate'"));
+        assert!(js.contains("'fx_rate', 'spot_fx_rate', 'amount_per_security'"));
     }
 
     #[tokio::test]
