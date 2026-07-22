@@ -366,13 +366,17 @@ const COLUMN_KINDS = (function () {
     // the exception (see rate4 below): it's an average price, so it rounds.
     'fx_rate', 'spot_fx_rate', 'amount_per_security', 'cost_base_adjustment',
     'rate',
-    'price', 'current_price', 'reinvestment_price', 'exercise_price', 'amount_per_unit',
+    'price', 'reinvestment_price', 'exercise_price', 'amount_per_unit',
     'buyback_price', 'buyback_dividend', 'buyback_franking_credit', 'buyback_market_value',
     'market_value_per_share', 'deductible_percentage', 'proceeds_per_right',
   ]);
-  // Average price figures — derived (avg_cost_base_per_unit) or entered
-  // (average_price) — round to 4 dp for display; never cent-rounded.
-  set('rate4', ['avg_cost_base_per_unit', 'average_price']);
+  // Average price figures — derived (avg_cost_base_per_unit, current_price)
+  // or entered (average_price) — round to 4 dp for display; never
+  // cent-rounded. current_price is always derived (a live quote converted to
+  // AUD via plain Decimal division, which doesn't terminate cleanly), never
+  // statement-entered, so it carries none of the 'rate' bucket's
+  // reconciliation concern.
+  set('rate4', ['avg_cost_base_per_unit', 'average_price', 'current_price']);
   set('quantity', [
     'quantity', 'quantity_allocated', 'securities_held', 'units_held', 'units',
     'original_quantity', 'remaining_quantity', 'quantity_held', 'cgt_discount_eligible_quantity',
