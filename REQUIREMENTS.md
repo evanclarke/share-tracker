@@ -1210,3 +1210,47 @@ button had no way to express a range at all.
   and range/backfill semantics, the 422 for a backwards range), README (the snapshot bullet and the
   Web UI bullet); no schema change, no change to the scheduled `report-snapshot` job's own 14-day
   catch-up window
+
+## Top menu bar navigation and an overview-first home screen (2026-07-25)
+
+The web UI's left sidebar (`buildNav` in `src/web/app.js`) is a single flat list: four
+hardcoded groups (Reference data, Activity, Maintenance, Reports) with every entity and
+report as a sibling link, no nesting. It has grown to ~24 entity links plus 19 report
+links — taller than the viewport, with the Reports group in particular an undifferentiated
+run of 19 items in arbitrary order. The Portfolio Overview screen is already the de-facto
+landing page (an empty hash redirects to `#/r/overview`), but it's buried mid-list among
+the other reports rather than presented as the app's home screen, and recording the two
+most common facts (a trade, a distribution) requires a hunt through the sidebar first.
+
+- Replace the left sidebar with a menu bar across the top of the page, with four menus:
+  **Activity**, **Reports**, **Reference Data**, **Jobs**. Hovering (or focusing/clicking,
+  for keyboard and touch users) a menu expands a panel showing its items; the Reports menu's
+  panel is a grouped mega-menu with titled columns (Portfolio; CGT & tax; Decision support;
+  Cross-checks & alerts) rather than one long list, since it holds 19 reports
+- Closing Prices, Snapshots, and Row History move into the Jobs menu (they're operational/
+  maintenance screens, not reference data or a report a user runs for a figure) — Jobs
+  becomes: Jobs, Closing Prices, Snapshots, Row History
+- The menu bar stays config-driven, the same way today's sidebar is: which menu and
+  (for Reports) which section an item appears under is declared once per entity/report
+  entry, not hardcoded in the render code — a config typo must not silently drop an item
+  from the nav
+- The current screen's menu is indicated as active with its panel closed, same as today's
+  sidebar highlighting
+- `#/` (the empty hash) becomes a real, stable route for the Portfolio Overview — rendered
+  directly rather than via a `location.hash` redirect to `#/r/overview` — so it can be the
+  target of a persistent "home"/brand link in the top bar; `#/r/overview` keeps working
+  unchanged (linked from the Reports menu)
+- The Portfolio Overview screen gains shortcut buttons for the most common data-entry paths,
+  placed above the performance panel: **New trade**, **New income**, **New sell**,
+  **New transfer** — linking to `#/e/trades/new`, `#/e/income/new`, `#/sells/new`,
+  `#/transfers/new` respectively
+- The overview screen's layout reflows so its headline figures are visible without
+  scrolling: shortcut buttons, then the performance panel's headline stat grid, then the
+  chart and date-range control, then the per-holding/per-currency detail, then the
+  holdings table; the Manual Price Overrides control demotes from a full card above the
+  results to a compact disclosure beside the holdings table
+- No new/changed HTTP endpoints and no schema change — this is purely a client-side
+  navigation and layout change
+- Docs per the standard sync rule: `docs/API.md`'s Web frontend section (the menu
+  structure, the four menus, `#/` as the home screen, the shortcut buttons, the
+  `/static/nav.js` module), README's Portfolio overview and Web UI feature bullets
