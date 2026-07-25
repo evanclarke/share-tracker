@@ -10,6 +10,16 @@ on:
   push:
     branches: [main]
 
+# Two pushes landing close together (e.g. a version-bump commit immediately
+# followed by a dependabot merge) each start a run; without this, both see
+# "release vX doesn't exist yet" in the version job and both build, then the
+# loser's `gh release create` fails once the winner has already published.
+# Serialising per-branch means the second run's version-job check happens
+# after the first run (including its release step) has fully finished.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
   contents: write
 
