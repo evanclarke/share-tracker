@@ -359,6 +359,10 @@ const COLUMN_KINDS = (function () {
     'deductions_loan_interest', 'deductions_management_fee', 'deductions_advice_fee',
     'deductions_account_keeping_fee', 'deductions_subscription', 'deductions_other',
     'deductions_total', 'net_assessable_investment_income',
+    // Period-performance report: opening/closing values and the
+    // capital/FX/income breakdown, all AUD.
+    'opening_market_value', 'closing_market_value', 'purchases', 'sale_proceeds',
+    'capital_growth', 'fx_movement', 'realised_capital_gain',
   ]);
   set('rate', [
     // Per-unit prices/rates entered from statements — rounding them would
@@ -369,6 +373,8 @@ const COLUMN_KINDS = (function () {
     'price', 'reinvestment_price', 'exercise_price', 'amount_per_unit',
     'buyback_price', 'buyback_dividend', 'buyback_franking_credit', 'buyback_market_value',
     'market_value_per_share', 'deductible_percentage', 'proceeds_per_right',
+    // Period-performance report: the ATO/RBA rates used at each endpoint.
+    'rate_from', 'rate_to',
   ]);
   // Average price figures — derived (avg_cost_base_per_unit, current_price)
   // or entered (average_price) — round to 4 dp for display; never

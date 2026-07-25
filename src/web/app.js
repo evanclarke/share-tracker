@@ -21,6 +21,7 @@ import {
   buildFieldInput, readFieldValue, wireGstBrokerage, allocationEditor,
 } from './forms.js';
 import { ENTITIES, REPORTS, ACTIONS } from './config.js';
+import { seriesChart, presetRange, sliceSeries } from './chart.js';
 
 const entityBySlug = {};
 ENTITIES.forEach(function (e) { entityBySlug[e.slug] = e; });
@@ -1178,81 +1179,13 @@ async function viewClosingPrices() {
 }
 
 // ---- report snapshots ---------------------------------------------------
-// Stored daily results of the price-dependent reports plus the time-series
-// graph. The SVG is built directly (no build step, no chart library): two
-// polylines — market value and unrealised gain — over the snapshot dates,
-// with stale snapshots' points hollow.
-function svgEl(tag, attrs) {
-  const n = document.createElementNS('http://www.w3.org/2000/svg', tag);
-  if (attrs) for (const k in attrs) { if (attrs[k] != null) n.setAttribute(k, attrs[k]); }
-  return n;
-}
-
-function seriesChart(points) {
-  if (!points || points.length < 2) {
-    return el('p', { class: 'hint' }, 'The graph appears once two or more daily snapshots are stored.');
-  }
-  const W = 860, H = 280, padL = 84, padR = 16, padT = 12, padB = 30;
-  const xs = points.map(function (p) { return new Date(p.snapshot_date + 'T00:00:00Z').getTime(); });
-  let yMin = 0, yMax = 1;
-  points.forEach(function (p) {
-    [Number(p.market_value), Number(p.unrealised_gain), 0].forEach(function (v) {
-      if (v < yMin) yMin = v;
-      if (v > yMax) yMax = v;
-    });
-  });
-  const xMin = xs[0], xMax = xs[xs.length - 1];
-  const x = function (t) { return padL + (t - xMin) / (xMax - xMin || 1) * (W - padL - padR); };
-  const y = function (v) { return H - padB - (v - yMin) / (yMax - yMin) * (H - padT - padB); };
-  const chart = svgEl('svg', { viewBox: '0 0 ' + W + ' ' + H, class: 'series-chart', role: 'img' });
-  // Horizontal gridlines with AUD labels.
-  for (let i = 0; i <= 4; i++) {
-    const v = yMin + (yMax - yMin) * i / 4;
-    chart.appendChild(svgEl('line', { x1: padL, x2: W - padR, y1: y(v), y2: y(v), class: 'grid' }));
-    const label = svgEl('text', { x: padL - 6, y: y(v) + 4, 'text-anchor': 'end', class: 'axis' });
-    label.textContent = Math.round(v).toLocaleString();
-    chart.appendChild(label);
-  }
-  // First and last snapshot dates on the x axis.
-  [0, points.length - 1].forEach(function (i) {
-    const label = svgEl('text', {
-      x: x(xs[i]), y: H - 8, 'text-anchor': i === 0 ? 'start' : 'end', class: 'axis',
-    });
-    label.textContent = points[i].snapshot_date;
-    chart.appendChild(label);
-  });
-  // One line + point markers per series; a stale snapshot's point is hollow,
-  // a provisional one's (valued at a fallback-month FX rate) has a dashed ring.
-  [['market_value', 'line-mv'], ['unrealised_gain', 'line-ug']].forEach(function (s) {
-    const field = s[0], klass = s[1];
-    const path = points.map(function (p, i) { return x(xs[i]) + ',' + y(Number(p[field])); }).join(' ');
-    chart.appendChild(svgEl('polyline', { points: path, class: klass, fill: 'none' }));
-    points.forEach(function (p, i) {
-      const dot = svgEl('circle', {
-        cx: x(xs[i]), cy: y(Number(p[field])), r: 3,
-        class: klass + (p.stale ? ' stale' : '') + (p.provisional ? ' provisional' : ''),
-      });
-      const tip = svgEl('title');
-      tip.textContent = p.snapshot_date + ': ' + p[field]
-        + (p.stale ? ' (stale)' : '') + (p.provisional ? ' (provisional)' : '');
-      dot.appendChild(tip);
-      chart.appendChild(dot);
-    });
-  });
-  return el('div', null, [
-    chart,
-    el('p', { class: 'hint' }, [
-      el('span', { class: 'legend-mv' }, '— market value'),
-      ' ',
-      el('span', { class: 'legend-ug' }, '— unrealised gain'),
-      ' (AUD; hollow points are stale snapshots, dashed rings provisional FX)',
-    ]),
-  ]);
-}
-
+// Stored daily results of the price-dependent reports (generate/regenerate
+// and inspect them here). The time-series graph itself lives on the
+// Portfolio Overview screen (`performancePanel`, below) — this is the
+// operational maintenance screen, not where anyone looks to see how the
+// portfolio is doing.
 async function viewSnapshots() {
   setActiveNav('r:snapshots');
-  const series = await api('GET', '/report_snapshots/series');
   const metas = await api('GET', '/report_snapshots');
 
   // On-demand generation: a past date whose prices have been backfilled, a
@@ -1350,11 +1283,8 @@ async function viewSnapshots() {
       + 'keeps showing, flagged, until regenerated. A snapshot valued while the month\'s FX rate '
       + 'was unpublished is provisional (an earlier month\'s rate was used) and is finalised '
       + 'automatically when the RBA import lands the real rate. A day whose price fetches failed '
-      + 'has no snapshot at all until the price re-run succeeds.'),
-    el('div', { class: 'card' }, [
-      el('h3', null, 'Market value and unrealised gain over time'),
-      seriesChart(series),
-    ]),
+      + 'has no snapshot at all until the price re-run succeeds. '
+      + 'The market-value graph moved to the Portfolio Overview screen.'),
     genForm,
     table,
   ]));
@@ -1381,6 +1311,140 @@ async function viewSnapshotDetail(report, date) {
 }
 
 // ---- reports ----------------------------------------------------------
+
+// A period figure formatted through the shared money display rules
+// (COLUMN_KINDS 'money': round to 2 dp + thousands grouping, full value on
+// hover when rounding drops precision) — the panel below is a hand-built
+// stat grid, not a filterableTable, so it calls numericDisplay directly
+// rather than formatting money itself.
+function moneyEl(value) {
+  const nd = numericDisplay(value, 'money');
+  return el('span', { title: nd ? nd.tip : null }, nd ? nd.text : cellText(value));
+}
+
+function statItem(label, valueEl) {
+  return el('div', { class: 'stat' }, [
+    el('div', { class: 'stat-label' }, label),
+    el('div', { class: 'stat-value' }, valueEl),
+  ]);
+}
+
+// The period-performance report's response, rendered as a stat grid (the
+// headline capital/FX/income breakdown, which always sums exactly to the
+// period return — see reports::period_performance), a per-currency FX
+// line, and the per-holding contributions in a collapsed detail table.
+async function renderPeriodSummary(r) {
+  const parts = [];
+  if (r.provisional) {
+    parts.push(el('p', { class: 'hint warn' },
+      'Provisional: a conversion at one end of this period used a fallback-month FX rate (the real month\'s rate was not published yet). Figures here will change once it lands.'));
+  }
+  parts.push(el('div', { class: 'perf-summary' }, [
+    statItem('Opening value', moneyEl(r.opening_market_value)),
+    statItem('Closing value', moneyEl(r.closing_market_value)),
+    statItem('Period return', moneyEl(r.total_return)),
+    statItem('Return %', r.total_return_pct == null ? '—' : cellText(r.total_return_pct) + '%'),
+    statItem('Capital growth', moneyEl(r.capital_growth)),
+    statItem('FX movement', moneyEl(r.fx_movement)),
+    statItem('Income', moneyEl(r.income)),
+    statItem('Purchases', moneyEl(r.purchases)),
+    statItem('Sale proceeds', moneyEl(r.sale_proceeds)),
+    statItem('Realised capital gain (tax)', moneyEl(r.realised_capital_gain)),
+  ]));
+  if (r.fx_by_currency.length > 0) {
+    parts.push(el('h4', null, 'FX movement by currency'));
+    parts.push(await dataTable(r.fx_by_currency, ['currency', 'fx_movement', 'rate_from', 'rate_to', 'provisional']));
+  }
+  parts.push(el('details', null, [
+    el('summary', null, 'Per-holding contributions'),
+    await dataTable(r.holdings, [
+      'listing_id', 'holding_account_id', 'opening_market_value', 'closing_market_value',
+      'purchases', 'sale_proceeds', 'income', 'capital_growth', 'fx_movement', 'total_return',
+    ]),
+  ]));
+  return el('div', null, parts);
+}
+
+// The Portfolio Overview screen's market-value graph and period-performance
+// summary (moved here from the Snapshots maintenance screen — see
+// `viewSnapshots`). Range presets and a custom from/to both resolve to the
+// nearest actual stored snapshot dates before calling the report, so the
+// summary always matches stored prices and the chart's own endpoints.
+async function performancePanel() {
+  const series = await api('GET', '/report_snapshots/series');
+  if (!series || series.length < 2) {
+    return el('div', { class: 'card' }, [el('h3', null, 'Performance'), seriesChart(series)]);
+  }
+
+  const chartHolder = el('div');
+  const summaryHolder = el('div');
+  const fromInp = el('input', { type: 'date' });
+  const toInp = el('input', { type: 'date' });
+
+  function nearestSeriesDates(from, to) {
+    let rFrom = null, rTo = null;
+    series.forEach(function (p) {
+      if (p.snapshot_date >= from && rFrom === null) rFrom = p.snapshot_date;
+      if (p.snapshot_date <= to) rTo = p.snapshot_date;
+    });
+    return { from: rFrom, to: rTo };
+  }
+
+  async function applyRange(from, to) {
+    fromInp.value = from;
+    toInp.value = to;
+    chartHolder.innerHTML = '';
+    chartHolder.appendChild(seriesChart(sliceSeries(series, from, to)));
+    summaryHolder.innerHTML = '';
+    const resolved = nearestSeriesDates(from, to);
+    if (!resolved.from || !resolved.to || resolved.from >= resolved.to) {
+      summaryHolder.appendChild(el('p', { class: 'hint' },
+        'Select a range spanning at least two stored snapshots for a period summary.'));
+      return;
+    }
+    try {
+      const result = await api('POST', '/portfolio/period-performance', {
+        from: resolved.from, to: resolved.to,
+      });
+      summaryHolder.appendChild(await renderPeriodSummary(result));
+    } catch (e) {
+      summaryHolder.appendChild(el('p', { class: 'hint warn' }, e.message));
+    }
+  }
+
+  const presets = [
+    ['1m', '1M'], ['3m', '3M'], ['6m', '6M'], ['1y', '1Y'], ['fytd', 'FY'], ['all', 'All'],
+  ];
+  const presetButtons = presets.map(function (p) {
+    const btn = el('button', { type: 'button', class: 'small' }, p[1]);
+    btn.addEventListener('click', function () {
+      const r = presetRange(series, p[0]);
+      applyRange(r.from, r.to);
+    });
+    return btn;
+  });
+
+  const rangeForm = el('form', { class: 'range-control' });
+  rangeForm.appendChild(el('div', { class: 'form-actions' }, presetButtons));
+  rangeForm.appendChild(el('div', { class: 'field' }, [el('label', null, 'From'), fromInp]));
+  rangeForm.appendChild(el('div', { class: 'field' }, [el('label', null, 'To'), toInp]));
+  rangeForm.appendChild(el('button', { type: 'submit', class: 'small' }, 'Apply'));
+  rangeForm.addEventListener('submit', function (ev) {
+    ev.preventDefault();
+    if (fromInp.value && toInp.value) applyRange(fromInp.value, toInp.value);
+  });
+
+  const panel = el('div', { class: 'card' }, [
+    el('h3', null, 'Market value and unrealised gain over time'),
+    chartHolder,
+    rangeForm,
+    summaryHolder,
+  ]);
+  const initial = presetRange(series, 'all');
+  await applyRange(initial.from, initial.to);
+  return panel;
+}
+
 async function viewReport(report) {
   setActiveNav('r:' + report.slug);
   const header = el('div', null, [
@@ -1394,6 +1458,10 @@ async function viewReport(report) {
       el('a', { href: report.api + '/export', class: 'export-link' }, 'Export CSV')));
   }
   const result = el('div');
+  // Config-driven, not overview-specific — any report can opt in by setting
+  // `performancePanel` (see config.js). Currently only the Portfolio
+  // Overview screen does.
+  const panel = report.performancePanel ? await performancePanel() : null;
 
   // Summarise the live-fetched prices' as-of times into one "as at …" line
   // (the freshness of the valuation), plus a count of holdings the live fetch
@@ -1456,7 +1524,7 @@ async function viewReport(report) {
 
   if (report.method === 'GET') {
     await render(await api('GET', report.api));
-    setMain(el('div', null, [header, result]));
+    setMain(el('div', null, [header, panel, result]));
     return;
   }
 
@@ -1483,7 +1551,7 @@ async function viewReport(report) {
         toast(e.message, true);
       }
     });
-    setMain(el('div', null, [header, form, result]));
+    setMain(el('div', null, [header, panel, form, result]));
     return;
   }
 
@@ -1535,7 +1603,7 @@ async function viewReport(report) {
       toast(e.message, true);
     }
   });
-  setMain(el('div', null, [header, priceForm, result]));
+  setMain(el('div', null, [header, panel, priceForm, result]));
   // Run live on first load so the valuation is shown without manual entry.
   try {
     await render(await api('POST', report.api, buildBody()));

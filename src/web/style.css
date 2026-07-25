@@ -211,3 +211,17 @@ input[type=checkbox] { width: auto; }
 .hint.warn { color: var(--warn); }
 .hint.as-at { margin: 0 0 10px; }
 .hint.as-at .warn { color: var(--warn); }
+
+/* Portfolio Overview performance panel: the graph's date-range presets and
+   the period-performance stat grid. */
+.range-control { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px; margin: 12px 0; }
+.range-control .form-actions { margin-top: 0; }
+.range-control .field { margin-bottom: 0; }
+.perf-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 12px 20px;
+  margin: 12px 0;
+}
+.stat-label { color: var(--muted); font-size: 12px; font-weight: 600; }
+.stat-value { font-size: 18px; font-weight: 600; }

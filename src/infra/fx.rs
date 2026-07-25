@@ -24,10 +24,11 @@
 //! month's rate — bounded by [`VALUATION_FALLBACK_MONTHS`] — and say so in the
 //! result ([`ValuationRate::provisional`]) so the caller flags the output as
 //! provisional, never silently. Only valuation paths (snapshot generation in
-//! `reports::snapshot`, live-quote conversion in `entities::closing_price`)
-//! may call these; tax calculations and FY reports keep the strict
-//! [`resolve_rate`] rule so no tax figure can ever be computed from a
-//! fallback-month rate.
+//! `reports::snapshot`, live-quote conversion in `entities::closing_price`,
+//! and the period-performance report's FX attribution in
+//! `reports::period_performance`, both over `reports::valuation`) may call
+//! these; tax calculations and FY reports keep the strict [`resolve_rate`]
+//! rule so no tax figure can ever be computed from a fallback-month rate.
 
 use chrono::{Datelike, NaiveDate};
 use rust_decimal::Decimal;

@@ -53,9 +53,8 @@ use serde::{Deserialize, Serialize};
 use sqlx::{QueryBuilder, Row, SqlitePool};
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use crate::entities::closing_price::{self, Market, PriceStatus};
-use crate::infra::fx::FxRates;
-use crate::reports::{performance, portfolio, unrealised_gains};
+use crate::entities::closing_price::{self, Market};
+use crate::reports::{performance, portfolio, unrealised_gains, valuation};
 
 /// The price-dependent reports that are snapshotted daily.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type)]
@@ -154,6 +153,15 @@ impl From<sqlx::Error> for GenerateError {
     }
 }
 
+impl From<valuation::ValuationError> for GenerateError {
+    fn from(e: valuation::ValuationError) -> Self {
+        match e {
+            valuation::ValuationError::Unprocessable(msg) => GenerateError::Unprocessable(msg),
+            valuation::ValuationError::Db(msg) => GenerateError::Db(msg),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // DB access
 // ---------------------------------------------------------------------------
@@ -248,24 +256,6 @@ pub async fn db_series(pool: &SqlitePool) -> Result<Vec<SeriesPoint>, sqlx::Erro
 // Generation
 // ---------------------------------------------------------------------------
 
-/// The market contexts of the listings held as at `date` (live holdings when
-/// `None`).
-async fn held_markets(
-    pool: &SqlitePool,
-    as_of: Option<NaiveDate>,
-) -> Result<Vec<Market>, GenerateError> {
-    let ids = closing_price::db_held_listing_ids(pool, as_of).await?;
-    let mut markets = Vec::with_capacity(ids.len());
-    for id in ids {
-        markets.push(
-            closing_price::load_market(pool, id)
-                .await?
-                .ok_or_else(|| GenerateError::Db(format!("listing {id} disappeared")))?,
-        );
-    }
-    Ok(markets)
-}
-
 /// The latest calendar date the whole portfolio can be valued at with final
 /// prices at `now`: starting from the most advanced market's latest complete
 /// trading day, walk back until every held listing's valuation day (its
@@ -275,7 +265,7 @@ pub async fn latest_snapshot_date(
     pool: &SqlitePool,
     now: DateTime<Utc>,
 ) -> Result<Option<NaiveDate>, GenerateError> {
-    let markets = held_markets(pool, None).await?;
+    let markets = valuation::held_markets(pool, None).await?;
     let mut pairs: Vec<(&Market, NaiveDate)> = Vec::with_capacity(markets.len());
     for m in &markets {
         let latest = m
@@ -312,78 +302,24 @@ pub async fn latest_snapshot_date(
     Ok(Some(floor))
 }
 
-/// AUD price per listing held as at `date`, from the stored closing prices:
-/// each listing is valued at its nearest trading day on or before `date`,
-/// whose stored price must be ok and final, converted at the valuation FX
-/// rate. The second return value is the listings whose conversion used a
-/// fallback-month rate — non-empty makes the snapshot provisional. Fails with
-/// the full list of blockers otherwise — a failed-price day must yield no
-/// snapshot at all.
+/// AUD price per listing held as at `date`, from `valuation::stored_valuations`.
+/// The second return value is the listings whose conversion used a
+/// fallback-month rate — non-empty makes the snapshot provisional.
 async fn aud_prices_for(
     pool: &SqlitePool,
     date: NaiveDate,
     now: DateTime<Utc>,
 ) -> Result<(HashMap<i64, Decimal>, HashSet<i64>), GenerateError> {
-    let markets = held_markets(pool, Some(date)).await?;
-    if markets.is_empty() {
-        return Err(GenerateError::Unprocessable(format!(
-            "nothing was held on {date}"
-        )));
-    }
-
+    let valuations = valuation::stored_valuations(pool, date, now).await?;
     let mut prices = HashMap::new();
     let mut provisional: HashSet<i64> = HashSet::new();
-    let mut blockers: Vec<String> = Vec::new();
-    // every imported ATO FX rate — per-listing conversions below are map
-    // lookups, not one DB round-trip each
-    let fx = FxRates::load(pool).await?;
-    for market in &markets {
-        let ticker = &market.listing.ticker;
-        let Some(valuation_day) = market.latest_trading_day_on_or_before(date) else {
-            blockers.push(format!(
-                "{ticker}: no trading day in the year before {date}"
-            ));
-            continue;
-        };
-        let final_day = market
-            .latest_complete_trading_day(now)
-            .map_err(GenerateError::Db)?;
-        if final_day.is_none_or(|f| valuation_day > f) {
-            blockers.push(format!(
-                "{ticker}: the close of {valuation_day} is not final yet"
-            ));
-            continue;
-        }
-        match closing_price::db_get_one(pool, market.listing.id, valuation_day).await? {
-            Some(row) if row.status == PriceStatus::Ok => {
-                let price = row.price.expect("ok row carries a price (schema CHECK)");
-                match fx.resolve_valuation_rate(&market.listing.currency, valuation_day) {
-                    Ok(vr) => {
-                        prices.insert(
-                            market.listing.id,
-                            crate::infra::fx::apply_rate(price, vr.rate),
-                        );
-                        if vr.provisional {
-                            provisional.insert(market.listing.id);
-                        }
-                    }
-                    Err(e) => blockers.push(format!("{ticker}: {e}")),
-                }
-            }
-            Some(row) => blockers.push(format!(
-                "{ticker}: the stored price for {valuation_day} is errored ({}) — re-fetch it",
-                row.error.unwrap_or_default()
-            )),
-            None => blockers.push(format!(
-                "{ticker}: no stored price for {valuation_day} — backfill it"
-            )),
+    for v in valuations {
+        prices.insert(v.listing_id, v.aud_price);
+        if v.provisional {
+            provisional.insert(v.listing_id);
         }
     }
-    if blockers.is_empty() {
-        Ok((prices, provisional))
-    } else {
-        Err(GenerateError::Unprocessable(blockers.join("; ")))
-    }
+    Ok((prices, provisional))
 }
 
 /// Generate (or regenerate) the three snapshots for `date` and store them in

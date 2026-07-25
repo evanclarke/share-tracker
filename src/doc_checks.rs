@@ -497,6 +497,27 @@ fn advisory_ignores_expire() {
     }
 }
 
+/// Docs-sync pin for the overview performance panel (REQUIREMENTS
+/// 2026-07-25): the API docs the new endpoint's `(from, to]`/FX-attribution
+/// conventions and its Known-limitations entry, the response-codes catalogue
+/// covers its 422s, and the README surfaces the panel on the overview screen
+/// (and no longer claims the graph lives on the snapshots screen).
+#[test]
+fn period_performance_panel_documented() {
+    assert!(API_MD.contains("### Period performance"));
+    assert!(API_MD.contains("POST /portfolio/period-performance"));
+    assert!(API_MD.contains("half-open `(from, to]`"));
+    assert!(
+        API_MD.contains("a period-performance request whose `from` is not strictly before `to`")
+    );
+    let limits = known_limitations();
+    assert!(limits.contains("Period-performance FX attribution is approximate"));
+    assert!(limits.contains("capital_growth + fx_movement + income"));
+    assert!(README_MD.contains("period performance"));
+    assert!(README_MD.contains("capital growth"));
+    assert!(README_MD.contains("date-range presets"));
+}
+
 /// Pins for the FreeBSD packaging + versioned-release pipeline (REQUIREMENTS
 /// 2026-07-13). The release workflow and package skeleton are plain text CI
 /// consumes, so these tests keep their load-bearing pieces from silently

@@ -416,7 +416,7 @@ export const ENTITIES = [
 ];
 
 export const REPORTS = [
-  { slug: 'overview', title: 'Portfolio Overview', api: '/portfolio/overview', method: 'POST', prices: true, desc: 'Open holdings per listing and holding account, with optional market value.' },
+  { slug: 'overview', title: 'Portfolio Overview', api: '/portfolio/overview', method: 'POST', prices: true, performancePanel: true, desc: 'Open holdings per listing and holding account, with optional market value, a market-value graph over a selectable date range, and a period performance summary (capital growth / FX movement / income).' },
   { slug: 'open-parcels', title: 'Open Parcels', api: '/portfolio/open-parcels', method: 'GET', desc: 'Every open parcel: acquisition date, original cost base, AMIT and return-of-capital reductions, remaining quantity and adjusted cost base (AUD).' },
   {
     slug: 'activity', title: 'Listing Activity', api: '/portfolio/activity', method: 'POST',
@@ -539,7 +539,7 @@ export const REPORTS = [
       dec('units', 'Units to sell', { required: true, default: '' }),
     ],
   },
-  { slug: 'snapshots', title: 'Snapshots', custom: 'snapshots', api: '/report_snapshots', desc: 'Stored daily results of the price-dependent reports (portfolio overview, unrealised gains, performance), valued at the stored closing prices, with a time-series graph. A back-dated fact marks affected snapshots stale; regenerate them here.' },
+  { slug: 'snapshots', title: 'Snapshots', custom: 'snapshots', api: '/report_snapshots', desc: 'Stored daily results of the price-dependent reports (portfolio overview, unrealised gains, performance), valued at the stored closing prices. A back-dated fact marks affected snapshots stale; regenerate them here. The market-value graph is on the Portfolio Overview screen.' },
   {
     slug: 'row-history', title: 'Row History', api: '/reports/row_history', method: 'POST',
     desc: 'The append-only audit trail: every past version of one record, newest first. Database triggers capture the prior values whenever an audited row is edited or deleted, so an accidental change to a historical fact can be noticed and reconstructed; entries are kept forever and nothing can rewrite them. No entries = the row has never been changed since the trail began.',

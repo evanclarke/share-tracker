@@ -34,8 +34,9 @@ const STYLE_CSS: &str = include_str!("web/style.css");
 /// The ES modules making up the app, as (route, source) pairs: the `app.js`
 /// entry point plus everything it (transitively) imports. A new module is
 /// served by adding a pair here.
-const JS_MODULES: [(&str, &str); 4] = [
+const JS_MODULES: [(&str, &str); 5] = [
     ("/static/app.js", include_str!("web/app.js")),
+    ("/static/chart.js", include_str!("web/chart.js")),
     ("/static/config.js", include_str!("web/config.js")),
     ("/static/forms.js", include_str!("web/forms.js")),
     ("/static/util.js", include_str!("web/util.js")),

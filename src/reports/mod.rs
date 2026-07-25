@@ -25,6 +25,7 @@ pub mod net_capital_gain;
 pub mod open_parcels;
 pub mod parcel_optimiser;
 pub mod performance;
+pub mod period_performance;
 pub mod portfolio;
 pub mod realised_gains;
 pub mod row_history;
@@ -32,6 +33,7 @@ pub mod settlement_coverage;
 pub mod snapshot;
 pub mod tax_summary;
 pub mod unrealised_gains;
+pub mod valuation;
 pub mod wash_sales;
 
 /// A listing's ticker for a rejection or detail message — the error-bodies
@@ -71,6 +73,7 @@ pub fn router() -> Router<SqlitePool> {
         .merge(activity::router())
         .merge(open_parcels::router())
         .merge(performance::router())
+        .merge(period_performance::router())
         .merge(unrealised_gains::router())
         .merge(realised_gains::router())
         .merge(net_capital_gain::router())

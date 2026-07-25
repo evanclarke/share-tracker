@@ -31,6 +31,13 @@ checks=(
   '#/e/income|<h2>Income</h2>|2,757.30'
   '#/r/open-parcels|<h2>Open Parcels</h2>|XASX:VAS'
   '#/r/tax-summary|<h2>Tax Summary</h2>|filter-row'
+  # The demo fixture seeds no closing prices (no live price fetch here — see
+  # the file header), so the report-snapshot series is empty; this still
+  # catches a broken chart.js module route or a load-time exception in the
+  # performance panel, just not the populated chart/summary (covered by the
+  # Rust unit/API tests in reports::period_performance and a manual /verify
+  # pass instead).
+  '#/r/overview|<h2>Portfolio Overview</h2>|graph appears once two or more'
 )
 
 failures=0
