@@ -94,8 +94,24 @@ pub struct PeriodPerformance {
     pub fx_movement: Decimal,
     pub total_return: Decimal,
     /// `total_return / opening_market_value * 100`. `None` when the window
-    /// opened with nothing held.
+    /// opened with nothing held. Not annualised, and not cash-flow aware: a
+    /// window with large purchases partway through returns a figure that
+    /// looks big relative to the (comparatively small) opening balance —
+    /// `money_weighted_return_pct` is the annualised, cash-flow-aware figure
+    /// the UI shows for a window longer than a year.
     pub total_return_pct: Option<Decimal>,
+    /// The window's annualised money-weighted return (IRR, actual/365) —
+    /// `reports::performance`'s `money_weighted_annual_return` run over the
+    /// portfolio's external cash flows in `(from, to]` plus the opening
+    /// market value as an outflow at `from` and the closing market value as
+    /// an inflow at `to` (the same convention `db_performance` uses for a
+    /// still-open holding's market value at `as_of`). Unlike
+    /// `total_return_pct`, this is correct regardless of how much of the
+    /// closing value came from money added during the window rather than
+    /// growth of the opening balance. `None` under the same conditions
+    /// `money_weighted_annual_return` returns `None` (all flows on one day,
+    /// or the flows admit no rate).
+    pub money_weighted_return_pct: Option<Decimal>,
     /// The tax realised capital gain for disposals in the window (sum of
     /// `reports::realised_gains` rows with `sale_date` in `(from, to]`) —
     /// informational only, not part of the additive capital/FX/income split.
@@ -336,6 +352,27 @@ pub async fn compute(
     let total_return_pct = (opening_total > Decimal::ZERO)
         .then(|| (return_total / opening_total * Decimal::from(100)).round_dp(4));
 
+    // The window's flows: every external cash flow since inception up to
+    // `to`, filtered to this window (a flow on `from` itself is already
+    // inside the opening valuation, matching the module's half-open (from,
+    // to] convention), plus the opening/closing market values as boundary
+    // flows — capital already committed going into the window is an outflow
+    // at `from`, capital still held at `to` is an inflow, the same sign
+    // convention `overall_flows`'s own entries use.
+    let mut mw_flows: Vec<(NaiveDate, Decimal)> = performance::overall_flows(pool, to)
+        .await?
+        .into_iter()
+        .filter(|&(d, _)| d > from)
+        .collect();
+    if opening_total != Decimal::ZERO {
+        mw_flows.push((from, -opening_total));
+    }
+    if closing_total != Decimal::ZERO {
+        mw_flows.push((to, closing_total));
+    }
+    let money_weighted_return_pct = performance::money_weighted_annual_return(&mw_flows)
+        .map(|r| (r * Decimal::from(100)).round_dp(4));
+
     let realised_capital_gain = realised_gains::db_realised_gains(pool)
         .await?
         .into_iter()
@@ -366,6 +403,7 @@ pub async fn compute(
         fx_movement: fx_total,
         total_return: return_total,
         total_return_pct,
+        money_weighted_return_pct,
         realised_capital_gain,
         provisional,
         holdings,
@@ -477,6 +515,53 @@ mod tests {
             r.capital_growth + r.fx_movement + r.income,
             r.total_return,
             "capital + FX + income must sum exactly to the period return"
+        );
+    }
+
+    /// `total_return_pct` divides by the opening balance alone, so a mid-window
+    /// purchase inflates it — the annualised money-weighted return is not
+    /// fooled: it accounts for the purchase's own AUD cost and date, giving a
+    /// materially lower (and correct) figure. Hand-computed by discounting
+    /// the flows (-1200 @ from, -1000 @ the mid-window buy, +2700 @ to,
+    /// actual/365) to a zero NPV — the same bisection `money_weighted_annual_
+    /// return` runs, reproduced independently here to pin the wiring (dates,
+    /// signs, which totals feed it) rather than the bisection math itself
+    /// (covered in `reports::performance`'s own tests).
+    #[tokio::test]
+    async fn money_weighted_return_accounts_for_a_mid_window_purchase() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BTC", "AUD").await;
+        test_support::buy(1, 1)
+            .date(ymd(2020, 1, 1))
+            .qty(dec("100"))
+            .price(dec("10"))
+            .currency("AUD")
+            .insert(&pool)
+            .await;
+        let from = ymd(2025, 1, 1);
+        let to = ymd(2026, 1, 1); // exactly 365 days later
+        store_price(&pool, 1, from, "12").await; // opening: 100 * 12 = 1,200
+        test_support::buy(2, 1)
+            .date(ymd(2025, 7, 1)) // mid-window purchase: 50 * 20 = 1,000
+            .qty(dec("50"))
+            .price(dec("20"))
+            .currency("AUD")
+            .insert(&pool)
+            .await;
+        store_price(&pool, 1, to, "18").await; // closing: 150 * 18 = 2,700
+
+        let r = compute(&pool, from, to, now_after(to)).await.unwrap();
+        assert_eq!(r.opening_market_value, dec("1200"));
+        assert_eq!(r.closing_market_value, dec("2700"));
+        assert_eq!(r.purchases, dec("1000"));
+        assert_eq!(r.total_return, dec("500")); // (2700-1200) - 1000
+        assert_eq!(
+            r.total_return_pct,
+            Some(dec("41.6667")), // 500 / 1200 — looks like a great year
+        );
+        assert_eq!(
+            r.money_weighted_return_pct,
+            Some(dec("29.9144")), // the real annualised rate, cash-flow aware
         );
     }
 

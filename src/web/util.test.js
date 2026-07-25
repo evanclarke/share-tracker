@@ -16,7 +16,7 @@ import assert from 'node:assert/strict';
 import {
   roundDecimalStr, groupThousands, padMinDp, decStrEq, numericDisplay,
   addDecimalStrings, decParts, mulToCents, frankingCreditFor, decEq,
-  looksNumeric, columnKinds, columnLabel, tradeOrigin,
+  looksNumeric, columnKinds, columnLabel, tradeOrigin, periodReturnPct,
 } from './util.js';
 
 // ---- roundDecimalStr ----------------------------------------------------
@@ -238,4 +238,31 @@ test('tradeOrigin: remaining provenance links label plainly', () => {
 test('tradeOrigin: ordinary trades have no origin (null links included)', () => {
   assert.equal(tradeOrigin({ trade_type: 'Buy', transfer_id: null, scrip_action_id: null }), '');
   assert.equal(tradeOrigin({ trade_type: 'Sell' }), '');
+});
+
+// ---- periodReturnPct --------------------------------------------------------
+test('periodReturnPct: a window of a year or less shows the raw total_return_pct', () => {
+  const r = { from: '2025-01-01', to: '2025-06-30', total_return_pct: '10.0000', money_weighted_return_pct: '9.5000' };
+  assert.deepEqual(periodReturnPct(r), { value: '10.0000', annualized: false });
+});
+
+test('periodReturnPct: exactly 365 days still counts as "a year", not "over a year"', () => {
+  const r = { from: '2023-01-01', to: '2024-01-01', total_return_pct: '10.0000', money_weighted_return_pct: '9.5000' };
+  assert.deepEqual(periodReturnPct(r), { value: '10.0000', annualized: false });
+});
+
+test('periodReturnPct: a window over a year shows the annualised money-weighted return', () => {
+  // Mirrors reports::period_performance's own test: a mid-window purchase
+  // inflates total_return_pct (41.6667%) — money_weighted_return_pct
+  // (29.9144%) is the correct annualised figure.
+  const r = {
+    from: '2025-01-01', to: '2026-01-02', // 366 days: just over the boundary
+    total_return_pct: '41.6667', money_weighted_return_pct: '29.9144',
+  };
+  assert.deepEqual(periodReturnPct(r), { value: '29.9144', annualized: true });
+});
+
+test('periodReturnPct: null money_weighted_return_pct falls back to —, not the raw figure', () => {
+  const r = { from: '2020-01-01', to: '2023-01-01', total_return_pct: '1716.7300', money_weighted_return_pct: null };
+  assert.deepEqual(periodReturnPct(r), { value: null, annualized: true });
 });

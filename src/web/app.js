@@ -15,6 +15,7 @@ import {
   el, toast, setMain, looksNumeric, isTimestamp, fmtLocalTimestamp, utcTooltip,
   cellText, numericDisplay, columnKinds, columnLabel, columnLabelMaps,
   fkLabelMaps, api, nextId, loadOptions, listingNamer, describeTrade, tradeOrigin,
+  periodReturnPct,
 } from './util.js';
 import {
   field, txt, dec, dt, bool, fk,
@@ -1354,11 +1355,15 @@ async function renderPeriodSummary(r) {
     parts.push(el('p', { class: 'hint warn' },
       'Provisional: a conversion at one end of this period used a fallback-month FX rate (the real month\'s rate was not published yet). Figures here will change once it lands.'));
   }
+  // Windows over a year show the annualised money-weighted return instead of
+  // the raw total_return_pct — see periodReturnPct's own comment for why.
+  const ret = periodReturnPct(r);
   parts.push(el('div', { class: 'perf-summary' }, [
     statItem('Opening value', moneyEl(r.opening_market_value)),
     statItem('Closing value', moneyEl(r.closing_market_value)),
     statItem('Period return', moneyEl(r.total_return)),
-    statItem('Return %', r.total_return_pct == null ? '—' : cellText(r.total_return_pct) + '%'),
+    statItem(ret.annualized ? 'Return % (p.a.)' : 'Return %',
+      ret.value == null ? '—' : cellText(ret.value) + '%'),
     statItem('Capital growth', moneyEl(r.capital_growth)),
     statItem('FX movement', moneyEl(r.fx_movement)),
     statItem('Income', moneyEl(r.income)),

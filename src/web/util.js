@@ -136,6 +136,25 @@ export function decStrEq(a, b) {
   return ra != null && ra === rb;
 }
 
+// Which of period-performance's two percentage fields the overview panel
+// should show. `total_return_pct` divides the period return by the opening
+// balance alone — fine for a short window, but a mid-window purchase
+// inflates it (it looks like a great year when most of the closing value is
+// new money, not growth — see reports::period_performance's doc comment on
+// the two fields), and reading it as-is over a period longer than a year is
+// misleading either way (a raw multi-year percentage with no per-year
+// framing). Windows over 365 days show `money_weighted_return_pct` instead
+// — the server's annualised, cash-flow-aware money-weighted return (an
+// IRR) — which is already a correct per-year figure, no client-side math
+// needed. `r` is a period-performance response (`from`/`to`,
+// `total_return_pct`, `money_weighted_return_pct`).
+export function periodReturnPct(r) {
+  const days = (new Date(r.to + 'T00:00:00Z') - new Date(r.from + 'T00:00:00Z')) / 86400000;
+  return days > 365
+    ? { value: r.money_weighted_return_pct, annualized: true }
+    : { value: r.total_return_pct, annualized: false };
+}
+
 // Format a numeric cell for display per its column kind. Returns null when
 // the column has no kind or the value isn't numeric (caller uses cellText);
 // otherwise { text, tip } where tip is the original value when money/rate4

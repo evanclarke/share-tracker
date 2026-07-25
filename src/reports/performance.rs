@@ -206,7 +206,7 @@ impl TradeFlow {
 /// zero, with time in years (actual/365) from the first flow. Solved by
 /// bisection on [−99.99%, +1,000%]; `None` when no such rate exists there
 /// (one-sided flows, all flows on one day, or no sign change).
-fn money_weighted_annual_return(flows: &[(NaiveDate, Decimal)]) -> Option<Decimal> {
+pub(crate) fn money_weighted_annual_return(flows: &[(NaiveDate, Decimal)]) -> Option<Decimal> {
     let start = flows.iter().map(|&(d, _)| d).min()?;
     let end = flows.iter().map(|&(d, _)| d).max()?;
     if start == end
@@ -353,11 +353,21 @@ fn build_row(
     }
 }
 
-pub async fn db_performance(
+/// The dated cash-flow accumulation shared by `db_performance` (which turns
+/// it into report rows valued at `as_of`) and `overall_flows` (which
+/// `period_performance` reuses to build a window-scoped money-weighted
+/// return) — the trade/income processing (internal-movement exclusion,
+/// AUD conversion, carried cost) needs to happen exactly once either way.
+struct Accumulated {
+    holdings: BTreeMap<(i64, i64), Acc>,
+    overall: Acc,
+    tickers: HashMap<i64, String>,
+}
+
+async fn accumulate(
     pool: &SqlitePool,
-    prices: &HashMap<i64, Decimal>,
     as_of: NaiveDate,
-) -> Result<Vec<HoldingPerformance>, sqlx::Error> {
+) -> Result<Option<Accumulated>, sqlx::Error> {
     // One read transaction: every input below comes from the same snapshot.
     let mut tx = pool.begin().await?;
     let trades: Vec<TradeFlow> = sqlx::query_as(
@@ -381,7 +391,7 @@ pub async fn db_performance(
 
     if trades.is_empty() && income_rows.is_empty() {
         // Nothing to report; the dropped transaction was read-only.
-        return Ok(vec![]);
+        return Ok(None);
     }
 
     // Units sold out of each purchase parcel by as_of (with sale dates, so the
@@ -518,6 +528,42 @@ pub async fn db_performance(
             overall.trailing_income += cash;
         }
     }
+
+    Ok(Some(Accumulated {
+        holdings,
+        overall,
+        tickers,
+    }))
+}
+
+/// Every external cash-flow event (Buy/DRP AUD cost, Sell AUD net proceeds,
+/// cash income — dated, signed, internal-movement legs excluded) since
+/// inception up to `as_of`, portfolio-wide — the same flows `db_performance`
+/// feeds to `money_weighted_annual_return` for its OVERALL row, exposed for
+/// `period_performance` to filter to a window and combine with the window's
+/// opening/closing market value as boundary flows.
+pub(crate) async fn overall_flows(
+    pool: &SqlitePool,
+    as_of: NaiveDate,
+) -> Result<Vec<(NaiveDate, Decimal)>, sqlx::Error> {
+    Ok(accumulate(pool, as_of)
+        .await?
+        .map_or_else(Vec::new, |a| a.overall.flows))
+}
+
+pub async fn db_performance(
+    pool: &SqlitePool,
+    prices: &HashMap<i64, Decimal>,
+    as_of: NaiveDate,
+) -> Result<Vec<HoldingPerformance>, sqlx::Error> {
+    let Some(Accumulated {
+        holdings,
+        overall,
+        tickers,
+    }) = accumulate(pool, as_of).await?
+    else {
+        return Ok(vec![]);
+    };
 
     // Assemble rows: one per holding, then the OVERALL row (external flows
     // only — the internal legs cancel — with the market value summed across
