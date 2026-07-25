@@ -1577,9 +1577,10 @@ async function viewReport(report) {
   // POST reports value each held listing from the live price source by
   // default (live: true); the form below lets the user override specific
   // listings' prices (what-if) and pick an as-of date. An explicit price
-  // wins over the live fetch. Styled as a plain (non-card) form: it sits
-  // beside the holdings table it values, not as a headline element — the
-  // Portfolio Overview's performance panel is what leads the screen.
+  // wins over the live fetch. Styled as a plain (non-card) form and placed
+  // below the holdings table it values, not as a headline element — the
+  // Portfolio Overview's performance panel and the table itself are what
+  // lead the screen.
   const listings = await api('GET', '/listings');
   const priceForm = el('form', { class: 'price-form' });
   const priceDetails = el('details', { class: 'price-overrides' }, [
@@ -1624,7 +1625,7 @@ async function viewReport(report) {
       toast(e.message, true);
     }
   });
-  setMain(el('div', null, [header, shortcuts, panel, el('h3', null, 'Holdings'), priceForm, result]));
+  setMain(el('div', null, [header, shortcuts, panel, el('h3', null, 'Holdings'), result, priceForm]));
   // Run live on first load so the valuation is shown without manual entry.
   try {
     await render(await api('POST', report.api, buildBody()));

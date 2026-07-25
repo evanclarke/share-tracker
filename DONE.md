@@ -1579,3 +1579,16 @@ almost-white background, and the performance panel's chart and stat grid were ca
 - [x] `cargo build`, `cargo test` (1131 passed), `cargo fmt --check`, `node --test
   'src/web/*.test.js'` (46 passed) all clean; `scripts/ui-check.sh --seed demo --screenshot '#/'`
   confirmed the active Reports label is legible and the panel now spans most of the content area
+
+## Manual Price Overrides moved below the holdings table (2026-07-25 follow-up)
+User feedback on the reflowed overview: the Manual Price Overrides control and its Run report
+button (the shared `viewReport` price-form branch, `app.js` — used by every prices-with-no-params
+report: Portfolio Overview, Unrealised Gains, Performance) still appeared between the "Holdings"
+heading and the table, ahead of the data it overrides. Reordered `setMain`'s children so the
+result (as-at line + table) renders directly under the "Holdings" heading, with the price form
+last.
+- [x] `app.js`: swapped `[…, priceForm, result]` to `[…, result, priceForm]` in the shared
+      price-form branch; updated the branch's comment (it now sits below, not "beside", the table)
+- [x] `cargo build`, `cargo test` (1131 passed), `cargo fmt --check`, `node --test
+  'src/web/*.test.js'` (46 passed) all clean; `scripts/ui-check.sh --seed demo --screenshot '#/'`
+  confirmed Manual Price Overrides and Run report now render below the holdings table
