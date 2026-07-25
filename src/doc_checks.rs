@@ -101,6 +101,19 @@ fn provisional_snapshots_and_catchup_documented() {
     assert!(README_MD.contains("backfills missing dates over a 14-day window"));
 }
 
+/// Docs-sync pin for date-ranged bulk regeneration (REQUIREMENTS 2026-07-25):
+/// the API documents the new default-range endpoint, `regenerate_all`'s
+/// range/backfill semantics and its 422, and the README surfaces that
+/// regenerate-all is date-ranged and defaults to the whole history.
+#[test]
+fn regenerate_all_date_range_documented() {
+    assert!(API_MD.contains("/report_snapshots/regenerate_range"));
+    assert!(API_MD.contains("a backfill for dates that never had a snapshot"));
+    assert!(API_MD.contains("clamped up to the first-ever-held date"));
+    assert!(API_MD.contains("returns `422` if its resolved `from` is after its `to`"));
+    assert!(README_MD.contains("date-ranged regenerate-all action"));
+}
+
 /// Docs-sync pin for the AMIT cash-only income rows (REQUIREMENTS
 /// 2026-06-12): the Income section documents the cash-only rule and its 422s,
 /// the Tax summary section documents the exclusion, the cross-check report

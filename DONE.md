@@ -1446,3 +1446,53 @@ full context.
 - [x] Docs: `docs/API.md` new `### Period performance` section (request/response, the `(from, to]` convention, the FX-attribution formula, the 422 catalogue entry), a Known-limitations entry (FX attribution is approximate for a holding traded inside the window — the residual lands in capital growth, and `capital_growth + fx_movement + income` still sums exactly to `total_return` regardless), README features (the panel on the overview screen, snapshots screen no longer claiming the graph), `src/infra/fx.rs`'s module doc comment + CLAUDE.md's `resolve_valuation_rate` allowed-callers sentence updated for the new caller, CLAUDE.md's web module list and pure-helper-testing sentence gain `chart.js`; no schema change (no new table/column) — `doc_checks::period_performance_panel_documented` pins the doc text
 - [x] `scripts/ui-smoke.sh` gains an `#/r/overview` check for the performance panel — the closing-price/snapshot data needed to exercise the *populated* chart/summary can only be seeded via a live price fetch (there is no direct write path for `closing_prices`), which the network-free smoke check deliberately never does; the empty-series hint is what it asserts instead, with the populated case covered by `reports::period_performance`'s unit/API tests plus the manual `/verify` pass above
 - [x] `cargo build`, `cargo test` (1121 passed), `cargo fmt --check`, `cargo deny check advisories`, `node --test 'src/web/*.test.js'` (36 passed), `scripts/ui-smoke.sh` all clean; manual end-to-end `/verify` pass on `#/r/overview` confirmed the range control, stat grid, per-currency FX, and per-holding table all render correctly and the breakdown sums to the period return on screen
+
+## Snapshots screen: date-ranged regenerate-all (REQUIREMENTS 2026-07-25)
+`POST /report_snapshots/regenerate_all` only ever re-ran dates that already had a stored snapshot
+(`SELECT DISTINCT snapshot_date FROM report_snapshots`) — it could never create a snapshot for a
+date that never had one, so a date backfilled with old closing prices still needed one-at-a-time
+`POST /report_snapshots/generate` calls, and the Snapshots screen's button had no way to express a
+range. See REQUIREMENTS.md 2026-07-25 for full context.
+- [x] `default_regenerate_range(pool, now)` (`src/reports/snapshot.rs`): the default bulk-regen
+  bounds — `from` = `MIN(date)` over Buy/DRP trades, `to` = `latest_snapshot_date` — both `None`
+  when nothing has ever been held. `regenerate_all(pool, from, to, now)` takes optional bounds,
+  defaulting either from this; `from` is clamped up to the first-ever-held date so an over-wide
+  caller-given `from` can't spin through years of no-op days; `from > to` → `Unprocessable` (422).
+  Walks every calendar day in range, keeping only dates `closing_price::db_held_listing_ids` finds
+  something held on (the same guard the scheduled job uses), and regenerates them via the existing
+  `regenerate_dates` — a date with no stored snapshot is generated for the first time, a stored one
+  is force-regenerated regardless of its stale/provisional/fresh flags (kept as the reliable full
+  repair, not narrowed to a catch-up window); blocked dates are still reported, not fatal. Tests:
+  `snapshot::tests::db_regenerate_all_over_a_range_backfills_missing_dates` (backfills dates that
+  never had a snapshot, clamps an over-wide `from`), `api_regenerate_all_accepts_a_date_range`
+  (the `regenerate_range` endpoint's null/populated shapes, a narrowed range, the 422 for a
+  backwards range), `api_regenerate_all_and_provisional` (updated for range semantics — a range
+  spanning a weekend now also picks up the weekend's walked-back price)
+- [x] `GET /report_snapshots/regenerate_range` → `Json<RegenerateRange>` for the UI to prefill the
+  range boxes; `POST /report_snapshots/regenerate_all` takes an optional `{ "from", "to" }` body
+  (`Option<Json<RegenerateBody>>`, so a bodyless POST still works and means the default range).
+  Tests as above plus `web::tests::report_snapshots_ui_present`
+- [x] Web UI (`src/web/app.js` `viewSnapshots`): two date inputs prefilled from
+  `GET /report_snapshots/regenerate_range`, posted as the Regenerate all button's body; the result
+  toast caps the blocked-date list at 5 with a `… and N more` tail instead of dumping a
+  potentially long list. Pinned by `web::tests::report_snapshots_ui_present`
+  (`/report_snapshots/regenerate_range`, `rangeFromInp`, `rangeToInp` present in the bundle)
+- [x] `regenerate_dates` (the shared helper behind both `regenerate_all` and `regenerate_provisional`)
+  logs each date's outcome as it completes — INFO `"snapshot regenerated"` on success, WARN
+  `"snapshot regeneration blocked"` with the reason otherwise — carrying a running `done`/`total`
+  count, so a long bulk run's progress is visible in the log file as it happens rather than only in
+  the final JSON summary. Test: `snapshot::tests::db_regenerate_all_logs_progress_per_date`
+  (`#[tracing_test::traced_test]` + `logs_contain`, exercising both the success and blocked lines
+  and the done/total counters in one range)
+- [x] Docs: `docs/API.md` (the new `GET` endpoint row, `regenerate_all`'s range/backfill body and
+  semantics, its 422, the Web frontend paragraph), README (the snapshot bullet and the Web UI
+  bullet) — `doc_checks::regenerate_all_date_range_documented`; no schema change, no change to the
+  scheduled `report-snapshot` job's own 14-day catch-up window
+- [x] `cargo build`, `cargo test` (1125 passed), `cargo fmt --check`, `cargo deny check advisories`,
+  `node --test 'src/web/*.test.js'` (36 passed), `scripts/ui-smoke.sh` all clean;
+  `scripts/ui-check.sh --seed demo '#/r/snapshots'` confirmed the two date boxes render prefilled
+  (from = the fixture's first Buy date, to = the real latest fully-valuable date); a manual
+  end-to-end HTTP pass against a fresh temp DB (one AUD listing, one Buy, prices backfilled for
+  2026-06-01..08 only) confirmed a bodyless `regenerate_all` generated exactly those 8 never-before-
+  snapshotted dates (24 stored rows = 3 reports × 8 dates) while reporting every later date blocked
+  with an actionable "backfill it" reason, and that an explicit backwards range 422s

@@ -302,6 +302,30 @@ pub async fn latest_snapshot_date(
     Ok(Some(floor))
 }
 
+/// The bulk-regeneration bounds to use when the caller gives none: the first
+/// date anything was ever held (a Buy/DRP trade date — the same "held"
+/// definition as [`closing_price::db_held_listing_ids`]) through the latest
+/// date the portfolio can be valued at with final prices. Both `None` when
+/// nothing has ever been held.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RegenerateRange {
+    pub from: Option<NaiveDate>,
+    pub to: Option<NaiveDate>,
+}
+
+pub async fn default_regenerate_range(
+    pool: &SqlitePool,
+    now: DateTime<Utc>,
+) -> Result<RegenerateRange, GenerateError> {
+    let from: Option<NaiveDate> =
+        sqlx::query_scalar("SELECT MIN(date) FROM trades WHERE trade_type IN ('Buy', 'DRP')")
+            .fetch_one(pool)
+            .await
+            .map_err(GenerateError::from)?;
+    let to = latest_snapshot_date(pool, now).await?;
+    Ok(RegenerateRange { from, to })
+}
+
 /// AUD price per listing held as at `date`, from `valuation::stored_valuations`.
 /// The second return value is the listings whose conversion used a
 /// fallback-month rate — non-empty makes the snapshot provisional.
@@ -528,40 +552,84 @@ pub struct BlockedDate {
 
 /// Regenerate each of `dates` with the single-date semantics of [`generate`]
 /// (as-at-date facts, stored prices; nothing stored for a still-blocked
-/// date), collecting per-date blockers instead of aborting.
+/// date), collecting per-date blockers instead of aborting. Logs each date
+/// as it completes (INFO on success, WARN when blocked) with a running
+/// `done`/`total` count, so a long bulk run's progress is visible in the log
+/// file rather than only in the final response.
 async fn regenerate_dates(
     pool: &SqlitePool,
     dates: impl IntoIterator<Item = NaiveDate>,
     now: DateTime<Utc>,
 ) -> RegenerateSummary {
+    let dates: Vec<NaiveDate> = dates.into_iter().collect();
+    let total = dates.len();
     let mut summary = RegenerateSummary {
         regenerated: Vec::new(),
         blocked: Vec::new(),
     };
-    for date in dates {
+    for (i, date) in dates.into_iter().enumerate() {
+        let done = i + 1;
         match generate(pool, date, now).await {
-            Ok(_) => summary.regenerated.push(date),
-            Err(e) => summary.blocked.push(BlockedDate {
-                date,
-                reason: e.to_string(),
-            }),
+            Ok(_) => {
+                tracing::info!(%date, done, total, "snapshot regenerated");
+                summary.regenerated.push(date);
+            }
+            Err(e) => {
+                tracing::warn!(%date, done, total, reason = %e, "snapshot regeneration blocked");
+                summary.blocked.push(BlockedDate {
+                    date,
+                    reason: e.to_string(),
+                });
+            }
         }
     }
     summary
 }
 
-/// Regenerate every stored snapshot date across the whole series — the bulk
-/// repair after back-dated edits. Unblocked dates still regenerate when
+/// Regenerate every date in `[from, to]` the portfolio held anything on —
+/// the bulk repair after back-dated edits, and a backfill for dates that
+/// never had a snapshot stored (e.g. after backfilling old closing prices).
+/// A missing bound defaults to [`default_regenerate_range`] (first-ever-held
+/// date / latest fully-valuable date); `from` is then clamped up to the
+/// first-held date so an earlier caller-given `from` can't spin through
+/// years of no-op days. Dates with nothing held are skipped silently; dates
+/// that are blocked (missing/errored price) are reported in the summary
+/// rather than aborting the others. Unblocked dates still regenerate when
 /// others are blocked.
 pub async fn regenerate_all(
     pool: &SqlitePool,
+    from: Option<NaiveDate>,
+    to: Option<NaiveDate>,
     now: DateTime<Utc>,
-) -> Result<RegenerateSummary, sqlx::Error> {
-    let dates: Vec<NaiveDate> = sqlx::query_scalar(
-        "SELECT DISTINCT snapshot_date FROM report_snapshots ORDER BY snapshot_date",
-    )
-    .fetch_all(pool)
-    .await?;
+) -> Result<RegenerateSummary, GenerateError> {
+    let default_range = default_regenerate_range(pool, now).await?;
+    let (Some(first_held), Some(default_to)) = (default_range.from, default_range.to) else {
+        // Nothing has ever been held — nothing to regenerate.
+        return Ok(RegenerateSummary {
+            regenerated: Vec::new(),
+            blocked: Vec::new(),
+        });
+    };
+    let from = from.unwrap_or(first_held).max(first_held);
+    let to = to.unwrap_or(default_to);
+    if from > to {
+        return Err(GenerateError::Unprocessable(format!(
+            "the range start ({from}) is after its end ({to})"
+        )));
+    }
+
+    let mut dates: Vec<NaiveDate> = Vec::new();
+    let mut date = from;
+    while date <= to {
+        if !closing_price::db_held_listing_ids(pool, Some(date))
+            .await
+            .map_err(GenerateError::from)?
+            .is_empty()
+        {
+            dates.push(date);
+        }
+        date += Duration::days(1);
+    }
     Ok(regenerate_dates(pool, dates, now).await)
 }
 
@@ -653,13 +721,42 @@ impl From<GenerateError> for ApiError {
     }
 }
 
-/// Bulk repair: regenerate every stored snapshot date. 200 with the summary —
-/// per-date blockers are reported in it, not as an error, so unblocked dates
-/// still regenerate.
+/// The optional `{ "from", "to" }` body for `regenerate_all` — either or both
+/// omitted default per [`default_regenerate_range`].
+#[derive(Debug, Default, Deserialize)]
+struct RegenerateBody {
+    from: Option<NaiveDate>,
+    to: Option<NaiveDate>,
+}
+
+/// The default bulk-regeneration bounds, for the UI to prefill the range
+/// boxes before the user submits.
+async fn regenerate_range_handler(
+    State(pool): State<SqlitePool>,
+) -> Result<Json<RegenerateRange>, ApiError> {
+    Ok(Json(
+        default_regenerate_range(&pool, Utc::now())
+            .await
+            .map_err(ApiError::from)?,
+    ))
+}
+
+/// Bulk repair: regenerate every date in the range (default: first-ever-held
+/// through the latest fully-valuable date) that anything was held on —
+/// backfilling dates that never had a snapshot as well as re-running stored
+/// ones. 200 with the summary — per-date blockers are reported in it, not as
+/// an error, so unblocked dates still regenerate. 422 if `from` is after
+/// `to`.
 async fn regenerate_all_handler(
     State(pool): State<SqlitePool>,
+    body: Option<Json<RegenerateBody>>,
 ) -> Result<Json<RegenerateSummary>, ApiError> {
-    Ok(Json(regenerate_all(&pool, Utc::now()).await?))
+    let RegenerateBody { from, to } = body.map(|Json(b)| b).unwrap_or_default();
+    Ok(Json(
+        regenerate_all(&pool, from, to, Utc::now())
+            .await
+            .map_err(ApiError::from)?,
+    ))
 }
 
 /// The manual counterpart of the post-import true-up: regenerate only the
@@ -678,6 +775,10 @@ pub fn router() -> Router<SqlitePool> {
         .route(
             "/report_snapshots/regenerate_all",
             post(regenerate_all_handler),
+        )
+        .route(
+            "/report_snapshots/regenerate_range",
+            get(regenerate_range_handler),
         )
         .route(
             "/report_snapshots/regenerate_provisional",
@@ -1383,8 +1484,9 @@ mod tests {
             vec![true; 3]
         );
 
-        // June's rate lands; regenerate-all re-runs both dates and finalises
-        // the provisional one.
+        // June's rate lands; regenerate-all (narrowed to just these two
+        // dates — the default range is exercised separately) re-runs both
+        // and finalises the provisional one.
         import_rate(&pool, "USD", "2026-06", "2.5").await;
         let resp = app
             .clone()
@@ -1392,16 +1494,22 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/report_snapshots/regenerate_all")
-                    .body(Body::empty())
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"from":"2026-05-29","to":"2026-06-04"}"#))
                     .unwrap(),
             )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let summary = body_json(resp).await;
+        // The range walks every calendar day 5/29..6/4: the weekend right
+        // after 5/29 (Sat/Sun) walks back to Friday's price and succeeds
+        // too; the weekdays 6/1-6/3 have no stored price and land in
+        // `blocked` (not asserted here — the next block covers a blocked
+        // date's shape).
         assert_eq!(
             summary["regenerated"],
-            serde_json::json!(["2026-05-29", "2026-06-04"])
+            serde_json::json!(["2026-05-29", "2026-05-30", "2026-05-31", "2026-06-04"])
         );
         assert_eq!(
             provisional_flags(&pool, ymd(2026, 6, 4)).await,
@@ -1420,7 +1528,8 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/report_snapshots/regenerate_all")
-                    .body(Body::empty())
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"from":"2026-05-29","to":"2026-06-04"}"#))
                     .unwrap(),
             )
             .await
@@ -1435,6 +1544,159 @@ mod tests {
                 .unwrap()
                 .contains("backfill")
         );
+    }
+
+    /// Unlike a plain re-run of stored dates, a range can cover dates that
+    /// never had a snapshot at all (e.g. after backfilling old closing
+    /// prices) — those are generated, not just re-run. A `from` earlier than
+    /// the first Buy/DRP is clamped up to it, so an over-wide caller-given
+    /// range can't spin through years of no-op days; a date with nothing
+    /// held is skipped rather than reported blocked.
+    #[tokio::test]
+    async fn db_regenerate_all_over_a_range_backfills_missing_dates() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BHP", Some("XASX"), "AUD").await;
+        insert_buy(&pool, 1, 1, ymd(2026, 6, 2), "100", "10", "AUD").await;
+        for (date, price) in [
+            (ymd(2026, 6, 2), "60.00"),
+            (ymd(2026, 6, 3), "61.00"),
+            (ymd(2026, 6, 4), "62.48"),
+        ] {
+            store_price(&pool, 1, date, price).await;
+        }
+        let now = friday_evening_sydney();
+        assert!(
+            db_list(&pool, None, None, None).await.unwrap().is_empty(),
+            "nothing stored yet"
+        );
+
+        // A range starting well before the first Buy is clamped up to it;
+        // the pre-holding days it would otherwise cover are skipped, not
+        // reported blocked.
+        let summary = regenerate_all(&pool, Some(ymd(2026, 5, 20)), Some(ymd(2026, 6, 4)), now)
+            .await
+            .unwrap();
+        assert_eq!(
+            summary.regenerated,
+            vec![ymd(2026, 6, 2), ymd(2026, 6, 3), ymd(2026, 6, 4)]
+        );
+        assert!(summary.blocked.is_empty());
+        let stored = db_list(&pool, None, None, None).await.unwrap();
+        assert_eq!(stored.len(), 9, "3 reports x 3 dates");
+    }
+
+    /// A bulk regeneration logs each date's outcome as it completes — INFO on
+    /// success, WARN when blocked — with a running done/total count, so
+    /// progress on a long run is visible in the log file rather than only in
+    /// the final response.
+    #[tracing_test::traced_test]
+    #[tokio::test]
+    async fn db_regenerate_all_logs_progress_per_date() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BHP", Some("XASX"), "AUD").await;
+        insert_buy(&pool, 1, 1, ymd(2026, 6, 2), "100", "10", "AUD").await;
+        store_price(&pool, 1, ymd(2026, 6, 2), "60.00").await;
+        store_price(&pool, 1, ymd(2026, 6, 3), "61.00").await;
+        // 6/4 has no stored price, so it stays blocked — exercising both the
+        // success and blocked log lines in one range.
+        let now = friday_evening_sydney();
+
+        regenerate_all(&pool, Some(ymd(2026, 6, 2)), Some(ymd(2026, 6, 4)), now)
+            .await
+            .unwrap();
+
+        assert!(logs_contain("snapshot regenerated"));
+        assert!(logs_contain("done=1"));
+        assert!(logs_contain("done=2"));
+        assert!(logs_contain("total=3"));
+        assert!(logs_contain("snapshot regeneration blocked"));
+        assert!(logs_contain("done=3"));
+    }
+
+    /// `regenerate_all`'s defaults span the whole history — first-ever-held
+    /// through the latest fully-valuable date — and are what
+    /// `GET /report_snapshots/regenerate_range` reports for the UI to
+    /// prefill; an explicit range narrows it, and a backwards range is
+    /// rejected.
+    #[tokio::test]
+    async fn api_regenerate_all_accepts_a_date_range() {
+        let pool = test_pool().await;
+        // Before anything is held, the range is all-null.
+        let app0 = app(pool.clone());
+        let resp = app0
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/report_snapshots/regenerate_range")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let range = body_json(resp).await;
+        assert_eq!(range["from"], serde_json::Value::Null);
+        assert_eq!(range["to"], serde_json::Value::Null);
+
+        insert_listing(&pool, 1, "BHP", Some("XASX"), "AUD").await;
+        insert_buy(&pool, 1, 1, ymd(2026, 6, 1), "100", "10", "AUD").await;
+        store_price(&pool, 1, ymd(2026, 6, 2), "60.00").await;
+        store_price(&pool, 1, ymd(2026, 6, 3), "61.00").await;
+        store_price(&pool, 1, ymd(2026, 6, 4), "62.48").await;
+        let app = app(pool.clone());
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/report_snapshots/regenerate_range")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let range = body_json(resp).await;
+        assert_eq!(range["from"], "2026-06-01");
+        // "to" is the real latest fully-valuable date (the handler uses the
+        // real clock, unlike the fixed `now` the other tests inject) —
+        // just assert it resolved to something on/after the stored prices.
+        assert!(range["to"].as_str().unwrap() >= "2026-06-04");
+
+        // Bodyless POST defaults to that full range and backfills it.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/report_snapshots/regenerate_all")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let summary = body_json(resp).await;
+        assert_eq!(
+            summary["regenerated"],
+            serde_json::json!(["2026-06-02", "2026-06-03", "2026-06-04"])
+        );
+
+        // A backwards range is rejected.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/report_snapshots/regenerate_all")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"from":"2026-06-04","to":"2026-06-01"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     #[tokio::test]

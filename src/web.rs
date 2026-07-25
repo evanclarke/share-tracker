@@ -239,6 +239,11 @@ mod tests {
         assert!(js.contains("Regenerate all"));
         assert!(js.contains("Regenerate provisional"));
         assert!(js.contains("snap.provisional"));
+        // Regenerate-all takes a date range, prefilled from the API's
+        // default-range endpoint.
+        assert!(js.contains("/report_snapshots/regenerate_range"));
+        assert!(js.contains("rangeFromInp"));
+        assert!(js.contains("rangeToInp"));
         // The time-series graph is built as inline SVG (no build step, no
         // chart library) from the series endpoint: market value and
         // unrealised gain over the stored snapshot dates.

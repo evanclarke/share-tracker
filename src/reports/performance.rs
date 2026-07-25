@@ -232,11 +232,32 @@ fn money_weighted_annual_return(flows: &[(NaiveDate, Decimal)]) -> Option<Decima
         .iter()
         .map(|&(t, _)| t)
         .fold(Decimal::ZERO, Decimal::max);
+    // For a fractional exponent, `base.checked_powd(exp)` is exactly
+    // `(exp * base.ln()).checked_exp()` internally — so calling it once per
+    // flow recomputes `base.ln()` from scratch for every flow, even though
+    // `base` (the bisection's current candidate rate) is the same for all of
+    // them. `base` is always positive here (rate is bounded within
+    // [−99.99%, +1,000%], so base ∈ (0.0001, 11)), matching `checked_powd`'s
+    // own positive-base path exactly, so hoisting the `ln` out and reusing it
+    // is the identical computation for that path. But an exponent that lands
+    // on an exact integer (flows spaced a whole number of years apart) takes
+    // a *different*, exact path inside `checked_powd` — repeated squaring,
+    // not ln/exp — which is both more precise and avoids ln/exp underflow at
+    // the wide extremes this bisection's bounds can reach (a 20-year gap at
+    // the −99.99% bound needs `ln(0.0001)·20 ≈ −184`, right at `checked_exp`'s
+    // underflow edge); that path is preserved by falling back to
+    // `checked_powd` whenever the exponent is a whole number.
     let npv = |rate: Decimal| -> Option<Decimal> {
         let base = Decimal::ONE + rate;
+        let ln_base = base.checked_ln()?;
         let mut total = Decimal::ZERO;
         for &(t, amount) in &timed {
-            let factor = base.checked_powd(t_max - t)?;
+            let exp = t_max - t;
+            let factor = if exp.normalize().scale() == 0 {
+                base.checked_powd(exp)?
+            } else {
+                (ln_base * exp).checked_exp()?
+            };
             total = total.checked_add(amount.checked_mul(factor)?)?;
         }
         Some(total)
@@ -256,7 +277,12 @@ fn money_weighted_annual_return(flows: &[(NaiveDate, Decimal)]) -> Option<Decima
         return None;
     }
     let two = Decimal::from(2);
-    for _ in 0..64 {
+    // 40 halvings of the ~11-wide [−99.99%, +1,000%] bracket reach ~1e-8
+    // precision — the result is rounded to 4 dp, so this already has margin
+    // to spare over the 64 the bisection used to run (each extra iteration
+    // costs one more `ln`/`exp` evaluation per flow, so trimming this
+    // matters as much as the hoist above for a flow-heavy holding).
+    for _ in 0..40 {
         let mid = (lo + hi) / two;
         let v = npv(mid)?;
         if v.is_zero() {
@@ -801,6 +827,43 @@ mod tests {
         .expect("a rate exists: (1+r)^20 = 0.5");
         // (1+r)^20 = 0.5 → r = 0.5^(1/20) − 1 ≈ −3.4064% p.a.
         assert_eq!(r.round_dp(6), "-0.034064".parse().unwrap());
+    }
+
+    /// Regression for the `ln`-hoisting optimisation in `npv`'s inner loop:
+    /// two flows a non-whole number of years apart take the `checked_exp`
+    /// path (not the exact-integer-exponent `checked_powd` fallback the
+    /// 7-year/20-year tests above exercise), so this is what most real
+    /// portfolios' flows actually hit — hand-computed against a plain
+    /// annualised rate, not just re-deriving whatever the code returns.
+    #[test]
+    fn money_weighted_return_of_a_fractional_year_gap_matches_hand_calc() {
+        let start = d(2023, 1, 1);
+        let end = start + chrono::Duration::days(200);
+        let r = money_weighted_annual_return(&[
+            (start, Decimal::from(-10_000)),
+            (end, Decimal::from(11_000)),
+        ])
+        .expect("a rate exists: (1+r)^(200/365) = 1.1");
+        // (1+r)^(200/365) = 1.1 → r = 1.1^(365/200) − 1 ≈ 18.9985% p.a.
+        assert_eq!(r.round_dp(6), "0.189985".parse().unwrap());
+    }
+
+    /// A single call mixing a whole-number-of-years gap with a fractional
+    /// one exercises both branches of the exponent dispatch together — the
+    /// exact-integer `checked_powd` fallback for one flow and the hoisted
+    /// `ln`/`checked_exp` path for the other, both discounted against the
+    /// same bisected rate.
+    #[test]
+    fn money_weighted_return_mixes_integer_and_fractional_exponents() {
+        let start = d(2020, 1, 1);
+        let mid = start + chrono::Duration::days(365); // exactly 1 year: integer exponent
+        let end = start + chrono::Duration::days(365 + 200); // +200 days: fractional exponent
+        let r = money_weighted_annual_return(&[
+            (start, Decimal::from(-10_000)),
+            (mid, Decimal::from(-1_000)),
+            (end, Decimal::from(12_500)),
+        ]);
+        assert!(r.is_some());
     }
 
     /// A fully sold holding needs no price: its return is realised, the

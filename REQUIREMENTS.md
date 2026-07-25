@@ -1183,3 +1183,30 @@ financial-year keyed.
 - Docs per the standard sync rule: `docs/API.md` (the new endpoint, its request/response, the
   `(from, to]` and FX-attribution conventions, a Known-limitations entry that FX attribution is
   approximate when units traded inside the window), README features line; no schema change
+
+## Snapshots screen: date-ranged regenerate-all (2026-07-25)
+
+`POST /report_snapshots/regenerate_all` only ever re-ran dates that already had a stored snapshot
+(`SELECT DISTINCT snapshot_date FROM report_snapshots`) — it could never create a snapshot for a
+date that never had one, so a date backfilled with old closing prices still needed one-at-a-time
+`POST /report_snapshots/generate` calls to snapshot it. The Snapshots screen's **Regenerate all**
+button had no way to express a range at all.
+
+- `POST /report_snapshots/regenerate_all` takes an optional `{ "from", "to" }` body and walks every
+  calendar date in `[from, to]`, generating dates with no stored snapshot as well as re-running
+  stored ones; a date with nothing held is skipped, a still-blocked date (missing/errored price) is
+  reported rather than aborting the others (unchanged from before)
+- Either bound omitted/`null` defaults from `GET /report_snapshots/regenerate_range` — the new
+  endpoint reporting `{ "from": <first-ever Buy/DRP date>, "to": <latest fully-valuable date> }`
+  (both `null` if nothing has ever been held); a caller-given `from` earlier than the first-held
+  date is clamped up to it so an over-wide range can't spin through years of no-op days; `from`
+  after `to` is rejected `422`
+- Every date in the range is force-regenerated regardless of its stale/provisional/fresh flags —
+  kept as the reliable full-series repair after edits, not narrowed to a catch-up-style window
+- Web UI: the Snapshots screen's Regenerate all button gains two date boxes, prefilled from
+  `regenerate_range`; the result toast shows the regenerated count and the first 5 blocked dates
+  (`… and N more` beyond that) rather than dumping a potentially long list
+- Docs per the standard sync rule: `docs/API.md` (the new `GET` endpoint, the `regenerate_all` body
+  and range/backfill semantics, the 422 for a backwards range), README (the snapshot bullet and the
+  Web UI bullet); no schema change, no change to the scheduled `report-snapshot` job's own 14-day
+  catch-up window

@@ -68,7 +68,7 @@ transfers                    Moves of a listing between two holding accounts of 
 trades
 ├── id                INTEGER PK
 ├── trade_type        TEXT         Buy | Sell | DRP
-├── date              DATE
+├── date              DATE   Indexed — every as-of report (open holdings, unrealised gains, performance) filters trades by date <= as_of
 ├── settlement_date   DATE
 ├── listing_id        INTEGER FK→listings.id
 ├── average_price     TEXT (decimal)
@@ -114,7 +114,7 @@ inheritances                 Inherited share parcels from a deceased estate — 
 income
 ├── id                        INTEGER PK
 ├── listing_id                INTEGER FK→listings.id
-├── date_paid                 DATE
+├── date_paid                 DATE   Indexed — every as-of report filters income by date_paid <= as_of
 ├── ex_date                   DATE (nullable)
 ├── franked_amount            TEXT (decimal)
 ├── unfranked_amount          TEXT (decimal)

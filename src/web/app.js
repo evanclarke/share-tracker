@@ -1187,6 +1187,7 @@ async function viewClosingPrices() {
 async function viewSnapshots() {
   setActiveNav('r:snapshots');
   const metas = await api('GET', '/report_snapshots');
+  const defaultRange = await api('GET', '/report_snapshots/regenerate_range');
 
   // On-demand generation: a past date whose prices have been backfilled, a
   // stale date after recording a back-dated fact, or (date blank) the
@@ -1212,22 +1213,34 @@ async function viewSnapshots() {
     }
   });
 
-  // Bulk repair: regenerate the whole series (after back-dated edits), or
-  // just the provisional dates (the manual counterpart of the true-up that
-  // runs after an FX import). Blocked dates are reported; the rest still
-  // regenerate.
-  function bulkButton(label, path) {
+  // Bulk repair: regenerate a date range (after back-dated edits, or to
+  // backfill dates that never had a snapshot — e.g. after backfilling old
+  // closing prices), or just the provisional dates (the manual counterpart
+  // of the true-up that runs after an FX import). Blocked dates are
+  // reported; the rest still regenerate.
+  const rangeFromInp = el('input', { type: 'date', value: defaultRange.from || '' });
+  const rangeToInp = el('input', { type: 'date', value: defaultRange.to || '' });
+  genForm.appendChild(el('div', { class: 'field' }, [
+    el('label', null, 'Regenerate-all range'),
+    rangeFromInp, ' to ', rangeToInp,
+  ]));
+  genForm.appendChild(el('p', { class: 'hint' },
+    'Defaults to the first-ever holding through the latest date with final prices. Every date in range is regenerated, including one with no stored snapshot yet; a date with nothing held is skipped, and a date whose prices aren’t backfilled is reported blocked.'));
+
+  function bulkButton(label, path, buildBody) {
     const btn = el('button', { type: 'button' }, label);
     btn.addEventListener('click', async function () {
       btn.disabled = true;
       btn.textContent = 'Regenerating…';
       try {
-        const summary = await api('POST', path);
+        const summary = await api('POST', path, buildBody ? buildBody() : undefined);
         let msg = 'Regenerated ' + summary.regenerated.length + ' date(s).';
         if (summary.blocked.length > 0) {
-          msg += ' Blocked: ' + summary.blocked.map(function (b) {
+          const shown = summary.blocked.slice(0, 5).map(function (b) {
             return b.date + ' (' + b.reason + ')';
           }).join('; ');
+          const more = summary.blocked.length > 5 ? '; … and ' + (summary.blocked.length - 5) + ' more' : '';
+          msg += ' Blocked: ' + shown + more;
         }
         toast(msg, summary.blocked.length > 0);
       } catch (e) {
@@ -1238,7 +1251,9 @@ async function viewSnapshots() {
     return btn;
   }
   genForm.appendChild(el('div', { class: 'form-actions' }, [
-    bulkButton('Regenerate all', '/report_snapshots/regenerate_all'),
+    bulkButton('Regenerate all', '/report_snapshots/regenerate_all', function () {
+      return { from: rangeFromInp.value || null, to: rangeToInp.value || null };
+    }),
     ' ',
     bulkButton('Regenerate provisional', '/report_snapshots/regenerate_provisional'),
   ]));
