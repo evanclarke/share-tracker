@@ -1557,3 +1557,25 @@ whenever nothing needed attention, pre-dating and unrelated to the menu-bar work
 - [x] `cargo build`, `cargo test` (1131 passed), `cargo fmt --check`, `cargo deny check advisories`,
   `node --test 'src/web/*.test.js'` (46 passed) all clean; `scripts/ui-check.sh --seed demo
   --screenshot '#/'` confirmed the stray strip is gone
+
+## Top menu bar contrast and narrow performance panel (2026-07-25 fixes)
+User-reported after the top-menu-bar redesign above: a hovered/active top-level menu label
+(`.menu-label:hover, .menu-label.active { color: #fff; }`) read as almost-white text on an
+almost-white background, and the performance panel's chart and stat grid were capped at the
+`.card` default's form-friendly 720px even though the removed sidebar freed up much more width.
+- [x] Root cause of the contrast bug: the generic `button:hover { background: #eef1f5; }` rule sets
+      a *different* property than `.menu-label:hover`'s `color: #fff`, so it still applied on top —
+      near-white text landed on a near-white button. Fixed by giving `.menu-label:hover`/`.active`
+      their own explicit `background: rgba(255, 255, 255, 0.12)` (a light overlay on the dark
+      topbar, visible on hover and when the current screen's menu is highlighted) — the higher
+      specificity of the combined selector wins outright rather than relying on property ordering.
+      Test: `web::tests::top_menu_bar_ui_present` pins the fixed rule
+- [x] Widened the performance panel: gave the panel a `perf-panel` class (both the `<2`-snapshot
+      degenerate card and the full chart+stats card in `performancePanel()`, `app.js`) with its own
+      `max-width: 1200px` (`.card`'s 720px default stays for data-entry forms, which shouldn't
+      stretch), and raised `.series-chart`'s cap from 900px to 1160px (used nowhere but this panel,
+      so no other view is affected) — the `.perf-summary` stat grid already reflows via
+      `auto-fit`/`minmax`, so it fills the extra width automatically
+- [x] `cargo build`, `cargo test` (1131 passed), `cargo fmt --check`, `node --test
+  'src/web/*.test.js'` (46 passed) all clean; `scripts/ui-check.sh --seed demo --screenshot '#/'`
+  confirmed the active Reports label is legible and the panel now spans most of the content area

@@ -1379,7 +1379,7 @@ async function renderPeriodSummary(r) {
 async function performancePanel() {
   const series = await api('GET', '/report_snapshots/series');
   if (!series || series.length < 2) {
-    return el('div', { class: 'card' }, [el('h3', null, 'Performance'), seriesChart(series)]);
+    return el('div', { class: 'card perf-panel' }, [el('h3', null, 'Performance'), seriesChart(series)]);
   }
 
   const statsHolder = el('div');
@@ -1444,7 +1444,7 @@ async function performancePanel() {
     if (fromInp.value && toInp.value) applyRange(fromInp.value, toInp.value);
   });
 
-  const panel = el('div', { class: 'card' }, [
+  const panel = el('div', { class: 'card perf-panel' }, [
     el('h3', null, 'Market value and unrealised gain over time'),
     statsHolder,
     chartHolder,

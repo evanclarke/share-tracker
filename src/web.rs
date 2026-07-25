@@ -808,6 +808,11 @@ mod tests {
         // them), pinned here since no bundle-string assertion touches CSS.
         assert!(css.contains(".menu:hover .menu-panel"));
         assert!(css.contains(".menu:focus-within .menu-panel"));
+        // A hovered/active menu label must set its own background — the
+        // generic `button:hover` rule's light background is a different
+        // property to `.menu-label:hover`'s color change, so without this it
+        // still applies and gives near-white text on a near-white button.
+        assert!(css.contains(".menu-label:hover, .menu-label.active { color: #fff; background:"));
     }
 
     #[tokio::test]

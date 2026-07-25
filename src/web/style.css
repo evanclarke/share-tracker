@@ -71,7 +71,12 @@ body {
   color: #dfe4ea;
   cursor: pointer;
 }
-.menu-label:hover, .menu-label.active { color: #fff; }
+/* The generic `button:hover { background: #eef1f5 }` rule (below) would
+   otherwise still apply here (it sets a different property than this rule,
+   so it isn't overridden by specificity alone), giving near-white text on a
+   near-white background — explicit background keeps it a light overlay on
+   the dark topbar instead. */
+.menu-label:hover, .menu-label.active { color: #fff; background: rgba(255, 255, 255, 0.12); }
 .menu-label::after { content: ' ▾'; font-size: 11px; }
 
 .menu-panel {
@@ -176,6 +181,10 @@ td.detail-cell table { background: var(--panel); }
   margin-bottom: 18px;
   max-width: 720px;
 }
+/* The performance panel (graph + stat grid) isn't a data-entry form, so the
+   .card default's form-friendly 720px cap just wastes the width the removed
+   sidebar freed up. */
+.perf-panel { max-width: 1200px; }
 
 .price-overrides { margin-bottom: 16px; }
 .price-overrides summary { cursor: pointer; font-weight: 600; font-size: 1.17em; margin-bottom: 8px; }
@@ -227,7 +236,7 @@ input[type=checkbox] { width: auto; }
 #toast.error { background: var(--danger); }
 
 /* Snapshot time-series chart (built as inline SVG, no chart library). */
-.series-chart { width: 100%; max-width: 900px; height: auto; }
+.series-chart { width: 100%; max-width: 1160px; height: auto; }
 .series-chart .grid { stroke: #e3e7eb; stroke-width: 1; }
 .series-chart .axis { fill: var(--muted); font-size: 11px; }
 .series-chart polyline.line-mv { stroke: var(--accent); stroke-width: 2; }
