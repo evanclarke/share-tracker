@@ -531,6 +531,23 @@ fn period_performance_panel_documented() {
     assert!(README_MD.contains("date-range presets"));
 }
 
+/// Docs-sync pin for the top menu bar + overview-first home screen
+/// (REQUIREMENTS 2026-07-25): the API docs name the menu bar, its four menus,
+/// `#/` as the home route, and the new `/static/nav.js` module; the README's
+/// Web UI bullet describes the menu bar, and the Portfolio overview bullet
+/// names the home screen and its shortcut buttons.
+#[test]
+fn top_menu_bar_documented() {
+    assert!(API_MD.contains("/static/nav.js"));
+    assert!(API_MD.contains("top menu bar"));
+    for menu in ["Activity", "Reports", "Reference Data", "Jobs"] {
+        assert!(API_MD.contains(menu), "API.md should name the {menu} menu");
+    }
+    assert!(API_MD.contains("the app's home screen"));
+    assert!(README_MD.contains("top menu bar"));
+    assert!(README_MD.contains("New trade/income/sell/transfer shortcut buttons"));
+}
+
 /// Pins for the FreeBSD packaging + versioned-release pipeline (REQUIREMENTS
 /// 2026-07-13). The release workflow and package skeleton are plain text CI
 /// consumes, so these tests keep their load-bearing pieces from silently

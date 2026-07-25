@@ -34,11 +34,12 @@ const STYLE_CSS: &str = include_str!("web/style.css");
 /// The ES modules making up the app, as (route, source) pairs: the `app.js`
 /// entry point plus everything it (transitively) imports. A new module is
 /// served by adding a pair here.
-const JS_MODULES: [(&str, &str); 5] = [
+const JS_MODULES: [(&str, &str); 6] = [
     ("/static/app.js", include_str!("web/app.js")),
     ("/static/chart.js", include_str!("web/chart.js")),
     ("/static/config.js", include_str!("web/config.js")),
     ("/static/forms.js", include_str!("web/forms.js")),
+    ("/static/nav.js", include_str!("web/nav.js")),
     ("/static/util.js", include_str!("web/util.js")),
 ];
 
@@ -767,6 +768,55 @@ mod tests {
     async fn portfolio_overview_ui_present() {
         let js = app_js_body().await;
         assert!(js.contains("/portfolio/overview"));
+        // The overview is the app's home screen: shortcut buttons for the
+        // most common data-entry paths, reflowed above the performance
+        // panel's chart so the headline stats are visible without scrolling.
+        assert!(js.contains("report.shortcuts"));
+        assert!(js.contains("'#/e/trades/new'"));
+        assert!(js.contains("'#/e/income/new'"));
+        assert!(js.contains("'#/sells/new'"));
+        assert!(js.contains("'#/transfers/new'"));
+        assert!(js.contains("statsHolder"));
+        assert!(js.contains("summary.headline"));
+        assert!(js.contains("summary.detail"));
+    }
+
+    #[tokio::test]
+    async fn top_menu_bar_ui_present() {
+        let js = app_js_body().await;
+        let css = STYLE_CSS;
+        // The top menu bar replaces the old left sidebar: a config-driven
+        // model (navModel) grouping ENTITIES/REPORTS by `menu`, with the
+        // Reports menu further split into titled sections (a mega-menu,
+        // since it holds far more entries than the other three menus).
+        assert!(js.contains("function navModel("));
+        assert!(js.contains("export const MENUS"));
+        for label in ["Activity", "Reports", "Reference Data", "Jobs"] {
+            assert!(js.contains(label), "menu label {label} missing");
+        }
+        for section in [
+            "Portfolio",
+            "CGT & tax",
+            "Decision support",
+            "Cross-checks & alerts",
+        ] {
+            assert!(js.contains(section), "report section {section} missing");
+        }
+        assert!(js.contains("menu-panel"));
+        assert!(js.contains("menu-label"));
+        // Panels expand on hover and on keyboard focus (no JS needed to open
+        // them), pinned here since no bundle-string assertion touches CSS.
+        assert!(css.contains(".menu:hover .menu-panel"));
+        assert!(css.contains(".menu:focus-within .menu-panel"));
+    }
+
+    #[tokio::test]
+    async fn overview_is_the_home_screen() {
+        let js = app_js_body().await;
+        // An empty hash renders the overview report directly rather than
+        // redirecting via location.hash, so `#/` is a stable home URL.
+        assert!(js.contains("return await viewReport(reportBySlug.overview)"));
+        assert!(!js.contains("location.hash = '#/r/overview'"));
     }
 
     #[tokio::test]

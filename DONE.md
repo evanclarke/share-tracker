@@ -1496,3 +1496,49 @@ range. See REQUIREMENTS.md 2026-07-25 for full context.
   2026-06-01..08 only) confirmed a bodyless `regenerate_all` generated exactly those 8 never-before-
   snapshotted dates (24 stored rows = 3 reports × 8 dates) while reporting every later date blocked
   with an actionable "backfill it" reason, and that an explicit backwards range 422s
+
+## Top menu bar navigation and an overview-first home screen (REQUIREMENTS 2026-07-25)
+Replace the flat left sidebar with a hover-expanding top menu bar (Activity / Reports /
+Reference Data / Jobs, Reports as a grouped mega-menu), make `#/` a real home route
+rendering the Portfolio Overview directly, add New trade/income/sell/transfer shortcut
+buttons to the overview, and reflow the overview so headline figures sit above the fold.
+See REQUIREMENTS.md 2026-07-25 for full context.
+- [x] New `src/web/nav.js` module: pure `navModel(entities, reports, menus)` plus
+      `buildNav()`/`setActiveNav()`, replacing the sidebar code in `app.js`; add its
+      `JS_MODULES` entry in `src/web.rs` (array size 5 → 6) — `web::tests::every_module_import_is_served`,
+      `js_test_files_are_not_served_and_every_module_is`, `nav.test.js`
+- [x] `src/web/config.js`: rename ENTITIES' `group` to `menu` (values: Activity,
+      Reference Data, Jobs — Jobs gains Closing Prices, Snapshots, Row History), add
+      `menu`/`section` to REPORTS, add `MENUS` export, add `shortcuts` to the `overview`
+      report entry — `nav.test.js`, `web::tests::top_menu_bar_ui_present`
+- [x] `src/web/index.html` + `src/web/style.css`: drop the `#layout`/sidebar markup and
+      CSS, add the menu bar (`.menubar`/`.menu`/`.menu-panel`/`.menu-section`) with
+      CSS-driven hover/focus-within expansion, add `.price-form` for the demoted price
+      override control — `web::tests::index_is_served_as_html`, `top_menu_bar_ui_present`
+      (pins the `:hover`/`:focus-within` CSS rules)
+- [x] `src/web/app.js`: empty-hash route renders the overview report directly (no
+      `location.hash` redirect); `viewReport` renders `report.shortcuts` as a toolbar;
+      split `renderPeriodSummary` into headline stats vs. detail so `performancePanel`
+      can place the chart+range control between them; demote the price-override form off
+      `.card` styling with a preceding "Holdings" heading — `web::tests::overview_is_the_home_screen`,
+      `portfolio_overview_ui_present`
+- [x] `src/web/nav.test.js` (new): every entity/report appears in exactly one menu/section,
+      menu and section ordering, href/data-key correctness including `custom` overrides — 6 tests,
+      all passing
+- [x] `src/web.rs`: `top_menu_bar_ui_present`, `overview_is_the_home_screen`, strengthened
+      `portfolio_overview_ui_present` with the shortcuts + reflow markers
+- [x] `scripts/ui-smoke.sh`: added a `#/` route check (`<h2>Portfolio Overview</h2>`, `New trade`,
+      `Reference Data`)
+- [x] Docs: `docs/API.md` Web frontend section (menu bar, four menus, `#/` home route, shortcuts,
+      `/static/nav.js` + `/static/chart.js` module rows), README (Portfolio overview + Web UI
+      bullets) — `doc_checks::top_menu_bar_documented`
+- [x] `cargo build`, `cargo test` (1131 passed), `cargo fmt --check`, `cargo deny check advisories`,
+  `node --test 'src/web/*.test.js'` (46 passed), `scripts/ui-smoke.sh` all clean (the pre-existing
+  Chrome watchdog timeout noise in this sandbox environment affects every route uniformly, not just
+  the new ones, and the DOM markers still matched before the timeout fired); a manual
+  `scripts/ui-check.sh --seed demo --screenshot` pass against `#/`, `#/e/trades` confirmed the menu
+  bar renders and routing still works, and a temporary `!important` CSS override (reverted before
+  commit) force-opened every panel simultaneously to visually confirm the Reports mega-menu's four
+  titled columns and the Activity/Reference Data/Jobs single-column panels all render their
+  configured items correctly (the overlap visible in that forced-open screenshot is an artifact of
+  four panels being open at once, which real hover/focus-within usage never produces)

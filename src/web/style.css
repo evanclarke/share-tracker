@@ -21,15 +21,18 @@ body {
 }
 
 #topbar {
+  position: relative;
+  z-index: 20;
   display: flex;
-  align-items: baseline;
-  gap: 12px;
-  padding: 12px 20px;
+  align-items: center;
+  gap: 20px;
+  padding: 0 20px;
   background: var(--ink);
   color: #fff;
 }
-#topbar h1 { margin: 0; font-size: 18px; font-weight: 600; }
-#topbar .subtitle { color: #aab3c0; font-size: 12px; }
+#brand { display: flex; text-decoration: none; color: inherit; }
+#topbar h1 { margin: 0; padding: 12px 0; font-size: 18px; font-weight: 600; }
+#topbar .subtitle { margin-left: auto; color: #aab3c0; font-size: 12px; }
 
 /* Cross-view health strip: stale price/FX data and failed jobs, populated by
    refreshHealthBanner in app.js from GET /reports/health. */
@@ -45,27 +48,54 @@ body {
 }
 #health-banner a { color: var(--warn); font-weight: 600; white-space: nowrap; }
 
-#layout { display: flex; align-items: flex-start; }
-
-#nav {
-  width: 220px;
-  flex: 0 0 220px;
-  padding: 12px 0;
-  background: var(--panel);
-  border-right: 1px solid var(--line);
-  min-height: calc(100vh - 45px);
+/* Top menu bar (replaces the old left sidebar): a row of hover/focus-
+   expanding menus, each opening a panel of one or more titled columns. The
+   Reports menu's panel has several `.menu-section`s (a mega-menu); the
+   single-column menus (Activity, Reference Data, Jobs) render one untitled
+   section, same markup either way — see nav.js. */
+.menubar { display: flex; flex-wrap: wrap; gap: 4px; margin: 0; padding: 0; list-style: none; }
+.menu { position: relative; }
+.menu-label {
+  font: inherit;
+  padding: 14px 12px;
+  border: none;
+  border-radius: 0;
+  background: none;
+  color: #dfe4ea;
+  cursor: pointer;
 }
-#nav .group { padding: 10px 16px 4px; font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
-#nav a {
+.menu-label:hover, .menu-label.active { color: #fff; }
+.menu-label::after { content: ' ▾'; font-size: 11px; }
+
+.menu-panel {
+  display: none;
+  position: absolute;
+  top: 100%;
+  left: 0;
+  z-index: 20;
+  gap: 24px;
+  padding: 14px 18px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 0 0 8px 8px;
+  box-shadow: 0 8px 20px rgba(0,0,0,.15);
+  white-space: nowrap;
+}
+.menu:hover .menu-panel, .menu:focus-within .menu-panel { display: flex; }
+
+.menu-section { display: flex; flex-direction: column; }
+.menu-section-title { padding: 4px 10px 6px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+.menu-panel a {
   display: block;
-  padding: 6px 16px;
+  padding: 6px 10px;
+  border-radius: 4px;
   color: var(--ink);
   text-decoration: none;
 }
-#nav a:hover { background: #eef1f5; }
-#nav a.active { background: #e7f0ff; color: var(--accent); font-weight: 600; border-right: 3px solid var(--accent); }
+.menu-panel a:hover { background: #eef1f5; }
+.menu-panel a.active { background: #e7f0ff; color: var(--accent); font-weight: 600; }
 
-#app { flex: 1 1 auto; padding: 20px 24px; max-width: 100%; overflow-x: auto; }
+#app { padding: 20px 24px; max-width: 100%; overflow-x: auto; }
 
 h2 { margin: 0 0 4px; font-size: 20px; }
 .view-desc { color: var(--muted); margin: 0 0 16px; }
@@ -225,3 +255,11 @@ input[type=checkbox] { width: auto; }
 }
 .stat-label { color: var(--muted); font-size: 12px; font-weight: 600; }
 .stat-value { font-size: 18px; font-weight: 600; }
+
+/* Report shortcut buttons (currently the Portfolio Overview's New trade /
+   New income / New sell / New transfer row) — reuses .toolbar's spacing. */
+.report-shortcuts { margin-bottom: 16px; }
+
+/* The overview's Manual Price Overrides control, demoted from a full .card
+   above the results to a plain form sitting beside the holdings table. */
+.price-form .price-overrides summary { font-size: 1em; }

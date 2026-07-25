@@ -9,10 +9,15 @@
 import { describeTrade, tradeOrigin } from './util.js';
 import { txt, dec, int, dt, bool, sel, fk, wireGstBrokerage, wireIncomeEntry } from './forms.js';
 
+// Top menu bar order (nav.js's navModel groups ENTITIES/REPORTS by their
+// `menu` field into this order). Reports additionally group into titled
+// sections within its panel — see the comment above REPORTS.
+export const MENUS = ['Activity', 'Reports', 'Reference Data', 'Jobs'];
+
 // ---- entity configuration --------------------------------------------
 export const ENTITIES = [
   {
-    slug: 'exchanges', title: 'Exchanges', group: 'Reference data', api: '/exchanges',
+    slug: 'exchanges', title: 'Exchanges', menu: 'Reference Data', api: '/exchanges',
     desc: 'Curated trading venues. Seeded with XASX (ASX) and XNYS (NYSE).',
     keyFields: [txt('mic', 'MIC', { required: true })],
     fields: [
@@ -26,14 +31,14 @@ export const ENTITIES = [
     columns: ['mic', 'name', 'country', 'currency', 'timezone', 'settlement_days', 'close_time'],
   },
   {
-    slug: 'exchange_holidays', title: 'Exchange Holidays', group: 'Reference data', api: '/exchange_holidays',
+    slug: 'exchange_holidays', title: 'Exchange Holidays', menu: 'Reference Data', api: '/exchange_holidays',
     desc: 'Full-closure non-trading days; settlement skips these as well as weekends.',
     keyFields: [fk('mic', 'Exchange', 'exchanges', { required: true, encode: 'string' }), dt('holiday_date', 'Date', { required: true })],
     fields: [txt('name', 'Name', { required: true })],
     columns: ['mic', 'holiday_date', 'name'],
   },
   {
-    slug: 'listings', title: 'Listings', group: 'Reference data', api: '/listings',
+    slug: 'listings', title: 'Listings', menu: 'Reference Data', api: '/listings',
     desc: 'Securities you trade, each on a curated exchange — except Crypto listings, which have no exchange (leave it blank), settle same-day, and need a recognised digital-token ticker (e.g. BTC).',
     keyFields: [int('id', 'ID', { auto: true })],
     fields: [
@@ -49,33 +54,37 @@ export const ENTITIES = [
     columns: ['id', 'exchange_mic', 'ticker', 'name', 'isin', 'security_type', 'currency', 'amit', 'preference'],
   },
   {
-    slug: 'holding_accounts', title: 'Holding Accounts', group: 'Reference data', api: '/holding_accounts',
+    slug: 'holding_accounts', title: 'Holding Accounts', menu: 'Reference Data', api: '/holding_accounts',
     desc: 'Where holdings sit within the one taxpayer (e.g. an employer share-plan account vs a personal broker account). The same listing can be held in several accounts at once, each with its own DRP enrolment; move parcels between them with a Transfer. Account 1 is the seeded default every write falls back to.',
     keyFields: [int('id', 'ID', { auto: true })],
     fields: [txt('name', 'Name', { required: true })],
     columns: ['id', 'name'],
   },
   {
-    slug: 'currencies', title: 'Currencies', group: 'Reference data', api: '/currencies', readonly: true,
+    slug: 'currencies', title: 'Currencies', menu: 'Reference Data', api: '/currencies', readonly: true,
     desc: 'Recognised ISO 4217 fiat and ISO 24165 token codes (import-managed).',
     columns: ['code', 'kind', 'numeric_code', 'name', 'short_name', 'minor_units', 'source'],
   },
   {
-    slug: 'mic_registry', title: 'MIC Registry', group: 'Reference data', api: '/mic_registry', readonly: true,
+    slug: 'mic_registry', title: 'MIC Registry', menu: 'Reference Data', api: '/mic_registry', readonly: true,
     desc: 'ISO 10383 Market Identifier Codes (import-managed).',
     columns: ['mic', 'operating_mic', 'name', 'country_code', 'city', 'status', 'expiry_date'],
   },
   {
-    slug: 'closing_prices', title: 'Closing Prices', group: 'Reference data', api: '/closing_prices', custom: 'prices',
+    slug: 'jobs', title: 'Jobs', menu: 'Jobs', api: '/jobs', custom: 'jobs',
+    desc: 'Run scheduled maintenance jobs (backup, reference-data imports) on demand.',
+  },
+  {
+    slug: 'closing_prices', title: 'Closing Prices', menu: 'Jobs', api: '/closing_prices', custom: 'prices',
     desc: 'Stored daily closing prices per held listing, collected by the price-import job.',
   },
   {
-    slug: 'rba_fx_rates', title: 'RBA FX Rates', group: 'Reference data', api: '/rba_fx_rates', readonly: true,
+    slug: 'rba_fx_rates', title: 'RBA FX Rates', menu: 'Reference Data', api: '/rba_fx_rates', readonly: true,
     desc: 'Monthly RBA F11 rates (foreign units per AUD) used for ATO conversion (import-managed).',
     columns: ['id', 'currency', 'month', 'rate'],
   },
   {
-    slug: 'trades', title: 'Trades', group: 'Activity', api: '/trades',
+    slug: 'trades', title: 'Trades', menu: 'Activity', api: '/trades',
     desc: 'Buy acquisitions. Sells are entered under Sells so they always carry parcel allocations; DRP acquisitions are created from the funding distribution under Income (Reinvest under DRP) so the shares stay linked to their dividend and residual chain.',
     keyFields: [int('id', 'ID', { auto: true })],
     fields: [
@@ -106,15 +115,15 @@ export const ENTITIES = [
     wireForm: wireGstBrokerage,
   },
   {
-    slug: 'sells', title: 'Sells', group: 'Activity', api: '/sells', custom: 'sells',
+    slug: 'sells', title: 'Sells', menu: 'Activity', api: '/sells', custom: 'sells',
     desc: 'Sell trades created atomically with their parcel allocations.',
   },
   {
-    slug: 'transfers', title: 'Transfers', group: 'Activity', api: '/transfers', custom: 'transfers',
+    slug: 'transfers', title: 'Transfers', menu: 'Activity', api: '/transfers', custom: 'transfers',
     desc: 'Moves between holding accounts (e.g. vested plan shares to a personal account) — not a CGT event.',
   },
   {
-    slug: 'inheritances', title: 'Inheritances', group: 'Activity', api: '/inheritances',
+    slug: 'inheritances', title: 'Inheritances', menu: 'Activity', api: '/inheritances',
     desc: 'Inherited parcels from a deceased estate — receiving them is not a CGT event. Recording one creates the parcel Buy at the date of death: the cost base per the chosen rule plus any legal-personal-representative (LPR) expenditure, with the 12-month discount clock per s 115-30. The parcel then flows through every report like a Buy; edit or delete it here (not under Trades) — refused while a sale or AMIT adjustment draws on it. The estate/LPR side (assets the executor sells) is not modelled.',
     keyFields: [int('id', 'ID', { auto: true })],
     fields: [
@@ -148,7 +157,7 @@ export const ENTITIES = [
     columns: ['id', 'listing_id', 'holding_account_id', 'quantity', 'date_of_death', 'cost_base_rule', 'cost_base', 'lpr_expenditure', 'deceased_acquisition_date', 'currency'],
   },
   {
-    slug: 'income', title: 'Income', group: 'Activity', api: '/income',
+    slug: 'income', title: 'Income', menu: 'Activity', api: '/income',
     desc: 'Dividends and trust distributions. The form captures what the payment advice prints — amount, franking treatment, the per-share figures — and the advanced toggle reveals the full tax-component breakdown; a DRP statement’s reinvestment can be entered in the same form.',
     keyFields: [int('id', 'ID', { auto: true })],
     fields: [
@@ -184,7 +193,7 @@ export const ENTITIES = [
     attachOwner: 'income_id',
   },
   {
-    slug: 'interest_income', title: 'Interest Income', group: 'Activity', api: '/interest_income',
+    slug: 'interest_income', title: 'Interest Income', menu: 'Activity', api: '/interest_income',
     desc: 'Interest income — bank, term-deposit, or broker-cash interest (it has no listing, so it isn’t an Income row). Enter the gross amount as the statement shows it, including any amount withheld. An Australian-source row reports as the year’s gross interest (question 10 label L, TFN withholding joining the withholding line, label M); a foreign-source row (e.g. a foreign broker’s cash or money-market sweep fund) reports as assessable foreign source income instead (question 20 label E, its foreign tax withheld joining the FITO line). Both count in gross assessable investment income.',
     keyFields: [int('id', 'ID', { auto: true })],
     fields: [
@@ -201,7 +210,7 @@ export const ENTITIES = [
     attachOwner: 'interest_income_id',
   },
   {
-    slug: 'investment_expenses', title: 'Investment Expenses', group: 'Activity', api: '/investment_expenses',
+    slug: 'investment_expenses', title: 'Investment Expenses', menu: 'Activity', api: '/investment_expenses',
     desc: 'Deductible investment expenses — the cost of earning assessable investment income: interest on money borrowed to buy income-producing shares, management/adviser fees, account-keeping fees, and subscriptions. Enter the amount as the deductible figure (post-apportionment — the portion you have determined is income-producing); the tax summary nets these against gross assessable investment income per financial year. Brokerage is not an expense here (it forms the CGT cost base on the trade) and the LIC capital gain deduction is its own income field.',
     keyFields: [int('id', 'ID', { auto: true })],
     fields: [
@@ -218,7 +227,7 @@ export const ENTITIES = [
     columns: ['id', 'date_incurred', 'expense_type', 'amount', 'currency', 'description', 'listing_id', 'holding_account_id'],
   },
   {
-    slug: 'amma_statements', title: 'AMMA Statements', group: 'Activity', api: '/amma_statements',
+    slug: 'amma_statements', title: 'AMMA Statements', menu: 'Activity', api: '/amma_statements',
     desc: 'Annual AMIT Member Annual statements.',
     keyFields: [int('id', 'ID', { auto: true })],
     fields: [
@@ -249,7 +258,7 @@ export const ENTITIES = [
     attachOwner: 'amma_statement_id',
   },
   {
-    slug: 'ess_statements', title: 'ESS Statements', group: 'Activity', api: '/ess_statements',
+    slug: 'ess_statements', title: 'ESS Statements', menu: 'Activity', api: '/ess_statements',
     desc: 'Employee share scheme statements: the assessable discount on ESS interests (declared at Item 12 in the year of the taxing point), split by scheme type. The taxed-upfront-eligible discount is reduced by up to $1,000 per year in the tax summary (the ≤$180,000 income test is your responsibility). Use the row’s Vest action to create the cost-base-reset Buy for the vested shares — once vested the action is replaced by the linked Buy in the Vest trade column (delete the statement to redo it).',
     keyFields: [int('id', 'ID', { auto: true })],
     fields: [
@@ -280,7 +289,7 @@ export const ENTITIES = [
     attachOwner: 'ess_statement_id',
   },
   {
-    slug: 'amit_adjustments', title: 'AMIT Adjustments', group: 'Activity', api: '/amit_adjustments',
+    slug: 'amit_adjustments', title: 'AMIT Adjustments', menu: 'Activity', api: '/amit_adjustments',
     desc: 'Links a purchase parcel (Buy/DRP trade) to an AMMA statement.',
     keyFields: [int('id', 'ID', { auto: true })],
     fields: [
@@ -291,19 +300,19 @@ export const ENTITIES = [
     columns: ['id', 'amma_statement_id', 'trade_id', 'quantity'],
   },
   {
-    slug: 'parcel_allocations', title: 'Parcel Allocations', group: 'Activity', api: '/parcel_allocations', readonly: true,
+    slug: 'parcel_allocations', title: 'Parcel Allocations', menu: 'Activity', api: '/parcel_allocations', readonly: true,
     desc: 'Sell→purchase parcel links (read-only; managed via Sells).',
     columns: ['id', 'sale_trade_id', 'purchase_trade_id', 'quantity_allocated'],
   },
   {
-    slug: 'rights_sales', title: 'Rights Sales', group: 'Activity', api: '/rights_sales', deleteOnly: true,
+    slug: 'rights_sales', title: 'Rights Sales', menu: 'Activity', api: '/rights_sales', deleteOnly: true,
     desc: 'Disposals of renounceable rights — sold on-market, lapsed, or compensated by a retail premium — recorded via a rights issue row’s Sell rights action (Corporate Actions). Each is a CGT event on the rights themselves, not the shares: the holding is untouched, free rights have a nil cost base (purchased rights carry their cost), and the gain/loss is anchored to the original parcels’ acquisition dates in the realised-gains and net-capital-gain reports. Rows are immutable — delete (freeing the entitlement) and re-enter to amend.',
     keyFields: [int('id', 'ID', { auto: true })],
     fields: [],
     columns: ['id', 'rights_action_id', 'date', 'units', 'proceeds_per_right', 'rights_cost', 'fx_rate', 'holding_account_id'],
   },
   {
-    slug: 'drp_enrolments', title: 'DRP Enrolments', group: 'Activity', api: '/drp_enrolments',
+    slug: 'drp_enrolments', title: 'DRP Enrolments', menu: 'Activity', api: '/drp_enrolments',
     desc: 'Dated DRP enrolment periods per (listing, holding account) — the same listing may be enrolled in one account and not another (blank unenrolment date = currently enrolled). Periods within an account must not overlap; unenrolling pays out the trailing carried residual.',
     keyFields: [int('id', 'ID', { auto: true })],
     fields: [
@@ -316,7 +325,7 @@ export const ENTITIES = [
     columns: ['id', 'listing_id', 'holding_account_id', 'enrolment_date', 'unenrolment_date', 'residual_handling'],
   },
   {
-    slug: 'corporate_actions', title: 'Corporate Actions', group: 'Activity', api: '/corporate_actions',
+    slug: 'corporate_actions', title: 'Corporate Actions', menu: 'Activity', api: '/corporate_actions',
     desc: 'Capital events against a listing: return of capital, share splits/consolidations, bonus issues, rights issues, off-market buy-backs, scrip-for-scrip takeovers, demergers, and worthless/delisted shares. The form shows only the chosen action type’s fields; rights issues, buy-backs, scrip-for-scrip takeovers, demergers, and worthless shares are executed after recording via the row’s Exercise / Participate / Exchange / Demerge / Recognise action.',
     keyFields: [int('id', 'ID', { auto: true })],
     fields: [
@@ -403,23 +412,36 @@ export const ENTITIES = [
     },
   },
   {
-    slug: 'cgt_settings', title: 'CGT Settings', group: 'Activity', api: '/cgt_settings',
+    slug: 'cgt_settings', title: 'CGT Settings', menu: 'Activity', api: '/cgt_settings',
     desc: 'Opening carried-forward capital loss (pre-system loss years), applied as the starting balance in the Net Capital Gain report.',
     keyFields: [int('id', 'ID', { required: true, default: '1', hint: 'Singleton — always 1.' })],
     fields: [dec('opening_capital_loss', 'Opening capital loss carried forward', { required: true })],
     columns: ['id', 'opening_capital_loss'],
   },
-  {
-    slug: 'jobs', title: 'Jobs', group: 'Maintenance', api: '/jobs', custom: 'jobs',
-    desc: 'Run scheduled maintenance jobs (backup, reference-data imports) on demand.',
-  },
 ];
 
+// Menu/section placement for the Reports mega-menu: which top-level menu an
+// entry appears under (shared with ENTITIES' `menu` field — Reports, unlike
+// Activity/Reference Data/Jobs, also groups into titled columns via
+// `section`, since it holds far more entries) — see nav.js's navModel.
 export const REPORTS = [
-  { slug: 'overview', title: 'Portfolio Overview', api: '/portfolio/overview', method: 'POST', prices: true, performancePanel: true, desc: 'Open holdings per listing and holding account, with optional market value, a market-value graph over a selectable date range, and a period performance summary (capital growth / FX movement / income).' },
-  { slug: 'open-parcels', title: 'Open Parcels', api: '/portfolio/open-parcels', method: 'GET', desc: 'Every open parcel: acquisition date, original cost base, AMIT and return-of-capital reductions, remaining quantity and adjusted cost base (AUD).' },
+  {
+    slug: 'overview', title: 'Portfolio Overview', api: '/portfolio/overview', method: 'POST', prices: true, performancePanel: true,
+    menu: 'Reports', section: 'Portfolio',
+    desc: 'Open holdings per listing and holding account, with optional market value, a market-value graph over a selectable date range, and a period performance summary (capital growth / FX movement / income).',
+    // Shortcut buttons for the most common data-entry paths, shown above the
+    // performance panel — this is the app's home screen (#/).
+    shortcuts: [
+      { label: '+ New trade', href: '#/e/trades/new', primary: true },
+      { label: '+ New income', href: '#/e/income/new' },
+      { label: '+ New sell', href: '#/sells/new' },
+      { label: '+ New transfer', href: '#/transfers/new' },
+    ],
+  },
+  { slug: 'open-parcels', title: 'Open Parcels', api: '/portfolio/open-parcels', method: 'GET', menu: 'Reports', section: 'Portfolio', desc: 'Every open parcel: acquisition date, original cost base, AMIT and return-of-capital reductions, remaining quantity and adjusted cost base (AUD).' },
   {
     slug: 'activity', title: 'Listing Activity', api: '/portfolio/activity', method: 'POST',
+    menu: 'Reports', section: 'Portfolio',
     desc: 'Everything ever recorded against one listing, in date order — trades labelled with the operation that created them, transfers, income, corporate actions, statements — with a running units-held balance, ending in the final holding summary per account (units held, cost base, market value).',
     params: [
       fk('listing_id', 'Listing', 'listings', { required: true }),
@@ -432,6 +454,7 @@ export const REPORTS = [
   },
   {
     slug: 'parcel-optimiser', title: 'Parcel Optimiser', api: '/portfolio/parcel-optimiser', method: 'POST',
+    menu: 'Reports', section: 'Decision support',
     desc: 'Candidate parcel selections for a contemplated sale — which parcels a sale comes from is your choice, and it changes the tax outcome. Each strategy shows its per-parcel allocations and the resulting gross gain / discountable split. Nothing is recorded: enter the chosen allocations on the real Sell.',
     params: [
       fk('listing_id', 'Listing', 'listings', { required: true }),
@@ -453,18 +476,20 @@ export const REPORTS = [
       },
     ],
   },
-  { slug: 'unrealised-gains', title: 'Unrealised Gains', api: '/portfolio/unrealised-gains', method: 'POST', prices: true, asOfDate: true, desc: 'Per-holding (listing × holding account) unrealised gain/loss vs cost base.' },
+  { slug: 'unrealised-gains', title: 'Unrealised Gains', api: '/portfolio/unrealised-gains', method: 'POST', prices: true, asOfDate: true, menu: 'Reports', section: 'CGT & tax', desc: 'Per-holding (listing × holding account) unrealised gain/loss vs cost base.' },
   {
     slug: 'realised-gains', title: 'Realised Gains', api: '/portfolio/realised-gains', method: 'GET',
+    menu: 'Reports', section: 'CGT & tax',
     desc: 'Per-disposal capital gain/loss split into CGT buckets — ordinary sales plus rights sales/lapses (source column). Expand a disposal for the individual parcels sold and each one’s own CGT outcome.',
     expand: {
       key: 'parcels',
       columns: ['purchase_trade_id', 'acquisition_date', 'units', 'cost_base', 'proceeds', 'capital_gain_loss', 'discount_eligible'],
     },
   },
-  { slug: 'performance', title: 'Performance', api: '/portfolio/performance', method: 'POST', prices: true, asOfDate: true, desc: 'Investment performance per holding and overall: total return, money-weighted return (% p.a.), trailing-12-month income yield.' },
+  { slug: 'performance', title: 'Performance', api: '/portfolio/performance', method: 'POST', prices: true, asOfDate: true, menu: 'Reports', section: 'Portfolio', desc: 'Investment performance per holding and overall: total return, money-weighted return (% p.a.), trailing-12-month income yield.' },
   {
     slug: 'net-capital-gain', title: 'Net Capital Gain', api: '/portfolio/net-capital-gain', method: 'GET', export: true,
+    menu: 'Reports', section: 'CGT & tax',
     desc: 'Assessable net capital gain per financial year. Expand a year for its realised disposals, and a disposal for its per-parcel breakdown.',
     expand: {
       key: 'disposals',
@@ -477,6 +502,7 @@ export const REPORTS = [
   },
   {
     slug: 'net-capital-gain-what-if', title: 'Pre-Sale What-If', api: '/portfolio/net-capital-gain/what-if', method: 'POST',
+    menu: 'Reports', section: 'Decision support',
     desc: 'Dry-run a hypothetical disposal through the Net Capital Gain report: the disposal year’s figures with and without it, using a Parcel Optimiser strategy to pick the parcels (the API also accepts explicit allocations). Nothing is written, and the whole-of-income tax estimate is out of scope — this is the CGT-side delta only.',
     params: [
       fk('listing_id', 'Listing', 'listings', { required: true }),
@@ -517,21 +543,23 @@ export const REPORTS = [
       },
     ],
   },
-  { slug: 'tax-summary', title: 'Tax Summary', api: '/portfolio/tax-summary', method: 'GET', export: true, desc: 'Income aggregated by Australian financial year.' },
-  { slug: 'exchange-mic-validation', title: 'Exchange MIC Validation', api: '/reports/exchange_mic_validation', method: 'GET', statusField: 'registry_status', desc: 'Curated exchanges checked against the ISO MIC registry.' },
-  { slug: 'settlement-holiday-coverage', title: 'Settlement Holiday Coverage', api: '/reports/settlement_holiday_coverage', method: 'GET', statusField: 'coverage_status', desc: 'Trades whose settlement window falls outside the seeded exchange-holiday calendars (settlement may have skipped weekends only).' },
-  { slug: 'e4-cross-check', title: 'Tax-Deferred E4 Cross-Check', api: '/reports/e4_cross_check', method: 'GET', desc: 'Trust income rows whose statement reported a tax-deferred amount (a CGT event E4 cost-base reduction) with no Return of capital corporate action on the listing in the same financial year — enter the action to clear a row.' },
-  { slug: 'amit-cash-cross-check', title: 'AMIT Cash Cross-Check', api: '/reports/amit_cash_cross_check', method: 'GET', desc: 'Financial years with AMIT cash distribution rows but no AMMA statement covering the year. AMIT cash rows fund DRP reinvestment only — the AMMA attribution is the assessable record the Tax Summary reports — so a missing AMMA would silently drop the year’s income from the return. Enter the fund’s AMMA statement to clear a row; an AMMA year with no cash rows is fine.' },
+  { slug: 'tax-summary', title: 'Tax Summary', api: '/portfolio/tax-summary', method: 'GET', export: true, menu: 'Reports', section: 'CGT & tax', desc: 'Income aggregated by Australian financial year.' },
+  { slug: 'exchange-mic-validation', title: 'Exchange MIC Validation', api: '/reports/exchange_mic_validation', method: 'GET', statusField: 'registry_status', menu: 'Reports', section: 'Cross-checks & alerts', desc: 'Curated exchanges checked against the ISO MIC registry.' },
+  { slug: 'settlement-holiday-coverage', title: 'Settlement Holiday Coverage', api: '/reports/settlement_holiday_coverage', method: 'GET', statusField: 'coverage_status', menu: 'Reports', section: 'Cross-checks & alerts', desc: 'Trades whose settlement window falls outside the seeded exchange-holiday calendars (settlement may have skipped weekends only).' },
+  { slug: 'e4-cross-check', title: 'Tax-Deferred E4 Cross-Check', api: '/reports/e4_cross_check', method: 'GET', menu: 'Reports', section: 'Cross-checks & alerts', desc: 'Trust income rows whose statement reported a tax-deferred amount (a CGT event E4 cost-base reduction) with no Return of capital corporate action on the listing in the same financial year — enter the action to clear a row.' },
+  { slug: 'amit-cash-cross-check', title: 'AMIT Cash Cross-Check', api: '/reports/amit_cash_cross_check', method: 'GET', menu: 'Reports', section: 'Cross-checks & alerts', desc: 'Financial years with AMIT cash distribution rows but no AMMA statement covering the year. AMIT cash rows fund DRP reinvestment only — the AMMA attribution is the assessable record the Tax Summary reports — so a missing AMMA would silently drop the year’s income from the return. Enter the fund’s AMMA statement to clear a row; an AMMA year with no cash rows is fine.' },
   {
     slug: 'wash-sales', title: 'Wash Sales', api: '/reports/wash_sales', method: 'POST',
+    menu: 'Reports', section: 'Decision support',
     desc: 'Loss-realising Sells with a Buy of the same listing within the window either side, across all holding accounts — the sell-and-repurchase pattern the ATO warns may have the loss cancelled under Part IVA (TR 2008/1). Advisory only: nothing is rejected and the loss still counts in every CGT report; whether a flag matters depends on the facts (a market-driven repurchase days later survived the ATO’s own example).',
     params: [
       int('window_days', 'Window (days either side)', { default: '30', hint: 'TR 2008/1 has no statutory window — 24 hours apart has failed and 3 days apart has passed. 30 days is a review convention; blank = 30.' }),
     ],
   },
-  { slug: 'franking-at-risk', title: 'Franking At-Risk', api: '/reports/franking_at_risk', method: 'GET', statusField: 'status', desc: 'Each dividend whose shares fail the 45-day (90 for preference) at-risk holding-period walk: the failing qualification window, the entitled and disqualified units, and the credits denied — or shielded by the year’s under-$5,000 small-shareholder exemption. Denied rows are exactly what the Tax Summary subtracts as franking_credits_denied.' },
+  { slug: 'franking-at-risk', title: 'Franking At-Risk', api: '/reports/franking_at_risk', method: 'GET', statusField: 'status', menu: 'Reports', section: 'Cross-checks & alerts', desc: 'Each dividend whose shares fail the 45-day (90 for preference) at-risk holding-period walk: the failing qualification window, the entitled and disqualified units, and the credits denied — or shielded by the year’s under-$5,000 small-shareholder exemption. Denied rows are exactly what the Tax Summary subtracts as franking_credits_denied.' },
   {
     slug: 'franking-what-if', title: 'Franking Sale What-If', api: '/reports/franking_at_risk/what-if', method: 'POST', statusField: 'status',
+    menu: 'Reports', section: 'Decision support',
     desc: 'Before recording a Sell: which dividends’ franking credits the contemplated sale would put at risk under the 45-day rule. Each row shows the additional credits at stake and the qualification window end — selling after that date cannot disqualify the dividend. Nothing is written.',
     params: [
       fk('listing_id', 'Listing', 'listings', { required: true }),
@@ -539,9 +567,10 @@ export const REPORTS = [
       dec('units', 'Units to sell', { required: true, default: '' }),
     ],
   },
-  { slug: 'snapshots', title: 'Snapshots', custom: 'snapshots', api: '/report_snapshots', desc: 'Stored daily results of the price-dependent reports (portfolio overview, unrealised gains, performance), valued at the stored closing prices. A back-dated fact marks affected snapshots stale; regenerate them here. The market-value graph is on the Portfolio Overview screen.' },
+  { slug: 'snapshots', title: 'Snapshots', custom: 'snapshots', api: '/report_snapshots', menu: 'Jobs', desc: 'Stored daily results of the price-dependent reports (portfolio overview, unrealised gains, performance), valued at the stored closing prices. A back-dated fact marks affected snapshots stale; regenerate them here. The market-value graph is on the Portfolio Overview screen.' },
   {
     slug: 'row-history', title: 'Row History', api: '/reports/row_history', method: 'POST',
+    menu: 'Jobs',
     desc: 'The append-only audit trail: every past version of one record, newest first. Database triggers capture the prior values whenever an audited row is edited or deleted, so an accidental change to a historical fact can be noticed and reconstructed; entries are kept forever and nothing can rewrite them. No entries = the row has never been changed since the trail began.',
     params: [
       // Must list exactly the audited tables (reports::row_history::AUDITED_TABLES;

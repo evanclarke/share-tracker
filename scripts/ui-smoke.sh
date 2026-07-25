@@ -38,6 +38,11 @@ checks=(
   # Rust unit/API tests in reports::period_performance and a manual /verify
   # pass instead).
   '#/r/overview|<h2>Portfolio Overview</h2>|graph appears once two or more'
+  # `#/` is the home screen (the same view as #/r/overview, rendered
+  # directly): also checks the top menu bar rendered and the New trade
+  # shortcut is present, since menu items are in the DOM even with every
+  # panel closed (--dump-dom doesn't simulate hover).
+  '#/|<h2>Portfolio Overview</h2>|New trade|Reference Data'
 )
 
 failures=0

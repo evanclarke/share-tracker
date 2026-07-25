@@ -23,6 +23,7 @@ import {
 } from './forms.js';
 import { ENTITIES, REPORTS, ACTIONS } from './config.js';
 import { seriesChart, presetRange, sliceSeries } from './chart.js';
+import { buildNav, setActiveNav } from './nav.js';
 
 const entityBySlug = {};
 ENTITIES.forEach(function (e) { entityBySlug[e.slug] = e; });
@@ -30,30 +31,6 @@ const reportBySlug = {};
 REPORTS.forEach(function (r) { reportBySlug[r.slug] = r; });
 const actionBySlug = {};
 ACTIONS.forEach(function (a) { actionBySlug[a.slug] = a; });
-
-// ---- navigation -------------------------------------------------------
-function buildNav() {
-  const nav = document.getElementById('nav');
-  nav.innerHTML = '';
-  const groups = ['Reference data', 'Activity', 'Maintenance'];
-  groups.forEach(function (g) {
-    nav.appendChild(el('div', { class: 'group' }, g));
-    ENTITIES.filter(function (e) { return e.group === g; }).forEach(function (e) {
-      const href = e.custom ? '#/' + e.custom : '#/e/' + e.slug;
-      nav.appendChild(el('a', { href: href, 'data-key': e.slug }, e.title));
-    });
-  });
-  nav.appendChild(el('div', { class: 'group' }, 'Reports'));
-  REPORTS.forEach(function (r) {
-    nav.appendChild(el('a', { href: '#/r/' + r.slug, 'data-key': 'r:' + r.slug }, r.title));
-  });
-}
-
-function setActiveNav(key) {
-  document.querySelectorAll('#nav a').forEach(function (a) {
-    a.classList.toggle('active', a.getAttribute('data-key') === key);
-  });
-}
 
 // ---- generic table ----------------------------------------------------
 // Default page size: tables with this many rows or fewer show no pager; a
@@ -1345,20 +1322,21 @@ function statItem(label, valueEl) {
   ]);
 }
 
-// The period-performance report's response, rendered as a stat grid (the
-// headline capital/FX/income breakdown, which always sums exactly to the
-// period return — see reports::period_performance), a per-currency FX
-// line, and the per-holding contributions in a collapsed detail table.
+// The period-performance report's response, split into a `headline` (the
+// stat grid, which always sums exactly to the period return — see
+// reports::period_performance) shown above the chart so it's visible without
+// scrolling, and a `detail` (the per-currency FX line and the collapsed
+// per-holding contributions) shown below the range control.
 async function renderPeriodSummary(r) {
-  const parts = [];
+  const headlineParts = [];
   if (r.provisional) {
-    parts.push(el('p', { class: 'hint warn' },
+    headlineParts.push(el('p', { class: 'hint warn' },
       'Provisional: a conversion at one end of this period used a fallback-month FX rate (the real month\'s rate was not published yet). Figures here will change once it lands.'));
   }
   // Windows over a year show the annualised money-weighted return instead of
   // the raw total_return_pct — see periodReturnPct's own comment for why.
   const ret = periodReturnPct(r);
-  parts.push(el('div', { class: 'perf-summary' }, [
+  headlineParts.push(el('div', { class: 'perf-summary' }, [
     statItem('Opening value', moneyEl(r.opening_market_value)),
     statItem('Closing value', moneyEl(r.closing_market_value)),
     statItem('Period return', moneyEl(r.total_return)),
@@ -1371,18 +1349,21 @@ async function renderPeriodSummary(r) {
     statItem('Sale proceeds', moneyEl(r.sale_proceeds)),
     statItem('Realised capital gain (tax)', moneyEl(r.realised_capital_gain)),
   ]));
+
+  const detailParts = [];
   if (r.fx_by_currency.length > 0) {
-    parts.push(el('h4', null, 'FX movement by currency'));
-    parts.push(await dataTable(r.fx_by_currency, ['currency', 'fx_movement', 'rate_from', 'rate_to', 'provisional']));
+    detailParts.push(el('h4', null, 'FX movement by currency'));
+    detailParts.push(await dataTable(r.fx_by_currency, ['currency', 'fx_movement', 'rate_from', 'rate_to', 'provisional']));
   }
-  parts.push(el('details', null, [
+  detailParts.push(el('details', null, [
     el('summary', null, 'Per-holding contributions'),
     await dataTable(r.holdings, [
       'listing_id', 'holding_account_id', 'opening_market_value', 'closing_market_value',
       'purchases', 'sale_proceeds', 'income', 'capital_growth', 'fx_movement', 'total_return',
     ]),
   ]));
-  return el('div', null, parts);
+
+  return { headline: el('div', null, headlineParts), detail: el('div', null, detailParts) };
 }
 
 // The Portfolio Overview screen's market-value graph and period-performance
@@ -1390,14 +1371,20 @@ async function renderPeriodSummary(r) {
 // `viewSnapshots`). Range presets and a custom from/to both resolve to the
 // nearest actual stored snapshot dates before calling the report, so the
 // summary always matches stored prices and the chart's own endpoints.
+//
+// Layout puts the headline stat grid above the chart (so the return figures
+// are visible without scrolling, since this panel opens the app's home
+// screen) and the FX/per-holding detail below the range control, where a
+// closed-by-default `<details>` doesn't compete for attention.
 async function performancePanel() {
   const series = await api('GET', '/report_snapshots/series');
   if (!series || series.length < 2) {
     return el('div', { class: 'card' }, [el('h3', null, 'Performance'), seriesChart(series)]);
   }
 
+  const statsHolder = el('div');
   const chartHolder = el('div');
-  const summaryHolder = el('div');
+  const detailHolder = el('div');
   const fromInp = el('input', { type: 'date' });
   const toInp = el('input', { type: 'date' });
 
@@ -1415,10 +1402,11 @@ async function performancePanel() {
     toInp.value = to;
     chartHolder.innerHTML = '';
     chartHolder.appendChild(seriesChart(sliceSeries(series, from, to)));
-    summaryHolder.innerHTML = '';
+    statsHolder.innerHTML = '';
+    detailHolder.innerHTML = '';
     const resolved = nearestSeriesDates(from, to);
     if (!resolved.from || !resolved.to || resolved.from >= resolved.to) {
-      summaryHolder.appendChild(el('p', { class: 'hint' },
+      statsHolder.appendChild(el('p', { class: 'hint' },
         'Select a range spanning at least two stored snapshots for a period summary.'));
       return;
     }
@@ -1426,9 +1414,11 @@ async function performancePanel() {
       const result = await api('POST', '/portfolio/period-performance', {
         from: resolved.from, to: resolved.to,
       });
-      summaryHolder.appendChild(await renderPeriodSummary(result));
+      const summary = await renderPeriodSummary(result);
+      statsHolder.appendChild(summary.headline);
+      detailHolder.appendChild(summary.detail);
     } catch (e) {
-      summaryHolder.appendChild(el('p', { class: 'hint warn' }, e.message));
+      statsHolder.appendChild(el('p', { class: 'hint warn' }, e.message));
     }
   }
 
@@ -1456,9 +1446,10 @@ async function performancePanel() {
 
   const panel = el('div', { class: 'card' }, [
     el('h3', null, 'Market value and unrealised gain over time'),
+    statsHolder,
     chartHolder,
     rangeForm,
-    summaryHolder,
+    detailHolder,
   ]);
   const initial = presetRange(series, 'all');
   await applyRange(initial.from, initial.to);
@@ -1482,6 +1473,14 @@ async function viewReport(report) {
   // `performancePanel` (see config.js). Currently only the Portfolio
   // Overview screen does.
   const panel = report.performancePanel ? await performancePanel() : null;
+  // Shortcut buttons for the report's most common follow-on actions — the
+  // Portfolio Overview (the app's home screen) uses this for New trade/
+  // income/sell/transfer so they don't require a menu hunt.
+  const shortcuts = report.shortcuts
+    ? el('div', { class: 'toolbar report-shortcuts' }, report.shortcuts.map(function (s) {
+      return el('a', { href: s.href }, el('button', { class: s.primary ? 'primary' : null }, s.label));
+    }))
+    : null;
 
   // Summarise the live-fetched prices' as-of times into one "as at …" line
   // (the freshness of the valuation), plus a count of holdings the live fetch
@@ -1544,7 +1543,7 @@ async function viewReport(report) {
 
   if (report.method === 'GET') {
     await render(await api('GET', report.api));
-    setMain(el('div', null, [header, panel, result]));
+    setMain(el('div', null, [header, shortcuts, panel, result]));
     return;
   }
 
@@ -1571,16 +1570,18 @@ async function viewReport(report) {
         toast(e.message, true);
       }
     });
-    setMain(el('div', null, [header, panel, form, result]));
+    setMain(el('div', null, [header, shortcuts, panel, form, result]));
     return;
   }
 
   // POST reports value each held listing from the live price source by
   // default (live: true); the form below lets the user override specific
   // listings' prices (what-if) and pick an as-of date. An explicit price
-  // wins over the live fetch.
+  // wins over the live fetch. Styled as a plain (non-card) form: it sits
+  // beside the holdings table it values, not as a headline element — the
+  // Portfolio Overview's performance panel is what leads the screen.
   const listings = await api('GET', '/listings');
-  const priceForm = el('form', { class: 'card' });
+  const priceForm = el('form', { class: 'price-form' });
   const priceDetails = el('details', { class: 'price-overrides' }, [
     el('summary', null, 'Manual Price Overrides'),
     el('p', { class: 'hint' },
@@ -1623,7 +1624,7 @@ async function viewReport(report) {
       toast(e.message, true);
     }
   });
-  setMain(el('div', null, [header, panel, priceForm, result]));
+  setMain(el('div', null, [header, shortcuts, panel, el('h3', null, 'Holdings'), priceForm, result]));
   // Run live on first load so the valuation is shown without manual entry.
   try {
     await render(await api('POST', report.api, buildBody()));
@@ -1638,7 +1639,11 @@ async function render() {
   const hash = (location.hash || '').replace(/^#/, '');
   const parts = hash.split('/').filter(Boolean);
   try {
-    if (parts.length === 0) { location.hash = '#/r/overview'; return; }
+    // `#/` is the app's home screen: the Portfolio Overview, rendered
+    // directly (not a redirect) so it's a real, stable URL for the brand
+    // link. `#/r/overview` keeps working unchanged (linked from the Reports
+    // menu) and resolves to the same view via the `parts[0] === 'r'` branch.
+    if (parts.length === 0) return await viewReport(reportBySlug.overview);
     if (parts[0] === 'e') {
       const entity = entityBySlug[parts[1]];
       if (!entity) throw new Error('Unknown view');
