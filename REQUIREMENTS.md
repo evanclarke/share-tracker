@@ -1142,3 +1142,44 @@ late input delays a snapshot instead of losing it.
 - Docs per the standard sync rule: `docs/SCHEMA.md` (the `provisional` column),
   `docs/API.md` (flag in responses, the two regeneration endpoints, response codes), README
   features (provisional-then-finalised snapshot behaviour)
+
+## Portfolio overview performance panel — graph, date range, and period attribution (2026-07-25)
+
+The market-value/unrealised-gain time-series graph currently lives on the Snapshots screen, which
+exists for operational maintenance (generate/regenerate/inspect stored snapshots) — nobody visits
+it to see how the portfolio is doing. The Portfolio Overview screen, the app's landing page, is a
+flat table of open holdings with no history at all. There is also no report anywhere that answers
+"how did the portfolio do between two dates, and why" — every report is point-in-time or
+financial-year keyed.
+
+- Move the graph to the Portfolio Overview screen; the Snapshots screen keeps its
+  generate/regenerate controls and meta table but drops the chart
+- Add range selection to the graph: quick presets (1M/3M/6M/1Y/FY-to-date/All, computed from the
+  series' own latest stored date, not today) and custom from/to dates, clamped to the stored
+  series so a preset can never select a range with no data
+- A text performance summary for the selected range: opening/closing market value, period return
+  (AUD and %), purchases/sale proceeds/income in the window
+- A breakdown of that period return into three additive parts — capital growth, FX movement,
+  income — computed from a half-open window `(from, to]`:
+  - Income: cash income (franked + unfranked + foreign source − foreign tax − TFN withholding,
+    same definition as the DRP-reinvestable cash figure) received in the window
+  - FX movement: the closing native-currency exposure revalued at the opening vs closing month's
+    ATO/RBA rate — `closing_units · native_price · (1/rate_to − 1/rate_from)`; exactly zero for
+    AUD listings
+  - Capital growth: the residual (period return − FX movement − income) — so the three always sum
+    exactly to the period return, including when a holding is opened or closed mid-window or a
+    split occurs inside it
+  - The period return itself is the existing `reports::performance` cumulative total-return figure
+    at `to` minus at `from` (that computation already handles internal movements — transfers,
+    scrip-for-scrip, demergers — correctly at portfolio level), so the new report reuses it rather
+    than re-deriving cash flows
+  - `capital_growth` is an investment-performance figure, not the tax realised capital gain; also
+    surface the tax realised capital gain for disposals in the window as a separate informational
+    line, clearly not part of the additive breakdown
+  - A provisional-FX endpoint (fallback-month rate, per `infra::fx::resolve_valuation_rate`) flags
+    the whole period result as provisional, same convention as snapshots
+  - Per-holding contributions (same four buckets) and a per-currency FX breakdown (with the rates
+    used) are available, not just the portfolio totals
+- Docs per the standard sync rule: `docs/API.md` (the new endpoint, its request/response, the
+  `(from, to]` and FX-attribution conventions, a Known-limitations entry that FX attribution is
+  approximate when units traded inside the window), README features line; no schema change
