@@ -1046,6 +1046,13 @@ mod tests {
         assert!(index.contains("id=\"health-banner\""));
         let css = body_string(get("/static/style.css").await).await;
         assert!(css.contains("#health-banner"));
+        // `#health-banner`'s own `display: flex` outranks the UA stylesheet's
+        // `[hidden] { display: none }` (an id selector beats an attribute
+        // selector), so without this higher-specificity id+attribute rule the
+        // `hidden` attribute alone doesn't collapse it — the shell renders it
+        // `hidden` until a real problem is found, and it must paint nothing
+        // (not an empty coloured strip) until then.
+        assert!(css.contains("#health-banner[hidden] { display: none; }"));
     }
 
     #[tokio::test]

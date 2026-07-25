@@ -47,6 +47,13 @@ body {
   font-size: 13px;
 }
 #health-banner a { color: var(--warn); font-weight: 600; white-space: nowrap; }
+/* #health-banner's own `display: flex` outweighs the UA stylesheet's
+   `[hidden] { display: none }` (an id selector beats an attribute selector),
+   so the `hidden` attribute alone doesn't collapse it — it painted an empty
+   flex row (background + padding, no content) whenever nothing needed
+   attention. This id+attribute selector has higher specificity than the
+   plain id rule above and wins regardless of source order. */
+#health-banner[hidden] { display: none; }
 
 /* Top menu bar (replaces the old left sidebar): a row of hover/focus-
    expanding menus, each opening a panel of one or more titled columns. The

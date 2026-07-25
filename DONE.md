@@ -1542,3 +1542,18 @@ See REQUIREMENTS.md 2026-07-25 for full context.
   titled columns and the Activity/Reference Data/Jobs single-column panels all render their
   configured items correctly (the overlap visible in that forced-open screenshot is an artifact of
   four panels being open at once, which real hover/focus-within usage never produces)
+
+## Health banner painted an empty strip instead of collapsing when hidden (2026-07-25 fix)
+Found while screenshotting the top-menu-bar redesign above: `#health-banner`'s own `display: flex`
+rule (id selector, specificity (1,0,0)) outranks the browser's built-in `[hidden] { display: none }`
+rule (attribute selector, specificity (0,1,0)), so the `hidden` attribute alone never collapsed the
+banner — it painted an empty coloured flex row (background + padding, no content) on every screen
+whenever nothing needed attention, pre-dating and unrelated to the menu-bar work.
+- [x] `#health-banner[hidden] { display: none; }` added to `style.css` — an id+attribute selector
+      (specificity (1,1,0)) beats the plain id rule regardless of source order, so it collapses
+      correctly however the two rules are ordered
+- [x] Test: `web::tests::health_banner_ui_present` now pins the exact override rule's presence in
+      the served stylesheet
+- [x] `cargo build`, `cargo test` (1131 passed), `cargo fmt --check`, `cargo deny check advisories`,
+  `node --test 'src/web/*.test.js'` (46 passed) all clean; `scripts/ui-check.sh --seed demo
+  --screenshot '#/'` confirmed the stray strip is gone
