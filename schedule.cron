@@ -15,14 +15,27 @@
 # run stores, per held listing, every trading day in the last 7 whose row is
 # missing or errored (days already stored ok are never re-fetched), so the
 # three runs cover their own markets between them and backfill outages.
+#
+# The crypto run sits at 08:00 UTC, not right at the 00:00 UTC candle
+# close: production job_runs history (2026-07 onward) showed the provider's
+# daily crypto candle is consistently NOT yet published a few minutes or even
+# a couple of hours after the UTC cut-off (a 00:30 UTC attempt failed on
+# literally every run), but reliably available by the time the 07:30 UTC ASX
+# run's lookback retried it. 08:00 UTC keeps a margin beyond that observed
+# success point rather than relying on a same-day equity run (or, on
+# weekends, a 24h-later retry) to paper over a guaranteed same-day failure.
 30 17 * * 1-5   Australia/Sydney   price-import  # after the 16:00 ASX close
 30 17 * * 1-5   America/New_York   price-import  # after the 16:00 NYSE close
-30 0  * * *     UTC                price-import  # after the crypto UTC daily cut-off
+0  8  * * *     UTC                price-import  # crypto, ~8h after the UTC cut-off
 
-# Report snapshots, daily at 12:00 local (assumed near Sydney time): stores the
-# price-dependent reports for every missing date in a 14-day window up to the
-# latest date every held listing can be valued at with final prices — typically
-# yesterday, once the NYSE and crypto runs above have landed (07:30-09:30 and
-# 10:30-11:30 Sydney respectively). Regenerates stale or provisional window
-# dates; a blocked date is skipped (reported) and retried on later runs.
-0 12 * * *     report-snapshot
+# Report snapshots, pinned to UTC (rather than local time) for the same reason
+# as the crypto price-import above — an unambiguous margin past every price
+# run regardless of either hemisphere's DST state. 09:00 UTC lands after all
+# three price-import runs for the Sydney calendar day: the ASX close from the
+# previous local afternoon, the NYSE close that landed Sydney-morning, and the
+# crypto run above (~18:00-19:00 Sydney). Stores the price-dependent reports
+# for every missing date in a 14-day window up to the latest date every held
+# listing can be valued at with final prices. Regenerates stale or
+# provisional window dates; a blocked date is skipped (reported) and retried
+# on later runs.
+0 9 * * *      UTC   report-snapshot
