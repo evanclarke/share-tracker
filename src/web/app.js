@@ -114,20 +114,24 @@ function filterableTable(rows, cols, opts) {
 
   // Header row: click-to-sort column titles, shown as friendly labels
   // (columnLabel) while sorting/filtering stay keyed by the raw column name.
-  const headCells = cols.map(function (c) {
+  // `colHeadCells` holds only the real sortable columns — the click handler's
+  // indicator loop must iterate this, not `headCells` below, which gains a
+  // non-sortable expand/Actions th with no `_ind`/`_col` of its own.
+  const colHeadCells = cols.map(function (c) {
     const indicator = el('span', { class: 'sort-ind' }, '');
     const th = el('th', { class: (numeric[c] ? 'num ' : '') + 'sortable' }, [columnLabel(c), indicator]);
     th._col = c;
     th._ind = indicator;
     th.addEventListener('click', function () {
       if (sortCol === c) sortDir = -sortDir; else { sortCol = c; sortDir = 1; }
-      headCells.forEach(function (h) {
+      colHeadCells.forEach(function (h) {
         h._ind.textContent = h._col === sortCol ? (sortDir === 1 ? ' ▲' : ' ▼') : '';
       });
       renderBody();
     });
     return th;
   });
+  const headCells = colHeadCells.slice();
   if (expand) headCells.unshift(el('th', { class: 'expand-col' }, ''));
   if (actions) headCells.push(el('th', null, 'Actions'));
 
