@@ -1,11 +1,11 @@
 use crate::domain::tax_year::tax_year_for;
-use crate::infra::decimal::row_opt_dec;
+use crate::entities::income::Income;
 use crate::infra::http::ApiError;
 use axum::{Json, Router, extract::State, routing::get};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use sqlx::{Row, SqlitePool};
+use sqlx::{FromRow, Row, SqlitePool};
 
 /// A trust income row whose statement reported a tax-deferred amount with no
 /// `ReturnOfCapital` corporate action on the listing in the same financial
@@ -45,8 +45,7 @@ pub async fn db_e4_alerts(pool: &SqlitePool) -> Result<Vec<E4CrossCheckAlert>, s
     // action set.
     let mut tx = pool.begin().await?;
     let income_rows = sqlx::query(
-        "SELECT i.id AS income_id, i.listing_id, l.ticker, i.date_paid, \
-                i.entitlement_date, i.tax_deferred_amount \
+        "SELECT i.*, l.ticker \
          FROM income i \
          JOIN listings l ON l.id = i.listing_id \
          WHERE i.trust_income = 1 AND i.tax_deferred_amount IS NOT NULL \
@@ -72,25 +71,28 @@ pub async fn db_e4_alerts(pool: &SqlitePool) -> Result<Vec<E4CrossCheckAlert>, s
 
     let mut alerts = Vec::new();
     for row in &income_rows {
+        // The joined ticker aside, every field comes off the income model, so
+        // the assessment-date rule is the entity's own
+        // (`Income::assessment_date` — present entitlement for a trust row,
+        // payment otherwise), shared with the tax summary rather than
+        // restated here.
+        let income = Income::from_row(row)?;
         // The query filters to non-NULL; parse failures still propagate.
-        let Some(tax_deferred_amount) = row_opt_dec(row, "tax_deferred_amount")? else {
+        let Some(tax_deferred_amount) = income.tax_deferred_amount else {
             continue;
         };
         if tax_deferred_amount.is_zero() {
             continue;
         }
-        let listing_id: i64 = row.try_get("listing_id")?;
-        let date_paid: NaiveDate = row.try_get("date_paid")?;
-        let entitlement_date: Option<NaiveDate> = row.try_get("entitlement_date")?;
-        let tax_year = tax_year_for(entitlement_date.unwrap_or(date_paid));
-        if covered.contains(&(listing_id, tax_year)) {
+        let tax_year = tax_year_for(income.assessment_date());
+        if covered.contains(&(income.listing_id, tax_year)) {
             continue;
         }
         alerts.push(E4CrossCheckAlert {
-            income_id: row.try_get("income_id")?,
-            listing_id,
+            income_id: income.id,
+            listing_id: income.listing_id,
             ticker: row.try_get("ticker")?,
-            date_paid,
+            date_paid: income.date_paid,
             tax_deferred_amount,
             tax_year,
         });

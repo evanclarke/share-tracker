@@ -301,9 +301,10 @@ pub async fn db_activity(
         if let Some(trade_id) = i.reinvestment_trade_id {
             detail.push_str(&format!(", reinvested (trade #{trade_id})"));
         }
-        // The AUD month follows the tax summary: present entitlement governs
-        // a trust row when recorded, otherwise the pay date.
-        let fx_date = i.entitlement_date.unwrap_or(i.date_paid);
+        // The AUD month follows the tax summary, on the model's own
+        // `assessment_date`: present entitlement governs a trust row when
+        // recorded, otherwise the pay date.
+        let fx_date = i.assessment_date();
         let amount_aud = fx.to_aud(gross, &i.currency, fx_date, FxOverride::None)?;
         rows.push(Proto {
             date: i.date_paid,
@@ -911,6 +912,43 @@ mod tests {
         // 150 × 10 = 1500 USD at 2 USD/AUD → 750 AUD.
         assert_eq!(events[0].amount_aud, Some(dec("750")));
         assert_eq!(events[0].detail, "10 @ 150 USD");
+    }
+
+    /// A trust distribution's AUD month is its *assessment* month
+    /// (`Income::assessment_date`) — present entitlement, not payment — so a
+    /// June-entitled distribution paid in July converts at the June rate, the
+    /// same attribution the tax summary applies. The two months carry
+    /// deliberately different rates so only the right one can produce the
+    /// asserted figure; the ledger still *dates* the row by payment.
+    #[tokio::test]
+    async fn db_trust_distribution_converts_at_the_entitlement_month() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "VAF").await;
+        crate::entities::rba_fx_rate::db_import_rate(&pool, "USD", "2025-06", dec("2"))
+            .await
+            .unwrap();
+        crate::entities::rba_fx_rate::db_import_rate(&pool, "USD", "2025-07", dec("4"))
+            .await
+            .unwrap();
+        test_support::income(1, 1, ymd(2025, 7, 15))
+            .with(|i| {
+                i.trust_income = true;
+                i.entitlement_date = Some(ymd(2025, 6, 30));
+                i.unfranked_amount = dec("100");
+                i.currency = "USD".to_string();
+            })
+            .insert(&pool)
+            .await;
+
+        let events = events(&pool, 1).await;
+        let row = events
+            .iter()
+            .find(|e| e.event == "Trust distribution")
+            .expect("the distribution is in the ledger");
+        assert_eq!(row.date, ymd(2025, 7, 15), "dated by payment");
+        // 100 USD at the June rate of 2 USD/AUD → 50 AUD (the July rate of 4
+        // would give 25).
+        assert_eq!(row.amount_aud, Some(dec("50")));
     }
 
     /// Statement-ish rows all land in the ledger with their labels: return of
