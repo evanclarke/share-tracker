@@ -681,6 +681,11 @@ pub struct DeductionRow {
 pub struct IncomeSections {
     pub trust_income: Vec<TrustIncomeRow>,
     pub amma_statements: Vec<AmmaStatementRow>,
+    /// Item 11 (Australian-company dividends) only — a non-trust income row
+    /// with no franked/unfranked/franking-credit/LIC/TFN content (a foreign
+    /// company's dividend, entered via `foreign_source_income` alone) is
+    /// excluded rather than printing as an all-zero row; it still appears in
+    /// `foreign_income` below.
     pub dividends: Vec<DividendIncomeRow>,
     pub foreign_income: Vec<ForeignIncomeRow>,
     pub interest: Vec<InterestIncomeRow>,
@@ -765,7 +770,18 @@ async fn income_section(
                 tax_deferred_amount: tax_deferred,
                 franking_credits_aud: fc,
             });
-        } else {
+        } else if franked > Decimal::ZERO
+            || unfranked > Decimal::ZERO
+            || fc > Decimal::ZERO
+            || lic > Decimal::ZERO
+            || tfn > Decimal::ZERO
+        {
+            // Item 11 (Dividends) is Australian-company dividends only — a
+            // foreign company's dividend (e.g. a US-listed RSU holding) is
+            // entered with only `foreign_source_income` set and reported
+            // under Item 20 instead (the `foreign` push below); such a row
+            // carries no Item-11 content, so it stays out of this table
+            // rather than printing as an all-zero dividend line.
             let alert = franking_alerts.get(&income_id);
             out.dividends.push(DividendIncomeRow {
                 income_id,
@@ -1189,7 +1205,7 @@ async fn years_handler(State(pool): State<SqlitePool>) -> Result<Json<Vec<i32>>,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::entities::{interest_income, investment_expense};
+    use crate::entities::{interest_income, investment_expense, rba_fx_rate};
     use crate::test_support::{self, dec, ymd};
 
     async fn listing_amit(pool: &SqlitePool, id: i64, ticker: &str) {
@@ -1450,6 +1466,54 @@ mod tests {
         assert_eq!(interest_total, summary.interest_income);
         let deductions_total: Decimal = report.income.deductions.iter().map(|r| r.amount_aud).sum();
         assert_eq!(deductions_total, summary.deductions_total);
+    }
+
+    /// A foreign company's dividend (e.g. a US-listed RSU holding like ICE)
+    /// is entered with only `foreign_source_income` set — no Item-11
+    /// content — so it must not print as an all-zero row in the Dividend
+    /// income table; it still appears in Foreign income, and a genuine
+    /// (Australian, franked) dividend in the same year still prints.
+    #[tokio::test]
+    async fn foreign_only_income_row_excluded_from_dividends_table() {
+        let pool = test_support::test_pool().await;
+        test_support::listing(1)
+            .ticker("ICE")
+            .name("Intercontinental Exchange")
+            .currency("USD")
+            .insert(&pool)
+            .await;
+        test_support::listing(2)
+            .ticker("T1")
+            .name("Test One")
+            .insert(&pool)
+            .await;
+        rba_fx_rate::db_import_rate(&pool, "USD", "2024-03", dec("0.65"))
+            .await
+            .unwrap();
+        test_support::income(1, 1, ymd(2024, 3, 31))
+            .with(|i| {
+                i.currency = "USD".to_string();
+                i.foreign_source_income = dec("22.42");
+                i.foreign_tax_paid = dec("3.36");
+            })
+            .insert(&pool)
+            .await;
+        test_support::income(2, 2, ymd(2024, 3, 31))
+            .with(|i| {
+                i.franked_amount = dec("70");
+                i.franking_credits = dec("30");
+            })
+            .insert(&pool)
+            .await;
+
+        let report = db_tax_report(&pool, 2024).await.unwrap();
+        assert_eq!(report.income.dividends.len(), 1);
+        assert_eq!(report.income.dividends[0].ticker, "T1");
+        assert_eq!(report.income.foreign_income.len(), 1);
+        assert_eq!(
+            report.income.foreign_income[0].ticker.as_deref(),
+            Some("ICE")
+        );
     }
 
     /// The holdings-based completeness check must fire for an AMIT fund held
