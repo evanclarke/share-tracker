@@ -18,6 +18,7 @@
 
 use crate::domain::tax_year::tax_year_for;
 use crate::entities::corporate_action::{self, SplitEvent};
+use crate::entities::trade::TradeType;
 use crate::infra::decimal::parse_dec;
 use crate::infra::fx::{FxOverride, FxRates};
 use chrono::{Datelike, Duration, NaiveDate};
@@ -120,9 +121,9 @@ impl HoldingWalks {
         .await?;
         for row in &rows {
             let listing_id: i64 = row.try_get("listing_id")?;
-            let trade_type: String = row.try_get("trade_type")?;
+            let trade_type: TradeType = row.try_get("trade_type")?;
             let event = Event {
-                sell: trade_type == "Sell",
+                sell: trade_type == TradeType::Sell,
                 date: row.try_get("date")?,
                 qty: parse_dec("quantity", row.try_get("quantity")?)?,
             };

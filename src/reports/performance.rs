@@ -40,6 +40,7 @@
 //! row does the same unless every open holding is priced.
 
 use crate::entities::closing_price::{self, SharedFetcher};
+use crate::entities::trade::TradeType;
 use crate::infra::decimal::{parse_dec, row_dec};
 use crate::infra::fx::{FxOverride, FxRates};
 use crate::infra::http::ApiError;
@@ -173,12 +174,12 @@ impl sqlx::FromRow<'_, sqlx::sqlite::SqliteRow> for TradeFlow {
             .map(|id| (GroupKind::Transfer, id))
             .or(scrip_id.map(|id| (GroupKind::Scrip, id)))
             .or(demerger_id.map(|id| (GroupKind::Demerger, id)));
-        let trade_type: String = row.try_get("trade_type")?;
+        let trade_type: TradeType = row.try_get("trade_type")?;
         Ok(TradeFlow {
             id: row.try_get("id")?,
             listing_id: row.try_get("listing_id")?,
             account_id: row.try_get("holding_account_id")?,
-            is_sell: trade_type == "Sell",
+            is_sell: trade_type == TradeType::Sell,
             date: row.try_get("date")?,
             quantity: row_dec(row, "quantity")?,
             price: row_dec(row, "average_price")?,
