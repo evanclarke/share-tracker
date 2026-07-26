@@ -181,6 +181,8 @@ Installing creates a non-login `share_tracker` service user and `/var/db/share-t
 
 The package skeleton lives in [`pkg/freebsd/`](pkg/freebsd/); `pkg/freebsd/build-pkg.sh` builds the same package locally on any FreeBSD host.
 
+To upgrade an existing install, run `pkg/freebsd/update.sh` as root (e.g. `doas pkg/freebsd/update.sh`) on the deployment host: it checks the GitHub releases API for the latest version (or installs a specific one, e.g. `update.sh 0.5.0`), downloads the matching `.pkg`, installs it with `pkg add -f`, and restarts the service if it was already running. There is deliberately no cron job for this — upgrading is a manual, deliberate step, not an automatic one.
+
 ## Releases and versioning
 
 `Cargo.toml`'s `version` is the single source of truth: the binary's `--version`, the pkg version, and the release tag all derive from it. On every push to `main`, the [release workflow](.github/workflows/release.yml) checks whether a release exists for the current version; if not, it builds the package natively in a FreeBSD 15.1 VM, installs and smoke-tests it inside the VM (`pkg/freebsd/smoke-test.sh`: version check, rc-script load, server answers HTTP), then publishes release `v<version>` with the `.pkg` attached — tagging the exact commit the package was built from. The release notes are generated from the commit subjects between the previous release tag and that commit ([`scripts/release-notes.sh`](scripts/release-notes.sh)), with a full-changelog compare link; the first release lists every commit. **Cutting a release = bumping `version` in `Cargo.toml`** (and `cargo build` once so `Cargo.lock` follows) and pushing to `main`; a push without a version bump publishes nothing.
