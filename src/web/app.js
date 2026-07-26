@@ -1041,11 +1041,13 @@ async function viewAttachments(ownerField, ownerId) {
 
 // ---- health banner ------------------------------------------------------
 // Cross-view strip driven by GET /reports/health: stale closing prices or RBA
-// FX rates (the staleness thresholds live server-side) and any job whose
-// latest run failed, each linking to the Jobs page. Refreshed on every route
-// render, so fixing the cause (e.g. re-running the failed job) clears it on
-// the next navigation. A failing health fetch hides the banner rather than
-// breaking the app — the Jobs page remains the manual fallback.
+// FX rates (the staleness thresholds live server-side), any job whose latest
+// run failed (linking to Jobs), and any listing with errored closing-price
+// rows — a wrong/renamed/delisted provider symbol otherwise only shows up
+// indirectly as a missing snapshot (linking to Closing Prices, where the
+// backfill action re-fetches once the symbol is fixed). Refreshed on every
+// route render, so fixing the cause clears it on the next navigation. A
+// failing health fetch hides the banner rather than breaking the app.
 async function refreshHealthBanner() {
   const banner = document.getElementById('health-banner');
   try {
@@ -1062,6 +1064,11 @@ async function refreshHealthBanner() {
     (h.failed_jobs || []).forEach(function (j) {
       problems.push("Job '" + j.name + "' failed" + (j.error ? ': ' + j.error : '') + '.');
     });
+    const erroredPrices = h.errored_prices || [];
+    if (erroredPrices.length > 0) {
+      problems.push(erroredPrices.length + ' listing(s) have errored closing prices ('
+        + erroredPrices.map(function (r) { return r.ticker; }).join(', ') + ').');
+    }
     if (problems.length === 0) {
       banner.hidden = true;
       banner.innerHTML = '';
@@ -1070,6 +1077,9 @@ async function refreshHealthBanner() {
     banner.innerHTML = '';
     banner.appendChild(el('span', null, '⚠ ' + problems.join(' ')));
     banner.appendChild(el('a', { href: '#/jobs' }, 'Open Jobs →'));
+    if (erroredPrices.length > 0) {
+      banner.appendChild(el('a', { href: '#/prices' }, 'Open Closing Prices →'));
+    }
     banner.hidden = false;
   } catch (e) {
     banner.hidden = true;
@@ -1153,12 +1163,26 @@ async function viewJobs() {
 // actions: re-fetch one (listing, day) — typically to replace an errored row
 // — and backfill a listing over a date range. Collection otherwise runs on
 // the price-import job's schedule.
+// 'YYYY-MM-DD' minus `days` calendar days, computed in UTC to avoid
+// timezone-boundary drift.
+function isoDateMinusDays(dateStr, days) {
+  const d = new Date(dateStr + 'T00:00:00Z');
+  d.setUTCDate(d.getUTCDate() - days);
+  return d.toISOString().slice(0, 10);
+}
+
 async function viewClosingPrices() {
   setActiveNav('closing_prices');
   const listings = await api('GET', '/listings');
   const byId = {};
   listings.forEach(function (l) { byId[l.id] = l; });
   const prices = await api('GET', '/closing_prices');
+  // Listings with errored rows (health.errored_prices) — a wrong, renamed, or
+  // delisted provider symbol otherwise only shows up indirectly as a missing
+  // snapshot. Surfaced here with a Backfill action pre-filling the form
+  // below over a generous window ending at the latest errored date.
+  const health = await api('GET', '/reports/health').catch(function () { return {}; });
+  const erroredListings = health.errored_prices || [];
   const rows = prices.map(function (p) {
     const l = byId[p.listing_id];
     return {
@@ -1224,12 +1248,51 @@ async function viewClosingPrices() {
     }
   });
 
+  // Errored-listings surface: one row per listing with any errored price,
+  // its Backfill action pre-fills the form above (a generous window ending
+  // at the latest errored date, adjustable before submitting) and scrolls to
+  // it — the actual re-fetch is one submit away.
+  const erroredRows = erroredListings.map(function (r) {
+    return {
+      ticker: r.ticker,
+      errored_days: r.errored_days,
+      latest_errored_date: r.latest_errored_date,
+      latest_error: r.latest_error,
+      _listing_id: r.listing_id,
+      _from: isoDateMinusDays(r.latest_errored_date, r.errored_days * 2),
+    };
+  });
+  const erroredTable = erroredRows.length > 0 ? filterableTable(
+    erroredRows,
+    ['ticker', 'errored_days', 'latest_errored_date', 'latest_error'],
+    {
+      actions: function (row) {
+        const btn = el('button', { class: 'small primary' }, 'Backfill');
+        btn.addEventListener('click', function () {
+          listingSel.value = String(row._listing_id);
+          fromInp.value = row._from;
+          toInp.value = row.latest_errored_date;
+          backfillForm.scrollIntoView({ behavior: 'smooth' });
+        });
+        return el('td', { class: 'actions' }, btn);
+      },
+    },
+  ) : null;
+
   setMain(el('div', null, [
     el('h2', null, 'Closing Prices'),
     el('p', { class: 'view-desc' },
       'Daily closing prices per held listing, in the listing\'s quote currency, collected by the '
       + 'price-import job after each exchange\'s close (crypto at the UTC-midnight cut-off). '
       + 'A failed fetch shows as an errored row — re-fetch it here once the provider recovers.'),
+    erroredTable ? el('div', { class: 'card' }, [
+      el('h3', null, 'Listings with errored prices'),
+      el('p', { class: 'hint' },
+        'A wrong, renamed, or delisted provider symbol otherwise only shows up indirectly, as a '
+        + 'missing snapshot from the errored date onward. Fix the symbol (set price_symbol on the '
+        + 'listing, or record a ticker change via Listings) then Backfill to re-fetch.'),
+      erroredTable,
+    ]) : null,
     backfillForm,
     table,
   ]));

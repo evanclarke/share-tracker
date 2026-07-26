@@ -18,7 +18,7 @@ use sqlx::{Row, SqlitePool};
 /// `row_history.table_name` CHECK and its per-table trigger pairs — a test
 /// pins the three lists to each other, and the web UI's table picker is
 /// asserted against this list too.
-pub const AUDITED_TABLES: [&str; 17] = [
+pub const AUDITED_TABLES: [&str; 18] = [
     "trades",
     "parcel_allocations",
     "income",
@@ -36,6 +36,7 @@ pub const AUDITED_TABLES: [&str; 17] = [
     "cgt_settings",
     "attachments",
     "listings",
+    "listing_renames",
 ];
 
 #[derive(Debug, Deserialize)]
@@ -497,6 +498,15 @@ mod tests {
                 "'b.pdf'",
             ),
             ("listings", None, 2, "name", "'Renamed'"),
+            (
+                "listing_renames",
+                Some(
+                    "INSERT INTO listing_renames (id, listing_id, effective_date, old_ticker, new_ticker) VALUES (18, 1, '2024-01-01', 'OLD', 'NEW')",
+                ),
+                18,
+                "note",
+                "'edited note'",
+            ),
         ];
         assert_eq!(cases.len(), AUDITED_TABLES.len());
 
@@ -542,6 +552,7 @@ mod tests {
             ("trades", 1, 2),
             ("corporate_actions", 10, 2),
             ("listings", 2, 2),
+            ("listing_renames", 18, 2),
         ] {
             sqlx::query(sqlx::AssertSqlSafe(format!(
                 "DELETE FROM {table} WHERE id = {id}"
@@ -559,11 +570,20 @@ mod tests {
 
     /// The three copies of the audited-table list — the Rust const, the
     /// migration's CHECK constraint, and the migration's trigger pairs —
-    /// cannot drift apart.
+    /// cannot drift apart. Pinned against 0013 for the tables audited from
+    /// the trail's introduction, and against each later migration that
+    /// introduced or rebuilt one (mirroring the attachments blocks below).
     #[test]
     fn audited_tables_match_migration_check_and_triggers() {
         let sql = include_str!("../../migrations/0013_row_history.sql");
-        for table in AUDITED_TABLES {
+        // listing_renames postdates 0013 (added by 0018, checked below) —
+        // every other table was audited from the start.
+        let tables_as_of_0013 = AUDITED_TABLES
+            .into_iter()
+            .filter(|&t| t != "listing_renames");
+        let mut count = 0;
+        for table in tables_as_of_0013 {
+            count += 1;
             assert!(
                 sql.contains(&format!("'{table}'")),
                 "{table} missing from the table_name CHECK"
@@ -575,9 +595,10 @@ mod tests {
         }
         assert_eq!(
             sql.matches("CREATE TRIGGER").count(),
-            AUDITED_TABLES.len() * 2 + 2,
-            "one UPDATE + one DELETE trigger per audited table, plus the two \
-             append-only guards on row_history itself — nothing extra, nothing missing"
+            count * 2 + 2,
+            "one UPDATE + one DELETE trigger per table audited as of 0013, plus \
+             the two append-only guards on row_history itself — nothing extra, \
+             nothing missing"
         );
 
         // 0014 rebuilt the attachments table (new owner columns + text/plain),
@@ -621,6 +642,33 @@ mod tests {
                 "both re-created attachments triggers must record {col}"
             );
         }
+
+        // 0018 added listing_renames and, because the table_name CHECK lives
+        // on row_history itself (a table-level CHECK SQLite cannot ALTER),
+        // rebuilt row_history to extend it — dropping and re-creating its own
+        // append-only guard triggers with it. It also re-created the
+        // listings trigger pair (new price_symbol column) and the newly
+        // audited listing_renames pair.
+        let sql18 = include_str!("../../migrations/0018_listing_renames.sql");
+        assert!(
+            sql18.contains("'listing_renames'"),
+            "0018 must add listing_renames to the table_name CHECK"
+        );
+        for table in ["row_history", "listings", "listing_renames"] {
+            for op in ["update", "delete"] {
+                let trigger = if table == "row_history" {
+                    format!("CREATE TRIGGER row_history_append_only_{op}")
+                } else {
+                    format!("CREATE TRIGGER {table}_row_history_{op}")
+                };
+                assert!(sql18.contains(&trigger), "0018 must re-create {trigger}");
+            }
+        }
+        assert_eq!(
+            sql18.matches("'price_symbol', OLD.price_symbol").count(),
+            2,
+            "both re-created listings triggers must record price_symbol"
+        );
     }
 
     /// The migration is purely additive: it creates the trail and its

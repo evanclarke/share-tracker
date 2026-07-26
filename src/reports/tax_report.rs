@@ -22,6 +22,7 @@
 //! fires, never a reported dollar figure.
 
 use crate::domain::cost_base::{self, CostBaseAdjustment, ParcelRow};
+use crate::domain::listing_identity::RenameHistory;
 use crate::domain::tax_year::tax_year_for;
 use crate::entities::corporate_action::{RocEvent, SplitEvent};
 use crate::entities::trade::{Trade, TradeType};
@@ -522,6 +523,7 @@ async fn disposals_section(
                 ))
             })
             .collect::<Result<_, _>>()?;
+    let renames = RenameHistory::load(conn).await?;
 
     let mut by_listing: HashMap<i64, Vec<DisposalParcelRow>> = HashMap::new();
     for d in &year_disposals {
@@ -545,10 +547,20 @@ async fn disposals_section(
                 subtotal.add(r);
                 totals.add(r);
             }
-            let (ticker, listing_name) = listing_names
+            let (current_ticker, listing_name) = listing_names
                 .get(&listing_id)
                 .cloned()
                 .unwrap_or_else(|| (format!("listing {listing_id}"), String::new()));
+            // The group heading names the ticker as at its most recent
+            // disposal — the taxable event closest to "now" within this
+            // printed group — so it reads the way the broker statement did
+            // even if a rename landed partway through the year.
+            let latest_sale_date = parcels
+                .iter()
+                .map(|p| p.sale_date)
+                .max()
+                .expect("a listing group always has at least one parcel");
+            let ticker = renames.ticker_as_at(listing_id, latest_sale_date, &current_ticker);
             DisposalListingGroup {
                 listing_id,
                 ticker,
@@ -688,6 +700,14 @@ async fn income_section(
         .into_iter()
         .map(|r| Ok::<_, sqlx::Error>((r.try_get("id")?, r.try_get("ticker")?)))
         .collect::<Result<_, _>>()?;
+    let renames = RenameHistory::load(&mut *conn).await?;
+    // As at `date`: the current ticker (from `tickers`) unless renamed since,
+    // in which case the ticker in effect on `date` — so an income row prints
+    // the way the broker statement named the security when it was paid.
+    let ticker_as_at = |listing_id: i64, date: NaiveDate| -> String {
+        let current = tickers.get(&listing_id).map(String::as_str).unwrap_or("");
+        renames.ticker_as_at(listing_id, date, current)
+    };
 
     let mut out = IncomeSections::default();
 
@@ -718,7 +738,7 @@ async fn income_section(
         let listing_id: i64 = row.try_get("listing_id")?;
         let currency: String = row.try_get("currency")?;
         let income_id: i64 = row.try_get("id")?;
-        let ticker = tickers.get(&listing_id).cloned().unwrap_or_default();
+        let ticker = ticker_as_at(listing_id, assessed);
         let franked = tax_summary::aud_field(&fx, row, "franked_amount", &currency, assessed)?;
         let unfranked = tax_summary::aud_field(&fx, row, "unfranked_amount", &currency, assessed)?;
         let foreign =
@@ -766,7 +786,7 @@ async fn income_section(
             out.foreign_income.push(ForeignIncomeRow {
                 kind: "Dividend/trust foreign income".to_string(),
                 listing_id: Some(listing_id),
-                ticker: tickers.get(&listing_id).cloned(),
+                ticker: Some(ticker_as_at(listing_id, assessed)),
                 date: assessed,
                 amount_aud: foreign,
                 foreign_tax_paid_aud: foreign_tax,
@@ -798,7 +818,7 @@ async fn income_section(
         out.amma_statements.push(AmmaStatementRow {
             amma_statement_id: row.try_get("id")?,
             listing_id,
-            ticker: tickers.get(&listing_id).cloned().unwrap_or_default(),
+            ticker: ticker_as_at(listing_id, d),
             tax_year_end_date: d,
             australian_interest_aud: tax_summary::aud_field(
                 &fx,
@@ -868,7 +888,7 @@ async fn income_section(
             out.foreign_income.push(ForeignIncomeRow {
                 kind: "AMMA foreign income".to_string(),
                 listing_id: Some(listing_id),
-                ticker: tickers.get(&listing_id).cloned(),
+                ticker: Some(ticker_as_at(listing_id, d)),
                 date: d,
                 amount_aud: foreign_income,
                 foreign_tax_paid_aud: foreign_tax,
@@ -944,7 +964,7 @@ async fn income_section(
         out.ess.push(EssIncomeRow {
             ess_statement_id: row.try_get("id")?,
             listing_id,
-            ticker: tickers.get(&listing_id).cloned().unwrap_or_default(),
+            ticker: ticker_as_at(listing_id, taxing_point),
             taxing_point_date: taxing_point,
             taxed_upfront_eligible_aud: tax_summary::aud_label(
                 &fx,
@@ -987,7 +1007,7 @@ async fn income_section(
             out.foreign_income.push(ForeignIncomeRow {
                 kind: "ESS foreign-source discount (memo)".to_string(),
                 listing_id: Some(listing_id),
-                ticker: tickers.get(&listing_id).cloned(),
+                ticker: Some(ticker_as_at(listing_id, taxing_point)),
                 date: taxing_point,
                 amount_aud: foreign,
                 foreign_tax_paid_aud: Decimal::ZERO,
@@ -1246,6 +1266,62 @@ mod tests {
         assert_eq!(row.cgt_discount_amount_aud, dec("100"));
         assert_eq!(row.gain_after_discount_aud, dec("100"));
         assert_eq!(row.acquisition_method, "Buy");
+    }
+
+    /// A rename mid-year: the disposal group's heading names the ticker as
+    /// at its most recent disposal, and an income row's ticker resolves at
+    /// its own date — so a printed document keeps reading the way the
+    /// broker statement did, before and after the rename.
+    #[tokio::test]
+    async fn tickers_resolve_as_at_the_taxable_events_own_date_across_a_rename() {
+        let pool = test_support::test_pool().await;
+        test_support::listing(1)
+            .ticker("LAAC")
+            .name("Lithium Americas (Argentina) Corp")
+            .insert(&pool)
+            .await;
+        test_support::buy(1, 1)
+            .date(ymd(2023, 1, 1))
+            .qty(dec("100"))
+            .price(dec("10"))
+            .insert(&pool)
+            .await;
+        // A dividend paid before the rename.
+        test_support::income(1, 1, ymd(2024, 1, 5))
+            .with(|i| i.franked_amount = dec("50"))
+            .insert(&pool)
+            .await;
+        // Renamed mid-year: LAAC -> LAR (the listing's current ticker).
+        crate::entities::listing_rename::db_rename(
+            &pool,
+            1,
+            &crate::entities::listing_rename::RenameBody {
+                effective_date: ymd(2024, 3, 1),
+                ticker: "LAR".to_string(),
+                exchange_mic: None,
+                name: None,
+                price_symbol: None,
+                note: None,
+            },
+        )
+        .await
+        .unwrap();
+        // A sale after the rename.
+        test_support::sell(2, 1)
+            .date(ymd(2024, 5, 1))
+            .qty(dec("10"))
+            .price(dec("15"))
+            .insert(&pool)
+            .await;
+        test_support::allocate(&pool, 1, 2, 1, dec("10")).await;
+
+        let report = db_tax_report(&pool, 2024).await.unwrap();
+        // The dividend, paid before the rename, prints the pre-rename ticker.
+        assert_eq!(report.income.dividends.len(), 1);
+        assert_eq!(report.income.dividends[0].ticker, "LAAC");
+        // The disposal group, sold after the rename, prints the new ticker.
+        assert_eq!(report.disposals.listings.len(), 1);
+        assert_eq!(report.disposals.listings[0].ticker, "LAR");
     }
 
     /// The CGT-summary section's ATO-worksheet lines must reconcile back to

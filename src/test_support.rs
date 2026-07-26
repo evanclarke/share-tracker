@@ -42,6 +42,7 @@ pub fn listing(id: i64) -> ListingBuilder {
             currency: "AUD".to_string(),
             amit: false,
             preference: false,
+            price_symbol: None,
         },
     }
 }
@@ -90,6 +91,11 @@ impl ListingBuilder {
 
     pub fn preference(mut self, preference: bool) -> Self {
         self.l.preference = preference;
+        self
+    }
+
+    pub fn price_symbol(mut self, symbol: &str) -> Self {
+        self.l.price_symbol = Some(symbol.to_string());
         self
     }
 

@@ -326,8 +326,23 @@ mod tests {
         insert_listing(&pool, 1, "OLD").await;
         insert_buy(&pool, 1, 1, buy_date, Decimal::from(100), Decimal::from(10)).await;
 
-        // The security is renamed: same listing id, new ticker + name.
-        insert_listing(&pool, 1, "NEW").await;
+        // The security is renamed: same listing id, new ticker — recorded via
+        // the rename action (a bare PUT is refused once the listing has a
+        // trade; see entities::listing::UpsertError::IdentityChangeRequiresRename).
+        crate::entities::listing_rename::db_rename(
+            &pool,
+            1,
+            &crate::entities::listing_rename::RenameBody {
+                effective_date: NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(),
+                ticker: "NEW".to_string(),
+                exchange_mic: None,
+                name: Some("NEW".to_string()),
+                price_symbol: None,
+                note: None,
+            },
+        )
+        .await
+        .unwrap();
 
         let parcels = db_open_parcels(&pool).await.unwrap();
         assert_eq!(parcels.len(), 1);

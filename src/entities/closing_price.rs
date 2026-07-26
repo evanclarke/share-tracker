@@ -108,6 +108,12 @@ pub struct Market {
     pub listing: listing::Listing,
     pub exchange: Option<exchange::Exchange>,
     pub holidays: HashSet<NaiveDate>,
+    /// One-off provider-symbol override for this fetch only — not persisted
+    /// (contrast `listing.price_symbol`, which is stored). Set by the
+    /// backfill endpoint's optional `symbol` so a pre-rename date range can
+    /// be fetched under the old symbol without touching the listing row;
+    /// `load_market` always leaves this `None`.
+    pub symbol_override: Option<String>,
 }
 
 impl Market {
@@ -204,6 +210,7 @@ pub async fn load_market(
         listing,
         exchange,
         holidays,
+        symbol_override: None,
     }))
 }
 
@@ -291,10 +298,20 @@ pub struct YahooFetcher {
     client: yfinance_rs::YfClient,
 }
 
-/// The Yahoo symbol for a listing: ASX tickers carry `.AX`, NYSE/Nasdaq are
-/// plain, crypto is `<TICKER>-<quote currency>` (so Yahoo quotes it in the
-/// listing's own currency). Other exchanges need a mapping added here.
-fn yahoo_symbol(listing: &listing::Listing) -> Result<String, String> {
+/// The Yahoo symbol for a market: a one-off `symbol_override` (backfill's
+/// `symbol` param) wins first, then the listing's stored `price_symbol`
+/// override, then the derived mapping — ASX tickers carry `.AX`, NYSE/Nasdaq
+/// are plain, crypto is `<TICKER>-<quote currency>` (so Yahoo quotes it in
+/// the listing's own currency). Other exchanges need a mapping added here,
+/// or a `price_symbol` override on the listing.
+fn yahoo_symbol(market: &Market) -> Result<String, String> {
+    if let Some(symbol) = &market.symbol_override {
+        return Ok(symbol.clone());
+    }
+    let listing = &market.listing;
+    if let Some(symbol) = &listing.price_symbol {
+        return Ok(symbol.clone());
+    }
     match listing.exchange_mic.as_deref() {
         None => Ok(format!("{}-{}", listing.ticker, listing.currency)),
         Some("XASX") => Ok(format!("{}.AX", listing.ticker)),
@@ -315,7 +332,7 @@ impl PriceFetcher for YahooFetcher {
         to: NaiveDate,
     ) -> FetchFuture<'a> {
         Box::pin(async move {
-            let symbol = yahoo_symbol(&market.listing)?;
+            let symbol = yahoo_symbol(market)?;
             let tz = market.tz()?;
             // Daily candles are timestamped at session start, so the UTC
             // window [from 00:00, to+1 00:00) in the market's timezone covers
@@ -342,7 +359,7 @@ impl PriceFetcher for YahooFetcher {
 
     fn latest_quote<'a>(&'a self, market: &'a Market) -> QuoteFuture<'a> {
         Box::pin(async move {
-            let symbol = yahoo_symbol(&market.listing)?;
+            let symbol = yahoo_symbol(market)?;
             let quotes = yfinance_rs::quotes(&self.client, [symbol.clone()])
                 .await
                 .map_err(|e| format!("yahoo quote for {symbol} failed: {e}"))?;
@@ -538,11 +555,28 @@ async fn fetch_and_store(
     let by_date: Result<HashMap<NaiveDate, FetchedClose>, String> =
         fetched.map(|closes| closes.into_iter().map(|c| (c.date, c)).collect());
 
+    // A provider call that returns *zero* candles across the whole requested
+    // window (as opposed to a partial result with a data gap on one date) is
+    // the classic wrong/renamed/delisted-symbol case, not a transient outage
+    // — the day-by-day fallback message below is indistinguishable from one,
+    // so every date gets a message that names the symbol and points at the
+    // fix instead.
+    let symbol_dead_or_wrong = matches!(&by_date, Ok(map) if map.is_empty());
+    let no_candles_message = || {
+        let symbol = yahoo_symbol(market).unwrap_or_else(|e| e);
+        format!(
+            "provider returned no candles for {symbol} over {from}..{to} — the symbol may be \
+             wrong, renamed, or delisted; set price_symbol on the listing or backfill with an \
+             explicit symbol"
+        )
+    };
+
     let fetched_at = Utc::now().to_rfc3339();
     let (mut ok, mut errored) = (0, 0);
     for &date in dates {
         let result = match &by_date {
             Err(e) => Err(e.clone()),
+            Ok(_) if symbol_dead_or_wrong => Err(no_candles_message()),
             Ok(map) => match map.get(&date) {
                 None => Err("provider returned no candle for an expected trading day".to_string()),
                 Some(close) if close.currency != market.listing.currency => Err(format!(
@@ -812,6 +846,13 @@ struct BackfillBody {
     listing_id: i64,
     from: NaiveDate,
     to: NaiveDate,
+    /// One-off provider symbol for this fetch only (not persisted to
+    /// `listings.price_symbol`) — recovers a pre-rename date range under the
+    /// old symbol, when the provider no longer serves it under the current
+    /// one. Omitted: the listing's stored `price_symbol` (if any) or the
+    /// derived mapping, as for any other fetch.
+    #[serde(default)]
+    symbol: Option<String>,
 }
 
 /// What a backfill run did, returned to the caller.
@@ -860,17 +901,19 @@ async fn fetch_one(
 }
 
 /// Backfill a listing's price history over a date range (e.g. after importing
-/// an old trade): trading days only, skipping dates already stored ok, in one
-/// provider call.
+/// an old trade, or recovering pre-rename history under the old symbol via
+/// the optional `symbol` override): trading days only, skipping dates
+/// already stored ok, in one provider call.
 async fn backfill(
     State(pool): State<SqlitePool>,
     Extension(fetcher): Extension<SharedFetcher>,
     Json(body): Json<BackfillBody>,
 ) -> Result<Json<BackfillSummary>, ApiError> {
-    let market = load_market(&pool, body.listing_id)
+    let mut market = load_market(&pool, body.listing_id)
         .await
         .map_err(internal)?
         .ok_or_else(|| ApiError::not_found("no such listing"))?;
+    market.symbol_override = body.symbol.clone();
     if body.from > body.to {
         return Err(ApiError::unprocessable("from is after to"));
     }
@@ -1088,6 +1131,10 @@ mod tests {
         quotes: HashMap<i64, LatestQuote>,
         fail: Option<String>,
         calls: Mutex<Vec<(i64, NaiveDate, NaiveDate)>>,
+        /// The resolved symbol (`yahoo_symbol`'s output) each `daily_closes`
+        /// call was made with — lets a test confirm a backfill `symbol`
+        /// override actually reached the fetcher.
+        symbols: Mutex<Vec<String>>,
     }
 
     impl StubFetcher {
@@ -1131,6 +1178,10 @@ mod tests {
         fn calls(&self) -> Vec<(i64, NaiveDate, NaiveDate)> {
             self.calls.lock().unwrap().clone()
         }
+
+        fn symbols(&self) -> Vec<String> {
+            self.symbols.lock().unwrap().clone()
+        }
     }
 
     impl PriceFetcher for StubFetcher {
@@ -1149,6 +1200,10 @@ mod tests {
                     .lock()
                     .unwrap()
                     .push((market.listing.id, from, to));
+                self.symbols
+                    .lock()
+                    .unwrap()
+                    .push(yahoo_symbol(market).unwrap_or_default());
                 if let Some(msg) = &self.fail {
                     return Err(msg.clone());
                 }
@@ -1611,6 +1666,46 @@ mod tests {
         assert_eq!(wed.price, Some("64.91".parse().unwrap()));
     }
 
+    /// The backfill body's optional `symbol` reaches the fetcher as a one-off
+    /// override — recovering a pre-rename date range under the old symbol
+    /// without touching `listings.price_symbol`.
+    #[tokio::test]
+    async fn api_backfill_symbol_override_reaches_the_fetcher() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "LAR", "XNYS", "USD").await;
+        insert_buy(&pool, 1, 1, "100").await;
+
+        let fetcher = Arc::new(StubFetcher::default().with_close(1, ymd(2026, 6, 1), "10", "USD"));
+        let shared: SharedFetcher = fetcher.clone();
+        let app = router().with_state(pool.clone()).layer(Extension(shared));
+
+        let (status, bytes) = post_json(
+            &app,
+            "/closing_prices/backfill",
+            serde_json::json!({
+                "listing_id": 1, "from": "2026-06-01", "to": "2026-06-01",
+                "symbol": "LAAC-OLD"
+            }),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+        assert_eq!(fetcher.symbols(), vec!["LAAC-OLD".to_string()]);
+        // The listing's own stored symbol is untouched by the one-off override.
+        assert_eq!(
+            listing::db_get(&pool, 1)
+                .await
+                .unwrap()
+                .unwrap()
+                .price_symbol,
+            None
+        );
+    }
+
     #[tokio::test]
     async fn api_backfill_records_missing_candles_as_errors() {
         let pool = test_pool().await;
@@ -1641,6 +1736,38 @@ mod tests {
             .unwrap();
         assert_eq!(row.status, PriceStatus::Error);
         assert!(row.error.as_deref().unwrap().contains("no candle"));
+    }
+
+    /// A provider call that returns *zero* candles across the whole
+    /// requested window (as opposed to a data gap on one date among others)
+    /// is the classic wrong/renamed/delisted-symbol case — every date's
+    /// errored row names the symbol and points at the fix, instead of the
+    /// generic per-day message that's indistinguishable from a transient
+    /// outage.
+    #[tokio::test]
+    async fn fetch_and_store_names_the_symbol_when_the_whole_window_returns_no_candles() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "LAAC", "XNYS", "USD").await;
+        insert_buy(&pool, 1, 1, "100").await;
+        let market = load_market(&pool, 1).await.unwrap().unwrap();
+
+        // Fetcher has no data for this listing at all — Ok(vec![]).
+        let empty = StubFetcher::default();
+        let dates = [ymd(2026, 6, 1), ymd(2026, 6, 2)];
+        let (ok, errored) = fetch_and_store(&pool, &empty, &market, &dates)
+            .await
+            .unwrap();
+        assert_eq!(ok, 0);
+        assert_eq!(errored, 2);
+
+        for date in dates {
+            let row = db_get_one(&pool, 1, date).await.unwrap().unwrap();
+            assert_eq!(row.status, PriceStatus::Error);
+            let msg = row.error.unwrap();
+            assert!(msg.contains("LAAC"), "names the symbol: {msg}");
+            assert!(msg.contains("renamed"), "points at the cause: {msg}");
+            assert!(msg.contains("price_symbol"), "points at the fix: {msg}");
+        }
     }
 
     #[tokio::test]
@@ -1932,11 +2059,17 @@ mod tests {
                 .ticker(ticker)
                 .name(ticker)
                 .currency(ccy);
-            match mic {
+            let listing = match mic {
                 Some(m) => b.mic(m).security_type(listing::SecurityType::Share),
                 None => b.crypto(),
             }
-            .build()
+            .build();
+            Market {
+                listing,
+                exchange: None,
+                holidays: HashSet::new(),
+                symbol_override: None,
+            }
         };
         assert_eq!(
             yahoo_symbol(&mk(Some("XASX"), "BHP", "AUD")).unwrap(),
@@ -1952,5 +2085,45 @@ mod tests {
                 .unwrap_err()
                 .contains("XLON")
         );
+    }
+
+    /// `listings.price_symbol` overrides the derived mapping (a symbol the
+    /// provider spells differently, or an exchange with no mapping at all).
+    #[test]
+    fn yahoo_symbol_prefers_the_listings_stored_price_symbol_override() {
+        let mut market = Market {
+            listing: crate::test_support::listing(1)
+                .mic("XLON")
+                .security_type(listing::SecurityType::Share)
+                .ticker("BARC")
+                .build(),
+            exchange: None,
+            holidays: HashSet::new(),
+            symbol_override: None,
+        };
+        // XLON has no derived mapping, so without an override it errors...
+        assert!(yahoo_symbol(&market).is_err());
+        // ...but a stored price_symbol resolves it.
+        market.listing.price_symbol = Some("BARC.L".to_string());
+        assert_eq!(yahoo_symbol(&market).unwrap(), "BARC.L");
+    }
+
+    /// A one-off `symbol_override` (backfill's `symbol` param) wins over even
+    /// a stored `price_symbol` — it's for a single deliberate fetch, e.g.
+    /// recovering pre-rename history under the old symbol.
+    #[test]
+    fn yahoo_symbol_override_wins_over_the_stored_price_symbol() {
+        let market = Market {
+            listing: crate::test_support::listing(1)
+                .mic("XNYS")
+                .security_type(listing::SecurityType::Share)
+                .ticker("LAR")
+                .price_symbol("LAR-CURRENT")
+                .build(),
+            exchange: None,
+            holidays: HashSet::new(),
+            symbol_override: Some("LAAC-OLD".to_string()),
+        };
+        assert_eq!(yahoo_symbol(&market).unwrap(), "LAAC-OLD");
     }
 }

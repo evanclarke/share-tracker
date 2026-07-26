@@ -10,7 +10,11 @@
 //!   publishes month M's F11 rates shortly after M ends, so anything older
 //!   than the previous calendar month means the weekly import has stopped
 //!   landing new months);
-//! - every job whose most recent recorded run failed.
+//! - every job whose most recent recorded run failed;
+//! - every listing with at least one errored closing-price row (a wrong,
+//!   renamed, or delisted provider symbol otherwise only shows up
+//!   indirectly, as a missing snapshot from the errored date onward —
+//!   `reports::valuation` refuses to value a date with an errored price).
 //!
 //! A database with no prices or FX rates at all reports `stale = false` for
 //! that series: nothing has decayed — a fresh install shows no banner, and a
@@ -37,6 +41,23 @@ pub struct FailedJob {
     pub error: Option<String>,
 }
 
+/// A listing with one or more errored closing-price rows: a stuck symbol
+/// (wrong, renamed, or delisted) would otherwise only show up indirectly, as
+/// a missing snapshot from the errored date onward (`reports::valuation`
+/// refuses to value a date with an errored price). Re-fetch it via
+/// `POST /closing_prices/backfill` (or `/fetch` for a single date) once the
+/// underlying symbol issue — see `latest_error` — is fixed (e.g. set
+/// `listings.price_symbol`).
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
+pub struct ErroredPriceListing {
+    pub listing_id: i64,
+    pub ticker: String,
+    /// Count of errored rows for this listing (any date, not just recent).
+    pub errored_days: i64,
+    pub latest_errored_date: NaiveDate,
+    pub latest_error: String,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct HealthReport {
     /// Latest `closing_prices` date stored with status ok, across every
@@ -47,6 +68,9 @@ pub struct HealthReport {
     pub latest_fx_month: Option<String>,
     pub fx_stale: bool,
     pub failed_jobs: Vec<FailedJob>,
+    /// Listings with at least one errored closing-price row, newest error
+    /// first. Empty when every stored price is ok.
+    pub errored_prices: Vec<ErroredPriceListing>,
 }
 
 /// Business days (Mon–Fri) strictly after `from`, up to and including `today`.
@@ -92,6 +116,19 @@ pub async fn db_health(pool: &SqlitePool, today: NaiveDate) -> Result<HealthRepo
     )
     .fetch_all(&mut *tx)
     .await?;
+    let errored_prices = sqlx::query_as::<_, ErroredPriceListing>(
+        "SELECT cp.listing_id AS listing_id, l.ticker AS ticker, \
+                COUNT(*) AS errored_days, MAX(cp.price_date) AS latest_errored_date, \
+                (SELECT cp2.error FROM closing_prices cp2 \
+                 WHERE cp2.listing_id = cp.listing_id AND cp2.status = 'error' \
+                 ORDER BY cp2.price_date DESC LIMIT 1) AS latest_error \
+         FROM closing_prices cp JOIN listings l ON l.id = cp.listing_id \
+         WHERE cp.status = 'error' \
+         GROUP BY cp.listing_id \
+         ORDER BY latest_errored_date DESC",
+    )
+    .fetch_all(&mut *tx)
+    .await?;
     tx.commit().await?;
 
     let prices_stale = latest_price_date
@@ -105,6 +142,7 @@ pub async fn db_health(pool: &SqlitePool, today: NaiveDate) -> Result<HealthRepo
         latest_fx_month,
         fx_stale,
         failed_jobs,
+        errored_prices,
     })
 }
 
@@ -136,6 +174,19 @@ mod tests {
         )
         .bind(listing_id)
         .bind(date)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn insert_error_price(pool: &SqlitePool, listing_id: i64, date: &str, error: &str) {
+        sqlx::query(
+            "INSERT INTO closing_prices (listing_id, price_date, price, source, fetched_at, status, error) \
+             VALUES (?, ?, NULL, 'yahoo', '2026-07-01T00:00:00Z', 'error', ?)",
+        )
+        .bind(listing_id)
+        .bind(date)
+        .bind(error)
         .execute(pool)
         .await
         .unwrap();
@@ -192,6 +243,7 @@ mod tests {
         assert_eq!(h.latest_fx_month, None);
         assert!(!h.fx_stale);
         assert!(h.failed_jobs.is_empty());
+        assert!(h.errored_prices.is_empty());
     }
 
     #[tokio::test]
@@ -226,6 +278,66 @@ mod tests {
         let h = db_health(&pool, ymd(2026, 7, 13)).await.unwrap();
         assert_eq!(h.latest_price_date, Some(ymd(2026, 7, 1)));
         assert!(h.prices_stale);
+    }
+
+    /// A listing with errored closing-price rows is surfaced by ticker (not
+    /// raw id), with the count and the most recent error message — the
+    /// surface that stops a stuck symbol (renamed/delisted) from only
+    /// showing up indirectly as a missing snapshot.
+    #[tokio::test]
+    async fn errored_price_listing_is_surfaced_with_ticker_count_and_latest_error() {
+        let pool = test_pool().await;
+        test_support::listing(1).ticker("LAR").insert(&pool).await;
+        insert_error_price(
+            &pool,
+            1,
+            "2026-07-01",
+            "provider returned no candles for LAR",
+        )
+        .await;
+        insert_error_price(
+            &pool,
+            1,
+            "2026-07-02",
+            "provider returned no candles for LAR",
+        )
+        .await;
+        insert_error_price(
+            &pool,
+            1,
+            "2026-07-03",
+            "provider returned no candles for LAR (latest)",
+        )
+        .await;
+
+        let h = db_health(&pool, ymd(2026, 7, 13)).await.unwrap();
+        assert_eq!(h.errored_prices.len(), 1);
+        let row = &h.errored_prices[0];
+        assert_eq!(row.listing_id, 1);
+        assert_eq!(row.ticker, "LAR");
+        assert_eq!(row.errored_days, 3);
+        assert_eq!(row.latest_errored_date, ymd(2026, 7, 3));
+        assert_eq!(
+            row.latest_error,
+            "provider returned no candles for LAR (latest)"
+        );
+    }
+
+    /// Multiple affected listings are each their own row, newest error first
+    /// — and an ok price for the same listing doesn't hide its errors.
+    #[tokio::test]
+    async fn errored_prices_are_grouped_per_listing_and_ordered_newest_first() {
+        let pool = test_pool().await;
+        test_support::listing(1).ticker("A").insert(&pool).await;
+        test_support::listing(2).ticker("B").insert(&pool).await;
+        insert_ok_price(&pool, 1, "2026-07-01").await;
+        insert_error_price(&pool, 1, "2026-07-05", "err A").await;
+        insert_error_price(&pool, 2, "2026-07-10", "err B").await;
+
+        let h = db_health(&pool, ymd(2026, 7, 13)).await.unwrap();
+        assert_eq!(h.errored_prices.len(), 2);
+        assert_eq!(h.errored_prices[0].ticker, "B"); // newest error first
+        assert_eq!(h.errored_prices[1].ticker, "A");
     }
 
     #[tokio::test]

@@ -1294,6 +1294,70 @@ Nothing here recomputes tax — every figure is sourced from the existing pipeli
 Tax Summary screen, its endpoint, and its CSV export are unchanged and stay as the
 multi-year/spreadsheet path.
 
+## Ticker and exchange-code changes (2026-07-26)
+
+Securities get renamed without becoming a different security (e.g. LAAC → LAR). Identity
+continuity is already solved: everything keys on `listings.id`, nothing is keyed by ticker,
+and a rename recorded as an in-place edit (`PUT /listings/:id`, same id, new `ticker`) keeps
+every parcel, cost base, and the 12-month discount clock attached (`docs/API.md`'s "Ticker
+or name changes" paragraph; tests
+`open_parcels::tests::db_ticker_rename_keeps_parcels_attached_to_the_listing` and
+`realised_gains::tests::db_sale_after_ticker_rename_keeps_cost_base_and_discount_clock`).
+What's missing is on the price-fetch and presentation side:
+
+- **No provider-symbol escape hatch.** `closing_price::yahoo_symbol` derives the Yahoo
+  symbol live from the listing's *current* ticker, with no override and no coverage beyond
+  ASX/NYSE/Nasdaq. There's no way to fix a symbol Yahoo spells differently, and no way to
+  fetch pre-rename dates if Yahoo doesn't serve them under the new symbol
+- **A wrong or dead symbol fails silently and permanently.** Every trading day becomes an
+  errored row with a generic message indistinguishable from a transient outage.
+  `reports::valuation` then refuses to value that date at all, so every snapshot from that
+  date onward is blocked. Healing exists (`POST /closing_prices/backfill` re-attempts
+  non-`ok` days) but nothing surfaces that healing is needed — `reports::health` never
+  counts errored rows
+- **Historical documents relabel.** Reports resolve the ticker at read time, so a re-run
+  prior-year Annual Tax Report prints the new ticker for a sale the broker statement called
+  by the old one
+- **An `exchange_mic` change is unrecorded.** It silently changes the Yahoo suffix and the
+  settlement-holiday calendar (`exchange_holiday::exchange_holidays_for_listing`) for every
+  trade on the listing, not just new ones, with no record of when the change took effect
+
+Resolution: a rename becomes an explicit, dated, audited event, not a bare field edit.
+
+- New table `listing_renames` (`listing_id`, `effective_date`, `old_ticker`/`new_ticker`,
+  `old_exchange_mic`/`new_exchange_mic`, `note`) — one row per rename, audited via
+  `row_history` like every other fact table. New nullable `listings.price_symbol` column: a
+  provider-symbol override used verbatim by `yahoo_symbol` when set, ahead of the derived
+  mapping
+- New endpoints: `POST /listings/:id/rename` (records the event and updates the listing
+  atomically; the server derives `old_ticker`/`old_exchange_mic` from the current row, never
+  from the request body), `GET /listings/:id/renames` (the chain, newest first),
+  `DELETE /listings/:id/renames/:rename_id` (undo, only the newest rename in the chain).
+  `PUT /listings/:id` is restricted: it rejects a `ticker` or `exchange_mic` change once the
+  listing has any dependent trades/income/closing-prices — that's what forces a rename
+  through the audited path instead of silently losing the event; a brand-new listing stays
+  freely editable
+- `POST /closing_prices/backfill` gains an optional `symbol` override (in-memory only, not
+  persisted) so pre-rename dates can be fetched under the old symbol when needed — prices
+  still land under the same `listing_id`, so history stays unified. The scheduled fetch
+  itself stays on the listing's current symbol (Yahoo serves the full history under the
+  current symbol in the common case; a per-date lookup from `listing_renames` would break
+  that)
+- `reports::health` gains an `errored_prices` list (listing, ticker, count of errored days,
+  latest error) so a stuck symbol is visible instead of only showing up as missing
+  snapshots; the `#/prices` screen surfaces it with the backfill action already available
+- The Annual Tax Report and the listing activity ledger resolve/show the ticker as it stood
+  at each row's date (a small shared `domain::listing_identity` resolver over
+  `listing_renames`) — archived tax documents keep reading the way the broker statement did.
+  Every other report keeps showing the current ticker (it is the same security), with the
+  full chain discoverable via `GET /listings/:id/renames` and the Row History screen
+- Docs: `docs/API.md`'s "Ticker or name changes" paragraph is rewritten for the rename
+  action; `docs/SCHEMA.md` gains the new table/column; a Known-limitations entry records
+  that re-saving a trade dated before an exchange change recomputes its settlement date
+  against the *current* exchange's holiday calendar
+
+## Annual tax report — printable per-year tax document (2026-07-16)
+
 - New endpoints: `GET /reports/tax-report/years` (every FY with any recorded fact, for the
   UI's year dropdown) and `POST /reports/tax-report` (body `{ "tax_year": N }`) returning
   the full document for one financial year. An out-of-range year returns a zeroed document,

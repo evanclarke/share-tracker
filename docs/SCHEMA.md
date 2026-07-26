@@ -26,7 +26,19 @@ listings
 ├── security_type TEXT           Share | ETF | LIC | Trust | Crypto
 ├── currency     TEXT FK→currencies.code
 ├── amit         BOOLEAN          True if the security is an AMIT
-└── preference   BOOLEAN          Preference share: franking credits need 90 (not 45) at-risk days
+├── preference   BOOLEAN          Preference share: franking credits need 90 (not 45) at-risk days
+└── price_symbol TEXT (nullable)  Provider-symbol override (0018): used verbatim by closing_price::yahoo_symbol ahead of its derived ticker/exchange mapping, for a symbol the provider spells differently or an exchange with no mapping
+
+listing_renames               A ticker or exchange-code rename, as a dated event (0018; see API.md Ticker or name changes)
+├── id               INTEGER PK
+├── listing_id       INTEGER FK→listings.id
+├── effective_date   TEXT             'YYYY-MM-DD' — first trading day under the new identity; UNIQUE with listing_id
+├── old_ticker       TEXT             Written from the listing's row at the moment of the rename, never trusted from the request
+├── new_ticker       TEXT
+├── old_exchange_mic TEXT FK→exchanges.mic (nullable)
+├── new_exchange_mic TEXT FK→exchanges.mic (nullable)
+└── note             TEXT (nullable)
+                       CHECK: old_ticker <> new_ticker OR old_exchange_mic IS NOT new_exchange_mic (no no-op rename)
 
 rba_fx_rates                  RBA F11 monthly FX rates (the rate used for ATO conversion)
 ├── id           INTEGER PK
@@ -320,7 +332,7 @@ job_runs                     Run history of the scheduled/on-demand maintenance 
 
 row_history                  Append-only audit trail of the financial fact tables (written by database triggers on every UPDATE/DELETE; inspected via POST /reports/row_history — see API.md Row history)
 ├── id          INTEGER PK       Autoincrement — write order (newest entry = highest id); indexed with (table_name, row_id) for per-row lookups
-├── table_name  TEXT             The audited table (CHECK-enforced enum: trades, parcel_allocations, income, interest_income, amma_statements, amit_adjustments, ess_statements, transfers, corporate_actions, inheritances, rights_sales, rights_sale_allocations, investment_expenses, drp_enrolments, cgt_settings, attachments, listings)
+├── table_name  TEXT             The audited table (CHECK-enforced enum: trades, parcel_allocations, income, interest_income, amma_statements, amit_adjustments, ess_statements, transfers, corporate_actions, inheritances, rights_sales, rights_sale_allocations, investment_expenses, drp_enrolments, cgt_settings, attachments, listings, listing_renames)
 ├── row_id      INTEGER          The audited row's id
 ├── operation   TEXT             UPDATE | DELETE (CHECK-enforced enum) — INSERTs are not recorded (until first changed, the live row is its own record)
 ├── changed_at  TEXT             RFC 3339 UTC timestamp of the write, millisecond precision
@@ -364,6 +376,8 @@ exchanges ──< listings ──< trades >────────────�
                        trades (buy-back Sell) ──< income (buyback_trade_id)
                        trades, income, amma_statements, ess_statements, interest_income, corporate_actions ──< attachments (exactly one owner; ON DELETE CASCADE)
                        listings ──< closing_prices (one row per listing per trading day)
+                       listings ──< listing_renames
+                       exchanges ──< listing_renames (old_exchange_mic + new_exchange_mic, nullable)
                        trades, parcel_allocations, income, amma_statements, amit_adjustments,
                        corporate_actions, closing_prices ──> report_snapshots.stale (staleness triggers)
                        every audited table (see row_history.table_name) ──> row_history (audit triggers on UPDATE/DELETE; table_name/row_id, not FKs — entries outlive their row)
@@ -375,7 +389,7 @@ Each `attachments` row belongs to exactly one activity via one of six nullable f
 
 `report_snapshots` has no foreign keys of its own (`report` is an in-code enum, the rows are a JSON payload), but every dated fact table writes to it through **staleness triggers** (0001_schema.sql): inserting, updating, or deleting a row in `trades`, `parcel_allocations` (dated by its sale trade), `income` (by `date_paid`), `amma_statements` / `amit_adjustments` (by the statement's `tax_year_end_date`), or `corporate_actions` sets `stale = 1` on every snapshot dated on or after the fact — an update from the earlier of the old and new dates — atomically with the fact write, so no write path (entity CRUD, Sells, transfers, corporate-action operations, DRP reinvestment) can bypass the invalidation. Revising a stored ok closing price (or erroring it out) likewise stales snapshots from its date, since they were valued at it. `rights_sales` / `rights_sale_allocations` and `interest_income` are the deliberate exceptions: no snapshotted report reads them (a rights sale changes no holding quantity and no parcel cost base — its effect is confined to the live-computed CGT reports; interest reaches only the tax summary, which is not snapshotted), so they carry no trigger set.
 
-`row_history` is the **append-only audit trail** (0013_row_history.sql). `AFTER UPDATE` / `AFTER DELETE` triggers on every audited table record the prior row (as JSON), the operation, and a UTC timestamp — in the writing transaction itself, so no write path can bypass it and a rejected (rolled-back) write leaves no phantom entry, while cascade deletes (an activity's attachments, a rights sale's allocations) are recorded like direct ones. `table_name`/`row_id` are deliberately *not* foreign keys: a history entry must outlive its row (the DELETE case). Audited (scope decision 2026-07-14): every user-entered table whose values feed a calculation — the financial fact tables plus `cgt_settings` and, of the reference data, `listings` alone (its `amit`/`security_type`/`preference` flags retroactively change tax calculations). Import-managed reference data (`currencies`, `mic_registry`, `rba_fx_rates`, `closing_prices`), tables that only influence values persisted onto trades at write time (`exchanges`, `exchange_holidays`), the identity-only `holding_accounts`, and derived state (`report_snapshots`, `job_runs`) are out of scope. Retention (decision 2026-07-14): entries are kept forever — the table is itself append-only, enforced by its own `BEFORE UPDATE`/`BEFORE DELETE` `RAISE(ABORT)` triggers, and deliberately has no pruning job. A migration adding a column to an audited table must recreate that table's two `*_row_history_*` triggers with the new column list.
+`row_history` is the **append-only audit trail** (0013_row_history.sql). `AFTER UPDATE` / `AFTER DELETE` triggers on every audited table record the prior row (as JSON), the operation, and a UTC timestamp — in the writing transaction itself, so no write path can bypass it and a rejected (rolled-back) write leaves no phantom entry, while cascade deletes (an activity's attachments, a rights sale's allocations) are recorded like direct ones. `table_name`/`row_id` are deliberately *not* foreign keys: a history entry must outlive its row (the DELETE case). Audited (scope decision 2026-07-14): every user-entered table whose values feed a calculation — the financial fact tables plus `cgt_settings` and, of the reference data, `listings` alone (its `amit`/`security_type`/`preference` flags retroactively change tax calculations). `listing_renames` (0018) joined the audited set too, which required rebuilding `row_history` itself to extend its `table_name` CHECK (a table-level CHECK SQLite cannot `ALTER`) — the *live* `row_history_append_only_*` guard triggers, and the `listings` trigger pair carrying the new `price_symbol` column, come from 0018, not 0013. Import-managed reference data (`currencies`, `mic_registry`, `rba_fx_rates`, `closing_prices`), tables that only influence values persisted onto trades at write time (`exchanges`, `exchange_holidays`), the identity-only `holding_accounts`, and derived state (`report_snapshots`, `job_runs`) are out of scope. Retention (decision 2026-07-14): entries are kept forever — the table is itself append-only, enforced by its own `BEFORE UPDATE`/`BEFORE DELETE` `RAISE(ABORT)` triggers, and deliberately has no pruning job. A migration adding a column to an audited table must recreate that table's two `*_row_history_*` triggers with the new column list.
 
 `rba_fx_rates` is standalone reference data (no foreign keys); it is looked up by `(currency, month)`. `job_runs` is likewise standalone: `name` is the in-code job name (not a foreign key), and each scheduled or manual run appends a row, pruning that job's history to the newest 20 rows in the same transaction — so an intermittent failure that later succeeds stays visible (surfaced by `GET /jobs` and the [health report](API.md#health)) without the table growing unboundedly. `cgt_settings` is also standalone: a singleton row (`CHECK (id = 1)`) holding the entered opening carried-forward capital loss consumed by the [net capital gain report](API.md#net-capital-gain).
 

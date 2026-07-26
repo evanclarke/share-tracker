@@ -41,6 +41,13 @@ pub struct Listing {
     /// Preference share: the franking-credit holding-period rule requires 90
     /// at-risk days instead of 45 (see `reports::franking`).
     pub preference: bool,
+    /// Provider-symbol override: `closing_price::yahoo_symbol` uses this
+    /// verbatim, ahead of its derived ticker/exchange mapping, for a symbol
+    /// the provider spells differently or an exchange with no mapping.
+    /// Independent of `listing_rename`'s rename chain — set directly via
+    /// `PUT`, since it rarely needs to change in lockstep with a rename (an
+    /// override that matched the old ticker rarely matches the new one).
+    pub price_symbol: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -55,6 +62,8 @@ pub struct ListingBody {
     pub amit: bool,
     #[serde(default)]
     pub preference: bool,
+    #[serde(default)]
+    pub price_symbol: Option<String>,
 }
 
 /// Why a listing upsert was refused.
@@ -64,6 +73,13 @@ pub enum UpsertError {
     /// `currencies` (kind DigitalToken — the ISO 24165 / DTIF list, matched on
     /// the DTI `code` or the human `short_name` ticker the import carries).
     UnrecognisedDigitalToken,
+    /// A plain `PUT` tried to change `ticker` or `exchange_mic` on a listing
+    /// that already has dependent trades, income, or closing prices. Once a
+    /// listing has history, an identity change must go through
+    /// `POST /listings/:id/rename` (`entities::listing_rename`) so the change
+    /// is recorded as a dated event, not silently lost — a brand-new listing
+    /// with no dependents yet stays freely editable.
+    IdentityChangeRequiresRename,
     /// Constraint violations (Crypto with an exchange / non-Crypto without
     /// one, duplicate ticker, unknown exchange or currency) surface here via
     /// the table's CHECKs and FKs.
@@ -82,6 +98,10 @@ impl From<UpsertError> for ApiError {
             UpsertError::UnrecognisedDigitalToken => ApiError::unprocessable(
                 "a Crypto listing's ticker must be a recognised digital-token code",
             ),
+            UpsertError::IdentityChangeRequiresRename => ApiError::unprocessable(
+                "use POST /listings/:id/rename to record a ticker or exchange change \
+                 on a listing with recorded trades, income, or prices",
+            ),
             UpsertError::Db(err) => err.into(),
         }
     }
@@ -95,7 +115,8 @@ pub fn router() -> Router<SqlitePool> {
 
 pub async fn db_list(pool: &SqlitePool) -> Result<Vec<Listing>, sqlx::Error> {
     sqlx::query_as(
-        "SELECT id, exchange_mic, ticker, name, isin, security_type, currency, amit, preference \
+        "SELECT id, exchange_mic, ticker, name, isin, security_type, currency, amit, preference, \
+                price_symbol \
          FROM listings ORDER BY exchange_mic, ticker",
     )
     .fetch_all(pool)
@@ -104,7 +125,8 @@ pub async fn db_list(pool: &SqlitePool) -> Result<Vec<Listing>, sqlx::Error> {
 
 pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<Listing>, sqlx::Error> {
     sqlx::query_as(
-        "SELECT id, exchange_mic, ticker, name, isin, security_type, currency, amit, preference \
+        "SELECT id, exchange_mic, ticker, name, isin, security_type, currency, amit, preference, \
+                price_symbol \
          FROM listings WHERE id = ?",
     )
     .bind(id)
@@ -114,6 +136,32 @@ pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<Listing>, sqlx:
 
 pub async fn db_upsert(pool: &SqlitePool, listing: &Listing) -> Result<(), UpsertError> {
     let mut tx = pool.begin().await?;
+
+    // An identity change (ticker or exchange) on a listing that already has
+    // history must go through the rename action instead of a bare field
+    // edit, so the change is recorded rather than silently lost — a
+    // brand-new listing with no dependents yet stays freely editable here.
+    let current: Option<(String, Option<String>)> =
+        sqlx::query_as("SELECT ticker, exchange_mic FROM listings WHERE id = ?")
+            .bind(listing.id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    if let Some((old_ticker, old_exchange_mic)) = current
+        && (old_ticker != listing.ticker || old_exchange_mic != listing.exchange_mic)
+    {
+        let has_dependents: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM trades WHERE listing_id = ?1) \
+                 OR EXISTS(SELECT 1 FROM income WHERE listing_id = ?1) \
+                 OR EXISTS(SELECT 1 FROM closing_prices WHERE listing_id = ?1)",
+        )
+        .bind(listing.id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if has_dependents {
+            return Err(UpsertError::IdentityChangeRequiresRename);
+        }
+    }
+
     // A Crypto listing's ticker must be a recognised digital-token code
     // (validated in the write transaction; the mic/Crypto pairing and ticker
     // uniqueness are CHECK/index-enforced by the table itself).
@@ -130,8 +178,8 @@ pub async fn db_upsert(pool: &SqlitePool, listing: &Listing) -> Result<(), Upser
         }
     }
     sqlx::query(
-        "INSERT INTO listings (id, exchange_mic, ticker, name, isin, security_type, currency, amit, preference) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
+        "INSERT INTO listings (id, exchange_mic, ticker, name, isin, security_type, currency, amit, preference, price_symbol) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT(id) DO UPDATE SET \
              exchange_mic  = excluded.exchange_mic, \
              ticker        = excluded.ticker, \
@@ -140,7 +188,8 @@ pub async fn db_upsert(pool: &SqlitePool, listing: &Listing) -> Result<(), Upser
              security_type = excluded.security_type, \
              currency      = excluded.currency, \
              amit          = excluded.amit, \
-             preference    = excluded.preference",
+             preference    = excluded.preference, \
+             price_symbol  = excluded.price_symbol",
     )
     .bind(listing.id)
     .bind(&listing.exchange_mic)
@@ -151,6 +200,7 @@ pub async fn db_upsert(pool: &SqlitePool, listing: &Listing) -> Result<(), Upser
     .bind(listing.currency.as_str())
     .bind(listing.amit)
     .bind(listing.preference)
+    .bind(&listing.price_symbol)
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -191,6 +241,7 @@ async fn upsert(
         currency: body.currency,
         amit: body.amit,
         preference: body.preference,
+        price_symbol: body.price_symbol,
     };
     db_upsert(&pool, &listing).await?;
     Ok(StatusCode::NO_CONTENT)
@@ -266,6 +317,52 @@ mod tests {
         assert!(!got.amit);
     }
 
+    /// A ticker or exchange change on a listing with no recorded trades,
+    /// income, or prices is still a plain field edit — no history exists yet
+    /// for a rename event to protect.
+    #[tokio::test]
+    async fn db_ticker_change_allowed_with_no_dependents() {
+        let pool = test_pool().await;
+        db_upsert(&pool, &xtest()).await.unwrap();
+        let mut renamed = xtest();
+        renamed.ticker = "VASX".to_string();
+        db_upsert(&pool, &renamed).await.unwrap();
+        assert_eq!(db_get(&pool, 1).await.unwrap().unwrap().ticker, "VASX");
+    }
+
+    /// Once a listing has a trade, a bare `PUT` changing its ticker or
+    /// exchange is refused — `entities::listing_rename` is the only path
+    /// once there is history to protect. A same-identity edit (e.g. just the
+    /// name) still goes through.
+    #[tokio::test]
+    async fn db_ticker_or_exchange_change_refused_once_dependents_exist() {
+        let pool = test_pool().await;
+        db_upsert(&pool, &xtest()).await.unwrap();
+        crate::test_support::buy(1, 1).insert(&pool).await;
+
+        let mut ticker_changed = xtest();
+        ticker_changed.ticker = "VASX".to_string();
+        assert!(matches!(
+            db_upsert(&pool, &ticker_changed).await.unwrap_err(),
+            UpsertError::IdentityChangeRequiresRename
+        ));
+
+        let mut exchange_changed = xtest();
+        exchange_changed.exchange_mic = Some("XNYS".to_string());
+        assert!(matches!(
+            db_upsert(&pool, &exchange_changed).await.unwrap_err(),
+            UpsertError::IdentityChangeRequiresRename
+        ));
+
+        // A same-identity edit (name only) is unaffected.
+        let mut renamed_only = xtest();
+        renamed_only.name = "Renamed ETF".to_string();
+        db_upsert(&pool, &renamed_only).await.unwrap();
+        assert_eq!(db_get(&pool, 1).await.unwrap().unwrap().name, "Renamed ETF");
+        // The ticker is still untouched by the refused attempts.
+        assert_eq!(db_get(&pool, 1).await.unwrap().unwrap().ticker, "VAS");
+    }
+
     #[tokio::test]
     async fn db_preference_flag_round_trips_and_defaults_false() {
         let pool = test_pool().await;
@@ -277,6 +374,20 @@ mod tests {
         pref.preference = true;
         db_upsert(&pool, &pref).await.unwrap();
         assert!(db_get(&pool, 1).await.unwrap().unwrap().preference);
+    }
+
+    #[tokio::test]
+    async fn db_price_symbol_round_trips_and_defaults_none() {
+        let pool = test_pool().await;
+        db_upsert(&pool, &xtest()).await.unwrap();
+        assert_eq!(db_get(&pool, 1).await.unwrap().unwrap().price_symbol, None);
+        let mut with_symbol = xtest();
+        with_symbol.price_symbol = Some("VAS.AX".to_string());
+        db_upsert(&pool, &with_symbol).await.unwrap();
+        assert_eq!(
+            db_get(&pool, 1).await.unwrap().unwrap().price_symbol,
+            Some("VAS.AX".to_string())
+        );
     }
 
     #[tokio::test]

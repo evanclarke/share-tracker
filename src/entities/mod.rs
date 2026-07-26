@@ -25,6 +25,7 @@ pub mod inheritance;
 pub mod interest_income;
 pub mod investment_expense;
 pub mod listing;
+pub mod listing_rename;
 pub mod mic_registry;
 pub mod parcel_allocation;
 pub mod rba_fx_rate;
@@ -41,6 +42,7 @@ pub fn router() -> Router<SqlitePool> {
     exchange::router()
         .merge(exchange_holiday::router())
         .merge(listing::router())
+        .merge(listing_rename::router())
         .merge(holding_account::router())
         .merge(currencies::router())
         .merge(mic_registry::router())

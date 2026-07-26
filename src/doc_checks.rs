@@ -190,6 +190,50 @@ fn known_limitations_document_rsu_dividend_equivalents() {
     assert!(README_MD.contains("ordinary income when paid"));
 }
 
+/// Known-limitation pin (REQUIREMENTS "Ticker and exchange-code changes",
+/// 2026-07-26): an exchange change recorded via `POST /listings/:id/rename`
+/// doesn't retroactively pin historical trades to the calendar in force at
+/// the time — re-saving a trade dated before the change without an explicit
+/// `settlement_date` recomputes it against the listing's *current* exchange.
+#[test]
+fn known_limitations_document_exchange_change_recomputation() {
+    let limitations = known_limitations();
+    assert!(limitations.contains(
+        "An exchange change follows the listing's *current* exchange, not the date of the change"
+    ));
+    assert!(limitations.contains("settlement-holiday calendar"));
+    assert!(limitations.contains("`trades.settlement_date` is a stored column"));
+    assert!(limitations.contains("recomputes it against the exchange currently on the listing"));
+}
+
+/// Known-limitation pin (REQUIREMENTS "Ticker and exchange-code changes",
+/// 2026-07-26): a rename carries no staleness trigger for `listing_renames`
+/// (the ticker is a display label over `listing_id`, never a computed
+/// figure), so a snapshot generated before a rename keeps its pre-rename
+/// ticker label until regenerated.
+#[test]
+fn known_limitations_document_snapshot_ticker_labels_are_display_only() {
+    let limitations = known_limitations();
+    assert!(limitations.contains("Snapshot ticker labels are display-only"));
+    assert!(limitations.contains("`listing_renames` deliberately carries no staleness trigger"));
+    assert!(limitations.contains("This is display drift only"));
+}
+
+/// Ticker/exchange renames (REQUIREMENTS "Ticker and exchange-code changes",
+/// 2026-07-26): a rename is an explicit, dated, audited event once a listing
+/// has history — the rename action, the provider-symbol override, and the
+/// as-at ticker resolution used by the tax report and activity ledger are
+/// all documented in the Listings section, and the feature is in README.
+#[test]
+fn listing_rename_action_documented() {
+    assert!(API_MD.contains("POST /listings/:id/rename"));
+    assert!(API_MD.contains("GET /listings/:id/renames"));
+    assert!(API_MD.contains("DELETE /listings/:id/renames/:rename_id"));
+    assert!(API_MD.contains("price_symbol"));
+    assert!(API_MD.contains("resolves **as at its own date**"));
+    assert!(README_MD.contains("Ticker and exchange-code renames"));
+}
+
 /// Resolved-limitation pin (REQUIREMENTS 2026-07-13; formerly the
 /// "Foreign broker-cash interest classification" Known limitation, 2026-06-12):
 /// interest income is classified by payer — Australian-source at question 10

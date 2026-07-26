@@ -224,6 +224,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn errored_prices_ui_present() {
+        let js = app_js_body().await;
+        // The Closing Prices screen surfaces health.errored_prices with a
+        // Backfill action pre-filling the backfill form…
+        assert!(js.contains("errored_prices"));
+        assert!(js.contains("Listings with errored prices"));
+        assert!(js.contains("/reports/health"));
+        // …and the cross-view health banner links to it.
+        assert!(js.contains("#/prices"));
+        assert!(js.contains("Open Closing Prices"));
+    }
+
+    #[tokio::test]
     async fn report_snapshots_ui_present() {
         let js = app_js_body().await;
         // The snapshot list + per-snapshot detail views drive the snapshot

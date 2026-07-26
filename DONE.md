@@ -1778,3 +1778,92 @@ the whole document register across the portfolio, with a link to download or vie
       "No records." empty state — the demo fixture seeds no attachments, since seeding is JSON PUTs
       and an upload is multipart; confirmed rendered DOM by hand: heading, description, empty state)
       all clean
+
+## Ticker and exchange-code changes (REQUIREMENTS 2026-07-26)
+A rename was already identity-safe (in-place `PUT /listings/:id`, everything keyed on
+`listings.id` — parcels, cost bases, and the 12-month discount clock stay attached, pinned by
+`reports::open_parcels::tests::db_ticker_rename_keeps_parcels_attached_to_the_listing` and
+`reports::realised_gains::tests::db_sale_after_ticker_rename_keeps_cost_base_and_discount_clock`).
+This section closed the price-fetch and presentation gaps around it: no provider-symbol escape
+hatch, a wrong/dead symbol failing silently and permanently, historical documents relabelling
+after a rename, and an unrecorded exchange change. LAAC → LAR was the prompting real-world case.
+- [x] Migration `0018_listing_renames.sql`: new `listing_renames` table (`listing_id`,
+      `effective_date`, `old_ticker`/`new_ticker`, `old_exchange_mic`/`new_exchange_mic`, `note`;
+      `UNIQUE(listing_id, effective_date)`; CHECK rejecting a no-op rename) plus nullable
+      `listings.price_symbol`. Deliberately no `*_stale_snapshots_*` trigger pair (a snapshot's
+      ticker is a display label, never a computed figure). `listing_renames` joining the audited
+      set required rebuilding `row_history` itself to extend its `table_name` CHECK (a table-level
+      CHECK SQLite cannot `ALTER`) — hit and fixed two real SQLite gotchas along the way: (1) the
+      `row_history_row` index from the pre-rename table still existed under its old name when the
+      rename-pattern tried to recreate it (fixed by creating the index after dropping the `_old`
+      table, not before); (2) the bundled SQLite's default `ALTER TABLE ... RENAME TO` rewrites
+      every *other* trigger body that references the renamed table by name (even ones defined on
+      unrelated tables, like every other audited table's own row-history trigger inserting into
+      `row_history`) to point at the new name — silently breaking them the moment the `_old` table
+      is dropped; fixed with `PRAGMA legacy_alter_table = ON` around the rename, confirmed by direct
+      SQLite experimentation (a naive raw-sqlite3 repro didn't reproduce it — the two environments'
+      SQLite versions disagree on this specific behaviour). Test:
+      `reports::row_history::tests::audited_tables_match_migration_check_and_triggers` extended with
+      a per-migration exception block (mirroring the existing attachments-rebuild precedent) plus a
+      new `every_audited_table_records_update_and_delete` case; `docs/SCHEMA.md` updated (the new
+      table/column, the Relationships section, the audited-tables prose)
+- [x] `src/entities/listing_rename.rs`: `POST /listings/:id/rename` (records the event — with
+      `old_ticker`/`old_exchange_mic` always read from the listing's current row, never trusted from
+      the request, so the chain can't be falsified — and updates the listing, atomically; 422 on a
+      no-op, an `effective_date` not after the listing's most recent rename, a ticker collision, or
+      an unrecognised Crypto digital-token ticker), `GET /listings/:id/renames` (the chain, newest
+      first), `DELETE /listings/:id/renames/:rename_id` (undo — restores `ticker`/`exchange_mic`
+      from `old_*` — only for the newest rename in the chain; 422 otherwise). `listing::db_upsert`
+      gained the restriction that makes the rename path mandatory: a bare `PUT` changing `ticker` or
+      `exchange_mic` is refused (`UpsertError::IdentityChangeRequiresRename`) once the listing has
+      any trades, income, or closing prices — a brand-new listing stays freely editable. The
+      identity-continuity tests were updated to drive the rename through the action instead of a
+      raw upsert, keeping their original assertions intact. 17 tests in `listing_rename.rs`, plus 2
+      new `listing.rs` tests for the PUT restriction
+- [x] `closing_price::Market` gained `symbol_override` (in-memory only, set by backfill's optional
+      `symbol` param — recovers a pre-rename date range under the old symbol without touching the
+      listing row); `yahoo_symbol` resolves `symbol_override` → `listing.price_symbol` → the derived
+      mapping. The scheduled fetch deliberately stays on the listing's current symbol (Yahoo serves
+      the full history under the current symbol in the common case). Tests cover the precedence
+      order and the symbol reaching the fetcher end to end (a concrete `Arc<StubFetcher>` kept
+      alongside the trait-object `SharedFetcher` so a test can inspect calls after the request)
+- [x] `fetch_and_store` distinguishes a provider call returning **zero** candles across the whole
+      requested window from a partial result with a data gap on one date — the former (the
+      wrong/renamed/delisted-symbol case) now stores a message naming the symbol and pointing at the
+      fix on every date, instead of the generic per-day message indistinguishable from a transient
+      outage. `reports::health::HealthReport` gained `errored_prices` (`listing_id`, `ticker`,
+      `errored_days`, `latest_errored_date`, `latest_error`, newest error first); the `#/prices`
+      screen surfaces it with a Backfill action that pre-fills the existing backfill form
+- [x] `domain::listing_identity::RenameHistory` (`ticker_as_at(listing_id, date, current_ticker)`,
+      pre-loaded once per report like `infra::fx::FxRates`) resolves the ticker in effect at a given
+      date across a listing's rename chain. Applied in the Annual Tax Report (a disposal group's
+      heading names the ticker as at its most recent disposal in the year; an income row resolves at
+      its own date) and the listing activity ledger (a rename appears as a `Ticker/exchange change`
+      event, chronologically ordered, naming the exchange too when the rename moved it). A
+      speculative `label_with_former` helper was dropped before landing — neither caller turned out
+      to have a bare ticker string to decorate, so it would have been unused dead code. Every other
+      report keeps showing the current ticker (the ATO view: a rename is the same security)
+- [x] Confirmed `trades.settlement_date` is a stored column computed once at write time only when
+      the request omits it (`entities::trade::http.rs`), never re-derived at read time — so an
+      exchange change is safe for existing trades and only affects a trade re-saved afterward without
+      an explicit `settlement_date`. Documented as a Known limitation rather than a code change
+- [x] Docs: `docs/API.md`'s "Ticker or name changes" paragraph rewritten for the rename action (new
+      endpoints, request/response shapes, the identity-preservation guarantee), the Closing Prices
+      and Health sections updated for `price_symbol`/`symbol`/`errored_prices`, the Listing Activity
+      and Annual Tax Report sections noting the as-at ticker resolution, two new Known-limitations
+      entries (exchange-change recomputation; snapshot ticker labels are display-only), and the 201/
+      422 response-code catalog entries; `docs/SCHEMA.md` (phase 1) and a README Features bullet.
+      `src/doc_checks.rs` pins the new Known-limitations text and the documented endpoints/response
+      shapes (`known_limitations_document_exchange_change_recomputation`,
+      `known_limitations_document_snapshot_ticker_labels_are_display_only`,
+      `listing_rename_action_documented`)
+- [x] Verified: `cargo build`/`cargo test` (1192 passed, warning-free), `cargo fmt --check` and
+      `cargo deny check advisories` clean, `node --test 'src/web/*.test.js'` (55 passed),
+      `scripts/ui-smoke.sh` clean. End-to-end over HTTP against a scratch DB: created a listing,
+      recorded a pre-rename Buy and dividend, renamed it, confirmed the trade/listing_id and the
+      chain were correct, confirmed a bare `PUT` retrying the ticker change now 422s, recorded a
+      post-rename Sell, confirmed the FY2024 tax report showed the dividend under the **old** ticker
+      and the FY2025 report showed the disposal under the **new** one, confirmed `errored_prices`
+      appeared correctly after a real (intentionally-failing) backfill with an explicit `symbol`
+      override, and confirmed the listing activity ledger showed the rename in chronological order
+      between the Buy and the Sell

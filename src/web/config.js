@@ -599,7 +599,7 @@ export const REPORTS = [
         'amma_statements', 'amit_adjustments', 'ess_statements', 'transfers',
         'corporate_actions', 'inheritances', 'rights_sales',
         'rights_sale_allocations', 'investment_expenses', 'drp_enrolments',
-        'cgt_settings', 'attachments', 'listings',
+        'cgt_settings', 'attachments', 'listings', 'listing_renames',
       ], { required: true, default: 'trades' }),
       int('row_id', 'Row ID', { required: true, hint: "The record's id as shown in its entity list." }),
     ],

@@ -81,6 +81,17 @@ pub struct ActivityResponse {
     pub holdings: Vec<HoldingOverview>,
 }
 
+/// One recorded ticker/exchange rename (`entities::listing_rename`).
+#[derive(sqlx::FromRow)]
+struct ListingRenameRow {
+    id: i64,
+    effective_date: NaiveDate,
+    old_ticker: String,
+    new_ticker: String,
+    old_exchange_mic: Option<String>,
+    new_exchange_mic: Option<String>,
+}
+
 /// A rights disposal row joined back to its issue's listing and currency.
 struct RightsSaleRow {
     id: i64,
@@ -166,6 +177,13 @@ pub async fn db_activity(
             .bind(listing_id)
             .fetch_all(&mut *tx)
             .await?;
+    let renames: Vec<ListingRenameRow> = sqlx::query_as(
+        "SELECT id, effective_date, old_ticker, new_ticker, old_exchange_mic, new_exchange_mic \
+         FROM listing_renames WHERE listing_id = ?",
+    )
+    .bind(listing_id)
+    .fetch_all(&mut *tx)
+    .await?;
     let rights_sales: Vec<RightsSaleRow> = sqlx::query(
         "SELECT rs.id, rs.date, rs.units, rs.proceeds_per_right, rs.fx_rate, \
                 rs.holding_account_id, ca.currency \
@@ -362,6 +380,29 @@ pub async fn db_activity(
             quantity: None,
             rebase: None,
             amount_aud: Some(amount_aud),
+        });
+    }
+
+    for r in &renames {
+        let mut detail = format!("renamed {} -> {}", r.old_ticker, r.new_ticker);
+        if r.old_exchange_mic != r.new_exchange_mic {
+            detail.push_str(&format!(
+                " (exchange {} -> {})",
+                r.old_exchange_mic.as_deref().unwrap_or("Crypto"),
+                r.new_exchange_mic.as_deref().unwrap_or("Crypto")
+            ));
+        }
+        rows.push(Proto {
+            date: r.effective_date,
+            rank: 1,
+            src: 9,
+            id: r.id,
+            event: "Ticker/exchange change".to_string(),
+            detail,
+            holding_account_id: None,
+            quantity: None,
+            rebase: None,
+            amount_aud: None,
         });
     }
 
@@ -1134,5 +1175,68 @@ mod tests {
         let pool = test_pool().await;
         let resp = post_activity(pool, serde_json::json!({ "listing_id": 42 })).await;
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// A rename is a chronological event on the listing and belongs in the
+    /// ledger, in order alongside the trades either side of it — including
+    /// the exchange when a rename moves it, too.
+    #[tokio::test]
+    async fn db_rename_appears_as_a_chronological_ledger_event() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "LAAC").await;
+        test_support::buy(1, 1)
+            .date(ymd(2024, 1, 1))
+            .insert(&pool)
+            .await;
+        crate::entities::listing_rename::db_rename(
+            &pool,
+            1,
+            &crate::entities::listing_rename::RenameBody {
+                effective_date: ymd(2024, 6, 1),
+                ticker: "LAR".to_string(),
+                exchange_mic: Some("XNYS".to_string()),
+                name: None,
+                price_symbol: None,
+                note: None,
+            },
+        )
+        .await
+        .unwrap();
+        test_support::sell(2, 1)
+            .date(ymd(2024, 9, 1))
+            .qty(dec("10"))
+            .insert(&pool)
+            .await;
+        allocate(&pool, 1, 2, 1, dec("10")).await;
+
+        let rows = events(&pool, 1).await;
+        let rename_row = rows
+            .iter()
+            .find(|r| r.event == "Ticker/exchange change")
+            .expect("rename event present");
+        assert_eq!(rename_row.date, ymd(2024, 6, 1));
+        assert!(
+            rename_row.detail.contains("LAAC -> LAR"),
+            "detail: {}",
+            rename_row.detail
+        );
+        assert!(
+            rename_row.detail.contains("XASX -> XNYS"),
+            "exchange change detail: {}",
+            rename_row.detail
+        );
+
+        // Chronological: Buy, rename, Sell.
+        let event_names: Vec<&str> = rows.iter().map(|r| r.event.as_str()).collect();
+        let buy_pos = event_names.iter().position(|e| *e == "Buy").unwrap();
+        let rename_pos = event_names
+            .iter()
+            .position(|e| *e == "Ticker/exchange change")
+            .unwrap();
+        let sell_pos = event_names
+            .iter()
+            .position(|e| e.starts_with("Sell"))
+            .unwrap();
+        assert!(buy_pos < rename_pos && rename_pos < sell_pos);
     }
 }
