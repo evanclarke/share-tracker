@@ -310,12 +310,25 @@ function buildExpand(expandCfg, labels, context) {
   };
 }
 
-// Report tables: read-only, no actions column. Foreign-key id columns render
-// the referenced row's name (per FK_COLUMN_SOURCES), same as the entity lists.
-// `expandCfg` (a REPORTS `expand` entry) turns each row into a expand-to-a-
-// child-table row (see `buildExpand`); `context` is the whole multi-`tables`
-// response object, needed only for an expand config's `from` sibling lookup.
-async function dataTable(rows, columns, statusField, expandCfg, context) {
+// A row action rendered as a plain link + button — shared by the entity
+// list's Actions column and a report's `rowActions` (below). `newTab` opens
+// the link in a new tab/window (e.g. a report's Download/View links onto
+// /attachments/:id/content) rather than navigating the app away.
+function rowActionLink(a) {
+  return el('a', { href: a.href, target: a.newTab ? '_blank' : null },
+    el('button', { class: 'link small' }, a.label));
+}
+
+// Report tables: read-only — no per-row Edit/Delete — but a report may still
+// declare `rowActions` (config.js) for link-only actions (e.g. the
+// Attachments report's Download/View/Record links); `dataTable` renders them
+// the same way the entity list's Actions column does, via `rowActionLink`.
+// Foreign-key id columns render the referenced row's name (per
+// FK_COLUMN_SOURCES), same as the entity lists. `expandCfg` (a REPORTS
+// `expand` entry) turns each row into a expand-to-a-child-table row (see
+// `buildExpand`); `context` is the whole multi-`tables` response object,
+// needed only for an expand config's `from` sibling lookup.
+async function dataTable(rows, columns, statusField, expandCfg, context, rowActions) {
   if (!rows || rows.length === 0) return el('div', { class: 'empty' }, 'No records.');
   // A `key` expand reads its children from a nested field on the row itself
   // (e.g. `parcels`) — excluded from the parent's own columns, whether
@@ -326,6 +339,11 @@ async function dataTable(rows, columns, statusField, expandCfg, context) {
   const labels = await columnLabelMaps(cols.concat(expandColumns(expandCfg)));
   const opts = { statusField: statusField, labels: labels };
   if (expandCfg) opts.expand = buildExpand(expandCfg, labels, context);
+  if (rowActions) {
+    opts.actions = function (row) {
+      return el('td', { class: 'actions' }, rowActions(row).map(rowActionLink));
+    };
+  }
   return filterableTable(rows, cols, opts);
 }
 
@@ -381,7 +399,7 @@ async function viewEntityList(entity) {
             },
           }, a.label));
         } else {
-          td.appendChild(el('a', { href: a.href }, el('button', { class: 'link small' }, a.label)));
+          td.appendChild(rowActionLink(a));
         }
       });
       if (entity.attachOwner) {
@@ -1665,7 +1683,7 @@ async function viewReport(report) {
       }
       return;
     }
-    result.appendChild(await dataTable(rows, null, report.statusField, report.expand));
+    result.appendChild(await dataTable(rows, report.columns || null, report.statusField, report.expand, null, report.rowActions));
   }
 
   if (report.method === 'GET') {

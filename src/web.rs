@@ -1072,6 +1072,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn attachments_report_ui_present() {
+        let js = app_js_body().await;
+        // The whole-portfolio attachments index report: a plain GET report
+        // over /reports/attachments…
+        assert!(js.contains("slug: 'attachments'"));
+        assert!(js.contains("/reports/attachments"));
+        // …whose row actions link to Download, an inline View (new tab, via
+        // ?disposition=inline), and back to the owning record's own
+        // per-owner attachments view.
+        assert!(js.contains("disposition=inline"));
+        assert!(js.contains("'Download'"));
+        assert!(js.contains("'View'"));
+        assert!(js.contains("'Record'"));
+    }
+
+    #[tokio::test]
     async fn sells_list_has_attachments_action() {
         let js = app_js_body().await;
         // The Sells screen is hand-rendered (viewSellsList) rather than the

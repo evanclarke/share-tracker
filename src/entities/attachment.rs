@@ -426,10 +426,29 @@ async fn read_owner_field(
         .map_err(|_| ApiError::unprocessable("an owner id is not a valid integer"))
 }
 
+/// `?disposition=` on `GET /attachments/{id}/content`: `attachment` (the
+/// default) prompts a download, `inline` lets the browser render the file
+/// in place (used by the Attachments report's View link) — any other value
+/// is rejected rather than silently falling back.
+#[derive(Debug, Deserialize)]
+struct ContentQuery {
+    disposition: Option<String>,
+}
+
 async fn download(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
+    Query(query): Query<ContentQuery>,
 ) -> Result<Response, ApiError> {
+    let disposition = match query.disposition.as_deref() {
+        None | Some("attachment") => "attachment",
+        Some("inline") => "inline",
+        Some(_) => {
+            return Err(ApiError::unprocessable(
+                "disposition must be 'attachment' or 'inline'",
+            ));
+        }
+    };
     let (content_type, filename, bytes) = db_get_content(&pool, id)
         .await
         .map_err(ApiError::from)?
@@ -440,7 +459,14 @@ async fn download(
         .header(header::CONTENT_TYPE, content_type.as_mime())
         .header(
             header::CONTENT_DISPOSITION,
-            format!("attachment; filename=\"{safe_name}\""),
+            format!("{disposition}; filename=\"{safe_name}\""),
+        )
+        // The allowlist (pdf/png/jpeg/txt) is enforced at upload time, but an
+        // inline render is still same-origin content the browser could try to
+        // sniff — nosniff pins it to the stored content type.
+        .header(
+            header::HeaderName::from_static("x-content-type-options"),
+            "nosniff",
         )
         .body(Body::from(bytes))
         .map_err(ApiError::internal)
@@ -714,6 +740,68 @@ mod tests {
         );
         let dl_bytes = dl.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(&dl_bytes[..], content);
+    }
+
+    /// The default (and an explicit `?disposition=attachment`) download
+    /// prompts a save; `?disposition=inline` lets the browser render it in
+    /// place (the Attachments report's View link); any other value is
+    /// rejected rather than silently falling back to one or the other. Both
+    /// dispositions carry `X-Content-Type-Options: nosniff`.
+    #[tokio::test]
+    async fn api_download_disposition_controls_content_disposition() {
+        let pool = test_pool().await;
+        let trade_id = insert_trade(&pool).await;
+        let mut body = Vec::new();
+        push_field(&mut body, "trade_id", &trade_id.to_string());
+        push_file(&mut body, "conf.pdf", "application/pdf", b"%PDF-1.4");
+        finish(&mut body);
+        let resp = post_multipart(pool.clone(), body).await;
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let meta: Attachment = serde_json::from_slice(&bytes).unwrap();
+
+        async fn fetch(pool: SqlitePool, uri: String) -> Response {
+            router()
+                .with_state(pool)
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap()
+        }
+
+        for (query, expected) in [
+            ("", "attachment"),
+            ("?disposition=attachment", "attachment"),
+            ("?disposition=inline", "inline"),
+        ] {
+            let resp = fetch(
+                pool.clone(),
+                format!("/attachments/{}/content{query}", meta.id),
+            )
+            .await;
+            assert_eq!(resp.status(), StatusCode::OK);
+            let cd = resp
+                .headers()
+                .get(header::CONTENT_DISPOSITION)
+                .unwrap()
+                .to_str()
+                .unwrap();
+            assert!(cd.starts_with(expected), "{query}: {cd}");
+            assert!(cd.contains("conf.pdf"));
+            assert_eq!(
+                resp.headers()
+                    .get("x-content-type-options")
+                    .unwrap()
+                    .to_str()
+                    .unwrap(),
+                "nosniff"
+            );
+        }
+
+        let bad = fetch(
+            pool.clone(),
+            format!("/attachments/{}/content?disposition=bogus", meta.id),
+        )
+        .await;
+        assert_eq!(bad.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     #[tokio::test]

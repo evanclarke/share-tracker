@@ -441,6 +441,19 @@ export const REPORTS = [
   },
   { slug: 'open-parcels', title: 'Open Parcels', api: '/portfolio/open-parcels', method: 'GET', menu: 'Reports', section: 'Portfolio', desc: 'Every open parcel: acquisition date, original cost base, AMIT and return-of-capital reductions, remaining quantity and adjusted cost base (AUD).' },
   {
+    slug: 'attachments', title: 'Attachments', api: '/reports/attachments', method: 'GET',
+    menu: 'Reports', section: 'Portfolio',
+    desc: 'Every stored document — the file, the activity it is attached to, and that activity’s listing. Download saves the file; View opens it in a new tab; Record opens the owning activity’s own attachments view, where a file can be deleted or another uploaded.',
+    columns: ['id', 'filename', 'content_type', 'byte_size', 'uploaded_at', 'owner_type', 'owner_id', 'owner_description', 'listing_id'],
+    rowActions: function (row) {
+      return [
+        { label: 'Download', href: '/attachments/' + row.id + '/content', newTab: true },
+        { label: 'View', href: '/attachments/' + row.id + '/content?disposition=inline', newTab: true },
+        { label: 'Record', href: '#/attachments/' + row.owner_field + '/' + row.owner_id },
+      ];
+    },
+  },
+  {
     slug: 'activity', title: 'Listing Activity', api: '/portfolio/activity', method: 'POST',
     menu: 'Reports', section: 'Portfolio',
     desc: 'Everything ever recorded against one listing, in date order — trades labelled with the operation that created them, transfers, income, corporate actions, statements — with a running units-held balance, ending in the final holding summary per account (units held, cost base, market value).',

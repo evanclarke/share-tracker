@@ -15,6 +15,7 @@ pub const TAXPAYER_BASIS: &str = "individual resident: 50% CGT discount; 50% LIC
 
 pub mod activity;
 pub mod amit_cash_cross_check;
+pub mod attachments;
 pub mod e4_cross_check;
 pub mod export;
 pub mod franking;
@@ -90,4 +91,5 @@ pub fn router() -> Router<SqlitePool> {
         .merge(health::router())
         .merge(snapshot::router())
         .merge(tax_report::router())
+        .merge(attachments::router())
 }

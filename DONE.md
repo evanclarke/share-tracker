@@ -1746,3 +1746,35 @@ report's totals routinely carry 3+ places from pro-rated brokerage/GST and the 5
   `cargo fmt --check`, `node --test 'src/web/*.test.js'` (55 passed) all clean; confirmed
   `numericDisplay` rounds the actual report figures correctly (`1184.677` → `1,184.68`,
   `592.33850` → `592.34`, `3204.378` → `3,204.38`, `80.10945` → `80.11`, full value kept on hover)
+
+## Attachments index report (2026-07-26)
+User request: attachments could only be seen one owner at a time (the per-owner
+`#/attachments/<owner_field>/<owner_id>` view reached from a row's Attachments action) — no way to see
+the whole document register across the portfolio, with a link to download or view each file.
+- [x] `GET /reports/attachments` (`src/reports/attachments.rs`) lists every stored attachment LEFT
+      JOINed out to its owning activity — `owner_type` (Trade/Income/AMMA statement/ESS
+      statement/Interest income/Corporate action), `owner_field` (the matching `?<field>=` query key),
+      `owner_id`, a human `owner_description` (e.g. "Buy on 2024-05-01"), and `listing_id` (null only
+      for interest income, which has no listing) — alongside the existing filename/content_type/
+      byte_size/uploaded_at metadata, newest upload first; tests
+      `reports::attachments::tests::db_trade_owned_attachment` / `db_income_owned_attachment` /
+      `db_amma_owned_attachment` / `db_ess_owned_attachment` /
+      `db_interest_income_owned_attachment_has_no_listing` / `db_corporate_action_owned_attachment` /
+      `db_orders_newest_upload_first` / `db_empty_when_no_attachments`, `api_get_attachments_report`
+- [x] `GET /attachments/{id}/content` gained `?disposition=inline` (default stays `attachment`) so a
+      file can be viewed in place rather than downloaded — both forms now also carry
+      `X-Content-Type-Options: nosniff`; an unrecognised value is `422`; test
+      `entities::attachment::tests::api_download_disposition_controls_content_disposition`
+- [x] Report tables gained a generic `rowActions` mechanism (`dataTable`/`config.js`, mirroring the
+      entity list's `rowActions`) since no report previously had per-row link actions; the Attachments
+      report config wires Download / View (new tab, `?disposition=inline`) / Record (link to the
+      owning record's own per-owner attachments view) — pinned by `web::tests::attachments_report_ui_present`
+- [x] Docs: `docs/API.md` (`?disposition=inline` on the download endpoint, the new `### Attachments
+      index` report section, the 422 case, the web-frontend report list) and a README feature bullet
+      updated in the same change
+- [x] Verified: `cargo build`/`cargo test` (1156 passed, warning-free), `cargo fmt --check` and
+      `cargo deny check advisories` clean (no dependency changes), `node --test 'src/web/*.test.js'`
+      (55 passed), `scripts/ui-smoke.sh` (added `#/r/attachments`, asserting the heading and the
+      "No records." empty state — the demo fixture seeds no attachments, since seeding is JSON PUTs
+      and an upload is multipart; confirmed rendered DOM by hand: heading, description, empty state)
+      all clean

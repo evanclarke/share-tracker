@@ -31,6 +31,12 @@ checks=(
   '#/e/income|<h2>Income</h2>|2,757.30'
   '#/r/open-parcels|<h2>Open Parcels</h2>|XASX:VAS'
   '#/r/tax-summary|<h2>Tax Summary</h2>|filter-row'
+  # The demo fixture seeds no attachments (fixture seeding is JSON PUTs; an
+  # attachment upload is multipart/form-data, outside that mechanism), so the
+  # table never mounts — dataTable renders the "No records." empty state
+  # instead. That's still a real assertion: a broken route or load-time
+  # exception leaves the app mount empty and fails both markers just the same.
+  '#/r/attachments|<h2>Attachments</h2>|No records.'
   # The demo fixture seeds no closing prices (no live price fetch here — see
   # the file header), so the report-snapshot series is empty; this still
   # catches a broken chart.js module route or a load-time exception in the

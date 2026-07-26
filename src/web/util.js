@@ -569,6 +569,11 @@ const COLUMN_LABELS = {
   // The employer statement's stated AUD figure for label F (reported verbatim
   // by the tax summary); the default humaniser would render "Aud …".
   aud_deferral_discount: 'Statement AUD deferral (F)',
+  // Attachments report: owner_id is a raw id (not resolved to a name — it can
+  // point at six different tables), so it needs to read as an id, not a bare
+  // "Owner" beside the "Owner description" column.
+  owner_id: 'Owner ID',
+  byte_size: 'Size (bytes)',
 };
 
 // The friendly heading for a column: an explicit override, else humanised.
