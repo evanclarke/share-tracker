@@ -728,9 +728,19 @@ async function viewTransferForm() {
   for (const f of fields) form.appendChild(await buildFieldInput(f, null, false));
 
   // The parcels to move — the same shape as a Sell's allocations (the shared
-  // editor); partial parcels allowed.
-  const buyParcels = await loadOptions('buyParcels');
-  const allocEditor = allocationEditor(buyParcels, null, {
+  // editor); partial parcels allowed. Narrowed to open parcels matching the
+  // chosen listing + source account — the two things the server itself
+  // requires a parcel to match (`entities::transfer`) — re-filtered live as
+  // either field changes.
+  const openParcels = await loadOptions('openParcels');
+  function validParcelOptions() {
+    const listingId = form.querySelector('[name="listing_id"]').value;
+    const accountId = form.querySelector('[name="from_account_id"]').value;
+    return openParcels.filter(function (p) {
+      return String(p.listing_id) === listingId && String(p.holding_account_id) === accountId;
+    });
+  }
+  const allocEditor = allocationEditor(validParcelOptions(), null, {
     heading: 'Parcels to move',
     hint: 'Each parcel must be a Buy/DRP of the chosen listing held in the source account, with enough remaining units. Moved units keep their cost base and acquisition date.',
     parcelLabel: 'Parcel to move',
@@ -743,7 +753,7 @@ async function viewTransferForm() {
   // an on-chain transfer fee. Unlike the move, these units are a CGT event
   // (ATO: a holding reducing to cover a network fee is a disposal) — they
   // show up in the gains reports at the per-unit market value below.
-  const feeEditor = allocationEditor(buyParcels, null, {
+  const feeEditor = allocationEditor(validParcelOptions(), null, {
     heading: 'Network fee (optional)',
     hint: 'Leave empty for no fee. Otherwise: the source parcels disposed of to pay the on-chain network fee. These units are a CGT disposal (not moved) at the per-unit market value below — they surface a capital gain/loss in the realised-gains report.',
     parcelLabel: 'Fee parcel',
@@ -751,6 +761,14 @@ async function viewTransferForm() {
     addLabel: '+ Add fee parcel',
   });
   form.appendChild(feeEditor.section);
+  form.querySelector('[name="listing_id"]').addEventListener('change', function () {
+    allocEditor.setOptions(validParcelOptions());
+    feeEditor.setOptions(validParcelOptions());
+  });
+  form.querySelector('[name="from_account_id"]').addEventListener('change', function () {
+    allocEditor.setOptions(validParcelOptions());
+    feeEditor.setOptions(validParcelOptions());
+  });
   const feePrice = field('fee_market_price', 'Fee market value per unit (AUD)', 'decimal',
     { required: false, hint: "The fee crypto's market value per unit at the transfer date — the disposal's capital proceeds. Required only when a fee parcel is set." });
   form.appendChild(await buildFieldInput(feePrice, null, false));
