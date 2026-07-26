@@ -152,8 +152,9 @@ impl HoldingWalks {
     }
 
     /// Run the holding-period test for a dividend on `listing_id` whose shares
-    /// went ex-dividend on `ex_date` (the caller falls back to the payment date
-    /// when no ex-date was recorded).
+    /// went ex-dividend on `ex_date` (the caller resolves it via
+    /// `Income::ex_or_pay_date`, which falls back to the payment date when no
+    /// ex-date was recorded).
     ///
     /// Walks the listing's trade history (trade dates; LIFO stack of acquisition
     /// parcels). Units held when the shares go ex-dividend are the entitled units;
@@ -346,7 +347,7 @@ pub async fn db_franked_dividends(
             tax_year,
             listing_id: income.listing_id,
             date_paid: income.date_paid,
-            ex_date: income.ex_date.unwrap_or(income.date_paid),
+            ex_date: income.ex_or_pay_date(),
             credits_aud,
         });
         *attached_by_year.entry(tax_year).or_default() += credits_aud;

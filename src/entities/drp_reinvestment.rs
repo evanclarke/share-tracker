@@ -219,14 +219,14 @@ pub async fn db_reinvest(
         listing_id,
         holding_account_id,
         date_paid,
-        ex_date,
         ..
     } = income;
     let cash = income.net_cash_received();
 
     // Reinvestability is decided as at the ex date (DRP participation is fixed
-    // at the record date), falling back to the pay date when not recorded.
-    let entitlement_date = ex_date.unwrap_or(date_paid);
+    // at the record date), falling back to the pay date when not recorded —
+    // the model's own `ex_or_pay_date`.
+    let entitlement_date = income.ex_or_pay_date();
 
     // That date must fall inside an enrolment period *for the distribution's
     // holding account* — half-open [enrolment_date, unenrolment_date),

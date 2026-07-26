@@ -160,6 +160,23 @@ impl Income {
         }
     }
 
+    /// The date the distribution went ex — the date the entitlement to it was
+    /// fixed — falling back to the payment date when the statement didn't
+    /// record one.
+    ///
+    /// Distinct from [`Self::assessment_date`]: that is *when the income is
+    /// taxed*, this is *who was entitled to it*. The two rules the entitlement
+    /// side drives both read it — whether a DRP enrolment period covered the
+    /// holding when the distribution went ex
+    /// (`entities::drp_reinvestment`, since participation is fixed at the
+    /// record date), and the start of the franking holding-period window the
+    /// at-risk test measures (`reports::franking`). The fallback is the
+    /// conservative one: with no ex date recorded, the payment date is the
+    /// latest the entitlement can have been fixed.
+    pub fn ex_or_pay_date(&self) -> NaiveDate {
+        self.ex_date.unwrap_or(self.date_paid)
+    }
+
     /// The distribution's gross cash components in its own currency:
     /// `franked_amount + unfranked_amount + foreign_source_income`.
     ///
@@ -766,6 +783,34 @@ mod tests {
             .build();
         assert_eq!(income.gross_cash_income(), Decimal::from(100));
         assert_eq!(income.net_cash_received(), Decimal::from(92));
+    }
+
+    /// Entitlement is fixed when the shares go ex, so `ex_or_pay_date` is the
+    /// recorded ex date — and the payment date only when the statement gave
+    /// none. It is not [`Income::assessment_date`]: that answers when the
+    /// income is taxed, which for a trust row can be a different date again.
+    #[test]
+    fn ex_or_pay_date_prefers_the_ex_date_and_is_not_the_assessment_date() {
+        let paid = ymd(2024, 7, 15);
+        let with_ex = test_support::income(1, 1, paid)
+            .with(|i| i.ex_date = Some(ymd(2024, 6, 20)))
+            .build();
+        assert_eq!(with_ex.ex_or_pay_date(), ymd(2024, 6, 20));
+
+        let without_ex = test_support::income(1, 1, paid).build();
+        assert_eq!(without_ex.ex_or_pay_date(), paid);
+
+        // A trust row can have all three dates differ: entitled on the ex
+        // date, assessed on the entitlement date, paid later still.
+        let trust = test_support::income(1, 1, paid)
+            .with(|i| {
+                i.trust_income = true;
+                i.ex_date = Some(ymd(2024, 6, 20));
+                i.entitlement_date = Some(ymd(2024, 6, 30));
+            })
+            .build();
+        assert_eq!(trust.ex_or_pay_date(), ymd(2024, 6, 20));
+        assert_eq!(trust.assessment_date(), ymd(2024, 6, 30));
     }
 
     /// `is_foreign_only` is the Australian-side content test the annual tax
