@@ -277,10 +277,9 @@ pub async fn db_sell_rights(
         };
         let parcel_listing: i64 = parcel.try_get("listing_id")?;
         let parcel_date: NaiveDate = parcel.try_get("date")?;
-        if !matches!(
-            parcel.try_get::<TradeType, _>("trade_type")?,
-            TradeType::Buy | TradeType::DRP
-        ) || parcel_listing != action.listing_id
+        let parcel_type: TradeType = parcel.try_get("trade_type")?;
+        if !parcel_type.is_acquisition()
+            || parcel_listing != action.listing_id
             || parcel_date >= record_date
         {
             return Err(SellRightsError::NotAnOriginalParcel);

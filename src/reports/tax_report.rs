@@ -140,7 +140,7 @@ async fn amma_missing(
         };
         if date < start {
             *opening.entry(listing_id).or_insert(Decimal::ZERO) += signed;
-        } else if date <= end && matches!(trade_type, TradeType::Buy | TradeType::DRP) {
+        } else if date <= end && trade_type.is_acquisition() {
             bought_in_year.insert(listing_id);
         }
     }

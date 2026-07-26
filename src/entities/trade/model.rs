@@ -18,6 +18,24 @@ pub enum TradeType {
     DRP,
 }
 
+impl TradeType {
+    /// True for the types that *create* a parcel — a Buy or a DRP
+    /// reinvestment — as against a Sell, which consumes one.
+    ///
+    /// Every write-time guard that needs something to draw on tests this: a
+    /// Sell allocation's and a rights sale's purchase parcel, an AMIT
+    /// adjustment's target trade. Code that must instead handle each type
+    /// keeps an exhaustive `match` (the activity ledger's event labelling, the
+    /// signed-quantity walks) so adding a variant still fails to compile there
+    /// rather than silently taking a default branch.
+    pub fn is_acquisition(self) -> bool {
+        match self {
+            TradeType::Buy | TradeType::DRP => true,
+            TradeType::Sell => false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Trade {
     pub id: i64,

@@ -579,7 +579,7 @@ pub(crate) async fn upsert_sell_in_tx(
             return Err(SellError::PurchaseParcelMissing);
         };
         let purchase_type: TradeType = purchase_row.try_get("trade_type")?;
-        if !matches!(purchase_type, TradeType::Buy | TradeType::DRP) {
+        if !purchase_type.is_acquisition() {
             return Err(SellError::PurchaseTradeNotBuyOrDrp);
         }
         // A sale can only dispose of units its holding account actually

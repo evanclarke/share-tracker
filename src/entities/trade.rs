@@ -722,6 +722,16 @@ mod tests {
         ));
     }
 
+    /// A parcel is created by a Buy or a DRP reinvestment and consumed by a
+    /// Sell — the classification every "needs something to draw on" write-time
+    /// guard tests (Sell and rights-sale allocations, AMIT adjustments).
+    #[test]
+    fn only_buy_and_drp_are_acquisitions() {
+        assert!(TradeType::Buy.is_acquisition());
+        assert!(TradeType::DRP.is_acquisition());
+        assert!(!TradeType::Sell.is_acquisition());
+    }
+
     #[test]
     fn add_business_days_skips_weekend() {
         let none = HashSet::new();

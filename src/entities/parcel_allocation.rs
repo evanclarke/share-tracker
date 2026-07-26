@@ -124,7 +124,7 @@ pub async fn db_upsert(
             .fetch_one(pool)
             .await?;
     let purchase_type: TradeType = purchase_row.try_get("trade_type")?;
-    if !matches!(purchase_type, TradeType::Buy | TradeType::DRP) {
+    if !purchase_type.is_acquisition() {
         return Err(UpsertError::PurchaseTradeNotBuyOrDrp);
     }
     let purchase_date: NaiveDate = purchase_row.try_get("date")?;

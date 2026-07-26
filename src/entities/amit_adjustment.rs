@@ -91,7 +91,7 @@ pub async fn db_upsert(pool: &SqlitePool, adj: &AmitAdjustment) -> Result<(), Up
         .bind(adj.trade_id)
         .fetch_one(pool)
         .await?;
-    if !matches!(trade_type, TradeType::Buy | TradeType::DRP) {
+    if !trade_type.is_acquisition() {
         return Err(UpsertError::TradeNotBuyOrDrp);
     }
 
