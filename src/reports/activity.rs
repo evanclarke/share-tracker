@@ -484,8 +484,10 @@ pub async fn db_activity(
 }
 
 /// The trade's event label: its type, qualified by the operation that created
-/// it (the provenance columns / the transfer's network-fee link).
-fn trade_event(t: &Trade, fee_sale_ids: &HashSet<i64>) -> String {
+/// it (the provenance columns / the transfer's network-fee link). `pub(crate)`
+/// so the annual tax report's disposal schedule can label each parcel's
+/// acquisition the same way this ledger does, instead of a second labeller.
+pub(crate) fn trade_event(t: &Trade, fee_sale_ids: &HashSet<i64>) -> String {
     let base = match t.trade_type {
         TradeType::Buy => "Buy",
         TradeType::Sell => "Sell",

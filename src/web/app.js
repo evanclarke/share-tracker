@@ -24,6 +24,7 @@ import {
 import { ENTITIES, REPORTS, ACTIONS } from './config.js';
 import { seriesChart, presetRange, sliceSeries } from './chart.js';
 import { buildNav, setActiveNav } from './nav.js';
+import { viewTaxReport } from './taxreport.js';
 
 const entityBySlug = {};
 ENTITIES.forEach(function (e) { entityBySlug[e.slug] = e; });
@@ -1742,6 +1743,7 @@ async function render() {
         if (parts[2] && parts[3]) return await viewSnapshotDetail(parts[2], parts[3]);
         return await viewSnapshots();
       }
+      if (report.custom === 'tax-report') return await viewTaxReport();
       return await viewReport(report);
     }
     throw new Error('Not found');

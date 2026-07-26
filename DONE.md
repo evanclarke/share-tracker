@@ -1641,3 +1641,108 @@ Client-side-only change to the performance panel (`performancePanel`/`renderPeri
   from the latest snapshot) with the checkbox still unchecked from an earlier toggle; applying a
   custom range clears the remembered preset and the next reload falls back to All. Screenshots
   confirm the 2Y/3Y buttons render and the active preset is visibly highlighted.
+
+## Annual tax report — printable per-year tax document (REQUIREMENTS 2026-07-26)
+A year-selected, printable/archivable tax document (`src/reports/tax_report.rs`, `src/web/
+taxreport.js`), distinct from the existing multi-year Tax Summary screen (unchanged).
+Presentation/reconciliation only — no new tax math; every figure is sourced from
+`domain::cost_base`, `reports::realised_gains`, `reports::net_capital_gain`, and
+`reports::tax_summary`.
+- [x] Itemised cost-base adjustments: `domain::cost_base::adjustment_detail` — a reporting-only
+      sibling of `adjusted_cost_base` (not a change to `CostBase` itself, which stays on the hot
+      path of five reports) returning one `CostBaseAdjustment` row per AMIT/return-of-
+      capital/split-rebase adjustment, each with its date, human reference, per-unit figure, and a
+      `capped` bit marking the row that first drives the running balance to nil (E10/G1). Fed by
+      the new `entities::amit_adjustment::db_cost_base_reduction_detail` (the itemised sibling of
+      `db_cost_base_reductions`). Tests (`cost_base.rs`):
+      `itemised_amit_rows_sum_to_the_netted_reduction_including_the_floored_case`,
+      `itemised_roc_and_split_rows_sum_to_the_netted_reduction` — itemised rows sum exactly to
+      `CostBase`'s netted `amit_reduction`/`roc_reduction`, including the floored case
+- [x] `src/reports/tax_report.rs`: `GET /reports/tax-report/years` and `POST /reports/tax-report`
+      (body `{ tax_year }`), registered in `reports::router()`. The core financial sections (the
+      disposal schedule, the CGT summary, the year's `TaxYearSummary` line) read on one
+      `pool.begin()` transaction, folding in `realised_gains::db_realised_gains_on` and the new
+      `tax_summary::db_tax_summary_on`/`net_capital_gain::db_cgt_summary_year`; the completeness
+      cross-checks and franking-entitlement detail deliberately read their own snapshots (advisory
+      notes/drilldown rows alongside a total computed elsewhere — documented in the module doc). An
+      out-of-range year returns a zeroed document, not an error. Test:
+      `empty_year_returns_zeroed_document_not_error`
+- [x] Completeness section: `amma_missing` — a new holdings-based check (a simple net-Buy/DRP-minus-
+      Sell walk per AMIT listing, not cost-base aware) that fires for a fund held during the year
+      with *no AMMA statement and no cash rows at all* — the gap the existing cash-driven
+      `amit_cash_cross_check` documents it cannot catch — plus that report's and `e4_cross_check`'s
+      existing alerts filtered to the year. Non-blocking; `complete` true only when all three are
+      empty. Tests: `amma_missing_is_holdings_based_and_clears_once_entered`,
+      `amma_missing_ignores_a_listing_not_held_during_the_year`
+- [x] Trading activity section: per-parcel disposal detail grouped by listing (buy date/price,
+      adjusted cost base with the itemised adjustment rows nested under it, sell date/price,
+      gain/loss, discounted gain/loss, units, brokerage/GST both sides, contract note references,
+      acquisition provenance via `activity::trade_event` — made `pub(crate)` — and native-currency/
+      buy-and-sell-month-rate detail for a non-AUD parcel), with per-listing and grand totals
+      computed server-side in `Decimal`. Test: `disposal_figures_equal_realised_gains_for_the_same_year`
+- [x] Gain/loss summary section: `net_capital_gain::CgtSummaryYear` / `db_cgt_summary_year` — the
+      ATO worksheet layout (short-term less losses; long-term split into the grossed-up AMMA
+      discount-distribution component and everything else, less losses, less the 50% concession).
+      `GrossBuckets` gained one field (`amma_discount_grossed_up`) to carry the split through the
+      existing `gross_buckets`/`net_years` pipeline unchanged — no second netting implementation;
+      `NetCapitalGainYear`'s public fields and CSV export are untouched. Test:
+      `cgt_summary_reconciles_to_net_capital_gain_year`
+- [x] Income section: Trust (+ full AMMA statement component detail), Dividend (each row carrying
+      its `franking_status` — `entitled`/`denied`/`exempt_small_shareholder` — from
+      `franking_at_risk`), Foreign, Interest, ESS, and Deductions detail, every AUD figure converted
+      via `tax_summary`'s own `aud_field`/`aud_label` helpers (made `pub(crate)`, not re-implemented).
+      Test: `income_sections_sum_to_tax_year_summary`
+- [x] Overall tax summary section: the year's `TaxYearSummary` fields paired with their ATO labels,
+      reusing `tax_summary`'s `CSV_HEADER`/`CSV_ATO_LABELS` (made `pub(crate)`) zipped together —
+      one source of truth for the labels, shared with the CSV export; `db_tax_summary` factored into
+      a `db_tax_summary_on(conn)` so the single-year read doesn't re-run the whole multi-year
+      aggregation on its own transaction
+- [x] Web UI: new `src/web/taxreport.js` module (added to `JS_MODULES` in `src/web.rs`, hard-coded
+      length bumped 6→7), a `custom: 'tax-report'` REPORTS entry in `config.js`, a year dropdown +
+      Generate button (nothing runs until pressed), a Print/Save-as-PDF button (`window.print()`).
+      Renders plain semantic `<table>`s, deliberately not through `filterableTable` (its filter row,
+      sort indicators, and 50-row pager have no business in a print document — the pager would
+      silently print only the first page); the exception is recorded in CLAUDE.md's web-frontend
+      module-graph description. Test: `web::tests::annual_tax_report_ui_present`
+- [x] New `@media print` block in `src/web/style.css` (none existed before): hides
+      nav/menus/toast/the year-select toolbar, drops `th`'s sticky positioning, repeats table
+      headers per page (`thead { display: table-header-group }`), forces white background/black
+      text, avoids breaking a table row/section across a page. Test:
+      `web::tests::annual_tax_report_print_styles_present`
+- [x] Docs per the standard sync rule: `docs/API.md` (a new "Annual tax report" section — both
+      endpoints, response shape, the holdings-based completeness rule and why it's non-blocking, the
+      "every figure is sourced from the existing pipelines" note — plus the Web frontend section's
+      module table and report list), README's Features list (a new bullet) and Web UI bullet,
+      CLAUDE.md's web-frontend module-graph description (the `filterableTable` exception and
+      `taxreport.js`/`nav.js` added to the file list)
+- [x] `cargo build`, `cargo test` (1144 passed), `cargo fmt --check`, `node --test
+  'src/web/*.test.js'` (55 passed), and `scripts/ui-smoke.sh` (exit 0, "all routes rendered") all
+  clean; `cargo deny check advisories` clean (no dependency changes). Manually verified end-to-end
+  against a live scratch server: seeded an AUD listing with a discount-eligible disposal and an
+  AMIT listing with no AMMA statement — `POST /reports/tax-report` returned the correct itemised
+  cost base ($8010.945 initial → $3204.378 adjusted for the 40/100-unit allocation), proceeds
+  ($4389.055), gain ($1184.677), and 50%-discounted gain ($592.3385), matching `realised_gains` and
+  `net_capital_gain` exactly; `completeness.amma_missing` correctly flagged the AMIT listing (held,
+  no cash rows, no statement — the gap the existing cash-driven check misses) and cleared once an
+  AMMA statement was entered. `scripts/ui-check.sh --seed demo '#/r/tax-report'` confirmed the
+  initial screen (year dropdown populated from real data, Generate/Print controls, nav highlighting
+  the new Reports → CGT & tax entry) renders correctly in headless Chrome.
+
+## Annual tax report: subtotal/total figures showed raw Decimal precision (2026-07-26 follow-up)
+User feedback: several fields — most visibly the disposal subtotal/total lines — rendered with far
+more decimal places than a money figure needs (e.g. `592.33850`, `3204.378`). `taxreport.js` builds
+most money cells through the shared `moneyTd`/`moneyEl` helpers (which round through `numericDisplay`
+the same way every other screen does), but the subtotal/total paragraphs and two alert messages were
+built as plain string concatenation using `cellText` — which prints a `Decimal` verbatim, and this
+report's totals routinely carry 3+ places from pro-rated brokerage/GST and the 50% discount halving.
+- [x] Added `moneyText(value)` (the plain-string counterpart to `moneyEl`, same `numericDisplay`
+      rounding) and used it in the disposal subtotal/total lines and the two completeness alert
+      messages (`amit_cash_alerts`/`e4_alerts`) that had been using `cellText` on a money figure
+- [x] `genericTable` (the income section's generic renderer) only money-formatted `_aud`-suffixed
+      columns; the AMMA/trust `tax_deferred_amount`/`tax_free_amount` fields are native-currency
+      (informational, never AUD-converted) but still cent figures — added an explicit
+      `EXTRA_MONEY_COLUMNS` list so they round too
+- [x] Verified: `node --check src/web/taxreport.js`, `cargo build`, `cargo test` (1144 passed),
+  `cargo fmt --check`, `node --test 'src/web/*.test.js'` (55 passed) all clean; confirmed
+  `numericDisplay` rounds the actual report figures correctly (`1184.677` → `1,184.68`,
+  `592.33850` → `592.34`, `3204.378` → `3,204.38`, `80.10945` → `80.11`, full value kept on hover)

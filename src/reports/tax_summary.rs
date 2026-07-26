@@ -145,7 +145,7 @@ pub fn router() -> Router<SqlitePool> {
 /// CSV export columns — `TaxYearSummary`'s fields in declaration order. The csv
 /// writer rejects a record whose length differs from this header (see
 /// `reports::export`), so a drift between the two fails loudly.
-const CSV_HEADER: &[&str] = &[
+pub(crate) const CSV_HEADER: &[&str] = &[
     "tax_year",
     "dividends_assessable",
     "interest_income",
@@ -190,7 +190,7 @@ const CSV_HEADER: &[&str] = &[
 /// question 18's net-capital-gain calculation, whose final 18H/18A/18V figures
 /// the net-capital-gain export carries. The full mapping rationale is in
 /// `docs/API.md`.
-const CSV_ATO_LABELS: &[&str] = &[
+pub(crate) const CSV_ATO_LABELS: &[&str] = &[
     export::ATO_LABELS_MARKER, // tax_year
     "11S + 11T",               // dividends_assessable (unfranked + franked)
     "10L",                     // interest_income (Australian gross, incl. TFN withheld)
@@ -283,8 +283,10 @@ fn fito_de_minimis_aud() -> Decimal {
 /// pre-loaded ATO rate for `currency` and the month of `date`. Income and
 /// AMMA records carry no manual fx override, so a non-AUD amount with no ATO
 /// rate fails loudly (the `FxError` surfaces as a decode error) rather than
-/// being passed through or zeroed.
-fn aud_field(
+/// being passed through or zeroed. `pub(crate)` so the annual tax report's
+/// per-record income detail converts every figure exactly the same way this
+/// report's totals do.
+pub(crate) fn aud_field(
     fx: &FxRates,
     row: &sqlx::sqlite::SqliteRow,
     field: &str,
@@ -298,7 +300,7 @@ fn aud_field(
 /// AUD figure for an ESS discount label: the statement-AUD override column
 /// (`aud_<field>` — the employer's stated AUD figure, used verbatim) when
 /// present, otherwise the label converted like any other field.
-fn aud_label(
+pub(crate) fn aud_label(
     fx: &FxRates,
     row: &sqlx::sqlite::SqliteRow,
     field: &str,
@@ -315,6 +317,18 @@ pub async fn db_tax_summary(pool: &SqlitePool) -> Result<Vec<TaxYearSummary>, sq
     // One read transaction for the income-side inputs (and the FX rates that
     // convert them), so they come from a single consistent snapshot.
     let mut tx = pool.begin().await?;
+    let result = db_tax_summary_on(&mut tx).await?;
+    tx.commit().await?;
+    Ok(result)
+}
+
+/// [`db_tax_summary`] on the caller's own connection, for callers (the
+/// annual tax report) folding a single year's summary into a wider
+/// single-snapshot read transaction instead of re-running this whole
+/// multi-year aggregation on its own transaction.
+pub(crate) async fn db_tax_summary_on(
+    tx: &mut sqlx::SqliteConnection,
+) -> Result<Vec<TaxYearSummary>, sqlx::Error> {
     // An AMIT listing's cash rows are excluded outright: for an AMIT the AMMA
     // attribution is the only assessable record — the cash advice exists to
     // drive the DRP chain, and counting its cash alongside the AMMA components
@@ -374,14 +388,13 @@ pub async fn db_tax_summary(pool: &SqlitePool) -> Result<Vec<TaxYearSummary>, sq
     // small-shareholder exemption test — the loader shared with the franking
     // at-risk report, so the two reports can never disagree about them.
     let (franked_dividends, attached_credits_by_year) =
-        franking::db_franked_dividends(&mut tx, &fx).await?;
+        franking::db_franked_dividends(tx, &fx).await?;
     // The holding-period walks' inputs (listing preference, trades, splits)
     // load on the same transaction, so the denials below are computed from the
     // same snapshot as every other line — a trade committed after this point
     // can't change the outcome — and each dividend's walk below is a pure
     // in-memory pass, not more queries.
-    let walks = franking::HoldingWalks::load(&mut tx).await?;
-    tx.commit().await?;
+    let walks = franking::HoldingWalks::load(tx).await?;
 
     let mut map: HashMap<i32, TaxYearSummary> = HashMap::new();
 

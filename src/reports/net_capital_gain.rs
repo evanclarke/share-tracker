@@ -172,6 +172,14 @@ struct GrossBuckets {
     e10: Decimal,
     /// Gross CGT event G1 gains folded into the buckets above (informational).
     g1: Decimal,
+    /// The AMMA discount-method distribution component of `discount_eligible`
+    /// (grossed up ×2), tracked separately so the annual tax report can show
+    /// it on its own ATO-worksheet line ("Discounted Capital Gain
+    /// Distributions (Grossed Up)") — `discount_eligible` itself keeps
+    /// merging it with realised long-term sells and any discount-eligible
+    /// E10/G1 gain, since a capital loss is applied to the combined total
+    /// either way.
+    amma_discount_grossed_up: Decimal,
 }
 
 /// Read a TEXT decimal column and convert it to AUD via the pre-loaded ATO
@@ -496,7 +504,9 @@ async fn gross_buckets(
         let other = aud_field(&fx, row, "cgt_other_gains", &currency, d)?;
 
         let b = buckets.entry(year_end.year()).or_default();
-        b.discount_eligible += discount_net * Decimal::from(2);
+        let grossed_up = discount_net * Decimal::from(2);
+        b.discount_eligible += grossed_up;
+        b.amma_discount_grossed_up += grossed_up;
         b.other += indexation + other;
     }
 
@@ -582,6 +592,93 @@ fn net_years(
             year
         })
         .collect()
+}
+
+/// Extra CGT-worksheet detail for one tax year, reproducing the ATO
+/// worksheet layout (`docs/ato/personal-investors-guide-managed-fund-
+/// distributions.md`) the annual tax report prints. Kept off
+/// [`NetCapitalGainYear`] itself — unlike that struct this is never exported
+/// as CSV — but every figure here is derived from the exact same
+/// `gross_buckets`/`net_years` pipeline that struct comes from, never a
+/// second implementation of the netting rule.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct CgtSummaryYear {
+    pub tax_year: i32,
+    /// "Capital Gains on shares applicable for 'Other' method (short term
+    /// gains)" — `NetCapitalGainYear::other_gains` unchanged (there's no AMMA
+    /// distribution split on this side: an AMMA's indexation/other-method
+    /// gains are already the full untaxed amount, not a halved distribution
+    /// figure needing a separate grossed-up line).
+    pub short_term_gains: Decimal,
+    /// "Capital Gains on shares applicable for 'Discount' method (long term
+    /// gains)" — `discount_eligible_gains` less the AMMA distribution
+    /// component below (realised long-term sells plus any discount-eligible
+    /// E10/G1 gain).
+    pub long_term_gains: Decimal,
+    /// "Discounted Capital Gain Distributions (Grossed Up)".
+    pub amma_discount_gains_grossed_up: Decimal,
+    /// "less Capital losses available to be offset" (Other method side).
+    pub losses_applied_other: Decimal,
+    pub net_other_gain: Decimal,
+    /// "less Capital losses available to be offset" (Discount method side).
+    pub losses_applied_discount: Decimal,
+    pub net_discount_eligible_gain: Decimal,
+    /// "less CGT Concession Amount @ 50%".
+    pub cgt_concession_amount: Decimal,
+    /// "Capital Gain" — the final assessable net capital gain.
+    pub net_capital_gain: Decimal,
+    pub capital_losses_this_year: Decimal,
+    pub capital_loss_brought_forward: Decimal,
+    pub capital_loss_carried_forward: Decimal,
+    pub cgt_event_e10_gain: Decimal,
+    pub cgt_event_g1_gain: Decimal,
+    pub taxpayer_basis: String,
+}
+
+/// [`CgtSummaryYear`] for one tax year — `None` when the year has no
+/// recorded gain/loss activity at all (matches [`NetCapitalGainYear`]'s own
+/// behaviour of only emitting a row for years with something to report; an
+/// out-of-range or otherwise empty year has nothing to show). Runs the whole
+/// loss chain from the first recorded year — the carried-forward balance can
+/// only be computed by walking every prior year in order — then picks out
+/// the requested one, the same full-history computation
+/// [`db_net_capital_gain`] already does.
+pub(crate) async fn db_cgt_summary_year(
+    conn: &mut sqlx::SqliteConnection,
+    tax_year: i32,
+) -> Result<Option<CgtSummaryYear>, sqlx::Error> {
+    let realised = super::realised_gains::db_realised_gains_on(&mut *conn).await?;
+    let buckets = gross_buckets(&mut *conn, &realised).await?;
+    let amma_grossed_up: HashMap<i32, Decimal> = buckets
+        .iter()
+        .map(|(y, b)| (*y, b.amma_discount_grossed_up))
+        .collect();
+    let opening = crate::entities::cgt_settings::db_opening_capital_loss(&mut *conn).await?;
+    let years = net_years(buckets, opening);
+    Ok(years.into_iter().find(|y| y.tax_year == tax_year).map(|y| {
+        let amma = amma_grossed_up
+            .get(&tax_year)
+            .copied()
+            .unwrap_or(Decimal::ZERO);
+        CgtSummaryYear {
+            tax_year: y.tax_year,
+            short_term_gains: y.other_gains,
+            long_term_gains: y.discount_eligible_gains - amma,
+            amma_discount_gains_grossed_up: amma,
+            losses_applied_other: y.other_gains - y.net_other_gain,
+            net_other_gain: y.net_other_gain,
+            losses_applied_discount: y.discount_eligible_gains - y.net_discount_eligible_gain,
+            net_discount_eligible_gain: y.net_discount_eligible_gain,
+            cgt_concession_amount: y.cgt_discount,
+            net_capital_gain: y.net_capital_gain,
+            capital_losses_this_year: y.capital_losses,
+            capital_loss_brought_forward: y.capital_loss_brought_forward,
+            capital_loss_carried_forward: y.capital_loss_carried_forward,
+            cgt_event_e10_gain: y.cgt_event_e10_gain,
+            cgt_event_g1_gain: y.cgt_event_g1_gain,
+            taxpayer_basis: y.taxpayer_basis,
+        }
+    }))
 }
 
 async fn net_capital_gain_handler(

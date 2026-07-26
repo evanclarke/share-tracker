@@ -544,6 +544,11 @@ export const REPORTS = [
     ],
   },
   { slug: 'tax-summary', title: 'Tax Summary', api: '/portfolio/tax-summary', method: 'GET', export: true, menu: 'Reports', section: 'CGT & tax', desc: 'Income aggregated by Australian financial year.' },
+  {
+    slug: 'tax-report', title: 'Annual Tax Report', custom: 'tax-report', api: '/reports/tax-report',
+    menu: 'Reports', section: 'CGT & tax',
+    desc: 'A printable, archivable tax document for one financial year — trading gains/losses with a full cost-base breakdown, the ATO gain/loss worksheet, income by category, and a data-completeness check. Print or Save as PDF to archive it.',
+  },
   { slug: 'exchange-mic-validation', title: 'Exchange MIC Validation', api: '/reports/exchange_mic_validation', method: 'GET', statusField: 'registry_status', menu: 'Reports', section: 'Cross-checks & alerts', desc: 'Curated exchanges checked against the ISO MIC registry.' },
   { slug: 'settlement-holiday-coverage', title: 'Settlement Holiday Coverage', api: '/reports/settlement_holiday_coverage', method: 'GET', statusField: 'coverage_status', menu: 'Reports', section: 'Cross-checks & alerts', desc: 'Trades whose settlement window falls outside the seeded exchange-holiday calendars (settlement may have skipped weekends only).' },
   { slug: 'e4-cross-check', title: 'Tax-Deferred E4 Cross-Check', api: '/reports/e4_cross_check', method: 'GET', menu: 'Reports', section: 'Cross-checks & alerts', desc: 'Trust income rows whose statement reported a tax-deferred amount (a CGT event E4 cost-base reduction) with no Return of capital corporate action on the listing in the same financial year — enter the action to clear a row.' },

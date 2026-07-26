@@ -7,8 +7,10 @@
 //! (`<script type="module">` in the shell): `app.js` is the entry point (the
 //! generic rendering engine and router) importing `config.js` (the
 //! ENTITIES/REPORTS/ACTIONS configuration), `forms.js` (field constructors and
-//! form wiring), and `util.js` (shared utilities) — each import specifier must
-//! have a matching `/static/...` route here. The app is a hash-routed SPA that
+//! form wiring), `util.js` (shared utilities), and `taxreport.js` (the Annual
+//! Tax Report's bespoke, non-`filterableTable` print-document renderer) —
+//! each import specifier must have a matching `/static/...` route here. The
+//! app is a hash-routed SPA that
 //! talks to the existing JSON API, so `/` is the only HTML entry point (deep
 //! links use `#/...` fragments, which never reach the server) and no SPA
 //! fallback route is needed.
@@ -34,12 +36,13 @@ const STYLE_CSS: &str = include_str!("web/style.css");
 /// The ES modules making up the app, as (route, source) pairs: the `app.js`
 /// entry point plus everything it (transitively) imports. A new module is
 /// served by adding a pair here.
-const JS_MODULES: [(&str, &str); 6] = [
+const JS_MODULES: [(&str, &str); 7] = [
     ("/static/app.js", include_str!("web/app.js")),
     ("/static/chart.js", include_str!("web/chart.js")),
     ("/static/config.js", include_str!("web/config.js")),
     ("/static/forms.js", include_str!("web/forms.js")),
     ("/static/nav.js", include_str!("web/nav.js")),
+    ("/static/taxreport.js", include_str!("web/taxreport.js")),
     ("/static/util.js", include_str!("web/util.js")),
 ];
 
@@ -929,6 +932,36 @@ mod tests {
     async fn tax_summary_ui_present() {
         let js = app_js_body().await;
         assert!(js.contains("/portfolio/tax-summary"));
+    }
+
+    /// The Annual Tax Report — a printable per-year document, distinct from
+    /// the multi-year Tax Summary screen above. Pins: the config entry routes
+    /// through the `custom` dispatch (not the generic `filterableTable`
+    /// report machinery — a print document needs neither its pager nor its
+    /// filter row), both endpoints, the Generate/Print controls, and every
+    /// section heading; the print stylesheet is pinned separately below.
+    #[tokio::test]
+    async fn annual_tax_report_ui_present() {
+        let js = app_js_body().await;
+        assert!(js.contains("custom: 'tax-report'"));
+        assert!(js.contains("/reports/tax-report/years"));
+        assert!(js.contains("/reports/tax-report"));
+        assert!(js.contains("viewTaxReport"));
+        assert!(js.contains("Generate report"));
+        assert!(js.contains("Print / Save as PDF"));
+        assert!(js.contains("window.print()"));
+        assert!(js.contains("Data completeness"));
+        assert!(js.contains("Trading activity"));
+        assert!(js.contains("Gain / loss summary"));
+        assert!(js.contains("Overall tax summary"));
+    }
+
+    #[tokio::test]
+    async fn annual_tax_report_print_styles_present() {
+        let css = STYLE_CSS;
+        assert!(css.contains("@media print"));
+        assert!(css.contains(".tax-report-doc"));
+        assert!(css.contains("#topbar"));
     }
 
     #[tokio::test]

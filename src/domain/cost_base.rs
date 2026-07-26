@@ -37,9 +37,10 @@
 
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
+use serde::Serialize;
 use sqlx::{Row, sqlite::SqliteRow};
 
-use crate::entities::corporate_action::{RocEvent, SplitEvent, per_unit_reduction};
+use crate::entities::corporate_action::{RocEvent, SplitEvent, per_unit_reduction, split_ratio};
 use crate::infra::decimal::row_dec;
 use crate::infra::fx;
 
@@ -206,6 +207,188 @@ pub fn adjusted_cost_base(
     })
 }
 
+/// One AMMA statement's whole-parcel AMIT cost-base reduction
+/// (`amit_adjustments.quantity × amma_statements.cost_base_adjustment`), the
+/// itemised input [`adjustment_detail`] needs in place of
+/// [`adjusted_cost_base`]'s single pre-summed `amit_reduction` total. Produced
+/// by `entities::amit_adjustment::db_cost_base_reduction_detail`.
+#[derive(Debug, Clone, Copy)]
+pub struct AmitReductionEvent {
+    pub amma_statement_id: i64,
+    pub tax_year_end_date: NaiveDate,
+    /// The whole-parcel reduction from this one statement (native currency).
+    pub amount: Decimal,
+}
+
+/// Which step of the pipeline (see the module doc) a [`CostBaseAdjustment`]
+/// row belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum AdjustmentKind {
+    AmitCostBase,
+    ReturnOfCapital,
+    /// A split/consolidation re-bases the unit count but reduces nothing
+    /// (TD 2000/10) — carries `amount: 0`; included purely so a reader can
+    /// reconcile a changed unit count against the source documents.
+    SplitRebase,
+}
+
+/// One line of the reason the adjusted cost base is what it is — the
+/// itemised detail behind [`CostBase::amit_reduction`] / `roc_reduction`,
+/// which are cumulative totals. Reporting-only: never consumed by a
+/// calculation, only rendered. Native currency, like [`CostBase`] itself,
+/// until the caller converts (each row's `amount` divides by the same
+/// acquisition-month rate as the parcel's other cost-base components, per
+/// [`CostBase::into_aud_with`]'s step-5 simplification).
+#[derive(Debug, Clone, Serialize)]
+pub struct CostBaseAdjustment {
+    pub kind: AdjustmentKind,
+    /// The AMMA statement's year end / the return-of-capital payment date /
+    /// the split's effective date.
+    pub date: NaiveDate,
+    /// Human-readable source of the row, e.g. "AMMA statement 12 (year ended
+    /// 2025-06-30)", "Return of capital @ 0.15 AUD/unit", "2-for-1 split".
+    pub reference: String,
+    /// Native-currency reduction per as-acquired unit, where meaningful
+    /// (`None` for a whole-parcel AMIT row or a split rebase).
+    pub per_unit: Option<Decimal>,
+    /// The reduction this row applies to the costed units, native currency —
+    /// the *full* amount even where it (or a later row) pushes the running
+    /// balance past nil; rows sum exactly to [`CostBase::amit_reduction`] (the
+    /// [`AdjustmentKind::AmitCostBase`] rows) or `roc_reduction` (the
+    /// [`AdjustmentKind::ReturnOfCapital`] rows).
+    pub amount: Decimal,
+    /// This row is the one that first drives the running balance to nil, or
+    /// falls after that point (CGT event E10/G1) — the excess is a capital
+    /// gain in the net-capital-gain report, not reflected in the cost base.
+    pub capped: bool,
+}
+
+/// The itemised detail behind [`adjusted_cost_base`]'s AMIT and
+/// return-of-capital reductions, plus informational split-rebase rows, for
+/// `units` as-acquired units of `parcel`. Mirrors `adjusted_cost_base`'s
+/// walk (steps 2–4 of the module doc) so the two can never disagree — a test
+/// pins the rows summing to the same function's netted totals.
+///
+/// `amit_events` replaces `adjusted_cost_base`'s single pre-summed
+/// `amit_reduction`: one [`AmitReductionEvent`] per AMMA statement affecting
+/// this parcel (`entities::amit_adjustment::db_cost_base_reduction_detail`),
+/// in `tax_year_end_date` order. `roc_events`, `splits` and `up_to` are the
+/// same inputs as `adjusted_cost_base`.
+pub fn adjustment_detail(
+    parcel: &Parcel<'_>,
+    units: Decimal,
+    amit_events: &[AmitReductionEvent],
+    roc_events: &[RocEvent],
+    splits: &[SplitEvent],
+    up_to: Option<NaiveDate>,
+) -> Result<Vec<CostBaseAdjustment>, sqlx::Error> {
+    let initial_cost =
+        parcel.average_price * parcel.quantity + parcel.brokerage + parcel.gst_on_brokerage;
+    let mut rows = Vec::new();
+
+    // AMIT reductions (CGT event E10): whole-parcel, in statement-year order.
+    // The running balance floors at nil exactly like adjusted_cost_base's
+    // single `(initial_cost - amit_reduction).max(0)` — flooring after each
+    // step never loses value versus one accumulated subtraction, since every
+    // step only ever subtracts a non-negative amount.
+    let mut running = initial_cost;
+    for e in amit_events {
+        let before = running;
+        running = (running - e.amount).max(Decimal::ZERO);
+        let capped = before <= Decimal::ZERO || e.amount > before;
+        let per_unit = (parcel.quantity != Decimal::ZERO).then(|| e.amount / parcel.quantity);
+        rows.push(CostBaseAdjustment {
+            kind: AdjustmentKind::AmitCostBase,
+            date: e.tax_year_end_date,
+            reference: format!(
+                "AMMA statement {} (year ended {})",
+                e.amma_statement_id, e.tax_year_end_date
+            ),
+            per_unit,
+            amount: e.amount,
+            capped,
+        });
+    }
+    let net_cost = running;
+
+    // Return-of-capital payments (CGT event G1), on the costed units only —
+    // the pool they draw down is the costed units' share of the post-AMIT
+    // cost base, mirroring adjusted_cost_base's
+    // `net_cost * units / parcel.quantity` term.
+    let costed_pool = if parcel.quantity > Decimal::ZERO {
+        net_cost * units / parcel.quantity
+    } else {
+        Decimal::ZERO
+    };
+    let mut roc_running = costed_pool;
+    for e in roc_events {
+        if e.date < parcel.trade_date || up_to.is_some_and(|d| e.date > d) {
+            continue;
+        }
+        if e.currency != parcel.currency {
+            return Err(sqlx::Error::Decode(
+                format!(
+                    "return-of-capital currency {} differs from the parcel's currency {}",
+                    e.currency, parcel.currency
+                )
+                .into(),
+            ));
+        }
+        let (new, old) = split_ratio(splits, parcel.trade_date, Some(e.date));
+        let per_unit = if new == old {
+            e.amount_per_unit
+        } else {
+            e.amount_per_unit * new / old
+        };
+        let amount = per_unit * units;
+        let before = roc_running;
+        roc_running = (roc_running - amount).max(Decimal::ZERO);
+        let capped = before <= Decimal::ZERO || amount > before;
+        rows.push(CostBaseAdjustment {
+            kind: AdjustmentKind::ReturnOfCapital,
+            date: e.date,
+            reference: format!("Return of capital @ {per_unit} {}/unit", parcel.currency),
+            per_unit: Some(per_unit),
+            amount,
+            capped,
+        });
+    }
+
+    // Split/consolidation rebases: informational only (amount 0) — they
+    // explain a changed unit count, never a cost-base reduction.
+    for s in splits {
+        if s.date < parcel.trade_date || up_to.is_some_and(|d| s.date > d) {
+            continue;
+        }
+        rows.push(CostBaseAdjustment {
+            kind: AdjustmentKind::SplitRebase,
+            date: s.date,
+            reference: format!("{}-for-{} split", s.new_units, s.old_units),
+            per_unit: None,
+            amount: Decimal::ZERO,
+            capped: false,
+        });
+    }
+
+    rows.sort_by(|a, b| {
+        a.date
+            .cmp(&b.date)
+            .then(kind_rank(a.kind).cmp(&kind_rank(b.kind)))
+    });
+    Ok(rows)
+}
+
+/// Stable tie-break for same-date rows: AMIT, then return of capital, then
+/// the split that made room for it — an arbitrary but deterministic order
+/// (`adjustment_detail`'s doc comment).
+fn kind_rank(kind: AdjustmentKind) -> u8 {
+    match kind {
+        AdjustmentKind::AmitCostBase => 0,
+        AdjustmentKind::ReturnOfCapital => 1,
+        AdjustmentKind::SplitRebase => 2,
+    }
+}
+
 impl CostBase {
     /// Step 5 of the pipeline: convert every figure to AUD at the ATO
     /// reference rate for the parcel's acquisition month (`acquired` — the
@@ -322,6 +505,54 @@ mod tests {
         assert_eq!(cb.adjusted, Decimal::ZERO);
     }
 
+    /// `adjustment_detail`'s itemised AMIT rows must sum to exactly the same
+    /// `amit_reduction` `adjusted_cost_base` reports — including the E10
+    /// floored case, where the second statement is the one that pushes the
+    /// running balance to nil.
+    #[test]
+    fn itemised_amit_rows_sum_to_the_netted_reduction_including_the_floored_case() {
+        let amit = |id: i64, y: i32, amount: i64| AmitReductionEvent {
+            amma_statement_id: id,
+            tax_year_end_date: date(y, 6, 30),
+            amount: Decimal::from(amount),
+        };
+        // Two statements, neither alone exceeding the $1000 cost base.
+        let events = [amit(1, 2024, 500), amit(2, 2025, 600)];
+        let cb = adjusted_cost_base(
+            &parcel(100, 10),
+            Decimal::from(100),
+            events.iter().map(|e| e.amount).sum(),
+            &[],
+            &[],
+            None,
+        )
+        .unwrap();
+        let rows = adjustment_detail(
+            &parcel(100, 10),
+            Decimal::from(100),
+            &events,
+            &[],
+            &[],
+            None,
+        )
+        .unwrap();
+        let amit_rows: Vec<_> = rows
+            .iter()
+            .filter(|r| r.kind == AdjustmentKind::AmitCostBase)
+            .collect();
+        assert_eq!(amit_rows.len(), 2);
+        let total: Decimal = amit_rows.iter().map(|r| r.amount).sum();
+        assert_eq!(total, cb.amit_reduction);
+        assert_eq!(cb.amit_reduction, Decimal::from(1100));
+        assert_eq!(cb.adjusted, Decimal::ZERO); // 1000 - 1100, floored at nil (E10)
+        // The first statement (500 of 1000) doesn't exhaust the cost base;
+        // the second (600, on a remaining balance of 500) does.
+        assert!(!amit_rows[0].capped);
+        assert!(amit_rows[1].capped);
+        assert_eq!(amit_rows[0].date, date(2024, 6, 30));
+        assert_eq!(amit_rows[1].date, date(2025, 6, 30));
+    }
+
     #[test]
     fn roc_payments_reduce_and_g1_floors_at_nil() {
         let roc = |amount: &str, d: NaiveDate| RocEvent {
@@ -402,6 +633,69 @@ mod tests {
         .unwrap();
         assert_eq!(cb.roc_reduction, Decimal::from(50));
         assert_eq!(cb.adjusted, Decimal::from(950));
+    }
+
+    /// `adjustment_detail`'s itemised ROC rows sum to exactly `roc_reduction`
+    /// (including a floored G1 case), and a split within the holding window
+    /// shows up as an informational nil-amount row in date order alongside
+    /// them.
+    #[test]
+    fn itemised_roc_and_split_rows_sum_to_the_netted_reduction() {
+        let split = SplitEvent {
+            date: date(2024, 3, 1),
+            new_units: Decimal::from(2),
+            old_units: Decimal::ONE,
+        };
+        // Two ROC payments after the split: the second (per post-split unit)
+        // exceeds what's left of the parcel's $1000 cost base and floors it.
+        let roc = |amount: &str, d: NaiveDate| RocEvent {
+            date: d,
+            amount_per_unit: amount.parse().unwrap(),
+            currency: "AUD".to_string(),
+        };
+        let events = [roc("0.25", date(2024, 4, 1)), roc("5", date(2024, 5, 1))];
+        let cb = adjusted_cost_base(
+            &parcel(100, 10),
+            Decimal::from(100),
+            Decimal::ZERO,
+            &events,
+            &[split.clone()],
+            None,
+        )
+        .unwrap();
+        let rows = adjustment_detail(
+            &parcel(100, 10),
+            Decimal::from(100),
+            &[],
+            &events,
+            &[split],
+            None,
+        )
+        .unwrap();
+
+        let roc_rows: Vec<_> = rows
+            .iter()
+            .filter(|r| r.kind == AdjustmentKind::ReturnOfCapital)
+            .collect();
+        assert_eq!(roc_rows.len(), 2);
+        let total: Decimal = roc_rows.iter().map(|r| r.amount).sum();
+        assert_eq!(total, cb.roc_reduction);
+        assert_eq!(cb.adjusted, Decimal::ZERO); // G1-floored
+        assert!(!roc_rows[0].capped);
+        assert!(roc_rows[1].capped);
+
+        let split_rows: Vec<_> = rows
+            .iter()
+            .filter(|r| r.kind == AdjustmentKind::SplitRebase)
+            .collect();
+        assert_eq!(split_rows.len(), 1);
+        assert_eq!(split_rows[0].amount, Decimal::ZERO);
+        assert_eq!(split_rows[0].date, date(2024, 3, 1));
+
+        // Rows come back date-ordered: split, then the two ROC payments.
+        assert_eq!(rows[0].kind, AdjustmentKind::SplitRebase);
+        assert_eq!(rows[1].date, date(2024, 4, 1));
+        assert_eq!(rows[2].date, date(2024, 5, 1));
     }
 
     #[test]

@@ -197,6 +197,50 @@ where
     Ok(map)
 }
 
+/// The itemised detail behind [`db_cost_base_reductions`]: every AMMA
+/// statement adjusting a purchase parcel, keyed by `trade_id`, each carrying
+/// its own whole-parcel reduction (`adjustment.quantity ×
+/// amma.cost_base_adjustment`) — the [`crate::domain::cost_base::
+/// AmitReductionEvent`] input `domain::cost_base::adjustment_detail` needs to
+/// itemise the E10 walk instead of `db_cost_base_reductions`' single summed
+/// total. Sorted by `tax_year_end_date` (then statement id) within each
+/// trade, matching the year-order `adjustment_detail`'s running floor
+/// assumes. Generic over the executor so a report can read it on its own
+/// transaction.
+pub async fn db_cost_base_reduction_detail<'e, E>(
+    executor: E,
+) -> Result<HashMap<i64, Vec<crate::domain::cost_base::AmitReductionEvent>>, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
+    let rows = sqlx::query(
+        "SELECT aa.trade_id, a.id AS amma_statement_id, a.tax_year_end_date, aa.quantity, \
+         a.cost_base_adjustment \
+         FROM amit_adjustments aa \
+         JOIN amma_statements a ON a.id = aa.amma_statement_id \
+         ORDER BY aa.trade_id, a.tax_year_end_date, a.id",
+    )
+    .fetch_all(executor)
+    .await?;
+
+    let mut map: HashMap<i64, Vec<crate::domain::cost_base::AmitReductionEvent>> = HashMap::new();
+    for row in &rows {
+        let trade_id: i64 = row.try_get("trade_id")?;
+        let amma_statement_id: i64 = row.try_get("amma_statement_id")?;
+        let tax_year_end_date = row.try_get("tax_year_end_date")?;
+        let qty = parse_dec("quantity", row.try_get("quantity")?)?;
+        let cba = parse_dec("cost_base_adjustment", row.try_get("cost_base_adjustment")?)?;
+        map.entry(trade_id)
+            .or_default()
+            .push(crate::domain::cost_base::AmitReductionEvent {
+                amma_statement_id,
+                tax_year_end_date,
+                amount: qty * cba,
+            });
+    }
+    Ok(map)
+}
+
 async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<AmitAdjustment>>, ApiError> {
     db_list(&pool).await.map(Json).map_err(ApiError::from)
 }

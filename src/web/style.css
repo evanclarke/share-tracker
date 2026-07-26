@@ -286,3 +286,30 @@ input[type=checkbox] { width: auto; }
 /* The overview's Manual Price Overrides control, demoted from a full .card
    above the results to a plain form sitting beside the holdings table. */
 .price-form .price-overrides summary { font-size: 1em; }
+
+/* ---- Annual Tax Report (src/web/taxreport.js) --------------------------
+   A printable document, not a data grid — plain semantic tables, not
+   filterableTable, so no filter row / sort indicators / pager to style. */
+.badge.warn { background: #fdf3e0; color: var(--warn); }
+.tax-report-doc h1 { margin-bottom: 4px; }
+.tax-report-doc .doc-section { margin: 24px 0; }
+.tax-report-doc h4 { margin: 16px 0 8px; }
+.tax-report-doc table.doc-table th { position: static; } /* no scroll in a document */
+.tax-report-doc tr.adjustment-row td { color: var(--muted); font-size: 12px; white-space: normal; }
+.tax-report-doc tr.note-row td { color: var(--muted); font-size: 12px; white-space: normal; padding-top: 2px; padding-bottom: 10px; }
+.tax-report-doc .listing-group { margin-bottom: 20px; }
+.tax-report-doc p.subtotal, .tax-report-doc p.total { text-align: right; font-weight: 600; }
+.tax-report-doc table.summary-table { max-width: 640px; }
+.tax-report-doc table.summary-table td.indent { padding-left: 24px; }
+.tax-report-doc table.summary-table tr.summary-header td { font-weight: 600; padding-top: 14px; }
+.tax-report-doc table.summary-table tr.summary-total td { font-weight: 600; border-top: 1px solid var(--line); }
+
+@media print {
+  #topbar, #nav, #health-banner, #toast, .tax-report-toolbar { display: none !important; }
+  body, #app { background: #fff; color: #000; }
+  .card, table { box-shadow: none; }
+  @page { margin: 15mm; }
+  table.doc-table th { background: none; }
+  table.doc-table thead { display: table-header-group; }
+  .tax-report-doc tr, .tax-report-doc .doc-section, .tax-report-doc .listing-group { break-inside: avoid; }
+}

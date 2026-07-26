@@ -1280,3 +1280,65 @@ the selected range, which show every figure at zero and bury the holdings that a
   range, the hide-inactive checkbox) and `docs/API.md`'s Web frontend / Period performance
   sections (the endpoint returns a row per holding with any history; the UI hides all-zero rows
   by default)
+
+## Annual tax report — printable per-year tax document (2026-07-26)
+
+The Tax Summary screen (`GET /portfolio/tax-summary`) returns one flat row per financial
+year across every year at once, rendered through the generic `filterableTable`. It answers
+"what goes on the return" but shows no capital-gains working and isn't something to print
+and archive. Add a second, year-selected report built for printing/saving to PDF and filing:
+enough detail to hand-check every figure against the source contract notes and statements.
+Nothing here recomputes tax — every figure is sourced from the existing pipelines
+(`domain::cost_base`, `reports::realised_gains`, `reports::net_capital_gain`,
+`reports::tax_summary`); this is a presentation and reconciliation layer only. The existing
+Tax Summary screen, its endpoint, and its CSV export are unchanged and stay as the
+multi-year/spreadsheet path.
+
+- New endpoints: `GET /reports/tax-report/years` (every FY with any recorded fact, for the
+  UI's year dropdown) and `POST /reports/tax-report` (body `{ "tax_year": N }`) returning
+  the full document for one financial year. An out-of-range year returns a zeroed document,
+  not an error (a mid-year draft is a legitimate use)
+- The document has: a title with the tax year and its date range (1 Jul–30 Jun), a
+  "produced at" timestamp, and these sections:
+  - **Data completeness** — checked at generation time, never blocking: every AMIT listing
+    held at any point in the year with no covering AMMA statement (**holdings-based**, so it
+    also catches a fund-year where no cash rows were entered at all — the existing
+    `amit_cash_cross_check` only fires when cash rows exist), plus the existing AMIT
+    cash-cross-check and E4 cross-check results filtered to the year. Prints a clear
+    verified/not-verified banner so an archived copy always records its own completeness
+    state
+  - **Trading activity gains/losses** — every parcel disposed of in the year (Sells and
+    rights sales/lapses), grouped by listing: buy date, buy price, adjusted cost base with
+    one printed row per adjustment underneath it (AMIT, return-of-capital, split re-basing —
+    itemised detail that doesn't exist anywhere today; `domain::cost_base` only returns
+    netted reduction totals), sell date, sell price, gain/loss, and the CGT-discounted
+    gain/loss. Plus: listing/account identity and contract note references (traceability),
+    per-unit and brokerage figures (so headline numbers are re-derivable by hand), native
+    currency and both months' ATO rates for non-AUD parcels, and acquisition provenance
+    (Buy/DRP/inherited/ESS vest/rights exercise/scrip rollover/demerger, and the deemed
+    acquisition date where it differs from the trade date). Per-listing and grand totals
+  - **Gain/loss summary** — the ATO worksheet layout: short-term (Other method) gains less
+    losses offset; long-term (Discount method) gains plus grossed-up discounted AMMA capital
+    gain distributions, less losses offset, less the 50% CGT concession, to the final Capital
+    Gain figure; plus the brought-forward/carried-forward loss position and the informational
+    E10/G1 gain lines
+  - **Income** — Trust income (non-AMIT trust income rows + AMMA statement component detail),
+    Dividend income (each row with its franking entitlement/denial status), Foreign income
+    (foreign-source income/interest/AMMA foreign income with the FITO de-minimis working) —
+    plus Interest, ESS, and Deductions, needed so the final tax summary section is fully
+    reconcilable from the document alone
+  - **Overall tax summary** — the existing `TaxYearSummary` fields for the year, each paired
+    with its ATO tax-return label (reusing the CSV export's existing label mapping)
+- Print path: a "Print / Save as PDF" button (`window.print()`) plus a new `@media print`
+  stylesheet (none exists today) — hides nav/menus/buttons/the year-select form, drops
+  sticky headers and any pager, repeats table headers per page, forces black-on-white. No
+  new dependency and no server-side PDF generation
+- The report renders as plain semantic tables, not through the generic `filterableTable` —
+  filtering, sorting and the 50-row pager are wrong in a print document (the pager would
+  silently print only the first page). A documented, deliberate exception to the "route new
+  tables through `filterableTable`" convention
+- No schema change and no migration — reads existing tables only
+- Docs per the standard sync rule: `docs/API.md` (both new endpoints, request/response
+  shapes, response codes, the holdings-based completeness rule), README's Features list, and
+  CLAUDE.md's web-frontend section (the `filterableTable` exception and the new
+  `src/web/taxreport.js` module in the module graph)

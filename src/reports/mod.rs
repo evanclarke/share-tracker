@@ -31,6 +31,7 @@ pub mod realised_gains;
 pub mod row_history;
 pub mod settlement_coverage;
 pub mod snapshot;
+pub mod tax_report;
 pub mod tax_summary;
 pub mod unrealised_gains;
 pub mod valuation;
@@ -88,4 +89,5 @@ pub fn router() -> Router<SqlitePool> {
         .merge(franking_at_risk::router())
         .merge(health::router())
         .merge(snapshot::router())
+        .merge(tax_report::router())
 }
