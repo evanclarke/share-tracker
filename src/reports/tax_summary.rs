@@ -294,6 +294,18 @@ pub(crate) fn aud_field(
     date: NaiveDate,
 ) -> Result<Decimal, sqlx::Error> {
     let value = parse_dec(field, row.try_get(field)?)?;
+    aud_value(fx, value, currency, date)
+}
+
+/// [`aud_field`] for a figure already decoded off a model struct rather than
+/// read column-by-column off a row — same rate resolution, same loud failure
+/// when a non-AUD amount has no ATO rate.
+pub(crate) fn aud_value(
+    fx: &FxRates,
+    value: Decimal,
+    currency: &str,
+    date: NaiveDate,
+) -> Result<Decimal, sqlx::Error> {
     Ok(fx.to_aud(value, currency, date, FxOverride::None)?)
 }
 

@@ -109,6 +109,40 @@ impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for Income {
     }
 }
 
+impl Income {
+    /// True when the distribution carries no Australian-sourced component —
+    /// every one of `franked_amount`, `unfranked_amount`, `franking_credits`,
+    /// `lic_capital_gain_deduction`, `conduit_foreign_income` (an Australian
+    /// company's income, only *labelled* conduit — see `tax_summary`, which
+    /// keeps it out of the foreign total) and `tfn_withholding_tax` is zero.
+    /// A foreign company's dividend (e.g. a US-listed RSU holding) is entered
+    /// this way: `foreign_source_income` and `foreign_tax_paid` alone.
+    ///
+    /// This is the "nothing to declare at Item 11 / Item 13" test the
+    /// Australian-side income tables use to skip a row that would otherwise
+    /// print as all zeros — such a row belongs under Item 20 (foreign income)
+    /// instead. Read on the row's own native-currency figures, so the answer
+    /// never depends on an FX rate being importable.
+    ///
+    /// Two corollaries follow from the fields it looks at. A row with no
+    /// amounts at all counts as foreign-only: there is nothing to declare on
+    /// the Australian side either way. And `tax_deferred_amount` is ignored —
+    /// it is a non-assessable payment (a CGT event E4 cost-base reduction),
+    /// not income of any source.
+    pub fn is_foreign_only(&self) -> bool {
+        [
+            self.franked_amount,
+            self.unfranked_amount,
+            self.franking_credits,
+            self.lic_capital_gain_deduction,
+            self.conduit_foreign_income,
+            self.tfn_withholding_tax,
+        ]
+        .iter()
+        .all(|amount| amount.is_zero())
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct IncomeBody {
     pub listing_id: i64,
@@ -636,6 +670,75 @@ mod tests {
                 i.franking_credits = Decimal::from(30);
             })
             .build()
+    }
+
+    /// `is_foreign_only` is the Australian-side content test the annual tax
+    /// report's Item 11 table skips a row by: only a row whose every
+    /// Australian-sourced component is zero counts as foreign-only, and each
+    /// such component on its own is enough to disqualify it. Read off the
+    /// native-currency figures, so a foreign row with no imported FX rate
+    /// still classifies.
+    #[test]
+    fn foreign_only_requires_every_australian_component_to_be_zero() {
+        // A US-listed holding's dividend, entered the way the statement reads.
+        let foreign = test_support::income(1, 1, ymd(2024, 3, 31))
+            .with(|i| {
+                i.currency = "USD".to_string();
+                i.foreign_source_income = Decimal::from(100);
+                i.foreign_tax_paid = Decimal::from(15);
+            })
+            .build();
+        assert!(foreign.is_foreign_only());
+        // An ordinary franked dividend is not.
+        assert!(!dividend_income().is_foreign_only());
+
+        // The same foreign row with one Australian-side component added.
+        let plus = |set: fn(&mut Income)| {
+            let mut income = foreign.clone();
+            set(&mut income);
+            income
+        };
+        for (field, income) in [
+            ("franked_amount", plus(|i| i.franked_amount = Decimal::ONE)),
+            (
+                "unfranked_amount",
+                plus(|i| i.unfranked_amount = Decimal::ONE),
+            ),
+            (
+                "franking_credits",
+                plus(|i| i.franking_credits = Decimal::ONE),
+            ),
+            (
+                "lic_capital_gain_deduction",
+                plus(|i| i.lic_capital_gain_deduction = Decimal::ONE),
+            ),
+            (
+                "conduit_foreign_income",
+                plus(|i| i.conduit_foreign_income = Decimal::ONE),
+            ),
+            (
+                "tfn_withholding_tax",
+                plus(|i| i.tfn_withholding_tax = Decimal::ONE),
+            ),
+        ] {
+            assert!(
+                !income.is_foreign_only(),
+                "{field} is Australian-side content"
+            );
+        }
+
+        // Corollaries: a row with no amounts at all has nothing to declare on
+        // the Australian side either, and a tax-deferred amount is a
+        // non-assessable payment rather than income of any source.
+        let empty = test_support::income(2, 1, ymd(2024, 3, 31)).build();
+        assert!(empty.is_foreign_only());
+        let deferred = test_support::income(3, 1, ymd(2024, 3, 31))
+            .with(|i| {
+                i.trust_income = true;
+                i.tax_deferred_amount = Some(Decimal::from(50));
+            })
+            .build();
+        assert!(deferred.is_foreign_only());
     }
 
     // DB-level tests

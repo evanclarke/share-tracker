@@ -25,6 +25,7 @@ use crate::domain::cost_base::{self, CostBaseAdjustment, ParcelRow};
 use crate::domain::listing_identity::RenameHistory;
 use crate::domain::tax_year::tax_year_for;
 use crate::entities::corporate_action::{RocEvent, SplitEvent};
+use crate::entities::income::Income;
 use crate::entities::trade::{Trade, TradeType};
 use crate::infra::fx::FxRates;
 use crate::infra::http::ApiError;
@@ -718,21 +719,22 @@ async fn income_section(
 
     // Income rows (dividends + non-AMIT trust distributions), same
     // assessment-date rule the tax summary uses.
-    let income_rows = sqlx::query(
-        "SELECT i.id, i.listing_id, i.date_paid, i.ex_date, i.entitlement_date, i.trust_income, \
-                i.franked_amount, i.unfranked_amount, i.foreign_source_income, i.foreign_tax_paid, \
-                i.tfn_withholding_tax, i.franking_credits, i.lic_capital_gain_deduction, \
-                i.tax_deferred_amount, i.currency \
-         FROM income i JOIN listings l ON l.id = i.listing_id \
+    let income_rows: Vec<Income> = sqlx::query_as(
+        "SELECT i.* FROM income i JOIN listings l ON l.id = i.listing_id \
          WHERE NOT l.amit",
     )
     .fetch_all(&mut *conn)
     .await?;
 
-    for row in &income_rows {
-        let date_paid: NaiveDate = row.try_get("date_paid")?;
-        let trust_income: bool = row.try_get("trust_income")?;
-        let entitlement_date: Option<NaiveDate> = row.try_get("entitlement_date")?;
+    for income in &income_rows {
+        let Income {
+            id: income_id,
+            listing_id,
+            date_paid,
+            entitlement_date,
+            trust_income,
+            ..
+        } = *income;
         let assessed = match entitlement_date {
             Some(d) if trust_income => d,
             _ => date_paid,
@@ -740,22 +742,17 @@ async fn income_section(
         if tax_year_for(assessed) != tax_year {
             continue;
         }
-        let listing_id: i64 = row.try_get("listing_id")?;
-        let currency: String = row.try_get("currency")?;
-        let income_id: i64 = row.try_get("id")?;
         let ticker = ticker_as_at(listing_id, assessed);
-        let franked = tax_summary::aud_field(&fx, row, "franked_amount", &currency, assessed)?;
-        let unfranked = tax_summary::aud_field(&fx, row, "unfranked_amount", &currency, assessed)?;
-        let foreign =
-            tax_summary::aud_field(&fx, row, "foreign_source_income", &currency, assessed)?;
-        let foreign_tax =
-            tax_summary::aud_field(&fx, row, "foreign_tax_paid", &currency, assessed)?;
-        let fc = tax_summary::aud_field(&fx, row, "franking_credits", &currency, assessed)?;
-        let lic =
-            tax_summary::aud_field(&fx, row, "lic_capital_gain_deduction", &currency, assessed)?;
-        let tfn = tax_summary::aud_field(&fx, row, "tfn_withholding_tax", &currency, assessed)?;
-        let tax_deferred: Option<Decimal> =
-            crate::infra::decimal::row_opt_dec(row, "tax_deferred_amount")?;
+        // Every figure converts exactly the way the tax summary's own totals
+        // do, at the assessment date's month.
+        let aud = |amount: Decimal| tax_summary::aud_value(&fx, amount, &income.currency, assessed);
+        let franked = aud(income.franked_amount)?;
+        let unfranked = aud(income.unfranked_amount)?;
+        let foreign = aud(income.foreign_source_income)?;
+        let foreign_tax = aud(income.foreign_tax_paid)?;
+        let fc = aud(income.franking_credits)?;
+        let lic = aud(income.lic_capital_gain_deduction)?;
+        let tfn = aud(income.tfn_withholding_tax)?;
 
         if trust_income {
             out.trust_income.push(TrustIncomeRow {
@@ -767,15 +764,10 @@ async fn income_section(
                 franked_amount_aud: franked,
                 unfranked_amount_aud: unfranked,
                 foreign_source_income_aud: foreign,
-                tax_deferred_amount: tax_deferred,
+                tax_deferred_amount: income.tax_deferred_amount,
                 franking_credits_aud: fc,
             });
-        } else if franked > Decimal::ZERO
-            || unfranked > Decimal::ZERO
-            || fc > Decimal::ZERO
-            || lic > Decimal::ZERO
-            || tfn > Decimal::ZERO
-        {
+        } else if !income.is_foreign_only() {
             // Item 11 (Dividends) is Australian-company dividends only — a
             // foreign company's dividend (e.g. a US-listed RSU holding) is
             // entered with only `foreign_source_income` set and reported
@@ -788,7 +780,7 @@ async fn income_section(
                 listing_id,
                 ticker,
                 date_paid,
-                ex_date: row.try_get("ex_date")?,
+                ex_date: income.ex_date,
                 franked_amount_aud: franked,
                 unfranked_amount_aud: unfranked,
                 franking_credits_aud: fc - alert.map_or(Decimal::ZERO, |a| a.credits_denied),
