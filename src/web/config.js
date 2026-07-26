@@ -444,7 +444,7 @@ export const REPORTS = [
     slug: 'attachments', title: 'Attachments', api: '/reports/attachments', method: 'GET',
     menu: 'Reports', section: 'Portfolio',
     desc: 'Every stored document — the file, the activity it is attached to, and that activity’s listing. Download saves the file; View opens it in a new tab; Record opens the owning activity’s own attachments view, where a file can be deleted or another uploaded.',
-    columns: ['id', 'filename', 'content_type', 'byte_size', 'uploaded_at', 'owner_type', 'owner_id', 'owner_description', 'listing_id'],
+    columns: ['id', 'filename', 'content_type', 'byte_size', 'uploaded_at', 'owner_type', 'listing_id', 'owner_description'],
     rowActions: function (row) {
       return [
         { label: 'Download', href: '/attachments/' + row.id + '/content', newTab: true },
