@@ -400,6 +400,26 @@ fn backup_pipeline_documented() {
     ));
 }
 
+/// Docs-sync pin for the `?suffix=` param on `POST /jobs/:name` (the
+/// update.sh pre-upgrade backup): the jobs API documents its allowed
+/// characters and the `422` it produces when invalid, that a suffixed backup
+/// is pruned by the same retention policy as any other, and the README
+/// documents update.sh's abort-before-`pkg add` behaviour and the
+/// `-n`/`--no-backup` escape hatch.
+#[test]
+fn backup_suffix_param_documented() {
+    assert!(API_MD.contains("`POST /jobs/:name?suffix=`"));
+    assert!(API_MD.contains(
+        "Allowed characters are ASCII letters, digits, `.`, `_`, and `-`, up to 40 characters"
+    ));
+    assert!(API_MD.contains(
+        "A suffixed one-off backup is pruned by the same policy as any other — it is not exempt."
+    ));
+    assert!(README_MD.contains("aborts before touching the package"));
+    assert!(README_MD.contains("`-n`/`--no-backup`"));
+    assert!(README_MD.contains("never exempt from pruning"));
+}
+
 /// Doc-only resolution pin for settlement-window forex — CGT events K10/K11
 /// (REQUIREMENTS 2026-06-12, NEEDS DECISION resolved 2026-06-12 as out of
 /// scope): the Known-limitations entry states the rule (cost-base adjustment

@@ -55,20 +55,30 @@ pub async fn init(db_path: &str) -> Result<SqlitePool, sqlx::Error> {
     Ok(pool)
 }
 
-/// Destination filename for a backup taken now: `<file>-YYYY-MM-DD-HHMMSS.db`,
-/// placed in `backup_dir` when configured (so backups can land on another
-/// volume) or beside the database file otherwise. The time component (down to
-/// the second) keeps each weekly backup distinct — the backup job runs weekly,
-/// so a date-only name would collide across runs.
-pub fn backup_path(db_path: &str, backup_dir: Option<&str>) -> String {
-    backup_path_at(db_path, backup_dir, Local::now())
+/// Destination filename for a backup taken now:
+/// `<file>-YYYY-MM-DD-HHMMSS[-suffix].db`, placed in `backup_dir` when
+/// configured (so backups can land on another volume) or beside the database
+/// file otherwise. The time component (down to the second) keeps each weekly
+/// backup distinct — the backup job runs weekly, so a date-only name would
+/// collide across runs. `suffix` (validated by [`validate_backup_suffix`])
+/// labels a one-off backup with why it was taken, e.g. `pre-0.5.1` for an
+/// update.sh pre-upgrade snapshot — it does not change how the file is found
+/// for pruning (see `backup_timestamp`).
+pub fn backup_path(db_path: &str, backup_dir: Option<&str>, suffix: Option<&str>) -> String {
+    backup_path_at(db_path, backup_dir, suffix, Local::now())
 }
 
-fn backup_path_at(db_path: &str, backup_dir: Option<&str>, at: DateTime<Local>) -> String {
+fn backup_path_at(
+    db_path: &str,
+    backup_dir: Option<&str>,
+    suffix: Option<&str>,
+    at: DateTime<Local>,
+) -> String {
     let ts = at.format("%Y-%m-%d-%H%M%S");
+    let suffix_part = suffix.map(|s| format!("-{s}")).unwrap_or_default();
     let stem = db_path.strip_suffix(".db").unwrap_or(db_path);
     match backup_dir {
-        None => format!("{stem}-{ts}.db"),
+        None => format!("{stem}-{ts}{suffix_part}.db"),
         Some(dir) => {
             // Only the filename moves to the configured dir; the db's own
             // directory component is dropped.
@@ -77,11 +87,45 @@ fn backup_path_at(db_path: &str, backup_dir: Option<&str>, at: DateTime<Local>) 
                 .map(|f| f.to_string_lossy().into_owned())
                 .unwrap_or_else(|| stem.to_string());
             Path::new(dir)
-                .join(format!("{name}-{ts}.db"))
+                .join(format!("{name}-{ts}{suffix_part}.db"))
                 .to_string_lossy()
                 .into_owned()
         }
     }
+}
+
+/// Longest accepted `suffix` for a one-off backup (see [`backup`]). The value
+/// lands directly in a filename, so it is kept short and self-documenting
+/// (e.g. `pre-0.5.1`) rather than free text.
+pub const MAX_BACKUP_SUFFIX_LEN: usize = 40;
+
+/// Validate a caller-supplied backup filename suffix. The value is appended
+/// to the backup filename as `-<suffix>.db` (see `backup_path`), so this is
+/// the one gate standing between an HTTP query param and the filesystem:
+/// characters are limited to ASCII alphanumerics, `.`, `_`, and `-`, which
+/// makes `/`, `..`, NUL, and path separators structurally impossible, and the
+/// suffix must not itself start with `-` or `.` (keeps the joining hyphen
+/// unambiguous and rules out a leading-dot hidden file). Returns the reason on
+/// failure, suitable for a `422` response body.
+pub fn validate_backup_suffix(suffix: &str) -> Result<(), String> {
+    if suffix.is_empty() {
+        return Err("suffix must not be empty".to_string());
+    }
+    if suffix.len() > MAX_BACKUP_SUFFIX_LEN {
+        return Err(format!(
+            "suffix must be at most {MAX_BACKUP_SUFFIX_LEN} characters"
+        ));
+    }
+    if !suffix
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    {
+        return Err("suffix may only contain ASCII letters, digits, '.', '_', and '-'".to_string());
+    }
+    if suffix.starts_with('-') || suffix.starts_with('.') {
+        return Err("suffix must not start with '-' or '.'".to_string());
+    }
+    Ok(())
 }
 
 /// Why a backup run failed. `Verification` marks a produced file that is not a
@@ -95,6 +139,7 @@ pub enum BackupError {
     Io(std::io::Error),
     Verification { path: String, reason: String },
     Command { command: String, reason: String },
+    InvalidSuffix { suffix: String, reason: String },
 }
 
 impl std::fmt::Display for BackupError {
@@ -107,6 +152,9 @@ impl std::fmt::Display for BackupError {
             }
             BackupError::Command { command, reason } => {
                 write!(f, "post-backup command failed ({command}): {reason}")
+            }
+            BackupError::InvalidSuffix { suffix, reason } => {
+                write!(f, "invalid backup suffix '{suffix}': {reason}")
             }
         }
     }
@@ -131,14 +179,24 @@ pub async fn backup(
     db_path: &str,
     backup_dir: Option<&str>,
     backup_command: Option<&str>,
+    suffix: Option<&str>,
 ) -> Result<(), BackupError> {
+    // Validated before any filesystem work, even though the HTTP handler
+    // validates too (for a clean 422) — backup() is pub and must not be
+    // bypassable by a caller that skips the handler.
+    if let Some(s) = suffix {
+        validate_backup_suffix(s).map_err(|reason| BackupError::InvalidSuffix {
+            suffix: s.to_string(),
+            reason,
+        })?;
+    }
     // A configured backup dir may not exist yet (fresh volume / first run);
     // create it rather than failing the weekly job. The beside-the-DB default
     // needs no such step — the database file's directory already exists.
     if let Some(dir) = backup_dir {
         std::fs::create_dir_all(dir)?;
     }
-    let dest = backup_path(db_path, backup_dir);
+    let dest = backup_path(db_path, backup_dir, suffix);
     let created = backup_to(pool, &dest).await?;
 
     // Only run the hook for a backup actually produced by this run — not one
@@ -297,14 +355,28 @@ async fn verify_or_quarantine(pool: &SqlitePool, dest: &str) -> Result<(), Backu
 const KEEP_RECENT: usize = 8;
 const KEEP_MONTHLY: usize = 12;
 
+/// Fixed width of the `YYYY-MM-DD-HHMMSS` timestamp component embedded in a
+/// backup filename.
+const BACKUP_TIMESTAMP_LEN: usize = 17;
+
 /// The timestamp embedded in a backup filename, if `name` matches this
-/// database's backup naming pattern (`<stem>-YYYY-MM-DD-HHMMSS.db`) exactly.
+/// database's backup naming pattern — `<stem>-YYYY-MM-DD-HHMMSS.db` or
+/// `<stem>-YYYY-MM-DD-HHMMSS-<suffix>.db` (see `backup_path`) — exactly.
 /// Pruning candidates are selected by this — anything else is never touched.
+/// A suffixed backup is treated as an ordinary pruning candidate: it competes
+/// in the same retention policy as any other backup of this database.
 fn backup_timestamp(name: &str, stem: &str) -> Option<NaiveDateTime> {
-    let ts = name
+    let rest = name
         .strip_prefix(stem)?
         .strip_prefix('-')?
         .strip_suffix(".db")?;
+    // `get` rather than slicing/`split_at`: a non-ASCII filename must yield
+    // `None` here, never panic on a non-char-boundary index.
+    let ts = rest.get(..BACKUP_TIMESTAMP_LEN)?;
+    let after = rest.get(BACKUP_TIMESTAMP_LEN..)?;
+    if !after.is_empty() && !after.starts_with('-') {
+        return None;
+    }
     NaiveDateTime::parse_from_str(ts, "%Y-%m-%d-%H%M%S").ok()
 }
 
@@ -406,7 +478,7 @@ mod tests {
         // Capture the destination before backing up: `backup` computes its own
         // timestamp internally, so re-deriving the path afterwards could land in
         // a later second and miss the file. Drive `backup_to` with the same dest.
-        let dest = backup_path(&db_path, None);
+        let dest = backup_path(&db_path, None, None);
         backup_to(&pool, &dest).await.unwrap();
 
         assert!(Path::new(&dest).exists());
@@ -419,7 +491,7 @@ mod tests {
         // Date-only naming (`-2026-06-01.db`) would collide across weekly runs;
         // the filename must carry the time component down to the second.
         assert_eq!(
-            backup_path_at("share-tracker.db", None, at),
+            backup_path_at("share-tracker.db", None, None, at),
             "share-tracker-2026-06-01-143005.db"
         );
     }
@@ -431,8 +503,102 @@ mod tests {
         // With a configured dir only the filename is kept — the db's own
         // directory component must not be re-rooted under the backup dir.
         assert_eq!(
-            backup_path_at("/data/share-tracker.db", Some("/mnt/backups"), at),
+            backup_path_at("/data/share-tracker.db", Some("/mnt/backups"), None, at),
             "/mnt/backups/share-tracker-2026-06-01-143005.db"
+        );
+    }
+
+    #[test]
+    fn backup_path_appends_suffix() {
+        use chrono::TimeZone;
+        let at = Local.with_ymd_and_hms(2026, 6, 1, 14, 30, 5).unwrap();
+        assert_eq!(
+            backup_path_at("share-tracker.db", None, Some("pre-0.5.1"), at),
+            "share-tracker-2026-06-01-143005-pre-0.5.1.db"
+        );
+    }
+
+    #[test]
+    fn backup_path_with_suffix_honours_backup_dir() {
+        use chrono::TimeZone;
+        let at = Local.with_ymd_and_hms(2026, 6, 1, 14, 30, 5).unwrap();
+        assert_eq!(
+            backup_path_at(
+                "/data/share-tracker.db",
+                Some("/mnt/backups"),
+                Some("pre-0.5.1"),
+                at
+            ),
+            "/mnt/backups/share-tracker-2026-06-01-143005-pre-0.5.1.db"
+        );
+    }
+
+    #[tokio::test]
+    async fn backup_with_suffix_writes_suffixed_file() {
+        // A real backup() call with a suffix: the file must exist, verify, and
+        // carry the suffix — the one-off pre-upgrade backup that update.sh
+        // takes before `pkg add` (see pkg/freebsd/update.sh).
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db").to_string_lossy().to_string();
+        let pool = init(&db_path).await.unwrap();
+
+        backup(&pool, &db_path, None, None, Some("pre-0.5.1"))
+            .await
+            .unwrap();
+
+        let made_backup = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .find(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                name.starts_with("test-") && name.ends_with("-pre-0.5.1.db")
+            });
+        assert!(
+            made_backup.is_some(),
+            "expected a suffixed backup in {}",
+            dir.path().display()
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_suffix_is_rejected() {
+        // The value lands directly in a filename; every rejected shape below
+        // would otherwise let a query param write outside the backup dir (or
+        // collide with the naming pattern pruning relies on). No file must be
+        // written for any of them.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db").to_string_lossy().to_string();
+        let pool = init(&db_path).await.unwrap();
+
+        let cases: &[&str] = &[
+            "",
+            "a/b",
+            "..",
+            "../etc",
+            "-leading",
+            ".leading",
+            "has space",
+            "emoji-\u{1F600}",
+            &"x".repeat(MAX_BACKUP_SUFFIX_LEN + 1),
+        ];
+        for suffix in cases {
+            let err = backup(&pool, &db_path, None, None, Some(suffix))
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, BackupError::InvalidSuffix { .. }),
+                "suffix {suffix:?}: expected InvalidSuffix, got {err:?}"
+            );
+        }
+        let files: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n != "test.db" && !n.starts_with("test.db-"))
+            .collect();
+        assert!(
+            files.is_empty(),
+            "no backup file must be written for an invalid suffix, found {files:?}"
         );
     }
 
@@ -449,7 +615,7 @@ mod tests {
             .join("weekly")
             .to_string_lossy()
             .to_string();
-        backup(&pool, &db_path, Some(&dest_dir), None)
+        backup(&pool, &db_path, Some(&dest_dir), None, None)
             .await
             .unwrap();
 
@@ -488,7 +654,7 @@ mod tests {
             .await
             .unwrap();
 
-        let dest = backup_path(&db_path, None);
+        let dest = backup_path(&db_path, None, None);
         backup_to(&pool, &dest).await.unwrap();
 
         // Mutate after the backup: this row must be gone after the restore.
@@ -630,7 +796,7 @@ mod tests {
 
         // Fixed destination so this exercises the skip-if-exists guard directly
         // rather than depending on two `backup` calls landing in the same second.
-        let dest = backup_path(&db_path, None);
+        let dest = backup_path(&db_path, None, None);
         backup_to(&pool, &dest).await.unwrap();
         let mtime1 = std::fs::metadata(&dest).unwrap().modified().unwrap();
 
@@ -648,7 +814,7 @@ mod tests {
         let db_path = dir.path().join("test.db").to_string_lossy().to_string();
         let pool = init(&db_path).await.unwrap();
 
-        let dest = backup_path(&db_path, None);
+        let dest = backup_path(&db_path, None, None);
         backup_to(&pool, &dest).await.unwrap();
 
         assert!(Path::new(&dest).exists());
@@ -717,6 +883,14 @@ mod tests {
     /// Touch an empty file named as a backup of `test.db` taken at `ts`.
     fn fake_backup(dir: &Path, ts: &str) -> PathBuf {
         let path = dir.join(format!("test-{ts}.db"));
+        std::fs::write(&path, b"").unwrap();
+        path
+    }
+
+    /// Touch an empty file named as a suffixed backup of `test.db` taken at
+    /// `ts` (e.g. an update.sh pre-upgrade backup).
+    fn fake_backup_suffixed(dir: &Path, ts: &str, suffix: &str) -> PathBuf {
+        let path = dir.join(format!("test-{ts}-{suffix}.db"));
         std::fs::write(&path, b"").unwrap();
         path
     }
@@ -829,6 +1003,45 @@ mod tests {
         );
     }
 
+    #[test]
+    fn suffixed_backups_are_pruning_candidates() {
+        // A suffixed one-off backup (e.g. update.sh's pre-upgrade snapshot)
+        // must compete in the same retention policy as any other backup of
+        // this database — never exempt, or every upgrade would leave a
+        // permanent extra copy behind. One backup per month for 14 months (as
+        // in `prune_drops_monthly_keepers_beyond_the_cap`), but the very
+        // oldest — otherwise this month's sole, and so "first of month",
+        // backup — is suffixed: it must still roll off once its month falls
+        // outside the 12-month cap, exactly like an unsuffixed one would.
+        let dir = tempfile::tempdir().unwrap();
+        let months: Vec<String> = (0..14)
+            .map(|i| format!("{}-{:02}", 2025 + (i / 12), 1 + (i % 12)))
+            .collect();
+        let oldest_suffixed =
+            fake_backup_suffixed(dir.path(), &format!("{}-01-000000", months[0]), "pre-0.4.0");
+        for month in &months[1..] {
+            fake_backup(dir.path(), &format!("{month}-01-000000"));
+        }
+
+        let dir_str = dir.path().to_string_lossy().to_string();
+        let deleted = prune_backups("test.db", Some(&dir_str)).unwrap();
+
+        assert!(
+            deleted.contains(&oldest_suffixed),
+            "a suffixed backup outside the retention policy must be pruned like any other"
+        );
+        assert!(!oldest_suffixed.exists());
+
+        // A fresh suffixed backup (within KEEP_RECENT) must survive pruning.
+        let fresh_suffixed = fake_backup_suffixed(dir.path(), "2026-02-15-101500", "pre-0.5.1");
+        let deleted2 = prune_backups("test.db", Some(&dir_str)).unwrap();
+        assert!(
+            !deleted2.contains(&fresh_suffixed),
+            "a fresh suffixed backup within the retention window must survive"
+        );
+        assert!(fresh_suffixed.exists());
+    }
+
     #[tokio::test]
     async fn prune_beside_db_spares_the_live_database() {
         // With no --backup-dir, backups (and so pruning) live beside the db
@@ -867,7 +1080,9 @@ mod tests {
         }
 
         let dir_str = backup_dir.path().to_string_lossy().to_string();
-        backup(&pool, &db_path, Some(&dir_str), None).await.unwrap();
+        backup(&pool, &db_path, Some(&dir_str), None, None)
+            .await
+            .unwrap();
 
         let survives = |month: &str| {
             backup_dir
@@ -911,7 +1126,9 @@ mod tests {
         }
 
         let dir_str = backup_dir.path().to_string_lossy().to_string();
-        backup(&pool, &db_path, Some(&dir_str), None).await.unwrap();
+        backup(&pool, &db_path, Some(&dir_str), None, None)
+            .await
+            .unwrap();
         let produced = std::fs::read_dir(backup_dir.path())
             .unwrap()
             .filter_map(|e| e.ok())
@@ -968,7 +1185,9 @@ mod tests {
 
         let marker = dir.path().join("offsite-copy.db");
         let command = format!("cp {{BACKUP_FILE}} {}", marker.to_string_lossy());
-        backup(&pool, &db_path, None, Some(&command)).await.unwrap();
+        backup(&pool, &db_path, None, Some(&command), None)
+            .await
+            .unwrap();
 
         assert!(
             marker.exists(),
@@ -989,7 +1208,7 @@ mod tests {
             fake_backup(dir.path(), &format!("{month}-01-000000"));
         }
 
-        let err = backup(&pool, &db_path, None, Some("exit 1"))
+        let err = backup(&pool, &db_path, None, Some("exit 1"), None)
             .await
             .unwrap_err();
         assert!(
@@ -1011,7 +1230,7 @@ mod tests {
         let db_path = dir.path().join("test.db").to_string_lossy().to_string();
         let pool = init(&db_path).await.unwrap();
 
-        let dest = backup_path(&db_path, None);
+        let dest = backup_path(&db_path, None, None);
         backup_to(&pool, &dest).await.unwrap();
 
         let marker = dir.path().join("should-not-exist");
@@ -1033,7 +1252,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db").to_string_lossy().to_string();
         let pool = init(&db_path).await.unwrap();
-        let dest = backup_path(&db_path, None);
+        let dest = backup_path(&db_path, None, None);
         backup_to(&pool, &dest).await.unwrap();
 
         let marker = dir.path().join("path-seen.txt");

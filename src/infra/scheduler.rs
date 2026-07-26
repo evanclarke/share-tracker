@@ -13,7 +13,7 @@
 
 use axum::{
     Extension, Json, Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     routing::{get, post},
 };
@@ -29,7 +29,18 @@ use std::{
 /// A unit of scheduled work. Each call runs the job once, returning `Ok(())` on
 /// success or a human-readable error. Jobs do their own detailed INFO logging.
 type JobFuture = Pin<Box<dyn Future<Output = Result<(), String>> + Send>>;
-type Job = Arc<dyn Fn() -> JobFuture + Send + Sync>;
+type Job = Arc<dyn Fn(JobParams) -> JobFuture + Send + Sync>;
+
+/// Caller-supplied parameters for a manual job trigger, taken from the
+/// `POST /jobs/{name}` query string. Currently only the `backup` job reads
+/// `suffix` (see [`crate::infra::db::backup`]); every other registered job
+/// ignores it. The scheduled loop always passes [`JobParams::default`] — a
+/// suffix only makes sense for a deliberately-labelled one-off backup, not
+/// the weekly scheduled run.
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct JobParams {
+    pub suffix: Option<String>,
+}
 
 /// A registered job: the work plus a per-job lock serialising its execution.
 /// `run_job` holds the lock for the whole run, so a manual trigger can never
@@ -190,7 +201,7 @@ pub fn registry(
     let backup_pool = pool.clone();
     jobs.insert(
         "backup".to_string(),
-        RegisteredJob::new(Arc::new(move || {
+        RegisteredJob::new(Arc::new(move |params: JobParams| {
             let pool = backup_pool.clone();
             let db_path = db_path.clone();
             let backup_dir = backup_dir.clone();
@@ -201,6 +212,7 @@ pub fn registry(
                     &db_path,
                     backup_dir.as_deref(),
                     backup_command.as_deref(),
+                    params.suffix.as_deref(),
                 )
                 .await
                 .map_err(|e| e.to_string())
@@ -211,7 +223,7 @@ pub fn registry(
     let mic_pool = pool.clone();
     jobs.insert(
         "mic-import".to_string(),
-        RegisteredJob::new(Arc::new(move || {
+        RegisteredJob::new(Arc::new(move |_params: JobParams| {
             let pool = mic_pool.clone();
             Box::pin(async move {
                 match crate::entities::mic_registry::run_import(&pool).await {
@@ -228,7 +240,7 @@ pub fn registry(
     let currency_pool = pool.clone();
     jobs.insert(
         "currency-import".to_string(),
-        RegisteredJob::new(Arc::new(move || {
+        RegisteredJob::new(Arc::new(move |_params: JobParams| {
             let pool = currency_pool.clone();
             Box::pin(async move {
                 match crate::entities::currencies::run_import(&pool).await {
@@ -246,7 +258,7 @@ pub fn registry(
     let price_fetcher = fetcher;
     jobs.insert(
         "price-import".to_string(),
-        RegisteredJob::new(Arc::new(move || {
+        RegisteredJob::new(Arc::new(move |_params: JobParams| {
             let pool = price_pool.clone();
             let fetcher = price_fetcher.clone();
             Box::pin(async move {
@@ -263,7 +275,7 @@ pub fn registry(
     let snapshot_pool = pool.clone();
     jobs.insert(
         "report-snapshot".to_string(),
-        RegisteredJob::new(Arc::new(move || {
+        RegisteredJob::new(Arc::new(move |_params: JobParams| {
             let pool = snapshot_pool.clone();
             Box::pin(async move {
                 crate::reports::snapshot::run_snapshot_job(&pool, chrono::Utc::now()).await
@@ -274,7 +286,7 @@ pub fn registry(
     let fx_pool = pool.clone();
     jobs.insert(
         "rba-fx-import".to_string(),
-        RegisteredJob::new(Arc::new(move || {
+        RegisteredJob::new(Arc::new(move |_params: JobParams| {
             let pool = fx_pool.clone();
             Box::pin(async move {
                 let summary = match crate::entities::rba_fx_rate::run_import(&pool).await {
@@ -325,11 +337,16 @@ pub fn registry(
 /// The per-job lock is held for the whole run, serialising executions of the
 /// same job: a manual trigger overlapping the scheduled run (or another
 /// trigger) waits for the in-flight run to finish instead of racing it.
-async fn run_job(pool: &SqlitePool, name: &str, job: &RegisteredJob) -> Result<(), String> {
+async fn run_job(
+    pool: &SqlitePool,
+    name: &str,
+    job: &RegisteredJob,
+    params: JobParams,
+) -> Result<(), String> {
     let _running = job.lock.lock().await;
     let started_at = chrono::Utc::now().to_rfc3339();
     tracing::info!(job = %name, "job started");
-    let result = (job.work)().await;
+    let result = (job.work)(params).await;
     let finished_at = chrono::Utc::now().to_rfc3339();
     tracing::info!(job = %name, ok = result.is_ok(), "job finished");
 
@@ -503,7 +520,9 @@ async fn run_entry<Z>(
             };
         }
         tokio::time::sleep(delay).await;
-        if let Err(e) = run_job(&pool, &name, &job).await {
+        // A scheduled run always uses the default (unsuffixed) params — a
+        // suffix labels a deliberate one-off backup, not the weekly run.
+        if let Err(e) = run_job(&pool, &name, &job, JobParams::default()).await {
             tracing::warn!(job = %name, "job failed: {e}");
         }
     }
@@ -558,17 +577,25 @@ async fn trigger(
     State(pool): State<SqlitePool>,
     Extension(registry): Extension<JobRegistry>,
     Path(name): Path<String>,
-) -> StatusCode {
-    match registry.get(&name) {
+    Query(params): Query<JobParams>,
+) -> Result<StatusCode, crate::infra::http::ApiError> {
+    // Reject an invalid suffix before the registry lookup or run_job: a
+    // malformed request must not be recorded as a failed job run (only the
+    // backup job reads it, but the query string is shared across all names).
+    if let Some(suffix) = &params.suffix {
+        crate::infra::db::validate_backup_suffix(suffix)
+            .map_err(crate::infra::http::ApiError::unprocessable)?;
+    }
+    Ok(match registry.get(&name) {
         None => StatusCode::NOT_FOUND,
-        Some(job) => match run_job(&pool, &name, job).await {
+        Some(job) => match run_job(&pool, &name, job, params).await {
             Ok(()) => StatusCode::NO_CONTENT,
             Err(e) => {
                 tracing::warn!(job = %name, "manual job trigger failed: {e}");
                 StatusCode::INTERNAL_SERVER_ERROR
             }
         },
-    }
+    })
 }
 
 /// Routes for inspecting and manually triggering jobs. The `JobRegistry` is
@@ -818,7 +845,7 @@ mod tests {
 
         let fired_at = Arc::new(std::sync::Mutex::new(Vec::<DateTime<Utc>>::new()));
         let fired = fired_at.clone();
-        let job = RegisteredJob::new(Arc::new(move || {
+        let job = RegisteredJob::new(Arc::new(move |_params: JobParams| {
             let fired = fired.clone();
             let now = clock();
             Box::pin(async move {
@@ -909,7 +936,7 @@ mod tests {
         let overlapped = Arc::new(AtomicBool::new(false));
         let runs = Arc::new(AtomicUsize::new(0));
         let (a, o, r) = (active.clone(), overlapped.clone(), runs.clone());
-        let job = RegisteredJob::new(Arc::new(move || {
+        let job = RegisteredJob::new(Arc::new(move |_params: JobParams| {
             let (a, o, r) = (a.clone(), o.clone(), r.clone());
             Box::pin(async move {
                 if a.fetch_add(1, Ordering::SeqCst) > 0 {
@@ -923,8 +950,8 @@ mod tests {
         }));
 
         let (r1, r2) = tokio::join!(
-            run_job(&pool, "same-job", &job),
-            run_job(&pool, "same-job", &job),
+            run_job(&pool, "same-job", &job, JobParams::default()),
+            run_job(&pool, "same-job", &job, JobParams::default()),
         );
         r1.unwrap();
         r2.unwrap();
@@ -972,6 +999,113 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn trigger_backup_with_suffix_writes_suffixed_file() {
+        // POST /jobs/backup?suffix=... (the update.sh pre-upgrade path) must
+        // reach the backup job's suffix param end-to-end through the HTTP
+        // layer, not just the db::backup unit tests.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("t.db").to_string_lossy().to_string();
+        let pool = db::init(&db_path).await.unwrap();
+        let reg = registry(pool.clone(), db_path.clone(), None, None, stub_fetcher());
+        let app = router().with_state(pool).layer(Extension(reg));
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/jobs/backup?suffix=pre-0.5.1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let made_backup = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .any(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                name.starts_with("t-") && name.ends_with("-pre-0.5.1.db")
+            });
+        assert!(made_backup, "expected a suffixed backup file beside t.db");
+    }
+
+    #[tokio::test]
+    async fn trigger_with_invalid_suffix_returns_422_and_records_no_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("t.db").to_string_lossy().to_string();
+        let pool = db::init(&db_path).await.unwrap();
+        let reg = registry(pool.clone(), db_path, None, None, stub_fetcher());
+        let app = router().with_state(pool.clone()).layer(Extension(reg));
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/jobs/backup?suffix=../etc/passwd")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        // Beside "t.db" itself, WAL-mode sidecars (t.db-wal, t.db-shm) are
+        // expected; only a backup-named file would indicate the rejected
+        // suffix reached the filesystem.
+        let no_backup = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .all(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                name == "t.db" || name.starts_with("t.db-")
+            });
+        assert!(
+            no_backup,
+            "an invalid suffix must never reach the filesystem"
+        );
+
+        // A rejected request never called run_job, so no run was recorded.
+        let runs: Vec<(String,)> = sqlx::query_as("SELECT name FROM job_runs")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert!(
+            runs.is_empty(),
+            "an invalid suffix must be rejected before run_job, recording no run"
+        );
+    }
+
+    #[tokio::test]
+    async fn scheduled_backup_takes_no_suffix() {
+        // The scheduled loop always passes JobParams::default(): the weekly
+        // run must keep producing the plain, unsuffixed name.
+        let (reg, pool, dir, db_path) = test_registry().await;
+        let job = reg.get("backup").unwrap();
+        run_job(&pool, "backup", job, JobParams::default())
+            .await
+            .unwrap();
+
+        let stem = std::path::Path::new(&db_path)
+            .file_stem()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let has_suffix = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .any(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                name.starts_with(&format!("{stem}-")) && name.matches('-').count() > 4
+            });
+        assert!(
+            !has_suffix,
+            "the scheduled run must not append a suffix to the backup filename"
+        );
+    }
+
+    #[tokio::test]
     async fn backup_job_honours_configured_backup_dir() {
         // The --backup-dir option must reach the scheduled backup job: with a
         // dir configured, the job writes there, not beside the database file.
@@ -988,7 +1122,9 @@ mod tests {
         );
 
         let job = reg.get("backup").unwrap();
-        run_job(&pool, "backup", job).await.unwrap();
+        run_job(&pool, "backup", job, JobParams::default())
+            .await
+            .unwrap();
 
         let in_backup_dir = std::fs::read_dir(backup_dir.path())
             .unwrap()
@@ -1018,7 +1154,9 @@ mod tests {
         let reg = registry(pool.clone(), db_path, None, Some(command), stub_fetcher());
 
         let job = reg.get("backup").unwrap();
-        run_job(&pool, "backup", job).await.unwrap();
+        run_job(&pool, "backup", job, JobParams::default())
+            .await
+            .unwrap();
 
         assert!(
             marker.exists(),
@@ -1033,7 +1171,9 @@ mod tests {
         // scheduled path: a job must be bracketed by INFO start/finish lines.
         let (reg, pool, _dir, _path) = test_registry().await;
         let job = reg.get("backup").unwrap();
-        run_job(&pool, "backup", job).await.unwrap();
+        run_job(&pool, "backup", job, JobParams::default())
+            .await
+            .unwrap();
         assert!(logs_contain("job started"));
         assert!(logs_contain("job finished"));
     }
@@ -1117,7 +1257,9 @@ mod tests {
         // success = true and no error.
         let (reg, pool, _dir, _path) = test_registry().await;
         let job = reg.get("backup").unwrap();
-        run_job(&pool, "backup", job).await.unwrap();
+        run_job(&pool, "backup", job, JobParams::default())
+            .await
+            .unwrap();
 
         let app = router().with_state(pool).layer(Extension(reg));
         let resp = app

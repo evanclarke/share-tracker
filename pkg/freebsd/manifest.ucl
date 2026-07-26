@@ -10,6 +10,11 @@ maintainer: "evan@evanclarke.com"
 prefix: "/usr/local"
 categories: ["finance"]
 licenses: ["MIT"]
+# curl: pkg/freebsd/update.sh needs it to POST the pre-upgrade backup trigger
+# (fetch(1), FreeBSD's base HTTP client, cannot POST).
+deps: {
+  curl: { origin: "ftp/curl", version: "8.0.0" }
+}
 desc: <<EOD
 Records facts about investing activity (trades, income, corporate actions,
 AMMA and ESS statements) in SQLite and materialises portfolio, CGT and

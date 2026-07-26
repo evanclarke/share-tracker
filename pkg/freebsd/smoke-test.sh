@@ -108,6 +108,15 @@ ls /var/log/share-tracker.log.0* >/dev/null
 # curl, not a hand-rolled request over nc: nc's early half-close makes
 # hyper treat the request as canceled before the handler runs.
 curl -sf -X POST http://127.0.0.1:3000/jobs/backup >/dev/null
+# The suffix query param that update.sh uses for its pre-upgrade backup
+# (curl is the same tool it needs — see the manifest's curl dep and
+# update.sh's pre_upgrade_backup) must reach the real installed package.
+curl -sf -X POST 'http://127.0.0.1:3000/jobs/backup?suffix=pre-smoke' >/dev/null
+ls /var/db/share-tracker/backups/*-pre-smoke.db >/dev/null 2>&1 || {
+  echo "expected a suffixed backup in /var/db/share-tracker/backups" >&2
+  ls -la /var/db/share-tracker/backups >&2 2>/dev/null || true
+  exit 1
+}
 ok=""
 for _ in $(seq 1 15); do
   if grep -q "job started" /var/log/share-tracker.log 2>/dev/null; then
