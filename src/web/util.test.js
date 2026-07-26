@@ -17,6 +17,7 @@ import {
   roundDecimalStr, groupThousands, padMinDp, decStrEq, numericDisplay,
   addDecimalStrings, decParts, mulToCents, frankingCreditFor, decEq,
   looksNumeric, columnKinds, columnLabel, tradeOrigin, periodReturnPct,
+  holdingHasActivity, loadPref, savePref,
 } from './util.js';
 
 // ---- roundDecimalStr ----------------------------------------------------
@@ -265,4 +266,80 @@ test('periodReturnPct: a window over a year shows the annualised money-weighted 
 test('periodReturnPct: null money_weighted_return_pct falls back to —, not the raw figure', () => {
   const r = { from: '2020-01-01', to: '2023-01-01', total_return_pct: '1716.7300', money_weighted_return_pct: null };
   assert.deepEqual(periodReturnPct(r), { value: null, annualized: true });
+});
+
+// ---- holdingHasActivity -----------------------------------------------
+
+function holdingRow(overrides) {
+  return Object.assign({
+    listing_id: 1, holding_account_id: 1,
+    opening_market_value: '0', closing_market_value: '0',
+    purchases: '0', sale_proceeds: '0', income: '0',
+    capital_growth: '0', fx_movement: '0', total_return: '0',
+  }, overrides);
+}
+
+test('holdingHasActivity: all-zero row (a holding closed before the period) has no activity', () => {
+  assert.equal(holdingHasActivity(holdingRow()), false);
+});
+
+test('holdingHasActivity: "0.00" and "-0.00" spellings still count as zero', () => {
+  assert.equal(holdingHasActivity(holdingRow({
+    opening_market_value: '0.00', closing_market_value: '-0.00', purchases: '0.0',
+  })), false);
+});
+
+test('holdingHasActivity: income alone makes a holding active', () => {
+  assert.equal(holdingHasActivity(holdingRow({ income: '12.50', total_return: '12.50' })), true);
+});
+
+test('holdingHasActivity: a flat holding (unchanged value, no trades) is still active', () => {
+  assert.equal(holdingHasActivity(holdingRow({
+    opening_market_value: '1000', closing_market_value: '1000',
+  })), true);
+});
+
+// ---- loadPref / savePref -----------------------------------------------
+
+function stubStore() {
+  const m = new Map();
+  return {
+    getItem: function (k) { return m.has(k) ? m.get(k) : null; },
+    setItem: function (k, v) { m.set(k, v); },
+    removeItem: function (k) { m.delete(k); },
+  };
+}
+
+test('loadPref: falls back when nothing is stored', () => {
+  assert.equal(loadPref('k', 'fallback', stubStore()), 'fallback');
+});
+
+test('savePref/loadPref: round-trips a stored value', () => {
+  const store = stubStore();
+  savePref('k', 'v', store);
+  assert.equal(loadPref('k', 'fallback', store), 'v');
+});
+
+test('savePref: null/empty clears the preference back to the fallback', () => {
+  const store = stubStore();
+  savePref('k', 'v', store);
+  savePref('k', null, store);
+  assert.equal(loadPref('k', 'fallback', store), 'fallback');
+  savePref('k', 'v', store);
+  savePref('k', '', store);
+  assert.equal(loadPref('k', 'fallback', store), 'fallback');
+});
+
+test('loadPref: a throwing store is treated as nothing stored', () => {
+  const angry = {
+    getItem: function () { throw new Error('storage disabled'); },
+  };
+  assert.equal(loadPref('k', 'fallback', angry), 'fallback');
+});
+
+test('savePref: a throwing store does not raise', () => {
+  const angry = {
+    setItem: function () { throw new Error('storage disabled'); },
+  };
+  assert.doesNotThrow(function () { savePref('k', 'v', angry); });
 });

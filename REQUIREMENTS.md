@@ -1254,3 +1254,29 @@ most common facts (a trade, a distribution) requires a hunt through the sidebar 
 - Docs per the standard sync rule: `docs/API.md`'s Web frontend section (the menu
   structure, the four menus, `#/` as the home screen, the shortcut buttons, the
   `/static/nav.js` module), README's Portfolio overview and Web UI feature bullets
+
+## Portfolio Overview: longer range presets, remembered range, hide inactive holdings (2026-07-26)
+
+The Portfolio Overview's performance panel (`performancePanel` in `src/web/app.js`) offers
+date-range presets 1M/3M/6M/1Y/FY-to-date/All, always opens on All, and lists a per-holding
+contributions row for every holding with any history — including ones sold out years before
+the selected range, which show every figure at zero and bury the holdings that actually moved.
+
+- Add **2Y** and **3Y** to the preset list, alongside the existing 1M/3M/6M/1Y/FY/All
+- Remember the last-used preset across page reloads (`localStorage`), so the panel opens on
+  the same preset (e.g. 1Y) every day the page is checked rather than resetting to All. Only a
+  preset selection is remembered; applying a custom From/To range is ad-hoc and clears the
+  remembered preset, so the next load falls back to All. The active preset is visibly
+  highlighted so the remembered state is legible, not just applied silently
+- Add a checkbox (default checked) above the per-holding contributions table: "Hide holdings
+  with no activity in this period". A holding counts as no-activity when its opening market
+  value, closing market value, purchases, sale proceeds, and income are **all** zero for the
+  selected range (which forces capital growth, FX movement, and total return to zero too) —
+  i.e. holdings with no bearing on the period at all, not holdings that were merely flat. The
+  checkbox state is remembered the same way as the range preset
+- No new/changed HTTP endpoints and no schema change — `period_performance` keeps returning
+  every holding row; hiding is display-only, client-side
+- Docs per the standard sync rule: README's Portfolio overview bullet (preset list, remembered
+  range, the hide-inactive checkbox) and `docs/API.md`'s Web frontend / Period performance
+  sections (the endpoint returns a row per holding with any history; the UI hides all-zero rows
+  by default)

@@ -115,6 +115,8 @@ export function presetRange(series, preset) {
     case '3m': from = addMonths(to, -3); break;
     case '6m': from = addMonths(to, -6); break;
     case '1y': from = addMonths(to, -12); break;
+    case '2y': from = addMonths(to, -24); break;
+    case '3y': from = addMonths(to, -36); break;
     case 'fytd': from = fyStart(to); break;
     case 'all':
     default: from = earliest; break;

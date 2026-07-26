@@ -26,6 +26,8 @@ test('presetRange: month-based presets end at the series\' own latest date, not 
   assert.deepEqual(presetRange(s, '3m'), { from: '2026-04-25', to: '2026-07-25' });
   assert.deepEqual(presetRange(s, '6m'), { from: '2026-01-25', to: '2026-07-25' });
   assert.deepEqual(presetRange(s, '1y'), { from: '2025-07-25', to: '2026-07-25' });
+  assert.deepEqual(presetRange(s, '2y'), { from: '2024-07-25', to: '2026-07-25' });
+  assert.deepEqual(presetRange(s, '3y'), { from: '2023-07-25', to: '2026-07-25' });
 });
 
 test('presetRange: fytd is 1 July of the FY containing the latest date (July counts as the next FY)', () => {
@@ -44,6 +46,8 @@ test('presetRange: fytd is 1 July of the FY containing the latest date (July cou
 test('presetRange: a preset never precedes the series\' earliest stored date', () => {
   const s1y = series(['2026-06-01', '2026-06-15', '2026-07-01']);
   assert.deepEqual(presetRange(s1y, '1y'), { from: '2026-06-01', to: '2026-07-01' });
+  assert.deepEqual(presetRange(s1y, '2y'), { from: '2026-06-01', to: '2026-07-01' });
+  assert.deepEqual(presetRange(s1y, '3y'), { from: '2026-06-01', to: '2026-07-01' });
 
   // Latest date 2026-05-10 is in FY2026 (start 2025-07-01), which precedes
   // the series' earliest stored date (2026-01-01) — clamp, don't reach

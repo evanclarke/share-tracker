@@ -15,7 +15,7 @@ import {
   el, toast, setMain, looksNumeric, isTimestamp, fmtLocalTimestamp, utcTooltip,
   cellText, numericDisplay, columnKinds, columnLabel, columnLabelMaps,
   fkLabelMaps, api, nextId, loadOptions, listingNamer, describeTrade, tradeOrigin,
-  periodReturnPct,
+  periodReturnPct, holdingHasActivity, loadPref, savePref,
 } from './util.js';
 import {
   field, txt, dec, dt, bool, fk,
@@ -1305,6 +1305,19 @@ async function viewSnapshotDetail(report, date) {
 
 // ---- reports ----------------------------------------------------------
 
+// The Portfolio Overview performance panel's quick-select range presets and
+// the localStorage keys it remembers across reloads under (so the panel
+// opens on the last-used preset, e.g. 1Y, instead of resetting to All every
+// day the page is checked). A custom From/To range is deliberately *not*
+// remembered — applying one clears the stored preset (see performancePanel)
+// so the remembered range always keeps moving with new snapshots.
+const RANGE_PRESETS = [
+  ['1m', '1M'], ['3m', '3M'], ['6m', '6M'], ['1y', '1Y'], ['2y', '2Y'], ['3y', '3Y'],
+  ['fytd', 'FY'], ['all', 'All'],
+];
+const RANGE_PREF_KEY = 'share-tracker.overview.range';
+const HIDE_INACTIVE_PREF_KEY = 'share-tracker.overview.hideInactive';
+
 // A period figure formatted through the shared money display rules
 // (COLUMN_KINDS 'money': round to 2 dp + thousands grouping, full value on
 // hover when rounding drops precision) — the panel below is a hand-built
@@ -1355,12 +1368,48 @@ async function renderPeriodSummary(r) {
     detailParts.push(el('h4', null, 'FX movement by currency'));
     detailParts.push(await dataTable(r.fx_by_currency, ['currency', 'fx_movement', 'rate_from', 'rate_to', 'provisional']));
   }
-  detailParts.push(el('details', null, [
-    el('summary', null, 'Per-holding contributions'),
-    await dataTable(r.holdings, [
+
+  // `holdings` includes a row for every holding with any history at all —
+  // including one fully closed years before `from`, which shows every figure
+  // at exactly zero (see holdingHasActivity's doc comment). The checkbox
+  // hides those by default so real movers aren't buried in zero-rows;
+  // unticking shows the full set. Remembered across reloads like the range
+  // preset.
+  const contribHolder = el('div');
+  const hideInp = el('input', { type: 'checkbox', id: 'hide-inactive-holdings' });
+  hideInp.checked = loadPref(HIDE_INACTIVE_PREF_KEY, 'true') !== 'false';
+  async function renderContrib() {
+    contribHolder.innerHTML = '';
+    const all = r.holdings;
+    const rows = hideInp.checked ? all.filter(holdingHasActivity) : all;
+    const hiddenCount = all.length - rows.length;
+    if (rows.length === 0 && hiddenCount > 0) {
+      contribHolder.appendChild(el('p', { class: 'hint' },
+        'All ' + hiddenCount + (hiddenCount === 1 ? ' holding had' : ' holdings had') + ' no activity in this period.'));
+      return;
+    }
+    contribHolder.appendChild(await dataTable(rows, [
       'listing_id', 'holding_account_id', 'opening_market_value', 'closing_market_value',
       'purchases', 'sale_proceeds', 'income', 'capital_growth', 'fx_movement', 'total_return',
+    ]));
+    if (hiddenCount > 0) {
+      contribHolder.appendChild(el('p', { class: 'hint' },
+        hiddenCount + (hiddenCount === 1 ? ' holding' : ' holdings') + ' with no activity in this period hidden.'));
+    }
+  }
+  hideInp.addEventListener('change', function () {
+    savePref(HIDE_INACTIVE_PREF_KEY, hideInp.checked ? 'true' : 'false');
+    renderContrib();
+  });
+  await renderContrib();
+
+  detailParts.push(el('details', null, [
+    el('summary', null, 'Per-holding contributions'),
+    el('div', { class: 'toggle-row' }, [
+      hideInp,
+      el('label', { for: 'hide-inactive-holdings' }, 'Hide holdings with no activity in this period'),
     ]),
+    contribHolder,
   ]));
 
   return { headline: el('div', null, headlineParts), detail: el('div', null, detailParts) };
@@ -1398,6 +1447,7 @@ async function performancePanel() {
   }
 
   async function applyRange(from, to) {
+    syncPresetButtons();
     fromInp.value = from;
     toInp.value = to;
     chartHolder.innerHTML = '';
@@ -1422,17 +1472,28 @@ async function performancePanel() {
     }
   }
 
-  const presets = [
-    ['1m', '1M'], ['3m', '3M'], ['6m', '6M'], ['1y', '1Y'], ['fytd', 'FY'], ['all', 'All'],
-  ];
-  const presetButtons = presets.map(function (p) {
+  // `activePreset` is null while a custom From/To range is in effect (no
+  // preset button highlighted); a preset click or the initial restore sets
+  // it before calling applyRange, which then highlights the matching button.
+  let activePreset = null;
+  const presetButtons = RANGE_PRESETS.map(function (p) {
     const btn = el('button', { type: 'button', class: 'small' }, p[1]);
+    btn._presetKey = p[0];
     btn.addEventListener('click', function () {
+      activePreset = p[0];
+      savePref(RANGE_PREF_KEY, activePreset);
       const r = presetRange(series, p[0]);
       applyRange(r.from, r.to);
     });
     return btn;
   });
+  function syncPresetButtons() {
+    presetButtons.forEach(function (btn) {
+      const active = btn._presetKey === activePreset;
+      btn.classList.toggle('active', active);
+      btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+    });
+  }
 
   const rangeForm = el('form', { class: 'range-control' });
   rangeForm.appendChild(el('div', { class: 'form-actions' }, presetButtons));
@@ -1441,7 +1502,14 @@ async function performancePanel() {
   rangeForm.appendChild(el('button', { type: 'submit', class: 'small' }, 'Apply'));
   rangeForm.addEventListener('submit', function (ev) {
     ev.preventDefault();
-    if (fromInp.value && toInp.value) applyRange(fromInp.value, toInp.value);
+    if (fromInp.value && toInp.value) {
+      // A custom range is ad-hoc: clear the remembered preset so the next
+      // page load falls back to the default (all) rather than reapplying
+      // stale fixed dates.
+      activePreset = null;
+      savePref(RANGE_PREF_KEY, null);
+      applyRange(fromInp.value, toInp.value);
+    }
   });
 
   const panel = el('div', { class: 'card perf-panel' }, [
@@ -1451,7 +1519,9 @@ async function performancePanel() {
     rangeForm,
     detailHolder,
   ]);
-  const initial = presetRange(series, 'all');
+  const storedPreset = loadPref(RANGE_PREF_KEY, 'all');
+  activePreset = RANGE_PRESETS.some(function (p) { return p[0] === storedPreset; }) ? storedPreset : 'all';
+  const initial = presetRange(series, activePreset);
   await applyRange(initial.from, initial.to);
   return panel;
 }

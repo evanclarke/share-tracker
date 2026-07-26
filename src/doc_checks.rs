@@ -531,6 +531,23 @@ fn period_performance_panel_documented() {
     assert!(README_MD.contains("date-range presets"));
 }
 
+/// Docs-sync pin for the overview panel's 2Y/3Y presets, remembered range,
+/// and the per-holding "hide no-activity holdings" checkbox (REQUIREMENTS
+/// 2026-07-26): the README's preset list includes 2Y/3Y and the remembered-
+/// range/hide-inactive behaviour, and the API docs' Period performance
+/// section explains that `holdings` returns every holding unfiltered and the
+/// UI hides all-zero ones by default.
+#[test]
+fn overview_range_presets_and_activity_filter_documented() {
+    assert!(README_MD.contains("1M/3M/6M/1Y/2Y/3Y/FY-to-date/all"));
+    assert!(README_MD.contains("last-picked preset is remembered across reloads"));
+    assert!(README_MD.contains("hide holdings with no activity in this period"));
+    assert!(API_MD.contains(
+        "a row for **every** holding with any history up to either endpoint, including one fully closed well before `from`"
+    ));
+    assert!(API_MD.contains("hide holdings with no activity in this period"));
+}
+
 /// Docs-sync pin for the top menu bar + overview-first home screen
 /// (REQUIREMENTS 2026-07-25): the API docs name the menu bar, its four menus,
 /// `#/` as the home route, and the new `/static/nav.js` module; the README's

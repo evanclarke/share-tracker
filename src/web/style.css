@@ -263,6 +263,13 @@ input[type=checkbox] { width: auto; }
 .range-control { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px; margin: 12px 0; }
 .range-control .form-actions { margin-top: 0; }
 .range-control .field { margin-bottom: 0; }
+/* The remembered range preset (loaded from localStorage on open, or set by
+   the last click) is highlighted so the restored state is legible, not
+   silently applied. */
+.range-control button.small.active { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+/* The per-holding contributions "hide inactive" checkbox — outside any
+   <form>, so it doesn't get the form .field stacked layout. */
+.toggle-row { display: flex; align-items: center; gap: 6px; margin: 8px 0; }
 .perf-summary {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));

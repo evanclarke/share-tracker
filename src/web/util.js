@@ -43,6 +43,45 @@ export function setMain(node) {
   app.appendChild(node);
 }
 
+// ---- persisted UI preferences -----------------------------------------
+
+// Small localStorage wrapper for remembering a UI choice across reloads
+// (e.g. the Portfolio Overview's last-used range preset and its hide-
+// inactive-holdings checkbox — the app's first use of any client-side
+// persistence). Storage access can throw (Safari private browsing, storage
+// disabled) — treated the same as "nothing stored" rather than breaking the
+// view. `store` defaults to the browser's localStorage; tests pass a stub
+// implementing the same getItem/setItem/removeItem shape, since Node has no
+// localStorage.
+function defaultStore() {
+  return typeof localStorage === 'undefined' ? null : localStorage;
+}
+
+export function loadPref(key, fallback, store) {
+  const s = store || defaultStore();
+  if (!s) return fallback;
+  try {
+    const v = s.getItem(key);
+    return v == null ? fallback : v;
+  } catch (e) {
+    return fallback;
+  }
+}
+
+// A `null`/`undefined`/empty-string value clears the preference (used when a
+// custom range is applied, so the remembered preset doesn't linger) rather
+// than storing an empty string.
+export function savePref(key, value, store) {
+  const s = store || defaultStore();
+  if (!s) return;
+  try {
+    if (value == null || value === '') s.removeItem(key);
+    else s.setItem(key, String(value));
+  } catch (e) {
+    // storage unavailable — the preference just won't persist this session
+  }
+}
+
 export function looksNumeric(v) {
   return typeof v !== 'boolean' && v != null && v !== '' && /^-?\d+(\.\d+)?$/.test(String(v));
 }
@@ -153,6 +192,26 @@ export function periodReturnPct(r) {
   return days > 365
     ? { value: r.money_weighted_return_pct, annualized: true }
     : { value: r.total_return_pct, annualized: false };
+}
+
+// The strict "no impact on this period" predicate for a period-performance
+// per-holding contribution row (reports::period_performance's
+// `HoldingPeriod`): false only when opening/closing market value, purchases,
+// sale proceeds, and income are *all* exactly zero — which forces
+// capital_growth/fx_movement/total_return to zero too (they're derived from
+// these), i.e. the holding was fully closed before the period even started
+// and has zero bearing on it. A holding that was merely flat (held
+// throughout, unchanged value, no trades) still counts as active — only the
+// all-zero case is filtered by the Portfolio Overview's "hide holdings with
+// no activity" checkbox. Values are decimal *strings* (e.g. "0.00", possibly
+// "-0.00"), so compare with the exact decStrEq helper above (signed, and
+// normalises "-0.00" to zero) rather than the non-negative-only decEq, and
+// never Number()/parseFloat.
+const NO_ACTIVITY_FIELDS = [
+  'opening_market_value', 'closing_market_value', 'purchases', 'sale_proceeds', 'income',
+];
+export function holdingHasActivity(h) {
+  return !NO_ACTIVITY_FIELDS.every(function (f) { return decStrEq(h[f], '0'); });
 }
 
 // Format a numeric cell for display per its column kind. Returns null when

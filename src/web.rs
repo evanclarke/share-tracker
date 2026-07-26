@@ -782,6 +782,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn portfolio_overview_range_presets_and_activity_filter_present() {
+        let js = app_js_body().await;
+        // 2Y/3Y presets alongside the existing 1M/3M/6M/1Y/FY/All.
+        assert!(js.contains("RANGE_PRESETS"));
+        assert!(js.contains("['2y', '2Y']"));
+        assert!(js.contains("['3y', '3Y']"));
+        // The chosen preset is remembered across reloads (localStorage), and
+        // a custom range clears it rather than being remembered itself.
+        assert!(js.contains("share-tracker.overview.range"));
+        assert!(js.contains("loadPref"));
+        assert!(js.contains("savePref"));
+        assert!(js.contains("syncPresetButtons"));
+        // The per-holding contributions "hide no-activity holdings" checkbox,
+        // default checked, also remembered across reloads.
+        assert!(js.contains("share-tracker.overview.hideInactive"));
+        assert!(js.contains("holdingHasActivity"));
+        assert!(js.contains("Hide holdings with no activity in this period"));
+    }
+
+    #[tokio::test]
     async fn top_menu_bar_ui_present() {
         let js = app_js_body().await;
         let css = STYLE_CSS;

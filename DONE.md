@@ -1592,3 +1592,52 @@ last.
 - [x] `cargo build`, `cargo test` (1131 passed), `cargo fmt --check`, `node --test
   'src/web/*.test.js'` (46 passed) all clean; `scripts/ui-check.sh --seed demo --screenshot '#/'`
   confirmed Manual Price Overrides and Run report now render below the holdings table
+
+## Portfolio Overview range presets, remembered range, hide inactive holdings (REQUIREMENTS 2026-07-26)
+Client-side-only change to the performance panel (`performancePanel`/`renderPeriodSummary` in
+`src/web/app.js`, presets in `src/web/chart.js`). No schema or endpoint change.
+- [x] Added 2Y and 3Y to the range-preset list (`presetRange` in `src/web/chart.js`), reusing
+      `addMonths`; clamps to the earliest stored date like the existing presets. Test:
+      `src/web/chart.test.js` (`presetRange: month-based presets end at the series' own latest
+      date`, `a preset never precedes the series' earliest stored date`, extended with 2Y/3Y
+      assertions)
+- [x] The last-used preset is remembered across reloads via `localStorage`, defaulting to `all`
+      when nothing is stored or the stored value isn't a known preset — new `loadPref`/`savePref`
+      helpers in `src/web/util.js` (the app's first use of any client-side persistence; storage
+      access is wrapped in try/catch so a throwing/disabled store degrades to "nothing stored"
+      rather than breaking the view). `performancePanel` tracks the active preset in a closure
+      variable, restores it on open (validated against `RANGE_PRESETS`), and highlights the
+      matching button (`.range-control button.small.active`, `syncPresetButtons`). Applying a
+      custom From/To range clears the remembered preset (`savePref(RANGE_PREF_KEY, null)`) instead
+      of storing fixed dates, so the next load falls back to `all` rather than a stale range. Tests:
+      `src/web/util.test.js` (`loadPref`/`savePref` round-trip, fallback on missing key, fallback on
+      a throwing store, null/empty clears back to the fallback) and
+      `web::tests::portfolio_overview_range_presets_and_activity_filter_present` (served-bundle
+      wiring: `RANGE_PRESETS`, the `share-tracker.overview.range` key, `loadPref`/`savePref`,
+      `syncPresetButtons`)
+- [x] Added a default-checked "Hide holdings with no activity in this period" checkbox above the
+      per-holding contributions table (`renderPeriodSummary`), filtering out holdings where
+      `opening_market_value`, `closing_market_value`, `purchases`, `sale_proceeds`, and `income` are
+      all exactly zero — `holdingHasActivity` in `src/web/util.js`, compared via the signed exact
+      decimal-string helper `decStrEq` (handles `"0.00"`/`"-0.00"` spellings), never
+      `Number()`/`parseFloat`. A hidden-count hint shows below the table, and a holding that was
+      merely flat (unchanged value, no trades) stays visible — only holdings closed before the
+      period even started are hidden. Checkbox state is remembered the same way as the range preset
+      (`share-tracker.overview.hideInactive`). Tests: `src/web/util.test.js`
+      (`holdingHasActivity`: all-zero row incl. `"-0.00"` → false, income-only → true, flat holding
+      → true) and `web::tests::portfolio_overview_range_presets_and_activity_filter_present`
+      (`holdingHasActivity`, the checkbox label text, and the `hideInactive` key present in the
+      bundle)
+- [x] Docs: README's Portfolio overview bullet (full preset list incl. 2Y/3Y, the remembered-range
+      behaviour, the hide-inactive checkbox) and `docs/API.md`'s Web frontend and Period performance
+      sections (the endpoint returns a row for every holding with any history unfiltered; the UI
+      hides all-zero ones by default). New doc_checks pin:
+      `doc_checks::overview_range_presets_and_activity_filter_documented`
+- [x] `cargo build`, `cargo test` (1133 passed), `cargo fmt --check` all clean; `node --test
+  'src/web/*.test.js'` (55 passed) clean. End-to-end verified against a real server (seeded demo
+  fixture + synthetic closing prices spanning 2024-02 to 2026-07, snapshots generated) via headless
+  Chrome driven over the DevTools protocol: a fresh load defaults to All; clicking 1Y persists to
+  `localStorage` and highlights the button; reloading restores 1Y (correct From date, one year back
+  from the latest snapshot) with the checkbox still unchecked from an earlier toggle; applying a
+  custom range clears the remembered preset and the next reload falls back to All. Screenshots
+  confirm the 2Y/3Y buttons render and the active preset is visibly highlighted.
