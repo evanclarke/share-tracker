@@ -140,6 +140,34 @@ pub struct ListQuery {
     pub include_linked: Option<bool>,
 }
 
+impl ListQuery {
+    /// Every owner column paired with the filter value supplied for it — the
+    /// one place this endpoint enumerates the six. Both rules it applies read
+    /// off this set (which filters to AND into the query, and whether
+    /// `include_linked` was combined with a non-trade owner), so neither can
+    /// end up written against five of the six.
+    fn owner_filters(&self) -> [(&'static str, Option<i64>); 6] {
+        [
+            ("trade_id", self.trade_id),
+            ("income_id", self.income_id),
+            ("amma_statement_id", self.amma_statement_id),
+            ("ess_statement_id", self.ess_statement_id),
+            ("interest_income_id", self.interest_income_id),
+            ("corporate_action_id", self.corporate_action_id),
+        ]
+    }
+
+    /// Whether any owner filter other than `trade_id` is set. The linked
+    /// traversal is defined from a trade, so combining it with another owner
+    /// filter has no meaning — and honouring only the trade filter would
+    /// silently return rows the other filter excluded.
+    fn has_non_trade_owner_filter(&self) -> bool {
+        self.owner_filters()
+            .into_iter()
+            .any(|(column, value)| column != "trade_id" && value.is_some())
+    }
+}
+
 const METADATA_COLS: &str = "id, trade_id, income_id, amma_statement_id, ess_statement_id, interest_income_id, corporate_action_id, filename, content_type, byte_size, checksum, uploaded_at";
 
 pub fn router() -> Router<SqlitePool> {
@@ -164,19 +192,14 @@ pub fn checksum_hex(content: &[u8]) -> String {
 }
 
 pub async fn db_list(pool: &SqlitePool, q: &ListQuery) -> Result<Vec<Attachment>, sqlx::Error> {
-    // Each present owner filter is ANDed in; the column names come from this
-    // module's fixed set, never user input, so they are safe to push as raw SQL.
-    let conds: Vec<(&str, i64)> = [
-        ("trade_id", q.trade_id),
-        ("income_id", q.income_id),
-        ("amma_statement_id", q.amma_statement_id),
-        ("ess_statement_id", q.ess_statement_id),
-        ("interest_income_id", q.interest_income_id),
-        ("corporate_action_id", q.corporate_action_id),
-    ]
-    .into_iter()
-    .filter_map(|(col, val)| val.map(|v| (col, v)))
-    .collect();
+    // Each present owner filter is ANDed in; the column names come from the
+    // query's own fixed set, never user input, so they are safe to push as raw
+    // SQL.
+    let conds: Vec<(&str, i64)> = q
+        .owner_filters()
+        .into_iter()
+        .filter_map(|(col, val)| val.map(|v| (col, v)))
+        .collect();
 
     let mut qb: QueryBuilder<Sqlite> =
         QueryBuilder::new(format!("SELECT {METADATA_COLS} FROM attachments"));
@@ -282,10 +305,7 @@ async fn list(
         // The linked traversal is defined from a trade only; combining it
         // with another owner filter has no meaning, so reject rather than
         // silently ignore either parameter.
-        let other_owner = q.income_id.is_some()
-            || q.amma_statement_id.is_some()
-            || q.ess_statement_id.is_some()
-            || q.interest_income_id.is_some();
+        let other_owner = q.has_non_trade_owner_filter();
         let Some(trade_id) = q.trade_id else {
             return Err(ApiError::unprocessable(
                 "include_linked lists a trade's linked documents — it requires a trade_id filter",
@@ -366,14 +386,17 @@ async fn upload(
         }
     }
 
-    // Exactly one owner must be set.
-    let owners = trade_id.is_some() as u8
-        + income_id.is_some() as u8
-        + amma_statement_id.is_some() as u8
-        + ess_statement_id.is_some() as u8
-        + interest_income_id.is_some() as u8
-        + corporate_action_id.is_some() as u8;
-    if owners != 1 {
+    // Exactly one owner must be set (mirroring the table's CHECK, so a bad
+    // upload is a readable 422 rather than a constraint violation).
+    let owners = [
+        trade_id,
+        income_id,
+        amma_statement_id,
+        ess_statement_id,
+        interest_income_id,
+        corporate_action_id,
+    ];
+    if owners.iter().filter(|owner| owner.is_some()).count() != 1 {
         return Err(ApiError::unprocessable(
             "attach to exactly one of a trade, income record, AMMA statement, ESS statement, interest income record, or corporate action",
         ));
@@ -1075,17 +1098,29 @@ mod tests {
         assert!(names.is_empty());
     }
 
+    /// `include_linked` needs a lone `trade_id`: no trade filter is a 422, and
+    /// so is a trade filter combined with *any* of the other five owners. The
+    /// guard reads the query's own owner set, so every non-trade column is
+    /// listed here — a filter it failed to notice would be silently dropped,
+    /// returning rows the caller asked to exclude.
     #[tokio::test]
     async fn api_list_include_linked_requires_a_lone_trade_filter() {
         let pool = test_pool().await;
         let trade_id = insert_trade(&pool).await;
-        let income_id = insert_income(&pool).await;
-        // No trade_id at all, and combined with another owner filter — both 422.
-        for query in [
-            "include_linked=true".to_string(),
-            format!("income_id={income_id}&include_linked=true"),
-            format!("trade_id={trade_id}&income_id={income_id}&include_linked=true"),
+        // The guard runs before any lookup, so the other owners' ids need not
+        // exist — only that the filter is seen.
+        let mut queries = vec!["include_linked=true".to_string()];
+        for owner in [
+            "income_id",
+            "amma_statement_id",
+            "ess_statement_id",
+            "interest_income_id",
+            "corporate_action_id",
         ] {
+            queries.push(format!("{owner}=1&include_linked=true"));
+            queries.push(format!("trade_id={trade_id}&{owner}=1&include_linked=true"));
+        }
+        for query in queries {
             let resp = get_list(pool.clone(), &query).await;
             assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY, "?{query}");
         }
