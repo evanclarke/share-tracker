@@ -18,6 +18,55 @@ pub struct RocEvent {
     pub currency: String,
 }
 
+impl RocEvent {
+    /// What this payment reduces the cost base by, per *as-acquired* unit of
+    /// a parcel acquired on `acquired` and still held at `up_to` (`None` =
+    /// held today) — or `None` when the payment does not reach those units at
+    /// all.
+    ///
+    /// A payment before the parcel was acquired was never received on it, and
+    /// a unit sold before a payment was not held for it, so the payment
+    /// applies only within `[acquired, up_to]`. Each payment is per unit *at
+    /// the payment date*: a split between acquisition and the payment
+    /// multiplies the units receiving it, so the amount is scaled by the split
+    /// ratio over `(acquired, payment date]` to express it per as-acquired
+    /// unit (TD 2000/10).
+    ///
+    /// Fails loudly when the payment's currency differs from the parcel's —
+    /// amounts in different currencies must never be netted against each
+    /// other. This is the whole of a payment's relationship to a parcel:
+    /// [`per_unit_reduction`] sums it, `domain::cost_base::adjustment_detail`
+    /// itemises it, and the net-capital-gain report's G1 walk scales it to the
+    /// whole parcel — none of them restates the window, the guard, or the
+    /// re-basing.
+    pub fn per_unit_for(
+        &self,
+        splits: &[SplitEvent],
+        parcel_currency: &str,
+        acquired: NaiveDate,
+        up_to: Option<NaiveDate>,
+    ) -> Result<Option<Decimal>, sqlx::Error> {
+        if self.date < acquired || up_to.is_some_and(|d| self.date > d) {
+            return Ok(None);
+        }
+        if self.currency != parcel_currency {
+            return Err(sqlx::Error::Decode(
+                format!(
+                    "return-of-capital currency {} differs from the parcel's currency {}",
+                    self.currency, parcel_currency
+                )
+                .into(),
+            ));
+        }
+        let (new, old) = split_ratio(splits, acquired, Some(self.date));
+        Ok(Some(if new == old {
+            self.amount_per_unit
+        } else {
+            self.amount_per_unit * new / old
+        }))
+    }
+}
+
 /// All ReturnOfCapital actions keyed by listing, each list sorted by payment
 /// date (then id). Shared by the portfolio/unrealised/realised/open-parcels
 /// reports to reduce affected parcels' cost bases, and by the net-capital-gain
@@ -206,13 +255,9 @@ pub fn sold_in_acquired_units(
 /// open-holdings reports pass `None` (an unsold unit was held for every
 /// payment since acquisition).
 ///
-/// Each payment is per unit *at the payment date*: a split between acquisition
-/// and the payment multiplies the units receiving the per-unit amount, so the
-/// payment is scaled by the split ratio over `(acquired, payment date]` to
-/// express it per as-acquired unit.
-///
-/// Fails loudly when a payment's currency differs from the parcel's — amounts in
-/// different currencies must never be netted against each other.
+/// Which payments apply, how a split re-bases each one, and the loud failure
+/// on a currency mismatch are all [`RocEvent::per_unit_for`]'s — this is only
+/// the sum over the listing's payments.
 pub fn per_unit_reduction(
     events: &[RocEvent],
     splits: &[SplitEvent],
@@ -222,24 +267,9 @@ pub fn per_unit_reduction(
 ) -> Result<Decimal, sqlx::Error> {
     let mut total = Decimal::ZERO;
     for e in events {
-        if e.date < acquired || up_to.is_some_and(|d| e.date > d) {
-            continue;
+        if let Some(per_unit) = e.per_unit_for(splits, trade_currency, acquired, up_to)? {
+            total += per_unit;
         }
-        if e.currency != trade_currency {
-            return Err(sqlx::Error::Decode(
-                format!(
-                    "return-of-capital currency {} differs from the parcel's currency {}",
-                    e.currency, trade_currency
-                )
-                .into(),
-            ));
-        }
-        let (new, old) = split_ratio(splits, acquired, Some(e.date));
-        total += if new == old {
-            e.amount_per_unit
-        } else {
-            e.amount_per_unit * new / old
-        };
     }
     Ok(total)
 }

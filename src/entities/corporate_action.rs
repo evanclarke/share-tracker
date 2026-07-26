@@ -22,7 +22,7 @@
 //! acquisition date — only the unit count (and so the per-unit cost base)
 //! changes. Trade rows keep the quantities as originally transacted; reports
 //! and write-time allocation checks re-base quantities between unit bases via
-//! [`split_ratio`] / [`split_adjusted_quantity`] / [`as_acquired_quantity`].
+//! [`split_adjusted_quantity`] / [`as_acquired_quantity`].
 //! A trade dated on the conversion date is already in post-split units.
 //!
 //! **BonusIssue** — a non-assessable bonus share issue (the general
@@ -136,7 +136,6 @@ mod model;
 pub use adjustments::{
     RocEvent, SplitEvent, as_acquired_quantity, db_return_of_capital_events, db_share_split_events,
     db_splits_for_listing, per_unit_reduction, sold_in_acquired_units, split_adjusted_quantity,
-    split_ratio,
 };
 pub use db::db_get_tx;
 pub use http::router;
@@ -148,6 +147,14 @@ pub use model::{ActionKind, CorporateAction, WorthlessEvent};
 /// reasoning as `trade.rs`'s `UpsertError` re-export.
 #[cfg(test)]
 pub use db::{WriteError, db_delete, db_get, db_list, db_upsert};
+
+/// The raw conversion ratio is now used only *inside* `adjustments` — every
+/// caller outside it asks a higher-level question instead
+/// ([`split_adjusted_quantity`] / [`as_acquired_quantity`] for a quantity,
+/// [`RocEvent::per_unit_for`] for a payment) — so the re-export is test-gated
+/// for its own unit tests, keeping the non-test build warning-free.
+#[cfg(test)]
+pub use adjustments::split_ratio;
 
 #[cfg(test)]
 use axum::http::StatusCode;
@@ -1020,6 +1027,33 @@ mod tests {
         // An out-of-range event in another currency is not an error — it doesn't
         // participate in the calculation at all.
         assert!(per_unit_reduction(&events, &[], "AUD", d(2024, 7, 1), None).is_ok());
+    }
+
+    /// The window, the currency guard and the split re-basing above are all
+    /// `RocEvent::per_unit_for`'s, reached through `per_unit_reduction`. What
+    /// only the method itself exposes is the `Option`: a payment that doesn't
+    /// reach the units *declines* rather than reducing them by nil — which is
+    /// what lets `domain::cost_base::adjustment_detail` leave the payment out
+    /// of the itemised breakdown entirely instead of printing a zero row.
+    #[test]
+    fn per_unit_for_declines_a_payment_outside_the_holding_period() {
+        let payment = RocEvent {
+            date: d(2024, 6, 1),
+            amount_per_unit: "0.20".parse().unwrap(),
+            currency: "AUD".into(),
+        };
+        let pu = |acquired, up_to| {
+            payment
+                .per_unit_for(&[], "AUD", acquired, up_to)
+                .expect("same currency")
+        };
+        assert_eq!(pu(d(2024, 1, 1), None), Some("0.20".parse().unwrap()));
+        assert_eq!(pu(d(2024, 7, 1), None), None, "acquired after the payment");
+        assert_eq!(
+            pu(d(2024, 1, 1), Some(d(2024, 5, 1))),
+            None,
+            "sold before the payment"
+        );
     }
 
     // API-level tests

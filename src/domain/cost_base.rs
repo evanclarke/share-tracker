@@ -21,8 +21,8 @@
 //!    `docs/ato/bonus-shares.md`). The pipeline therefore works in the
 //!    parcel's *as-acquired* units: callers re-base a sale-date quantity back
 //!    via `corporate_action::as_acquired_quantity` /
-//!    `sold_in_acquired_units` before calling, and per-unit payments are
-//!    re-based inside `corporate_action::per_unit_reduction`.
+//!    `sold_in_acquired_units` before calling, and each payment re-bases
+//!    itself (`corporate_action::RocEvent::per_unit_for`).
 //! 5. **AUD conversion at the acquisition month**
 //!    ([`CostBase::into_aud_with`]) — reports take the Australian-tax view,
 //!    so the cost base converts at the ATO reference rate for the parcel's
@@ -40,7 +40,7 @@ use rust_decimal::Decimal;
 use serde::Serialize;
 use sqlx::{Row, sqlite::SqliteRow};
 
-use crate::entities::corporate_action::{RocEvent, SplitEvent, per_unit_reduction, split_ratio};
+use crate::entities::corporate_action::{RocEvent, SplitEvent, per_unit_reduction};
 use crate::infra::decimal::row_dec;
 use crate::infra::fx;
 
@@ -322,23 +322,13 @@ pub fn adjustment_detail(
     };
     let mut roc_running = costed_pool;
     for e in roc_events {
-        if e.date < parcel.trade_date || up_to.is_some_and(|d| e.date > d) {
+        // Applicability, the currency guard and the split re-basing are the
+        // payment's own (`RocEvent::per_unit_for`) — the same call
+        // `per_unit_reduction` sums, so the itemised rows can't describe a
+        // different set of payments than the totals were computed from.
+        let Some(per_unit) = e.per_unit_for(splits, parcel.currency, parcel.trade_date, up_to)?
+        else {
             continue;
-        }
-        if e.currency != parcel.currency {
-            return Err(sqlx::Error::Decode(
-                format!(
-                    "return-of-capital currency {} differs from the parcel's currency {}",
-                    e.currency, parcel.currency
-                )
-                .into(),
-            ));
-        }
-        let (new, old) = split_ratio(splits, parcel.trade_date, Some(e.date));
-        let per_unit = if new == old {
-            e.amount_per_unit
-        } else {
-            e.amount_per_unit * new / old
         };
         let amount = per_unit * units;
         let before = roc_running;

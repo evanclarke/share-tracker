@@ -30,6 +30,7 @@
 //!     year in the series.
 
 use crate::domain::tax_year::tax_year_for;
+use crate::entities::corporate_action::RocEvent;
 use crate::infra::decimal::parse_dec;
 use crate::infra::fx::{FxOverride, FxRates};
 use crate::infra::http::ApiError;
@@ -361,31 +362,23 @@ async fn g1_gains(
         let mut remaining = price * trade_qty + brok + gst;
 
         while i < rows.len() && rows[i].try_get::<i64, _>("trade_id")? == trade_id {
-            let action_date: NaiveDate = rows[i].try_get("action_date")?;
-            let amount_pu = parse_dec("amount_per_unit", rows[i].try_get("amount_per_unit")?)?;
-            let action_currency: String = rows[i].try_get("action_currency")?;
-            if action_currency != trade_currency {
-                return Err(sqlx::Error::Decode(
-                    format!(
-                        "return-of-capital currency {action_currency} differs from the \
-                         parcel's currency {trade_currency}"
-                    )
-                    .into(),
-                ));
-            }
-            // Whole-parcel equivalent of the per-unit payment. The payment is
-            // per unit *at the payment date*: a split between acquisition and
-            // the payment multiplies the units receiving it.
-            let (new, old) = crate::entities::corporate_action::split_ratio(
-                splits,
-                trade_date,
-                Some(action_date),
-            );
-            let payment = if new == old {
-                amount_pu * trade_qty
-            } else {
-                amount_pu * trade_qty * new / old
+            let event = RocEvent {
+                date: rows[i].try_get("action_date")?,
+                amount_per_unit: parse_dec("amount_per_unit", rows[i].try_get("amount_per_unit")?)?,
+                currency: rows[i].try_get("action_currency")?,
             };
+            let action_date = event.date;
+            // Whole-parcel equivalent of the payment, over the payment's own
+            // reduction per as-acquired unit (`RocEvent::per_unit_for`, which
+            // carries the currency guard and the split re-basing — a payment
+            // is per unit *at the payment date*, so a split between
+            // acquisition and the payment multiplies the units receiving it).
+            // The join already bounds the payments to this parcel's holding
+            // period, so `per_unit_for` never declines one here.
+            let per_unit = event
+                .per_unit_for(splits, &trade_currency, trade_date, None)?
+                .unwrap_or(Decimal::ZERO);
+            let payment = per_unit * trade_qty;
             if payment > remaining {
                 let excess = payment - remaining;
                 // Only the units still held at the payment date received it
@@ -405,7 +398,7 @@ async fn g1_gains(
                 if held > Decimal::ZERO && trade_qty > Decimal::ZERO {
                     let gain = excess * held / trade_qty;
                     let gain_aud =
-                        fx.to_aud(gain, &action_currency, action_date, FxOverride::None)?;
+                        fx.to_aud(gain, &event.currency, action_date, FxOverride::None)?;
                     let discount_eligible =
                         crate::domain::cgt_discount::discount_eligible(acquired, action_date);
                     out.push((tax_year_for(action_date), gain_aud, discount_eligible));
