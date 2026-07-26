@@ -598,6 +598,29 @@ mod tests {
                 "both re-created attachments triggers must record {col}"
             );
         }
+
+        // 0017 rebuilt the attachments table again (corporate_action_id
+        // owner), which again dropped its trigger pair with the old table —
+        // the *live* attachments triggers come from 0017 and must carry the
+        // full column list.
+        let sql17 = include_str!("../../migrations/0017_attachment_corporate_action_owner.sql");
+        for op in ["update", "delete"] {
+            assert!(
+                sql17.contains(&format!("CREATE TRIGGER attachments_row_history_{op}")),
+                "0017 must re-create the attachments {op} trigger"
+            );
+        }
+        for col in [
+            "ess_statement_id",
+            "interest_income_id",
+            "corporate_action_id",
+        ] {
+            assert_eq!(
+                sql17.matches(&format!("'{col}', OLD.{col}")).count(),
+                2,
+                "both re-created attachments triggers must record {col}"
+            );
+        }
     }
 
     /// The migration is purely additive: it creates the trail and its

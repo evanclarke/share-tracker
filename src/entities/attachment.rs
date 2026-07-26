@@ -1,19 +1,19 @@
 //! Document attachments for an activity (Trade, Income, AMMA Statement, ESS
-//! Statement, or Interest Income record).
+//! Statement, Interest Income record, or Corporate Action).
 //!
 //! A user attaches a supporting file — a trade confirmation / contract note PDF,
 //! a dividend statement, an AMMA statement scan, an annual ESS statement, a
-//! plain-text exchange record — to exactly one activity. The bytes are stored in
-//! the database as a BLOB (the `content` column) so the existing weekly DB
-//! backup captures the documents too; there is no separate file store to back
-//! up.
+//! plain-text exchange record, a demerger booklet or scrip-exchange offer
+//! document — to exactly one activity. The bytes are stored in the database as
+//! a BLOB (the `content` column) so the existing weekly DB backup captures the
+//! documents too; there is no separate file store to back up.
 //!
-//! Ownership is five nullable FK columns (`trade_id` / `income_id` /
-//! `amma_statement_id` / `ess_statement_id` / `interest_income_id`) with a DB
-//! CHECK that exactly one is set, rather than a polymorphic `type` + `id` pair —
-//! that way referential integrity to the owning activity is enforced by a real
-//! foreign key, and `ON DELETE CASCADE` removes an activity's attachments when
-//! it is deleted (no orphaned blobs).
+//! Ownership is six nullable FK columns (`trade_id` / `income_id` /
+//! `amma_statement_id` / `ess_statement_id` / `interest_income_id` /
+//! `corporate_action_id`) with a DB CHECK that exactly one is set, rather than
+//! a polymorphic `type` + `id` pair — that way referential integrity to the
+//! owning activity is enforced by a real foreign key, and `ON DELETE CASCADE`
+//! removes an activity's attachments when it is deleted (no orphaned blobs).
 //!
 //! The payload is binary, so this module does not follow the JSON-CRUD
 //! convention used by the other entities:
@@ -101,6 +101,7 @@ pub struct Attachment {
     pub amma_statement_id: Option<i64>,
     pub ess_statement_id: Option<i64>,
     pub interest_income_id: Option<i64>,
+    pub corporate_action_id: Option<i64>,
     pub filename: String,
     pub content_type: ContentType,
     pub byte_size: i64,
@@ -115,6 +116,7 @@ pub struct NewAttachment<'a> {
     pub amma_statement_id: Option<i64>,
     pub ess_statement_id: Option<i64>,
     pub interest_income_id: Option<i64>,
+    pub corporate_action_id: Option<i64>,
     pub filename: String,
     pub content_type: ContentType,
     pub checksum: String,
@@ -123,10 +125,10 @@ pub struct NewAttachment<'a> {
 }
 
 /// Owner filter for the list endpoint (`?trade_id=`/`?income_id=`/
-/// `?amma_statement_id=`/`?ess_statement_id=`/`?interest_income_id=`).
-/// `include_linked=true` (valid only with a lone `trade_id` filter) also
-/// returns the linked source record's attachments — see
-/// [`db_list_with_linked`].
+/// `?amma_statement_id=`/`?ess_statement_id=`/`?interest_income_id=`/
+/// `?corporate_action_id=`). `include_linked=true` (valid only with a lone
+/// `trade_id` filter) also returns the linked source record's attachments —
+/// see [`db_list_with_linked`].
 #[derive(Debug, Default, Deserialize)]
 pub struct ListQuery {
     pub trade_id: Option<i64>,
@@ -134,10 +136,11 @@ pub struct ListQuery {
     pub amma_statement_id: Option<i64>,
     pub ess_statement_id: Option<i64>,
     pub interest_income_id: Option<i64>,
+    pub corporate_action_id: Option<i64>,
     pub include_linked: Option<bool>,
 }
 
-const METADATA_COLS: &str = "id, trade_id, income_id, amma_statement_id, ess_statement_id, interest_income_id, filename, content_type, byte_size, checksum, uploaded_at";
+const METADATA_COLS: &str = "id, trade_id, income_id, amma_statement_id, ess_statement_id, interest_income_id, corporate_action_id, filename, content_type, byte_size, checksum, uploaded_at";
 
 pub fn router() -> Router<SqlitePool> {
     Router::new()
@@ -169,6 +172,7 @@ pub async fn db_list(pool: &SqlitePool, q: &ListQuery) -> Result<Vec<Attachment>
         ("amma_statement_id", q.amma_statement_id),
         ("ess_statement_id", q.ess_statement_id),
         ("interest_income_id", q.interest_income_id),
+        ("corporate_action_id", q.corporate_action_id),
     ]
     .into_iter()
     .filter_map(|(col, val)| val.map(|v| (col, v)))
@@ -194,9 +198,14 @@ pub async fn db_list(pool: &SqlitePool, q: &ListQuery) -> Result<Vec<Attachment>
 /// - a buy-back participation Sell's dividend income row (`income.buyback_trade_id`)
 /// - an ESS vest Buy's annual statement (`trades.ess_statement_id`)
 ///
-/// The other provenance-created trades (transfers, rights exercises, scrip
-/// exchanges, demergers, inheritances, worthless-shares sells) trace to
-/// records that cannot own attachments, so there is nothing to traverse.
+/// Transfers and inheritances trace to records that cannot own attachments at
+/// all, so there is nothing to traverse for them. Rights exercises, scrip
+/// exchanges, demergers, and worthless-shares sells trace to a corporate
+/// action row, which *can* own attachments directly (0017) — but one action
+/// can spawn many trades over time (e.g. several exercise Buys against one
+/// RightsIssue), so "the action's document" doesn't map onto "this trade's
+/// linked document" the way the 1:1 cases above do; its paperwork is reached
+/// via the Corporate Actions screen instead.
 pub async fn db_list_with_linked(
     pool: &SqlitePool,
     trade_id: i64,
@@ -237,14 +246,15 @@ pub async fn db_get_content(
 pub async fn db_insert(pool: &SqlitePool, att: &NewAttachment<'_>) -> Result<i64, sqlx::Error> {
     let row: (i64,) = sqlx::query_as(
         "INSERT INTO attachments \
-         (trade_id, income_id, amma_statement_id, ess_statement_id, interest_income_id, filename, content_type, byte_size, checksum, uploaded_at, content) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
+         (trade_id, income_id, amma_statement_id, ess_statement_id, interest_income_id, corporate_action_id, filename, content_type, byte_size, checksum, uploaded_at, content) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
     )
     .bind(att.trade_id)
     .bind(att.income_id)
     .bind(att.amma_statement_id)
     .bind(att.ess_statement_id)
     .bind(att.interest_income_id)
+    .bind(att.corporate_action_id)
     .bind(&att.filename)
     .bind(att.content_type)
     .bind(att.content.len() as i64)
@@ -315,6 +325,7 @@ async fn upload(
     let mut amma_statement_id: Option<i64> = None;
     let mut ess_statement_id: Option<i64> = None;
     let mut interest_income_id: Option<i64> = None;
+    let mut corporate_action_id: Option<i64> = None;
     let mut file: Option<(String, ContentType, Vec<u8>)> = None;
 
     while let Some(field) = multipart
@@ -330,6 +341,7 @@ async fn upload(
             Some("amma_statement_id") => amma_statement_id = read_owner_field(field).await?,
             Some("ess_statement_id") => ess_statement_id = read_owner_field(field).await?,
             Some("interest_income_id") => interest_income_id = read_owner_field(field).await?,
+            Some("corporate_action_id") => corporate_action_id = read_owner_field(field).await?,
             Some("file") => {
                 let filename = field.file_name().unwrap_or("attachment").to_string();
                 let declared = field.content_type().map(str::to_string);
@@ -359,10 +371,11 @@ async fn upload(
         + income_id.is_some() as u8
         + amma_statement_id.is_some() as u8
         + ess_statement_id.is_some() as u8
-        + interest_income_id.is_some() as u8;
+        + interest_income_id.is_some() as u8
+        + corporate_action_id.is_some() as u8;
     if owners != 1 {
         return Err(ApiError::unprocessable(
-            "attach to exactly one of a trade, income record, AMMA statement, ESS statement, or interest income record",
+            "attach to exactly one of a trade, income record, AMMA statement, ESS statement, interest income record, or corporate action",
         ));
     }
 
@@ -380,6 +393,7 @@ async fn upload(
         amma_statement_id,
         ess_statement_id,
         interest_income_id,
+        corporate_action_id,
         filename,
         content_type,
         checksum: checksum_hex(&content),
@@ -513,6 +527,18 @@ mod tests {
         id
     }
 
+    async fn insert_corporate_action(pool: &SqlitePool) -> i64 {
+        insert_listing(pool).await;
+        let (id,): (i64,) = sqlx::query_as(
+            "INSERT INTO corporate_actions (action_type, listing_id, date, amount_per_unit, currency) \
+             VALUES ('ReturnOfCapital', 1, '2024-04-01', '1', 'AUD') RETURNING id",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        id
+    }
+
     /// Insert an attachment owned by exactly one of a trade, income row, or
     /// ESS statement (the owners the linked-traversal tests exercise).
     async fn insert_owned(
@@ -530,6 +556,7 @@ mod tests {
                 amma_statement_id: None,
                 ess_statement_id,
                 interest_income_id: None,
+                corporate_action_id: None,
                 filename: name.to_string(),
                 content_type: ContentType::Pdf,
                 checksum: checksum_hex(b"x"),
@@ -617,6 +644,7 @@ mod tests {
                 amma_statement_id: None,
                 ess_statement_id: None,
                 interest_income_id: None,
+                corporate_action_id: None,
                 filename: "conf.pdf".to_string(),
                 content_type: ContentType::Pdf,
                 checksum: checksum_hex(content),
@@ -748,10 +776,12 @@ mod tests {
         let pool = test_pool().await;
         let ess_id = insert_ess_statement(&pool).await;
         let interest_id = insert_interest_income(&pool).await;
+        let action_id = insert_corporate_action(&pool).await;
 
         for (field, id, name) in [
             ("ess_statement_id", ess_id, "ess.pdf"),
             ("interest_income_id", interest_id, "interest.pdf"),
+            ("corporate_action_id", action_id, "demerger-booklet.pdf"),
         ] {
             let mut body = Vec::new();
             push_field(&mut body, field, &id.to_string());
@@ -765,6 +795,10 @@ mod tests {
         for (query, expected) in [
             (format!("ess_statement_id={ess_id}"), "ess.pdf"),
             (format!("interest_income_id={interest_id}"), "interest.pdf"),
+            (
+                format!("corporate_action_id={action_id}"),
+                "demerger-booklet.pdf",
+            ),
         ] {
             let resp = router()
                 .with_state(pool.clone())
@@ -789,7 +823,12 @@ mod tests {
         let pool = test_pool().await;
         let ess_id = insert_ess_statement(&pool).await;
         let interest_id = insert_interest_income(&pool).await;
-        for (e, i) in [(Some(ess_id), None), (None, Some(interest_id))] {
+        let action_id = insert_corporate_action(&pool).await;
+        for (e, i, a) in [
+            (Some(ess_id), None, None),
+            (None, Some(interest_id), None),
+            (None, None, Some(action_id)),
+        ] {
             db_insert(
                 &pool,
                 &NewAttachment {
@@ -798,6 +837,7 @@ mod tests {
                     amma_statement_id: None,
                     ess_statement_id: e,
                     interest_income_id: i,
+                    corporate_action_id: a,
                     filename: "x.pdf".to_string(),
                     content_type: ContentType::Pdf,
                     checksum: checksum_hex(b"x"),
@@ -819,11 +859,16 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
+        sqlx::query("DELETE FROM corporate_actions WHERE id = ?")
+            .bind(action_id)
+            .execute(&pool)
+            .await
+            .unwrap();
 
         let remaining = db_list(&pool, &ListQuery::default()).await.unwrap();
         assert!(
             remaining.is_empty(),
-            "ON DELETE CASCADE should remove both attachments"
+            "ON DELETE CASCADE should remove all three attachments"
         );
     }
 
@@ -1028,6 +1073,7 @@ mod tests {
                     amma_statement_id: None,
                     ess_statement_id: None,
                     interest_income_id: None,
+                    corporate_action_id: None,
                     filename: name.to_string(),
                     content_type: ContentType::Pdf,
                     checksum: checksum_hex(b"x"),
@@ -1075,6 +1121,7 @@ mod tests {
                 amma_statement_id: None,
                 ess_statement_id: None,
                 interest_income_id: None,
+                corporate_action_id: None,
                 filename: "x.pdf".to_string(),
                 content_type: ContentType::Pdf,
                 checksum: checksum_hex(b"x"),
@@ -1125,6 +1172,7 @@ mod tests {
                 amma_statement_id: None,
                 ess_statement_id: None,
                 interest_income_id: None,
+                corporate_action_id: None,
                 filename: "x.pdf".to_string(),
                 content_type: ContentType::Pdf,
                 checksum: checksum_hex(b"x"),
@@ -1161,6 +1209,7 @@ mod tests {
         let pool = test_pool().await;
         let trade_id = insert_trade(&pool).await;
         let income_id = insert_income(&pool).await;
+        let action_id = insert_corporate_action(&pool).await;
         // Two owners set → CHECK violation.
         let err = sqlx::query(
             "INSERT INTO attachments (trade_id, income_id, filename, content_type, byte_size, checksum, uploaded_at, content) \
@@ -1175,6 +1224,20 @@ mod tests {
             "exactly-one-owner CHECK should reject two owners"
         );
 
+        // A trade plus a corporate action set → still a CHECK violation.
+        let err = sqlx::query(
+            "INSERT INTO attachments (trade_id, corporate_action_id, filename, content_type, byte_size, checksum, uploaded_at, content) \
+             VALUES (?, ?, 'x.pdf', 'application/pdf', 1, 'abc', '2024-01-01T00:00:00Z', X'00')",
+        )
+        .bind(trade_id)
+        .bind(action_id)
+        .execute(&pool)
+        .await;
+        assert!(
+            err.is_err(),
+            "exactly-one-owner CHECK should reject a trade plus a corporate action"
+        );
+
         // Zero owners set → CHECK violation.
         let err = sqlx::query(
             "INSERT INTO attachments (filename, content_type, byte_size, checksum, uploaded_at, content) \
@@ -1185,6 +1248,19 @@ mod tests {
         assert!(
             err.is_err(),
             "exactly-one-owner CHECK should reject zero owners"
+        );
+
+        // Corporate action alone → accepted.
+        let ok = sqlx::query(
+            "INSERT INTO attachments (corporate_action_id, filename, content_type, byte_size, checksum, uploaded_at, content) \
+             VALUES (?, 'x.pdf', 'application/pdf', 1, 'abc', '2024-01-01T00:00:00Z', X'00')",
+        )
+        .bind(action_id)
+        .execute(&pool)
+        .await;
+        assert!(
+            ok.is_ok(),
+            "a corporate action as the sole owner should be accepted"
         );
     }
 

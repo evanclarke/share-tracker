@@ -576,6 +576,7 @@ async function viewSellsList() {
       labels: await columnLabelMaps(cols),
       actions: function (row) {
         return el('td', { class: 'actions' }, [
+          el('a', { href: '#/attachments/trade_id/' + row.id }, el('button', { class: 'link small' }, 'Attachments')),
           el('a', { href: '#/sells/edit/' + row.id }, el('button', { class: 'link small' }, 'Edit')),
           el('button', {
             class: 'link small danger',
@@ -897,6 +898,7 @@ const ATTACH_OWNER = {
   amma_statement_id: { noun: 'AMMA statement', api: '/amma_statements', name: function (o, listing) { return listing(o.listing_id) + ' FY' + o.tax_year_end_date; } },
   ess_statement_id: { noun: 'ESS statement', api: '/ess_statements', name: function (o, listing) { return listing(o.listing_id) + ' taxing point ' + o.taxing_point_date; } },
   interest_income_id: { noun: 'interest income', api: '/interest_income', name: function (o) { return (o.source ? o.source + ' ' : '') + 'on ' + o.date_paid; } },
+  corporate_action_id: { noun: 'corporate action', api: '/corporate_actions', name: function (o, listing) { return o.action_type + ' ' + listing(o.listing_id) + ' on ' + o.date; } },
 };
 
 async function viewAttachments(ownerField, ownerId) {

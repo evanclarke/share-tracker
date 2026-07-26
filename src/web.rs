@@ -1028,8 +1028,8 @@ mod tests {
     async fn attachments_ui_present() {
         let js = app_js_body().await;
         // The attachments view lists/uploads/downloads via the /attachments API,
-        // reached from the Trade/Income/AMMA/ESS-statement/Interest-income row
-        // "Attachments" action.
+        // reached from the Trade/Income/AMMA/ESS-statement/Interest-income/
+        // Corporate-action row "Attachments" action.
         assert!(js.contains("viewAttachments"));
         assert!(js.contains("/attachments"));
         assert!(js.contains("attachOwner"));
@@ -1041,11 +1041,13 @@ mod tests {
             "'amma_statement_id'",
             "'ess_statement_id'",
             "'interest_income_id'",
+            "'corporate_action_id'",
         ] {
             assert!(js.contains(&format!("attachOwner: {owner}")), "{owner}");
         }
         assert!(js.contains("ess_statement_id: { noun: 'ESS statement'"));
         assert!(js.contains("interest_income_id: { noun: 'interest income'"));
+        assert!(js.contains("corporate_action_id: { noun: 'corporate action'"));
         // Plain-text records are attachable; the file picker offers .txt.
         assert!(js.contains(".pdf,.png,.jpg,.jpeg,.txt"));
         // The checksum is stored integrity metadata, not a user-facing column.
@@ -1067,6 +1069,16 @@ mod tests {
         assert!(js.contains("linkedOwner"));
         assert!(js.contains("(linked)"));
         assert!(js.contains("Owner's attachments"));
+    }
+
+    #[tokio::test]
+    async fn sells_list_has_attachments_action() {
+        let js = app_js_body().await;
+        // The Sells screen is hand-rendered (viewSellsList) rather than the
+        // generic entity list, so it doesn't pick up entity.attachOwner
+        // automatically — it wires its own link to the same route the
+        // generic list uses for the trades entity (attachOwner: 'trade_id').
+        assert!(js.contains("'#/attachments/trade_id/' + row.id"));
     }
 
     #[tokio::test]

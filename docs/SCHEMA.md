@@ -279,18 +279,19 @@ rights_sale_allocations      Which original parcels the sold rights are anchored
 
 attachments                  Supporting documents for an activity; bytes stored in the DB (captured by the weekly backup)
 ├── id                 INTEGER PK
-├── trade_id           INTEGER FK→trades.id (nullable, ON DELETE CASCADE)            Owner (exactly one of the five is set)
-├── income_id          INTEGER FK→income.id (nullable, ON DELETE CASCADE)            Owner (exactly one of the five is set)
-├── amma_statement_id  INTEGER FK→amma_statements.id (nullable, ON DELETE CASCADE)   Owner (exactly one of the five is set)
-├── ess_statement_id   INTEGER FK→ess_statements.id (nullable, ON DELETE CASCADE)    Owner (exactly one of the five is set) — e.g. the annual ESS statement document (0014)
-├── interest_income_id INTEGER FK→interest_income.id (nullable, ON DELETE CASCADE)   Owner (exactly one of the five is set) — e.g. a broker statement whose only activity is cash interest (0014)
+├── trade_id           INTEGER FK→trades.id (nullable, ON DELETE CASCADE)            Owner (exactly one of the six is set)
+├── income_id          INTEGER FK→income.id (nullable, ON DELETE CASCADE)            Owner (exactly one of the six is set)
+├── amma_statement_id  INTEGER FK→amma_statements.id (nullable, ON DELETE CASCADE)   Owner (exactly one of the six is set)
+├── ess_statement_id   INTEGER FK→ess_statements.id (nullable, ON DELETE CASCADE)    Owner (exactly one of the six is set) — e.g. the annual ESS statement document (0014)
+├── interest_income_id INTEGER FK→interest_income.id (nullable, ON DELETE CASCADE)   Owner (exactly one of the six is set) — e.g. a broker statement whose only activity is cash interest (0014)
+├── corporate_action_id INTEGER FK→corporate_actions.id (nullable, ON DELETE CASCADE) Owner (exactly one of the six is set) — e.g. a demerger booklet or scrip-exchange offer document (0017)
 ├── filename           TEXT             Original upload filename, preserved for download
 ├── content_type       TEXT             application/pdf | image/png | image/jpeg | text/plain (allowlist, CHECK-enforced; text/plain since 0014 — plain-text records like crypto exchange exports and DRP advices)
 ├── byte_size          INTEGER          Size of content in bytes (informational)
 ├── checksum           TEXT             SHA-256 of content, hex (integrity / duplicate detection)
 ├── uploaded_at        TEXT             RFC 3339 timestamp the attachment was stored
 └── content            BLOB             The file bytes
-                       CHECK: exactly one of trade_id / income_id / amma_statement_id / ess_statement_id / interest_income_id is non-null
+                       CHECK: exactly one of trade_id / income_id / amma_statement_id / ess_statement_id / interest_income_id / corporate_action_id is non-null
 
 closing_prices               Daily closing-price history per listing (collected by the price-import job; see API.md Closing prices)
 ├── listing_id  INTEGER FK→listings.id   Part of PK
@@ -361,7 +362,7 @@ exchanges ──< listings ──< trades >────────────�
                        corporate_actions (Demerger) >── listings (demerger_listing_id)
                        corporate_actions (WorthlessShares) ──< trades (worthless_action_id; the recognise closing Sell)
                        trades (buy-back Sell) ──< income (buyback_trade_id)
-                       trades, income, amma_statements, ess_statements, interest_income ──< attachments (exactly one owner; ON DELETE CASCADE)
+                       trades, income, amma_statements, ess_statements, interest_income, corporate_actions ──< attachments (exactly one owner; ON DELETE CASCADE)
                        listings ──< closing_prices (one row per listing per trading day)
                        trades, parcel_allocations, income, amma_statements, amit_adjustments,
                        corporate_actions, closing_prices ──> report_snapshots.stale (staleness triggers)
@@ -370,7 +371,7 @@ exchanges ──< listings ──< trades >────────────�
 currencies ──< exchanges, listings, trades (currency + brokerage_currency), income, interest_income, amma_statements, corporate_actions (currency + scrip_cash_currency), ess_statements, investment_expenses, inheritances
 ```
 
-Each `attachments` row belongs to exactly one activity via one of five nullable foreign keys (`trade_id` / `income_id` / `amma_statement_id` / `ess_statement_id` / `interest_income_id` — the last two added by 0014, which rebuilt the table and re-created its audit triggers), with a `CHECK` enforcing that exactly one is set — a real foreign key keeps referential integrity to the owning row, and `ON DELETE CASCADE` removes an activity's attachments when it is deleted. File contents live in the `content` BLOB so the weekly DB backup captures the documents with no separate file store.
+Each `attachments` row belongs to exactly one activity via one of six nullable foreign keys (`trade_id` / `income_id` / `amma_statement_id` / `ess_statement_id` / `interest_income_id` — the last two added by 0014 — / `corporate_action_id` — added by 0017, e.g. a demerger booklet or scrip-exchange offer document — each rebuild of the table re-creating its audit triggers), with a `CHECK` enforcing that exactly one is set — a real foreign key keeps referential integrity to the owning row, and `ON DELETE CASCADE` removes an activity's attachments when it is deleted. File contents live in the `content` BLOB so the weekly DB backup captures the documents with no separate file store.
 
 `report_snapshots` has no foreign keys of its own (`report` is an in-code enum, the rows are a JSON payload), but every dated fact table writes to it through **staleness triggers** (0001_schema.sql): inserting, updating, or deleting a row in `trades`, `parcel_allocations` (dated by its sale trade), `income` (by `date_paid`), `amma_statements` / `amit_adjustments` (by the statement's `tax_year_end_date`), or `corporate_actions` sets `stale = 1` on every snapshot dated on or after the fact — an update from the earlier of the old and new dates — atomically with the fact write, so no write path (entity CRUD, Sells, transfers, corporate-action operations, DRP reinvestment) can bypass the invalidation. Revising a stored ok closing price (or erroring it out) likewise stales snapshots from its date, since they were valued at it. `rights_sales` / `rights_sale_allocations` and `interest_income` are the deliberate exceptions: no snapshotted report reads them (a rights sale changes no holding quantity and no parcel cost base — its effect is confined to the live-computed CGT reports; interest reaches only the tax summary, which is not snapshotted), so they carry no trigger set.
 

@@ -327,6 +327,7 @@ export const ENTITIES = [
   {
     slug: 'corporate_actions', title: 'Corporate Actions', menu: 'Activity', api: '/corporate_actions',
     desc: 'Capital events against a listing: return of capital, share splits/consolidations, bonus issues, rights issues, off-market buy-backs, scrip-for-scrip takeovers, demergers, and worthless/delisted shares. The form shows only the chosen action type’s fields; rights issues, buy-backs, scrip-for-scrip takeovers, demergers, and worthless shares are executed after recording via the row’s Exercise / Participate / Exchange / Demerge / Recognise action.',
+    attachOwner: 'corporate_action_id',
     keyFields: [int('id', 'ID', { auto: true })],
     fields: [
       sel('action_type', 'Action type', ['ReturnOfCapital', 'ShareSplit', 'BonusIssue', 'RightsIssue', 'BuyBack', 'ScripForScrip', 'Demerger', 'WorthlessShares'], { required: true }),
