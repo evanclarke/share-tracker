@@ -1,10 +1,11 @@
+use crate::domain::cgt_discount;
 use crate::domain::cost_base::{self, ParcelRow};
 use crate::entities::closing_price::{self, SharedFetcher};
 use crate::infra::decimal::parse_dec;
 use crate::infra::fx::FxRates;
 use crate::infra::http::ApiError;
 use axum::{Extension, Json, Router, extract::State, routing::post};
-use chrono::{Months, NaiveDate};
+use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
@@ -171,12 +172,12 @@ pub async fn db_unrealised_gains(
         *holding_qty.entry(key).or_insert(Decimal::ZERO) += remaining_as_of;
         *holding_cost_base.entry(key).or_insert(Decimal::ZERO) += remaining_cost;
 
-        // CGT discount: parcel held strictly more than 12 months. A split does
-        // not restart the clock — the converted shares keep the original
-        // acquisition date (TD 2000/10) — and a scrip-for-scrip replacement
-        // parcel counts the combined holding period from its deemed
-        // acquisition date.
-        if as_of_date > t.acquired() + Months::new(12) {
+        // CGT discount, on the shared ownership rule (`domain::cgt_discount`).
+        // A split does not restart the clock — the converted shares keep the
+        // original acquisition date (TD 2000/10) — and a scrip-for-scrip
+        // replacement parcel counts the combined holding period from its
+        // deemed acquisition date.
+        if cgt_discount::discount_eligible(t.acquired(), as_of_date) {
             *holding_cgt_eligible_qty.entry(key).or_insert(Decimal::ZERO) += remaining_as_of;
         }
     }

@@ -16,14 +16,17 @@
 //! adjusted AUD cost base), so every cost-base rule — AMIT/E10, return of
 //! capital/G1, splits, rollover carried dates — flows through unchanged. The
 //! hypothetical sale carries no brokerage (it isn't known yet), and the
-//! 12-month discount clock is the realised report's rule: strictly more than
-//! 12 months from the (possibly deemed) acquisition date to the sale date.
+//! 12-month discount clock is the shared ownership rule
+//! (`domain::cgt_discount`), run from the parcel's (possibly deemed)
+//! acquisition date to the sale date — the same rule, not a matching copy of
+//! it, as the realised report applies.
 
+use crate::domain::cgt_discount::discount_eligible;
 use crate::entities::closing_price::{self, SharedFetcher};
 use crate::infra::http::ApiError;
 use crate::reports::open_parcels::{self, OpenParcel};
 use axum::{Extension, Json, Router, extract::State, routing::post};
-use chrono::{Months, NaiveDate};
+use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
@@ -114,12 +117,6 @@ pub async fn db_candidate_parcels_on(
         .collect();
     parcels.sort_by_key(|p| (p.acquisition_date, p.trade_id));
     Ok(parcels)
-}
-
-/// 12-month CGT discount clock, as the realised-gains report applies it:
-/// eligible when held *strictly* more than 12 months.
-fn discount_eligible(acquired: NaiveDate, sale_date: NaiveDate) -> bool {
-    sale_date > acquired + Months::new(12)
 }
 
 /// Allocate `units` across `parcels` in the strategy's preference order,
@@ -521,12 +518,32 @@ mod tests {
         assert_eq!(picks, vec![(1, Decimal::from(100)), (3, Decimal::from(50))]);
     }
 
-    /// The 12-month clock is strict: exactly 12 months is not eligible, one
-    /// day more is (the realised-gains report's rule).
+    /// The optimiser classifies on the shared ownership rule, so the boundary
+    /// it applies is `domain::cgt_discount`'s (pinned by its own test) rather
+    /// than one of its own. Asserted here through `allocate_strategy` so the
+    /// wiring — not just the rule — is covered: a parcel one day short of 12
+    /// months is a non-discountable gain and so sorts last under MaxDiscount.
     #[test]
-    fn discount_window_edge_is_strictly_more_than_12_months() {
-        assert!(!discount_eligible(ymd(2025, 6, 15), ymd(2026, 6, 15)));
-        assert!(discount_eligible(ymd(2025, 6, 15), ymd(2026, 6, 16)));
+    fn max_discount_treats_a_parcel_one_day_short_as_non_discountable() {
+        let parcel = |trade_id, acquired| CandidateParcel {
+            trade_id,
+            holding_account_id: 1,
+            acquisition_date: acquired,
+            remaining_quantity: Decimal::from(10),
+            remaining_cost_base: Decimal::from(100),
+        };
+        // Both parcels stand at a gain (price 20 vs cost 10/unit); only the
+        // older one has cleared 12 months as at the sale date.
+        let sale_date = ymd(2026, 6, 15);
+        let parcels = vec![parcel(1, ymd(2025, 6, 15)), parcel(2, ymd(2025, 6, 14))];
+        let picks = allocate_strategy(
+            &parcels,
+            Decimal::from(20),
+            Decimal::from(20),
+            sale_date,
+            Strategy::MaxDiscount,
+        );
+        assert_eq!(picks, vec![(2, Decimal::from(10)), (1, Decimal::from(10))]);
     }
 
     // ---- disposal figures ------------------------------------------------

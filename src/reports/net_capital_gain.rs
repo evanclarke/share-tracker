@@ -41,7 +41,7 @@ use axum::{
     response::Response,
     routing::{get, post},
 };
-use chrono::{Datelike, Months, NaiveDate};
+use chrono::{Datelike, NaiveDate};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
@@ -261,7 +261,8 @@ async fn e10_gains(
             if reduction > remaining {
                 let excess = reduction - remaining;
                 let excess_aud = fx.to_aud(excess, &currency, acquired, fx_override)?;
-                let discount_eligible = year_end > acquired + Months::new(12);
+                let discount_eligible =
+                    crate::domain::cgt_discount::discount_eligible(acquired, year_end);
                 out.push((year_end.year(), excess_aud, discount_eligible));
                 remaining = Decimal::ZERO;
             } else {
@@ -405,7 +406,8 @@ async fn g1_gains(
                     let gain = excess * held / trade_qty;
                     let gain_aud =
                         fx.to_aud(gain, &action_currency, action_date, FxOverride::None)?;
-                    let discount_eligible = action_date > acquired + Months::new(12);
+                    let discount_eligible =
+                        crate::domain::cgt_discount::discount_eligible(acquired, action_date);
                     out.push((tax_year_for(action_date), gain_aud, discount_eligible));
                 }
                 remaining = Decimal::ZERO;

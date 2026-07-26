@@ -1,10 +1,11 @@
+use crate::domain::cgt_discount;
 use crate::domain::cost_base::{self, ParcelRow};
 use crate::entities::corporate_action::{RocEvent, SplitEvent};
 use crate::infra::decimal::{row_dec, row_opt_dec};
 use crate::infra::fx::{FxOverride, FxRates};
 use crate::infra::http::ApiError;
 use axum::{Json, Router, extract::State, routing::get};
-use chrono::{Months, NaiveDate};
+use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool, sqlite::SqliteRow};
@@ -455,13 +456,13 @@ fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sq
         *sale_proceeds.entry(sale_id).or_insert(Decimal::ZERO) += alloc_proceeds;
         *sale_cost_base.entry(sale_id).or_insert(Decimal::ZERO) += alloc_cost;
 
-        // Classify each allocation's gain/loss for CGT: a gain from a parcel held
-        // strictly > 12 months — from the (possibly deemed) acquisition date — is
-        // discount-eligible; a gain from a parcel held ≤ 12 months is
-        // non-discountable ("other" method); a negative result is a capital loss
-        // (recorded as a positive amount). The net-capital-gain report nets these
-        // buckets across sales and AMMA gains.
-        let discount_eligible = sale.date > buy.acquired() + Months::new(12);
+        // Classify each allocation's gain/loss for CGT: a gain from a parcel
+        // held long enough (`domain::cgt_discount`, from the possibly deemed
+        // acquisition date) is discount-eligible; a gain from a parcel held ≤
+        // 12 months is non-discountable ("other" method); a negative result is
+        // a capital loss (recorded as a positive amount). The net-capital-gain
+        // report nets these buckets across sales and AMMA gains.
+        let discount_eligible = cgt_discount::discount_eligible(buy.acquired(), sale.date);
         if alloc_gain > Decimal::ZERO {
             if discount_eligible {
                 *sale_discount_gain.entry(sale_id).or_insert(Decimal::ZERO) += alloc_gain;
@@ -575,7 +576,7 @@ fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sq
             let alloc_gain = alloc_proceeds - alloc_cost;
             proceeds += alloc_proceeds;
             cost_base += alloc_cost;
-            let discount_eligible = sale.date > buy.acquired() + Months::new(12);
+            let discount_eligible = cgt_discount::discount_eligible(buy.acquired(), sale.date);
             if alloc_gain > Decimal::ZERO {
                 if discount_eligible {
                     discount_gain += alloc_gain;
