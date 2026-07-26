@@ -825,10 +825,33 @@ async function viewAction(action, id) {
   const fields = typeof action.fields === 'function' ? action.fields(owner) : action.fields;
   const form = el('form');
   for (const f of fields) form.appendChild(await buildFieldInput(f, null, false));
+  // Parcel choices, when the action takes allocations: narrowed by its
+  // `allocations.filter` (listing fixed to the owning record unless
+  // `listingField` names a field to read live; `accountField`/`beforeOwnerDate`
+  // add the other constraints the server itself enforces for that action) —
+  // re-filtered live as any watched field changes.
   let allocEditor = null;
   if (action.allocations) {
-    allocEditor = allocationEditor(await loadOptions('buyParcels'), null, action.allocations);
+    const filter = action.allocations.filter || {};
+    const parcels = await loadOptions(filter.source === 'buy' ? 'buyParcels' : 'openParcels');
+    function currentParcelOptions() {
+      const listingId = filter.listingField
+        ? form.querySelector('[name="' + filter.listingField + '"]').value
+        : String(owner.listing_id);
+      return parcels.filter(function (p) {
+        if (String(p.listing_id) !== listingId) return false;
+        if (filter.accountField
+          && String(p.holding_account_id) !== form.querySelector('[name="' + filter.accountField + '"]').value) return false;
+        if (filter.beforeOwnerDate && !(p.date < owner.date)) return false;
+        return true;
+      });
+    }
+    allocEditor = allocationEditor(currentParcelOptions(), null, action.allocations);
     form.appendChild(allocEditor.section);
+    [filter.listingField, filter.accountField].forEach(function (name) {
+      if (!name) return;
+      form.querySelector('[name="' + name + '"]').addEventListener('change', function () { allocEditor.setOptions(currentParcelOptions()); });
+    });
   }
   form.appendChild(el('div', { class: 'form-actions' }, [
     el('button', { type: 'submit', class: 'primary' }, action.submit),

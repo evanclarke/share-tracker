@@ -271,10 +271,22 @@ export async function loadOptions(source) {
       const listing = await listingNamer();
       return (await api('GET', '/amma_statements')).map(function (a) { return { value: a.id, label: a.id + ': ' + listing(a.listing_id) + ' FY' + a.tax_year_end_date }; });
     }
+    // Every open-or-not Buy/DRP trade — carries listing_id, holding_account_id
+    // and date so a caller can filter the picker itself (e.g. the rights-sale
+    // anchoring picker, which needs parcels dated before a record date and so
+    // can't use the already-remaining-filtered 'openParcels' below).
     case 'buyParcels': {
       const listing = await listingNamer();
       return (await api('GET', '/trades')).filter(function (t) { return t.trade_type !== 'Sell'; })
-        .map(function (t) { return { value: t.id, label: t.id + ': ' + t.trade_type + ' ' + t.quantity + ' (' + listing(t.listing_id) + ', ' + t.date + ')' }; });
+        .map(function (t) {
+          return {
+            value: t.id,
+            label: t.id + ': ' + t.trade_type + ' ' + t.quantity + ' (' + listing(t.listing_id) + ', ' + t.date + ')',
+            listing_id: t.listing_id,
+            holding_account_id: t.holding_account_id,
+            date: t.date,
+          };
+        });
     }
     // Open (not fully sold) Buy/DRP parcels only — carries listing_id and
     // holding_account_id so a caller can filter the picker down to parcels

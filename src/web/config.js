@@ -658,6 +658,11 @@ export const ACTIONS = [
       heading: 'Anchoring parcels', parcelLabel: 'Original parcel', qtyLabel: 'Rights anchored',
       addLabel: '+ Add parcel', qtyField: 'units',
       hint: 'Which original parcels earned the sold rights — each anchors its rights to that parcel’s acquisition date for the CGT discount; no parcel units are consumed. Must sum exactly to the rights sold; each parcel is capped at the entitlement its record-date units earned.',
+      // No remaining-quantity or holding-account constraint here — a parcel
+      // fully sold since still earned rights it held at the record date. The
+      // only things that make it a candidate: the action's own listing, and
+      // having existed before the record date (the action's own date).
+      filter: { source: 'buy', beforeOwnerDate: true },
     },
     toast: function (sale) { return sale ? 'Recorded rights sale #' + sale.id + ' (' + sale.units + ' right(s)).' : 'Recorded rights sale.'; },
   },
@@ -677,7 +682,12 @@ export const ACTIONS = [
         fk('holding_account_id', 'Holding account', 'holdingAccounts', { required: true, default: '1', hint: 'The participating account: allocations may only consume its parcels.' }),
       ];
     },
-    allocations: { hint: 'Allocations must sum exactly to the units sold. Each parcel must be a Buy/DRP with enough remaining units.' },
+    allocations: {
+      hint: 'Allocations must sum exactly to the units sold. Each parcel must be a Buy/DRP with enough remaining units.',
+      // Same two things the server itself requires: the action's own
+      // listing, and the chosen holding account (its parcels only).
+      filter: { source: 'open', accountField: 'holding_account_id' },
+    },
     toast: function (r, listing) {
       const t = r && r.trade;
       return 'Sold into the buy-back: ' + describeTrade(t, listing) + (t ? ' (trade #' + t.id + ')' : '')
