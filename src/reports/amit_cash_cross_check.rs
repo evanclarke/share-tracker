@@ -1,12 +1,12 @@
 use crate::domain::tax_year::tax_year_for;
-use crate::infra::decimal::parse_dec;
+use crate::entities::income::Income;
 use crate::infra::fx::{FxOverride, FxRates};
 use crate::infra::http::ApiError;
 use axum::{Json, Router, extract::State, routing::get};
 use chrono::{Datelike, NaiveDate};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use sqlx::{Row, SqlitePool};
+use sqlx::{FromRow, Row, SqlitePool};
 use std::collections::{BTreeMap, HashSet};
 
 /// A financial year in which an AMIT listing received cash distributions but
@@ -46,8 +46,7 @@ pub async fn db_amit_cash_alerts(pool: &SqlitePool) -> Result<Vec<AmitCashAlert>
     // can't pair a cash row with a half-entered statement set.
     let mut tx = pool.begin().await?;
     let cash_rows = sqlx::query(
-        "SELECT i.listing_id, l.ticker, i.date_paid, i.entitlement_date, i.trust_income, \
-                i.franked_amount, i.unfranked_amount, i.foreign_source_income, i.currency \
+        "SELECT i.*, l.ticker \
          FROM income i \
          JOIN listings l ON l.id = i.listing_id \
          WHERE l.amit",
@@ -73,28 +72,26 @@ pub async fn db_amit_cash_alerts(pool: &SqlitePool) -> Result<Vec<AmitCashAlert>
     // report ordered by ticker then year.
     let mut by_year: BTreeMap<(String, i64, i32), (i64, Decimal)> = BTreeMap::new();
     for row in &cash_rows {
-        let listing_id: i64 = row.try_get("listing_id")?;
-        let date_paid: NaiveDate = row.try_get("date_paid")?;
-        // Trust rows are assessed by present entitlement when recorded —
-        // the same attribution the tax summary applies.
-        let trust_income: bool = row.try_get("trust_income")?;
-        let entitlement_date: Option<NaiveDate> = row.try_get("entitlement_date")?;
-        let assessed = match entitlement_date {
-            Some(d) if trust_income => d,
-            _ => date_paid,
-        };
+        // The joined ticker aside, every field comes off the income model, so
+        // the assessment-date rule and the gross-cash definition are the
+        // entity's own (`Income::assessment_date` — present entitlement for a
+        // trust row, payment otherwise — and `Income::gross_cash_income`),
+        // shared with the tax summary rather than restated here.
+        let income = Income::from_row(row)?;
+        let assessed = income.assessment_date();
         let tax_year = tax_year_for(assessed);
-        if covered.contains(&(listing_id, tax_year)) {
+        if covered.contains(&(income.listing_id, tax_year)) {
             continue;
         }
-        let currency: String = row.try_get("currency")?;
-        let dec = |col: &str| -> Result<Decimal, sqlx::Error> { parse_dec(col, row.try_get(col)?) };
-        let gross =
-            dec("franked_amount")? + dec("unfranked_amount")? + dec("foreign_source_income")?;
-        let gross_aud = fx.to_aud(gross, &currency, assessed, FxOverride::None)?;
+        let gross_aud = fx.to_aud(
+            income.gross_cash_income(),
+            &income.currency,
+            assessed,
+            FxOverride::None,
+        )?;
         let ticker: String = row.try_get("ticker")?;
         let entry = by_year
-            .entry((ticker, listing_id, tax_year))
+            .entry((ticker, income.listing_id, tax_year))
             .or_insert((0, Decimal::ZERO));
         entry.0 += 1;
         entry.1 += gross_aud;

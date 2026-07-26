@@ -40,6 +40,7 @@
 //! row does the same unless every open holding is priced.
 
 use crate::entities::closing_price::{self, SharedFetcher};
+use crate::entities::income::Income;
 use crate::entities::trade::TradeType;
 use crate::infra::decimal::{parse_dec, row_dec};
 use crate::infra::fx::{FxOverride, FxRates};
@@ -381,14 +382,10 @@ async fn accumulate(
     .fetch_all(&mut *tx)
     .await?;
 
-    let income_rows = sqlx::query(
-        "SELECT listing_id, holding_account_id, date_paid, franked_amount, \
-         unfranked_amount, foreign_source_income, foreign_tax_paid, \
-         tfn_withholding_tax, currency FROM income WHERE date_paid <= ?",
-    )
-    .bind(as_of)
-    .fetch_all(&mut *tx)
-    .await?;
+    let income_rows: Vec<Income> = sqlx::query_as("SELECT * FROM income WHERE date_paid <= ?")
+        .bind(as_of)
+        .fetch_all(&mut *tx)
+        .await?;
 
     if trades.is_empty() && income_rows.is_empty() {
         // Nothing to report; the dropped transaction was read-only.
@@ -498,28 +495,26 @@ async fn accumulate(
         }
     }
 
-    // Cash income. Same cash definition as the DRP reinvestable amount:
-    // franking credits are a tax offset, not cash received.
+    // Cash income, on the model's own `net_cash_received` definition — the
+    // same figure the DRP reinvests: franking credits are a tax offset, not
+    // cash received. Timed by `date_paid` (when the cash landed) rather than
+    // the tax assessment date: this is a return measure, not a tax figure.
     let trailing_start = as_of
         .checked_sub_months(Months::new(12))
         .unwrap_or(NaiveDate::MIN);
-    for row in &income_rows {
-        let listing_id: i64 = row.try_get("listing_id")?;
-        let account_id: i64 = row.try_get("holding_account_id")?;
-        let date_paid: NaiveDate = row.try_get("date_paid")?;
-        let cash = parse_dec("franked_amount", row.try_get("franked_amount")?)?
-            + parse_dec("unfranked_amount", row.try_get("unfranked_amount")?)?
-            + parse_dec(
-                "foreign_source_income",
-                row.try_get("foreign_source_income")?,
-            )?
-            - parse_dec("foreign_tax_paid", row.try_get("foreign_tax_paid")?)?
-            - parse_dec("tfn_withholding_tax", row.try_get("tfn_withholding_tax")?)?;
-        let currency: String = row.try_get("currency")?;
+    for income in &income_rows {
+        let date_paid = income.date_paid;
         // Income rows carry no manual fx override: a non-AUD amount with no
         // ATO rate fails loudly (same as the tax summary).
-        let cash = fx.to_aud(cash, &currency, date_paid, FxOverride::None)?;
-        let acc = holdings.entry((listing_id, account_id)).or_default();
+        let cash = fx.to_aud(
+            income.net_cash_received(),
+            &income.currency,
+            date_paid,
+            FxOverride::None,
+        )?;
+        let acc = holdings
+            .entry((income.listing_id, income.holding_account_id))
+            .or_default();
         acc.income += cash;
         acc.flows.push((date_paid, cash));
         overall.income += cash;

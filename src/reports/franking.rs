@@ -18,6 +18,7 @@
 
 use crate::domain::tax_year::tax_year_for;
 use crate::entities::corporate_action::{self, SplitEvent};
+use crate::entities::income::Income;
 use crate::entities::trade::TradeType;
 use crate::infra::decimal::parse_dec;
 use crate::infra::fx::{FxOverride, FxRates};
@@ -319,39 +320,33 @@ pub async fn db_franked_dividends(
     // AMIT listings' cash rows carry no attributable credits (write-time
     // validated; the fund's credits arrive via its AMMA statement below), so
     // they are excluded here just as the tax summary excludes them.
-    let income_rows = sqlx::query(
-        "SELECT i.id, i.listing_id, i.date_paid, i.ex_date, i.franking_credits, \
-         i.currency, i.trust_income, i.entitlement_date \
-         FROM income i JOIN listings l ON l.id = i.listing_id \
+    let income_rows: Vec<Income> = sqlx::query_as(
+        "SELECT i.* FROM income i JOIN listings l ON l.id = i.listing_id \
          WHERE NOT l.amit",
     )
     .fetch_all(&mut *conn)
     .await?;
-    for row in &income_rows {
-        let date_paid: NaiveDate = row.try_get("date_paid")?;
-        // Trust income is assessed in the year of *present entitlement*, not
-        // payment (docs/ato/trust-income-timing.md); dividends go by date_paid
-        // — the same attribution the tax summary applies to every component.
-        let trust_income: bool = row.try_get("trust_income")?;
-        let entitlement_date: Option<NaiveDate> = row.try_get("entitlement_date")?;
-        let assessed = match entitlement_date {
-            Some(d) if trust_income => d,
-            _ => date_paid,
-        };
-        let currency: String = row.try_get("currency")?;
-        let credits = parse_dec("franking_credits", row.try_get("franking_credits")?)?;
-        let credits_aud = fx.to_aud(credits, &currency, assessed, FxOverride::None)?;
+    for income in &income_rows {
+        // Assessed per `Income::assessment_date` — present entitlement for a
+        // trust row, payment otherwise — the same attribution the tax summary
+        // applies to every component.
+        let assessed = income.assessment_date();
+        let credits_aud = fx.to_aud(
+            income.franking_credits,
+            &income.currency,
+            assessed,
+            FxOverride::None,
+        )?;
         if credits_aud <= Decimal::ZERO {
             continue;
         }
         let tax_year = tax_year_for(assessed);
-        let ex_date: Option<NaiveDate> = row.try_get("ex_date")?;
         dividends.push(FrankedDividend {
-            income_id: row.try_get("id")?,
+            income_id: income.id,
             tax_year,
-            listing_id: row.try_get("listing_id")?,
-            date_paid,
-            ex_date: ex_date.unwrap_or(date_paid),
+            listing_id: income.listing_id,
+            date_paid: income.date_paid,
+            ex_date: income.ex_date.unwrap_or(income.date_paid),
             credits_aud,
         });
         *attached_by_year.entry(tax_year).or_default() += credits_aud;

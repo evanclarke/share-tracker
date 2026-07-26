@@ -735,10 +735,7 @@ async fn income_section(
             trust_income,
             ..
         } = *income;
-        let assessed = match entitlement_date {
-            Some(d) if trust_income => d,
-            _ => date_paid,
-        };
+        let assessed = income.assessment_date();
         if tax_year_for(assessed) != tax_year {
             continue;
         }

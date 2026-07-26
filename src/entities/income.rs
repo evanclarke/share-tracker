@@ -141,6 +141,50 @@ impl Income {
         .iter()
         .all(|amount| amount.is_zero())
     }
+
+    /// The date the distribution is assessed on — the date every FY-keyed
+    /// report buckets it by (via [`crate::domain::tax_year::tax_year_for`])
+    /// and the date whose month resolves its FX rate.
+    ///
+    /// Trust income is assessed in the year of *present entitlement*, not of
+    /// payment (ATO QC 23087, `docs/ato/trust-income-timing.md`): a June trust
+    /// distribution paid in mid-July belongs to the FY just ended. When a
+    /// trust row records its `entitlement_date`, every component of the row is
+    /// attributed by it. A dividend is always assessed by `date_paid` — the
+    /// column is rejected on a non-trust row at write time, so the
+    /// `trust_income` guard here only restates that invariant.
+    pub fn assessment_date(&self) -> NaiveDate {
+        match self.entitlement_date {
+            Some(d) if self.trust_income => d,
+            _ => self.date_paid,
+        }
+    }
+
+    /// The distribution's gross cash components in its own currency:
+    /// `franked_amount + unfranked_amount + foreign_source_income`.
+    ///
+    /// Franking credits are notional rather than cash, and foreign tax /  TFN
+    /// amounts are withheld *from* this gross rather than added to it — so
+    /// neither belongs in the sum (see [`Self::net_cash_received`] for the
+    /// figure net of what was withheld). This is the gross the per-share check
+    /// reconciles the statement's `amount_per_security × securities_held`
+    /// against, the AMIT cash cross-check totals, and the activity ledger
+    /// prints.
+    pub fn gross_cash_income(&self) -> Decimal {
+        self.franked_amount + self.unfranked_amount + self.foreign_source_income
+    }
+
+    /// Cash actually received from the distribution:
+    /// [`Self::gross_cash_income`] less the foreign tax and TFN amounts
+    /// withheld at source. Franking credits are a tax offset rather than cash
+    /// and never appear in it.
+    ///
+    /// This is what a DRP has available to reinvest
+    /// (`entities::drp_reinvestment`) and what the performance report counts
+    /// as an income cash flow — one definition, so the two can't drift.
+    pub fn net_cash_received(&self) -> Decimal {
+        self.gross_cash_income() - self.foreign_tax_paid - self.tfn_withholding_tax
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -308,8 +352,7 @@ fn check_per_share(income: &Income) -> Result<(), PerShareError> {
     };
     let product = (aps * held)
         .round_dp_with_strategy(2, rust_decimal::RoundingStrategy::MidpointAwayFromZero);
-    let gross = income.franked_amount + income.unfranked_amount + income.foreign_source_income;
-    if product != gross {
+    if product != income.gross_cash_income() {
         return Err(PerShareError::ProductMismatch { product });
     }
     Ok(())
@@ -670,6 +713,59 @@ mod tests {
                 i.franking_credits = Decimal::from(30);
             })
             .build()
+    }
+
+    /// A trust row records its assessment date as the date of present
+    /// entitlement (ATO QC 23087) — so a June distribution paid in mid-July is
+    /// assessed in the FY just ended, not the one that has begun. A dividend
+    /// is always assessed by payment, and a trust row without an entitlement
+    /// date falls back to it. Every FY-keyed report shares this one rule.
+    #[test]
+    fn trust_income_is_assessed_by_present_entitlement_not_payment() {
+        let trust = |entitlement| {
+            test_support::income(1, 1, ymd(2024, 7, 15))
+                .with(|i: &mut Income| {
+                    i.trust_income = true;
+                    i.entitlement_date = entitlement;
+                })
+                .build()
+        };
+        assert_eq!(
+            trust(Some(ymd(2024, 6, 30))).assessment_date(),
+            ymd(2024, 6, 30),
+            "the entitlement date governs the whole row"
+        );
+        assert_eq!(
+            trust(None).assessment_date(),
+            ymd(2024, 7, 15),
+            "no entitlement date recorded: assessed on payment"
+        );
+        // A dividend goes by payment even were the column somehow set (write
+        // time rejects it on a non-trust row).
+        let dividend = test_support::income(1, 1, ymd(2024, 7, 15))
+            .with(|i| i.entitlement_date = Some(ymd(2024, 6, 30)))
+            .build();
+        assert_eq!(dividend.assessment_date(), ymd(2024, 7, 15));
+    }
+
+    /// Gross cash is the three cash components; franking credits are notional
+    /// and the two withholdings are deducted from (not part of) it — the
+    /// distinction between the gross the per-share check reconciles against
+    /// and the net cash a DRP reinvests.
+    #[test]
+    fn gross_cash_excludes_credits_and_net_cash_deducts_withholdings() {
+        let income = test_support::income(1, 1, ymd(2024, 3, 31))
+            .with(|i| {
+                i.franked_amount = Decimal::from(70);
+                i.unfranked_amount = Decimal::from(20);
+                i.foreign_source_income = Decimal::from(10);
+                i.franking_credits = Decimal::from(30);
+                i.foreign_tax_paid = Decimal::from(3);
+                i.tfn_withholding_tax = Decimal::from(5);
+            })
+            .build();
+        assert_eq!(income.gross_cash_income(), Decimal::from(100));
+        assert_eq!(income.net_cash_received(), Decimal::from(92));
     }
 
     /// `is_foreign_only` is the Australian-side content test the annual tax

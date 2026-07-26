@@ -293,7 +293,7 @@ pub async fn db_activity(
         } else {
             "Dividend"
         };
-        let gross = i.franked_amount + i.unfranked_amount + i.foreign_source_income;
+        let gross = i.gross_cash_income();
         let mut detail = format!("gross {gross} {}", i.currency);
         if i.franking_credits > Decimal::ZERO {
             detail.push_str(&format!(", franking credits {}", i.franking_credits));

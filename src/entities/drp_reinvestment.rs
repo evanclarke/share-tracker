@@ -53,6 +53,7 @@
 
 use crate::entities::{
     drp_enrolment::ResidualHandling,
+    income::Income,
     trade::{self, Trade},
 };
 use crate::infra::decimal::parse_dec;
@@ -66,7 +67,7 @@ use axum::{
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::Deserialize;
-use sqlx::{Row, SqlitePool};
+use sqlx::SqlitePool;
 
 #[derive(Debug, Deserialize)]
 pub struct ReinvestBody {
@@ -183,18 +184,6 @@ pub fn router() -> Router<SqlitePool> {
     Router::new().route("/income/{id}/reinvest", post(reinvest).delete(unreinvest))
 }
 
-/// Cash actually received from a distribution and therefore available to
-/// reinvest. Franking credits are notional (not cash) and excluded; foreign
-/// tax and TFN amounts withheld at source reduce the cash received.
-fn reinvestable_cash(row: &sqlx::sqlite::SqliteRow) -> Result<Decimal, sqlx::Error> {
-    let dec = |col: &str| -> Result<Decimal, sqlx::Error> { parse_dec(col, row.try_get(col)?) };
-    Ok(
-        dec("franked_amount")? + dec("unfranked_amount")? + dec("foreign_source_income")?
-            - dec("foreign_tax_paid")?
-            - dec("tfn_withholding_tax")?,
-    )
-}
-
 /// Create the DRP trade for a distribution and link it, atomically.
 pub async fn db_reinvest(
     pool: &SqlitePool,
@@ -213,30 +202,27 @@ pub async fn db_reinvest(
     let mut tx = pool.begin().await?;
 
     // Load the distribution and its cash components.
-    let income = sqlx::query(
-        "SELECT listing_id, holding_account_id, date_paid, ex_date, reinvestment_trade_id, \
-         franked_amount, unfranked_amount, foreign_source_income, foreign_tax_paid, \
-         tfn_withholding_tax \
-         FROM income WHERE id = ?",
-    )
-    .bind(income_id)
-    .fetch_optional(&mut *tx)
-    .await?;
+    let income: Option<Income> = sqlx::query_as("SELECT * FROM income WHERE id = ?")
+        .bind(income_id)
+        .fetch_optional(&mut *tx)
+        .await?;
     let income = match income {
         Some(r) => r,
         None => return Err(ReinvestError::IncomeNotFound),
     };
 
-    let existing: Option<i64> = income.try_get("reinvestment_trade_id")?;
-    if existing.is_some() {
+    if income.reinvestment_trade_id.is_some() {
         return Err(ReinvestError::AlreadyReinvested);
     }
 
-    let listing_id: i64 = income.try_get("listing_id")?;
-    let holding_account_id: i64 = income.try_get("holding_account_id")?;
-    let date_paid: NaiveDate = income.try_get("date_paid")?;
-    let ex_date: Option<NaiveDate> = income.try_get("ex_date")?;
-    let cash = reinvestable_cash(&income)?;
+    let Income {
+        listing_id,
+        holding_account_id,
+        date_paid,
+        ex_date,
+        ..
+    } = income;
+    let cash = income.net_cash_received();
 
     // Reinvestability is decided as at the ex date (DRP participation is fixed
     // at the record date), falling back to the pay date when not recorded.

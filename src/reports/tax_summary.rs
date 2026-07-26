@@ -1,4 +1,5 @@
 use crate::domain::tax_year::tax_year_for;
+use crate::entities::income::Income;
 use crate::infra::decimal::{parse_dec, row_opt_dec};
 use crate::infra::fx::{FxOverride, FxRates};
 use crate::infra::http::ApiError;
@@ -346,12 +347,8 @@ pub(crate) async fn db_tax_summary_on(
     // drive the DRP chain, and counting its cash alongside the AMMA components
     // would double the year's income (write-time validation already keeps the
     // notional components off these rows, `entities::income`).
-    let income_rows = sqlx::query(
-        "SELECT i.date_paid, i.franked_amount, i.unfranked_amount, \
-         i.foreign_source_income, i.foreign_tax_paid, i.tfn_withholding_tax, \
-         i.franking_credits, i.lic_capital_gain_deduction, i.currency, i.trust_income, \
-         i.entitlement_date \
-         FROM income i JOIN listings l ON l.id = i.listing_id \
+    let income_rows: Vec<Income> = sqlx::query_as(
+        "SELECT i.* FROM income i JOIN listings l ON l.id = i.listing_id \
          WHERE NOT l.amit",
     )
     .fetch_all(&mut *tx)
@@ -410,32 +407,26 @@ pub(crate) async fn db_tax_summary_on(
 
     let mut map: HashMap<i32, TaxYearSummary> = HashMap::new();
 
-    for row in &income_rows {
-        let date_paid: NaiveDate = row.try_get("date_paid")?;
-        // Trust income is assessed in the year of *present entitlement*, not
-        // payment (ATO QC 23087, docs/ato/trust-income-timing.md) — a June
-        // trust distribution paid in mid-July belongs to the FY just ended.
-        // When a trust row records its entitlement date, every component of
-        // the row is attributed by it; dividends always go by date_paid.
-        let trust_income: bool = row.try_get("trust_income")?;
-        let entitlement_date: Option<NaiveDate> = row.try_get("entitlement_date")?;
-        let assessed = match entitlement_date {
-            Some(d) if trust_income => d,
-            _ => date_paid,
-        };
+    for income in &income_rows {
+        // `Income::assessment_date`: trust income is assessed in the year of
+        // *present entitlement*, not of payment (ATO QC 23087,
+        // docs/ato/trust-income-timing.md) — a June trust distribution paid in
+        // mid-July belongs to the FY just ended, and every component of the
+        // row is attributed by that date; dividends go by date_paid.
+        let assessed = income.assessment_date();
         let tax_year = tax_year_for(assessed);
 
         // Amounts are denominated in the record's currency; convert to AUD via the
         // ATO rate for the month of the assessment date (the entitlement date when
         // it governs, otherwise date_paid) before aggregating.
-        let currency: String = row.try_get("currency")?;
-        let franked = aud_field(&fx, row, "franked_amount", &currency, assessed)?;
-        let unfranked = aud_field(&fx, row, "unfranked_amount", &currency, assessed)?;
-        let foreign_income = aud_field(&fx, row, "foreign_source_income", &currency, assessed)?;
-        let foreign_tax = aud_field(&fx, row, "foreign_tax_paid", &currency, assessed)?;
-        let tfn_wht = aud_field(&fx, row, "tfn_withholding_tax", &currency, assessed)?;
-        let fc = aud_field(&fx, row, "franking_credits", &currency, assessed)?;
-        let lic = aud_field(&fx, row, "lic_capital_gain_deduction", &currency, assessed)?;
+        let aud = |amount: Decimal| aud_value(&fx, amount, &income.currency, assessed);
+        let franked = aud(income.franked_amount)?;
+        let unfranked = aud(income.unfranked_amount)?;
+        let foreign_income = aud(income.foreign_source_income)?;
+        let foreign_tax = aud(income.foreign_tax_paid)?;
+        let tfn_wht = aud(income.tfn_withholding_tax)?;
+        let fc = aud(income.franking_credits)?;
+        let lic = aud(income.lic_capital_gain_deduction)?;
 
         let s = map
             .entry(tax_year)
