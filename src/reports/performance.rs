@@ -39,10 +39,11 @@
 //! market-dependent metrics rather than a silently wrong figure; the OVERALL
 //! row does the same unless every open holding is priced.
 
+use crate::domain::cost_base::ParcelRow;
 use crate::entities::closing_price::{self, SharedFetcher};
 use crate::entities::income::Income;
 use crate::entities::trade::TradeType;
-use crate::infra::decimal::{parse_dec, row_dec};
+use crate::infra::decimal::parse_dec;
 use crate::infra::fx::{FxOverride, FxRates};
 use crate::infra::http::ApiError;
 use axum::{Extension, Json, Router, extract::State, routing::post};
@@ -148,19 +149,11 @@ enum GroupKind {
 }
 
 struct TradeFlow {
-    id: i64,
-    listing_id: i64,
-    account_id: i64,
+    /// The trade's own columns, on the shared cost-base mapping — so its
+    /// acquisition date, FX precedence and initial cost base are the parcel's
+    /// definitions, not this report's restatements of them.
+    parcel: ParcelRow,
     is_sell: bool,
-    date: NaiveDate,
-    quantity: Decimal,
-    price: Decimal,
-    brokerage: Decimal,
-    gst: Decimal,
-    currency: String,
-    fx_rate: Decimal,
-    spot_fx_rate: Option<Decimal>,
-    deemed: Option<NaiveDate>,
     group: Option<(GroupKind, i64)>,
 }
 
@@ -177,29 +170,10 @@ impl sqlx::FromRow<'_, sqlx::sqlite::SqliteRow> for TradeFlow {
             .or(demerger_id.map(|id| (GroupKind::Demerger, id)));
         let trade_type: TradeType = row.try_get("trade_type")?;
         Ok(TradeFlow {
-            id: row.try_get("id")?,
-            listing_id: row.try_get("listing_id")?,
-            account_id: row.try_get("holding_account_id")?,
+            parcel: ParcelRow::from_row(row)?,
             is_sell: trade_type == TradeType::Sell,
-            date: row.try_get("date")?,
-            quantity: row_dec(row, "quantity")?,
-            price: row_dec(row, "average_price")?,
-            brokerage: row_dec(row, "brokerage")?,
-            gst: row_dec(row, "gst_on_brokerage")?,
-            currency: row.try_get("currency")?,
-            fx_rate: row_dec(row, "fx_rate")?,
-            spot_fx_rate: crate::infra::decimal::row_opt_dec(row, "spot_fx_rate")?,
-            deemed: row.try_get("deemed_acquisition_date")?,
             group,
         })
-    }
-}
-
-impl TradeFlow {
-    /// The trade's per-record FX rate: its deliberate spot override when set,
-    /// else its `fx_rate` fallback (see `infra::fx::FxOverride`).
-    fn fx_override(&self) -> FxOverride {
-        FxOverride::from_trade(self.fx_rate, self.spot_fx_rate)
     }
 }
 
@@ -372,12 +346,11 @@ async fn accumulate(
 ) -> Result<Option<Accumulated>, sqlx::Error> {
     // One read transaction: every input below comes from the same snapshot.
     let mut tx = pool.begin().await?;
-    let trades: Vec<TradeFlow> = sqlx::query_as(
-        "SELECT id, listing_id, holding_account_id, trade_type, date, quantity, \
-         average_price, brokerage, gst_on_brokerage, currency, fx_rate, spot_fx_rate, \
-         deemed_acquisition_date, transfer_id, scrip_action_id, demerger_action_id \
+    let trades: Vec<TradeFlow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT {}, trade_type, transfer_id, scrip_action_id, demerger_action_id \
          FROM trades WHERE date <= ?",
-    )
+        ParcelRow::COLUMNS
+    )))
     .bind(as_of)
     .fetch_all(&mut *tx)
     .await?;
@@ -433,34 +406,40 @@ async fn accumulate(
     // Pass 1 — acquisitions (also totals each internal group's carried cost,
     // which pass 2 needs for the closing Sells).
     for t in trades.iter().filter(|t| !t.is_sell) {
-        let cost = t.price * t.quantity + t.brokerage + t.gst;
+        let p = &t.parcel;
         // Convert at the acquisition month — the deemed acquisition month for a
         // rollover/transfer-created parcel, preserving the original AUD cost.
-        let acquired = t.deemed.unwrap_or(t.date);
-        let cost = fx.to_aud(cost, &t.currency, acquired, t.fx_override())?;
-        let acc = holdings.entry((t.listing_id, t.account_id)).or_default();
+        let cost = fx.to_aud(
+            p.parcel().initial_cost(),
+            &p.currency,
+            p.acquired(),
+            p.fx_override(),
+        )?;
+        let acc = holdings
+            .entry((p.listing_id, p.holding_account_id))
+            .or_default();
         acc.invested += cost;
-        acc.flows.push((t.date, -cost));
+        acc.flows.push((p.date, -cost));
         if let Some(key) = t.group {
             *group_costs.entry(key).or_insert(Decimal::ZERO) += cost;
         } else {
             overall.invested += cost;
-            overall.flows.push((t.date, -cost));
+            overall.flows.push((p.date, -cost));
         }
 
         // Units of this parcel still open at as_of (in as-of units).
-        let splits = split_events.get(&t.listing_id).map_or(&[][..], |v| v);
+        let splits = split_events.get(&p.listing_id).map_or(&[][..], |v| v);
         let sold = crate::entities::corporate_action::sold_in_acquired_units(
-            qty_sold.get(&t.id).map_or(&[][..], |v| v),
+            qty_sold.get(&p.id).map_or(&[][..], |v| v),
             splits,
-            t.date,
+            p.date,
         );
-        let remaining = t.quantity - sold;
+        let remaining = p.quantity - sold;
         if remaining > Decimal::ZERO {
             acc.quantity += crate::entities::corporate_action::split_adjusted_quantity(
                 remaining,
                 splits,
-                t.date,
+                p.date,
                 Some(as_of),
             );
         }
@@ -472,26 +451,33 @@ async fn accumulate(
     // real external cash the holder received, so it also reaches OVERALL);
     // a real Sell is worth its net proceeds.
     for t in trades.iter().filter(|t| t.is_sell) {
+        let p = &t.parcel;
+        let acc_key = (p.listing_id, p.holding_account_id);
         if let Some(key) = t.group {
             let carried = group_costs.get(&key).copied().unwrap_or(Decimal::ZERO);
             let mut inflow = carried;
-            if !t.price.is_zero() {
-                let cash = fx.to_aud(t.price * t.quantity, &t.currency, t.date, t.fx_override())?;
+            if !p.average_price.is_zero() {
+                let cash = fx.to_aud(
+                    p.average_price * p.quantity,
+                    &p.currency,
+                    p.date,
+                    p.fx_override(),
+                )?;
                 inflow += cash;
                 overall.proceeds += cash;
-                overall.flows.push((t.date, cash));
+                overall.flows.push((p.date, cash));
             }
-            let acc = holdings.entry((t.listing_id, t.account_id)).or_default();
+            let acc = holdings.entry(acc_key).or_default();
             acc.proceeds += inflow;
-            acc.flows.push((t.date, inflow));
+            acc.flows.push((p.date, inflow));
         } else {
-            let net = t.price * t.quantity - t.brokerage - t.gst;
-            let net = fx.to_aud(net, &t.currency, t.date, t.fx_override())?;
-            let acc = holdings.entry((t.listing_id, t.account_id)).or_default();
+            let net = p.average_price * p.quantity - p.brokerage - p.gst_on_brokerage;
+            let net = fx.to_aud(net, &p.currency, p.date, p.fx_override())?;
+            let acc = holdings.entry(acc_key).or_default();
             acc.proceeds += net;
-            acc.flows.push((t.date, net));
+            acc.flows.push((p.date, net));
             overall.proceeds += net;
-            overall.flows.push((t.date, net));
+            overall.flows.push((p.date, net));
         }
     }
 

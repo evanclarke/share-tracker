@@ -50,6 +50,7 @@
 //! replacement share classes, pre-CGT originals, and exchanges that would
 //! crystallise a capital loss (the law does not allow rolling over a loss).
 
+use crate::domain::cost_base::ParcelRow;
 use crate::entities::corporate_action::{
     self, ActionKind, RocEvent, sold_in_acquired_units, split_adjusted_quantity,
 };
@@ -186,11 +187,11 @@ pub async fn db_exchange(pool: &SqlitePool, action_id: i64) -> Result<Exchange, 
     // The original listing's open parcels, with the same remaining-quantity
     // and reduced-cost-base rules as the open-parcels report (as-acquired
     // units internally; allocations re-based across splits).
-    let parcel_rows = sqlx::query(
-        "SELECT id, date, quantity, average_price, brokerage, gst_on_brokerage, currency, \
-                fx_rate, spot_fx_rate, deemed_acquisition_date, holding_account_id \
-         FROM trades WHERE listing_id = ? AND trade_type IN ('Buy', 'DRP') ORDER BY date, id",
-    )
+    let parcel_rows: Vec<ParcelRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT {} FROM trades \
+         WHERE listing_id = ? AND trade_type IN ('Buy', 'DRP') ORDER BY date, id",
+        ParcelRow::COLUMNS
+    )))
     .bind(action.listing_id)
     .fetch_all(&mut *tx)
     .await?;
@@ -251,25 +252,14 @@ pub async fn db_exchange(pool: &SqlitePool, action_id: i64) -> Result<Exchange, 
     }
 
     let mut replacements: Vec<Replacement> = Vec::new();
-    for row in &parcel_rows {
-        let parcel_id: i64 = row.try_get("id")?;
-        let date: NaiveDate = row.try_get("date")?;
-        let qty = parse_dec("quantity", row.try_get("quantity")?)?;
-        let price = parse_dec("average_price", row.try_get("average_price")?)?;
-        let brok = parse_dec("brokerage", row.try_get("brokerage")?)?;
-        let gst = parse_dec("gst_on_brokerage", row.try_get("gst_on_brokerage")?)?;
-        let currency: String = row.try_get("currency")?;
-        let fx_rate = parse_dec("fx_rate", row.try_get("fx_rate")?)?;
-        let spot_fx_rate = crate::infra::decimal::row_opt_dec(row, "spot_fx_rate")?;
-        let deemed: Option<NaiveDate> = row.try_get("deemed_acquisition_date")?;
-        let holding_account_id: i64 = row.try_get("holding_account_id")?;
-
+    for parcel in &parcel_rows {
+        let parcel_id = parcel.id;
         let sold = sold_in_acquired_units(
             qty_sold.get(&parcel_id).map_or(&[][..], |v| v),
             &splits,
-            date,
+            parcel.date,
         );
-        let remaining = qty - sold;
+        let remaining = parcel.quantity - sold;
         if remaining <= Decimal::ZERO {
             continue;
         }
@@ -277,14 +267,7 @@ pub async fn db_exchange(pool: &SqlitePool, action_id: i64) -> Result<Exchange, 
         // Remaining reduced cost base in the parcel's own currency: the
         // shared pipeline (`domain::cost_base`), bounded at the exchange date.
         let reduced_cost_base = crate::domain::cost_base::adjusted_cost_base(
-            &crate::domain::cost_base::Parcel {
-                quantity: qty,
-                average_price: price,
-                brokerage: brok,
-                gst_on_brokerage: gst,
-                currency: &currency,
-                trade_date: date,
-            },
+            &parcel.parcel(),
             remaining,
             *amit_reductions.get(&parcel_id).unwrap_or(&Decimal::ZERO),
             &roc_events,
@@ -304,19 +287,21 @@ pub async fn db_exchange(pool: &SqlitePool, action_id: i64) -> Result<Exchange, 
         };
 
         // The exchange ratio applies to units as held at the exchange date.
-        let at_date_units = split_adjusted_quantity(remaining, &splits, date, Some(action.date));
+        let at_date_units =
+            split_adjusted_quantity(remaining, &splits, parcel.date, Some(action.date));
         replacements.push(Replacement {
             parcel_id,
             at_date_units,
             new_quantity: at_date_units * new_units / old_units,
-            currency,
-            fx_rate,
-            spot_fx_rate,
+            currency: parcel.currency.clone(),
+            fx_rate: parcel.fx_rate,
+            spot_fx_rate: parcel.spot_fx_rate,
             carried_cost_base,
             // Chain through an earlier exchange: the clock always runs from
-            // the first acquisition in the rollover chain.
-            deemed_acquisition_date: deemed.unwrap_or(date),
-            holding_account_id,
+            // the first acquisition in the rollover chain — the parcel's own
+            // `acquired()`, deemed date where it carries one.
+            deemed_acquisition_date: parcel.acquired(),
+            holding_account_id: parcel.holding_account_id,
         });
     }
     if replacements.is_empty() {

@@ -64,6 +64,18 @@ pub struct Parcel<'a> {
     pub trade_date: NaiveDate,
 }
 
+impl Parcel<'_> {
+    /// Step 1 of the pipeline: the whole parcel's initial cost base in its own
+    /// currency — the acquisition cost plus the incidental costs of acquiring
+    /// it (`docs/ato/cgt-cost-base.md`). Every later step reduces this figure,
+    /// so a caller that walks the reductions itself (the net-capital-gain
+    /// report's E10 and G1 excess walks) starts from the same definition
+    /// [`adjusted_cost_base`] does rather than re-adding the three terms.
+    pub fn initial_cost(&self) -> Decimal {
+        self.average_price * self.quantity + self.brokerage + self.gst_on_brokerage
+    }
+}
+
 /// A Buy/DRP trade row as every cost-base report reads it — one `FromRow`
 /// mapping (TEXT decimal columns via the `infra::decimal` helpers) instead of
 /// a per-report field-by-field copy. Select [`ParcelRow::COLUMNS`] from
@@ -97,6 +109,23 @@ impl ParcelRow {
     pub const COLUMNS: &'static str = "id, listing_id, holding_account_id, date, quantity, \
          average_price, brokerage, gst_on_brokerage, currency, fx_rate, spot_fx_rate, \
          deemed_acquisition_date";
+
+    /// [`Self::COLUMNS`] qualified by a table alias and re-aliased back to the
+    /// plain names, for a query that joins `trades` to a table carrying
+    /// columns of the same name — `quantity`, `date` and `currency` all recur
+    /// elsewhere in the schema, and the `FromRow` mapping reads by name, so an
+    /// unqualified `quantity` would be ambiguous. Same set as `COLUMNS`, so a
+    /// column added to one is added to both.
+    pub fn columns_qualified(alias: &str) -> String {
+        Self::COLUMNS
+            .split(',')
+            .map(|column| {
+                let column = column.trim();
+                format!("{alias}.{column} AS {column}")
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
 
     /// The CGT acquisition date: the deemed date where set (rollover
     /// replacement parcels), else the trade date. Drives the 12-month
@@ -183,8 +212,7 @@ pub fn adjusted_cost_base(
     splits: &[SplitEvent],
     up_to: Option<NaiveDate>,
 ) -> Result<CostBase, sqlx::Error> {
-    let initial_cost =
-        parcel.average_price * parcel.quantity + parcel.brokerage + parcel.gst_on_brokerage;
+    let initial_cost = parcel.initial_cost();
     let net_cost = (initial_cost - amit_reduction).max(Decimal::ZERO);
     let roc_per_unit = per_unit_reduction(
         roc_events,
@@ -282,8 +310,7 @@ pub fn adjustment_detail(
     splits: &[SplitEvent],
     up_to: Option<NaiveDate>,
 ) -> Result<Vec<CostBaseAdjustment>, sqlx::Error> {
-    let initial_cost =
-        parcel.average_price * parcel.quantity + parcel.brokerage + parcel.gst_on_brokerage;
+    let initial_cost = parcel.initial_cost();
     let mut rows = Vec::new();
 
     // AMIT reductions (CGT event E10): whole-parcel, in statement-year order.

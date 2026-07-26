@@ -234,6 +234,16 @@ impl Trade {
         }
         self
     }
+
+    /// The trade's per-record FX rate: its deliberate `spot_fx_rate` override
+    /// when set, else its `fx_rate` fallback (see `infra::fx::FxOverride`).
+    /// The same precedence the cost-base pipeline's `ParcelRow` applies —
+    /// stated here too so a caller holding the model itself (the activity
+    /// ledger, the annual tax report) asks rather than re-pairs the two
+    /// columns.
+    pub fn fx_override(&self) -> crate::infra::fx::FxOverride {
+        crate::infra::fx::FxOverride::from_trade(self.fx_rate, self.spot_fx_rate)
+    }
 }
 
 #[derive(Debug, Deserialize)]

@@ -444,11 +444,7 @@ fn disposal_parcel_rows(
             let buy_rate = buy_trade.and_then(|bt| {
                 inputs
                     .fx
-                    .resolve_rate(
-                        &currency,
-                        p.acquisition_date,
-                        crate::infra::fx::FxOverride::from_trade(bt.fx_rate, bt.spot_fx_rate),
-                    )
+                    .resolve_rate(&currency, p.acquisition_date, bt.fx_override())
                     .ok()
             });
 

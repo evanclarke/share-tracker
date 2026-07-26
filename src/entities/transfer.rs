@@ -33,6 +33,7 @@
 //! Buy is consumed by later allocations, AMIT adjustments, or income links).
 //! A recorded transfer is immutable — delete it and re-transfer instead.
 
+use crate::domain::cost_base::ParcelRow;
 use crate::entities::corporate_action::{self, RocEvent, as_acquired_quantity};
 use crate::entities::sell::{self, AllocationInput, SellBody};
 use crate::entities::trade::{self, Trade};
@@ -276,11 +277,10 @@ pub async fn db_transfer(
 
     let mut transfer_ins: Vec<TransferIn> = Vec::with_capacity(body.allocations.len());
     for alloc in &body.allocations {
-        let parcel = sqlx::query(
-            "SELECT date, listing_id, quantity, average_price, brokerage, gst_on_brokerage, \
-                    currency, fx_rate, spot_fx_rate, deemed_acquisition_date \
-             FROM trades WHERE id = ?",
-        )
+        let parcel: Option<ParcelRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "SELECT {} FROM trades WHERE id = ?",
+            ParcelRow::COLUMNS
+        )))
         .bind(alloc.purchase_trade_id)
         .fetch_optional(&mut *tx)
         .await?;
@@ -290,36 +290,18 @@ pub async fn db_transfer(
         let Some(parcel) = parcel else {
             return Err(TransferError::Sell(sell::SellError::PurchaseParcelMissing));
         };
-        let parcel_listing: i64 = parcel.try_get("listing_id")?;
-        if parcel_listing != body.listing_id {
+        if parcel.listing_id != body.listing_id {
             return Err(TransferError::ListingMismatch);
         }
-
-        let date: NaiveDate = parcel.try_get("date")?;
-        let qty = parse_dec("quantity", parcel.try_get("quantity")?)?;
-        let price = parse_dec("average_price", parcel.try_get("average_price")?)?;
-        let brok = parse_dec("brokerage", parcel.try_get("brokerage")?)?;
-        let gst = parse_dec("gst_on_brokerage", parcel.try_get("gst_on_brokerage")?)?;
-        let currency: String = parcel.try_get("currency")?;
-        let fx_rate = parse_dec("fx_rate", parcel.try_get("fx_rate")?)?;
-        let spot_fx_rate = crate::infra::decimal::row_opt_dec(&parcel, "spot_fx_rate")?;
-        let deemed: Option<NaiveDate> = parcel.try_get("deemed_acquisition_date")?;
 
         // The moved units' share of the parcel's remaining reduced cost base,
         // in the parcel's own currency: the shared pipeline
         // (`domain::cost_base`), pro-rated over the *as-acquired* moved units
         // so a partial transfer carries exactly its share.
         let moved_as_acquired =
-            as_acquired_quantity(alloc.quantity_allocated, &splits, date, body.date);
+            as_acquired_quantity(alloc.quantity_allocated, &splits, parcel.date, body.date);
         let carried_cost_base = crate::domain::cost_base::adjusted_cost_base(
-            &crate::domain::cost_base::Parcel {
-                quantity: qty,
-                average_price: price,
-                brokerage: brok,
-                gst_on_brokerage: gst,
-                currency: &currency,
-                trade_date: date,
-            },
+            &parcel.parcel(),
             moved_as_acquired,
             *amit_reductions
                 .get(&alloc.purchase_trade_id)
@@ -333,12 +315,13 @@ pub async fn db_transfer(
         transfer_ins.push(TransferIn {
             quantity: alloc.quantity_allocated,
             carried_cost_base,
-            currency,
-            fx_rate,
-            spot_fx_rate,
+            currency: parcel.currency.clone(),
+            fx_rate: parcel.fx_rate,
+            spot_fx_rate: parcel.spot_fx_rate,
             // Chain through an earlier rollover/transfer: the discount clock
-            // always runs from the first acquisition.
-            deemed_acquisition_date: deemed.unwrap_or(date),
+            // always runs from the first acquisition — the parcel's own
+            // `acquired()`, deemed date where it carries one.
+            deemed_acquisition_date: parcel.acquired(),
         });
     }
 

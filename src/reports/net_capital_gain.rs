@@ -29,6 +29,7 @@
 //!     discount-eligible gain. Any unused loss is carried forward into the next
 //!     year in the series.
 
+use crate::domain::cost_base::ParcelRow;
 use crate::domain::tax_year::tax_year_for;
 use crate::entities::corporate_action::RocEvent;
 use crate::infra::decimal::parse_dec;
@@ -45,7 +46,7 @@ use axum::{
 use chrono::{Datelike, NaiveDate};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use sqlx::{Row, SqlitePool};
+use sqlx::{FromRow, Row, SqlitePool};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -216,42 +217,30 @@ async fn e10_gains(
     conn: &mut sqlx::SqliteConnection,
     fx: &FxRates,
 ) -> Result<Vec<(i32, Decimal, bool)>, sqlx::Error> {
-    let rows = sqlx::query(
-        "SELECT aa.trade_id, aa.quantity AS adj_qty, \
-                t.date AS trade_date, t.deemed_acquisition_date, \
-                t.quantity AS trade_qty, t.average_price, \
-                t.brokerage, t.gst_on_brokerage, t.currency AS trade_currency, t.fx_rate, \
-                t.spot_fx_rate, \
-                a.cost_base_adjustment, a.tax_year_end_date \
+    let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "SELECT aa.quantity AS adj_qty, a.cost_base_adjustment, a.tax_year_end_date, {} \
          FROM amit_adjustments aa \
          JOIN trades t ON t.id = aa.trade_id \
          JOIN amma_statements a ON a.id = aa.amma_statement_id \
          ORDER BY aa.trade_id, a.tax_year_end_date, a.id",
-    )
+        ParcelRow::columns_qualified("t")
+    )))
     .fetch_all(conn)
     .await?;
 
     let mut out = Vec::new();
     let mut i = 0;
     while i < rows.len() {
-        let trade_id: i64 = rows[i].try_get("trade_id")?;
-        // Parcel cost base in native currency (the trade columns repeat per row).
-        let trade_qty = parse_dec("trade_qty", rows[i].try_get("trade_qty")?)?;
-        let price = parse_dec("average_price", rows[i].try_get("average_price")?)?;
-        let brok = parse_dec("brokerage", rows[i].try_get("brokerage")?)?;
-        let gst = parse_dec("gst_on_brokerage", rows[i].try_get("gst_on_brokerage")?)?;
-        let trade_date: NaiveDate = rows[i].try_get("trade_date")?;
-        // A scrip-for-scrip replacement parcel's discount clock and AUD
-        // translation month run from its deemed (carried) acquisition date.
-        let deemed: Option<NaiveDate> = rows[i].try_get("deemed_acquisition_date")?;
-        let acquired = deemed.unwrap_or(trade_date);
-        let currency: String = rows[i].try_get("trade_currency")?;
-        let fx_rate = parse_dec("fx_rate", rows[i].try_get("fx_rate")?)?;
-        let spot_fx_rate = crate::infra::decimal::row_opt_dec(&rows[i], "spot_fx_rate")?;
-        let fx_override = FxOverride::from_trade(fx_rate, spot_fx_rate);
-        let mut remaining = price * trade_qty + brok + gst;
+        // The parcel's trade columns repeat per adjustment row; read once via
+        // the shared mapping, so its acquisition date, FX precedence and
+        // initial cost base are the parcel's own rather than re-derived here.
+        let parcel = ParcelRow::from_row(&rows[i])?;
+        let trade_id = parcel.id;
+        let acquired = parcel.acquired();
+        let fx_override = parcel.fx_override();
+        let mut remaining = parcel.parcel().initial_cost();
 
-        while i < rows.len() && rows[i].try_get::<i64, _>("trade_id")? == trade_id {
+        while i < rows.len() && rows[i].try_get::<i64, _>("id")? == trade_id {
             let adj_qty = parse_dec("adj_qty", rows[i].try_get("adj_qty")?)?;
             let cba = parse_dec(
                 "cost_base_adjustment",
@@ -261,7 +250,7 @@ async fn e10_gains(
             let reduction = adj_qty * cba;
             if reduction > remaining {
                 let excess = reduction - remaining;
-                let excess_aud = fx.to_aud(excess, &currency, acquired, fx_override)?;
+                let excess_aud = fx.to_aud(excess, &parcel.currency, acquired, fx_override)?;
                 let discount_eligible =
                     crate::domain::cgt_discount::discount_eligible(acquired, year_end);
                 out.push((year_end.year(), excess_aud, discount_eligible));
@@ -296,20 +285,16 @@ async fn g1_gains(
     conn: &mut sqlx::SqliteConnection,
     fx: &FxRates,
 ) -> Result<Vec<(i32, Decimal, bool)>, sqlx::Error> {
-    let rows = sqlx::query(
-        "SELECT ca.date AS action_date, ca.amount_per_unit, ca.currency AS action_currency, \
-                ca.listing_id, \
-                t.id AS trade_id, t.date AS trade_date, t.deemed_acquisition_date, \
-                t.quantity AS trade_qty, \
-                t.average_price, t.brokerage, t.gst_on_brokerage, \
-                t.currency AS trade_currency \
+    let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "SELECT ca.date AS action_date, ca.amount_per_unit, ca.currency AS action_currency, {} \
          FROM corporate_actions ca \
          JOIN trades t ON t.listing_id = ca.listing_id \
                       AND t.trade_type IN ('Buy', 'DRP') \
                       AND t.date <= ca.date \
          WHERE ca.action_type = 'ReturnOfCapital' \
          ORDER BY t.id, ca.date, ca.id",
-    )
+        ParcelRow::columns_qualified("t")
+    )))
     .fetch_all(&mut *conn)
     .await?;
 
@@ -342,26 +327,22 @@ async fn g1_gains(
     let mut out = Vec::new();
     let mut i = 0;
     while i < rows.len() {
-        let trade_id: i64 = rows[i].try_get("trade_id")?;
-        // Parcel cost base in native currency (the trade columns repeat per row).
-        let trade_qty = parse_dec("trade_qty", rows[i].try_get("trade_qty")?)?;
-        let price = parse_dec("average_price", rows[i].try_get("average_price")?)?;
-        let brok = parse_dec("brokerage", rows[i].try_get("brokerage")?)?;
-        let gst = parse_dec("gst_on_brokerage", rows[i].try_get("gst_on_brokerage")?)?;
-        let trade_date: NaiveDate = rows[i].try_get("trade_date")?;
-        // A scrip-for-scrip replacement parcel's discount clock runs from its
-        // deemed (carried) acquisition date; split/payment applicability
-        // stays on the actual trade date.
-        let deemed: Option<NaiveDate> = rows[i].try_get("deemed_acquisition_date")?;
-        let acquired = deemed.unwrap_or(trade_date);
-        let trade_currency: String = rows[i].try_get("trade_currency")?;
-        let listing_id: i64 = rows[i].try_get("listing_id")?;
-        let splits = split_events.get(&listing_id).map_or(&[][..], |v| v);
+        // The parcel's trade columns repeat per payment row; read once via the
+        // shared mapping. A scrip-for-scrip replacement parcel's discount clock
+        // runs from its deemed (carried) acquisition date, while split/payment
+        // applicability stays on the actual trade date — the two the row
+        // distinguishes as `acquired()` and `date`.
+        let parcel = ParcelRow::from_row(&rows[i])?;
+        let trade_id = parcel.id;
+        let trade_qty = parcel.quantity;
+        let trade_date = parcel.date;
+        let acquired = parcel.acquired();
+        let splits = split_events.get(&parcel.listing_id).map_or(&[][..], |v| v);
         // Whole-parcel remaining cost base: remaining ÷ quantity is the per-unit
         // figure the payment is compared against, kept un-divided for precision.
-        let mut remaining = price * trade_qty + brok + gst;
+        let mut remaining = parcel.parcel().initial_cost();
 
-        while i < rows.len() && rows[i].try_get::<i64, _>("trade_id")? == trade_id {
+        while i < rows.len() && rows[i].try_get::<i64, _>("id")? == trade_id {
             let event = RocEvent {
                 date: rows[i].try_get("action_date")?,
                 amount_per_unit: parse_dec("amount_per_unit", rows[i].try_get("amount_per_unit")?)?,
@@ -376,7 +357,7 @@ async fn g1_gains(
             // The join already bounds the payments to this parcel's holding
             // period, so `per_unit_for` never declines one here.
             let per_unit = event
-                .per_unit_for(splits, &trade_currency, trade_date, None)?
+                .per_unit_for(splits, &parcel.currency, trade_date, None)?
                 .unwrap_or(Decimal::ZERO);
             let payment = per_unit * trade_qty;
             if payment > remaining {

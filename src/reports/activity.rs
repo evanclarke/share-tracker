@@ -478,12 +478,7 @@ pub async fn db_activity(
             TradeType::Buy | TradeType::DRP => t.average_price * t.quantity + costs,
             TradeType::Sell => t.average_price * t.quantity - costs,
         };
-        let amount_aud = fx.to_aud(
-            total,
-            &t.currency,
-            t.date,
-            FxOverride::from_trade(t.fx_rate, t.spot_fx_rate),
-        )?;
+        let amount_aud = fx.to_aud(total, &t.currency, t.date, t.fx_override())?;
         rows.push(Proto {
             date: t.date,
             rank: 2,
