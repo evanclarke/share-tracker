@@ -659,7 +659,7 @@ mod tests {
             Decimal::from(100),
             Decimal::ZERO,
             &events,
-            &[split.clone()],
+            std::slice::from_ref(&split),
             None,
         )
         .unwrap();
