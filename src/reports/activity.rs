@@ -469,16 +469,19 @@ pub async fn db_activity(
             TradeType::Buy | TradeType::DRP => t.quantity,
             TradeType::Sell => -t.quantity,
         };
-        // Whole consideration in the trade currency, converted once with the
-        // trade's own FX precedence — the cost-base pipeline's convention. A
-        // rollover/vest/inheritance-created trade carries its figure on the
-        // brokerage column (price 0), so the carried amount still shows.
-        let costs = t.brokerage + t.gst_on_brokerage;
-        let total = match t.trade_type {
-            TradeType::Buy | TradeType::DRP => t.average_price * t.quantity + costs,
-            TradeType::Sell => t.average_price * t.quantity - costs,
-        };
-        let amount_aud = fx.to_aud(total, &t.currency, t.date, t.fx_override())?;
+        // What the trade adds up to in its own currency — the model's own
+        // `net_transaction_total`, i.e. the very figure the write path
+        // cross-checks a recorded statement total against — converted once
+        // with the trade's own FX precedence, the cost-base pipeline's
+        // convention. A rollover/vest/inheritance-created trade carries its
+        // figure on the brokerage column (price 0), so the carried amount
+        // still shows.
+        let amount_aud = fx.to_aud(
+            t.net_transaction_total(),
+            &t.currency,
+            t.date,
+            t.fx_override(),
+        )?;
         rows.push(Proto {
             date: t.date,
             rank: 2,
@@ -907,6 +910,51 @@ mod tests {
         // 150 × 10 = 1500 USD at 2 USD/AUD → 750 AUD.
         assert_eq!(events[0].amount_aud, Some(dec("750")));
         assert_eq!(events[0].detail, "10 @ 150 USD");
+    }
+
+    /// A trade's ledger amount is what the trade adds up to — the same
+    /// `net_transaction_total` the write path cross-checks a recorded
+    /// `statement_total` against. So a trade whose statement total was
+    /// *accepted* reports exactly that total in the ledger: a Buy's amount
+    /// payable includes its costs, a Sell's net proceeds have them deducted.
+    /// Both trades are AUD, so nothing converts between the two figures.
+    #[tokio::test]
+    async fn db_trade_amount_is_the_total_the_write_path_accepted() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "VAS").await;
+        // Buy: 100 × 10 + 9.95 + 0.995 = 1010.945 payable.
+        let buy_total = dec("1010.945");
+        test_support::buy(1, 1)
+            .qty(dec("100"))
+            .price(dec("10"))
+            .brokerage(dec("9.95"))
+            .gst_on_brokerage(dec("0.995"))
+            .with(|t| t.statement_total = Some(buy_total))
+            .insert(&pool)
+            .await;
+        // Sell: 40 × 12 − 9.95 − 0.995 = 469.055 receivable.
+        let sell_total = dec("469.055");
+        test_support::sell(2, 1)
+            .date(ymd(2024, 6, 1))
+            .qty(dec("40"))
+            .price(dec("12"))
+            .brokerage(dec("9.95"))
+            .gst_on_brokerage(dec("0.995"))
+            .with(|t| t.statement_total = Some(sell_total))
+            .insert(&pool)
+            .await;
+        allocate(&pool, 1, 2, 1, dec("40")).await;
+
+        let events = events(&pool, 1).await;
+        let amount = |event: &str| {
+            events
+                .iter()
+                .find(|e| e.event == event)
+                .unwrap_or_else(|| panic!("{event} is in the ledger"))
+                .amount_aud
+        };
+        assert_eq!(amount("Buy"), Some(buy_total));
+        assert_eq!(amount("Sell"), Some(sell_total));
     }
 
     /// A trust distribution's AUD month is its *assessment* month

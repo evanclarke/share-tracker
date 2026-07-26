@@ -185,26 +185,49 @@ pub(crate) enum StatementTotalError {
     TotalMismatch { expected: Decimal },
 }
 
-/// The figures a recorded statement total is cross-checked against, gathered
-/// for [`check_statement_total`]. Named fields keep the four adjacent `Decimal`
-/// amounts from being transposed at the call site.
-pub(crate) struct StatementTotalCheck<'a> {
-    pub statement_total: Option<Decimal>,
+/// A trade's core money figures, in its own currency. Named fields keep the
+/// four adjacent `Decimal` amounts from being transposed at the call site.
+pub(crate) struct TradeAmounts {
     pub trade_type: TradeType,
     pub quantity: Decimal,
     pub average_price: Decimal,
     pub brokerage: Decimal,
     pub gst_on_brokerage: Decimal,
+}
+
+impl TradeAmounts {
+    /// What the trade adds up to in its own currency: the amount *payable* on
+    /// a Buy/DRP — consideration plus the incidental costs — or the net
+    /// proceeds *receivable* on a Sell, where a statement nets those costs
+    /// out of the consideration instead.
+    ///
+    /// One definition with two readers: [`check_statement_total`] rejects a
+    /// recorded `statement_total` that doesn't equal it, and the activity
+    /// ledger reports it as the row's amount. So the ledger can never print a
+    /// figure the write path would have refused to accept as the trade's own.
+    pub(crate) fn net_transaction_total(&self) -> Decimal {
+        let costs = self.brokerage + self.gst_on_brokerage;
+        match self.trade_type {
+            TradeType::Buy | TradeType::DRP => self.quantity * self.average_price + costs,
+            TradeType::Sell => self.quantity * self.average_price - costs,
+        }
+    }
+}
+
+/// The figures a recorded statement total is cross-checked against, gathered
+/// for [`check_statement_total`]: the trade's own amounts plus the currencies
+/// that decide whether a single-currency total exists to check at all.
+pub(crate) struct StatementTotalCheck<'a> {
+    pub statement_total: Option<Decimal>,
+    pub amounts: TradeAmounts,
     pub currency: &'a str,
     pub brokerage_currency: &'a str,
 }
 
-/// Cross-check an optionally supplied statement total against the trade's
-/// own figures: quantity × price + brokerage + GST for a Buy/DRP (amount
-/// payable), quantity × price − brokerage − GST for a Sell (net proceeds
-/// receivable — the statement nets costs out). Contract notes print the
-/// consideration rounded to the cent, so the total also passes when it
-/// equals the computed figure rounded to 2 dp (half away from zero, as
+/// Cross-check an optionally supplied statement total against what the trade
+/// itself adds up to ([`TradeAmounts::net_transaction_total`]). Contract notes
+/// print the consideration rounded to the cent, so the total also passes when
+/// it equals the computed figure rounded to 2 dp (half away from zero, as
 /// statements round). Comparison is numeric (`Decimal` equality ignores
 /// trailing zeros: 1234.50 matches 1234.5). `None` means the statement
 /// total wasn't recorded — nothing to check.
@@ -215,11 +238,7 @@ pub(crate) fn check_statement_total(c: StatementTotalCheck) -> Result<(), Statem
     if c.currency != c.brokerage_currency {
         return Err(StatementTotalError::CurrencyMismatch);
     }
-    let costs = c.brokerage + c.gst_on_brokerage;
-    let expected = match c.trade_type {
-        TradeType::Buy | TradeType::DRP => c.quantity * c.average_price + costs,
-        TradeType::Sell => c.quantity * c.average_price - costs,
-    };
+    let expected = c.amounts.net_transaction_total();
     let cent_rounded =
         expected.round_dp_with_strategy(2, rust_decimal::RoundingStrategy::MidpointAwayFromZero);
     if total != expected && total != cent_rounded {

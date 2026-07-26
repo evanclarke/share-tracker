@@ -490,11 +490,13 @@ pub(crate) async fn upsert_sell_in_tx(
     .map_err(SellError::Amounts)?;
     trade::check_statement_total(trade::StatementTotalCheck {
         statement_total: body.statement_total,
-        trade_type: TradeType::Sell,
-        quantity: body.quantity,
-        average_price: body.average_price,
-        brokerage,
-        gst_on_brokerage,
+        amounts: trade::TradeAmounts {
+            trade_type: TradeType::Sell,
+            quantity: body.quantity,
+            average_price: body.average_price,
+            brokerage,
+            gst_on_brokerage,
+        },
         currency: &body.currency,
         brokerage_currency: &body.brokerage_currency,
     })

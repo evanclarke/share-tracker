@@ -235,6 +235,27 @@ impl Trade {
         self
     }
 
+    /// The trade's core money figures, for the rules defined over them (see
+    /// [`super::checks::TradeAmounts`]).
+    pub(crate) fn amounts(&self) -> super::checks::TradeAmounts {
+        super::checks::TradeAmounts {
+            trade_type: self.trade_type,
+            quantity: self.quantity,
+            average_price: self.average_price,
+            brokerage: self.brokerage,
+            gst_on_brokerage: self.gst_on_brokerage,
+        }
+    }
+
+    /// What this trade adds up to in its own currency — the amount payable on
+    /// a Buy/DRP, the net proceeds receivable on a Sell. The same figure the
+    /// write path cross-checks a recorded `statement_total` against
+    /// ([`super::checks::TradeAmounts::net_transaction_total`]), so the
+    /// activity ledger reports exactly what the trade was accepted as.
+    pub fn net_transaction_total(&self) -> Decimal {
+        self.amounts().net_transaction_total()
+    }
+
     /// The trade's per-record FX rate: its deliberate `spot_fx_rate` override
     /// when set, else its `fx_rate` fallback (see `infra::fx::FxOverride`).
     /// The same precedence the cost-base pipeline's `ParcelRow` applies —

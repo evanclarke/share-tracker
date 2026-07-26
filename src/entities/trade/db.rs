@@ -161,11 +161,7 @@ pub async fn db_upsert(pool: &SqlitePool, trade: &Trade) -> Result<(), UpsertErr
     // caught before anything is written.
     check_statement_total(StatementTotalCheck {
         statement_total: trade.statement_total,
-        trade_type: trade.trade_type,
-        quantity: trade.quantity,
-        average_price: trade.average_price,
-        brokerage: trade.brokerage,
-        gst_on_brokerage: trade.gst_on_brokerage,
+        amounts: trade.amounts(),
         currency: &trade.currency,
         brokerage_currency: &trade.brokerage_currency,
     })

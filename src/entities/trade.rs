@@ -23,8 +23,8 @@ pub use model::{Trade, TradeBody, TradeType};
 
 pub(crate) use checks::{
     AmountsCheck, AmountsError, CGT_START, SpotFxRateError, StatementTotalCheck,
-    StatementTotalError, amounts_detail, check_amounts, check_statement_total, resolve_brokerage,
-    spot_fx_rate_detail, statement_total_detail, validate_spot_fx_rate,
+    StatementTotalError, TradeAmounts, amounts_detail, check_amounts, check_statement_total,
+    resolve_brokerage, spot_fx_rate_detail, statement_total_detail, validate_spot_fx_rate,
 };
 pub(crate) use settlement::auto_settlement_date;
 
