@@ -627,10 +627,23 @@ async function viewSellForm(id) {
   }
   wireGstBrokerage(form);
 
-  // Allocations: the shared editor, pre-filled with the existing rows.
-  const allocEditor = allocationEditor(await loadOptions('buyParcels'), existingAllocs, {
-    hint: 'Allocations must sum exactly to the sell quantity. Each parcel must be a Buy/DRP with enough remaining units.',
+  // Allocations: the shared editor, pre-filled with the existing rows and
+  // narrowed to open parcels matching the chosen listing + holding account —
+  // the two things the server itself requires a parcel to match
+  // (`entities::sell`) — re-filtered live as either field changes.
+  const openParcels = await loadOptions('openParcels');
+  function validParcelOptions() {
+    const listingId = form.querySelector('[name="listing_id"]').value;
+    const accountId = form.querySelector('[name="holding_account_id"]').value;
+    return openParcels.filter(function (p) {
+      return String(p.listing_id) === listingId && String(p.holding_account_id) === accountId;
+    });
+  }
+  const allocEditor = allocationEditor(validParcelOptions(), existingAllocs, {
+    hint: 'Allocations must sum exactly to the sell quantity. Each parcel must be a Buy/DRP with enough remaining units, in the chosen listing and holding account.',
   });
+  form.querySelector('[name="listing_id"]').addEventListener('change', function () { allocEditor.setOptions(validParcelOptions()); });
+  form.querySelector('[name="holding_account_id"]').addEventListener('change', function () { allocEditor.setOptions(validParcelOptions()); });
 
   const actions = el('div', { class: 'form-actions' }, [
     el('button', { type: 'submit', class: 'primary' }, editing ? 'Save Sell' : 'Create Sell'),

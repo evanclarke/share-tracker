@@ -304,11 +304,23 @@ export function allocationEditor(parcelOptions, existingAllocs, labels) {
     qtyLabel: 'Quantity allocated',
     addLabel: '+ Add allocation',
   }, labels);
+  let options = parcelOptions;
   const list = el('div');
+  // (Re)populates a row's parcel select from the current `options`, keeping
+  // whatever value it already had even if that parcel has since fallen out
+  // of the (now-filtered) list — an already-made selection is never silently
+  // dropped or swapped out from under the user.
+  function populateSelect(sel, keepValue) {
+    sel.innerHTML = '';
+    options.forEach(function (o) { sel.appendChild(el('option', { value: o.value }, o.label)); });
+    if (keepValue != null && keepValue !== '' && !options.some(function (o) { return String(o.value) === String(keepValue); })) {
+      sel.appendChild(el('option', { value: keepValue }, '#' + keepValue + ' (not a currently valid parcel)'));
+    }
+    if (keepValue != null && keepValue !== '') sel.value = String(keepValue);
+  }
   function addRow(alloc) {
     const purchaseSel = el('select', { name: 'alloc_purchase' });
-    parcelOptions.forEach(function (o) { purchaseSel.appendChild(el('option', { value: o.value }, o.label)); });
-    if (alloc) purchaseSel.value = String(alloc.purchase_trade_id);
+    populateSelect(purchaseSel, alloc ? alloc.purchase_trade_id : null);
     const qtyInput = el('input', { type: 'text', inputmode: 'decimal', name: 'alloc_qty', value: alloc ? String(alloc.quantity_allocated) : '' });
     const row = el('div', { class: 'alloc-row' }, [
       el('div', { class: 'field' }, [el('label', null, labels.parcelLabel), purchaseSel]),
@@ -337,5 +349,15 @@ export function allocationEditor(parcelOptions, existingAllocs, labels) {
     });
     return allocs;
   }
-  return { section: section, read: read };
+  // Re-filters every row's parcel choices in place (e.g. the Sell form
+  // narrowing to the newly chosen listing/holding account) without touching
+  // rows' already-made selections.
+  function setOptions(newOptions) {
+    options = newOptions;
+    list.querySelectorAll('.alloc-row').forEach(function (row) {
+      const sel = row.querySelector('[name="alloc_purchase"]');
+      populateSelect(sel, sel.value);
+    });
+  }
+  return { section: section, read: read, setOptions: setOptions };
 }

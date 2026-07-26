@@ -276,6 +276,20 @@ export async function loadOptions(source) {
       return (await api('GET', '/trades')).filter(function (t) { return t.trade_type !== 'Sell'; })
         .map(function (t) { return { value: t.id, label: t.id + ': ' + t.trade_type + ' ' + t.quantity + ' (' + listing(t.listing_id) + ', ' + t.date + ')' }; });
     }
+    // Open (not fully sold) Buy/DRP parcels only — carries listing_id and
+    // holding_account_id so a caller can filter the picker down to parcels
+    // that are actually valid for a given Sell/Transfer (matching listing and
+    // account, remaining_quantity > 0 is already enforced by the report).
+    case 'openParcels': {
+      return (await api('GET', '/portfolio/open-parcels')).map(function (p) {
+        return {
+          value: p.trade_id,
+          label: p.trade_id + ': ' + p.ticker + ' — ' + p.remaining_quantity + ' remaining (acquired ' + p.acquisition_date + ')',
+          listing_id: p.listing_id,
+          holding_account_id: p.holding_account_id,
+        };
+      });
+    }
     default:
       return [];
   }
