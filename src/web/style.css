@@ -30,8 +30,9 @@ body {
   background: var(--ink);
   color: #fff;
 }
-#brand { display: flex; text-decoration: none; color: inherit; }
+#brand { display: flex; align-items: baseline; gap: 6px; text-decoration: none; color: inherit; }
 #topbar h1 { margin: 0; padding: 12px 0; font-size: 18px; font-weight: 600; }
+#version { color: #aab3c0; font-size: 11px; }
 #topbar .subtitle { margin-left: auto; color: #aab3c0; font-size: 12px; }
 
 /* Cross-view health strip: stale price/FX data and failed jobs, populated by

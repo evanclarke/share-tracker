@@ -68,7 +68,8 @@ fn js_asset(body: &'static str) -> Response {
 }
 
 async fn index() -> Response {
-    asset("text/html; charset=utf-8", INDEX_HTML)
+    let html = INDEX_HTML.replace("{{VERSION}}", env!("CARGO_PKG_VERSION"));
+    ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
 }
 
 async fn style_css() -> Response {
@@ -113,6 +114,16 @@ mod tests {
         assert!(body.contains("/static/style.css"));
         assert!(body.contains("id=\"app\""));
         assert!(body.contains("id=\"nav\""));
+    }
+
+    // The version shown in the header is substituted from the crate version
+    // at serve time (single source of truth: Cargo.toml), not hardcoded or
+    // left as the raw template placeholder.
+    #[tokio::test]
+    async fn index_shows_the_crate_version() {
+        let body = body_string(get("/").await).await;
+        assert!(body.contains(&format!("id=\"version\">v{}", env!("CARGO_PKG_VERSION"))));
+        assert!(!body.contains("{{VERSION}}"));
     }
 
     #[tokio::test]
