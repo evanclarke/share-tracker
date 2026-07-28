@@ -1215,6 +1215,26 @@ async function viewClosingPrices() {
         }
         viewClosingPrices();
       });
+      // An errored day no re-fetch can ever fix — before the security's first
+      // trading day, or a permanent hole in the provider's series — is
+      // discarded so it stops being reported by the health banner. Only
+      // errored rows are deletable; an ok price is replaced by a re-fetch.
+      if (row.status !== 'ok') {
+        const del = el('button', { class: 'small' }, 'Discard');
+        del.addEventListener('click', async function () {
+          if (!confirm('Discard the errored row for ' + row.listing + ' on ' + row.date
+            + '?\n\nDo this only when no price can ever exist for that day.')) return;
+          del.disabled = true;
+          try {
+            await api('DELETE', '/closing_prices/' + row._listing_id + '/' + row.date);
+            toast('Discarded the errored row for ' + row.date + '.');
+          } catch (e) {
+            toast(e.message, true);
+          }
+          viewClosingPrices();
+        });
+        return el('td', { class: 'actions' }, [btn, del]);
+      }
       return el('td', { class: 'actions' }, btn);
     },
   });

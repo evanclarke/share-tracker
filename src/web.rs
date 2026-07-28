@@ -230,6 +230,11 @@ mod tests {
         // two on-demand endpoints.
         assert!(js.contains("/closing_prices/fetch"));
         assert!(js.contains("/closing_prices/backfill"));
+        // An errored row no re-fetch can fix is discardable, so the health
+        // banner stops reporting it — offered only on non-ok rows.
+        assert!(js.contains("Discard"));
+        assert!(js.contains("row.status !== 'ok'"));
+        assert!(js.contains("'/closing_prices/' + row._listing_id"));
         // The price-import job is described in the Jobs view.
         assert!(js.contains("price-import"));
     }

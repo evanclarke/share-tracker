@@ -34,12 +34,16 @@
 //! - A failed fetch is stored as an errored row for that (listing, date) —
 //!   never a silent zero or a skipped row — and is replaced by a later
 //!   successful re-run.
+//! - Only an **errored** row is deletable ([`db_delete`]): the acknowledgement
+//!   that no price will ever exist for that day. An ok row is replaced by a
+//!   re-fetch, never removed, so no valuation can lose a price it once had.
 
 use crate::infra::http::ApiError;
 use axum::{
     Extension, Json, Router,
-    extract::{Query, State},
-    routing::{get, post},
+    extract::{Path, Query, State},
+    http::StatusCode,
+    routing::{delete, get, post},
 };
 use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveTime, Utc};
 use chrono_tz::Tz;
@@ -478,6 +482,25 @@ async fn db_store(pool: &SqlitePool, row: &ClosingPrice) -> Result<(), sqlx::Err
     .execute(pool)
     .await?;
     Ok(())
+}
+
+/// Delete one stored row, reporting whether one was there. Callers must have
+/// established that the row is errored (the handler rejects an ok row): an
+/// errored date is never valued — `reports::valuation` blocks it outright —
+/// so removing the row cannot invalidate a stored snapshot. That is what lets
+/// `closing_prices` keep its single `..._stale_snapshots_update` trigger
+/// (0001_schema.sql) with no DELETE counterpart, unlike the fact tables.
+pub async fn db_delete(
+    pool: &SqlitePool,
+    listing_id: i64,
+    price_date: NaiveDate,
+) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query("DELETE FROM closing_prices WHERE listing_id = ? AND price_date = ?")
+        .bind(listing_id)
+        .bind(price_date)
+        .execute(pool)
+        .await?;
+    Ok(result.rows_affected() > 0)
 }
 
 /// Listings with a non-zero holding: total Buy/DRP quantity minus the units
@@ -953,6 +976,35 @@ async fn backfill(
     }))
 }
 
+/// Delete one **errored** row: the acknowledgement that no price will ever
+/// exist for that (listing, day) — a date before the security's first trading
+/// day, or a permanent hole in the provider's series — so it stops being
+/// reported by `GET /reports/health`'s `errored_prices`, which otherwise nags
+/// forever about a row no re-fetch can fix.
+///
+/// An **ok** row is rejected 422: real price data is replaced by a re-fetch
+/// (`/fetch`, `/backfill`), never deleted, so this endpoint can never punch a
+/// hole in a valued series. For a held listing, deleting an errored row does
+/// not unblock its date — valuation still refuses it, now for want of any row
+/// at all ("no stored price … backfill it") — it only clears the standing
+/// alarm.
+async fn delete_one(
+    State(pool): State<SqlitePool>,
+    Path((listing_id, price_date)): Path<(i64, NaiveDate)>,
+) -> Result<StatusCode, ApiError> {
+    let row = db_get_one(&pool, listing_id, price_date)
+        .await?
+        .ok_or_else(|| ApiError::not_found("no stored price for that listing and date"))?;
+    if row.status == PriceStatus::Ok {
+        return Err(ApiError::unprocessable(format!(
+            "the stored price for {price_date} is ok, not errored — re-fetch it to replace it \
+             rather than deleting it"
+        )));
+    }
+    db_delete(&pool, listing_id, price_date).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// 422 unless `date` is a trading day whose close has passed.
 fn validate_complete_trading_day(market: &Market, date: NaiveDate) -> Result<(), ApiError> {
     let latest = market
@@ -984,6 +1036,10 @@ pub fn router() -> Router<SqlitePool> {
         .route("/closing_prices", get(list))
         .route("/closing_prices/fetch", post(fetch_one))
         .route("/closing_prices/backfill", post(backfill))
+        .route(
+            "/closing_prices/{listing_id}/{price_date}",
+            delete(delete_one),
+        )
 }
 
 /// Reusable price-fetcher stub for the report tests (the daily-close tests in
@@ -1614,6 +1670,102 @@ mod tests {
         let status = resp.status();
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         (status, bytes)
+    }
+
+    async fn delete_req(app: &axum::Router, uri: &str) -> (StatusCode, axum::body::Bytes) {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        (status, bytes)
+    }
+
+    /// Store one errored row for (listing 1, `date`) via the normal fetch
+    /// path — a stub with no candle for the day.
+    async fn store_errored(pool: &SqlitePool, date: NaiveDate) {
+        let market = load_market(pool, 1).await.unwrap().unwrap();
+        let (_, errored) = fetch_and_store(pool, &StubFetcher::default(), &market, &[date])
+            .await
+            .unwrap();
+        assert_eq!(errored, 1);
+    }
+
+    // --- delete ---
+
+    /// An errored row for a day that can never have a price (here: before the
+    /// security's first trading day) is deletable, which is the only way to
+    /// stop `reports::health` reporting it forever.
+    #[tokio::test]
+    async fn api_delete_removes_an_errored_row() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "HNDQ", "XASX", "AUD").await;
+        insert_buy(&pool, 1, 1, "100").await;
+        store_errored(&pool, ymd(2026, 6, 2)).await;
+        let app = full_router(pool.clone(), StubFetcher::default());
+
+        let (status, bytes) = delete_req(&app, "/closing_prices/1/2026-06-02").await;
+        assert_eq!(
+            status,
+            StatusCode::NO_CONTENT,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+        assert!(bytes.is_empty());
+        assert!(
+            db_get_one(&pool, 1, ymd(2026, 6, 2))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        // The health report's standing alarm is cleared with it.
+        let health = crate::reports::health::db_health(&pool, ymd(2026, 6, 3))
+            .await
+            .unwrap();
+        assert!(health.errored_prices.is_empty());
+    }
+
+    /// An ok row is never deletable: real price data is replaced by a
+    /// re-fetch, so the endpoint cannot punch a hole in a valued series.
+    #[tokio::test]
+    async fn api_delete_rejects_an_ok_row() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
+        insert_buy(&pool, 1, 1, "100").await;
+        let market = load_market(&pool, 1).await.unwrap().unwrap();
+        let stub = StubFetcher::default().with_close(1, ymd(2026, 6, 2), "62.48", "AUD");
+        fetch_and_store(&pool, &stub, &market, &[ymd(2026, 6, 2)])
+            .await
+            .unwrap();
+        let app = full_router(pool.clone(), StubFetcher::default());
+
+        let (status, bytes) = delete_req(&app, "/closing_prices/1/2026-06-02").await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        let msg = String::from_utf8_lossy(&bytes);
+        assert!(msg.contains("re-fetch it"), "points at the fix: {msg}");
+        let row = db_get_one(&pool, 1, ymd(2026, 6, 2))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.status, PriceStatus::Ok, "the price is still stored");
+    }
+
+    #[tokio::test]
+    async fn api_delete_unknown_row_is_404() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
+        let app = full_router(pool.clone(), StubFetcher::default());
+
+        let (status, _) = delete_req(&app, "/closing_prices/1/2026-06-02").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
