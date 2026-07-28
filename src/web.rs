@@ -239,6 +239,21 @@ mod tests {
         assert!(js.contains("price-import"));
     }
 
+    /// A day the provider cannot serve is priced by hand from this screen:
+    /// the form drives the manual-price PUT with both provenance fields, the
+    /// columns show where every stored price came from, and a manual row
+    /// offers no Re-fetch (the server refuses one).
+    #[tokio::test]
+    async fn manual_price_ui_present() {
+        let js = app_js_body().await;
+        assert!(js.contains("Manual price"));
+        assert!(js.contains("'/closing_prices/' + Number(mListingSel.value)"));
+        assert!(js.contains("sourced_from: mSourcedInp.value"));
+        assert!(js.contains("reason: mReasonInp.value"));
+        assert!(js.contains("'sourced_from', 'reason'"));
+        assert!(js.contains("row.origin === 'manual'"));
+    }
+
     #[tokio::test]
     async fn errored_prices_ui_present() {
         let js = app_js_body().await;

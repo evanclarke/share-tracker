@@ -1192,15 +1192,28 @@ async function viewClosingPrices() {
       currency: l ? l.currency : '',
       source: p.source,
       status: p.status,
+      origin: p.origin,
+      sourced_from: p.sourced_from || '',
+      reason: p.reason || '',
       error: p.error || '',
       fetched_at: p.fetched_at,
       _listing_id: p.listing_id,
     };
   });
-  const cols = ['listing', 'date', 'price', 'currency', 'source', 'status', 'error', 'fetched_at'];
+  const cols = ['listing', 'date', 'price', 'currency', 'source', 'status', 'origin',
+    'sourced_from', 'reason', 'error', 'fetched_at'];
   const table = filterableTable(rows, cols, {
     statusField: 'status',
     actions: function (row) {
+      // A hand-entered price is a deliberate correction for a day the
+      // provider got wrong or cannot serve, so the provider never takes the
+      // day back: the server refuses a re-fetch (422) and there is nothing to
+      // discard (only errored rows are deletable). It is changed by entering
+      // another manual price below.
+      if (row.origin === 'manual') {
+        return el('td', { class: 'actions' },
+          el('span', { class: 'hint' }, 'Manual — re-enter to change'));
+      }
       const btn = el('button', { class: 'small' }, 'Re-fetch');
       btn.addEventListener('click', async function () {
         btn.disabled = true;
@@ -1268,6 +1281,49 @@ async function viewClosingPrices() {
     }
   });
 
+  // Manual price: the way out of a day the provider cannot serve at all (a
+  // delisted or mis-served symbol, a permanent hole in its series), which
+  // valuation otherwise blocks forever, taking the day's snapshots with it.
+  // Both provenance fields are required — a hand-entered figure is only
+  // auditable with where it came from and why it was needed.
+  const manualForm = el('form', { class: 'card' });
+  manualForm.appendChild(el('h3', null, 'Manual price'));
+  manualForm.appendChild(el('p', { class: 'hint' },
+    'Enter a closing price by hand for a trading day the provider cannot serve. In the '
+    + 'listing\'s quote currency, not AUD. Reports value it exactly like a fetched price; the '
+    + 'provider will not take the day back, so change it by re-entering it here.'));
+  const mListingSel = el('select', null, listings.map(function (l) {
+    return el('option', { value: l.id }, l.id + ': ' + l.ticker + ' (' + (l.exchange_mic || 'Crypto') + ')');
+  }));
+  const mDateInp = el('input', { type: 'date', required: true });
+  const mPriceInp = el('input', { type: 'text', inputmode: 'decimal', required: true });
+  const mSourcedInp = el('input', {
+    type: 'text', required: true, placeholder: 'e.g. asx.com.au closing report',
+  });
+  const mReasonInp = el('input', {
+    type: 'text', required: true, placeholder: 'e.g. provider serves no candle since the delisting',
+  });
+  manualForm.appendChild(el('div', { class: 'field' }, [el('label', null, 'Listing'), mListingSel]));
+  manualForm.appendChild(el('div', { class: 'field' }, [el('label', null, 'Date'), mDateInp]));
+  manualForm.appendChild(el('div', { class: 'field' }, [el('label', null, 'Price'), mPriceInp]));
+  manualForm.appendChild(el('div', { class: 'field' }, [el('label', null, 'Sourced from'), mSourcedInp]));
+  manualForm.appendChild(el('div', { class: 'field' }, [el('label', null, 'Reason'), mReasonInp]));
+  manualForm.appendChild(el('div', { class: 'form-actions' }, [
+    el('button', { type: 'submit', class: 'primary' }, 'Store price'),
+  ]));
+  manualForm.addEventListener('submit', async function (ev) {
+    ev.preventDefault();
+    try {
+      await api('PUT', '/closing_prices/' + Number(mListingSel.value) + '/' + mDateInp.value, {
+        price: mPriceInp.value, sourced_from: mSourcedInp.value, reason: mReasonInp.value,
+      });
+      toast('Stored ' + mPriceInp.value + ' for ' + mDateInp.value + '.');
+      viewClosingPrices();
+    } catch (e) {
+      toast(e.message, true);
+    }
+  });
+
   // Errored-listings surface: one row per listing with any errored price,
   // its Backfill action pre-fills the form above (a generous window ending
   // at the latest errored date, adjustable before submitting) and scrolls to
@@ -1304,7 +1360,8 @@ async function viewClosingPrices() {
     el('p', { class: 'view-desc' },
       'Daily closing prices per held listing, in the listing\'s quote currency, collected by the '
       + 'price-import job after each exchange\'s close (crypto at the UTC-midnight cut-off). '
-      + 'A failed fetch shows as an errored row — re-fetch it here once the provider recovers.'),
+      + 'A failed fetch shows as an errored row — re-fetch it here once the provider recovers, '
+      + 'or enter the price by hand if the provider can never serve that day.'),
     erroredTable ? el('div', { class: 'card' }, [
       el('h3', null, 'Listings with errored prices'),
       el('p', { class: 'hint' },
@@ -1314,6 +1371,7 @@ async function viewClosingPrices() {
       erroredTable,
     ]) : null,
     backfillForm,
+    manualForm,
     table,
   ]));
 }

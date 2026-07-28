@@ -7,7 +7,7 @@
 //! through the entity's own `db_upsert` so write-time invariants still apply.
 
 use crate::entities::{
-    amit_adjustment, amma, ess_statement, income, listing, parcel_allocation, trade,
+    amit_adjustment, amma, closing_price, ess_statement, income, listing, parcel_allocation, trade,
 };
 use crate::infra::db;
 use chrono::NaiveDate;
@@ -111,6 +111,70 @@ impl ListingBuilder {
 
     pub async fn insert(self, pool: &SqlitePool) {
         listing::db_upsert(pool, &self.l).await.unwrap();
+    }
+}
+
+/// Closing-price fixture: a provider-fetched ok price of 10 in the listing's
+/// quote currency. `.errored(msg)` turns it into a recorded fetch failure and
+/// `.manual(sourced_from, reason)` into a hand-entered price — each keeps the
+/// row's CHECK pairings consistent, so a test cannot build an impossible one.
+pub fn closing_price(listing_id: i64, price_date: NaiveDate) -> ClosingPriceBuilder {
+    ClosingPriceBuilder {
+        p: closing_price::ClosingPrice {
+            listing_id,
+            price_date,
+            price: Some(Decimal::from(10)),
+            source: "test".to_string(),
+            fetched_at: "2026-06-05T08:00:00Z".to_string(),
+            status: closing_price::PriceStatus::Ok,
+            error: None,
+            origin: closing_price::PriceOrigin::Fetched,
+            sourced_from: None,
+            reason: None,
+        },
+    }
+}
+
+pub struct ClosingPriceBuilder {
+    p: closing_price::ClosingPrice,
+}
+
+impl ClosingPriceBuilder {
+    pub fn price(mut self, price: &str) -> Self {
+        self.p.price = Some(dec(price));
+        self
+    }
+
+    pub fn source(mut self, source: &str) -> Self {
+        self.p.source = source.to_string();
+        self
+    }
+
+    pub fn fetched_at(mut self, fetched_at: &str) -> Self {
+        self.p.fetched_at = fetched_at.to_string();
+        self
+    }
+
+    /// A recorded fetch failure: no price, the message stored (CHECK-paired).
+    pub fn errored(mut self, error: &str) -> Self {
+        self.p.price = None;
+        self.p.status = closing_price::PriceStatus::Error;
+        self.p.error = Some(error.to_string());
+        self
+    }
+
+    /// A price entered by hand, with the provenance the schema requires: the
+    /// `source` moves to `manual` in step with the origin (CHECK-paired).
+    pub fn manual(mut self, sourced_from: &str, reason: &str) -> Self {
+        self.p.source = closing_price::MANUAL_SOURCE.to_string();
+        self.p.origin = closing_price::PriceOrigin::Manual;
+        self.p.sourced_from = Some(sourced_from.to_string());
+        self.p.reason = Some(reason.to_string());
+        self
+    }
+
+    pub async fn insert(self, pool: &SqlitePool) {
+        closing_price::db_store(pool, &self.p).await.unwrap();
     }
 }
 

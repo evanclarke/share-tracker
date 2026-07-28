@@ -458,16 +458,11 @@ mod tests {
     }
 
     async fn store_price(pool: &SqlitePool, listing_id: i64, date: NaiveDate, price: &str) {
-        sqlx::query(
-            "INSERT INTO closing_prices (listing_id, price_date, price, source, fetched_at, status, error) \
-             VALUES (?, ?, ?, 'test', '2026-01-01T00:00:00Z', 'ok', NULL)",
-        )
-        .bind(listing_id)
-        .bind(date)
-        .bind(price)
-        .execute(pool)
-        .await
-        .unwrap();
+        test_support::closing_price(listing_id, date)
+            .price(price)
+            .fetched_at("2026-01-01T00:00:00Z")
+            .insert(pool)
+            .await;
     }
 
     async fn insert_fx_rate(pool: &SqlitePool, currency: &str, month: &str, rate: &str) {

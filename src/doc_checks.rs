@@ -455,6 +455,37 @@ fn known_limitations_document_settlement_window_forex_k10_k11() {
     assert!(README_MD.contains("CGT events K10/K11"));
 }
 
+/// Docs-sync pin for hand-entered closing prices (2026-07-28): the API
+/// documents the endpoint, both required provenance fields, and its 422s; the
+/// schema documents the three columns and why the table still carries no
+/// INSERT/DELETE staleness trigger and stays outside the audit trail; and the
+/// Known-limitations entry states the two consequences the user lives with —
+/// a manual price is one-way, and its superseded provenance is not retained.
+#[test]
+fn manual_closing_prices_documented() {
+    // API.md: the endpoint, its body, and the one-way rule.
+    assert!(API_MD.contains("PUT` | `/closing_prices/:listing_id/:price_date"));
+    assert!(API_MD.contains("`sourced_from` (where the figure came from"));
+    assert!(API_MD.contains("`reason` (why manual entry was needed"));
+    assert!(API_MD.contains("**only ever replaced by another manual price**"));
+    assert!(API_MD.contains("re-fetching a day whose stored price was entered manually"));
+    // SCHEMA.md: the columns, the trigger reasoning, and the audit exclusion.
+    assert!(SCHEMA_MD.contains("fetched | manual (CHECK-enforced enum, 0020)"));
+    assert!(SCHEMA_MD.contains("Where a manual price was taken from"));
+    assert!(SCHEMA_MD.contains("Why manual entry was needed"));
+    assert!(SCHEMA_MD.contains("A **manually entered** price (0020) changes neither premise"));
+    assert!(SCHEMA_MD.contains("stays out of scope after 0020 made a price hand-enterable"));
+    // Known limitations: both consequences, stated plainly.
+    let limitations = known_limitations();
+    assert!(
+        limitations.contains("**A manually entered price is one-way and is not itself audited**")
+    );
+    assert!(limitations.contains("cannot be removed — only overwritten"));
+    assert!(limitations.contains("the superseded provenance is not retained"));
+    // README surfaces the feature.
+    assert!(README_MD.contains("**priced by hand**"));
+}
+
 /// Docs-sync pin (REQUIREMENTS 2026-07-13, lossless GST-inclusive
 /// round-trip): the Trades section states the read/write round-trip
 /// semantics explicitly — with the flag set, `brokerage` is the one

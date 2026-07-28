@@ -612,13 +612,10 @@ mod tests {
         db_import_rate(&pool, "USD", "2026-05", "2".parse().unwrap())
             .await
             .unwrap();
-        sqlx::query(
-            "INSERT INTO closing_prices (listing_id, price_date, price, source, fetched_at, status, error) \
-             VALUES (1, '2026-06-04', '141.50', 'test', '2026-06-05T08:00:00Z', 'ok', NULL)",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
+        crate::test_support::closing_price(1, june4)
+            .price("141.50")
+            .insert(&pool)
+            .await;
         crate::reports::snapshot::generate(&pool, june4, chrono::Utc::now())
             .await
             .unwrap();

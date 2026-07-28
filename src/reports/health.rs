@@ -168,28 +168,21 @@ mod tests {
     use tower::ServiceExt;
 
     async fn insert_ok_price(pool: &SqlitePool, listing_id: i64, date: &str) {
-        sqlx::query(
-            "INSERT INTO closing_prices (listing_id, price_date, price, source, fetched_at, status, error) \
-             VALUES (?, ?, '10.50', 'yahoo', '2026-07-01T00:00:00Z', 'ok', NULL)",
-        )
-        .bind(listing_id)
-        .bind(date)
-        .execute(pool)
-        .await
-        .unwrap();
+        test_support::closing_price(listing_id, date.parse().unwrap())
+            .price("10.50")
+            .source("yahoo")
+            .fetched_at("2026-07-01T00:00:00Z")
+            .insert(pool)
+            .await;
     }
 
     async fn insert_error_price(pool: &SqlitePool, listing_id: i64, date: &str, error: &str) {
-        sqlx::query(
-            "INSERT INTO closing_prices (listing_id, price_date, price, source, fetched_at, status, error) \
-             VALUES (?, ?, NULL, 'yahoo', '2026-07-01T00:00:00Z', 'error', ?)",
-        )
-        .bind(listing_id)
-        .bind(date)
-        .bind(error)
-        .execute(pool)
-        .await
-        .unwrap();
+        test_support::closing_price(listing_id, date.parse().unwrap())
+            .source("yahoo")
+            .fetched_at("2026-07-01T00:00:00Z")
+            .errored(error)
+            .insert(pool)
+            .await;
     }
 
     async fn insert_fx_month(pool: &SqlitePool, month: &str) {
@@ -268,13 +261,7 @@ mod tests {
         let pool = test_pool().await;
         test_support::listing(1).insert(&pool).await;
         insert_ok_price(&pool, 1, "2026-07-01").await;
-        sqlx::query(
-            "INSERT INTO closing_prices (listing_id, price_date, price, source, fetched_at, status, error) \
-             VALUES (1, '2026-07-10', NULL, 'yahoo', '2026-07-10T00:00:00Z', 'error', 'provider down')",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
+        insert_error_price(&pool, 1, "2026-07-10", "provider down").await;
         let h = db_health(&pool, ymd(2026, 7, 13)).await.unwrap();
         assert_eq!(h.latest_price_date, Some(ymd(2026, 7, 1)));
         assert!(h.prices_stale);

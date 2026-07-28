@@ -37,13 +37,20 @@
 //! - Only an **errored** row is deletable ([`db_delete`]): the acknowledgement
 //!   that no price will ever exist for that day. An ok row is replaced by a
 //!   re-fetch, never removed, so no valuation can lose a price it once had.
+//! - A day the provider cannot serve at all can be priced **by hand**
+//!   (`PUT /closing_prices/{listing_id}/{price_date}`), recorded with where
+//!   the figure was sourced from and why manual entry was needed
+//!   ([`PriceOrigin::Manual`]). Valuation reads such a row exactly like a
+//!   fetched one. The provider never takes the day back: collection and
+//!   backfill skip it as an ok row, and an explicit re-fetch is refused — a
+//!   manual price is changed only by entering another one.
 
 use crate::infra::http::ApiError;
 use axum::{
     Extension, Json, Router,
     extract::{Path, Query, State},
     http::StatusCode,
-    routing::{delete, get, post},
+    routing::{get, post, put},
 };
 use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveTime, Utc};
 use chrono_tz::Tz;
@@ -69,6 +76,20 @@ pub enum PriceStatus {
     Error,
 }
 
+/// How a stored row came to be: fetched from the provider, or entered by hand
+/// for a day the provider cannot serve.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, sqlx::Type)]
+#[sqlx(rename_all = "lowercase")]
+#[serde(rename_all = "lowercase")]
+pub enum PriceOrigin {
+    Fetched,
+    Manual,
+}
+
+/// The `source` of a manually entered row — the provider slot, held in step
+/// with `origin = "manual"` by a schema CHECK (0020).
+pub const MANUAL_SOURCE: &str = "manual";
+
 /// One stored closing price — or one recorded fetch failure (`status =
 /// "error"`, `price` null, `error` set).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,13 +99,21 @@ pub struct ClosingPrice {
     /// Closing price in the listing's quote currency; None exactly when the
     /// fetch failed.
     pub price: Option<Decimal>,
-    /// Provider that produced the row, e.g. "yahoo".
+    /// Provider that produced the row, e.g. "yahoo" — [`MANUAL_SOURCE`]
+    /// exactly when `origin` is `Manual`.
     pub source: String,
-    /// RFC 3339 UTC timestamp of the fetch that produced the row.
+    /// RFC 3339 UTC timestamp of the fetch that produced the row — for a
+    /// manual row, of the entry that recorded it.
     pub fetched_at: String,
     pub status: PriceStatus,
     /// Failure detail; None exactly when the fetch succeeded.
     pub error: Option<String>,
+    pub origin: PriceOrigin,
+    /// Where a manual price was sourced from; None exactly when `origin` is
+    /// `Fetched`.
+    pub sourced_from: Option<String>,
+    /// Why manual entry was needed; None exactly when `origin` is `Fetched`.
+    pub reason: Option<String>,
 }
 
 impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for ClosingPrice {
@@ -98,6 +127,9 @@ impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for ClosingPrice {
             fetched_at: row.try_get("fetched_at")?,
             status: row.try_get("status")?,
             error: row.try_get("error")?,
+            origin: row.try_get("origin")?,
+            sourced_from: row.try_get("sourced_from")?,
+            reason: row.try_get("reason")?,
         })
     }
 }
@@ -405,7 +437,8 @@ pub async fn db_get_one(
     price_date: NaiveDate,
 ) -> Result<Option<ClosingPrice>, sqlx::Error> {
     sqlx::query_as(
-        "SELECT listing_id, price_date, price, source, fetched_at, status, error \
+        "SELECT listing_id, price_date, price, source, fetched_at, status, error, \
+                origin, sourced_from, reason \
          FROM closing_prices WHERE listing_id = ? AND price_date = ?",
     )
     .bind(listing_id)
@@ -422,7 +455,8 @@ pub async fn db_list(
     to: Option<NaiveDate>,
 ) -> Result<Vec<ClosingPrice>, sqlx::Error> {
     let mut qb = QueryBuilder::new(
-        "SELECT listing_id, price_date, price, source, fetched_at, status, error \
+        "SELECT listing_id, price_date, price, source, fetched_at, status, error, \
+                origin, sourced_from, reason \
          FROM closing_prices WHERE 1=1",
     );
     if let Some(id) = listing_id {
@@ -459,18 +493,25 @@ async fn db_ok_dates(
 }
 
 /// Upsert one row: a re-fetch replaces whatever is stored for the
-/// (listing, date) — in particular, a success replaces an errored row.
-async fn db_store(pool: &SqlitePool, row: &ClosingPrice) -> Result<(), sqlx::Error> {
+/// (listing, date) — in particular, a success replaces an errored row — and a
+/// manual entry replaces whatever was stored before it. Every column moves
+/// together, so a row can never keep the origin of one write and the
+/// provenance of another.
+pub(crate) async fn db_store(pool: &SqlitePool, row: &ClosingPrice) -> Result<(), sqlx::Error> {
     sqlx::query(
         "INSERT INTO closing_prices \
-             (listing_id, price_date, price, source, fetched_at, status, error) \
-         VALUES (?, ?, ?, ?, ?, ?, ?) \
+             (listing_id, price_date, price, source, fetched_at, status, error, \
+              origin, sourced_from, reason) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT(listing_id, price_date) DO UPDATE SET \
              price = excluded.price, \
              source = excluded.source, \
              fetched_at = excluded.fetched_at, \
              status = excluded.status, \
-             error = excluded.error",
+             error = excluded.error, \
+             origin = excluded.origin, \
+             sourced_from = excluded.sourced_from, \
+             reason = excluded.reason",
     )
     .bind(row.listing_id)
     .bind(row.price_date)
@@ -479,6 +520,9 @@ async fn db_store(pool: &SqlitePool, row: &ClosingPrice) -> Result<(), sqlx::Err
     .bind(&row.fetched_at)
     .bind(row.status)
     .bind(&row.error)
+    .bind(row.origin)
+    .bind(&row.sourced_from)
+    .bind(&row.reason)
     .execute(pool)
     .await?;
     Ok(())
@@ -620,6 +664,9 @@ async fn fetch_and_store(
                     fetched_at: fetched_at.clone(),
                     status: PriceStatus::Ok,
                     error: None,
+                    origin: PriceOrigin::Fetched,
+                    sourced_from: None,
+                    reason: None,
                 }
             }
             Err(e) => {
@@ -632,6 +679,9 @@ async fn fetch_and_store(
                     fetched_at: fetched_at.clone(),
                     status: PriceStatus::Error,
                     error: Some(e),
+                    origin: PriceOrigin::Fetched,
+                    sourced_from: None,
+                    reason: None,
                 }
             }
         };
@@ -878,6 +928,19 @@ struct BackfillBody {
     symbol: Option<String>,
 }
 
+/// A price entered by hand for a day the provider cannot serve, with the
+/// provenance that makes the figure auditable later.
+#[derive(Debug, Deserialize)]
+struct ManualPriceBody {
+    /// Closing price in the listing's quote currency (never AUD).
+    price: Decimal,
+    /// Where the figure came from, e.g. "asx.com.au closing report".
+    sourced_from: String,
+    /// Why manual entry was needed, e.g. "provider serves no candle since the
+    /// delisting".
+    reason: String,
+}
+
 /// What a backfill run did, returned to the caller.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct BackfillSummary {
@@ -899,9 +962,72 @@ async fn list(
         .map_err(ApiError::from)
 }
 
+/// Store a price entered by hand for one (listing, day), with the provenance
+/// that makes it auditable: where it was sourced from and why manual entry
+/// was needed. This is the way out of a day the provider cannot serve — a
+/// delisted or mis-served symbol, or a permanent hole in its series — which
+/// `reports::valuation` otherwise blocks forever, taking the day's snapshots
+/// with it.
+///
+/// The day must be a trading day whose close is final, exactly as for a
+/// fetch: a price on any other date would never be read by valuation. A
+/// manual price may deliberately replace a stored provider price that is
+/// wrong; that is an ordinary UPDATE, so the staleness trigger regenerates
+/// the snapshots that used the old figure.
+async fn put_manual(
+    State(pool): State<SqlitePool>,
+    Path((listing_id, price_date)): Path<(i64, NaiveDate)>,
+    Json(body): Json<ManualPriceBody>,
+) -> Result<StatusCode, ApiError> {
+    let market = load_market(&pool, listing_id)
+        .await
+        .map_err(internal)?
+        .ok_or_else(|| ApiError::not_found("no such listing"))?;
+    validate_complete_trading_day(&market, price_date)?;
+
+    if body.price <= Decimal::ZERO {
+        return Err(ApiError::unprocessable(format!(
+            "the price must be positive, not {}",
+            body.price
+        )));
+    }
+    let sourced_from = body.sourced_from.trim();
+    let reason = body.reason.trim();
+    if sourced_from.is_empty() {
+        return Err(ApiError::unprocessable(
+            "sourced_from is required: record where the price was taken from",
+        ));
+    }
+    if reason.is_empty() {
+        return Err(ApiError::unprocessable(
+            "reason is required: record why the price had to be entered by hand",
+        ));
+    }
+
+    let row = ClosingPrice {
+        listing_id,
+        price_date,
+        price: Some(body.price),
+        source: MANUAL_SOURCE.to_string(),
+        fetched_at: Utc::now().to_rfc3339(),
+        status: PriceStatus::Ok,
+        error: None,
+        origin: PriceOrigin::Manual,
+        sourced_from: Some(sourced_from.to_string()),
+        reason: Some(reason.to_string()),
+    };
+    db_store(&pool, &row).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// Re-fetch one (listing, date) on demand — typically to replace an errored
 /// row. Returns the freshly stored row (which itself is errored if the
 /// provider failed again).
+///
+/// A **manual** row is rejected 422: a hand-entered price is a deliberate
+/// correction for a day the provider got wrong or cannot serve at all, so the
+/// provider never takes the day back — the price is changed by entering
+/// another one.
 async fn fetch_one(
     State(pool): State<SqlitePool>,
     Extension(fetcher): Extension<SharedFetcher>,
@@ -912,6 +1038,16 @@ async fn fetch_one(
         .map_err(internal)?
         .ok_or_else(|| ApiError::not_found("no such listing"))?;
     validate_complete_trading_day(&market, body.price_date)?;
+    if let Some(stored) = db_get_one(&pool, body.listing_id, body.price_date).await?
+        && stored.origin == PriceOrigin::Manual
+    {
+        return Err(ApiError::unprocessable(format!(
+            "the stored price for {} was entered manually ({}) — re-enter it manually to \
+             change it, the provider does not take the day back",
+            body.price_date,
+            stored.reason.unwrap_or_default()
+        )));
+    }
 
     fetch_and_store(&pool, fetcher.as_ref(), &market, &[body.price_date])
         .await
@@ -996,9 +1132,13 @@ async fn delete_one(
         .await?
         .ok_or_else(|| ApiError::not_found("no stored price for that listing and date"))?;
     if row.status == PriceStatus::Ok {
+        let replacement = match row.origin {
+            PriceOrigin::Manual => "enter another manual price to replace it",
+            PriceOrigin::Fetched => "re-fetch it to replace it",
+        };
         return Err(ApiError::unprocessable(format!(
-            "the stored price for {price_date} is ok, not errored — re-fetch it to replace it \
-             rather than deleting it"
+            "the stored price for {price_date} is ok, not errored — {replacement} rather than \
+             deleting it"
         )));
     }
     db_delete(&pool, listing_id, price_date).await?;
@@ -1038,7 +1178,7 @@ pub fn router() -> Router<SqlitePool> {
         .route("/closing_prices/backfill", post(backfill))
         .route(
             "/closing_prices/{listing_id}/{price_date}",
-            delete(delete_one),
+            put(put_manual).delete(delete_one),
         )
 }
 
@@ -1432,15 +1572,30 @@ mod tests {
 
     /// Store an ok row directly (as an earlier successful run would have).
     async fn seed_ok_price(pool: &SqlitePool, listing_id: i64, date: NaiveDate) {
-        sqlx::query(
-            "INSERT INTO closing_prices (listing_id, price_date, price, source, fetched_at, status, error) \
-             VALUES (?, ?, '10', 'stub', '2026-06-01T00:00:00Z', 'ok', NULL)",
-        )
-        .bind(listing_id)
-        .bind(date)
-        .execute(pool)
-        .await
-        .unwrap();
+        crate::test_support::closing_price(listing_id, date)
+            .source("stub")
+            .fetched_at("2026-06-01T00:00:00Z")
+            .insert(pool)
+            .await;
+    }
+
+    /// Store an errored row directly (as an earlier failed run would have).
+    async fn seed_errored_price(pool: &SqlitePool, listing_id: i64, date: NaiveDate, msg: &str) {
+        crate::test_support::closing_price(listing_id, date)
+            .source("stub")
+            .fetched_at("2026-06-03T08:00:00Z")
+            .errored(msg)
+            .insert(pool)
+            .await;
+    }
+
+    /// Store a hand-entered price directly, as `PUT /closing_prices/…` does.
+    async fn seed_manual_price(pool: &SqlitePool, listing_id: i64, date: NaiveDate, price: &str) {
+        crate::test_support::closing_price(listing_id, date)
+            .price(price)
+            .manual("asx.com.au closing report", "provider serves no candle")
+            .insert(pool)
+            .await;
     }
 
     #[tokio::test]
@@ -1515,13 +1670,7 @@ mod tests {
         for &d in &asx_lookback_week()[..4] {
             seed_ok_price(&pool, 1, d).await;
         }
-        sqlx::query(
-            "INSERT INTO closing_prices (listing_id, price_date, price, source, fetched_at, status, error) \
-             VALUES (1, '2026-06-03', NULL, 'stub', '2026-06-03T08:00:00Z', 'error', 'provider down')",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
+        seed_errored_price(&pool, 1, ymd(2026, 6, 3), "provider down").await;
 
         let fetcher = StubFetcher::default()
             .with_close(1, ymd(2026, 6, 3), "64.91", "AUD")
@@ -1756,6 +1905,404 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(row.status, PriceStatus::Ok, "the price is still stored");
+    }
+
+    // --- manual prices ---
+
+    async fn put_json(
+        app: &axum::Router,
+        uri: &str,
+        body: serde_json::Value,
+    ) -> (StatusCode, axum::body::Bytes) {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        (status, bytes)
+    }
+
+    fn manual_body(price: &str) -> serde_json::Value {
+        serde_json::json!({
+            "price": price,
+            "sourced_from": "asx.com.au closing report",
+            "reason": "provider serves no candle since the delisting",
+        })
+    }
+
+    /// A day the provider cannot serve is priced by hand, and the row records
+    /// both halves of its provenance — where the figure came from and why it
+    /// had to be entered — with the provider slot moved to `manual`.
+    #[tokio::test]
+    async fn api_manual_price_stores_the_price_with_its_provenance() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
+        insert_buy(&pool, 1, 1, "100").await;
+        let app = full_router(pool.clone(), StubFetcher::default());
+
+        let (status, bytes) =
+            put_json(&app, "/closing_prices/1/2026-06-04", manual_body("62.48")).await;
+        assert_eq!(
+            status,
+            StatusCode::NO_CONTENT,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+        assert!(bytes.is_empty());
+
+        let row = db_get_one(&pool, 1, ymd(2026, 6, 4))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.price, Some("62.48".parse().unwrap()));
+        assert_eq!(row.status, PriceStatus::Ok);
+        assert_eq!(row.origin, PriceOrigin::Manual);
+        assert_eq!(row.source, "manual");
+        assert_eq!(
+            row.sourced_from.as_deref(),
+            Some("asx.com.au closing report")
+        );
+        assert_eq!(
+            row.reason.as_deref(),
+            Some("provider serves no candle since the delisting")
+        );
+        assert!(row.error.is_none());
+    }
+
+    /// A manual price is read by valuation exactly like a fetched one: it is
+    /// the way a date the provider blocked forever starts producing snapshots.
+    #[tokio::test]
+    async fn manual_price_unblocks_valuation_of_an_errored_day() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
+        insert_buy(&pool, 1, 1, "100").await;
+        store_errored(&pool, ymd(2026, 6, 4)).await;
+        let now = utc(2026, 6, 8, 9, 0);
+
+        let blocked = crate::reports::valuation::stored_valuations(&pool, ymd(2026, 6, 4), now)
+            .await
+            .unwrap_err();
+        assert!(
+            blocked.to_string().contains("errored"),
+            "setup: the day is blocked — {blocked}"
+        );
+
+        let app = full_router(pool.clone(), StubFetcher::default());
+        let (status, bytes) =
+            put_json(&app, "/closing_prices/1/2026-06-04", manual_body("62.48")).await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{:?}", bytes);
+
+        let valuations = crate::reports::valuation::stored_valuations(&pool, ymd(2026, 6, 4), now)
+            .await
+            .unwrap();
+        assert_eq!(valuations.len(), 1);
+        assert_eq!(valuations[0].native_price, "62.48".parse().unwrap());
+        assert_eq!(valuations[0].aud_price, "62.48".parse().unwrap());
+    }
+
+    /// Both provenance fields are required, and whitespace does not satisfy
+    /// them: a hand-entered figure with no sourcing or reason is exactly the
+    /// unauditable row the columns exist to prevent.
+    #[tokio::test]
+    async fn api_manual_price_requires_both_provenance_fields() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
+        let app = full_router(pool.clone(), StubFetcher::default());
+
+        for (sourced_from, reason, expected) in [
+            ("   ", "provider has no candle", "sourced_from is required"),
+            ("asx.com.au", "  ", "reason is required"),
+        ] {
+            let body = serde_json::json!({
+                "price": "62.48", "sourced_from": sourced_from, "reason": reason,
+            });
+            let (status, bytes) = put_json(&app, "/closing_prices/1/2026-06-04", body).await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+            let msg = String::from_utf8_lossy(&bytes);
+            assert!(msg.contains(expected), "names the missing field: {msg}");
+        }
+        assert!(
+            db_get_one(&pool, 1, ymd(2026, 6, 4))
+                .await
+                .unwrap()
+                .is_none(),
+            "nothing is stored for a rejected entry"
+        );
+    }
+
+    /// A price that can never exist is refused rather than stored: zero or
+    /// negative is a typo, not a close.
+    #[tokio::test]
+    async fn api_manual_price_rejects_a_non_positive_price() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
+        let app = full_router(pool.clone(), StubFetcher::default());
+
+        for price in ["0", "-1.50"] {
+            let (status, bytes) =
+                put_json(&app, "/closing_prices/1/2026-06-04", manual_body(price)).await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{price}");
+            let msg = String::from_utf8_lossy(&bytes);
+            assert!(msg.contains("must be positive"), "{msg}");
+        }
+    }
+
+    /// The same trading-day gate as a fetch: valuation only ever reads a
+    /// trading day whose close is final, so a manual price on any other date
+    /// would be a row nothing could use.
+    #[tokio::test]
+    async fn api_manual_price_rejects_non_trading_days_and_unfinished_closes() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
+        let app = full_router(pool.clone(), StubFetcher::default());
+
+        // 2026-06-06 is a Saturday.
+        let (status, bytes) =
+            put_json(&app, "/closing_prices/1/2026-06-06", manual_body("62.48")).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            String::from_utf8_lossy(&bytes).contains("not a trading day"),
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+
+        // A date whose close cannot have happened yet.
+        let future = (Utc::now() + Duration::days(30)).date_naive();
+        let (status, bytes) = put_json(
+            &app,
+            &format!("/closing_prices/1/{future}"),
+            manual_body("62.48"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            String::from_utf8_lossy(&bytes).contains("not final yet"),
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+    }
+
+    #[tokio::test]
+    async fn api_manual_price_unknown_listing_is_404() {
+        let pool = test_pool().await;
+        let app = full_router(pool.clone(), StubFetcher::default());
+
+        let (status, _) =
+            put_json(&app, "/closing_prices/9/2026-06-04", manual_body("62.48")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    /// The provider never takes a hand-priced day back: an explicit re-fetch
+    /// is refused, so a deliberate correction cannot be lost to a stray click
+    /// — and the refusal quotes the reason so the user sees why it exists.
+    #[tokio::test]
+    async fn api_fetch_refuses_to_replace_a_manual_price() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
+        insert_buy(&pool, 1, 1, "100").await;
+        seed_manual_price(&pool, 1, ymd(2026, 6, 4), "62.48").await;
+        let stub = StubFetcher::default().with_close(1, ymd(2026, 6, 4), "99.99", "AUD");
+        let app = full_router(pool.clone(), stub);
+
+        let (status, bytes) = post_json(
+            &app,
+            "/closing_prices/fetch",
+            serde_json::json!({ "listing_id": 1, "price_date": "2026-06-04" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        let msg = String::from_utf8_lossy(&bytes);
+        assert!(msg.contains("entered manually"), "{msg}");
+        assert!(
+            msg.contains("provider serves no candle"),
+            "quotes why: {msg}"
+        );
+
+        let row = db_get_one(&pool, 1, ymd(2026, 6, 4))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.price, Some("62.48".parse().unwrap()), "untouched");
+        assert_eq!(row.origin, PriceOrigin::Manual);
+    }
+
+    /// Nor is a manual price deletable — it is an ok row, so the same rule
+    /// that stops a fetched price being deleted applies, and the message
+    /// points at the only way to change it.
+    #[tokio::test]
+    async fn api_delete_rejects_a_manual_price() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
+        seed_manual_price(&pool, 1, ymd(2026, 6, 4), "62.48").await;
+        let app = full_router(pool.clone(), StubFetcher::default());
+
+        let (status, bytes) = delete_req(&app, "/closing_prices/1/2026-06-04").await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        let msg = String::from_utf8_lossy(&bytes);
+        assert!(msg.contains("enter another manual price"), "{msg}");
+        assert!(
+            db_get_one(&pool, 1, ymd(2026, 6, 4))
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    /// Neither the scheduled run nor a backfill over the range clobbers a
+    /// hand-entered price: both skip every date already stored ok, which a
+    /// manual row is.
+    #[tokio::test]
+    async fn collection_and_backfill_leave_a_manual_price_alone() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
+        insert_buy(&pool, 1, 1, "100").await;
+        seed_manual_price(&pool, 1, ymd(2026, 6, 4), "62.48").await;
+
+        let week = asx_lookback_week();
+        let mut stub = StubFetcher::default();
+        for &d in &week {
+            stub = stub.with_close(1, d, "99.99", "AUD");
+        }
+        run_collection(&pool, &stub, friday_evening_sydney())
+            .await
+            .unwrap();
+        let row = db_get_one(&pool, 1, ymd(2026, 6, 4))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.price, Some("62.48".parse().unwrap()), "not re-fetched");
+        assert_eq!(row.origin, PriceOrigin::Manual);
+        // The other days of the window were collected normally.
+        let other = db_get_one(&pool, 1, ymd(2026, 6, 5))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(other.origin, PriceOrigin::Fetched);
+
+        let app = full_router(pool.clone(), StubFetcher::default());
+        let (status, bytes) = post_json(
+            &app,
+            "/closing_prices/backfill",
+            serde_json::json!({ "listing_id": 1, "from": "2026-06-01", "to": "2026-06-05" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{:?}", bytes);
+        let row = db_get_one(&pool, 1, ymd(2026, 6, 4))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.price, Some("62.48".parse().unwrap()), "still manual");
+        assert_eq!(row.origin, PriceOrigin::Manual);
+    }
+
+    /// The schema pairs a manual row's provenance with its origin, so no
+    /// write path — not even raw SQL — can store a hand-entered price without
+    /// its sourcing and reason, or hang them on a fetched row.
+    #[tokio::test]
+    async fn db_check_constraints_pair_manual_provenance_with_the_origin() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
+        let insert = |columns: &'static str, values: &'static str| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query(sqlx::AssertSqlSafe(format!(
+                    "INSERT INTO closing_prices \
+                         (listing_id, price_date, price, fetched_at, status, error, {columns}) \
+                     VALUES (1, '2026-06-05', '1.23', 'now', 'ok', NULL, {values})"
+                )))
+                .execute(&pool)
+                .await
+            }
+        };
+
+        // manual without either provenance field
+        assert!(
+            insert("source, origin", "'manual', 'manual'")
+                .await
+                .is_err()
+        );
+        // manual with only one of them
+        assert!(
+            insert(
+                "source, origin, sourced_from",
+                "'manual', 'manual', 'asx.com.au'"
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            insert("source, origin, reason", "'manual', 'manual', 'no candle'")
+                .await
+                .is_err()
+        );
+        // a fetched row may not carry provenance meant for a manual one
+        assert!(
+            insert(
+                "source, origin, sourced_from, reason",
+                "'yahoo', 'fetched', 'asx.com.au', 'no candle'"
+            )
+            .await
+            .is_err()
+        );
+        // the provider slot and the origin may not disagree, either way round
+        assert!(
+            insert(
+                "source, origin, sourced_from, reason",
+                "'yahoo', 'manual', 'asx.com.au', 'no candle'"
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            insert("source, origin", "'manual', 'fetched'")
+                .await
+                .is_err()
+        );
+        // an unknown origin is rejected by the enum CHECK
+        assert!(
+            insert(
+                "source, origin, sourced_from, reason",
+                "'manual', 'entered', 'asx.com.au', 'no candle'"
+            )
+            .await
+            .is_err()
+        );
+        // …and the valid combination is accepted.
+        assert!(
+            insert(
+                "source, origin, sourced_from, reason",
+                "'manual', 'manual', 'asx.com.au', 'no candle'"
+            )
+            .await
+            .is_ok()
+        );
+    }
+
+    /// A manual row is always a price, never a recorded failure: there is no
+    /// such thing as a hand-entered fetch error.
+    #[tokio::test]
+    async fn db_check_constraint_forbids_an_errored_manual_row() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
+        let bad = sqlx::query(
+            "INSERT INTO closing_prices \
+                 (listing_id, price_date, price, source, fetched_at, status, error, \
+                  origin, sourced_from, reason) \
+             VALUES (1, '2026-06-05', NULL, 'manual', 'now', 'error', 'oops', \
+                     'manual', 'asx.com.au', 'no candle')",
+        )
+        .execute(&pool)
+        .await;
+        assert!(bad.is_err());
     }
 
     #[tokio::test]

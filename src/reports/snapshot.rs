@@ -848,31 +848,17 @@ mod tests {
     }
 
     async fn store_price(pool: &SqlitePool, listing_id: i64, date: NaiveDate, price: &str) {
-        sqlx::query(
-            "INSERT INTO closing_prices (listing_id, price_date, price, source, fetched_at, status, error) \
-             VALUES (?, ?, ?, 'test', '2026-06-05T08:00:00Z', 'ok', NULL) \
-             ON CONFLICT(listing_id, price_date) DO UPDATE SET \
-                 price = excluded.price, status = 'ok', error = NULL",
-        )
-        .bind(listing_id)
-        .bind(date)
-        .bind(price)
-        .execute(pool)
-        .await
-        .unwrap();
+        test_support::closing_price(listing_id, date)
+            .price(price)
+            .insert(pool)
+            .await;
     }
 
     async fn store_errored_price(pool: &SqlitePool, listing_id: i64, date: NaiveDate, msg: &str) {
-        sqlx::query(
-            "INSERT INTO closing_prices (listing_id, price_date, price, source, fetched_at, status, error) \
-             VALUES (?, ?, NULL, 'test', '2026-06-05T08:00:00Z', 'error', ?)",
-        )
-        .bind(listing_id)
-        .bind(date)
-        .bind(msg)
-        .execute(pool)
-        .await
-        .unwrap();
+        test_support::closing_price(listing_id, date)
+            .errored(msg)
+            .insert(pool)
+            .await;
     }
 
     async fn stale_flags(pool: &SqlitePool, date: NaiveDate) -> Vec<bool> {
@@ -991,6 +977,49 @@ mod tests {
             serde_json::from_value(snap.rows).unwrap();
         assert_eq!(gains[0].market_value, Some("6248.00".parse().unwrap()));
         assert_eq!(gains[1].market_value, Some("49772.675".parse().unwrap())); // 0.5 × 99545.35
+    }
+
+    /// Correcting a stored provider price by hand is an ordinary UPDATE, so
+    /// the staleness trigger catches it exactly as it catches a re-fetch: the
+    /// snapshots that were valued at the wrong figure regenerate at the
+    /// manual one, and earlier snapshots are untouched.
+    #[tokio::test]
+    async fn db_manual_price_over_a_stored_price_stales_on_or_after_snapshots() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BHP", Some("XASX"), "AUD").await;
+        insert_buy(&pool, 1, 1, ymd(2024, 1, 15), "100", "10", "AUD").await;
+        store_price(&pool, 1, ymd(2026, 6, 3), "64.91").await; // Wednesday
+        store_price(&pool, 1, ymd(2026, 6, 5), "62.48").await; // Friday
+        let now = friday_evening_sydney();
+        generate(&pool, ymd(2026, 6, 3), now).await.unwrap();
+        generate(&pool, ymd(2026, 6, 5), now).await.unwrap();
+        assert_eq!(stale_flags(&pool, ymd(2026, 6, 5)).await, vec![false; 3]);
+
+        // Friday's close was wrong; the corrected figure is entered by hand.
+        test_support::closing_price(1, ymd(2026, 6, 5))
+            .price("60.00")
+            .manual(
+                "asx.com.au closing report",
+                "provider quoted the wrong close",
+            )
+            .insert(&pool)
+            .await;
+        assert_eq!(stale_flags(&pool, ymd(2026, 6, 5)).await, vec![true; 3]);
+        assert_eq!(stale_flags(&pool, ymd(2026, 6, 3)).await, vec![false; 3]);
+
+        generate(&pool, ymd(2026, 6, 5), now).await.unwrap();
+        assert_eq!(stale_flags(&pool, ymd(2026, 6, 5)).await, vec![false; 3]);
+        let snap = db_get(&pool, ReportKind::UnrealisedGains, ymd(2026, 6, 5))
+            .await
+            .unwrap()
+            .unwrap();
+        let gains: Vec<unrealised_gains::UnrealisedGain> =
+            serde_json::from_value(snap.rows).unwrap();
+        assert_eq!(
+            gains[0].market_value,
+            Some("6000.00".parse().unwrap()),
+            "regenerated at the hand-entered price"
+        );
     }
 
     /// A back-dated fact (here: a trade, an income row, and a corporate action,

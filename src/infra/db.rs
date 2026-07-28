@@ -702,6 +702,92 @@ mod tests {
         sqlx::migrate!().run(&pool).await.unwrap();
     }
 
+    /// 0020 rebuilds `closing_prices` via the rename pattern to add the
+    /// manual-price columns, and a rebuild is exactly where rows go missing.
+    /// Every price stored before it must survive with its value intact and be
+    /// stamped as provider-fetched — the migration is applied here on top of a
+    /// database seeded through 0019, not through `init`, so the copy step is
+    /// really exercised.
+    #[tokio::test]
+    async fn migration_0020_preserves_prices_and_stamps_them_fetched() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let migrator = sqlx::migrate!();
+        for m in migrator.iter().filter(|m| m.version < 20) {
+            sqlx::raw_sql(sqlx::AssertSqlSafe(m.sql.as_str().to_string()))
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+
+        sqlx::query(
+            "INSERT INTO listings (id, exchange_mic, ticker, name, security_type, currency) \
+             VALUES (1, 'XASX', 'BHP', 'BHP Group', 'Share', 'AUD')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO closing_prices \
+                 (listing_id, price_date, price, source, fetched_at, status, error) \
+             VALUES (1, '2026-06-04', '62.4899995', 'yahoo', '2026-06-04T08:00:00Z', 'ok', NULL), \
+                    (1, '2026-06-05', NULL, 'yahoo', '2026-06-05T08:00:00Z', 'error', 'no candle')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let m20 = migrator.iter().find(|m| m.version == 20).expect("0020");
+        sqlx::raw_sql(sqlx::AssertSqlSafe(m20.sql.as_str().to_string()))
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        #[derive(sqlx::FromRow)]
+        struct Row {
+            price: Option<String>,
+            source: String,
+            origin: String,
+            sourced_from: Option<String>,
+            reason: Option<String>,
+        }
+        let rows: Vec<Row> = sqlx::query_as(
+            "SELECT price, source, origin, sourced_from, reason \
+             FROM closing_prices ORDER BY price_date",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 2, "both rows survive the rebuild");
+        assert_eq!(
+            rows[0].price.as_deref(),
+            Some("62.4899995"),
+            "value untouched"
+        );
+        assert_eq!(rows[1].price, None, "the errored row keeps its null price");
+        for row in &rows {
+            assert_eq!(row.source, "yahoo", "the provider slot is untouched");
+            assert_eq!(row.origin, "fetched", "existing rows are provider-fetched");
+            assert_eq!(row.sourced_from, None);
+            assert_eq!(row.reason, None);
+        }
+
+        // The staleness trigger is re-created with the table, not lost with it.
+        let triggers: Vec<(String,)> = sqlx::query_as(
+            "SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'closing_prices'",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            triggers
+                .iter()
+                .map(|t| t.0.as_str())
+                .collect::<Vec<_>>()
+                .as_slice(),
+            ["closing_prices_stale_snapshots_update"]
+        );
+    }
+
     #[test]
     fn migrations_do_not_drop_tables_or_columns() {
         let migrations_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
