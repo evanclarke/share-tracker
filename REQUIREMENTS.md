@@ -1406,3 +1406,55 @@ Resolution: a rename becomes an explicit, dated, audited event, not a bare field
   shapes, response codes, the holdings-based completeness rule), README's Features list, and
   CLAUDE.md's web-frontend section (the `filterableTable` exception and the new
   `src/web/taxreport.js` module in the module graph)
+
+## Health check: held but never priced (2026-07-28)
+
+`reports::health`'s `errored_prices` catches a listing whose fetches *fail* — a row exists with
+`status = 'error'`. It cannot catch the case that actually bit: a day that was held and never
+fetched **at all**, so no row exists to be errored. That is silent, and it is permanent.
+
+The prompting case: listing 7 (LAC) was bought 2021-03-25 but entered five years later, so the
+listing wasn't in the DB during the years it needed pricing and nothing ever attempted those days.
+The only symptom was 544 snapshots stuck stale over exactly 2021-03-25..2022-09-19 — the Buy date
+through the day before its price history began — and nothing surfaced it. By the time it was found
+Yahoo no longer served `LAC` before 2023-10-02 (the symbol had been re-pointed at the
+post-demerger entity), so the range was unrecoverable and had to be filled from the sibling
+listing's demerger-adjusted series to unblock it: the period is now unblocked but still ~2.46x
+below the actual closes.
+
+Why it recurs: the scheduled collection window is `COLLECTION_LOOKBACK_DAYS` (14 calendar days).
+A trade entered later than that, on a listing not otherwise held, leaves a hole no scheduled run
+will ever revisit — and whether a backfill can still close it depends on the provider not having
+re-pointed or retired the symbol in the meantime. Batch entry from a statement archive is an
+established workflow here, so this is a live risk, not a hypothetical one.
+
+Resolution: `GET /reports/health` gains an `unpriced_days` list, the missing-row counterpart of
+`errored_prices`.
+
+- Definition must be exactly what `reports::valuation::stored_valuations` asks for, so there are
+  no false positives: for each date in a listing's held span, its **valuation day**
+  (`Market::latest_trading_day_on_or_before`, which since 2026-07-28 resolves the trading calendar
+  as at the date via the listing's identity timeline) has no stored row at all. A day whose stored
+  row is errored belongs to `errored_prices`, not here — the two lists partition the problem
+- Excludes days whose close is not final yet (`Market::latest_complete_trading_day`), so today and
+  an unsettled crypto candle never appear
+- Held span is the same "held as at that date" rule the valuation path uses
+  (`closing_price::db_held_listing_ids(pool, Some(date))`), so a fully-sold listing stops being
+  reported for dates after its sale and a listing sold and re-bought is covered for both spans
+- Row shape mirrors `errored_prices`: `listing_id`, `ticker`, `unpriced_days`, `earliest_date`,
+  `latest_date` — enough to drive a backfill without opening another screen. Ordered by
+  `earliest_date` so the oldest (least recoverable) hole reads first
+- Surfaced on the `#/prices` screen beside the errored-price list, reusing its existing Backfill
+  action
+- Performance: the health report is on-demand, but a naive per-listing-per-day walk over the whole
+  history is thousands of iterations. Read each listing's stored dates once into a set and walk its
+  held span in memory — one query per listing, no per-day round trip — following the pattern the
+  reports already use for `FxRates`/`RenameHistory` pre-loading
+- No schema change and no migration: reads `trades`, `parcel_allocations`, and `closing_prices`
+- Docs per the standard sync rule: `docs/API.md`'s Health section (the new list and its fields,
+  and the `errored_prices`/`unpriced_days` partition), plus README's Features list if the health
+  check is described there
+
+Not in scope: automatically backfilling what it finds. The check reports; closing the hole stays a
+deliberate act (`POST /closing_prices/backfill`, or a manual price for a day the provider can
+never serve), because a silently auto-filled hole is how the wrong series gets in.
