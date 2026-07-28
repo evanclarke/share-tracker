@@ -17,8 +17,10 @@ use sqlx::{Row, SqlitePool};
 /// The audited tables, exactly as migration 0013 enumerates them in the
 /// `row_history.table_name` CHECK and its per-table trigger pairs — a test
 /// pins the three lists to each other, and the web UI's table picker is
-/// asserted against this list too.
-pub const AUDITED_TABLES: [&str; 18] = [
+/// asserted against this list too. Two joined later: `listing_renames` (0018)
+/// and `closing_prices` (0021, once 0020 made a price hand-enterable), each
+/// migration rebuilding `row_history` to extend the CHECK.
+pub const AUDITED_TABLES: [&str; 19] = [
     "trades",
     "parcel_allocations",
     "income",
@@ -37,6 +39,7 @@ pub const AUDITED_TABLES: [&str; 18] = [
     "attachments",
     "listings",
     "listing_renames",
+    "closing_prices",
 ];
 
 #[derive(Debug, Deserialize)]
@@ -507,6 +510,15 @@ mod tests {
                 "note",
                 "'edited note'",
             ),
+            (
+                "closing_prices",
+                Some(
+                    "INSERT INTO closing_prices (id, listing_id, price_date, price, source, fetched_at, status, origin) VALUES (19, 1, '2024-01-02', '10', 'yahoo', '2024-01-02T08:00:00Z', 'ok', 'fetched')",
+                ),
+                19,
+                "price",
+                "'11'",
+            ),
         ];
         assert_eq!(cases.len(), AUDITED_TABLES.len());
 
@@ -551,6 +563,7 @@ mod tests {
             ("cgt_settings", 1, 2),
             ("trades", 1, 2),
             ("corporate_actions", 10, 2),
+            ("closing_prices", 19, 2),
             ("listings", 2, 2),
             ("listing_renames", 18, 2),
         ] {
@@ -576,11 +589,11 @@ mod tests {
     #[test]
     fn audited_tables_match_migration_check_and_triggers() {
         let sql = include_str!("../../migrations/0013_row_history.sql");
-        // listing_renames postdates 0013 (added by 0018, checked below) —
-        // every other table was audited from the start.
+        // listing_renames (0018) and closing_prices (0021) postdate 0013, and
+        // are checked below — every other table was audited from the start.
         let tables_as_of_0013 = AUDITED_TABLES
             .into_iter()
-            .filter(|&t| t != "listing_renames");
+            .filter(|&t| t != "listing_renames" && t != "closing_prices");
         let mut count = 0;
         for table in tables_as_of_0013 {
             count += 1;
@@ -669,6 +682,61 @@ mod tests {
             2,
             "both re-created listings triggers must record price_symbol"
         );
+
+        // 0021 added closing_prices, which needed two rebuilds: the table
+        // itself (a surrogate `id` for row_history.row_id to key on, the old
+        // composite primary key kept as a UNIQUE constraint) and row_history
+        // again to extend the table_name CHECK — re-creating its append-only
+        // guards, closing_prices' own staleness trigger, and creating the new
+        // audit pair.
+        let sql21 = include_str!("../../migrations/0021_audit_closing_prices.sql");
+        assert!(
+            sql21.contains("'closing_prices'"),
+            "0021 must add closing_prices to the table_name CHECK"
+        );
+        assert!(
+            sql21.contains("id           INTEGER PRIMARY KEY AUTOINCREMENT"),
+            "the surrogate key must not reuse a deleted row's id"
+        );
+        assert!(
+            sql21.contains("UNIQUE (listing_id, price_date)"),
+            "the former primary key stays enforced as a UNIQUE constraint"
+        );
+        for op in ["update", "delete"] {
+            assert!(
+                sql21.contains(&format!("CREATE TRIGGER closing_prices_row_history_{op} ")),
+                "0021 must create the closing_prices {op} trigger"
+            );
+            assert!(
+                sql21.contains(&format!("CREATE TRIGGER row_history_append_only_{op} ")),
+                "0021 must re-create the row_history {op} guard"
+            );
+        }
+        assert!(
+            sql21.contains("CREATE TRIGGER closing_prices_stale_snapshots_update "),
+            "0021 must re-create closing_prices' staleness trigger"
+        );
+        // Every column of the rebuilt table is recorded by both triggers —
+        // a column the trail drops is a version that cannot be reconstructed.
+        for col in [
+            "id",
+            "listing_id",
+            "price_date",
+            "price",
+            "source",
+            "fetched_at",
+            "status",
+            "error",
+            "origin",
+            "sourced_from",
+            "reason",
+        ] {
+            assert_eq!(
+                sql21.matches(&format!("'{col}', OLD.{col}")).count(),
+                2,
+                "both closing_prices triggers must record {col}"
+            );
+        }
     }
 
     /// The migration is purely additive: it creates the trail and its

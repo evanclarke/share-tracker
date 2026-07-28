@@ -1186,6 +1186,9 @@ async function viewClosingPrices() {
   const rows = prices.map(function (p) {
     const l = byId[p.listing_id];
     return {
+      // The surrogate key, shown so a row can be looked up on the Row History
+      // screen (which asks for the record's id).
+      id: p.id,
       listing: l ? ((l.exchange_mic || 'Crypto') + ':' + l.ticker) : ('listing ' + p.listing_id),
       date: p.price_date,
       price: p.price == null ? '' : p.price,
@@ -1200,7 +1203,7 @@ async function viewClosingPrices() {
       _listing_id: p.listing_id,
     };
   });
-  const cols = ['listing', 'date', 'price', 'currency', 'source', 'status', 'origin',
+  const cols = ['id', 'listing', 'date', 'price', 'currency', 'source', 'status', 'origin',
     'sourced_from', 'reason', 'error', 'fetched_at'];
   const table = filterableTable(rows, cols, {
     statusField: 'status',

@@ -702,6 +702,33 @@ mod tests {
         sqlx::migrate!().run(&pool).await.unwrap();
     }
 
+    /// A pool migrated up to (but excluding) `version`, so a single migration
+    /// can then be applied to data that predates it — the only way to exercise
+    /// a rebuild migration's copy step, which `init` (which applies
+    /// everything) cannot reach.
+    async fn pool_migrated_below(version: i64) -> SqlitePool {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        for m in sqlx::migrate!().iter().filter(|m| m.version < version) {
+            sqlx::raw_sql(sqlx::AssertSqlSafe(m.sql.as_str().to_string()))
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        pool
+    }
+
+    /// Apply one migration by version to an already-seeded pool.
+    async fn apply_migration(pool: &SqlitePool, version: i64) {
+        let m = sqlx::migrate!()
+            .iter()
+            .find(|m| m.version == version)
+            .unwrap_or_else(|| panic!("migration {version} exists"));
+        sqlx::raw_sql(sqlx::AssertSqlSafe(m.sql.as_str().to_string()))
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
     /// 0020 rebuilds `closing_prices` via the rename pattern to add the
     /// manual-price columns, and a rebuild is exactly where rows go missing.
     /// Every price stored before it must survive with its value intact and be
@@ -710,14 +737,7 @@ mod tests {
     /// really exercised.
     #[tokio::test]
     async fn migration_0020_preserves_prices_and_stamps_them_fetched() {
-        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
-        let migrator = sqlx::migrate!();
-        for m in migrator.iter().filter(|m| m.version < 20) {
-            sqlx::raw_sql(sqlx::AssertSqlSafe(m.sql.as_str().to_string()))
-                .execute(&pool)
-                .await
-                .unwrap();
-        }
+        let pool = pool_migrated_below(20).await;
 
         sqlx::query(
             "INSERT INTO listings (id, exchange_mic, ticker, name, security_type, currency) \
@@ -736,11 +756,7 @@ mod tests {
         .await
         .unwrap();
 
-        let m20 = migrator.iter().find(|m| m.version == 20).expect("0020");
-        sqlx::raw_sql(sqlx::AssertSqlSafe(m20.sql.as_str().to_string()))
-            .execute(&pool)
-            .await
-            .unwrap();
+        apply_migration(&pool, 20).await;
 
         #[derive(sqlx::FromRow)]
         struct Row {
@@ -785,6 +801,134 @@ mod tests {
                 .collect::<Vec<_>>()
                 .as_slice(),
             ["closing_prices_stale_snapshots_update"]
+        );
+    }
+
+    /// 0021 rebuilds `closing_prices` again (a surrogate `id` so the audit
+    /// trail can key on it) *and* `row_history` (to extend its `table_name`
+    /// CHECK). Two rebuilds in one migration is the riskiest shape in this
+    /// schema, so this pins all of it against data that predates it: prices
+    /// survive with ids assigned oldest-first, their manual provenance
+    /// intact, the natural key still unique; existing audit entries survive;
+    /// the trail is still append-only; and closing_prices is now audited.
+    #[tokio::test]
+    async fn migration_0021_adds_the_surrogate_key_and_audits_closing_prices() {
+        let pool = pool_migrated_below(21).await;
+        sqlx::query(
+            "INSERT INTO listings (id, exchange_mic, ticker, name, security_type, currency) \
+             VALUES (1, 'XASX', 'BHP', 'BHP Group', 'Share', 'AUD')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        // A fetched price, an errored row, and a manual price with provenance.
+        sqlx::query(
+            "INSERT INTO closing_prices \
+                 (listing_id, price_date, price, source, fetched_at, status, error, \
+                  origin, sourced_from, reason) \
+             VALUES (1, '2026-06-05', '62.48', 'yahoo', '2026-06-05T08:00:00Z', 'ok', NULL, \
+                     'fetched', NULL, NULL), \
+                    (1, '2026-06-08', NULL, 'yahoo', '2026-06-08T08:00:00Z', 'error', 'no candle', \
+                     'fetched', NULL, NULL), \
+                    (1, '2026-06-04', '41.25', 'manual', '2026-06-06T01:00:00Z', 'ok', NULL, \
+                     'manual', 'asx.com.au', 'delisted symbol')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        // An existing audit entry, from a table audited before 0021.
+        sqlx::query("UPDATE listings SET name = 'BHP Group Ltd' WHERE id = 1")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let history_before: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM row_history WHERE table_name = 'listings'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(history_before, 1, "setup: one pre-existing audit entry");
+
+        apply_migration(&pool, 21).await;
+
+        // Prices survive, with ids assigned oldest price first.
+        #[derive(sqlx::FromRow)]
+        struct Priced {
+            id: i64,
+            price_date: String,
+            price: Option<String>,
+            origin: String,
+            reason: Option<String>,
+        }
+        let rows: Vec<Priced> = sqlx::query_as(
+            "SELECT id, price_date, price, origin, reason FROM closing_prices ORDER BY id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 3, "every price survives the rebuild");
+        assert_eq!(
+            rows.iter()
+                .map(|r| (r.id, r.price_date.as_str()))
+                .collect::<Vec<_>>()
+                .as_slice(),
+            [(1, "2026-06-04"), (2, "2026-06-05"), (3, "2026-06-08")],
+            "ids ascend with the history they describe"
+        );
+        assert_eq!(rows[0].price.as_deref(), Some("41.25"), "value untouched");
+        assert_eq!(rows[0].origin, "manual");
+        assert_eq!(
+            rows[0].reason.as_deref(),
+            Some("delisted symbol"),
+            "manual provenance survives"
+        );
+
+        // The former primary key is still enforced, now as a UNIQUE constraint.
+        let dup = sqlx::query(
+            "INSERT INTO closing_prices \
+                 (listing_id, price_date, price, source, fetched_at, status, origin) \
+             VALUES (1, '2026-06-05', '1.00', 'yahoo', 'now', 'ok', 'fetched')",
+        )
+        .execute(&pool)
+        .await;
+        assert!(dup.is_err(), "one price per (listing, day) still holds");
+
+        // Pre-existing audit entries survive the row_history rebuild, and the
+        // trail is still append-only.
+        let history_after: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM row_history WHERE table_name = 'listings'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(history_after, 1, "the audit trail is not truncated");
+        assert!(
+            sqlx::query("DELETE FROM row_history")
+                .execute(&pool)
+                .await
+                .is_err(),
+            "the append-only guards are re-created with the table"
+        );
+
+        // closing_prices is audited from here on: revising a price records the
+        // superseded row, provenance included.
+        sqlx::query("UPDATE closing_prices SET price = '42.00' WHERE id = 1")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let old_row: String = sqlx::query_scalar(
+            "SELECT old_row FROM row_history \
+             WHERE table_name = 'closing_prices' AND row_id = 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(old_row.contains("\"price\":\"41.25\""), "{old_row}");
+        assert!(
+            old_row.contains("\"reason\":\"delisted symbol\""),
+            "{old_row}"
+        );
+        assert!(
+            old_row.contains("\"sourced_from\":\"asx.com.au\""),
+            "{old_row}"
         );
     }
 

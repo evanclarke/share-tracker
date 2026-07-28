@@ -474,16 +474,34 @@ fn manual_closing_prices_documented() {
     assert!(SCHEMA_MD.contains("Where a manual price was taken from"));
     assert!(SCHEMA_MD.contains("Why manual entry was needed"));
     assert!(SCHEMA_MD.contains("A **manually entered** price (0020) changes neither premise"));
-    assert!(SCHEMA_MD.contains("stays out of scope after 0020 made a price hand-enterable"));
-    // Known limitations: both consequences, stated plainly.
+    // Known limitations: the one-way rule, and that overwriting still loses
+    // nothing now that the table is audited (0021).
     let limitations = known_limitations();
-    assert!(
-        limitations.contains("**A manually entered price is one-way and is not itself audited**")
-    );
+    assert!(limitations.contains("**A manually entered price is one-way**"));
     assert!(limitations.contains("cannot be removed — only overwritten"));
-    assert!(limitations.contains("the superseded provenance is not retained"));
+    assert!(limitations.contains("Overwriting loses nothing"));
     // README surfaces the feature.
     assert!(README_MD.contains("**priced by hand**"));
+}
+
+/// Docs-sync pin for auditing closing prices (2026-07-28): the schema records
+/// why the table joined the audited set, the surrogate key it needed, and what
+/// the old composite key became; the API documents the `id` and points a
+/// history lookup at it; the README names hand-entered prices among the
+/// audited facts.
+#[test]
+fn audited_closing_prices_documented() {
+    // SCHEMA.md: the reversal of the original exclusion and the key change.
+    assert!(SCHEMA_MD.contains("`closing_prices` joined the audited set in 0021"));
+    assert!(SCHEMA_MD.contains("AUTOINCREMENT surrogate `id`"));
+    assert!(SCHEMA_MD.contains("kept as `UNIQUE(listing_id, price_date)`"));
+    assert!(SCHEMA_MD.contains("Server-assigned surrogate key"));
+    // API.md: the id, what it is for, and that it survives a replacement.
+    assert!(API_MD.contains("`{\"table\": \"closing_prices\", \"row_id\": <id>}`"));
+    assert!(API_MD.contains("one row's whole revision history sits under one id"));
+    assert!(API_MD.contains("Its `id` is the `row_id` to ask for."));
+    // README: hand-entered prices are named among the audited facts.
+    assert!(README_MD.contains("hand-entered closing prices"));
 }
 
 /// Docs-sync pin (REQUIREMENTS 2026-07-13, lossless GST-inclusive

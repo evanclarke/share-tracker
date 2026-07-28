@@ -252,6 +252,10 @@ mod tests {
         assert!(js.contains("reason: mReasonInp.value"));
         assert!(js.contains("'sourced_from', 'reason'"));
         assert!(js.contains("row.origin === 'manual'"));
+        // The surrogate key is shown so a price can be looked up on the Row
+        // History screen, which asks for the record's id.
+        assert!(js.contains("id: p.id"));
+        assert!(js.contains("const cols = ['id', 'listing', 'date'"));
     }
 
     #[tokio::test]

@@ -121,6 +121,7 @@ impl ListingBuilder {
 pub fn closing_price(listing_id: i64, price_date: NaiveDate) -> ClosingPriceBuilder {
     ClosingPriceBuilder {
         p: closing_price::ClosingPrice {
+            id: closing_price::UNASSIGNED_ID,
             listing_id,
             price_date,
             price: Some(Decimal::from(10)),

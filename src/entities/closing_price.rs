@@ -90,10 +90,22 @@ pub enum PriceOrigin {
 /// with `origin = "manual"` by a schema CHECK (0020).
 pub const MANUAL_SOURCE: &str = "manual";
 
+/// The [`ClosingPrice::id`] of a row built to be written: the surrogate key is
+/// server-assigned, so [`db_store`] ignores the value and lets the database
+/// assign a new id (or preserve the stored row's, on an upsert that updates).
+pub const UNASSIGNED_ID: i64 = 0;
+
 /// One stored closing price — or one recorded fetch failure (`status =
 /// "error"`, `price` null, `error` set).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClosingPrice {
+    /// Server-assigned surrogate key (0021): the row's identity for the audit
+    /// trail (`row_history.row_id`, so `POST /reports/row_history` can be
+    /// keyed on it). Writes address a row by its `(listing_id, price_date)`
+    /// natural key, never by this — [`db_store`] ignores the value it is
+    /// handed and lets the database assign or preserve it.
+    #[serde(default)]
+    pub id: i64,
     pub listing_id: i64,
     pub price_date: NaiveDate,
     /// Closing price in the listing's quote currency; None exactly when the
@@ -120,6 +132,7 @@ impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for ClosingPrice {
     fn from_row(row: &'r sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
         let price: Option<String> = row.try_get("price")?;
         Ok(ClosingPrice {
+            id: row.try_get("id")?,
             listing_id: row.try_get("listing_id")?,
             price_date: row.try_get("price_date")?,
             price: price.map(|p| parse_dec("price", p)).transpose()?,
@@ -437,7 +450,7 @@ pub async fn db_get_one(
     price_date: NaiveDate,
 ) -> Result<Option<ClosingPrice>, sqlx::Error> {
     sqlx::query_as(
-        "SELECT listing_id, price_date, price, source, fetched_at, status, error, \
+        "SELECT id, listing_id, price_date, price, source, fetched_at, status, error, \
                 origin, sourced_from, reason \
          FROM closing_prices WHERE listing_id = ? AND price_date = ?",
     )
@@ -455,7 +468,7 @@ pub async fn db_list(
     to: Option<NaiveDate>,
 ) -> Result<Vec<ClosingPrice>, sqlx::Error> {
     let mut qb = QueryBuilder::new(
-        "SELECT listing_id, price_date, price, source, fetched_at, status, error, \
+        "SELECT id, listing_id, price_date, price, source, fetched_at, status, error, \
                 origin, sourced_from, reason \
          FROM closing_prices WHERE 1=1",
     );
@@ -497,6 +510,13 @@ async fn db_ok_dates(
 /// manual entry replaces whatever was stored before it. Every column moves
 /// together, so a row can never keep the origin of one write and the
 /// provenance of another.
+///
+/// `row.id` is ignored (see [`UNASSIGNED_ID`]): the natural key is the conflict
+/// target, so the database assigns a new surrogate id on an insert and keeps
+/// the stored one when this updates — which is what lets the row's audit trail
+/// span every version of it. A replacing write is an UPDATE, so the superseded
+/// row (a manual price's own `sourced_from`/`reason` included) is recorded in
+/// `row_history` by the 0021 trigger rather than lost.
 pub(crate) async fn db_store(pool: &SqlitePool, row: &ClosingPrice) -> Result<(), sqlx::Error> {
     sqlx::query(
         "INSERT INTO closing_prices \
@@ -657,6 +677,7 @@ async fn fetch_and_store(
             Ok(price) => {
                 ok += 1;
                 ClosingPrice {
+                    id: UNASSIGNED_ID,
                     listing_id: market.listing.id,
                     price_date: date,
                     price: Some(price),
@@ -672,6 +693,7 @@ async fn fetch_and_store(
             Err(e) => {
                 errored += 1;
                 ClosingPrice {
+                    id: UNASSIGNED_ID,
                     listing_id: market.listing.id,
                     price_date: date,
                     price: None,
@@ -1005,6 +1027,7 @@ async fn put_manual(
     }
 
     let row = ClosingPrice {
+        id: UNASSIGNED_ID,
         listing_id,
         price_date,
         price: Some(body.price),
@@ -2202,6 +2225,89 @@ mod tests {
             .unwrap();
         assert_eq!(row.price, Some("62.48".parse().unwrap()), "still manual");
         assert_eq!(row.origin, PriceOrigin::Manual);
+    }
+
+    /// Correcting a manual price keeps the superseded one: the upsert is an
+    /// UPDATE, so the audit trail (0021) holds the old figure *and* the
+    /// sourcing and reason given for it. Without that, re-entering a price
+    /// would quietly destroy the record of why the first one was entered —
+    /// which is what made auditing this table worth the surrogate key.
+    #[tokio::test]
+    async fn revising_a_manual_price_retains_the_superseded_provenance() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
+        let app = full_router(pool.clone(), StubFetcher::default());
+
+        let first = serde_json::json!({
+            "price": "62.48",
+            "sourced_from": "asx.com.au closing report",
+            "reason": "provider serves no candle since the delisting",
+        });
+        let (status, _) = put_json(&app, "/closing_prices/1/2026-06-04", first).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let stored = db_get_one(&pool, 1, ymd(2026, 6, 4))
+            .await
+            .unwrap()
+            .unwrap();
+
+        let corrected = serde_json::json!({
+            "price": "64.28",
+            "sourced_from": "the registry's own statement",
+            "reason": "the first entry transposed two digits",
+        });
+        let (status, _) = put_json(&app, "/closing_prices/1/2026-06-04", corrected).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        // The row keeps its identity across the correction — one audit trail,
+        // not two rows.
+        let now = db_get_one(&pool, 1, ymd(2026, 6, 4))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(now.id, stored.id, "the surrogate key survives an upsert");
+        assert_eq!(now.price, Some("64.28".parse().unwrap()));
+
+        let history = crate::reports::row_history::db_row_history(&pool, "closing_prices", now.id)
+            .await
+            .unwrap();
+        assert_eq!(history.len(), 1, "one recorded prior version");
+        let prior = &history[0];
+        assert_eq!(prior["operation"], "UPDATE");
+        assert_eq!(prior["price"], "62.48");
+        assert_eq!(prior["sourced_from"], "asx.com.au closing report");
+        assert_eq!(
+            prior["reason"],
+            "provider serves no candle since the delisting"
+        );
+    }
+
+    /// Discarding an errored row is recorded too — the trail keeps the
+    /// acknowledgement that a day was written off, and the message it carried.
+    #[tokio::test]
+    async fn discarding_an_errored_row_is_recorded_in_the_audit_trail() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
+        insert_buy(&pool, 1, 1, "100").await;
+        store_errored(&pool, ymd(2026, 6, 2)).await;
+        let row = db_get_one(&pool, 1, ymd(2026, 6, 2))
+            .await
+            .unwrap()
+            .unwrap();
+        let app = full_router(pool.clone(), StubFetcher::default());
+
+        let (status, _) = delete_req(&app, "/closing_prices/1/2026-06-02").await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        let history = crate::reports::row_history::db_row_history(&pool, "closing_prices", row.id)
+            .await
+            .unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0]["operation"], "DELETE");
+        assert_eq!(history[0]["status"], "error");
+        assert!(
+            history[0]["error"].as_str().is_some_and(|e| !e.is_empty()),
+            "the failure the day was written off for is kept"
+        );
     }
 
     /// The schema pairs a manual row's provenance with its origin, so no
