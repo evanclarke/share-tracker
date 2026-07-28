@@ -97,7 +97,7 @@ fn provisional_snapshots_and_catchup_documented() {
     // README: provisional-then-finalised snapshots and the two lookbacks.
     assert!(README_MD.contains("flagged **provisional**"));
     assert!(README_MD.contains("finalised automatically"));
-    assert!(README_MD.contains("self-heals the last 7 trading days"));
+    assert!(README_MD.contains("self-heals the last 14 calendar days"));
     assert!(README_MD.contains("backfills missing dates over a 14-day window"));
 }
 
@@ -191,19 +191,38 @@ fn known_limitations_document_rsu_dividend_equivalents() {
 }
 
 /// Known-limitation pin (REQUIREMENTS "Ticker and exchange-code changes",
-/// 2026-07-26): an exchange change recorded via `POST /listings/:id/rename`
-/// doesn't retroactively pin historical trades to the calendar in force at
-/// the time — re-saving a trade dated before the change without an explicit
+/// 2026-07-26; narrowed 2026-07-28 to settlement only, once price collection
+/// started resolving its symbol and calendar as at the date fetched): an
+/// exchange change recorded via `POST /listings/:id/rename` doesn't
+/// retroactively pin historical trades to the calendar in force at the time —
+/// re-saving a trade dated before the change without an explicit
 /// `settlement_date` recomputes it against the listing's *current* exchange.
 #[test]
 fn known_limitations_document_exchange_change_recomputation() {
     let limitations = known_limitations();
     assert!(limitations.contains(
-        "An exchange change follows the listing's *current* exchange, not the date of the change"
+        "Settlement dates follow the listing's *current* exchange, not the date of the change"
     ));
     assert!(limitations.contains("settlement-holiday calendar"));
     assert!(limitations.contains("`trades.settlement_date` is a stored column"));
     assert!(limitations.contains("recomputes it against the exchange currently on the listing"));
+    // The price path is explicitly carved out — it is no longer an instance
+    // of this limitation.
+    assert!(limitations.contains("no longer shares this limitation"));
+}
+
+/// Price collection resolves the provider symbol and the trading calendar as
+/// at the date being fetched, from the rename chain (2026-07-28) — the fix
+/// that made the fetch and snapshot-valuation paths agree across a rename.
+#[test]
+fn as_at_price_symbol_resolution_documented() {
+    assert!(API_MD.contains("The symbol is resolved **as at the date being fetched**"));
+    assert!(API_MD.contains("one provider call per identity"));
+    // `price_symbol` is the current spelling, so it must not relabel history.
+    assert!(API_MD.contains("applies only to dates in the listing's current identity"));
+    // The collection window and the snapshot catch-up window are one length.
+    assert!(API_MD.contains("same length as the [report-snapshot](#report-snapshots) catch-up"));
+    assert!(README_MD.contains("under the symbol in force on each date"));
 }
 
 /// Known-limitation pin (REQUIREMENTS "Ticker and exchange-code changes",

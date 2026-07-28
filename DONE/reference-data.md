@@ -123,3 +123,68 @@ after a rename, and an unrecorded exchange change. LAAC → LAR was the promptin
       appeared correctly after a real (intentionally-failing) backfill with an explicit `symbol`
       override, and confirmed the listing activity ledger showed the rename in chronological order
       between the Buy and the Sell
+
+## Price fetching and snapshot valuation disagree about renames, sales and splits (2026-07-28)
+`reports::valuation::stored_valuations` refuses a date unless every listing held *as at that date*
+has a final, ok stored close; price collection is what keeps that satisfiable. The two paths have
+drifted apart four ways, leaving dates the snapshot job demands forever and collection can never
+fill. The prompting case is the LAAC → LAR rename (`listing_renames` id 1), but only the first two
+items are rename-specific. Evidence in the live DB: listing 8 (LAR) holds `ok` rows back to
+2021-03-01 — Yahoo's `LAR` series, which maps onto the *pre-demerger old-LAC* prices, stored as if
+they were LAAC's — while sibling listing 7 (LAC) has 187 errored days over 2023-01-03..2023-09-29
+for the same period under a symbol that no longer serves it. Two listings, one window, opposite
+wrong answers, neither reachable by the scheduled job.
+- [x] Resolve the provider symbol **as at each date**: `yahoo_symbol` reads only the listing's current identity, and `fetch_and_store` issues one provider call for the whole `from..=to`, so a window straddling a rename cannot be right. Resolve from `listing_renames` (reusing `domain::listing_identity`, which already does this for the tax report and activity ledger) and split a straddling range into one provider call per identity segment
+- [x] Resolve the **exchange calendar as at each date**: `load_market` builds holidays/timezone/close from the listing's live `exchange_mic`, so after a cross-exchange rename pre-rename trading days resolve against the new calendar — on both the fetch and the valuation path. Collection then requests days the old exchange was shut (permanent errored rows) and `stored_valuations` picks valuation days that were never fetchable
+- [x] Align collection's held-set and window with the snapshot catch-up: `run_collection` uses `db_held_listing_ids(pool, None)` (held *now*) while `stored_valuations` uses `Some(date)` (held *then*), so a listing sold today stops being fetched while snapshot dates inside the catch-up window still demand its prices; and `COLLECTION_LOOKBACK_TRADING_DAYS = 7` (~9–11 calendar days) is narrower than `CATCHUP_LOOKBACK_DAYS = 14`, so days 11–14 back are retried forever and refilled never
+- [x] Re-base allocations across splits in `db_held_listing_ids`: it subtracts `quantity_allocated` (sale-date units) raw from as-acquired Buy units, while `portfolio::db_holdings_on` and `unrealised_gains` re-base via `sold_in_acquired_units`. With a split between a Buy and a Sell they disagree, and `snapshot::generate` stores the snapshot anyway with `market_value = None` — silently unvalued, contradicting the module's own guarantee — or blocks a date on a security already fully sold
+- Implementation notes (2026-07-28):
+  - `domain::listing_identity` grew `Identity { from, ticker, exchange_mic }`, `identities()` (the
+    listing's contiguous spans, the last always carrying the listing's *current* row) and
+    `identity_as_at()`; `ticker_as_at` is now a thin delegate, so `tax_report`/`activity` were
+    untouched. The module has three callers now, for two reasons — two presentational, one
+    (price collection) a correctness one
+  - `closing_price::Market` became an identity timeline (`Vec<MarketIdentity>`, private) with
+    `identity_at` / `current` / `identity_segments`. `is_trading_day` and
+    `latest_trading_day_on_or_before` resolve per date; `tz`/`close_time`/
+    `latest_complete_trading_day` stay on the current identity, since "now" is by definition after
+    any rename. `load_market` loads the chain and one exchange + holiday set per *distinct* MIC.
+    New `exchange_holiday::db_holiday_dates_for(mic)` — the listing-joined
+    `exchange_holidays_for_listing` can only answer for today's exchange, and settlement still
+    uses it
+  - `yahoo_symbol` takes a date; precedence is one-off `symbol_override` → `price_symbol` **only on
+    the current span** → the derived mapping over the as-at ticker + MIC. `yahoo_symbol_now` is the
+    live-quote form. `fetch_and_store` splits its dates by `identity_segments` and makes one
+    provider call per span, with the zero-candle "symbol may be wrong/renamed/delisted" detection
+    judged per span so the message names the symbol that actually came back empty
+  - `COLLECTION_LOOKBACK_TRADING_DAYS: usize = 7` became `COLLECTION_LOOKBACK_DAYS: i64 = 14`
+    (calendar days), and `snapshot::CATCHUP_LOOKBACK_DAYS` is now *defined as* that constant so the
+    two windows cannot drift apart again. `run_collection` takes its candidates from the new
+    `db_listing_ids_held_between(from, to)` instead of the live holdings
+  - `db_held_listing_ids` now re-bases each allocation with
+    `corporate_action::sold_in_acquired_units` over `db_share_split_events`, floored at nil per
+    parcel — the same shape as `portfolio::db_holdings_on`. The old comment claiming splits
+    "can't change whether the result is positive" was simply wrong, since nothing re-based
+  - `test_support::QuoteStub` gained `with_symbol_closes(symbol, currency, closes)`: canned candles
+    keyed by *provider symbol*, so a stub can model a provider that serves history only under the
+    symbol in force at the time — the shape a rename produces
+  - Tests: 4 new in `listing_identity.rs`, 10 in `closing_price.rs` (as-at symbol, as-at exchange
+    suffix, `price_symbol` scoped to the current span, as-at holiday calendar, per-identity call
+    splitting, self-healing pre-rename backfill with no `symbol` param, per-span dead-symbol
+    message, a listing sold mid-window still collected, the window-covers-catch-up pin, and the
+    held-set matching `portfolio::db_holdings_on` across both a 2:1 split and a 1:10
+    consolidation), 2 in `snapshot.rs` (a pre-rename date valued end-to-end from what collection
+    filled; a split holding never stored unvalued), and 1 new `doc_checks` pin — 1252 tests green
+  - Docs: the `docs/API.md` Known limitation was **narrowed** to settlement only ("Settlement dates
+    follow the listing's *current* exchange…") — the price half is fixed, and the entry now says so
+    explicitly; its `doc_checks` pin was updated to match. The Closing prices and Listings sections
+    describe as-at symbol resolution, per-identity calls, the `price_symbol` scoping and the shared
+    14-day window; README's rename and closing-price feature lines follow
+  - Verified end-to-end against a **copy** of the live DB (the live file was never written to):
+    a pre-rename backfill of LAR over 2021-02 with **no** `symbol` param went to Yahoo as `LAAC`
+    (the ticker in force then; Yahoo has retired it, so the rows errored naming `LAAC` — the
+    resolution is the point, and it would have said `LAR` before); a post-rename backfill over
+    2025-02 fetched 5 ok rows under `LAR`; and a backfill straddling a synthetic effective date
+    split correctly — the days before it fetched real prices under the old ticker, the days from it
+    errored under the new one, i.e. two provider calls, not one. `POST /jobs/price-import` then ran
+    clean (`failed=0`) over the widened window

@@ -436,7 +436,12 @@ pub async fn generate(
 /// and regenerate stale/provisional ones. Dates older than this are repaired
 /// on demand (`generate`, `regenerate_all`) or by the RBA-import true-up
 /// (`regenerate_provisional`), not by the daily job.
-pub const CATCHUP_LOOKBACK_DAYS: i64 = 14;
+///
+/// Deliberately the *same* number as price collection's lookback rather than
+/// an independent one: a date this job keeps retrying but collection no longer
+/// refills is a date that can never unblock itself, so the two windows are one
+/// constant (`closing_price::COLLECTION_LOOKBACK_DAYS`).
+pub const CATCHUP_LOOKBACK_DAYS: i64 = closing_price::COLLECTION_LOOKBACK_DAYS;
 
 /// Whether the stored metadata for one date needs (re)generation: anything
 /// short of all three reports stored fresh and final does.
@@ -1753,5 +1758,122 @@ mod tests {
             detail.contains("BHP") && detail.contains("backfill"),
             "{detail}"
         );
+    }
+
+    // --- price collection and snapshot valuation agree ---
+
+    /// End-to-end for the prompting case (LAAC → LAR): the scheduled
+    /// collection run fills the window under the symbol in force on each
+    /// date, and a snapshot dated *before* the rename then generates instead
+    /// of blocking on a missing price.
+    #[tokio::test]
+    async fn db_a_pre_rename_date_is_valued_from_prices_the_collection_run_filled() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "LAAC", Some("XNYS"), "USD").await;
+        insert_buy(&pool, 1, 1, ymd(2024, 1, 15), "100", "10", "USD").await;
+        import_rate(&pool, "USD", "2024-01", "0.65").await;
+        import_rate(&pool, "USD", "2026-06", "0.65").await;
+        crate::entities::listing_rename::db_rename(
+            &pool,
+            1,
+            &crate::entities::listing_rename::RenameBody {
+                effective_date: ymd(2026, 6, 3),
+                ticker: "LAR".to_string(),
+                exchange_mic: None,
+                name: None,
+                price_symbol: None,
+                note: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        // The provider serves the pre-rename days only under the old symbol
+        // and the later ones only under the new one — as Yahoo does.
+        let fetcher = closing_price::test_support::QuoteStub::default()
+            .with_symbol_closes(
+                "LAAC",
+                "USD",
+                &[(ymd(2026, 6, 1), "2.80"), (ymd(2026, 6, 2), "2.77")],
+            )
+            .with_symbol_closes(
+                "LAR",
+                "USD",
+                &[
+                    (ymd(2026, 6, 3), "2.73"),
+                    (ymd(2026, 6, 4), "2.63"),
+                    (ymd(2026, 6, 5), "2.60"),
+                ],
+            );
+        closing_price::run_collection(&pool, &fetcher, friday_evening_sydney())
+            .await
+            .unwrap_err(); // the days outside the stub's range error, as expected
+
+        // 2026-06-02 is inside the catch-up window and before the rename.
+        let metas = generate(&pool, ymd(2026, 6, 2), friday_evening_sydney())
+            .await
+            .unwrap();
+        assert_eq!(metas.len(), ReportKind::ALL.len());
+        let overview = db_get(&pool, ReportKind::PortfolioOverview, ymd(2026, 6, 2))
+            .await
+            .unwrap()
+            .unwrap();
+        let rows = overview.rows.as_array().expect("rows are an array");
+        assert_eq!(rows.len(), 1);
+        assert!(
+            !rows[0]["market_value"].is_null(),
+            "the holding is valued, not silently unpriced: {}",
+            overview.rows
+        );
+    }
+
+    /// A split between a Buy and a Sell used to make `db_held_listing_ids`
+    /// and the holdings reports disagree, so `generate` stored a row whose
+    /// `market_value` was null — a holding silently missing from the totals.
+    /// Every row in a stored snapshot must be priced.
+    #[tokio::test]
+    async fn db_a_split_holding_is_never_stored_unvalued() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "SPL", Some("XASX"), "AUD").await;
+        insert_buy(&pool, 1, 1, ymd(2024, 1, 15), "100", "10", "AUD").await;
+        corporate_action::db_upsert(
+            &pool,
+            &corporate_action::CorporateAction {
+                id: 1,
+                listing_id: 1,
+                date: ymd(2024, 3, 1),
+                kind: corporate_action::ActionKind::ShareSplit {
+                    split_new_units: "2".parse().unwrap(),
+                    split_old_units: "1".parse().unwrap(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+        // 150 of the 200 post-split units sold; 50 remain.
+        test_support::sell(2, 1)
+            .date(ymd(2024, 6, 1))
+            .settlement(ymd(2024, 6, 1))
+            .qty("150".parse().unwrap())
+            .price("8".parse().unwrap())
+            .insert(&pool)
+            .await;
+        test_support::allocate(&pool, 2, 2, 1, "150".parse().unwrap()).await;
+        store_price(&pool, 1, ymd(2026, 6, 5), "62.48").await;
+
+        generate(&pool, ymd(2026, 6, 5), friday_evening_sydney())
+            .await
+            .unwrap();
+
+        for kind in [ReportKind::PortfolioOverview, ReportKind::UnrealisedGains] {
+            let stored = db_get(&pool, kind, ymd(2026, 6, 5)).await.unwrap().unwrap();
+            let rows = stored.rows.as_array().expect("rows are an array");
+            assert_eq!(rows.len(), 1, "{kind:?}");
+            assert!(
+                !rows[0]["market_value"].is_null(),
+                "{kind:?} stored an unvalued holding: {}",
+                stored.rows
+            );
+        }
     }
 }

@@ -61,6 +61,24 @@ pub async fn db_list_for_exchange(
     .await
 }
 
+/// One exchange's public-holiday dates as a lookup set, keyed by MIC rather
+/// than by listing. Price collection needs this form because a listing that
+/// has moved exchange (`listing_renames`) trades on a *different* calendar
+/// before and after the move, so its `Market` holds one holiday set per
+/// identity — the listing-joined `exchange_holidays_for_listing` can only
+/// ever answer for the exchange the listing records today.
+pub(crate) async fn db_holiday_dates_for(
+    pool: &SqlitePool,
+    mic: &str,
+) -> Result<HashSet<NaiveDate>, sqlx::Error> {
+    let dates: Vec<NaiveDate> =
+        sqlx::query_scalar("SELECT holiday_date FROM exchange_holidays WHERE mic = ?")
+            .bind(mic)
+            .fetch_all(pool)
+            .await?;
+    Ok(dates.into_iter().collect())
+}
+
 pub async fn db_get(
     pool: &SqlitePool,
     mic: &str,

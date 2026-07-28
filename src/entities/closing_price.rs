@@ -149,23 +149,35 @@ impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for ClosingPrice {
 
 // ---------------------------------------------------------------------------
 // Market context: a listing plus the exchange-calendar data price collection
-// needs (timezone, close time, holidays). `exchange` is None exactly for
-// exchange-less (Crypto) listings.
+// needs (timezone, close time, holidays).
+//
+// A listing that has been renamed traded under a different ticker — and, for
+// an exchange-code change, on a different calendar — before the rename took
+// effect (`listing_renames`, `domain::listing_identity`). So a market is not
+// one exchange but a *timeline* of identities: resolving a historical date
+// against today's identity asks the provider for a symbol that was never
+// quoted then, and walks a calendar that was not in force. `exchange` is None
+// exactly for an exchange-less (Crypto) span.
 // ---------------------------------------------------------------------------
 
-pub struct Market {
-    pub listing: listing::Listing,
+/// One span of a listing's history: the ticker and exchange in force from
+/// [`MarketIdentity::from`] until the next span begins.
+pub struct MarketIdentity {
+    /// First date this identity was in effect; `None` for the earliest span,
+    /// which reaches back indefinitely.
+    pub from: Option<NaiveDate>,
+    pub ticker: String,
+    /// The MIC the security traded under over this span; `None` exactly for
+    /// an exchange-less (Crypto) span. The provider-symbol mapping keys off
+    /// this, so it answers even when the `exchanges` row itself is absent.
+    pub exchange_mic: Option<String>,
+    /// The `exchanges` row for `exchange_mic`, when there is one: the source
+    /// of the timezone, close time and (with `holidays`) the trading calendar.
     pub exchange: Option<exchange::Exchange>,
     pub holidays: HashSet<NaiveDate>,
-    /// One-off provider-symbol override for this fetch only — not persisted
-    /// (contrast `listing.price_symbol`, which is stored). Set by the
-    /// backfill endpoint's optional `symbol` so a pre-rename date range can
-    /// be fetched under the old symbol without touching the listing row;
-    /// `load_market` always leaves this `None`.
-    pub symbol_override: Option<String>,
 }
 
-impl Market {
+impl MarketIdentity {
     /// The timezone trading days are keyed on: the exchange's, or UTC for
     /// exchange-less (Crypto) listings, per the resolved cut-off convention.
     fn tz(&self) -> Result<Tz, String> {
@@ -180,8 +192,9 @@ impl Market {
         }
     }
 
-    /// Whether `date` is a trading day: crypto trades every day; an exchange
-    /// trades on weekdays that are not seeded public holidays.
+    /// Whether `date` is a trading day under this identity: crypto trades
+    /// every day; an exchange trades on weekdays that are not seeded public
+    /// holidays.
     fn is_trading_day(&self, date: NaiveDate) -> bool {
         if self.exchange.is_none() {
             return true;
@@ -190,6 +203,81 @@ impl Market {
         weekday != chrono::Weekday::Sat
             && weekday != chrono::Weekday::Sun
             && !self.holidays.contains(&date)
+    }
+}
+
+pub struct Market {
+    pub listing: listing::Listing,
+    /// The listing's identity spans, ascending by `from` and contiguous; the
+    /// last is the one in effect now. Always non-empty — a listing with no
+    /// recorded rename has exactly one open-ended span.
+    identities: Vec<MarketIdentity>,
+    /// One-off provider-symbol override for this fetch only — not persisted
+    /// (contrast `listing.price_symbol`, which is stored). Set by the
+    /// backfill endpoint's optional `symbol` for a provider spelling the
+    /// rename chain doesn't record; `load_market` always leaves this `None`.
+    pub symbol_override: Option<String>,
+}
+
+impl Market {
+    /// The identity in effect on `date` — the latest span that had started by
+    /// then, falling back to the earliest (which is open-ended, so this only
+    /// matters for a date before a chain the listing somehow starts after).
+    pub fn identity_at(&self, date: NaiveDate) -> &MarketIdentity {
+        self.identities
+            .iter()
+            .rev()
+            .find(|i| i.from.is_none_or(|from| from <= date))
+            .unwrap_or_else(|| self.earliest())
+    }
+
+    fn earliest(&self) -> &MarketIdentity {
+        self.identities.first().expect("always at least one span")
+    }
+
+    /// The identity in effect now — the one `now`-relative questions (the
+    /// close time, the timezone the current date is read in) are answered
+    /// against.
+    pub fn current(&self) -> &MarketIdentity {
+        self.identities.last().expect("always at least one span")
+    }
+
+    /// Split `from..=to` into maximal sub-ranges that each sit wholly inside
+    /// one identity, ascending. One provider call is made per sub-range, so a
+    /// range straddling a rename is fetched under each symbol that was
+    /// actually quoted over it. An unrenamed listing yields exactly one.
+    pub fn identity_segments(
+        &self,
+        from: NaiveDate,
+        to: NaiveDate,
+    ) -> Vec<(NaiveDate, NaiveDate, &MarketIdentity)> {
+        let mut segments = Vec::new();
+        if from > to {
+            return segments;
+        }
+        let mut start = from;
+        while start <= to {
+            let identity = self.identity_at(start);
+            // The segment runs until the next span begins, or to `to`.
+            let next_start = self
+                .identities
+                .iter()
+                .filter_map(|i| i.from)
+                .filter(|f| *f > start)
+                .min();
+            let end = match next_start {
+                Some(next) => to.min(next - Duration::days(1)),
+                None => to,
+            };
+            segments.push((start, end, identity));
+            start = end + Duration::days(1);
+        }
+        segments
+    }
+
+    /// Whether `date` is a trading day on the calendar that was in force then.
+    fn is_trading_day(&self, date: NaiveDate) -> bool {
+        self.identity_at(date).is_trading_day(date)
     }
 
     /// The market's nearest trading day at or before `date` (the day whose
@@ -213,6 +301,8 @@ impl Market {
     /// `close_time` has passed, else the previous date — then walked back to
     /// the nearest trading day. Crypto: yesterday's UTC date (the daily candle
     /// for date D completes at 00:00 UTC at the end of D); every day trades.
+    /// Read against the *current* identity: "now" is by definition after any
+    /// rename, so the close that matters is the one in force today.
     ///
     /// `None` only if no trading day exists in the past year (a calendar
     /// misconfiguration, e.g. every day seeded as a holiday).
@@ -220,7 +310,8 @@ impl Market {
         &self,
         now: DateTime<Utc>,
     ) -> Result<Option<NaiveDate>, String> {
-        let candidate = match &self.exchange {
+        let current = self.current();
+        let candidate = match &current.exchange {
             None => now.date_naive() - Duration::days(1),
             Some(ex) => {
                 let close = NaiveTime::parse_from_str(&ex.close_time, "%H:%M").map_err(|_| {
@@ -229,7 +320,7 @@ impl Market {
                         ex.mic, ex.close_time
                     )
                 })?;
-                let now_local = now.with_timezone(&self.tz()?);
+                let now_local = now.with_timezone(&current.tz()?);
                 if now_local.time() >= close {
                     now_local.date_naive()
                 } else {
@@ -241,7 +332,42 @@ impl Market {
     }
 }
 
-/// Load the market context for a listing; None if the listing doesn't exist.
+#[cfg(test)]
+impl Market {
+    /// A market with an explicit identity timeline, for tests that exercise
+    /// renames without going through the database.
+    pub(crate) fn from_identities(
+        listing: listing::Listing,
+        identities: Vec<MarketIdentity>,
+    ) -> Self {
+        assert!(!identities.is_empty(), "a market needs at least one span");
+        Market {
+            listing,
+            identities,
+            symbol_override: None,
+        }
+    }
+
+    /// A never-renamed market: one open-ended span taking its ticker and MIC
+    /// from the listing row.
+    pub(crate) fn unrenamed(
+        listing: listing::Listing,
+        exchange: Option<exchange::Exchange>,
+        holidays: HashSet<NaiveDate>,
+    ) -> Self {
+        let identity = MarketIdentity {
+            from: None,
+            ticker: listing.ticker.clone(),
+            exchange_mic: listing.exchange_mic.clone(),
+            exchange,
+            holidays,
+        };
+        Market::from_identities(listing, vec![identity])
+    }
+}
+
+/// Load the market context for a listing — its identity timeline, with each
+/// span's exchange and holiday calendar; None if the listing doesn't exist.
 pub async fn load_market(
     pool: &SqlitePool,
     listing_id: i64,
@@ -249,16 +375,53 @@ pub async fn load_market(
     let Some(listing) = listing::db_get(pool, listing_id).await? else {
         return Ok(None);
     };
-    let exchange = match &listing.exchange_mic {
-        None => None,
-        Some(mic) => exchange::db_get(pool, mic).await?,
-    };
-    let holidays =
-        crate::entities::exchange_holiday::exchange_holidays_for_listing(pool, listing_id).await?;
+    let mut conn = pool.acquire().await?;
+    let renames = crate::domain::listing_identity::RenameHistory::load(&mut conn).await?;
+    drop(conn);
+    let spans = renames.identities(
+        listing_id,
+        crate::domain::listing_identity::Identity {
+            from: None,
+            ticker: listing.ticker.clone(),
+            exchange_mic: listing.exchange_mic.clone(),
+        },
+    );
+
+    // One exchange (and one holiday load) per distinct MIC across the
+    // timeline, not one per span — a chain that renames within the same
+    // exchange must not re-read its calendar for every link.
+    let mut exchanges: HashMap<String, Option<exchange::Exchange>> = HashMap::new();
+    let mut holidays: HashMap<String, HashSet<NaiveDate>> = HashMap::new();
+    let mut identities = Vec::with_capacity(spans.len());
+    for span in spans {
+        let (exchange, holiday_dates) = match &span.exchange_mic {
+            None => (None, HashSet::new()),
+            Some(mic) => {
+                if !exchanges.contains_key(mic) {
+                    exchanges.insert(mic.clone(), exchange::db_get(pool, mic).await?);
+                    holidays.insert(
+                        mic.clone(),
+                        crate::entities::exchange_holiday::db_holiday_dates_for(pool, mic).await?,
+                    );
+                }
+                (
+                    exchanges[mic].clone(),
+                    holidays.get(mic).cloned().unwrap_or_default(),
+                )
+            }
+        };
+        identities.push(MarketIdentity {
+            from: span.from,
+            ticker: span.ticker,
+            exchange_mic: span.exchange_mic,
+            exchange,
+            holidays: holiday_dates,
+        });
+    }
+
     Ok(Some(Market {
         listing,
-        exchange,
-        holidays,
+        identities,
         symbol_override: None,
     }))
 }
@@ -305,6 +468,12 @@ pub trait PriceFetcher: Send + Sync {
     /// Daily closes for the listing over `from..=to` (trading-day dates in the
     /// market's timezone convention). Non-trading days in the range simply
     /// have no entry.
+    ///
+    /// `from..=to` must sit wholly inside **one** of the market's identities
+    /// (`Market::identity_segments` is what guarantees it): the provider is
+    /// asked for a single symbol per call, and after a rename that symbol
+    /// differs either side of the effective date. Implementations resolve the
+    /// symbol at `from`.
     fn daily_closes<'a>(
         &'a self,
         market: &'a Market,
@@ -347,24 +516,43 @@ pub struct YahooFetcher {
     client: yfinance_rs::YfClient,
 }
 
-/// The Yahoo symbol for a market: a one-off `symbol_override` (backfill's
-/// `symbol` param) wins first, then the listing's stored `price_symbol`
-/// override, then the derived mapping — ASX tickers carry `.AX`, NYSE/Nasdaq
-/// are plain, crypto is `<TICKER>-<quote currency>` (so Yahoo quotes it in
-/// the listing's own currency). Other exchanges need a mapping added here,
-/// or a `price_symbol` override on the listing.
-fn yahoo_symbol(market: &Market) -> Result<String, String> {
+/// The Yahoo symbol for a market **as at `date`** — the symbol the security
+/// was actually quoted under then, so a historical fetch isn't asked for a
+/// ticker that didn't exist yet.
+///
+/// Precedence: a one-off `symbol_override` (backfill's `symbol` param) wins
+/// first; then the listing's stored `price_symbol`, but only for a date in
+/// the *current* identity, since an override that matched the old ticker
+/// rarely matches the new one (`listing::Listing::price_symbol`); then the
+/// derived mapping over the identity in force on `date` — ASX tickers carry
+/// `.AX`, NYSE/Nasdaq are plain, crypto is `<TICKER>-<quote currency>` (so
+/// Yahoo quotes it in the listing's own currency). Other exchanges need a
+/// mapping added here, or a `price_symbol` override on the listing.
+fn yahoo_symbol(market: &Market, date: NaiveDate) -> Result<String, String> {
+    yahoo_symbol_for(market, market.identity_at(date))
+}
+
+/// The Yahoo symbol for the identity in effect **now** — for a live quote,
+/// which is always a question about today.
+fn yahoo_symbol_now(market: &Market) -> Result<String, String> {
+    yahoo_symbol_for(market, market.current())
+}
+
+fn yahoo_symbol_for(market: &Market, identity: &MarketIdentity) -> Result<String, String> {
     if let Some(symbol) = &market.symbol_override {
         return Ok(symbol.clone());
     }
-    let listing = &market.listing;
-    if let Some(symbol) = &listing.price_symbol {
+    // Spans are unique by their start date, so this identifies the current one.
+    if let Some(symbol) = &market.listing.price_symbol
+        && identity.from == market.current().from
+    {
         return Ok(symbol.clone());
     }
-    match listing.exchange_mic.as_deref() {
-        None => Ok(format!("{}-{}", listing.ticker, listing.currency)),
-        Some("XASX") => Ok(format!("{}.AX", listing.ticker)),
-        Some("XNYS") | Some("XNAS") => Ok(listing.ticker.clone()),
+    let currency = &market.listing.currency;
+    match identity.exchange_mic.as_deref() {
+        None => Ok(format!("{}-{}", identity.ticker, currency)),
+        Some("XASX") => Ok(format!("{}.AX", identity.ticker)),
+        Some("XNYS") | Some("XNAS") => Ok(identity.ticker.clone()),
         Some(mic) => Err(format!("no Yahoo symbol mapping for exchange {mic}")),
     }
 }
@@ -381,8 +569,10 @@ impl PriceFetcher for YahooFetcher {
         to: NaiveDate,
     ) -> FetchFuture<'a> {
         Box::pin(async move {
-            let symbol = yahoo_symbol(market)?;
-            let tz = market.tz()?;
+            // `from..=to` sits inside one identity by contract, so its symbol
+            // and calendar answer for the whole call.
+            let symbol = yahoo_symbol(market, from)?;
+            let tz = market.identity_at(from).tz()?;
             // Daily candles are timestamped at session start, so the UTC
             // window [from 00:00, to+1 00:00) in the market's timezone covers
             // exactly the requested trading days.
@@ -408,7 +598,7 @@ impl PriceFetcher for YahooFetcher {
 
     fn latest_quote<'a>(&'a self, market: &'a Market) -> QuoteFuture<'a> {
         Box::pin(async move {
-            let symbol = yahoo_symbol(market)?;
+            let symbol = yahoo_symbol_now(market)?;
             let quotes = yfinance_rs::quotes(&self.client, [symbol.clone()])
                 .await
                 .map_err(|e| format!("yahoo quote for {symbol} failed: {e}"))?;
@@ -567,48 +757,67 @@ pub async fn db_delete(
     Ok(result.rows_affected() > 0)
 }
 
-/// Listings with a non-zero holding: total Buy/DRP quantity minus the units
-/// consumed by parcel allocations (in as-acquired units — splits only rescale,
-/// so they can't change whether the result is positive). Decimal arithmetic in
-/// Rust, never float SUM in SQL. With `as_of` the holding is taken as at that
-/// date — trades and sales dated after it don't count (snapshot generation for
-/// a past date values what was held then, not what is held now).
+/// Listings with a non-zero holding. Decimal arithmetic in Rust, never float
+/// SUM in SQL. With `as_of` the holding is taken as at that date — trades and
+/// sales dated after it don't count (snapshot generation for a past date
+/// values what was held then, not what is held now).
+///
+/// Each sale's `quantity_allocated` is expressed in the unit basis of its own
+/// sale date, so it is re-based back to the parcel's as-acquired units
+/// (`corporate_action::sold_in_acquired_units`) before being subtracted —
+/// exactly as `reports::portfolio::db_holdings_on` does. Without that, a
+/// split between a Buy and a Sell makes this function and the holdings
+/// reports disagree about whether the listing is held at all, and snapshot
+/// generation then stores a silently unvalued row (a holding the price map
+/// has no entry for) or blocks a date on a security already fully sold.
 pub async fn db_held_listing_ids(
     pool: &SqlitePool,
     as_of: Option<NaiveDate>,
 ) -> Result<Vec<i64>, sqlx::Error> {
     let cutoff = crate::infra::date::as_of_or_open(as_of);
     let buys = sqlx::query(
-        "SELECT id, listing_id, quantity FROM trades \
+        "SELECT id, listing_id, date, quantity FROM trades \
          WHERE trade_type IN ('Buy', 'DRP') AND date <= ?",
     )
     .bind(cutoff)
     .fetch_all(pool)
     .await?;
-    let mut listing_of: HashMap<i64, i64> = HashMap::new();
-    let mut held: HashMap<i64, Decimal> = HashMap::new();
-    for row in &buys {
-        let trade_id: i64 = row.try_get("id")?;
-        let listing_id: i64 = row.try_get("listing_id")?;
-        let qty = parse_dec("quantity", row.try_get("quantity")?)?;
-        listing_of.insert(trade_id, listing_id);
-        *held.entry(listing_id).or_default() += qty;
-    }
 
+    // sale-date-basis units allocated out of each purchase parcel
     let allocs = sqlx::query(
-        "SELECT pa.purchase_trade_id, pa.quantity_allocated \
+        "SELECT pa.purchase_trade_id, pa.quantity_allocated, s.date AS sale_date \
          FROM parcel_allocations pa JOIN trades s ON s.id = pa.sale_trade_id \
          WHERE s.date <= ?",
     )
     .bind(cutoff)
     .fetch_all(pool)
     .await?;
+    let mut qty_sold: HashMap<i64, Vec<(NaiveDate, Decimal)>> = HashMap::new();
     for row in &allocs {
         let trade_id: i64 = row.try_get("purchase_trade_id")?;
-        let qty = parse_dec("quantity_allocated", row.try_get("quantity_allocated")?)?;
-        if let Some(listing_id) = listing_of.get(&trade_id) {
-            *held.entry(*listing_id).or_default() -= qty;
-        }
+        qty_sold.entry(trade_id).or_default().push((
+            row.try_get("sale_date")?,
+            parse_dec("quantity_allocated", row.try_get("quantity_allocated")?)?,
+        ));
+    }
+
+    let split_events = crate::entities::corporate_action::db_share_split_events(pool).await?;
+
+    let mut held: HashMap<i64, Decimal> = HashMap::new();
+    for row in &buys {
+        let trade_id: i64 = row.try_get("id")?;
+        let listing_id: i64 = row.try_get("listing_id")?;
+        let acquired: NaiveDate = row.try_get("date")?;
+        let qty = parse_dec("quantity", row.try_get("quantity")?)?;
+        let splits = split_events.get(&listing_id).map_or(&[][..], |v| v);
+        let sold = crate::entities::corporate_action::sold_in_acquired_units(
+            qty_sold.get(&trade_id).map_or(&[][..], |v| v),
+            splits,
+            acquired,
+        );
+        // Per parcel, floored at nil: an over-allocated parcel must not net
+        // off another parcel's remaining units.
+        *held.entry(listing_id).or_default() += (qty - sold).max(Decimal::ZERO);
     }
 
     let mut ids: Vec<i64> = held
@@ -624,55 +833,83 @@ pub async fn db_held_listing_ids(
 // Fetch-and-store: shared by scheduled collection, manual re-fetch and backfill
 // ---------------------------------------------------------------------------
 
-/// Fetch the given trading days for a listing (one provider call spanning the
-/// range) and store one row per requested date: an ok row for a returned
-/// candle in the listing's currency, an errored row for a fetch failure, a
-/// missing candle, or a currency mismatch. Returns (ok, errored) counts.
+/// Fetch the given trading days for a listing and store one row per requested
+/// date: an ok row for a returned candle in the listing's currency, an errored
+/// row for a fetch failure, a missing candle, or a currency mismatch. Returns
+/// (ok, errored) counts.
+///
+/// The dates are split by [`Market::identity_segments`] and fetched with **one
+/// provider call per identity** — a range straddling a rename is quoted under
+/// the old symbol before the effective date and the new one after, so a
+/// historical backfill recovers pre-rename history without the caller having
+/// to supply the old symbol by hand.
 async fn fetch_and_store(
     pool: &SqlitePool,
     fetcher: &dyn PriceFetcher,
     market: &Market,
     dates: &[NaiveDate],
 ) -> Result<(usize, usize), sqlx::Error> {
-    let (Some(&from), Some(&to)) = (dates.iter().min(), dates.iter().max()) else {
+    let (Some(&overall_from), Some(&overall_to)) = (dates.iter().min(), dates.iter().max()) else {
         return Ok((0, 0));
     };
 
-    let fetched = fetcher.daily_closes(market, from, to).await;
-    let by_date: Result<HashMap<NaiveDate, FetchedClose>, String> =
-        fetched.map(|closes| closes.into_iter().map(|c| (c.date, c)).collect());
+    // Per requested date: the fetch outcome for the segment it falls in.
+    let mut outcome: HashMap<NaiveDate, Result<Decimal, String>> = HashMap::new();
+    for (from, to, _identity) in market.identity_segments(overall_from, overall_to) {
+        let wanted: Vec<NaiveDate> = dates
+            .iter()
+            .copied()
+            .filter(|d| *d >= from && *d <= to)
+            .collect();
+        if wanted.is_empty() {
+            continue; // a segment the caller asked for no days in
+        }
+        let fetched = fetcher.daily_closes(market, from, to).await;
+        let by_date: Result<HashMap<NaiveDate, FetchedClose>, String> =
+            fetched.map(|closes| closes.into_iter().map(|c| (c.date, c)).collect());
 
-    // A provider call that returns *zero* candles across the whole requested
-    // window (as opposed to a partial result with a data gap on one date) is
-    // the classic wrong/renamed/delisted-symbol case, not a transient outage
-    // — the day-by-day fallback message below is indistinguishable from one,
-    // so every date gets a message that names the symbol and points at the
-    // fix instead.
-    let symbol_dead_or_wrong = matches!(&by_date, Ok(map) if map.is_empty());
-    let no_candles_message = || {
-        let symbol = yahoo_symbol(market).unwrap_or_else(|e| e);
-        format!(
-            "provider returned no candles for {symbol} over {from}..{to} — the symbol may be \
-             wrong, renamed, or delisted; set price_symbol on the listing or backfill with an \
-             explicit symbol"
-        )
-    };
+        // A provider call that returns *zero* candles across the whole
+        // requested window (as opposed to a partial result with a data gap on
+        // one date) is the classic wrong/renamed/delisted-symbol case, not a
+        // transient outage — the day-by-day fallback message below is
+        // indistinguishable from one, so every date gets a message that names
+        // the symbol and points at the fix instead. Judged per segment, so the
+        // message names the symbol that actually came back empty.
+        let symbol_dead_or_wrong = matches!(&by_date, Ok(map) if map.is_empty());
+        let no_candles_message = || {
+            let symbol = yahoo_symbol(market, from).unwrap_or_else(|e| e);
+            format!(
+                "provider returned no candles for {symbol} over {from}..{to} — the symbol may be \
+                 wrong, renamed, or delisted; set price_symbol on the listing or backfill with an \
+                 explicit symbol"
+            )
+        };
+
+        for date in wanted {
+            let result = match &by_date {
+                Err(e) => Err(e.clone()),
+                Ok(_) if symbol_dead_or_wrong => Err(no_candles_message()),
+                Ok(map) => match map.get(&date) {
+                    None => {
+                        Err("provider returned no candle for an expected trading day".to_string())
+                    }
+                    Some(close) if close.currency != market.listing.currency => Err(format!(
+                        "currency mismatch: provider quoted {}, listing is {}",
+                        close.currency, market.listing.currency
+                    )),
+                    Some(close) => Ok(close.price),
+                },
+            };
+            outcome.insert(date, result);
+        }
+    }
 
     let fetched_at = Utc::now().to_rfc3339();
     let (mut ok, mut errored) = (0, 0);
     for &date in dates {
-        let result = match &by_date {
-            Err(e) => Err(e.clone()),
-            Ok(_) if symbol_dead_or_wrong => Err(no_candles_message()),
-            Ok(map) => match map.get(&date) {
-                None => Err("provider returned no candle for an expected trading day".to_string()),
-                Some(close) if close.currency != market.listing.currency => Err(format!(
-                    "currency mismatch: provider quoted {}, listing is {}",
-                    close.currency, market.listing.currency
-                )),
-                Some(close) => Ok(close.price),
-            },
-        };
+        let result = outcome
+            .remove(&date)
+            .unwrap_or_else(|| Err("no identity span covers this date".to_string()));
         let row = match result {
             Ok(price) => {
                 ok += 1;
@@ -712,16 +949,27 @@ async fn fetch_and_store(
     Ok((ok, errored))
 }
 
-/// How many trading days back one collection run looks, so a day missed
+/// How many **calendar** days back one collection run looks, so a day missed
 /// outright (host down, provider outage) or stored errored is re-attempted by
 /// the following runs instead of becoming a permanent hole. Ok rows are never
 /// re-fetched, so the runs stay idempotent and the lookback costs nothing
 /// once the window is filled.
-pub const COLLECTION_LOOKBACK_TRADING_DAYS: usize = 7;
+///
+/// `reports::snapshot::CATCHUP_LOOKBACK_DAYS` *is* this constant: the snapshot
+/// job retries every blocked date in its window on every run, and a date it
+/// retries but collection no longer refills is a date that can never be
+/// unblocked without a manual backfill. Calendar days, not trading days, so
+/// the two windows are directly comparable — seven trading days is only
+/// nine-to-eleven calendar days, which used to leave the far end of the
+/// snapshot window permanently unreachable.
+pub const COLLECTION_LOOKBACK_DAYS: i64 = 14;
 
-/// The listing's last [`COLLECTION_LOOKBACK_TRADING_DAYS`] trading days ending
-/// at its latest complete trading day at `now`, oldest first. `None` when the
-/// market has no complete trading day (calendar misconfiguration).
+/// The listing's trading days over the last [`COLLECTION_LOOKBACK_DAYS`]
+/// calendar days ending at its latest complete trading day at `now`, oldest
+/// first. `None` when the market has no complete trading day (calendar
+/// misconfiguration). Each day is tested against the calendar in force *then*
+/// (`Market::identity_at`), so a window spanning an exchange change mixes both
+/// exchanges' calendars correctly.
 fn lookback_trading_days(
     market: &Market,
     now: DateTime<Utc>,
@@ -729,38 +977,63 @@ fn lookback_trading_days(
     let Some(latest) = market.latest_complete_trading_day(now)? else {
         return Ok(None);
     };
-    let mut days = Vec::with_capacity(COLLECTION_LOOKBACK_TRADING_DAYS);
-    let mut candidate = latest;
-    // 366-day guard as in latest_trading_day_on_or_before: a calendar seeded
-    // with a year of holidays must not loop forever.
-    for _ in 0..366 {
+    let earliest = latest - Duration::days(COLLECTION_LOOKBACK_DAYS - 1);
+    let mut days = Vec::new();
+    let mut candidate = earliest;
+    while candidate <= latest {
         if market.is_trading_day(candidate) {
             days.push(candidate);
-            if days.len() == COLLECTION_LOOKBACK_TRADING_DAYS {
-                break;
-            }
         }
-        candidate -= Duration::days(1);
+        candidate += Duration::days(1);
     }
-    days.reverse();
     Ok(Some(days))
 }
 
-/// One scheduled collection run: for every listing with a non-zero holding,
-/// store the closing price of every trading day in the lookback window whose
-/// stored row is missing or errored (one provider call spanning the window;
-/// days already stored ok are never re-fetched). A non-trading day stores no
-/// row and is not an error; a failed fetch stores an errored row and fails
-/// the job (so the Jobs UI shows it), without stopping the other listings —
-/// and is re-attempted by later runs while it stays in the window.
+/// The listings held at any point over `from..=to` — the union of the holdings
+/// as at each day in the window.
+///
+/// Collection needs this, not "held now": `reports::valuation` values a
+/// snapshot date against the listings held *on that date*, so a listing sold
+/// part-way through the window is still required to have prices for the days
+/// before the sale. Taking only the live holdings dropped it from collection
+/// the moment the Sell was entered — and with trades entered retroactively
+/// from statements, that is the ordinary case, not an edge one.
+async fn db_listing_ids_held_between(
+    pool: &SqlitePool,
+    from: NaiveDate,
+    to: NaiveDate,
+) -> Result<Vec<i64>, sqlx::Error> {
+    let mut ids: std::collections::BTreeSet<i64> = std::collections::BTreeSet::new();
+    let mut date = from;
+    while date <= to {
+        ids.extend(db_held_listing_ids(pool, Some(date)).await?);
+        date += Duration::days(1);
+    }
+    Ok(ids.into_iter().collect())
+}
+
+/// One scheduled collection run: for every listing held at any point in the
+/// lookback window, store the closing price of every trading day in that
+/// window whose stored row is missing or errored (one provider call per
+/// identity span; days already stored ok are never re-fetched). A non-trading
+/// day stores no row and is not an error; a failed fetch stores an errored row
+/// and fails the job (so the Jobs UI shows it), without stopping the other
+/// listings — and is re-attempted by later runs while it stays in the window.
 pub async fn run_collection(
     pool: &SqlitePool,
     fetcher: &dyn PriceFetcher,
     now: DateTime<Utc>,
 ) -> Result<(), String> {
-    let ids = db_held_listing_ids(pool, None)
-        .await
-        .map_err(|e| e.to_string())?;
+    // The window is bounded by calendar dates, so one span over all listings
+    // covers every market's own lookback regardless of its exchange calendar.
+    let today = now.date_naive();
+    let ids = db_listing_ids_held_between(
+        pool,
+        today - Duration::days(COLLECTION_LOOKBACK_DAYS),
+        today,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
 
     let (mut stored, mut skipped) = (0, 0);
     let mut failures: Vec<String> = Vec::new();
@@ -1215,10 +1488,37 @@ pub mod test_support {
     #[derive(Default)]
     pub struct QuoteStub {
         quotes: HashMap<i64, LatestQuote>,
+        /// Daily closes keyed by **provider symbol**, so a stub can model a
+        /// provider that serves a security's history only under the symbol it
+        /// was quoted as at the time — the shape a rename produces.
+        closes: HashMap<String, Vec<FetchedClose>>,
         fail: Option<String>,
     }
 
     impl QuoteStub {
+        /// Canned daily closes served for `symbol` only. A fetch whose
+        /// resolved symbol has no entry gets no candles, exactly as a
+        /// provider does for a symbol it no longer serves.
+        pub fn with_symbol_closes(
+            mut self,
+            symbol: &str,
+            currency: &str,
+            closes: &[(NaiveDate, &str)],
+        ) -> Self {
+            self.closes.insert(
+                symbol.to_string(),
+                closes
+                    .iter()
+                    .map(|(date, price)| FetchedClose {
+                        date: *date,
+                        price: price.parse().unwrap(),
+                        currency: currency.to_string(),
+                    })
+                    .collect(),
+            );
+            self
+        }
+
         pub fn with_quote(
             mut self,
             listing_id: i64,
@@ -1257,11 +1557,26 @@ pub mod test_support {
 
         fn daily_closes<'a>(
             &'a self,
-            _market: &'a Market,
-            _from: NaiveDate,
-            _to: NaiveDate,
+            market: &'a Market,
+            from: NaiveDate,
+            to: NaiveDate,
         ) -> FetchFuture<'a> {
-            Box::pin(async move { Ok(vec![]) })
+            Box::pin(async move {
+                if let Some(msg) = &self.fail {
+                    return Err(msg.clone());
+                }
+                let symbol = yahoo_symbol(market, from)?;
+                Ok(self
+                    .closes
+                    .get(&symbol)
+                    .map(|v| {
+                        v.iter()
+                            .filter(|c| c.date >= from && c.date <= to)
+                            .cloned()
+                            .collect()
+                    })
+                    .unwrap_or_default())
+            })
         }
 
         fn latest_quote<'a>(&'a self, market: &'a Market) -> QuoteFuture<'a> {
@@ -1422,7 +1737,7 @@ mod tests {
                 self.symbols
                     .lock()
                     .unwrap()
-                    .push(yahoo_symbol(market).unwrap_or_default());
+                    .push(yahoo_symbol(market, from).unwrap_or_default());
                 if let Some(msg) = &self.fail {
                     return Err(msg.clone());
                 }
@@ -1456,6 +1771,54 @@ mod tests {
     // 08:00 UTC = 18:00 Sydney (AEST) — after the 16:00 ASX close.
     fn friday_evening_sydney() -> DateTime<Utc> {
         utc(2026, 6, 5, 8, 0)
+    }
+
+    async fn insert_share_split(
+        pool: &SqlitePool,
+        listing_id: i64,
+        date: NaiveDate,
+        new: &str,
+        old: &str,
+    ) {
+        crate::entities::corporate_action::db_upsert(
+            pool,
+            &crate::entities::corporate_action::CorporateAction {
+                id: 900 + listing_id,
+                listing_id,
+                date,
+                kind: crate::entities::corporate_action::ActionKind::ShareSplit {
+                    split_new_units: new.parse().unwrap(),
+                    split_old_units: old.parse().unwrap(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    /// Record a rename through the entity's own path, so the chain and the
+    /// listing row move together exactly as `POST /listings/:id/rename` does.
+    async fn rename_listing(
+        pool: &SqlitePool,
+        listing_id: i64,
+        effective_date: NaiveDate,
+        new_ticker: &str,
+        new_mic: Option<&str>,
+    ) {
+        crate::entities::listing_rename::db_rename(
+            pool,
+            listing_id,
+            &crate::entities::listing_rename::RenameBody {
+                effective_date,
+                ticker: new_ticker.to_string(),
+                exchange_mic: new_mic.map(str::to_string),
+                name: None,
+                price_symbol: None,
+                note: None,
+            },
+        )
+        .await
+        .unwrap();
     }
 
     // --- clean_price ---
@@ -1581,8 +1944,14 @@ mod tests {
 
     /// The 7-trading-day lookback window ending Friday 2026-06-05 on the ASX
     /// calendar (no seeded holiday falls inside it), oldest first.
-    fn asx_lookback_week() -> Vec<NaiveDate> {
+    /// The ASX trading days in the collection window ending Friday
+    /// 2026-06-05 — the last [`COLLECTION_LOOKBACK_DAYS`] calendar days, so
+    /// from Saturday 2026-05-23, whose first trading day is Monday 2026-05-25.
+    fn asx_lookback_window() -> Vec<NaiveDate> {
         vec![
+            ymd(2026, 5, 25),
+            ymd(2026, 5, 26),
+            ymd(2026, 5, 27),
             ymd(2026, 5, 28),
             ymd(2026, 5, 29),
             ymd(2026, 6, 1),
@@ -1628,7 +1997,7 @@ mod tests {
         insert_listing(&pool, 2, "IDLE", "XASX", "AUD").await;
         insert_buy(&pool, 1, 1, "100").await;
         // The earlier window days are already stored ok; only Friday is new.
-        for &d in asx_lookback_week().iter().rev().skip(1) {
+        for &d in asx_lookback_window().iter().rev().skip(1) {
             seed_ok_price(&pool, 1, d).await;
         }
         let fetcher = StubFetcher::default().with_close(1, ymd(2026, 6, 5), "62.48", "AUD");
@@ -1660,7 +2029,7 @@ mod tests {
         insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
         insert_buy(&pool, 1, 1, "100").await;
         let mut fetcher = StubFetcher::default();
-        for &d in &asx_lookback_week() {
+        for &d in &asx_lookback_window() {
             fetcher = fetcher.with_close(1, d, "62.48", "AUD");
         }
         run_collection(&pool, &fetcher, friday_evening_sydney())
@@ -1671,14 +2040,14 @@ mod tests {
             1,
             "one provider call spans the window"
         );
-        assert_eq!(db_list(&pool, None, None, None).await.unwrap().len(), 7);
+        assert_eq!(db_list(&pool, None, None, None).await.unwrap().len(), 10);
 
         // A second run (same evening) finds every window day ok: no re-fetch.
         run_collection(&pool, &fetcher, friday_evening_sydney())
             .await
             .unwrap();
         assert_eq!(fetcher.calls().len(), 1, "no second provider call");
-        assert_eq!(db_list(&pool, None, None, None).await.unwrap().len(), 7);
+        assert_eq!(db_list(&pool, None, None, None).await.unwrap().len(), 10);
     }
 
     /// The lookback self-heals: a day stored errored (and a day missed
@@ -1690,7 +2059,7 @@ mod tests {
         insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
         insert_buy(&pool, 1, 1, "100").await;
         // Window state: Wed errored, Thu missing, Fri missing; the rest ok.
-        for &d in &asx_lookback_week()[..4] {
+        for &d in &asx_lookback_window()[..7] {
             seed_ok_price(&pool, 1, d).await;
         }
         seed_errored_price(&pool, 1, ymd(2026, 6, 3), "provider down").await;
@@ -1731,7 +2100,7 @@ mod tests {
         let rows = db_list(&pool, None, None, None).await.unwrap();
         assert_eq!(
             rows.len(),
-            7,
+            asx_lookback_window().len(),
             "every attempted window day is recorded, never silently missing"
         );
         assert!(rows.iter().all(|r| r.status == PriceStatus::Error));
@@ -1753,7 +2122,7 @@ mod tests {
         .unwrap_err();
 
         let mut fetcher = StubFetcher::default();
-        for &d in &asx_lookback_week() {
+        for &d in &asx_lookback_window() {
             fetcher = fetcher.with_close(1, d, "62.48", "AUD");
         }
         run_collection(&pool, &fetcher, friday_evening_sydney())
@@ -1761,7 +2130,7 @@ mod tests {
             .unwrap();
 
         let rows = db_list(&pool, None, None, None).await.unwrap();
-        assert_eq!(rows.len(), 7);
+        assert_eq!(rows.len(), asx_lookback_window().len());
         assert!(rows.iter().all(|r| r.status == PriceStatus::Ok));
         assert!(rows.iter().all(|r| r.error.is_none()));
     }
@@ -1773,7 +2142,7 @@ mod tests {
         insert_buy(&pool, 1, 1, "10").await;
         // Only Friday is missing; the provider quotes AUD for a USD listing —
         // wrong symbol mapping; the price must not be stored as if it were USD.
-        for &d in asx_lookback_week().iter().rev().skip(1) {
+        for &d in asx_lookback_window().iter().rev().skip(1) {
             seed_ok_price(&pool, 1, d).await;
         }
         let fetcher = StubFetcher::default().with_close(1, ymd(2026, 6, 5), "141.50", "AUD");
@@ -1795,9 +2164,10 @@ mod tests {
         let pool = test_pool().await;
         insert_crypto_listing(&pool, 1, "BTC").await;
         insert_buy(&pool, 1, 1, "0.5").await;
-        // Crypto trades every day: the lookback is the 7 calendar days ending
-        // Saturday 2026-06-06; all but Saturday already stored ok.
-        for i in 1..7 {
+        // Crypto trades every day: the lookback is the COLLECTION_LOOKBACK_DAYS
+        // calendar days ending Saturday 2026-06-06; all but Saturday are
+        // already stored ok.
+        for i in 1..COLLECTION_LOOKBACK_DAYS {
             seed_ok_price(&pool, 1, ymd(2026, 6, 6) - Duration::days(i)).await;
         }
         let fetcher = StubFetcher::default().with_close(1, ymd(2026, 6, 6), "86378.35", "AUD");
@@ -2190,7 +2560,7 @@ mod tests {
         insert_buy(&pool, 1, 1, "100").await;
         seed_manual_price(&pool, 1, ymd(2026, 6, 4), "62.48").await;
 
-        let week = asx_lookback_week();
+        let week = asx_lookback_window();
         let mut stub = StubFetcher::default();
         for &d in &week {
             stub = stub.with_close(1, d, "99.99", "AUD");
@@ -2869,24 +3239,20 @@ mod tests {
                 None => b.crypto(),
             }
             .build();
-            Market {
-                listing,
-                exchange: None,
-                holidays: HashSet::new(),
-                symbol_override: None,
-            }
+            Market::unrenamed(listing, None, HashSet::new())
         };
+        let d = ymd(2024, 6, 3);
         assert_eq!(
-            yahoo_symbol(&mk(Some("XASX"), "BHP", "AUD")).unwrap(),
+            yahoo_symbol(&mk(Some("XASX"), "BHP", "AUD"), d).unwrap(),
             "BHP.AX"
         );
         assert_eq!(
-            yahoo_symbol(&mk(Some("XNYS"), "ICE", "USD")).unwrap(),
+            yahoo_symbol(&mk(Some("XNYS"), "ICE", "USD"), d).unwrap(),
             "ICE"
         );
-        assert_eq!(yahoo_symbol(&mk(None, "BTC", "AUD")).unwrap(), "BTC-AUD");
+        assert_eq!(yahoo_symbol(&mk(None, "BTC", "AUD"), d).unwrap(), "BTC-AUD");
         assert!(
-            yahoo_symbol(&mk(Some("XLON"), "BARC", "GBP"))
+            yahoo_symbol(&mk(Some("XLON"), "BARC", "GBP"), d)
                 .unwrap_err()
                 .contains("XLON")
         );
@@ -2896,21 +3262,21 @@ mod tests {
     /// provider spells differently, or an exchange with no mapping at all).
     #[test]
     fn yahoo_symbol_prefers_the_listings_stored_price_symbol_override() {
-        let mut market = Market {
-            listing: crate::test_support::listing(1)
+        let mut market = Market::unrenamed(
+            crate::test_support::listing(1)
                 .mic("XLON")
                 .security_type(listing::SecurityType::Share)
                 .ticker("BARC")
                 .build(),
-            exchange: None,
-            holidays: HashSet::new(),
-            symbol_override: None,
-        };
+            None,
+            HashSet::new(),
+        );
+        let d = ymd(2024, 6, 3);
         // XLON has no derived mapping, so without an override it errors...
-        assert!(yahoo_symbol(&market).is_err());
+        assert!(yahoo_symbol(&market, d).is_err());
         // ...but a stored price_symbol resolves it.
         market.listing.price_symbol = Some("BARC.L".to_string());
-        assert_eq!(yahoo_symbol(&market).unwrap(), "BARC.L");
+        assert_eq!(yahoo_symbol(&market, d).unwrap(), "BARC.L");
     }
 
     /// A one-off `symbol_override` (backfill's `symbol` param) wins over even
@@ -2918,17 +3284,348 @@ mod tests {
     /// recovering pre-rename history under the old symbol.
     #[test]
     fn yahoo_symbol_override_wins_over_the_stored_price_symbol() {
-        let market = Market {
-            listing: crate::test_support::listing(1)
+        let mut market = Market::unrenamed(
+            crate::test_support::listing(1)
                 .mic("XNYS")
                 .security_type(listing::SecurityType::Share)
                 .ticker("LAR")
                 .price_symbol("LAR-CURRENT")
                 .build(),
-            exchange: None,
-            holidays: HashSet::new(),
-            symbol_override: Some("LAAC-OLD".to_string()),
-        };
-        assert_eq!(yahoo_symbol(&market).unwrap(), "LAAC-OLD");
+            None,
+            HashSet::new(),
+        );
+        market.symbol_override = Some("LAAC-OLD".to_string());
+        assert_eq!(yahoo_symbol(&market, ymd(2024, 6, 3)).unwrap(), "LAAC-OLD");
+    }
+
+    // --- as-at identity: the symbol and the calendar follow the date ---
+
+    /// The prompting case (LAAC → LAR): a fetch of a date *before* the rename
+    /// asks the provider for the symbol the security was actually quoted
+    /// under then, with no `symbol` override supplied by the caller.
+    #[tokio::test]
+    async fn db_yahoo_symbol_resolves_as_at_the_date_across_a_rename() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "LAAC", "XNYS", "USD").await;
+        rename_listing(&pool, 1, ymd(2025, 1, 27), "LAR", None).await;
+
+        let market = load_market(&pool, 1).await.unwrap().unwrap();
+        assert_eq!(yahoo_symbol(&market, ymd(2025, 1, 26)).unwrap(), "LAAC");
+        // The effective date itself is already the new identity.
+        assert_eq!(yahoo_symbol(&market, ymd(2025, 1, 27)).unwrap(), "LAR");
+        assert_eq!(yahoo_symbol(&market, ymd(2025, 6, 1)).unwrap(), "LAR");
+        // A live quote is always a question about today.
+        assert_eq!(yahoo_symbol_now(&market).unwrap(), "LAR");
+    }
+
+    /// An exchange change moves the derived suffix too: the same security is
+    /// `OLD.AX` before it moved and plain `NEW` after.
+    #[tokio::test]
+    async fn db_yahoo_symbol_follows_the_exchange_in_force_on_the_date() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "OLD", "XASX", "AUD").await;
+        rename_listing(&pool, 1, ymd(2025, 3, 10), "NEW", Some("XNYS")).await;
+
+        let market = load_market(&pool, 1).await.unwrap().unwrap();
+        assert_eq!(yahoo_symbol(&market, ymd(2025, 3, 7)).unwrap(), "OLD.AX");
+        assert_eq!(yahoo_symbol(&market, ymd(2025, 3, 10)).unwrap(), "NEW");
+    }
+
+    /// `listings.price_symbol` is the *current* provider spelling, so it must
+    /// not be applied to a pre-rename date — an override that matched the new
+    /// ticker would otherwise silently re-label the old identity's history.
+    #[tokio::test]
+    async fn db_price_symbol_applies_to_the_current_identity_only() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "LAAC", "XNYS", "USD").await;
+        rename_listing(&pool, 1, ymd(2025, 1, 27), "LAR", None).await;
+        sqlx::query("UPDATE listings SET price_symbol = 'LAR-CURRENT' WHERE id = 1")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let market = load_market(&pool, 1).await.unwrap().unwrap();
+        assert_eq!(yahoo_symbol(&market, ymd(2025, 1, 26)).unwrap(), "LAAC");
+        assert_eq!(
+            yahoo_symbol(&market, ymd(2025, 2, 3)).unwrap(),
+            "LAR-CURRENT"
+        );
+    }
+
+    /// A trading-day question about a pre-rename date is answered by the
+    /// exchange that was actually open then. 2025-01-27 is Australia Day
+    /// (an ASX holiday, seeded) and an ordinary NYSE trading day, so the two
+    /// calendars disagree on exactly that date.
+    #[tokio::test]
+    async fn db_trading_days_follow_the_exchange_calendar_in_force_then() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "OLD", "XASX", "AUD").await;
+        exchange_holiday::db_upsert(
+            &pool,
+            &exchange_holiday::ExchangeHoliday {
+                mic: "XASX".to_string(),
+                holiday_date: ymd(2025, 1, 27),
+                name: "Australia Day".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        rename_listing(&pool, 1, ymd(2025, 6, 2), "NEW", Some("XNYS")).await;
+
+        let market = load_market(&pool, 1).await.unwrap().unwrap();
+        // Before the move the ASX calendar applies, so the holiday is closed
+        // and valuation falls back to the previous trading day.
+        assert_eq!(
+            market.latest_trading_day_on_or_before(ymd(2025, 1, 27)),
+            Some(ymd(2025, 1, 24))
+        );
+        // After the move, NYSE's calendar — which has no such holiday — is
+        // what a date is tested against.
+        assert_eq!(
+            market.latest_trading_day_on_or_before(ymd(2025, 6, 3)),
+            Some(ymd(2025, 6, 3))
+        );
+    }
+
+    /// A fetch range straddling a rename is one call per identity, each under
+    /// the symbol quoted over its own span — never one call for the lot under
+    /// today's symbol.
+    #[tokio::test]
+    async fn db_fetch_straddling_a_rename_calls_the_provider_once_per_identity() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "LAAC", "XNYS", "USD").await;
+        rename_listing(&pool, 1, ymd(2026, 6, 3), "LAR", None).await;
+
+        let market = load_market(&pool, 1).await.unwrap().unwrap();
+        let days = [
+            ymd(2026, 6, 1),
+            ymd(2026, 6, 2),
+            ymd(2026, 6, 3),
+            ymd(2026, 6, 4),
+        ];
+        let mut stub = StubFetcher::default();
+        for &d in &days {
+            stub = stub.with_close(1, d, "2.77", "USD");
+        }
+        let (ok, errored) = fetch_and_store(&pool, &stub, &market, &days).await.unwrap();
+        assert_eq!((ok, errored), (4, 0));
+
+        assert_eq!(
+            stub.calls(),
+            vec![
+                (1, ymd(2026, 6, 1), ymd(2026, 6, 2)),
+                (1, ymd(2026, 6, 3), ymd(2026, 6, 4)),
+            ],
+            "the range splits at the effective date"
+        );
+        assert_eq!(stub.symbols(), vec!["LAAC".to_string(), "LAR".to_string()]);
+    }
+
+    /// A wholly pre-rename backfill is self-healing: the operator supplies no
+    /// `symbol`, and the old one is read off the rename chain.
+    #[tokio::test]
+    async fn api_backfill_before_a_rename_uses_the_old_symbol_without_an_override() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "LAAC", "XNYS", "USD").await;
+        rename_listing(&pool, 1, ymd(2026, 6, 3), "LAR", None).await;
+
+        let stub = Arc::new(StubFetcher::default().with_close(1, ymd(2026, 6, 1), "2.77", "USD"));
+        let shared: SharedFetcher = stub.clone();
+        let app = router().with_state(pool.clone()).layer(Extension(shared));
+        let (status, bytes) = post_json(
+            &app,
+            "/closing_prices/backfill",
+            serde_json::json!({ "listing_id": 1, "from": "2026-06-01", "to": "2026-06-01" }),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+
+        assert_eq!(stub.symbols(), vec!["LAAC".to_string()]);
+        let row = db_get_one(&pool, 1, ymd(2026, 6, 1))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.status, PriceStatus::Ok);
+        assert_eq!(row.price, Some("2.77".parse().unwrap()));
+    }
+
+    /// The zero-candle message is judged per segment, so it names the symbol
+    /// that actually came back empty rather than today's — and the segment
+    /// that *did* return candles still stores its ok rows.
+    #[tokio::test]
+    async fn db_a_dead_segment_errors_alone_and_names_its_own_symbol() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "LAAC", "XNYS", "USD").await;
+        rename_listing(&pool, 1, ymd(2026, 6, 3), "LAR", None).await;
+
+        let market = load_market(&pool, 1).await.unwrap().unwrap();
+        // Only the post-rename day has a candle; the old symbol serves none.
+        let stub = StubFetcher::default().with_close(1, ymd(2026, 6, 3), "2.77", "USD");
+        let days = [ymd(2026, 6, 2), ymd(2026, 6, 3)];
+        let (ok, errored) = fetch_and_store(&pool, &stub, &market, &days).await.unwrap();
+        assert_eq!((ok, errored), (1, 1));
+
+        let dead = db_get_one(&pool, 1, ymd(2026, 6, 2))
+            .await
+            .unwrap()
+            .unwrap();
+        let msg = dead.error.unwrap();
+        assert!(
+            msg.contains("LAAC"),
+            "names the dead segment's symbol: {msg}"
+        );
+        assert!(!msg.contains("LAR"), "not the current symbol: {msg}");
+        let good = db_get_one(&pool, 1, ymd(2026, 6, 3))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(good.status, PriceStatus::Ok);
+    }
+
+    // --- collection's held-set and window ---
+
+    /// A listing sold part-way through the lookback window is still collected
+    /// for the days it was held: `reports::valuation` values a snapshot date
+    /// against the listings held *on that date*, so dropping it the moment
+    /// the Sell lands leaves those dates permanently blocked.
+    #[tokio::test]
+    async fn collection_covers_a_listing_sold_inside_the_lookback_window() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
+        crate::test_support::buy(1, 1)
+            .date(ymd(2024, 1, 15))
+            .qty(Decimal::from(100))
+            .price(Decimal::from(10))
+            .insert(&pool)
+            .await;
+        sell_everything(&pool, 2, 1, 1, "100").await;
+        sqlx::query("UPDATE trades SET date = '2026-06-03' WHERE id = 2")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // Nothing is held now, but the listing was held for most of the window.
+        assert!(db_held_listing_ids(&pool, None).await.unwrap().is_empty());
+
+        let mut stub = StubFetcher::default();
+        for &d in &asx_lookback_window() {
+            stub = stub.with_close(1, d, "62.48", "AUD");
+        }
+        run_collection(&pool, &stub, friday_evening_sydney())
+            .await
+            .unwrap();
+
+        let stored = db_list(&pool, Some(1), None, None).await.unwrap();
+        assert!(
+            !stored.is_empty(),
+            "the sold listing is still collected for the window"
+        );
+        assert!(
+            stored.iter().any(|r| r.price_date == ymd(2026, 6, 2)),
+            "including the days before the sale"
+        );
+    }
+
+    /// The collection window must reach at least as far back as the snapshot
+    /// catch-up window: a date the snapshot job retries but collection no
+    /// longer refills can never unblock itself.
+    #[test]
+    fn collection_window_covers_the_snapshot_catchup_window() {
+        // Read through a runtime binding so this stays a real assertion if the
+        // two constants are ever decoupled again.
+        let catchup: i64 = crate::reports::snapshot::CATCHUP_LOOKBACK_DAYS;
+        let collection: i64 = COLLECTION_LOOKBACK_DAYS;
+        assert!(
+            catchup <= collection,
+            "snapshot catch-up ({catchup}) reaches further back than collection ({collection})"
+        );
+    }
+
+    // --- the held-set agrees with the holdings reports across a split ---
+
+    /// `db_held_listing_ids` and `reports::portfolio::db_holdings_on` must
+    /// agree about whether a listing is held: the price map is keyed off the
+    /// former and the snapshot rows off the latter, so a disagreement stores
+    /// a silently unvalued holding (or blocks a date on a security already
+    /// fully sold). A split between the Buy and the Sell is what used to
+    /// separate them — the allocation is in sale-date units, the parcel in
+    /// as-acquired ones.
+    async fn held_sets_agree(pool: &SqlitePool, as_of: NaiveDate) {
+        let ids = db_held_listing_ids(pool, Some(as_of)).await.unwrap();
+        let mut conn = pool.acquire().await.unwrap();
+        let holdings = crate::reports::portfolio::db_holdings_on(&mut conn, Some(as_of))
+            .await
+            .unwrap();
+        let mut from_report: Vec<i64> = holdings.iter().map(|h| h.listing_id).collect();
+        from_report.sort();
+        from_report.dedup();
+        assert_eq!(ids, from_report, "as at {as_of}");
+    }
+
+    #[tokio::test]
+    async fn db_held_listings_match_the_holdings_report_across_a_split() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
+        // Buy 100, 2:1 split to 200 units, sell 150 of them.
+        crate::test_support::buy(1, 1)
+            .date(ymd(2024, 1, 15))
+            .qty(Decimal::from(100))
+            .price(Decimal::from(10))
+            .insert(&pool)
+            .await;
+        insert_share_split(&pool, 1, ymd(2024, 3, 1), "2", "1").await;
+        crate::test_support::sell(2, 1)
+            .date(ymd(2024, 6, 1))
+            .qty(Decimal::from(150))
+            .price(Decimal::from(8))
+            .insert(&pool)
+            .await;
+        crate::test_support::allocate(&pool, 2, 2, 1, Decimal::from(150)).await;
+
+        // 50 of the 200 post-split units remain, so the listing is still held
+        // — the raw subtraction (100 − 150) used to make it look fully sold.
+        held_sets_agree(&pool, ymd(2024, 7, 1)).await;
+        assert_eq!(
+            db_held_listing_ids(&pool, Some(ymd(2024, 7, 1)))
+                .await
+                .unwrap(),
+            vec![1]
+        );
+    }
+
+    #[tokio::test]
+    async fn db_held_listings_match_the_holdings_report_across_a_consolidation() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
+        // Buy 1000, 1:10 consolidation to 100 units, sell all 100.
+        crate::test_support::buy(1, 1)
+            .date(ymd(2024, 1, 15))
+            .qty(Decimal::from(1000))
+            .price(Decimal::from(1))
+            .insert(&pool)
+            .await;
+        insert_share_split(&pool, 1, ymd(2024, 3, 1), "1", "10").await;
+        crate::test_support::sell(2, 1)
+            .date(ymd(2024, 6, 1))
+            .qty(Decimal::from(100))
+            .price(Decimal::from(12))
+            .insert(&pool)
+            .await;
+        crate::test_support::allocate(&pool, 2, 2, 1, Decimal::from(100)).await;
+
+        // Fully sold — the raw subtraction (1000 − 100) used to leave 900
+        // phantom units, blocking every later snapshot on a missing price.
+        held_sets_agree(&pool, ymd(2024, 7, 1)).await;
+        assert!(
+            db_held_listing_ids(&pool, Some(ymd(2024, 7, 1)))
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 }
