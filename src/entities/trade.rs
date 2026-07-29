@@ -42,12 +42,14 @@ use sqlx::SqlitePool;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{self, dec, test_pool, ymd};
-    use axum::{body::Body, http::Request};
-    use http_body_util::BodyExt;
+    use crate::test_support::{self, ApiClient, dec, test_pool, ymd};
     use rust_decimal::Decimal;
     use std::collections::HashSet;
-    use tower::ServiceExt;
+
+    /// Client over this module's own routes.
+    fn client(pool: &SqlitePool) -> ApiClient {
+        ApiClient::over(router().with_state(pool.clone()))
+    }
 
     async fn insert_test_listing(pool: &SqlitePool) {
         test_support::listing(1)
@@ -367,19 +369,8 @@ mod tests {
             "brokerage_currency": "AUD",
             "fx_rate": 1.0
         });
-        let resp = router()
-            .with_state(pool.clone())
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri("/trades/1")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let resp = client(&pool).put("/trades/1", &body).await;
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
         let trade_type: String = sqlx::query_scalar("SELECT trade_type FROM trades WHERE id = 1")
             .fetch_one(&pool)
             .await
@@ -578,19 +569,8 @@ mod tests {
             "brokerage_currency": "AUD",
             "fx_rate": 1.0
         });
-        let resp = router()
-            .with_state(pool.clone())
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri("/trades/1")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let resp = client(&pool).put("/trades/1", &body).await;
+        assert_eq!(resp.status, StatusCode::NO_CONTENT);
         let trade = db_get(&pool, 1).await.unwrap().unwrap();
         assert_eq!(
             trade.settlement_date,
@@ -625,19 +605,8 @@ mod tests {
             "brokerage_currency": "AUD",
             "fx_rate": "1"
         });
-        let resp = router()
-            .with_state(pool.clone())
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri("/trades/1")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let resp = client(&pool).put("/trades/1", &body).await;
+        assert_eq!(resp.status, StatusCode::NO_CONTENT);
         let trade = db_get(&pool, 1).await.unwrap().unwrap();
         assert_eq!(
             trade.settlement_date,
@@ -668,20 +637,9 @@ mod tests {
             "brokerage_currency": "AUD",
             "fx_rate": 1.0
         });
-        let resp = router()
-            .with_state(pool.clone())
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri("/trades/1")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let resp = client(&pool).put("/trades/1", &body).await;
         // Non-blocking: the write succeeds, the warning surfaces the gap.
-        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert_eq!(resp.status, StatusCode::NO_CONTENT);
         assert!(logs_contain(
             "settlement window outside seeded exchange-holiday coverage"
         ));
@@ -704,19 +662,8 @@ mod tests {
             "brokerage_currency": "AUD",
             "fx_rate": 1.0
         });
-        let resp = router()
-            .with_state(pool.clone())
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri("/trades/1")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let resp = client(&pool).put("/trades/1", &body).await;
+        assert_eq!(resp.status, StatusCode::NO_CONTENT);
         assert!(!logs_contain(
             "settlement window outside seeded exchange-holiday coverage"
         ));
@@ -791,19 +738,8 @@ mod tests {
             "brokerage_currency": "AUD",
             "fx_rate": 1.0
         });
-        let resp = router()
-            .with_state(pool.clone())
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri("/trades/1")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let resp = client(&pool).put("/trades/1", &body).await;
+        assert_eq!(resp.status, StatusCode::NO_CONTENT);
         let trade = db_get(&pool, 1).await.unwrap().unwrap();
         assert_eq!(
             trade.settlement_date,
@@ -828,19 +764,8 @@ mod tests {
             "brokerage_currency": "AUD",
             "fx_rate": 1.0
         });
-        let resp = router()
-            .with_state(pool.clone())
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri("/trades/1")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let resp = client(&pool).put("/trades/1", &body).await;
+        assert_eq!(resp.status, StatusCode::NO_CONTENT);
         let trade = db_get(&pool, 1).await.unwrap().unwrap();
         assert_eq!(
             trade.settlement_date,
@@ -865,19 +790,8 @@ mod tests {
             "brokerage_currency": "AUD",
             "fx_rate": 1.0
         });
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri("/trades/1")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let resp = client(&pool).put("/trades/1", &body).await;
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     #[tokio::test]
@@ -899,19 +813,8 @@ mod tests {
             "brokerage_currency": "AUD",
             "fx_rate": 1.0
         });
-        let resp = router()
-            .with_state(pool.clone())
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri("/trades/1")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let resp = client(&pool).put("/trades/1", &body).await;
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
         let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM trades")
             .fetch_one(&pool)
             .await
@@ -936,19 +839,8 @@ mod tests {
             "brokerage_currency": "AUD",
             "fx_rate": 1.0
         });
-        let resp = router()
-            .with_state(pool.clone())
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri("/trades/1")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let resp = client(&pool).put("/trades/1", &body).await;
+        assert_eq!(resp.status, StatusCode::NO_CONTENT);
         let trade = db_get(&pool, 1).await.unwrap().unwrap();
         assert_eq!(
             trade.settlement_date,
@@ -961,19 +853,9 @@ mod tests {
         let pool = test_pool().await;
         insert_test_listing(&pool).await;
         db_upsert(&pool, &buy_trade()).await.unwrap();
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .uri("/trades")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let trades: Vec<Trade> = serde_json::from_slice(&bytes).unwrap();
+        let resp = client(&pool).get("/trades").await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let trades: Vec<Trade> = resp.json();
         assert_eq!(trades.len(), 1);
         assert_eq!(trades[0].trade_type, TradeType::Buy);
     }
@@ -983,19 +865,9 @@ mod tests {
         let pool = test_pool().await;
         insert_test_listing(&pool).await;
         db_upsert(&pool, &buy_trade()).await.unwrap();
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .uri("/trades/1")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let t: Trade = serde_json::from_slice(&bytes).unwrap();
+        let resp = client(&pool).get("/trades/1").await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let t: Trade = resp.json();
         assert_eq!(t.trade_type, TradeType::Buy);
         assert_eq!(t.quantity, Decimal::from(10));
     }
@@ -1003,17 +875,8 @@ mod tests {
     #[tokio::test]
     async fn api_get_missing_returns_404() {
         let pool = test_pool().await;
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .uri("/trades/999")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let resp = client(&pool).get("/trades/999").await;
+        assert_eq!(resp.status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
@@ -1021,35 +884,15 @@ mod tests {
         let pool = test_pool().await;
         insert_test_listing(&pool).await;
         db_upsert(&pool, &buy_trade()).await.unwrap();
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .method("DELETE")
-                    .uri("/trades/1")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let resp = client(&pool).delete("/trades/1").await;
+        assert_eq!(resp.status, StatusCode::NO_CONTENT);
     }
 
     #[tokio::test]
     async fn api_delete_missing_returns_404() {
         let pool = test_pool().await;
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .method("DELETE")
-                    .uri("/trades/999")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let resp = client(&pool).delete("/trades/999").await;
+        assert_eq!(resp.status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
@@ -1059,18 +902,8 @@ mod tests {
         db_upsert(&pool, &buy_trade()).await.unwrap();
         insert_sell_consuming(&pool, 2, 1, Decimal::from(5)).await;
 
-        let resp = router()
-            .with_state(pool.clone())
-            .oneshot(
-                Request::builder()
-                    .method("DELETE")
-                    .uri("/trades/1")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let resp = client(&pool).delete("/trades/1").await;
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
         assert!(
             db_get(&pool, 1).await.unwrap().is_some(),
             "consumed buy must remain"
@@ -1099,19 +932,8 @@ mod tests {
             "brokerage_currency": "AUD",
             "fx_rate": "1"
         });
-        let resp = router()
-            .with_state(pool.clone())
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri("/trades/1")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let resp = client(&pool).put("/trades/1", &body).await;
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(
             db_get(&pool, 1).await.unwrap().unwrap().quantity,
             Decimal::from(10)
@@ -1164,31 +986,10 @@ mod tests {
             "brokerage_currency": "AUD",
             "fx_rate": "1.0"
         });
-        let resp = router()
-            .with_state(pool.clone())
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri("/trades/1")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .uri("/trades/1")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let t: Trade = serde_json::from_slice(&bytes).unwrap();
+        let resp = client(&pool).put("/trades/1", &body).await;
+        assert_eq!(resp.status, StatusCode::NO_CONTENT);
+        let resp = client(&pool).get("/trades/1").await;
+        let t: Trade = resp.json();
         assert_eq!(t.average_price, "99.9999999999".parse::<Decimal>().unwrap());
         assert_eq!(t.quantity, "10.5".parse::<Decimal>().unwrap());
         assert_eq!(t.brokerage, "9.95".parse::<Decimal>().unwrap());
@@ -1205,21 +1006,9 @@ mod tests {
         id: i64,
         body: serde_json::Value,
     ) -> (StatusCode, String) {
-        let resp = router()
-            .with_state(pool.clone())
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri(format!("/trades/{id}"))
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let status = resp.status();
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        (status, String::from_utf8(bytes.to_vec()).unwrap())
+        let resp = client(pool).put(format!("/trades/{id}"), &body).await;
+        let status = resp.status;
+        (status, resp.text().to_string())
     }
 
     /// Degenerate core figures are rejected with 422 per shape — a zero or
@@ -1419,20 +1208,10 @@ mod tests {
     /// GET the JSON body of /trades/{id} as raw bytes (the exact wire shape a
     /// round-trip client would re-PUT) plus its parsed `Trade`.
     async fn get_trade_raw(pool: &SqlitePool, id: i64) -> (Vec<u8>, Trade) {
-        let resp = router()
-            .with_state(pool.clone())
-            .oneshot(
-                Request::builder()
-                    .uri(format!("/trades/{id}"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let trade = serde_json::from_slice(&bytes).unwrap();
-        (bytes.to_vec(), trade)
+        let resp = client(pool).get(format!("/trades/{id}")).await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let trade = resp.json();
+        (resp.body.to_vec(), trade)
     }
 
     /// Lossless GST-inclusive round-trip (REQUIREMENTS 2026-07-13): with the
@@ -1725,18 +1504,7 @@ mod tests {
         let pool = test_pool().await;
         insert_test_listing(&pool).await;
         let put = |pool: SqlitePool, body: serde_json::Value| async move {
-            router()
-                .with_state(pool)
-                .oneshot(
-                    Request::builder()
-                        .method("PUT")
-                        .uri("/trades/1")
-                        .header("content-type", "application/json")
-                        .body(Body::from(body.to_string()))
-                        .unwrap(),
-                )
-                .await
-                .unwrap()
+            client(&pool).put("/trades/1", &body).await
         };
         // A USD trade with a deliberate spot rate persists it.
         let resp = put(
@@ -1749,7 +1517,7 @@ mod tests {
             }),
         )
         .await;
-        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert_eq!(resp.status, StatusCode::NO_CONTENT);
         let got = db_get(&pool, 1).await.unwrap().unwrap();
         assert_eq!(got.spot_fx_rate, Some("0.6543".parse().unwrap()));
 
@@ -1764,16 +1532,8 @@ mod tests {
             }),
         )
         .await;
-        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        let detail = String::from_utf8(
-            resp.into_body()
-                .collect()
-                .await
-                .unwrap()
-                .to_bytes()
-                .to_vec(),
-        )
-        .unwrap();
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
+        let detail = resp.text();
         assert!(detail.contains("non-AUD"), "detail: {detail}");
     }
 }

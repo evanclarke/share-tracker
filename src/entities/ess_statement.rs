@@ -422,10 +422,12 @@ async fn delete(
 mod tests {
     use super::*;
     use crate::entities::listing;
-    use crate::test_support::{self, test_pool, ymd};
-    use axum::{body::Body, http::Request};
-    use http_body_util::BodyExt;
-    use tower::ServiceExt;
+    use crate::test_support::{self, ApiClient, test_pool, ymd};
+
+    /// Client over this module's own routes.
+    fn client(pool: &SqlitePool) -> ApiClient {
+        ApiClient::over(router().with_state(pool.clone()))
+    }
 
     async fn insert_listing(pool: &SqlitePool, id: i64) {
         test_support::listing(id)
@@ -522,18 +524,8 @@ mod tests {
 
         // The field is present in the JSON the list endpoint serves (the UI
         // reads it straight off the row).
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .uri("/ess_statements")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let items: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let resp = client(&pool).get("/ess_statements").await;
+        let items: serde_json::Value = resp.json();
         assert_eq!(items[0]["vest_trade_id"], serde_json::json!(vest.id));
     }
 
@@ -567,19 +559,8 @@ mod tests {
             "taxing_point_date": "2024-09-01",
             "currency": "ZZZ"
         });
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri("/ess_statements/1")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let resp = client(&pool).put("/ess_statements/1", &body).await;
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     #[tokio::test]
@@ -592,38 +573,16 @@ mod tests {
             "currency": "AUD",
             "aud_deferral_discount": "600"
         });
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri("/ess_statements/1")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let resp = client(&pool).put("/ess_statements/1", &body).await;
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     #[tokio::test]
     async fn api_unknown_listing_rejected_422() {
         let pool = test_pool().await;
         let body = serde_json::json!({ "listing_id": 999, "taxing_point_date": "2024-09-01" });
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri("/ess_statements/1")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let resp = client(&pool).put("/ess_statements/1", &body).await;
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     #[tokio::test]
@@ -631,19 +590,9 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
         db_upsert(&pool, &sample(1)).await.unwrap();
-        let resp = router()
-            .with_state(pool.clone())
-            .oneshot(
-                Request::builder()
-                    .uri("/ess_statements")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let items: Vec<EssStatement> = serde_json::from_slice(&bytes).unwrap();
+        let resp = client(&pool).get("/ess_statements").await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let items: Vec<EssStatement> = resp.json();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].deferral_discount, Decimal::from(600));
     }
@@ -651,17 +600,7 @@ mod tests {
     #[tokio::test]
     async fn api_delete_missing_returns_404() {
         let pool = test_pool().await;
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .method("DELETE")
-                    .uri("/ess_statements/99")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let resp = client(&pool).delete("/ess_statements/99").await;
+        assert_eq!(resp.status, StatusCode::NOT_FOUND);
     }
 }

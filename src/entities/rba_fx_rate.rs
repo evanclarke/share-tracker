@@ -273,11 +273,13 @@ impl From<ImportError> for ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::test_pool;
+    use crate::test_support::{ApiClient, test_pool};
     use axum::http::StatusCode;
-    use axum::{body::Body, http::Request};
-    use http_body_util::BodyExt;
-    use tower::ServiceExt;
+
+    /// Client over this module's own routes.
+    fn client(pool: &SqlitePool) -> ApiClient {
+        ApiClient::over(router().with_state(pool.clone()))
+    }
 
     /// A trimmed slice of the real RBA F11 layout: BOM, metadata rows, a Title row
     /// with a non-currency Index column to skip, and two monthly data rows (the
@@ -472,19 +474,9 @@ mod tests {
         db_import_rate(&pool, "USD", "2024-01", "1.5".parse().unwrap())
             .await
             .unwrap();
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .uri("/rba_fx_rates")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let rates: Vec<RbaFxRate> = serde_json::from_slice(&bytes).unwrap();
+        let resp = client(&pool).get("/rba_fx_rates").await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let rates: Vec<RbaFxRate> = resp.json();
         assert_eq!(rates.len(), 1);
         assert_eq!(rates[0].currency, "USD");
     }
@@ -496,19 +488,9 @@ mod tests {
             .await
             .unwrap();
         let id = db_list(&pool).await.unwrap()[0].id;
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .uri(format!("/rba_fx_rates/{id}"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let rate: RbaFxRate = serde_json::from_slice(&bytes).unwrap();
+        let resp = client(&pool).get(format!("/rba_fx_rates/{id}")).await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let rate: RbaFxRate = resp.json();
         assert_eq!(rate.currency, "USD");
         assert_eq!(rate.rate, "1.5".parse::<Decimal>().unwrap());
     }
@@ -516,36 +498,18 @@ mod tests {
     #[tokio::test]
     async fn api_get_missing_returns_404() {
         let pool = test_pool().await;
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .uri("/rba_fx_rates/999")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let resp = client(&pool).get("/rba_fx_rates/999").await;
+        assert_eq!(resp.status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
     async fn api_import_endpoint_invokes_import() {
         let pool = test_pool().await;
-        let resp = router()
-            .with_state(pool.clone())
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/rba_fx_rates/import")
-                    .body(Body::from(SAMPLE_CSV))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let summary: ImportSummary = serde_json::from_slice(&bytes).unwrap();
+        let resp = client(&pool)
+            .post_bytes("/rba_fx_rates/import", None, SAMPLE_CSV)
+            .await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let summary: ImportSummary = resp.json();
         assert_eq!(
             summary,
             ImportSummary {
@@ -603,20 +567,11 @@ mod tests {
 
         // The import lands June's real rate; the response reports the true-up
         // and the stored snapshots are final afterwards.
-        let resp = router()
-            .with_state(pool.clone())
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/rba_fx_rates/import")
-                    .body(Body::from("Title,A$1=USD\n30-Jun-2026,2.5\n"))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let outcome: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let resp = client(&pool)
+            .post_raw("/rba_fx_rates/import", "Title,A$1=USD\n30-Jun-2026,2.5\n")
+            .await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let outcome: serde_json::Value = resp.json();
         assert_eq!(outcome["inserted"], 1);
         assert_eq!(
             outcome["snapshot_true_up"]["regenerated"],
@@ -631,19 +586,10 @@ mod tests {
         );
 
         // A re-import with nothing new performs no true-up.
-        let resp = router()
-            .with_state(pool.clone())
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/rba_fx_rates/import")
-                    .body(Body::from("Title,A$1=USD\n30-Jun-2026,2.5\n"))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let outcome: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let resp = client(&pool)
+            .post_raw("/rba_fx_rates/import", "Title,A$1=USD\n30-Jun-2026,2.5\n")
+            .await;
+        let outcome: serde_json::Value = resp.json();
         assert_eq!(outcome["inserted"], 0);
         assert!(
             outcome.get("snapshot_true_up").is_none(),
@@ -654,17 +600,9 @@ mod tests {
     #[tokio::test]
     async fn api_import_endpoint_rejects_malformed_feed() {
         let pool = test_pool().await;
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/rba_fx_rates/import")
-                    .body(Body::from("Title,A$1=USD\n29-Jan-2010,oops\n"))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let resp = client(&pool)
+            .post_raw("/rba_fx_rates/import", "Title,A$1=USD\n29-Jan-2010,oops\n")
+            .await;
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
     }
 }

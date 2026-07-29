@@ -76,11 +76,8 @@ pub fn router() -> Router<SqlitePool> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::test_pool;
-    use axum::body::Body;
-    use axum::http::{Request, StatusCode};
-    use http_body_util::BodyExt;
-    use tower::ServiceExt;
+    use crate::test_support::{ApiClient, test_pool};
+    use axum::http::StatusCode;
 
     /// Every entity DELETE route, with the noun its 404 body must name.
     ///
@@ -118,20 +115,11 @@ mod tests {
     async fn deleting_a_missing_row_is_404_naming_what_was_missing() {
         for (uri, noun) in DELETE_ROUTES {
             let pool = test_pool().await;
-            let resp = router()
-                .with_state(pool)
-                .oneshot(
-                    Request::builder()
-                        .method("DELETE")
-                        .uri(*uri)
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(resp.status(), StatusCode::NOT_FOUND, "DELETE {uri}");
-            let body = resp.into_body().collect().await.unwrap().to_bytes();
-            let body = String::from_utf8(body.to_vec()).unwrap();
+            let resp = ApiClient::over(router().with_state(pool))
+                .delete(*uri)
+                .await;
+            assert_eq!(resp.status, StatusCode::NOT_FOUND, "DELETE {uri}");
+            let body = resp.text().to_string();
             assert!(
                 body.contains(noun),
                 "DELETE {uri} answered 404 with a body that does not name the missing \

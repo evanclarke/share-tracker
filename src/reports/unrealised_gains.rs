@@ -185,11 +185,13 @@ async fn unrealised_gains_handler(
 mod tests {
     use super::*;
     use crate::entities::corporate_action;
-    use crate::test_support::{self, allocate, dec, test_pool, ymd};
+    use crate::test_support::{self, ApiClient, allocate, dec, test_pool, ymd};
     use axum::http::StatusCode;
-    use axum::{body::Body, http::Request};
-    use http_body_util::BodyExt;
-    use tower::ServiceExt;
+
+    /// Client over this module's own routes.
+    fn client(pool: &SqlitePool) -> ApiClient {
+        ApiClient::over(router().with_state(pool.clone()))
+    }
 
     async fn insert_listing(pool: &SqlitePool, id: i64, ticker: &str) {
         test_support::listing(id)
@@ -437,21 +439,11 @@ mod tests {
         insert_buy(&pool, 1, 1, buy_date, Decimal::from(100), Decimal::from(10)).await;
 
         let body = serde_json::json!({ "as_of_date": "2025-06-01" });
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/portfolio/unrealised-gains")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let gains: Vec<UnrealisedGain> = serde_json::from_slice(&bytes).unwrap();
+        let resp = client(&pool)
+            .post("/portfolio/unrealised-gains", &body)
+            .await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let gains: Vec<UnrealisedGain> = resp.json();
         assert_eq!(gains.len(), 1);
         assert!(gains[0].current_price.is_none());
         assert!(gains[0].unrealised_gain_loss.is_none());
@@ -466,21 +458,11 @@ mod tests {
         insert_buy(&pool, 1, 1, buy_date, Decimal::from(100), Decimal::from(10)).await;
 
         let body = serde_json::json!({ "prices": { "1": "15.00" }, "as_of_date": "2025-06-01" });
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/portfolio/unrealised-gains")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let gains: Vec<UnrealisedGain> = serde_json::from_slice(&bytes).unwrap();
+        let resp = client(&pool)
+            .post("/portfolio/unrealised-gains", &body)
+            .await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let gains: Vec<UnrealisedGain> = resp.json();
         assert_eq!(gains.len(), 1);
         let g = &gains[0];
         assert_eq!(g.current_price, Some("15.00".parse::<Decimal>().unwrap()));
@@ -504,38 +486,18 @@ mod tests {
 
         // as_of = 2025-01-01: exactly 12 months, NOT eligible
         let body = serde_json::json!({ "as_of_date": "2025-01-01" });
-        let resp = router()
-            .with_state(pool.clone())
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/portfolio/unrealised-gains")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let gains: Vec<UnrealisedGain> = serde_json::from_slice(&bytes).unwrap();
+        let resp = client(&pool)
+            .post("/portfolio/unrealised-gains", &body)
+            .await;
+        let gains: Vec<UnrealisedGain> = resp.json();
         assert_eq!(gains[0].cgt_discount_eligible_quantity, Decimal::ZERO);
 
         // as_of = 2025-01-02: one day past 12 months — eligible
         let body = serde_json::json!({ "as_of_date": "2025-01-02" });
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/portfolio/unrealised-gains")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let gains: Vec<UnrealisedGain> = serde_json::from_slice(&bytes).unwrap();
+        let resp = client(&pool)
+            .post("/portfolio/unrealised-gains", &body)
+            .await;
+        let gains: Vec<UnrealisedGain> = resp.json();
         assert_eq!(gains[0].cgt_discount_eligible_quantity, Decimal::from(100));
     }
 
@@ -556,22 +518,11 @@ mod tests {
             .shared();
 
         let body = serde_json::json!({ "live": true, "as_of_date": "2026-06-05" });
-        let resp = router()
-            .with_state(pool)
-            .layer(axum::Extension(fetcher))
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/portfolio/unrealised-gains")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let gains: Vec<UnrealisedGain> = serde_json::from_slice(&bytes).unwrap();
+        let resp = ApiClient::over(router().with_state(pool).layer(axum::Extension(fetcher)))
+            .post("/portfolio/unrealised-gains", &body)
+            .await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let gains: Vec<UnrealisedGain> = resp.json();
         assert_eq!(gains[0].market_value, Some(Decimal::from(1500)));
         assert_eq!(
             gains[0].unrealised_gain_loss,
@@ -595,22 +546,11 @@ mod tests {
         let fetcher = QuoteStub::failing("provider down").shared();
 
         let body = serde_json::json!({ "live": true, "as_of_date": "2026-06-05" });
-        let resp = router()
-            .with_state(pool)
-            .layer(axum::Extension(fetcher))
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/portfolio/unrealised-gains")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let gains: Vec<UnrealisedGain> = serde_json::from_slice(&bytes).unwrap();
+        let resp = ApiClient::over(router().with_state(pool).layer(axum::Extension(fetcher)))
+            .post("/portfolio/unrealised-gains", &body)
+            .await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let gains: Vec<UnrealisedGain> = resp.json();
         assert_eq!(gains.len(), 1);
         assert!(gains[0].market_value.is_none());
         assert!(gains[0].unrealised_gain_loss.is_none());

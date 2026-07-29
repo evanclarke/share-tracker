@@ -849,11 +849,8 @@ async fn activity_handler(
 mod tests {
     use super::*;
     use crate::entities::{corporate_action, transfer};
-    use crate::test_support::{self, allocate, dec, test_pool, ymd};
+    use crate::test_support::{self, ApiClient, ApiResponse, allocate, dec, test_pool, ymd};
     use axum::http::StatusCode;
-    use axum::{body::Body, http::Request};
-    use http_body_util::BodyExt;
-    use tower::ServiceExt;
 
     async fn insert_listing(pool: &SqlitePool, id: i64, ticker: &str) {
         test_support::listing(id)
@@ -1284,19 +1281,10 @@ mod tests {
 
     // API-level tests
 
-    async fn post_activity(pool: SqlitePool, body: serde_json::Value) -> axum::response::Response {
-        router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/portfolio/activity")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
+    async fn post_activity(pool: SqlitePool, body: serde_json::Value) -> ApiResponse {
+        ApiClient::over(router().with_state(pool))
+            .post("/portfolio/activity", &body)
             .await
-            .unwrap()
     }
 
     #[tokio::test]
@@ -1306,9 +1294,8 @@ mod tests {
         test_support::buy(1, 1).qty(dec("100")).insert(&pool).await;
 
         let resp = post_activity(pool, serde_json::json!({ "listing_id": 1, "price": "12" })).await;
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let r: ActivityResponse = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+        let r: ActivityResponse = resp.json();
         assert_eq!(r.events.len(), 1);
         assert_eq!(r.events[0].event, "Buy");
         assert_eq!(r.holdings.len(), 1);
@@ -1325,9 +1312,8 @@ mod tests {
         test_support::buy(1, 1).insert(&pool).await;
 
         let resp = post_activity(pool, serde_json::json!({ "listing_id": 1 })).await;
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let r: ActivityResponse = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+        let r: ActivityResponse = resp.json();
         assert!(r.holdings[0].market_value.is_none());
         assert!(r.holdings[0].price_unavailable.is_some());
     }
@@ -1345,24 +1331,14 @@ mod tests {
             .with_quote(1, "12.50", "AUD", as_of)
             .shared();
 
-        let resp = router()
-            .with_state(pool)
-            .layer(axum::Extension(fetcher))
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/portfolio/activity")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        serde_json::json!({ "listing_id": 1 }).to_string(),
-                    ))
-                    .unwrap(),
+        let resp = ApiClient::over(router().with_state(pool).layer(axum::Extension(fetcher)))
+            .post(
+                "/portfolio/activity",
+                &serde_json::json!({ "listing_id": 1 }),
             )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let r: ActivityResponse = serde_json::from_slice(&bytes).unwrap();
+            .await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let r: ActivityResponse = resp.json();
         assert_eq!(r.holdings[0].market_value, Some(dec("1250.00")));
         assert!(r.holdings[0].price_as_of.is_some());
     }
@@ -1371,7 +1347,7 @@ mod tests {
     async fn api_activity_unknown_listing_404() {
         let pool = test_pool().await;
         let resp = post_activity(pool, serde_json::json!({ "listing_id": 42 })).await;
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert_eq!(resp.status, StatusCode::NOT_FOUND);
     }
 
     /// A rename is a chronological event on the listing and belongs in the

@@ -239,10 +239,12 @@ async fn upsert(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::test_pool;
-    use axum::{body::Body, http::Request};
-    use http_body_util::BodyExt;
-    use tower::ServiceExt;
+    use crate::test_support::{ApiClient, test_pool};
+
+    /// Client over this module's own routes.
+    fn client(pool: &SqlitePool) -> ApiClient {
+        ApiClient::over(router().with_state(pool.clone()))
+    }
 
     fn sample(id: i64) -> InterestIncome {
         InterestIncome {
@@ -324,19 +326,10 @@ mod tests {
     }
 
     async fn put(pool: &SqlitePool, id: i64, body: serde_json::Value) -> StatusCode {
-        router()
-            .with_state(pool.clone())
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri(format!("/interest_income/{id}"))
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
+        client(pool)
+            .put(format!("/interest_income/{id}"), &body)
             .await
-            .unwrap()
-            .status()
+            .status
     }
 
     #[tokio::test]
@@ -394,25 +387,13 @@ mod tests {
                 }),
             ),
         ] {
-            let resp = router()
-                .with_state(pool.clone())
-                .oneshot(
-                    Request::builder()
-                        .method("PUT")
-                        .uri("/interest_income/1")
-                        .header("content-type", "application/json")
-                        .body(Body::from(body.to_string()))
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
+            let resp = client(&pool).put("/interest_income/1", &body).await;
             assert_eq!(
-                resp.status(),
+                resp.status,
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "negative {field} must be rejected"
             );
-            let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-            let detail = String::from_utf8(bytes.to_vec()).unwrap();
+            let detail = resp.text().to_string();
             assert!(
                 detail.contains(field) && detail.contains("cannot be negative"),
                 "negative {field}: detail must name the field, got: {detail}"
@@ -450,21 +431,9 @@ mod tests {
                 }),
             ),
         ] {
-            let resp = router()
-                .with_state(pool.clone())
-                .oneshot(
-                    Request::builder()
-                        .method("PUT")
-                        .uri("/interest_income/1")
-                        .header("content-type", "application/json")
-                        .body(Body::from(body.to_string()))
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
-            let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-            let detail = String::from_utf8(bytes.to_vec()).unwrap();
+            let resp = client(&pool).put("/interest_income/1", &body).await;
+            assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
+            let detail = resp.text().to_string();
             assert!(
                 detail.contains(needle),
                 "expected '{needle}', got: {detail}"
@@ -510,52 +479,23 @@ mod tests {
     async fn api_list_returns_ok() {
         let pool = test_pool().await;
         db_upsert(&pool, &sample(1)).await.unwrap();
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .uri("/interest_income")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let items: Vec<InterestIncome> = serde_json::from_slice(&bytes).unwrap();
+        let resp = client(&pool).get("/interest_income").await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let items: Vec<InterestIncome> = resp.json();
         assert_eq!(items.len(), 1);
     }
 
     #[tokio::test]
     async fn api_get_missing_returns_404() {
         let pool = test_pool().await;
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .uri("/interest_income/99")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let resp = client(&pool).get("/interest_income/99").await;
+        assert_eq!(resp.status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
     async fn api_delete_missing_returns_404() {
         let pool = test_pool().await;
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .method("DELETE")
-                    .uri("/interest_income/99")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let resp = client(&pool).delete("/interest_income/99").await;
+        assert_eq!(resp.status, StatusCode::NOT_FOUND);
     }
 }

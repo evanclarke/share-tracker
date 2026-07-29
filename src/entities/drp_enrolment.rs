@@ -246,10 +246,12 @@ impl From<UpsertError> for ApiError {
 mod tests {
     use super::*;
     use crate::entities::listing;
-    use crate::test_support::{self, test_pool};
-    use axum::{body::Body, http::Request};
-    use http_body_util::BodyExt;
-    use tower::ServiceExt;
+    use crate::test_support::{self, ApiClient, test_pool};
+
+    /// Client over this module's own routes.
+    fn client(pool: &SqlitePool) -> ApiClient {
+        ApiClient::over(router().with_state(pool.clone()))
+    }
 
     async fn insert_listing(pool: &SqlitePool, id: i64) {
         test_support::listing(id)
@@ -685,52 +687,23 @@ mod tests {
     async fn api_put_get_delete_round_trip() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        let resp = router()
-            .with_state(pool.clone())
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri("/drp_enrolments/1")
-                    .header("content-type", "application/json")
-                    // No residual_handling → default CarryForward.
-                    .body(Body::from(
-                        r#"{"listing_id":1,"enrolment_date":"2024-01-01"}"#,
-                    ))
-                    .unwrap(),
+        let resp = client(&pool)
+            .put_raw(
+                "/drp_enrolments/1",
+                r#"{"listing_id":1,"enrolment_date":"2024-01-01"}"#,
             )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+            .await;
+        assert_eq!(resp.status, StatusCode::NO_CONTENT);
 
-        let resp = router()
-            .with_state(pool.clone())
-            .oneshot(
-                Request::builder()
-                    .uri("/drp_enrolments")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let items: Vec<DrpEnrolment> = serde_json::from_slice(&bytes).unwrap();
+        let resp = client(&pool).get("/drp_enrolments").await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let items: Vec<DrpEnrolment> = resp.json();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].residual_handling, ResidualHandling::CarryForward);
         assert_eq!(items[0].unenrolment_date, None);
 
-        let resp = router()
-            .with_state(pool.clone())
-            .oneshot(
-                Request::builder()
-                    .method("DELETE")
-                    .uri("/drp_enrolments/1")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let resp = client(&pool).delete("/drp_enrolments/1").await;
+        assert_eq!(resp.status, StatusCode::NO_CONTENT);
         assert!(db_get(&pool, 1).await.unwrap().is_none());
     }
 
@@ -744,59 +717,33 @@ mod tests {
         )
         .await
         .unwrap();
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri("/drp_enrolments/2")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        r#"{"listing_id":1,"enrolment_date":"2025-01-01"}"#,
-                    ))
-                    .unwrap(),
+        let resp = client(&pool)
+            .put_raw(
+                "/drp_enrolments/2",
+                r#"{"listing_id":1,"enrolment_date":"2025-01-01"}"#,
             )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        let bytes = BodyExt::collect(resp.into_body()).await.unwrap().to_bytes();
-        let detail = String::from_utf8(bytes.to_vec()).unwrap();
+            .await;
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
+        let detail = resp.text().to_string();
         assert!(detail.contains("overlaps"), "detail: {detail}");
     }
 
     #[tokio::test]
     async fn api_put_bad_listing_returns_422() {
         let pool = test_pool().await;
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri("/drp_enrolments/1")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        r#"{"listing_id":99,"enrolment_date":"2024-01-01"}"#,
-                    ))
-                    .unwrap(),
+        let resp = client(&pool)
+            .put_raw(
+                "/drp_enrolments/1",
+                r#"{"listing_id":99,"enrolment_date":"2024-01-01"}"#,
             )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+            .await;
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     #[tokio::test]
     async fn api_get_missing_returns_404() {
         let pool = test_pool().await;
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .uri("/drp_enrolments/1")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let resp = client(&pool).get("/drp_enrolments/1").await;
+        assert_eq!(resp.status, StatusCode::NOT_FOUND);
     }
 }

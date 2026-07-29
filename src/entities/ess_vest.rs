@@ -150,11 +150,8 @@ mod tests {
     use super::*;
     use crate::entities::trade::TradeType;
     use crate::entities::{ess_statement, listing};
-    use crate::test_support::{self, test_pool, ymd};
-    use axum::{body::Body, http::Request};
+    use crate::test_support::{self, ApiClient, test_pool, ymd};
     use chrono::NaiveDate;
-    use http_body_util::BodyExt;
-    use tower::ServiceExt;
 
     async fn insert_listing(pool: &SqlitePool, id: i64, currency: &str) {
         test_support::listing(id)
@@ -359,20 +356,11 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "AUD").await;
         insert_statement(&pool, 1, "100", "6", "AUD").await;
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/ess_statements/1/vest")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::CREATED);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let trade: Trade = serde_json::from_slice(&bytes).unwrap();
+        let resp = ApiClient::over(router().with_state(pool))
+            .post_empty("/ess_statements/1/vest")
+            .await;
+        assert_eq!(resp.status, StatusCode::CREATED);
+        let trade: Trade = resp.json();
         assert_eq!(trade.trade_type, TradeType::Buy);
         assert_eq!(trade.quantity, Decimal::from(100));
     }
@@ -380,17 +368,9 @@ mod tests {
     #[tokio::test]
     async fn api_vest_missing_statement_returns_404() {
         let pool = test_pool().await;
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/ess_statements/99/vest")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let resp = ApiClient::over(router().with_state(pool))
+            .post_empty("/ess_statements/99/vest")
+            .await;
+        assert_eq!(resp.status, StatusCode::NOT_FOUND);
     }
 }

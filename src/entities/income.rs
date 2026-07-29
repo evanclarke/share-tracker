@@ -662,11 +662,13 @@ async fn delete(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{self, test_pool, ymd};
-    use axum::{body::Body, http::Request};
-    use http_body_util::BodyExt;
+    use crate::test_support::{self, ApiClient, test_pool, ymd};
     use rust_decimal::Decimal;
-    use tower::ServiceExt;
+
+    /// Client over this module's own routes.
+    fn client(pool: &SqlitePool) -> ApiClient {
+        ApiClient::over(router().with_state(pool.clone()))
+    }
 
     async fn insert_test_listing(pool: &SqlitePool) {
         test_support::listing(1)
@@ -960,19 +962,8 @@ mod tests {
             "unfranked_amount": 30.0,
             "franking_credits": 30.0
         });
-        let resp = router()
-            .with_state(pool.clone())
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri("/income/1")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let resp = client(&pool).put("/income/1", &body).await;
+        assert_eq!(resp.status, StatusCode::NO_CONTENT);
         let got = db_get(&pool, 1).await.unwrap().unwrap();
         assert_eq!(got.franked_amount, Decimal::from(70));
     }
@@ -982,36 +973,17 @@ mod tests {
         let pool = test_pool().await;
         insert_test_listing(&pool).await;
         db_upsert(&pool, &dividend_income()).await.unwrap();
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .uri("/income")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let items: Vec<Income> = serde_json::from_slice(&bytes).unwrap();
+        let resp = client(&pool).get("/income").await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let items: Vec<Income> = resp.json();
         assert_eq!(items.len(), 1);
     }
 
     #[tokio::test]
     async fn api_get_missing_returns_404() {
         let pool = test_pool().await;
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .uri("/income/999")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let resp = client(&pool).get("/income/999").await;
+        assert_eq!(resp.status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
@@ -1019,18 +991,8 @@ mod tests {
         let pool = test_pool().await;
         insert_test_listing(&pool).await;
         db_upsert(&pool, &dividend_income()).await.unwrap();
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .method("DELETE")
-                    .uri("/income/1")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let resp = client(&pool).delete("/income/1").await;
+        assert_eq!(resp.status, StatusCode::NO_CONTENT);
     }
 
     #[tokio::test]
@@ -1041,27 +1003,20 @@ mod tests {
         let pool = test_pool().await;
         insert_test_listing(&pool).await;
         let trade_id = insert_test_trade(&pool).await;
-        let app = router().with_state(pool.clone());
+        let app = client(&pool);
 
-        let put = |body: serde_json::Value| {
-            Request::builder()
-                .method("PUT")
-                .uri("/income/1")
-                .header("content-type", "application/json")
-                .body(Body::from(body.to_string()))
-                .unwrap()
-        };
         let resp = app
-            .clone()
-            .oneshot(put(serde_json::json!({
-                "listing_id": 1,
-                "date_paid": "2024-03-15",
-                "franked_amount": 70.0,
-                "reinvestment_trade_id": trade_id
-            })))
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+            .put(
+                "/income/1",
+                &serde_json::json!({
+                    "listing_id": 1,
+                    "date_paid": "2024-03-15",
+                    "franked_amount": 70.0,
+                    "reinvestment_trade_id": trade_id
+                }),
+            )
+            .await;
+        assert_eq!(resp.status, StatusCode::NO_CONTENT);
         let got = db_get(&pool, 1).await.unwrap().unwrap();
         assert_eq!(
             got.reinvestment_trade_id, None,
@@ -1076,14 +1031,16 @@ mod tests {
             .await
             .unwrap();
         let resp = app
-            .oneshot(put(serde_json::json!({
-                "listing_id": 1,
-                "date_paid": "2024-03-15",
-                "franked_amount": 75.0
-            })))
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+            .put(
+                "/income/1",
+                &serde_json::json!({
+                    "listing_id": 1,
+                    "date_paid": "2024-03-15",
+                    "franked_amount": 75.0
+                }),
+            )
+            .await;
+        assert_eq!(resp.status, StatusCode::NO_CONTENT);
         let got = db_get(&pool, 1).await.unwrap().unwrap();
         assert_eq!(got.reinvestment_trade_id, Some(trade_id));
         assert_eq!(got.franked_amount, Decimal::from(75));
@@ -1103,20 +1060,9 @@ mod tests {
             .await
             .unwrap();
 
-        let resp = router()
-            .with_state(pool.clone())
-            .oneshot(
-                Request::builder()
-                    .method("DELETE")
-                    .uri("/income/1")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let text = String::from_utf8(bytes.to_vec()).unwrap();
+        let resp = client(&pool).delete("/income/1").await;
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
+        let text = resp.text().to_string();
         assert!(text.contains("undo the reinvestment"), "body: {text}");
         assert!(
             db_get(&pool, 1).await.unwrap().is_some(),
@@ -1127,18 +1073,8 @@ mod tests {
     #[tokio::test]
     async fn api_delete_missing_returns_404() {
         let pool = test_pool().await;
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .method("DELETE")
-                    .uri("/income/999")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let resp = client(&pool).delete("/income/999").await;
+        assert_eq!(resp.status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
@@ -1152,31 +1088,10 @@ mod tests {
             "unfranked_amount": "29.876543211",
             "franking_credits": "30.052631578"
         });
-        let resp = router()
-            .with_state(pool.clone())
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri("/income/1")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .uri("/income/1")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let inc: Income = serde_json::from_slice(&bytes).unwrap();
+        let resp = client(&pool).put("/income/1", &body).await;
+        assert_eq!(resp.status, StatusCode::NO_CONTENT);
+        let resp = client(&pool).get("/income/1").await;
+        let inc: Income = resp.json();
         assert_eq!(
             inc.franked_amount,
             "70.123456789".parse::<Decimal>().unwrap()
@@ -1198,21 +1113,9 @@ mod tests {
         id: i64,
         body: serde_json::Value,
     ) -> (StatusCode, String) {
-        let resp = router()
-            .with_state(pool.clone())
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri(format!("/income/{id}"))
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let status = resp.status();
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        (status, String::from_utf8(bytes.to_vec()).unwrap())
+        let resp = client(pool).put(format!("/income/{id}"), &body).await;
+        let status = resp.status;
+        (status, resp.text().to_string())
     }
 
     /// PLS 2023 final dividend payment advice: 14 cents per share × 19,695
@@ -1376,18 +1279,8 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::NO_CONTENT);
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .uri("/income/1")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let inc: Income = serde_json::from_slice(&bytes).unwrap();
+        let resp = client(&pool).get("/income/1").await;
+        let inc: Income = resp.json();
         assert_eq!(
             inc.amount_per_security,
             Some("0.89891492".parse::<Decimal>().unwrap())
@@ -1723,18 +1616,8 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::NO_CONTENT);
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .uri("/income/1")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let inc: Income = serde_json::from_slice(&bytes).unwrap();
+        let resp = client(&pool).get("/income/1").await;
+        let inc: Income = resp.json();
         assert_eq!(
             inc.entitlement_date,
             Some(NaiveDate::from_ymd_opt(2026, 6, 30).unwrap())

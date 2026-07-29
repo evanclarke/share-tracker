@@ -1698,11 +1698,9 @@ pub mod test_support {
 mod tests {
     use super::*;
     use crate::entities::exchange_holiday;
-    use crate::test_support::test_pool;
-    use axum::{body::Body, http::Request, http::StatusCode};
-    use http_body_util::BodyExt;
+    use crate::test_support::{ApiClient, test_pool};
+    use axum::http::StatusCode;
     use std::sync::Mutex;
-    use tower::ServiceExt;
 
     fn ymd(y: i32, m: u32, d: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(y, m, d).unwrap()
@@ -2288,47 +2286,26 @@ mod tests {
 
     // --- backfill ---
 
-    fn full_router(pool: SqlitePool, fetcher: StubFetcher) -> axum::Router {
+    fn full_router(pool: SqlitePool, fetcher: StubFetcher) -> ApiClient {
         let shared: SharedFetcher = Arc::new(fetcher);
-        router().with_state(pool).layer(Extension(shared))
+        ApiClient::over(router().with_state(pool).layer(Extension(shared)))
     }
 
     async fn post_json(
-        app: &axum::Router,
+        app: &ApiClient,
         uri: &str,
         body: serde_json::Value,
     ) -> (StatusCode, axum::body::Bytes) {
-        let resp = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(uri)
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let status = resp.status();
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let resp = app.post(uri, &body).await;
+        let status = resp.status;
+        let bytes = resp.body.clone();
         (status, bytes)
     }
 
-    async fn delete_req(app: &axum::Router, uri: &str) -> (StatusCode, axum::body::Bytes) {
-        let resp = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("DELETE")
-                    .uri(uri)
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let status = resp.status();
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    async fn delete_req(app: &ApiClient, uri: &str) -> (StatusCode, axum::body::Bytes) {
+        let resp = app.delete(uri).await;
+        let status = resp.status;
+        let bytes = resp.body.clone();
         (status, bytes)
     }
 
@@ -2404,24 +2381,13 @@ mod tests {
     // --- manual prices ---
 
     async fn put_json(
-        app: &axum::Router,
+        app: &ApiClient,
         uri: &str,
         body: serde_json::Value,
     ) -> (StatusCode, axum::body::Bytes) {
-        let resp = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri(uri)
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let status = resp.status();
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let resp = app.put(uri, &body).await;
+        let status = resp.status;
+        let bytes = resp.body.clone();
         (status, bytes)
     }
 
@@ -2953,7 +2919,7 @@ mod tests {
 
         let fetcher = Arc::new(StubFetcher::default().with_close(1, ymd(2026, 6, 1), "10", "USD"));
         let shared: SharedFetcher = fetcher.clone();
-        let app = router().with_state(pool.clone()).layer(Extension(shared));
+        let app = ApiClient::over(router().with_state(pool.clone()).layer(Extension(shared)));
 
         let (status, bytes) = post_json(
             &app,
@@ -3173,12 +3139,9 @@ mod tests {
             let app = app.clone();
             let uri = uri.to_string();
             async move {
-                let resp = app
-                    .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
-                    .await
-                    .unwrap();
-                assert_eq!(resp.status(), StatusCode::OK);
-                let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+                let resp = app.get(uri).await;
+                assert_eq!(resp.status, StatusCode::OK);
+                let bytes = resp.body.clone();
                 serde_json::from_slice::<Vec<ClosingPrice>>(&bytes).unwrap()
             }
         };
@@ -3532,7 +3495,7 @@ mod tests {
 
         let stub = Arc::new(StubFetcher::default().with_close(1, ymd(2026, 6, 1), "2.77", "USD"));
         let shared: SharedFetcher = stub.clone();
-        let app = router().with_state(pool.clone()).layer(Extension(shared));
+        let app = ApiClient::over(router().with_state(pool.clone()).layer(Extension(shared)));
         let (status, bytes) = post_json(
             &app,
             "/closing_prices/backfill",

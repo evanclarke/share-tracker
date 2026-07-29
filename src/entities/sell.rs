@@ -710,9 +710,12 @@ async fn delete(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{self, test_pool};
-    use axum::{body::Body, http::Request};
-    use tower::ServiceExt;
+    use crate::test_support::{self, ApiClient, test_pool};
+
+    /// Client over this module's own routes.
+    fn client(pool: &SqlitePool) -> ApiClient {
+        ApiClient::over(router().with_state(pool.clone()))
+    }
 
     async fn insert_listing(pool: &SqlitePool, id: i64) {
         test_support::listing(id).insert(pool).await;
@@ -1014,19 +1017,8 @@ mod tests {
             "fx_rate": "1",
             "allocations": [ { "purchase_trade_id": 1, "quantity_allocated": "100" } ]
         });
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri("/sells/2")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let resp = client(&pool).put("/sells/2", &body).await;
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     /// PUT the JSON body to /sells/{id}, returning the status and response
@@ -1036,24 +1028,9 @@ mod tests {
         id: i64,
         body: serde_json::Value,
     ) -> (StatusCode, String) {
-        let resp = router()
-            .with_state(pool.clone())
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri(format!("/sells/{id}"))
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let status = resp.status();
-        let bytes = http_body_util::BodyExt::collect(resp.into_body())
-            .await
-            .unwrap()
-            .to_bytes();
-        (status, String::from_utf8(bytes.to_vec()).unwrap())
+        let resp = client(pool).put(format!("/sells/{id}"), &body).await;
+        let status = resp.status;
+        (status, resp.text().to_string())
     }
 
     #[tokio::test]
@@ -1220,19 +1197,8 @@ mod tests {
             "fx_rate": "1",
             "allocations": [ { "purchase_trade_id": 1, "quantity_allocated": "100" } ]
         });
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri("/sells/2")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let resp = client(&pool).put("/sells/2", &body).await;
+        assert_eq!(resp.status, StatusCode::NO_CONTENT);
     }
 
     #[tokio::test]
@@ -1294,32 +1260,13 @@ mod tests {
         );
         db_upsert_sell(&pool, 2, &body).await.unwrap();
 
-        let app = router().with_state(pool.clone());
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .method("DELETE")
-                    .uri("/sells/2")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let app = client(&pool);
+        let resp = app.delete("/sells/2").await;
+        assert_eq!(resp.status, StatusCode::NO_CONTENT);
 
         // second delete: already gone
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .method("DELETE")
-                    .uri("/sells/2")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let resp = client(&pool).delete("/sells/2").await;
+        assert_eq!(resp.status, StatusCode::NOT_FOUND);
     }
 
     /// A Sell's statement total is the *net proceeds* — quantity × price −
@@ -1419,24 +1366,9 @@ mod tests {
             "statement_total": "1500",
             "allocations": [ { "purchase_trade_id": 1, "quantity_allocated": "100" } ]
         });
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri("/sells/2")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        let bytes = http_body_util::BodyExt::collect(resp.into_body())
-            .await
-            .unwrap()
-            .to_bytes();
-        let detail = String::from_utf8(bytes.to_vec()).unwrap();
+        let resp = client(&pool).put("/sells/2", &body).await;
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
+        let detail = resp.text().to_string();
         assert!(
             detail.contains("1490.05"),
             "detail must carry the net proceeds: {detail}"
@@ -1472,22 +1404,11 @@ mod tests {
         // Two full read → re-PUT passes: the stored split never moves.
         for pass in 1..=2 {
             // A Sell reads back the way any API client reads it: GET /trades/:id.
-            let resp = trade::router()
-                .with_state(pool.clone())
-                .oneshot(
-                    Request::builder()
-                        .uri("/trades/2")
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(resp.status(), StatusCode::OK);
-            let bytes = http_body_util::BodyExt::collect(resp.into_body())
-                .await
-                .unwrap()
-                .to_bytes();
-            let mut body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            let resp = ApiClient::over(trade::router().with_state(pool.clone()))
+                .get("/trades/2")
+                .await;
+            assert_eq!(resp.status, StatusCode::OK);
+            let mut body: serde_json::Value = resp.json();
             let read_brokerage: Decimal = body["brokerage"].as_str().unwrap().parse().unwrap();
             assert_eq!(
                 read_brokerage,
@@ -1525,24 +1446,9 @@ mod tests {
             "fx_rate": "1",
             "allocations": [ { "purchase_trade_id": 1, "quantity_allocated": "60" } ]
         });
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri("/sells/2")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        let body = http_body_util::BodyExt::collect(resp.into_body())
-            .await
-            .unwrap()
-            .to_bytes();
-        let detail = String::from_utf8(body.to_vec()).unwrap();
+        let resp = client(&pool).put("/sells/2", &body).await;
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
+        let detail = resp.text().to_string();
         // The rejection says why, not a bare "HTTP 422".
         assert!(
             detail.contains("sum to the sell quantity"),
@@ -1714,7 +1620,6 @@ mod tests {
 
     #[tokio::test]
     async fn api_sell_spot_fx_rate_persists_and_aud_is_422() {
-        use http_body_util::BodyExt;
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
         insert_buy(&pool, 1, 1, Decimal::from(100)).await;
@@ -1736,37 +1641,18 @@ mod tests {
                 "spot_fx_rate": "0.6543",
                 "allocations": [ { "purchase_trade_id": 1, "quantity_allocated": "100" } ]
             });
-            router()
-                .with_state(pool)
-                .oneshot(
-                    Request::builder()
-                        .method("PUT")
-                        .uri("/sells/2")
-                        .header("content-type", "application/json")
-                        .body(Body::from(body.to_string()))
-                        .unwrap(),
-                )
-                .await
-                .unwrap()
+            client(&pool).put("/sells/2", &body).await
         };
 
         // An AUD Sell with a spot override is rejected with the reason…
         let resp = put(pool.clone(), "AUD").await;
-        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        let detail = String::from_utf8(
-            resp.into_body()
-                .collect()
-                .await
-                .unwrap()
-                .to_bytes()
-                .to_vec(),
-        )
-        .unwrap();
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
+        let detail = resp.text();
         assert!(detail.contains("non-AUD"), "detail: {detail}");
 
         // …and a USD Sell persists it.
         let resp = put(pool.clone(), "USD").await;
-        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert_eq!(resp.status, StatusCode::NO_CONTENT);
         let got = trade::db_get(&pool, 2).await.unwrap().unwrap();
         assert_eq!(got.spot_fx_rate, Some("0.6543".parse().unwrap()));
     }

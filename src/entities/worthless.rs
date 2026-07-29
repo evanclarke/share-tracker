@@ -299,10 +299,12 @@ mod tests {
     use crate::entities::corporate_action::{CorporateAction, WorthlessEvent};
     use crate::entities::listing;
     use crate::entities::trade::TradeType;
-    use crate::test_support::{self, test_pool};
-    use axum::{body::Body, http::Request};
-    use http_body_util::BodyExt;
-    use tower::ServiceExt;
+    use crate::test_support::{self, ApiClient, test_pool};
+
+    /// Client over this module's own routes.
+    fn client(pool: &SqlitePool) -> ApiClient {
+        ApiClient::over(router().with_state(pool.clone()))
+    }
 
     fn d(y: i32, m: u32, day: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(y, m, day).unwrap()
@@ -679,20 +681,11 @@ mod tests {
         insert_buy(&pool, 1, 1, d(2020, 10, 1), "1000", "1.50").await;
         insert_worthless(&pool, 10, 1, d(2025, 3, 31), WorthlessEvent::G3Declaration).await;
 
-        let resp = router()
-            .with_state(pool.clone())
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/corporate_actions/10/recognise")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::CREATED);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let resp = client(&pool)
+            .post_empty("/corporate_actions/10/recognise")
+            .await;
+        assert_eq!(resp.status, StatusCode::CREATED);
+        let v: serde_json::Value = resp.json();
         assert_eq!(v["sell"]["quantity"], "1000");
         assert_eq!(v["sell"]["average_price"], "0");
         assert_eq!(v["sell"]["worthless_action_id"], 10);
@@ -704,32 +697,16 @@ mod tests {
         insert_listing(&pool, 1, "DEAD").await;
 
         // Missing action → 404.
-        let resp = router()
-            .with_state(pool.clone())
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/corporate_actions/99/recognise")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let resp = client(&pool)
+            .post_empty("/corporate_actions/99/recognise")
+            .await;
+        assert_eq!(resp.status, StatusCode::NOT_FOUND);
 
         // Nothing held → 422.
         insert_worthless(&pool, 10, 1, d(2025, 3, 31), WorthlessEvent::G3Declaration).await;
-        let resp = router()
-            .with_state(pool.clone())
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/corporate_actions/10/recognise")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let resp = client(&pool)
+            .post_empty("/corporate_actions/10/recognise")
+            .await;
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
     }
 }

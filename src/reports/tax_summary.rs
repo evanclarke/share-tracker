@@ -668,6 +668,7 @@ async fn tax_summary_export_handler(State(pool): State<SqlitePool>) -> Result<Re
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::ApiClient;
     use crate::{
         entities::{
             amma, ess_statement, income, interest_income, investment_expense, listing, rba_fx_rate,
@@ -676,9 +677,11 @@ mod tests {
         test_support::{self, test_pool, ymd},
     };
     use axum::http::StatusCode;
-    use axum::{body::Body, http::Request};
-    use http_body_util::BodyExt;
-    use tower::ServiceExt;
+
+    /// Client over this module's own routes.
+    fn client(pool: &SqlitePool) -> ApiClient {
+        ApiClient::over(router().with_state(pool.clone()))
+    }
 
     async fn insert_listing(pool: &SqlitePool, id: i64) {
         test_support::listing(id)
@@ -1582,20 +1585,9 @@ mod tests {
         inc.franking_credits = Decimal::from(30);
         income::db_upsert(&pool, &inc).await.unwrap();
 
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri("/portfolio/tax-summary")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let result: Vec<TaxYearSummary> = serde_json::from_slice(&bytes).unwrap();
+        let resp = client(&pool).get("/portfolio/tax-summary").await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let result: Vec<TaxYearSummary> = resp.json();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].tax_year, 2024);
         assert_eq!(result[0].dividends_assessable, Decimal::from(100));
@@ -1612,32 +1604,19 @@ mod tests {
         inc.franking_credits = "30.50".parse().unwrap();
         income::db_upsert(&pool, &inc).await.unwrap();
 
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri("/portfolio/tax-summary/export")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
+        let resp = client(&pool).get("/portfolio/tax-summary/export").await;
+        assert_eq!(resp.status, StatusCode::OK);
         assert_eq!(
-            resp.headers()
-                .get(axum::http::header::CONTENT_TYPE)
-                .unwrap(),
+            resp.headers.get(axum::http::header::CONTENT_TYPE).unwrap(),
             "text/csv; charset=utf-8"
         );
         assert_eq!(
-            resp.headers()
+            resp.headers
                 .get(axum::http::header::CONTENT_DISPOSITION)
                 .unwrap(),
             "attachment; filename=\"tax-summary.csv\""
         );
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let csv = String::from_utf8(bytes.to_vec()).unwrap();
+        let csv = resp.text().to_string();
         let mut lines = csv.lines();
         // Header names every TaxYearSummary field, in declaration order.
         assert_eq!(lines.next().unwrap(), CSV_HEADER.join(","));
@@ -2372,20 +2351,9 @@ mod tests {
     #[tokio::test]
     async fn api_export_of_empty_report_still_returns_header() {
         let pool = test_pool().await;
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri("/portfolio/tax-summary/export")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let csv = String::from_utf8(bytes.to_vec()).unwrap();
+        let resp = client(&pool).get("/portfolio/tax-summary/export").await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let csv = resp.text().to_string();
         assert_eq!(
             csv,
             CSV_HEADER.join(",") + "\n" + &CSV_ATO_LABELS.join(",") + "\n"

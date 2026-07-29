@@ -459,10 +459,12 @@ async fn unreinvest(
 mod tests {
     use super::*;
     use crate::entities::{drp_enrolment, income, listing, trade::TradeType};
-    use crate::test_support::{self, test_pool};
-    use axum::{body::Body, http::Request};
-    use http_body_util::BodyExt;
-    use tower::ServiceExt;
+    use crate::test_support::{self, ApiClient, test_pool};
+
+    /// Client over this module's own routes.
+    fn client(pool: &SqlitePool) -> ApiClient {
+        ApiClient::over(router().with_state(pool.clone()))
+    }
 
     async fn insert_listing(pool: &SqlitePool, id: i64, currency: &str) {
         test_support::listing(id)
@@ -1199,21 +1201,11 @@ mod tests {
         enrol(&pool, 1, ResidualHandling::CarryForward).await;
         insert_distribution(&pool, 1, 1, Decimal::from(100), Decimal::ZERO).await;
 
-        let resp = router()
-            .with_state(pool.clone())
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/income/1/reinvest")
-                    .header("content-type", "application/json")
-                    .body(Body::from(r#"{"reinvestment_price":"9"}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::CREATED);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let trade: Trade = serde_json::from_slice(&bytes).unwrap();
+        let resp = client(&pool)
+            .post_raw("/income/1/reinvest", r#"{"reinvestment_price":"9"}"#)
+            .await;
+        assert_eq!(resp.status, StatusCode::CREATED);
+        let trade: Trade = resp.json();
         assert_eq!(trade.trade_type, TradeType::DRP);
         assert_eq!(trade.quantity, Decimal::from(11));
     }
@@ -1225,23 +1217,14 @@ mod tests {
         enrol(&pool, 1, ResidualHandling::CarryForward).await;
         insert_distribution(&pool, 1, 1, "68.47".parse().unwrap(), Decimal::ZERO).await;
 
-        let resp = router()
-            .with_state(pool.clone())
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/income/1/reinvest")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        r#"{"reinvestment_price":"136.94","units":"0.500"}"#,
-                    ))
-                    .unwrap(),
+        let resp = client(&pool)
+            .post_raw(
+                "/income/1/reinvest",
+                r#"{"reinvestment_price":"136.94","units":"0.500"}"#,
             )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::CREATED);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let trade: Trade = serde_json::from_slice(&bytes).unwrap();
+            .await;
+        assert_eq!(resp.status, StatusCode::CREATED);
+        let trade: Trade = resp.json();
         assert_eq!(trade.trade_type, TradeType::DRP);
         assert_eq!(trade.quantity, "0.500".parse::<Decimal>().unwrap());
     }
@@ -1254,23 +1237,14 @@ mod tests {
         insert_listing(&pool, 1, "USD").await;
         enrol(&pool, 1, ResidualHandling::CarryForward).await;
         insert_distribution(&pool, 1, 1, "68.66".parse().unwrap(), Decimal::ZERO).await;
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/income/1/reinvest")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        r#"{"reinvestment_price":"137.05","units":"0.600"}"#,
-                    ))
-                    .unwrap(),
+        let resp = client(&pool)
+            .post_raw(
+                "/income/1/reinvest",
+                r#"{"reinvestment_price":"137.05","units":"0.600"}"#,
             )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        let body = resp.into_body().collect().await.unwrap().to_bytes();
-        let text = String::from_utf8(body.to_vec()).unwrap();
+            .await;
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
+        let text = resp.text().to_string();
         assert!(text.contains("82.23000"), "body: {text}"); // 0.600 × 137.05
         assert!(text.contains("68.66"), "body: {text}");
     }
@@ -1280,21 +1254,11 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "AUD").await;
         insert_distribution(&pool, 1, 1, Decimal::from(100), Decimal::ZERO).await;
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/income/1/reinvest")
-                    .header("content-type", "application/json")
-                    .body(Body::from(r#"{"reinvestment_price":"9"}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        let body = resp.into_body().collect().await.unwrap().to_bytes();
-        let text = String::from_utf8(body.to_vec()).unwrap();
+        let resp = client(&pool)
+            .post_raw("/income/1/reinvest", r#"{"reinvestment_price":"9"}"#)
+            .await;
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
+        let text = resp.text().to_string();
         // The rejection names the account and ticker, not raw ids.
         assert!(text.contains("Default"), "body: {text}");
         assert!(text.contains("T1"), "body: {text}");
@@ -1304,19 +1268,10 @@ mod tests {
     #[tokio::test]
     async fn api_reinvest_missing_income_returns_404() {
         let pool = test_pool().await;
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/income/99/reinvest")
-                    .header("content-type", "application/json")
-                    .body(Body::from(r#"{"reinvestment_price":"9"}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let resp = client(&pool)
+            .post_raw("/income/99/reinvest", r#"{"reinvestment_price":"9"}"#)
+            .await;
+        assert_eq!(resp.status, StatusCode::NOT_FOUND);
     }
 
     // ---- unreinvest (DELETE /income/:id/reinvest) ----
@@ -1493,29 +1448,14 @@ mod tests {
         insert_distribution(&pool, 1, 1, Decimal::from(100), Decimal::ZERO).await;
         db_reinvest(&pool, 1, &body("9")).await.unwrap();
 
-        let del = |uri: &str| {
-            Request::builder()
-                .method("DELETE")
-                .uri(uri)
-                .body(Body::empty())
-                .unwrap()
-        };
-        let app = router().with_state(pool.clone());
-        let resp = app
-            .clone()
-            .oneshot(del("/income/1/reinvest"))
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let app = client(&pool);
+        let resp = app.delete("/income/1/reinvest").await;
+        assert_eq!(resp.status, StatusCode::NO_CONTENT);
 
         // Nothing left to undo → 422; unknown income → 404.
-        let resp = app
-            .clone()
-            .oneshot(del("/income/1/reinvest"))
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        let resp = app.oneshot(del("/income/99/reinvest")).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let resp = app.delete("/income/1/reinvest").await;
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
+        let resp = app.delete("/income/99/reinvest").await;
+        assert_eq!(resp.status, StatusCode::NOT_FOUND);
     }
 }

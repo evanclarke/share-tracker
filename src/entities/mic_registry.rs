@@ -251,11 +251,13 @@ impl From<ImportError> for ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::test_pool;
+    use crate::test_support::{ApiClient, test_pool};
     use axum::http::StatusCode;
-    use axum::{body::Body, http::Request};
-    use http_body_util::BodyExt;
-    use tower::ServiceExt;
+
+    /// Client over this module's own routes.
+    fn client(pool: &SqlitePool) -> ApiClient {
+        ApiClient::over(router().with_state(pool.clone()))
+    }
 
     /// A trimmed slice of the real ISO10383_MIC layout: a BOM, the full quoted
     /// header row, an ACTIVE operating MIC, an ACTIVE segment MIC with an empty
@@ -389,19 +391,9 @@ mod tests {
     async fn api_list_returns_entries() {
         let pool = test_pool().await;
         db_upsert(&pool, &sample_entry()).await.unwrap();
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .uri("/mic_registry")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let entries: Vec<MicEntry> = serde_json::from_slice(&bytes).unwrap();
+        let resp = client(&pool).get("/mic_registry").await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let entries: Vec<MicEntry> = resp.json();
         assert_eq!(entries, vec![sample_entry()]);
     }
 
@@ -409,55 +401,27 @@ mod tests {
     async fn api_get_existing_returns_entry() {
         let pool = test_pool().await;
         db_upsert(&pool, &sample_entry()).await.unwrap();
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .uri("/mic_registry/XTES")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let entry: MicEntry = serde_json::from_slice(&bytes).unwrap();
+        let resp = client(&pool).get("/mic_registry/XTES").await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let entry: MicEntry = resp.json();
         assert_eq!(entry, sample_entry());
     }
 
     #[tokio::test]
     async fn api_get_missing_returns_404() {
         let pool = test_pool().await;
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .uri("/mic_registry/XXXX")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let resp = client(&pool).get("/mic_registry/XXXX").await;
+        assert_eq!(resp.status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
     async fn api_import_endpoint_invokes_import() {
         let pool = test_pool().await;
-        let resp = router()
-            .with_state(pool.clone())
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/mic_registry/import")
-                    .body(Body::from(SAMPLE_CSV))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let summary: ImportSummary = serde_json::from_slice(&bytes).unwrap();
+        let resp = client(&pool)
+            .post_bytes("/mic_registry/import", None, SAMPLE_CSV)
+            .await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let summary: ImportSummary = resp.json();
         assert_eq!(summary, ImportSummary { imported: 3 });
         assert_eq!(db_list(&pool).await.unwrap().len(), 3);
     }
@@ -465,17 +429,12 @@ mod tests {
     #[tokio::test]
     async fn api_import_endpoint_rejects_malformed_feed() {
         let pool = test_pool().await;
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/mic_registry/import")
-                    .body(Body::from("\"MIC\",\"STATUS\"\n\"XNYS\",\"ACTIVE\"\n"))
-                    .unwrap(),
+        let resp = client(&pool)
+            .post_raw(
+                "/mic_registry/import",
+                "\"MIC\",\"STATUS\"\n\"XNYS\",\"ACTIVE\"\n",
             )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+            .await;
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
     }
 }

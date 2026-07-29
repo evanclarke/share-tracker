@@ -311,10 +311,12 @@ async fn undo(
 mod tests {
     use super::*;
     use crate::entities::listing;
-    use crate::test_support::{self, test_pool};
-    use axum::{body::Body, http::Request};
-    use http_body_util::BodyExt;
-    use tower::ServiceExt;
+    use crate::test_support::{self, ApiClient, test_pool};
+
+    /// Client over this module's own routes.
+    fn client(pool: &SqlitePool) -> ApiClient {
+        ApiClient::over(router().with_state(pool.clone()))
+    }
 
     fn body(effective_date: &str, ticker: &str) -> RenameBody {
         RenameBody {
@@ -579,23 +581,14 @@ mod tests {
         let pool = test_pool().await;
         test_support::listing(1).ticker("LAAC").insert(&pool).await;
 
-        let resp = router()
-            .with_state(pool.clone())
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/listings/1/rename")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        r#"{"effective_date":"2024-06-01","ticker":"LAR"}"#,
-                    ))
-                    .unwrap(),
+        let resp = client(&pool)
+            .post_raw(
+                "/listings/1/rename",
+                r#"{"effective_date":"2024-06-01","ticker":"LAR"}"#,
             )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::CREATED);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let created: ListingRename = serde_json::from_slice(&bytes).unwrap();
+            .await;
+        assert_eq!(resp.status, StatusCode::CREATED);
+        let created: ListingRename = resp.json();
         assert_eq!(created.new_ticker, "LAR");
         assert_eq!(
             listing::db_get(&pool, 1).await.unwrap().unwrap().ticker,
@@ -606,21 +599,13 @@ mod tests {
     #[tokio::test]
     async fn api_rename_missing_listing_returns_404() {
         let pool = test_pool().await;
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/listings/99/rename")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        r#"{"effective_date":"2024-06-01","ticker":"LAR"}"#,
-                    ))
-                    .unwrap(),
+        let resp = client(&pool)
+            .post_raw(
+                "/listings/99/rename",
+                r#"{"effective_date":"2024-06-01","ticker":"LAR"}"#,
             )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+            .await;
+        assert_eq!(resp.status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
@@ -630,19 +615,9 @@ mod tests {
         db_rename(&pool, 1, &body("2024-01-01", "B")).await.unwrap();
         db_rename(&pool, 1, &body("2024-06-01", "C")).await.unwrap();
 
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .uri("/listings/1/renames")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let chain: Vec<ListingRename> = serde_json::from_slice(&bytes).unwrap();
+        let resp = client(&pool).get("/listings/1/renames").await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let chain: Vec<ListingRename> = resp.json();
         assert_eq!(chain.len(), 2);
         assert_eq!(chain[0].new_ticker, "C");
         assert_eq!(chain[1].new_ticker, "B");
@@ -656,20 +631,11 @@ mod tests {
             .await
             .unwrap();
 
-        let del = |uri: String| {
-            Request::builder()
-                .method("DELETE")
-                .uri(uri)
-                .body(Body::empty())
-                .unwrap()
-        };
-        let app = router().with_state(pool.clone());
+        let app = client(&pool);
         let resp = app
-            .clone()
-            .oneshot(del(format!("/listings/1/renames/{}", created.id)))
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+            .delete(format!("/listings/1/renames/{}", created.id))
+            .await;
+        assert_eq!(resp.status, StatusCode::NO_CONTENT);
         assert_eq!(
             listing::db_get(&pool, 1).await.unwrap().unwrap().ticker,
             "LAAC"
@@ -677,10 +643,9 @@ mod tests {
 
         // Undoing again (already gone) is a 404.
         let resp = app
-            .oneshot(del(format!("/listings/1/renames/{}", created.id)))
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+            .delete(format!("/listings/1/renames/{}", created.id))
+            .await;
+        assert_eq!(resp.status, StatusCode::NOT_FOUND);
     }
 
     /// End to end: a rename leaves parcels, cost base, and the discount

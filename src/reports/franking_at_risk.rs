@@ -245,11 +245,8 @@ async fn what_if(
 mod tests {
     use super::*;
     use crate::reports::tax_summary;
-    use crate::test_support::{self, test_pool, ymd};
+    use crate::test_support::{self, ApiClient, test_pool, ymd};
     use axum::http::StatusCode;
-    use axum::{body::Body, http::Request};
-    use http_body_util::BodyExt;
-    use tower::ServiceExt;
 
     async fn insert_listing(pool: &SqlitePool, id: i64, ticker: &str) {
         test_support::listing(id)
@@ -486,19 +483,11 @@ mod tests {
         insert_sell(&pool, 2, 1, ymd(2025, 4, 10), 1000).await;
         insert_dividend(&pool, 1, 1, ymd(2025, 3, 28), ymd(2025, 3, 14), 5600).await;
 
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .uri("/reports/franking_at_risk")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let alerts: Vec<FrankingAtRiskAlert> = serde_json::from_slice(&bytes).unwrap();
+        let resp = ApiClient::over(router().with_state(pool))
+            .get("/reports/franking_at_risk")
+            .await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let alerts: Vec<FrankingAtRiskAlert> = resp.json();
         assert_eq!(alerts.len(), 1);
         assert_eq!(alerts[0].status, "denied");
     }
@@ -511,39 +500,29 @@ mod tests {
         insert_dividend(&pool, 1, 1, ymd(2025, 3, 28), ymd(2025, 3, 14), 7000).await;
 
         let post = |body: String| {
-            let pool = pool.clone();
+            let client = ApiClient::over(router().with_state(pool.clone()));
             async move {
-                router()
-                    .with_state(pool)
-                    .oneshot(
-                        Request::builder()
-                            .method("POST")
-                            .uri("/reports/franking_at_risk/what-if")
-                            .header("content-type", "application/json")
-                            .body(Body::from(body))
-                            .unwrap(),
-                    )
+                client
+                    .post_raw("/reports/franking_at_risk/what-if", body.as_ref())
                     .await
-                    .unwrap()
             }
         };
 
         let resp =
             post(r#"{"listing_id": 1, "sale_date": "2025-04-03", "units": "4000"}"#.to_string())
                 .await;
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let alerts: Vec<FrankingWhatIfAlert> = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+        let alerts: Vec<FrankingWhatIfAlert> = resp.json();
         assert_eq!(alerts.len(), 1);
         assert_eq!(alerts[0].additional_credits_at_risk, Decimal::from(7000));
 
         // Non-positive units rejected.
         let resp =
             post(r#"{"listing_id": 1, "sale_date": "2025-04-03", "units": "0"}"#.to_string()).await;
-        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
 
         // A missing required field is a deserialization failure (422).
         let resp = post(r#"{"listing_id": 1}"#.to_string()).await;
-        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
     }
 }

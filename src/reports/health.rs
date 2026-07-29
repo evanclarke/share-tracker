@@ -284,11 +284,8 @@ pub fn router() -> Router<SqlitePool> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{self, dec, test_pool, ymd};
+    use crate::test_support::{self, ApiClient, dec, test_pool, ymd};
     use axum::http::StatusCode;
-    use axum::{body::Body, http::Request};
-    use http_body_util::BodyExt;
-    use tower::ServiceExt;
 
     /// The report as at `today`, read late enough in the day (22:00 Sydney /
     /// noon UTC) that `today`'s ASX close is final. Tests that care about the
@@ -752,19 +749,11 @@ mod tests {
     async fn api_get_health() {
         let pool = test_pool().await;
         insert_job_run(&pool, "backup", "2026-07-13T00:00:00Z", Some("disk full")).await;
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .uri("/reports/health")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let h: HealthReport = serde_json::from_slice(&bytes).unwrap();
+        let resp = ApiClient::over(router().with_state(pool))
+            .get("/reports/health")
+            .await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let h: HealthReport = resp.json();
         assert_eq!(h.failed_jobs.len(), 1);
         assert_eq!(h.failed_jobs[0].name, "backup");
     }

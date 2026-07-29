@@ -916,11 +916,13 @@ async fn what_if_handler(
 mod tests {
     use super::*;
     use crate::entities::{amma, cgt_settings, corporate_action, rba_fx_rate, trade};
-    use crate::test_support::{self, allocate, test_pool};
+    use crate::test_support::{self, ApiClient, allocate, test_pool};
     use axum::http::StatusCode;
-    use axum::{body::Body, http::Request};
-    use http_body_util::BodyExt;
-    use tower::ServiceExt;
+
+    /// Client over this module's own routes.
+    fn client(pool: &SqlitePool) -> ApiClient {
+        ApiClient::over(router().with_state(pool.clone()))
+    }
 
     async fn insert_listing(pool: &SqlitePool, id: i64, ticker: &str) {
         test_support::listing(id)
@@ -2133,20 +2135,9 @@ mod tests {
         .await;
         allocate(&pool, 1, 2, 1, Decimal::from(100)).await;
 
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri("/portfolio/net-capital-gain")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let result: Vec<NetCapitalGainYear> = serde_json::from_slice(&bytes).unwrap();
+        let resp = client(&pool).get("/portfolio/net-capital-gain").await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let result: Vec<NetCapitalGainYear> = resp.json();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].net_capital_gain, Decimal::from(250));
     }
@@ -2178,32 +2169,21 @@ mod tests {
         .await;
         allocate(&pool, 1, 2, 1, Decimal::from(100)).await;
 
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri("/portfolio/net-capital-gain/export")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
+        let resp = client(&pool)
+            .get("/portfolio/net-capital-gain/export")
+            .await;
+        assert_eq!(resp.status, StatusCode::OK);
         assert_eq!(
-            resp.headers()
-                .get(axum::http::header::CONTENT_TYPE)
-                .unwrap(),
+            resp.headers.get(axum::http::header::CONTENT_TYPE).unwrap(),
             "text/csv; charset=utf-8"
         );
         assert_eq!(
-            resp.headers()
+            resp.headers
                 .get(axum::http::header::CONTENT_DISPOSITION)
                 .unwrap(),
             "attachment; filename=\"net-capital-gain.csv\""
         );
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let csv = String::from_utf8(bytes.to_vec()).unwrap();
+        let csv = resp.text().to_string();
         let mut lines = csv.lines();
         // Header names every NetCapitalGainYear field, in declaration order.
         assert_eq!(lines.next().unwrap(), CSV_HEADER.join(","));
@@ -2224,20 +2204,11 @@ mod tests {
     #[tokio::test]
     async fn api_export_of_empty_report_still_returns_header() {
         let pool = test_pool().await;
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri("/portfolio/net-capital-gain/export")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let csv = String::from_utf8(bytes.to_vec()).unwrap();
+        let resp = client(&pool)
+            .get("/portfolio/net-capital-gain/export")
+            .await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let csv = resp.text().to_string();
         assert_eq!(
             csv,
             CSV_HEADER.join(",") + "\n" + &CSV_ATO_LABELS.join(",") + "\n"
@@ -2434,21 +2405,11 @@ mod tests {
     // ---- pre-sale what-if -------------------------------------------------
 
     async fn post_what_if(pool: SqlitePool, body: serde_json::Value) -> (StatusCode, Vec<u8>) {
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/portfolio/net-capital-gain/what-if")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let status = resp.status();
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        (status, bytes.to_vec())
+        let resp = client(&pool)
+            .post("/portfolio/net-capital-gain/what-if", &body)
+            .await;
+        let status = resp.status;
+        (status, resp.body.to_vec())
     }
 
     /// FY2026 already holds a realised non-discountable gain of 500; the

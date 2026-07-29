@@ -117,10 +117,11 @@ async fn upsert(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::test_pool;
-    use axum::{body::Body, http::Request};
-    use http_body_util::BodyExt;
-    use tower::ServiceExt;
+    use crate::test_support::{ApiClient, test_pool};
+
+    fn client(pool: &SqlitePool) -> ApiClient {
+        ApiClient::over(router().with_state(pool.clone()))
+    }
 
     fn xtest() -> Exchange {
         Exchange {
@@ -190,19 +191,7 @@ mod tests {
     #[tokio::test]
     async fn api_list_includes_seed_exchanges() {
         let pool = test_pool().await;
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .uri("/exchanges")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let exchanges: Vec<Exchange> = serde_json::from_slice(&bytes).unwrap();
+        let exchanges: Vec<Exchange> = client(&pool).get_json("/exchanges").await;
         assert!(exchanges.iter().any(|e| e.mic == "XASX"));
         assert!(exchanges.iter().any(|e| e.mic == "XNYS"));
     }
@@ -210,36 +199,15 @@ mod tests {
     #[tokio::test]
     async fn api_get_existing_returns_exchange() {
         let pool = test_pool().await;
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .uri("/exchanges/XASX")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let ex: Exchange = serde_json::from_slice(&bytes).unwrap();
+        let ex: Exchange = client(&pool).get_json("/exchanges/XASX").await;
         assert_eq!(ex.mic, "XASX");
     }
 
     #[tokio::test]
     async fn api_get_missing_returns_404() {
         let pool = test_pool().await;
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .uri("/exchanges/XXXX")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let resp = client(&pool).get("/exchanges/XXXX").await;
+        assert_eq!(resp.status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
@@ -252,19 +220,7 @@ mod tests {
             "timezone": "UTC",
             "settlement_days": 2
         });
-        let resp = router()
-            .with_state(pool.clone())
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri("/exchanges/XTES")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        client(&pool).put_ok("/exchanges/XTES", &body).await;
         assert!(db_get(&pool, "XTES").await.unwrap().is_some());
     }
 
@@ -279,19 +235,7 @@ mod tests {
             "timezone": "UTC",
             "settlement_days": 3
         });
-        let resp = router()
-            .with_state(pool.clone())
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri("/exchanges/XTES")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        client(&pool).put_ok("/exchanges/XTES", &body).await;
         let got = db_get(&pool, "XTES").await.unwrap().unwrap();
         assert_eq!(got.name, "Renamed Exchange");
         assert_eq!(got.settlement_days, 3);
@@ -303,34 +247,14 @@ mod tests {
         // Delete a fresh exchange with no dependents — the seeded XASX/XNYS now
         // have child rows in exchange_holidays, so their delete is FK-blocked.
         db_upsert(&pool, &xtest()).await.unwrap();
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .method("DELETE")
-                    .uri("/exchanges/XTES")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let resp = client(&pool).delete("/exchanges/XTES").await;
+        assert_eq!(resp.status, StatusCode::NO_CONTENT);
     }
 
     #[tokio::test]
     async fn api_delete_missing_returns_404() {
         let pool = test_pool().await;
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .method("DELETE")
-                    .uri("/exchanges/XXXX")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let resp = client(&pool).delete("/exchanges/XXXX").await;
+        assert_eq!(resp.status, StatusCode::NOT_FOUND);
     }
 }

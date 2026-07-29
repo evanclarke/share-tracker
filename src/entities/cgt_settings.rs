@@ -110,10 +110,12 @@ async fn upsert(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::test_pool;
-    use axum::{body::Body, http::Request};
-    use http_body_util::BodyExt;
-    use tower::ServiceExt;
+    use crate::test_support::{ApiClient, test_pool};
+
+    /// Client over this module's own routes.
+    fn client(pool: &SqlitePool) -> ApiClient {
+        ApiClient::over(router().with_state(pool.clone()))
+    }
 
     #[tokio::test]
     async fn db_insert_and_retrieve_preserves_precision() {
@@ -191,133 +193,56 @@ mod tests {
     #[tokio::test]
     async fn api_put_get_list_delete_round_trip() {
         let pool = test_pool().await;
-        let resp = router()
-            .with_state(pool.clone())
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri("/cgt_settings/1")
-                    .header("content-type", "application/json")
-                    .body(Body::from(r#"{"opening_capital_loss":"1500.25"}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let resp = client(&pool)
+            .put_raw("/cgt_settings/1", r#"{"opening_capital_loss":"1500.25"}"#)
+            .await;
+        assert_eq!(resp.status, StatusCode::NO_CONTENT);
 
-        let resp = router()
-            .with_state(pool.clone())
-            .oneshot(
-                Request::builder()
-                    .uri("/cgt_settings/1")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let got: CgtSettings = serde_json::from_slice(&bytes).unwrap();
+        let resp = client(&pool).get("/cgt_settings/1").await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let got: CgtSettings = resp.json();
         assert_eq!(
             got.opening_capital_loss,
             "1500.25".parse::<Decimal>().unwrap()
         );
 
-        let resp = router()
-            .with_state(pool.clone())
-            .oneshot(
-                Request::builder()
-                    .uri("/cgt_settings")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let items: Vec<CgtSettings> = serde_json::from_slice(&bytes).unwrap();
+        let resp = client(&pool).get("/cgt_settings").await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let items: Vec<CgtSettings> = resp.json();
         assert_eq!(items.len(), 1);
 
-        let resp = router()
-            .with_state(pool.clone())
-            .oneshot(
-                Request::builder()
-                    .method("DELETE")
-                    .uri("/cgt_settings/1")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let resp = client(&pool).delete("/cgt_settings/1").await;
+        assert_eq!(resp.status, StatusCode::NO_CONTENT);
         assert!(db_get(&pool, 1).await.unwrap().is_none());
     }
 
     #[tokio::test]
     async fn api_put_negative_loss_returns_422() {
         let pool = test_pool().await;
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri("/cgt_settings/1")
-                    .header("content-type", "application/json")
-                    .body(Body::from(r#"{"opening_capital_loss":"-10"}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        let bytes = BodyExt::collect(resp.into_body()).await.unwrap().to_bytes();
-        let detail = String::from_utf8(bytes.to_vec()).unwrap();
+        let resp = client(&pool)
+            .put_raw("/cgt_settings/1", r#"{"opening_capital_loss":"-10"}"#)
+            .await;
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
+        let detail = resp.text().to_string();
         assert!(detail.contains("cannot be negative"), "detail: {detail}");
     }
 
     #[tokio::test]
     async fn api_put_non_singleton_id_returns_422() {
         let pool = test_pool().await;
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri("/cgt_settings/2")
-                    .header("content-type", "application/json")
-                    .body(Body::from(r#"{"opening_capital_loss":"10"}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let resp = client(&pool)
+            .put_raw("/cgt_settings/2", r#"{"opening_capital_loss":"10"}"#)
+            .await;
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     #[tokio::test]
     async fn api_get_missing_returns_404() {
         let pool = test_pool().await;
-        let resp = router()
-            .with_state(pool.clone())
-            .oneshot(
-                Request::builder()
-                    .uri("/cgt_settings/1")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let resp = client(&pool).get("/cgt_settings/1").await;
+        assert_eq!(resp.status, StatusCode::NOT_FOUND);
 
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .method("DELETE")
-                    .uri("/cgt_settings/1")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let resp = client(&pool).delete("/cgt_settings/1").await;
+        assert_eq!(resp.status, StatusCode::NOT_FOUND);
     }
 }

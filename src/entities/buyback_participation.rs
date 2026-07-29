@@ -286,10 +286,12 @@ mod tests {
     use super::*;
     use crate::entities::trade::TradeType;
     use crate::entities::{corporate_action::CorporateAction, listing};
-    use crate::test_support::{self, dec, test_pool};
-    use axum::{body::Body, http::Request};
-    use http_body_util::BodyExt;
-    use tower::ServiceExt;
+    use crate::test_support::{self, ApiClient, dec, test_pool};
+
+    /// Client over this module's own routes.
+    fn client(pool: &SqlitePool) -> ApiClient {
+        ApiClient::over(router().with_state(pool.clone()))
+    }
 
     fn d(y: i32, m: u32, day: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(y, m, day).unwrap()
@@ -717,30 +719,20 @@ mod tests {
         insert_buy(&pool, 1, d(2020, 1, 15), "10000", "6.00").await;
         insert_buyback(&pool, 10, d(2024, 7, 1)).await;
 
-        let resp = router()
-            .with_state(pool.clone())
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/corporate_actions/10/participate")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        serde_json::json!({
-                            "date": "2024-07-10",
-                            "units": "1000",
-                            "allocations": [
-                                { "purchase_trade_id": 1, "quantity_allocated": "1000" }
-                            ],
-                        })
-                        .to_string(),
-                    ))
-                    .unwrap(),
+        let resp = client(&pool)
+            .post(
+                "/corporate_actions/10/participate",
+                &serde_json::json!({
+                    "date": "2024-07-10",
+                    "units": "1000",
+                    "allocations": [
+                        { "purchase_trade_id": 1, "quantity_allocated": "1000" }
+                    ],
+                }),
             )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::CREATED);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            .await;
+        assert_eq!(resp.status, StatusCode::CREATED);
+        let v: serde_json::Value = resp.json();
         assert_eq!(v["trade"]["average_price"], "8.80");
         assert_eq!(v["trade"]["quantity"], "1000");
         assert_eq!(v["trade"]["buyback_action_id"], 10);
@@ -800,21 +792,11 @@ mod tests {
             ),
         ];
         for (body, expected_text) in cases {
-            let resp = router()
-                .with_state(pool.clone())
-                .oneshot(
-                    Request::builder()
-                        .method("POST")
-                        .uri("/corporate_actions/10/participate")
-                        .header("content-type", "application/json")
-                        .body(Body::from(body.to_string()))
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
-            let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-            let text = String::from_utf8(bytes.to_vec()).unwrap();
+            let resp = client(&pool)
+                .post("/corporate_actions/10/participate", &body)
+                .await;
+            assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
+            let text = resp.text().to_string();
             assert!(
                 text.contains(expected_text),
                 "expected the 422 body to say {expected_text:?}, got {text:?}"
@@ -828,19 +810,10 @@ mod tests {
         body: serde_json::Value,
         expected: StatusCode,
     ) {
-        let resp = router()
-            .with_state(pool.clone())
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(format!("/corporate_actions/{action_id}/participate"))
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), expected);
+        let resp = client(pool)
+            .post(format!("/corporate_actions/{action_id}/participate"), &body)
+            .await;
+        assert_eq!(resp.status, expected);
     }
 
     #[tokio::test]
@@ -888,61 +861,34 @@ mod tests {
             .fetch_one(&pool)
             .await
             .unwrap();
-        let app = crate::entities::router().with_state(pool.clone());
+        let app = ApiClient::over(crate::entities::router().with_state(pool.clone()));
         let resp = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri(format!("/sells/{trade_id}"))
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        serde_json::json!({
-                            "date": "2024-07-10", "listing_id": 1,
-                            "average_price": "99", "quantity": "1000",
-                            "currency": "AUD", "brokerage": "0",
-                            "gst_on_brokerage": "0", "brokerage_currency": "AUD",
-                            "fx_rate": "1",
-                            "allocations": [
-                                { "purchase_trade_id": 1, "quantity_allocated": "1000" }
-                            ],
-                        })
-                        .to_string(),
-                    ))
-                    .unwrap(),
+            .put(
+                format!("/sells/{trade_id}"),
+                &serde_json::json!({
+                    "date": "2024-07-10", "listing_id": 1,
+                    "average_price": "99", "quantity": "1000",
+                    "currency": "AUD", "brokerage": "0",
+                    "gst_on_brokerage": "0", "brokerage_currency": "AUD",
+                    "fx_rate": "1",
+                    "allocations": [
+                        { "purchase_trade_id": 1, "quantity_allocated": "1000" }
+                    ],
+                }),
             )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+            .await;
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
         let resp = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri(format!("/income/{income_id}"))
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        serde_json::json!({
-                            "listing_id": 1, "date_paid": "2024-07-10",
-                            "franked_amount": "9999",
-                        })
-                        .to_string(),
-                    ))
-                    .unwrap(),
+            .put(
+                format!("/income/{income_id}"),
+                &serde_json::json!({
+                    "listing_id": 1, "date_paid": "2024-07-10",
+                    "franked_amount": "9999",
+                }),
             )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .method("DELETE")
-                    .uri(format!("/income/{income_id}"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+            .await;
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
+        let resp = app.delete(format!("/income/{income_id}")).await;
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
     }
 }

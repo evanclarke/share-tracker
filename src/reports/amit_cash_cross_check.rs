@@ -121,11 +121,8 @@ async fn report(State(pool): State<SqlitePool>) -> Result<Json<Vec<AmitCashAlert
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{self, test_pool, ymd};
+    use crate::test_support::{self, ApiClient, test_pool, ymd};
     use axum::http::StatusCode;
-    use axum::{body::Body, http::Request};
-    use http_body_util::BodyExt;
-    use tower::ServiceExt;
 
     async fn insert_amit_listing(pool: &SqlitePool, id: i64, ticker: &str) {
         test_support::listing(id)
@@ -246,19 +243,11 @@ mod tests {
         let pool = test_pool().await;
         insert_amit_listing(&pool, 1, "VDHG").await;
         insert_cash(&pool, 1, 1, ymd(2024, 10, 16)).await;
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .uri("/reports/amit_cash_cross_check")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let alerts: Vec<AmitCashAlert> = serde_json::from_slice(&bytes).unwrap();
+        let resp = ApiClient::over(router().with_state(pool))
+            .get("/reports/amit_cash_cross_check")
+            .await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let alerts: Vec<AmitCashAlert> = resp.json();
         assert_eq!(alerts.len(), 1);
         assert_eq!(alerts[0].ticker, "VDHG");
         assert_eq!(alerts[0].cash_total_aud, Decimal::from(100));

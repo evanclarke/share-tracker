@@ -107,12 +107,9 @@ async fn report(
 mod tests {
     use super::*;
     use crate::entities::exchange;
-    use crate::test_support::{self, test_pool, ymd};
+    use crate::test_support::{self, ApiClient, test_pool, ymd};
     use axum::http::StatusCode;
-    use axum::{body::Body, http::Request};
-    use http_body_util::BodyExt;
     use rust_decimal::Decimal;
-    use tower::ServiceExt;
 
     async fn insert_listing(pool: &SqlitePool, id: i64, mic: &str) {
         test_support::listing(id).mic(mic).insert(pool).await;
@@ -236,19 +233,11 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "XASX").await;
         insert_buy(&pool, 1, 1, ymd(2030, 6, 3), ymd(2030, 6, 5)).await;
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .uri("/reports/settlement_holiday_coverage")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let alerts: Vec<SettlementCoverageAlert> = serde_json::from_slice(&bytes).unwrap();
+        let resp = ApiClient::over(router().with_state(pool))
+            .get("/reports/settlement_holiday_coverage")
+            .await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let alerts: Vec<SettlementCoverageAlert> = resp.json();
         assert_eq!(alerts.len(), 1);
         assert_eq!(alerts[0].trade_id, 1);
         assert_eq!(alerts[0].coverage_status, "outside_holiday_coverage");

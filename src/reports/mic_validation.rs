@@ -64,11 +64,8 @@ async fn report(State(pool): State<SqlitePool>) -> Result<Json<Vec<ExchangeMicSt
 mod tests {
     use super::*;
     use crate::entities::{exchange, mic_registry};
-    use crate::test_support::test_pool;
+    use crate::test_support::{ApiClient, test_pool};
     use axum::http::StatusCode;
-    use axum::{body::Body, http::Request};
-    use http_body_util::BodyExt;
-    use tower::ServiceExt;
 
     fn mic(mic: &str, status: &str, expiry: Option<&str>) -> mic_registry::MicEntry {
         mic_registry::MicEntry {
@@ -161,19 +158,11 @@ mod tests {
         mic_registry::db_upsert(&pool, &mic("XASX", "ACTIVE", None))
             .await
             .unwrap();
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .uri("/reports/exchange_mic_validation")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let report: Vec<ExchangeMicStatus> = serde_json::from_slice(&bytes).unwrap();
+        let resp = ApiClient::over(router().with_state(pool))
+            .get("/reports/exchange_mic_validation")
+            .await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let report: Vec<ExchangeMicStatus> = resp.json();
         assert!(
             report
                 .iter()

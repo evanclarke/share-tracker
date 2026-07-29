@@ -484,10 +484,12 @@ async fn download(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::test_pool;
-    use axum::http::Request;
-    use http_body_util::BodyExt;
-    use tower::ServiceExt;
+    use crate::test_support::{ApiClient, ApiResponse, test_pool};
+
+    /// Client over this module's own routes.
+    fn client(pool: &SqlitePool) -> ApiClient {
+        ApiClient::over(router().with_state(pool.clone()))
+    }
 
     const BOUNDARY: &str = "X-TEST-BOUNDARY";
 
@@ -587,24 +589,14 @@ mod tests {
         .unwrap()
     }
 
-    async fn get_list(pool: SqlitePool, query: &str) -> Response {
-        router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .uri(format!("/attachments?{query}"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap()
+    async fn get_list(pool: SqlitePool, query: &str) -> ApiResponse {
+        client(&pool).get(format!("/attachments?{query}")).await
     }
 
     async fn list_filenames(pool: SqlitePool, query: &str) -> Vec<String> {
         let resp = get_list(pool, query).await;
-        assert_eq!(resp.status(), StatusCode::OK, "?{query}");
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let items: Vec<Attachment> = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(resp.status, StatusCode::OK, "?{query}");
+        let items: Vec<Attachment> = resp.json();
         items.into_iter().map(|a| a.filename).collect()
     }
 
@@ -632,22 +624,14 @@ mod tests {
         body.extend_from_slice(format!("--{BOUNDARY}--\r\n").as_bytes());
     }
 
-    async fn post_multipart(pool: SqlitePool, body: Vec<u8>) -> Response {
-        router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/attachments")
-                    .header(
-                        "content-type",
-                        format!("multipart/form-data; boundary={BOUNDARY}"),
-                    )
-                    .body(Body::from(body))
-                    .unwrap(),
+    async fn post_multipart(pool: SqlitePool, body: Vec<u8>) -> ApiResponse {
+        client(&pool)
+            .post_bytes(
+                "/attachments",
+                Some(&format!("multipart/form-data; boundary={BOUNDARY}")),
+                body,
             )
             .await
-            .unwrap()
     }
 
     #[tokio::test]
@@ -697,9 +681,8 @@ mod tests {
         finish(&mut body);
 
         let resp = post_multipart(pool.clone(), body).await;
-        assert_eq!(resp.status(), StatusCode::CREATED);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let meta: Attachment = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(resp.status, StatusCode::CREATED);
+        let meta: Attachment = resp.json();
         assert_eq!(meta.trade_id, Some(trade_id));
         assert_eq!(meta.filename, "conf.pdf");
         assert_eq!(meta.content_type, ContentType::Pdf);
@@ -708,31 +691,23 @@ mod tests {
         assert_eq!(meta.checksum, checksum_hex(content));
 
         // The content round-trips byte-for-byte with the stored content type.
-        let dl = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .uri(format!("/attachments/{}/content", meta.id))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(dl.status(), StatusCode::OK);
+        let dl = client(&pool)
+            .get(format!("/attachments/{}/content", meta.id))
+            .await;
+        assert_eq!(dl.status, StatusCode::OK);
         assert_eq!(
-            dl.headers().get(header::CONTENT_TYPE).unwrap(),
+            dl.headers.get(header::CONTENT_TYPE).unwrap(),
             "application/pdf"
         );
         assert!(
-            dl.headers()
+            dl.headers
                 .get(header::CONTENT_DISPOSITION)
                 .unwrap()
                 .to_str()
                 .unwrap()
                 .contains("conf.pdf")
         );
-        let dl_bytes = dl.into_body().collect().await.unwrap().to_bytes();
-        assert_eq!(&dl_bytes[..], content);
+        assert_eq!(dl.body.as_ref(), content);
     }
 
     /// The default (and an explicit `?disposition=attachment`) download
@@ -749,15 +724,10 @@ mod tests {
         push_file(&mut body, "conf.pdf", "application/pdf", b"%PDF-1.4");
         finish(&mut body);
         let resp = post_multipart(pool.clone(), body).await;
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let meta: Attachment = serde_json::from_slice(&bytes).unwrap();
+        let meta: Attachment = resp.json();
 
-        async fn fetch(pool: SqlitePool, uri: String) -> Response {
-            router()
-                .with_state(pool)
-                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
-                .await
-                .unwrap()
+        async fn fetch(pool: SqlitePool, uri: String) -> ApiResponse {
+            client(&pool).get(uri).await
         }
 
         for (query, expected) in [
@@ -770,9 +740,9 @@ mod tests {
                 format!("/attachments/{}/content{query}", meta.id),
             )
             .await;
-            assert_eq!(resp.status(), StatusCode::OK);
+            assert_eq!(resp.status, StatusCode::OK);
             let cd = resp
-                .headers()
+                .headers
                 .get(header::CONTENT_DISPOSITION)
                 .unwrap()
                 .to_str()
@@ -780,7 +750,7 @@ mod tests {
             assert!(cd.starts_with(expected), "{query}: {cd}");
             assert!(cd.contains("conf.pdf"));
             assert_eq!(
-                resp.headers()
+                resp.headers
                     .get("x-content-type-options")
                     .unwrap()
                     .to_str()
@@ -794,7 +764,7 @@ mod tests {
             format!("/attachments/{}/content?disposition=bogus", meta.id),
         )
         .await;
-        assert_eq!(bad.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(bad.status, StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     #[tokio::test]
@@ -807,7 +777,7 @@ mod tests {
         finish(&mut body);
 
         let resp = post_multipart(pool, body).await;
-        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     #[tokio::test]
@@ -828,28 +798,16 @@ mod tests {
         finish(&mut body);
 
         let resp = post_multipart(pool.clone(), body).await;
-        assert_eq!(resp.status(), StatusCode::CREATED);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let meta: Attachment = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(resp.status, StatusCode::CREATED);
+        let meta: Attachment = resp.json();
         assert_eq!(meta.content_type, ContentType::Txt);
 
         // Downloads carry the stored text/plain content type.
-        let dl = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .uri(format!("/attachments/{}/content", meta.id))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            dl.headers().get(header::CONTENT_TYPE).unwrap(),
-            "text/plain"
-        );
-        let dl_bytes = dl.into_body().collect().await.unwrap().to_bytes();
-        assert_eq!(&dl_bytes[..], content);
+        let dl = client(&pool)
+            .get(format!("/attachments/{}/content", meta.id))
+            .await;
+        assert_eq!(dl.headers.get(header::CONTENT_TYPE).unwrap(), "text/plain");
+        assert_eq!(dl.body.as_ref(), content);
     }
 
     #[tokio::test]
@@ -869,7 +827,7 @@ mod tests {
             push_file(&mut body, name, "application/pdf", b"%PDF");
             finish(&mut body);
             let resp = post_multipart(pool.clone(), body).await;
-            assert_eq!(resp.status(), StatusCode::CREATED, "{field} upload");
+            assert_eq!(resp.status, StatusCode::CREATED, "{field} upload");
         }
 
         // Each owner filter returns exactly its own attachment.
@@ -881,19 +839,9 @@ mod tests {
                 "demerger-booklet.pdf",
             ),
         ] {
-            let resp = router()
-                .with_state(pool.clone())
-                .oneshot(
-                    Request::builder()
-                        .uri(format!("/attachments?{query}"))
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(resp.status(), StatusCode::OK);
-            let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-            let items: Vec<Attachment> = serde_json::from_slice(&bytes).unwrap();
+            let resp = client(&pool).get(format!("/attachments?{query}")).await;
+            assert_eq!(resp.status, StatusCode::OK);
+            let items: Vec<Attachment> = resp.json();
             assert_eq!(items.len(), 1, "?{query}");
             assert_eq!(items[0].filename, expected);
         }
@@ -990,9 +938,8 @@ mod tests {
             &format!("trade_id={drp_id}&include_linked=true"),
         )
         .await;
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let items: Vec<Attachment> = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+        let items: Vec<Attachment> = resp.json();
         let names: Vec<&str> = items.iter().map(|a| a.filename.as_str()).collect();
         assert_eq!(names, ["drp-advice.pdf", "own.pdf"]);
         let advice = &items[0];
@@ -1092,7 +1039,7 @@ mod tests {
         }
         for query in queries {
             let resp = get_list(pool.clone(), &query).await;
-            assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY, "?{query}");
+            assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY, "?{query}");
         }
     }
 
@@ -1104,7 +1051,7 @@ mod tests {
         finish(&mut body);
 
         let resp = post_multipart(pool, body).await;
-        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     #[tokio::test]
@@ -1119,7 +1066,7 @@ mod tests {
         finish(&mut body);
 
         let resp = post_multipart(pool, body).await;
-        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     #[tokio::test]
@@ -1132,7 +1079,7 @@ mod tests {
         finish(&mut body);
 
         let resp = post_multipart(pool, body).await;
-        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     #[tokio::test]
@@ -1146,7 +1093,7 @@ mod tests {
         finish(&mut body);
 
         let resp = post_multipart(pool, body).await;
-        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(resp.status, StatusCode::PAYLOAD_TOO_LARGE);
     }
 
     #[tokio::test]
@@ -1179,20 +1126,12 @@ mod tests {
         }
 
         // Filter to the trade's attachments only.
-        let resp = router()
-            .with_state(pool.clone())
-            .oneshot(
-                Request::builder()
-                    .uri(format!("/attachments?trade_id={trade_id}"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let resp = client(&pool)
+            .get(format!("/attachments?trade_id={trade_id}"))
+            .await;
+        assert_eq!(resp.status, StatusCode::OK);
         // The JSON carries metadata fields but never a "content" key.
-        let text = String::from_utf8(bytes.to_vec()).unwrap();
+        let text = resp.text().to_string();
         assert!(
             !text.contains("\"content\""),
             "list must not include the blob"
@@ -1225,32 +1164,12 @@ mod tests {
         .await
         .unwrap();
 
-        let resp = router()
-            .with_state(pool.clone())
-            .oneshot(
-                Request::builder()
-                    .method("DELETE")
-                    .uri(format!("/attachments/{id}"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let resp = client(&pool).delete(format!("/attachments/{id}")).await;
+        assert_eq!(resp.status, StatusCode::NO_CONTENT);
 
         // Deleting again → 404.
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .method("DELETE")
-                    .uri(format!("/attachments/{id}"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let resp = client(&pool).delete(format!("/attachments/{id}")).await;
+        assert_eq!(resp.status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

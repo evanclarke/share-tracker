@@ -469,10 +469,7 @@ mod tests {
     use super::*;
     use crate::entities::corporate_action::CorporateAction;
     use crate::entities::{listing, rights_exercise, trade};
-    use crate::test_support::{self, test_pool};
-    use axum::{body::Body, http::Request};
-    use http_body_util::BodyExt;
-    use tower::ServiceExt;
+    use crate::test_support::{self, ApiClient, test_pool};
 
     fn d(y: i32, m: u32, day: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(y, m, day).unwrap()
@@ -834,87 +831,40 @@ mod tests {
         insert_listing(&pool, 1).await;
         insert_buy(&pool, 1, d(2024, 1, 15), "1000").await;
         insert_rights_issue(&pool, 10, d(2024, 7, 1)).await;
-        let app = router().with_state(pool.clone());
+        let app = ApiClient::over(router().with_state(pool.clone()));
 
         let resp = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/corporate_actions/10/sell_rights")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        serde_json::json!({
-                            "date": "2024-07-20",
-                            "units": "250",
-                            "proceeds_per_right": "0.20",
-                            "allocations": [
-                                { "purchase_trade_id": 1, "units": "250" },
-                            ],
-                        })
-                        .to_string(),
-                    ))
-                    .unwrap(),
+            .post(
+                "/corporate_actions/10/sell_rights",
+                &serde_json::json!({
+                    "date": "2024-07-20",
+                    "units": "250",
+                    "proceeds_per_right": "0.20",
+                    "allocations": [
+                        { "purchase_trade_id": 1, "units": "250" },
+                    ],
+                }),
             )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::CREATED);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let sale: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            .await;
+        assert_eq!(resp.status, StatusCode::CREATED);
+        let sale: serde_json::Value = resp.json();
         assert_eq!(sale["units"], "250");
         assert_eq!(sale["proceeds_per_right"], "0.20");
         assert_eq!(sale["allocations"][0]["purchase_trade_id"], 1);
         let id = sale["id"].as_i64().unwrap();
 
-        let resp = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/rights_sales")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let sales: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let resp = app.get("/rights_sales").await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let sales: serde_json::Value = resp.json();
         assert_eq!(sales.as_array().unwrap().len(), 1);
 
-        let resp = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri(format!("/rights_sales/{id}"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
+        let resp = app.get(format!("/rights_sales/{id}")).await;
+        assert_eq!(resp.status, StatusCode::OK);
 
-        let resp = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("DELETE")
-                    .uri(format!("/rights_sales/{id}"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri(format!("/rights_sales/{id}"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let resp = app.delete(format!("/rights_sales/{id}")).await;
+        assert_eq!(resp.status, StatusCode::NO_CONTENT);
+        let resp = app.get(format!("/rights_sales/{id}")).await;
+        assert_eq!(resp.status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
@@ -923,7 +873,7 @@ mod tests {
         insert_listing(&pool, 1).await;
         insert_buy(&pool, 1, d(2024, 1, 15), "1000").await;
         insert_rights_issue(&pool, 10, d(2024, 7, 1)).await;
-        let app = router().with_state(pool.clone());
+        let app = ApiClient::over(router().with_state(pool.clone()));
 
         let cases: Vec<(i64, serde_json::Value, StatusCode)> = vec![
             (
@@ -961,21 +911,11 @@ mod tests {
         ];
         for (action_id, json, expected) in cases {
             let resp = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .method("POST")
-                        .uri(format!("/corporate_actions/{action_id}/sell_rights"))
-                        .header("content-type", "application/json")
-                        .body(Body::from(json.to_string()))
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(resp.status(), expected);
-            let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+                .post(format!("/corporate_actions/{action_id}/sell_rights"), &json)
+                .await;
+            assert_eq!(resp.status, expected);
             assert!(
-                !bytes.is_empty(),
+                !resp.body.is_empty(),
                 "a {expected} rejection must carry a reason body"
             );
         }

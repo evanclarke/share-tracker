@@ -231,10 +231,12 @@ async fn upsert(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::test_pool;
-    use axum::{body::Body, http::Request};
-    use http_body_util::BodyExt;
-    use tower::ServiceExt;
+    use crate::test_support::{ApiClient, test_pool};
+
+    /// Client over this module's own routes.
+    fn client(pool: &SqlitePool) -> ApiClient {
+        ApiClient::over(router().with_state(pool.clone()))
+    }
 
     fn xtest() -> Listing {
         crate::test_support::listing(1)
@@ -484,19 +486,9 @@ mod tests {
     async fn api_list_returns_ok() {
         let pool = test_pool().await;
         db_upsert(&pool, &xtest()).await.unwrap();
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .uri("/listings")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let listings: Vec<Listing> = serde_json::from_slice(&bytes).unwrap();
+        let resp = client(&pool).get("/listings").await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let listings: Vec<Listing> = resp.json();
         assert_eq!(listings.len(), 1);
         assert_eq!(listings[0].ticker, "VAS");
     }
@@ -505,36 +497,17 @@ mod tests {
     async fn api_get_existing_returns_listing() {
         let pool = test_pool().await;
         db_upsert(&pool, &xtest()).await.unwrap();
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .uri("/listings/1")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let l: Listing = serde_json::from_slice(&bytes).unwrap();
+        let resp = client(&pool).get("/listings/1").await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let l: Listing = resp.json();
         assert_eq!(l.ticker, "VAS");
     }
 
     #[tokio::test]
     async fn api_get_missing_returns_404() {
         let pool = test_pool().await;
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .uri("/listings/999")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let resp = client(&pool).get("/listings/999").await;
+        assert_eq!(resp.status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
@@ -549,19 +522,8 @@ mod tests {
             "currency": "AUD",
             "amit": true
         });
-        let resp = router()
-            .with_state(pool.clone())
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri("/listings/1")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let resp = client(&pool).put("/listings/1", &body).await;
+        assert_eq!(resp.status, StatusCode::NO_CONTENT);
         assert!(db_get(&pool, 1).await.unwrap().is_some());
     }
 
@@ -579,19 +541,8 @@ mod tests {
             "currency": "ZZZ",
             "amit": true
         });
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri("/listings/1")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let resp = client(&pool).put("/listings/1", &body).await;
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     #[tokio::test]
@@ -607,19 +558,8 @@ mod tests {
             "currency": "AUD",
             "amit": false
         });
-        let resp = router()
-            .with_state(pool.clone())
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri("/listings/2")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let resp = client(&pool).put("/listings/2", &body).await;
+        assert_eq!(resp.status, StatusCode::NO_CONTENT);
         let got = db_get(&pool, 2).await.unwrap().unwrap();
         assert_eq!(got.exchange_mic, None);
         assert_eq!(got.security_type, SecurityType::Crypto);
@@ -645,49 +585,25 @@ mod tests {
                 "security_type": "ETF", "currency": "AUD", "amit": false
             }),
         ] {
-            let resp = router()
-                .with_state(pool.clone())
-                .oneshot(
-                    Request::builder()
-                        .method("PUT")
-                        .uri("/listings/2")
-                        .header("content-type", "application/json")
-                        .body(Body::from(body.to_string()))
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
+            let resp = client(&pool).put("/listings/2", &body).await;
             assert_eq!(
-                resp.status(),
+                resp.status,
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "body: {body}"
             );
         }
 
         // The unrecognised-digital-token rejection says why, not a bare "HTTP 422".
-        let resp = router()
-            .with_state(pool.clone())
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri("/listings/2")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        serde_json::json!({
-                            "ticker": "DOGE", "name": "Dogecoin", "isin": null,
-                            "security_type": "Crypto", "currency": "AUD", "amit": false
-                        })
-                        .to_string(),
-                    ))
-                    .unwrap(),
+        let resp = client(&pool)
+            .put(
+                "/listings/2",
+                &serde_json::json!({
+                    "ticker": "DOGE", "name": "Dogecoin", "isin": null,
+                    "security_type": "Crypto", "currency": "AUD", "amit": false
+                }),
             )
-            .await
-            .unwrap();
-        let bytes = http_body_util::BodyExt::collect(resp.into_body())
-            .await
-            .unwrap()
-            .to_bytes();
-        let detail = String::from_utf8(bytes.to_vec()).unwrap();
+            .await;
+        let detail = resp.text().to_string();
         assert!(detail.contains("digital-token"), "detail: {detail}");
     }
 
@@ -704,19 +620,8 @@ mod tests {
             "currency": "AUD",
             "amit": false
         });
-        let resp = router()
-            .with_state(pool.clone())
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri("/listings/1")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let resp = client(&pool).put("/listings/1", &body).await;
+        assert_eq!(resp.status, StatusCode::NO_CONTENT);
         let got = db_get(&pool, 1).await.unwrap().unwrap();
         assert_eq!(got.name, "Renamed ETF");
         assert!(!got.amit);
@@ -726,34 +631,14 @@ mod tests {
     async fn api_delete_existing_returns_no_content() {
         let pool = test_pool().await;
         db_upsert(&pool, &xtest()).await.unwrap();
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .method("DELETE")
-                    .uri("/listings/1")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let resp = client(&pool).delete("/listings/1").await;
+        assert_eq!(resp.status, StatusCode::NO_CONTENT);
     }
 
     #[tokio::test]
     async fn api_delete_missing_returns_404() {
         let pool = test_pool().await;
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .method("DELETE")
-                    .uri("/listings/999")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let resp = client(&pool).delete("/listings/999").await;
+        assert_eq!(resp.status, StatusCode::NOT_FOUND);
     }
 }

@@ -237,10 +237,12 @@ async fn delete(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{self, test_pool, ymd};
-    use axum::{body::Body, http::Request};
-    use http_body_util::BodyExt;
-    use tower::ServiceExt;
+    use crate::test_support::{self, ApiClient, test_pool, ymd};
+
+    /// Client over this module's own routes.
+    fn client(pool: &SqlitePool) -> ApiClient {
+        ApiClient::over(router().with_state(pool.clone()))
+    }
 
     async fn insert_listing(pool: &SqlitePool, id: i64, mic: &str) {
         test_support::listing(id)
@@ -407,19 +409,9 @@ mod tests {
     #[tokio::test]
     async fn api_list_for_exchange_returns_seeded_holidays() {
         let pool = test_pool().await;
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .uri("/exchange_holidays/XASX")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let holidays: Vec<ExchangeHoliday> = serde_json::from_slice(&bytes).unwrap();
+        let resp = client(&pool).get("/exchange_holidays/XASX").await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let holidays: Vec<ExchangeHoliday> = resp.json();
         assert!(holidays.iter().all(|h| h.mic == "XASX"));
         assert!(holidays.iter().any(|h| h.holiday_date == ymd(2024, 12, 25)));
     }
@@ -428,19 +420,10 @@ mod tests {
     async fn api_upsert_and_get() {
         let pool = test_pool().await;
         let body = serde_json::json!({ "name": "Test Holiday" });
-        let resp = router()
-            .with_state(pool.clone())
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri("/exchange_holidays/XASX/2030-04-01")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let resp = client(&pool)
+            .put("/exchange_holidays/XASX/2030-04-01", &body)
+            .await;
+        assert_eq!(resp.status, StatusCode::NO_CONTENT);
         let got = db_get(&pool, "XASX", ymd(2030, 4, 1))
             .await
             .unwrap()
@@ -452,48 +435,22 @@ mod tests {
     async fn api_upsert_unknown_exchange_returns_422() {
         let pool = test_pool().await;
         let body = serde_json::json!({ "name": "Test Holiday" });
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri("/exchange_holidays/ZZZZ/2030-04-01")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let resp = client(&pool)
+            .put("/exchange_holidays/ZZZZ/2030-04-01", &body)
+            .await;
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     #[tokio::test]
     async fn api_delete_existing_then_404() {
         let pool = test_pool().await;
-        let app = router().with_state(pool.clone());
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .method("DELETE")
-                    .uri("/exchange_holidays/XASX/2024-12-25")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let app = client(&pool);
+        let resp = app.delete("/exchange_holidays/XASX/2024-12-25").await;
+        assert_eq!(resp.status, StatusCode::NO_CONTENT);
 
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .method("DELETE")
-                    .uri("/exchange_holidays/XASX/2024-12-25")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let resp = client(&pool)
+            .delete("/exchange_holidays/XASX/2024-12-25")
+            .await;
+        assert_eq!(resp.status, StatusCode::NOT_FOUND);
     }
 }

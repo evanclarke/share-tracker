@@ -632,11 +632,8 @@ async fn realised_gains_handler(
 mod tests {
     use super::*;
     use crate::entities::{corporate_action, listing, rba_fx_rate, trade};
-    use crate::test_support::{self, allocate, test_pool};
+    use crate::test_support::{self, ApiClient, allocate, test_pool};
     use axum::http::StatusCode;
-    use axum::{body::Body, http::Request};
-    use http_body_util::BodyExt;
-    use tower::ServiceExt;
 
     async fn insert_listing(pool: &SqlitePool, id: i64, ticker: &str) {
         test_support::listing(id)
@@ -1341,20 +1338,11 @@ mod tests {
         .await;
         allocate(&pool, 1, 2, 1, Decimal::from(100)).await;
 
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri("/portfolio/realised-gains")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let result: Vec<RealisedGainLoss> = serde_json::from_slice(&bytes).unwrap();
+        let resp = ApiClient::over(router().with_state(pool))
+            .get("/portfolio/realised-gains")
+            .await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let result: Vec<RealisedGainLoss> = resp.json();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].capital_gain_loss, Decimal::from(500));
         // held > 12 months

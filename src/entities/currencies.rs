@@ -433,11 +433,13 @@ impl From<ImportError> for ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::test_pool;
+    use crate::test_support::{ApiClient, test_pool};
     use axum::http::StatusCode;
-    use axum::{body::Body, http::Request};
-    use http_body_util::BodyExt;
-    use tower::ServiceExt;
+
+    /// Client over this module's own routes.
+    fn client(pool: &SqlitePool) -> ApiClient {
+        ApiClient::over(router().with_state(pool.clone()))
+    }
 
     /// A trimmed slice of the real List One layout: the `<ISO_4217>`/`<CcyTbl>`
     /// wrappers, AUD (minor units 2), a second EUR country row (same code → must
@@ -723,19 +725,9 @@ mod tests {
     async fn api_list_returns_currencies() {
         let pool = test_pool().await;
         db_upsert(&pool, &aud()).await.unwrap();
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .uri("/currencies")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let currencies: Vec<Currency> = serde_json::from_slice(&bytes).unwrap();
+        let resp = client(&pool).get("/currencies").await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let currencies: Vec<Currency> = resp.json();
         // The DB is seeded with a baseline; the inserted AUD must be among them.
         assert!(currencies.contains(&aud()));
     }
@@ -744,55 +736,27 @@ mod tests {
     async fn api_get_existing_returns_currency() {
         let pool = test_pool().await;
         db_upsert(&pool, &aud()).await.unwrap();
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .uri("/currencies/AUD")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let currency: Currency = serde_json::from_slice(&bytes).unwrap();
+        let resp = client(&pool).get("/currencies/AUD").await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let currency: Currency = resp.json();
         assert_eq!(currency, aud());
     }
 
     #[tokio::test]
     async fn api_get_missing_returns_404() {
         let pool = test_pool().await;
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .uri("/currencies/ZZZ")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let resp = client(&pool).get("/currencies/ZZZ").await;
+        assert_eq!(resp.status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
     async fn api_import_endpoint_invokes_import() {
         let pool = test_pool().await;
-        let resp = router()
-            .with_state(pool.clone())
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/currencies/import")
-                    .body(Body::from(SAMPLE_XML))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let summary: ImportSummary = serde_json::from_slice(&bytes).unwrap();
+        let resp = client(&pool)
+            .post_bytes("/currencies/import", None, SAMPLE_XML)
+            .await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let summary: ImportSummary = resp.json();
         assert_eq!(summary, ImportSummary { imported: 3 });
         // Import ran against the seeded baseline: the new XAU row is now present.
         assert!(db_get(&pool, "XAU").await.unwrap().is_some());
@@ -801,17 +765,9 @@ mod tests {
     #[tokio::test]
     async fn api_import_endpoint_rejects_malformed_feed() {
         let pool = test_pool().await;
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/currencies/import")
-                    .body(Body::from("not a currency feed"))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let resp = client(&pool)
+            .post_raw("/currencies/import", "not a currency feed")
+            .await;
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
     }
 }

@@ -296,10 +296,7 @@ async fn exercise(
 mod tests {
     use super::*;
     use crate::entities::{corporate_action::CorporateAction, listing, sell};
-    use crate::test_support::{self, test_pool};
-    use axum::{body::Body, http::Request};
-    use http_body_util::BodyExt;
-    use tower::ServiceExt;
+    use crate::test_support::{self, ApiClient, test_pool};
 
     fn d(y: i32, m: u32, day: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(y, m, day).unwrap()
@@ -733,28 +730,18 @@ mod tests {
         insert_buy(&pool, 1, d(2024, 1, 15), "1000", "2.00").await;
         insert_rights_issue(&pool, 10, d(2024, 7, 1)).await;
 
-        let resp = router()
-            .with_state(pool.clone())
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/corporate_actions/10/exercise")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        serde_json::json!({
-                            "date": "2024-08-01",
-                            "units": "250",
-                            "rights_cost": "10.50",
-                        })
-                        .to_string(),
-                    ))
-                    .unwrap(),
+        let resp = ApiClient::over(router().with_state(pool.clone()))
+            .post(
+                "/corporate_actions/10/exercise",
+                &serde_json::json!({
+                    "date": "2024-08-01",
+                    "units": "250",
+                    "rights_cost": "10.50",
+                }),
             )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::CREATED);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let trade: Trade = serde_json::from_slice(&bytes).unwrap();
+            .await;
+        assert_eq!(resp.status, StatusCode::CREATED);
+        let trade: Trade = resp.json();
         assert_eq!(trade.quantity, Decimal::from(250));
         assert_eq!(trade.brokerage, "10.50".parse::<Decimal>().unwrap());
         assert_eq!(trade.rights_action_id, Some(10));
@@ -767,24 +754,14 @@ mod tests {
         body: serde_json::Value,
         expected: StatusCode,
     ) {
-        let resp = router()
-            .with_state(pool.clone())
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(format!("/corporate_actions/{action_id}/exercise"))
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), expected);
+        let resp = ApiClient::over(router().with_state(pool.clone()))
+            .post(format!("/corporate_actions/{action_id}/exercise"), &body)
+            .await;
+        assert_eq!(resp.status, expected);
         // Every client-error rejection carries a reason for the toast.
         if expected.is_client_error() {
-            let bytes = BodyExt::collect(resp.into_body()).await.unwrap().to_bytes();
             assert!(
-                !bytes.is_empty(),
+                !resp.body.is_empty(),
                 "a {expected} rejection must carry a reason body"
             );
         }
@@ -815,61 +792,34 @@ mod tests {
             .fetch_one(&pool)
             .await
             .unwrap();
-        let app = crate::entities::router().with_state(pool.clone());
+        let app = ApiClient::over(crate::entities::router().with_state(pool.clone()));
         let resp = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri(format!("/trades/{trade_id}"))
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        serde_json::json!({
-                            "trade_type": "Buy", "date": "2024-08-01",
-                            "settlement_date": "2024-08-01", "listing_id": 1,
-                            "average_price": "1.80", "quantity": "9999",
-                            "currency": "AUD", "brokerage": "0",
-                            "gst_on_brokerage": "0", "brokerage_currency": "AUD",
-                            "fx_rate": "1",
-                        })
-                        .to_string(),
-                    ))
-                    .unwrap(),
+            .put(
+                format!("/trades/{trade_id}"),
+                &serde_json::json!({
+                    "trade_type": "Buy", "date": "2024-08-01",
+                    "settlement_date": "2024-08-01", "listing_id": 1,
+                    "average_price": "1.80", "quantity": "9999",
+                    "currency": "AUD", "brokerage": "0",
+                    "gst_on_brokerage": "0", "brokerage_currency": "AUD",
+                    "fx_rate": "1",
+                }),
             )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+            .await;
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
         let resp = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri("/corporate_actions/10")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        serde_json::json!({
-                            "action_type": "RightsIssue", "listing_id": 1,
-                            "date": "2024-07-01", "rights_units": "1",
-                            "rights_held_units": "4", "exercise_price": "1.80",
-                            "currency": "AUD",
-                        })
-                        .to_string(),
-                    ))
-                    .unwrap(),
+            .put(
+                "/corporate_actions/10",
+                &serde_json::json!({
+                    "action_type": "RightsIssue", "listing_id": 1,
+                    "date": "2024-07-01", "rights_units": "1",
+                    "rights_held_units": "4", "exercise_price": "1.80",
+                    "currency": "AUD",
+                }),
             )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .method("DELETE")
-                    .uri("/corporate_actions/10")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+            .await;
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
+        let resp = app.delete("/corporate_actions/10").await;
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
     }
 }

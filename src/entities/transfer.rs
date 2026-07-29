@@ -601,10 +601,7 @@ mod tests {
     use crate::entities::holding_account::{self, HoldingAccount};
     use crate::entities::sell::{SellBody, SellError};
     use crate::entities::trade::TradeType;
-    use crate::test_support::{self, dec};
-    use axum::{body::Body, http::Request};
-    use http_body_util::BodyExt;
-    use tower::ServiceExt;
+    use crate::test_support::{self, ApiClient, dec};
 
     async fn test_pool() -> SqlitePool {
         let pool = test_support::test_pool().await;
@@ -1400,20 +1397,9 @@ mod tests {
             "to_account_id": 1,
             "allocations": [ { "purchase_trade_id": 1, "quantity_allocated": "100" } ]
         });
-        let resp = app()
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri("/transfers/1")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::CREATED);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let resp = ApiClient::over(app()).put("/transfers/1", &body).await;
+        assert_eq!(resp.status, StatusCode::CREATED);
+        let v: serde_json::Value = resp.json();
         assert_eq!(v["sell"]["holding_account_id"], 2);
         assert_eq!(v["transfer_ins"][0]["holding_account_id"], 1);
         assert_eq!(v["transfer_ins"][0]["brokerage"], "12000");
@@ -1423,40 +1409,14 @@ mod tests {
         );
 
         // GET list/one.
-        let resp = app()
-            .oneshot(
-                Request::builder()
-                    .uri("/transfers/1")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
+        let resp = ApiClient::over(app()).get("/transfers/1").await;
+        assert_eq!(resp.status, StatusCode::OK);
 
         // DELETE restores; a second DELETE is 404.
-        let resp = app()
-            .oneshot(
-                Request::builder()
-                    .method("DELETE")
-                    .uri("/transfers/1")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
-        let resp = app()
-            .oneshot(
-                Request::builder()
-                    .method("DELETE")
-                    .uri("/transfers/1")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let resp = ApiClient::over(app()).delete("/transfers/1").await;
+        assert_eq!(resp.status, StatusCode::NO_CONTENT);
+        let resp = ApiClient::over(app()).delete("/transfers/1").await;
+        assert_eq!(resp.status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
@@ -1473,24 +1433,11 @@ mod tests {
             "to_account_id": 2,
             "allocations": [ { "purchase_trade_id": 1, "quantity_allocated": "100" } ]
         });
-        let resp = router()
-            .with_state(pool.clone())
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri("/transfers/1")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        let bytes = http_body_util::BodyExt::collect(resp.into_body())
-            .await
-            .unwrap()
-            .to_bytes();
-        let detail = String::from_utf8(bytes.to_vec()).unwrap();
+        let resp = ApiClient::over(router().with_state(pool.clone()))
+            .put("/transfers/1", &body)
+            .await;
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
+        let detail = resp.text().to_string();
         assert!(detail.contains("same"), "detail: {detail}");
 
         // Unknown destination account → FK violation → 422.
@@ -1501,18 +1448,9 @@ mod tests {
             "to_account_id": 99,
             "allocations": [ { "purchase_trade_id": 1, "quantity_allocated": "100" } ]
         });
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri("/transfers/1")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let resp = ApiClient::over(router().with_state(pool))
+            .put("/transfers/1", &body)
+            .await;
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
     }
 }

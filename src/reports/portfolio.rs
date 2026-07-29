@@ -190,11 +190,13 @@ async fn overview(
 mod tests {
     use super::*;
     use crate::entities::{amit_adjustment, amma, corporate_action, trade};
-    use crate::test_support::{self, allocate, dec, test_pool, ymd};
+    use crate::test_support::{self, ApiClient, allocate, dec, test_pool, ymd};
     use axum::http::StatusCode;
-    use axum::{body::Body, http::Request};
-    use http_body_util::BodyExt;
-    use tower::ServiceExt;
+
+    /// Client over this module's own routes.
+    fn client(pool: &SqlitePool) -> ApiClient {
+        ApiClient::over(router().with_state(pool.clone()))
+    }
 
     async fn insert_listing(pool: &SqlitePool, id: i64, ticker: &str) {
         test_support::listing(id)
@@ -300,19 +302,10 @@ mod tests {
             "brokerage_currency": "AUD",
             "fx_rate": "1"
         });
-        let resp = trade::router()
-            .with_state(pool.clone())
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri("/trades/1")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let resp = ApiClient::over(trade::router().with_state(pool.clone()))
+            .put("/trades/1", &body)
+            .await;
+        assert_eq!(resp.status, StatusCode::NO_CONTENT);
 
         let holdings = db_holdings(&pool, None).await.unwrap();
         // cost = 10 × 100 + 9.95 (the inclusive amount paid) = 1009.95
@@ -772,20 +765,9 @@ mod tests {
         insert_listing(&pool, 1, "VAS").await;
         insert_buy(&pool, 1, 1, Decimal::from(100), Decimal::from(10)).await;
 
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/portfolio/overview")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let holdings: Vec<HoldingOverview> = serde_json::from_slice(&bytes).unwrap();
+        let resp = client(&pool).post_empty("/portfolio/overview").await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let holdings: Vec<HoldingOverview> = resp.json();
         assert_eq!(holdings.len(), 1);
         assert_eq!(holdings[0].quantity, Decimal::from(100));
         assert!(holdings[0].current_price.is_none());
@@ -799,21 +781,9 @@ mod tests {
         insert_buy(&pool, 1, 1, Decimal::from(100), Decimal::from(10)).await;
 
         let body = serde_json::json!({ "prices": { "1": "120.50" } });
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/portfolio/overview")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let holdings: Vec<HoldingOverview> = serde_json::from_slice(&bytes).unwrap();
+        let resp = client(&pool).post("/portfolio/overview", &body).await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let holdings: Vec<HoldingOverview> = resp.json();
         assert_eq!(holdings.len(), 1);
         assert_eq!(
             holdings[0].current_price,
@@ -834,21 +804,9 @@ mod tests {
 
         // price for listing 99 (doesn't exist) — should be silently ignored
         let body = serde_json::json!({ "prices": { "99": "50.00" } });
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/portfolio/overview")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let holdings: Vec<HoldingOverview> = serde_json::from_slice(&bytes).unwrap();
+        let resp = client(&pool).post("/portfolio/overview", &body).await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let holdings: Vec<HoldingOverview> = resp.json();
         assert_eq!(holdings.len(), 1);
         assert!(holdings[0].market_value.is_none());
     }
@@ -868,22 +826,11 @@ mod tests {
             .shared();
 
         let body = serde_json::json!({ "live": true });
-        let resp = router()
-            .with_state(pool)
-            .layer(axum::Extension(fetcher))
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/portfolio/overview")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let holdings: Vec<HoldingOverview> = serde_json::from_slice(&bytes).unwrap();
+        let resp = ApiClient::over(router().with_state(pool).layer(axum::Extension(fetcher)))
+            .post("/portfolio/overview", &body)
+            .await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let holdings: Vec<HoldingOverview> = resp.json();
         assert_eq!(holdings[0].current_price, Some("12.50".parse().unwrap()));
         assert_eq!(holdings[0].market_value, Some(Decimal::from(1250)));
         assert_eq!(
@@ -925,23 +872,16 @@ mod tests {
             .with_quote(1, "141.50", "USD", as_of)
             .shared();
 
-        let request = || {
-            Request::builder()
-                .method("POST")
-                .uri("/portfolio/overview")
-                .header("content-type", "application/json")
-                .body(Body::from(serde_json::json!({ "live": true }).to_string()))
-                .unwrap()
-        };
-        let resp = router()
-            .with_state(pool.clone())
-            .layer(axum::Extension(fetcher.clone()))
-            .oneshot(request())
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let holdings: Vec<HoldingOverview> = serde_json::from_slice(&bytes).unwrap();
+        let live = serde_json::json!({ "live": true });
+        let resp = ApiClient::over(
+            router()
+                .with_state(pool.clone())
+                .layer(axum::Extension(fetcher.clone())),
+        )
+        .post("/portfolio/overview", &live)
+        .await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let holdings: Vec<HoldingOverview> = resp.json();
         // Valued at May's fallback rate (141.50 / 2), flagged provisional.
         assert_eq!(holdings[0].current_price, Some("70.75".parse().unwrap()));
         assert!(
@@ -959,14 +899,10 @@ mod tests {
         crate::entities::rba_fx_rate::db_import_rate(&pool, "USD", "2026-03", "2".parse().unwrap())
             .await
             .unwrap();
-        let resp = router()
-            .with_state(pool)
-            .layer(axum::Extension(fetcher))
-            .oneshot(request())
-            .await
-            .unwrap();
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let holdings: Vec<HoldingOverview> = serde_json::from_slice(&bytes).unwrap();
+        let resp = ApiClient::over(router().with_state(pool).layer(axum::Extension(fetcher)))
+            .post("/portfolio/overview", &live)
+            .await;
+        let holdings: Vec<HoldingOverview> = resp.json();
         assert!(holdings[0].current_price.is_none());
         assert!(!holdings[0].fx_provisional);
         assert!(
@@ -998,22 +934,11 @@ mod tests {
             .shared();
 
         let body = serde_json::json!({ "live": true, "prices": { "2": "99" } });
-        let resp = router()
-            .with_state(pool)
-            .layer(axum::Extension(fetcher))
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/portfolio/overview")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let holdings: Vec<HoldingOverview> = serde_json::from_slice(&bytes).unwrap();
+        let resp = ApiClient::over(router().with_state(pool).layer(axum::Extension(fetcher)))
+            .post("/portfolio/overview", &body)
+            .await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let holdings: Vec<HoldingOverview> = resp.json();
         // Listing 1: live-valued.
         assert_eq!(holdings[0].current_price, Some(Decimal::from(20)));
         assert!(holdings[0].price_as_of.is_some());

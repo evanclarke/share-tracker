@@ -143,11 +143,8 @@ async fn open_parcels_handler(
 mod tests {
     use super::*;
     use crate::entities::corporate_action;
-    use crate::test_support::{self, allocate, dec, test_pool, ymd};
+    use crate::test_support::{self, ApiClient, allocate, dec, test_pool, ymd};
     use axum::http::StatusCode;
-    use axum::{body::Body, http::Request};
-    use http_body_util::BodyExt;
-    use tower::ServiceExt;
 
     async fn insert_listing(pool: &SqlitePool, id: i64, ticker: &str) {
         test_support::listing(id)
@@ -633,20 +630,11 @@ mod tests {
         insert_sell(&pool, 2, 1, Decimal::from(40)).await;
         allocate(&pool, 1, 2, 1, Decimal::from(40)).await;
 
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri("/portfolio/open-parcels")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let parcels: Vec<OpenParcel> = serde_json::from_slice(&bytes).unwrap();
+        let resp = ApiClient::over(router().with_state(pool))
+            .get("/portfolio/open-parcels")
+            .await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let parcels: Vec<OpenParcel> = resp.json();
         assert_eq!(parcels.len(), 1);
         assert_eq!(parcels[0].ticker, "VAS");
         assert_eq!(parcels[0].remaining_quantity, Decimal::from(60));

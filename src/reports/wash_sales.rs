@@ -173,11 +173,8 @@ async fn report(
 mod tests {
     use super::*;
     use crate::entities::holding_account;
-    use crate::test_support::{self, allocate, test_pool, ymd};
+    use crate::test_support::{self, ApiClient, allocate, test_pool, ymd};
     use axum::http::StatusCode;
-    use axum::{body::Body, http::Request};
-    use http_body_util::BodyExt;
-    use tower::ServiceExt;
 
     async fn insert_listing(pool: &SqlitePool, id: i64, ticker: &str) {
         test_support::listing(id)
@@ -537,40 +534,25 @@ mod tests {
             .await;
 
         let post = |body: &'static str| {
-            let pool = pool.clone();
-            async move {
-                router()
-                    .with_state(pool)
-                    .oneshot(
-                        Request::builder()
-                            .method("POST")
-                            .uri("/reports/wash_sales")
-                            .header("content-type", "application/json")
-                            .body(Body::from(body))
-                            .unwrap(),
-                    )
-                    .await
-                    .unwrap()
-            }
+            let client = ApiClient::over(router().with_state(pool.clone()));
+            async move { client.post_raw("/reports/wash_sales", body.as_ref()).await }
         };
 
         // Empty body → default 30-day window: the 10-day repurchase flags.
         let resp = post("{}").await;
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let alerts: Vec<WashSaleAlert> = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+        let alerts: Vec<WashSaleAlert> = resp.json();
         assert_eq!(alerts.len(), 1);
         assert_eq!(alerts[0].days_apart, 10);
 
         // An explicit 5-day window excludes it.
         let resp = post(r#"{"window_days": 5}"#).await;
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let alerts: Vec<WashSaleAlert> = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+        let alerts: Vec<WashSaleAlert> = resp.json();
         assert!(alerts.is_empty());
 
         // A non-positive window is rejected, not silently defaulted.
         let resp = post(r#"{"window_days": 0}"#).await;
-        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
     }
 }

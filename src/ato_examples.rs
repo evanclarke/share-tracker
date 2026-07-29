@@ -91,50 +91,16 @@ use crate::reports::net_capital_gain::NetCapitalGainYear;
 use crate::reports::portfolio::HoldingOverview;
 use crate::reports::realised_gains::{DisposalSource, RealisedGainLoss};
 use crate::reports::tax_summary::TaxYearSummary;
-use crate::{app, infra::scheduler};
-use axum::body::Body;
-use axum::http::{Request, StatusCode};
-use http_body_util::BodyExt;
+use axum::http::StatusCode;
 use rust_decimal::Decimal;
 use serde_json::{Value, json};
 use sqlx::SqlitePool;
-use tower::ServiceExt;
 
-use crate::test_support::test_pool;
-
-/// The full application router, exactly as `main` serves it — but with an
-/// offline price-source stub instead of the live `YahooFetcher`, so these
-/// acceptance tests never reach the network (they value via explicit cost-base
-/// assertions, not live prices).
-fn router(pool: &SqlitePool) -> axum::Router {
-    let fetcher = crate::entities::closing_price::test_support::QuoteStub::default().shared();
-    app::router(
-        pool.clone(),
-        scheduler::registry(
-            pool.clone(),
-            ":memory:".to_string(),
-            None,
-            None,
-            fetcher.clone(),
-        ),
-        fetcher,
-    )
-}
+use crate::test_support::{ApiClient, test_pool};
 
 /// PUT a JSON body to the API and require the entity-write success status (204).
 async fn api_put(pool: &SqlitePool, path: &str, body: Value) {
-    let resp = router(pool)
-        .oneshot(
-            Request::builder()
-                .method("PUT")
-                .uri(path)
-                .header("content-type", "application/json")
-                .body(Body::from(body.to_string()))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::NO_CONTENT, "PUT {path} failed");
+    ApiClient::full(pool).put_ok(path, &body).await;
 }
 
 /// POST a JSON body (action/report endpoints) and deserialize the JSON response,
@@ -145,31 +111,16 @@ async fn api_post<T: serde::de::DeserializeOwned>(
     body: Value,
     expect: StatusCode,
 ) -> T {
-    let resp = router(pool)
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri(path)
-                .header("content-type", "application/json")
-                .body(Body::from(body.to_string()))
-                .unwrap(),
-        )
+    ApiClient::full(pool)
+        .post(path, &body)
         .await
-        .unwrap();
-    assert_eq!(resp.status(), expect, "POST {path} failed");
-    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    serde_json::from_slice(&bytes).unwrap()
+        .expect_status(expect)
+        .json()
 }
 
 /// GET a report endpoint and deserialize the JSON response.
 async fn api_get<T: serde::de::DeserializeOwned>(pool: &SqlitePool, path: &str) -> T {
-    let resp = router(pool)
-        .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK, "GET {path} failed");
-    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    serde_json::from_slice(&bytes).unwrap()
+    ApiClient::full(pool).get_json(path).await
 }
 
 /// Register an AUD listing on the seeded XASX exchange via `PUT /listings/:id`.

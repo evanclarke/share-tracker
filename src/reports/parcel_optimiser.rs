@@ -421,11 +421,8 @@ async fn optimiser_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{self, allocate, dec, test_pool, ymd};
+    use crate::test_support::{self, ApiClient, allocate, dec, test_pool, ymd};
     use axum::http::StatusCode;
-    use axum::{body::Body, http::Request};
-    use http_body_util::BodyExt;
-    use tower::ServiceExt;
 
     async fn insert_listing(pool: &SqlitePool, id: i64, ticker: &str) {
         test_support::listing(id)
@@ -633,20 +630,11 @@ mod tests {
         if let Some(f) = fetcher {
             router = router.layer(Extension(f));
         }
-        let resp = router
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/portfolio/parcel-optimiser")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let status = resp.status();
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        (status, bytes.to_vec())
+        let resp = ApiClient::over(router)
+            .post("/portfolio/parcel-optimiser", &body)
+            .await;
+        let status = resp.status;
+        (status, resp.body.to_vec())
     }
 
     #[tokio::test]

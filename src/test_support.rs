@@ -1,22 +1,248 @@
 //! Shared test fixtures (`#[cfg(test)]`-only, see the declaration in `main.rs`).
 //!
-//! Test modules build their data through these builders instead of spelling
-//! out every `Listing`/`Trade` field — a new column is then added here once,
-//! not in every test module. Each builder starts from a plausible default row
-//! and exposes setters only for what tests actually vary; `insert` upserts
-//! through the entity's own `db_upsert` so write-time invariants still apply.
+//! Two halves. The *data* half: builders that let a test spell out only what it
+//! varies instead of every `Listing`/`Trade` field — a new column is then added
+//! here once, not in every test module. Each builder starts from a plausible
+//! default row and exposes setters only for what tests actually vary; `insert`
+//! upserts through the entity's own `db_upsert` so write-time invariants still
+//! apply. The *HTTP* half: [`ApiClient`], which drives a router through
+//! `tower::ServiceExt::oneshot` so a test says `client.put_json(path, &body)`
+//! rather than open-coding `Request::builder()` and the body decode.
 
 use crate::entities::{
     amit_adjustment, amma, closing_price, ess_statement, income, listing, parcel_allocation, trade,
 };
 use crate::infra::db;
+use axum::body::{Body, Bytes};
+use axum::http::{HeaderMap, Request, StatusCode};
 use chrono::NaiveDate;
+use http_body_util::BodyExt;
 use rust_decimal::Decimal;
 use sqlx::SqlitePool;
+use tower::ServiceExt;
 
 /// Fresh in-memory database with migrations and seed data applied.
 pub async fn test_pool() -> SqlitePool {
     db::init(":memory:").await.unwrap()
+}
+
+/// One request's outcome: the status and the raw body, kept together so a
+/// rejection test can assert on both without re-plumbing the decode.
+pub struct ApiResponse {
+    pub status: StatusCode,
+    pub headers: HeaderMap,
+    pub body: Bytes,
+}
+
+impl ApiResponse {
+    /// The body as JSON. Panics with the body text on a decode failure — a
+    /// test that mis-types its response should say what actually came back.
+    pub fn json<T: serde::de::DeserializeOwned>(&self) -> T {
+        serde_json::from_slice(&self.body)
+            .unwrap_or_else(|e| panic!("decoding {:?} failed: {e}", self.text()))
+    }
+
+    /// The body as text — the plain-text reason on a 4xx.
+    pub fn text(&self) -> &str {
+        std::str::from_utf8(&self.body).expect("response body is not UTF-8")
+    }
+
+    /// Status plus body text, the pair the rejection tests assert on.
+    pub fn status_and_body(&self) -> (StatusCode, &str) {
+        (self.status, self.text())
+    }
+
+    /// Requires `expected`, reporting the body when it doesn't match, and
+    /// returns self so a decode can be chained on.
+    #[track_caller]
+    pub fn expect_status(self, expected: StatusCode) -> Self {
+        assert_eq!(self.status, expected, "body: {:?}", self.text());
+        self
+    }
+}
+
+/// Drives a router in-process — no network, no port binding. Construct it over
+/// whichever router the test needs: one entity's own [`ApiClient::over`], or
+/// the whole application as `main` serves it ([`ApiClient::full`]).
+#[derive(Clone)]
+pub struct ApiClient {
+    app: axum::Router,
+}
+
+impl ApiClient {
+    /// Client over an already-assembled router, e.g. one module's
+    /// `router().with_state(pool)`.
+    pub fn over(app: axum::Router) -> Self {
+        ApiClient { app }
+    }
+
+    /// Client over the full application router, exactly as `main` serves it,
+    /// but with an offline price stub in place of the live `YahooFetcher` — so
+    /// no test path can reach the network.
+    pub fn full(pool: &SqlitePool) -> Self {
+        Self::full_with(
+            pool,
+            closing_price::test_support::QuoteStub::default().shared(),
+        )
+    }
+
+    /// [`Self::full`] with a caller-supplied price fetcher, for the tests that
+    /// need canned quotes or a failing provider.
+    pub fn full_with(pool: &SqlitePool, fetcher: closing_price::SharedFetcher) -> Self {
+        let registry = crate::infra::scheduler::registry(
+            pool.clone(),
+            ":memory:".to_string(),
+            None,
+            None,
+            fetcher.clone(),
+        );
+        ApiClient::over(crate::app::router(pool.clone(), registry, fetcher))
+    }
+
+    async fn send(&self, req: Request<Body>) -> ApiResponse {
+        let resp = self.app.clone().oneshot(req).await.unwrap();
+        let status = resp.status();
+        let headers = resp.headers().clone();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        ApiResponse {
+            status,
+            headers,
+            body,
+        }
+    }
+
+    async fn with_body(
+        &self,
+        method: &str,
+        path: impl AsRef<str>,
+        body: &impl serde::Serialize,
+    ) -> ApiResponse {
+        self.send(
+            Request::builder()
+                .method(method)
+                .uri(path.as_ref())
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(body).unwrap()))
+                .unwrap(),
+        )
+        .await
+    }
+
+    pub async fn get(&self, path: impl AsRef<str>) -> ApiResponse {
+        self.send(
+            Request::builder()
+                .uri(path.as_ref())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+    }
+
+    pub async fn put(&self, path: impl AsRef<str>, body: &impl serde::Serialize) -> ApiResponse {
+        self.with_body("PUT", path, body).await
+    }
+
+    pub async fn post(&self, path: impl AsRef<str>, body: &impl serde::Serialize) -> ApiResponse {
+        self.with_body("POST", path, body).await
+    }
+
+    /// PUT a body already written out as a string, for the tests whose point
+    /// is the exact bytes on the wire (a malformed or hand-shaped payload).
+    pub async fn put_raw(&self, path: impl AsRef<str>, body: &str) -> ApiResponse {
+        self.raw("PUT", path, body).await
+    }
+
+    /// POST a body already written out as a string. See [`Self::put_raw`].
+    pub async fn post_raw(&self, path: impl AsRef<str>, body: &str) -> ApiResponse {
+        self.raw("POST", path, body).await
+    }
+
+    async fn raw(&self, method: &str, path: impl AsRef<str>, body: &str) -> ApiResponse {
+        self.send(
+            Request::builder()
+                .method(method)
+                .uri(path.as_ref())
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+    }
+
+    /// POST raw bytes for the payloads that are not JSON — the multipart
+    /// uploads and the CSV/XML import feeds. `content_type` is optional
+    /// because the import endpoints take a bare `String` body and are driven
+    /// with no content type at all.
+    pub async fn post_bytes(
+        &self,
+        path: impl AsRef<str>,
+        content_type: Option<&str>,
+        body: impl Into<Body>,
+    ) -> ApiResponse {
+        let mut req = Request::builder().method("POST").uri(path.as_ref());
+        if let Some(ct) = content_type {
+            req = req.header("content-type", ct);
+        }
+        self.send(req.body(body.into()).unwrap()).await
+    }
+
+    /// POST with no request body, for the endpoints that take none
+    /// (`POST /jobs/{name}`).
+    pub async fn post_empty(&self, path: impl AsRef<str>) -> ApiResponse {
+        self.send(
+            Request::builder()
+                .method("POST")
+                .uri(path.as_ref())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+    }
+
+    pub async fn delete(&self, path: impl AsRef<str>) -> ApiResponse {
+        self.send(
+            Request::builder()
+                .method("DELETE")
+                .uri(path.as_ref())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+    }
+
+    /// GET, require 200, decode the JSON body — the read half of most tests.
+    pub async fn get_json<T: serde::de::DeserializeOwned>(&self, path: impl AsRef<str>) -> T {
+        self.get(path).await.expect_status(StatusCode::OK).json()
+    }
+
+    /// PUT a JSON body and return the status alone (an entity upsert answers
+    /// 204 with no body); the rejection tests use [`Self::put`] instead.
+    pub async fn put_json(
+        &self,
+        path: impl AsRef<str>,
+        body: &impl serde::Serialize,
+    ) -> StatusCode {
+        self.put(path, body).await.status
+    }
+
+    /// PUT a JSON body and require the 204 an entity upsert answers.
+    pub async fn put_ok(&self, path: impl AsRef<str>, body: &impl serde::Serialize) {
+        self.put(path, body)
+            .await
+            .expect_status(StatusCode::NO_CONTENT);
+    }
+
+    /// POST a JSON body, require 200, decode the JSON body.
+    pub async fn post_json<T: serde::de::DeserializeOwned>(
+        &self,
+        path: impl AsRef<str>,
+        body: &impl serde::Serialize,
+    ) -> T {
+        self.post(path, body)
+            .await
+            .expect_status(StatusCode::OK)
+            .json()
+    }
 }
 
 /// `NaiveDate` literal without the `from_ymd_opt(..).unwrap()` ceremony.
@@ -516,4 +742,105 @@ pub async fn allocate(pool: &SqlitePool, id: i64, sale_id: i64, buy_id: i64, qty
     )
     .await
     .unwrap();
+}
+
+/// Tests of the fixtures themselves — specifically [`ApiClient`], whose whole
+/// job is to say what a hand-rolled `Request::builder()` block used to say.
+/// Every verb is driven against the real application router, so a change that
+/// broke the request shape (a missing content type, a swallowed body) would
+/// fail here rather than in the ~50 test modules that depend on it.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::entities::exchange::Exchange;
+    use serde_json::json;
+
+    fn xtes() -> serde_json::Value {
+        json!({
+            "name": "Test Exchange",
+            "country": "Testland",
+            "currency": "AUD",
+            "timezone": "UTC",
+            "settlement_days": 2,
+        })
+    }
+
+    #[tokio::test]
+    async fn the_crud_verbs_round_trip_an_entity() {
+        let pool = test_pool().await;
+        let client = ApiClient::full(&pool);
+
+        // PUT reports the upsert status; the body reached the handler.
+        assert_eq!(
+            client.put_json("/exchanges/XTES", &xtes()).await,
+            StatusCode::NO_CONTENT
+        );
+
+        // GET decodes into the entity's own type, and lists it.
+        let ex: Exchange = client.get_json("/exchanges/XTES").await;
+        assert_eq!(ex.name, "Test Exchange");
+        let all: Vec<Exchange> = client.get_json("/exchanges").await;
+        assert!(all.iter().any(|e| e.mic == "XTES"));
+
+        // DELETE answers 204, and a second one the named 404.
+        assert_eq!(
+            client.delete("/exchanges/XTES").await.status,
+            StatusCode::NO_CONTENT
+        );
+        let gone = client.delete("/exchanges/XTES").await;
+        let (status, body) = gone.status_and_body();
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(body.contains("exchange"), "404 body: {body:?}");
+    }
+
+    #[tokio::test]
+    async fn post_json_decodes_a_report_response() {
+        let pool = test_pool().await;
+        let client = ApiClient::full(&pool);
+        let holdings: Vec<serde_json::Value> =
+            client.post_json("/portfolio/overview", &json!({})).await;
+        assert!(holdings.is_empty(), "an empty portfolio holds nothing");
+    }
+
+    /// The rejection path: the 422 reason is readable as text, and
+    /// `expect_status` reports it when the status is not the expected one.
+    #[tokio::test]
+    async fn a_rejection_carries_its_reason_as_text() {
+        let pool = test_pool().await;
+        let client = ApiClient::full(&pool);
+        let resp = client
+            .put_raw("/exchanges/XTES", r#"{"name":"no other fields"}"#)
+            .await;
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(!resp.text().is_empty(), "422 must say why");
+    }
+
+    /// `post_bytes` drives the non-JSON payloads, and `post_empty` the
+    /// endpoints that take no body at all.
+    #[tokio::test]
+    async fn post_bytes_and_post_empty_reach_their_handlers() {
+        let pool = test_pool().await;
+        let client = ApiClient::full(&pool);
+
+        let resp = client
+            .post_bytes("/mic_registry/import", None, "not,a,valid,header\n")
+            .await;
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
+
+        let resp = client.post_empty("/jobs/no-such-job").await;
+        assert_eq!(resp.status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn over_wraps_a_narrower_router_than_the_whole_app() {
+        let pool = test_pool().await;
+        let client = ApiClient::over(crate::entities::router().with_state(pool));
+        // The entity routes are served…
+        assert_eq!(client.get("/exchanges").await.status, StatusCode::OK);
+        // …and the report routes, which this router does not carry, are not.
+        assert_eq!(
+            client.get("/portfolio/overview").await.status,
+            StatusCode::NOT_FOUND
+        );
+    }
 }

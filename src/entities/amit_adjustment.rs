@@ -263,10 +263,12 @@ impl From<UpsertError> for ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{self, dec, test_pool, ymd};
-    use axum::{body::Body, http::Request};
-    use http_body_util::BodyExt;
-    use tower::ServiceExt;
+    use crate::test_support::{self, ApiClient, dec, test_pool, ymd};
+
+    /// Client over this module's own routes.
+    fn client(pool: &SqlitePool) -> ApiClient {
+        ApiClient::over(router().with_state(pool.clone()))
+    }
 
     async fn insert_test_listing(pool: &SqlitePool, id: i64, exchange_mic: &str, ticker: &str) {
         test_support::listing(id)
@@ -543,19 +545,8 @@ mod tests {
             "trade_id": 1,
             "quantity": "100"
         });
-        let resp = router()
-            .with_state(pool.clone())
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri("/amit_adjustments/1")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let resp = client(&pool).put("/amit_adjustments/1", &body).await;
+        assert_eq!(resp.status, StatusCode::NO_CONTENT);
 
         let got = db_get(&pool, 1).await.unwrap().unwrap();
         assert_eq!(got.amma_statement_id, 1);
@@ -575,24 +566,9 @@ mod tests {
             "trade_id": 1,
             "quantity": "50"
         });
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri("/amit_adjustments/1")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        let bytes = http_body_util::BodyExt::collect(resp.into_body())
-            .await
-            .unwrap()
-            .to_bytes();
-        let detail = String::from_utf8(bytes.to_vec()).unwrap();
+        let resp = client(&pool).put("/amit_adjustments/1", &body).await;
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
+        let detail = resp.text().to_string();
         assert!(detail.contains("not a Buy or DRP"), "detail: {detail}");
     }
 
@@ -609,19 +585,8 @@ mod tests {
             "trade_id": 1,
             "quantity": "50"
         });
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri("/amit_adjustments/1")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let resp = client(&pool).put("/amit_adjustments/1", &body).await;
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     #[tokio::test]
@@ -642,36 +607,17 @@ mod tests {
         .await
         .unwrap();
 
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .uri("/amit_adjustments")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let items: Vec<AmitAdjustment> = serde_json::from_slice(&bytes).unwrap();
+        let resp = client(&pool).get("/amit_adjustments").await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let items: Vec<AmitAdjustment> = resp.json();
         assert_eq!(items.len(), 1);
     }
 
     #[tokio::test]
     async fn api_get_missing_returns_404() {
         let pool = test_pool().await;
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .uri("/amit_adjustments/999")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let resp = client(&pool).get("/amit_adjustments/999").await;
+        assert_eq!(resp.status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
@@ -692,34 +638,14 @@ mod tests {
         .await
         .unwrap();
 
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .method("DELETE")
-                    .uri("/amit_adjustments/1")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let resp = client(&pool).delete("/amit_adjustments/1").await;
+        assert_eq!(resp.status, StatusCode::NO_CONTENT);
     }
 
     #[tokio::test]
     async fn api_delete_missing_returns_404() {
         let pool = test_pool().await;
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .method("DELETE")
-                    .uri("/amit_adjustments/999")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let resp = client(&pool).delete("/amit_adjustments/999").await;
+        assert_eq!(resp.status, StatusCode::NOT_FOUND);
     }
 }

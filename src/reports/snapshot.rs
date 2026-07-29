@@ -793,11 +793,8 @@ pub fn router() -> Router<SqlitePool> {
 mod tests {
     use super::*;
     use crate::entities::{corporate_action, listing};
-    use crate::test_support::{self, test_pool, ymd};
+    use crate::test_support::{self, ApiClient, ApiResponse, test_pool, ymd};
     use axum::http::StatusCode;
-    use axum::{body::Body, http::Request};
-    use http_body_util::BodyExt;
-    use tower::ServiceExt;
 
     fn utc(y: i32, m: u32, d: u32, h: u32, min: u32) -> DateTime<Utc> {
         chrono::TimeZone::with_ymd_and_hms(&Utc, y, m, d, h, min, 0).unwrap()
@@ -1350,13 +1347,12 @@ mod tests {
 
     // --- HTTP API ---
 
-    fn app(pool: SqlitePool) -> axum::Router {
-        router().with_state(pool)
+    fn app(pool: SqlitePool) -> ApiClient {
+        ApiClient::over(router().with_state(pool))
     }
 
-    async fn body_json(resp: axum::response::Response) -> serde_json::Value {
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        serde_json::from_slice(&bytes).unwrap()
+    async fn body_json(resp: ApiResponse) -> serde_json::Value {
+        resp.json()
     }
 
     #[tokio::test]
@@ -1371,34 +1367,21 @@ mod tests {
         // Generate two days on demand (a backfilled past date + the latest).
         for date in ["2026-06-04", "2026-06-05"] {
             let resp = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .method("POST")
-                        .uri("/report_snapshots/generate")
-                        .header("content-type", "application/json")
-                        .body(Body::from(format!("{{\"date\":\"{date}\"}}")))
-                        .unwrap(),
+                .post_raw(
+                    "/report_snapshots/generate",
+                    &format!("{{\"date\":\"{date}\"}}"),
                 )
-                .await
-                .unwrap();
-            assert_eq!(resp.status(), StatusCode::OK);
+                .await;
+            assert_eq!(resp.status, StatusCode::OK);
             let metas = body_json(resp).await;
             assert_eq!(metas.as_array().unwrap().len(), 3);
         }
 
         // List, filterable by report and date.
         let resp = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/report_snapshots?report=unrealised_gains&from=2026-06-05")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
+            .get("/report_snapshots?report=unrealised_gains&from=2026-06-05")
+            .await;
+        assert_eq!(resp.status, StatusCode::OK);
         let metas = body_json(resp).await;
         assert_eq!(metas.as_array().unwrap().len(), 1);
         assert_eq!(metas[0]["report"], "unrealised_gains");
@@ -1410,16 +1393,9 @@ mod tests {
 
         // Get one snapshot's stored rows.
         let resp = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/report_snapshots/unrealised_gains/2026-06-05")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
+            .get("/report_snapshots/unrealised_gains/2026-06-05")
+            .await;
+        assert_eq!(resp.status, StatusCode::OK);
         let snap = body_json(resp).await;
         assert_eq!(snap["rows"][0]["market_value"], "6248.00");
         assert_eq!(
@@ -1429,17 +1405,8 @@ mod tests {
 
         // The series feeds the graph: one point per snapshot date, with the
         // portfolio's AUD totals.
-        let resp = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/report_snapshots/series")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
+        let resp = app.get("/report_snapshots/series").await;
+        assert_eq!(resp.status, StatusCode::OK);
         let series = body_json(resp).await;
         let points = series.as_array().unwrap();
         assert_eq!(points.len(), 2);
@@ -1458,12 +1425,8 @@ mod tests {
             "/report_snapshots/no_such_report/2026-06-05",
             "/report_snapshots/performance/2020-01-01",
         ] {
-            let resp = app
-                .clone()
-                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
-                .await
-                .unwrap();
-            assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{uri}");
+            let resp = app.get(uri).await;
+            assert_eq!(resp.status, StatusCode::NOT_FOUND, "{uri}");
         }
     }
 
@@ -1496,17 +1459,9 @@ mod tests {
         // Regenerate-provisional touches only the provisional date; June's
         // rate is still missing, so it regenerates and stays provisional.
         let resp = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/report_snapshots/regenerate_provisional")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
+            .post_empty("/report_snapshots/regenerate_provisional")
+            .await;
+        assert_eq!(resp.status, StatusCode::OK);
         let summary = body_json(resp).await;
         assert_eq!(summary["regenerated"], serde_json::json!(["2026-06-04"]));
         assert_eq!(summary["blocked"].as_array().unwrap().len(), 0);
@@ -1520,18 +1475,12 @@ mod tests {
         // and finalises the provisional one.
         import_rate(&pool, "USD", "2026-06", "2.5").await;
         let resp = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/report_snapshots/regenerate_all")
-                    .header("content-type", "application/json")
-                    .body(Body::from(r#"{"from":"2026-05-29","to":"2026-06-04"}"#))
-                    .unwrap(),
+            .post_raw(
+                "/report_snapshots/regenerate_all",
+                r#"{"from":"2026-05-29","to":"2026-06-04"}"#,
             )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
+            .await;
+        assert_eq!(resp.status, StatusCode::OK);
         let summary = body_json(resp).await;
         // The range walks every calendar day 5/29..6/4: the weekend right
         // after 5/29 (Sat/Sun) walks back to Friday's price and succeeds
@@ -1554,18 +1503,12 @@ mod tests {
             .await
             .unwrap();
         let resp = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/report_snapshots/regenerate_all")
-                    .header("content-type", "application/json")
-                    .body(Body::from(r#"{"from":"2026-05-29","to":"2026-06-04"}"#))
-                    .unwrap(),
+            .post_raw(
+                "/report_snapshots/regenerate_all",
+                r#"{"from":"2026-05-29","to":"2026-06-04"}"#,
             )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
+            .await;
+        assert_eq!(resp.status, StatusCode::OK);
         let summary = body_json(resp).await;
         assert_eq!(summary["regenerated"], serde_json::json!(["2026-06-04"]));
         assert_eq!(summary["blocked"][0]["date"], "2026-05-29");
@@ -1654,17 +1597,8 @@ mod tests {
         let pool = test_pool().await;
         // Before anything is held, the range is all-null.
         let app0 = app(pool.clone());
-        let resp = app0
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri("/report_snapshots/regenerate_range")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
+        let resp = app0.get("/report_snapshots/regenerate_range").await;
+        assert_eq!(resp.status, StatusCode::OK);
         let range = body_json(resp).await;
         assert_eq!(range["from"], serde_json::Value::Null);
         assert_eq!(range["to"], serde_json::Value::Null);
@@ -1676,18 +1610,8 @@ mod tests {
         store_price(&pool, 1, ymd(2026, 6, 4), "62.48").await;
         let app = app(pool.clone());
 
-        let resp = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri("/report_snapshots/regenerate_range")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
+        let resp = app.get("/report_snapshots/regenerate_range").await;
+        assert_eq!(resp.status, StatusCode::OK);
         let range = body_json(resp).await;
         assert_eq!(range["from"], "2026-06-01");
         // "to" is the real latest fully-valuable date (the handler uses the
@@ -1696,18 +1620,8 @@ mod tests {
         assert!(range["to"].as_str().unwrap() >= "2026-06-04");
 
         // Bodyless POST defaults to that full range and backfills it.
-        let resp = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/report_snapshots/regenerate_all")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
+        let resp = app.post_empty("/report_snapshots/regenerate_all").await;
+        assert_eq!(resp.status, StatusCode::OK);
         let summary = body_json(resp).await;
         assert_eq!(
             summary["regenerated"],
@@ -1716,18 +1630,12 @@ mod tests {
 
         // A backwards range is rejected.
         let resp = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/report_snapshots/regenerate_all")
-                    .header("content-type", "application/json")
-                    .body(Body::from(r#"{"from":"2026-06-04","to":"2026-06-01"}"#))
-                    .unwrap(),
+            .post_raw(
+                "/report_snapshots/regenerate_all",
+                r#"{"from":"2026-06-04","to":"2026-06-01"}"#,
             )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+            .await;
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     #[tokio::test]
@@ -1738,19 +1646,10 @@ mod tests {
         let app = app(pool);
 
         let resp = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/report_snapshots/generate")
-                    .header("content-type", "application/json")
-                    .body(Body::from("{\"date\":\"2026-06-03\"}"))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let detail = String::from_utf8_lossy(&bytes);
+            .post_raw("/report_snapshots/generate", "{\"date\":\"2026-06-03\"}")
+            .await;
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
+        let detail = resp.text();
         assert!(
             detail.contains("BHP") && detail.contains("backfill"),
             "{detail}"

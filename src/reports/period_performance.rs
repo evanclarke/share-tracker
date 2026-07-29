@@ -426,11 +426,8 @@ pub fn router() -> Router<SqlitePool> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{self, dec, test_pool, ymd};
+    use crate::test_support::{self, ApiClient, dec, test_pool, ymd};
     use axum::http::StatusCode;
-    use axum::{body::Body, http::Request};
-    use http_body_util::BodyExt;
-    use tower::ServiceExt;
 
     /// Two calendar days after `date` at 00:00 UTC — comfortably past the
     /// crypto valuation rule (`latest_complete_trading_day` = yesterday's UTC
@@ -818,21 +815,11 @@ mod tests {
         store_price(&pool, 1, to, "15").await;
 
         let body = serde_json::json!({ "from": from, "to": to });
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/portfolio/period-performance")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let result: PeriodPerformance = serde_json::from_slice(&bytes).unwrap();
+        let resp = ApiClient::over(router().with_state(pool))
+            .post("/portfolio/period-performance", &body)
+            .await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let result: PeriodPerformance = resp.json();
         assert_eq!(result.capital_growth, dec("300"));
     }
 
@@ -840,18 +827,9 @@ mod tests {
     async fn api_period_performance_invalid_range_is_422() {
         let pool = test_pool().await;
         let body = serde_json::json!({ "from": "2026-07-01", "to": "2026-06-01" });
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/portfolio/period-performance")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let resp = ApiClient::over(router().with_state(pool))
+            .post("/portfolio/period-performance", &body)
+            .await;
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
     }
 }

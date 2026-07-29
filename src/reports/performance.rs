@@ -652,11 +652,8 @@ async fn performance_handler(
 mod tests {
     use super::*;
     use crate::entities::{listing, trade};
-    use crate::test_support::{self, test_pool};
+    use crate::test_support::{self, ApiClient, test_pool};
     use axum::http::StatusCode;
-    use axum::{body::Body, http::Request};
-    use http_body_util::BodyExt;
-    use tower::ServiceExt;
 
     fn d(y: i32, m: u32, day: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(y, m, day).unwrap()
@@ -1145,21 +1142,11 @@ mod tests {
             "prices": { "1": "12" },
             "as_of_date": "2024-12-31",
         });
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/portfolio/performance")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let rows: Vec<HoldingPerformance> = serde_json::from_slice(&bytes).unwrap();
+        let resp = ApiClient::over(router().with_state(pool))
+            .post("/portfolio/performance", &body)
+            .await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let rows: Vec<HoldingPerformance> = resp.json();
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].ticker, "VAS");
         assert_eq!(rows[0].market_value, Some(Decimal::from(1200)));
@@ -1192,22 +1179,11 @@ mod tests {
             "as_of_date": "2024-12-31",
             "prices": { "2": "20" },
         });
-        let resp = router()
-            .with_state(pool)
-            .layer(axum::Extension(fetcher))
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/portfolio/performance")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let rows: Vec<HoldingPerformance> = serde_json::from_slice(&bytes).unwrap();
+        let resp = ApiClient::over(router().with_state(pool).layer(axum::Extension(fetcher)))
+            .post("/portfolio/performance", &body)
+            .await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let rows: Vec<HoldingPerformance> = resp.json();
         let by_id = |id: i64| rows.iter().find(|r| r.listing_id == Some(id)).unwrap();
         // Listing 1: live-valued at 12 → market value 1,200, as-of carried.
         assert_eq!(by_id(1).market_value, Some(Decimal::from(1200)));
@@ -1233,20 +1209,11 @@ mod tests {
         insert_listing(&pool, 1, "VAS", "XASX", "AUD").await;
         buy(&pool, 1, 1, d(2024, 1, 1), 100, 10).await;
 
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/portfolio/performance")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let rows: Vec<HoldingPerformance> = serde_json::from_slice(&bytes).unwrap();
+        let resp = ApiClient::over(router().with_state(pool))
+            .post_empty("/portfolio/performance")
+            .await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let rows: Vec<HoldingPerformance> = resp.json();
         // Unpriced open holding: figures present, market metrics null.
         assert_eq!(rows[0].invested, Decimal::from(1000));
         assert_eq!(rows[0].market_value, None);

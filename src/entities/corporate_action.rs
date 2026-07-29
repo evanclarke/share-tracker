@@ -169,10 +169,12 @@ use sqlx::SqlitePool;
 mod tests {
     use super::*;
     use crate::entities::listing;
-    use crate::test_support::{self, test_pool};
-    use axum::{body::Body, http::Request};
-    use http_body_util::BodyExt;
-    use tower::ServiceExt;
+    use crate::test_support::{self, ApiClient, test_pool};
+
+    /// Client over this module's own routes.
+    fn client(pool: &SqlitePool) -> ApiClient {
+        ApiClient::over(router().with_state(pool.clone()))
+    }
 
     async fn insert_listing(pool: &SqlitePool, id: i64, ticker: &str) {
         test_support::listing(id)
@@ -1069,79 +1071,27 @@ mod tests {
             "amount_per_unit": "0.50",
             "currency": "AUD",
         });
-        let resp = router()
-            .with_state(pool.clone())
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri("/corporate_actions/1")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let resp = client(&pool).put("/corporate_actions/1", &body).await;
+        assert_eq!(resp.status, StatusCode::NO_CONTENT);
 
-        let resp = router()
-            .with_state(pool.clone())
-            .oneshot(
-                Request::builder()
-                    .uri("/corporate_actions/1")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let got: CorporateAction = serde_json::from_slice(&bytes).unwrap();
+        let resp = client(&pool).get("/corporate_actions/1").await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let got: CorporateAction = resp.json();
         assert_eq!(got.kind, roc(1, 1, d(2024, 11, 30), "0.50").kind);
 
-        let resp = router()
-            .with_state(pool.clone())
-            .oneshot(
-                Request::builder()
-                    .uri("/corporate_actions")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let items: Vec<CorporateAction> = serde_json::from_slice(&bytes).unwrap();
+        let resp = client(&pool).get("/corporate_actions").await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let items: Vec<CorporateAction> = resp.json();
         assert_eq!(items.len(), 1);
 
-        let resp = router()
-            .with_state(pool.clone())
-            .oneshot(
-                Request::builder()
-                    .method("DELETE")
-                    .uri("/corporate_actions/1")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let resp = client(&pool).delete("/corporate_actions/1").await;
+        assert_eq!(resp.status, StatusCode::NO_CONTENT);
         assert!(db_get(&pool, 1).await.unwrap().is_none());
     }
 
     async fn api_put_expecting(pool: &SqlitePool, body: serde_json::Value, expected: StatusCode) {
-        let resp = router()
-            .with_state(pool.clone())
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri("/corporate_actions/1")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), expected);
+        let resp = client(pool).put("/corporate_actions/1", &body).await;
+        assert_eq!(resp.status, expected);
     }
 
     #[tokio::test]
@@ -1959,29 +1909,10 @@ mod tests {
     #[tokio::test]
     async fn api_get_and_delete_missing_return_404() {
         let pool = test_pool().await;
-        let resp = router()
-            .with_state(pool.clone())
-            .oneshot(
-                Request::builder()
-                    .uri("/corporate_actions/999")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let resp = client(&pool).get("/corporate_actions/999").await;
+        assert_eq!(resp.status, StatusCode::NOT_FOUND);
 
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .method("DELETE")
-                    .uri("/corporate_actions/999")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let resp = client(&pool).delete("/corporate_actions/999").await;
+        assert_eq!(resp.status, StatusCode::NOT_FOUND);
     }
 }

@@ -119,12 +119,9 @@ async fn report(
 mod tests {
     use super::*;
     use crate::entities::{sell, trade};
-    use crate::test_support::{self, allocate, test_pool, ymd};
+    use crate::test_support::{self, ApiClient, allocate, test_pool, ymd};
     use axum::http::StatusCode;
-    use axum::{body::Body, http::Request};
-    use http_body_util::BodyExt;
     use rust_decimal::Decimal;
-    use tower::ServiceExt;
 
     async fn history_count(pool: &SqlitePool, table: &str, row_id: i64) -> i64 {
         sqlx::query_scalar("SELECT COUNT(*) FROM row_history WHERE table_name = ? AND row_id = ?")
@@ -243,19 +240,10 @@ mod tests {
             "brokerage_currency": "AUD", "fx_rate": "1",
             "allocations": [{ "purchase_trade_id": 1, "quantity_allocated": "10" }],
         });
-        let resp = sell::router()
-            .with_state(pool.clone())
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri("/sells/2")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let resp = ApiClient::over(sell::router().with_state(pool.clone()))
+            .put("/sells/2", &body)
+            .await;
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
 
         let after = db_row_history(&pool, "trades", 2).await.unwrap();
         assert_eq!(
@@ -328,43 +316,27 @@ mod tests {
         trade::db_upsert(&pool, &edited).await.unwrap();
 
         let post = |body: String| {
-            let pool = pool.clone();
-            async move {
-                router()
-                    .with_state(pool)
-                    .oneshot(
-                        Request::builder()
-                            .method("POST")
-                            .uri("/reports/row_history")
-                            .header("content-type", "application/json")
-                            .body(Body::from(body))
-                            .unwrap(),
-                    )
-                    .await
-                    .unwrap()
-            }
+            let client = ApiClient::over(router().with_state(pool.clone()));
+            async move { client.post_raw("/reports/row_history", body.as_ref()).await }
         };
 
         let resp = post(r#"{"table": "trades", "row_id": 1}"#.to_string()).await;
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let entries: Vec<Map<String, Value>> = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+        let entries: Vec<Map<String, Value>> = resp.json();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0]["operation"], "UPDATE");
         assert_eq!(entries[0]["quantity"], "100");
 
         // A row with no recorded history is an empty trail, not an error.
         let resp = post(r#"{"table": "trades", "row_id": 999}"#.to_string()).await;
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        assert_eq!(String::from_utf8_lossy(&bytes), "[]");
+        assert_eq!(resp.status, StatusCode::OK);
+        assert_eq!(resp.text(), "[]");
 
         // Unknown table: rejected with the audited list, never interpolated
         // into SQL.
         let resp = post(r#"{"table": "sqlite_master", "row_id": 1}"#.to_string()).await;
-        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let msg = String::from_utf8_lossy(&bytes);
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
+        let msg = resp.text();
         assert!(msg.contains("not an audited table"), "{msg}");
     }
 

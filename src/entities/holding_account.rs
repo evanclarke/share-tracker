@@ -175,10 +175,7 @@ async fn delete(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::test_pool;
-    use axum::{body::Body, http::Request};
-    use http_body_util::BodyExt;
-    use tower::ServiceExt;
+    use crate::test_support::{ApiClient, test_pool};
 
     // DB-level tests
 
@@ -283,56 +280,22 @@ mod tests {
         let pool = test_pool().await;
         let app = || router().with_state(pool.clone());
 
-        let resp = app()
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri("/holding_accounts/2")
-                    .header("content-type", "application/json")
-                    .body(Body::from(r#"{"name":"ICE Employee Plan"}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let resp = ApiClient::over(app())
+            .put_raw("/holding_accounts/2", r#"{"name":"ICE Employee Plan"}"#)
+            .await;
+        assert_eq!(resp.status, StatusCode::NO_CONTENT);
 
-        let resp = app()
-            .oneshot(
-                Request::builder()
-                    .uri("/holding_accounts")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let accounts: Vec<HoldingAccount> = serde_json::from_slice(&bytes).unwrap();
+        let resp = ApiClient::over(app()).get("/holding_accounts").await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let accounts: Vec<HoldingAccount> = resp.json();
         assert_eq!(accounts.len(), 2);
         assert_eq!(accounts[1].name, "ICE Employee Plan");
 
-        let resp = app()
-            .oneshot(
-                Request::builder()
-                    .method("DELETE")
-                    .uri("/holding_accounts/2")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let resp = ApiClient::over(app()).delete("/holding_accounts/2").await;
+        assert_eq!(resp.status, StatusCode::NO_CONTENT);
 
-        let resp = app()
-            .oneshot(
-                Request::builder()
-                    .uri("/holding_accounts/2")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let resp = ApiClient::over(app()).get("/holding_accounts/2").await;
+        assert_eq!(resp.status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
@@ -340,35 +303,16 @@ mod tests {
         let pool = test_pool().await;
         let app = || router().with_state(pool.clone());
 
-        let resp = app()
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri("/holding_accounts/2")
-                    .header("content-type", "application/json")
-                    .body(Body::from(r#"{"name":"Default"}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        let bytes = BodyExt::collect(resp.into_body()).await.unwrap().to_bytes();
-        let detail = String::from_utf8(bytes.to_vec()).unwrap();
+        let resp = ApiClient::over(app())
+            .put_raw("/holding_accounts/2", r#"{"name":"Default"}"#)
+            .await;
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
+        let detail = resp.text().to_string();
         assert!(detail.contains("already exists"), "detail: {detail}");
 
-        let resp = app()
-            .oneshot(
-                Request::builder()
-                    .method("DELETE")
-                    .uri("/holding_accounts/1")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        let bytes = BodyExt::collect(resp.into_body()).await.unwrap().to_bytes();
-        let detail = String::from_utf8(bytes.to_vec()).unwrap();
+        let resp = ApiClient::over(app()).delete("/holding_accounts/1").await;
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
+        let detail = resp.text().to_string();
         assert!(detail.contains("still has"), "detail: {detail}");
     }
 }

@@ -296,10 +296,12 @@ async fn upsert(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{self, dec, test_pool};
-    use axum::{body::Body, http::Request};
-    use http_body_util::BodyExt;
-    use tower::ServiceExt;
+    use crate::test_support::{self, ApiClient, dec, test_pool};
+
+    /// Client over this module's own routes.
+    fn client(pool: &SqlitePool) -> ApiClient {
+        ApiClient::over(router().with_state(pool.clone()))
+    }
 
     async fn insert_test_listing(pool: &SqlitePool) {
         test_support::listing(1)
@@ -394,19 +396,8 @@ mod tests {
             "tax_deferred_amount": "2.30",
             "cost_base_adjustment": "0.0023"
         });
-        let resp = router()
-            .with_state(pool.clone())
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri("/amma_statements/1")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let resp = client(&pool).put("/amma_statements/1", &body).await;
+        assert_eq!(resp.status, StatusCode::NO_CONTENT);
         let got = db_get(&pool, 1).await.unwrap().unwrap();
         assert_eq!(got.australian_interest, "12.50".parse::<Decimal>().unwrap());
         assert_eq!(
@@ -420,36 +411,17 @@ mod tests {
         let pool = test_pool().await;
         insert_test_listing(&pool).await;
         db_upsert(&pool, &sample_amma()).await.unwrap();
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .uri("/amma_statements")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let items: Vec<AmmaStatement> = serde_json::from_slice(&bytes).unwrap();
+        let resp = client(&pool).get("/amma_statements").await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let items: Vec<AmmaStatement> = resp.json();
         assert_eq!(items.len(), 1);
     }
 
     #[tokio::test]
     async fn api_get_missing_returns_404() {
         let pool = test_pool().await;
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .uri("/amma_statements/999")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let resp = client(&pool).get("/amma_statements/999").await;
+        assert_eq!(resp.status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
@@ -457,35 +429,15 @@ mod tests {
         let pool = test_pool().await;
         insert_test_listing(&pool).await;
         db_upsert(&pool, &sample_amma()).await.unwrap();
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .method("DELETE")
-                    .uri("/amma_statements/1")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let resp = client(&pool).delete("/amma_statements/1").await;
+        assert_eq!(resp.status, StatusCode::NO_CONTENT);
     }
 
     #[tokio::test]
     async fn api_delete_missing_returns_404() {
         let pool = test_pool().await;
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .method("DELETE")
-                    .uri("/amma_statements/999")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let resp = client(&pool).delete("/amma_statements/999").await;
+        assert_eq!(resp.status, StatusCode::NOT_FOUND);
     }
 
     /// `tax_year_end_date` must be a 30 June FY end: reports bucket the statement
@@ -502,25 +454,13 @@ mod tests {
                 "tax_year_end_date": date,
                 "date_received": "2024-08-15"
             });
-            let resp = router()
-                .with_state(pool.clone())
-                .oneshot(
-                    Request::builder()
-                        .method("PUT")
-                        .uri("/amma_statements/1")
-                        .header("content-type", "application/json")
-                        .body(Body::from(body.to_string()))
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
+            let resp = client(&pool).put("/amma_statements/1", &body).await;
             assert_eq!(
-                resp.status(),
+                resp.status,
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "{date} must be rejected"
             );
-            let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-            let detail = String::from_utf8(bytes.to_vec()).unwrap();
+            let detail = resp.text().to_string();
             assert!(
                 detail.contains(date) && detail.contains("30 June"),
                 "{date}: detail must carry the date and the rule, got: {detail}"
@@ -558,31 +498,10 @@ mod tests {
             "australian_interest": "9.876543210",
             "cost_base_adjustment": "0.001234567890"
         });
-        let resp = router()
-            .with_state(pool.clone())
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri("/amma_statements/1")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .uri("/amma_statements/1")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let got: AmmaStatement = serde_json::from_slice(&bytes).unwrap();
+        let resp = client(&pool).put("/amma_statements/1", &body).await;
+        assert_eq!(resp.status, StatusCode::NO_CONTENT);
+        let resp = client(&pool).get("/amma_statements/1").await;
+        let got: AmmaStatement = resp.json();
         assert_eq!(got.units_held, "1234.567890123".parse::<Decimal>().unwrap());
         assert_eq!(
             got.australian_interest,

@@ -452,3 +452,45 @@ none of the tail entries below moved, so the table still stands.)
   - The rest of the list is 104–192 lines, none of it a copy of anything else. Left alone deliberately: `entities/sell.rs:455` `upsert_sell_in_tx` (177) and `entities/corporate_action/db.rs:81` (192) are write-time-invariant sequences where each check is a few lines and the ordering is the point, and `corporate_action/model.rs:339` (175) is the `ActionKind` FromRow match, which is one arm per variant by construction
 - [x] Tests: pure refactor, so the gate is the existing suite plus `ato_examples.rs` passing unchanged; no behaviour change means no new test, which is the one case where an item here closes without one
   - Full suite green unchanged at 1277 tests (no test file touched except three test-module `use` lines that had been relying on a now-narrowed parent import), including the `ato_examples` acceptance tests that reproduce the ATO's own worked examples for both rollovers — `takeovers_example_27_gunther_partial_scrip_for_scrip_rollover` and `demergers_examples_30_32_anita_bhp_billiton_demerger`, which is the assurance that the shared `domain::rollover` pipeline still reaches the ATO's stated figures. `cargo build`/`cargo test` warning-free, `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` clean
+
+## HTTP test boilerplate (2026-07-29 Rust review)
+
+`test_support.rs` solved the *data* half of test setup (builders for the wide structs) but not the
+HTTP half: 274 `Request::builder()` calls across 55 files and 130 copies of
+`.collect().await.unwrap().to_bytes()`. Only `entities/closing_price.rs` has local `post_json`
+/`put_json` helpers (`:2314`, `:2424`); every other module open-codes the request and the body
+decode. Since tests are ~60% of the tree (41.6k of 69.8k lines), this is where line-count reduction
+is largest — but it is lower value than the sections above, so it should not jump the queue.
+
+- [x] Add the HTTP half to `test_support.rs`: an `ApiClient` wrapping `app::router(pool, registry, fetcher)` (or the narrower `router().with_state(pool)` where a test doesn't need the registry/fetcher) with `get_json::<T>(path)`, `put_json(path, &body) -> StatusCode`, `post_json::<T>(path, &body)`, and a `status_and_body(path)` for the rejection tests that assert on the 422 text
+- [x] Migrate test modules onto it opportunistically — when a module is already being touched for one of the sections above, rather than as one large mechanical commit
+- [x] Tests: the migrated tests are the test; the gate is the full suite passing unchanged after each module's migration
+
+**Closed 2026-07-29.** `ApiClient` + `ApiResponse` live in `src/test_support.rs` beside the row
+builders. `ApiClient::over(router)` wraps any assembled router, `ApiClient::full(&pool)` the whole
+application as `main` serves it (offline `QuoteStub` in place of `YahooFetcher`, so no test path can
+reach the network) and `full_with` the same with a caller-supplied fetcher. Verbs: `get`, `put`,
+`post`, `delete`, `put_raw`/`post_raw` (a body already written out as a string), `post_bytes`
+(non-JSON payloads — the multipart uploads, the CSV/XML import feeds, content type optional because
+the import endpoints take a bare `String` body and are driven with none) and `post_empty`
+(`POST /jobs/{name}`). Each returns an `ApiResponse { status, headers, body }` with `json()`,
+`text()`, `status_and_body()` and `expect_status()`; the convenience wrappers `get_json`, `put_json`,
+`put_ok` and `post_json` fold the status assertion and the decode into one call. `status_and_body`
+landed on the *response* rather than as `status_and_body(path)`, because the rejection tests it is
+for assert on a PUT/POST body, not a GET.
+
+Migration was **not** opportunistic in the end: it went in as one pass over the whole tree, because
+the mechanical shape was uniform enough that a script plus the compiler and the full suite made a
+single sweep safer than 55 partial ones spread over months. All 274 `Request::builder()` blocks and
+every `.collect().await.unwrap().to_bytes()` are gone (`test_support.rs` itself is the only file
+that builds a `Request`), and the three modules that had grown local duplicates —
+`entities/closing_price.rs`'s `post_json`/`put_json`/`delete_req`, `ato_examples.rs`'s
+`api_put`/`api_post`/`api_get`, `web.rs`'s `get`/`body_string` — now delegate instead of
+open-coding. Modules that hit the same `router().with_state(pool)` three or more times gained a
+one-line local `fn client(pool: &SqlitePool) -> ApiClient`. Net **−2,297 lines** across 57 files.
+
+`test_support::tests` is the new self-test of the harness: it drives every verb against the real
+router (CRUD round-trip, report POST decode, a 422 reason read as text, `post_bytes`/`post_empty`,
+and `over` seeing a narrower route table than `full`), so a change that broke the request shape
+fails there rather than in the ~50 modules that depend on it. Full suite 1282 passed / 0 failed,
+`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` clean.

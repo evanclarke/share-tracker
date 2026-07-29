@@ -79,32 +79,25 @@ async fn style_css() -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{
-        body::Body,
-        http::{Request, StatusCode},
-    };
-    use http_body_util::BodyExt;
-    use tower::ServiceExt;
+    use crate::test_support::{ApiClient, ApiResponse};
+    use axum::http::StatusCode;
 
-    async fn get(uri: &str) -> Response {
-        router()
-            .with_state(SqlitePool::connect(":memory:").await.unwrap())
-            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+    async fn get(uri: &str) -> ApiResponse {
+        ApiClient::over(router().with_state(SqlitePool::connect(":memory:").await.unwrap()))
+            .get(uri)
             .await
-            .unwrap()
     }
 
-    async fn body_string(resp: Response) -> String {
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        String::from_utf8(bytes.to_vec()).unwrap()
+    async fn body_string(resp: ApiResponse) -> String {
+        resp.text().to_string()
     }
 
     #[tokio::test]
     async fn index_is_served_as_html() {
         let resp = get("/").await;
-        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.status, StatusCode::OK);
         assert_eq!(
-            resp.headers().get(header::CONTENT_TYPE).unwrap(),
+            resp.headers.get(header::CONTENT_TYPE).unwrap(),
             "text/html; charset=utf-8"
         );
         let body = body_string(resp).await;
@@ -130,9 +123,9 @@ mod tests {
     async fn es_modules_are_served_as_javascript() {
         for (path, source) in JS_MODULES {
             let resp = get(path).await;
-            assert_eq!(resp.status(), StatusCode::OK, "{path}");
+            assert_eq!(resp.status, StatusCode::OK, "{path}");
             assert_eq!(
-                resp.headers().get(header::CONTENT_TYPE).unwrap(),
+                resp.headers.get(header::CONTENT_TYPE).unwrap(),
                 "text/javascript; charset=utf-8",
                 "{path}"
             );
@@ -191,9 +184,9 @@ mod tests {
     #[tokio::test]
     async fn style_css_is_served_as_css() {
         let resp = get("/static/style.css").await;
-        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.status, StatusCode::OK);
         assert_eq!(
-            resp.headers().get(header::CONTENT_TYPE).unwrap(),
+            resp.headers.get(header::CONTENT_TYPE).unwrap(),
             "text/css; charset=utf-8"
         );
     }

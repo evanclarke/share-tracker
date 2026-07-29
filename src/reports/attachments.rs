@@ -172,12 +172,9 @@ async fn report(State(pool): State<SqlitePool>) -> Result<Json<Vec<AttachmentInd
 mod tests {
     use super::*;
     use crate::entities::{attachment, corporate_action, interest_income};
-    use crate::test_support::{self, test_pool, ymd};
+    use crate::test_support::{self, ApiClient, test_pool, ymd};
     use axum::http::StatusCode;
-    use axum::{body::Body, http::Request};
-    use http_body_util::BodyExt;
     use rust_decimal::Decimal;
-    use tower::ServiceExt;
 
     async fn attach(
         pool: &SqlitePool,
@@ -457,19 +454,11 @@ mod tests {
         )
         .await;
 
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .uri("/reports/attachments")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let rows: Vec<AttachmentIndexRow> = serde_json::from_slice(&bytes).unwrap();
+        let resp = ApiClient::over(router().with_state(pool))
+            .get("/reports/attachments")
+            .await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let rows: Vec<AttachmentIndexRow> = resp.json();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].owner_type, "Trade");
         assert_eq!(rows[0].filename, "conf.pdf");

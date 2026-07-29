@@ -50,18 +50,16 @@ use schedule::parse;
 mod tests {
     use super::*;
     use crate::infra::db;
+    use crate::test_support::ApiClient;
     use axum::Extension;
-    use axum::body::Body;
-    use axum::http::{Request, StatusCode};
+    use axum::http::StatusCode;
     use chrono::{DateTime, Local, TimeZone, Utc};
     use chrono_tz::Tz;
     use croner::Cron;
-    use http_body_util::BodyExt;
     use sqlx::SqlitePool;
     use std::str::FromStr;
     use std::sync::Arc;
     use std::time::Duration;
-    use tower::ServiceExt;
 
     /// An offline price-source stub so building a registry never constructs the
     /// live `YahooFetcher` (these tests trigger only the `backup` job, but the
@@ -414,20 +412,11 @@ mod tests {
         let db_path = dir.path().join("t.db").to_string_lossy().to_string();
         let pool = db::init(&db_path).await.unwrap();
         let reg = registry(pool.clone(), db_path.clone(), None, None, stub_fetcher());
-        let app = router().with_state(pool).layer(Extension(reg));
+        let app = ApiClient::over(router().with_state(pool).layer(Extension(reg)));
 
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/jobs/backup")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let resp = app.post_empty("/jobs/backup").await;
 
-        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert_eq!(resp.status, StatusCode::NO_CONTENT);
         // The backup job derives its own timestamped name (`t-YYYY-MM-DD-HHMMSS.db`),
         // so re-deriving the path here could land in a later second and miss it.
         // Assert instead that a backup file for this DB was written to the dir.
@@ -453,20 +442,11 @@ mod tests {
         let db_path = dir.path().join("t.db").to_string_lossy().to_string();
         let pool = db::init(&db_path).await.unwrap();
         let reg = registry(pool.clone(), db_path.clone(), None, None, stub_fetcher());
-        let app = router().with_state(pool).layer(Extension(reg));
+        let app = ApiClient::over(router().with_state(pool).layer(Extension(reg)));
 
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/jobs/backup?suffix=pre-0.5.1")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let resp = app.post_empty("/jobs/backup?suffix=pre-0.5.1").await;
 
-        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert_eq!(resp.status, StatusCode::NO_CONTENT);
         let made_backup = std::fs::read_dir(dir.path())
             .unwrap()
             .filter_map(|e| e.ok())
@@ -483,20 +463,11 @@ mod tests {
         let db_path = dir.path().join("t.db").to_string_lossy().to_string();
         let pool = db::init(&db_path).await.unwrap();
         let reg = registry(pool.clone(), db_path, None, None, stub_fetcher());
-        let app = router().with_state(pool.clone()).layer(Extension(reg));
+        let app = ApiClient::over(router().with_state(pool.clone()).layer(Extension(reg)));
 
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/jobs/backup?suffix=../etc/passwd")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let resp = app.post_empty("/jobs/backup?suffix=../etc/passwd").await;
 
-        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
         // Beside "t.db" itself, WAL-mode sidecars (t.db-wal, t.db-shm) are
         // expected; only a backup-named file would indicate the rejected
         // suffix reached the filesystem.
@@ -632,20 +603,11 @@ mod tests {
         let db_path = dir.path().join("t.db").to_string_lossy().to_string();
         let pool = db::init(&db_path).await.unwrap();
         let reg = registry(pool.clone(), db_path, None, None, stub_fetcher());
-        let app = router().with_state(pool).layer(Extension(reg));
+        let app = ApiClient::over(router().with_state(pool).layer(Extension(reg)));
 
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/jobs/backup")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let resp = app.post_empty("/jobs/backup").await;
 
-        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert_eq!(resp.status, StatusCode::NO_CONTENT);
         assert!(logs_contain("job started"));
         assert!(logs_contain("job finished"));
     }
@@ -656,20 +618,11 @@ mod tests {
         let db_path = dir.path().join("t.db").to_string_lossy().to_string();
         let pool = db::init(&db_path).await.unwrap();
         let reg = registry(pool.clone(), db_path, None, None, stub_fetcher());
-        let app = router().with_state(pool).layer(Extension(reg));
+        let app = ApiClient::over(router().with_state(pool).layer(Extension(reg)));
 
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/jobs/does-not-exist")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let resp = app.post_empty("/jobs/does-not-exist").await;
 
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert_eq!(resp.status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
@@ -678,16 +631,12 @@ mod tests {
         let db_path = dir.path().join("t.db").to_string_lossy().to_string();
         let pool = db::init(&db_path).await.unwrap();
         let reg = registry(pool.clone(), db_path, None, None, stub_fetcher());
-        let app = router().with_state(pool).layer(Extension(reg));
+        let app = ApiClient::over(router().with_state(pool).layer(Extension(reg)));
 
-        let resp = app
-            .oneshot(Request::builder().uri("/jobs").body(Body::empty()).unwrap())
-            .await
-            .unwrap();
+        let resp = app.get("/jobs").await;
 
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = resp.into_body().collect().await.unwrap().to_bytes();
-        let statuses: Vec<JobStatus> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+        let statuses: Vec<JobStatus> = resp.json();
         let names: Vec<&str> = statuses.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"backup"));
         assert!(names.contains(&"rba-fx-import"));
@@ -707,14 +656,10 @@ mod tests {
             .await
             .unwrap();
 
-        let app = router().with_state(pool).layer(Extension(reg));
-        let resp = app
-            .oneshot(Request::builder().uri("/jobs").body(Body::empty()).unwrap())
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = resp.into_body().collect().await.unwrap().to_bytes();
-        let statuses: Vec<JobStatus> = serde_json::from_slice(&body).unwrap();
+        let app = ApiClient::over(router().with_state(pool).layer(Extension(reg)));
+        let resp = app.get("/jobs").await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let statuses: Vec<JobStatus> = resp.json();
         let backup = statuses.iter().find(|s| s.name == "backup").unwrap();
         assert!(backup.last_started_at.is_some());
         assert!(backup.last_finished_at.is_some());
@@ -825,14 +770,10 @@ mod tests {
         .await
         .unwrap();
 
-        let app = router().with_state(pool).layer(Extension(reg));
-        let resp = app
-            .oneshot(Request::builder().uri("/jobs").body(Body::empty()).unwrap())
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = resp.into_body().collect().await.unwrap().to_bytes();
-        let statuses: Vec<JobStatus> = serde_json::from_slice(&body).unwrap();
+        let app = ApiClient::over(router().with_state(pool).layer(Extension(reg)));
+        let resp = app.get("/jobs").await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let statuses: Vec<JobStatus> = resp.json();
         let backup = statuses.iter().find(|s| s.name == "backup").unwrap();
         assert_eq!(backup.runs.len(), 2);
         assert!(backup.runs[0].success);

@@ -108,11 +108,8 @@ async fn report(State(pool): State<SqlitePool>) -> Result<Json<Vec<E4CrossCheckA
 mod tests {
     use super::*;
     use crate::entities::corporate_action;
-    use crate::test_support::{self, test_pool, ymd};
+    use crate::test_support::{self, ApiClient, test_pool, ymd};
     use axum::http::StatusCode;
-    use axum::{body::Body, http::Request};
-    use http_body_util::BodyExt;
-    use tower::ServiceExt;
 
     async fn insert_trust_income(
         pool: &SqlitePool,
@@ -256,19 +253,11 @@ mod tests {
         let pool = test_pool().await;
         test_support::listing(1).insert(&pool).await;
         insert_trust_income(&pool, 1, ymd(2025, 3, 15), Some("120.50")).await;
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .uri("/reports/e4_cross_check")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let alerts: Vec<E4CrossCheckAlert> = serde_json::from_slice(&bytes).unwrap();
+        let resp = ApiClient::over(router().with_state(pool))
+            .get("/reports/e4_cross_check")
+            .await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let alerts: Vec<E4CrossCheckAlert> = resp.json();
         assert_eq!(alerts.len(), 1);
         assert_eq!(alerts[0].income_id, 1);
         assert_eq!(alerts[0].ticker, "T1");

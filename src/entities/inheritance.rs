@@ -516,10 +516,7 @@ mod tests {
     use super::*;
     use crate::entities::sell::{self, AllocationInput, SellBody};
     use crate::entities::trade::{self, TradeType};
-    use crate::test_support::{self, dec, test_pool, ymd};
-    use axum::{body::Body, http::Request};
-    use http_body_util::BodyExt;
-    use tower::ServiceExt;
+    use crate::test_support::{self, ApiClient, dec, test_pool, ymd};
 
     async fn insert_listing(pool: &SqlitePool, id: i64, currency: &str) {
         test_support::listing(id)
@@ -982,72 +979,27 @@ mod tests {
             "lpr_expenditure_date": "2025-03-01",
             "deceased_acquisition_date": "2020-02-01"
         });
-        let resp = app()
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri("/inheritances/1")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let resp = ApiClient::over(app()).put("/inheritances/1", &body).await;
+        assert_eq!(resp.status, StatusCode::NO_CONTENT);
 
         // The omitted fields took their defaults (account 1, AUD, fx 1).
-        let resp = app()
-            .oneshot(
-                Request::builder()
-                    .uri("/inheritances/1")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let got: Inheritance = serde_json::from_slice(&bytes).unwrap();
+        let resp = ApiClient::over(app()).get("/inheritances/1").await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let got: Inheritance = resp.json();
         assert_eq!(got.holding_account_id, 1);
         assert_eq!(got.currency, "AUD");
         assert_eq!(got.fx_rate, Decimal::ONE);
         assert_eq!(got.cost_base_rule, CostBaseRule::DeceasedCostBase);
 
         // List.
-        let resp = app()
-            .oneshot(
-                Request::builder()
-                    .uri("/inheritances")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
+        let resp = ApiClient::over(app()).get("/inheritances").await;
+        assert_eq!(resp.status, StatusCode::OK);
 
         // DELETE removes it and its Buy; a second DELETE is 404.
-        let resp = app()
-            .oneshot(
-                Request::builder()
-                    .method("DELETE")
-                    .uri("/inheritances/1")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
-        let resp = app()
-            .oneshot(
-                Request::builder()
-                    .method("DELETE")
-                    .uri("/inheritances/1")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let resp = ApiClient::over(app()).delete("/inheritances/1").await;
+        assert_eq!(resp.status, StatusCode::NO_CONTENT);
+        let resp = ApiClient::over(app()).delete("/inheritances/1").await;
+        assert_eq!(resp.status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
@@ -1063,21 +1015,11 @@ mod tests {
             "cost_base_rule": "DeceasedCostBase",
             "cost_base": "3000"
         });
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri("/inheritances/1")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let detail = String::from_utf8(bytes.to_vec()).unwrap();
+        let resp = ApiClient::over(router().with_state(pool))
+            .put("/inheritances/1", &body)
+            .await;
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
+        let detail = resp.text().to_string();
         assert!(detail.contains("acquisition date"), "detail: {detail}");
     }
 }

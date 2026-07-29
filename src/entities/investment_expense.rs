@@ -193,10 +193,12 @@ async fn upsert(
 mod tests {
     use super::*;
     use crate::entities::listing;
-    use crate::test_support::{self, test_pool};
-    use axum::{body::Body, http::Request};
-    use http_body_util::BodyExt;
-    use tower::ServiceExt;
+    use crate::test_support::{self, ApiClient, test_pool};
+
+    /// Client over this module's own routes.
+    fn client(pool: &SqlitePool) -> ApiClient {
+        ApiClient::over(router().with_state(pool.clone()))
+    }
 
     async fn insert_listing(pool: &SqlitePool, id: i64) {
         test_support::listing(id)
@@ -270,19 +272,10 @@ mod tests {
     }
 
     async fn put(pool: &SqlitePool, id: i64, body: serde_json::Value) -> StatusCode {
-        router()
-            .with_state(pool.clone())
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri(format!("/investment_expenses/{id}"))
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
+        client(pool)
+            .put(format!("/investment_expenses/{id}"), &body)
             .await
-            .unwrap()
-            .status()
+            .status
     }
 
     #[tokio::test]
@@ -378,36 +371,16 @@ mod tests {
     async fn api_list_returns_ok() {
         let pool = test_pool().await;
         db_upsert(&pool, &sample(1)).await.unwrap();
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .uri("/investment_expenses")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let items: Vec<InvestmentExpense> = serde_json::from_slice(&bytes).unwrap();
+        let resp = client(&pool).get("/investment_expenses").await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let items: Vec<InvestmentExpense> = resp.json();
         assert_eq!(items.len(), 1);
     }
 
     #[tokio::test]
     async fn api_delete_missing_returns_404() {
         let pool = test_pool().await;
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .method("DELETE")
-                    .uri("/investment_expenses/99")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let resp = client(&pool).delete("/investment_expenses/99").await;
+        assert_eq!(resp.status, StatusCode::NOT_FOUND);
     }
 }

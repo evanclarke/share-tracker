@@ -189,11 +189,13 @@ pub async fn db_upsert(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{self, dec, test_pool, ymd};
+    use crate::test_support::{self, ApiClient, dec, test_pool, ymd};
     use axum::http::StatusCode;
-    use axum::{body::Body, http::Request};
-    use http_body_util::BodyExt;
-    use tower::ServiceExt;
+
+    /// Client over this module's own routes.
+    fn client(pool: &SqlitePool) -> ApiClient {
+        ApiClient::over(router().with_state(pool.clone()))
+    }
 
     async fn insert_test_listing(pool: &SqlitePool) {
         test_support::listing(1)
@@ -435,36 +437,15 @@ mod tests {
             "purchase_trade_id": 1,
             "quantity_allocated": "5"
         });
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri("/parcel_allocations/1")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+        let resp = client(&pool).put("/parcel_allocations/1", &body).await;
+        assert_eq!(resp.status, StatusCode::METHOD_NOT_ALLOWED);
     }
 
     #[tokio::test]
     async fn api_delete_allocation_route_is_not_allowed() {
         let pool = test_pool().await;
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .method("DELETE")
-                    .uri("/parcel_allocations/1")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+        let resp = client(&pool).delete("/parcel_allocations/1").await;
+        assert_eq!(resp.status, StatusCode::METHOD_NOT_ALLOWED);
     }
 
     #[tokio::test]
@@ -485,19 +466,9 @@ mod tests {
         .await
         .unwrap();
 
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .uri("/parcel_allocations")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let allocs: Vec<ParcelAllocation> = serde_json::from_slice(&bytes).unwrap();
+        let resp = client(&pool).get("/parcel_allocations").await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let allocs: Vec<ParcelAllocation> = resp.json();
         assert_eq!(allocs.len(), 1);
         assert_eq!(allocs[0].quantity_allocated, Decimal::from(5));
     }
@@ -505,17 +476,8 @@ mod tests {
     #[tokio::test]
     async fn api_get_missing_returns_404() {
         let pool = test_pool().await;
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .uri("/parcel_allocations/999")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let resp = client(&pool).get("/parcel_allocations/999").await;
+        assert_eq!(resp.status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
@@ -536,18 +498,8 @@ mod tests {
         .await
         .unwrap();
 
-        let resp = router()
-            .with_state(pool)
-            .oneshot(
-                Request::builder()
-                    .uri("/parcel_allocations/1")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let alloc: ParcelAllocation = serde_json::from_slice(&bytes).unwrap();
+        let resp = client(&pool).get("/parcel_allocations/1").await;
+        let alloc: ParcelAllocation = resp.json();
         assert_eq!(alloc.quantity_allocated, "10.5".parse::<Decimal>().unwrap());
     }
 }
