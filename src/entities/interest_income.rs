@@ -15,7 +15,7 @@
 //! exists).
 
 use crate::infra::decimal::Money;
-use crate::infra::http::ApiError;
+use crate::infra::http::{self, ApiError, CrudEntity};
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -87,31 +87,32 @@ fn default_currency() -> String {
     "AUD".to_string()
 }
 
-pub fn router() -> Router<SqlitePool> {
-    Router::new().route("/interest_income", get(list)).route(
-        "/interest_income/{id}",
-        get(get_one).put(upsert).delete(delete),
-    )
-}
-
-const COLUMNS: &str = "id, date_paid, amount, tfn_withholding_tax, foreign_source, \
+impl CrudEntity for InterestIncome {
+    type Key = i64;
+    const TABLE: &'static str = "interest_income";
+    const COLUMNS: &'static str = "id, date_paid, amount, tfn_withholding_tax, foreign_source, \
      foreign_tax_paid, currency, source, holding_account_id";
-
-pub async fn db_list(pool: &SqlitePool) -> Result<Vec<InterestIncome>, sqlx::Error> {
-    sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT {COLUMNS} FROM interest_income ORDER BY date_paid, id"
-    )))
-    .fetch_all(pool)
-    .await
+    const ORDER_BY: &'static str = "date_paid, id";
+    const NOUN: &'static str = "interest income";
 }
 
+pub fn router() -> Router<SqlitePool> {
+    Router::new()
+        .route(
+            "/interest_income",
+            get(http::list_handler::<InterestIncome>),
+        )
+        .route(
+            "/interest_income/{id}",
+            get(http::get_handler::<InterestIncome>)
+                .put(upsert)
+                .delete(http::delete_handler::<InterestIncome>),
+        )
+}
+
+#[cfg(test)]
 pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<InterestIncome>, sqlx::Error> {
-    sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT {COLUMNS} FROM interest_income WHERE id = ?"
-    )))
-    .bind(id)
-    .fetch_optional(pool)
-    .await
+    http::crud_get(pool, id).await
 }
 
 #[derive(Debug)]
@@ -210,28 +211,9 @@ pub async fn db_upsert(pool: &SqlitePool, i: &InterestIncome) -> Result<(), Upse
     Ok(())
 }
 
+#[cfg(test)]
 pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<bool, sqlx::Error> {
-    let rows = sqlx::query("DELETE FROM interest_income WHERE id = ?")
-        .bind(id)
-        .execute(pool)
-        .await?
-        .rows_affected();
-    Ok(rows > 0)
-}
-
-async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<InterestIncome>>, ApiError> {
-    db_list(&pool).await.map(Json).map_err(ApiError::from)
-}
-
-async fn get_one(
-    State(pool): State<SqlitePool>,
-    Path(id): Path<i64>,
-) -> Result<Json<InterestIncome>, ApiError> {
-    db_get(&pool, id)
-        .await
-        .map_err(ApiError::from)?
-        .map(Json)
-        .ok_or(ApiError::NotFound)
+    http::crud_delete::<InterestIncome>(pool, id).await
 }
 
 async fn upsert(
@@ -254,17 +236,6 @@ async fn upsert(
         .await
         .map(|_| StatusCode::NO_CONTENT)
         .map_err(ApiError::from)
-}
-
-async fn delete(
-    State(pool): State<SqlitePool>,
-    Path(id): Path<i64>,
-) -> Result<StatusCode, ApiError> {
-    if db_delete(&pool, id).await? {
-        Ok(StatusCode::NO_CONTENT)
-    } else {
-        Err(ApiError::not_found("no interest income with that id"))
-    }
 }
 
 #[cfg(test)]

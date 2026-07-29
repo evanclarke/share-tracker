@@ -16,7 +16,7 @@
 //! month of `date_incurred` (failing loudly when no rate exists).
 
 use crate::infra::decimal::{Money, OptMoney};
-use crate::infra::http::ApiError;
+use crate::infra::http::{self, ApiError, CrudEntity};
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -99,33 +99,32 @@ fn default_currency() -> String {
     "AUD".to_string()
 }
 
+impl CrudEntity for InvestmentExpense {
+    type Key = i64;
+    const TABLE: &'static str = "investment_expenses";
+    const COLUMNS: &'static str = "id, date_incurred, expense_type, amount, gross_amount, \
+     deductible_percentage, currency, description, listing_id, holding_account_id";
+    const ORDER_BY: &'static str = "date_incurred, id";
+    const NOUN: &'static str = "investment expense";
+}
+
 pub fn router() -> Router<SqlitePool> {
     Router::new()
-        .route("/investment_expenses", get(list))
+        .route(
+            "/investment_expenses",
+            get(http::list_handler::<InvestmentExpense>),
+        )
         .route(
             "/investment_expenses/{id}",
-            get(get_one).put(upsert).delete(delete),
+            get(http::get_handler::<InvestmentExpense>)
+                .put(upsert)
+                .delete(http::delete_handler::<InvestmentExpense>),
         )
 }
 
-const COLUMNS: &str = "id, date_incurred, expense_type, amount, gross_amount, \
-     deductible_percentage, currency, description, listing_id, holding_account_id";
-
-pub async fn db_list(pool: &SqlitePool) -> Result<Vec<InvestmentExpense>, sqlx::Error> {
-    sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT {COLUMNS} FROM investment_expenses ORDER BY date_incurred, id"
-    )))
-    .fetch_all(pool)
-    .await
-}
-
+#[cfg(test)]
 pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<InvestmentExpense>, sqlx::Error> {
-    sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT {COLUMNS} FROM investment_expenses WHERE id = ?"
-    )))
-    .bind(id)
-    .fetch_optional(pool)
-    .await
+    http::crud_get(pool, id).await
 }
 
 pub async fn db_upsert(pool: &SqlitePool, e: &InvestmentExpense) -> Result<(), sqlx::Error> {
@@ -160,28 +159,9 @@ pub async fn db_upsert(pool: &SqlitePool, e: &InvestmentExpense) -> Result<(), s
     Ok(())
 }
 
+#[cfg(test)]
 pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<bool, sqlx::Error> {
-    let rows = sqlx::query("DELETE FROM investment_expenses WHERE id = ?")
-        .bind(id)
-        .execute(pool)
-        .await?
-        .rows_affected();
-    Ok(rows > 0)
-}
-
-async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<InvestmentExpense>>, ApiError> {
-    db_list(&pool).await.map(Json).map_err(ApiError::from)
-}
-
-async fn get_one(
-    State(pool): State<SqlitePool>,
-    Path(id): Path<i64>,
-) -> Result<Json<InvestmentExpense>, ApiError> {
-    db_get(&pool, id)
-        .await
-        .map_err(ApiError::from)?
-        .map(Json)
-        .ok_or(ApiError::NotFound)
+    http::crud_delete::<InvestmentExpense>(pool, id).await
 }
 
 async fn upsert(
@@ -207,17 +187,6 @@ async fn upsert(
         // Unknown currency/listing/account (FK) or a bad enum value (CHECK)
         // surface as 422 with the offending constraint named.
         .map_err(ApiError::from)
-}
-
-async fn delete(
-    State(pool): State<SqlitePool>,
-    Path(id): Path<i64>,
-) -> Result<StatusCode, ApiError> {
-    if db_delete(&pool, id).await? {
-        Ok(StatusCode::NO_CONTENT)
-    } else {
-        Err(ApiError::not_found("no investment expense with that id"))
-    }
 }
 
 #[cfg(test)]

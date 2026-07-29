@@ -1,5 +1,5 @@
 use crate::infra::decimal::{Money, OptMoney};
-use crate::infra::http::ApiError;
+use crate::infra::http::{self, ApiError, CrudEntity};
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -236,37 +236,29 @@ fn default_currency() -> String {
     "AUD".to_string()
 }
 
-pub fn router() -> Router<SqlitePool> {
-    Router::new()
-        .route("/income", get(list))
-        .route("/income/{id}", get(get_one).put(upsert).delete(delete))
-}
-
-pub async fn db_list(pool: &SqlitePool) -> Result<Vec<Income>, sqlx::Error> {
-    sqlx::query_as(
-        "SELECT id, listing_id, date_paid, ex_date, franked_amount, unfranked_amount, \
+impl CrudEntity for Income {
+    type Key = i64;
+    const TABLE: &'static str = "income";
+    const COLUMNS: &'static str = "id, listing_id, date_paid, ex_date, franked_amount, unfranked_amount, \
          foreign_source_income, foreign_tax_paid, tfn_withholding_tax, franking_credits, \
          lic_capital_gain_deduction, conduit_foreign_income, trust_income, entitlement_date, \
          reinvestment_trade_id, currency, buyback_trade_id, holding_account_id, \
-         amount_per_security, securities_held, tax_deferred_amount \
-         FROM income ORDER BY date_paid, id",
-    )
-    .fetch_all(pool)
-    .await
+         amount_per_security, securities_held, tax_deferred_amount";
+    const ORDER_BY: &'static str = "date_paid, id";
+    const NOUN: &'static str = "income";
+}
+
+pub fn router() -> Router<SqlitePool> {
+    Router::new()
+        .route("/income", get(http::list_handler::<Income>))
+        .route(
+            "/income/{id}",
+            get(http::get_handler::<Income>).put(upsert).delete(delete),
+        )
 }
 
 pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<Income>, sqlx::Error> {
-    sqlx::query_as(
-        "SELECT id, listing_id, date_paid, ex_date, franked_amount, unfranked_amount, \
-         foreign_source_income, foreign_tax_paid, tfn_withholding_tax, franking_credits, \
-         lic_capital_gain_deduction, conduit_foreign_income, trust_income, entitlement_date, \
-         reinvestment_trade_id, currency, buyback_trade_id, holding_account_id, \
-         amount_per_security, securities_held, tax_deferred_amount \
-         FROM income WHERE id = ?",
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await
+    http::crud_get(pool, id).await
 }
 
 #[derive(Debug)]
@@ -557,21 +549,6 @@ pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<DeleteOutcome, sqlx
         .await?;
     tx.commit().await?;
     Ok(DeleteOutcome::Deleted)
-}
-
-async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<Income>>, ApiError> {
-    db_list(&pool).await.map(Json).map_err(ApiError::from)
-}
-
-async fn get_one(
-    State(pool): State<SqlitePool>,
-    Path(id): Path<i64>,
-) -> Result<Json<Income>, ApiError> {
-    db_get(&pool, id)
-        .await
-        .map_err(ApiError::from)?
-        .map(Json)
-        .ok_or(ApiError::NotFound)
 }
 
 async fn upsert(

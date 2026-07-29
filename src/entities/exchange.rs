@@ -1,4 +1,4 @@
-use crate::infra::http::ApiError;
+use crate::infra::http::{self, ApiError, CrudEntity};
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -37,29 +37,32 @@ fn default_close_time() -> String {
     "16:00".to_string()
 }
 
-pub fn router() -> Router<SqlitePool> {
-    Router::new()
-        .route("/exchanges", get(list))
-        .route("/exchanges/{mic}", get(get_one).put(upsert).delete(delete))
+impl CrudEntity for Exchange {
+    /// Keyed by MIC, not a rowid.
+    type Key = String;
+    const TABLE: &'static str = "exchanges";
+    const COLUMNS: &'static str =
+        "mic, name, country, currency, timezone, settlement_days, close_time";
+    const KEY_COLUMN: &'static str = "mic";
+    const ORDER_BY: &'static str = "mic";
+    const NOUN: &'static str = "exchange";
 }
 
-pub async fn db_list(pool: &SqlitePool) -> Result<Vec<Exchange>, sqlx::Error> {
-    sqlx::query_as(
-        "SELECT mic, name, country, currency, timezone, settlement_days, close_time \
-         FROM exchanges ORDER BY mic",
-    )
-    .fetch_all(pool)
-    .await
+pub fn router() -> Router<SqlitePool> {
+    Router::new()
+        .route("/exchanges", get(http::list_handler::<Exchange>))
+        .route(
+            "/exchanges/{mic}",
+            get(http::get_handler::<Exchange>)
+                .put(upsert)
+                // Deleting an exchange still referenced by listings/holidays
+                // violates an FK → 422.
+                .delete(http::delete_handler::<Exchange>),
+        )
 }
 
 pub async fn db_get(pool: &SqlitePool, mic: &str) -> Result<Option<Exchange>, sqlx::Error> {
-    sqlx::query_as(
-        "SELECT mic, name, country, currency, timezone, settlement_days, close_time \
-         FROM exchanges WHERE mic = ?",
-    )
-    .bind(mic)
-    .fetch_optional(pool)
-    .await
+    http::crud_get(pool, mic.to_string()).await
 }
 
 pub async fn db_upsert(pool: &SqlitePool, exchange: &Exchange) -> Result<(), sqlx::Error> {
@@ -86,27 +89,9 @@ pub async fn db_upsert(pool: &SqlitePool, exchange: &Exchange) -> Result<(), sql
     Ok(())
 }
 
+#[cfg(test)]
 pub async fn db_delete(pool: &SqlitePool, mic: &str) -> Result<bool, sqlx::Error> {
-    let result = sqlx::query("DELETE FROM exchanges WHERE mic = ?")
-        .bind(mic)
-        .execute(pool)
-        .await?;
-    Ok(result.rows_affected() > 0)
-}
-
-async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<Exchange>>, ApiError> {
-    db_list(&pool).await.map(Json).map_err(ApiError::from)
-}
-
-async fn get_one(
-    State(pool): State<SqlitePool>,
-    Path(mic): Path<String>,
-) -> Result<Json<Exchange>, ApiError> {
-    db_get(&pool, &mic)
-        .await
-        .map_err(ApiError::from)?
-        .map(Json)
-        .ok_or(ApiError::NotFound)
+    http::crud_delete::<Exchange>(pool, mic.to_string()).await
 }
 
 async fn upsert(
@@ -126,23 +111,6 @@ async fn upsert(
     db_upsert(&pool, &exchange)
         .await
         .map(|_| StatusCode::NO_CONTENT)
-        .map_err(ApiError::from)
-}
-
-async fn delete(
-    State(pool): State<SqlitePool>,
-    Path(mic): Path<String>,
-) -> Result<StatusCode, ApiError> {
-    db_delete(&pool, &mic)
-        .await
-        .map(|found| {
-            if found {
-                StatusCode::NO_CONTENT
-            } else {
-                StatusCode::NOT_FOUND
-            }
-        })
-        // Deleting an exchange still referenced by listings/holidays violates an FK → 422.
         .map_err(ApiError::from)
 }
 

@@ -1,8 +1,8 @@
 //! HTTP routes: list/get/upsert/delete over the corporate_actions table.
 
-use super::db::{db_delete, db_get, db_list, db_upsert};
+use super::db::db_upsert;
 use super::model::{CorporateAction, CorporateActionBody};
-use crate::infra::http::ApiError;
+use crate::infra::http::{self, ApiError};
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -12,25 +12,20 @@ use axum::{
 use sqlx::SqlitePool;
 
 pub fn router() -> Router<SqlitePool> {
-    Router::new().route("/corporate_actions", get(list)).route(
-        "/corporate_actions/{id}",
-        get(get_one).put(upsert).delete(delete),
-    )
-}
-
-async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<CorporateAction>>, ApiError> {
-    db_list(&pool).await.map(Json).map_err(ApiError::from)
-}
-
-async fn get_one(
-    State(pool): State<SqlitePool>,
-    Path(id): Path<i64>,
-) -> Result<Json<CorporateAction>, ApiError> {
-    db_get(&pool, id)
-        .await
-        .map_err(ApiError::from)?
-        .map(Json)
-        .ok_or(ApiError::NotFound)
+    Router::new()
+        .route(
+            "/corporate_actions",
+            get(http::list_handler::<CorporateAction>),
+        )
+        .route(
+            "/corporate_actions/{id}",
+            get(http::get_handler::<CorporateAction>)
+                .put(upsert)
+                // Deleting an action still referenced by rights-exercise trades
+                // violates the trades.rights_action_id FK → 422 (delete those
+                // first).
+                .delete(http::delete_handler::<CorporateAction>),
+        )
 }
 
 async fn upsert(
@@ -52,22 +47,4 @@ async fn upsert(
     };
     db_upsert(&pool, &action).await?;
     Ok(StatusCode::NO_CONTENT)
-}
-
-async fn delete(
-    State(pool): State<SqlitePool>,
-    Path(id): Path<i64>,
-) -> Result<StatusCode, ApiError> {
-    db_delete(&pool, id)
-        .await
-        .map(|found| {
-            if found {
-                StatusCode::NO_CONTENT
-            } else {
-                StatusCode::NOT_FOUND
-            }
-        })
-        // Deleting an action still referenced by rights-exercise trades
-        // violates the trades.rights_action_id FK → 422 (delete those first).
-        .map_err(ApiError::from)
 }

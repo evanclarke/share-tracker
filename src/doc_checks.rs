@@ -697,6 +697,20 @@ fn top_menu_bar_documented() {
     assert!(README_MD.contains("New trade/income/sell/transfer shortcut buttons"));
 }
 
+/// Docs-sync pin for the uniform DELETE 404 contract (2026-07-29 Rust review):
+/// the Response-codes table states that a `DELETE` of a missing row answers
+/// with a plain-text reason (a `GET` still answers with an empty body), and
+/// the Error-bodies paragraph counts deletes among the reasoned 404s. The
+/// behaviour itself is pinned by
+/// `entities::tests::deleting_a_missing_row_is_404_naming_what_was_missing`.
+#[test]
+fn delete_404_reason_documented() {
+    assert!(API_MD.contains("A `GET` of a missing row answers with an empty body"));
+    assert!(API_MD.contains("every `DELETE` of a missing row"));
+    assert!(API_MD.contains("no AMMA statement with that id"));
+    assert!(API_MD.contains("`404`-with-a-cause — which includes every `DELETE` of a row"));
+}
+
 /// Pins for the FreeBSD packaging + versioned-release pipeline (REQUIREMENTS
 /// 2026-07-13). The release workflow and package skeleton are plain text CI
 /// consumes, so these tests keep their load-bearing pieces from silently

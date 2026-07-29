@@ -43,7 +43,7 @@ use crate::entities::corporate_action::{
 use crate::entities::rights_exercise::{db_held_at_record_date, db_rights_used, entitled_units};
 use crate::entities::trade::TradeType;
 use crate::infra::decimal::{Money, parse_dec, row_dec};
-use crate::infra::http::ApiError;
+use crate::infra::http::{self, ApiError};
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -454,11 +454,7 @@ async fn delete_one(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
 ) -> Result<StatusCode, ApiError> {
-    if db_delete(&pool, id).await? {
-        Ok(StatusCode::NO_CONTENT)
-    } else {
-        Err(ApiError::not_found("no rights sale with that id"))
-    }
+    http::deleted(db_delete(&pool, id).await?, "rights sale")
 }
 
 #[cfg(test)]

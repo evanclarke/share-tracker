@@ -20,7 +20,7 @@
 //! nothing.
 
 use crate::infra::decimal::{Money, parse_dec};
-use crate::infra::http::ApiError;
+use crate::infra::http::{self, ApiError, CrudEntity};
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -90,32 +90,34 @@ impl From<sqlx::Error> for UpsertError {
     }
 }
 
+impl CrudEntity for DrpEnrolment {
+    type Key = i64;
+    const TABLE: &'static str = "drp_enrolments";
+    const COLUMNS: &'static str =
+        "id, listing_id, holding_account_id, enrolment_date, unenrolment_date, residual_handling";
+    const ORDER_BY: &'static str = "listing_id, holding_account_id, enrolment_date, id";
+    const NOUN: &'static str = "DRP enrolment";
+}
+
 pub fn router() -> Router<SqlitePool> {
-    Router::new().route("/drp_enrolments", get(list)).route(
-        "/drp_enrolments/{id}",
-        get(get_one).put(upsert).delete(delete),
-    )
+    Router::new()
+        .route("/drp_enrolments", get(http::list_handler::<DrpEnrolment>))
+        .route(
+            "/drp_enrolments/{id}",
+            get(http::get_handler::<DrpEnrolment>)
+                .put(upsert)
+                .delete(http::delete_handler::<DrpEnrolment>),
+        )
 }
 
-const COLUMNS: &str =
-    "id, listing_id, holding_account_id, enrolment_date, unenrolment_date, residual_handling";
-
+#[cfg(test)]
 pub async fn db_list(pool: &SqlitePool) -> Result<Vec<DrpEnrolment>, sqlx::Error> {
-    sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT {COLUMNS} FROM drp_enrolments \
-         ORDER BY listing_id, holding_account_id, enrolment_date, id"
-    )))
-    .fetch_all(pool)
-    .await
+    http::crud_list(pool).await
 }
 
+#[cfg(test)]
 pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<DrpEnrolment>, sqlx::Error> {
-    sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT {COLUMNS} FROM drp_enrolments WHERE id = ?"
-    )))
-    .bind(id)
-    .fetch_optional(pool)
-    .await
+    http::crud_get(pool, id).await
 }
 
 /// Upsert an enrolment period, enforcing the no-overlap invariant and settling
@@ -210,29 +212,6 @@ pub async fn db_upsert(pool: &SqlitePool, period: &DrpEnrolment) -> Result<(), U
     Ok(())
 }
 
-pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<bool, sqlx::Error> {
-    let result = sqlx::query("DELETE FROM drp_enrolments WHERE id = ?")
-        .bind(id)
-        .execute(pool)
-        .await?;
-    Ok(result.rows_affected() > 0)
-}
-
-async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<DrpEnrolment>>, ApiError> {
-    db_list(&pool).await.map(Json).map_err(ApiError::from)
-}
-
-async fn get_one(
-    State(pool): State<SqlitePool>,
-    Path(id): Path<i64>,
-) -> Result<Json<DrpEnrolment>, ApiError> {
-    db_get(&pool, id)
-        .await
-        .map_err(ApiError::from)?
-        .map(Json)
-        .ok_or(ApiError::NotFound)
-}
-
 async fn upsert(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
@@ -264,22 +243,6 @@ impl From<UpsertError> for ApiError {
             UpsertError::Db(err) => err.into(),
         }
     }
-}
-
-async fn delete(
-    State(pool): State<SqlitePool>,
-    Path(id): Path<i64>,
-) -> Result<StatusCode, ApiError> {
-    db_delete(&pool, id)
-        .await
-        .map(|found| {
-            if found {
-                StatusCode::NO_CONTENT
-            } else {
-                StatusCode::NOT_FOUND
-            }
-        })
-        .map_err(ApiError::from)
 }
 
 #[cfg(test)]

@@ -11,10 +11,10 @@
 //! `minor_units` is informational only: stored monetary amounts remain
 //! arbitrary-precision Decimal and are never rounded to a currency's minor unit.
 
-use crate::infra::http::ApiError;
+use crate::infra::http::{self, ApiError, CrudEntity};
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::State,
     routing::{get, post},
 };
 use quick_xml::events::Event;
@@ -88,31 +88,32 @@ pub struct ImportSummary {
     pub imported: usize,
 }
 
+impl CrudEntity for Currency {
+    /// Keyed by ISO 4217 (or ISO 24165 DTI) code, not a rowid.
+    type Key = String;
+    const TABLE: &'static str = "currencies";
+    const COLUMNS: &'static str = "code, kind, numeric_code, name, short_name, minor_units, source";
+    const KEY_COLUMN: &'static str = "code";
+    const ORDER_BY: &'static str = "code";
+    const NOUN: &'static str = "currency";
+}
+
 pub fn router() -> Router<SqlitePool> {
     Router::new()
-        .route("/currencies", get(list))
-        .route("/currencies/{code}", get(get_one))
+        .route("/currencies", get(http::list_handler::<Currency>))
+        .route("/currencies/{code}", get(http::get_handler::<Currency>))
         // Manual trigger for retries / missed runs. Read-only for clients otherwise.
         .route("/currencies/import", post(import))
 }
 
+#[cfg(test)]
 pub async fn db_list(pool: &SqlitePool) -> Result<Vec<Currency>, sqlx::Error> {
-    sqlx::query_as(
-        "SELECT code, kind, numeric_code, name, short_name, minor_units, source \
-         FROM currencies ORDER BY code",
-    )
-    .fetch_all(pool)
-    .await
+    http::crud_list(pool).await
 }
 
+#[cfg(test)]
 pub async fn db_get(pool: &SqlitePool, code: &str) -> Result<Option<Currency>, sqlx::Error> {
-    sqlx::query_as(
-        "SELECT code, kind, numeric_code, name, short_name, minor_units, source \
-         FROM currencies WHERE code = ?",
-    )
-    .bind(code)
-    .fetch_optional(pool)
-    .await
+    http::crud_get(pool, code.to_string()).await
 }
 
 /// Insert or update a currency by `code`. A currency's name / minor units can be
@@ -398,21 +399,6 @@ async fn fetch(url: &str, basic_auth: Option<(&str, &str)>) -> Result<String, Im
     resp.text()
         .await
         .map_err(|e| ImportError::Fetch(e.to_string()))
-}
-
-async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<Currency>>, ApiError> {
-    db_list(&pool).await.map(Json).map_err(ApiError::from)
-}
-
-async fn get_one(
-    State(pool): State<SqlitePool>,
-    Path(code): Path<String>,
-) -> Result<Json<Currency>, ApiError> {
-    db_get(&pool, &code)
-        .await
-        .map_err(ApiError::from)?
-        .map(Json)
-        .ok_or(ApiError::NotFound)
 }
 
 /// Manually trigger the import. With a non-empty request body, imports that body

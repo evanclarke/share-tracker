@@ -8,7 +8,7 @@
 //! indefinitely, per `docs/ato/cgt-using-capital-losses.md`). Absent row = zero.
 
 use crate::infra::decimal::Money;
-use crate::infra::http::ApiError;
+use crate::infra::http::{self, ApiError, CrudEntity};
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -34,24 +34,27 @@ pub struct CgtSettingsBody {
     pub opening_capital_loss: Decimal,
 }
 
+impl CrudEntity for CgtSettings {
+    type Key = i64;
+    const TABLE: &'static str = "cgt_settings";
+    const COLUMNS: &'static str = "id, opening_capital_loss";
+    const NOUN: &'static str = "CGT settings row";
+}
+
 pub fn router() -> Router<SqlitePool> {
-    Router::new().route("/cgt_settings", get(list)).route(
-        "/cgt_settings/{id}",
-        get(get_one).put(upsert).delete(delete),
-    )
+    Router::new()
+        .route("/cgt_settings", get(http::list_handler::<CgtSettings>))
+        .route(
+            "/cgt_settings/{id}",
+            get(http::get_handler::<CgtSettings>)
+                .put(upsert)
+                .delete(http::delete_handler::<CgtSettings>),
+        )
 }
 
-pub async fn db_list(pool: &SqlitePool) -> Result<Vec<CgtSettings>, sqlx::Error> {
-    sqlx::query_as("SELECT id, opening_capital_loss FROM cgt_settings ORDER BY id")
-        .fetch_all(pool)
-        .await
-}
-
+#[cfg(test)]
 pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<CgtSettings>, sqlx::Error> {
-    sqlx::query_as("SELECT id, opening_capital_loss FROM cgt_settings WHERE id = ?")
-        .bind(id)
-        .fetch_optional(pool)
-        .await
+    http::crud_get(pool, id).await
 }
 
 pub async fn db_upsert(pool: &SqlitePool, settings: &CgtSettings) -> Result<(), sqlx::Error> {
@@ -64,14 +67,6 @@ pub async fn db_upsert(pool: &SqlitePool, settings: &CgtSettings) -> Result<(), 
     .execute(pool)
     .await?;
     Ok(())
-}
-
-pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<bool, sqlx::Error> {
-    let result = sqlx::query("DELETE FROM cgt_settings WHERE id = ?")
-        .bind(id)
-        .execute(pool)
-        .await?;
-    Ok(result.rows_affected() > 0)
 }
 
 /// The opening carried-forward capital loss, or zero when no settings row exists.
@@ -87,21 +82,6 @@ where
             .fetch_optional(executor)
             .await?;
     Ok(settings.map_or(Decimal::ZERO, |s| s.opening_capital_loss))
-}
-
-async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<CgtSettings>>, ApiError> {
-    db_list(&pool).await.map(Json).map_err(ApiError::from)
-}
-
-async fn get_one(
-    State(pool): State<SqlitePool>,
-    Path(id): Path<i64>,
-) -> Result<Json<CgtSettings>, ApiError> {
-    db_get(&pool, id)
-        .await
-        .map_err(ApiError::from)?
-        .map(Json)
-        .ok_or(ApiError::NotFound)
 }
 
 async fn upsert(
@@ -124,22 +104,6 @@ async fn upsert(
         .await
         .map(|_| StatusCode::NO_CONTENT)
         // id != 1 violates the singleton CHECK → 422.
-        .map_err(ApiError::from)
-}
-
-async fn delete(
-    State(pool): State<SqlitePool>,
-    Path(id): Path<i64>,
-) -> Result<StatusCode, ApiError> {
-    db_delete(&pool, id)
-        .await
-        .map(|found| {
-            if found {
-                StatusCode::NO_CONTENT
-            } else {
-                StatusCode::NOT_FOUND
-            }
-        })
         .map_err(ApiError::from)
 }
 

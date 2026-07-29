@@ -49,10 +49,13 @@ Modules are grouped into four folders; `main.rs`, `app.rs`, and the migrations l
 Each entity in `src/entities/<entity>.rs` follows this structure:
 1. Model struct — derives `Serialize`, `Deserialize`, `sqlx::FromRow`
 2. Input body struct — for PUT endpoints; omits the primary key (comes from URL path)
-3. `pub db_*` functions — `db_list`, `db_get`, `db_upsert`, `db_delete`
-4. Private axum handlers — call the `db_*` functions and return `Result<_, infra::http::ApiError>` (entity errors convert via their `From<EntityError> for ApiError` impl)
-5. `pub fn router() -> Router<SqlitePool>` — registers the entity's routes
-6. Inline `#[cfg(test)]` module — DB-level tests and API-level tests via `tower::ServiceExt::oneshot`
+3. `impl infra::http::CrudEntity for <Model>` — `TABLE`, `COLUMNS`, `NOUN` (+ `KEY_COLUMN`/`ORDER_BY`/`Key` where they aren't `id`/`id`/`i64`). This *is* the list/get-one/delete implementation: the routes use the generic `http::list_handler::<M>` / `get_handler::<M>` / `delete_handler::<M>`, and `http::crud_list`/`crud_get`/`crud_delete` are the query behind them — don't hand-write another `async fn list`/`get_one`/`delete`, and don't spell the SELECT column list out per query. A verb that does more than one table's worth of work (a filtered list, a read that attaches child rows, a delete with referenced-row guards) stays hand-written for that verb only; the entity still implements the trait for the rest
+4. `pub db_*` functions — `db_upsert` (always hand-written: this is where the write-time invariants live), plus `db_list`/`db_get`/`db_delete` as one-line delegations to the `crud_*` helpers where other modules or the DB-level tests call them by name. Where only the tests do, gate the wrapper `#[cfg(test)]`; where nothing does, don't write it
+5. Private axum handlers — the verbs the trait doesn't cover (`upsert`, operations): call the `db_*` functions and return `Result<_, infra::http::ApiError>` (entity errors convert via their `From<EntityError> for ApiError` impl)
+6. `pub fn router() -> Router<SqlitePool>` — registers the entity's routes
+7. Inline `#[cfg(test)]` module — DB-level tests and API-level tests via `tower::ServiceExt::oneshot`
+
+A `DELETE` of a row that isn't there always answers `404` with a plain-text body naming it (`no <noun> with that id`) — never a bare `StatusCode::NOT_FOUND`, which the web UI can only show as "HTTP 404". `delete_handler` does this from `NOUN`; a hand-written delete uses `infra::http::deleted(found, noun)`, or its own `ApiError::not_found` where the wording needs the composite key (`exchange_holiday`). `entities::tests::deleting_a_missing_row_is_404_naming_what_was_missing` pins every delete route against that contract — add the new route there.
 
 New entity modules are added by dropping the file in `src/entities/` and adding one `pub mod <entity>;` line plus one `.merge(<entity>::router())` line in `src/entities/mod.rs` — `main.rs` and `app.rs` don't change. Reports follow the same pattern in `src/reports/mod.rs`.
 

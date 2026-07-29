@@ -1,5 +1,5 @@
 use crate::infra::decimal::Money;
-use crate::infra::http::ApiError;
+use crate::infra::http::{self, ApiError, CrudEntity};
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -157,40 +157,40 @@ impl From<UpsertError> for ApiError {
     }
 }
 
+impl CrudEntity for AmmaStatement {
+    type Key = i64;
+    const TABLE: &'static str = "amma_statements";
+    const COLUMNS: &'static str = "id, listing_id, tax_year_end_date, units_held, date_received, \
+         australian_interest, australian_dividends_unfranked, franked_dividends, \
+         franking_credits, net_rent, foreign_income, foreign_tax_credits, other_income, \
+         cgt_discount_gains, cgt_indexation_gains, cgt_other_gains, capital_losses_applied, \
+         tax_deferred_amount, tax_free_amount, cost_base_adjustment, tfn_withholding_tax, \
+         currency, holding_account_id";
+    const ORDER_BY: &'static str = "tax_year_end_date, id";
+    const NOUN: &'static str = "AMMA statement";
+}
+
 pub fn router() -> Router<SqlitePool> {
-    Router::new().route("/amma_statements", get(list)).route(
-        "/amma_statements/{id}",
-        get(get_one).put(upsert).delete(delete),
-    )
+    Router::new()
+        .route("/amma_statements", get(http::list_handler::<AmmaStatement>))
+        .route(
+            "/amma_statements/{id}",
+            get(http::get_handler::<AmmaStatement>)
+                .put(upsert)
+                // Deleting a statement still referenced by AMIT adjustments
+                // violates an FK → 422.
+                .delete(http::delete_handler::<AmmaStatement>),
+        )
 }
 
+#[cfg(test)]
 pub async fn db_list(pool: &SqlitePool) -> Result<Vec<AmmaStatement>, sqlx::Error> {
-    sqlx::query_as(
-        "SELECT id, listing_id, tax_year_end_date, units_held, date_received, \
-         australian_interest, australian_dividends_unfranked, franked_dividends, \
-         franking_credits, net_rent, foreign_income, foreign_tax_credits, other_income, \
-         cgt_discount_gains, cgt_indexation_gains, cgt_other_gains, capital_losses_applied, \
-         tax_deferred_amount, tax_free_amount, cost_base_adjustment, tfn_withholding_tax, \
-         currency, holding_account_id \
-         FROM amma_statements ORDER BY tax_year_end_date, id",
-    )
-    .fetch_all(pool)
-    .await
+    http::crud_list(pool).await
 }
 
+#[cfg(test)]
 pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<AmmaStatement>, sqlx::Error> {
-    sqlx::query_as(
-        "SELECT id, listing_id, tax_year_end_date, units_held, date_received, \
-         australian_interest, australian_dividends_unfranked, franked_dividends, \
-         franking_credits, net_rent, foreign_income, foreign_tax_credits, other_income, \
-         cgt_discount_gains, cgt_indexation_gains, cgt_other_gains, capital_losses_applied, \
-         tax_deferred_amount, tax_free_amount, cost_base_adjustment, tfn_withholding_tax, \
-         currency, holding_account_id \
-         FROM amma_statements WHERE id = ?",
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await
+    http::crud_get(pool, id).await
 }
 
 pub async fn db_upsert(pool: &SqlitePool, stmt: &AmmaStatement) -> Result<(), UpsertError> {
@@ -261,29 +261,6 @@ pub async fn db_upsert(pool: &SqlitePool, stmt: &AmmaStatement) -> Result<(), Up
     Ok(())
 }
 
-pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<bool, sqlx::Error> {
-    let result = sqlx::query("DELETE FROM amma_statements WHERE id = ?")
-        .bind(id)
-        .execute(pool)
-        .await?;
-    Ok(result.rows_affected() > 0)
-}
-
-async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<AmmaStatement>>, ApiError> {
-    db_list(&pool).await.map(Json).map_err(ApiError::from)
-}
-
-async fn get_one(
-    State(pool): State<SqlitePool>,
-    Path(id): Path<i64>,
-) -> Result<Json<AmmaStatement>, ApiError> {
-    db_get(&pool, id)
-        .await
-        .map_err(ApiError::from)?
-        .map(Json)
-        .ok_or(ApiError::NotFound)
-}
-
 async fn upsert(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
@@ -317,23 +294,6 @@ async fn upsert(
     db_upsert(&pool, &stmt)
         .await
         .map(|_| StatusCode::NO_CONTENT)
-        .map_err(ApiError::from)
-}
-
-async fn delete(
-    State(pool): State<SqlitePool>,
-    Path(id): Path<i64>,
-) -> Result<StatusCode, ApiError> {
-    db_delete(&pool, id)
-        .await
-        .map(|found| {
-            if found {
-                StatusCode::NO_CONTENT
-            } else {
-                StatusCode::NOT_FOUND
-            }
-        })
-        // Deleting a statement still referenced by AMIT adjustments violates an FK → 422.
         .map_err(ApiError::from)
 }
 

@@ -4,7 +4,7 @@
 
 use super::model::{ActionKind, CorporateAction};
 use crate::infra::decimal::OptMoney;
-use crate::infra::http::ApiError;
+use crate::infra::http::{ApiError, CrudEntity};
 use sqlx::SqlitePool;
 
 const COLUMNS: &str = "id, action_type, listing_id, date, amount_per_unit, currency, \
@@ -16,14 +16,19 @@ const COLUMNS: &str = "id, action_type, listing_id, date, amount_per_unit, curre
                        scrip_cash_currency, demerger_listing_id, demerger_new_units, \
                        demerger_held_units, demerger_cost_base_pct, worthless_event";
 
-pub async fn db_list(pool: &SqlitePool) -> Result<Vec<CorporateAction>, sqlx::Error> {
-    sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT {COLUMNS} FROM corporate_actions ORDER BY id"
-    )))
-    .fetch_all(pool)
-    .await
+impl CrudEntity for CorporateAction {
+    type Key = i64;
+    const TABLE: &'static str = "corporate_actions";
+    const COLUMNS: &'static str = COLUMNS;
+    const NOUN: &'static str = "corporate action";
 }
 
+#[cfg(test)]
+pub async fn db_list(pool: &SqlitePool) -> Result<Vec<CorporateAction>, sqlx::Error> {
+    crate::infra::http::crud_list(pool).await
+}
+
+#[cfg(test)]
 pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<CorporateAction>, sqlx::Error> {
     db_get_tx(pool, id).await
 }
@@ -283,10 +288,7 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
 /// participation, scrip-for-scrip exchange, or demerger trades is protected
 /// by the corresponding `trades.*_action_id` foreign key — the violation
 /// surfaces as a database error the handler maps to `422`.
+#[cfg(test)]
 pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<bool, sqlx::Error> {
-    let result = sqlx::query("DELETE FROM corporate_actions WHERE id = ?")
-        .bind(id)
-        .execute(pool)
-        .await?;
-    Ok(result.rows_affected() > 0)
+    crate::infra::http::crud_delete::<CorporateAction>(pool, id).await
 }

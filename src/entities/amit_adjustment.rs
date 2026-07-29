@@ -1,5 +1,5 @@
 use crate::infra::decimal::{Money, parse_dec};
-use crate::infra::http::ApiError;
+use crate::infra::http::{self, ApiError, CrudEntity};
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -32,28 +32,30 @@ pub struct AmitAdjustmentBody {
     pub quantity: Decimal,
 }
 
+impl CrudEntity for AmitAdjustment {
+    type Key = i64;
+    const TABLE: &'static str = "amit_adjustments";
+    const COLUMNS: &'static str = "id, amma_statement_id, trade_id, quantity";
+    const NOUN: &'static str = "AMIT adjustment";
+}
+
 pub fn router() -> Router<SqlitePool> {
-    Router::new().route("/amit_adjustments", get(list)).route(
-        "/amit_adjustments/{id}",
-        get(get_one).put(upsert).delete(delete),
-    )
+    Router::new()
+        .route(
+            "/amit_adjustments",
+            get(http::list_handler::<AmitAdjustment>),
+        )
+        .route(
+            "/amit_adjustments/{id}",
+            get(http::get_handler::<AmitAdjustment>)
+                .put(upsert)
+                .delete(http::delete_handler::<AmitAdjustment>),
+        )
 }
 
-pub async fn db_list(pool: &SqlitePool) -> Result<Vec<AmitAdjustment>, sqlx::Error> {
-    sqlx::query_as(
-        "SELECT id, amma_statement_id, trade_id, quantity FROM amit_adjustments ORDER BY id",
-    )
-    .fetch_all(pool)
-    .await
-}
-
+#[cfg(test)]
 pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<AmitAdjustment>, sqlx::Error> {
-    sqlx::query_as(
-        "SELECT id, amma_statement_id, trade_id, quantity FROM amit_adjustments WHERE id = ?",
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await
+    http::crud_get(pool, id).await
 }
 
 #[derive(Debug)]
@@ -130,14 +132,6 @@ pub async fn db_upsert(pool: &SqlitePool, adj: &AmitAdjustment) -> Result<(), Up
     .execute(pool)
     .await?;
     Ok(())
-}
-
-pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<bool, sqlx::Error> {
-    let result = sqlx::query("DELETE FROM amit_adjustments WHERE id = ?")
-        .bind(id)
-        .execute(pool)
-        .await?;
-    Ok(result.rows_affected() > 0)
 }
 
 /// Returns the total AMIT cost base reduction per purchase trade, keyed by `trade_id`.
@@ -231,21 +225,6 @@ where
     Ok(map)
 }
 
-async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<AmitAdjustment>>, ApiError> {
-    db_list(&pool).await.map(Json).map_err(ApiError::from)
-}
-
-async fn get_one(
-    State(pool): State<SqlitePool>,
-    Path(id): Path<i64>,
-) -> Result<Json<AmitAdjustment>, ApiError> {
-    db_get(&pool, id)
-        .await
-        .map_err(ApiError::from)?
-        .map(Json)
-        .ok_or(ApiError::NotFound)
-}
-
 async fn upsert(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
@@ -280,22 +259,6 @@ impl From<UpsertError> for ApiError {
             UpsertError::Db(err) => err.into(),
         }
     }
-}
-
-async fn delete(
-    State(pool): State<SqlitePool>,
-    Path(id): Path<i64>,
-) -> Result<StatusCode, ApiError> {
-    db_delete(&pool, id)
-        .await
-        .map(|found| {
-            if found {
-                StatusCode::NO_CONTENT
-            } else {
-                StatusCode::NOT_FOUND
-            }
-        })
-        .map_err(ApiError::from)
 }
 
 #[cfg(test)]

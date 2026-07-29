@@ -13,7 +13,7 @@
 //! every holding account belongs to the same taxpayer, so taxpayer-level
 //! reports (tax summary, net capital gain) aggregate across all of them.
 
-use crate::infra::http::ApiError;
+use crate::infra::http::{self, ApiError, CrudEntity};
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -43,24 +43,35 @@ pub struct HoldingAccountBody {
     pub name: String,
 }
 
+impl CrudEntity for HoldingAccount {
+    type Key = i64;
+    const TABLE: &'static str = "holding_accounts";
+    const COLUMNS: &'static str = "id, name";
+    const NOUN: &'static str = "holding account";
+}
+
 pub fn router() -> Router<SqlitePool> {
-    Router::new().route("/holding_accounts", get(list)).route(
-        "/holding_accounts/{id}",
-        get(get_one).put(upsert).delete(delete),
-    )
+    Router::new()
+        .route(
+            "/holding_accounts",
+            get(http::list_handler::<HoldingAccount>),
+        )
+        .route(
+            "/holding_accounts/{id}",
+            get(http::get_handler::<HoldingAccount>)
+                .put(upsert)
+                .delete(delete),
+        )
 }
 
+#[cfg(test)]
 pub async fn db_list(pool: &SqlitePool) -> Result<Vec<HoldingAccount>, sqlx::Error> {
-    sqlx::query_as("SELECT id, name FROM holding_accounts ORDER BY id")
-        .fetch_all(pool)
-        .await
+    http::crud_list(pool).await
 }
 
+#[cfg(test)]
 pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<HoldingAccount>, sqlx::Error> {
-    sqlx::query_as("SELECT id, name FROM holding_accounts WHERE id = ?")
-        .bind(id)
-        .fetch_optional(pool)
-        .await
+    http::crud_get(pool, id).await
 }
 
 pub async fn db_upsert(pool: &SqlitePool, account: &HoldingAccount) -> Result<(), sqlx::Error> {
@@ -126,21 +137,6 @@ pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<DeleteOutcome, sqlx
         .await?;
     tx.commit().await?;
     Ok(DeleteOutcome::Deleted)
-}
-
-async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<HoldingAccount>>, ApiError> {
-    db_list(&pool).await.map(Json).map_err(ApiError::from)
-}
-
-async fn get_one(
-    State(pool): State<SqlitePool>,
-    Path(id): Path<i64>,
-) -> Result<Json<HoldingAccount>, ApiError> {
-    db_get(&pool, id)
-        .await
-        .map_err(ApiError::from)?
-        .map(Json)
-        .ok_or(ApiError::NotFound)
 }
 
 async fn upsert(

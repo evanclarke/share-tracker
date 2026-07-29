@@ -1,7 +1,7 @@
-use crate::infra::http::ApiError;
+use crate::infra::http::{self, ApiError, CrudEntity};
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::State,
     routing::{get, post},
 };
 use chrono::NaiveDate;
@@ -53,31 +53,33 @@ pub struct ImportSummary {
     pub imported: usize,
 }
 
+impl CrudEntity for MicEntry {
+    /// Keyed by MIC, not a rowid.
+    type Key = String;
+    const TABLE: &'static str = "mic_registry";
+    const COLUMNS: &'static str =
+        "mic, operating_mic, name, country_code, city, status, expiry_date";
+    const KEY_COLUMN: &'static str = "mic";
+    const ORDER_BY: &'static str = "mic";
+    const NOUN: &'static str = "MIC registry entry";
+}
+
 pub fn router() -> Router<SqlitePool> {
     Router::new()
-        .route("/mic_registry", get(list))
-        .route("/mic_registry/{mic}", get(get_one))
+        .route("/mic_registry", get(http::list_handler::<MicEntry>))
+        .route("/mic_registry/{mic}", get(http::get_handler::<MicEntry>))
         // Manual trigger for retries / missed runs. Read-only for clients otherwise.
         .route("/mic_registry/import", post(import))
 }
 
+#[cfg(test)]
 pub async fn db_list(pool: &SqlitePool) -> Result<Vec<MicEntry>, sqlx::Error> {
-    sqlx::query_as(
-        "SELECT mic, operating_mic, name, country_code, city, status, expiry_date \
-         FROM mic_registry ORDER BY mic",
-    )
-    .fetch_all(pool)
-    .await
+    http::crud_list(pool).await
 }
 
+#[cfg(test)]
 pub async fn db_get(pool: &SqlitePool, mic: &str) -> Result<Option<MicEntry>, sqlx::Error> {
-    sqlx::query_as(
-        "SELECT mic, operating_mic, name, country_code, city, status, expiry_date \
-         FROM mic_registry WHERE mic = ?",
-    )
-    .bind(mic)
-    .fetch_optional(pool)
-    .await
+    http::crud_get(pool, mic.to_string()).await
 }
 
 /// Insert or update a registry entry by MIC. Unlike the FX rates (which are
@@ -216,21 +218,6 @@ async fn fetch_registry(url: &str) -> Result<String, ImportError> {
     resp.text()
         .await
         .map_err(|e| ImportError::Fetch(e.to_string()))
-}
-
-async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<MicEntry>>, ApiError> {
-    db_list(&pool).await.map(Json).map_err(ApiError::from)
-}
-
-async fn get_one(
-    State(pool): State<SqlitePool>,
-    Path(mic): Path<String>,
-) -> Result<Json<MicEntry>, ApiError> {
-    db_get(&pool, &mic)
-        .await
-        .map_err(ApiError::from)?
-        .map(Json)
-        .ok_or(ApiError::NotFound)
 }
 
 /// Manually trigger the import. With a non-empty request body, imports that body

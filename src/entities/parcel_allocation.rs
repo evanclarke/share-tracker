@@ -1,10 +1,6 @@
 use crate::infra::decimal::Money;
-use crate::infra::http::ApiError;
-use axum::{
-    Json, Router,
-    extract::{Path, State},
-    routing::get,
-};
+use crate::infra::http::{self, CrudEntity};
+use axum::{Router, routing::get};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
@@ -26,29 +22,28 @@ pub struct ParcelAllocation {
 /// `sell` module); allowing standalone writes here would let a Sell become
 /// under-covered (e.g. deleting or shrinking an allocation), breaking the
 /// invariant that every persisted Sell is fully allocated.
+impl CrudEntity for ParcelAllocation {
+    type Key = i64;
+    const TABLE: &'static str = "parcel_allocations";
+    const COLUMNS: &'static str = "id, sale_trade_id, purchase_trade_id, quantity_allocated";
+    const NOUN: &'static str = "parcel allocation";
+}
+
 pub fn router() -> Router<SqlitePool> {
     Router::new()
-        .route("/parcel_allocations", get(list))
-        .route("/parcel_allocations/{id}", get(get_one))
+        .route(
+            "/parcel_allocations",
+            get(http::list_handler::<ParcelAllocation>),
+        )
+        .route(
+            "/parcel_allocations/{id}",
+            get(http::get_handler::<ParcelAllocation>),
+        )
 }
 
-pub async fn db_list(pool: &SqlitePool) -> Result<Vec<ParcelAllocation>, sqlx::Error> {
-    sqlx::query_as(
-        "SELECT id, sale_trade_id, purchase_trade_id, quantity_allocated \
-         FROM parcel_allocations ORDER BY id",
-    )
-    .fetch_all(pool)
-    .await
-}
-
+#[cfg(test)]
 pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<ParcelAllocation>, sqlx::Error> {
-    sqlx::query_as(
-        "SELECT id, sale_trade_id, purchase_trade_id, quantity_allocated \
-         FROM parcel_allocations WHERE id = ?",
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await
+    http::crud_get(pool, id).await
 }
 
 // The write path below is retained only as a test-fixture builder for the
@@ -195,21 +190,6 @@ pub async fn db_upsert(
     .execute(pool)
     .await?;
     Ok(())
-}
-
-async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<ParcelAllocation>>, ApiError> {
-    db_list(&pool).await.map(Json).map_err(ApiError::from)
-}
-
-async fn get_one(
-    State(pool): State<SqlitePool>,
-    Path(id): Path<i64>,
-) -> Result<Json<ParcelAllocation>, ApiError> {
-    db_get(&pool, id)
-        .await
-        .map_err(ApiError::from)?
-        .map(Json)
-        .ok_or(ApiError::NotFound)
 }
 
 #[cfg(test)]

@@ -28,7 +28,7 @@
 //!   content type and a download filename.
 //! - `DELETE /attachments/{id}` removes one attachment.
 
-use crate::infra::http::ApiError;
+use crate::infra::http::{self, ApiError, CrudEntity};
 use std::fmt::Write as _;
 
 use axum::{
@@ -170,10 +170,20 @@ impl ListQuery {
 
 const METADATA_COLS: &str = "id, trade_id, income_id, amma_statement_id, ess_statement_id, interest_income_id, corporate_action_id, filename, content_type, byte_size, checksum, uploaded_at";
 
+impl CrudEntity for Attachment {
+    type Key = i64;
+    const TABLE: &'static str = "attachments";
+    const COLUMNS: &'static str = METADATA_COLS;
+    const NOUN: &'static str = "attachment";
+}
+
 pub fn router() -> Router<SqlitePool> {
     Router::new()
         .route("/attachments", get(list).post(upload))
-        .route("/attachments/{id}", get(get_one).delete(delete))
+        .route(
+            "/attachments/{id}",
+            get(http::get_handler::<Attachment>).delete(http::delete_handler::<Attachment>),
+        )
         .route("/attachments/{id}/content", get(download))
         // Raise the body limit above the per-file ceiling so the explicit
         // size check (below) is what rejects an oversized file with 413,
@@ -247,12 +257,7 @@ pub async fn db_list_with_linked(
 }
 
 pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<Attachment>, sqlx::Error> {
-    sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT {METADATA_COLS} FROM attachments WHERE id = ?"
-    )))
-    .bind(id)
-    .fetch_optional(pool)
-    .await
+    http::crud_get(pool, id).await
 }
 
 /// Load the content for download: its content type, filename, and raw bytes.
@@ -289,14 +294,6 @@ pub async fn db_insert(pool: &SqlitePool, att: &NewAttachment<'_>) -> Result<i64
     Ok(row.0)
 }
 
-pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<bool, sqlx::Error> {
-    let result = sqlx::query("DELETE FROM attachments WHERE id = ?")
-        .bind(id)
-        .execute(pool)
-        .await?;
-    Ok(result.rows_affected() > 0)
-}
-
 async fn list(
     State(pool): State<SqlitePool>,
     Query(q): Query<ListQuery>,
@@ -322,17 +319,6 @@ async fn list(
             .map_err(ApiError::from);
     }
     db_list(&pool, &q).await.map(Json).map_err(ApiError::from)
-}
-
-async fn get_one(
-    State(pool): State<SqlitePool>,
-    Path(id): Path<i64>,
-) -> Result<Json<Attachment>, ApiError> {
-    db_get(&pool, id)
-        .await
-        .map_err(ApiError::from)?
-        .map(Json)
-        .ok_or(ApiError::NotFound)
 }
 
 async fn upload(
@@ -493,22 +479,6 @@ async fn download(
         )
         .body(Body::from(bytes))
         .map_err(ApiError::internal)
-}
-
-async fn delete(
-    State(pool): State<SqlitePool>,
-    Path(id): Path<i64>,
-) -> Result<StatusCode, ApiError> {
-    db_delete(&pool, id)
-        .await
-        .map(|found| {
-            if found {
-                StatusCode::NO_CONTENT
-            } else {
-                StatusCode::NOT_FOUND
-            }
-        })
-        .map_err(ApiError::from)
 }
 
 #[cfg(test)]

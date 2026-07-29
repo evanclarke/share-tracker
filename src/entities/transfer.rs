@@ -38,7 +38,7 @@ use crate::entities::corporate_action::{self, RocEvent, as_acquired_quantity};
 use crate::entities::sell::{self, AllocationInput, SellBody};
 use crate::entities::trade::{self, Trade};
 use crate::infra::decimal::{Money, OptMoney, parse_dec};
-use crate::infra::http::ApiError;
+use crate::infra::http::{self, ApiError, CrudEntity};
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -176,29 +176,28 @@ impl From<TransferError> for ApiError {
     }
 }
 
-pub fn router() -> Router<SqlitePool> {
-    Router::new()
-        .route("/transfers", get(list))
-        .route("/transfers/{id}", get(get_one).put(upsert).delete(delete))
+impl CrudEntity for Transfer {
+    type Key = i64;
+    const TABLE: &'static str = "transfers";
+    const COLUMNS: &'static str =
+        "id, listing_id, date, from_account_id, to_account_id, fee_sale_trade_id";
+    const ORDER_BY: &'static str = "date, id";
+    const NOUN: &'static str = "transfer";
 }
 
-pub async fn db_list(pool: &SqlitePool) -> Result<Vec<Transfer>, sqlx::Error> {
-    sqlx::query_as(
-        "SELECT id, listing_id, date, from_account_id, to_account_id, fee_sale_trade_id \
-         FROM transfers ORDER BY date, id",
-    )
-    .fetch_all(pool)
-    .await
+pub fn router() -> Router<SqlitePool> {
+    Router::new()
+        .route("/transfers", get(http::list_handler::<Transfer>))
+        .route(
+            "/transfers/{id}",
+            get(http::get_handler::<Transfer>)
+                .put(upsert)
+                .delete(delete),
+        )
 }
 
 pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<Transfer>, sqlx::Error> {
-    sqlx::query_as(
-        "SELECT id, listing_id, date, from_account_id, to_account_id, fee_sale_trade_id \
-         FROM transfers WHERE id = ?",
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await
+    http::crud_get(pool, id).await
 }
 
 /// Record and execute a transfer, atomically: insert the transfer row, close
@@ -592,21 +591,6 @@ pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<DeleteOutcome, sqlx
 
     tx.commit().await?;
     Ok(DeleteOutcome::Deleted)
-}
-
-async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<Transfer>>, ApiError> {
-    db_list(&pool).await.map(Json).map_err(ApiError::from)
-}
-
-async fn get_one(
-    State(pool): State<SqlitePool>,
-    Path(id): Path<i64>,
-) -> Result<Json<Transfer>, ApiError> {
-    db_get(&pool, id)
-        .await
-        .map_err(ApiError::from)?
-        .map(Json)
-        .ok_or(ApiError::NotFound)
 }
 
 async fn upsert(

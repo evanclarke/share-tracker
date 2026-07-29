@@ -1,4 +1,4 @@
-use crate::infra::http::ApiError;
+use crate::infra::http::{self, ApiError, CrudEntity};
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -107,31 +107,29 @@ impl From<UpsertError> for ApiError {
     }
 }
 
-pub fn router() -> Router<SqlitePool> {
-    Router::new()
-        .route("/listings", get(list))
-        .route("/listings/{id}", get(get_one).put(upsert).delete(delete))
+impl CrudEntity for Listing {
+    type Key = i64;
+    const TABLE: &'static str = "listings";
+    const COLUMNS: &'static str = "id, exchange_mic, ticker, name, isin, security_type, currency, amit, preference, \
+         price_symbol";
+    const ORDER_BY: &'static str = "exchange_mic, ticker";
+    const NOUN: &'static str = "listing";
 }
 
-pub async fn db_list(pool: &SqlitePool) -> Result<Vec<Listing>, sqlx::Error> {
-    sqlx::query_as(
-        "SELECT id, exchange_mic, ticker, name, isin, security_type, currency, amit, preference, \
-                price_symbol \
-         FROM listings ORDER BY exchange_mic, ticker",
-    )
-    .fetch_all(pool)
-    .await
+pub fn router() -> Router<SqlitePool> {
+    Router::new()
+        .route("/listings", get(http::list_handler::<Listing>))
+        .route(
+            "/listings/{id}",
+            get(http::get_handler::<Listing>)
+                .put(upsert)
+                // Deleting a listing still referenced by trades/income violates an FK → 422.
+                .delete(http::delete_handler::<Listing>),
+        )
 }
 
 pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<Listing>, sqlx::Error> {
-    sqlx::query_as(
-        "SELECT id, exchange_mic, ticker, name, isin, security_type, currency, amit, preference, \
-                price_symbol \
-         FROM listings WHERE id = ?",
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await
+    http::crud_get(pool, id).await
 }
 
 pub async fn db_upsert(pool: &SqlitePool, listing: &Listing) -> Result<(), UpsertError> {
@@ -207,23 +205,9 @@ pub async fn db_upsert(pool: &SqlitePool, listing: &Listing) -> Result<(), Upser
     Ok(())
 }
 
+#[cfg(test)]
 pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<bool, sqlx::Error> {
-    let result = sqlx::query("DELETE FROM listings WHERE id = ?")
-        .bind(id)
-        .execute(pool)
-        .await?;
-    Ok(result.rows_affected() > 0)
-}
-
-async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<Listing>>, ApiError> {
-    Ok(Json(db_list(&pool).await?))
-}
-
-async fn get_one(
-    State(pool): State<SqlitePool>,
-    Path(id): Path<i64>,
-) -> Result<Json<Listing>, ApiError> {
-    db_get(&pool, id).await?.map(Json).ok_or(ApiError::NotFound)
+    http::crud_delete::<Listing>(pool, id).await
 }
 
 async fn upsert(
@@ -245,18 +229,6 @@ async fn upsert(
     };
     db_upsert(&pool, &listing).await?;
     Ok(StatusCode::NO_CONTENT)
-}
-
-async fn delete(
-    State(pool): State<SqlitePool>,
-    Path(id): Path<i64>,
-) -> Result<StatusCode, ApiError> {
-    // Deleting a listing still referenced by trades/income violates an FK → 422.
-    if db_delete(&pool, id).await? {
-        Ok(StatusCode::NO_CONTENT)
-    } else {
-        Err(ApiError::NotFound)
-    }
 }
 
 #[cfg(test)]

@@ -1,7 +1,7 @@
-use crate::infra::http::ApiError;
+use crate::infra::http::{self, ApiError, CrudEntity};
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::State,
     routing::{get, post},
 };
 use chrono::NaiveDate;
@@ -83,25 +83,30 @@ pub async fn true_up_provisional_snapshots(
     Ok(Some(true_up))
 }
 
+impl CrudEntity for RbaFxRate {
+    type Key = i64;
+    const TABLE: &'static str = "rba_fx_rates";
+    const COLUMNS: &'static str = "id, currency, month, rate";
+    const ORDER_BY: &'static str = "currency, month";
+    const NOUN: &'static str = "FX rate";
+}
+
 pub fn router() -> Router<SqlitePool> {
     Router::new()
-        .route("/rba_fx_rates", get(list))
-        .route("/rba_fx_rates/{id}", get(get_one))
+        .route("/rba_fx_rates", get(http::list_handler::<RbaFxRate>))
+        .route("/rba_fx_rates/{id}", get(http::get_handler::<RbaFxRate>))
         // Manual trigger for retries / missed runs. Read-only for clients otherwise.
         .route("/rba_fx_rates/import", post(import))
 }
 
+#[cfg(test)]
 pub async fn db_list(pool: &SqlitePool) -> Result<Vec<RbaFxRate>, sqlx::Error> {
-    sqlx::query_as("SELECT id, currency, month, rate FROM rba_fx_rates ORDER BY currency, month")
-        .fetch_all(pool)
-        .await
+    http::crud_list(pool).await
 }
 
+#[cfg(test)]
 pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<RbaFxRate>, sqlx::Error> {
-    sqlx::query_as("SELECT id, currency, month, rate FROM rba_fx_rates WHERE id = ?")
-        .bind(id)
-        .fetch_optional(pool)
-        .await
+    http::crud_get(pool, id).await
 }
 
 /// Insert a rate for a (currency, month) only if absent, leaving any existing row
@@ -228,21 +233,6 @@ async fn fetch_rates(url: &str) -> Result<String, ImportError> {
     resp.text()
         .await
         .map_err(|e| ImportError::Fetch(e.to_string()))
-}
-
-async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<RbaFxRate>>, ApiError> {
-    db_list(&pool).await.map(Json).map_err(ApiError::from)
-}
-
-async fn get_one(
-    State(pool): State<SqlitePool>,
-    Path(id): Path<i64>,
-) -> Result<Json<RbaFxRate>, ApiError> {
-    db_get(&pool, id)
-        .await
-        .map_err(ApiError::from)?
-        .map(Json)
-        .ok_or(ApiError::NotFound)
 }
 
 /// Manually trigger the import. With a non-empty request body, imports that body

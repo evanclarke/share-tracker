@@ -1,8 +1,12 @@
 //! HTTP helpers shared by entity and report handlers.
 
+use axum::Json;
+use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use sqlx::error::ErrorKind;
+use sqlx::sqlite::SqliteRow;
+use sqlx::{Sqlite, SqlitePool};
 
 /// A boxed error source carried by [`ApiError::Internal`].
 pub type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
@@ -80,6 +84,24 @@ impl ApiError {
     }
 }
 
+/// The shared outcome of a DELETE: `204` when a row was removed, `404` naming
+/// the missing row when there was nothing to remove.
+///
+/// A DELETE is an operation endpoint — unlike a GET, whose URL is still on
+/// screen when the 404 arrives, a delete is fired from a list row and its
+/// failure surfaces only as a toast. So the body always names what was
+/// missing ("no income with that id") rather than leaving the web UI to show
+/// a bare "HTTP 404". Every entity delete goes through this helper, or (where
+/// the delete has its own outcome enum for the referenced-row cases) returns
+/// the same wording by hand.
+pub fn deleted(found: bool, noun: &str) -> Result<StatusCode, ApiError> {
+    if found {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError::not_found(format!("no {noun} with that id")))
+    }
+}
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         match self {
@@ -102,6 +124,133 @@ impl IntoResponse for ApiError {
             ApiError::NotFoundWithReason(body) => (StatusCode::NOT_FOUND, body).into_response(),
         }
     }
+}
+
+/// An entity whose list / get-one / delete are plain single-table operations
+/// over one primary key, implemented once here instead of copied per module.
+///
+/// Before this trait, 19 entity modules carried a byte-identical `async fn
+/// list` and near-identical `get_one`/`delete`, and the SELECT column list was
+/// spelled out twice per module (list and get). An entity now declares its
+/// table, columns, ordering and noun, and takes [`list_handler`],
+/// [`get_handler`] and [`delete_handler`] for its routes.
+///
+/// Deliberately *not* covered: `db_upsert`. That is where each entity's
+/// write-time invariants live (see CLAUDE.md, "Data integrity") and it must
+/// stay hand-written per entity. An entity whose read or delete does more than
+/// one table's worth of work — `rights_sale` (attaches allocations),
+/// `attachment` (filtered list), the outcome-enum deletes (`income`, `sell`,
+/// `trade`, …) — keeps that verb hand-written and adopts the trait for the
+/// verbs that do fit.
+///
+/// An entity keeps its own `db_list`/`db_get`/`db_delete` (now one-line
+/// delegations to [`crud_list`]/[`crud_get`]/[`crud_delete`]) because other
+/// modules and the DB-level tests call them by name (CLAUDE.md, "Test
+/// conventions"). Where only the tests do, the wrapper is `#[cfg(test)]` —
+/// the routes reach the query through the handler instead, so an ungated
+/// wrapper would be dead code in the non-test build.
+pub trait CrudEntity:
+    Sized + Send + Unpin + serde::Serialize + for<'r> sqlx::FromRow<'r, SqliteRow> + 'static
+{
+    /// The primary key as it appears in the URL path — `i64` for the
+    /// rowid-keyed tables, `String` for the code-keyed ones (`exchanges`,
+    /// `currencies`, `mic_registry`).
+    type Key: serde::de::DeserializeOwned
+        + for<'q> sqlx::Encode<'q, Sqlite>
+        + sqlx::Type<Sqlite>
+        + Send
+        + 'static;
+
+    /// The table the three operations read and delete from.
+    const TABLE: &'static str;
+    /// The SELECT list, in the model struct's field order.
+    const COLUMNS: &'static str;
+    /// The primary-key column [`Self::Key`] addresses.
+    const KEY_COLUMN: &'static str = "id";
+    /// The list's ORDER BY, always ending in a unique column so the order is
+    /// total (a list whose order can change between identical requests makes
+    /// the UI's row positions unstable).
+    const ORDER_BY: &'static str = "id";
+    /// What a 404 from [`delete_handler`] calls the missing row, e.g.
+    /// `"AMMA statement"` → `no AMMA statement with that id`.
+    const NOUN: &'static str;
+}
+
+/// Every row of `E`'s table, in `E::ORDER_BY` order.
+pub async fn crud_list<E: CrudEntity>(pool: &SqlitePool) -> Result<Vec<E>, sqlx::Error> {
+    sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT {} FROM {} ORDER BY {}",
+        E::COLUMNS,
+        E::TABLE,
+        E::ORDER_BY
+    )))
+    .fetch_all(pool)
+    .await
+}
+
+/// One row of `E`'s table by primary key, or `None`.
+pub async fn crud_get<E: CrudEntity>(
+    pool: &SqlitePool,
+    key: E::Key,
+) -> Result<Option<E>, sqlx::Error> {
+    sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT {} FROM {} WHERE {} = ?",
+        E::COLUMNS,
+        E::TABLE,
+        E::KEY_COLUMN
+    )))
+    .bind(key)
+    .fetch_optional(pool)
+    .await
+}
+
+/// Delete one row of `E`'s table by primary key; `true` if a row went.
+pub async fn crud_delete<E: CrudEntity>(
+    pool: &SqlitePool,
+    key: E::Key,
+) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DELETE FROM {} WHERE {} = ?",
+        E::TABLE,
+        E::KEY_COLUMN
+    )))
+    .bind(key)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// `GET /<entities>` → 200 with every row as JSON.
+pub async fn list_handler<E: CrudEntity>(
+    State(pool): State<SqlitePool>,
+) -> Result<Json<Vec<E>>, ApiError> {
+    crud_list::<E>(&pool)
+        .await
+        .map(Json)
+        .map_err(ApiError::from)
+}
+
+/// `GET /<entities>/{id}` → 200 with the row, or an empty-bodied 404 (the URL
+/// itself names what is missing).
+pub async fn get_handler<E: CrudEntity>(
+    State(pool): State<SqlitePool>,
+    Path(key): Path<E::Key>,
+) -> Result<Json<E>, ApiError> {
+    crud_get::<E>(&pool, key)
+        .await
+        .map_err(ApiError::from)?
+        .map(Json)
+        .ok_or(ApiError::NotFound)
+}
+
+/// `DELETE /<entities>/{id}` → 204, or a 404 naming the missing row. A row
+/// still referenced by another table fails its foreign key and surfaces as
+/// 422 through [`ApiError`]'s `From<sqlx::Error>`.
+pub async fn delete_handler<E: CrudEntity>(
+    State(pool): State<SqlitePool>,
+    Path(key): Path<E::Key>,
+) -> Result<StatusCode, ApiError> {
+    deleted(crud_delete::<E>(&pool, key).await?, E::NOUN)
 }
 
 /// Classify a database error: a constraint violation (foreign key, check,

@@ -9,37 +9,33 @@ use super::checks::{
 };
 use super::model::Trade;
 use crate::infra::decimal::{Money, OptMoney, parse_dec};
-use crate::infra::http::ApiError;
+use crate::infra::http::{self, ApiError, CrudEntity};
 use rust_decimal::Decimal;
 use sqlx::{Row, SqlitePool};
 
-pub async fn db_list(pool: &SqlitePool) -> Result<Vec<Trade>, sqlx::Error> {
-    sqlx::query_as(
-        "SELECT id, trade_type, date, settlement_date, listing_id, average_price, quantity, \
+/// The list and get *reads* are the plain single-table shape, so their SQL
+/// comes from here; the routes still use hand-written handlers, because a
+/// trade is presented through [`Trade::present`] and its delete has its own
+/// [`DeleteOutcome`] guards.
+impl CrudEntity for Trade {
+    type Key = i64;
+    const TABLE: &'static str = "trades";
+    const COLUMNS: &'static str = "id, trade_type, date, settlement_date, listing_id, average_price, quantity, \
          currency, brokerage, gst_on_brokerage, brokerage_includes_gst, brokerage_currency, \
          fx_rate, spot_fx_rate, contract_note_ref, statement_total, \
          residual_brought_forward, residual_carried_forward, residual_paid_out, rights_action_id, \
          buyback_action_id, scrip_action_id, demerger_action_id, deemed_acquisition_date, \
-         holding_account_id, transfer_id, ess_statement_id, worthless_action_id, inheritance_id \
-         FROM trades ORDER BY date, id",
-    )
-    .fetch_all(pool)
-    .await
+         holding_account_id, transfer_id, ess_statement_id, worthless_action_id, inheritance_id";
+    const ORDER_BY: &'static str = "date, id";
+    const NOUN: &'static str = "trade";
+}
+
+pub async fn db_list(pool: &SqlitePool) -> Result<Vec<Trade>, sqlx::Error> {
+    http::crud_list(pool).await
 }
 
 pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<Trade>, sqlx::Error> {
-    sqlx::query_as(
-        "SELECT id, trade_type, date, settlement_date, listing_id, average_price, quantity, \
-         currency, brokerage, gst_on_brokerage, brokerage_includes_gst, brokerage_currency, \
-         fx_rate, spot_fx_rate, contract_note_ref, statement_total, \
-         residual_brought_forward, residual_carried_forward, residual_paid_out, rights_action_id, \
-         buyback_action_id, scrip_action_id, demerger_action_id, deemed_acquisition_date, \
-         holding_account_id, transfer_id, ess_statement_id, worthless_action_id, inheritance_id \
-         FROM trades WHERE id = ?",
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await
+    http::crud_get(pool, id).await
 }
 
 #[derive(Debug)]

@@ -15,28 +15,6 @@ Currently handled correctly: the server binds `127.0.0.1` by default and exposin
 `--host` opt-in documented as unauthenticated. Only matters if the server is ever exposed.
 - [ ] If/when exposure is wanted: add an auth layer (e.g. a bearer token/basic-auth middleware over the whole router) before recommending `--host 0.0.0.0` for anything but a trusted LAN; until then this section records the decision that localhost-only is the accepted posture
 
-## Entity CRUD scaffolding duplicated, and the DELETE 404 contract has drifted (2026-07-29 Rust review)
-
-19 entity modules contain a byte-identical `async fn list`, and `get_one`/`delete` are identical
-modulo the type and the message. The duplication is cheap on its own, but it has already let the
-404 contract drift three ways across the delete handlers:
-
-| style | count | user-visible effect |
-| --- | --- | --- |
-| `StatusCode::NOT_FOUND` | 8 — `amma`, `amit_adjustment`, `cgt_settings`, `exchange`, `exchange_holiday`, `drp_enrolment`, `attachment`, `corporate_action/http` | empty body; the web UI shows a bare "HTTP 404" |
-| `Err(ApiError::NotFound)` | 1 — `listing` | empty body, same effect |
-| `ApiError::not_found("no X with that id")` | 9 — `sell`, `trade/http`, `transfer`, `income`, `inheritance`, `holding_account`, `ess_statement`, `interest_income`, `investment_expense` | UI toast names what was missing |
-
-That is exactly the split `ApiError::NotFoundWithReason` was introduced to remove
-(DONE/reviews.md, "Stop swallowing errors behind bare 500s"): operation endpoints name the missing
-prerequisite, and a DELETE is an operation endpoint. The fix is worth doing for the contract alone;
-the boilerplate removal is the bonus.
-
-- [ ] Make the DELETE 404 contract uniform: every entity delete returns `ApiError::not_found("no <noun> with that id")`. Smallest form is one shared `infra::http::deleted(found: bool, noun: &str) -> Result<StatusCode, ApiError>` helper — do this first and independently, since it is the user-visible half
-- [ ] Then fold the mechanical scaffolding: a `CrudEntity` trait (`const TABLE`, `const COLUMNS`, `const NOUN`, plus the model type) with generic `list_handler`/`get_handler`/`delete_handler` in `infra/http.rs`. `db_upsert` stays per-entity — that is where the write-time invariants live and it must not be generated away
-- [ ] Update `docs/API.md`'s Response codes section to state that a DELETE of a missing row returns 404 *with* a plain-text reason, matching the other operation endpoints
-- [ ] Tests: one test per converted entity asserting `DELETE /<entity>/{unknown-id}` is 404 with a non-empty body naming the noun (the 8 bare-404 entities have no such assertion today); the existing per-entity list/get tests cover the generic handlers
-
 ## 37 error enums with hand-written `From<sqlx::Error>` (2026-07-29 Rust review)
 
 There are 37 error enums and 32 hand-written `impl From<sqlx::Error>` blocks that all read

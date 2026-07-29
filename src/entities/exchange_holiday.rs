@@ -223,16 +223,15 @@ async fn delete(
     let date: NaiveDate = date
         .parse()
         .map_err(|_| ApiError::bad_request("the holiday date is not a valid date"))?;
-    db_delete(&pool, &mic, date)
-        .await
-        .map(|found| {
-            if found {
-                StatusCode::NO_CONTENT
-            } else {
-                StatusCode::NOT_FOUND
-            }
-        })
-        .map_err(ApiError::from)
+    if db_delete(&pool, &mic, date).await? {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        // Keyed by exchange + date rather than an id, so this one names both
+        // instead of going through `infra::http::deleted`.
+        Err(ApiError::not_found(
+            "no exchange holiday on that date for that exchange",
+        ))
+    }
 }
 
 #[cfg(test)]
