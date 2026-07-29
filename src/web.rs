@@ -271,6 +271,18 @@ mod tests {
         assert!(js.contains("Open Closing Prices"));
     }
 
+    /// The missing-row counterpart: held days nothing ever fetched, beside
+    /// the errored list and reusing the same Backfill action — over exactly
+    /// the reported hole.
+    #[tokio::test]
+    async fn unpriced_days_ui_present() {
+        let js = app_js_body().await;
+        assert!(js.contains("unpriced_days"));
+        assert!(js.contains("Listings with unpriced held days"));
+        assert!(js.contains("fromInp.value = row.earliest_date"));
+        assert!(js.contains("toInp.value = row.latest_date"));
+    }
+
     #[tokio::test]
     async fn report_snapshots_ui_present() {
         let js = app_js_body().await;

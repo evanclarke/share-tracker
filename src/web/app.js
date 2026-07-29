@@ -1183,6 +1183,9 @@ async function viewClosingPrices() {
   // below over a generous window ending at the latest errored date.
   const health = await api('GET', '/reports/health').catch(function () { return {}; });
   const erroredListings = health.errored_prices || [];
+  // Held days no fetch was ever attempted for (health.unpriced_days) — the
+  // missing-row counterpart, typically a trade entered long after the fact.
+  const unpricedListings = health.unpriced_days || [];
   const rows = prices.map(function (p) {
     const l = byId[p.listing_id];
     return {
@@ -1358,6 +1361,35 @@ async function viewClosingPrices() {
     },
   ) : null;
 
+  // Unpriced-days surface: one row per listing with a held day that has no
+  // stored row at all. Its Backfill action pre-fills the form above over
+  // exactly the hole (earliest → latest unpriced day) and scrolls to it.
+  const unpricedRows = unpricedListings.map(function (r) {
+    return {
+      ticker: r.ticker,
+      unpriced_days: r.unpriced_days,
+      earliest_date: r.earliest_date,
+      latest_date: r.latest_date,
+      _listing_id: r.listing_id,
+    };
+  });
+  const unpricedTable = unpricedRows.length > 0 ? filterableTable(
+    unpricedRows,
+    ['ticker', 'unpriced_days', 'earliest_date', 'latest_date'],
+    {
+      actions: function (row) {
+        const btn = el('button', { class: 'small primary' }, 'Backfill');
+        btn.addEventListener('click', function () {
+          listingSel.value = String(row._listing_id);
+          fromInp.value = row.earliest_date;
+          toInp.value = row.latest_date;
+          backfillForm.scrollIntoView({ behavior: 'smooth' });
+        });
+        return el('td', { class: 'actions' }, btn);
+      },
+    },
+  ) : null;
+
   setMain(el('div', null, [
     el('h2', null, 'Closing Prices'),
     el('p', { class: 'view-desc' },
@@ -1372,6 +1404,15 @@ async function viewClosingPrices() {
         + 'missing snapshot from the errored date onward. Fix the symbol (set price_symbol on the '
         + 'listing, or record a ticker change via Listings) then Backfill to re-fetch.'),
       erroredTable,
+    ]) : null,
+    unpricedTable ? el('div', { class: 'card' }, [
+      el('h3', null, 'Listings with unpriced held days'),
+      el('p', { class: 'hint' },
+        'A day that was held but never fetched leaves no row at all — it is silent, and the '
+        + 'provider stops serving history long before it stops serving last week, so the oldest '
+        + 'hole is the urgent one. It happens when a trade is entered long after the fact. '
+        + 'Backfill the range; if the provider cannot serve it, enter the price by hand below.'),
+      unpricedTable,
     ]) : null,
     backfillForm,
     manualForm,

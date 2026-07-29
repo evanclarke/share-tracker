@@ -188,3 +188,55 @@ wrong answers, neither reachable by the scheduled job.
     split correctly — the days before it fetched real prices under the old ticker, the days from it
     errored under the new one, i.e. two provider calls, not one. `POST /jobs/price-import` then ran
     clean (`failed=0`) over the widened window
+
+## Health check: held but never priced (REQUIREMENTS 2026-07-28)
+`reports::health`'s `errored_prices` only catches a listing whose fetches *fail* — a row exists
+with `status = 'error'`. The case that actually bit leaves no row at all: a day that was held and
+never fetched, which is silent and permanent. Listing 7 (LAC) was bought 2021-03-25 but entered
+five years later, so nothing ever attempted those days; the only symptom was 544 snapshots stuck
+stale over exactly 2021-03-25..2022-09-19, and by the time it was found Yahoo no longer served
+`LAC` before 2023-10-02, so the range was unrecoverable. It recurs whenever a trade is entered
+later than the 14-day `COLLECTION_LOOKBACK_DAYS` window on a listing not otherwise held — an
+established workflow here, since entry is batched from the statement archive.
+- [x] `GET /reports/health` gains an `unpriced_days` list, the missing-row counterpart of `errored_prices`: for each date in a listing's held span, its **valuation day** (`Market::latest_trading_day_on_or_before`) has no stored row at all. Defined as exactly what `reports::valuation::stored_valuations` asks for, so there are no false positives; a day whose stored row is errored stays in `errored_prices` — the two lists partition the problem
+- [x] Exclude days whose close is not final yet (`Market::latest_complete_trading_day`), so today and an unsettled crypto candle never appear; use the same held-as-at-that-date rule as the valuation path (`closing_price::db_held_listing_ids(pool, Some(date))`), so a fully-sold listing stops being reported after its sale and a sold-then-rebought listing is covered for both spans
+- [x] Row shape mirrors `errored_prices` — `listing_id`, `ticker`, `unpriced_days`, `earliest_date`, `latest_date` — ordered by `earliest_date` so the oldest (least recoverable) hole reads first
+- [x] Read each listing's stored dates once into a set and walk its held span in memory (one query per listing, no per-day round trip), following the existing `FxRates`/`RenameHistory` pre-loading pattern — a naive per-listing-per-day walk over six years of history is thousands of iterations
+- [x] Surface on the `#/prices` screen beside the errored-price list, reusing its existing Backfill action; UI item asserted against the served bundle per the web-testing convention
+- [x] Tests: a held day with no row is reported; an errored day is *not* (it belongs to `errored_prices`); a non-trading day and a not-yet-final close are not; a fully-sold listing isn't reported for dates after its sale; a hole straddling a rename resolves its trading calendar as at the date; a fully-priced database reports an empty list
+- [x] Docs: `docs/API.md`'s Health section (the new list, its fields, and the `errored_prices`/`unpriced_days` partition), plus README's Features list if the health check is described there. No schema change and no migration — reads `trades`, `parcel_allocations`, and `closing_prices` only
+- [ ] Deliberately NOT in scope: auto-backfilling what it finds. The check reports; closing the hole stays a deliberate act (`POST /closing_prices/backfill`, or a manual price for a day the provider can never serve) — a silently auto-filled hole is how the wrong series gets in
+- Implementation notes (2026-07-29):
+  - The held-span question needed a holdings model that answers *many* dates, so
+    `closing_price::db_held_listing_ids`'s body became `HeldTimeline` (`closing_price.rs`): three
+    queries (Buy/DRP parcels, allocations joined to their sale date, split events) loaded once, each
+    allocation re-based to its parcel's as-acquired units at load time
+    (`corporate_action::as_acquired_quantity`), then `held_listing_ids(as_of)` /
+    `listing_ids()` / `held_spans(listing_id, until)` answered in memory.
+    `db_held_listing_ids` is now a thin wrapper over it, so the "held" rule stays single-sourced
+    and the existing callers (valuation, snapshot generation) are unchanged
+  - `held_spans` evaluates the holding only at acquisition/sale dates and holds it constant in
+    between — a listing's quantity cannot change on any other date — so the six-year walk is over
+    calendar dates, not per-date holding sums. Spans are clipped at the caller's `until`
+    (each market's `latest_complete_trading_day`) and merged when adjacent; a sold-then-rebought
+    listing yields one span per holding period
+  - `reports::health::db_unpriced_days` walks each held span, maps every calendar date to its
+    valuation day and collects the **distinct** days with no stored row into a `BTreeSet` — so a
+    weekend and the Friday it values at are one hole, not three, and `earliest_date`/`latest_date`
+    fall out of the set's ends. Stored dates are read once per listing (any status: an errored day
+    is `errored_prices`' to report). `db_health` gained a `now: DateTime<Utc>` parameter beside
+    `today` for the not-final-yet cut-off; the handler passes `Utc::now()`
+  - Deliberately *not* on the caller's read transaction (`load_market` is pool-based, and a hole is
+    a hole whichever snapshot it is seen in) and deliberately *not* on the cross-view health banner:
+    an unrecoverable hole (LAC 2021-03..2022-09 — Yahoo will never serve it) would nag on every
+    screen forever with no way to clear it. The `#/prices` screen is where the fix lives, so that is
+    where it is reported
+  - Tests: 8 new in `reports::health::tests` (a held day with no row; an errored day excluded; a
+    weekend + the ASX King's Birthday not holes; a close not final yet, before and after the ASX
+    close on the same day; a fully-sold listing not reported past its sale; a hole straddling an
+    ASX→NYSE rename walked on each date's own calendar; a fully-priced DB empty; oldest hole first)
+    plus `web::tests::unpriced_days_ui_present` — 1261 green, clippy/fmt clean
+  - Verified live: a fresh DB seeded with the demo fixture reports
+    `{"ticker":"VAS","unpriced_days":646,"earliest_date":"2024-01-10","latest_date":"2026-07-29"}`
+    in ~10 ms, and `scripts/ui-check.sh --seed demo '#/prices'` renders both rows (VAS before
+    VDHG — oldest hole first) with the Backfill button pre-filling the form over exactly the hole

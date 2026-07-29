@@ -14,18 +14,23 @@
 //! - every listing with at least one errored closing-price row (a wrong,
 //!   renamed, or delisted provider symbol otherwise only shows up
 //!   indirectly, as a missing snapshot from the errored date onward —
-//!   `reports::valuation` refuses to value a date with an errored price).
+//!   `reports::valuation` refuses to value a date with an errored price);
+//! - every listing with a held day whose price was never even attempted —
+//!   the missing-row counterpart of the errored list (see
+//!   [`UnpricedListing`]).
 //!
 //! A database with no prices or FX rates at all reports `stale = false` for
 //! that series: nothing has decayed — a fresh install shows no banner, and a
 //! price/FX import that breaks before ever succeeding surfaces through
 //! `failed_jobs` (and the Jobs page) instead.
 
+use crate::entities::closing_price::{self, HeldTimeline};
 use crate::infra::http::ApiError;
 use axum::{Json, Router, extract::State, routing::get};
-use chrono::{Datelike, NaiveDate, Weekday};
+use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc, Weekday};
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
+use std::collections::{BTreeSet, HashSet};
 
 /// Prices are stale once the latest ok closing price is more than this many
 /// business days (Mon–Fri) old. The price-import job runs every weekday, so a
@@ -58,6 +63,33 @@ pub struct ErroredPriceListing {
     pub latest_error: String,
 }
 
+/// A listing with a held day whose price was never stored at all — the
+/// missing-row counterpart of [`ErroredPriceListing`]. An errored fetch at
+/// least leaves a row to find; a day nobody ever asked for is silent and
+/// permanent: it only shows up as a snapshot stuck stale, and by the time it
+/// is noticed the provider may no longer serve that far back.
+///
+/// It happens whenever a trade is entered later than the price-import job's
+/// lookback window on a listing not otherwise held — a batch of statements
+/// entered years after the fact — so nothing ever attempted those days.
+///
+/// A day is unpriced when it is exactly what `reports::valuation` would ask
+/// for and not find: the listing was held on some calendar date, that date's
+/// valuation day (`Market::latest_trading_day_on_or_before`) has no
+/// `closing_prices` row, and that day's close is already final. A day whose
+/// row is errored belongs to `errored_prices` instead — the two lists
+/// partition the problem. Close it with `POST /closing_prices/backfill`, or a
+/// manual price for a day the provider can never serve.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UnpricedListing {
+    pub listing_id: i64,
+    pub ticker: String,
+    /// Count of distinct valuation days with no stored row.
+    pub unpriced_days: i64,
+    pub earliest_date: NaiveDate,
+    pub latest_date: NaiveDate,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct HealthReport {
     /// Latest `closing_prices` date stored with status ok, across every
@@ -71,6 +103,10 @@ pub struct HealthReport {
     /// Listings with at least one errored closing-price row, newest error
     /// first. Empty when every stored price is ok.
     pub errored_prices: Vec<ErroredPriceListing>,
+    /// Listings with a held day that has no stored price row at all, oldest
+    /// hole first — the oldest is the least recoverable, since a provider
+    /// stops serving history long before it stops serving last week.
+    pub unpriced_days: Vec<UnpricedListing>,
 }
 
 /// Business days (Mon–Fri) strictly after `from`, up to and including `today`.
@@ -98,9 +134,94 @@ fn previous_month(today: NaiveDate) -> String {
     format!("{year:04}-{month:02}")
 }
 
-/// Read the three freshness facts on one snapshot. `today` is a parameter so
-/// tests can pin the staleness thresholds to fixed dates.
-pub async fn db_health(pool: &SqlitePool, today: NaiveDate) -> Result<HealthReport, sqlx::Error> {
+/// Held days with no stored closing-price row at all, per listing (see
+/// [`UnpricedListing`]).
+///
+/// Deliberately shaped as the exact question `reports::valuation` asks, so
+/// there are no false positives: for every calendar date a listing was held,
+/// the valuation day it resolves to must have a row. Days whose close is not
+/// final yet (today's, an unsettled crypto candle) are out of scope — the
+/// walk stops at each market's `latest_complete_trading_day`.
+///
+/// One holdings load and one stored-date query per listing, then an in-memory
+/// walk: six years of history per listing is thousands of dates, so a per-day
+/// round trip is not an option (the same pre-loading pattern as `FxRates` and
+/// `RenameHistory`).
+///
+/// Not on the read transaction its caller uses: `load_market` is pool-based,
+/// and this check tolerates a concurrent write far better than a financial
+/// aggregation would — a hole is a hole whichever snapshot it is seen in.
+async fn db_unpriced_days(
+    pool: &SqlitePool,
+    now: DateTime<Utc>,
+) -> Result<Vec<UnpricedListing>, sqlx::Error> {
+    let timeline = HeldTimeline::load(pool).await?;
+    let mut listings = Vec::new();
+    for listing_id in timeline.listing_ids() {
+        let Some(market) = closing_price::load_market(pool, listing_id).await? else {
+            continue;
+        };
+        // A calendar so misconfigured it has no trading day in the past year
+        // has nothing this check can say about it; the price-import job fails
+        // loudly on the same listing.
+        let Some(final_day) = market
+            .latest_complete_trading_day(now)
+            .map_err(sqlx::Error::Protocol)?
+        else {
+            continue;
+        };
+        let spans = timeline.held_spans(listing_id, final_day);
+        if spans.is_empty() {
+            continue;
+        }
+        // Every stored date, ok or errored: an errored day is *not* unpriced
+        // — it is reported by `errored_prices`.
+        let stored: HashSet<NaiveDate> =
+            sqlx::query_scalar("SELECT price_date FROM closing_prices WHERE listing_id = ?")
+                .bind(listing_id)
+                .fetch_all(pool)
+                .await?
+                .into_iter()
+                .collect();
+
+        // Distinct valuation days, not calendar days: a weekend and the
+        // Friday it values at are one hole, not three.
+        let mut missing: BTreeSet<NaiveDate> = BTreeSet::new();
+        for (from, to) in spans {
+            let mut date = from;
+            while date <= to {
+                if let Some(valuation_day) = market.latest_trading_day_on_or_before(date)
+                    && !stored.contains(&valuation_day)
+                {
+                    missing.insert(valuation_day);
+                }
+                date += Duration::days(1);
+            }
+        }
+        let (Some(&earliest_date), Some(&latest_date)) = (missing.first(), missing.last()) else {
+            continue;
+        };
+        listings.push(UnpricedListing {
+            listing_id,
+            ticker: market.listing.ticker.clone(),
+            unpriced_days: missing.len() as i64,
+            earliest_date,
+            latest_date,
+        });
+    }
+    // Oldest hole first: the least recoverable reads first.
+    listings.sort_by_key(|row| (row.earliest_date, row.listing_id));
+    Ok(listings)
+}
+
+/// Read the freshness facts on one snapshot. `today` and `now` are parameters
+/// so tests can pin the staleness thresholds and the "close is final yet"
+/// cut-off to fixed dates.
+pub async fn db_health(
+    pool: &SqlitePool,
+    today: NaiveDate,
+    now: DateTime<Utc>,
+) -> Result<HealthReport, sqlx::Error> {
     let mut tx = pool.begin().await?;
     let latest_price_date: Option<NaiveDate> =
         sqlx::query_scalar("SELECT MAX(price_date) FROM closing_prices WHERE status = 'ok'")
@@ -130,6 +251,7 @@ pub async fn db_health(pool: &SqlitePool, today: NaiveDate) -> Result<HealthRepo
     .fetch_all(&mut *tx)
     .await?;
     tx.commit().await?;
+    let unpriced_days = db_unpriced_days(pool, now).await?;
 
     let prices_stale = latest_price_date
         .is_some_and(|d| business_days_since(d, today) > PRICE_STALE_BUSINESS_DAYS);
@@ -143,12 +265,13 @@ pub async fn db_health(pool: &SqlitePool, today: NaiveDate) -> Result<HealthRepo
         fx_stale,
         failed_jobs,
         errored_prices,
+        unpriced_days,
     })
 }
 
 async fn report(State(pool): State<SqlitePool>) -> Result<Json<HealthReport>, ApiError> {
     let today = chrono::Local::now().date_naive();
-    db_health(&pool, today)
+    db_health(&pool, today, Utc::now())
         .await
         .map(Json)
         .map_err(ApiError::from)
@@ -161,11 +284,23 @@ pub fn router() -> Router<SqlitePool> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{self, test_pool, ymd};
+    use crate::test_support::{self, dec, test_pool, ymd};
     use axum::http::StatusCode;
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
     use tower::ServiceExt;
+
+    /// The report as at `today`, read late enough in the day (22:00 Sydney /
+    /// noon UTC) that `today`'s ASX close is final. Tests that care about the
+    /// "not final yet" boundary call `db_health` directly with their own
+    /// `now`.
+    async fn health(pool: &SqlitePool, today: NaiveDate) -> HealthReport {
+        db_health(pool, today, noon_utc(today)).await.unwrap()
+    }
+
+    fn noon_utc(date: NaiveDate) -> DateTime<Utc> {
+        date.and_hms_opt(12, 0, 0).expect("valid time").and_utc()
+    }
 
     async fn insert_ok_price(pool: &SqlitePool, listing_id: i64, date: &str) {
         test_support::closing_price(listing_id, date.parse().unwrap())
@@ -230,13 +365,14 @@ mod tests {
         // A fresh install has nothing to have gone stale: no banner. A price
         // import that breaks before ever succeeding shows via failed_jobs.
         let pool = test_pool().await;
-        let h = db_health(&pool, ymd(2026, 7, 13)).await.unwrap();
+        let h = health(&pool, ymd(2026, 7, 13)).await;
         assert_eq!(h.latest_price_date, None);
         assert!(!h.prices_stale);
         assert_eq!(h.latest_fx_month, None);
         assert!(!h.fx_stale);
         assert!(h.failed_jobs.is_empty());
         assert!(h.errored_prices.is_empty());
+        assert!(h.unpriced_days.is_empty());
     }
 
     #[tokio::test]
@@ -245,12 +381,12 @@ mod tests {
         test_support::listing(1).insert(&pool).await;
         // Wed 2026-07-08 → Mon 2026-07-13 is exactly 3 business days: fresh.
         insert_ok_price(&pool, 1, "2026-07-08").await;
-        let h = db_health(&pool, ymd(2026, 7, 13)).await.unwrap();
+        let h = health(&pool, ymd(2026, 7, 13)).await;
         assert_eq!(h.latest_price_date, Some(ymd(2026, 7, 8)));
         assert!(!h.prices_stale);
 
         // One business day further out (Tue 2026-07-14) crosses the threshold.
-        let h = db_health(&pool, ymd(2026, 7, 14)).await.unwrap();
+        let h = health(&pool, ymd(2026, 7, 14)).await;
         assert!(h.prices_stale);
     }
 
@@ -262,7 +398,7 @@ mod tests {
         test_support::listing(1).insert(&pool).await;
         insert_ok_price(&pool, 1, "2026-07-01").await;
         insert_error_price(&pool, 1, "2026-07-10", "provider down").await;
-        let h = db_health(&pool, ymd(2026, 7, 13)).await.unwrap();
+        let h = health(&pool, ymd(2026, 7, 13)).await;
         assert_eq!(h.latest_price_date, Some(ymd(2026, 7, 1)));
         assert!(h.prices_stale);
     }
@@ -297,7 +433,7 @@ mod tests {
         )
         .await;
 
-        let h = db_health(&pool, ymd(2026, 7, 13)).await.unwrap();
+        let h = health(&pool, ymd(2026, 7, 13)).await;
         assert_eq!(h.errored_prices.len(), 1);
         let row = &h.errored_prices[0];
         assert_eq!(row.listing_id, 1);
@@ -321,7 +457,7 @@ mod tests {
         insert_error_price(&pool, 1, "2026-07-05", "err A").await;
         insert_error_price(&pool, 2, "2026-07-10", "err B").await;
 
-        let h = db_health(&pool, ymd(2026, 7, 13)).await.unwrap();
+        let h = health(&pool, ymd(2026, 7, 13)).await;
         assert_eq!(h.errored_prices.len(), 2);
         assert_eq!(h.errored_prices[0].ticker, "B"); // newest error first
         assert_eq!(h.errored_prices[1].ticker, "A");
@@ -332,12 +468,12 @@ mod tests {
         let pool = test_pool().await;
         // June is the month before July 2026: fresh.
         insert_fx_month(&pool, "2026-06").await;
-        let h = db_health(&pool, ymd(2026, 7, 13)).await.unwrap();
+        let h = health(&pool, ymd(2026, 7, 13)).await;
         assert_eq!(h.latest_fx_month.as_deref(), Some("2026-06"));
         assert!(!h.fx_stale);
 
         // Come September with nothing newer imported, June is stale.
-        let h = db_health(&pool, ymd(2026, 9, 1)).await.unwrap();
+        let h = health(&pool, ymd(2026, 9, 1)).await;
         assert!(h.fx_stale);
     }
 
@@ -345,7 +481,7 @@ mod tests {
     async fn fx_current_month_is_fresh() {
         let pool = test_pool().await;
         insert_fx_month(&pool, "2026-07").await;
-        let h = db_health(&pool, ymd(2026, 7, 13)).await.unwrap();
+        let h = health(&pool, ymd(2026, 7, 13)).await;
         assert!(!h.fx_stale);
     }
 
@@ -359,7 +495,7 @@ mod tests {
             Some("yahoo 403"),
         )
         .await;
-        let h = db_health(&pool, ymd(2026, 7, 13)).await.unwrap();
+        let h = health(&pool, ymd(2026, 7, 13)).await;
         assert_eq!(h.failed_jobs.len(), 1);
         assert_eq!(h.failed_jobs[0].name, "price-import");
         assert_eq!(h.failed_jobs[0].error.as_deref(), Some("yahoo 403"));
@@ -382,9 +518,234 @@ mod tests {
         insert_job_run(&pool, "backup", "2026-07-12T00:00:00Z", None).await;
         insert_job_run(&pool, "backup", "2026-07-13T00:00:00Z", Some("disk full")).await;
 
-        let h = db_health(&pool, ymd(2026, 7, 13)).await.unwrap();
+        let h = health(&pool, ymd(2026, 7, 13)).await;
         assert_eq!(h.failed_jobs.len(), 1);
         assert_eq!(h.failed_jobs[0].name, "backup");
+    }
+
+    /// The case the errored list cannot catch: a held day nobody ever
+    /// fetched, so there is no row to find. Wed 2026-07-08 is a trading day
+    /// inside the held span with no stored row.
+    #[tokio::test]
+    async fn a_held_day_with_no_stored_row_is_reported() {
+        let pool = test_pool().await;
+        test_support::listing(1).ticker("BHP").insert(&pool).await;
+        test_support::buy(1, 1)
+            .date(ymd(2026, 7, 6))
+            .insert(&pool)
+            .await;
+        for day in [
+            "2026-07-06",
+            "2026-07-07",
+            "2026-07-09",
+            "2026-07-10",
+            "2026-07-13",
+        ] {
+            insert_ok_price(&pool, 1, day).await;
+        }
+
+        let h = health(&pool, ymd(2026, 7, 13)).await;
+        assert_eq!(h.unpriced_days.len(), 1);
+        let row = &h.unpriced_days[0];
+        assert_eq!(row.listing_id, 1);
+        assert_eq!(row.ticker, "BHP");
+        assert_eq!(row.unpriced_days, 1);
+        assert_eq!(row.earliest_date, ymd(2026, 7, 8));
+        assert_eq!(row.latest_date, ymd(2026, 7, 8));
+    }
+
+    /// The two lists partition the problem: a day whose fetch failed has a
+    /// row, so it is `errored_prices`' to report, never `unpriced_days`'.
+    #[tokio::test]
+    async fn an_errored_day_is_not_reported_as_unpriced() {
+        let pool = test_pool().await;
+        test_support::listing(1).ticker("BHP").insert(&pool).await;
+        test_support::buy(1, 1)
+            .date(ymd(2026, 7, 6))
+            .insert(&pool)
+            .await;
+        for day in [
+            "2026-07-06",
+            "2026-07-07",
+            "2026-07-09",
+            "2026-07-10",
+            "2026-07-13",
+        ] {
+            insert_ok_price(&pool, 1, day).await;
+        }
+        insert_error_price(&pool, 1, "2026-07-08", "provider down").await;
+
+        let h = health(&pool, ymd(2026, 7, 13)).await;
+        assert!(h.unpriced_days.is_empty());
+        assert_eq!(h.errored_prices.len(), 1);
+    }
+
+    /// A day the market was shut is not a hole: the weekend and the ASX's
+    /// King's Birthday (Mon 2026-06-08) all value at Fri 2026-06-05, which is
+    /// priced.
+    #[tokio::test]
+    async fn non_trading_days_are_not_unpriced() {
+        let pool = test_pool().await;
+        test_support::listing(1).insert(&pool).await;
+        test_support::buy(1, 1)
+            .date(ymd(2026, 6, 5))
+            .insert(&pool)
+            .await;
+        for day in ["2026-06-05", "2026-06-09", "2026-06-10"] {
+            insert_ok_price(&pool, 1, day).await;
+        }
+
+        let h = health(&pool, ymd(2026, 6, 10)).await;
+        assert!(h.unpriced_days.is_empty());
+    }
+
+    /// Today's close is not final until the exchange closes, so the day the
+    /// price-import job has yet to collect is not reported as a hole — it
+    /// becomes one only once the close has passed and nothing was stored.
+    #[tokio::test]
+    async fn a_close_that_is_not_final_yet_is_not_unpriced() {
+        let pool = test_pool().await;
+        test_support::listing(1).insert(&pool).await;
+        test_support::buy(1, 1)
+            .date(ymd(2026, 7, 6))
+            .insert(&pool)
+            .await;
+        for day in [
+            "2026-07-06",
+            "2026-07-07",
+            "2026-07-08",
+            "2026-07-09",
+            "2026-07-10",
+        ] {
+            insert_ok_price(&pool, 1, day).await;
+        }
+
+        // 11:00 Sydney on Mon 2026-07-13: the ASX has not closed yet.
+        let before_close = "2026-07-13T01:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let h = db_health(&pool, ymd(2026, 7, 13), before_close)
+            .await
+            .unwrap();
+        assert!(h.unpriced_days.is_empty());
+
+        // After the close, the still-unstored day is a hole.
+        let h = health(&pool, ymd(2026, 7, 13)).await;
+        assert_eq!(h.unpriced_days.len(), 1);
+        assert_eq!(h.unpriced_days[0].latest_date, ymd(2026, 7, 13));
+    }
+
+    /// Nothing is held after the last unit is sold, so the span ends there —
+    /// a listing sold out of the portfolio must not report every day since as
+    /// a hole.
+    #[tokio::test]
+    async fn a_fully_sold_listing_is_not_reported_after_its_sale() {
+        let pool = test_pool().await;
+        test_support::listing(1).insert(&pool).await;
+        test_support::buy(1, 1)
+            .date(ymd(2026, 7, 6))
+            .insert(&pool)
+            .await;
+        test_support::sell(2, 1)
+            .date(ymd(2026, 7, 8))
+            .insert(&pool)
+            .await;
+        test_support::allocate(&pool, 1, 2, 1, dec("100")).await;
+
+        // Nothing was ever priced, so the whole held span is a hole: Mon
+        // 2026-07-06 and Tue 07-07, and nothing from the sale date onward.
+        let h = health(&pool, ymd(2026, 7, 13)).await;
+        assert_eq!(h.unpriced_days.len(), 1);
+        assert_eq!(h.unpriced_days[0].unpriced_days, 2);
+        assert_eq!(h.unpriced_days[0].earliest_date, ymd(2026, 7, 6));
+        assert_eq!(h.unpriced_days[0].latest_date, ymd(2026, 7, 7));
+    }
+
+    /// A hole spanning a ticker/exchange change is walked on the calendar
+    /// that was in force at each date: the ASX's King's Birthday (Mon
+    /// 2026-06-08) is not a trading day before the move to the NYSE, whose
+    /// calendar has no such holiday, so it is not its own hole.
+    #[tokio::test]
+    async fn a_hole_straddling_a_rename_uses_the_calendar_of_the_date() {
+        let pool = test_pool().await;
+        test_support::listing(1).ticker("OLD").insert(&pool).await;
+        test_support::buy(1, 1)
+            .date(ymd(2026, 6, 5))
+            .insert(&pool)
+            .await;
+        crate::entities::listing_rename::db_rename(
+            &pool,
+            1,
+            &crate::entities::listing_rename::RenameBody {
+                effective_date: ymd(2026, 6, 10),
+                ticker: "NEW".to_string(),
+                exchange_mic: Some("XNYS".to_string()),
+                name: None,
+                price_symbol: None,
+                note: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        // 17:00 New York on Fri 2026-06-12: that day's close is final.
+        let now = "2026-06-12T21:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let h = db_health(&pool, ymd(2026, 6, 12), now).await.unwrap();
+        assert_eq!(h.unpriced_days.len(), 1);
+        let row = &h.unpriced_days[0];
+        assert_eq!(row.ticker, "NEW");
+        // Fri 06-05, Tue 06-09, then 06-10..06-12 under the NYSE calendar —
+        // the ASX holiday of Mon 06-08 values at Fri 06-05 and is not a sixth.
+        assert_eq!(row.unpriced_days, 5);
+        assert_eq!(row.earliest_date, ymd(2026, 6, 5));
+        assert_eq!(row.latest_date, ymd(2026, 6, 12));
+    }
+
+    #[tokio::test]
+    async fn a_fully_priced_database_reports_no_unpriced_days() {
+        let pool = test_pool().await;
+        test_support::listing(1).insert(&pool).await;
+        test_support::buy(1, 1)
+            .date(ymd(2026, 7, 6))
+            .insert(&pool)
+            .await;
+        for day in [
+            "2026-07-06",
+            "2026-07-07",
+            "2026-07-08",
+            "2026-07-09",
+            "2026-07-10",
+            "2026-07-13",
+        ] {
+            insert_ok_price(&pool, 1, day).await;
+        }
+
+        let h = health(&pool, ymd(2026, 7, 13)).await;
+        assert!(h.unpriced_days.is_empty());
+    }
+
+    /// Oldest hole first: the further back it goes the less likely the
+    /// provider will still serve it, so it is the one to act on.
+    #[tokio::test]
+    async fn unpriced_listings_are_ordered_oldest_hole_first() {
+        let pool = test_pool().await;
+        test_support::listing(1)
+            .ticker("RECENT")
+            .insert(&pool)
+            .await;
+        test_support::listing(2).ticker("OLD").insert(&pool).await;
+        test_support::buy(1, 1)
+            .date(ymd(2026, 7, 6))
+            .insert(&pool)
+            .await;
+        test_support::buy(2, 2)
+            .date(ymd(2026, 7, 2))
+            .insert(&pool)
+            .await;
+
+        let h = health(&pool, ymd(2026, 7, 13)).await;
+        assert_eq!(h.unpriced_days.len(), 2);
+        assert_eq!(h.unpriced_days[0].ticker, "OLD");
+        assert_eq!(h.unpriced_days[0].earliest_date, ymd(2026, 7, 2));
+        assert_eq!(h.unpriced_days[1].ticker, "RECENT");
     }
 
     #[tokio::test]
