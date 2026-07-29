@@ -79,32 +79,33 @@ pub struct Exchange {
     pub replacements: Vec<Trade>,
 }
 
-#[derive(Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum ExchangeError {
-    Db(sqlx::Error),
+    #[error("scrip-for-scrip exchange write failed: {0}")]
+    Db(#[from] sqlx::Error),
     /// No corporate action with that id.
+    #[error("no corporate action with that id")]
     ActionNotFound,
     /// The action is not a ScripForScrip.
+    #[error("that corporate action is not a scrip-for-scrip exchange")]
     NotAScripForScrip,
     /// The action has already been exchanged (trades reference it). Delete
     /// the closing Sell via `DELETE /sells` first to redo it.
+    #[error("this exchange has already been applied")]
     AlreadyExchanged,
     /// Nothing of the original listing is held at the exchange date — there
     /// is nothing to substitute.
+    #[error("nothing of the original listing is held at the exchange date")]
     NothingHeld,
     /// The original listing has a trade dated on or after the exchange date.
     /// The takeover delisted it, so such a trade contradicts the action —
     /// fix the data before exchanging.
+    #[error("the original listing has a trade dated on or after the exchange date")]
     TradedOnOrAfterExchangeDate,
     /// The Sell-side invariants failed (defensive: the exchange constructs
     /// its allocations to satisfy them).
-    Sell(sell::SellError),
-}
-
-impl From<sqlx::Error> for ExchangeError {
-    fn from(e: sqlx::Error) -> Self {
-        ExchangeError::Db(e)
-    }
+    #[error("the exchange's closing Sell was rejected: {0}")]
+    Sell(#[source] sell::SellError),
 }
 
 impl From<sell::SellError> for ExchangeError {

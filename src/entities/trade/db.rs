@@ -38,61 +38,74 @@ pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<Trade>, sqlx::E
     http::crud_get(pool, id).await
 }
 
-#[derive(Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum UpsertError {
-    Db(sqlx::Error),
+    #[error("trade write failed: {0}")]
+    Db(#[from] sqlx::Error),
     /// The new quantity falls below the total already allocated out of this
     /// parcel by Sell allocations — accepting it would leave those allocations
     /// drawing on units the parcel no longer has.
+    #[error("the new quantity is below what Sell allocations already draw from this parcel")]
     QuantityBelowAllocated,
     /// The new quantity falls below a linked AMIT adjustment's covered
     /// quantity, breaking that adjustment's `quantity <= trade.quantity`
     /// invariant (see `amit_adjustment::db_upsert`).
+    #[error("the new quantity is below a linked AMIT adjustment's covered quantity")]
     QuantityBelowAmitAdjustment,
     /// The edit changes the trade's `listing_id` while Sell allocations or
     /// AMIT adjustments draw on this parcel: accepting it would silently
     /// re-associate those dependants to the new listing, costing them
     /// cross-listing in every CGT report. Remove the dependants first (e.g.
     /// delete the Sell via `DELETE /sells/:id`).
+    #[error(
+        "the listing cannot be changed while Sell allocations or AMIT adjustments reference this parcel"
+    )]
     ListingChangeReferenced,
     /// The existing trade is a rights exercise (`rights_action_id` set): its
     /// figures were validated against the rights issue's entitlement, which a
     /// free-form edit could exceed. Delete it and re-exercise instead (see
     /// `entities::rights_exercise`).
+    #[error("this trade is a rights exercise and cannot be edited")]
     RightsExerciseTrade,
     /// The existing trade is a buy-back participation Sell
     /// (`buyback_action_id` set): its figures derive from the buy-back's
     /// terms and it carries a linked dividend-component income row. Delete it
     /// via `DELETE /sells` and re-participate instead (see
     /// `entities::buyback_participation`).
+    #[error("this trade is a buy-back participation and cannot be edited")]
     BuyBackTrade,
     /// The existing trade belongs to a scrip-for-scrip exchange group
     /// (`scrip_action_id` set): its figures carry the rollover's cost base
     /// and deemed acquisition date, which a free-form edit would corrupt.
     /// Delete the group via `DELETE /sells` on the closing Sell and
     /// re-exchange instead (see `entities::scrip_exchange`).
+    #[error("this trade belongs to a scrip-for-scrip exchange and cannot be edited")]
     ScripExchangeTrade,
     /// The existing trade belongs to a demerger group (`demerger_action_id`
     /// set): its figures carry the rollover's apportioned cost base and
     /// deemed acquisition date, which a free-form edit would corrupt. Delete
     /// the group via `DELETE /sells` on the closing Sell and re-demerge
     /// instead (see `entities::demerger`).
+    #[error("this trade belongs to a demerger and cannot be edited")]
     DemergerTrade,
     /// The existing trade belongs to a holding-account transfer group
     /// (`transfer_id` set): its figures carry the moved parcel's cost base
     /// and deemed acquisition date, which a free-form edit would corrupt.
     /// Delete the transfer via `DELETE /transfers/:id` and re-transfer
     /// instead (see `entities::transfer`).
+    #[error("this trade belongs to a holding-account transfer and cannot be edited")]
     TransferTrade,
     /// The existing trade is a cost-base-reset ESS vest Buy
     /// (`ess_statement_id` set): its figures derive from the ESS statement's
     /// quantity and taxing-point market value. Delete the statement (which
     /// removes the vest) and re-vest instead (see `entities::ess_vest`).
+    #[error("this trade is an ESS vest and cannot be edited")]
     EssVestTrade,
     /// The existing trade is an inherited-parcel Buy (`inheritance_id` set):
     /// its figures carry the inheritance's cost base and s 115-30 discount
     /// clock, which a free-form edit would corrupt. Edit the inheritance
     /// (`PUT /inheritances/:id`) instead (see `entities::inheritance`).
+    #[error("this trade is an inherited parcel and cannot be edited here")]
     InheritedParcelTrade,
     /// The existing trade is a DRP reinvestment — a distribution links to it
     /// via `income.reinvestment_trade_id`. Its quantity, price, and residual
@@ -104,6 +117,7 @@ pub enum UpsertError {
     /// The provenance lives on the income row, not on the trade, so it is
     /// guarded by a lookup rather than a column (symmetric with `db_delete`'s
     /// reinvestment guard).
+    #[error("this trade is a DRP reinvestment and cannot be edited")]
     ReinvestmentTrade,
     /// The existing trade is an original parcel anchoring a rights sale
     /// (`rights_sale_allocations.purchase_trade_id`): its date and quantity
@@ -111,26 +125,24 @@ pub enum UpsertError {
     /// which a free-form edit could silently break. Delete the rights sale
     /// (`DELETE /rights_sales/:id`) and re-enter it after the edit (see
     /// `entities::rights_sale`).
+    #[error("this parcel anchors a rights sale and cannot be edited")]
     RightsAnchorParcel,
     /// A supplied statement total failed the cross-check (see
     /// `check_statement_total`): it doesn't reconcile with the trade's own
     /// figures, or the trade and brokerage currencies differ so there is no
     /// single-currency total to check.
-    StatementTotal(StatementTotalError),
+    #[error("the statement total cross-check failed: {0}")]
+    StatementTotal(#[source] StatementTotalError),
     /// A supplied spot-rate override was rejected (see
     /// `validate_spot_fx_rate`): non-positive, or on an AUD trade where it
     /// could never apply.
-    SpotFxRate(SpotFxRateError),
+    #[error("the spot FX rate override was rejected: {0}")]
+    SpotFxRate(#[source] SpotFxRateError),
     /// A degenerate core figure was rejected (see [`check_amounts`]):
     /// non-positive quantity or FX rate, negative price/brokerage/GST, or a
     /// settlement before the trade date.
-    Amounts(AmountsError),
-}
-
-impl From<sqlx::Error> for UpsertError {
-    fn from(e: sqlx::Error) -> Self {
-        UpsertError::Db(e)
-    }
+    #[error("a core trade figure was rejected: {0}")]
+    Amounts(#[source] AmountsError),
 }
 
 /// Create or update a trade. Validated and written in one transaction

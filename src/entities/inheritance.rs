@@ -137,47 +137,51 @@ pub fn router() -> Router<SqlitePool> {
     )
 }
 
-#[derive(Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum UpsertError {
-    Db(sqlx::Error),
+    #[error("inheritance write failed: {0}")]
+    Db(#[from] sqlx::Error),
     /// The inherited unit count must be positive — there is no parcel
     /// otherwise.
+    #[error("the inherited quantity must be greater than zero")]
     QuantityNotPositive,
     /// The cost base and LPR expenditure are amounts spent: negative values
     /// are data-entry errors.
+    #[error("the cost base and LPR expenditure must not be negative")]
     NegativeAmount,
     /// `deceased_acquisition_date` must be present exactly when the rule is
     /// `DeceasedCostBase` (it starts the discount clock); a pre-CGT asset's
     /// clock runs from the date of death and the date is not recorded.
+    #[error("the deceased's acquisition date belongs only with the DeceasedCostBase rule")]
     RuleAcquisitionDateMismatch,
     /// A `DeceasedCostBase` inheritance with the deceased's acquisition
     /// before 20 September 1985 — that is the pre-CGT case, which takes the
     /// `MarketValueAtDeath` rule instead.
+    #[error("the deceased acquired the asset before 20 September 1985 (a pre-CGT asset)")]
     DeceasedAcquisitionPreCgt,
     /// A death before 20 September 1985: the beneficiary is treated as
     /// having owned the asset since (at latest) the death, so the parcel is
     /// pre-CGT in the beneficiary's own hands — outside CGT and not
     /// modelled.
+    #[error("the date of death is before 20 September 1985, so the parcel is pre-CGT")]
     DeathPreCgt,
     /// The deceased cannot have acquired the asset after they died.
+    #[error("the deceased's acquisition date cannot be after the date of death")]
     DeceasedAcquisitionAfterDeath,
     /// `lpr_expenditure_date` must be present exactly when a non-zero
     /// `lpr_expenditure` is recorded (the figure is dated when the LPR
     /// incurred it).
+    #[error("a non-zero LPR expenditure needs the date the LPR incurred it, and vice versa")]
     LprExpenditureDateMismatch,
     /// LPR expenditure is incurred administering the estate — it cannot
     /// pre-date the death.
+    #[error("the LPR expenditure date cannot be before the date of death")]
     LprExpenditureBeforeDeath,
     /// The linked Buy is drawn on by a Sell allocation or AMIT adjustment —
     /// editing the inheritance under it could invalidate those dependants.
     /// Remove them first.
+    #[error("the inherited parcel is drawn on by a sale allocation or AMIT adjustment")]
     ParcelDrawnOn,
-}
-
-impl From<sqlx::Error> for UpsertError {
-    fn from(e: sqlx::Error) -> Self {
-        UpsertError::Db(e)
-    }
 }
 
 impl From<UpsertError> for ApiError {

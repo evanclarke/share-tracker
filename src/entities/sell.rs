@@ -69,25 +69,32 @@ pub struct SellBody {
     pub allocations: Vec<AllocationInput>,
 }
 
-#[derive(Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum SellError {
-    Db(sqlx::Error),
+    #[error("Sell write failed: {0}")]
+    Db(#[from] sqlx::Error),
     /// Allocated quantities do not sum exactly to the sell quantity.
+    #[error("the parcel allocations do not sum to the sell quantity")]
     AllocationMismatch,
     /// A referenced purchase trade does not exist.
+    #[error("an allocated purchase parcel does not exist")]
     PurchaseParcelMissing,
     /// A referenced purchase trade is not a Buy or DRP.
+    #[error("an allocated parcel is not a Buy or DRP trade")]
     PurchaseTradeNotBuyOrDrp,
     /// Allocating these parcels would exceed a purchase parcel's quantity.
+    #[error("the allocations exceed a purchase parcel's available quantity")]
     PurchaseQuantityExceeded,
     /// An allocation consumes a parcel of a different listing from the
     /// Sell's: a sale can only dispose of units of the security actually
     /// sold — a cross-listing allocation would be costed against the wrong
     /// security in every CGT report.
+    #[error("an allocated parcel belongs to a different listing than the Sell")]
     PurchaseListingMismatch,
     /// An allocation consumes a parcel dated after the sale date: units
     /// cannot be sold before they were acquired (a negative holding period
     /// would corrupt the discount test and the gains reports).
+    #[error("an allocated parcel is dated after the sale date")]
     PurchaseAfterSale,
     /// The existing trade is a buy-back participation Sell
     /// (`buyback_action_id` set): its figures derive from the buy-back's
@@ -95,24 +102,28 @@ pub enum SellError {
     /// free-form edits are rejected. Delete it (`DELETE /sells/:id`, which
     /// also removes the income row) and re-participate instead (see
     /// `entities::buyback_participation`).
+    #[error("this Sell is a buy-back participation and cannot be edited")]
     BuyBackSell,
     /// The existing trade is a scrip-for-scrip exchange closing Sell
     /// (`scrip_action_id` set): it consumes exactly the parcels the exchange
     /// substituted, so free-form edits are rejected. Delete it
     /// (`DELETE /sells/:id`, which also removes the replacement Buys) and
     /// re-exchange instead (see `entities::scrip_exchange`).
+    #[error("this Sell is a scrip-for-scrip exchange closing Sell and cannot be edited")]
     ScripExchangeSell,
     /// The existing trade is a demerger closing Sell (`demerger_action_id`
     /// set): it consumes exactly the parcels the demerger apportioned, so
     /// free-form edits are rejected. Delete it (`DELETE /sells/:id`, which
     /// also removes the head and demerged-entity Buys) and re-demerge
     /// instead (see `entities::demerger`).
+    #[error("this Sell is a demerger closing Sell and cannot be edited")]
     DemergerSell,
     /// The existing trade is a holding-account transfer-out Sell
     /// (`transfer_id` set): it consumes exactly the parcels the transfer
     /// moved, so free-form edits (and `DELETE /sells`) are rejected. Delete
     /// the transfer (`DELETE /transfers/:id`, which also removes the
     /// transfer-in Buys) and re-transfer instead (see `entities::transfer`).
+    #[error("this Sell is a holding-account transfer-out and cannot be edited")]
     TransferSell,
     /// An allocation consumes a parcel held in a different holding account
     /// from the Sell's: a sale can only dispose of units its account actually
@@ -121,37 +132,37 @@ pub enum SellError {
     /// Sells are exempt — they mechanically close the *whole* holding across
     /// every account, and their replacement Buys stay in each consumed
     /// parcel's account.)
+    #[error("an allocated parcel is held in a different holding account from the Sell")]
     PurchaseInDifferentAccount,
     /// The existing trade is a worthless-shares recognise closing Sell
     /// (`worthless_action_id` set): it consumes exactly the parcels the
     /// recognise operation closed at nil proceeds, so free-form edits are
     /// rejected. Delete it (`DELETE /sells/:id`, which restores the holding)
     /// and re-recognise instead (see `entities::worthless`).
+    #[error("this Sell is a worthless-shares recognise closing Sell and cannot be edited")]
     WorthlessSell,
     /// A supplied statement total failed the cross-check (see
     /// `trade::check_statement_total`): for a Sell it must equal the net
     /// proceeds, quantity × price − brokerage − GST.
-    StatementTotal(trade::StatementTotalError),
+    #[error("the statement total cross-check failed: {0}")]
+    StatementTotal(#[source] trade::StatementTotalError),
     /// A supplied spot-rate override was rejected (see
     /// `trade::validate_spot_fx_rate`): non-positive, or on an AUD Sell where
     /// it could never apply.
-    SpotFxRate(trade::SpotFxRateError),
+    #[error("the spot FX rate override was rejected: {0}")]
+    SpotFxRate(#[source] trade::SpotFxRateError),
     /// A degenerate core figure was rejected (see `trade::check_amounts`):
     /// non-positive quantity or FX rate, negative price/brokerage/GST, or a
     /// settlement before the sale date.
-    Amounts(trade::AmountsError),
+    #[error("a core trade figure was rejected: {0}")]
+    Amounts(#[source] trade::AmountsError),
     /// An allocation's `quantity_allocated` is zero or negative. A negative
     /// allocation would pass both the sum check and the per-parcel capacity
     /// check while quietly increasing another parcel's capacity (e.g. −5 on
     /// parcel A and +105 on parcel B "sums" to a 100-unit Sell), and a zero
     /// one is a no-op row.
+    #[error("each parcel allocation must be for a positive quantity")]
     AllocationNotPositive,
-}
-
-impl From<sqlx::Error> for SellError {
-    fn from(e: sqlx::Error) -> Self {
-        SellError::Db(e)
-    }
 }
 
 impl From<SellError> for ApiError {

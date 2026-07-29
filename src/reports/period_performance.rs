@@ -127,20 +127,17 @@ pub struct PeriodPerformance {
 /// Why a period performance figure could not be computed. `Unprocessable`
 /// carries the human detail (invalid range, a blocked valuation) and maps to
 /// HTTP 422; anything else is a 500.
-#[derive(Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum PeriodError {
+    #[error("{0}")]
     Unprocessable(String),
+    #[error("{0}")]
     Db(String),
 }
 
-impl std::fmt::Display for PeriodError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            PeriodError::Unprocessable(msg) | PeriodError::Db(msg) => write!(f, "{msg}"),
-        }
-    }
-}
-
+/// The `Db` arm keeps the message rather than the `sqlx::Error` itself: the
+/// same variant also carries failures with no `sqlx::Error` behind them (a
+/// `ValuationError::Db`, an `FxError::Db`).
 impl From<sqlx::Error> for PeriodError {
     fn from(e: sqlx::Error) -> Self {
         PeriodError::Db(e.to_string())

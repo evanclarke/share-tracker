@@ -34,12 +34,14 @@ pub(crate) fn resolve_brokerage(
 }
 
 /// Why a supplied spot-rate override was rejected (both map to 422).
-#[derive(Debug, PartialEq)]
+#[derive(thiserror::Error, Debug, PartialEq)]
 pub(crate) enum SpotFxRateError {
     /// Zero or negative: the rate divides the amount (AUD = foreign / rate).
+    #[error("the spot FX rate must be greater than zero")]
     NotPositive,
     /// On an AUD trade nothing converts, so the override could never apply —
     /// accepting it would silently ignore a deliberate entry.
+    #[error("a spot FX rate cannot apply to an AUD trade")]
     AudTrade,
 }
 
@@ -90,26 +92,33 @@ pub(crate) const CGT_START: NaiveDate = match NaiveDate::from_ymd_opt(1985, 9, 2
 /// corrupts every downstream report without failing anything, so it is
 /// rejected at write time. Shared by the trade and Sell write paths so the
 /// two can't drift.
-#[derive(Debug, PartialEq)]
+#[derive(thiserror::Error, Debug, PartialEq)]
 pub(crate) enum AmountsError {
     /// Zero or negative quantity: a trade of nothing (or of negative units)
     /// has no meaning, and a negative parcel/sale silently skews holdings.
+    #[error("the quantity must be greater than zero")]
     QuantityNotPositive,
     /// Negative unit price (zero is legitimate — e.g. a worthless-shares
     /// closing Sell at nil proceeds).
+    #[error("the unit price cannot be negative")]
     PriceNegative,
     /// Negative brokerage.
+    #[error("the brokerage cannot be negative")]
     BrokerageNegative,
     /// Negative GST on brokerage.
+    #[error("the GST on brokerage cannot be negative")]
     GstNegative,
     /// Zero or negative fallback FX rate: the rate divides the amount
     /// (AUD = foreign / rate), so it can never be a real exchange rate.
+    #[error("the fallback FX rate must be greater than zero")]
     FxRateNotPositive,
     /// Settlement dated before the trade itself.
+    #[error("the settlement date is before the trade date")]
     SettlementBeforeTrade,
     /// Dated before the start of CGT (20 September 1985): a pre-CGT holding
     /// is outside CGT and not modelled — every report would wrongly compute
     /// a capital gain or loss on it (see [`CGT_START`]).
+    #[error("the trade date is before the start of CGT (20 September 1985)")]
     PreCgtDate,
 }
 
@@ -174,14 +183,16 @@ pub(crate) fn amounts_detail(e: &AmountsError) -> &'static str {
 }
 
 /// Why a supplied statement total failed to reconcile (both map to 422).
-#[derive(Debug, PartialEq)]
+#[derive(thiserror::Error, Debug, PartialEq)]
 pub(crate) enum StatementTotalError {
     /// The trade and brokerage currencies differ, so no single-currency
     /// total exists to check against — supplying one is rejected rather
     /// than inventing an FX conversion.
+    #[error("the trade and brokerage currencies differ, so no single-currency total exists")]
     CurrencyMismatch,
     /// The supplied total does not equal the computed figure (carried so
     /// the rejection can say what the trade actually adds up to).
+    #[error("the supplied statement total does not equal the computed {expected}")]
     TotalMismatch { expected: Decimal },
 }
 

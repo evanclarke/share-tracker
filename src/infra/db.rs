@@ -133,45 +133,18 @@ pub fn validate_backup_suffix(suffix: &str) -> Result<(), String> {
 /// (renamed `<name>.bad`) so it can never be mistaken for a good backup.
 /// `Command` marks a configured `backup_command` that failed to run or exited
 /// non-zero; the backup itself is already complete and verified by that point.
-#[derive(Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum BackupError {
-    Db(sqlx::Error),
-    Io(std::io::Error),
+    #[error("backup failed: {0}")]
+    Db(#[from] sqlx::Error),
+    #[error("backup failed: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("backup verification failed for {path}: {reason}")]
     Verification { path: String, reason: String },
+    #[error("post-backup command failed ({command}): {reason}")]
     Command { command: String, reason: String },
+    #[error("invalid backup suffix '{suffix}': {reason}")]
     InvalidSuffix { suffix: String, reason: String },
-}
-
-impl std::fmt::Display for BackupError {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match self {
-            BackupError::Db(e) => write!(f, "backup failed: {e}"),
-            BackupError::Io(e) => write!(f, "backup failed: {e}"),
-            BackupError::Verification { path, reason } => {
-                write!(f, "backup verification failed for {path}: {reason}")
-            }
-            BackupError::Command { command, reason } => {
-                write!(f, "post-backup command failed ({command}): {reason}")
-            }
-            BackupError::InvalidSuffix { suffix, reason } => {
-                write!(f, "invalid backup suffix '{suffix}': {reason}")
-            }
-        }
-    }
-}
-
-impl std::error::Error for BackupError {}
-
-impl From<sqlx::Error> for BackupError {
-    fn from(e: sqlx::Error) -> Self {
-        BackupError::Db(e)
-    }
-}
-
-impl From<std::io::Error> for BackupError {
-    fn from(e: std::io::Error) -> Self {
-        BackupError::Io(e)
-    }
 }
 
 pub async fn backup(

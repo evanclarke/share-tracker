@@ -65,42 +65,36 @@ pub struct RenameBody {
     pub note: Option<String>,
 }
 
-#[derive(Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum RenameError {
+    #[error("no listing with that id")]
     ListingNotFound,
     /// The request changes neither `ticker` nor `exchange_mic` (also
     /// CHECK-enforced at the table level; caught here first for a clearer
     /// message).
+    #[error("the rename changes neither the ticker nor the exchange")]
     NoOp,
     /// `effective_date` is not after this listing's most recent rename.
-    OutOfOrder {
-        latest: NaiveDate,
-    },
+    #[error("effective_date must be after this listing's most recent rename ({latest})")]
+    OutOfOrder { latest: NaiveDate },
     /// A Crypto listing's new ticker is not a recognised digital-token code
     /// (the same rule `listing::db_upsert` enforces).
+    #[error("a Crypto listing's ticker must be a recognised digital-token code")]
     UnrecognisedDigitalToken,
-    Db(sqlx::Error),
+    #[error("listing rename write failed: {0}")]
+    Db(#[from] sqlx::Error),
 }
 
-#[derive(Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum UndoError {
+    #[error("no rename with that id")]
     RenameNotFound,
     /// The targeted rename is not the newest one for its listing — undo must
     /// unwind the chain last-in-first-out.
+    #[error("only the newest rename for a listing can be undone")]
     NotNewest,
-    Db(sqlx::Error),
-}
-
-impl From<sqlx::Error> for RenameError {
-    fn from(e: sqlx::Error) -> Self {
-        RenameError::Db(e)
-    }
-}
-
-impl From<sqlx::Error> for UndoError {
-    fn from(e: sqlx::Error) -> Self {
-        UndoError::Db(e)
-    }
+    #[error("rename undo failed: {0}")]
+    Db(#[from] sqlx::Error),
 }
 
 impl From<RenameError> for ApiError {

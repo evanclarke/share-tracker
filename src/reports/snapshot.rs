@@ -133,20 +133,17 @@ pub struct SeriesPoint {
 /// detail (which listing's price is missing/errored, an unconvertible
 /// currency, a close that is not final yet) and maps to HTTP 422; anything
 /// else is a 500.
-#[derive(Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum GenerateError {
+    #[error("{0}")]
     Unprocessable(String),
+    #[error("{0}")]
     Db(String),
 }
 
-impl std::fmt::Display for GenerateError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            GenerateError::Unprocessable(msg) | GenerateError::Db(msg) => write!(f, "{msg}"),
-        }
-    }
-}
-
+/// The `Db` arm keeps the message rather than the `sqlx::Error` itself: the
+/// same variant also carries generation failures with no `sqlx::Error` behind
+/// them (a missing price row, a `ValuationError::Db`).
 impl From<sqlx::Error> for GenerateError {
     fn from(e: sqlx::Error) -> Self {
         GenerateError::Db(e.to_string())

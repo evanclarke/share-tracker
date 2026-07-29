@@ -128,20 +128,16 @@ fn default_currency() -> String {
     "AUD".to_string()
 }
 
-#[derive(Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum UpsertError {
     /// `tax_year_end_date` is not a 30 June date (carries the rejected date).
     /// An AMMA statement attributes a full Australian financial year, and every
     /// AMMA-keyed report buckets it into the FY named by this date's calendar
     /// year — a mid-year date would silently land in the wrong FY. Mapped to `422`.
+    #[error("tax_year_end_date {0} is not a 30 June date")]
     NotFinancialYearEnd(NaiveDate),
-    Db(sqlx::Error),
-}
-
-impl From<sqlx::Error> for UpsertError {
-    fn from(err: sqlx::Error) -> Self {
-        UpsertError::Db(err)
-    }
+    #[error("AMMA statement write failed: {0}")]
+    Db(#[from] sqlx::Error),
 }
 
 impl From<UpsertError> for ApiError {

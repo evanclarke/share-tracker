@@ -33,6 +33,10 @@ csv = "1"
 # fixed there (cargo deny check advisories pins this floor).
 quick-xml = "0.41"
 sha2 = "0.11"
+# Derives Display/Error/From for the per-operation error enums, so a wrapped
+# sqlx::Error keeps its own message and stays reachable through source().
+# Proc-macro only: nothing of it survives into the runtime.
+thiserror = "2"
 toml = "1.1.2"
 
 [dev-dependencies]

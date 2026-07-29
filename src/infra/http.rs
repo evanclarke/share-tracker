@@ -28,28 +28,35 @@ pub type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
 /// Per-entity error enums stay (they document each operation's failure modes
 /// and keep DB-level tests precise) and convert via `impl From<EntityError>
 /// for ApiError` next to the enum — the handler itself never matches.
-#[derive(Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum ApiError {
     /// 500 — logged at error level when the response is built; empty body.
-    Internal(BoxError),
+    #[error("{0}")]
+    Internal(#[source] BoxError),
     /// 422 with a plain-text explanation of what the request got wrong.
+    #[error("{0}")]
     Unprocessable(String),
     /// 400 — the request itself is malformed (e.g. an unparseable date in
     /// the path), as opposed to well-formed data the model rejects (422).
+    #[error("{0}")]
     BadRequest(String),
     /// 502 — an upstream feed (MIC registry, currency list, RBA rates)
     /// could not be fetched. The underlying fetch error is logged at error
     /// level when the response is built; the body carries the short
     /// user-facing explanation only.
+    #[error("{body}: {source}")]
     BadGateway { body: String, source: BoxError },
     /// 413 — an upload exceeds the size ceiling.
+    #[error("{0}")]
     PayloadTooLarge(String),
     /// 404, empty body — entity GETs, where the URL itself names what is
     /// missing.
+    #[error("not found")]
     NotFound,
     /// 404 with a plain-text reason for the UI toast — operation endpoints
     /// (exercise, reinvest, delete), where the missing prerequisite deserves
     /// naming. Construct via [`ApiError::not_found`].
+    #[error("{0}")]
     NotFoundWithReason(String),
 }
 
@@ -346,11 +353,9 @@ mod tests {
         assert_eq!(body_of(resp).await, "");
     }
 
-    /// The whole point of the type: an internal failure reaches the logs.
-    /// A buffer-backed tracing subscriber captures what `into_response`
-    /// emits and the named decode failure must appear in it.
-    #[tokio::test]
-    async fn internal_logs_the_wrapped_error_at_error_level() {
+    /// Build the response under a buffer-backed tracing subscriber and return
+    /// everything it emitted, so a test can assert on what reached the logs.
+    fn logs_of(err: ApiError) -> String {
         #[derive(Clone, Default)]
         struct Buf(Arc<Mutex<Vec<u8>>>);
         impl std::io::Write for Buf {
@@ -369,14 +374,59 @@ mod tests {
             .with_max_level(tracing::Level::ERROR)
             .finish();
 
-        let err = ApiError::internal(sqlx::Error::Decode(
-            "invalid decimal in column fx_rate: oops".into(),
-        ));
         tracing::subscriber::with_default(subscriber, || {
             let _ = err.into_response();
         });
 
-        let logged = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        String::from_utf8(buf.0.lock().unwrap().clone()).unwrap()
+    }
+
+    /// The whole point of the type: an internal failure reaches the logs.
+    /// A buffer-backed tracing subscriber captures what `into_response`
+    /// emits and the named decode failure must appear in it.
+    #[tokio::test]
+    async fn internal_logs_the_wrapped_error_at_error_level() {
+        let logged = logs_of(ApiError::internal(sqlx::Error::Decode(
+            "invalid decimal in column fx_rate: oops".into(),
+        )));
+        assert!(
+            logged.contains("ERROR"),
+            "no error-level line logged: {logged}"
+        );
+        assert!(
+            logged.contains("invalid decimal in column fx_rate: oops"),
+            "the wrapped error's message is missing from the log: {logged}"
+        );
+    }
+
+    /// The same guarantee one layer up, which is what the per-entity enums'
+    /// `#[derive(thiserror::Error)]` buys: a `sqlx::Error` that a `db_*`
+    /// function absorbed into its own error enum via `#[from]` keeps the
+    /// database's own message in the enum's `Display` — so wrapping *that*
+    /// in `Internal` still logs what actually went wrong, not just a variant
+    /// name — and `source()` still reaches the `sqlx::Error` itself.
+    #[tokio::test]
+    async fn an_entity_enum_keeps_the_wrapped_sqlx_error_in_its_message_and_source() {
+        use crate::entities::listing::UpsertError;
+        use std::error::Error as _;
+
+        let entity_err: UpsertError =
+            sqlx::Error::Decode("invalid decimal in column fx_rate: oops".into()).into();
+
+        assert!(
+            entity_err
+                .to_string()
+                .contains("invalid decimal in column fx_rate: oops"),
+            "the enum's Display dropped the wrapped error: {entity_err}"
+        );
+        assert!(
+            entity_err
+                .source()
+                .is_some_and(|source| source.is::<sqlx::Error>()),
+            "source() does not chain back to the sqlx::Error: {entity_err}"
+        );
+
+        let logged = logs_of(ApiError::internal(entity_err));
         assert!(
             logged.contains("ERROR"),
             "no error-level line logged: {logged}"

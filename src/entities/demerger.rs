@@ -82,32 +82,33 @@ pub struct Demerge {
     pub demerged_replacements: Vec<Trade>,
 }
 
-#[derive(Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum DemergeError {
-    Db(sqlx::Error),
+    #[error("demerge write failed: {0}")]
+    Db(#[from] sqlx::Error),
     /// No corporate action with that id.
+    #[error("no corporate action with that id")]
     ActionNotFound,
     /// The action is not a Demerger.
+    #[error("that corporate action is not a demerger")]
     NotADemerger,
     /// The action has already been demerged (trades reference it). Delete
     /// the closing Sell via `DELETE /sells` first to redo it.
+    #[error("this demerger has already been applied")]
     AlreadyDemerged,
     /// Nothing of the head listing is held at the demerger date — there is
     /// nothing to apportion.
+    #[error("nothing of the head listing is held at the demerger date")]
     NothingHeld,
     /// The head listing has a trade dated on or after the demerger date.
     /// The demerge closes and recreates every open parcel as at that date, so
     /// later-dated activity must be entered after demerging, not before.
+    #[error("the head listing has a trade dated on or after the demerger date")]
     TradedOnOrAfterDemergerDate,
     /// The Sell-side invariants failed (defensive: the demerge constructs
     /// its allocations to satisfy them).
-    Sell(sell::SellError),
-}
-
-impl From<sqlx::Error> for DemergeError {
-    fn from(e: sqlx::Error) -> Self {
-        DemergeError::Db(e)
-    }
+    #[error("the demerger's closing Sell was rejected: {0}")]
+    Sell(#[source] sell::SellError),
 }
 
 impl From<sell::SellError> for DemergeError {

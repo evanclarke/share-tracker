@@ -1,4 +1,6 @@
 use crate::infra::decimal::Money;
+#[cfg(test)]
+use crate::infra::decimal::parse_dec;
 use crate::infra::http::{self, CrudEntity};
 use axum::{Router, routing::get};
 use rust_decimal::Decimal;
@@ -50,20 +52,18 @@ pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<ParcelAllocatio
 // report modules (and this module's own validation tests). Allocations are no
 // longer writable over HTTP — they are managed atomically via `PUT /sells/{id}`.
 #[cfg(test)]
-#[derive(Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum UpsertError {
-    Db,
+    #[error("parcel allocation write failed: {0}")]
+    Db(#[from] sqlx::Error),
+    #[error("the sale trade is not a Sell")]
     SaleTradeNotSell,
+    #[error("the purchase trade is not a Buy or DRP")]
     PurchaseTradeNotBuyOrDrp,
+    #[error("the allocation exceeds the purchase parcel's quantity")]
     PurchaseQuantityExceeded,
+    #[error("the allocations exceed the sale's quantity")]
     SaleQuantityExceeded,
-}
-
-#[cfg(test)]
-impl From<sqlx::Error> for UpsertError {
-    fn from(_: sqlx::Error) -> Self {
-        UpsertError::Db
-    }
 }
 
 #[cfg(test)]
@@ -117,10 +117,7 @@ pub async fn db_upsert(
     }
     let purchase_date: NaiveDate = purchase_row.try_get("date")?;
     let purchase_listing: i64 = purchase_row.try_get("listing_id")?;
-    let purchase_qty: Decimal = purchase_row
-        .try_get::<String, _>("quantity")?
-        .parse()
-        .map_err(|_| UpsertError::Db)?;
+    let purchase_qty: Decimal = parse_dec("quantity", purchase_row.try_get("quantity")?)?;
 
     // The parcel's quantity is in as-acquired units while the allocation is in
     // sale-date units: re-base across any share splits/consolidations between
@@ -145,10 +142,7 @@ pub async fn db_upsert(
         .await?;
         let mut total = Decimal::ZERO;
         for row in &rows {
-            let qty: Decimal = row
-                .try_get::<String, _>("quantity_allocated")?
-                .parse()
-                .map_err(|_| UpsertError::Db)?;
+            let qty: Decimal = parse_dec("quantity_allocated", row.try_get("quantity_allocated")?)?;
             let d: NaiveDate = row.try_get("sale_date")?;
             total += corporate_action::as_acquired_quantity(qty, &splits, purchase_date, d);
         }
@@ -162,7 +156,7 @@ pub async fn db_upsert(
         .bind(allocation.sale_trade_id)
         .fetch_one(pool)
         .await?;
-    let sale_qty: Decimal = sale_qty.parse().map_err(|_| UpsertError::Db)?;
+    let sale_qty: Decimal = parse_dec("quantity", sale_qty)?;
 
     let already_sale_allocated = sum_allocated(
         pool,

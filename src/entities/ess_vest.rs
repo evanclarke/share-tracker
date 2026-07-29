@@ -28,22 +28,20 @@ use axum::{
 use rust_decimal::Decimal;
 use sqlx::{Row, SqlitePool};
 
-#[derive(Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum VestError {
-    Db(sqlx::Error),
+    #[error("ESS vest write failed: {0}")]
+    Db(#[from] sqlx::Error),
     /// No ess_statements row with that id.
+    #[error("no ESS statement with that id")]
     StatementNotFound,
     /// The statement already has a vest Buy. Delete the statement to redo it.
+    #[error("this ESS statement has already been vested")]
     AlreadyVested,
     /// The statement's quantity or per-share market value is not positive —
     /// there is no parcel to create.
+    #[error("the ESS statement's quantity and per-share market value must both be positive")]
     NothingToVest,
-}
-
-impl From<sqlx::Error> for VestError {
-    fn from(e: sqlx::Error) -> Self {
-        VestError::Db(e)
-    }
 }
 
 pub fn router() -> Router<SqlitePool> {

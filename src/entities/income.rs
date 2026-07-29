@@ -261,34 +261,41 @@ pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<Income>, sqlx::
     http::crud_get(pool, id).await
 }
 
-#[derive(Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum UpsertError {
-    Db(sqlx::Error),
+    #[error("income write failed: {0}")]
+    Db(#[from] sqlx::Error),
     /// The existing row is a buy-back dividend component (`buyback_trade_id`
     /// set): its figures derive from the buy-back's terms, so free-form edits
     /// are rejected. Delete the buy-back Sell via `DELETE /sells/:id` (which
     /// removes this row too) and re-participate instead. Mapped to `422`.
+    #[error("this income row is a buy-back dividend component and cannot be edited")]
     BuyBackIncome,
     /// The supplied per-share figures failed the cross-check. Mapped to `422`.
-    PerShare(PerShareError),
+    #[error("the per-share cross-check failed: {0}")]
+    PerShare(#[source] PerShareError),
     /// An `entitlement_date` was supplied on a non-trust row. A dividend is
     /// assessed when paid or credited — present entitlement only shifts the
     /// assessment year of trust distributions (`docs/ato/trust-income-timing.md`).
     /// Mapped to `422`.
+    #[error("entitlement_date only applies to trust distributions")]
     EntitlementDateOnNonTrust,
     /// A `tax_deferred_amount` was supplied on a non-trust row. Tax-deferred
     /// amounts are a unit-trust statement concept (CGT event E4,
     /// `docs/ato/cgt-non-assessable-payments.md`) — a company's equivalent is
     /// a return of capital, entered as the corporate action directly. Mapped
     /// to `422`.
+    #[error("tax_deferred_amount only applies to trust distributions")]
     TaxDeferredOnNonTrust,
     /// A negative `tax_deferred_amount` — the statement figure is a payment
     /// received, never below zero. Mapped to `422`.
+    #[error("tax_deferred_amount cannot be negative")]
     TaxDeferredNegative,
     /// The row's listing is an AMIT (`listings.amit`) but `trust_income` is
     /// false. An AMIT is an attribution managed investment *trust* — its cash
     /// distribution advice is entered as a trust row (cash-only: the AMMA
     /// statement is the assessable record). Mapped to `422`.
+    #[error("this listing is an AMIT — its distributions are trust income")]
     AmitNonTrust,
     /// A non-zero notional tax component (`franking_credits`,
     /// `lic_capital_gain_deduction`, or `conduit_foreign_income`) on an AMIT
@@ -297,35 +304,34 @@ pub enum UpsertError {
     /// statement, and the tax summary reads it from there alone; a value here
     /// would be stored but never used. Carries the offending field name.
     /// Mapped to `422`.
+    #[error("{0} cannot be entered on an AMIT distribution")]
     AmitNotionalComponent(&'static str),
     /// A `tax_deferred_amount` on an AMIT listing's row. An AMIT's cost-base
     /// movement is the AMMA statement's `cost_base_adjustment` (entered as
     /// AMIT adjustments, CGT event E10) — the E4 tax-deferred mechanism is
     /// for non-AMIT trusts. Mapped to `422`.
+    #[error("tax_deferred_amount does not apply to an AMIT")]
     AmitTaxDeferred,
     /// A negative money figure (carries the field name). Every income figure
     /// — cash and notional components, withholding, and the per-share
     /// cross-check figures — is the statement's own amount, never below
     /// zero; a negative would silently reduce the year's totals in every
     /// report. Mapped to `422`.
+    #[error("{0} cannot be negative")]
     NegativeAmount(&'static str),
 }
 
-impl From<sqlx::Error> for UpsertError {
-    fn from(e: sqlx::Error) -> Self {
-        UpsertError::Db(e)
-    }
-}
-
 /// Why the supplied per-share figures failed to reconcile (both map to 422).
-#[derive(Debug, PartialEq)]
+#[derive(thiserror::Error, Debug, PartialEq)]
 pub enum PerShareError {
     /// Exactly one of `amount_per_security` / `securities_held` was supplied —
     /// the cross-check needs both (or neither).
+    #[error("amount_per_security and securities_held must be supplied together")]
     SuppliedAlone,
     /// amount_per_security × securities_held, cent-rounded, does not equal
     /// the gross cash components (carried so the rejection can say what the
     /// statement figures actually multiply to).
+    #[error("the per-share figures multiply to {product}, which is not the gross cash components")]
     ProductMismatch { product: Decimal },
 }
 

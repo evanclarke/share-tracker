@@ -14,26 +14,15 @@ use std::str::FromStr;
 
 /// Why a schedule file was rejected. Carries the 1-based line number so a bad
 /// `schedule.cron` is easy to fix.
-#[derive(Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum ScheduleError {
     /// A line was malformed: too few fields, or an unparseable cron expression.
+    #[error("schedule line {line}: {msg}")]
     Parse { line: usize, msg: String },
     /// A line referenced a job name that is not in the registry.
+    #[error("schedule line {line}: no such job {name:?}")]
     UnknownJob { line: usize, name: String },
 }
-
-impl std::fmt::Display for ScheduleError {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match self {
-            ScheduleError::Parse { line, msg } => write!(f, "schedule line {line}: {msg}"),
-            ScheduleError::UnknownJob { line, name } => {
-                write!(f, "schedule line {line}: no such job {name:?}")
-            }
-        }
-    }
-}
-
-impl std::error::Error for ScheduleError {}
 
 /// One parsed schedule line: when to fire, in which timezone (`None` = the
 /// server's local timezone), and which registered job to run. `line` is the

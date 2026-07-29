@@ -2639,6 +2639,7 @@ dependencies = [
  "sha2 0.11.0",
  "sqlx",
  "tempfile",
+ "thiserror",
  "tokio",
  "toml",
  "tower",

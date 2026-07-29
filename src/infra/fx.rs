@@ -71,33 +71,15 @@ impl FxOverride {
 }
 
 /// Why a required AUD conversion could not be performed.
-#[derive(Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum FxError {
     /// No ATO rate exists for this (currency, month) and no manual override was
     /// supplied. The conversion fails rather than guessing a rate.
+    #[error("no ATO FX rate for {currency} in {month} and no manual override supplied")]
     MissingRate { currency: String, month: String },
     /// Reading the rate from the database failed.
-    Db(sqlx::Error),
-}
-
-impl std::fmt::Display for FxError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            FxError::MissingRate { currency, month } => write!(
-                f,
-                "no ATO FX rate for {currency} in {month} and no manual override supplied"
-            ),
-            FxError::Db(e) => write!(f, "FX rate lookup failed: {e}"),
-        }
-    }
-}
-
-impl std::error::Error for FxError {}
-
-impl From<sqlx::Error> for FxError {
-    fn from(e: sqlx::Error) -> Self {
-        FxError::Db(e)
-    }
+    #[error("FX rate lookup failed: {0}")]
+    Db(#[from] sqlx::Error),
 }
 
 /// Surface an FX failure through report code that returns `sqlx::Error`: a DB

@@ -176,9 +176,10 @@ pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<EssStatement>, 
     http::crud_get(pool, id).await
 }
 
-#[derive(Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum UpsertError {
-    Db(sqlx::Error),
+    #[error("ESS statement write failed: {0}")]
+    Db(#[from] sqlx::Error),
     /// The statement already has a vest Buy (`trades.ess_statement_id`) and the
     /// edit changes a field that Buy was created from (listing, account, taxing
     /// point, quantity, market value, or currency), which would desync it.
@@ -186,17 +187,13 @@ pub enum UpsertError {
     /// overrides) stay editable — the employer's annual ESS statement arrives
     /// after the vest is recorded. Delete the statement (which removes the vest)
     /// and re-enter to change the vest side. Mapped to 422.
+    #[error("this ESS statement is vested: the fields its vest Buy came from cannot change")]
     Vested,
     /// A statement-AUD override was supplied on a statement already denominated
     /// in AUD — the label amount *is* the AUD figure, and a second one could
     /// silently disagree with it. Mapped to 422.
+    #[error("a statement-AUD override was supplied on a statement already denominated in AUD")]
     AudOverrideOnAudStatement,
-}
-
-impl From<sqlx::Error> for UpsertError {
-    fn from(e: sqlx::Error) -> Self {
-        UpsertError::Db(e)
-    }
 }
 
 pub async fn db_upsert(pool: &SqlitePool, s: &EssStatement) -> Result<(), UpsertError> {

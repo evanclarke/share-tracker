@@ -60,33 +60,34 @@ pub struct Recognise {
     pub sell: Trade,
 }
 
-#[derive(Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum RecogniseError {
-    Db(sqlx::Error),
+    #[error("worthless-shares recognise write failed: {0}")]
+    Db(#[from] sqlx::Error),
     /// No corporate action with that id.
+    #[error("no corporate action with that id")]
     ActionNotFound,
     /// The action is not a WorthlessShares.
+    #[error("that corporate action is not a worthless-shares event")]
     NotWorthlessShares,
     /// The action has already been recognised (a Sell references it). Delete
     /// the closing Sell via `DELETE /sells` first to redo it.
+    #[error("this worthless-shares loss has already been recognised")]
     AlreadyRecognised,
     /// Nothing of the listing is held at the event date — there is no loss to
     /// recognise.
+    #[error("nothing of the listing is held at the event date")]
     NothingHeld,
     /// The listing has a trade dated on or after the event date. The recognise
     /// closes every open parcel as at that date, so later-dated activity would
     /// draw on parcels the closing Sell consumes (and a failed/delisted company
     /// does not trade on after the event) — fix the data first.
+    #[error("the listing has a trade dated on or after the event date")]
     TradedOnOrAfterEventDate,
     /// The Sell-side invariants failed (defensive: the recognise constructs its
     /// allocations to satisfy them).
-    Sell(sell::SellError),
-}
-
-impl From<sqlx::Error> for RecogniseError {
-    fn from(e: sqlx::Error) -> Self {
-        RecogniseError::Db(e)
-    }
+    #[error("the recognise's closing Sell was rejected: {0}")]
+    Sell(#[source] sell::SellError),
 }
 
 impl From<sell::SellError> for RecogniseError {

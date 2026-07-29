@@ -58,22 +58,21 @@ pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<AmitAdjustment>
     http::crud_get(pool, id).await
 }
 
-#[derive(Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum UpsertError {
-    Db(sqlx::Error),
+    #[error("AMIT adjustment write failed: {0}")]
+    Db(#[from] sqlx::Error),
+    #[error("the adjusted trade is not a Buy or DRP parcel")]
     TradeNotBuyOrDrp,
+    #[error("the trade's listing differs from the AMMA statement's listing")]
     ListingMismatch,
     /// The trade sits in a different holding account from the AMMA
     /// statement's: a registry issues one statement per holder account, so a
     /// statement only ever adjusts its own account's parcels.
+    #[error("the trade sits in a different holding account from the AMMA statement")]
     HoldingAccountMismatch,
+    #[error("the adjusted quantity exceeds the trade's quantity")]
     QuantityExceedsTrade,
-}
-
-impl From<sqlx::Error> for UpsertError {
-    fn from(e: sqlx::Error) -> Self {
-        UpsertError::Db(e)
-    }
 }
 
 pub async fn db_upsert(pool: &SqlitePool, adj: &AmitAdjustment) -> Result<(), UpsertError> {

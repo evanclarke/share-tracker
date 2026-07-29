@@ -66,19 +66,16 @@ pub struct Currency {
     pub source: CurrencySource,
 }
 
-#[derive(Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum ImportError {
     /// Could not retrieve a published feed (network / HTTP error).
+    #[error("could not fetch the currency feed: {0}")]
     Fetch(String),
     /// A feed was not the expected ISO 4217 XML / ISO 24165 JSON shape.
+    #[error("the currency feed is malformed: {0}")]
     Parse(String),
-    Db(sqlx::Error),
-}
-
-impl From<sqlx::Error> for ImportError {
-    fn from(e: sqlx::Error) -> Self {
-        ImportError::Db(e)
-    }
+    #[error("currency import write failed: {0}")]
+    Db(#[from] sqlx::Error),
 }
 
 /// Outcome of an import run: how many currency rows were written (inserted or

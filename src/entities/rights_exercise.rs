@@ -67,28 +67,29 @@ pub struct ExerciseBody {
     pub holding_account_id: i64,
 }
 
-#[derive(Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum ExerciseError {
-    Db(sqlx::Error),
+    #[error("rights exercise write failed: {0}")]
+    Db(#[from] sqlx::Error),
     /// No corporate action with that id.
+    #[error("no corporate action with that id")]
     ActionNotFound,
     /// The action is not a RightsIssue.
+    #[error("that corporate action is not a rights issue")]
     NotARightsIssue,
     /// `units` is not strictly positive.
+    #[error("the number of units exercised must be greater than zero")]
     NonPositiveUnits,
     /// `rights_cost` is negative.
+    #[error("the rights cost cannot be negative")]
     NegativeRightsCost,
     /// The exercise date precedes the issue's record date.
+    #[error("the exercise date is before the issue's record date")]
     BeforeRecordDate,
     /// Cumulative exercised units would exceed the entitlement earned by the
     /// units held at the record date.
+    #[error("the units exercised exceed the entitlement earned at the record date")]
     ExceedsEntitlement,
-}
-
-impl From<sqlx::Error> for ExerciseError {
-    fn from(e: sqlx::Error) -> Self {
-        ExerciseError::Db(e)
-    }
 }
 
 impl From<ExerciseError> for ApiError {

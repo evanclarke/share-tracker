@@ -107,32 +107,33 @@ pub struct TransferGroup {
     pub fee_sale: Option<Trade>,
 }
 
-#[derive(Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum TransferError {
-    Db(sqlx::Error),
+    #[error("transfer write failed: {0}")]
+    Db(#[from] sqlx::Error),
     /// Source and destination accounts are the same — nothing to move.
+    #[error("the source and destination accounts are the same")]
     SameAccount,
     /// A transfer is recorded and executed in one step and is immutable:
     /// delete it (`DELETE /transfers/:id`) and re-transfer instead.
+    #[error("a transfer with that id already exists and is immutable")]
     AlreadyExists,
     /// No allocations — a transfer must move at least one parcel.
+    #[error("a transfer must move at least one parcel")]
     NothingToTransfer,
     /// A referenced parcel (moved or fee) does not belong to the transfer's
     /// listing.
+    #[error("a selected parcel does not belong to the transfer's listing")]
     ListingMismatch,
     /// A network fee was specified (`fee_allocations` non-empty) without a
     /// positive per-unit market value for the fee crypto — the disposal needs
     /// its capital proceeds.
+    #[error("a network fee was specified without a positive per-unit market value")]
     FeeMarketPriceMissing,
     /// The Sell-side invariants failed: missing/over-allocated parcel, a
     /// non-Buy/DRP parcel, or a parcel outside the source account.
-    Sell(sell::SellError),
-}
-
-impl From<sqlx::Error> for TransferError {
-    fn from(e: sqlx::Error) -> Self {
-        TransferError::Db(e)
-    }
+    #[error("the transfer-out Sell was rejected: {0}")]
+    Sell(#[source] sell::SellError),
 }
 
 impl From<sell::SellError> for TransferError {

@@ -15,22 +15,6 @@ Currently handled correctly: the server binds `127.0.0.1` by default and exposin
 `--host` opt-in documented as unauthenticated. Only matters if the server is ever exposed.
 - [ ] If/when exposure is wanted: add an auth layer (e.g. a bearer token/basic-auth middleware over the whole router) before recommending `--host 0.0.0.0` for anything but a trusted LAN; until then this section records the decision that localhost-only is the accepted posture
 
-## 37 error enums with hand-written `From<sqlx::Error>` (2026-07-29 Rust review)
-
-There are 37 error enums and 32 hand-written `impl From<sqlx::Error>` blocks that all read
-`fn from(e: sqlx::Error) -> Self { X::Db(e) }`. None of them implement `Display` or
-`std::error::Error`, so when one is wrapped into `ApiError::Internal` the log message quality
-depends entirely on whatever the `From<EntityError> for ApiError` arm writes, and the underlying
-error's `source()` chain is lost.
-
-`thiserror` gives `#[from]`, `Display`, and `source()` chaining for free. It is a proc-macro-only
-dependency (no runtime surface) with a clean advisory history, so it passes the `cargo deny check
-advisories` gate.
-
-- [ ] Add `thiserror` and convert the 37 enums: `#[derive(thiserror::Error, Debug)]` with `#[error("…")]` per variant and `#[from]` on the `Db(sqlx::Error)` variant, deleting the 32 `From<sqlx::Error>` impls
-- [ ] Keep every `impl From<EntityError> for ApiError` exactly as it is — those carry the user-facing 422 wording that `docs/API.md` documents and must not become derived `Display` output
-- [ ] Tests: the existing per-entity rejection tests already assert the 422 bodies, so a green suite is the gate that the user-facing messages are unchanged. Add one test asserting a wrapped `sqlx::Error` still reaches the log through `ApiError::Internal` with its own message intact (extending `infra::http::tests::internal_logs_the_wrapped_error_at_error_level`)
-
 ## Over-long functions (2026-07-29 Rust review)
 
 23 functions exceed 100 lines in the non-test build (`cargo clippy -- -W clippy::too_many_lines`).

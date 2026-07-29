@@ -74,20 +74,17 @@ pub struct DrpEnrolmentBody {
     pub residual_handling: ResidualHandling,
 }
 
-#[derive(Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum UpsertError {
     /// The unenrolment date is not after the enrolment date.
+    #[error("the unenrolment date must be after the enrolment date")]
     EmptyPeriod,
     /// The period overlaps another period for the same listing (two open
     /// periods always overlap, so this also enforces at-most-one-open).
+    #[error("this period overlaps an existing enrolment for the same listing and account")]
     Overlap,
-    Db(sqlx::Error),
-}
-
-impl From<sqlx::Error> for UpsertError {
-    fn from(e: sqlx::Error) -> Self {
-        UpsertError::Db(e)
-    }
+    #[error("DRP enrolment write failed: {0}")]
+    Db(#[from] sqlx::Error),
 }
 
 impl CrudEntity for DrpEnrolment {

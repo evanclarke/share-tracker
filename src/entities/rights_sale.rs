@@ -125,38 +125,45 @@ pub struct SellRightsBody {
     pub allocations: Vec<AllocationInput>,
 }
 
-#[derive(Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum SellRightsError {
-    Db(sqlx::Error),
+    #[error("rights sale write failed: {0}")]
+    Db(#[from] sqlx::Error),
     /// No corporate action with that id.
+    #[error("no corporate action with that id")]
     ActionNotFound,
     /// The action is not a RightsIssue.
+    #[error("that corporate action is not a rights issue")]
     NotARightsIssue,
     /// `units` is not strictly positive.
+    #[error("the number of rights sold must be greater than zero")]
     NonPositiveUnits,
     /// `proceeds_per_right` is negative.
+    #[error("the proceeds per right cannot be negative")]
     NegativeProceeds,
     /// `rights_cost` is negative.
+    #[error("the rights cost cannot be negative")]
     NegativeRightsCost,
     /// The sale date precedes the issue's record date.
+    #[error("the sale date is before the issue's record date")]
     BeforeRecordDate,
     /// The allocations are empty, non-positive, or do not sum to `units`.
+    #[error("the parcel allocations must be positive and sum to the rights sold")]
     AllocationsDontSum,
     /// An allocation's parcel is missing, not a Buy/DRP of the issue's
     /// listing, or not held before the record date (so it earned no rights).
+    #[error(
+        "an allocated parcel is not a Buy/DRP of the issue's listing held before the record date"
+    )]
     NotAnOriginalParcel,
     /// Rights anchored to a parcel (across the action's sales) exceed the
     /// entitlement that parcel's record-date units earned.
+    #[error("the rights anchored to a parcel exceed the entitlement its record-date units earned")]
     ExceedsParcelEntitlement,
     /// Total rights used — exercises plus sales — would exceed the
     /// entitlement earned by the units held at the record date.
+    #[error("the rights sold and exercised exceed the entitlement earned at the record date")]
     ExceedsEntitlement,
-}
-
-impl From<sqlx::Error> for SellRightsError {
-    fn from(e: sqlx::Error) -> Self {
-        SellRightsError::Db(e)
-    }
 }
 
 impl From<SellRightsError> for ApiError {

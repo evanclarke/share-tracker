@@ -67,11 +67,12 @@ pub struct ListingBody {
 }
 
 /// Why a listing upsert was refused.
-#[derive(Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum UpsertError {
     /// A Crypto listing's ticker is not a recognised digital-token code in
     /// `currencies` (kind DigitalToken — the ISO 24165 / DTIF list, matched on
     /// the DTI `code` or the human `short_name` ticker the import carries).
+    #[error("a Crypto listing's ticker must be a recognised digital-token code")]
     UnrecognisedDigitalToken,
     /// A plain `PUT` tried to change `ticker` or `exchange_mic` on a listing
     /// that already has dependent trades, income, or closing prices. Once a
@@ -79,17 +80,13 @@ pub enum UpsertError {
     /// `POST /listings/:id/rename` (`entities::listing_rename`) so the change
     /// is recorded as a dated event, not silently lost — a brand-new listing
     /// with no dependents yet stays freely editable.
+    #[error("a ticker or exchange change on a listing with history needs POST /rename")]
     IdentityChangeRequiresRename,
     /// Constraint violations (Crypto with an exchange / non-Crypto without
     /// one, duplicate ticker, unknown exchange or currency) surface here via
     /// the table's CHECKs and FKs.
-    Db(sqlx::Error),
-}
-
-impl From<sqlx::Error> for UpsertError {
-    fn from(e: sqlx::Error) -> Self {
-        UpsertError::Db(e)
-    }
+    #[error("listing write failed: {0}")]
+    Db(#[from] sqlx::Error),
 }
 
 impl From<UpsertError> for ApiError {

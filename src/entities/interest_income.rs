@@ -115,28 +115,26 @@ pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<InterestIncome>
     http::crud_get(pool, id).await
 }
 
-#[derive(Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum UpsertError {
-    Db(sqlx::Error),
+    #[error("interest income write failed: {0}")]
+    Db(#[from] sqlx::Error),
     /// A negative `amount`, `tfn_withholding_tax`, or `foreign_tax_paid`
     /// (carries the field name): interest figures are the statement's
     /// positive (or zero) amounts — a negative would silently reduce the
     /// year's gross-interest line. Mapped to `422`.
+    #[error("{0} cannot be negative")]
     NegativeAmount(&'static str),
     /// `foreign_tax_paid` on an Australian-source row: foreign tax is only
     /// withheld by a foreign payer, and silently accepting it would claim a
     /// FITO the row can't support. Mapped to `422`.
+    #[error("foreign_tax_paid only applies to a foreign-source interest row")]
     ForeignTaxOnAustralianSource,
     /// `tfn_withholding_tax` on a foreign-source row: TFN amounts are
     /// withheld by Australian investment bodies — foreign withholding belongs
     /// in `foreign_tax_paid`. Mapped to `422`.
+    #[error("tfn_withholding_tax only applies to an Australian-source interest row")]
     TfnWithholdingOnForeignSource,
-}
-
-impl From<sqlx::Error> for UpsertError {
-    fn from(e: sqlx::Error) -> Self {
-        UpsertError::Db(e)
-    }
 }
 
 impl From<UpsertError> for ApiError {

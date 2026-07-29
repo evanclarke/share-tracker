@@ -28,19 +28,16 @@ pub struct RbaFxRate {
     pub rate: Decimal,
 }
 
-#[derive(Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum ImportError {
     /// Could not retrieve the published rates (network / HTTP error).
+    #[error("could not fetch the RBA FX rate feed: {0}")]
     Fetch(String),
     /// The feed was not the expected RBA F11 shape (missing header, bad rate).
+    #[error("the RBA FX rate feed is malformed: {0}")]
     Parse(String),
-    Db(sqlx::Error),
-}
-
-impl From<sqlx::Error> for ImportError {
-    fn from(e: sqlx::Error) -> Self {
-        ImportError::Db(e)
-    }
+    #[error("RBA FX rate import write failed: {0}")]
+    Db(#[from] sqlx::Error),
 }
 
 /// Outcome of an import run: how many new rows were inserted vs already present.

@@ -47,9 +47,10 @@ where
     .await
 }
 
-#[derive(Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum WriteError {
-    Db(sqlx::Error),
+    #[error("corporate action write failed: {0}")]
+    Db(#[from] sqlx::Error),
     /// The action is referenced by rights-exercise, buy-back participation,
     /// scrip-for-scrip exchange, demerger, or worthless-shares recognise trades
     /// (`trades.rights_action_id` / `trades.buyback_action_id` /
@@ -58,13 +59,8 @@ pub enum WriteError {
     /// (`rights_sales.rights_action_id`): editing it would retroactively change
     /// the terms those rows were created and validated against. Delete the
     /// referencing rows first. Mapped to `422`.
+    #[error("this corporate action is referenced by trades or rights sales and cannot be edited")]
     ReferencedByTrade,
-}
-
-impl From<sqlx::Error> for WriteError {
-    fn from(e: sqlx::Error) -> Self {
-        WriteError::Db(e)
-    }
 }
 
 impl From<WriteError> for ApiError {

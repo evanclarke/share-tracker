@@ -89,50 +89,51 @@ pub struct ReinvestBody {
     pub date: Option<NaiveDate>,
 }
 
-#[derive(Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum ReinvestError {
-    Db(sqlx::Error),
+    #[error("DRP reinvestment write failed: {0}")]
+    Db(#[from] sqlx::Error),
     /// No income row with that id.
+    #[error("no distribution with that id")]
     IncomeNotFound,
     /// No enrolment period covers the distribution's ex date (or pay date when
     /// no ex date is recorded): never enrolled, dated before enrolment, or in a
     /// gap between unenrolment and re-enrolment. Carries the account name,
     /// ticker, and date so the rejection can name them rather than raw ids.
+    #[error("account '{account}' is not enrolled in a DRP for {ticker} at {date}")]
     NotEnrolled {
         account: String,
         ticker: String,
         date: NaiveDate,
     },
     /// The distribution already has a reinvestment trade.
+    #[error("this distribution already has a reinvestment trade")]
     AlreadyReinvested,
     /// The reinvestment price is not strictly positive.
+    #[error("the reinvestment price must be greater than zero")]
     NonPositivePrice,
     /// The stated units are not strictly positive.
+    #[error("the stated units must be greater than zero")]
     NonPositiveUnits,
     /// The stated units don't spend the available cash at the given price:
     /// `units × price` differs from it by a full unit-step (at the units'
     /// stated precision) or more. Carries both figures for the rejection.
-    UnitsCashMismatch {
-        cost: Decimal,
-        available: Decimal,
-    },
+    #[error("the stated units spend {cost}, but the reinvestable cash is {available}")]
+    UnitsCashMismatch { cost: Decimal, available: Decimal },
     /// Undo requested on a distribution with no reinvestment trade.
+    #[error("this distribution has no reinvestment trade to undo")]
     NotReinvested,
     /// Undo refused: the DRP trade is drawn on by a Sell allocation or an
     /// AMIT adjustment — deleting it would orphan those dependants. Remove
     /// them first (e.g. delete the Sell via `DELETE /sells/:id`).
+    #[error("the reinvestment trade is drawn on by a Sell allocation or AMIT adjustment")]
     ReinvestmentConsumed,
     /// Undo refused: a later DRP trade exists for the same listing and
     /// holding account. Its `residual_brought_forward` was read from this
     /// chain, so removing a mid-chain trade would falsify it — undo the later
     /// reinvestments first (LIFO).
+    #[error("a later DRP reinvestment brought this trade's residual forward")]
     ReinvestmentNotChainTail,
-}
-
-impl From<sqlx::Error> for ReinvestError {
-    fn from(e: sqlx::Error) -> Self {
-        ReinvestError::Db(e)
-    }
 }
 
 impl From<ReinvestError> for ApiError {

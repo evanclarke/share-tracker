@@ -30,19 +30,16 @@ pub struct MicEntry {
     pub expiry_date: Option<String>, // 'YYYY-MM-DD', present only when EXPIRED
 }
 
-#[derive(Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum ImportError {
     /// Could not retrieve the published registry (network / HTTP error).
+    #[error("could not fetch the MIC registry feed: {0}")]
     Fetch(String),
     /// The feed was not the expected ISO10383_MIC shape (missing column, bad row).
+    #[error("the MIC registry feed is malformed: {0}")]
     Parse(String),
-    Db(sqlx::Error),
-}
-
-impl From<sqlx::Error> for ImportError {
-    fn from(e: sqlx::Error) -> Self {
-        ImportError::Db(e)
-    }
+    #[error("MIC registry import write failed: {0}")]
+    Db(#[from] sqlx::Error),
 }
 
 /// Outcome of an import run: how many registry rows were written (inserted or

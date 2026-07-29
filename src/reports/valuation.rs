@@ -18,20 +18,17 @@ use crate::infra::fx::FxRates;
 /// Why valuation could not proceed for one or more held listings.
 /// `Unprocessable` carries the joined per-listing blockers (missing/errored
 /// price, a close not final yet, no FX rate available) and maps to HTTP 422.
-#[derive(Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum ValuationError {
+    #[error("{0}")]
     Unprocessable(String),
+    #[error("{0}")]
     Db(String),
 }
 
-impl std::fmt::Display for ValuationError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ValuationError::Unprocessable(msg) | ValuationError::Db(msg) => write!(f, "{msg}"),
-        }
-    }
-}
-
+/// The `Db` arm keeps the message rather than the `sqlx::Error` itself: the
+/// same variant also carries the report's own "listing disappeared" style
+/// failures, which have no `sqlx::Error` behind them.
 impl From<sqlx::Error> for ValuationError {
     fn from(e: sqlx::Error) -> Self {
         ValuationError::Db(e.to_string())

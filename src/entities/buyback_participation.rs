@@ -79,26 +79,26 @@ pub struct Participation {
     pub income: Option<Income>,
 }
 
-#[derive(Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum ParticipationError {
-    Db(sqlx::Error),
+    #[error("buy-back participation write failed: {0}")]
+    Db(#[from] sqlx::Error),
     /// No corporate action with that id.
+    #[error("no corporate action with that id")]
     ActionNotFound,
     /// The action is not a BuyBack.
+    #[error("that corporate action is not a buy-back")]
     NotABuyBack,
     /// `units` is not strictly positive.
+    #[error("the number of units participated must be greater than zero")]
     NonPositiveUnits,
     /// The participation date precedes the action's buy-back date.
+    #[error("the participation date is before the buy-back date")]
     BeforeBuyBackDate,
     /// The Sell-side invariants failed (allocation mismatch, bad parcel,
     /// over-allocation, ...).
-    Sell(sell::SellError),
-}
-
-impl From<sqlx::Error> for ParticipationError {
-    fn from(e: sqlx::Error) -> Self {
-        ParticipationError::Db(e)
-    }
+    #[error("the buy-back's Sell was rejected: {0}")]
+    Sell(#[source] sell::SellError),
 }
 
 impl From<sell::SellError> for ParticipationError {
