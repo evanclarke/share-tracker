@@ -17,7 +17,7 @@
 //! transaction — **refused** (422) while that Buy is drawn on by a Sell
 //! allocation or AMIT adjustment.
 
-use crate::infra::decimal::{row_dec, row_opt_dec};
+use crate::infra::decimal::{Money, OptMoney};
 use crate::infra::http::ApiError;
 use axum::{
     Json, Router,
@@ -28,9 +28,9 @@ use axum::{
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use sqlx::{Row, SqlitePool};
+use sqlx::SqlitePool;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct EssStatement {
     pub id: i64,
     pub listing_id: i64,
@@ -43,22 +43,30 @@ pub struct EssStatement {
     /// Shares that vest at the taxing point and their per-share market value —
     /// together the cost-base-reset Buy (quantity, price) the vesting operation
     /// creates. Positive for a vest.
+    #[sqlx(try_from = "Money")]
     pub quantity: Decimal,
+    #[sqlx(try_from = "Money")]
     pub market_value_per_share: Decimal,
     /// Item 12 label D: taxed-upfront discount eligible for the $1,000 reduction.
+    #[sqlx(try_from = "Money")]
     pub taxed_upfront_eligible: Decimal,
     /// Item 12 label E: taxed-upfront discount not eligible for the reduction.
+    #[sqlx(try_from = "Money")]
     pub taxed_upfront_not_eligible: Decimal,
     /// Item 12 label F: deferral-scheme discount (the RSU case).
+    #[sqlx(try_from = "Money")]
     pub deferral_discount: Decimal,
     /// Pre-1 July 2009 ESS interests whose cessation time falls in the year
     /// (assessable this year, the same as the other discount labels).
+    #[sqlx(try_from = "Money")]
     pub pre_2009_cessation_discount: Decimal,
     /// Item 12 label A: the foreign-source portion of the above discounts — a
     /// memo already counted within the discount labels, surfaced separately by
     /// the tax summary for the foreign-income/FITO calculation. Not added on top.
+    #[sqlx(try_from = "Money")]
     pub foreign_source_discount: Decimal,
     /// Item 12 label C: TFN amounts withheld from the discounts.
+    #[sqlx(try_from = "Money")]
     pub tfn_withholding: Decimal,
     /// ISO 4217 currency the amounts are denominated in. The tax summary
     /// converts non-AUD amounts to AUD via the ATO rate for this currency and
@@ -71,10 +79,15 @@ pub struct EssStatement {
     /// label; absent, the label converts via the RBA rate as usual. Only
     /// accepted on a non-AUD statement (422 otherwise — two AUD figures for the
     /// same label could silently disagree).
+    #[sqlx(try_from = "OptMoney")]
     pub aud_taxed_upfront_eligible: Option<Decimal>,
+    #[sqlx(try_from = "OptMoney")]
     pub aud_taxed_upfront_not_eligible: Option<Decimal>,
+    #[sqlx(try_from = "OptMoney")]
     pub aud_deferral_discount: Option<Decimal>,
+    #[sqlx(try_from = "OptMoney")]
     pub aud_pre_2009_cessation_discount: Option<Decimal>,
+    #[sqlx(try_from = "OptMoney")]
     pub aud_foreign_source_discount: Option<Decimal>,
     /// Read-only: the id of the statement's vest Buy (the trade whose
     /// `ess_statement_id` links back here), `None` while unvested. Derived on
@@ -82,32 +95,6 @@ pub struct EssStatement {
     /// the Vest action only on unvested rows.
     #[serde(default)]
     pub vest_trade_id: Option<i64>,
-}
-
-impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for EssStatement {
-    fn from_row(row: &'r sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
-        Ok(EssStatement {
-            id: row.try_get("id")?,
-            listing_id: row.try_get("listing_id")?,
-            holding_account_id: row.try_get("holding_account_id")?,
-            taxing_point_date: row.try_get("taxing_point_date")?,
-            quantity: row_dec(row, "quantity")?,
-            market_value_per_share: row_dec(row, "market_value_per_share")?,
-            taxed_upfront_eligible: row_dec(row, "taxed_upfront_eligible")?,
-            taxed_upfront_not_eligible: row_dec(row, "taxed_upfront_not_eligible")?,
-            deferral_discount: row_dec(row, "deferral_discount")?,
-            pre_2009_cessation_discount: row_dec(row, "pre_2009_cessation_discount")?,
-            foreign_source_discount: row_dec(row, "foreign_source_discount")?,
-            tfn_withholding: row_dec(row, "tfn_withholding")?,
-            currency: row.try_get("currency")?,
-            aud_taxed_upfront_eligible: row_opt_dec(row, "aud_taxed_upfront_eligible")?,
-            aud_taxed_upfront_not_eligible: row_opt_dec(row, "aud_taxed_upfront_not_eligible")?,
-            aud_deferral_discount: row_opt_dec(row, "aud_deferral_discount")?,
-            aud_pre_2009_cessation_discount: row_opt_dec(row, "aud_pre_2009_cessation_discount")?,
-            aud_foreign_source_discount: row_opt_dec(row, "aud_foreign_source_discount")?,
-            vest_trade_id: row.try_get("vest_trade_id")?,
-        })
-    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -288,20 +275,20 @@ pub async fn db_upsert(pool: &SqlitePool, s: &EssStatement) -> Result<(), Upsert
     .bind(s.listing_id)
     .bind(s.holding_account_id)
     .bind(s.taxing_point_date)
-    .bind(s.quantity.to_string())
-    .bind(s.market_value_per_share.to_string())
-    .bind(s.taxed_upfront_eligible.to_string())
-    .bind(s.taxed_upfront_not_eligible.to_string())
-    .bind(s.deferral_discount.to_string())
-    .bind(s.pre_2009_cessation_discount.to_string())
-    .bind(s.foreign_source_discount.to_string())
-    .bind(s.tfn_withholding.to_string())
+    .bind(Money(s.quantity))
+    .bind(Money(s.market_value_per_share))
+    .bind(Money(s.taxed_upfront_eligible))
+    .bind(Money(s.taxed_upfront_not_eligible))
+    .bind(Money(s.deferral_discount))
+    .bind(Money(s.pre_2009_cessation_discount))
+    .bind(Money(s.foreign_source_discount))
+    .bind(Money(s.tfn_withholding))
     .bind(&s.currency)
-    .bind(s.aud_taxed_upfront_eligible.map(|d| d.to_string()))
-    .bind(s.aud_taxed_upfront_not_eligible.map(|d| d.to_string()))
-    .bind(s.aud_deferral_discount.map(|d| d.to_string()))
-    .bind(s.aud_pre_2009_cessation_discount.map(|d| d.to_string()))
-    .bind(s.aud_foreign_source_discount.map(|d| d.to_string()))
+    .bind(OptMoney(s.aud_taxed_upfront_eligible))
+    .bind(OptMoney(s.aud_taxed_upfront_not_eligible))
+    .bind(OptMoney(s.aud_deferral_discount))
+    .bind(OptMoney(s.aud_pre_2009_cessation_discount))
+    .bind(OptMoney(s.aud_foreign_source_discount))
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;

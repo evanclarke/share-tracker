@@ -1,14 +1,14 @@
 use crate::domain::cgt_discount;
 use crate::domain::cost_base::{self, ParcelRow};
 use crate::entities::corporate_action::{RocEvent, SplitEvent};
-use crate::infra::decimal::{row_dec, row_opt_dec};
+use crate::infra::decimal::{Money, OptMoney};
 use crate::infra::fx::{FxOverride, FxRates};
 use crate::infra::http::ApiError;
 use axum::{Json, Router, extract::State, routing::get};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use sqlx::{Row, SqlitePool, sqlite::SqliteRow};
+use sqlx::SqlitePool;
 use std::collections::HashMap;
 
 /// Where a realised disposal came from.
@@ -96,18 +96,45 @@ pub fn router() -> Router<SqlitePool> {
 /// convert independently — a buy and the sell that closes it may settle in
 /// different months at different rates — so totals are never aggregated
 /// across mixed currencies.
+#[derive(sqlx::FromRow)]
 struct SellInfo {
     id: i64,
     listing_id: i64,
     holding_account_id: i64,
     date: NaiveDate,
+    #[sqlx(try_from = "Money")]
     quantity: Decimal,
+    #[sqlx(try_from = "Money")]
     average_price: Decimal,
+    #[sqlx(try_from = "Money")]
     brokerage: Decimal,
+    #[sqlx(try_from = "Money")]
     gst_on_brokerage: Decimal,
     currency: String,
+    #[sqlx(try_from = "Money")]
     fx_rate: Decimal,
+    #[sqlx(try_from = "OptMoney")]
     spot_fx_rate: Option<Decimal>,
+    /// The cash terms of the scrip-for-scrip action this Sell closes, joined
+    /// in — all four are `None` for an ordinary Sell, and all four are set on
+    /// a partial-rollover closing Sell (see [`SellInfo::scrip_cash_apportionment`]).
+    #[sqlx(try_from = "OptMoney")]
+    scrip_cash_per_unit: Option<Decimal>,
+    #[sqlx(try_from = "OptMoney")]
+    scrip_market_value: Option<Decimal>,
+    #[sqlx(try_from = "OptMoney")]
+    scrip_new_units: Option<Decimal>,
+    #[sqlx(try_from = "OptMoney")]
+    scrip_old_units: Option<Decimal>,
+}
+
+impl SellInfo {
+    /// The sale's per-record FX rate: its deliberate spot override when set,
+    /// else its `fx_rate` fallback (see `infra::fx::FxOverride`).
+    fn fx_override(&self) -> FxOverride {
+        FxOverride::from_trade(self.fx_rate, self.spot_fx_rate)
+    }
+
     /// Set on a partial-rollover scrip-for-scrip closing Sell (its action has
     /// a cash component): the `(numerator, denominator)` of the cash side's
     /// market-value share of each allocated parcel's reduced cost base —
@@ -117,61 +144,46 @@ struct SellInfo {
     /// time, so only this share is realised against the cash proceeds. Kept
     /// as a pair and multiplied before dividing so exact fractions (e.g.
     /// Gunther's 1/3) don't round twice. `None` for ordinary Sells.
-    scrip_cash_apportionment: Option<(Decimal, Decimal)>,
-}
-
-impl sqlx::FromRow<'_, SqliteRow> for SellInfo {
-    fn from_row(row: &SqliteRow) -> Result<Self, sqlx::Error> {
-        let scrip_cash_apportionment = match row_opt_dec(row, "scrip_cash_per_unit")? {
-            Some(cash) => {
-                let mv = row_dec(row, "scrip_market_value")?;
-                let new = row_dec(row, "scrip_new_units")?;
-                let old = row_dec(row, "scrip_old_units")?;
-                Some((cash * old, cash * old + mv * new))
-            }
-            None => None,
+    ///
+    /// A cash component with any of its companion terms missing is a corrupt
+    /// action row — `corporate_actions` CHECKs `scrip_market_value` and
+    /// `scrip_cash_per_unit` present together, and a ScripForScrip action
+    /// always carries its exchange ratio — so it is an error, never a
+    /// silently un-apportioned (and so overstated) cost base.
+    fn scrip_cash_apportionment(&self) -> Result<Option<(Decimal, Decimal)>, sqlx::Error> {
+        let Some(cash) = self.scrip_cash_per_unit else {
+            return Ok(None);
         };
-        Ok(SellInfo {
-            id: row.try_get("id")?,
-            listing_id: row.try_get("listing_id")?,
-            holding_account_id: row.try_get("holding_account_id")?,
-            date: row.try_get("date")?,
-            quantity: row_dec(row, "quantity")?,
-            average_price: row_dec(row, "average_price")?,
-            brokerage: row_dec(row, "brokerage")?,
-            gst_on_brokerage: row_dec(row, "gst_on_brokerage")?,
-            currency: row.try_get("currency")?,
-            fx_rate: row_dec(row, "fx_rate")?,
-            spot_fx_rate: row_opt_dec(row, "spot_fx_rate")?,
-            scrip_cash_apportionment,
-        })
-    }
-}
-
-impl SellInfo {
-    /// The sale's per-record FX rate: its deliberate spot override when set,
-    /// else its `fx_rate` fallback (see `infra::fx::FxOverride`).
-    fn fx_override(&self) -> FxOverride {
-        FxOverride::from_trade(self.fx_rate, self.spot_fx_rate)
+        let missing = |col: &str| {
+            sqlx::Error::Decode(
+                format!(
+                    "scrip action of sell {} has a cash component but no {col}",
+                    self.id
+                )
+                .into(),
+            )
+        };
+        let mv = self
+            .scrip_market_value
+            .ok_or_else(|| missing("scrip_market_value"))?;
+        let new = self
+            .scrip_new_units
+            .ok_or_else(|| missing("scrip_new_units"))?;
+        let old = self
+            .scrip_old_units
+            .ok_or_else(|| missing("scrip_old_units"))?;
+        Ok(Some((cash * old, cash * old + mv * new)))
     }
 }
 
 /// One parcel-allocation row: `quantity_allocated` units of the sale (in the
 /// sale date's unit basis) came from the purchase parcel.
+#[derive(sqlx::FromRow)]
 struct Allocation {
     sale_trade_id: i64,
     purchase_trade_id: i64,
+    #[sqlx(try_from = "Money")]
     quantity_allocated: Decimal,
-}
-
-impl sqlx::FromRow<'_, SqliteRow> for Allocation {
-    fn from_row(row: &SqliteRow) -> Result<Self, sqlx::Error> {
-        Ok(Allocation {
-            sale_trade_id: row.try_get("sale_trade_id")?,
-            purchase_trade_id: row.try_get("purchase_trade_id")?,
-            quantity_allocated: row_dec(row, "quantity_allocated")?,
-        })
-    }
 }
 
 /// A rights sale/lapse as the report reads it (`rights_sales` joined to its
@@ -182,50 +194,31 @@ impl sqlx::FromRow<'_, SqliteRow> for Allocation {
 /// convert to AUD at the sale month's ATO rate (manual `fx_rate` fallback) —
 /// the rights' own purchase date isn't tracked, so the cost leg uses the sale
 /// date too.
+#[derive(sqlx::FromRow)]
 struct RightsSaleInfo {
     id: i64,
     listing_id: i64,
     holding_account_id: i64,
     date: NaiveDate,
+    #[sqlx(try_from = "Money")]
     units: Decimal,
+    #[sqlx(try_from = "Money")]
     proceeds_per_right: Decimal,
+    #[sqlx(try_from = "Money")]
     rights_cost: Decimal,
     currency: String,
+    #[sqlx(try_from = "Money")]
     fx_rate: Decimal,
-}
-
-impl sqlx::FromRow<'_, SqliteRow> for RightsSaleInfo {
-    fn from_row(row: &SqliteRow) -> Result<Self, sqlx::Error> {
-        Ok(RightsSaleInfo {
-            id: row.try_get("id")?,
-            listing_id: row.try_get("listing_id")?,
-            holding_account_id: row.try_get("holding_account_id")?,
-            date: row.try_get("date")?,
-            units: row_dec(row, "units")?,
-            proceeds_per_right: row_dec(row, "proceeds_per_right")?,
-            rights_cost: row_dec(row, "rights_cost")?,
-            currency: row.try_get("currency")?,
-            fx_rate: row_dec(row, "fx_rate")?,
-        })
-    }
 }
 
 /// One rights-sale anchoring row: `units` of the sale's rights were earned by
 /// (and take the acquisition date of) the purchase parcel. Consumes nothing.
+#[derive(sqlx::FromRow)]
 struct RightsAllocation {
     rights_sale_id: i64,
     purchase_trade_id: i64,
+    #[sqlx(try_from = "Money")]
     units: Decimal,
-}
-
-impl sqlx::FromRow<'_, SqliteRow> for RightsAllocation {
-    fn from_row(row: &SqliteRow) -> Result<Self, sqlx::Error> {
-        Ok(RightsAllocation {
-            rights_sale_id: row.try_get("rights_sale_id")?,
-            purchase_trade_id: row.try_get("purchase_trade_id")?,
-            units: row_dec(row, "units")?,
-        })
-    }
 }
 
 /// Everything the realised-gains computation consumes, read in one go by
@@ -446,7 +439,7 @@ fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sq
         // scrip side's share rolled over into the replacement parcels (the
         // exchange carried exactly the complement, so the two sum to the
         // full reduced cost base).
-        let alloc_cost = match sale.scrip_cash_apportionment {
+        let alloc_cost = match sale.scrip_cash_apportionment()? {
             Some((num, den)) => alloc_cost * num / den,
             None => alloc_cost,
         };
@@ -702,7 +695,10 @@ mod tests {
             currency: currency.to_string(),
             fx_rate: Decimal::ONE,
             spot_fx_rate: None,
-            scrip_cash_apportionment: None,
+            scrip_cash_per_unit: None,
+            scrip_market_value: None,
+            scrip_new_units: None,
+            scrip_old_units: None,
         }
     }
 
@@ -1978,9 +1974,17 @@ mod tests {
     fn pure_scrip_cash_apportionment_scales_the_cost_base() {
         let d = |y, m, day| NaiveDate::from_ymd_opt(y, m, day).unwrap();
         // 100 units, $9 cost base each; $10 cash against a $30 per-unit total
-        // consideration → apportionment (10, 30).
+        // consideration → apportionment (10, 30): 1-for-1 exchange, $20 market
+        // value per new unit.
         let mut sell = mem_sell(2, d(2024, 7, 10), 100, 10, "AUD");
-        sell.scrip_cash_apportionment = Some((Decimal::from(10), Decimal::from(30)));
+        sell.scrip_cash_per_unit = Some(Decimal::from(10));
+        sell.scrip_market_value = Some(Decimal::from(20));
+        sell.scrip_new_units = Some(Decimal::ONE);
+        sell.scrip_old_units = Some(Decimal::ONE);
+        assert_eq!(
+            sell.scrip_cash_apportionment().unwrap(),
+            Some((Decimal::from(10), Decimal::from(30)))
+        );
         let data = ReportData {
             sells: [(2, sell)].into(),
             buys: [(1, mem_buy(1, d(2023, 1, 15), 100, 9, "AUD"))].into(),

@@ -33,6 +33,7 @@ use crate::entities::corporate_action::{self, ActionKind};
 use crate::entities::income::{self, Income};
 use crate::entities::sell::{self, AllocationInput, SellBody};
 use crate::entities::trade::{self, Trade};
+use crate::infra::decimal::Money;
 use crate::infra::http::ApiError;
 use axum::{
     Json, Router,
@@ -241,8 +242,8 @@ pub async fn db_participate(
         .bind(id)
         .bind(action.listing_id)
         .bind(body.date)
-        .bind((dividend * body.units).to_string())
-        .bind((credit * body.units).to_string())
+        .bind(Money(dividend * body.units))
+        .bind(Money(credit * body.units))
         .bind(&currency)
         .bind(sell_id)
         .bind(body.holding_account_id)

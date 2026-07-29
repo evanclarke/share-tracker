@@ -19,7 +19,7 @@
 //! transaction. Deleting a period record means "it never existed" and settles
 //! nothing.
 
-use crate::infra::decimal::parse_dec;
+use crate::infra::decimal::{Money, parse_dec};
 use crate::infra::http::ApiError;
 use axum::{
     Json, Router,
@@ -198,7 +198,7 @@ pub async fn db_upsert(pool: &SqlitePool, period: &DrpEnrolment) -> Result<(), U
                     "UPDATE trades SET residual_carried_forward = '0', residual_paid_out = ? \
                      WHERE id = ?",
                 )
-                .bind((paid + carried).to_string())
+                .bind(Money(paid + carried))
                 .bind(trade_id)
                 .execute(&mut *tx)
                 .await?;

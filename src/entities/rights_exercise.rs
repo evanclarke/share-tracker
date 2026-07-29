@@ -33,7 +33,7 @@ use crate::entities::corporate_action::{
     self, ActionKind, SplitEvent, as_acquired_quantity, split_adjusted_quantity,
 };
 use crate::entities::trade::{self, Trade, TradeType};
-use crate::infra::decimal::parse_dec;
+use crate::infra::decimal::{Money, parse_dec};
 use crate::infra::http::ApiError;
 use axum::{
     Json, Router,
@@ -262,12 +262,12 @@ pub async fn db_exercise(
     .bind(body.date)
     .bind(body.date)
     .bind(action.listing_id)
-    .bind(exercise_price.to_string())
-    .bind(body.units.to_string())
+    .bind(Money(exercise_price))
+    .bind(Money(body.units))
     .bind(&currency)
-    .bind(rights_cost.to_string())
+    .bind(Money(rights_cost))
     .bind(&currency)
-    .bind(fx_rate.to_string())
+    .bind(Money(fx_rate))
     .bind(action_id)
     .bind(body.holding_account_id)
     .execute(&mut *tx)

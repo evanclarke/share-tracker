@@ -38,10 +38,9 @@
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::Serialize;
-use sqlx::{Row, sqlite::SqliteRow};
 
 use crate::entities::corporate_action::{RocEvent, SplitEvent, per_unit_reduction};
-use crate::infra::decimal::row_dec;
+use crate::infra::decimal::{Money, OptMoney};
 use crate::infra::fx;
 
 /// The facts of a Buy/DRP parcel as transacted, in its native currency and
@@ -77,10 +76,10 @@ impl Parcel<'_> {
 }
 
 /// A Buy/DRP trade row as every cost-base report reads it — one `FromRow`
-/// mapping (TEXT decimal columns via the `infra::decimal` helpers) instead of
-/// a per-report field-by-field copy. Select [`ParcelRow::COLUMNS`] from
-/// `trades`.
-#[derive(Debug, Clone)]
+/// mapping (TEXT decimal columns via `infra::decimal`'s [`Money`]/[`OptMoney`])
+/// instead of a per-report field-by-field copy. Select [`ParcelRow::COLUMNS`]
+/// from `trades`.
+#[derive(Debug, Clone, sqlx::FromRow)]
 pub struct ParcelRow {
     pub id: i64,
     pub listing_id: i64,
@@ -88,14 +87,20 @@ pub struct ParcelRow {
     /// The actual trade date — drives split and return-of-capital
     /// applicability (see [`Parcel::trade_date`]).
     pub date: NaiveDate,
+    #[sqlx(try_from = "Money")]
     pub quantity: Decimal,
+    #[sqlx(try_from = "Money")]
     pub average_price: Decimal,
+    #[sqlx(try_from = "Money")]
     pub brokerage: Decimal,
+    #[sqlx(try_from = "Money")]
     pub gst_on_brokerage: Decimal,
     pub currency: String,
+    #[sqlx(try_from = "Money")]
     pub fx_rate: Decimal,
     /// Deliberate transaction-date spot-rate override: when set it wins over
     /// the ATO monthly rate (see `infra::fx::FxOverride`).
+    #[sqlx(try_from = "OptMoney")]
     pub spot_fx_rate: Option<Decimal>,
     /// Set on a rollover replacement parcel (scrip-for-scrip, demerger): the
     /// consumed parcel's acquisition date, carried so the combined holding
@@ -150,25 +155,6 @@ impl ParcelRow {
             currency: &self.currency,
             trade_date: self.date,
         }
-    }
-}
-
-impl sqlx::FromRow<'_, SqliteRow> for ParcelRow {
-    fn from_row(row: &SqliteRow) -> Result<Self, sqlx::Error> {
-        Ok(ParcelRow {
-            id: row.try_get("id")?,
-            listing_id: row.try_get("listing_id")?,
-            holding_account_id: row.try_get("holding_account_id")?,
-            date: row.try_get("date")?,
-            quantity: row_dec(row, "quantity")?,
-            average_price: row_dec(row, "average_price")?,
-            brokerage: row_dec(row, "brokerage")?,
-            gst_on_brokerage: row_dec(row, "gst_on_brokerage")?,
-            currency: row.try_get("currency")?,
-            fx_rate: row_dec(row, "fx_rate")?,
-            spot_fx_rate: crate::infra::decimal::row_opt_dec(row, "spot_fx_rate")?,
-            deemed_acquisition_date: row.try_get("deemed_acquisition_date")?,
-        })
     }
 }
 

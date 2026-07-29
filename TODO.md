@@ -15,48 +15,6 @@ Currently handled correctly: the server binds `127.0.0.1` by default and exposin
 `--host` opt-in documented as unauthenticated. Only matters if the server is ever exposed.
 - [ ] If/when exposure is wanted: add an auth layer (e.g. a bearer token/basic-auth middleware over the whole router) before recommending `--host 0.0.0.0` for anything but a trusted LAN; until then this section records the decision that localhost-only is the accepted posture
 
-## Decimal columns bypass the sqlx type system (2026-07-29 Rust review)
-
-Every TEXT-stored decimal is read through a hand-written `FromRow` and written through
-`.bind(x.to_string())`: 19 hand-written `impl sqlx::FromRow` blocks across 16 files, ~100
-`row_dec`/`row_opt_dec` calls, and 109 `.bind(<decimal>.to_string())` sites. CLAUDE.md's
-"never `.parse().unwrap_or(Decimal::ZERO)`" rule and "new monetary columns are TEXT" rule are
-therefore enforced by review discipline on every new column, not by the compiler.
-
-sqlx 0.9 can carry this itself. A local newtype implementing `Type`/`Decode`/`Encode` for Sqlite,
-plus `#[sqlx(try_from = "…")]` on the field, lets row structs go back to `#[derive(sqlx::FromRow)]`
-with plain `Decimal`/`Option<Decimal>` fields:
-
-```rust
-// infra/decimal.rs
-pub struct Money(pub Decimal);             // TEXT-backed Type + Decode + Encode
-pub struct OptMoney(pub Option<Decimal>);  // decodes SQL NULL itself
-impl From<Money> for Decimal { … }
-impl From<OptMoney> for Option<Decimal> { … }
-
-#[derive(Serialize, Deserialize, sqlx::FromRow)]
-pub struct InterestIncome {
-    pub id: i64,
-    #[sqlx(try_from = "Money")]    pub amount: Decimal,
-    #[sqlx(try_from = "OptMoney")] pub gross_amount: Option<Decimal>,
-}
-```
-
-Prototyped and runtime-verified against sqlx 0.9 before writing this section: `123.4567890123`
-round-trips exactly, `NULL` decodes to `None`, and a malformed value fails with
-`error occurred while decoding column "amount": invalid decimal "oops"` — the column name now comes
-from sqlx rather than a hand-passed string literal that can drift from the actual column, so
-diagnostics are strictly better than `parse_dec`'s. Two things worth knowing up front: sqlx 0.9's
-`Encode::encode_by_ref` takes `&mut SqliteArgumentsBuffer` (not 0.8's
-`&mut Vec<SqliteArgumentValue>`), and `impl From<OptMoney> for Option<Decimal>` is orphan-legal
-because the local type sits in argument position.
-
-- [ ] Add `Money`/`OptMoney` to `infra/decimal.rs` with `Type`/`Decode`/`Encode` for Sqlite and the `From` conversions; keep `parse_dec` for the non-`FromRow` callers that read a scalar out of an ad-hoc query
-- [ ] Convert the 19 hand-written `FromRow` impls to derives, entity by entity (each file is independently convertible, so this can land as several small commits): `entities/{amit_adjustment,amma,cgt_settings,closing_price,ess_statement,income,inheritance,interest_income,investment_expense,parcel_allocation,rba_fx_rate}.rs`, `entities/{corporate_action/model,trade/model}.rs`, `reports/{performance,realised_gains}.rs`, `domain/cost_base.rs`
-- [ ] Replace the 109 `.bind(x.to_string())` sites with `.bind(Money(x))` so writes go through the same type as reads
-- [ ] Tests: a `Money`/`OptMoney` round-trip test in `infra::decimal` pinning full precision preserved, `NULL` → `None`, and a malformed value producing a decode error naming the column (the behaviour `db_malformed_decimal_is_an_error_not_zero` pins today, now at the type level). The existing per-entity CRUD tests cover the conversions; a green suite with the `FromRow` impls gone is the gate
-- [ ] Once converted, consider whether `db::tests::migrations_store_decimals_as_text_never_real` can be strengthened to also assert every monetary column's Rust field goes through `Money`/`OptMoney` — or record here that the derive makes it unnecessary
-
 ## Entity CRUD scaffolding duplicated, and the DELETE 404 contract has drifted (2026-07-29 Rust review)
 
 19 entity modules contain a byte-identical `async fn list`, and `get_one`/`delete` are identical

@@ -1,4 +1,4 @@
-use crate::infra::decimal::row_dec;
+use crate::infra::decimal::Money;
 use crate::infra::http::ApiError;
 use axum::{
     Json, Router,
@@ -9,9 +9,9 @@ use axum::{
 use chrono::{Datelike, NaiveDate};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use sqlx::{Row, SqlitePool};
+use sqlx::SqlitePool;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct AmmaStatement {
     pub id: i64,
     pub listing_id: i64,
@@ -21,35 +21,52 @@ pub struct AmmaStatement {
     /// `domain::tax_year` convention), so any other date would land the
     /// statement in the wrong year silently.
     pub tax_year_end_date: NaiveDate,
+    #[sqlx(try_from = "Money")]
     pub units_held: Decimal,
     pub date_received: NaiveDate,
+    #[sqlx(try_from = "Money")]
     pub australian_interest: Decimal,
+    #[sqlx(try_from = "Money")]
     pub australian_dividends_unfranked: Decimal,
+    #[sqlx(try_from = "Money")]
     pub franked_dividends: Decimal,
+    #[sqlx(try_from = "Money")]
     pub franking_credits: Decimal,
+    #[sqlx(try_from = "Money")]
     pub net_rent: Decimal,
+    #[sqlx(try_from = "Money")]
     pub foreign_income: Decimal,
+    #[sqlx(try_from = "Money")]
     pub foreign_tax_credits: Decimal,
+    #[sqlx(try_from = "Money")]
     pub other_income: Decimal,
+    #[sqlx(try_from = "Money")]
     pub cgt_discount_gains: Decimal,
+    #[sqlx(try_from = "Money")]
     pub cgt_indexation_gains: Decimal,
+    #[sqlx(try_from = "Money")]
     pub cgt_other_gains: Decimal,
+    #[sqlx(try_from = "Money")]
     pub capital_losses_applied: Decimal,
     /// Informational only. Tax-deferred amounts are a reported AMMA statement line, but
     /// they do NOT directly drive the member's cost base adjustment — the ATO's annual
     /// AMIT cost base net amount (`cost_base_adjustment` below) already reflects them.
     /// See `docs/ato/amit-cost-base-adjustments.md`. Not consumed by any calculation.
+    #[sqlx(try_from = "Money")]
     pub tax_deferred_amount: Decimal,
     /// Informational only. As with `tax_deferred_amount`, tax-free amounts are reported
     /// on the statement but are not a direct cost-base driver; they are broadly reflected
     /// in `cost_base_adjustment`. See `docs/ato/amit-cost-base-adjustments.md`.
+    #[sqlx(try_from = "Money")]
     pub tax_free_amount: Decimal,
     /// The AMIT cost base net amount **per unit** for the year — the sole driver of the
     /// cost base adjustment applied to affected parcels (see
     /// `amit_adjustment::db_cost_base_reductions`). A positive value reduces the cost base;
     /// a negative value increases it (upward adjustments are permitted under the AMIT
     /// regime). See `docs/ato/amit-cost-base-adjustments.md`.
+    #[sqlx(try_from = "Money")]
     pub cost_base_adjustment: Decimal,
+    #[sqlx(try_from = "Money")]
     pub tfn_withholding_tax: Decimal,
     /// ISO 4217 currency the attributed amounts are denominated in. The tax summary
     /// converts non-AUD amounts to AUD via the ATO rate for this currency and the
@@ -59,36 +76,6 @@ pub struct AmmaStatement {
     /// statement per holder account; see `entities::holding_account`).
     /// Defaults to the seeded default account when omitted from a request.
     pub holding_account_id: i64,
-}
-
-impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for AmmaStatement {
-    fn from_row(row: &'r sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
-        Ok(AmmaStatement {
-            id: row.try_get("id")?,
-            listing_id: row.try_get("listing_id")?,
-            tax_year_end_date: row.try_get("tax_year_end_date")?,
-            units_held: row_dec(row, "units_held")?,
-            date_received: row.try_get("date_received")?,
-            australian_interest: row_dec(row, "australian_interest")?,
-            australian_dividends_unfranked: row_dec(row, "australian_dividends_unfranked")?,
-            franked_dividends: row_dec(row, "franked_dividends")?,
-            franking_credits: row_dec(row, "franking_credits")?,
-            net_rent: row_dec(row, "net_rent")?,
-            foreign_income: row_dec(row, "foreign_income")?,
-            foreign_tax_credits: row_dec(row, "foreign_tax_credits")?,
-            other_income: row_dec(row, "other_income")?,
-            cgt_discount_gains: row_dec(row, "cgt_discount_gains")?,
-            cgt_indexation_gains: row_dec(row, "cgt_indexation_gains")?,
-            cgt_other_gains: row_dec(row, "cgt_other_gains")?,
-            capital_losses_applied: row_dec(row, "capital_losses_applied")?,
-            tax_deferred_amount: row_dec(row, "tax_deferred_amount")?,
-            tax_free_amount: row_dec(row, "tax_free_amount")?,
-            cost_base_adjustment: row_dec(row, "cost_base_adjustment")?,
-            tfn_withholding_tax: row_dec(row, "tfn_withholding_tax")?,
-            currency: row.try_get("currency")?,
-            holding_account_id: row.try_get("holding_account_id")?,
-        })
-    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -249,24 +236,24 @@ pub async fn db_upsert(pool: &SqlitePool, stmt: &AmmaStatement) -> Result<(), Up
     .bind(stmt.id)
     .bind(stmt.listing_id)
     .bind(stmt.tax_year_end_date)
-    .bind(stmt.units_held.to_string())
+    .bind(Money(stmt.units_held))
     .bind(stmt.date_received)
-    .bind(stmt.australian_interest.to_string())
-    .bind(stmt.australian_dividends_unfranked.to_string())
-    .bind(stmt.franked_dividends.to_string())
-    .bind(stmt.franking_credits.to_string())
-    .bind(stmt.net_rent.to_string())
-    .bind(stmt.foreign_income.to_string())
-    .bind(stmt.foreign_tax_credits.to_string())
-    .bind(stmt.other_income.to_string())
-    .bind(stmt.cgt_discount_gains.to_string())
-    .bind(stmt.cgt_indexation_gains.to_string())
-    .bind(stmt.cgt_other_gains.to_string())
-    .bind(stmt.capital_losses_applied.to_string())
-    .bind(stmt.tax_deferred_amount.to_string())
-    .bind(stmt.tax_free_amount.to_string())
-    .bind(stmt.cost_base_adjustment.to_string())
-    .bind(stmt.tfn_withholding_tax.to_string())
+    .bind(Money(stmt.australian_interest))
+    .bind(Money(stmt.australian_dividends_unfranked))
+    .bind(Money(stmt.franked_dividends))
+    .bind(Money(stmt.franking_credits))
+    .bind(Money(stmt.net_rent))
+    .bind(Money(stmt.foreign_income))
+    .bind(Money(stmt.foreign_tax_credits))
+    .bind(Money(stmt.other_income))
+    .bind(Money(stmt.cgt_discount_gains))
+    .bind(Money(stmt.cgt_indexation_gains))
+    .bind(Money(stmt.cgt_other_gains))
+    .bind(Money(stmt.capital_losses_applied))
+    .bind(Money(stmt.tax_deferred_amount))
+    .bind(Money(stmt.tax_free_amount))
+    .bind(Money(stmt.cost_base_adjustment))
+    .bind(Money(stmt.tfn_withholding_tax))
     .bind(&stmt.currency)
     .bind(stmt.holding_account_id)
     .execute(pool)

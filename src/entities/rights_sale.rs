@@ -42,7 +42,7 @@ use crate::entities::corporate_action::{
 };
 use crate::entities::rights_exercise::{db_held_at_record_date, db_rights_used, entitled_units};
 use crate::entities::trade::TradeType;
-use crate::infra::decimal::{parse_dec, row_dec};
+use crate::infra::decimal::{Money, parse_dec, row_dec};
 use crate::infra::http::ApiError;
 use axum::{
     Json, Router,
@@ -340,10 +340,10 @@ pub async fn db_sell_rights(
     )
     .bind(action_id)
     .bind(body.date)
-    .bind(body.units.to_string())
-    .bind(proceeds_per_right.to_string())
-    .bind(rights_cost.to_string())
-    .bind(fx_rate.to_string())
+    .bind(Money(body.units))
+    .bind(Money(proceeds_per_right))
+    .bind(Money(rights_cost))
+    .bind(Money(fx_rate))
     .bind(body.holding_account_id)
     .execute(&mut *tx)
     .await?;
@@ -355,7 +355,7 @@ pub async fn db_sell_rights(
         )
         .bind(new_id)
         .bind(alloc.purchase_trade_id)
-        .bind(alloc.units.to_string())
+        .bind(Money(alloc.units))
         .execute(&mut *tx)
         .await?;
     }

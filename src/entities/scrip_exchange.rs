@@ -56,7 +56,7 @@ use crate::entities::corporate_action::{
 };
 use crate::entities::sell::{self, AllocationInput, SellBody};
 use crate::entities::trade::{self, Trade};
-use crate::infra::decimal::parse_dec;
+use crate::infra::decimal::{Money, OptMoney, parse_dec};
 use crate::infra::http::ApiError;
 use axum::{
     Json, Router,
@@ -380,12 +380,12 @@ pub async fn db_exchange(pool: &SqlitePool, action_id: i64) -> Result<Exchange, 
         .bind(action.date)
         .bind(action.date)
         .bind(scrip_listing_id)
-        .bind(r.new_quantity.to_string())
+        .bind(Money(r.new_quantity))
         .bind(&r.currency)
-        .bind(r.carried_cost_base.to_string())
+        .bind(Money(r.carried_cost_base))
         .bind(&r.currency)
-        .bind(r.fx_rate.to_string())
-        .bind(r.spot_fx_rate.map(|d| d.to_string()))
+        .bind(Money(r.fx_rate))
+        .bind(OptMoney(r.spot_fx_rate))
         .bind(action_id)
         .bind(r.deemed_acquisition_date)
         .bind(r.holding_account_id)

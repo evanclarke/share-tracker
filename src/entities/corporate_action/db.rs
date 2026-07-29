@@ -3,6 +3,7 @@
 //! exchange/demerger/recognise trades is frozen against edits ([`WriteError`]).
 
 use super::model::{ActionKind, CorporateAction};
+use crate::infra::decimal::OptMoney;
 use crate::infra::http::ApiError;
 use sqlx::SqlitePool;
 
@@ -81,29 +82,29 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
     // types' columns are NULL (the table CHECKs require exactly this shape).
     #[derive(Default)]
     struct Cols {
-        amount_per_unit: Option<String>,
+        amount_per_unit: OptMoney,
         currency: Option<String>,
-        split_new_units: Option<String>,
-        split_old_units: Option<String>,
-        bonus_units: Option<String>,
-        bonus_held_units: Option<String>,
-        rights_units: Option<String>,
-        rights_held_units: Option<String>,
-        exercise_price: Option<String>,
-        buyback_price: Option<String>,
-        buyback_dividend: Option<String>,
-        buyback_franking_credit: Option<String>,
-        buyback_market_value: Option<String>,
+        split_new_units: OptMoney,
+        split_old_units: OptMoney,
+        bonus_units: OptMoney,
+        bonus_held_units: OptMoney,
+        rights_units: OptMoney,
+        rights_held_units: OptMoney,
+        exercise_price: OptMoney,
+        buyback_price: OptMoney,
+        buyback_dividend: OptMoney,
+        buyback_franking_credit: OptMoney,
+        buyback_market_value: OptMoney,
         scrip_listing_id: Option<i64>,
-        scrip_new_units: Option<String>,
-        scrip_old_units: Option<String>,
-        scrip_cash_per_unit: Option<String>,
-        scrip_market_value: Option<String>,
+        scrip_new_units: OptMoney,
+        scrip_old_units: OptMoney,
+        scrip_cash_per_unit: OptMoney,
+        scrip_market_value: OptMoney,
         scrip_cash_currency: Option<String>,
         demerger_listing_id: Option<i64>,
-        demerger_new_units: Option<String>,
-        demerger_held_units: Option<String>,
-        demerger_cost_base_pct: Option<String>,
+        demerger_new_units: OptMoney,
+        demerger_held_units: OptMoney,
+        demerger_cost_base_pct: OptMoney,
         worthless_event: Option<&'static str>,
     }
     let mut c = Cols::default();
@@ -112,22 +113,22 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
             amount_per_unit,
             currency,
         } => {
-            c.amount_per_unit = Some(amount_per_unit.to_string());
+            c.amount_per_unit = OptMoney(Some(*amount_per_unit));
             c.currency = Some(currency.clone());
         }
         ActionKind::ShareSplit {
             split_new_units,
             split_old_units,
         } => {
-            c.split_new_units = Some(split_new_units.to_string());
-            c.split_old_units = Some(split_old_units.to_string());
+            c.split_new_units = OptMoney(Some(*split_new_units));
+            c.split_old_units = OptMoney(Some(*split_old_units));
         }
         ActionKind::BonusIssue {
             bonus_units,
             bonus_held_units,
         } => {
-            c.bonus_units = Some(bonus_units.to_string());
-            c.bonus_held_units = Some(bonus_held_units.to_string());
+            c.bonus_units = OptMoney(Some(*bonus_units));
+            c.bonus_held_units = OptMoney(Some(*bonus_held_units));
         }
         ActionKind::RightsIssue {
             rights_units,
@@ -135,9 +136,9 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
             exercise_price,
             currency,
         } => {
-            c.rights_units = Some(rights_units.to_string());
-            c.rights_held_units = Some(rights_held_units.to_string());
-            c.exercise_price = Some(exercise_price.to_string());
+            c.rights_units = OptMoney(Some(*rights_units));
+            c.rights_held_units = OptMoney(Some(*rights_held_units));
+            c.exercise_price = OptMoney(Some(*exercise_price));
             c.currency = Some(currency.clone());
         }
         ActionKind::BuyBack {
@@ -147,10 +148,10 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
             buyback_market_value,
             currency,
         } => {
-            c.buyback_price = Some(buyback_price.to_string());
-            c.buyback_dividend = Some(buyback_dividend.to_string());
-            c.buyback_franking_credit = Some(buyback_franking_credit.to_string());
-            c.buyback_market_value = buyback_market_value.map(|v| v.to_string());
+            c.buyback_price = OptMoney(Some(*buyback_price));
+            c.buyback_dividend = OptMoney(Some(*buyback_dividend));
+            c.buyback_franking_credit = OptMoney(Some(*buyback_franking_credit));
+            c.buyback_market_value = OptMoney(*buyback_market_value);
             c.currency = Some(currency.clone());
         }
         ActionKind::ScripForScrip {
@@ -162,10 +163,10 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
             scrip_cash_currency,
         } => {
             c.scrip_listing_id = Some(*scrip_listing_id);
-            c.scrip_new_units = Some(scrip_new_units.to_string());
-            c.scrip_old_units = Some(scrip_old_units.to_string());
-            c.scrip_cash_per_unit = scrip_cash_per_unit.map(|v| v.to_string());
-            c.scrip_market_value = scrip_market_value.map(|v| v.to_string());
+            c.scrip_new_units = OptMoney(Some(*scrip_new_units));
+            c.scrip_old_units = OptMoney(Some(*scrip_old_units));
+            c.scrip_cash_per_unit = OptMoney(*scrip_cash_per_unit);
+            c.scrip_market_value = OptMoney(*scrip_market_value);
             c.scrip_cash_currency = scrip_cash_currency.clone();
         }
         ActionKind::Demerger {
@@ -175,9 +176,9 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
             demerger_cost_base_pct,
         } => {
             c.demerger_listing_id = Some(*demerger_listing_id);
-            c.demerger_new_units = Some(demerger_new_units.to_string());
-            c.demerger_held_units = Some(demerger_held_units.to_string());
-            c.demerger_cost_base_pct = Some(demerger_cost_base_pct.to_string());
+            c.demerger_new_units = OptMoney(Some(*demerger_new_units));
+            c.demerger_held_units = OptMoney(Some(*demerger_held_units));
+            c.demerger_cost_base_pct = OptMoney(Some(*demerger_cost_base_pct));
         }
         ActionKind::WorthlessShares { worthless_event } => {
             c.worthless_event = Some(worthless_event.as_str());

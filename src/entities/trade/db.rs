@@ -8,7 +8,7 @@ use super::checks::{
     statement_total_detail, validate_spot_fx_rate,
 };
 use super::model::Trade;
-use crate::infra::decimal::parse_dec;
+use crate::infra::decimal::{Money, OptMoney, parse_dec};
 use crate::infra::http::ApiError;
 use rust_decimal::Decimal;
 use sqlx::{Row, SqlitePool};
@@ -350,20 +350,20 @@ pub async fn db_upsert(pool: &SqlitePool, trade: &Trade) -> Result<(), UpsertErr
     .bind(trade.date)
     .bind(trade.settlement_date)
     .bind(trade.listing_id)
-    .bind(trade.average_price.to_string())
-    .bind(trade.quantity.to_string())
+    .bind(Money(trade.average_price))
+    .bind(Money(trade.quantity))
     .bind(&trade.currency)
-    .bind(trade.brokerage.to_string())
-    .bind(trade.gst_on_brokerage.to_string())
+    .bind(Money(trade.brokerage))
+    .bind(Money(trade.gst_on_brokerage))
     .bind(trade.brokerage_includes_gst)
     .bind(&trade.brokerage_currency)
-    .bind(trade.fx_rate.to_string())
-    .bind(trade.spot_fx_rate.map(|d| d.to_string()))
+    .bind(Money(trade.fx_rate))
+    .bind(OptMoney(trade.spot_fx_rate))
     .bind(&trade.contract_note_ref)
-    .bind(trade.statement_total.map(|d| d.to_string()))
-    .bind(trade.residual_brought_forward.to_string())
-    .bind(trade.residual_carried_forward.to_string())
-    .bind(trade.residual_paid_out.to_string())
+    .bind(OptMoney(trade.statement_total))
+    .bind(Money(trade.residual_brought_forward))
+    .bind(Money(trade.residual_carried_forward))
+    .bind(Money(trade.residual_paid_out))
     .bind(trade.holding_account_id)
     .execute(&mut *tx)
     .await?;

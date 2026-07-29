@@ -15,7 +15,7 @@
 //! investment income, converting a non-AUD amount to AUD via the ATO rate for the
 //! month of `date_incurred` (failing loudly when no rate exists).
 
-use crate::infra::decimal::{row_dec, row_opt_dec};
+use crate::infra::decimal::{Money, OptMoney};
 use crate::infra::http::ApiError;
 use axum::{
     Json, Router,
@@ -26,7 +26,7 @@ use axum::{
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use sqlx::{Row, SqlitePool};
+use sqlx::SqlitePool;
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, sqlx::Type)]
 pub enum ExpenseType {
@@ -44,7 +44,7 @@ pub enum ExpenseType {
     Other,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct InvestmentExpense {
     pub id: i64,
     /// Date incurred: its month sets the ATO FX conversion month and the
@@ -53,11 +53,14 @@ pub struct InvestmentExpense {
     pub expense_type: ExpenseType,
     /// The deductible amount (post-apportionment), in `currency`. The figure the
     /// tax summary totals.
+    #[sqlx(try_from = "Money")]
     pub amount: Decimal,
     /// Optional provenance (informational): the pre-apportionment gross expense.
+    #[sqlx(try_from = "OptMoney")]
     pub gross_amount: Option<Decimal>,
     /// Optional provenance (informational): the percentage of `gross_amount` the
     /// user determined was deductible.
+    #[sqlx(try_from = "OptMoney")]
     pub deductible_percentage: Option<Decimal>,
     /// ISO 4217 currency the amount is denominated in. The tax summary converts a
     /// non-AUD amount to AUD via the ATO rate for this currency and the month of
@@ -70,23 +73,6 @@ pub struct InvestmentExpense {
     /// Optional link to the holding account the expense relates to
     /// (NULL = portfolio-wide).
     pub holding_account_id: Option<i64>,
-}
-
-impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for InvestmentExpense {
-    fn from_row(row: &'r sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
-        Ok(InvestmentExpense {
-            id: row.try_get("id")?,
-            date_incurred: row.try_get("date_incurred")?,
-            expense_type: row.try_get("expense_type")?,
-            amount: row_dec(row, "amount")?,
-            gross_amount: row_opt_dec(row, "gross_amount")?,
-            deductible_percentage: row_opt_dec(row, "deductible_percentage")?,
-            currency: row.try_get("currency")?,
-            description: row.try_get("description")?,
-            listing_id: row.try_get("listing_id")?,
-            holding_account_id: row.try_get("holding_account_id")?,
-        })
-    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -162,9 +148,9 @@ pub async fn db_upsert(pool: &SqlitePool, e: &InvestmentExpense) -> Result<(), s
     .bind(e.id)
     .bind(e.date_incurred)
     .bind(e.expense_type)
-    .bind(e.amount.to_string())
-    .bind(e.gross_amount.map(|d| d.to_string()))
-    .bind(e.deductible_percentage.map(|d| d.to_string()))
+    .bind(Money(e.amount))
+    .bind(OptMoney(e.gross_amount))
+    .bind(OptMoney(e.deductible_percentage))
     .bind(&e.currency)
     .bind(&e.description)
     .bind(e.listing_id)

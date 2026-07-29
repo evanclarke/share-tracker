@@ -1,4 +1,4 @@
-use crate::infra::decimal::row_dec;
+use crate::infra::decimal::Money;
 use crate::infra::http::ApiError;
 use axum::{
     Json, Router,
@@ -7,25 +7,18 @@ use axum::{
 };
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use sqlx::{Row, SqlitePool};
+use sqlx::SqlitePool;
+// Only the test-fixture write path below reads columns off a raw row.
+#[cfg(test)]
+use sqlx::Row;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct ParcelAllocation {
     pub id: i64,
     pub sale_trade_id: i64,
     pub purchase_trade_id: i64,
+    #[sqlx(try_from = "Money")]
     pub quantity_allocated: Decimal,
-}
-
-impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for ParcelAllocation {
-    fn from_row(row: &'r sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
-        Ok(ParcelAllocation {
-            id: row.try_get("id")?,
-            sale_trade_id: row.try_get("sale_trade_id")?,
-            purchase_trade_id: row.try_get("purchase_trade_id")?,
-            quantity_allocated: row_dec(row, "quantity_allocated")?,
-        })
-    }
 }
 
 /// Parcel allocations are read-only over HTTP. They are created and replaced
@@ -198,7 +191,7 @@ pub async fn db_upsert(
     .bind(allocation.id)
     .bind(allocation.sale_trade_id)
     .bind(allocation.purchase_trade_id)
-    .bind(allocation.quantity_allocated.to_string())
+    .bind(Money(allocation.quantity_allocated))
     .execute(pool)
     .await?;
     Ok(())

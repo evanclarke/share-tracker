@@ -1,4 +1,4 @@
-use crate::infra::decimal::{parse_dec, row_dec};
+use crate::infra::decimal::{Money, parse_dec};
 use crate::infra::http::ApiError;
 use axum::{
     Json, Router,
@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 use std::collections::HashMap;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct AmitAdjustment {
     pub id: i64,
     pub amma_statement_id: i64,
@@ -21,18 +21,8 @@ pub struct AmitAdjustment {
     /// `trade.quantity`, which caps it). If a share split/consolidation
     /// intervened before the statement, enter as-acquired units and scale the
     /// statement's per-unit figure accordingly.
+    #[sqlx(try_from = "Money")]
     pub quantity: Decimal,
-}
-
-impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for AmitAdjustment {
-    fn from_row(row: &'r sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
-        Ok(AmitAdjustment {
-            id: row.try_get("id")?,
-            amma_statement_id: row.try_get("amma_statement_id")?,
-            trade_id: row.try_get("trade_id")?,
-            quantity: row_dec(row, "quantity")?,
-        })
-    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -136,7 +126,7 @@ pub async fn db_upsert(pool: &SqlitePool, adj: &AmitAdjustment) -> Result<(), Up
     .bind(adj.id)
     .bind(adj.amma_statement_id)
     .bind(adj.trade_id)
-    .bind(adj.quantity.to_string())
+    .bind(Money(adj.quantity))
     .execute(pool)
     .await?;
     Ok(())

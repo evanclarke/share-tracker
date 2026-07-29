@@ -1,4 +1,4 @@
-use crate::infra::decimal::{row_dec, row_opt_dec};
+use crate::infra::decimal::{Money, OptMoney};
 use crate::infra::http::ApiError;
 use axum::{
     Json, Router,
@@ -9,21 +9,29 @@ use axum::{
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use sqlx::{Row, SqlitePool};
+use sqlx::SqlitePool;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Income {
     pub id: i64,
     pub listing_id: i64,
     pub date_paid: NaiveDate,
     pub ex_date: Option<NaiveDate>,
+    #[sqlx(try_from = "Money")]
     pub franked_amount: Decimal,
+    #[sqlx(try_from = "Money")]
     pub unfranked_amount: Decimal,
+    #[sqlx(try_from = "Money")]
     pub foreign_source_income: Decimal,
+    #[sqlx(try_from = "Money")]
     pub foreign_tax_paid: Decimal,
+    #[sqlx(try_from = "Money")]
     pub tfn_withholding_tax: Decimal,
+    #[sqlx(try_from = "Money")]
     pub franking_credits: Decimal,
+    #[sqlx(try_from = "Money")]
     pub lic_capital_gain_deduction: Decimal,
+    #[sqlx(try_from = "Money")]
     pub conduit_foreign_income: Decimal,
     pub trust_income: bool,
     /// Trust distributions only: the date the holder became presently entitled
@@ -67,8 +75,10 @@ pub struct Income {
     /// equal the gross cash components (see `check_per_share`). Informational
     /// / validation-only — no report uses it (mirrors
     /// `trades.statement_total`).
+    #[sqlx(try_from = "OptMoney")]
     pub amount_per_security: Option<Decimal>,
     /// See `amount_per_security` — the statement's securities-held count.
+    #[sqlx(try_from = "OptMoney")]
     pub securities_held: Option<Decimal>,
     /// Non-AMIT trust statements only: the statement's "tax-deferred amount" —
     /// a non-assessable payment that is a CGT event E4 cost-base reduction
@@ -78,35 +88,8 @@ pub struct Income {
     /// (`reports::e4_cross_check`) flags a row whose non-zero amount has no
     /// matching same-FY action. Trust rows only, never negative (`422`
     /// otherwise, mirrored by a schema CHECK).
+    #[sqlx(try_from = "OptMoney")]
     pub tax_deferred_amount: Option<Decimal>,
-}
-
-impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for Income {
-    fn from_row(row: &'r sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
-        Ok(Income {
-            id: row.try_get("id")?,
-            listing_id: row.try_get("listing_id")?,
-            date_paid: row.try_get("date_paid")?,
-            ex_date: row.try_get("ex_date")?,
-            franked_amount: row_dec(row, "franked_amount")?,
-            unfranked_amount: row_dec(row, "unfranked_amount")?,
-            foreign_source_income: row_dec(row, "foreign_source_income")?,
-            foreign_tax_paid: row_dec(row, "foreign_tax_paid")?,
-            tfn_withholding_tax: row_dec(row, "tfn_withholding_tax")?,
-            franking_credits: row_dec(row, "franking_credits")?,
-            lic_capital_gain_deduction: row_dec(row, "lic_capital_gain_deduction")?,
-            conduit_foreign_income: row_dec(row, "conduit_foreign_income")?,
-            trust_income: row.try_get("trust_income")?,
-            entitlement_date: row.try_get("entitlement_date")?,
-            reinvestment_trade_id: row.try_get("reinvestment_trade_id")?,
-            currency: row.try_get("currency")?,
-            buyback_trade_id: row.try_get("buyback_trade_id")?,
-            holding_account_id: row.try_get("holding_account_id")?,
-            amount_per_security: row_opt_dec(row, "amount_per_security")?,
-            securities_held: row_opt_dec(row, "securities_held")?,
-            tax_deferred_amount: row_opt_dec(row, "tax_deferred_amount")?,
-        })
-    }
 }
 
 impl Income {
@@ -514,21 +497,21 @@ pub async fn db_upsert(pool: &SqlitePool, income: &Income) -> Result<(), UpsertE
     .bind(income.listing_id)
     .bind(income.date_paid)
     .bind(income.ex_date)
-    .bind(income.franked_amount.to_string())
-    .bind(income.unfranked_amount.to_string())
-    .bind(income.foreign_source_income.to_string())
-    .bind(income.foreign_tax_paid.to_string())
-    .bind(income.tfn_withholding_tax.to_string())
-    .bind(income.franking_credits.to_string())
-    .bind(income.lic_capital_gain_deduction.to_string())
-    .bind(income.conduit_foreign_income.to_string())
+    .bind(Money(income.franked_amount))
+    .bind(Money(income.unfranked_amount))
+    .bind(Money(income.foreign_source_income))
+    .bind(Money(income.foreign_tax_paid))
+    .bind(Money(income.tfn_withholding_tax))
+    .bind(Money(income.franking_credits))
+    .bind(Money(income.lic_capital_gain_deduction))
+    .bind(Money(income.conduit_foreign_income))
     .bind(income.trust_income)
     .bind(income.entitlement_date)
     .bind(&income.currency)
     .bind(income.holding_account_id)
-    .bind(income.amount_per_security.map(|d| d.to_string()))
-    .bind(income.securities_held.map(|d| d.to_string()))
-    .bind(income.tax_deferred_amount.map(|d| d.to_string()))
+    .bind(OptMoney(income.amount_per_security))
+    .bind(OptMoney(income.securities_held))
+    .bind(OptMoney(income.tax_deferred_amount))
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;

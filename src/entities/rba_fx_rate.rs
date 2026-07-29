@@ -7,9 +7,9 @@ use axum::{
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use sqlx::{Row, SqlitePool};
+use sqlx::SqlitePool;
 
-use crate::infra::decimal::parse_dec;
+use crate::infra::decimal::Money;
 
 /// Source of the official monthly foreign exchange rates used for AUD tax
 /// conversion: the RBA's F11 "Exchange Rates" CSV (the rates the ATO directs
@@ -19,23 +19,13 @@ const RBA_FX_RATES_URL: &str = "https://www.rba.gov.au/statistics/tables/csv/f11
 
 /// An official monthly foreign exchange rate. `rate` is foreign currency units
 /// per 1 AUD (foreign-per-AUD), so AUD = foreign / rate.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct RbaFxRate {
     pub id: i64,
     pub currency: String,
     pub month: String, // 'YYYY-MM'
+    #[sqlx(try_from = "Money")]
     pub rate: Decimal,
-}
-
-impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for RbaFxRate {
-    fn from_row(row: &'r sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
-        Ok(RbaFxRate {
-            id: row.try_get("id")?,
-            currency: row.try_get("currency")?,
-            month: row.try_get("month")?,
-            rate: parse_dec("rate", row.try_get("rate")?)?,
-        })
-    }
 }
 
 #[derive(Debug)]
@@ -129,7 +119,7 @@ pub async fn db_import_rate(
     )
     .bind(currency)
     .bind(month)
-    .bind(rate.to_string())
+    .bind(Money(rate))
     .execute(pool)
     .await?;
     Ok(result.rows_affected() > 0)

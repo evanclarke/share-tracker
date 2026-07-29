@@ -56,7 +56,7 @@ use crate::entities::{
     income::Income,
     trade::{self, Trade},
 };
-use crate::infra::decimal::parse_dec;
+use crate::infra::decimal::{Money, parse_dec};
 use crate::infra::http::ApiError;
 use axum::{
     Json, Router,
@@ -340,14 +340,14 @@ pub async fn db_reinvest(
     .bind(date)
     .bind(date)
     .bind(listing_id)
-    .bind(body.reinvestment_price.to_string())
-    .bind(quantity.to_string())
+    .bind(Money(body.reinvestment_price))
+    .bind(Money(quantity))
     .bind(&currency)
     .bind(&currency)
-    .bind(fx_rate.to_string())
-    .bind(residual_bf.to_string())
-    .bind(carried.to_string())
-    .bind(paid_out.to_string())
+    .bind(Money(fx_rate))
+    .bind(Money(residual_bf))
+    .bind(Money(carried))
+    .bind(Money(paid_out))
     .bind(holding_account_id)
     .execute(&mut *tx)
     .await?;

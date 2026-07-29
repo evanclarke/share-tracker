@@ -37,7 +37,7 @@ use crate::domain::cost_base::ParcelRow;
 use crate::entities::corporate_action::{self, RocEvent, as_acquired_quantity};
 use crate::entities::sell::{self, AllocationInput, SellBody};
 use crate::entities::trade::{self, Trade};
-use crate::infra::decimal::parse_dec;
+use crate::infra::decimal::{Money, OptMoney, parse_dec};
 use crate::infra::http::ApiError;
 use axum::{
     Json, Router,
@@ -391,12 +391,12 @@ pub async fn db_transfer(
         .bind(body.date)
         .bind(body.date)
         .bind(body.listing_id)
-        .bind(t.quantity.to_string())
+        .bind(Money(t.quantity))
         .bind(&t.currency)
-        .bind(t.carried_cost_base.to_string())
+        .bind(Money(t.carried_cost_base))
         .bind(&t.currency)
-        .bind(t.fx_rate.to_string())
-        .bind(t.spot_fx_rate.map(|d| d.to_string()))
+        .bind(Money(t.fx_rate))
+        .bind(OptMoney(t.spot_fx_rate))
         .bind(body.to_account_id)
         .bind(id)
         .bind(t.deemed_acquisition_date)

@@ -33,7 +33,7 @@
 //! editing and deleting go through the inheritance, and both are refused
 //! while the parcel is drawn on by a Sell allocation or AMIT adjustment.
 
-use crate::infra::decimal::row_dec;
+use crate::infra::decimal::Money;
 use crate::infra::http::ApiError;
 use axum::{
     Json, Router,
@@ -44,7 +44,7 @@ use axum::{
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use sqlx::{Row, SqlitePool};
+use sqlx::SqlitePool;
 
 /// Which QC 66053 rule produced the inheritance's first-element cost base.
 /// Serialized verbatim to JSON and to the CHECK-constrained TEXT
@@ -70,20 +70,23 @@ pub enum CostBaseRule {
 /// write paths, which reject any pre-CGT-dated trade.
 use super::trade::CGT_START;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Inheritance {
     pub id: i64,
     pub listing_id: i64,
     pub holding_account_id: i64,
     /// Units inherited, in date-of-death terms.
+    #[sqlx(try_from = "Money")]
     pub quantity: Decimal,
     pub date_of_death: NaiveDate,
     pub cost_base_rule: CostBaseRule,
     /// The whole-parcel first-element cost base per the rule, in `currency`.
+    #[sqlx(try_from = "Money")]
     pub cost_base: Decimal,
     /// LPR expenditure the beneficiary may include in the cost base
     /// (QC 66053 — e.g. conveyancing on the transfer, legal costs of proving
     /// the will). Added to the linked Buy's cost base.
+    #[sqlx(try_from = "Money")]
     pub lpr_expenditure: Decimal,
     /// When the LPR incurred the expenditure (on or after the date of death);
     /// recorded with the figure, provenance only.
@@ -95,26 +98,8 @@ pub struct Inheritance {
     pub currency: String,
     /// Manual foreign-per-AUD fallback rate (same convention as
     /// `trades.fx_rate`). 1 for AUD.
+    #[sqlx(try_from = "Money")]
     pub fx_rate: Decimal,
-}
-
-impl sqlx::FromRow<'_, sqlx::sqlite::SqliteRow> for Inheritance {
-    fn from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
-        Ok(Inheritance {
-            id: row.try_get("id")?,
-            listing_id: row.try_get("listing_id")?,
-            holding_account_id: row.try_get("holding_account_id")?,
-            quantity: row_dec(row, "quantity")?,
-            date_of_death: row.try_get("date_of_death")?,
-            cost_base_rule: row.try_get("cost_base_rule")?,
-            cost_base: row_dec(row, "cost_base")?,
-            lpr_expenditure: row_dec(row, "lpr_expenditure")?,
-            lpr_expenditure_date: row.try_get("lpr_expenditure_date")?,
-            deceased_acquisition_date: row.try_get("deceased_acquisition_date")?,
-            currency: row.try_get("currency")?,
-            fx_rate: row_dec(row, "fx_rate")?,
-        })
-    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -365,15 +350,15 @@ pub async fn db_upsert(pool: &SqlitePool, inh: &Inheritance) -> Result<(), Upser
     .bind(inh.id)
     .bind(inh.listing_id)
     .bind(inh.holding_account_id)
-    .bind(inh.quantity.to_string())
+    .bind(Money(inh.quantity))
     .bind(inh.date_of_death)
     .bind(inh.cost_base_rule)
-    .bind(inh.cost_base.to_string())
-    .bind(inh.lpr_expenditure.to_string())
+    .bind(Money(inh.cost_base))
+    .bind(Money(inh.lpr_expenditure))
     .bind(inh.lpr_expenditure_date)
     .bind(inh.deceased_acquisition_date)
     .bind(&inh.currency)
-    .bind(inh.fx_rate.to_string())
+    .bind(Money(inh.fx_rate))
     .execute(&mut *tx)
     .await?;
 
@@ -414,11 +399,11 @@ pub async fn db_upsert(pool: &SqlitePool, inh: &Inheritance) -> Result<(), Upser
     .bind(inh.date_of_death)
     .bind(inh.date_of_death)
     .bind(inh.listing_id)
-    .bind(inh.quantity.to_string())
+    .bind(Money(inh.quantity))
     .bind(&inh.currency)
-    .bind(total_cost_base.to_string())
+    .bind(Money(total_cost_base))
     .bind(&inh.currency)
-    .bind(inh.fx_rate.to_string())
+    .bind(Money(inh.fx_rate))
     .bind(inh.holding_account_id)
     .bind(inh.id)
     .bind(inh.deceased_acquisition_date)

@@ -17,6 +17,7 @@
 //! never deleted individually; `DELETE /ess_statements/:id` removes it.
 
 use crate::entities::trade::{self, Trade};
+use crate::infra::decimal::Money;
 use crate::infra::http::ApiError;
 use axum::{
     Json, Router,
@@ -106,8 +107,8 @@ pub async fn db_vest(pool: &SqlitePool, statement_id: i64) -> Result<Trade, Vest
     .bind(taxing_point_date)
     .bind(taxing_point_date)
     .bind(listing_id)
-    .bind(price.to_string())
-    .bind(quantity.to_string())
+    .bind(Money(price))
+    .bind(Money(quantity))
     .bind(&currency)
     .bind(&currency)
     .bind(holding_account_id)

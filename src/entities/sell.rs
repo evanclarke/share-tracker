@@ -11,6 +11,7 @@
 //! its parcel allocations with the submitted set.
 
 use crate::entities::trade::{self, TradeType};
+use crate::infra::decimal::{Money, OptMoney};
 use crate::infra::http::ApiError;
 use axum::{
     Json, Router,
@@ -542,17 +543,17 @@ pub(crate) async fn upsert_sell_in_tx(
     .bind(body.date)
     .bind(settlement_date)
     .bind(body.listing_id)
-    .bind(body.average_price.to_string())
-    .bind(body.quantity.to_string())
+    .bind(Money(body.average_price))
+    .bind(Money(body.quantity))
     .bind(&body.currency)
-    .bind(brokerage.to_string())
-    .bind(gst_on_brokerage.to_string())
+    .bind(Money(brokerage))
+    .bind(Money(gst_on_brokerage))
     .bind(body.brokerage_includes_gst)
     .bind(&body.brokerage_currency)
-    .bind(body.fx_rate.to_string())
-    .bind(body.spot_fx_rate.map(|d| d.to_string()))
+    .bind(Money(body.fx_rate))
+    .bind(OptMoney(body.spot_fx_rate))
     .bind(&body.contract_note_ref)
-    .bind(body.statement_total.map(|d| d.to_string()))
+    .bind(OptMoney(body.statement_total))
     .bind(buyback_action_id)
     .bind(scrip_action_id)
     .bind(demerger_action_id)
@@ -621,7 +622,7 @@ pub(crate) async fn upsert_sell_in_tx(
         )
         .bind(id)
         .bind(alloc.purchase_trade_id)
-        .bind(alloc.quantity_allocated.to_string())
+        .bind(Money(alloc.quantity_allocated))
         .execute(&mut *tx)
         .await?;
 

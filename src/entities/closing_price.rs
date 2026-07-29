@@ -65,7 +65,7 @@ use std::{
 };
 
 use crate::entities::{exchange, listing};
-use crate::infra::decimal::parse_dec;
+use crate::infra::decimal::{OptMoney, parse_dec};
 
 /// Whether a stored row carries a price or a fetch failure.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, sqlx::Type)]
@@ -97,7 +97,7 @@ pub const UNASSIGNED_ID: i64 = 0;
 
 /// One stored closing price — or one recorded fetch failure (`status =
 /// "error"`, `price` null, `error` set).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct ClosingPrice {
     /// Server-assigned surrogate key (0021): the row's identity for the audit
     /// trail (`row_history.row_id`, so `POST /reports/row_history` can be
@@ -110,6 +110,7 @@ pub struct ClosingPrice {
     pub price_date: NaiveDate,
     /// Closing price in the listing's quote currency; None exactly when the
     /// fetch failed.
+    #[sqlx(try_from = "OptMoney")]
     pub price: Option<Decimal>,
     /// Provider that produced the row, e.g. "yahoo" — [`MANUAL_SOURCE`]
     /// exactly when `origin` is `Manual`.
@@ -126,25 +127,6 @@ pub struct ClosingPrice {
     pub sourced_from: Option<String>,
     /// Why manual entry was needed; None exactly when `origin` is `Fetched`.
     pub reason: Option<String>,
-}
-
-impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for ClosingPrice {
-    fn from_row(row: &'r sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
-        let price: Option<String> = row.try_get("price")?;
-        Ok(ClosingPrice {
-            id: row.try_get("id")?,
-            listing_id: row.try_get("listing_id")?,
-            price_date: row.try_get("price_date")?,
-            price: price.map(|p| parse_dec("price", p)).transpose()?,
-            source: row.try_get("source")?,
-            fetched_at: row.try_get("fetched_at")?,
-            status: row.try_get("status")?,
-            error: row.try_get("error")?,
-            origin: row.try_get("origin")?,
-            sourced_from: row.try_get("sourced_from")?,
-            reason: row.try_get("reason")?,
-        })
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -725,7 +707,7 @@ pub(crate) async fn db_store(pool: &SqlitePool, row: &ClosingPrice) -> Result<()
     )
     .bind(row.listing_id)
     .bind(row.price_date)
-    .bind(row.price.map(|p| p.to_string()))
+    .bind(OptMoney(row.price))
     .bind(&row.source)
     .bind(&row.fetched_at)
     .bind(row.status)

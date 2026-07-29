@@ -162,7 +162,7 @@ impl ActionKind {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
 pub struct CorporateAction {
     pub id: i64,
     pub listing_id: i64,
@@ -180,67 +180,64 @@ pub struct CorporateAction {
     /// on it.
     pub date: NaiveDate,
     #[serde(flatten)]
+    #[sqlx(flatten)]
     pub kind: ActionKind,
 }
 
-fn kind_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<ActionKind, sqlx::Error> {
-    match row.try_get::<String, _>("action_type")?.as_str() {
-        "ReturnOfCapital" => Ok(ActionKind::ReturnOfCapital {
-            amount_per_unit: row_dec(row, "amount_per_unit")?,
-            currency: row.try_get("currency")?,
-        }),
-        "ShareSplit" => Ok(ActionKind::ShareSplit {
-            split_new_units: row_dec(row, "split_new_units")?,
-            split_old_units: row_dec(row, "split_old_units")?,
-        }),
-        "BonusIssue" => Ok(ActionKind::BonusIssue {
-            bonus_units: row_dec(row, "bonus_units")?,
-            bonus_held_units: row_dec(row, "bonus_held_units")?,
-        }),
-        "RightsIssue" => Ok(ActionKind::RightsIssue {
-            rights_units: row_dec(row, "rights_units")?,
-            rights_held_units: row_dec(row, "rights_held_units")?,
-            exercise_price: row_dec(row, "exercise_price")?,
-            currency: row.try_get("currency")?,
-        }),
-        "BuyBack" => Ok(ActionKind::BuyBack {
-            buyback_price: row_dec(row, "buyback_price")?,
-            buyback_dividend: row_dec(row, "buyback_dividend")?,
-            buyback_franking_credit: row_dec(row, "buyback_franking_credit")?,
-            buyback_market_value: row_opt_dec(row, "buyback_market_value")?,
-            currency: row.try_get("currency")?,
-        }),
-        "ScripForScrip" => Ok(ActionKind::ScripForScrip {
-            scrip_listing_id: row.try_get("scrip_listing_id")?,
-            scrip_new_units: row_dec(row, "scrip_new_units")?,
-            scrip_old_units: row_dec(row, "scrip_old_units")?,
-            scrip_cash_per_unit: row_opt_dec(row, "scrip_cash_per_unit")?,
-            scrip_market_value: row_opt_dec(row, "scrip_market_value")?,
-            scrip_cash_currency: row.try_get("scrip_cash_currency")?,
-        }),
-        "Demerger" => Ok(ActionKind::Demerger {
-            demerger_listing_id: row.try_get("demerger_listing_id")?,
-            demerger_new_units: row_dec(row, "demerger_new_units")?,
-            demerger_held_units: row_dec(row, "demerger_held_units")?,
-            demerger_cost_base_pct: row_dec(row, "demerger_cost_base_pct")?,
-        }),
-        "WorthlessShares" => Ok(ActionKind::WorthlessShares {
-            worthless_event: WorthlessEvent::from_str(row.try_get("worthless_event")?)?,
-        }),
-        other => Err(sqlx::Error::Decode(
-            format!("unknown corporate action_type {other}").into(),
-        )),
-    }
-}
-
-impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for CorporateAction {
+/// The one `FromRow` a derive cannot express: which payload columns the row carries
+/// depends on its `action_type` tag, so the variant has to be chosen before the
+/// columns are read. The decimal columns still decode through
+/// [`infra::decimal::Money`](crate::infra::decimal::Money) (via `row_dec`/`row_opt_dec`),
+/// so a malformed value is a column-named error here too.
+impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for ActionKind {
     fn from_row(row: &'r sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
-        Ok(CorporateAction {
-            id: row.try_get("id")?,
-            listing_id: row.try_get("listing_id")?,
-            date: row.try_get("date")?,
-            kind: kind_from_row(row)?,
-        })
+        match row.try_get::<String, _>("action_type")?.as_str() {
+            "ReturnOfCapital" => Ok(ActionKind::ReturnOfCapital {
+                amount_per_unit: row_dec(row, "amount_per_unit")?,
+                currency: row.try_get("currency")?,
+            }),
+            "ShareSplit" => Ok(ActionKind::ShareSplit {
+                split_new_units: row_dec(row, "split_new_units")?,
+                split_old_units: row_dec(row, "split_old_units")?,
+            }),
+            "BonusIssue" => Ok(ActionKind::BonusIssue {
+                bonus_units: row_dec(row, "bonus_units")?,
+                bonus_held_units: row_dec(row, "bonus_held_units")?,
+            }),
+            "RightsIssue" => Ok(ActionKind::RightsIssue {
+                rights_units: row_dec(row, "rights_units")?,
+                rights_held_units: row_dec(row, "rights_held_units")?,
+                exercise_price: row_dec(row, "exercise_price")?,
+                currency: row.try_get("currency")?,
+            }),
+            "BuyBack" => Ok(ActionKind::BuyBack {
+                buyback_price: row_dec(row, "buyback_price")?,
+                buyback_dividend: row_dec(row, "buyback_dividend")?,
+                buyback_franking_credit: row_dec(row, "buyback_franking_credit")?,
+                buyback_market_value: row_opt_dec(row, "buyback_market_value")?,
+                currency: row.try_get("currency")?,
+            }),
+            "ScripForScrip" => Ok(ActionKind::ScripForScrip {
+                scrip_listing_id: row.try_get("scrip_listing_id")?,
+                scrip_new_units: row_dec(row, "scrip_new_units")?,
+                scrip_old_units: row_dec(row, "scrip_old_units")?,
+                scrip_cash_per_unit: row_opt_dec(row, "scrip_cash_per_unit")?,
+                scrip_market_value: row_opt_dec(row, "scrip_market_value")?,
+                scrip_cash_currency: row.try_get("scrip_cash_currency")?,
+            }),
+            "Demerger" => Ok(ActionKind::Demerger {
+                demerger_listing_id: row.try_get("demerger_listing_id")?,
+                demerger_new_units: row_dec(row, "demerger_new_units")?,
+                demerger_held_units: row_dec(row, "demerger_held_units")?,
+                demerger_cost_base_pct: row_dec(row, "demerger_cost_base_pct")?,
+            }),
+            "WorthlessShares" => Ok(ActionKind::WorthlessShares {
+                worthless_event: WorthlessEvent::from_str(row.try_get("worthless_event")?)?,
+            }),
+            other => Err(sqlx::Error::Decode(
+                format!("unknown corporate action_type {other}").into(),
+            )),
+        }
     }
 }
 

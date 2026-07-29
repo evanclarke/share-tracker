@@ -58,7 +58,7 @@ use crate::entities::corporate_action::{
 };
 use crate::entities::sell::{self, AllocationInput, SellBody};
 use crate::entities::trade::{self, Trade};
-use crate::infra::decimal::parse_dec;
+use crate::infra::decimal::{Money, OptMoney, parse_dec};
 use crate::infra::http::ApiError;
 use axum::{
     Json, Router,
@@ -379,12 +379,12 @@ pub async fn db_demerge(pool: &SqlitePool, action_id: i64) -> Result<Demerge, De
             .bind(action.date)
             .bind(action.date)
             .bind(listing_id)
-            .bind(quantity.to_string())
+            .bind(Money(quantity))
             .bind(&r.currency)
-            .bind(cost_base.to_string())
+            .bind(Money(cost_base))
             .bind(&r.currency)
-            .bind(r.fx_rate.to_string())
-            .bind(r.spot_fx_rate.map(|d| d.to_string()))
+            .bind(Money(r.fx_rate))
+            .bind(OptMoney(r.spot_fx_rate))
             .bind(action_id)
             .bind(r.deemed_acquisition_date)
             .bind(r.holding_account_id)

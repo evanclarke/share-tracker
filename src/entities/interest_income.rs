@@ -14,7 +14,7 @@
 //! ATO rate for the month of `date_paid` (failing loudly when no rate
 //! exists).
 
-use crate::infra::decimal::row_dec;
+use crate::infra::decimal::Money;
 use crate::infra::http::ApiError;
 use axum::{
     Json, Router,
@@ -25,19 +25,21 @@ use axum::{
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use sqlx::{Row, SqlitePool};
+use sqlx::SqlitePool;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct InterestIncome {
     pub id: i64,
     /// Date paid/credited: its month sets the ATO FX conversion month and the
     /// Australian financial year the interest is assessed in.
     pub date_paid: NaiveDate,
     /// Gross interest (including any amount withheld), in `currency`.
+    #[sqlx(try_from = "Money")]
     pub amount: Decimal,
     /// TFN amount withheld from the gross interest; joins the tax summary's
     /// combined TFN withholding line. Australian-source rows only — TFN
     /// amounts are withheld by Australian investment bodies.
+    #[sqlx(try_from = "Money")]
     pub tfn_withholding_tax: Decimal,
     /// Whether the payer is foreign (e.g. a US broker's cash / money-market
     /// sweep fund): a foreign-source row is assessable foreign source income
@@ -47,6 +49,7 @@ pub struct InterestIncome {
     /// Foreign tax withheld from the gross amount, in `currency`; joins the
     /// tax summary's FITO line (capped at the A$1,000 de-minimis,
     /// docs/ato/fito-limit.md). Foreign-source rows only.
+    #[sqlx(try_from = "Money")]
     pub foreign_tax_paid: Decimal,
     /// ISO 4217 currency the amounts are denominated in. The tax summary
     /// converts a non-AUD amount to AUD via the ATO rate for this currency and
@@ -59,22 +62,6 @@ pub struct InterestIncome {
     /// broker cash account); NULL for interest from outside the portfolio's
     /// accounts. Informational only — no calculation reads it.
     pub holding_account_id: Option<i64>,
-}
-
-impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for InterestIncome {
-    fn from_row(row: &'r sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
-        Ok(InterestIncome {
-            id: row.try_get("id")?,
-            date_paid: row.try_get("date_paid")?,
-            amount: row_dec(row, "amount")?,
-            tfn_withholding_tax: row_dec(row, "tfn_withholding_tax")?,
-            foreign_source: row.try_get("foreign_source")?,
-            foreign_tax_paid: row_dec(row, "foreign_tax_paid")?,
-            currency: row.try_get("currency")?,
-            source: row.try_get("source")?,
-            holding_account_id: row.try_get("holding_account_id")?,
-        })
-    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -211,10 +198,10 @@ pub async fn db_upsert(pool: &SqlitePool, i: &InterestIncome) -> Result<(), Upse
     )
     .bind(i.id)
     .bind(i.date_paid)
-    .bind(i.amount.to_string())
-    .bind(i.tfn_withholding_tax.to_string())
+    .bind(Money(i.amount))
+    .bind(Money(i.tfn_withholding_tax))
     .bind(i.foreign_source)
-    .bind(i.foreign_tax_paid.to_string())
+    .bind(Money(i.foreign_tax_paid))
     .bind(&i.currency)
     .bind(&i.source)
     .bind(i.holding_account_id)

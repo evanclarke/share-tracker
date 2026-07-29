@@ -1,11 +1,10 @@
 //! The trade model: the stored row (`Trade`), its wire presentation, the
 //! `PUT` request body (`TradeBody`), and the `TradeType` enum.
 
-use crate::infra::decimal::{row_dec, row_opt_dec};
+use crate::infra::decimal::{Money, OptMoney};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use sqlx::Row;
 
 // `DRP` is serialized verbatim to JSON and persisted to the TEXT `trade_type`
 // column (matched by a CHECK constraint), so the acronym spelling is the
@@ -36,14 +35,16 @@ impl TradeType {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Trade {
     pub id: i64,
     pub trade_type: TradeType,
     pub date: NaiveDate,
     pub settlement_date: NaiveDate,
     pub listing_id: i64,
+    #[sqlx(try_from = "Money")]
     pub average_price: Decimal,
+    #[sqlx(try_from = "Money")]
     pub quantity: Decimal,
     pub currency: String,
     /// Always stored ex-GST: when a request flags `brokerage_includes_gst`,
@@ -53,7 +54,9 @@ pub struct Trade {
     /// On the wire, though, a flagged trade reads back with `brokerage` as
     /// the one GST-inclusive amount — the same shape the write path expects
     /// — so a GET → PUT round-trip is lossless (see [`Trade::present`]).
+    #[sqlx(try_from = "Money")]
     pub brokerage: Decimal,
+    #[sqlx(try_from = "Money")]
     pub gst_on_brokerage: Decimal,
     /// Records that the brokerage amount was *entered* GST-inclusive and
     /// server-split. Persisted so reads can re-present `brokerage` as the
@@ -66,6 +69,7 @@ pub struct Trade {
     /// foreign / fx_rate). Reports prefer the ATO RBA rate for the trade's month
     /// and fall back to this field only when no ATO rate exists (see `infra::fx`).
     /// 1.0 for AUD trades.
+    #[sqlx(try_from = "Money")]
     pub fx_rate: Decimal,
     /// Deliberate transaction-date spot-rate override (same foreign-per-AUD
     /// convention): when set it wins over the ATO monthly rate everywhere
@@ -74,6 +78,7 @@ pub struct Trade {
     /// asset (see `infra::fx::FxOverride`). `None` keeps the unchanged
     /// default (monthly rate first, `fx_rate` fallback). Rejected at write
     /// time unless positive and on a non-AUD trade (where it could apply).
+    #[sqlx(try_from = "OptMoney")]
     pub spot_fx_rate: Option<Decimal>,
     pub contract_note_ref: Option<String>,
     /// The broker statement's net transaction total in the brokerage
@@ -82,14 +87,18 @@ pub struct Trade {
     /// doesn't reconcile with quantity × price ± (brokerage + GST) is
     /// rejected — and informational-only after that: no report or
     /// calculation uses it.
+    #[sqlx(try_from = "OptMoney")]
     pub statement_total: Option<Decimal>,
     /// DRP reinvestment residual cash (DRP trades only; 0 for Buy/Sell). When a
     /// distribution doesn't divide evenly into whole shares, the leftover is
     /// carried forward to the next reinvestment or paid out. These are populated
     /// by the reinvestment operation (see `entities::drp_reinvestment`); a
     /// manually entered DRP trade leaves them 0.
+    #[sqlx(try_from = "Money")]
     pub residual_brought_forward: Decimal,
+    #[sqlx(try_from = "Money")]
     pub residual_carried_forward: Decimal,
+    #[sqlx(try_from = "Money")]
     pub residual_paid_out: Decimal,
     /// Provenance link from a rights-exercise Buy back to its `RightsIssue`
     /// corporate action (`None` for every other trade). Set only by
@@ -177,42 +186,6 @@ pub struct Trade {
     /// /trades` — edit or delete the inheritance instead (refused while the
     /// parcel is drawn on by a Sell allocation or AMIT adjustment).
     pub inheritance_id: Option<i64>,
-}
-
-impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for Trade {
-    fn from_row(row: &'r sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
-        Ok(Trade {
-            id: row.try_get("id")?,
-            trade_type: row.try_get::<TradeType, _>("trade_type")?,
-            date: row.try_get("date")?,
-            settlement_date: row.try_get("settlement_date")?,
-            listing_id: row.try_get("listing_id")?,
-            average_price: row_dec(row, "average_price")?,
-            quantity: row_dec(row, "quantity")?,
-            currency: row.try_get("currency")?,
-            brokerage: row_dec(row, "brokerage")?,
-            gst_on_brokerage: row_dec(row, "gst_on_brokerage")?,
-            brokerage_includes_gst: row.try_get("brokerage_includes_gst")?,
-            brokerage_currency: row.try_get("brokerage_currency")?,
-            fx_rate: row_dec(row, "fx_rate")?,
-            spot_fx_rate: row_opt_dec(row, "spot_fx_rate")?,
-            contract_note_ref: row.try_get("contract_note_ref")?,
-            statement_total: row_opt_dec(row, "statement_total")?,
-            residual_brought_forward: row_dec(row, "residual_brought_forward")?,
-            residual_carried_forward: row_dec(row, "residual_carried_forward")?,
-            residual_paid_out: row_dec(row, "residual_paid_out")?,
-            rights_action_id: row.try_get("rights_action_id")?,
-            buyback_action_id: row.try_get("buyback_action_id")?,
-            scrip_action_id: row.try_get("scrip_action_id")?,
-            demerger_action_id: row.try_get("demerger_action_id")?,
-            deemed_acquisition_date: row.try_get("deemed_acquisition_date")?,
-            holding_account_id: row.try_get("holding_account_id")?,
-            transfer_id: row.try_get("transfer_id")?,
-            ess_statement_id: row.try_get("ess_statement_id")?,
-            worthless_action_id: row.try_get("worthless_action_id")?,
-            inheritance_id: row.try_get("inheritance_id")?,
-        })
-    }
 }
 
 impl Trade {

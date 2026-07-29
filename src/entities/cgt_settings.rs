@@ -7,7 +7,7 @@
 //! when chaining unused losses across its year series (losses carry forward
 //! indefinitely, per `docs/ato/cgt-using-capital-losses.md`). Absent row = zero.
 
-use crate::infra::decimal::parse_dec;
+use crate::infra::decimal::Money;
 use crate::infra::http::ApiError;
 use axum::{
     Json, Router,
@@ -17,27 +17,16 @@ use axum::{
 };
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use sqlx::{Row, SqlitePool};
+use sqlx::SqlitePool;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct CgtSettings {
     /// Always 1 — the table CHECKs it, so at most one settings row exists.
     pub id: i64,
     /// Net capital loss carried forward from before the first recorded year
     /// (a non-negative amount, AUD).
+    #[sqlx(try_from = "Money")]
     pub opening_capital_loss: Decimal,
-}
-
-impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for CgtSettings {
-    fn from_row(row: &'r sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
-        Ok(CgtSettings {
-            id: row.try_get("id")?,
-            opening_capital_loss: parse_dec(
-                "opening_capital_loss",
-                row.try_get("opening_capital_loss")?,
-            )?,
-        })
-    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -71,7 +60,7 @@ pub async fn db_upsert(pool: &SqlitePool, settings: &CgtSettings) -> Result<(), 
          ON CONFLICT(id) DO UPDATE SET opening_capital_loss = excluded.opening_capital_loss",
     )
     .bind(settings.id)
-    .bind(settings.opening_capital_loss.to_string())
+    .bind(Money(settings.opening_capital_loss))
     .execute(pool)
     .await?;
     Ok(())
