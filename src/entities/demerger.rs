@@ -52,13 +52,10 @@
 //! separate capital returns, and registry cash-in-lieu of fractional
 //! entitlements (the demerge keeps exact fractional unit counts).
 
-use crate::domain::cost_base::ParcelRow;
-use crate::entities::corporate_action::{
-    self, ActionKind, RocEvent, sold_in_acquired_units, split_adjusted_quantity,
-};
-use crate::entities::sell::{self, AllocationInput, SellBody};
+use crate::domain::rollover;
+use crate::entities::corporate_action::{self, ActionKind};
+use crate::entities::sell::{self, AllocationInput};
 use crate::entities::trade::{self, Trade};
-use crate::infra::decimal::{Money, OptMoney, parse_dec};
 use crate::infra::http::ApiError;
 use axum::{
     Json, Router,
@@ -69,8 +66,7 @@ use axum::{
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::Serialize;
-use sqlx::{Row, SqlitePool};
-use std::collections::HashMap;
+use sqlx::SqlitePool;
 
 /// The sides of a demerge: the closing Sell on the head listing, the head
 /// replacement Buys, and the demerged-entity Buys (the latter two one per
@@ -135,164 +131,51 @@ pub async fn db_demerge(pool: &SqlitePool, action_id: i64) -> Result<Demerge, De
         Some(a) => a,
         None => return Err(DemergeError::ActionNotFound),
     };
-    let (demerged_listing_id, new_units, held_units, cost_base_pct) = match &action.kind {
-        ActionKind::Demerger {
-            demerger_listing_id,
-            demerger_new_units,
-            demerger_held_units,
-            demerger_cost_base_pct,
-        } => (
-            *demerger_listing_id,
-            *demerger_new_units,
-            *demerger_held_units,
-            *demerger_cost_base_pct,
-        ),
-        _ => return Err(DemergeError::NotADemerger),
+    let ActionKind::Demerger {
+        demerger_listing_id,
+        demerger_new_units: new_units,
+        demerger_held_units: held_units,
+        demerger_cost_base_pct: cost_base_pct,
+    } = action.kind
+    else {
+        return Err(DemergeError::NotADemerger);
     };
 
-    let already: bool =
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM trades WHERE demerger_action_id = ?)")
-            .bind(action_id)
-            .fetch_one(&mut *tx)
-            .await?;
-    if already {
-        return Err(DemergeError::AlreadyDemerged);
-    }
+    check_demergeable(&mut tx, action_id, action.listing_id, action.date).await?;
 
-    // Every trade of the head listing must predate the demerger: the demerge
-    // closes and recreates the holding as at the demerger date, so a
-    // later-dated trade would draw on parcels the closing Sell consumes.
-    // (Unlike a takeover, the head listing keeps trading — enter post-demerger
-    // activity after demerging.)
-    let late_trade: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM trades WHERE listing_id = ? AND date >= ?)",
-    )
-    .bind(action.listing_id)
-    .bind(action.date)
-    .fetch_one(&mut *tx)
-    .await?;
-    if late_trade {
-        return Err(DemergeError::TradedOnOrAfterDemergerDate);
-    }
+    // The head listing's open parcels, costed by the shared rollover
+    // machinery (as-acquired units internally; allocations re-based across
+    // splits). The ATO's step 1 takes the cost base immediately before the
+    // demerger, so it is bounded at the demerger date.
+    let inputs = rollover::CostBaseInputs::load(&mut tx, action.listing_id).await?;
+    let parcels = inputs
+        .open_parcels(&mut tx, action.listing_id, action.date)
+        .await?;
 
-    // The head listing's open parcels, with the same remaining-quantity and
-    // reduced-cost-base rules as the open-parcels report (as-acquired units
-    // internally; allocations re-based across splits).
-    let parcel_rows: Vec<ParcelRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT {} FROM trades \
-         WHERE listing_id = ? AND trade_type IN ('Buy', 'DRP') ORDER BY date, id",
-        ParcelRow::COLUMNS
-    )))
-    .bind(action.listing_id)
-    .fetch_all(&mut *tx)
-    .await?;
-
-    let alloc_rows = sqlx::query(
-        "SELECT pa.purchase_trade_id, pa.quantity_allocated, s.date AS sale_date \
-         FROM parcel_allocations pa \
-         JOIN trades s ON s.id = pa.sale_trade_id \
-         JOIN trades p ON p.id = pa.purchase_trade_id \
-         WHERE p.listing_id = ?",
-    )
-    .bind(action.listing_id)
-    .fetch_all(&mut *tx)
-    .await?;
-    let mut qty_sold: HashMap<i64, Vec<(NaiveDate, Decimal)>> = HashMap::new();
-    for row in &alloc_rows {
-        let tid: i64 = row.try_get("purchase_trade_id")?;
-        qty_sold.entry(tid).or_default().push((
-            row.try_get("sale_date")?,
-            parse_dec("quantity_allocated", row.try_get("quantity_allocated")?)?,
-        ));
-    }
-
-    let splits = corporate_action::db_splits_for_listing(&mut *tx, action.listing_id).await?;
-    let roc_rows = sqlx::query(
-        "SELECT date, amount_per_unit, currency FROM corporate_actions \
-         WHERE action_type = 'ReturnOfCapital' AND listing_id = ? ORDER BY date, id",
-    )
-    .bind(action.listing_id)
-    .fetch_all(&mut *tx)
-    .await?;
-    let mut roc_events = Vec::with_capacity(roc_rows.len());
-    for row in &roc_rows {
-        roc_events.push(RocEvent {
-            date: row.try_get("date")?,
-            amount_per_unit: parse_dec("amount_per_unit", row.try_get("amount_per_unit")?)?,
-            currency: row.try_get("currency")?,
-        });
-    }
-    let amit_reductions =
-        crate::entities::amit_adjustment::db_cost_base_reductions(&mut *tx).await?;
-
-    /// The two Buys to create for one consumed parcel: its exchange-date
-    /// units stay on the head listing with the head share of its remaining
-    /// reduced cost base; the entitlement units go to the demerged listing
-    /// with the rest. Both carry the parcel's acquisition date.
-    struct Replacement {
-        parcel_id: i64,
-        at_date_units: Decimal,
-        demerged_quantity: Decimal,
-        head_cost_base: Decimal,
-        demerged_cost_base: Decimal,
-        currency: String,
-        fx_rate: Decimal,
-        spot_fx_rate: Option<Decimal>,
-        deemed_acquisition_date: NaiveDate,
-        /// Replacement parcels stay in the account of the parcel that
-        /// produced them.
-        holding_account_id: i64,
-    }
-
-    let mut replacements: Vec<Replacement> = Vec::new();
-    for parcel in &parcel_rows {
-        let parcel_id = parcel.id;
-        let sold = sold_in_acquired_units(
-            qty_sold.get(&parcel_id).map_or(&[][..], |v| v),
-            &splits,
-            parcel.date,
-        );
-        let remaining = parcel.quantity - sold;
-        if remaining <= Decimal::ZERO {
-            continue;
-        }
-
-        // Remaining reduced cost base in the parcel's own currency: the
-        // shared pipeline (`domain::cost_base`). The ATO's step 1 takes the
-        // cost base immediately before the demerger, so `up_to` is the
-        // demerger date.
-        let carried_cost_base = crate::domain::cost_base::adjusted_cost_base(
-            &parcel.parcel(),
-            remaining,
-            *amit_reductions.get(&parcel_id).unwrap_or(&Decimal::ZERO),
-            &roc_events,
-            &splits,
-            Some(action.date),
-        )?
-        .adjusted;
+    let mut replacements: Vec<Replacement> = Vec::with_capacity(parcels.len());
+    for p in &parcels {
+        let carried_cost_base = inputs.carried_cost_base(&p.parcel, p.remaining, action.date)?;
 
         // Step 2: apportion by the advised percentage. demerged + head sum
         // exactly to the carried cost base by construction.
         let demerged_cost_base = carried_cost_base * cost_base_pct / Decimal::ONE_HUNDRED;
-        let head_cost_base = carried_cost_base - demerged_cost_base;
 
-        // The entitlement ratio applies to units as held at the demerger date.
-        let at_date_units =
-            split_adjusted_quantity(remaining, &splits, parcel.date, Some(action.date));
         replacements.push(Replacement {
-            parcel_id,
-            at_date_units,
-            demerged_quantity: at_date_units * new_units / held_units,
-            head_cost_base,
+            parcel_id: p.parcel.id,
+            at_date_units: p.at_date_units,
+            // The entitlement ratio applies to units as held at the demerger
+            // date.
+            demerged_quantity: p.at_date_units * new_units / held_units,
+            head_cost_base: carried_cost_base - demerged_cost_base,
             demerged_cost_base,
-            currency: parcel.currency.clone(),
-            fx_rate: parcel.fx_rate,
-            spot_fx_rate: parcel.spot_fx_rate,
+            currency: p.parcel.currency.clone(),
+            fx_rate: p.parcel.fx_rate,
+            spot_fx_rate: p.parcel.spot_fx_rate,
             // Chain through an earlier rollover: the clock always runs from
             // the first acquisition in the chain — the parcel's own
             // `acquired()`, deemed date where it carries one.
-            deemed_acquisition_date: parcel.acquired(),
-            holding_account_id: parcel.holding_account_id,
+            deemed_acquisition_date: p.parcel.acquired(),
+            holding_account_id: p.parcel.holding_account_id,
         });
     }
     if replacements.is_empty() {
@@ -301,7 +184,7 @@ pub async fn db_demerge(pool: &SqlitePool, action_id: i64) -> Result<Demerge, De
 
     // The closing Sell: zero proceeds (the rollover disregards any gain and
     // this Sell never reaches the realised-gains report), consuming every
-    // open parcel. Settlement is the demerger date — nothing market-settles.
+    // open parcel.
     let listing_currency: String = sqlx::query_scalar("SELECT currency FROM listings WHERE id = ?")
         .bind(action.listing_id)
         .fetch_one(&mut *tx)
@@ -309,30 +192,21 @@ pub async fn db_demerge(pool: &SqlitePool, action_id: i64) -> Result<Demerge, De
     let sell_id: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(id), 0) + 1 FROM trades")
         .fetch_one(&mut *tx)
         .await?;
-    let sell_body = SellBody {
-        brokerage_includes_gst: false,
-        statement_total: None,
-        holding_account_id: 1,
-        date: action.date,
-        settlement_date: Some(action.date),
-        listing_id: action.listing_id,
-        average_price: Decimal::ZERO,
-        quantity: replacements.iter().map(|r| r.at_date_units).sum(),
-        currency: listing_currency.clone(),
-        brokerage: Decimal::ZERO,
-        gst_on_brokerage: Decimal::ZERO,
-        brokerage_currency: listing_currency,
-        fx_rate: Decimal::ONE,
-        spot_fx_rate: None,
-        contract_note_ref: None,
-        allocations: replacements
+    let sell_body = rollover::closing_sell_body(
+        action.date,
+        action.listing_id,
+        1,
+        Decimal::ZERO,
+        listing_currency,
+        Decimal::ONE,
+        replacements
             .iter()
             .map(|r| AllocationInput {
                 purchase_trade_id: r.parcel_id,
                 quantity_allocated: r.at_date_units,
             })
             .collect(),
-    };
+    );
     sell::upsert_sell_in_tx(
         &mut tx,
         sell_id,
@@ -364,32 +238,27 @@ pub async fn db_demerge(pool: &SqlitePool, action_id: i64) -> Result<Demerge, De
             ),
             (
                 demerged_id,
-                demerged_listing_id,
+                demerger_listing_id,
                 r.demerged_quantity,
                 r.demerged_cost_base,
             ),
         ] {
-            sqlx::query(
-                "INSERT INTO trades \
-                 (id, trade_type, date, settlement_date, listing_id, average_price, quantity, \
-                  currency, brokerage, gst_on_brokerage, brokerage_currency, fx_rate, \
-                  spot_fx_rate, demerger_action_id, deemed_acquisition_date, holding_account_id) \
-                 VALUES (?, 'Buy', ?, ?, ?, '0', ?, ?, ?, '0', ?, ?, ?, ?, ?, ?)",
+            rollover::insert_replacement_buy(
+                &mut tx,
+                &rollover::ReplacementBuy {
+                    id: buy_id,
+                    date: action.date,
+                    listing_id,
+                    quantity,
+                    cost_base,
+                    currency: &r.currency,
+                    fx_rate: r.fx_rate,
+                    spot_fx_rate: r.spot_fx_rate,
+                    deemed_acquisition_date: r.deemed_acquisition_date,
+                    holding_account_id: r.holding_account_id,
+                },
+                rollover::Provenance::DemergerAction(action_id),
             )
-            .bind(buy_id)
-            .bind(action.date)
-            .bind(action.date)
-            .bind(listing_id)
-            .bind(Money(quantity))
-            .bind(&r.currency)
-            .bind(Money(cost_base))
-            .bind(&r.currency)
-            .bind(Money(r.fx_rate))
-            .bind(OptMoney(r.spot_fx_rate))
-            .bind(action_id)
-            .bind(r.deemed_acquisition_date)
-            .bind(r.holding_account_id)
-            .execute(&mut *tx)
             .await?;
         }
         head_ids.push(head_id);
@@ -402,28 +271,65 @@ pub async fn db_demerge(pool: &SqlitePool, action_id: i64) -> Result<Demerge, De
     // stored.
     let sell = trade::db_get(pool, sell_id)
         .await?
-        .ok_or_else(|| DemergeError::Db(sqlx::Error::RowNotFound))?;
-    let mut head_replacements = Vec::with_capacity(head_ids.len());
-    for id in head_ids {
-        head_replacements.push(
-            trade::db_get(pool, id)
-                .await?
-                .ok_or_else(|| DemergeError::Db(sqlx::Error::RowNotFound))?,
-        );
-    }
-    let mut demerged_replacements = Vec::with_capacity(demerged_ids.len());
-    for id in demerged_ids {
-        demerged_replacements.push(
-            trade::db_get(pool, id)
-                .await?
-                .ok_or_else(|| DemergeError::Db(sqlx::Error::RowNotFound))?,
-        );
-    }
+        .ok_or(sqlx::Error::RowNotFound)?;
     Ok(Demerge {
         sell,
-        head_replacements,
-        demerged_replacements,
+        head_replacements: rollover::created_trades(pool, head_ids).await?,
+        demerged_replacements: rollover::created_trades(pool, demerged_ids).await?,
     })
+}
+
+/// The two Buys to create for one consumed parcel: its demerger-date units
+/// stay on the head listing with the head share of its remaining reduced cost
+/// base; the entitlement units go to the demerged listing with the rest. Both
+/// carry the parcel's acquisition date.
+struct Replacement {
+    parcel_id: i64,
+    at_date_units: Decimal,
+    demerged_quantity: Decimal,
+    head_cost_base: Decimal,
+    demerged_cost_base: Decimal,
+    currency: String,
+    fx_rate: Decimal,
+    spot_fx_rate: Option<Decimal>,
+    deemed_acquisition_date: NaiveDate,
+    /// Replacement parcels stay in the account of the parcel that produced
+    /// them.
+    holding_account_id: i64,
+}
+
+/// The two write-time checks: the demerge has not already been applied, and
+/// no trade of the head listing is dated on or after the demerger date. The
+/// demerge closes and recreates the holding as at that date, so a later-dated
+/// trade would draw on parcels the closing Sell consumes. (Unlike a takeover,
+/// the head listing keeps trading — enter post-demerger activity after
+/// demerging.)
+async fn check_demergeable(
+    conn: &mut sqlx::SqliteConnection,
+    action_id: i64,
+    listing_id: i64,
+    date: NaiveDate,
+) -> Result<(), DemergeError> {
+    let already: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM trades WHERE demerger_action_id = ?)")
+            .bind(action_id)
+            .fetch_one(&mut *conn)
+            .await?;
+    if already {
+        return Err(DemergeError::AlreadyDemerged);
+    }
+
+    let late_trade: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM trades WHERE listing_id = ? AND date >= ?)",
+    )
+    .bind(listing_id)
+    .bind(date)
+    .fetch_one(&mut *conn)
+    .await?;
+    if late_trade {
+        return Err(DemergeError::TradedOnOrAfterDemergerDate);
+    }
+    Ok(())
 }
 
 async fn demerge(
@@ -464,6 +370,7 @@ impl From<DemergeError> for ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::entities::sell::SellBody;
     use crate::entities::trade::TradeType;
     use crate::entities::{corporate_action::CorporateAction, listing};
     use crate::test_support::{self, test_pool};

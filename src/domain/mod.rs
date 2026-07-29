@@ -6,4 +6,5 @@ pub mod cgt_discount;
 pub mod cost_base;
 pub mod listing_identity;
 pub mod open_parcels;
+pub mod rollover;
 pub mod tax_year;

@@ -34,10 +34,10 @@
 //! A recorded transfer is immutable — delete it and re-transfer instead.
 
 use crate::domain::cost_base::ParcelRow;
-use crate::entities::corporate_action::{self, RocEvent, as_acquired_quantity};
-use crate::entities::sell::{self, AllocationInput, SellBody};
+use crate::domain::rollover;
+use crate::entities::corporate_action::as_acquired_quantity;
+use crate::entities::sell::{self, AllocationInput};
 use crate::entities::trade::{self, Trade};
-use crate::infra::decimal::{Money, OptMoney, parse_dec};
 use crate::infra::http::{self, ApiError, CrudEntity};
 use axum::{
     Json, Router,
@@ -48,7 +48,7 @@ use axum::{
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use sqlx::{Row, SqlitePool};
+use sqlx::SqlitePool;
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Transfer {
@@ -240,95 +240,15 @@ pub async fn db_transfer(
     .execute(&mut *tx)
     .await?;
 
-    // Cost-base inputs, shared with the open-parcels report and the
-    // scrip-for-scrip exchange: splits re-base units, AMIT adjustments and
-    // return-of-capital payments up to the transfer date reduce the carried
-    // cost base.
-    let splits = corporate_action::db_splits_for_listing(&mut *tx, body.listing_id).await?;
-    let roc_rows = sqlx::query(
-        "SELECT date, amount_per_unit, currency FROM corporate_actions \
-         WHERE action_type = 'ReturnOfCapital' AND listing_id = ? ORDER BY date, id",
-    )
-    .bind(body.listing_id)
-    .fetch_all(&mut *tx)
-    .await?;
-    let mut roc_events = Vec::with_capacity(roc_rows.len());
-    for row in &roc_rows {
-        roc_events.push(RocEvent {
-            date: row.try_get("date")?,
-            amount_per_unit: parse_dec("amount_per_unit", row.try_get("amount_per_unit")?)?,
-            currency: row.try_get("currency")?,
-        });
-    }
-    let amit_reductions =
-        crate::entities::amit_adjustment::db_cost_base_reductions(&mut *tx).await?;
-
-    /// A transfer-in Buy to create: the moved units (transfer-date basis),
-    /// their share of the parcel's remaining reduced cost base, and the
-    /// carried acquisition date.
-    struct TransferIn {
-        quantity: Decimal,
-        carried_cost_base: Decimal,
-        currency: String,
-        fx_rate: Decimal,
-        spot_fx_rate: Option<Decimal>,
-        deemed_acquisition_date: NaiveDate,
-    }
-
-    let mut transfer_ins: Vec<TransferIn> = Vec::with_capacity(body.allocations.len());
-    for alloc in &body.allocations {
-        let parcel: Option<ParcelRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-            "SELECT {} FROM trades WHERE id = ?",
-            ParcelRow::COLUMNS
-        )))
-        .bind(alloc.purchase_trade_id)
-        .fetch_optional(&mut *tx)
-        .await?;
-        // A missing parcel (or a non-Buy/DRP, over-allocation, or
-        // wrong-account one) is also caught by the Sell core below; the
-        // listing check is the one thing it does not enforce.
-        let Some(parcel) = parcel else {
-            return Err(TransferError::Sell(sell::SellError::PurchaseParcelMissing));
-        };
-        if parcel.listing_id != body.listing_id {
-            return Err(TransferError::ListingMismatch);
-        }
-
-        // The moved units' share of the parcel's remaining reduced cost base,
-        // in the parcel's own currency: the shared pipeline
-        // (`domain::cost_base`), pro-rated over the *as-acquired* moved units
-        // so a partial transfer carries exactly its share.
-        let moved_as_acquired =
-            as_acquired_quantity(alloc.quantity_allocated, &splits, parcel.date, body.date);
-        let carried_cost_base = crate::domain::cost_base::adjusted_cost_base(
-            &parcel.parcel(),
-            moved_as_acquired,
-            *amit_reductions
-                .get(&alloc.purchase_trade_id)
-                .unwrap_or(&Decimal::ZERO),
-            &roc_events,
-            &splits,
-            Some(body.date),
-        )?
-        .adjusted;
-
-        transfer_ins.push(TransferIn {
-            quantity: alloc.quantity_allocated,
-            carried_cost_base,
-            currency: parcel.currency.clone(),
-            fx_rate: parcel.fx_rate,
-            spot_fx_rate: parcel.spot_fx_rate,
-            // Chain through an earlier rollover/transfer: the discount clock
-            // always runs from the first acquisition — the parcel's own
-            // `acquired()`, deemed date where it carries one.
-            deemed_acquisition_date: parcel.acquired(),
-        });
-    }
+    // Cost-base inputs, shared with the scrip-for-scrip exchange and the
+    // demerge: splits re-base units, AMIT adjustments and return-of-capital
+    // payments up to the transfer date reduce the carried cost base.
+    let inputs = rollover::CostBaseInputs::load(&mut tx, body.listing_id).await?;
+    let transfer_ins = transfer_ins(&mut tx, body, &inputs).await?;
 
     // The transfer-out Sell: zero proceeds (nothing is disposed of; the
     // transfer_id keeps it out of every gains report), consuming the chosen
-    // parcels in the source account. Settlement is the transfer date —
-    // nothing market-settles.
+    // parcels in the source account.
     let listing_currency: String = sqlx::query_scalar("SELECT currency FROM listings WHERE id = ?")
         .bind(body.listing_id)
         .fetch_one(&mut *tx)
@@ -336,31 +256,21 @@ pub async fn db_transfer(
     let sell_id: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(id), 0) + 1 FROM trades")
         .fetch_one(&mut *tx)
         .await?;
-    let sell_body = SellBody {
-        brokerage_includes_gst: false,
-        statement_total: None,
-        date: body.date,
-        settlement_date: Some(body.date),
-        listing_id: body.listing_id,
-        average_price: Decimal::ZERO,
-        quantity: body.allocations.iter().map(|a| a.quantity_allocated).sum(),
-        currency: listing_currency.clone(),
-        brokerage: Decimal::ZERO,
-        gst_on_brokerage: Decimal::ZERO,
-        brokerage_currency: listing_currency.clone(),
-        fx_rate: Decimal::ONE,
-        spot_fx_rate: None,
-        contract_note_ref: None,
-        holding_account_id: body.from_account_id,
-        allocations: body
-            .allocations
+    let sell_body = rollover::closing_sell_body(
+        body.date,
+        body.listing_id,
+        body.from_account_id,
+        Decimal::ZERO,
+        listing_currency.clone(),
+        Decimal::ONE,
+        body.allocations
             .iter()
             .map(|a| AllocationInput {
                 purchase_trade_id: a.purchase_trade_id,
                 quantity_allocated: a.quantity_allocated,
             })
             .collect(),
-    };
+    );
     sell::upsert_sell_in_tx(
         &mut tx,
         sell_id,
@@ -380,27 +290,22 @@ pub async fn db_transfer(
     let mut transfer_in_ids = Vec::with_capacity(transfer_ins.len());
     for (i, t) in transfer_ins.iter().enumerate() {
         let buy_id = sell_id + 1 + i as i64;
-        sqlx::query(
-            "INSERT INTO trades \
-             (id, trade_type, date, settlement_date, listing_id, average_price, quantity, \
-              currency, brokerage, gst_on_brokerage, brokerage_currency, fx_rate, \
-              spot_fx_rate, holding_account_id, transfer_id, deemed_acquisition_date) \
-             VALUES (?, 'Buy', ?, ?, ?, '0', ?, ?, ?, '0', ?, ?, ?, ?, ?, ?)",
+        rollover::insert_replacement_buy(
+            &mut tx,
+            &rollover::ReplacementBuy {
+                id: buy_id,
+                date: body.date,
+                listing_id: body.listing_id,
+                quantity: t.quantity,
+                cost_base: t.carried_cost_base,
+                currency: &t.currency,
+                fx_rate: t.fx_rate,
+                spot_fx_rate: t.spot_fx_rate,
+                deemed_acquisition_date: t.deemed_acquisition_date,
+                holding_account_id: body.to_account_id,
+            },
+            rollover::Provenance::Transfer(id),
         )
-        .bind(buy_id)
-        .bind(body.date)
-        .bind(body.date)
-        .bind(body.listing_id)
-        .bind(Money(t.quantity))
-        .bind(&t.currency)
-        .bind(Money(t.carried_cost_base))
-        .bind(&t.currency)
-        .bind(Money(t.fx_rate))
-        .bind(OptMoney(t.spot_fx_rate))
-        .bind(body.to_account_id)
-        .bind(id)
-        .bind(t.deemed_acquisition_date)
-        .execute(&mut *tx)
         .await?;
         transfer_in_ids.push(buy_id);
     }
@@ -414,101 +319,171 @@ pub async fn db_transfer(
     // via `transfers.fee_sale_trade_id` so the two are created and deleted
     // together. Its parcels' over-allocation is checked against the source
     // holding net of the transfer-out Sell above (both share the same tx).
-    let mut fee_sale_id: Option<i64> = None;
-    if !body.fee_allocations.is_empty() {
-        let fee_market_price = match body.fee_market_price {
-            Some(p) if p > Decimal::ZERO => p,
-            _ => return Err(TransferError::FeeMarketPriceMissing),
-        };
-        // Fee parcels must be of the transfer's listing (the Sell core checks
-        // the source-account and capacity invariants, but not the listing).
-        for alloc in &body.fee_allocations {
-            let parcel_listing: Option<i64> =
-                sqlx::query_scalar("SELECT listing_id FROM trades WHERE id = ?")
-                    .bind(alloc.purchase_trade_id)
-                    .fetch_optional(&mut *tx)
-                    .await?;
-            match parcel_listing {
-                None => return Err(TransferError::Sell(sell::SellError::PurchaseParcelMissing)),
-                Some(l) if l != body.listing_id => return Err(TransferError::ListingMismatch),
-                Some(_) => {}
-            }
-        }
-
-        let id_for_fee = sell_id + 1 + transfer_ins.len() as i64;
-        let fee_body = SellBody {
-            brokerage_includes_gst: false,
-            statement_total: None,
-            date: body.date,
-            settlement_date: Some(body.date),
-            listing_id: body.listing_id,
-            average_price: fee_market_price,
-            quantity: body
-                .fee_allocations
-                .iter()
-                .map(|a| a.quantity_allocated)
-                .sum(),
-            currency: listing_currency.clone(),
-            brokerage: Decimal::ZERO,
-            gst_on_brokerage: Decimal::ZERO,
-            brokerage_currency: listing_currency,
-            fx_rate: body.fee_fx_rate.unwrap_or(Decimal::ONE),
-            spot_fx_rate: None,
-            contract_note_ref: None,
-            holding_account_id: body.from_account_id,
-            allocations: body
-                .fee_allocations
-                .iter()
-                .map(|a| AllocationInput {
-                    purchase_trade_id: a.purchase_trade_id,
-                    quantity_allocated: a.quantity_allocated,
-                })
-                .collect(),
-        };
-        sell::upsert_sell_in_tx(
-            &mut tx, id_for_fee, &fee_body, body.date, None, None, None, None, None,
-        )
-        .await?;
-        sqlx::query("UPDATE transfers SET fee_sale_trade_id = ? WHERE id = ?")
-            .bind(id_for_fee)
-            .bind(id)
-            .execute(&mut *tx)
-            .await?;
-        fee_sale_id = Some(id_for_fee);
-    }
+    let fee_sale_id = write_fee_sale(
+        &mut tx,
+        id,
+        body,
+        sell_id + 1 + transfer_ins.len() as i64,
+        listing_currency,
+    )
+    .await?;
 
     tx.commit().await?;
 
     // Read the freshly created rows back so the response is exactly what was
     // stored.
-    let transfer = db_get(pool, id)
-        .await?
-        .ok_or_else(|| TransferError::Db(sqlx::Error::RowNotFound))?;
+    let transfer = db_get(pool, id).await?.ok_or(sqlx::Error::RowNotFound)?;
     let sell = trade::db_get(pool, sell_id)
         .await?
-        .ok_or_else(|| TransferError::Db(sqlx::Error::RowNotFound))?;
-    let mut created = Vec::with_capacity(transfer_in_ids.len());
-    for tid in transfer_in_ids {
-        created.push(
-            trade::db_get(pool, tid)
-                .await?
-                .ok_or_else(|| TransferError::Db(sqlx::Error::RowNotFound))?,
-        );
-    }
+        .ok_or(sqlx::Error::RowNotFound)?;
     let fee_sale = match fee_sale_id {
         Some(fid) => Some(
             trade::db_get(pool, fid)
                 .await?
-                .ok_or_else(|| TransferError::Db(sqlx::Error::RowNotFound))?,
+                .ok_or(sqlx::Error::RowNotFound)?,
         ),
         None => None,
     };
     Ok(TransferGroup {
         transfer,
         sell,
-        transfer_ins: created,
+        transfer_ins: rollover::created_trades(pool, transfer_in_ids).await?,
         fee_sale,
     })
+}
+
+/// A transfer-in Buy to create: the moved units (transfer-date basis), their
+/// share of the parcel's remaining reduced cost base, and the carried
+/// acquisition date.
+struct TransferIn {
+    quantity: Decimal,
+    carried_cost_base: Decimal,
+    currency: String,
+    fx_rate: Decimal,
+    spot_fx_rate: Option<Decimal>,
+    deemed_acquisition_date: NaiveDate,
+}
+
+/// One `TransferIn` per requested allocation: the moved units' share of that
+/// parcel's remaining reduced cost base, and what the new parcel carries over
+/// from the old one.
+async fn transfer_ins(
+    conn: &mut sqlx::SqliteConnection,
+    body: &TransferBody,
+    inputs: &rollover::CostBaseInputs,
+) -> Result<Vec<TransferIn>, TransferError> {
+    let mut out = Vec::with_capacity(body.allocations.len());
+    for alloc in &body.allocations {
+        let parcel: Option<ParcelRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "SELECT {} FROM trades WHERE id = ?",
+            ParcelRow::COLUMNS
+        )))
+        .bind(alloc.purchase_trade_id)
+        .fetch_optional(&mut *conn)
+        .await?;
+        // A missing parcel (or a non-Buy/DRP, over-allocation, or
+        // wrong-account one) is also caught by the Sell core; the listing
+        // check is the one thing it does not enforce.
+        let Some(parcel) = parcel else {
+            return Err(TransferError::Sell(sell::SellError::PurchaseParcelMissing));
+        };
+        if parcel.listing_id != body.listing_id {
+            return Err(TransferError::ListingMismatch);
+        }
+
+        // The moved units' share of the parcel's remaining reduced cost base,
+        // in the parcel's own currency: the shared pipeline, pro-rated over
+        // the *as-acquired* moved units so a partial transfer carries exactly
+        // its share.
+        let moved_as_acquired = as_acquired_quantity(
+            alloc.quantity_allocated,
+            &inputs.splits,
+            parcel.date,
+            body.date,
+        );
+        let carried_cost_base = inputs.carried_cost_base(&parcel, moved_as_acquired, body.date)?;
+
+        out.push(TransferIn {
+            quantity: alloc.quantity_allocated,
+            carried_cost_base,
+            currency: parcel.currency.clone(),
+            fx_rate: parcel.fx_rate,
+            spot_fx_rate: parcel.spot_fx_rate,
+            // Chain through an earlier rollover/transfer: the discount clock
+            // always runs from the first acquisition — the parcel's own
+            // `acquired()`, deemed date where it carries one.
+            deemed_acquisition_date: parcel.acquired(),
+        });
+    }
+    Ok(out)
+}
+
+/// The optional network-fee disposal, written on the same transaction and
+/// linked to the transfer. `None` when the body asked for none.
+async fn write_fee_sale(
+    conn: &mut sqlx::SqliteConnection,
+    transfer_id: i64,
+    body: &TransferBody,
+    fee_sale_id: i64,
+    listing_currency: String,
+) -> Result<Option<i64>, TransferError> {
+    if body.fee_allocations.is_empty() {
+        return Ok(None);
+    }
+    let fee_market_price = match body.fee_market_price {
+        Some(p) if p > Decimal::ZERO => p,
+        _ => return Err(TransferError::FeeMarketPriceMissing),
+    };
+    // Fee parcels must be of the transfer's listing (the Sell core checks the
+    // source-account and capacity invariants, but not the listing).
+    for alloc in &body.fee_allocations {
+        let parcel_listing: Option<i64> =
+            sqlx::query_scalar("SELECT listing_id FROM trades WHERE id = ?")
+                .bind(alloc.purchase_trade_id)
+                .fetch_optional(&mut *conn)
+                .await?;
+        match parcel_listing {
+            None => return Err(TransferError::Sell(sell::SellError::PurchaseParcelMissing)),
+            Some(l) if l != body.listing_id => return Err(TransferError::ListingMismatch),
+            Some(_) => {}
+        }
+    }
+
+    // An ordinary Sell at the fee crypto's market value: no `transfer_id`, so
+    // the gains reports count it like any disposal.
+    let fee_body = rollover::closing_sell_body(
+        body.date,
+        body.listing_id,
+        body.from_account_id,
+        fee_market_price,
+        listing_currency,
+        body.fee_fx_rate.unwrap_or(Decimal::ONE),
+        body.fee_allocations
+            .iter()
+            .map(|a| AllocationInput {
+                purchase_trade_id: a.purchase_trade_id,
+                quantity_allocated: a.quantity_allocated,
+            })
+            .collect(),
+    );
+    sell::upsert_sell_in_tx(
+        &mut *conn,
+        fee_sale_id,
+        &fee_body,
+        body.date,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await?;
+    sqlx::query("UPDATE transfers SET fee_sale_trade_id = ? WHERE id = ?")
+        .bind(fee_sale_id)
+        .bind(transfer_id)
+        .execute(&mut *conn)
+        .await?;
+    Ok(Some(fee_sale_id))
 }
 
 /// Outcome of a delete request, so the handler can map to the right status.
@@ -622,8 +597,9 @@ async fn delete(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::entities::corporate_action;
     use crate::entities::holding_account::{self, HoldingAccount};
-    use crate::entities::sell::SellError;
+    use crate::entities::sell::{SellBody, SellError};
     use crate::entities::trade::TradeType;
     use crate::test_support::{self, dec};
     use axum::{body::Body, http::Request};

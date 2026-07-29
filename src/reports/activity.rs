@@ -122,206 +122,280 @@ struct Proto {
     amount_aud: Option<Decimal>,
 }
 
-/// Reads the listing's whole history and its holding summary on one read
-/// transaction (a single consistent snapshot), then assembles the ledger.
-/// `None` when the listing does not exist.
-pub async fn db_activity(
-    pool: &SqlitePool,
-    listing_id: i64,
-) -> Result<Option<(Vec<ActivityEvent>, Vec<HoldingOverview>)>, sqlx::Error> {
-    let mut tx = pool.begin().await?;
-    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM listings WHERE id = ?)")
-        .bind(listing_id)
-        .fetch_one(&mut *tx)
-        .await?;
-    if !exists {
-        return Ok(None);
-    }
+/// Everything one listing's ledger is assembled from, read on a single
+/// transaction (see `Sources::load`).
+struct Sources {
+    trades: Vec<Trade>,
+    transfers: Vec<Transfer>,
+    incomes: Vec<Income>,
+    actions: Vec<CorporateAction>,
+    ammas: Vec<crate::entities::amma::AmmaStatement>,
+    esses: Vec<EssStatement>,
+    enrolments: Vec<DrpEnrolment>,
+    expenses: Vec<InvestmentExpense>,
+    renames: Vec<ListingRenameRow>,
+    rights_sales: Vec<RightsSaleRow>,
+    fx: FxRates,
+    /// Names for the detail texts: accounts and (scrip/demerger counterpart)
+    /// listings read as names/tickers, never raw foreign-key ids.
+    account_names: HashMap<i64, String>,
+    tickers: HashMap<i64, String>,
+    /// The portfolio overview's rows for this listing, from the same snapshot.
+    holdings: Vec<HoldingOverview>,
+}
 
-    let trades: Vec<Trade> = sqlx::query_as("SELECT * FROM trades WHERE listing_id = ?")
+impl Sources {
+    /// Reads the listing's whole history and its holding summary on the
+    /// caller's transaction, so ledger and summary come from one consistent
+    /// snapshot. `None` when the listing does not exist.
+    async fn load(
+        conn: &mut sqlx::SqliteConnection,
+        listing_id: i64,
+    ) -> Result<Option<Self>, sqlx::Error> {
+        let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM listings WHERE id = ?)")
+            .bind(listing_id)
+            .fetch_one(&mut *conn)
+            .await?;
+        if !exists {
+            return Ok(None);
+        }
+
+        let trades: Vec<Trade> = sqlx::query_as("SELECT * FROM trades WHERE listing_id = ?")
+            .bind(listing_id)
+            .fetch_all(&mut *conn)
+            .await?;
+        let transfers: Vec<Transfer> =
+            sqlx::query_as("SELECT * FROM transfers WHERE listing_id = ?")
+                .bind(listing_id)
+                .fetch_all(&mut *conn)
+                .await?;
+        let incomes: Vec<Income> = sqlx::query_as("SELECT * FROM income WHERE listing_id = ?")
+            .bind(listing_id)
+            .fetch_all(&mut *conn)
+            .await?;
+        let actions: Vec<CorporateAction> =
+            sqlx::query_as("SELECT * FROM corporate_actions WHERE listing_id = ?")
+                .bind(listing_id)
+                .fetch_all(&mut *conn)
+                .await?;
+        let ammas: Vec<crate::entities::amma::AmmaStatement> =
+            sqlx::query_as("SELECT * FROM amma_statements WHERE listing_id = ?")
+                .bind(listing_id)
+                .fetch_all(&mut *conn)
+                .await?;
+        let esses: Vec<EssStatement> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "SELECT {} FROM ess_statements WHERE listing_id = ?",
+            crate::entities::ess_statement::COLUMNS
+        )))
         .bind(listing_id)
-        .fetch_all(&mut *tx)
+        .fetch_all(&mut *conn)
         .await?;
-    let transfers: Vec<Transfer> = sqlx::query_as("SELECT * FROM transfers WHERE listing_id = ?")
+        let enrolments: Vec<DrpEnrolment> =
+            sqlx::query_as("SELECT * FROM drp_enrolments WHERE listing_id = ?")
+                .bind(listing_id)
+                .fetch_all(&mut *conn)
+                .await?;
+        let expenses: Vec<InvestmentExpense> =
+            sqlx::query_as("SELECT * FROM investment_expenses WHERE listing_id = ?")
+                .bind(listing_id)
+                .fetch_all(&mut *conn)
+                .await?;
+        let renames: Vec<ListingRenameRow> = sqlx::query_as(
+            "SELECT id, effective_date, old_ticker, new_ticker, old_exchange_mic, new_exchange_mic \
+             FROM listing_renames WHERE listing_id = ?",
+        )
         .bind(listing_id)
-        .fetch_all(&mut *tx)
+        .fetch_all(&mut *conn)
         .await?;
-    let incomes: Vec<Income> = sqlx::query_as("SELECT * FROM income WHERE listing_id = ?")
+        let rights_sales: Vec<RightsSaleRow> = sqlx::query(
+            "SELECT rs.id, rs.date, rs.units, rs.proceeds_per_right, rs.fx_rate, \
+                    rs.holding_account_id, ca.currency \
+             FROM rights_sales rs JOIN corporate_actions ca ON ca.id = rs.rights_action_id \
+             WHERE ca.listing_id = ?",
+        )
         .bind(listing_id)
-        .fetch_all(&mut *tx)
-        .await?;
-    let actions: Vec<CorporateAction> =
-        sqlx::query_as("SELECT * FROM corporate_actions WHERE listing_id = ?")
-            .bind(listing_id)
-            .fetch_all(&mut *tx)
-            .await?;
-    let ammas: Vec<crate::entities::amma::AmmaStatement> =
-        sqlx::query_as("SELECT * FROM amma_statements WHERE listing_id = ?")
-            .bind(listing_id)
-            .fetch_all(&mut *tx)
-            .await?;
-    let esses: Vec<EssStatement> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT {} FROM ess_statements WHERE listing_id = ?",
-        crate::entities::ess_statement::COLUMNS
-    )))
-    .bind(listing_id)
-    .fetch_all(&mut *tx)
-    .await?;
-    let enrolments: Vec<DrpEnrolment> =
-        sqlx::query_as("SELECT * FROM drp_enrolments WHERE listing_id = ?")
-            .bind(listing_id)
-            .fetch_all(&mut *tx)
-            .await?;
-    let expenses: Vec<InvestmentExpense> =
-        sqlx::query_as("SELECT * FROM investment_expenses WHERE listing_id = ?")
-            .bind(listing_id)
-            .fetch_all(&mut *tx)
-            .await?;
-    let renames: Vec<ListingRenameRow> = sqlx::query_as(
-        "SELECT id, effective_date, old_ticker, new_ticker, old_exchange_mic, new_exchange_mic \
-         FROM listing_renames WHERE listing_id = ?",
-    )
-    .bind(listing_id)
-    .fetch_all(&mut *tx)
-    .await?;
-    let rights_sales: Vec<RightsSaleRow> = sqlx::query(
-        "SELECT rs.id, rs.date, rs.units, rs.proceeds_per_right, rs.fx_rate, \
-                rs.holding_account_id, ca.currency \
-         FROM rights_sales rs JOIN corporate_actions ca ON ca.id = rs.rights_action_id \
-         WHERE ca.listing_id = ?",
-    )
-    .bind(listing_id)
-    .fetch_all(&mut *tx)
-    .await?
-    .iter()
-    .map(|row| {
-        Ok(RightsSaleRow {
-            id: row.try_get("id")?,
-            date: row.try_get("date")?,
-            units: parse_dec("units", row.try_get("units")?)?,
-            proceeds_per_right: parse_dec(
-                "proceeds_per_right",
-                row.try_get("proceeds_per_right")?,
-            )?,
-            fx_rate: parse_dec("fx_rate", row.try_get("fx_rate")?)?,
-            holding_account_id: row.try_get("holding_account_id")?,
-            currency: row.try_get("currency")?,
+        .fetch_all(&mut *conn)
+        .await?
+        .iter()
+        .map(|row| {
+            Ok(RightsSaleRow {
+                id: row.try_get("id")?,
+                date: row.try_get("date")?,
+                units: parse_dec("units", row.try_get("units")?)?,
+                proceeds_per_right: parse_dec(
+                    "proceeds_per_right",
+                    row.try_get("proceeds_per_right")?,
+                )?,
+                fx_rate: parse_dec("fx_rate", row.try_get("fx_rate")?)?,
+                holding_account_id: row.try_get("holding_account_id")?,
+                currency: row.try_get("currency")?,
+            })
         })
-    })
-    .collect::<Result<_, sqlx::Error>>()?;
-    let fx = FxRates::load(&mut *tx).await?;
-    // Names for the detail texts: accounts and (scrip/demerger counterpart)
-    // listings read as names/tickers, never raw foreign-key ids.
-    let account_names: HashMap<i64, String> =
-        sqlx::query_as("SELECT id, name FROM holding_accounts")
-            .fetch_all(&mut *tx)
+        .collect::<Result<_, sqlx::Error>>()?;
+        let fx = FxRates::load(&mut *conn).await?;
+        let account_names: HashMap<i64, String> =
+            sqlx::query_as("SELECT id, name FROM holding_accounts")
+                .fetch_all(&mut *conn)
+                .await?
+                .into_iter()
+                .collect();
+        let tickers: HashMap<i64, String> = sqlx::query_as("SELECT id, ticker FROM listings")
+            .fetch_all(&mut *conn)
             .await?
             .into_iter()
             .collect();
-    let tickers: HashMap<i64, String> = sqlx::query_as("SELECT id, ticker FROM listings")
-        .fetch_all(&mut *tx)
-        .await?
-        .into_iter()
-        .collect();
-    // The summary comes from the same snapshot as the ledger.
-    let holdings: Vec<HoldingOverview> = portfolio::db_holdings_on(&mut tx, None)
-        .await?
-        .into_iter()
-        .filter(|h| h.listing_id == listing_id)
-        .collect();
-    tx.commit().await?;
+        let holdings: Vec<HoldingOverview> = portfolio::db_holdings_on(&mut *conn, None)
+            .await?
+            .into_iter()
+            .filter(|h| h.listing_id == listing_id)
+            .collect();
 
-    let account = |id: i64| {
-        account_names
+        Ok(Some(Self {
+            trades,
+            transfers,
+            incomes,
+            actions,
+            ammas,
+            esses,
+            enrolments,
+            expenses,
+            renames,
+            rights_sales,
+            fx,
+            account_names,
+            tickers,
+            holdings,
+        }))
+    }
+
+    /// Every source table's rows as unsorted protos.
+    fn proto_rows(&self) -> Result<Vec<Proto>, sqlx::Error> {
+        let mut rows = Vec::new();
+        rows.extend(self.action_rows());
+        rows.extend(self.transfer_rows());
+        rows.extend(self.income_rows()?);
+        rows.extend(self.statement_rows());
+        rows.extend(self.rights_sale_rows()?);
+        rows.extend(self.rename_rows());
+        rows.extend(self.enrolment_rows());
+        rows.extend(self.expense_rows()?);
+        rows.extend(self.trade_rows()?);
+        Ok(rows)
+    }
+
+    /// `account 'Name'` for the detail texts, falling back to the raw id only
+    /// when the account has since gone.
+    fn account(&self, id: i64) -> String {
+        self.account_names
             .get(&id)
             .map_or_else(|| format!("account {id}"), |n| format!("account '{n}'"))
-    };
-
-    let mut rows: Vec<Proto> = Vec::new();
-
-    for a in &actions {
-        let (event, detail, rebase) = describe_action(a, &tickers);
-        rows.push(Proto {
-            date: a.date,
-            rank: 0,
-            src: 0,
-            id: a.id,
-            event,
-            detail,
-            holding_account_id: None,
-            quantity: None,
-            rebase,
-            amount_aud: None,
-        });
     }
 
-    for t in &transfers {
-        // The transfer group's own Sell/Buys collapse into this row (a
-        // transfer is not a disposal); the moved quantity comes from the
-        // group's transfer-out Sell.
-        let moved = trades
+    fn action_rows(&self) -> Vec<Proto> {
+        self.actions
             .iter()
-            .find(|tr| tr.transfer_id == Some(t.id) && tr.trade_type == TradeType::Sell)
-            .map(|tr| tr.quantity);
-        let (from, to) = (account(t.from_account_id), account(t.to_account_id));
-        let mut detail = match moved {
-            Some(q) => format!("{q} unit(s) from {from} to {to}"),
-            None => format!("from {from} to {to}"),
-        };
-        if let Some(fee_sell) = t.fee_sale_trade_id {
-            detail.push_str(&format!(" (network fee disposal: trade #{fee_sell})"));
-        }
-        rows.push(Proto {
-            date: t.date,
-            rank: 1,
-            src: 1,
-            id: t.id,
-            event: "Transfer between accounts".to_string(),
-            detail,
-            holding_account_id: None,
-            quantity: None,
-            rebase: None,
-            amount_aud: None,
-        });
+            .map(|a| {
+                let (event, detail, rebase) = describe_action(a, &self.tickers);
+                Proto {
+                    date: a.date,
+                    rank: 0,
+                    src: 0,
+                    id: a.id,
+                    event,
+                    detail,
+                    holding_account_id: None,
+                    quantity: None,
+                    rebase,
+                    amount_aud: None,
+                }
+            })
+            .collect()
     }
 
-    for i in &incomes {
-        let event = if i.buyback_trade_id.is_some() {
-            "Dividend (buy-back component)"
-        } else if i.trust_income {
-            "Trust distribution"
-        } else {
-            "Dividend"
-        };
-        let gross = i.gross_cash_income();
-        let mut detail = format!("gross {gross} {}", i.currency);
-        if i.franking_credits > Decimal::ZERO {
-            detail.push_str(&format!(", franking credits {}", i.franking_credits));
-        }
-        if let Some(trade_id) = i.reinvestment_trade_id {
-            detail.push_str(&format!(", reinvested (trade #{trade_id})"));
-        }
-        // The AUD month follows the tax summary, on the model's own
-        // `assessment_date`: present entitlement governs a trust row when
-        // recorded, otherwise the pay date.
-        let fx_date = i.assessment_date();
-        let amount_aud = fx.to_aud(gross, &i.currency, fx_date, FxOverride::None)?;
-        rows.push(Proto {
-            date: i.date_paid,
-            rank: 1,
-            src: 2,
-            id: i.id,
-            event: event.to_string(),
-            detail,
-            holding_account_id: Some(i.holding_account_id),
-            quantity: None,
-            rebase: None,
-            amount_aud: Some(amount_aud),
-        });
+    fn transfer_rows(&self) -> Vec<Proto> {
+        self.transfers
+            .iter()
+            .map(|t| {
+                // The transfer group's own Sell/Buys collapse into this row (a
+                // transfer is not a disposal); the moved quantity comes from
+                // the group's transfer-out Sell.
+                let moved = self
+                    .trades
+                    .iter()
+                    .find(|tr| tr.transfer_id == Some(t.id) && tr.trade_type == TradeType::Sell)
+                    .map(|tr| tr.quantity);
+                let (from, to) = (
+                    self.account(t.from_account_id),
+                    self.account(t.to_account_id),
+                );
+                let mut detail = match moved {
+                    Some(q) => format!("{q} unit(s) from {from} to {to}"),
+                    None => format!("from {from} to {to}"),
+                };
+                if let Some(fee_sell) = t.fee_sale_trade_id {
+                    detail.push_str(&format!(" (network fee disposal: trade #{fee_sell})"));
+                }
+                Proto {
+                    date: t.date,
+                    rank: 1,
+                    src: 1,
+                    id: t.id,
+                    event: "Transfer between accounts".to_string(),
+                    detail,
+                    holding_account_id: None,
+                    quantity: None,
+                    rebase: None,
+                    amount_aud: None,
+                }
+            })
+            .collect()
     }
 
-    for a in &ammas {
-        rows.push(Proto {
+    fn income_rows(&self) -> Result<Vec<Proto>, sqlx::Error> {
+        self.incomes
+            .iter()
+            .map(|i| {
+                let event = if i.buyback_trade_id.is_some() {
+                    "Dividend (buy-back component)"
+                } else if i.trust_income {
+                    "Trust distribution"
+                } else {
+                    "Dividend"
+                };
+                let gross = i.gross_cash_income();
+                let mut detail = format!("gross {gross} {}", i.currency);
+                if i.franking_credits > Decimal::ZERO {
+                    detail.push_str(&format!(", franking credits {}", i.franking_credits));
+                }
+                if let Some(trade_id) = i.reinvestment_trade_id {
+                    detail.push_str(&format!(", reinvested (trade #{trade_id})"));
+                }
+                // The AUD month follows the tax summary, on the model's own
+                // `assessment_date`: present entitlement governs a trust row
+                // when recorded, otherwise the pay date.
+                let amount_aud =
+                    self.fx
+                        .to_aud(gross, &i.currency, i.assessment_date(), FxOverride::None)?;
+                Ok(Proto {
+                    date: i.date_paid,
+                    rank: 1,
+                    src: 2,
+                    id: i.id,
+                    event: event.to_string(),
+                    detail,
+                    holding_account_id: Some(i.holding_account_id),
+                    quantity: None,
+                    rebase: None,
+                    amount_aud: Some(amount_aud),
+                })
+            })
+            .collect()
+    }
+
+    /// The two statement kinds — AMMA and ESS — which move no units and carry
+    /// no single AUD figure.
+    fn statement_rows(&self) -> Vec<Proto> {
+        let ammas = self.ammas.iter().map(|a| Proto {
             date: a.tax_year_end_date,
             rank: 1,
             src: 3,
@@ -339,10 +413,7 @@ pub async fn db_activity(
             rebase: None,
             amount_aud: None,
         });
-    }
-
-    for s in &esses {
-        rows.push(Proto {
+        let esses = self.esses.iter().map(|s| Proto {
             date: s.taxing_point_date,
             rank: 1,
             src: 4,
@@ -357,150 +428,180 @@ pub async fn db_activity(
             rebase: None,
             amount_aud: None,
         });
+        ammas.chain(esses).collect()
     }
 
-    for rs in &rights_sales {
-        let proceeds = rs.units * rs.proceeds_per_right;
-        let amount_aud = fx.to_aud(
-            proceeds,
-            &rs.currency,
-            rs.date,
-            FxOverride::Fallback(rs.fx_rate),
-        )?;
-        rows.push(Proto {
-            date: rs.date,
-            rank: 1,
-            src: 5,
-            id: rs.id,
-            event: "Rights sale/lapse".to_string(),
-            detail: format!(
-                "{} right(s) at {} {} per right (share holding untouched)",
-                rs.units, rs.proceeds_per_right, rs.currency
-            ),
-            holding_account_id: Some(rs.holding_account_id),
-            quantity: None,
-            rebase: None,
-            amount_aud: Some(amount_aud),
-        });
+    fn rights_sale_rows(&self) -> Result<Vec<Proto>, sqlx::Error> {
+        self.rights_sales
+            .iter()
+            .map(|rs| {
+                let proceeds = rs.units * rs.proceeds_per_right;
+                let amount_aud = self.fx.to_aud(
+                    proceeds,
+                    &rs.currency,
+                    rs.date,
+                    FxOverride::Fallback(rs.fx_rate),
+                )?;
+                Ok(Proto {
+                    date: rs.date,
+                    rank: 1,
+                    src: 5,
+                    id: rs.id,
+                    event: "Rights sale/lapse".to_string(),
+                    detail: format!(
+                        "{} right(s) at {} {} per right (share holding untouched)",
+                        rs.units, rs.proceeds_per_right, rs.currency
+                    ),
+                    holding_account_id: Some(rs.holding_account_id),
+                    quantity: None,
+                    rebase: None,
+                    amount_aud: Some(amount_aud),
+                })
+            })
+            .collect()
     }
 
-    for r in &renames {
-        let mut detail = format!("renamed {} -> {}", r.old_ticker, r.new_ticker);
-        if r.old_exchange_mic != r.new_exchange_mic {
-            detail.push_str(&format!(
-                " (exchange {} -> {})",
-                r.old_exchange_mic.as_deref().unwrap_or("Crypto"),
-                r.new_exchange_mic.as_deref().unwrap_or("Crypto")
-            ));
-        }
-        rows.push(Proto {
-            date: r.effective_date,
-            rank: 1,
-            src: 9,
-            id: r.id,
-            event: "Ticker/exchange change".to_string(),
-            detail,
-            holding_account_id: None,
-            quantity: None,
-            rebase: None,
-            amount_aud: None,
-        });
+    fn rename_rows(&self) -> Vec<Proto> {
+        self.renames
+            .iter()
+            .map(|r| {
+                let mut detail = format!("renamed {} -> {}", r.old_ticker, r.new_ticker);
+                if r.old_exchange_mic != r.new_exchange_mic {
+                    detail.push_str(&format!(
+                        " (exchange {} -> {})",
+                        r.old_exchange_mic.as_deref().unwrap_or("Crypto"),
+                        r.new_exchange_mic.as_deref().unwrap_or("Crypto")
+                    ));
+                }
+                Proto {
+                    date: r.effective_date,
+                    rank: 1,
+                    src: 9,
+                    id: r.id,
+                    event: "Ticker/exchange change".to_string(),
+                    detail,
+                    holding_account_id: None,
+                    quantity: None,
+                    rebase: None,
+                    amount_aud: None,
+                }
+            })
+            .collect()
     }
 
-    for e in &enrolments {
-        rows.push(Proto {
-            date: e.enrolment_date,
-            rank: 1,
-            src: 6,
-            id: e.id,
-            event: "DRP enrolment".to_string(),
-            detail: format!("residual handling: {:?}", e.residual_handling),
-            holding_account_id: Some(e.holding_account_id),
-            quantity: None,
-            rebase: None,
-            amount_aud: None,
-        });
-        if let Some(end) = e.unenrolment_date {
-            rows.push(Proto {
-                date: end,
-                rank: 1,
-                src: 6,
-                id: e.id,
-                event: "DRP unenrolment".to_string(),
-                detail: format!("enrolled since {}", e.enrolment_date),
-                holding_account_id: Some(e.holding_account_id),
-                quantity: None,
-                rebase: None,
-                amount_aud: None,
-            });
-        }
+    /// A DRP enrolment is one row, plus a second when it has since ended.
+    fn enrolment_rows(&self) -> Vec<Proto> {
+        self.enrolments
+            .iter()
+            .flat_map(|e| {
+                let started = Proto {
+                    date: e.enrolment_date,
+                    rank: 1,
+                    src: 6,
+                    id: e.id,
+                    event: "DRP enrolment".to_string(),
+                    detail: format!("residual handling: {:?}", e.residual_handling),
+                    holding_account_id: Some(e.holding_account_id),
+                    quantity: None,
+                    rebase: None,
+                    amount_aud: None,
+                };
+                let ended = e.unenrolment_date.map(|end| Proto {
+                    date: end,
+                    rank: 1,
+                    src: 6,
+                    id: e.id,
+                    event: "DRP unenrolment".to_string(),
+                    detail: format!("enrolled since {}", e.enrolment_date),
+                    holding_account_id: Some(e.holding_account_id),
+                    quantity: None,
+                    rebase: None,
+                    amount_aud: None,
+                });
+                std::iter::once(started).chain(ended)
+            })
+            .collect()
     }
 
-    for e in &expenses {
-        let mut detail = format!("{:?}: {} {}", e.expense_type, e.amount, e.currency);
-        if let Some(desc) = &e.description {
-            detail.push_str(&format!(" — {desc}"));
-        }
-        let amount_aud = fx.to_aud(e.amount, &e.currency, e.date_incurred, FxOverride::None)?;
-        rows.push(Proto {
-            date: e.date_incurred,
-            rank: 1,
-            src: 7,
-            id: e.id,
-            event: "Investment expense".to_string(),
-            detail,
-            holding_account_id: e.holding_account_id,
-            quantity: None,
-            rebase: None,
-            amount_aud: Some(amount_aud),
-        });
+    fn expense_rows(&self) -> Result<Vec<Proto>, sqlx::Error> {
+        self.expenses
+            .iter()
+            .map(|e| {
+                let mut detail = format!("{:?}: {} {}", e.expense_type, e.amount, e.currency);
+                if let Some(desc) = &e.description {
+                    detail.push_str(&format!(" — {desc}"));
+                }
+                let amount_aud =
+                    self.fx
+                        .to_aud(e.amount, &e.currency, e.date_incurred, FxOverride::None)?;
+                Ok(Proto {
+                    date: e.date_incurred,
+                    rank: 1,
+                    src: 7,
+                    id: e.id,
+                    event: "Investment expense".to_string(),
+                    detail,
+                    holding_account_id: e.holding_account_id,
+                    quantity: None,
+                    rebase: None,
+                    amount_aud: Some(amount_aud),
+                })
+            })
+            .collect()
     }
 
-    let fee_sale_ids: HashSet<i64> = transfers
-        .iter()
-        .filter_map(|t| t.fee_sale_trade_id)
-        .collect();
-    for t in &trades {
-        if t.transfer_id.is_some() {
-            continue; // collapsed into the transfer's own row
-        }
-        let event = trade_event(t, &fee_sale_ids);
-        let signed = match t.trade_type {
-            TradeType::Buy | TradeType::DRP => t.quantity,
-            TradeType::Sell => -t.quantity,
-        };
-        // What the trade adds up to in its own currency — the model's own
-        // `net_transaction_total`, i.e. the very figure the write path
-        // cross-checks a recorded statement total against — converted once
-        // with the trade's own FX precedence, the cost-base pipeline's
-        // convention. A rollover/vest/inheritance-created trade carries its
-        // figure on the brokerage column (price 0), so the carried amount
-        // still shows.
-        let amount_aud = fx.to_aud(
-            t.net_transaction_total(),
-            &t.currency,
-            t.date,
-            t.fx_override(),
-        )?;
-        rows.push(Proto {
-            date: t.date,
-            rank: 2,
-            src: 8,
-            id: t.id,
-            event,
-            detail: format!("{} @ {} {}", t.quantity, t.average_price, t.currency),
-            holding_account_id: Some(t.holding_account_id),
-            quantity: Some(signed),
-            rebase: None,
-            amount_aud: Some(amount_aud),
-        });
+    fn trade_rows(&self) -> Result<Vec<Proto>, sqlx::Error> {
+        let fee_sale_ids: HashSet<i64> = self
+            .transfers
+            .iter()
+            .filter_map(|t| t.fee_sale_trade_id)
+            .collect();
+        self.trades
+            .iter()
+            // A transfer group's trades are collapsed into the transfer's row.
+            .filter(|t| t.transfer_id.is_none())
+            .map(|t| {
+                let signed = match t.trade_type {
+                    TradeType::Buy | TradeType::DRP => t.quantity,
+                    TradeType::Sell => -t.quantity,
+                };
+                // What the trade adds up to in its own currency — the model's
+                // own `net_transaction_total`, i.e. the very figure the write
+                // path cross-checks a recorded statement total against —
+                // converted once with the trade's own FX precedence, the
+                // cost-base pipeline's convention. A rollover/vest/inheritance-
+                // created trade carries its figure on the brokerage column
+                // (price 0), so the carried amount still shows.
+                let amount_aud = self.fx.to_aud(
+                    t.net_transaction_total(),
+                    &t.currency,
+                    t.date,
+                    t.fx_override(),
+                )?;
+                Ok(Proto {
+                    date: t.date,
+                    rank: 2,
+                    src: 8,
+                    id: t.id,
+                    event: trade_event(t, &fee_sale_ids),
+                    detail: format!("{} @ {} {}", t.quantity, t.average_price, t.currency),
+                    holding_account_id: Some(t.holding_account_id),
+                    quantity: Some(signed),
+                    rebase: None,
+                    amount_aud: Some(amount_aud),
+                })
+            })
+            .collect()
     }
+}
 
+/// Orders the protos and walks them into the ledger, carrying the running
+/// units-held balance that a split/bonus re-bases in place before the day's
+/// trades (TD 2000/10).
+fn ledger(mut rows: Vec<Proto>) -> Vec<ActivityEvent> {
     rows.sort_by_key(|r| (r.date, r.rank, r.src, r.id));
-
     let mut balance = Decimal::ZERO;
-    let events = rows
-        .into_iter()
+    rows.into_iter()
         .map(|r| {
             if let Some((new, old)) = r.rebase {
                 balance = balance * new / old;
@@ -518,9 +619,24 @@ pub async fn db_activity(
                 amount_aud: r.amount_aud,
             }
         })
-        .collect();
+        .collect()
+}
 
-    Ok(Some((events, holdings)))
+/// Reads the listing's whole history and its holding summary on one read
+/// transaction (a single consistent snapshot), then assembles the ledger.
+/// `None` when the listing does not exist.
+pub async fn db_activity(
+    pool: &SqlitePool,
+    listing_id: i64,
+) -> Result<Option<(Vec<ActivityEvent>, Vec<HoldingOverview>)>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let Some(sources) = Sources::load(&mut tx, listing_id).await? else {
+        return Ok(None);
+    };
+    tx.commit().await?;
+
+    let events = ledger(sources.proto_rows()?);
+    Ok(Some((events, sources.holdings)))
 }
 
 /// The trade's event label: its type, qualified by the operation that created

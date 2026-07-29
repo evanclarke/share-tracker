@@ -690,31 +690,84 @@ pub struct IncomeSections {
     pub deductions: Vec<DeductionRow>,
 }
 
+impl IncomeSections {
+    /// Every section reads chronologically.
+    fn sort(&mut self) {
+        self.trust_income.sort_by_key(|r| r.date_paid);
+        self.dividends.sort_by_key(|r| r.date_paid);
+        self.foreign_income.sort_by_key(|r| r.date);
+        self.interest.sort_by_key(|r| r.date_paid);
+        self.ess.sort_by_key(|r| r.taxing_point_date);
+        self.deductions.sort_by_key(|r| r.date_incurred);
+    }
+}
+
+/// What every income section needs: the year being reported, the FX table to
+/// convert with, and the naming history to print each row's ticker as at its
+/// own date.
+struct IncomeContext {
+    tax_year: i32,
+    fx: FxRates,
+    tickers: HashMap<i64, String>,
+    renames: RenameHistory,
+}
+
+impl IncomeContext {
+    async fn load(conn: &mut sqlx::SqliteConnection, tax_year: i32) -> Result<Self, sqlx::Error> {
+        let fx = FxRates::load(&mut *conn).await?;
+        let tickers: HashMap<i64, String> = sqlx::query("SELECT id, ticker FROM listings")
+            .fetch_all(&mut *conn)
+            .await?
+            .into_iter()
+            .map(|r| Ok::<_, sqlx::Error>((r.try_get("id")?, r.try_get("ticker")?)))
+            .collect::<Result<_, _>>()?;
+        let renames = RenameHistory::load(&mut *conn).await?;
+        Ok(Self {
+            tax_year,
+            fx,
+            tickers,
+            renames,
+        })
+    }
+
+    /// As at `date`: the current ticker unless renamed since, in which case
+    /// the ticker in effect on `date` — so an income row prints the way the
+    /// broker statement named the security when it was paid.
+    fn ticker_as_at(&self, listing_id: i64, date: NaiveDate) -> String {
+        let current = self
+            .tickers
+            .get(&listing_id)
+            .map(String::as_str)
+            .unwrap_or("");
+        self.renames.ticker_as_at(listing_id, date, current)
+    }
+}
+
 async fn income_section(
     conn: &mut sqlx::SqliteConnection,
     tax_year: i32,
     franking_alerts: &HashMap<i64, franking_at_risk::FrankingAtRiskAlert>,
 ) -> Result<IncomeSections, sqlx::Error> {
-    let fx = FxRates::load(&mut *conn).await?;
-    let tickers: HashMap<i64, String> = sqlx::query("SELECT id, ticker FROM listings")
-        .fetch_all(&mut *conn)
-        .await?
-        .into_iter()
-        .map(|r| Ok::<_, sqlx::Error>((r.try_get("id")?, r.try_get("ticker")?)))
-        .collect::<Result<_, _>>()?;
-    let renames = RenameHistory::load(&mut *conn).await?;
-    // As at `date`: the current ticker (from `tickers`) unless renamed since,
-    // in which case the ticker in effect on `date` — so an income row prints
-    // the way the broker statement named the security when it was paid.
-    let ticker_as_at = |listing_id: i64, date: NaiveDate| -> String {
-        let current = tickers.get(&listing_id).map(String::as_str).unwrap_or("");
-        renames.ticker_as_at(listing_id, date, current)
-    };
-
+    let ctx = IncomeContext::load(&mut *conn, tax_year).await?;
     let mut out = IncomeSections::default();
+    push_income_rows(&mut *conn, &ctx, franking_alerts, &mut out).await?;
+    push_amma_rows(&mut *conn, &ctx, &mut out).await?;
+    push_interest_rows(&mut *conn, &ctx, &mut out).await?;
+    push_ess_rows(&mut *conn, &ctx, &mut out).await?;
+    push_deduction_rows(&mut *conn, &ctx, &mut out).await?;
+    out.sort();
+    Ok(out)
+}
 
-    // Income rows (dividends + non-AMIT trust distributions), same
-    // assessment-date rule the tax summary uses.
+/// Income rows (dividends + non-AMIT trust distributions), on the same
+/// assessment-date rule the tax summary uses.
+async fn push_income_rows(
+    conn: &mut sqlx::SqliteConnection,
+    ctx: &IncomeContext,
+    franking_alerts: &HashMap<i64, franking_at_risk::FrankingAtRiskAlert>,
+    out: &mut IncomeSections,
+) -> Result<(), sqlx::Error> {
+    let (tax_year, fx) = (ctx.tax_year, &ctx.fx);
     let income_rows: Vec<Income> = sqlx::query_as(
         "SELECT i.* FROM income i JOIN listings l ON l.id = i.listing_id \
          WHERE NOT l.amit",
@@ -735,10 +788,10 @@ async fn income_section(
         if tax_year_for(assessed) != tax_year {
             continue;
         }
-        let ticker = ticker_as_at(listing_id, assessed);
+        let ticker = ctx.ticker_as_at(listing_id, assessed);
         // Every figure converts exactly the way the tax summary's own totals
         // do, at the assessment date's month.
-        let aud = |amount: Decimal| tax_summary::aud_value(&fx, amount, &income.currency, assessed);
+        let aud = |amount: Decimal| tax_summary::aud_value(fx, amount, &income.currency, assessed);
         let franked = aud(income.franked_amount)?;
         let unfranked = aud(income.unfranked_amount)?;
         let foreign = aud(income.foreign_source_income)?;
@@ -787,15 +840,23 @@ async fn income_section(
             out.foreign_income.push(ForeignIncomeRow {
                 kind: "Dividend/trust foreign income".to_string(),
                 listing_id: Some(listing_id),
-                ticker: Some(ticker_as_at(listing_id, assessed)),
+                ticker: Some(ctx.ticker_as_at(listing_id, assessed)),
                 date: assessed,
                 amount_aud: foreign,
                 foreign_tax_paid_aud: foreign_tax,
             });
         }
     }
+    Ok(())
+}
 
-    // Full AMMA statement component detail for the year.
+/// Full AMMA statement component detail for the year.
+async fn push_amma_rows(
+    conn: &mut sqlx::SqliteConnection,
+    ctx: &IncomeContext,
+    out: &mut IncomeSections,
+) -> Result<(), sqlx::Error> {
+    let tax_year = ctx.tax_year;
     let amma_rows = sqlx::query(
         "SELECT a.id, a.listing_id, a.tax_year_end_date, a.australian_interest, \
                 a.australian_dividends_unfranked, a.franked_dividends, a.franking_credits, \
@@ -812,92 +873,67 @@ async fn income_section(
     .await?;
     for row in &amma_rows {
         let listing_id: i64 = row.try_get("listing_id")?;
-        let currency: String = row.try_get("currency")?;
         let d: NaiveDate = row.try_get("tax_year_end_date")?;
-        let foreign_income = tax_summary::aud_field(&fx, row, "foreign_income", &currency, d)?;
-        let foreign_tax = tax_summary::aud_field(&fx, row, "foreign_tax_credits", &currency, d)?;
-        out.amma_statements.push(AmmaStatementRow {
-            amma_statement_id: row.try_get("id")?,
-            listing_id,
-            ticker: ticker_as_at(listing_id, d),
-            tax_year_end_date: d,
-            australian_interest_aud: tax_summary::aud_field(
-                &fx,
-                row,
-                "australian_interest",
-                &currency,
-                d,
-            )?,
-            australian_dividends_unfranked_aud: tax_summary::aud_field(
-                &fx,
-                row,
-                "australian_dividends_unfranked",
-                &currency,
-                d,
-            )?,
-            franked_dividends_aud: tax_summary::aud_field(
-                &fx,
-                row,
-                "franked_dividends",
-                &currency,
-                d,
-            )?,
-            franking_credits_aud: tax_summary::aud_field(
-                &fx,
-                row,
-                "franking_credits",
-                &currency,
-                d,
-            )?,
-            net_rent_aud: tax_summary::aud_field(&fx, row, "net_rent", &currency, d)?,
-            foreign_income_aud: foreign_income,
-            foreign_tax_credits_aud: foreign_tax,
-            other_income_aud: tax_summary::aud_field(&fx, row, "other_income", &currency, d)?,
-            cgt_discount_gains_aud: tax_summary::aud_field(
-                &fx,
-                row,
-                "cgt_discount_gains",
-                &currency,
-                d,
-            )?,
-            cgt_indexation_gains_aud: tax_summary::aud_field(
-                &fx,
-                row,
-                "cgt_indexation_gains",
-                &currency,
-                d,
-            )?,
-            cgt_other_gains_aud: tax_summary::aud_field(&fx, row, "cgt_other_gains", &currency, d)?,
-            capital_losses_applied_aud: tax_summary::aud_field(
-                &fx,
-                row,
-                "capital_losses_applied",
-                &currency,
-                d,
-            )?,
-            tax_deferred_amount: crate::infra::decimal::row_dec(row, "tax_deferred_amount")?,
-            tax_free_amount: crate::infra::decimal::row_dec(row, "tax_free_amount")?,
-            tfn_withholding_tax_aud: tax_summary::aud_field(
-                &fx,
-                row,
-                "tfn_withholding_tax",
-                &currency,
-                d,
-            )?,
-        });
+        let statement = amma_statement_row(ctx, row, listing_id, d)?;
+        let (foreign_income, foreign_tax) = (
+            statement.foreign_income_aud,
+            statement.foreign_tax_credits_aud,
+        );
+        out.amma_statements.push(statement);
         if foreign_income > Decimal::ZERO || foreign_tax > Decimal::ZERO {
             out.foreign_income.push(ForeignIncomeRow {
                 kind: "AMMA foreign income".to_string(),
                 listing_id: Some(listing_id),
-                ticker: Some(ticker_as_at(listing_id, d)),
+                ticker: Some(ctx.ticker_as_at(listing_id, d)),
                 date: d,
                 amount_aud: foreign_income,
                 foreign_tax_paid_aud: foreign_tax,
             });
         }
     }
+    Ok(())
+}
 
-    // Interest income.
+/// One AMMA statement's components, each converted at the statement's own
+/// tax-year-end month.
+fn amma_statement_row(
+    ctx: &IncomeContext,
+    row: &sqlx::sqlite::SqliteRow,
+    listing_id: i64,
+    d: NaiveDate,
+) -> Result<AmmaStatementRow, sqlx::Error> {
+    let currency: String = row.try_get("currency")?;
+    let fx = &ctx.fx;
+    let aud = |column: &str| tax_summary::aud_field(fx, row, column, &currency, d);
+    Ok(AmmaStatementRow {
+        amma_statement_id: row.try_get("id")?,
+        listing_id,
+        ticker: ctx.ticker_as_at(listing_id, d),
+        tax_year_end_date: d,
+        australian_interest_aud: aud("australian_interest")?,
+        australian_dividends_unfranked_aud: aud("australian_dividends_unfranked")?,
+        franked_dividends_aud: aud("franked_dividends")?,
+        franking_credits_aud: aud("franking_credits")?,
+        net_rent_aud: aud("net_rent")?,
+        foreign_income_aud: aud("foreign_income")?,
+        foreign_tax_credits_aud: aud("foreign_tax_credits")?,
+        other_income_aud: aud("other_income")?,
+        cgt_discount_gains_aud: aud("cgt_discount_gains")?,
+        cgt_indexation_gains_aud: aud("cgt_indexation_gains")?,
+        cgt_other_gains_aud: aud("cgt_other_gains")?,
+        capital_losses_applied_aud: aud("capital_losses_applied")?,
+        tax_deferred_amount: crate::infra::decimal::row_dec(row, "tax_deferred_amount")?,
+        tax_free_amount: crate::infra::decimal::row_dec(row, "tax_free_amount")?,
+        tfn_withholding_tax_aud: aud("tfn_withholding_tax")?,
+    })
+}
+
+async fn push_interest_rows(
+    conn: &mut sqlx::SqliteConnection,
+    ctx: &IncomeContext,
+    out: &mut IncomeSections,
+) -> Result<(), sqlx::Error> {
+    let (tax_year, fx) = (ctx.tax_year, &ctx.fx);
     let interest_rows = sqlx::query(
         "SELECT id, date_paid, amount, tfn_withholding_tax, foreign_source, foreign_tax_paid, \
                 currency, source \
@@ -912,9 +948,9 @@ async fn income_section(
         }
         let currency: String = row.try_get("currency")?;
         let foreign_source: bool = row.try_get("foreign_source")?;
-        let amount = tax_summary::aud_field(&fx, row, "amount", &currency, date_paid)?;
+        let amount = tax_summary::aud_field(fx, row, "amount", &currency, date_paid)?;
         let foreign_tax =
-            tax_summary::aud_field(&fx, row, "foreign_tax_paid", &currency, date_paid)?;
+            tax_summary::aud_field(fx, row, "foreign_tax_paid", &currency, date_paid)?;
         out.interest.push(InterestIncomeRow {
             interest_income_id: row.try_get("id")?,
             date_paid,
@@ -923,7 +959,7 @@ async fn income_section(
             foreign_source,
             foreign_tax_paid_aud: foreign_tax,
             tfn_withholding_tax_aud: tax_summary::aud_field(
-                &fx,
+                fx,
                 row,
                 "tfn_withholding_tax",
                 &currency,
@@ -941,8 +977,15 @@ async fn income_section(
             });
         }
     }
+    Ok(())
+}
 
-    // ESS statements.
+async fn push_ess_rows(
+    conn: &mut sqlx::SqliteConnection,
+    ctx: &IncomeContext,
+    out: &mut IncomeSections,
+) -> Result<(), sqlx::Error> {
+    let (tax_year, fx) = (ctx.tax_year, &ctx.fx);
     let ess_rows = sqlx::query(
         "SELECT id, listing_id, taxing_point_date, taxed_upfront_eligible, \
                 taxed_upfront_not_eligible, deferral_discount, pre_2009_cessation_discount, \
@@ -960,44 +1003,22 @@ async fn income_section(
         }
         let currency: String = row.try_get("currency")?;
         let listing_id: i64 = row.try_get("listing_id")?;
-        let foreign =
-            tax_summary::aud_label(&fx, row, "foreign_source_discount", &currency, taxing_point)?;
+        // The discount components carry their own stored AUD figures (the
+        // `aud_*` columns), so they convert through `aud_label`.
+        let label = |column: &str| tax_summary::aud_label(fx, row, column, &currency, taxing_point);
+        let foreign = label("foreign_source_discount")?;
         out.ess.push(EssIncomeRow {
             ess_statement_id: row.try_get("id")?,
             listing_id,
-            ticker: ticker_as_at(listing_id, taxing_point),
+            ticker: ctx.ticker_as_at(listing_id, taxing_point),
             taxing_point_date: taxing_point,
-            taxed_upfront_eligible_aud: tax_summary::aud_label(
-                &fx,
-                row,
-                "taxed_upfront_eligible",
-                &currency,
-                taxing_point,
-            )?,
-            taxed_upfront_not_eligible_aud: tax_summary::aud_label(
-                &fx,
-                row,
-                "taxed_upfront_not_eligible",
-                &currency,
-                taxing_point,
-            )?,
-            deferral_discount_aud: tax_summary::aud_label(
-                &fx,
-                row,
-                "deferral_discount",
-                &currency,
-                taxing_point,
-            )?,
-            pre_2009_cessation_discount_aud: tax_summary::aud_label(
-                &fx,
-                row,
-                "pre_2009_cessation_discount",
-                &currency,
-                taxing_point,
-            )?,
+            taxed_upfront_eligible_aud: label("taxed_upfront_eligible")?,
+            taxed_upfront_not_eligible_aud: label("taxed_upfront_not_eligible")?,
+            deferral_discount_aud: label("deferral_discount")?,
+            pre_2009_cessation_discount_aud: label("pre_2009_cessation_discount")?,
             foreign_source_discount_aud: foreign,
             tfn_withholding_aud: tax_summary::aud_field(
-                &fx,
+                fx,
                 row,
                 "tfn_withholding",
                 &currency,
@@ -1008,15 +1029,23 @@ async fn income_section(
             out.foreign_income.push(ForeignIncomeRow {
                 kind: "ESS foreign-source discount (memo)".to_string(),
                 listing_id: Some(listing_id),
-                ticker: Some(ticker_as_at(listing_id, taxing_point)),
+                ticker: Some(ctx.ticker_as_at(listing_id, taxing_point)),
                 date: taxing_point,
                 amount_aud: foreign,
                 foreign_tax_paid_aud: Decimal::ZERO,
             });
         }
     }
+    Ok(())
+}
 
-    // Deductible investment expenses.
+/// Deductible investment expenses.
+async fn push_deduction_rows(
+    conn: &mut sqlx::SqliteConnection,
+    ctx: &IncomeContext,
+    out: &mut IncomeSections,
+) -> Result<(), sqlx::Error> {
+    let (tax_year, fx) = (ctx.tax_year, &ctx.fx);
     let expense_rows = sqlx::query(
         "SELECT id, date_incurred, expense_type, amount, currency, listing_id, description \
          FROM investment_expenses",
@@ -1033,19 +1062,12 @@ async fn income_section(
             investment_expense_id: row.try_get("id")?,
             date_incurred,
             expense_type: row.try_get("expense_type")?,
-            amount_aud: tax_summary::aud_field(&fx, row, "amount", &currency, date_incurred)?,
+            amount_aud: tax_summary::aud_field(fx, row, "amount", &currency, date_incurred)?,
             listing_id: row.try_get("listing_id")?,
             description: row.try_get("description")?,
         });
     }
-
-    out.trust_income.sort_by_key(|r| r.date_paid);
-    out.dividends.sort_by_key(|r| r.date_paid);
-    out.foreign_income.sort_by_key(|r| r.date);
-    out.interest.sort_by_key(|r| r.date_paid);
-    out.ess.sort_by_key(|r| r.taxing_point_date);
-    out.deductions.sort_by_key(|r| r.date_incurred);
-    Ok(out)
+    Ok(())
 }
 
 // ---- tax summary ------------------------------------------------------

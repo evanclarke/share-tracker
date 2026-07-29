@@ -50,13 +50,10 @@
 //! replacement share classes, pre-CGT originals, and exchanges that would
 //! crystallise a capital loss (the law does not allow rolling over a loss).
 
-use crate::domain::cost_base::ParcelRow;
-use crate::entities::corporate_action::{
-    self, ActionKind, RocEvent, sold_in_acquired_units, split_adjusted_quantity,
-};
-use crate::entities::sell::{self, AllocationInput, SellBody};
+use crate::domain::rollover;
+use crate::entities::corporate_action::{self, ActionKind};
+use crate::entities::sell::{self, AllocationInput};
 use crate::entities::trade::{self, Trade};
-use crate::infra::decimal::{Money, OptMoney, parse_dec};
 use crate::infra::http::ApiError;
 use axum::{
     Json, Router,
@@ -67,8 +64,7 @@ use axum::{
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::Serialize;
-use sqlx::{Row, SqlitePool};
-use std::collections::HashMap;
+use sqlx::SqlitePool;
 
 /// The two sides of an exchange: the closing Sell on the original listing
 /// and the replacement Buys it was substituted with (one per consumed
@@ -131,179 +127,19 @@ pub async fn db_exchange(pool: &SqlitePool, action_id: i64) -> Result<Exchange, 
         Some(a) => a,
         None => return Err(ExchangeError::ActionNotFound),
     };
-    let (scrip_listing_id, new_units, old_units, cash) = match &action.kind {
-        ActionKind::ScripForScrip {
-            scrip_listing_id,
-            scrip_new_units,
-            scrip_old_units,
-            scrip_cash_per_unit,
-            scrip_market_value,
-            scrip_cash_currency,
-        } => (
-            *scrip_listing_id,
-            *scrip_new_units,
-            *scrip_old_units,
-            // All three are present together or all absent (body validation
-            // + table CHECKs), so a partial set never reaches here.
-            match (scrip_cash_per_unit, scrip_market_value, scrip_cash_currency) {
-                (Some(cash), Some(mv), Some(currency)) => Some((*cash, *mv, currency.clone())),
-                _ => None,
-            },
-        ),
-        _ => return Err(ExchangeError::NotAScripForScrip),
-    };
+    let terms = Terms::of(&action.kind)?;
+    check_exchangeable(&mut tx, action_id, action.listing_id, action.date).await?;
 
-    // Partial rollover (Example 27): the cash side's share of each parcel's
-    // remaining reduced cost base, apportioned by the consideration's market
-    // values. Per old unit the holder receives `cash` plus `mv × new/old` of
-    // scrip, so cash's share is cash×old / (cash×old + mv×new) — kept as a
-    // (numerator, denominator) pair and multiplied before dividing, so exact
-    // fractions (e.g. Gunther's 1/3) don't round twice.
-    let cash_apportionment = cash
-        .as_ref()
-        .map(|(cash, mv, _)| (*cash * old_units, *cash * old_units + *mv * new_units));
-
-    let already: bool =
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM trades WHERE scrip_action_id = ?)")
-            .bind(action_id)
-            .fetch_one(&mut *tx)
-            .await?;
-    if already {
-        return Err(ExchangeError::AlreadyExchanged);
-    }
-
-    // Every trade of the original listing must predate the exchange — the
-    // takeover delisted it, so a later-dated trade contradicts the action.
-    let late_trade: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM trades WHERE listing_id = ? AND date >= ?)",
-    )
-    .bind(action.listing_id)
-    .bind(action.date)
-    .fetch_one(&mut *tx)
-    .await?;
-    if late_trade {
-        return Err(ExchangeError::TradedOnOrAfterExchangeDate);
-    }
-
-    // The original listing's open parcels, with the same remaining-quantity
-    // and reduced-cost-base rules as the open-parcels report (as-acquired
-    // units internally; allocations re-based across splits).
-    let parcel_rows: Vec<ParcelRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT {} FROM trades \
-         WHERE listing_id = ? AND trade_type IN ('Buy', 'DRP') ORDER BY date, id",
-        ParcelRow::COLUMNS
-    )))
-    .bind(action.listing_id)
-    .fetch_all(&mut *tx)
-    .await?;
-
-    let alloc_rows = sqlx::query(
-        "SELECT pa.purchase_trade_id, pa.quantity_allocated, s.date AS sale_date \
-         FROM parcel_allocations pa \
-         JOIN trades s ON s.id = pa.sale_trade_id \
-         JOIN trades p ON p.id = pa.purchase_trade_id \
-         WHERE p.listing_id = ?",
-    )
-    .bind(action.listing_id)
-    .fetch_all(&mut *tx)
-    .await?;
-    let mut qty_sold: HashMap<i64, Vec<(NaiveDate, Decimal)>> = HashMap::new();
-    for row in &alloc_rows {
-        let tid: i64 = row.try_get("purchase_trade_id")?;
-        qty_sold.entry(tid).or_default().push((
-            row.try_get("sale_date")?,
-            parse_dec("quantity_allocated", row.try_get("quantity_allocated")?)?,
-        ));
-    }
-
-    let splits = corporate_action::db_splits_for_listing(&mut *tx, action.listing_id).await?;
-    let roc_rows = sqlx::query(
-        "SELECT date, amount_per_unit, currency FROM corporate_actions \
-         WHERE action_type = 'ReturnOfCapital' AND listing_id = ? ORDER BY date, id",
-    )
-    .bind(action.listing_id)
-    .fetch_all(&mut *tx)
-    .await?;
-    let mut roc_events = Vec::with_capacity(roc_rows.len());
-    for row in &roc_rows {
-        roc_events.push(RocEvent {
-            date: row.try_get("date")?,
-            amount_per_unit: parse_dec("amount_per_unit", row.try_get("amount_per_unit")?)?,
-            currency: row.try_get("currency")?,
-        });
-    }
-    let amit_reductions =
-        crate::entities::amit_adjustment::db_cost_base_reductions(&mut *tx).await?;
-
-    /// A replacement Buy to create: the consumed parcel's exchange-date units
-    /// scaled by the ratio, its remaining reduced cost base, and its carried
-    /// acquisition date.
-    struct Replacement {
-        parcel_id: i64,
-        at_date_units: Decimal,
-        new_quantity: Decimal,
-        carried_cost_base: Decimal,
-        currency: String,
-        fx_rate: Decimal,
-        spot_fx_rate: Option<Decimal>,
-        deemed_acquisition_date: NaiveDate,
-        /// A replacement parcel stays in the account of the parcel it
-        /// substitutes.
-        holding_account_id: i64,
-    }
-
+    // The original listing's open parcels, costed by the shared rollover
+    // machinery (as-acquired units internally; allocations re-based across
+    // splits; AMIT/return-of-capital reductions up to the exchange date).
+    let inputs = rollover::CostBaseInputs::load(&mut tx, action.listing_id).await?;
+    let parcels = inputs
+        .open_parcels(&mut tx, action.listing_id, action.date)
+        .await?;
     let mut replacements: Vec<Replacement> = Vec::new();
-    for parcel in &parcel_rows {
-        let parcel_id = parcel.id;
-        let sold = sold_in_acquired_units(
-            qty_sold.get(&parcel_id).map_or(&[][..], |v| v),
-            &splits,
-            parcel.date,
-        );
-        let remaining = parcel.quantity - sold;
-        if remaining <= Decimal::ZERO {
-            continue;
-        }
-
-        // Remaining reduced cost base in the parcel's own currency: the
-        // shared pipeline (`domain::cost_base`), bounded at the exchange date.
-        let reduced_cost_base = crate::domain::cost_base::adjusted_cost_base(
-            &parcel.parcel(),
-            remaining,
-            *amit_reductions.get(&parcel_id).unwrap_or(&Decimal::ZERO),
-            &roc_events,
-            &splits,
-            Some(action.date),
-        )?
-        .adjusted;
-
-        // With a cash component, only the scrip side's market-value share of
-        // the cost base rolls over into the replacement; the cash side's
-        // share stays behind for the closing Sell's gain (computed the same
-        // way by the realised-gains report). The two sides sum exactly to
-        // the reduced cost base by construction.
-        let carried_cost_base = match cash_apportionment {
-            Some((num, den)) => reduced_cost_base - reduced_cost_base * num / den,
-            None => reduced_cost_base,
-        };
-
-        // The exchange ratio applies to units as held at the exchange date.
-        let at_date_units =
-            split_adjusted_quantity(remaining, &splits, parcel.date, Some(action.date));
-        replacements.push(Replacement {
-            parcel_id,
-            at_date_units,
-            new_quantity: at_date_units * new_units / old_units,
-            currency: parcel.currency.clone(),
-            fx_rate: parcel.fx_rate,
-            spot_fx_rate: parcel.spot_fx_rate,
-            carried_cost_base,
-            // Chain through an earlier exchange: the clock always runs from
-            // the first acquisition in the rollover chain — the parcel's own
-            // `acquired()`, deemed date where it carries one.
-            deemed_acquisition_date: parcel.acquired(),
-            holding_account_id: parcel.holding_account_id,
-        });
+    for p in &parcels {
+        replacements.push(terms.replacement_for(p, &inputs, action.date)?);
     }
     if replacements.is_empty() {
         return Err(ExchangeError::NothingHeld);
@@ -315,42 +151,32 @@ pub async fn db_exchange(pool: &SqlitePool, action_id: i64) -> Result<Exchange, 
     // unit is the Sell's price, and the realised-gains/net-capital-gain
     // reports assess its gain over the cash-apportioned cost base (the
     // AUD conversion prefers the ATO monthly rate for the cash currency).
-    // Settlement is the exchange date — nothing market-settles.
     let listing_currency: String = sqlx::query_scalar("SELECT currency FROM listings WHERE id = ?")
         .bind(action.listing_id)
         .fetch_one(&mut *tx)
         .await?;
-    let (sell_price, sell_currency) = match &cash {
+    let (sell_price, sell_currency) = match &terms.cash {
         Some((cash_per_unit, _, currency)) => (*cash_per_unit, currency.clone()),
         None => (Decimal::ZERO, listing_currency),
     };
     let sell_id: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(id), 0) + 1 FROM trades")
         .fetch_one(&mut *tx)
         .await?;
-    let sell_body = SellBody {
-        brokerage_includes_gst: false,
-        statement_total: None,
-        holding_account_id: 1,
-        date: action.date,
-        settlement_date: Some(action.date),
-        listing_id: action.listing_id,
-        average_price: sell_price,
-        quantity: replacements.iter().map(|r| r.at_date_units).sum(),
-        currency: sell_currency.clone(),
-        brokerage: Decimal::ZERO,
-        gst_on_brokerage: Decimal::ZERO,
-        brokerage_currency: sell_currency,
-        fx_rate: Decimal::ONE,
-        spot_fx_rate: None,
-        contract_note_ref: None,
-        allocations: replacements
+    let sell_body = rollover::closing_sell_body(
+        action.date,
+        action.listing_id,
+        1,
+        sell_price,
+        sell_currency,
+        Decimal::ONE,
+        replacements
             .iter()
             .map(|r| AllocationInput {
                 purchase_trade_id: r.parcel_id,
                 quantity_allocated: r.at_date_units,
             })
             .collect(),
-    };
+    );
     sell::upsert_sell_in_tx(
         &mut tx,
         sell_id,
@@ -370,27 +196,22 @@ pub async fn db_exchange(pool: &SqlitePool, action_id: i64) -> Result<Exchange, 
     let mut replacement_ids = Vec::with_capacity(replacements.len());
     for (i, r) in replacements.iter().enumerate() {
         let buy_id = sell_id + 1 + i as i64;
-        sqlx::query(
-            "INSERT INTO trades \
-             (id, trade_type, date, settlement_date, listing_id, average_price, quantity, \
-              currency, brokerage, gst_on_brokerage, brokerage_currency, fx_rate, \
-              spot_fx_rate, scrip_action_id, deemed_acquisition_date, holding_account_id) \
-             VALUES (?, 'Buy', ?, ?, ?, '0', ?, ?, ?, '0', ?, ?, ?, ?, ?, ?)",
+        rollover::insert_replacement_buy(
+            &mut tx,
+            &rollover::ReplacementBuy {
+                id: buy_id,
+                date: action.date,
+                listing_id: terms.scrip_listing_id,
+                quantity: r.new_quantity,
+                cost_base: r.carried_cost_base,
+                currency: &r.currency,
+                fx_rate: r.fx_rate,
+                spot_fx_rate: r.spot_fx_rate,
+                deemed_acquisition_date: r.deemed_acquisition_date,
+                holding_account_id: r.holding_account_id,
+            },
+            rollover::Provenance::ScripAction(action_id),
         )
-        .bind(buy_id)
-        .bind(action.date)
-        .bind(action.date)
-        .bind(scrip_listing_id)
-        .bind(Money(r.new_quantity))
-        .bind(&r.currency)
-        .bind(Money(r.carried_cost_base))
-        .bind(&r.currency)
-        .bind(Money(r.fx_rate))
-        .bind(OptMoney(r.spot_fx_rate))
-        .bind(action_id)
-        .bind(r.deemed_acquisition_date)
-        .bind(r.holding_account_id)
-        .execute(&mut *tx)
         .await?;
         replacement_ids.push(buy_id);
     }
@@ -401,19 +222,147 @@ pub async fn db_exchange(pool: &SqlitePool, action_id: i64) -> Result<Exchange, 
     // stored.
     let sell = trade::db_get(pool, sell_id)
         .await?
-        .ok_or_else(|| ExchangeError::Db(sqlx::Error::RowNotFound))?;
-    let mut created = Vec::with_capacity(replacement_ids.len());
-    for id in replacement_ids {
-        created.push(
-            trade::db_get(pool, id)
-                .await?
-                .ok_or_else(|| ExchangeError::Db(sqlx::Error::RowNotFound))?,
-        );
-    }
+        .ok_or(sqlx::Error::RowNotFound)?;
     Ok(Exchange {
         sell,
-        replacements: created,
+        replacements: rollover::created_trades(pool, replacement_ids).await?,
     })
+}
+
+/// The exchange's terms, read off the action: the replacement listing, the
+/// ratio, and the cash component of a partial rollover.
+struct Terms {
+    scrip_listing_id: i64,
+    new_units: Decimal,
+    old_units: Decimal,
+    /// `(cash per old unit, replacement market value, cash currency)` — all
+    /// three present together or all absent (body validation + table CHECKs),
+    /// so a partial set never reaches here.
+    cash: Option<(Decimal, Decimal, String)>,
+    /// Partial rollover (Example 27): the cash side's share of each parcel's
+    /// remaining reduced cost base, apportioned by the consideration's market
+    /// values. Per old unit the holder receives `cash` plus `mv × new/old` of
+    /// scrip, so cash's share is cash×old / (cash×old + mv×new) — kept as a
+    /// (numerator, denominator) pair and multiplied before dividing, so exact
+    /// fractions (e.g. Gunther's 1/3) don't round twice.
+    cash_apportionment: Option<(Decimal, Decimal)>,
+}
+
+impl Terms {
+    fn of(kind: &ActionKind) -> Result<Self, ExchangeError> {
+        let ActionKind::ScripForScrip {
+            scrip_listing_id,
+            scrip_new_units,
+            scrip_old_units,
+            scrip_cash_per_unit,
+            scrip_market_value,
+            scrip_cash_currency,
+        } = kind
+        else {
+            return Err(ExchangeError::NotAScripForScrip);
+        };
+        let cash = match (scrip_cash_per_unit, scrip_market_value, scrip_cash_currency) {
+            (Some(cash), Some(mv), Some(currency)) => Some((*cash, *mv, currency.clone())),
+            _ => None,
+        };
+        let cash_apportionment = cash.as_ref().map(|(cash, mv, _)| {
+            (
+                *cash * *scrip_old_units,
+                *cash * *scrip_old_units + *mv * *scrip_new_units,
+            )
+        });
+        Ok(Self {
+            scrip_listing_id: *scrip_listing_id,
+            new_units: *scrip_new_units,
+            old_units: *scrip_old_units,
+            cash,
+            cash_apportionment,
+        })
+    }
+
+    /// The replacement one open parcel is substituted with.
+    fn replacement_for(
+        &self,
+        p: &rollover::RolledParcel,
+        inputs: &rollover::CostBaseInputs,
+        exchange_date: NaiveDate,
+    ) -> Result<Replacement, sqlx::Error> {
+        let reduced_cost_base = inputs.carried_cost_base(&p.parcel, p.remaining, exchange_date)?;
+
+        // With a cash component, only the scrip side's market-value share of
+        // the cost base rolls over into the replacement; the cash side's
+        // share stays behind for the closing Sell's gain (computed the same
+        // way by the realised-gains report). The two sides sum exactly to
+        // the reduced cost base by construction.
+        let carried_cost_base = match self.cash_apportionment {
+            Some((num, den)) => reduced_cost_base - reduced_cost_base * num / den,
+            None => reduced_cost_base,
+        };
+
+        Ok(Replacement {
+            parcel_id: p.parcel.id,
+            at_date_units: p.at_date_units,
+            // The exchange ratio applies to units as held at the exchange date.
+            new_quantity: p.at_date_units * self.new_units / self.old_units,
+            carried_cost_base,
+            currency: p.parcel.currency.clone(),
+            fx_rate: p.parcel.fx_rate,
+            spot_fx_rate: p.parcel.spot_fx_rate,
+            // Chain through an earlier exchange: the clock always runs from
+            // the first acquisition in the rollover chain — the parcel's own
+            // `acquired()`, deemed date where it carries one.
+            deemed_acquisition_date: p.parcel.acquired(),
+            holding_account_id: p.parcel.holding_account_id,
+        })
+    }
+}
+
+/// A replacement Buy to create: the consumed parcel's exchange-date units
+/// scaled by the ratio, its remaining reduced cost base, and its carried
+/// acquisition date.
+struct Replacement {
+    parcel_id: i64,
+    at_date_units: Decimal,
+    new_quantity: Decimal,
+    carried_cost_base: Decimal,
+    currency: String,
+    fx_rate: Decimal,
+    spot_fx_rate: Option<Decimal>,
+    deemed_acquisition_date: NaiveDate,
+    /// A replacement parcel stays in the account of the parcel it
+    /// substitutes.
+    holding_account_id: i64,
+}
+
+/// The two write-time checks: the exchange has not already been applied, and
+/// nothing of the original listing traded on or after the exchange date (the
+/// takeover delisted it, so such a trade contradicts the action).
+async fn check_exchangeable(
+    conn: &mut sqlx::SqliteConnection,
+    action_id: i64,
+    listing_id: i64,
+    date: NaiveDate,
+) -> Result<(), ExchangeError> {
+    let already: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM trades WHERE scrip_action_id = ?)")
+            .bind(action_id)
+            .fetch_one(&mut *conn)
+            .await?;
+    if already {
+        return Err(ExchangeError::AlreadyExchanged);
+    }
+
+    let late_trade: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM trades WHERE listing_id = ? AND date >= ?)",
+    )
+    .bind(listing_id)
+    .bind(date)
+    .fetch_one(&mut *conn)
+    .await?;
+    if late_trade {
+        return Err(ExchangeError::TradedOnOrAfterExchangeDate);
+    }
+    Ok(())
 }
 
 async fn exchange(
@@ -459,6 +408,7 @@ impl From<ExchangeError> for ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::entities::sell::SellBody;
     use crate::entities::trade::TradeType;
     use crate::entities::{corporate_action::CorporateAction, listing};
     use crate::test_support::{self, test_pool};

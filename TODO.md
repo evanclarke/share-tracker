@@ -15,33 +15,6 @@ Currently handled correctly: the server binds `127.0.0.1` by default and exposin
 `--host` opt-in documented as unauthenticated. Only matters if the server is ever exposed.
 - [ ] If/when exposure is wanted: add an auth layer (e.g. a bearer token/basic-auth middleware over the whole router) before recommending `--host 0.0.0.0` for anything but a trusted LAN; until then this section records the decision that localhost-only is the accepted posture
 
-## Over-long functions (2026-07-29 Rust review)
-
-23 functions exceed 100 lines in the non-test build (`cargo clippy -- -W clippy::too_many_lines`).
-The tail is what matters:
-
-| lines | function |
-| --- | --- |
-| 362 | `reports/activity.rs:128` |
-| 327 | `reports/tax_report.rs:693` |
-| 249 | `entities/transfer.rs:208` |
-| 249 | `entities/demerger.rs:130` |
-| 234 | `entities/scrip_exchange.rs:126` |
-| 212 | `reports/tax_summary.rs:342` |
-| 206 | `reports/realised_gains.rs:358` |
-
-The three entity ones are all the same shape — validate → walk parcels → build replacement rows →
-write, in one transaction — and split naturally along those seams. The open-parcel and `Money`
-sections will already shrink several of these, so this is deliberately sequenced last. (The
-open-parcel extraction has since landed — see DONE/reviews.md — taking the count from 23 to 22;
-none of the tail entries below moved, so the table still stands.)
-
-- [ ] Split `reports/activity.rs:128` (362 lines) — the largest single function in the codebase; treat as its own task
-- [ ] Split `reports/tax_report.rs:693` (327 lines)
-- [ ] Split the three rollover/transfer operations (`transfer.rs:208`, `demerger.rs:130`, `scrip_exchange.rs:126`) along the shared validate → walk → build → write seam, ideally sharing the extracted pieces rather than each growing its own
-- [ ] Re-measure after the open-parcel and `Money` refactors land and record here which of the remaining sub-250-line entries are actually worth splitting — a long function that is one flat, well-commented sequence is not automatically a defect
-- [ ] Tests: pure refactor, so the gate is the existing suite plus `ato_examples.rs` passing unchanged; no behaviour change means no new test, which is the one case where an item here closes without one
-
 ## HTTP test boilerplate (2026-07-29 Rust review)
 
 `test_support.rs` solved the *data* half of test setup (builders for the wide structs) but not the
