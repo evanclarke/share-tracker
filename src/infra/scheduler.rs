@@ -10,611 +10,57 @@
 //!
 //! Each spawned task logs the next scheduled run at INFO after every run (and at
 //! startup), so the live schedule is verifiable from logs without reading code.
+//!
+//! Split into focused submodules, all re-exported here so `scheduler::X` paths
+//! are unchanged for callers:
+//! - [`registry`] — what each job name does, and the job/lock types
+//! - [`schedule`] — parsing `schedule.cron` and spawning a task per entry
+//! - [`run`] — the logged, lock-serialised single run and the per-entry timer loop
+//! - [`db`] — the bounded `job_runs` history
+//! - [`http`] — `GET /jobs` and `POST /jobs/{name}`
 
-use axum::{
-    Extension, Json, Router,
-    extract::{Path, Query, State},
-    http::StatusCode,
-    routing::{get, post},
-};
-use chrono::{DateTime, Local, TimeZone, Utc};
-use chrono_tz::Tz;
-use croner::Cron;
-use serde::{Deserialize, Serialize};
-use sqlx::SqlitePool;
-use std::{
-    collections::HashMap, future::Future, pin::Pin, str::FromStr, sync::Arc, time::Duration,
-};
+mod db;
+mod http;
+mod registry;
+mod run;
+mod schedule;
 
-/// A unit of scheduled work. Each call runs the job once, returning `Ok(())` on
-/// success or a human-readable error. Jobs do their own detailed INFO logging.
-type JobFuture = Pin<Box<dyn Future<Output = Result<(), String>> + Send>>;
-type Job = Arc<dyn Fn(JobParams) -> JobFuture + Send + Sync>;
+pub use http::router;
+pub use registry::{JobRegistry, registry};
+pub use schedule::spawn;
 
-/// Caller-supplied parameters for a manual job trigger, taken from the
-/// `POST /jobs/{name}` query string. Currently only the `backup` job reads
-/// `suffix` (see [`crate::infra::db::backup`]); every other registered job
-/// ignores it. The scheduled loop always passes [`JobParams::default`] — a
-/// suffix only makes sense for a deliberately-labelled one-off backup, not
-/// the weekly scheduled run.
-#[derive(Debug, Default, Clone, Deserialize)]
-pub struct JobParams {
-    pub suffix: Option<String>,
-}
-
-/// A registered job: the work plus a per-job lock serialising its execution.
-/// `run_job` holds the lock for the whole run, so a manual trigger can never
-/// overlap the scheduled run (or a second trigger) of the same job — a
-/// concurrent caller waits and runs after.
-pub struct RegisteredJob {
-    work: Job,
-    lock: tokio::sync::Mutex<()>,
-}
-
-impl RegisteredJob {
-    fn new(work: Job) -> Arc<Self> {
-        Arc::new(Self {
-            work,
-            lock: tokio::sync::Mutex::new(()),
-        })
-    }
-}
-
-/// Job-name → work. Shared between the spawned schedule tasks and the HTTP
-/// trigger handler (injected as an axum `Extension`).
-pub type JobRegistry = Arc<HashMap<String, Arc<RegisteredJob>>>;
-
-/// A job's status, surfaced by `GET /jobs` and the Jobs UI. Every registered
-/// job appears in the list; the `last_*` fields are `None` (and `runs` empty)
-/// until the job has run at least once. `runs` is the job's stored run history,
-/// most recent first, bounded to [`JOB_RUN_HISTORY_LIMIT`] entries — the
-/// `last_*` fields duplicate `runs[0]` for at-a-glance reading.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct JobStatus {
-    pub name: String,
-    pub last_started_at: Option<String>,
-    pub last_finished_at: Option<String>,
-    pub last_success: Option<bool>,
-    pub last_error: Option<String>,
-    pub runs: Vec<JobRunRecord>,
-}
-
-/// One stored run of a job, as exposed in a `JobStatus`'s `runs` history.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct JobRunRecord {
-    pub started_at: String,
-    pub finished_at: String,
-    pub success: bool,
-    pub error: Option<String>,
-}
-
-/// One persisted run row from `job_runs`.
-#[derive(sqlx::FromRow)]
-struct JobRun {
-    name: String,
-    started_at: String,
-    finished_at: String,
-    success: bool,
-    error: Option<String>,
-}
-
-/// Bound on the stored run history per job: recording a run prunes that job's
-/// rows to the newest this-many in the same transaction, so an intermittent
-/// (flapping) failure stays diagnosable from `GET /jobs` without the table
-/// growing unboundedly.
-pub const JOB_RUN_HISTORY_LIMIT: u32 = 20;
-
-/// Append a run record for `name` and prune the job's history to the newest
-/// [`JOB_RUN_HISTORY_LIMIT`] rows, atomically — history accumulates per run
-/// (unlike the old one-row-per-job upsert) but stays bounded.
-async fn db_record_run(
-    pool: &SqlitePool,
-    name: &str,
-    started_at: &str,
-    finished_at: &str,
-    success: bool,
-    error: Option<&str>,
-) -> Result<(), sqlx::Error> {
-    let mut tx = pool.begin().await?;
-    sqlx::query(
-        "INSERT INTO job_runs (name, started_at, finished_at, success, error) \
-         VALUES (?, ?, ?, ?, ?)",
-    )
-    .bind(name)
-    .bind(started_at)
-    .bind(finished_at)
-    .bind(success)
-    .bind(error)
-    .execute(&mut *tx)
-    .await?;
-    sqlx::query(
-        "DELETE FROM job_runs WHERE name = ?1 AND id NOT IN \
-             (SELECT id FROM job_runs WHERE name = ?1 ORDER BY id DESC LIMIT ?2)",
-    )
-    .bind(name)
-    .bind(JOB_RUN_HISTORY_LIMIT)
-    .execute(&mut *tx)
-    .await?;
-    tx.commit().await?;
-    Ok(())
-}
-
-/// Load every job's stored run history, keyed by job name, each job's runs
-/// most recent first.
-async fn db_run_histories(
-    pool: &SqlitePool,
-) -> Result<HashMap<String, Vec<JobRunRecord>>, sqlx::Error> {
-    let rows = sqlx::query_as::<_, JobRun>(
-        "SELECT name, started_at, finished_at, success, error FROM job_runs ORDER BY id DESC",
-    )
-    .fetch_all(pool)
-    .await?;
-    let mut histories: HashMap<String, Vec<JobRunRecord>> = HashMap::new();
-    for r in rows {
-        histories.entry(r.name).or_default().push(JobRunRecord {
-            started_at: r.started_at,
-            finished_at: r.finished_at,
-            success: r.success,
-            error: r.error,
-        });
-    }
-    Ok(histories)
-}
-
-/// Why a schedule file was rejected. Carries the 1-based line number so a bad
-/// `schedule.cron` is easy to fix.
-#[derive(Debug)]
-pub enum ScheduleError {
-    /// A line was malformed: too few fields, or an unparseable cron expression.
-    Parse { line: usize, msg: String },
-    /// A line referenced a job name that is not in the registry.
-    UnknownJob { line: usize, name: String },
-}
-
-impl std::fmt::Display for ScheduleError {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match self {
-            ScheduleError::Parse { line, msg } => write!(f, "schedule line {line}: {msg}"),
-            ScheduleError::UnknownJob { line, name } => {
-                write!(f, "schedule line {line}: no such job {name:?}")
-            }
-        }
-    }
-}
-
-impl std::error::Error for ScheduleError {}
-
-/// Build the registry of maintenance jobs, wiring each name to existing work
-/// functions. Adding a future job is a new entry here plus a line in the
-/// schedule file. The price source is injected (not constructed here) so the
-/// live `YahooFetcher` only ever reaches the registry from `main`; tests pass a
-/// stub and never touch the network.
-pub fn registry(
-    pool: SqlitePool,
-    db_path: String,
-    backup_dir: Option<String>,
-    backup_command: Option<String>,
-    fetcher: crate::entities::closing_price::SharedFetcher,
-) -> JobRegistry {
-    let mut jobs: HashMap<String, Arc<RegisteredJob>> = HashMap::new();
-
-    let backup_pool = pool.clone();
-    jobs.insert(
-        "backup".to_string(),
-        RegisteredJob::new(Arc::new(move |params: JobParams| {
-            let pool = backup_pool.clone();
-            let db_path = db_path.clone();
-            let backup_dir = backup_dir.clone();
-            let backup_command = backup_command.clone();
-            Box::pin(async move {
-                crate::infra::db::backup(
-                    &pool,
-                    &db_path,
-                    backup_dir.as_deref(),
-                    backup_command.as_deref(),
-                    params.suffix.as_deref(),
-                )
-                .await
-                .map_err(|e| e.to_string())
-            })
-        })),
-    );
-
-    let mic_pool = pool.clone();
-    jobs.insert(
-        "mic-import".to_string(),
-        RegisteredJob::new(Arc::new(move |_params: JobParams| {
-            let pool = mic_pool.clone();
-            Box::pin(async move {
-                match crate::entities::mic_registry::run_import(&pool).await {
-                    Ok(s) => {
-                        tracing::info!(imported = s.imported, "MIC registry import complete");
-                        Ok(())
-                    }
-                    Err(e) => Err(format!("{e:?}")),
-                }
-            })
-        })),
-    );
-
-    let currency_pool = pool.clone();
-    jobs.insert(
-        "currency-import".to_string(),
-        RegisteredJob::new(Arc::new(move |_params: JobParams| {
-            let pool = currency_pool.clone();
-            Box::pin(async move {
-                match crate::entities::currencies::run_import(&pool).await {
-                    Ok(s) => {
-                        tracing::info!(imported = s.imported, "currency import complete");
-                        Ok(())
-                    }
-                    Err(e) => Err(format!("{e:?}")),
-                }
-            })
-        })),
-    );
-
-    let price_pool = pool.clone();
-    let price_fetcher = fetcher;
-    jobs.insert(
-        "price-import".to_string(),
-        RegisteredJob::new(Arc::new(move |_params: JobParams| {
-            let pool = price_pool.clone();
-            let fetcher = price_fetcher.clone();
-            Box::pin(async move {
-                crate::entities::closing_price::run_collection(
-                    &pool,
-                    fetcher.as_ref(),
-                    chrono::Utc::now(),
-                )
-                .await
-            })
-        })),
-    );
-
-    let snapshot_pool = pool.clone();
-    jobs.insert(
-        "report-snapshot".to_string(),
-        RegisteredJob::new(Arc::new(move |_params: JobParams| {
-            let pool = snapshot_pool.clone();
-            Box::pin(async move {
-                crate::reports::snapshot::run_snapshot_job(&pool, chrono::Utc::now()).await
-            })
-        })),
-    );
-
-    let fx_pool = pool.clone();
-    jobs.insert(
-        "rba-fx-import".to_string(),
-        RegisteredJob::new(Arc::new(move |_params: JobParams| {
-            let pool = fx_pool.clone();
-            Box::pin(async move {
-                let summary = match crate::entities::rba_fx_rate::run_import(&pool).await {
-                    Ok(s) => {
-                        tracing::info!(
-                            inserted = s.inserted,
-                            skipped = s.skipped,
-                            "RBA FX rate import complete"
-                        );
-                        s
-                    }
-                    Err(e) => return Err(format!("{e:?}")),
-                };
-                // New rates may finalise provisional snapshots in this same
-                // run; a blocked true-up date fails the job so the Jobs UI
-                // surfaces it (the import itself succeeded and is idempotent).
-                match crate::entities::rba_fx_rate::true_up_provisional_snapshots(&pool, &summary)
-                    .await
-                {
-                    Ok(None) => Ok(()),
-                    Ok(Some(t)) if t.blocked.is_empty() => Ok(()),
-                    Ok(Some(t)) => Err(format!(
-                        "import ok ({} new rates); provisional snapshot true-up blocked: {}",
-                        summary.inserted,
-                        t.blocked
-                            .iter()
-                            .map(|b| format!("{}: {}", b.date, b.reason))
-                            .collect::<Vec<_>>()
-                            .join("; ")
-                    )),
-                    Err(e) => Err(format!("provisional snapshot true-up failed: {e}")),
-                }
-            })
-        })),
-    );
-
-    Arc::new(jobs)
-}
-
-/// Run a single job once, bracketing it with an INFO `job started` line and an
-/// INFO `job finished` line (the latter carries `ok` = whether it succeeded).
-/// Both the scheduled loop and the manual trigger go through here so every job
-/// logs start and finish uniformly, regardless of any per-job logging it does,
-/// and so every run persists its last-run record (timestamps, success, error)
-/// to `job_runs` for the Jobs UI. A failure to record the run is logged but does
-/// not change the job's own result.
-///
-/// The per-job lock is held for the whole run, serialising executions of the
-/// same job: a manual trigger overlapping the scheduled run (or another
-/// trigger) waits for the in-flight run to finish instead of racing it.
-async fn run_job(
-    pool: &SqlitePool,
-    name: &str,
-    job: &RegisteredJob,
-    params: JobParams,
-) -> Result<(), String> {
-    let _running = job.lock.lock().await;
-    let started_at = chrono::Utc::now().to_rfc3339();
-    tracing::info!(job = %name, "job started");
-    let result = (job.work)(params).await;
-    let finished_at = chrono::Utc::now().to_rfc3339();
-    tracing::info!(job = %name, ok = result.is_ok(), "job finished");
-
-    let error = result.as_ref().err().map(String::as_str);
-    if let Err(e) =
-        db_record_run(pool, name, &started_at, &finished_at, result.is_ok(), error).await
-    {
-        tracing::warn!(job = %name, "failed to record job run: {e}");
-    }
-    result
-}
-
-/// One parsed schedule line: when to fire, in which timezone (`None` = the
-/// server's local timezone), and which registered job to run. `line` is the
-/// 1-based line number in the schedule file (comments and blank lines count),
-/// so validation errors point at the real line.
-#[derive(Debug)]
-struct ScheduleEntry {
-    line: usize,
-    cron: Cron,
-    tz: Option<Tz>,
-    name: String,
-}
-
-/// Parse a cron schedule file. Lines are
-/// `<min> <hour> <dom> <mon> <dow> [timezone] <job-name>`; the optional
-/// timezone is an IANA name (e.g. `America/New_York`) pinning the cron
-/// expression to that zone — absent, the expression is server-local time.
-/// `#` starts a comment and blank lines are ignored.
-fn parse(schedule: &str) -> Result<Vec<ScheduleEntry>, ScheduleError> {
-    let mut entries = Vec::new();
-
-    for (idx, raw) in schedule.lines().enumerate() {
-        let line = idx + 1;
-        let content = raw.split('#').next().unwrap_or("").trim();
-        if content.is_empty() {
-            continue;
-        }
-
-        let fields: Vec<&str> = content.split_whitespace().collect();
-        let (tz, name) = match fields.len() {
-            6 => (None, fields[5]),
-            7 => {
-                let tz = fields[5].parse::<Tz>().map_err(|_| ScheduleError::Parse {
-                    line,
-                    msg: format!(
-                        "unknown timezone {:?} (expected an IANA name like Australia/Sydney)",
-                        fields[5]
-                    ),
-                })?;
-                (Some(tz), fields[6])
-            }
-            n => {
-                return Err(ScheduleError::Parse {
-                    line,
-                    msg: format!(
-                        "expected 5 cron fields, an optional IANA timezone, \
-                         and a job name, got {n} field(s)"
-                    ),
-                });
-            }
-        };
-
-        let expr = fields[..5].join(" ");
-        let cron = Cron::from_str(&expr).map_err(|e| ScheduleError::Parse {
-            line,
-            msg: format!("invalid cron {expr:?}: {e}"),
-        })?;
-        entries.push(ScheduleEntry {
-            line,
-            cron,
-            tz,
-            name: name.to_string(),
-        });
-    }
-
-    Ok(entries)
-}
-
-/// Parse the schedule, validate every entry against the registry, and spawn one
-/// background task per entry. Returns an error (without spawning anything) if
-/// the schedule is malformed or names an unregistered job.
-pub fn spawn(registry: JobRegistry, pool: SqlitePool, schedule: &str) -> Result<(), ScheduleError> {
-    let entries = parse(schedule)?;
-
-    // Validate all names up front so a bad file fails fast at startup rather
-    // than spawning a partial set of tasks.
-    for entry in &entries {
-        if !registry.contains_key(&entry.name) {
-            return Err(ScheduleError::UnknownJob {
-                line: entry.line,
-                name: entry.name.clone(),
-            });
-        }
-    }
-
-    // A registered job with no schedule line never runs automatically (only via
-    // POST /jobs/{name}). That is usually an oversight, so warn rather than fail.
-    for name in registry.keys() {
-        if !entries.iter().any(|entry| &entry.name == name) {
-            tracing::warn!(
-                job = %name,
-                "registered job has no schedule entry; it will only run via POST /jobs/{name}"
-            );
-        }
-    }
-
-    for entry in entries {
-        let job = registry[&entry.name].clone();
-        let pool = pool.clone();
-        // The two arms differ only in the timezone type the clock yields
-        // (`DateTime<Tz>` vs `DateTime<Local>`), so each instantiates the same
-        // generic loop.
-        match entry.tz {
-            Some(tz) => {
-                tokio::spawn(run_entry(pool, entry.name, job, entry.cron, move || {
-                    Utc::now().with_timezone(&tz)
-                }));
-            }
-            None => {
-                tokio::spawn(run_entry(pool, entry.name, job, entry.cron, Local::now));
-            }
-        }
-    }
-
-    Ok(())
-}
-
-/// Cap on any single timer sleep. Timer sleeps are monotonic, so a wall-clock
-/// shift mid-sleep (a DST transition in the entry's timezone, an NTP step, a
-/// laptop resume) would otherwise make the job fire offset from its wall-clock
-/// target. Sleeping at most this long and recomputing the target after each
-/// chunk re-anchors to the wall clock within an hour of any shift.
-const MAX_SLEEP: Duration = Duration::from_secs(60 * 60);
-
-/// The scheduled loop for one schedule entry: log the next run, sleep to it in
-/// capped chunks (recomputing the target after each chunk — see `MAX_SLEEP`),
-/// run the job, repeat. `now` supplies the current time in the entry's
-/// timezone — a per-entry IANA zone, or `Local` for entries without one.
-async fn run_entry<Z>(
-    pool: SqlitePool,
-    name: String,
-    job: Arc<RegisteredJob>,
-    cron: Cron,
-    now: impl Fn() -> DateTime<Z> + Send + 'static,
-) where
-    Z: TimeZone + Send + 'static,
-    Z::Offset: std::fmt::Display + Send,
-{
-    loop {
-        let (next, mut delay) = match next_run(&cron, now()) {
-            Some(pair) => pair,
-            None => {
-                tracing::error!(job = %name, "cannot compute next run, stopping");
-                return;
-            }
-        };
-        tracing::info!(
-            job = %name,
-            next_run = %next.format("%Y-%m-%d %H:%M:%S %Z"),
-            "next run scheduled"
-        );
-        while delay > MAX_SLEEP {
-            tokio::time::sleep(MAX_SLEEP).await;
-            delay = match next_run(&cron, now()) {
-                Some((_, recomputed)) => recomputed,
-                None => {
-                    tracing::error!(job = %name, "cannot compute next run, stopping");
-                    return;
-                }
-            };
-        }
-        tokio::time::sleep(delay).await;
-        // A scheduled run always uses the default (unsuffixed) params — a
-        // suffix labels a deliberate one-off backup, not the weekly run.
-        if let Err(e) = run_job(&pool, &name, &job, JobParams::default()).await {
-            tracing::warn!(job = %name, "job failed: {e}");
-        }
-    }
-}
-
-/// Compute the next scheduled fire time at or after `now` and the exact delay to
-/// sleep until then. The delay keeps sub-second precision: truncating it (e.g.
-/// via `num_seconds`) would make the timer wake *before* the target second, so
-/// the recomputed next run would still be the same instant and the loop would
-/// busy-spin until the clock crossed the boundary. Returns `None` only if the
-/// cron pattern has no future occurrence.
-fn next_run<Z: TimeZone>(cron: &Cron, now: DateTime<Z>) -> Option<(DateTime<Z>, Duration)> {
-    let next = cron.find_next_occurrence(&now, false).ok()?;
-    // `next` is strictly after `now`, so the difference is non-negative; the
-    // fallback only guards against clock skew between this read and the diff.
-    let delay = (next.clone() - now)
-        .to_std()
-        .unwrap_or(Duration::from_secs(1));
-    Some((next, delay))
-}
-
-/// List every registered job (sorted) with its bounded run history (most
-/// recent first). Jobs that have never run carry `None` in the `last_*` fields
-/// and an empty `runs`.
-async fn list(
-    State(pool): State<SqlitePool>,
-    Extension(registry): Extension<JobRegistry>,
-) -> Result<Json<Vec<JobStatus>>, crate::infra::http::ApiError> {
-    let mut histories = db_run_histories(&pool).await?;
-
-    let mut names: Vec<String> = registry.keys().cloned().collect();
-    names.sort();
-    let statuses = names
-        .into_iter()
-        .map(|name| {
-            let runs = histories.remove(&name).unwrap_or_default();
-            let last = runs.first();
-            JobStatus {
-                name,
-                last_started_at: last.map(|r| r.started_at.clone()),
-                last_finished_at: last.map(|r| r.finished_at.clone()),
-                last_success: last.map(|r| r.success),
-                last_error: last.and_then(|r| r.error.clone()),
-                runs,
-            }
-        })
-        .collect();
-    Ok(Json(statuses))
-}
-
-async fn trigger(
-    State(pool): State<SqlitePool>,
-    Extension(registry): Extension<JobRegistry>,
-    Path(name): Path<String>,
-    Query(params): Query<JobParams>,
-) -> Result<StatusCode, crate::infra::http::ApiError> {
-    // Reject an invalid suffix before the registry lookup or run_job: a
-    // malformed request must not be recorded as a failed job run (only the
-    // backup job reads it, but the query string is shared across all names).
-    if let Some(suffix) = &params.suffix {
-        crate::infra::db::validate_backup_suffix(suffix)
-            .map_err(crate::infra::http::ApiError::unprocessable)?;
-    }
-    Ok(match registry.get(&name) {
-        None => StatusCode::NOT_FOUND,
-        Some(job) => match run_job(&pool, &name, job, params).await {
-            Ok(()) => StatusCode::NO_CONTENT,
-            Err(e) => {
-                tracing::warn!(job = %name, "manual job trigger failed: {e}");
-                StatusCode::INTERNAL_SERVER_ERROR
-            }
-        },
-    })
-}
-
-/// Routes for inspecting and manually triggering jobs. The `JobRegistry` is
-/// supplied to handlers via an `Extension` layer (added in `main`), so this
-/// router shares the common `SqlitePool` state and merges with the others.
-pub fn router() -> Router<SqlitePool> {
-    Router::new()
-        .route("/jobs", get(list))
-        .route("/jobs/{name}", post(trigger))
-}
+// Reached only by the inline tests below; not part of the module's surface in
+// the non-test build, so gated to keep that build warning-free.
+#[cfg(test)]
+pub use db::JOB_RUN_HISTORY_LIMIT;
+#[cfg(test)]
+use db::{db_record_run, db_run_histories};
+#[cfg(test)]
+pub use http::JobStatus;
+#[cfg(test)]
+pub use registry::{JobParams, RegisteredJob};
+#[cfg(test)]
+use run::{next_run, run_entry, run_job};
+#[cfg(test)]
+pub use schedule::ScheduleError;
+#[cfg(test)]
+use schedule::parse;
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::infra::db;
+    use axum::Extension;
     use axum::body::Body;
-    use axum::http::Request;
-    use chrono::TimeZone;
+    use axum::http::{Request, StatusCode};
+    use chrono::{DateTime, Local, TimeZone, Utc};
+    use chrono_tz::Tz;
+    use croner::Cron;
     use http_body_util::BodyExt;
+    use sqlx::SqlitePool;
+    use std::str::FromStr;
+    use std::sync::Arc;
+    use std::time::Duration;
     use tower::ServiceExt;
 
     /// An offline price-source stub so building a registry never constructs the
@@ -845,14 +291,14 @@ mod tests {
 
         let fired_at = Arc::new(std::sync::Mutex::new(Vec::<DateTime<Utc>>::new()));
         let fired = fired_at.clone();
-        let job = RegisteredJob::new(Arc::new(move |_params: JobParams| {
+        let job = RegisteredJob::from_fn(move |_| {
             let fired = fired.clone();
             let now = clock();
-            Box::pin(async move {
+            async move {
                 fired.lock().unwrap().push(now);
                 Ok(())
-            })
-        }));
+            }
+        });
 
         let cron = Cron::from_str("30 3 1 6 *").unwrap(); // 03:30 on 2026-06-01
         tokio::spawn(run_entry(pool, "fake".to_string(), job, cron, clock));
@@ -936,9 +382,9 @@ mod tests {
         let overlapped = Arc::new(AtomicBool::new(false));
         let runs = Arc::new(AtomicUsize::new(0));
         let (a, o, r) = (active.clone(), overlapped.clone(), runs.clone());
-        let job = RegisteredJob::new(Arc::new(move |_params: JobParams| {
+        let job = RegisteredJob::from_fn(move |_| {
             let (a, o, r) = (a.clone(), o.clone(), r.clone());
-            Box::pin(async move {
+            async move {
                 if a.fetch_add(1, Ordering::SeqCst) > 0 {
                     o.store(true, Ordering::SeqCst);
                 }
@@ -946,8 +392,8 @@ mod tests {
                 a.fetch_sub(1, Ordering::SeqCst);
                 r.fetch_add(1, Ordering::SeqCst);
                 Ok(())
-            })
-        }));
+            }
+        });
 
         let (r1, r2) = tokio::join!(
             run_job(&pool, "same-job", &job, JobParams::default()),
