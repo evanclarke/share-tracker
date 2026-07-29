@@ -283,6 +283,34 @@ fn docs_document_foreign_interest_source_classification() {
     assert!(README_MD.contains("20E assessable foreign source income"));
 }
 
+/// Docs-sync pin for the collectables / personal-use-asset scope decision
+/// (2026-07-29, QC 106842): their capital losses are *quarantined* — a
+/// collectable's loss can only reduce a gain from another collectable, and a
+/// personal-use asset's loss is disregarded entirely — but this system has one
+/// loss pool and no asset-class dimension, so entering one would wrongly
+/// offset share gains. That has to be stated, not just omitted, because the
+/// failure is silent: the net capital gain simply comes out too low. This is
+/// the limitation the Kathleen acceptance test's jewellery leg cites for
+/// staying out (`src/ato_examples.rs`).
+#[test]
+fn known_limitations_document_quarantined_collectable_losses() {
+    let limitations = known_limitations();
+    assert!(limitations.contains("**Collectables and personal-use assets"));
+    assert!(limitations.contains("quarantined"));
+    // The two distinct rules, and why entering one here would be wrong.
+    assert!(limitations.contains("reduce a capital gain from another collectable"));
+    assert!(limitations.contains("never a gain on shares"));
+    assert!(limitations.contains("disregarded entirely"));
+    assert!(limitations.contains("wrongly offset share gains"));
+    // Cites the mirrored ATO source carrying the Kathleen examples.
+    assert!(limitations.contains("docs/ato/capital-gains-question-18.md"));
+    let mirror = include_str!("../docs/ato/capital-gains-question-18.md");
+    assert!(mirror.contains("QC 106842"));
+    // The mirror states the step order the net-capital-gain report implements.
+    assert!(mirror.contains("before applying the CGT discount"));
+    assert!(mirror.contains("$1,260"));
+}
+
 #[test]
 fn known_limitations_document_indexation_method() {
     let limitations = known_limitations();

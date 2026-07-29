@@ -29,13 +29,12 @@
 //!   post-CGT half is reproduced below (39 via the sell-rights operation, 40
 //!   via the exercise operation); both pre-CGT halves (the rights over the
 //!   1 June 1985 shares) turn on pre-CGT originals, which are not modelled.
-//! - `docs/ato/takeovers-and-scrip-for-scrip.md` Examples 26 and 28 (Desiree,
-//!   Stephanie) — neither matches the modelled cases (TODO "Corporate
-//!   actions", ScripForScrip): Example 26 is a takeover *without* rollover
-//!   (an ordinary market-value disposal, enterable as a manual Sell + Buy)
-//!   and Example 28 exchanges into *two* replacement share classes
-//!   (ordinary + preference) with the cost base apportioned by market value.
-//!   Example 27's partial rollover (cash component) is reproduced below; the
+//! - `docs/ato/takeovers-and-scrip-for-scrip.md` Example 28 (Stephanie) —
+//!   exchanges into *two* replacement share classes (ordinary + preference)
+//!   with the cost base apportioned by market value, which the ScripForScrip
+//!   action does not model (it has a single replacement leg). Example 26
+//!   (Desiree, a takeover *without* rollover) and Example 27 (Gunther, the
+//!   partial rollover with a cash component) are both reproduced below; the
 //!   all-scrip mechanics — gain disregarded, cost base carried, combined
 //!   holding period — are covered by `scrip_exchange`/report unit tests.
 //! - `docs/ato/demergers.md` Examples 31 and 33 (Anita's pre-CGT shares) — both
@@ -73,6 +72,22 @@
 //!   monthly rate of the trade date, so a same-rate-month T+2 settlement nets
 //!   to nil by construction; per-leg `spot_fx_rate` entry is what makes the
 //!   movement visible, and it stays the taxpayer's manual adjustment.
+//! - `docs/ato/capital-gains-question-18.md` Example 1's **jewellery leg** and
+//!   Example 6 (Kathleen's label V) — a collectable's capital loss is
+//!   quarantined to gains from other collectables, and neither collectables
+//!   nor personal-use assets are modelled (one loss pool, no asset-class
+//!   dimension — a Known limitation in `docs/API.md`). Her share legs and the
+//!   whole loss-order → discount chain of Examples 1–5 are reproduced below.
+//! - `docs/ato/demergers.md` Example 29 (Peter) — purely definitional (what a
+//!   demerger *is*: Company A transfers its Company B shares to shareholders);
+//!   it states no figures, so there is nothing to assert.
+//! - `docs/ato/cgt-event-timing.md` "Example: insurance policy" (Laurie) and
+//!   "Example: no compensation or insurance policy" (Christine) — both are
+//!   CGT event C1 (an asset lost or destroyed), where the event date turns on
+//!   when compensation was received or when the damage happened. Asset
+//!   destruction is not modelled, and as with the TD 2000/52 timing example
+//!   the date is a judgement made before entry — the system records the
+//!   user-supplied event date. Sue's contract-date example is reproduced below.
 //! - "Guide to foreign income tax offset rules 2025" Example 16 (Anna,
 //!   ato.gov.au law view SAV/FOROFFSET/00004) — the FITO offset-limit
 //!   calculation compares personal income-tax liabilities with and without the
@@ -2281,4 +2296,263 @@ async fn pig_managed_funds_example_28_miriam_amit_cost_base_net_amount() {
         dec("45"),
         "excess: $55 − $10 reduction"
     );
+}
+
+/// `docs/ato/capital-gains-question-18.md` (QC 106842) — "Example 1: sale of
+/// shares and collectables" through "Example 5: question 18 – label A"
+/// (Kathleen), the end-to-end net-capital-gain method.
+///
+/// > Capital gain on the sale of 1,000 shares for $6 each on 17 December 2025.
+/// > Kathleen bought these shares on 17 November 2000 and each has a cost base
+/// > of $3 … Capital gain = $6,000 − $3,000 = $3,000 … using the discount
+/// > method.
+/// > Capital gain on the sale of 130 shares for $8 each on 27 February 2026 …
+/// > bought … on 10 October 2025 and each has a cost base of $4 … As the asset
+/// > was bought and sold within 12 months, Kathleen must use the 'other'
+/// > method … (130 × $8) − (130 × $4) = $520.
+/// > … total current year capital gains of $3,520 ($3,000 + $520) … at label H
+/// > Capital loss on the sale of 600 shares for $3 each on 25 June 2026 …
+/// > reduced cost base of $4 … $2,400 − $1,800 = $600.
+/// > … deduct the first $520 of her capital loss from the capital gain
+/// > calculated using the 'other' method and … the remaining $80 from the
+/// > capital gain calculated using the discount method … totals $2,920.
+/// > … unapplied net capital losses from earlier years of $400 … $2,920 −
+/// > $400 = $2,520 … $2,520 × 50% = $1,260 … she writes $1,260 at question 18
+/// > – label A Net capital gain.
+///
+/// This is *the* canonical loss-netting order: current-year losses against the
+/// non-discountable ('other') gains first, then the earlier-year losses, and
+/// only then the 50% discount. The three share legs are entered as three
+/// listings — the ATO gives the 130-share and 600-share parcels the same
+/// 10 October 2025 acquisition date without saying whether they are the same
+/// company, and separate listings keep the parcels unambiguous without
+/// changing any figure.
+///
+/// **Kathleen's jewellery leg is deliberately not entered.** A collectable's
+/// capital loss is quarantined — it can only ever reduce a capital gain from
+/// another collectable — and this system has one loss pool and no asset-class
+/// dimension, so entering the $500 jewellery loss as an ordinary listing would
+/// wrongly offset the share gains (a Known limitation in `docs/API.md`). The
+/// ATO's label V is therefore her $500 collectables carry-forward, while this
+/// test asserts nil: every share-side loss is used up in the same year.
+#[tokio::test]
+async fn tax_return_18_kathleen_loss_order_then_discount() {
+    let pool = test_pool().await;
+    // $400 of unapplied net capital losses from earlier income years.
+    api_put(
+        &pool,
+        "/cgt_settings/1",
+        json!({ "opening_capital_loss": "400" }),
+    )
+    .await;
+
+    // Discount-method gain: bought 17 Nov 2000 at $3, sold 17 Dec 2025 at $6.
+    put_listing(&pool, 1, "KTHA").await;
+    put_buy(&pool, 1, 1, "2000-11-17", "1000", "3", "0").await;
+    put_sell(&pool, 10, 1, "2025-12-17", "1000", "6", "0", 1).await;
+
+    // 'Other'-method gain: bought and sold inside 12 months.
+    put_listing(&pool, 2, "KTHB").await;
+    put_buy(&pool, 2, 2, "2025-10-10", "130", "4", "0").await;
+    put_sell(&pool, 11, 2, "2026-02-27", "130", "8", "0", 2).await;
+
+    // The current-year capital loss.
+    put_listing(&pool, 3, "KTHC").await;
+    put_buy(&pool, 3, 3, "2025-10-10", "600", "4", "0").await;
+    put_sell(&pool, 12, 3, "2026-06-25", "600", "3", "0", 3).await;
+
+    let gains: Vec<RealisedGainLoss> = api_get(&pool, "/portfolio/realised-gains").await;
+    let by_sale = |id: i64| gains.iter().find(|g| g.sale_trade_id == id).unwrap();
+    assert_eq!(
+        by_sale(10).capital_gain_loss,
+        dec("3000"),
+        "$6,000 − $3,000"
+    );
+    assert_eq!(
+        by_sale(10).discount_eligible_gain,
+        dec("3000"),
+        "held since 2000 — the discount method"
+    );
+    assert_eq!(
+        by_sale(11).capital_gain_loss,
+        dec("520"),
+        "(130 × $8) − (130 × $4)"
+    );
+    assert_eq!(
+        by_sale(11).non_discountable_gain,
+        dec("520"),
+        "bought and sold within 12 months — the 'other' method"
+    );
+    assert_eq!(by_sale(12).capital_loss, dec("600"), "$2,400 − $1,800");
+
+    let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net-capital-gain").await;
+    let y = years.iter().find(|y| y.tax_year == 2026).unwrap();
+    // Label 18H: total current year capital gains, before losses and discount.
+    assert_eq!(y.discount_eligible_gains, dec("3000"));
+    assert_eq!(y.other_gains, dec("520"));
+    assert_eq!(
+        y.discount_eligible_gains + y.other_gains,
+        dec("3520"),
+        "label 18H: $3,000 + $520"
+    );
+    // Current-year loss applied 'other'-first: $520 → $0, the remaining $80
+    // off the discount-method gain ($3,000 → $2,920).
+    assert_eq!(y.capital_losses, dec("600"));
+    assert_eq!(
+        y.net_other_gain,
+        Decimal::ZERO,
+        "the $520 'other' gain is fully offset"
+    );
+    // Then the $400 brought forward: $2,920 − $400 = $2,520.
+    assert_eq!(y.capital_loss_brought_forward, dec("400"));
+    assert_eq!(
+        y.net_discount_eligible_gain,
+        dec("2520"),
+        "$2,920 − $400, before the discount"
+    );
+    // Only now the 50% discount.
+    assert_eq!(y.cgt_discount, dec("1260"), "$2,520 × 50%");
+    assert_eq!(
+        y.net_capital_gain,
+        dec("1260"),
+        "label 18A: net capital gain of $1,260"
+    );
+    assert_eq!(
+        y.capital_loss_carried_forward,
+        Decimal::ZERO,
+        "every share-side loss is used this year (the ATO's $500 at label V is \
+         her quarantined collectables loss, which this system does not model)"
+    );
+}
+
+/// `docs/ato/personal-investors-guide-managed-fund-distributions.md` —
+/// Examples 21–25 (Tim), the C1 step order end to end.
+///
+/// > *Example 21*: Tim receives a discounted capital gain of $400 → grosses up
+/// > to $800 ($400 × 2).
+/// > *Example 22*: Tim's fund also distributes a $100 'other'-method gain →
+/// > 18H is $900 ($800 + $100).
+/// > *Example 23*: Tim has a $200 capital loss selling another CGT asset →
+/// > $900 − $200 = $700, applied against the 'other' gain first, leaving the
+/// > whole $700 discountable.
+/// > *Example 24*: $700 × 50% = $350.
+///
+/// The same machinery as Bob/Ilena/Miriam below, on a different branch: no
+/// indexation component, and a loss that exactly consumes the 'other' gain
+/// before spilling into the grossed-up discount gain. The fund distribution is
+/// an AMMA statement; the $200 loss is Tim's own disposal of an unrelated
+/// asset. The ATO doesn't date the facts — entered in FY2024–25, the guide's
+/// own income year.
+#[tokio::test]
+async fn pig_managed_funds_examples_21_25_tim_gross_up_loss_then_discount() {
+    let pool = test_pool().await;
+    put_listing(&pool, 1, "TIMF").await;
+    put_buy(&pool, 1, 1, "2023-08-01", "1", "1000", "0").await;
+    // The fund's statement: a $400 discounted gain and a $100 'other' gain.
+    api_put(
+        &pool,
+        "/amma_statements/1",
+        json!({
+            "listing_id": 1,
+            "tax_year_end_date": "2025-06-30",
+            "date_received": "2025-05-31",
+            "units_held": "1",
+            "cgt_discount_gains": "400",
+            "cgt_other_gains": "100",
+        }),
+    )
+    .await;
+    // Tim's own $200 capital loss on another CGT asset, same income year.
+    put_listing(&pool, 2, "TIMX").await;
+    put_buy(&pool, 2, 2, "2024-09-02", "100", "10", "0").await;
+    put_sell(&pool, 10, 2, "2025-05-20", "100", "8", "0", 2).await;
+
+    let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net-capital-gain").await;
+    let y = years.iter().find(|y| y.tax_year == 2025).unwrap();
+    // Example 21: the distributed discount gain grosses up ×2.
+    assert_eq!(y.discount_eligible_gains, dec("800"), "$400 × 2");
+    assert_eq!(y.other_gains, dec("100"));
+    // Example 22: label 18H.
+    assert_eq!(
+        y.discount_eligible_gains + y.other_gains,
+        dec("900"),
+        "label 18H: $800 + $100"
+    );
+    // Example 23: the $200 loss takes the 'other' gain first, then $100 off
+    // the grossed-up discount gain — leaving the whole $700 discountable.
+    assert_eq!(y.capital_losses, dec("200"));
+    assert_eq!(y.net_other_gain, Decimal::ZERO);
+    assert_eq!(y.net_discount_eligible_gain, dec("700"), "$900 − $200");
+    // Example 24 / 25: the discount, and label 18A.
+    assert_eq!(y.cgt_discount, dec("350"), "$700 × 50%");
+    assert_eq!(
+        y.net_capital_gain,
+        dec("350"),
+        "label 18A: net capital gain of $350"
+    );
+}
+
+/// `docs/ato/takeovers-and-scrip-for-scrip.md` (QC 64895) — "Example 26:
+/// Takeover" (Desiree), a takeover **without** rollover.
+///
+/// > In October 2000, Desiree bought 500 shares in DEF Ltd. These shares are
+/// > currently worth $2 each. Their cost base is $1.50.
+/// > XYZ Ltd offers to acquire each share in DEF Ltd for one share in XYZ Ltd
+/// > and 75 cents cash. The shares in XYZ Ltd are valued at $1.25 each.
+/// > Accepting the offer, Desiree receives 500 shares in XYZ Ltd and $375 cash.
+/// > The capital proceeds received for each share in DEF Ltd is $2 ($1.25
+/// > market value of each XYZ Ltd share plus 75 cents cash). Therefore, as the
+/// > cost base of each DEF Ltd share is $1.50, Desiree will make a capital
+/// > gain of 50 cents ($2 − $1.50) on each share, a total of $250.
+/// > The cost base of the newly acquired XYZ Ltd shares is the market value of
+/// > the shares in DEF Ltd ($2) less the cash amount received ($0.75) which
+/// > equals $1.25 each or a total of $625 (500 × $1.25).
+///
+/// No rollover is chosen (or available), so this is an ordinary disposal at
+/// the market value of the consideration — entered manually as a Sell at the
+/// $2 market-value-derived price plus a Buy of the new XYZ holding at $1.25,
+/// exactly as the crypto-swap example above is entered. The ATO doesn't date
+/// the takeover ("currently worth $2"); entered on 15 March 2002, comfortably
+/// more than 12 months after the October 2000 purchase, so the gain is
+/// discount-eligible.
+#[tokio::test]
+async fn takeovers_example_26_desiree_takeover_without_rollover() {
+    let pool = test_pool().await;
+    put_listing(&pool, 1, "DEF").await;
+    put_listing(&pool, 2, "XYZ").await;
+    // 500 DEF shares bought October 2000 with a $1.50 cost base each.
+    put_buy(&pool, 1, 1, "2000-10-15", "500", "1.50", "0").await;
+    // The takeover: disposal at $2 per share (a $1.25 XYZ share + 75c cash)…
+    put_sell(&pool, 10, 1, "2002-03-15", "500", "2", "0", 1).await;
+    // …and the new XYZ parcel at its $1.25 market value.
+    put_buy(&pool, 2, 2, "2002-03-15", "500", "1.25", "0").await;
+
+    let gains: Vec<RealisedGainLoss> = api_get(&pool, "/portfolio/realised-gains").await;
+    assert_eq!(gains.len(), 1);
+    assert_eq!(gains[0].proceeds, dec("1000"), "500 × $2 capital proceeds");
+    assert_eq!(gains[0].cost_base, dec("750"), "500 × $1.50");
+    assert_eq!(
+        gains[0].capital_gain_loss,
+        dec("250"),
+        "50 cents per share on 500 shares"
+    );
+    assert_eq!(
+        gains[0].discount_eligible_gain,
+        dec("250"),
+        "held well over 12 months"
+    );
+
+    // The replacement holding: 500 XYZ shares at $1.25 = $625, acquired at the
+    // takeover (no rollover, so no carried acquisition date).
+    let parcels: Vec<crate::reports::open_parcels::OpenParcel> =
+        api_get(&pool, "/portfolio/open-parcels").await;
+    assert_eq!(parcels.len(), 1);
+    assert_eq!(parcels[0].ticker, "XYZ");
+    assert_eq!(parcels[0].remaining_quantity, dec("500"));
+    assert_eq!(
+        parcels[0].remaining_cost_base,
+        dec("625"),
+        "$1.25 each or a total of $625"
+    );
+    assert_eq!(parcels[0].acquisition_date.to_string(), "2002-03-15");
 }

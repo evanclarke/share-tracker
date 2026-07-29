@@ -54,6 +54,13 @@ Capital gains (not question 13 Partnerships and trusts).
   The discount is never applied to indexation/'other'-method gains.
   - *Example 24*: $700 × 50% = $350.
 - **Step 6 — Net capital gain (label 18A).** The remainder after steps 1–5.
+  - *Example 25*: Tim writes $350 at question 18 – label A.
+
+  (Examples 21–25 are one continuous worked example, reproduced in
+  `src/ato_examples.rs` as `pig_managed_funds_examples_21_25_tim_*`. The same
+  step order stated for the individual return — losses before the discount,
+  current-year losses before earlier-year ones — is mirrored in
+  [`capital-gains-question-18.md`](capital-gains-question-18.md).)
 - **Step 7 — Carry-forward losses (label 18V).** If total losses (current-year + unapplied prior)
   exceed the year's gains: nothing at 18A; the excess at 18V, carried forward against later years.
 
