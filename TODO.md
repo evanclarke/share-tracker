@@ -15,34 +15,6 @@ Currently handled correctly: the server binds `127.0.0.1` by default and exposin
 `--host` opt-in documented as unauthenticated. Only matters if the server is ever exposed.
 - [ ] If/when exposure is wanted: add an auth layer (e.g. a bearer token/basic-auth middleware over the whole router) before recommending `--host 0.0.0.0` for anything but a trusted LAN; until then this section records the decision that localhost-only is the accepted posture
 
-## Open-parcel assembly duplicated across six reports (2026-07-29 Rust review)
-
-`domain::cost_base` owns the per-parcel pipeline, but the *assembly* wrapped around it is
-copy-pasted. The same ~70-line block — load Buy/DRP `ParcelRow`s, load `parcel_allocations` joined
-to each sale's date, fold them into `qty_sold: HashMap<i64, Vec<(NaiveDate, Decimal)>>`, load AMIT
-reductions + ROC events + split events + `FxRates`, then loop `sold_in_acquired_units` →
-`remaining` → `adjusted_cost_base` → `into_aud_with` → `split_adjusted_quantity` — appears
-essentially verbatim in `reports/portfolio.rs:97` (`db_holdings_on`),
-`reports/unrealised_gains.rs:73` (`db_unrealised_gains`), `reports/open_parcels.rs:71`
-(`db_open_parcels_on`) and `reports/performance.rs:387`, with partial repeats in
-`reports/tax_report.rs:302`, `reports/realised_gains.rs:322`, and `reports/net_capital_gain.rs:309`.
-
-This is the same class of finding as the 2026-06-10 "extract a shared adjusted-cost-base module"
-item (DONE/reviews.md) one level up the call stack: that one unified steps 1–5, this one unifies
-the loader around them. Today a fix to the split/ROC re-basing interaction has to land in six
-places, and the copies have already drifted in ways that are correct but easy to get wrong when
-edited (`up_to: Some(as_of)` vs `None`, `db_cost_base_reductions_up_to` vs
-`db_cost_base_reductions`, quantity reported in as-of units vs current units).
-
-The variation between the copies is small and parameterisable: an `as_of` cutoff (or `None`),
-whether a joined `ticker` column is wanted, and whether the caller needs the full `CostBase`
-breakdown or only `.adjusted`.
-
-- [ ] Add `src/domain/open_parcels.rs` with a `load(conn, as_of) -> Result<Vec<OpenParcel>, sqlx::Error>` taking the caller's own `&mut SqliteConnection` (so it composes into each report's existing single-snapshot read transaction, per the house rule) and returning per-parcel `ParcelRow` + `remaining_as_acquired` + `remaining_as_of` + the AUD `CostBase` breakdown. Parcels fully consumed (`remaining <= 0`) are filtered out, as every copy does today
-- [ ] Rewire `portfolio::db_holdings_on`, `unrealised_gains::db_unrealised_gains`, `open_parcels::db_open_parcels_on`, and `performance.rs:387` onto it; each keeps only its own aggregation/shaping. `open_parcels` needs its joined `ticker` — resolve it as a separate lookup rather than pushing a join option into the shared loader
-- [ ] Assess `tax_report.rs:302`, `realised_gains.rs:322`, and `net_capital_gain.rs:309` separately: these walk *sold* parcels, not open ones, and may only share the reference-data loading (ROC/split/AMIT/FX). Either extract that narrower piece or record here why they stay as they are
-- [ ] Tests: the `ato_examples.rs` suite is the safety net (as it was for the cost-base extraction). Add a `domain::open_parcels` unit test per behaviour the copies encode — as-of cutoff excludes later trades/sales, split re-basing of an allocated quantity, AMIT/ROC reduction applied, fully-consumed parcel filtered out — plus an assertion that portfolio/unrealised/open-parcels agree on total cost base for the same fixture (the identity the duplication currently risks)
-
 ## Decimal columns bypass the sqlx type system (2026-07-29 Rust review)
 
 Every TEXT-stored decimal is read through a hand-written `FromRow` and written through
@@ -140,7 +112,9 @@ The tail is what matters:
 
 The three entity ones are all the same shape — validate → walk parcels → build replacement rows →
 write, in one transaction — and split naturally along those seams. The open-parcel and `Money`
-sections above will already shrink several of these, so this is deliberately sequenced last.
+sections will already shrink several of these, so this is deliberately sequenced last. (The
+open-parcel extraction has since landed — see DONE/reviews.md — taking the count from 23 to 22;
+none of the tail entries below moved, so the table still stands.)
 
 - [ ] Split `reports/activity.rs:128` (362 lines) — the largest single function in the codebase; treat as its own task
 - [ ] Split `reports/tax_report.rs:693` (327 lines)

@@ -40,10 +40,10 @@
 //! row does the same unless every open holding is priced.
 
 use crate::domain::cost_base::ParcelRow;
+use crate::domain::open_parcels;
 use crate::entities::closing_price::{self, SharedFetcher};
 use crate::entities::income::Income;
 use crate::entities::trade::TradeType;
-use crate::infra::decimal::parse_dec;
 use crate::infra::fx::{FxOverride, FxRates};
 use crate::infra::http::ApiError;
 use axum::{Extension, Json, Router, extract::State, routing::post};
@@ -367,22 +367,11 @@ async fn accumulate(
 
     // Units sold out of each purchase parcel by as_of (with sale dates, so the
     // allocated quantity is re-based across splits like the other reports).
-    let alloc_rows = sqlx::query(
-        "SELECT pa.purchase_trade_id, pa.quantity_allocated, s.date AS sale_date \
-         FROM parcel_allocations pa JOIN trades s ON s.id = pa.sale_trade_id \
-         WHERE s.date <= ?",
-    )
-    .bind(as_of)
-    .fetch_all(&mut *tx)
-    .await?;
-    let mut qty_sold: HashMap<i64, Vec<(NaiveDate, Decimal)>> = HashMap::new();
-    for row in &alloc_rows {
-        let tid: i64 = row.try_get("purchase_trade_id")?;
-        qty_sold.entry(tid).or_default().push((
-            row.try_get("sale_date")?,
-            parse_dec("quantity_allocated", row.try_get("quantity_allocated")?)?,
-        ));
-    }
+    // This report can't use `domain::open_parcels::load` itself — it walks
+    // every trade including the Sells, and values acquisitions at their
+    // initial cost rather than the adjusted cost base — but the allocations
+    // read is the same one, so it comes from there.
+    let qty_sold = open_parcels::db_units_sold(&mut tx, Some(as_of)).await?;
 
     let split_events = crate::entities::corporate_action::db_share_split_events(&mut *tx).await?;
     let ticker_rows = sqlx::query("SELECT id, ticker FROM listings")

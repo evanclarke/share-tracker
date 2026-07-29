@@ -1,14 +1,12 @@
 use crate::domain::cgt_discount;
-use crate::domain::cost_base::{self, ParcelRow};
+use crate::domain::open_parcels;
 use crate::entities::closing_price::{self, SharedFetcher};
-use crate::infra::decimal::parse_dec;
-use crate::infra::fx::FxRates;
 use crate::infra::http::ApiError;
 use axum::{Extension, Json, Router, extract::State, routing::post};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use sqlx::{Row, SqlitePool};
+use sqlx::SqlitePool;
 use std::collections::HashMap;
 
 /// Cost base is in AUD (each parcel converted via the ATO FX rate). The supplied
@@ -78,107 +76,29 @@ pub async fn db_unrealised_gains(
     // so an interleaved write can't yield e.g. an allocation whose parcel is
     // missing from the same read.
     let mut tx = pool.begin().await?;
-    let trade_rows: Vec<ParcelRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT {} FROM trades WHERE trade_type IN ('Buy', 'DRP') AND date <= ?",
-        ParcelRow::COLUMNS
-    )))
-    .bind(as_of_date)
-    .fetch_all(&mut *tx)
-    .await?;
-
-    if trade_rows.is_empty() {
-        // Nothing held; the dropped transaction was read-only.
-        return Ok(vec![]);
-    }
-
-    // units sold per purchase parcel, with each sale's date so the allocated
-    // quantity (in sale-date units) can be re-based across splits
-    let alloc_rows = sqlx::query(
-        "SELECT pa.purchase_trade_id, pa.quantity_allocated, s.date AS sale_date \
-         FROM parcel_allocations pa JOIN trades s ON s.id = pa.sale_trade_id \
-         WHERE s.date <= ?",
-    )
-    .bind(as_of_date)
-    .fetch_all(&mut *tx)
-    .await?;
-
-    let mut qty_sold: HashMap<i64, Vec<(NaiveDate, Decimal)>> = HashMap::new();
-    for row in &alloc_rows {
-        let tid: i64 = row.try_get("purchase_trade_id")?;
-        qty_sold.entry(tid).or_default().push((
-            row.try_get("sale_date")?,
-            parse_dec("quantity_allocated", row.try_get("quantity_allocated")?)?,
-        ));
-    }
-
-    let cba_reduction =
-        crate::entities::amit_adjustment::db_cost_base_reductions_up_to(&mut *tx, Some(as_of_date))
-            .await?;
-    let roc_events =
-        crate::entities::corporate_action::db_return_of_capital_events(&mut *tx).await?;
-    // share splits/consolidations per listing (quantity re-basing)
-    let split_events = crate::entities::corporate_action::db_share_split_events(&mut *tx).await?;
-    // every imported ATO FX rate — per-parcel conversions below are map
-    // lookups, not one DB round-trip each
-    let fx = FxRates::load(&mut *tx).await?;
+    // The open parcels and their AUD cost bases come from the shared loader
+    // (`domain::open_parcels`), bounded at the report's as-of date: trades,
+    // sales, AMIT statements and return-of-capital payments after it are
+    // excluded and quantities come back in that date's unit basis.
+    let open = open_parcels::load(&mut tx, Some(as_of_date)).await?;
     tx.commit().await?;
 
     let mut holding_qty: HashMap<(i64, i64), Decimal> = HashMap::new();
     let mut holding_cost_base: HashMap<(i64, i64), Decimal> = HashMap::new();
     let mut holding_cgt_eligible_qty: HashMap<(i64, i64), Decimal> = HashMap::new();
 
-    for t in &trade_rows {
-        // A scrip-for-scrip replacement parcel carries the consumed parcel's
-        // acquisition date (`t.acquired()`): it drives the discount clock and
-        // the AUD translation month; split/ROC applicability stays on the
-        // trade date.
-        let splits = split_events.get(&t.listing_id).map_or(&[][..], |v| v);
-        // Internal cost-base arithmetic stays in the parcel's as-acquired units;
-        // each sale's allocated quantity is re-based back across any splits.
-        let sold = crate::entities::corporate_action::sold_in_acquired_units(
-            qty_sold.get(&t.id).map_or(&[][..], |v| v),
-            splits,
-            t.date,
-        );
-        let remaining = t.quantity - sold;
-        if remaining <= Decimal::ZERO {
-            continue;
-        }
-
-        // Adjusted cost base of the remaining units via the shared pipeline
-        // (`domain::cost_base`), converted to AUD at the (possibly deemed)
-        // acquisition month so the holding's cost base is AUD. `up_to` is the
-        // report's as-of date.
-        let remaining_cost = cost_base::adjusted_cost_base(
-            &t.parcel(),
-            remaining,
-            *cba_reduction.get(&t.id).unwrap_or(&Decimal::ZERO),
-            roc_events.get(&t.listing_id).map_or(&[][..], |v| v),
-            splits,
-            Some(as_of_date),
-        )?
-        .into_aud_with(&fx, &t.currency, t.acquired(), t.fx_override())?
-        .adjusted;
-
-        // Quantities are reported in the unit basis of `as_of_date` (splits up
-        // to that date applied) so they line up with a price as of that date.
-        let remaining_as_of = crate::entities::corporate_action::split_adjusted_quantity(
-            remaining,
-            splits,
-            t.date,
-            Some(as_of_date),
-        );
-        let key = (t.listing_id, t.holding_account_id);
-        *holding_qty.entry(key).or_insert(Decimal::ZERO) += remaining_as_of;
-        *holding_cost_base.entry(key).or_insert(Decimal::ZERO) += remaining_cost;
+    for p in &open {
+        let key = (p.parcel.listing_id, p.parcel.holding_account_id);
+        *holding_qty.entry(key).or_insert(Decimal::ZERO) += p.remaining_as_of;
+        *holding_cost_base.entry(key).or_insert(Decimal::ZERO) += p.cost_base.adjusted;
 
         // CGT discount, on the shared ownership rule (`domain::cgt_discount`).
         // A split does not restart the clock — the converted shares keep the
         // original acquisition date (TD 2000/10) — and a scrip-for-scrip
         // replacement parcel counts the combined holding period from its
-        // deemed acquisition date.
-        if cgt_discount::discount_eligible(t.acquired(), as_of_date) {
-            *holding_cgt_eligible_qty.entry(key).or_insert(Decimal::ZERO) += remaining_as_of;
+        // deemed acquisition date (`ParcelRow::acquired`).
+        if cgt_discount::discount_eligible(p.parcel.acquired(), as_of_date) {
+            *holding_cgt_eligible_qty.entry(key).or_insert(Decimal::ZERO) += p.remaining_as_of;
         }
     }
 

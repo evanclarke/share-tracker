@@ -309,20 +309,11 @@ async fn g1_gains(
     let split_events = crate::entities::corporate_action::db_share_split_events(&mut *conn).await?;
 
     // Units sold out of each parcel, with the sale date — a unit sold before a
-    // payment was not held for it.
-    let alloc_rows = sqlx::query(
-        "SELECT pa.purchase_trade_id, pa.quantity_allocated, s.date AS sale_date \
-         FROM parcel_allocations pa JOIN trades s ON s.id = pa.sale_trade_id",
-    )
-    .fetch_all(&mut *conn)
-    .await?;
-    let mut sold: HashMap<i64, Vec<(NaiveDate, Decimal)>> = HashMap::new();
-    for row in &alloc_rows {
-        let tid: i64 = row.try_get("purchase_trade_id")?;
-        let qty = parse_dec("quantity_allocated", row.try_get("quantity_allocated")?)?;
-        let sale_date: NaiveDate = row.try_get("sale_date")?;
-        sold.entry(tid).or_default().push((sale_date, qty));
-    }
+    // payment was not held for it. The same allocations read the open-parcel
+    // loader does (`domain::open_parcels::db_units_sold`); this walk needs the
+    // per-sale dates rather than a single remainder, so only that read is
+    // shared.
+    let sold = crate::domain::open_parcels::db_units_sold(&mut *conn, None).await?;
 
     let mut out = Vec::new();
     let mut i = 0;

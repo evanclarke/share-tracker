@@ -294,3 +294,34 @@ contradicts the useful-error-messages convention (every 422 says which invariant
       Sell-side rejections carry the same per-invariant bodies as `PUT /sells/:id`
       (`buyback_participation::tests::api_sell_side_rejections_carry_their_own_422_bodies`)
 
+## Open-parcel assembly duplicated across six reports (2026-07-29 Rust review)
+
+`domain::cost_base` owns the per-parcel pipeline, but the *assembly* wrapped around it is
+copy-pasted. The same ~70-line block — load Buy/DRP `ParcelRow`s, load `parcel_allocations` joined
+to each sale's date, fold them into `qty_sold: HashMap<i64, Vec<(NaiveDate, Decimal)>>`, load AMIT
+reductions + ROC events + split events + `FxRates`, then loop `sold_in_acquired_units` →
+`remaining` → `adjusted_cost_base` → `into_aud_with` → `split_adjusted_quantity` — appears
+essentially verbatim in `reports/portfolio.rs:97` (`db_holdings_on`),
+`reports/unrealised_gains.rs:73` (`db_unrealised_gains`), `reports/open_parcels.rs:71`
+(`db_open_parcels_on`) and `reports/performance.rs:387`, with partial repeats in
+`reports/tax_report.rs:302`, `reports/realised_gains.rs:322`, and `reports/net_capital_gain.rs:309`.
+
+This is the same class of finding as the 2026-06-10 "extract a shared adjusted-cost-base module"
+item (DONE/reviews.md) one level up the call stack: that one unified steps 1–5, this one unifies
+the loader around them. Today a fix to the split/ROC re-basing interaction has to land in six
+places, and the copies have already drifted in ways that are correct but easy to get wrong when
+edited (`up_to: Some(as_of)` vs `None`, `db_cost_base_reductions_up_to` vs
+`db_cost_base_reductions`, quantity reported in as-of units vs current units).
+
+The variation between the copies is small and parameterisable: an `as_of` cutoff (or `None`),
+whether a joined `ticker` column is wanted, and whether the caller needs the full `CostBase`
+breakdown or only `.adjusted`.
+
+- [x] Add `src/domain/open_parcels.rs` with a `load(conn, as_of) -> Result<Vec<OpenParcel>, sqlx::Error>` taking the caller's own `&mut SqliteConnection` (so it composes into each report's existing single-snapshot read transaction, per the house rule) and returning per-parcel `ParcelRow` + `remaining_as_acquired` + `remaining_as_of` + the AUD `CostBase` breakdown. Parcels fully consumed (`remaining <= 0`) are filtered out, as every copy does today
+  - Shipped as `OpenParcel { parcel, remaining_as_of, cost_base }`. `remaining_as_acquired` was dropped from the returned struct: no caller reads it (the cost base it feeds is already computed inside `load`), so a `pub` field only reachable from `#[cfg(test)]` would fail the warning-free build gate. `parcel.quantity` is the whole parcel on that as-acquired basis, and the field doc records where the two bases differ
+- [x] Rewire `portfolio::db_holdings_on`, `unrealised_gains::db_unrealised_gains`, `open_parcels::db_open_parcels_on`, and `performance.rs:387` onto it; each keeps only its own aggregation/shaping. `open_parcels` needs its joined `ticker` — resolve it as a separate lookup rather than pushing a join option into the shared loader
+  - The first three are fully on `load` (ticker via a separate `SELECT id, ticker FROM listings` lookup, as specified). `performance.rs` takes only `db_units_sold`, the allocations read: it walks *every* trade including the Sells and values acquisitions at `initial_cost` rather than the adjusted cost base, so `load` would have re-read the buys and computed cost bases it discards
+- [x] Assess `tax_report.rs:302`, `realised_gains.rs:322`, and `net_capital_gain.rs:309` separately: these walk *sold* parcels, not open ones, and may only share the reference-data loading (ROC/split/AMIT/FX). Either extract that narrower piece or record here why they stay as they are
+  - `net_capital_gain::g1_gains` was the one real overlap and now calls `db_units_sold`. The other two stay: their reference-data loads look alike but no two want the same set — `realised_gains` needs the *summed* AMIT reduction plus the sells and the allocations keyed by sale, `tax_report` needs the *itemised* `db_cost_base_reduction_detail` plus all trades and the transfer fee-sale ids, `g1_gains` needs neither AMIT form. A shared struct would have to carry every field for every caller, trading duplication for a wide record most callers ignore — worse than the four independent `let … = db_…().await?` lines each has now
+- [x] Tests: the `ato_examples.rs` suite is the safety net (as it was for the cost-base extraction). Add a `domain::open_parcels` unit test per behaviour the copies encode — as-of cutoff excludes later trades/sales, split re-basing of an allocated quantity, AMIT/ROC reduction applied, fully-consumed parcel filtered out — plus an assertion that portfolio/unrealised/open-parcels agree on total cost base for the same fixture (the identity the duplication currently risks)
+  - 8 tests in `domain::open_parcels::tests`, including `the_open_holdings_reports_agree_on_total_cost_base` (the three reports over one split/partial-sale/AMIT/ROC fixture) and `a_post_split_sale_is_re_based_before_and_after_the_subtraction`. Full suite green unchanged; net −240 lines across the six reports

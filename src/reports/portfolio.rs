@@ -1,13 +1,11 @@
-use crate::domain::cost_base::{self, ParcelRow};
+use crate::domain::open_parcels;
 use crate::entities::closing_price::{self, SharedFetcher};
-use crate::infra::decimal::parse_dec;
-use crate::infra::fx::FxRates;
 use crate::infra::http::ApiError;
 use axum::{Extension, Json, Router, extract::State, routing::post};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use sqlx::{Row, SqlitePool};
+use sqlx::SqlitePool;
 use std::collections::HashMap;
 
 /// Cost base figures are in AUD (each parcel converted via the ATO FX rate). The
@@ -98,98 +96,22 @@ pub async fn db_holdings_on(
     conn: &mut sqlx::SqliteConnection,
     as_of: Option<NaiveDate>,
 ) -> Result<Vec<HoldingOverview>, sqlx::Error> {
-    let cutoff = crate::infra::date::as_of_or_open(as_of);
-    let trade_rows: Vec<ParcelRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT {} FROM trades WHERE trade_type IN ('Buy', 'DRP') AND date <= ?",
-        ParcelRow::COLUMNS
-    )))
-    .bind(cutoff)
-    .fetch_all(&mut *conn)
-    .await?;
-
-    if trade_rows.is_empty() {
-        // Nothing held.
-        return Ok(vec![]);
-    }
-
-    // units sold per purchase parcel, with each sale's date so the allocated
-    // quantity (in sale-date units) can be re-based across splits
-    let alloc_rows = sqlx::query(
-        "SELECT pa.purchase_trade_id, pa.quantity_allocated, s.date AS sale_date \
-         FROM parcel_allocations pa JOIN trades s ON s.id = pa.sale_trade_id \
-         WHERE s.date <= ?",
-    )
-    .bind(cutoff)
-    .fetch_all(&mut *conn)
-    .await?;
-
-    let mut qty_sold: HashMap<i64, Vec<(NaiveDate, Decimal)>> = HashMap::new();
-    for row in &alloc_rows {
-        let tid: i64 = row.try_get("purchase_trade_id")?;
-        qty_sold.entry(tid).or_default().push((
-            row.try_get("sale_date")?,
-            parse_dec("quantity_allocated", row.try_get("quantity_allocated")?)?,
-        ));
-    }
-
-    // total AMIT cost base reduction per purchase parcel (statements for
-    // years ending after `as_of` excluded)
-    let cba_reduction =
-        crate::entities::amit_adjustment::db_cost_base_reductions_up_to(&mut *conn, as_of).await?;
-    // return-of-capital payments (CGT event G1) per listing
-    let roc_events =
-        crate::entities::corporate_action::db_return_of_capital_events(&mut *conn).await?;
-    // share splits/consolidations per listing (quantity re-basing)
-    let split_events = crate::entities::corporate_action::db_share_split_events(&mut *conn).await?;
-    // every imported ATO FX rate — per-parcel conversions below are map
-    // lookups, not one DB round-trip each
-    let fx = FxRates::load(&mut *conn).await?;
+    // The open parcels and their AUD cost bases come from the shared loader
+    // (`domain::open_parcels`) — the assembly around `domain::cost_base` is
+    // identical for every open-holdings view. All this report adds is the
+    // aggregation per (listing, holding account).
+    let open = open_parcels::load(conn, as_of).await?;
 
     let mut holding_qty: HashMap<(i64, i64), Decimal> = HashMap::new();
     let mut holding_cost_base: HashMap<(i64, i64), Decimal> = HashMap::new();
 
-    for t in &trade_rows {
-        let splits = split_events.get(&t.listing_id).map_or(&[][..], |v| v);
-        // Internal cost-base arithmetic stays in the parcel's as-acquired units;
-        // each sale's allocated quantity is re-based back across any splits.
-        let sold = crate::entities::corporate_action::sold_in_acquired_units(
-            qty_sold.get(&t.id).map_or(&[][..], |v| v),
-            splits,
-            t.date,
-        );
-        let remaining = t.quantity - sold;
-        if remaining <= Decimal::ZERO {
-            continue;
-        }
-
-        // Adjusted cost base of the remaining units via the shared pipeline
-        // (`domain::cost_base`), converted to AUD at the (possibly deemed)
-        // acquisition month so holdings aggregate in AUD. `up_to` is the
-        // report's as-of date: payments after it haven't happened yet in
-        // this view.
-        let remaining_cost = cost_base::adjusted_cost_base(
-            &t.parcel(),
-            remaining,
-            *cba_reduction.get(&t.id).unwrap_or(&Decimal::ZERO),
-            roc_events.get(&t.listing_id).map_or(&[][..], |v| v),
-            splits,
-            as_of,
-        )?
-        .into_aud_with(&fx, &t.currency, t.acquired(), t.fx_override())?
-        .adjusted;
-
+    for p in &open {
+        let key = (p.parcel.listing_id, p.parcel.holding_account_id);
         // The holding's quantity is reported in the unit basis of `as_of`
         // (live view: current units, after every recorded split) so market
         // value lines up with a price as of that date.
-        let remaining_now = crate::entities::corporate_action::split_adjusted_quantity(
-            remaining, splits, t.date, as_of,
-        );
-        *holding_qty
-            .entry((t.listing_id, t.holding_account_id))
-            .or_insert(Decimal::ZERO) += remaining_now;
-        *holding_cost_base
-            .entry((t.listing_id, t.holding_account_id))
-            .or_insert(Decimal::ZERO) += remaining_cost;
+        *holding_qty.entry(key).or_insert(Decimal::ZERO) += p.remaining_as_of;
+        *holding_cost_base.entry(key).or_insert(Decimal::ZERO) += p.cost_base.adjusted;
     }
 
     let mut result: Vec<HoldingOverview> = holding_qty

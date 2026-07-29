@@ -1,12 +1,10 @@
-use crate::domain::cost_base::{self, ParcelRow};
-use crate::infra::decimal::parse_dec;
-use crate::infra::fx::FxRates;
+use crate::domain::open_parcels;
 use crate::infra::http::ApiError;
 use axum::{Json, Router, extract::State, routing::get};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use sqlx::{FromRow, Row, SqlitePool};
+use sqlx::{Row, SqlitePool};
 use std::collections::HashMap;
 
 /// One open (not fully sold) purchase parcel — the per-parcel schedule a user
@@ -71,108 +69,47 @@ pub async fn db_open_parcels(pool: &SqlitePool) -> Result<Vec<OpenParcel>, sqlx:
 pub async fn db_open_parcels_on(
     conn: &mut sqlx::SqliteConnection,
 ) -> Result<Vec<OpenParcel>, sqlx::Error> {
-    let raw_rows = sqlx::query(
-        "SELECT t.id, t.listing_id, t.holding_account_id, l.ticker, t.date, t.quantity, \
-         t.average_price, t.brokerage, t.gst_on_brokerage, t.currency, t.fx_rate, \
-         t.spot_fx_rate, t.deemed_acquisition_date \
-         FROM trades t JOIN listings l ON l.id = t.listing_id \
-         WHERE t.trade_type IN ('Buy', 'DRP')",
-    )
-    .fetch_all(&mut *conn)
-    .await?;
-    // The shared trade-row mapping plus this report's joined ticker column.
-    let trade_rows: Vec<(ParcelRow, String)> = raw_rows
-        .iter()
-        .map(|row| Ok((ParcelRow::from_row(row)?, row.try_get("ticker")?)))
-        .collect::<Result<_, sqlx::Error>>()?;
+    // The open parcels and their AUD cost bases come from the shared loader
+    // (`domain::open_parcels`) — `as_of: None`, the live view: an unsold unit
+    // was held for every recorded payment, and quantities come back in
+    // current units. This report adds only the joined ticker and the shaping
+    // into the printable schedule.
+    let open = open_parcels::load(&mut *conn, None).await?;
 
-    if trade_rows.is_empty() {
-        // Nothing held.
-        return Ok(vec![]);
+    // Ticker per listing, as a separate lookup rather than a join option on
+    // the shared loader (only this report wants it). Every trade's listing_id
+    // is a foreign key, so the map always has the row.
+    let ticker_rows = sqlx::query("SELECT id, ticker FROM listings")
+        .fetch_all(&mut *conn)
+        .await?;
+    let mut tickers: HashMap<i64, String> = HashMap::new();
+    for row in &ticker_rows {
+        tickers.insert(row.try_get("id")?, row.try_get("ticker")?);
     }
 
-    // units sold per purchase parcel, with each sale's date so the allocated
-    // quantity (in sale-date units) can be re-based across splits
-    let alloc_rows = sqlx::query(
-        "SELECT pa.purchase_trade_id, pa.quantity_allocated, s.date AS sale_date \
-         FROM parcel_allocations pa JOIN trades s ON s.id = pa.sale_trade_id",
-    )
-    .fetch_all(&mut *conn)
-    .await?;
-
-    let mut qty_sold: HashMap<i64, Vec<(NaiveDate, Decimal)>> = HashMap::new();
-    for row in &alloc_rows {
-        let tid: i64 = row.try_get("purchase_trade_id")?;
-        qty_sold.entry(tid).or_default().push((
-            row.try_get("sale_date")?,
-            parse_dec("quantity_allocated", row.try_get("quantity_allocated")?)?,
-        ));
-    }
-
-    let cba_reduction =
-        crate::entities::amit_adjustment::db_cost_base_reductions(&mut *conn).await?;
-    let roc_events =
-        crate::entities::corporate_action::db_return_of_capital_events(&mut *conn).await?;
-    // share splits/consolidations per listing (quantity re-basing)
-    let split_events = crate::entities::corporate_action::db_share_split_events(&mut *conn).await?;
-    // every imported ATO FX rate — per-parcel conversions below are map
-    // lookups, not one DB round-trip each
-    let fx = FxRates::load(&mut *conn).await?;
-
-    let mut parcels = Vec::new();
-    for (t, ticker) in &trade_rows {
+    let mut parcels = Vec::with_capacity(open.len());
+    for p in &open {
+        let t = &p.parcel;
         // A scrip-for-scrip replacement parcel carries the consumed parcel's
         // acquisition date (`t.acquired()`): it drives the reported
         // acquisition date and the AUD translation month (the rollover
         // carries the AUD cost base over); split/ROC applicability stays on
         // the actual trade date.
-        let splits = split_events.get(&t.listing_id).map_or(&[][..], |v| v);
-        // Internal cost-base arithmetic stays in the parcel's as-acquired units;
-        // each sale's allocated quantity is re-based back across any splits.
-        let sold = crate::entities::corporate_action::sold_in_acquired_units(
-            qty_sold.get(&t.id).map_or(&[][..], |v| v),
-            splits,
-            t.date,
-        );
-        let remaining = t.quantity - sold;
-        if remaining <= Decimal::ZERO {
-            continue;
-        }
-
-        // The shared pipeline (`domain::cost_base`) for the remaining units —
-        // `up_to: None`: an unsold unit was held for every payment since
-        // acquisition — with every figure converted to AUD at the parcel's
-        // acquisition-month ATO rate (the trade's manual fx_rate as fallback)
-        // so the schedule is uniformly AUD.
-        let cb = cost_base::adjusted_cost_base(
-            &t.parcel(),
-            remaining,
-            *cba_reduction.get(&t.id).unwrap_or(&Decimal::ZERO),
-            roc_events.get(&t.listing_id).map_or(&[][..], |v| v),
-            splits,
-            None,
-        )?
-        .into_aud_with(&fx, &t.currency, t.acquired(), t.fx_override())?;
-
-        // The remaining quantity is reported in current units — after every
-        // recorded split/consolidation — so it reconciles with a broker
-        // statement; `original_quantity` stays as transacted.
-        let remaining_now = crate::entities::corporate_action::split_adjusted_quantity(
-            remaining, splits, t.date, None,
-        );
-
         parcels.push(OpenParcel {
             trade_id: t.id,
             listing_id: t.listing_id,
             holding_account_id: t.holding_account_id,
-            ticker: ticker.clone(),
+            ticker: tickers.get(&t.listing_id).cloned().unwrap_or_default(),
             acquisition_date: t.acquired(),
             original_quantity: t.quantity,
-            remaining_quantity: remaining_now,
-            original_cost_base: cb.initial_cost,
-            amit_cost_base_reduction: cb.amit_reduction,
-            return_of_capital_reduction: cb.roc_reduction,
-            remaining_cost_base: cb.adjusted,
+            // Current units — after every recorded split/consolidation — so
+            // it reconciles with a broker statement; `original_quantity`
+            // stays as transacted.
+            remaining_quantity: p.remaining_as_of,
+            original_cost_base: p.cost_base.initial_cost,
+            amit_cost_base_reduction: p.cost_base.amit_reduction,
+            return_of_capital_reduction: p.cost_base.roc_reduction,
+            remaining_cost_base: p.cost_base.adjusted,
         });
     }
 
