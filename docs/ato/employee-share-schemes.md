@@ -74,16 +74,40 @@ loss, net rental-property loss, and deductible personal super contributions) is
 **$180,000 or less**. The reduction applies to **deferral** (label F) discounts
 **not at all** — only to label D.
 
-> **Worked example — taxed-upfront eligible (QC 47628).** Core Bank Ltd provides
-> its employee **Matt 600 shares** under an ESS on 4 August 2015. Total market
-> value **$3,600**; Matt pays **$1,200**, so the discount is **$2,400** ($3,600 −
-> $1,200), reported at **label D**. Because the employer doesn't know Matt's
-> adjusted taxable income, the ESS statement shows the full $2,400, ignoring the
-> concession. If Matt is eligible (income ≤ $180,000), his **assessable discount
-> is $2,400 − $1,000 = $1,400**. His shares' CGT cost base is the **$3,600**
-> market value, acquired 4 August 2015.
+**Worked example — taxed-upfront eligible (QC 47628).** The ATO's example, verbatim:
 
-This is reproduced in `src/ato_examples.rs`.
+> Core Bank Ltd provides its employee Matt 600 shares under an ESS on 4 August
+> 2015.
+>
+> The total market value of the shares is $3,600. Matt pays Core Bank Ltd
+> $1,200 to purchase the shares, acquiring the shares for a discount of $2,400
+> ($3,600 less $1,200).
+>
+> On 7 July 2016 Core Bank Ltd, gives Matt an ESS statement, with an amount of
+> $2,400 at label D "Discount from taxed upfront schemes – eligible for
+> reduction".
+>
+> Core Bank Ltd lodges an ESS annual report showing all reportable ESS data for
+> their employees with us by 14 August 2016.
+>
+> As Core Bank Ltd will not know Matt's taxable income after adjustments, they
+> report the discount as $2,400, ignoring the $1,000 concession.
+
+> **Project note — the two figures the ATO's example stops short of.** The
+> example ends at what the *employer* reports; the employee's own two outcomes
+> follow from rules stated elsewhere and are **not quoted text**:
+>
+> - **Assessable discount $1,400.** Applying the $1,000 reduction described
+>   above (Matt being eligible, adjusted taxable income ≤ $180,000):
+>   $2,400 − $1,000 = $1,400. The source page states only the rule ("reduce
+>   the amount of the discounts … by up to $1,000") and that the employer
+>   reports the unreduced $2,400.
+> - **CGT cost base $3,600.** The shares' first-element cost base is their
+>   market value at the taxing point (the discount having already been taxed
+>   as income), acquired 4 August 2015 — the general ESS/CGT interaction, not
+>   a statement of this example.
+>
+> Both are what `src/ato_examples.rs` asserts, which reproduces this example.
 
 ## How this maps to the implementation
 

@@ -165,17 +165,24 @@ date you acquired the right or option)**.
 
 If you do not (or cannot) take up a right or entitlement and the company pays
 you an amount based on the clearing price achieved when the equivalent shares
-are issued to other subscribers, that payment is a **retail premium**. The
-treatment depends on the offer (see [`retail-premiums.md`](retail-premiums.md),
-QC 21832, retrieved 2026-06-10): under a **renounceable** rights offer the
-premium is a **capital gain, not a dividend** (TR 2017/4) — the rights are
-taken to have been acquired when the original shares were acquired, so the
-gain can be a discount capital gain; under a **non-renounceable** entitlement
-offer it is an **unfranked dividend** (TR 2012/1). (In this system a
-renounceable-offer retail premium is entered with the sell-rights operation,
-premium as proceeds; a non-renounceable one as unfranked dividend income. An
-earlier revision of this file described all retail premiums as unfranked
-dividends — superseded.)
+are issued to other subscribers, that payment is a **retail premium**. Retail
+premiums are **unfranked dividends, or alternatively ordinary income, and
+should not be treated as capital gains**; recipients are not eligible to claim
+the CGT discount.
+
+> **Project note — superseded by a more specific ATO source.** The paragraph
+> above is the source page's own wording (the *Guide to capital gains tax
+> 2021*), reproduced verbatim. It is **not** the treatment this project
+> implements: the ATO's dedicated "Taxing retail premiums" page (QC 21832 —
+> mirrored in [`retail-premiums.md`](retail-premiums.md), retrieved
+> 2026-06-10) draws a distinction this older guide does not. Under a
+> **renounceable** rights offer the premium is a **capital gain, not a
+> dividend** (TR 2017/4) — the rights are taken to have been acquired when the
+> original shares were acquired, so the gain can be a discount capital gain;
+> only under a **non-renounceable** entitlement offer is it an **unfranked
+> dividend** (TR 2012/1). In this system a renounceable-offer retail premium
+> is entered with the sell-rights operation, premium as proceeds; a
+> non-renounceable one as unfranked dividend income.
 
 ---
 

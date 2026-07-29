@@ -1,7 +1,7 @@
 # How to calculate your CGT
 
 > Source: https://www.ato.gov.au/individuals-and-families/investments-and-assets/capital-gains-tax/calculating-your-cgt/how-to-calculate-your-cgt
-> Retrieved: 2026-06-01 from the Australian Taxation Office (ato.gov.au)
+> Retrieved: 2026-06-01 from the Australian Taxation Office (ato.gov.au); example dates refreshed 2026-07-29 (last updated 29 June 2026)
 > This is a local copy of ATO guidance for reference. The ATO site is authoritative.
 
 ---
@@ -105,7 +105,7 @@ Using the steps above, Rhi works out her capital gain as follows.
 7. Rhi can use the CGT discount to reduce her capital gain because she is an Australian resident and owned the asset for at least 12 months. The CGT discount is $70,000 × 50% = $35,000.
 8. Rhi reports a net capital gain of $35,000 and a capital gain of $70,000 at question **18** – labels **A** and **H** respectively in the supplementary section of her tax return. She will pay tax on the net capital gain at her marginal income tax rate.
 
-The capital gain for the property happens on the date of the sale contract, not the date of settlement. For example, if contracts are exchanged on 4 June 2025 and settlement happens on 6 July 2025, Rhi must report her capital gain in her tax return for the financial year ending 30 June 2025.
+The capital gain for the property happens on the date of the sale contract, not the date of settlement. For example, if contracts are exchanged on 4 June 2026 and settlement happens on 6 July 2026, Rhi must report her capital gain in her tax return for the financial year ending 30 June 2026.
 
 ##### Example: working out CGT for multiple assets
 

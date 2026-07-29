@@ -2,10 +2,10 @@
 
 > **Source:**
 > https://www.ato.gov.au/individuals-and-families/investments-and-assets/crypto-asset-investments/how-to-work-out-and-report-cgt-on-crypto
-> ("How to work out and report CGT on crypto", QC 69952, last updated 23 June 2025), and
+> ("How to work out and report CGT on crypto", QC 69952, last updated 22 June 2026), and
 > https://www.ato.gov.au/individuals-and-families/investments-and-assets/crypto-asset-investments/transactions-acquiring-and-disposing-of-crypto-assets/crypto-to-crypto-exchange-or-swap
-> ("Crypto to crypto exchange or swap", QC 69949, last updated 23 June 2025)
-> **Retrieved:** 2026-06-07
+> ("Crypto to crypto exchange or swap", QC 69949, last updated 22 June 2026)
+> **Retrieved:** 2026-07-29
 > The live ATO site is authoritative; this is a convenience mirror.
 
 ## When capital gains tax applies
@@ -75,10 +75,10 @@ dollars**.
 
 > **Example: market value of new asset determines old asset's disposal proceeds**
 >
-> Katrina acquires 100 Coin A for $15,000 on 5 July 2024.
+> Katrina acquires 100 Coin A for $15,000 on 5 July 2025.
 >
 > Katrina decides to exchange 20 Coin A for 100 Coin B through a reputable
-> digital asset exchange on 15 November 2024.
+> digital asset exchange on 15 November 2025.
 >
 > Using the exchange rates shown on the digital asset exchange at the time of
 > the transaction, the market value of 100 Coin B was $6,000.
@@ -95,11 +95,11 @@ disposing of to work out the capital proceeds.
 
 > **Example: market value of old crypto asset determines its disposal proceeds**
 >
-> Katrina acquires 100 Coin A for $15,000 on 5 July 2024.
+> Katrina acquires 100 Coin A for $15,000 on 5 July 2025.
 >
 > Katrina decides to exchange 20 Coin A for a new coin, Coin D, before it is
 > listed on a digital exchange. Katrina acquires 100 Coin D in the exchange on
-> 15 November 2024.
+> 15 November 2025.
 >
 > At the time of the transaction, Coin D doesn't have a market value. Katrina
 > uses the market value of Coin A on the digital asset exchange at the time of
@@ -111,9 +111,16 @@ disposing of to work out the capital proceeds.
 
 ## Transferring crypto between wallets you own (and network fees)
 
-> **Source:** the "Crypto asset investments and tax" guidance (QC 69952) and
-> [Crypto asset transactions](https://www.ato.gov.au/individuals-and-families/investments-and-assets/crypto-asset-investments/transactions-acquiring-and-disposing-of-crypto-assets/crypto-asset-transactions).
-> **Retrieved:** 2026-06-08.
+> **Source:** [Crypto asset investments and tax](https://www.ato.gov.au/other-languages/information-in-other-languages/investing/crypto-asset-investments-and-tax)
+> ("Crypto asset investments and tax", QC 67444, last updated 4 October 2022).
+> **Retrieved:** 2026-06-08; both quoted sentences re-verified verbatim on this
+> page 2026-07-29.
+>
+> Originally also cited [Crypto asset transactions](https://www.ato.gov.au/individuals-and-families/investments-and-assets/crypto-asset-investments/transactions-acquiring-and-disposing-of-crypto-assets/crypto-asset-transactions)
+> (now QC 69948, last updated 22 June 2026). **That page no longer carries the
+> wallet-transfer or network-fee sentences** — it was restructured; the
+> guidance below now lives only on the QC 67444 page above. The rule itself is
+> unchanged.
 
 Moving a crypto asset between two wallets you own is **not a disposal** as long
 as you keep ownership — no CGT event, exactly like a share transfer between two

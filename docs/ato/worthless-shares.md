@@ -4,7 +4,8 @@
 > - https://www.ato.gov.au/individuals-and-families/investments-and-assets/capital-gains-tax/shares-and-similar-investments/investments-in-a-company-in-liquidation-or-administration (Investments in a company in liquidation or administration, QC 52234)
 > - https://www.ato.gov.au/law/view/print?DocID=TXD%2FTD200052%2FNAT%2FATO%2F00001&PiT=99991231235958 (TD 2000/52 — CGT event G3, liquidator's declaration)
 > - https://www.ato.gov.au/law/view/print?DocID=TXD%2FTD20007%2FNAT%2FATO%2F00001&PiT=99991231235958 (TD 2000/7 — CGT event C2 on deregistration)
-> **Retrieved:** 2026-06-08
+> **Retrieved:** 2026-06-08 (QC 52234 example re-verified and refreshed 2026-07-29,
+> when the ATO rolled its illustrative years forward one year; last updated 22 June 2026)
 > The live ATO site is authoritative; this is a convenience mirror.
 
 ## What this covers
@@ -72,15 +73,15 @@ the user-supplied declaration/cancellation date as the event date.)
 
 ## Worked example — Dave (capital loss when company dissolves) — reproduced in `src/ato_examples.rs`
 
-On 31 March 2025, the administrators of Company Ltd made a written declaration
+On 31 March 2026, the administrators of Company Ltd made a written declaration
 that they had reasonable grounds to believe there was no likelihood that
 shareholders would receive any distribution. Dave owned 1,000 Company Ltd
-shares, acquired in March 2012 for **$1.70 each including brokerage**. He chose
-to claim the capital loss in his 2024–25 return.
+shares, acquired in March 2013 for **$1.70 each including brokerage**. He chose
+to claim the capital loss in his 2025–26 return.
 
 The reduced cost base — and Dave's capital loss — is **1,000 × $1.70 = $1,700**.
 That loss is taken into account in working out his net capital gain or loss for
-2024–25.
+2025–26.
 
 This is the modelled case: a `WorthlessShares` corporate action (a
 `G3Declaration`) whose recognise operation closes every open parcel held at the

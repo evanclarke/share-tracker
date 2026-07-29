@@ -7,6 +7,27 @@ calculations in this project. Each file carries its source URL and retrieval dat
 header block. **The live ATO site (ato.gov.au) is authoritative** — these copies are a
 convenience snapshot and may go stale (tax rules and form layouts change yearly).
 
+**Fidelity audit, 2026-07-29.** Every mirror was re-fetched from its source URL and
+compared figure-by-figure against the live page; every worked example reproduced in
+`src/ato_examples.rs` was checked against the mirror it cites. Findings, all resolved:
+
+- No mirror had drifted in substance — every monetary figure, rate and rule statement
+  still matches its live source. The only mirrored ATO *text* ever edited after capture
+  was `rights-issues.md`'s Retail premiums paragraph, which had been replaced with this
+  project's (correct, better-sourced) conclusion; the source wording is now restored
+  verbatim with the supersession moved into a project note beneath it.
+- Four pages had been refreshed upstream by the ATO rolling its illustrative years
+  forward one year, amounts unchanged: `cgt-dividend-reinvestment-plans.md` (Natalie),
+  `crypto-cgt.md` (Katrina), `worthless-shares.md` (Dave) and
+  `cgt-how-to-calculate.md`'s contract-vs-settlement note. All four mirrors and the
+  tests reproducing them were rolled forward to match.
+- `crypto-cgt.md`'s wallet-transfer/network-fee quotes were re-verified verbatim, but
+  the page originally cited for them (now QC 69948) no longer carries them; the section
+  now cites QC 67444, which does.
+- Derived figures the ATO's own examples stop short of are kept **outside** the quoted
+  blocks and labelled as this project's arithmetic (see `employee-share-schemes.md`'s
+  Matt note and `demergers.md`'s unrounded apportionment).
+
 These pages were captured because several TODO items in
 [`../TODO.md`](../TODO.md) need clarification on intended ATO behaviour before
 implementation — see "How this maps to open TODO items" at the end.

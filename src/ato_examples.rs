@@ -363,15 +363,15 @@ async fn cgt_how_to_calculate_example_multiple_assets() {
 
 /// `docs/ato/cgt-dividend-reinvestment-plans.md` — "Example: dividend reinvestment plans".
 ///
-/// > Natalie owns 1,440 shares in a company. In November 2024, the company
+/// > Natalie owns 1,440 shares in a company. In November 2025, the company
 /// > declared a dividend of 25 cents per share. Natalie was offered the choice of:
 /// > - taking the dividend as a cash payment of $360 (1,440 × 25 cents)
 /// > - reinvesting the dividend to acquire 45 more shares at $8 per share ($360 ÷ $8).
 /// > Natalie decided to participate in the dividend reinvestment plan and
-/// > received 45 new shares on 20 December 2024. This means:
+/// > received 45 new shares on 20 December 2025. This means:
 /// > - she must declare the $360 dividend as assessable dividend income in her
-/// >   2024–25 tax return
-/// > - for CGT purposes, she acquired the 45 new shares for $360 on 20 December 2024.
+/// >   2025–26 tax return
+/// > - for CGT purposes, she acquired the 45 new shares for $360 on 20 December 2025.
 #[tokio::test]
 async fn drp_example_natalie_reinvested_dividend() {
     let pool = test_pool().await;
@@ -381,7 +381,7 @@ async fn drp_example_natalie_reinvested_dividend() {
     api_put(
         &pool,
         "/drp_enrolments/1",
-        json!({ "listing_id": 1, "enrolment_date": "2024-01-01", "residual_handling": "CarryForward" }),
+        json!({ "listing_id": 1, "enrolment_date": "2025-01-01", "residual_handling": "CarryForward" }),
     )
     .await;
     api_put(
@@ -389,7 +389,7 @@ async fn drp_example_natalie_reinvested_dividend() {
         "/income/1",
         json!({
             "listing_id": 1,
-            "date_paid": "2024-12-20",
+            "date_paid": "2025-12-20",
             "unfranked_amount": "360",
             "currency": "AUD",
         }),
@@ -409,8 +409,8 @@ async fn drp_example_natalie_reinvested_dividend() {
     assert_eq!(trade.average_price, dec("8"), "at $8 per share");
     assert_eq!(
         trade.date.to_string(),
-        "2024-12-20",
-        "received on 20 December 2024"
+        "2025-12-20",
+        "received on 20 December 2025"
     );
 
     // For CGT purposes the 45 shares were acquired for $360.
@@ -424,10 +424,10 @@ async fn drp_example_natalie_reinvested_dividend() {
         "acquired the 45 new shares for $360"
     );
 
-    // The $360 dividend is assessable income in her 2024–25 tax return.
+    // The $360 dividend is assessable income in her 2025–26 tax return.
     let years: Vec<TaxYearSummary> = api_get(&pool, "/portfolio/tax-summary").await;
     assert_eq!(years.len(), 1);
-    assert_eq!(years[0].tax_year, 2025); // paid Dec 2024 → 2024–25
+    assert_eq!(years[0].tax_year, 2026); // paid Dec 2025 → 2025–26
     assert_eq!(
         years[0].dividends_assessable,
         dec("360"),
@@ -1448,9 +1448,9 @@ async fn takeovers_example_27_gunther_partial_scrip_for_scrip_rollover() {
 /// `docs/ato/crypto-cgt.md` — "Example: market value of new asset determines
 /// old asset's disposal proceeds" (Crypto to crypto exchange or swap, QC 69949).
 ///
-/// > Katrina acquires 100 Coin A for $15,000 on 5 July 2024. Katrina decides
+/// > Katrina acquires 100 Coin A for $15,000 on 5 July 2025. Katrina decides
 /// > to exchange 20 Coin A for 100 Coin B through a reputable digital asset
-/// > exchange on 15 November 2024. Using the exchange rates shown on the
+/// > exchange on 15 November 2025. Using the exchange rates shown on the
 /// > digital asset exchange at the time of the transaction, the market value
 /// > of 100 Coin B was $6,000. Therefore, Katrina's capital proceeds are
 /// > $6,000 for the disposal of 20 Coin A.
@@ -1460,7 +1460,7 @@ async fn takeovers_example_27_gunther_partial_scrip_for_scrip_rollover() {
 /// limitations). Coin A / Coin B are represented by the seeded BTC / ETH
 /// token codes — a Crypto listing's ticker must be a recognised digital
 /// token. The 20 disposed Coin A carry 15,000 × 20/100 = $3,000 of cost base,
-/// so the swap realises a $3,000 capital gain, held 5 Jul → 15 Nov 2024
+/// so the swap realises a $3,000 capital gain, held 5 Jul → 15 Nov 2025
 /// (under 12 months) → not discount-eligible; the acquired Coin B parcel
 /// opens at the $6,000 swap value. Both legs settle same-day (a crypto asset
 /// trades on no exchange — no T+n, no holiday calendar).
@@ -1488,11 +1488,11 @@ async fn crypto_cgt_example_katrina_coin_swap() {
         )
         .await;
     }
-    put_buy(&pool, 1, 1, "2024-07-05", "100", "150", "0").await; // 100 Coin A for $15,000
-    // The swap on 15 Nov 2024: dispose of 20 Coin A for $6,000 (100 Coin B's
+    put_buy(&pool, 1, 1, "2025-07-05", "100", "150", "0").await; // 100 Coin A for $15,000
+    // The swap on 15 Nov 2025: dispose of 20 Coin A for $6,000 (100 Coin B's
     // market value) and acquire 100 Coin B for the same $6,000.
-    put_sell(&pool, 2, 1, "2024-11-15", "20", "300", "0", 1).await;
-    put_buy(&pool, 3, 2, "2024-11-15", "100", "60", "0").await;
+    put_sell(&pool, 2, 1, "2025-11-15", "20", "300", "0", 1).await;
+    put_buy(&pool, 3, 2, "2025-11-15", "100", "60", "0").await;
 
     // Crypto settles same-day: the auto-populated settlement date is the
     // trade date itself.
@@ -1519,10 +1519,10 @@ async fn crypto_cgt_example_katrina_coin_swap() {
     );
     assert_eq!(sales[0].discount_eligible_gain, Decimal::ZERO);
 
-    // FY2024-25: the $3,000 gain is assessable in full (no discount).
+    // FY2025-26: the $3,000 gain is assessable in full (no discount).
     let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net-capital-gain").await;
     assert_eq!(years.len(), 1);
-    assert_eq!(years[0].tax_year, 2025);
+    assert_eq!(years[0].tax_year, 2026);
     assert_eq!(years[0].other_gains, dec("3000"));
     assert_eq!(years[0].cgt_discount, Decimal::ZERO);
     assert_eq!(years[0].net_capital_gain, dec("3000"));
@@ -1612,23 +1612,23 @@ async fn ess_example_matt_taxed_upfront_eligible_reduction() {
 /// `docs/ato/worthless-shares.md` (QC 52234) — "Capital loss when company
 /// dissolves" (Dave).
 ///
-/// > On 31 March 2025, the administrators of Company Ltd made a written
+/// > On 31 March 2026, the administrators of Company Ltd made a written
 /// > declaration that they had reasonable grounds to believe there was no
 /// > likelihood that shareholders would receive any distribution. Dave owned
-/// > 1,000 Company Ltd shares, acquired in March 2012 for $1.70 each including
+/// > 1,000 Company Ltd shares, acquired in March 2013 for $1.70 each including
 /// > brokerage … the reduced cost base of Dave's shares and his capital loss …
 /// > is $1,700 — that is, 1,000 multiplied by $1.70.
 ///
 /// Entered as a `WorthlessShares` corporate action (a G3 declaration) whose
 /// recognise operation closes the holding at nil proceeds. The realised-gains
 /// report shows a $1,700 capital loss (no gain, no discount), and the
-/// net-capital-gain report carries it into FY2024/25's loss pool.
+/// net-capital-gain report carries it into FY2025/26's loss pool.
 #[tokio::test]
 async fn worthless_shares_example_dave_capital_loss_on_dissolution() {
     let pool = test_pool().await;
     put_listing(&pool, 1, "CMP").await;
-    // 1,000 shares acquired March 2012 for $1.70 each, including brokerage.
-    put_buy(&pool, 1, 1, "2012-03-15", "1000", "1.70", "0").await;
+    // 1,000 shares acquired March 2013 for $1.70 each, including brokerage.
+    put_buy(&pool, 1, 1, "2013-03-15", "1000", "1.70", "0").await;
 
     // The administrators' written declaration of worthlessness (CGT event G3).
     api_put(
@@ -1637,7 +1637,7 @@ async fn worthless_shares_example_dave_capital_loss_on_dissolution() {
         json!({
             "action_type": "WorthlessShares",
             "listing_id": 1,
-            "date": "2025-03-31",
+            "date": "2026-03-31",
             "worthless_event": "G3Declaration",
         }),
     )
@@ -1663,10 +1663,10 @@ async fn worthless_shares_example_dave_capital_loss_on_dissolution() {
     assert_eq!(sales[0].capital_loss, dec("1700"));
     assert_eq!(sales[0].discount_eligible_gain, Decimal::ZERO);
 
-    // The loss is taken into account for FY2024/25 (year ending 30 June 2025),
+    // The loss is taken into account for FY2025/26 (year ending 30 June 2026),
     // carried forward as there are no gains to offset.
     let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net-capital-gain").await;
-    let y = years.iter().find(|y| y.tax_year == 2025).unwrap();
+    let y = years.iter().find(|y| y.tax_year == 2026).unwrap();
     assert_eq!(y.capital_losses, dec("1700"));
     assert_eq!(y.net_capital_gain, Decimal::ZERO);
     assert_eq!(y.capital_loss_carried_forward, dec("1700"));
