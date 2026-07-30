@@ -138,30 +138,72 @@ chrome_common=(--headless=new --disable-gpu --no-first-run --no-default-browser-
 # shellcheck disable=SC2206
 [ -n "${CHROME_FLAGS:-}" ] && chrome_common+=(${CHROME_FLAGS})
 
-# Hard ceiling for a single render: the virtual-time budget plus slack for
-# startup. A render that blocks (e.g. a stalled live-price fetch keeping the
-# page from going idle) is killed rather than hanging the whole script — which
-# is what previously stranded the server and Chrome past the cleanup trap.
+# Hard ceiling for a single render, as a genuine-failure backstop: the virtual-
+# time budget plus slack for startup. A render that blocks (e.g. a stalled live-
+# price fetch keeping the page from going idle) is killed rather than hanging the
+# whole script — which is what previously stranded the server and Chrome past the
+# cleanup trap.
 chrome_timeout=$(( budget / 1000 + 15 ))
 
-# Run Chrome bounded by chrome_timeout; on timeout kill the launcher and any
-# helper still referencing our temp profile. stdout (the dumped DOM) passes
-# through; Chrome's chatter on stderr is dropped. Returns Chrome's exit code,
-# or 124 if it was timed out.
+dump="$work/dump"
+shot_file=""
+
+# Chrome's teardown after a headless render is unreliable on macOS (measured on
+# Chrome 150, --headless=new): across repeated identical runs the artifact was
+# written every time and byte-for-byte identical, while the process itself then
+# exited promptly only about half the time and otherwise sat there until it was
+# killed. Waiting on the *process* therefore charged the full ceiling on those
+# runs and reported a timeout for a render that had in fact completed — every
+# route of scripts/ui-smoke.sh printed one while passing all its assertions.
+#
+# So wait for the *artifact* instead: `ready` succeeds once the output is
+# complete (the closing </html> of a dumped document, a PNG's IEND trailer), at
+# which point Chrome has done its job and is killed. Chrome exiting on its own
+# ends the wait just the same. Only the ceiling elapsing with no complete
+# artifact is a real failure, and that is now the only case the caller reports.
+#
+# Both searches are over raw bytes, so both force the C locale and -a: under a
+# UTF-8 locale BSD grep finds no match in a chunk that isn't valid UTF-8, which
+# silently sank the PNG check (its trailer is IEND followed by ae 42 60 82) —
+# the render then always ran to the ceiling and reported a false failure.
+dom_ready() { tail -c 64 "$dump" 2>/dev/null | LC_ALL=C grep -qa '</html>'; }
+shot_ready() { tail -c 8 "$shot_file" 2>/dev/null | LC_ALL=C grep -qa 'IEND'; }
+
+# chrome_run READY_FN CHROME_ARG... — 0 once the artifact is complete, 1 if
+# Chrome exited without producing one, 124 if the ceiling elapsed first.
 chrome_run() {
-  "$chrome" "${chrome_common[@]}" "$@" 2>/dev/null &
+  local ready="$1"; shift
+  "$chrome" "${chrome_common[@]}" "$@" >"$dump" 2>/dev/null &
   local cpid=$!
-  ( sleep "$chrome_timeout"; kill -9 "$cpid" 2>/dev/null; pkill -9 -f "$profile" 2>/dev/null ) &
-  local wd=$!
-  local rc=0
-  wait "$cpid" 2>/dev/null || rc=$?
-  if kill -0 "$wd" 2>/dev/null; then
-    kill "$wd" 2>/dev/null || true   # render finished first — cancel the watchdog
-    wait "$wd" 2>/dev/null || true
-  else
-    rc=124                           # watchdog already fired: render timed out
-  fi
+  local deadline=$(( SECONDS + chrome_timeout ))
+  local rc=124
+  while :; do
+    if "$ready"; then rc=0; break; fi
+    if ! kill -0 "$cpid" 2>/dev/null; then
+      # Exited on its own: complete (a race against the poll) or a real failure.
+      if "$ready"; then rc=0; else rc=1; fi
+      break
+    fi
+    [ "$SECONDS" -lt "$deadline" ] || break
+    sleep 0.1
+  done
+  # Reap the launcher and the render/gpu/network helpers it leaves behind. The
+  # braces' stderr redirect swallows the shell's own "Killed: 9" job notice for
+  # the SIGKILLed launcher, which is expected here, not a fault worth printing.
+  { kill -9 "$cpid" 2>/dev/null || true
+    wait "$cpid" 2>/dev/null || true
+    pkill -9 -f "$profile" 2>/dev/null || true
+  } 2>/dev/null
   return $rc
+}
+
+# 124 is the ceiling elapsing; anything else is Chrome giving up on its own.
+render_failed() {
+  if [ "$2" = 124 ]; then
+    echo "ui-check: render of $1 did not complete within ${chrome_timeout}s" >&2
+  else
+    echo "ui-check: Chrome exited without completing the render of $1" >&2
+  fi
 }
 
 [ "$mode" = shot ] && mkdir -p "$out"
@@ -171,17 +213,20 @@ for route in "${routes[@]}"; do
   url="$base/$route"
   if [ "$mode" = dom ]; then
     [ "$multi" = 1 ] && echo "===== $route ====="
-    chrome_run --dump-dom "$url" || echo "ui-check: render of $route timed out after ${chrome_timeout}s" >&2
+    rc=0; chrome_run dom_ready --dump-dom "$url" || rc=$?
+    [ "$rc" = 0 ] || render_failed "$route" "$rc"
+    # Emitted either way: a partial document is the most useful failure context
+    # (ui-smoke.sh prints the app mount from it when a marker is missing).
+    cat "$dump"
   else
     safe="$(printf '%s' "$route" | tr -c 'A-Za-z0-9' '_')"
-    file="$out/${safe}.png"
-    if chrome_run --window-size=1280,1600 --screenshot="$file" "$url"; then
-      echo "saved $file"
+    shot_file="$out/${safe}.png"
+    rm -f "$shot_file"
+    rc=0; chrome_run shot_ready --window-size=1280,1600 --screenshot="$shot_file" "$url" || rc=$?
+    if [ "$rc" = 0 ]; then
+      echo "saved $shot_file"
     else
-      echo "ui-check: render of $route timed out after ${chrome_timeout}s" >&2
+      render_failed "$route" "$rc"
     fi
   fi
-  # Clear any straggler helper from a killed render before the next route reuses
-  # the shared profile (a profile lock from a stray helper would wedge it).
-  pkill -9 -f "$profile" 2>/dev/null || true
 done
