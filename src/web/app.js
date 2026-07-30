@@ -14,7 +14,7 @@
 import {
   el, toast, setMain, looksNumeric, isTimestamp, fmtLocalTimestamp, utcTooltip,
   cellText, numericDisplay, columnKinds, columnLabel, columnLabelMaps,
-  fkLabelMaps, api, nextId, loadOptions, listingNamer, describeTrade, tradeOrigin,
+  fkLabelMaps, api, pathSeg, nextId, loadOptions, listingNamer, describeTrade, tradeOrigin,
   periodReturnPct, holdingHasActivity, loadPref, savePref,
 } from './util.js';
 import {
@@ -441,7 +441,12 @@ async function deleteEntity(entity, keyPath, row) {
 async function viewEntityForm(entity, keyParts) {
   setActiveNav(entity.slug);
   const editing = keyParts != null;
-  const existing = editing ? await api('GET', entity.api + '/' + keyParts.join('/')) : null;
+  // Each key part is encoded, not the joined string: the '/' between the parts
+  // of a composite key (closing_prices is listing_id + date) is real path
+  // structure, while the parts themselves came from the hash route.
+  const existing = editing
+    ? await api('GET', entity.api + '/' + keyParts.map(pathSeg).join('/'))
+    : null;
 
   // Per-type field grouping: an entity with `fieldGroups` (keyed by the
   // `typeField` select's value) renders only the chosen type's group after
@@ -638,7 +643,7 @@ function sellForesightLinks() {
 async function viewSellForm(id) {
   setActiveNav('sells');
   const editing = id != null;
-  const existing = editing ? await api('GET', '/trades/' + id) : null;
+  const existing = editing ? await api('GET', '/trades/' + pathSeg(id)) : null;
   let existingAllocs = [];
   if (editing) {
     existingAllocs = (await api('GET', '/parcel_allocations')).filter(function (a) { return a.sale_trade_id === Number(id); });
@@ -841,7 +846,7 @@ async function viewTransferForm() {
 // defaults apply; the no-field confirm-only actions POST without a body.
 async function viewAction(action, id) {
   setActiveNav(action.nav);
-  const owner = await api('GET', action.ownerApi + '/' + id);
+  const owner = await api('GET', action.ownerApi + '/' + pathSeg(id));
   // Action descriptions name the listings they touch rather than printing
   // raw ids; unknown/null ids fall back to the old "listing N" wording.
   const listingName = await listingNamer();
@@ -939,7 +944,7 @@ async function viewAttachments(ownerField, ownerId) {
   let ownerName = (ownerSpec ? ownerSpec.noun : 'activity') + ' #' + ownerId;
   if (ownerSpec) {
     try {
-      const owner = await api('GET', ownerSpec.api + '/' + ownerId);
+      const owner = await api('GET', ownerSpec.api + '/' + pathSeg(ownerId));
       ownerName = ownerSpec.noun + ' ' + ownerSpec.name(owner, await listingNamer()) + ' (#' + ownerId + ')';
     } catch (e) { /* fall back to the noun + id wording */ }
   }
@@ -1549,7 +1554,7 @@ async function viewSnapshots() {
 
 async function viewSnapshotDetail(report, date) {
   setActiveNav('r:snapshots');
-  const snap = await api('GET', '/report_snapshots/' + report + '/' + date);
+  const snap = await api('GET', '/report_snapshots/' + pathSeg(report) + '/' + pathSeg(date));
   const header = el('div', null, [
     el('h2', null, 'Snapshot: ' + report + ' @ ' + date),
     el('p', { class: 'view-desc', title: utcTooltip(snap.generated_at) },

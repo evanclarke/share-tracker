@@ -236,6 +236,18 @@ export function numericDisplay(value, kind) {
 }
 
 // ---- API client -------------------------------------------------------
+
+// A hash-route segment about to be interpolated into an API path. Route
+// segments come from location.hash, so they are user input, and `api` feeds
+// its path straight to fetch: without encoding, a hand-edited URL can bend the
+// request the SPA makes into a different one (a `?` in the segment turns the
+// rest into a query string). A real id, ISO date or report slug contains only
+// unreserved characters, so this is a no-op on every route the app itself
+// links to. Query-string values are already encoded at their call site.
+export function pathSeg(value) {
+  return encodeURIComponent(String(value));
+}
+
 export async function api(method, path, body) {
   const opts = { method: method, headers: {} };
   if (body !== undefined) {

@@ -17,7 +17,7 @@ import {
   roundDecimalStr, groupThousands, padMinDp, decStrEq, numericDisplay,
   addDecimalStrings, decParts, mulToCents, frankingCreditFor, decEq,
   looksNumeric, columnKinds, columnLabel, tradeOrigin, periodReturnPct,
-  holdingHasActivity, loadPref, savePref,
+  holdingHasActivity, loadPref, savePref, pathSeg,
 } from './util.js';
 
 // ---- roundDecimalStr ----------------------------------------------------
@@ -342,4 +342,32 @@ test('savePref: a throwing store does not raise', () => {
     setItem: function () { throw new Error('storage disabled'); },
   };
   assert.doesNotThrow(function () { savePref('k', 'v', angry); });
+});
+
+// ---- pathSeg ------------------------------------------------------------
+test('pathSeg leaves the segments real routes actually use untouched', () => {
+  // Every id, ISO date and slug the app links to is unreserved, so encoding
+  // a route segment must not change any URL the SPA builds for itself.
+  assert.equal(pathSeg('1'), '1');
+  assert.equal(pathSeg(42), '42');
+  assert.equal(pathSeg('2024-06-30'), '2024-06-30');
+  assert.equal(pathSeg('open-parcels'), 'open-parcels');
+  assert.equal(pathSeg('XASX:VAS'), 'XASX%3AVAS'); // ':' is reserved, still safe
+});
+
+test('pathSeg stops a hand-edited hash from re-shaping the request', () => {
+  // A '?' would otherwise turn the rest of the segment into a query string,
+  // and '/' would add path structure the route never intended.
+  assert.equal(pathSeg('1?include_linked=true'), '1%3Finclude_linked%3Dtrue');
+  assert.equal(pathSeg('../jobs'), '..%2Fjobs');
+  assert.equal(pathSeg('a/b'), 'a%2Fb');
+  assert.equal(pathSeg('#/e/trades'), '%23%2Fe%2Ftrades');
+});
+
+test('pathSeg over a composite key encodes the parts, not the separators', () => {
+  // closing_prices is keyed by listing_id + date: the '/' between the parts is
+  // real path structure and must survive, which is why the app maps pathSeg
+  // over the parts rather than encoding the joined string.
+  assert.equal(['1', '2024-06-30'].map(pathSeg).join('/'), '1/2024-06-30');
+  assert.equal(['a/b', 'c'].map(pathSeg).join('/'), 'a%2Fb/c');
 });
