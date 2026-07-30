@@ -617,6 +617,37 @@ fn supply_chain_checks_run_in_ci() {
     assert!(README_MD.contains("never permanent"));
 }
 
+/// Pins least-privilege `GITHUB_TOKEN` scopes on every workflow (CodeQL
+/// `actions/missing-workflow-permissions`, resolved 2026-07-30): a workflow
+/// with no `permissions:` block inherits the repository default, so a later
+/// change to that repository setting would silently widen what a compromised
+/// action could do. Each workflow therefore declares its own floor — `ci.yml`
+/// only reads the repo, `release.yml` needs `contents: write` to publish the
+/// release — and a new workflow must declare one too.
+#[test]
+fn workflows_declare_explicit_token_permissions() {
+    const CI_YML: &str = include_str!("../.github/workflows/ci.yml");
+    const RELEASE_YML: &str = include_str!("../.github/workflows/release.yml");
+    // CI publishes nothing and comments on nothing: read-only is the floor.
+    assert!(CI_YML.contains("permissions:\n  contents: read"));
+    // Releases create a tag + release, so this one is deliberately broader.
+    assert!(RELEASE_YML.contains("permissions:\n  contents: write"));
+    // Any workflow added later declares its own scopes rather than inheriting.
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/.github/workflows");
+    for entry in std::fs::read_dir(dir).expect("workflows dir is readable") {
+        let path = entry.expect("readable dir entry").path();
+        if path.extension().is_none_or(|e| e != "yml" && e != "yaml") {
+            continue;
+        }
+        let body = std::fs::read_to_string(&path).expect("workflow is readable");
+        assert!(
+            body.contains("\npermissions:"),
+            "{} declares no top-level permissions: block",
+            path.display()
+        );
+    }
+}
+
 /// Executable half of the deny.toml ignore policy (decided 2026-07-14): every
 /// advisory ignore entry carries a RustSec id, a non-empty reason, and — on
 /// the same line, per the format the file documents — an

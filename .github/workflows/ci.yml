@@ -4,6 +4,13 @@ on:
   push:
   pull_request:
 
+# Least privilege for GITHUB_TOKEN: this workflow only ever reads the repo
+# (checkout, and cargo-deny fetching the advisory DB) — it publishes nothing
+# and comments on nothing. Declared explicitly rather than inherited, so the
+# repository's default-permissions setting can't silently widen it.
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
