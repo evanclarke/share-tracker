@@ -20,9 +20,13 @@ export function el(tag, attrs, children) {
     }
   }
   if (children != null) {
+    // `append` (not `appendChild`) so a non-Node child is inserted as a Text
+    // node by the DOM itself: per spec `append` takes (Node or DOMString) and
+    // never parses markup, so a string child can only ever become text — the
+    // `html` attribute above is this helper's one deliberate HTML entry point.
     (Array.isArray(children) ? children : [children]).forEach(function (c) {
       if (c == null) return;
-      n.appendChild(typeof c === 'object' ? c : document.createTextNode(String(c)));
+      n.append(c instanceof Node ? c : String(c));
     });
   }
   return n;
