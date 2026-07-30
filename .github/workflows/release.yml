@@ -66,8 +66,11 @@ jobs:
           path: vm-cargo-cache.tar.zst
           key: freebsd-15.1-cargo-${{ hashFiles('Cargo.lock') }}
           restore-keys: freebsd-15.1-cargo-
+      # Pinned to a commit SHA for the same reason as ci.yml's third-party
+      # actions, and with more at stake: this one runs the build that produces
+      # the published package.
       - name: Build and smoke-test the FreeBSD package
-        uses: vmactions/freebsd-vm@v1
+        uses: vmactions/freebsd-vm@77ed28d336d03fe19a3f4f7266c1d2c4714dd79d # v1.5.2
         with:
           release: "15.1"
           usesh: true

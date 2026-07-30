@@ -648,6 +648,58 @@ fn workflows_declare_explicit_token_permissions() {
     }
 }
 
+/// Pins third-party actions to an immutable commit SHA (CodeQL
+/// `actions/unpinned-tag`, resolved 2026-07-30): a tag is mutable, so `@v2`
+/// runs whatever its owner later repoints it at, with the workflow's token.
+/// GitHub's own `actions/*` are first-party and exempt, matching the rule.
+/// Each pin carries a trailing `# <version>` comment — that is what Dependabot
+/// reads to raise the bump, so pinning hardens the workflows without freezing
+/// them at today's versions.
+#[test]
+fn third_party_actions_are_pinned_to_a_commit_sha() {
+    const CI_YML: &str = include_str!("../.github/workflows/ci.yml");
+    const RELEASE_YML: &str = include_str!("../.github/workflows/release.yml");
+    let mut checked = 0;
+    for (file, body) in [("ci.yml", CI_YML), ("release.yml", RELEASE_YML)] {
+        for line in body.lines() {
+            if line.trim_start().starts_with('#') {
+                continue; // prose about pinning, not a step
+            }
+            let Some((_, spec)) = line.split_once("uses:") else {
+                continue;
+            };
+            let spec = spec.trim();
+            let (action, reference) = spec
+                .split_once('@')
+                .unwrap_or_else(|| panic!("{file}: `uses: {spec}` names no ref"));
+            if action.starts_with("actions/") {
+                continue;
+            }
+            // Mutability first: on a reverted pin that is the real complaint,
+            // and a bare tag has no comment either, so checking the comment
+            // first would report the lesser problem.
+            let (sha, version) = match reference.split_once('#') {
+                Some((sha, version)) => (sha.trim(), Some(version.trim())),
+                None => (reference.trim(), None),
+            };
+            assert!(
+                sha.len() == 40 && sha.chars().all(|c| c.is_ascii_hexdigit()),
+                "{file}: `{action}` is pinned to `{sha}`, not a 40-character commit SHA — a tag is mutable",
+            );
+            let version = version.unwrap_or_else(|| {
+                panic!("{file}: `{action}`'s pin carries no `# <version>` comment for Dependabot")
+            });
+            assert!(
+                !version.is_empty(),
+                "{file}: `{action}`'s pin has an empty version comment",
+            );
+            checked += 1;
+        }
+    }
+    // The four that exist today; a new third-party action raises this.
+    assert_eq!(checked, 4, "expected 4 pinned third-party actions");
+}
+
 /// Executable half of the deny.toml ignore policy (decided 2026-07-14): every
 /// advisory ignore entry carries a RustSec id, a non-empty reason, and — on
 /// the same line, per the format the file documents — an

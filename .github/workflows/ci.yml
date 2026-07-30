@@ -18,10 +18,19 @@ jobs:
       - uses: actions/checkout@v7
       # yfinance-rs's build.rs compiles a protobuf schema and needs protoc.
       - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-      - uses: dtolnay/rust-toolchain@stable
+      # Third-party actions are pinned to a commit SHA, not a tag: a tag is
+      # mutable, so `@v2` would silently run whatever its owner repoints it at,
+      # with this workflow's token. Dependabot reads the trailing version
+      # comment and raises the bump, so pinning doesn't freeze them.
+      # `toolchain` is passed explicitly because dtolnay's action takes it from
+      # a per-branch default in action.yml (the `stable` branch sets
+      # `default: stable`) — a pin that landed on a commit without that default
+      # would otherwise fail with "'toolchain' is a required input".
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
+          toolchain: stable
           components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       # The frontend's pure JS helpers (money-adjacent decimal arithmetic in
       # src/web/util.js) are unit-tested with Node's built-in runner — no npm
       # install, no build step. Node 22+ (the glob needs >=21).
@@ -33,7 +42,7 @@ jobs:
       # dependency tree. deny.toml records the temporary-ignore policy for an
       # advisory with no upstream fix; the local equivalent is
       # `cargo deny check advisories` (cargo install cargo-deny --locked).
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
         with:
           command: check advisories
       # Keep the tree rustfmt-clean; fix locally with `cargo fmt`.
