@@ -304,13 +304,52 @@ input[type=checkbox] { width: auto; }
 .tax-report-doc table.summary-table td.indent { padding-left: 24px; }
 .tax-report-doc table.summary-table tr.summary-header td { font-weight: 600; padding-top: 14px; }
 .tax-report-doc table.summary-table tr.summary-total td { font-weight: 600; border-top: 1px solid var(--line); }
+/* The transposed AMMA components table (components down the page, one column
+   per statement) sizes to its content rather than stretching a single
+   statement's two columns across the full width. */
+.tax-report-doc table.amma-table { width: auto; max-width: 100%; }
 
 @media print {
   #topbar, #nav, #health-banner, #toast, .tax-report-toolbar { display: none !important; }
   body, #app { background: #fff; color: #000; }
   .card, table { box-shadow: none; }
-  @page { margin: 15mm; }
+  /* Landscape by default: the archived PDF must not depend on remembering a
+     print-dialog setting, and the document's wide tables want the full width.
+     WebKit implements neither descriptor (nor @page margin), so Safari prints
+     at the dialog's own orientation and margins — hence the Print button's
+     Safari hint in taxreport.js, and hence the cell metrics below are sized to
+     fit A4 *portrait* too, so Safari's default still prints every column. */
+  @page { size: A4 landscape; margin: 12mm; }
+  /* #app scrolls horizontally on screen (overflow-x: auto), but an overflow
+     box *clips* when printed — a too-wide table silently loses its right-hand
+     columns. Visible overflow plus wrappable cells instead lets a 100%-width
+     table compress its columns onto the page. */
+  #app { overflow: visible; padding: 0; }
+  .tax-report-doc { font-size: 8pt; }
+  .tax-report-doc h1 { font-size: 14pt; }
+  .tax-report-doc h2, .tax-report-doc h3 { font-size: 11pt; }
+  .tax-report-doc h4 { font-size: 9pt; }
+  .tax-report-doc table.doc-table th, .tax-report-doc table.doc-table td {
+    white-space: normal; /* long headers wrap instead of forcing the table wide */
+    padding: 2px 4px; /* 12 columns × 2px of horizontal padding is ~24px of page */
+  }
+  /* Only prose cells may break mid-token (a contract-note ref, a description):
+     a money figure, date, quantity or price split across two lines invites a
+     misread — see taxreport.js's ATOMIC_CELL. */
+  .tax-report-doc table.doc-table td:not(.num):not(.atomic) { overflow-wrap: anywhere; }
+  .tax-report-doc table.doc-table td.atomic { white-space: nowrap; }
+  .tax-report-doc tr.adjustment-row td, .tax-report-doc tr.note-row td { font-size: 7pt; }
   table.doc-table th { background: none; }
   table.doc-table thead { display: table-header-group; }
   .tax-report-doc tr, .tax-report-doc .doc-section, .tax-report-doc .listing-group { break-inside: avoid; }
+}
+
+/* A portrait page is ~330px narrower than the landscape one the @page rule asks
+   for, which the widest table (the 12-column disposal schedule) clears by only
+   ~15px at 8pt — one more digit in each money column would overflow it again.
+   Safari can land here (it ignores @page size), so drop a point of type when
+   the page really is portrait: enough headroom for eight-figure amounts. */
+@media print and (orientation: portrait) {
+  .tax-report-doc { font-size: 7pt; }
+  .tax-report-doc table.doc-table th, .tax-report-doc table.doc-table td { padding: 2px 3px; }
 }

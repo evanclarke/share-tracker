@@ -1009,12 +1009,71 @@ mod tests {
         assert!(js.contains("Overall tax summary"));
     }
 
+    /// The AMMA component breakdown is rendered transposed (components down
+    /// the page, one column per statement) — one row per statement would need
+    /// ~1400px and lose its right-hand components off the printed page. Pins
+    /// the transposed renderer, its width-capping class, and that every
+    /// component of the row the report returns is listed (the wide layout had
+    /// silently dropped `tfn_withholding_tax_aud`; the transpose has room).
+    #[tokio::test]
+    async fn annual_tax_report_amma_table_is_transposed() {
+        let js = app_js_body().await;
+        assert!(js.contains("ammaStatementsTable"));
+        assert!(js.contains("amma-table"));
+        assert!(js.contains("year ended "));
+        for component in [
+            "australian_interest_aud",
+            "australian_dividends_unfranked_aud",
+            "franked_dividends_aud",
+            "franking_credits_aud",
+            "net_rent_aud",
+            "foreign_income_aud",
+            "foreign_tax_credits_aud",
+            "other_income_aud",
+            "cgt_discount_gains_aud",
+            "cgt_indexation_gains_aud",
+            "cgt_other_gains_aud",
+            "capital_losses_applied_aud",
+            "tfn_withholding_tax_aud",
+            "tax_deferred_amount",
+            "tax_free_amount",
+        ] {
+            assert!(
+                js.contains(component),
+                "AMMA component {component} missing from the report"
+            );
+        }
+        assert!(STYLE_CSS.contains("table.amma-table"));
+    }
+
+    /// The print rules. Beyond hiding the chrome: the page is fixed to A4
+    /// landscape so an archived PDF doesn't depend on a print-dialog setting,
+    /// `#app`'s screen-only `overflow-x: auto` is reset to visible (an overflow
+    /// box *clips* when printed, silently losing a wide table's right-hand
+    /// columns), and document cells wrap at a reduced size so a wide table
+    /// compresses onto the page — except `.num`/`.atomic` cells, which must not
+    /// break a money figure, date, quantity or price across two lines.
+    ///
+    /// WebKit implements neither `@page` descriptor, so Safari prints at the
+    /// dialog's own orientation and margins: the portrait media query (a point
+    /// smaller, so the 12-column disposal schedule keeps real headroom on the
+    /// ~330px-narrower page) and the Print button's Safari hint are what make
+    /// that path print every column rather than clip one, and are pinned here.
     #[tokio::test]
     async fn annual_tax_report_print_styles_present() {
         let css = STYLE_CSS;
         assert!(css.contains("@media print"));
         assert!(css.contains(".tax-report-doc"));
         assert!(css.contains("#topbar"));
+        assert!(css.contains("size: A4 landscape"));
+        assert!(css.contains("#app { overflow: visible"));
+        assert!(css.contains("white-space: normal; /* long headers wrap"));
+        assert!(css.contains("td:not(.num):not(.atomic) { overflow-wrap: anywhere; }"));
+        assert!(css.contains("td.atomic { white-space: nowrap; }"));
+        assert!(css.contains("@media print and (orientation: portrait)"));
+        let js = app_js_body().await;
+        assert!(js.contains("class: 'atomic'"));
+        assert!(js.contains("Safari ignores the page-size rule"));
     }
 
     #[tokio::test]

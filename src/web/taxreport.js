@@ -34,8 +34,17 @@ function moneyEl(value) {
 function moneyTd(value, extraClass) {
   return el('td', { class: ['num', extraClass].filter(Boolean).join(' ') }, moneyEl(value));
 }
+// A cell holding one indivisible token — an ISO date, a quantity, a price —
+// must never be broken across lines. The print rules let cells wrap so a wide
+// table compresses onto the page, and both a hyphen and a decimal point are
+// break opportunities, so without this a date splits as "2022-06" / "-28" and a
+// price as "102.77" / "34" — a misread waiting to happen in a document whose
+// whole purpose is hand-checking figures against source statements. (Money
+// figures come from moneyTd, which marks them `num`; the CSS spares both.)
+const ATOMIC_CELL = /^(\d{4}-\d{2}-\d{2}|-?[\d,]+(\.\d+)?)$/;
 function td(value) {
-  return el('td', null, cellText(value));
+  const text = cellText(value);
+  return el('td', ATOMIC_CELL.test(text) ? { class: 'atomic' } : null, text);
 }
 function doc(headers, rows) {
   return el('table', { class: 'doc-table' }, [
@@ -206,18 +215,44 @@ function genericTable(rows, columns) {
   );
 }
 
+// The AMMA statement's income/CGT/non-assessable components, in the order the
+// statement itself lists them. Deliberately NOT rendered one-row-per-statement
+// like every other income table: fifteen money components plus the identifying
+// columns need ~1400px of table, so the right-hand components were cut off the
+// printed page entirely (an overflow box clips when printed — see the print
+// rules in style.css). Transposed — components down the page, one column per
+// statement — it fits any orientation, has room for every component, and reads
+// the way the paper AMMA statement does, which is what hand-checking a figure
+// against the source actually needs.
+const AMMA_COMPONENTS = [
+  'australian_interest_aud', 'australian_dividends_unfranked_aud', 'franked_dividends_aud',
+  'franking_credits_aud', 'net_rent_aud', 'foreign_income_aud', 'foreign_tax_credits_aud',
+  'other_income_aud', 'cgt_discount_gains_aud', 'cgt_indexation_gains_aud', 'cgt_other_gains_aud',
+  'capital_losses_applied_aud', 'tfn_withholding_tax_aud', 'tax_deferred_amount', 'tax_free_amount',
+];
+
+function ammaStatementsTable(rows) {
+  if (!rows || rows.length === 0) return el('p', null, 'None recorded.');
+  const headers = ['Component'].concat(rows.map(function (r) {
+    return r.ticker + ' — year ended ' + cellText(r.tax_year_end_date);
+  }));
+  const body = AMMA_COMPONENTS.map(function (c) {
+    return el('tr', null, [el('td', null, columnLabel(c))].concat(rows.map(function (r) {
+      return moneyTd(r[c]);
+    })));
+  });
+  const table = doc(headers, body);
+  table.classList.add('amma-table');
+  return table;
+}
+
 function incomeSection(inc) {
   return el('div', { class: 'doc-section' }, [
     el('h3', null, 'Income'),
     el('h4', null, 'Trust income'),
     genericTable(inc.trust_income, ['date_paid', 'ticker', 'entitlement_date', 'franked_amount_aud', 'unfranked_amount_aud', 'foreign_source_income_aud', 'franking_credits_aud', 'tax_deferred_amount']),
     inc.amma_statements.length ? el('p', { class: 'hint' }, 'AMMA statement components for the year:') : null,
-    genericTable(inc.amma_statements, [
-      'ticker', 'tax_year_end_date', 'australian_interest_aud', 'australian_dividends_unfranked_aud',
-      'franked_dividends_aud', 'franking_credits_aud', 'net_rent_aud', 'foreign_income_aud',
-      'foreign_tax_credits_aud', 'other_income_aud', 'cgt_discount_gains_aud', 'cgt_indexation_gains_aud',
-      'cgt_other_gains_aud', 'capital_losses_applied_aud', 'tax_deferred_amount', 'tax_free_amount',
-    ]),
+    ammaStatementsTable(inc.amma_statements),
     el('h4', null, 'Dividend income'),
     genericTable(inc.dividends, ['date_paid', 'ticker', 'ex_date', 'franked_amount_aud', 'unfranked_amount_aud', 'franking_credits_aud', 'lic_capital_gain_deduction_aud', 'franking_status']),
     el('h4', null, 'Foreign income'),
@@ -290,10 +325,19 @@ export async function viewTaxReport() {
 
   const generateBtn = el('button', { type: 'button', class: 'primary' }, 'Generate report');
   const printBtn = el('button', { type: 'button', hidden: true }, 'Print / Save as PDF');
+  // The stylesheet asks for A4 landscape via @page, which Chrome and Firefox
+  // honour; WebKit implements neither the size nor the margin descriptor, so
+  // Safari prints at whatever the dialog is set to. Say so rather than leave it
+  // as folklore — the document is sized to fit portrait as well, so a
+  // forgotten setting costs density, never a clipped column.
+  const printHint = el('span', { class: 'hint', hidden: true },
+    'Prints landscape automatically in Chrome and Firefox. Safari ignores the page-size rule — '
+    + 'choose Landscape in its print dialog for the roomiest result (portrait still fits every column).');
   const toolbar = el('div', { class: 'toolbar tax-report-toolbar' }, [
     el('label', null, ['Tax year ', yearSelect]),
     generateBtn,
     printBtn,
+    printHint,
   ]);
   const result = el('div');
 
@@ -304,6 +348,7 @@ export async function viewTaxReport() {
       result.innerHTML = '';
       result.appendChild(renderReport(report));
       printBtn.hidden = false;
+      printHint.hidden = false;
     } catch (e) {
       toast(e.message, true);
     }
