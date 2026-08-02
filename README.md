@@ -145,6 +145,8 @@ share-tracker gen-token       # prints a random 64-hex-char bearer token
 
 There is deliberately no `--auth-*` CLI flag for either value — config file only, for the same reason. Once `[auth]` is set, every route needs a session (sign in at `/login`; the session cookie lasts 30 days and survives a restart, but changing the password invalidates every existing session, since the session-signing key is derived from the password hash) or, for scripts that call the API without a browser, `Authorization: Bearer <api_token>` — the mechanism `pkg/freebsd/update.sh` and `smoke-test.sh` use once a token is configured. `POST /logout` clears the browser's cookie but cannot revoke a copied-out cookie value before its own expiry, there being no server-side session store to revoke it in (see [Known limitations](docs/API.md#known-limitations)). Full endpoint documentation: [Authentication](docs/API.md#authentication).
 
+`[auth]` has no lockout counter of its own — failed logins are throttled only by Argon2's own ~30 ms/attempt cost, which is deliberate for a single-credential hobbyist deployment but scales with however many source IPs an attacker uses. If the server is reachable from the internet, rate-limit `/login` at the proxy rather than in the app — see the `limit_req` example in the next section.
+
 ### Behind a reverse proxy
 
 The server binds `127.0.0.1`; unless [`[auth]`](#authentication) is configured it has **no authentication of its own**, so a reverse proxy is the natural place to put TLS and, in that case, access control too. Proxying it at the root of its own name (`https://tracker.example.com/`) needs no configuration here — just proxy to the port.
@@ -155,7 +157,30 @@ To serve it from a **sub-path** instead (`https://example.com/share_tracker/`), 
 share-tracker --base-path /share_tracker
 ```
 
+If [`[auth]`](#authentication) is configured and the server is reachable from the internet, also throttle `/login` — the app itself has no lockout counter (see the note above). Declare the zone once, in the `http {}` block:
+
 ```nginx
+# 5 requests/minute per client IP, tracked in a 10 MB shared zone (enough
+# for roughly 160,000 distinct IPs before the oldest entries are evicted).
+limit_req_zone $binary_remote_addr zone=login:10m rate=5r/m;
+```
+
+Then add a `location` for it alongside the prefix one, inside the same `server {}`:
+
+```nginx
+location = /share_tracker/login {   # /login instead, without a base_path
+    # burst=5 nodelay: a handful of quick attempts (e.g. a mistyped
+    # password) still go straight through; sustained guessing gets
+    # queued back down to the 5/minute rate. A request nginx throttles
+    # gets nginx's own 503, before it ever reaches the app.
+    limit_req zone=login burst=5 nodelay;
+    proxy_pass http://127.0.0.1:3000;
+    proxy_set_header Host              $host;
+    proxy_set_header X-Real-IP         $remote_addr;
+    proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+
 location /share_tracker/ {
     # No trailing slash on proxy_pass: that would strip the prefix, and the
     # app expects to receive it (it is what the app is mounted under).
@@ -171,6 +196,8 @@ location /share_tracker/ {
     client_max_body_size 25m;
 }
 ```
+
+`location =` is an exact match, and nginx always prefers an exact match over a prefix match (like the `location /share_tracker/` block) regardless of the order the two appear in the file, so `/login` is rate-limited before it can fall through to the general proxying below it.
 
 Because the app serves the prefixed paths itself, a prefixed deployment is reachable — and testable — without the proxy in front of it: `http://127.0.0.1:3000/share_tracker/` behaves exactly like the proxied URL. The startup log line names the base path for the same reason, so a mismatch between the proxy and the server is visible without reading either config:
 
