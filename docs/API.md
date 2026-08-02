@@ -4,6 +4,8 @@ The REST JSON API of [share-tracker](../README.md). The tables behind it are doc
 
 All data endpoints return JSON. Write endpoints accept `Content-Type: application/json`.
 
+**Base path.** Every path below is written as served at the root, which is the default. When the server is configured with a `base_path` (`--base-path /share_tracker`, for [running behind a reverse proxy](../README.md#behind-a-reverse-proxy) on a sub-path), the whole application — these endpoints and the [web frontend](#web-frontend) alike — moves under that prefix: `GET /listings` becomes `GET /share_tracker/listings`. Nothing else about the API changes, and the unprefixed paths are then not served at all. The bare prefix with a trailing slash (`/share_tracker/`) answers `307` to the prefix itself.
+
 ## Web frontend
 
 The server also hosts a built-in web UI — a no-build-step single-page app (plain HTML/CSS/JS, shipped as native ES modules) embedded in the binary and served from the same origin as the API:
@@ -19,6 +21,8 @@ The server also hosts a built-in web UI — a no-build-step single-page app (pla
 | `GET` | `/static/taxreport.js` | The Annual Tax Report's bespoke print-document renderer (JavaScript) |
 | `GET` | `/static/util.js` | Shared utilities: API client, formatting, decimal arithmetic (JavaScript) |
 | `GET` | `/static/style.css` | Stylesheet (CSS), incl. the Annual Tax Report's `@media print` rules |
+
+Under a configured `base_path` these asset routes move under the prefix with everything else. The frontend learns where it is mounted from a `<meta name="base-path">` tag the server substitutes into the shell, and prefixes every URL it sends to the server through one helper (`apiUrl` in `util.js`) — so the UI is identical whether it is served at `/` or at `/share_tracker/`. Hash routes need no prefixing: the fragment never reaches the server.
 
 Open `http://localhost:<port>/` in a browser — it opens straight on the **Portfolio Overview**, the app's home screen (`#/`; `#/r/overview` is the same view, reached from the Reports menu). Navigation is a menu bar across the top rather than a sidebar: **Activity**, **Reports**, **Reference Data**, and **Jobs**, each expanding a panel of its screens on hover, keyboard focus, or click (so it works for mouse, keyboard, and touch alike); the Reports panel, holding far more screens than the other three, is a mega-menu of titled columns (Portfolio, CGT & tax, Decision support, Cross-checks & alerts) rather than one long list. The current screen's menu is highlighted even with its panel closed. The Portfolio Overview carries shortcut buttons — **New trade**, **New income**, **New sell**, **New transfer** — linking straight to those entry forms, since recording a trade or a distribution is the most common thing done from this screen.
 
@@ -1229,6 +1233,7 @@ Deliberate scope decisions (2026-06-07), documented rather than modelled:
 | `200 OK` | Successful GET or report POST (JSON; the report `/export` endpoints return `text/csv`, an attachment content download returns its stored content type) |
 | `201 Created` | DRP reinvestment trade created via `POST /income/:id/reinvest`, a rights-exercise trade created via `POST /corporate_actions/:id/exercise`, a rights sale recorded via `POST /corporate_actions/:id/sell_rights`, a buy-back participation (Sell + dividend income) created via `POST /corporate_actions/:id/participate`, a scrip-for-scrip exchange (closing Sell + replacement parcels) created via `POST /corporate_actions/:id/exchange`, a demerger (closing Sell + head and demerged parcels) created via `POST /corporate_actions/:id/demerge`, a worthless-shares loss (closing Sell at nil proceeds) recognised via `POST /corporate_actions/:id/recognise`, a holding-account transfer (transfer-out Sell + transfer-in parcels) created via `PUT /transfers/:id`, a listing rename recorded via `POST /listings/:id/rename`, or an attachment uploaded via `POST /attachments` |
 | `204 No Content` | Successful PUT or DELETE, or a job run via `POST /jobs/:name` |
+| `307 Temporary Redirect` | The configured [base path](#http-api) requested with a trailing slash (`/share_tracker/` → `/share_tracker`). Only ever returned when a `base_path` is set |
 | `400 Bad Request` | Malformed path parameter (e.g. an `exchange_holidays` `:date` that is not `YYYY-MM-DD`) |
 | `404 Not Found` | Resource does not exist. A `GET` of a missing row answers with an empty body (its own URL names what is missing); every `DELETE` of a missing row, and every operation endpoint whose prerequisite is missing, carries a plain-text reason naming it — e.g. `no AMMA statement with that id`, `no exchange holiday on that date for that exchange` — so the web UI's toast says what was not there |
 | `405 Method Not Allowed` | Write attempted on a read-only path (e.g. `parcel_allocations`) |

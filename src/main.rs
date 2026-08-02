@@ -30,7 +30,10 @@ async fn main() {
         eprintln!("{e}");
         std::process::exit(1);
     });
-    let settings = config::Settings::resolve(args, file);
+    let settings = config::Settings::resolve(args, file).unwrap_or_else(|e| {
+        eprintln!("{e}");
+        std::process::exit(1);
+    });
 
     let pool = db::init(&settings.db)
         .await
@@ -55,17 +58,21 @@ async fn main() {
     );
     scheduler::spawn(registry.clone(), pool.clone(), &schedule).expect("invalid schedule");
 
-    let app = app::router(pool.clone(), registry, fetcher);
+    let app = app::router(&settings.base_path, pool.clone(), registry, fetcher);
     let ip: std::net::IpAddr = settings.host.parse().expect("invalid host address");
     let addr = std::net::SocketAddr::new(ip, settings.port);
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .expect("failed to bind");
+    // The base path is part of the URL every request must use, so log it with
+    // the address: a misconfigured reverse-proxy prefix is then diagnosable
+    // from the startup line rather than only from 404s.
     tracing::info!(
-        "share-tracker v{} started, db: {}, listening on: http://{}",
+        "share-tracker v{} started, db: {}, listening on: http://{}{}/",
         env!("CARGO_PKG_VERSION"),
         settings.db,
-        addr
+        addr,
+        settings.base_path
     );
 
     axum::serve(listener, app)

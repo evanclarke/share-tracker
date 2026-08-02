@@ -6,7 +6,7 @@
 // list/form/report/action code does the rest. Adding or changing an entity,
 // report, or action means editing the matching entry here, not adding views.
 //
-import { describeTrade, tradeOrigin } from './util.js';
+import { describeTrade, tradeOrigin, apiUrl } from './util.js';
 import { txt, dec, int, dt, bool, sel, fk, wireGstBrokerage, wireIncomeEntry } from './forms.js';
 
 // Top menu bar order (nav.js's navModel groups ENTITIES/REPORTS by their
@@ -447,8 +447,8 @@ export const REPORTS = [
     columns: ['id', 'filename', 'content_type', 'byte_size', 'uploaded_at', 'owner_type', 'listing_id', 'owner_description'],
     rowActions: function (row) {
       return [
-        { label: 'Download', href: '/attachments/' + row.id + '/content', newTab: true },
-        { label: 'View', href: '/attachments/' + row.id + '/content?disposition=inline', newTab: true },
+        { label: 'Download', href: apiUrl('/attachments/' + row.id + '/content'), newTab: true },
+        { label: 'View', href: apiUrl('/attachments/' + row.id + '/content?disposition=inline'), newTab: true },
         { label: 'Record', href: '#/attachments/' + row.owner_field + '/' + row.owner_id },
       ];
     },

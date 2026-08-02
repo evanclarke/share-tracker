@@ -248,13 +248,37 @@ export function pathSeg(value) {
   return encodeURIComponent(String(value));
 }
 
+// The reverse-proxy path prefix the server is mounted under, read from the
+// shell's <meta name="base-path"> (the server substitutes its configured
+// `base_path` there — see src/web.rs). Empty when mounted at the root, which is
+// the default, so every URL below is byte-for-byte what it was before.
+//
+// Read on each call rather than cached at module load: that keeps this a pure
+// function of the document, so the Node unit tests — which have no DOM — get
+// the root behaviour without a stub. Hash routes (`#/...`) need no prefixing;
+// they are resolved by the browser against the current document.
+export function basePath() {
+  if (typeof document === 'undefined') return '';
+  const meta = document.querySelector('meta[name="base-path"]');
+  return meta ? meta.getAttribute('content') || '' : '';
+}
+
+// Prefix a root-absolute server path with the base path. Every URL the app
+// sends to (or links at) the server goes through here — `api` below, the
+// attachment upload/download, and the report CSV export — so a path is written
+// once, as it appears in docs/API.md, and lands on the right origin path
+// whether the app is served at / or at /share_tracker.
+export function apiUrl(path) {
+  return basePath() + path;
+}
+
 export async function api(method, path, body) {
   const opts = { method: method, headers: {} };
   if (body !== undefined) {
     opts.headers['Content-Type'] = 'application/json';
     opts.body = JSON.stringify(body);
   }
-  const res = await fetch(path, opts);
+  const res = await fetch(apiUrl(path), opts);
   if (!res.ok) {
     let detail = '';
     try { detail = (await res.text()).trim(); } catch (e) { /* ignore */ }

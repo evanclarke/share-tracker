@@ -14,7 +14,7 @@
 import {
   el, toast, setMain, looksNumeric, isTimestamp, fmtLocalTimestamp, utcTooltip,
   cellText, numericDisplay, columnKinds, columnLabel, columnLabelMaps,
-  fkLabelMaps, api, pathSeg, nextId, loadOptions, listingNamer, describeTrade, tradeOrigin,
+  fkLabelMaps, api, apiUrl, pathSeg, nextId, loadOptions, listingNamer, describeTrade, tradeOrigin,
   periodReturnPct, holdingHasActivity, loadPref, savePref,
 } from './util.js';
 import {
@@ -983,7 +983,7 @@ async function viewAttachments(ownerField, ownerId) {
       actions: function (row) {
         const link = linkedOwner(row);
         const actions = [
-          el('a', { href: '/attachments/' + row.id + '/content', target: '_blank' },
+          el('a', { href: apiUrl('/attachments/' + row.id + '/content'), target: '_blank' },
             el('button', { class: 'link small' }, 'Download')),
         ];
         if (link) {
@@ -1022,7 +1022,7 @@ async function viewAttachments(ownerField, ownerId) {
       const fd = new FormData();
       fd.append(ownerField, String(ownerId));
       fd.append('file', fileInput.files[0]);
-      const res = await fetch('/attachments', { method: 'POST', body: fd });
+      const res = await fetch(apiUrl('/attachments'), { method: 'POST', body: fd });
       if (!res.ok) {
         let detail = '';
         try { detail = (await res.text()).trim(); } catch (e) { /* ignore */ }
@@ -1805,7 +1805,7 @@ async function viewReport(report) {
   // rows as CSV from `<api>/export` (Content-Disposition makes it a download).
   if (report.export) {
     header.appendChild(el('p', null,
-      el('a', { href: report.api + '/export', class: 'export-link' }, 'Export CSV')));
+      el('a', { href: apiUrl(report.api + '/export'), class: 'export-link' }, 'Export CSV')));
   }
   const result = el('div');
   // Config-driven, not overview-specific — any report can opt in by setting

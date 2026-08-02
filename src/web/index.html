@@ -4,7 +4,11 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>share-tracker</title>
-  <link rel="stylesheet" href="/static/style.css">
+  <!-- The reverse-proxy path prefix the server is mounted under ("" at the
+       root), substituted at startup. util.js's apiUrl reads it to prefix every
+       API call, so the app works identically at / and at /share_tracker. -->
+  <meta name="base-path" content="{{BASE}}">
+  <link rel="stylesheet" href="{{BASE}}/static/style.css">
 </head>
 <body>
   <header id="topbar">
@@ -15,6 +19,6 @@
   <div id="health-banner" hidden><!-- stale-data / failed-job strip, populated by app.js --></div>
   <main id="app"><!-- views render here --></main>
   <div id="toast" hidden></div>
-  <script type="module" src="/static/app.js"></script>
+  <script type="module" src="{{BASE}}/static/app.js"></script>
 </body>
 </html>

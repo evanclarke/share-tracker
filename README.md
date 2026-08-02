@@ -60,7 +60,7 @@ Deliberate scope cuts are documented in [Known limitations](docs/API.md#known-li
 
 ```bash
 cargo build --release
-./target/release/share-tracker [--config share-tracker.toml] [--db share-tracker.db] [--backup-dir /mnt/backups] [--backup-command 'scp {BACKUP_FILE} user@host:/backups/'] [--host 127.0.0.1] [--port 3000] [--schedule schedule.cron]
+./target/release/share-tracker [--config share-tracker.toml] [--db share-tracker.db] [--backup-dir /mnt/backups] [--backup-command 'scp {BACKUP_FILE} user@host:/backups/'] [--host 127.0.0.1] [--port 3000] [--base-path /share_tracker] [--schedule schedule.cron]
 ```
 
 | Flag | Default | Description |
@@ -71,6 +71,7 @@ cargo build --release
 | `--backup-command` | none | Shell command to run after each fresh, verified backup — e.g. to copy it off-machine. `{BACKUP_FILE}` is replaced with the backup's absolute path |
 | `--host` | `127.0.0.1` | IP address to bind. The default listens on localhost only; pass `0.0.0.0` to listen on all interfaces (reachable from other machines) |
 | `--port` | `3000` | HTTP port to listen on |
+| `--base-path` | none (mounted at `/`) | URL path prefix to mount the whole application under, for serving it from a sub-path [behind a reverse proxy](#behind-a-reverse-proxy) |
 | `--schedule` | built-in `schedule.cron` | Path to a cron file overriding the built-in maintenance schedule |
 
 `--version` prints the version (from `Cargo.toml`, the single source of truth for [release numbering](#releases-and-versioning)).
@@ -112,10 +113,48 @@ backup_dir = "/var/db/share-tracker/backups"
 backup_command = "scp {BACKUP_FILE} user@host:/backups/"
 host = "127.0.0.1"
 port = 3000
+base_path = "/share_tracker"   # only when proxied onto a sub-path; default is the root
 schedule = "/usr/local/etc/share-tracker.cron"
 ```
 
 An unknown key or invalid TOML aborts startup with the reason — a typo never silently falls back to a default (starting against the wrong database is worse than not starting). The full annotated example lives at [`pkg/freebsd/share-tracker.toml.sample`](pkg/freebsd/share-tracker.toml.sample).
+
+### Behind a reverse proxy
+
+The server binds `127.0.0.1` and has **no authentication of its own**, so a reverse proxy is the natural place to put TLS and access control. Proxying it at the root of its own name (`https://tracker.example.com/`) needs no configuration here — just proxy to the port.
+
+To serve it from a **sub-path** instead (`https://example.com/share_tracker/`), set `base_path`. The whole application moves under the prefix — every API route, the UI shell, and the static assets — and the UI emits its URLs with the prefix on them, so the proxy passes the path through **unchanged** rather than stripping it:
+
+```
+share-tracker --base-path /share_tracker
+```
+
+```nginx
+location /share_tracker/ {
+    # No trailing slash on proxy_pass: that would strip the prefix, and the
+    # app expects to receive it (it is what the app is mounted under).
+    proxy_pass http://127.0.0.1:3000;
+
+    proxy_set_header Host              $host;
+    proxy_set_header X-Real-IP         $remote_addr;
+    proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+
+    # Statement scans and other attachments are uploaded through the proxy;
+    # the default 1M limit is low for a multi-page PDF.
+    client_max_body_size 25m;
+}
+```
+
+Because the app serves the prefixed paths itself, a prefixed deployment is reachable — and testable — without the proxy in front of it: `http://127.0.0.1:3000/share_tracker/` behaves exactly like the proxied URL. The startup log line names the base path for the same reason, so a mismatch between the proxy and the server is visible without reading either config:
+
+```
+share-tracker v0.10.2 started, db: …, listening on: http://127.0.0.1:3000/share_tracker/
+```
+
+`base_path` is normalised (a leading slash is added, a trailing one dropped), and an unusable value — one with a space, `?`, `#`, `%`, or an empty segment — aborts startup rather than yielding a server whose every request 404s. Leave it unset, empty, or `/` to mount at the root, which is the default.
+
+The proxy must not rewrite the response body; no `sub_filter` is needed or wanted. Note that the app is a hash-routed SPA, so deep links (`#/r/overview`) never reach the proxy at all — the fragment stays in the browser.
 
 ### Scheduled maintenance
 

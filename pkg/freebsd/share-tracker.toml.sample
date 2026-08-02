@@ -32,6 +32,16 @@ host = "127.0.0.1"
 # HTTP port.
 port = 3000
 
+# URL path prefix to mount the whole application under, for serving it from a
+# sub-path behind a reverse proxy — e.g. "/share_tracker" puts the UI and the
+# API at https://host/share_tracker/... . Every route moves under the prefix
+# and the UI emits its URLs with it, so the proxy passes the path through
+# unchanged (nginx: `location /share_tracker/ { proxy_pass http://127.0.0.1:3000; }`
+# — no trailing slash on proxy_pass, or it would strip the prefix). Commented
+# out by default: the server is mounted at the root unless you are proxying it.
+# See the README's "Behind a reverse proxy" section for the full example.
+# base_path = "/share_tracker"
+
 # Cron schedule for the recurring maintenance jobs (backups, price and FX
 # imports). The package installs the default schedule at this path; edit it to
 # change run times.

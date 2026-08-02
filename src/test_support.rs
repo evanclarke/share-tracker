@@ -96,7 +96,9 @@ impl ApiClient {
             None,
             fetcher.clone(),
         );
-        ApiClient::over(crate::app::router(pool.clone(), registry, fetcher))
+        // Mounted at the root — the default. `app::router`'s own tests cover a
+        // router nested under a reverse-proxy base path.
+        ApiClient::over(crate::app::router("", pool.clone(), registry, fetcher))
     }
 
     async fn send(&self, req: Request<Body>) -> ApiResponse {

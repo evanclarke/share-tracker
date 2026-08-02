@@ -34,6 +34,13 @@ pub struct Args {
     /// Port to listen on [default: 3000]
     #[arg(long)]
     pub port: Option<u16>,
+    /// URL path prefix to mount the whole application under, for running
+    /// behind a reverse proxy on a sub-path — e.g. `/share_tracker` serves the
+    /// API and UI at `https://host/share_tracker/...`. Every route and every
+    /// URL the frontend emits moves under it, so the proxy passes the path
+    /// through unchanged. Default: empty (mounted at the root).
+    #[arg(long)]
+    pub base_path: Option<String>,
     /// Path to a cron schedule file overriding the built-in default (`schedule.cron`).
     #[arg(long)]
     pub schedule: Option<String>,
@@ -55,7 +62,14 @@ mod tests {
         assert_eq!(args.backup_command, None);
         assert_eq!(args.host, None);
         assert_eq!(args.port, None);
+        assert_eq!(args.base_path, None);
         assert_eq!(args.schedule, None);
+    }
+
+    #[test]
+    fn custom_base_path() {
+        let args = Args::parse_from(["share-tracker", "--base-path", "/share_tracker"]);
+        assert_eq!(args.base_path.as_deref(), Some("/share_tracker"));
     }
 
     #[test]

@@ -26,6 +26,7 @@ pub struct ConfigFile {
     pub backup_command: Option<String>,
     pub host: Option<String>,
     pub port: Option<u16>,
+    pub base_path: Option<String>,
     pub schedule: Option<String>,
 }
 
@@ -37,13 +38,21 @@ pub struct Settings {
     pub backup_command: Option<String>,
     pub host: String,
     pub port: u16,
+    /// URL path prefix the whole application is mounted under, normalised to
+    /// either `""` (the root — the default) or a leading-slash, no-trailing-slash
+    /// path like `/share_tracker`. See [`normalise_base_path`].
+    pub base_path: String,
     pub schedule: Option<String>,
 }
 
 impl Settings {
     /// Merge CLI args over config-file values over built-in defaults.
-    pub fn resolve(args: super::args::Args, file: ConfigFile) -> Settings {
-        Settings {
+    ///
+    /// Fallible only because of `base_path`: an unusable prefix is a typo in a
+    /// deployment config, and serving the whole app at a subtly wrong path is
+    /// worse than not starting (the same reasoning as `deny_unknown_fields`).
+    pub fn resolve(args: super::args::Args, file: ConfigFile) -> Result<Settings, String> {
+        Ok(Settings {
             db: args.db.or(file.db).unwrap_or_else(|| DEFAULT_DB.into()),
             backup_dir: args.backup_dir.or(file.backup_dir),
             backup_command: args.backup_command.or(file.backup_command),
@@ -52,9 +61,42 @@ impl Settings {
                 .or(file.host)
                 .unwrap_or_else(|| DEFAULT_HOST.into()),
             port: args.port.or(file.port).unwrap_or(DEFAULT_PORT),
+            base_path: normalise_base_path(args.base_path.or(file.base_path).as_deref())?,
             schedule: args.schedule.or(file.schedule),
-        }
+        })
     }
+}
+
+/// Normalise a configured reverse-proxy path prefix to the one form the rest of
+/// the code assumes: `""` (mounted at the root) or `/a/b` — leading slash, no
+/// trailing slash. Absent, empty and `"/"` all mean the root, so a config file
+/// can spell "no prefix" any of the obvious ways.
+///
+/// Each segment is restricted to unreserved URL characters (RFC 3986
+/// `A-Z a-z 0-9 - . _ ~`): a prefix is concatenated with API paths by the
+/// frontend and matched by axum's router, so a space, `?`, `#` or `%` in it
+/// would produce URLs that mean something other than intended. Rejecting is
+/// deliberate — the alternative is a server that starts and then serves a UI
+/// whose every request 404s.
+pub fn normalise_base_path(raw: Option<&str>) -> Result<String, String> {
+    let trimmed = raw.unwrap_or("").trim();
+    let stripped = trimmed.trim_matches('/');
+    if stripped.is_empty() {
+        return Ok(String::new());
+    }
+    let valid = |seg: &str| {
+        !seg.is_empty()
+            && seg
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_' | '~'))
+    };
+    if !stripped.split('/').all(valid) {
+        return Err(format!(
+            "invalid base_path {trimmed:?}: expected a URL path prefix like \"/share_tracker\" \
+             (path segments of letters, digits, '-', '.', '_' or '~')"
+        ));
+    }
+    Ok(format!("/{stripped}"))
 }
 
 /// Load the config file: an explicit `--config` path must exist; the default
@@ -90,7 +132,8 @@ mod tests {
     #[test]
     fn defaults_when_no_flags_and_no_file() {
         let settings =
-            Settings::resolve(Args::parse_from(["share-tracker"]), ConfigFile::default());
+            Settings::resolve(Args::parse_from(["share-tracker"]), ConfigFile::default())
+                .expect("defaults resolve");
         assert_eq!(
             settings,
             Settings {
@@ -99,6 +142,7 @@ mod tests {
                 backup_command: None,
                 host: "127.0.0.1".into(),
                 port: 3000,
+                base_path: String::new(),
                 schedule: None,
             }
         );
@@ -119,7 +163,8 @@ mod tests {
             schedule = "/usr/local/etc/share-tracker.cron"
             "#,
         );
-        let settings = Settings::resolve(Args::parse_from(["share-tracker"]), file);
+        let settings =
+            Settings::resolve(Args::parse_from(["share-tracker"]), file).expect("resolves");
         assert_eq!(settings.db, "/var/db/share-tracker/share-tracker.db");
         assert_eq!(
             settings.backup_dir.as_deref(),
@@ -141,7 +186,7 @@ mod tests {
     fn cli_flags_override_config_file() {
         let file = parse("db = \"file.db\"\nport = 8080\nhost = \"0.0.0.0\"");
         let args = Args::parse_from(["share-tracker", "--db", "cli.db", "--port", "9999"]);
-        let settings = Settings::resolve(args, file);
+        let settings = Settings::resolve(args, file).expect("resolves");
         assert_eq!(settings.db, "cli.db");
         assert_eq!(settings.port, 9999);
         // A flag not given still takes the file's value.
@@ -156,7 +201,7 @@ mod tests {
             "--backup-command",
             "rsync {BACKUP_FILE} new-dest:/",
         ]);
-        let settings = Settings::resolve(args, file);
+        let settings = Settings::resolve(args, file).expect("resolves");
         assert_eq!(
             settings.backup_command.as_deref(),
             Some("rsync {BACKUP_FILE} new-dest:/")
@@ -165,10 +210,82 @@ mod tests {
 
     #[test]
     fn partial_config_file_keeps_defaults_for_the_rest() {
-        let settings = Settings::resolve(Args::parse_from(["share-tracker"]), parse("port = 8080"));
+        let settings = Settings::resolve(Args::parse_from(["share-tracker"]), parse("port = 8080"))
+            .expect("resolves");
         assert_eq!(settings.port, 8080);
         assert_eq!(settings.db, "share-tracker.db");
         assert_eq!(settings.host, "127.0.0.1");
+    }
+
+    #[test]
+    fn base_path_defaults_to_the_root() {
+        // Absent, empty and "/" all mean "mounted at the root", so an operator
+        // can spell "no prefix" any of the obvious ways without it becoming a
+        // one-segment prefix.
+        for raw in [None, Some(""), Some("  "), Some("/"), Some("//")] {
+            assert_eq!(normalise_base_path(raw), Ok(String::new()), "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn base_path_is_normalised_to_leading_slash_no_trailing_slash() {
+        for raw in [
+            "/share_tracker",
+            "share_tracker",
+            "/share_tracker/",
+            "  /share_tracker/  ",
+        ] {
+            assert_eq!(
+                normalise_base_path(Some(raw)),
+                Ok("/share_tracker".to_string()),
+                "{raw:?}"
+            );
+        }
+        // Multi-segment prefixes are fine — a proxy may mount under /apps/x.
+        assert_eq!(
+            normalise_base_path(Some("apps/share-tracker/")),
+            Ok("/apps/share-tracker".to_string())
+        );
+    }
+
+    #[test]
+    fn unusable_base_path_is_rejected_naming_the_value() {
+        // Characters that would change what the concatenated URL means, or an
+        // empty interior segment: better to refuse to start than to serve a UI
+        // whose every request 404s.
+        for raw in ["/share tracker", "/a?b", "/a#b", "/a%2fb", "/a//b"] {
+            let err = normalise_base_path(Some(raw)).expect_err("an unusable prefix is rejected");
+            assert!(err.contains("base_path"), "{raw:?}: {err}");
+            assert!(
+                err.contains(raw.trim()),
+                "names the bad value — {raw:?}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn cli_base_path_overrides_config_file() {
+        let file = parse("base_path = \"/from_file\"");
+        let args = Args::parse_from(["share-tracker", "--base-path", "/from_cli/"]);
+        let settings = Settings::resolve(args, file).expect("resolves");
+        assert_eq!(settings.base_path, "/from_cli");
+        // …and the file's value applies on its own, normalised the same way.
+        let settings = Settings::resolve(
+            Args::parse_from(["share-tracker"]),
+            parse("base_path = \"share_tracker/\""),
+        )
+        .expect("resolves");
+        assert_eq!(settings.base_path, "/share_tracker");
+    }
+
+    #[test]
+    fn a_bad_base_path_fails_resolution() {
+        let err = Settings::resolve(
+            Args::parse_from(["share-tracker"]),
+            parse("base_path = \"/share tracker\""),
+        )
+        .expect_err("rejects an unusable prefix");
+        assert!(err.contains("share tracker"), "{err}");
     }
 
     #[test]
@@ -228,6 +345,14 @@ mod tests {
         assert!(
             SAMPLE.contains("# backup_command = "),
             "sample should document backup_command as a commented-out example"
+        );
+        // base_path is likewise commented out: the server is mounted at the
+        // root unless it is being proxied onto a sub-path, so the shipped file
+        // documents the setting without activating a prefix nobody asked for.
+        assert!(sample.base_path.is_none());
+        assert!(
+            SAMPLE.contains("# base_path = "),
+            "sample should document base_path as a commented-out example"
         );
     }
 }

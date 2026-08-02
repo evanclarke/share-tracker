@@ -49,14 +49,38 @@ const JS_MODULES: [(&str, &str); 7] = [
 /// Routes serving the frontend shell and its static assets. Returns a
 /// `Router<SqlitePool>` purely so it merges with the entity/report routers; the
 /// handlers are stateless.
-pub fn router() -> Router<SqlitePool> {
+///
+/// `base_path` is the reverse-proxy prefix the application is nested under
+/// (`""` at the root — see `app::router`). The routes themselves are unaware of
+/// it, because `nest` strips it before matching; it exists here only to be
+/// baked into the shell, which is the one place the frontend learns where it is
+/// mounted. The shell is templated once at startup, not per request.
+pub fn router(base_path: &str) -> Router<SqlitePool> {
+    let shell = index_html(base_path);
     let mut router = Router::new()
-        .route("/", get(index))
+        .route(
+            "/",
+            get(move || {
+                let shell = shell.clone();
+                async move { html_asset(shell) }
+            }),
+        )
         .route("/static/style.css", get(style_css));
     for (path, source) in JS_MODULES {
         router = router.route(path, get(move || async move { js_asset(source) }));
     }
     router
+}
+
+/// The SPA shell with its two build-time placeholders filled in: the crate
+/// version shown in the header, and the base path, which the shell carries in
+/// both directions — as the prefix on its own asset URLs, and as the
+/// `<meta name="base-path">` the frontend's `apiUrl` (util.js) reads to prefix
+/// every API call it makes.
+fn index_html(base_path: &str) -> String {
+    INDEX_HTML
+        .replace("{{VERSION}}", env!("CARGO_PKG_VERSION"))
+        .replace("{{BASE}}", base_path)
 }
 
 fn asset(content_type: &'static str, body: &'static str) -> Response {
@@ -67,9 +91,8 @@ fn js_asset(body: &'static str) -> Response {
     asset("text/javascript; charset=utf-8", body)
 }
 
-async fn index() -> Response {
-    let html = INDEX_HTML.replace("{{VERSION}}", env!("CARGO_PKG_VERSION"));
-    ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
+fn html_asset(body: String) -> Response {
+    ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], body).into_response()
 }
 
 async fn style_css() -> Response {
@@ -83,9 +106,18 @@ mod tests {
     use axum::http::StatusCode;
 
     async fn get(uri: &str) -> ApiResponse {
-        ApiClient::over(router().with_state(SqlitePool::connect(":memory:").await.unwrap()))
-            .get(uri)
-            .await
+        get_based("", uri).await
+    }
+
+    /// The frontend routes as served under a given base path. The routes are
+    /// nested by `app::router`, so this router still serves them unprefixed —
+    /// only the shell's contents change.
+    async fn get_based(base_path: &str, uri: &str) -> ApiResponse {
+        ApiClient::over(
+            router(base_path).with_state(SqlitePool::connect(":memory:").await.unwrap()),
+        )
+        .get(uri)
+        .await
     }
 
     async fn body_string(resp: ApiResponse) -> String {
@@ -117,6 +149,33 @@ mod tests {
         let body = body_string(get("/").await).await;
         assert!(body.contains(&format!("id=\"version\">v{}", env!("CARGO_PKG_VERSION"))));
         assert!(!body.contains("{{VERSION}}"));
+    }
+
+    // Under a reverse-proxy base path the shell must ask for its own assets at
+    // the prefixed paths — the browser resolves them against the origin, not
+    // the mount point — and must publish the prefix for the frontend's `apiUrl`
+    // to put in front of every API call it makes.
+    #[tokio::test]
+    async fn index_carries_the_base_path_on_its_assets_and_in_its_meta_tag() {
+        let body = body_string(get_based("/share_tracker", "/").await).await;
+        assert!(body.contains("<meta name=\"base-path\" content=\"/share_tracker\">"));
+        assert!(body.contains("<script type=\"module\" src=\"/share_tracker/static/app.js\">"));
+        assert!(body.contains("href=\"/share_tracker/static/style.css\""));
+        assert!(!body.contains("{{BASE}}"));
+        // Nothing may be left pointing at the unprefixed asset routes: those
+        // are outside the mount and would 404 behind the proxy.
+        assert!(!body.contains("\"/static/"));
+    }
+
+    // The default (no prefix) is byte-for-byte the pre-base-path shell: the
+    // placeholder collapses to nothing rather than leaving a stray separator.
+    #[tokio::test]
+    async fn no_base_path_leaves_the_asset_urls_at_the_root() {
+        let body = body_string(get("/").await).await;
+        assert!(body.contains("<meta name=\"base-path\" content=\"\">"));
+        assert!(body.contains("src=\"/static/app.js\""));
+        assert!(body.contains("href=\"/static/style.css\""));
+        assert!(!body.contains("{{BASE}}"));
     }
 
     #[tokio::test]
@@ -201,6 +260,29 @@ mod tests {
             bundle.push_str(&body_string(get(path).await).await);
         }
         bundle
+    }
+
+    // Every server URL the frontend emits must go through `apiUrl`, which puts
+    // the base path in front of it. A root-absolute literal instead — a bare
+    // `fetch('/…')` or an `href: '/…'` — works at the root and silently 404s
+    // behind a reverse-proxy prefix, on exactly the paths (uploads, downloads,
+    // CSV exports) least likely to be hit while testing at the root. This scans
+    // the whole served bundle so a new one is caught at the source.
+    //
+    // Hash routes (`href: '#/…'`) are exempt and don't match: the browser
+    // resolves them against the current document, prefix included.
+    #[tokio::test]
+    async fn no_module_bypasses_apiurl_with_a_root_absolute_url() {
+        let js = app_js_body().await;
+        for bad in ["fetch('/", "fetch(\"/", "href: '/", "href: \"/"] {
+            assert!(
+                !js.contains(bad),
+                "a served module contains {bad:?} — wrap the path in apiUrl(...) \
+                 so it works under a reverse-proxy base path"
+            );
+        }
+        // …and the one central client does prefix.
+        assert!(js.contains("fetch(apiUrl(path)"));
     }
 
     #[tokio::test]

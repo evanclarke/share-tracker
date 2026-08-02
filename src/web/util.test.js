@@ -17,7 +17,7 @@ import {
   roundDecimalStr, groupThousands, padMinDp, decStrEq, numericDisplay,
   addDecimalStrings, decParts, mulToCents, frankingCreditFor, decEq,
   looksNumeric, columnKinds, columnLabel, tradeOrigin, periodReturnPct,
-  holdingHasActivity, loadPref, savePref, pathSeg,
+  holdingHasActivity, loadPref, savePref, pathSeg, basePath, apiUrl,
 } from './util.js';
 
 // ---- roundDecimalStr ----------------------------------------------------
@@ -370,4 +370,47 @@ test('pathSeg over a composite key encodes the parts, not the separators', () =>
   // over the parts rather than encoding the joined string.
   assert.equal(['1', '2024-06-30'].map(pathSeg).join('/'), '1/2024-06-30');
   assert.equal(['a/b', 'c'].map(pathSeg).join('/'), 'a%2Fb/c');
+});
+
+// ---- basePath / apiUrl --------------------------------------------------
+// The reverse-proxy prefix is read from the shell's <meta name="base-path">.
+// Node has no DOM, so these pin the no-document path: the app must behave
+// exactly as it did before base paths existed when it is mounted at the root.
+test('basePath is empty without a document', () => {
+  assert.equal(basePath(), '');
+});
+
+test('apiUrl is the identity when mounted at the root', () => {
+  assert.equal(apiUrl('/listings'), '/listings');
+  assert.equal(apiUrl('/attachments/3/content'), '/attachments/3/content');
+  assert.equal(apiUrl('/reports/net_capital_gain/export'), '/reports/net_capital_gain/export');
+});
+
+test('apiUrl prefixes a path when a base path is published', () => {
+  // Stand in for the browser's document long enough to prove the prefixing:
+  // basePath reads the meta tag on each call, so no module state to reset.
+  globalThis.document = {
+    querySelector: (sel) => (sel === 'meta[name="base-path"]'
+      ? { getAttribute: () => '/share_tracker' }
+      : null),
+  };
+  try {
+    assert.equal(basePath(), '/share_tracker');
+    assert.equal(apiUrl('/listings'), '/share_tracker/listings');
+    // The result is still a root-absolute URL, so it resolves against the
+    // origin rather than the current hash route.
+    assert.ok(apiUrl('/trades').startsWith('/'));
+  } finally {
+    delete globalThis.document;
+  }
+});
+
+test('a document without the meta tag means the root, not undefined', () => {
+  globalThis.document = { querySelector: () => null };
+  try {
+    assert.equal(basePath(), '');
+    assert.equal(apiUrl('/listings'), '/listings');
+  } finally {
+    delete globalThis.document;
+  }
 });

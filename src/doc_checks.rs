@@ -822,6 +822,28 @@ fn delete_404_reason_documented() {
     assert!(API_MD.contains("`404`-with-a-cause — which includes every `DELETE` of a row"));
 }
 
+/// Docs-sync pin for serving the app under a reverse-proxy sub-path: the
+/// deployment story lives in the README (including the nginx block, whose
+/// two easy-to-get-wrong details — no trailing slash on `proxy_pass`, and
+/// an upload limit above the 25 MB attachment cap — are the whole reason
+/// the snippet is shipped rather than left to the reader), and the API doc
+/// states that every documented path moves under the prefix.
+#[test]
+fn reverse_proxy_base_path_documented() {
+    assert!(README_MD.contains("### Behind a reverse proxy"));
+    assert!(README_MD.contains("`--base-path`"));
+    assert!(README_MD.contains("location /share_tracker/ {"));
+    assert!(README_MD.contains("proxy_pass http://127.0.0.1:3000;"));
+    assert!(README_MD.contains("No trailing slash on proxy_pass"));
+    assert!(README_MD.contains("client_max_body_size 25m;"));
+    assert!(README_MD.contains("X-Forwarded-Proto"));
+    // API.md: the prefix applies to every documented path, and the
+    // trailing-slash redirect is a documented response code.
+    assert!(API_MD.contains("**Base path.**"));
+    assert!(API_MD.contains("`GET /listings` becomes `GET /share_tracker/listings`"));
+    assert!(API_MD.contains("`307 Temporary Redirect`"));
+}
+
 /// Pins for the FreeBSD packaging + versioned-release pipeline (REQUIREMENTS
 /// 2026-07-13). The release workflow and package skeleton are plain text CI
 /// consumes, so these tests keep their load-bearing pieces from silently
