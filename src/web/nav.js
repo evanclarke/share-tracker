@@ -3,7 +3,7 @@
 // sidebar it replaced outgrew a flat list (24 entities + 19 reports) — see
 // config.js's `MENUS`/`menu`/`section` fields for the data this renders.
 //
-import { el } from './util.js';
+import { el, apiUrl, authEnabled } from './util.js';
 import { ENTITIES, REPORTS, MENUS } from './config.js';
 
 // Pure model builder — no DOM — so the menu structure is unit-testable
@@ -91,6 +91,15 @@ export function buildNav() {
     bar.appendChild(li);
   });
   nav.appendChild(bar);
+  // A real form POST (not a fetch(), not a hash route): logging out is a
+  // state change, so it belongs on POST /logout, not a GET a prefetch or a
+  // stray click-through could trigger — and a plain submit works with no JS
+  // wiring beyond building the element, matching the login page it lands on.
+  if (authEnabled()) {
+    nav.appendChild(el('form', { method: 'post', action: apiUrl('/logout'), class: 'logout-form' }, [
+      el('button', { type: 'submit' }, 'Log out'),
+    ]));
+  }
 }
 
 export function setActiveNav(key) {

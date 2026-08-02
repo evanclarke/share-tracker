@@ -272,6 +272,16 @@ export function apiUrl(path) {
   return basePath() + path;
 }
 
+// Whether infra::auth is configured, from the shell's <meta name="auth">
+// (server-substituted — see src/web.rs's index_html). Read on each call, same
+// reasoning as basePath: a pure function of the document, so the Node unit
+// tests (no DOM) get the auth-off behaviour without a stub.
+export function authEnabled() {
+  if (typeof document === 'undefined') return false;
+  const meta = document.querySelector('meta[name="auth"]');
+  return !!(meta && meta.getAttribute('content'));
+}
+
 export async function api(method, path, body) {
   const opts = { method: method, headers: {} };
   if (body !== undefined) {
@@ -279,6 +289,16 @@ export async function api(method, path, body) {
     opts.body = JSON.stringify(body);
   }
   const res = await fetch(apiUrl(path), opts);
+  if (res.status === 401 && authEnabled()) {
+    // The session cookie is missing or expired: there is nothing this call
+    // site can recover from, so send the browser to sign in again rather
+    // than surface "HTTP 401" as if it were an ordinary rejection.
+    window.location.assign(apiUrl('/login'));
+    // Never resolves: the navigation above is about to tear this page down,
+    // and nothing downstream should run against a request that never
+    // actually succeeded.
+    return new Promise(function () {});
+  }
   if (!res.ok) {
     let detail = '';
     try { detail = (await res.text()).trim(); } catch (e) { /* ignore */ }

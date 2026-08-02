@@ -58,6 +58,13 @@ pub enum ApiError {
     /// naming. Construct via [`ApiError::not_found`].
     #[error("{0}")]
     NotFoundWithReason(String),
+    /// 401 — no valid session cookie or bearer token, or a login attempt
+    /// with the wrong credentials. Never logged as an error: an
+    /// unauthenticated request is expected traffic (a browser without a
+    /// session yet, a probe), not a server fault; the auth layer logs a
+    /// failed login itself, naming the peer.
+    #[error("{0}")]
+    Unauthorized(String),
 }
 
 impl ApiError {
@@ -88,6 +95,11 @@ impl ApiError {
     /// A 404 whose body names what was missing.
     pub fn not_found(msg: impl Into<String>) -> Self {
         ApiError::NotFoundWithReason(msg.into())
+    }
+
+    /// A 401 with the given plain-text explanation.
+    pub fn unauthorized(msg: impl Into<String>) -> Self {
+        ApiError::Unauthorized(msg.into())
     }
 }
 
@@ -129,6 +141,7 @@ impl IntoResponse for ApiError {
             }
             ApiError::NotFound => StatusCode::NOT_FOUND.into_response(),
             ApiError::NotFoundWithReason(body) => (StatusCode::NOT_FOUND, body).into_response(),
+            ApiError::Unauthorized(body) => (StatusCode::UNAUTHORIZED, body).into_response(),
         }
     }
 }
@@ -341,6 +354,13 @@ mod tests {
         let resp = ApiError::NotFound.into_response();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
         assert_eq!(body_of(resp).await, "");
+    }
+
+    #[tokio::test]
+    async fn unauthorized_is_401_with_the_message_as_body() {
+        let resp = ApiError::unauthorized("no session cookie or bearer token").into_response();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(body_of(resp).await, "no session cookie or bearer token");
     }
 
     #[tokio::test]

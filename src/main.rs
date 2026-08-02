@@ -15,14 +15,21 @@ mod test_support;
 mod web;
 
 use clap::Parser;
-use infra::args::Args;
+use infra::args::{Args, Command};
 use infra::{config, db, logging, scheduler};
 
 #[tokio::main]
 async fn main() {
+    let args = Args::parse();
+    // The one-off `[auth]`-populating helpers run instead of the server, and
+    // need no logging, config file or database — see `infra::args::Command`.
+    if let Some(command) = &args.command {
+        run_command(command);
+        return;
+    }
+
     logging::init();
 
-    let args = Args::parse();
     // CLI flags > config file (/usr/local/etc/share-tracker.toml or --config) >
     // built-in defaults. A bad config file aborts startup: running against the
     // wrong database is worse than not starting.
@@ -34,6 +41,13 @@ async fn main() {
         eprintln!("{e}");
         std::process::exit(1);
     });
+    if settings.auth.is_none() && settings.host != "127.0.0.1" {
+        tracing::warn!(
+            "no authentication configured; listening on {} without access control \
+             (see the README's \"Authentication\" section)",
+            settings.host
+        );
+    }
 
     let pool = db::init(&settings.db)
         .await
@@ -58,7 +72,13 @@ async fn main() {
     );
     scheduler::spawn(registry.clone(), pool.clone(), &schedule).expect("invalid schedule");
 
-    let app = app::router(&settings.base_path, pool.clone(), registry, fetcher);
+    let app = app::router(
+        &settings.base_path,
+        pool.clone(),
+        registry,
+        fetcher,
+        settings.auth.clone(),
+    );
     let ip: std::net::IpAddr = settings.host.parse().expect("invalid host address");
     let addr = std::net::SocketAddr::new(ip, settings.port);
     let listener = tokio::net::TcpListener::bind(addr)
@@ -82,6 +102,32 @@ async fn main() {
 
     tracing::info!("shutting down");
     pool.close().await;
+}
+
+/// Runs a `[auth]`-populating helper and exits. Neither touches the config
+/// file or database — each just prints a value the operator pastes into
+/// `[auth]` by hand.
+fn run_command(command: &Command) {
+    match command {
+        Command::HashPassword => {
+            use std::io::Read;
+            let mut password = String::new();
+            std::io::stdin()
+                .read_to_string(&mut password)
+                .expect("failed to read password from stdin");
+            // Trailing newline from an interactive Enter or `echo` (not
+            // `echo -n`) is not part of the intended password.
+            let password = password.trim_end_matches(['\n', '\r']);
+            match infra::auth::Auth::hash_password(password) {
+                Ok(hash) => println!("{hash}"),
+                Err(e) => {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        Command::GenToken => println!("{}", infra::auth::Auth::generate_token()),
+    }
 }
 
 async fn shutdown_signal() {

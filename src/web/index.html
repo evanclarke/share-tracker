@@ -8,6 +8,11 @@
        root), substituted at startup. util.js's apiUrl reads it to prefix every
        API call, so the app works identically at / and at /share_tracker. -->
   <meta name="base-path" content="{{BASE}}">
+  <!-- Whether infra::auth is configured ("1") or the server is open (""),
+       substituted at startup. nav.js reads it to decide whether to render
+       "Log out"; util.js reads it to decide whether a 401 means "go to
+       /login" (see infra::auth's module doc). -->
+  <meta name="auth" content="{{AUTH}}">
   <link rel="stylesheet" href="{{BASE}}/static/style.css">
 </head>
 <body>

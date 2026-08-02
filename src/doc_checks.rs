@@ -844,6 +844,35 @@ fn reverse_proxy_base_path_documented() {
     assert!(API_MD.contains("`307 Temporary Redirect`"));
 }
 
+/// Docs-sync pin for the optional `[auth]` shared-credential access control
+/// (`infra::auth`): the README surfaces it as a Feature and documents how to
+/// configure and generate credentials for it; the API doc has its own
+/// section plus the `401`/`303` response codes and the two accepted
+/// limitations (cookie revocation, login CSRF) it introduces.
+#[test]
+fn authentication_documented() {
+    // README: the Features bullet, the rewritten no-auth notes, the
+    // dedicated section and its config/CLI-helper examples.
+    assert!(README_MD.contains("**Authentication (optional)**"));
+    assert!(README_MD.contains("### Authentication"));
+    assert!(README_MD.contains("unless [`[auth]`](#authentication) is configured"));
+    assert!(README_MD.contains("share-tracker hash-password"));
+    assert!(README_MD.contains("share-tracker gen-token"));
+    assert!(README_MD.contains("[auth]"));
+    assert!(README_MD.contains("password_hash"));
+    // API.md: the preamble line, the dedicated section, the login/logout
+    // endpoints, and the response-code/known-limitations entries.
+    assert!(API_MD.contains("**Authentication.**"));
+    assert!(API_MD.contains("## Authentication"));
+    assert!(API_MD.contains("GET` | `/login`"));
+    assert!(API_MD.contains("POST` | `/login`"));
+    assert!(API_MD.contains("POST` | `/logout`"));
+    assert!(API_MD.contains("`303 See Other`"));
+    assert!(API_MD.contains("`401 Unauthorized`"));
+    assert!(known_limitations().contains("session cookies aren't revocable"));
+    assert!(known_limitations().contains("no CSRF token"));
+}
+
 /// Pins for the FreeBSD packaging + versioned-release pipeline (REQUIREMENTS
 /// 2026-07-13). The release workflow and package skeleton are plain text CI
 /// consumes, so these tests keep their load-bearing pieces from silently

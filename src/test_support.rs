@@ -67,13 +67,27 @@ impl ApiResponse {
 #[derive(Clone)]
 pub struct ApiClient {
     app: axum::Router,
+    /// Extra headers sent with every request — see [`Self::with_header`].
+    headers: Vec<(String, String)>,
 }
 
 impl ApiClient {
     /// Client over an already-assembled router, e.g. one module's
     /// `router().with_state(pool)`.
     pub fn over(app: axum::Router) -> Self {
-        ApiClient { app }
+        ApiClient {
+            app,
+            headers: Vec::new(),
+        }
+    }
+
+    /// Returns a client that also sends `name: value` on every request it
+    /// makes from here on — e.g. a session cookie or `Authorization: Bearer
+    /// <token>` against an `infra::auth`-gated router. Chainable:
+    /// `client.with_header("Cookie", a).with_header("X-Foo", b)`.
+    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.push((name.into(), value.into()));
+        self
     }
 
     /// Client over the full application router, exactly as `main` serves it,
@@ -96,12 +110,25 @@ impl ApiClient {
             None,
             fetcher.clone(),
         );
-        // Mounted at the root — the default. `app::router`'s own tests cover a
-        // router nested under a reverse-proxy base path.
-        ApiClient::over(crate::app::router("", pool.clone(), registry, fetcher))
+        // Mounted at the root, auth off — the default. `app::router`'s own
+        // tests cover a router nested under a reverse-proxy base path;
+        // `infra::auth`'s own tests cover one with `[auth]` configured.
+        ApiClient::over(crate::app::router(
+            "",
+            pool.clone(),
+            registry,
+            fetcher,
+            None,
+        ))
     }
 
-    async fn send(&self, req: Request<Body>) -> ApiResponse {
+    async fn send(&self, mut req: Request<Body>) -> ApiResponse {
+        for (name, value) in &self.headers {
+            req.headers_mut().insert(
+                axum::http::HeaderName::from_bytes(name.as_bytes()).expect("valid header name"),
+                axum::http::HeaderValue::from_str(value).expect("valid header value"),
+            );
+        }
         let resp = self.app.clone().oneshot(req).await.unwrap();
         let status = resp.status();
         let headers = resp.headers().clone();
@@ -831,6 +858,22 @@ mod tests {
 
         let resp = client.post_empty("/jobs/no-such-job").await;
         assert_eq!(resp.status, StatusCode::NOT_FOUND);
+    }
+
+    /// `with_header` reaches the handler on every verb — proven here via a
+    /// route that reflects a header back (the row-history import's content
+    /// type is otherwise the only header any handler reads): a bearer token
+    /// header on an unauthenticated router is simply ignored, so the
+    /// assertion is indirect — that no header we didn't ask for leaked in,
+    /// and that the one we asked for went out.
+    #[tokio::test]
+    async fn with_header_sends_the_header_on_every_request() {
+        let pool = test_pool().await;
+        let client = ApiClient::full(&pool).with_header("Authorization", "Bearer test-token");
+        // With no `[auth]` configured the router doesn't inspect this header
+        // at all, so the request behaves exactly as it would without it —
+        // this pins that `with_header` doesn't itself break a request.
+        assert_eq!(client.get("/exchanges").await.status, StatusCode::OK);
     }
 
     #[tokio::test]

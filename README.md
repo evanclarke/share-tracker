@@ -52,6 +52,7 @@ A personal Australian share portfolio tracker with a REST JSON API. Records trad
 - **Daily report snapshots** — once the day's last close is in, the price-dependent reports (portfolio overview, unrealised gains, performance) are run against the stored closing prices (AUD-converted) and persisted as a daily series, feeding the Portfolio Overview screen's graph and period-performance summary; each run also backfills missing dates over a 14-day window, so a blocked date is delayed, not lost. A snapshot valued before the month's RBA FX rate is published is stored flagged **provisional** (valued at an earlier month's rate, at most 2 months back) and finalised automatically once the rate import lands the real rate; recording a back-dated fact marks the affected snapshots stale — atomically, via database triggers — and the daily run regenerates stale/provisional window dates itself, with a date-ranged regenerate-all action (defaulting to the whole history — first-ever holding through the latest fully-valuable date — so it can also backfill dates that never had a snapshot) and a regenerate-provisional action to bulk-repair the series (see [Report snapshots](docs/API.md#report-snapshots))
 - **Append-only audit trail** — every edit or deletion of a financial fact (trades, allocations, income, statements, corporate actions, expenses, hand-entered closing prices, and the rest of the audited tables) records the prior row with a UTC timestamp, written by database triggers inside the same transaction so no write path can bypass it; entries are kept forever, the trail itself cannot be rewritten (database-enforced append-only), and any record's history is inspectable via the API and the web UI's Row History screen — so an accidental edit that would silently change prior-year cost bases or tax figures can be noticed and reconstructed (aligns with the ATO record-keeping guidance, `docs/ato/cgt-keeping-records-shares.md`; see [Row history](docs/API.md#row-history))
 - **Job and data-freshness monitoring** — every maintenance job run (scheduled or manual) is recorded as a bounded per-job history (the newest 20 runs), so an intermittent failure that later succeeded stays diagnosable from `GET /jobs` and the Jobs screen; a health endpoint reports the latest stored closing-price date, the latest RBA FX rate month, and any job whose latest run failed in one read, alongside the two price-gap lists that between them catch every day a holding cannot be valued — listings with an errored price row, and listings with a **held day nothing ever fetched** (no row at all, otherwise silent until a snapshot sticks stale, and surfaced on the Closing Prices screen with a Backfill action over exactly the hole) — and the web UI shows a cross-view warning banner (linking to the Jobs page) whenever data goes stale or a job fails — a broken price source is visible from any screen, not only when the Jobs page is opened (see [Health](docs/API.md#health))
+- **Authentication (optional)** — a single shared username + Argon2 password hash, set in `[auth]` in the config file, gates the whole application behind a `/login` page and a signed session cookie (access control only, not per-user data — the app stays single-taxpayer); a bearer token can be accepted alongside it for the deployment scripts that call the HTTP API without a browser. Off by default: the server serves exactly as it always has until `[auth]` is set (see [Authentication](docs/API.md#authentication))
 - **Web UI** — a built-in browser frontend (no build step, served from the same binary) navigated by a top menu bar (Activity, Reports, Reference Data, Jobs — each expanding a panel on hover/focus/click, Reports as a mega-menu of titled columns) rather than a sidebar, opening on the Portfolio Overview home screen with New trade/income/sell/transfer shortcut buttons; CRUD screens for every entity, atomic Sell + parcel-allocation entry, holding-account transfers, DRP reinvestment, an Origin column on the Trades/Sells lists labelling operation-created rows (so a transfer-in Buy's cost-base-carrying brokerage figure never reads as a real fee), a closing-price history screen with re-fetch and backfill actions, a snapshots maintenance screen with generate/regenerate and bulk regenerate-all (date-ranged, defaulting to the whole history) / regenerate-provisional actions, an inline-SVG time-series graph on the Portfolio Overview screen with date-range presets (stale points hollow, provisional points dash-ringed) and a period-performance summary, a view for each report, and a printable Annual Tax Report view (plain semantic tables, not the shared filterable/paginated table — a print document has no business with a filter row or a pager) with a Print / Save as PDF button; see [Web frontend](docs/API.md#web-frontend)
 
 Deliberate scope cuts are documented in [Known limitations](docs/API.md#known-limitations) — notably: **gifts / off-market related-party transfers** are a CGT disposal at **market value** (the market-value substitution rule) with no dedicated entry path — enter a manual Sell (gift out) or Buy (gift in) at market value; **pre-CGT holdings** (acquired before 20 September 1985) are outside CGT and not modelled — a trade dated before 20 September 1985 (or an inheritance from a pre-CGT death) is rejected at write time, so a parcel the system would wrongly compute gains on can't be entered; the **indexation method** (assets acquired before 21 September 1999, frozen at September 1999) is not modelled — the 50% discount is used throughout; **dividend equivalents on unvested RSU grants** are ordinary income when paid (TD 2017/26) and are not modelled — enterable manually as income if paid out in cash; **settlement-window forex outcomes on foreign-currency trades (CGT events K10/K11)** are not computed — the contract-to-settlement currency movement is the taxpayer's manual adjustment (nil by construction under same-rate-month monthly-rate entry; per-leg spot rates are what make it visible); and a foreign-currency parcel's **AMIT/return-of-capital cost-base reductions convert at the acquisition-month rate**, not each reduction's own payment/period month (s 960-50 translation timing) — material only for a non-AUD holding receiving non-AUD reductions.
@@ -76,7 +77,7 @@ cargo build --release
 
 `--version` prints the version (from `Cargo.toml`, the single source of truth for [release numbering](#releases-and-versioning)).
 
-> **Note:** the server has no authentication, so the default `--host 127.0.0.1` keeps it reachable from this machine only. Passing `--host 0.0.0.0` exposes it to every machine on the network — do that only on trusted networks.
+> **Note:** unless [`[auth]`](#authentication) is configured, the server has no authentication, so the default `--host 127.0.0.1` keeps it reachable from this machine only. Passing `--host 0.0.0.0` exposes it to every machine on the network — do that only on trusted networks, or with `[auth]` configured.
 
 The database is created automatically on first run. Migrations are applied in order at startup.
 
@@ -115,13 +116,38 @@ host = "127.0.0.1"
 port = 3000
 base_path = "/share_tracker"   # only when proxied onto a sub-path; default is the root
 schedule = "/usr/local/etc/share-tracker.cron"
+
+# [auth]                       # see "Authentication" below; off by default
+# username = "evan"
+# password_hash = "$argon2id$v=19$m=19456,t=2,p=1$..."
 ```
 
 An unknown key or invalid TOML aborts startup with the reason — a typo never silently falls back to a default (starting against the wrong database is worse than not starting). The full annotated example lives at [`pkg/freebsd/share-tracker.toml.sample`](pkg/freebsd/share-tracker.toml.sample).
 
+### Authentication
+
+Off by default (see the `--host` note above). To gate the whole application behind a single shared credential — access control only, not per-user data; the app stays single-taxpayer either way — add an `[auth]` table to the config file:
+
+```toml
+[auth]
+username = "evan"
+password_hash = "$argon2id$v=19$m=19456,t=2,p=1$..."   # share-tracker hash-password
+api_token = "...optional, for scripts..."               # share-tracker gen-token
+# secure_cookie = true   # default; set false only for a deliberately plain-HTTP setup
+```
+
+Generate both secrets with the binary's own helper subcommands rather than typing a password anywhere a shell history or `ps` could catch it:
+
+```bash
+share-tracker hash-password   # reads the password from stdin, prints an Argon2id PHC hash
+share-tracker gen-token       # prints a random 64-hex-char bearer token
+```
+
+There is deliberately no `--auth-*` CLI flag for either value — config file only, for the same reason. Once `[auth]` is set, every route needs a session (sign in at `/login`; the session cookie lasts 30 days and survives a restart, but changing the password invalidates every existing session, since the session-signing key is derived from the password hash) or, for scripts that call the API without a browser, `Authorization: Bearer <api_token>` — the mechanism `pkg/freebsd/update.sh` and `smoke-test.sh` use once a token is configured. `POST /logout` clears the browser's cookie but cannot revoke a copied-out cookie value before its own expiry, there being no server-side session store to revoke it in (see [Known limitations](docs/API.md#known-limitations)). Full endpoint documentation: [Authentication](docs/API.md#authentication).
+
 ### Behind a reverse proxy
 
-The server binds `127.0.0.1` and has **no authentication of its own**, so a reverse proxy is the natural place to put TLS and access control. Proxying it at the root of its own name (`https://tracker.example.com/`) needs no configuration here — just proxy to the port.
+The server binds `127.0.0.1`; unless [`[auth]`](#authentication) is configured it has **no authentication of its own**, so a reverse proxy is the natural place to put TLS and, in that case, access control too. Proxying it at the root of its own name (`https://tracker.example.com/`) needs no configuration here — just proxy to the port.
 
 To serve it from a **sub-path** instead (`https://example.com/share_tracker/`), set `base_path`. The whole application moves under the prefix — every API route, the UI shell, and the static assets — and the UI emits its URLs with the prefix on them, so the proxy passes the path through **unchanged** rather than stripping it:
 

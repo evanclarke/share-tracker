@@ -54,9 +54,13 @@ const JS_MODULES: [(&str, &str); 7] = [
 /// (`""` at the root — see `app::router`). The routes themselves are unaware of
 /// it, because `nest` strips it before matching; it exists here only to be
 /// baked into the shell, which is the one place the frontend learns where it is
-/// mounted. The shell is templated once at startup, not per request.
-pub fn router(base_path: &str) -> Router<SqlitePool> {
-    let shell = index_html(base_path);
+/// mounted. `auth_enabled` is likewise baked into the shell (as a `<meta
+/// name="auth">`) so `nav.js` knows whether to render "Log out" and `util.js`
+/// knows a 401 means "go to `/login`" rather than some other failure — the
+/// frontend has no other way to learn whether `[auth]` is configured. The
+/// shell is templated once at startup, not per request.
+pub fn router(base_path: &str, auth_enabled: bool) -> Router<SqlitePool> {
+    let shell = index_html(base_path, auth_enabled);
     let mut router = Router::new()
         .route(
             "/",
@@ -72,15 +76,17 @@ pub fn router(base_path: &str) -> Router<SqlitePool> {
     router
 }
 
-/// The SPA shell with its two build-time placeholders filled in: the crate
-/// version shown in the header, and the base path, which the shell carries in
+/// The SPA shell with its build-time placeholders filled in: the crate
+/// version shown in the header; the base path, which the shell carries in
 /// both directions — as the prefix on its own asset URLs, and as the
 /// `<meta name="base-path">` the frontend's `apiUrl` (util.js) reads to prefix
-/// every API call it makes.
-fn index_html(base_path: &str) -> String {
+/// every API call it makes; and whether `[auth]` is configured, as
+/// `<meta name="auth">` (`"1"` or `""`).
+fn index_html(base_path: &str, auth_enabled: bool) -> String {
     INDEX_HTML
         .replace("{{VERSION}}", env!("CARGO_PKG_VERSION"))
         .replace("{{BASE}}", base_path)
+        .replace("{{AUTH}}", if auth_enabled { "1" } else { "" })
 }
 
 fn asset(content_type: &'static str, body: &'static str) -> Response {
@@ -114,7 +120,7 @@ mod tests {
     /// only the shell's contents change.
     async fn get_based(base_path: &str, uri: &str) -> ApiResponse {
         ApiClient::over(
-            router(base_path).with_state(SqlitePool::connect(":memory:").await.unwrap()),
+            router(base_path, false).with_state(SqlitePool::connect(":memory:").await.unwrap()),
         )
         .get(uri)
         .await
@@ -176,6 +182,29 @@ mod tests {
         assert!(body.contains("src=\"/static/app.js\""));
         assert!(body.contains("href=\"/static/style.css\""));
         assert!(!body.contains("{{BASE}}"));
+    }
+
+    // The default: `[auth]` absent, so the shell tells the frontend there is
+    // nothing to log in or out of.
+    #[tokio::test]
+    async fn no_auth_leaves_the_auth_meta_empty() {
+        let body = body_string(get("/").await).await;
+        assert!(body.contains("<meta name=\"auth\" content=\"\">"));
+        assert!(!body.contains("{{AUTH}}"));
+    }
+
+    // With `[auth]` configured, the shell flags it so nav.js renders "Log
+    // out" and util.js treats a 401 as "go to /login" rather than a generic
+    // failure (see infra::auth's module doc).
+    #[tokio::test]
+    async fn auth_enabled_sets_the_auth_meta() {
+        let resp = ApiClient::over(
+            router("", true).with_state(SqlitePool::connect(":memory:").await.unwrap()),
+        )
+        .get("/")
+        .await;
+        let body = body_string(resp).await;
+        assert!(body.contains("<meta name=\"auth\" content=\"1\">"));
     }
 
     #[tokio::test]
@@ -971,6 +1000,19 @@ mod tests {
         // property to `.menu-label:hover`'s color change, so without this it
         // still applies and gives near-white text on a near-white button.
         assert!(css.contains(".menu-label:hover, .menu-label.active { color: #fff; background:"));
+    }
+
+    /// "Log out" (nav.js) renders in the top bar only when `[auth]` is
+    /// configured, as a real form POST — not a fetch() or a hash route — so
+    /// it works with no JS beyond building the element and needs no CSRF
+    /// token beyond the session cookie's own `SameSite=Lax`.
+    #[tokio::test]
+    async fn logout_ui_present_only_when_auth_is_configured() {
+        let js = app_js_body().await;
+        assert!(js.contains("authEnabled()"));
+        assert!(js.contains("method: 'post'"));
+        assert!(js.contains("action: apiUrl('/logout')"));
+        assert!(js.contains("'Log out'"));
     }
 
     #[tokio::test]

@@ -25,8 +25,9 @@ backup_dir = "/var/db/share-tracker/backups"
 # pruning.
 # backup_command = "scp {BACKUP_FILE} user@host:/backups/"
 
-# Bind address. The server has no authentication: keep 127.0.0.1 (localhost
-# only) unless the network is trusted — "0.0.0.0" exposes it.
+# Bind address. Unless [auth] below is configured, the server has no
+# authentication: keep 127.0.0.1 (localhost only) unless the network is
+# trusted — "0.0.0.0" exposes it.
 host = "127.0.0.1"
 
 # HTTP port.
@@ -46,3 +47,15 @@ port = 3000
 # imports). The package installs the default schedule at this path; edit it to
 # change run times.
 schedule = "/usr/local/etc/share-tracker.cron"
+
+# Shared-credential access control (see the README's "Authentication"
+# section). Commented out by default: the server is open (today's behaviour)
+# until this table is filled in. Generate password_hash with
+# `share-tracker hash-password` (reads the password from stdin, never argv)
+# and api_token with `share-tracker gen-token`. There are no --auth-* CLI
+# flags: a secret on the command line is visible to anyone on the host via ps.
+# [auth]
+# username = "evan"
+# password_hash = "$argon2id$v=19$m=19456,t=2,p=1$..."
+# api_token = "...output of gen-token..."
+# secure_cookie = true

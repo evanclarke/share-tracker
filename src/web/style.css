@@ -61,7 +61,14 @@ body {
    Reports menu's panel has several `.menu-section`s (a mega-menu); the
    single-column menus (Activity, Reference Data, Jobs) render one untitled
    section, same markup either way — see nav.js. */
+#nav { display: flex; align-items: center; gap: 12px; }
 .menubar { display: flex; flex-wrap: wrap; gap: 4px; margin: 0; padding: 0; list-style: none; }
+/* "Log out" (nav.js, rendered only when auth is on): a real form POST
+   alongside the menu bar, styled to match .menu-label rather than the
+   light-background button default. */
+.logout-form { margin: 0; }
+.logout-form button { border: none; border-radius: 0; background: none; color: #dfe4ea; padding: 14px 12px; }
+.logout-form button:hover { color: #fff; background: rgba(255, 255, 255, 0.12); }
 .menu { position: relative; }
 .menu-label {
   font: inherit;
@@ -212,6 +219,16 @@ input[type=checkbox] { width: auto; }
 .empty { color: var(--muted); padding: 16px 0; }
 .loading { color: var(--muted); padding: 16px 0; }
 .error { color: var(--danger); padding: 12px; background: #fdecea; border: 1px solid #f5c6cb; border-radius: 6px; }
+
+/* The server-rendered /login page (infra/auth), outside the SPA shell: it
+   must render and be usable before any JS module loads. Reuses the .field/
+   .form-actions/.error/button.primary rules above rather than a parallel set. */
+.login-page { display: flex; align-items: center; justify-content: center; min-height: 100vh; padding: 20px; }
+.login-card { width: 100%; max-width: 320px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 24px; }
+.login-card h1 { margin: 0 0 2px; font-size: 20px; }
+.login-card .subtitle { color: var(--muted); margin: 0 0 16px; font-size: 12px; }
+.login-card .error { margin-bottom: 16px; }
+.login-card button.primary { width: 100%; }
 
 .badge { padding: 1px 8px; border-radius: 10px; font-size: 12px; font-weight: 600; }
 .badge.ok { background: #e6f4ea; color: var(--ok); }

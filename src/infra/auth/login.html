@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>share-tracker — sign in</title>
+  <link rel="stylesheet" href="{{BASE}}/static/style.css">
+</head>
+<body>
+  <main class="login-page">
+    <div class="login-card">
+      <h1>share-tracker</h1>
+      <p class="subtitle">Sign in to continue</p>
+{{ERROR}}
+      <form method="post" action="{{BASE}}/login">
+        <div class="field">
+          <label for="login-username">Username</label>
+          <input id="login-username" type="text" name="username" autocomplete="username" autofocus required>
+        </div>
+        <div class="field">
+          <label for="login-password">Password</label>
+          <input id="login-password" type="password" name="password" autocomplete="current-password" required>
+        </div>
+        <div class="form-actions">
+          <button type="submit" class="primary">Sign in</button>
+        </div>
+      </form>
+    </div>
+  </main>
+</body>
+</html>

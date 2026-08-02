@@ -38,6 +38,16 @@ sha2 = "0.11"
 # Proc-macro only: nothing of it survives into the runtime.
 thiserror = "2"
 toml = "1.1.2"
+# infra::auth: password hashing for the optional [auth] shared credential.
+# `std` for OsRng; `password-hash` for the PHC string encode/decode `share
+# hash-password`/`Auth::new` use.
+argon2 = { version = "0.5", features = ["std", "password-hash"] }
+# infra::auth: signs and verifies the session cookie (already a transitive
+# dep of nothing before this — promoted from Cargo.lock's own crypto tree).
+hmac = "0.13"
+# infra::auth: constant-time bearer-token comparison, so a wrong token isn't
+# distinguishable by timing.
+subtle = "2"
 
 [dev-dependencies]
 http-body-util = "0.1"

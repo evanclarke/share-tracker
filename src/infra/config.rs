@@ -28,6 +28,29 @@ pub struct ConfigFile {
     pub port: Option<u16>,
     pub base_path: Option<String>,
     pub schedule: Option<String>,
+    pub auth: Option<AuthConfig>,
+}
+
+/// The optional `[auth]` table: a single shared credential gating the whole
+/// HTTP surface (see `infra::auth`). Deliberately config-file only — there
+/// are no `--auth-*` CLI flags, because a password hash or bearer token on
+/// argv is visible to anyone on the host via `ps`; this also matches the
+/// FreeBSD rc.d script, which only ever passes `--config`.
+#[derive(Debug, Default, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthConfig {
+    pub username: String,
+    /// An Argon2id PHC string — generate one with `share-tracker
+    /// hash-password`, never a plain password.
+    pub password_hash: String,
+    /// Bearer token accepted alongside a session cookie, for the deployment
+    /// scripts (`pkg/freebsd/update.sh`, `smoke-test.sh`) that call the HTTP
+    /// API without a browser. Generate one with `share-tracker gen-token`.
+    pub api_token: Option<String>,
+    /// Whether the session cookie carries `Secure`. Defaults to `true` (see
+    /// `infra::auth::Auth`); set `false` only for a deliberately plain-HTTP
+    /// setup.
+    pub secure_cookie: Option<bool>,
 }
 
 /// The fully resolved settings the server runs with.
@@ -43,6 +66,10 @@ pub struct Settings {
     /// path like `/share_tracker`. See [`normalise_base_path`].
     pub base_path: String,
     pub schedule: Option<String>,
+    /// `None` (the default) serves the whole application exactly as before —
+    /// see `infra::auth`. `Some` only when `[auth]` is present in the config
+    /// file; there is no CLI flag for it.
+    pub auth: Option<super::auth::Auth>,
 }
 
 impl Settings {
@@ -52,6 +79,17 @@ impl Settings {
     /// deployment config, and serving the whole app at a subtly wrong path is
     /// worse than not starting (the same reasoning as `deny_unknown_fields`).
     pub fn resolve(args: super::args::Args, file: ConfigFile) -> Result<Settings, String> {
+        let auth = file
+            .auth
+            .map(|a| {
+                super::auth::Auth::new(
+                    a.username,
+                    a.password_hash,
+                    a.api_token,
+                    a.secure_cookie.unwrap_or(true),
+                )
+            })
+            .transpose()?;
         Ok(Settings {
             db: args.db.or(file.db).unwrap_or_else(|| DEFAULT_DB.into()),
             backup_dir: args.backup_dir.or(file.backup_dir),
@@ -63,6 +101,7 @@ impl Settings {
             port: args.port.or(file.port).unwrap_or(DEFAULT_PORT),
             base_path: normalise_base_path(args.base_path.or(file.base_path).as_deref())?,
             schedule: args.schedule.or(file.schedule),
+            auth,
         })
     }
 }
@@ -144,6 +183,7 @@ mod tests {
                 port: 3000,
                 base_path: String::new(),
                 schedule: None,
+                auth: None,
             }
         );
         // The default host must parse to a bindable address (the server has no
@@ -289,6 +329,59 @@ mod tests {
     }
 
     #[test]
+    fn auth_table_resolves_into_settings() {
+        let hash = crate::infra::auth::Auth::hash_password("hunter2").unwrap();
+        let file = parse(&format!(
+            r#"
+            [auth]
+            username = "evan"
+            password_hash = "{hash}"
+            api_token = "abc123"
+            secure_cookie = false
+            "#,
+        ));
+        let settings =
+            Settings::resolve(Args::parse_from(["share-tracker"]), file).expect("resolves");
+        assert!(settings.auth.is_some());
+    }
+
+    #[test]
+    fn no_auth_table_leaves_settings_auth_none() {
+        let settings = Settings::resolve(Args::parse_from(["share-tracker"]), parse("port = 8080"))
+            .expect("resolves");
+        assert!(settings.auth.is_none());
+    }
+
+    #[test]
+    fn an_unparseable_password_hash_fails_resolution_naming_the_field() {
+        let file = parse(
+            r#"
+            [auth]
+            username = "evan"
+            password_hash = "not a phc string"
+            "#,
+        );
+        let err = Settings::resolve(Args::parse_from(["share-tracker"]), file)
+            .err()
+            .unwrap();
+        assert!(err.contains("password_hash"), "{err}");
+    }
+
+    #[test]
+    fn auth_table_rejects_unknown_keys() {
+        let err = toml::from_str::<ConfigFile>(
+            r#"
+            [auth]
+            username = "evan"
+            password_hash = "x"
+            typo_field = "x"
+            "#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("typo_field"), "{err}");
+    }
+
+    #[test]
     fn unknown_key_is_rejected() {
         // A typo must fail loudly, never silently fall back to a default.
         let err = toml::from_str::<ConfigFile>("prot = 8080").unwrap_err();
@@ -353,6 +446,15 @@ mod tests {
         assert!(
             SAMPLE.contains("# base_path = "),
             "sample should document base_path as a commented-out example"
+        );
+        // [auth] is commented out too: the server is open by default, and a
+        // commented example (rather than a fabricated active hash) is the
+        // only honest way to document the setting without shipping a
+        // password nobody chose.
+        assert!(sample.auth.is_none());
+        assert!(
+            SAMPLE.contains("# [auth]"),
+            "sample should document the [auth] table as a commented-out example"
         );
     }
 }

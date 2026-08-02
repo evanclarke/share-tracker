@@ -44,6 +44,25 @@ pub struct Args {
     /// Path to a cron schedule file overriding the built-in default (`schedule.cron`).
     #[arg(long)]
     pub schedule: Option<String>,
+    /// A helper subcommand (`hash-password`, `gen-token`) instead of running
+    /// the server. `None` — the ordinary "run the server" path — when no
+    /// subcommand is given.
+    #[command(subcommand)]
+    pub command: Option<Command>,
+}
+
+/// One-off helpers for populating `[auth]` in the config file. Neither reads
+/// or writes the config itself — each just prints a value to paste in by
+/// hand, so the deliberate absence of `--auth-*` flags (a secret on argv is
+/// visible via `ps`) doesn't leave the operator with no way to generate one.
+#[derive(clap::Subcommand)]
+pub enum Command {
+    /// Hash a password for `[auth].password_hash`. Reads the password from
+    /// stdin (never as an argument, which `ps`/shell history would expose)
+    /// and prints the Argon2id PHC string to stdout.
+    HashPassword,
+    /// Print 32 random bytes as hex, for `[auth].api_token`.
+    GenToken,
 }
 
 #[cfg(test)]
@@ -64,6 +83,19 @@ mod tests {
         assert_eq!(args.port, None);
         assert_eq!(args.base_path, None);
         assert_eq!(args.schedule, None);
+        assert!(args.command.is_none());
+    }
+
+    #[test]
+    fn hash_password_subcommand_parses() {
+        let args = Args::parse_from(["share-tracker", "hash-password"]);
+        assert!(matches!(args.command, Some(Command::HashPassword)));
+    }
+
+    #[test]
+    fn gen_token_subcommand_parses() {
+        let args = Args::parse_from(["share-tracker", "gen-token"]);
+        assert!(matches!(args.command, Some(Command::GenToken)));
     }
 
     #[test]

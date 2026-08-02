@@ -17,7 +17,7 @@ import {
   roundDecimalStr, groupThousands, padMinDp, decStrEq, numericDisplay,
   addDecimalStrings, decParts, mulToCents, frankingCreditFor, decEq,
   looksNumeric, columnKinds, columnLabel, tradeOrigin, periodReturnPct,
-  holdingHasActivity, loadPref, savePref, pathSeg, basePath, apiUrl,
+  holdingHasActivity, loadPref, savePref, pathSeg, basePath, apiUrl, authEnabled,
 } from './util.js';
 
 // ---- roundDecimalStr ----------------------------------------------------
@@ -410,6 +410,41 @@ test('a document without the meta tag means the root, not undefined', () => {
   try {
     assert.equal(basePath(), '');
     assert.equal(apiUrl('/listings'), '/listings');
+  } finally {
+    delete globalThis.document;
+  }
+});
+
+// ---- authEnabled ----------------------------------------------------------
+// Read from the shell's <meta name="auth"> the same way basePath reads
+// <meta name="base-path"> — see src/web.rs's index_html.
+test('authEnabled is false without a document', () => {
+  assert.equal(authEnabled(), false);
+});
+
+test('authEnabled is false when the meta tag is absent or empty', () => {
+  globalThis.document = { querySelector: () => null };
+  try {
+    assert.equal(authEnabled(), false);
+  } finally {
+    delete globalThis.document;
+  }
+  globalThis.document = {
+    querySelector: (sel) => (sel === 'meta[name="auth"]' ? { getAttribute: () => '' } : null),
+  };
+  try {
+    assert.equal(authEnabled(), false);
+  } finally {
+    delete globalThis.document;
+  }
+});
+
+test('authEnabled is true when the shell published [auth] as configured', () => {
+  globalThis.document = {
+    querySelector: (sel) => (sel === 'meta[name="auth"]' ? { getAttribute: () => '1' } : null),
+  };
+  try {
+    assert.equal(authEnabled(), true);
   } finally {
     delete globalThis.document;
   }

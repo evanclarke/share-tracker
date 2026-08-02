@@ -4,6 +4,7 @@ use axum::{Extension, Router};
 use sqlx::SqlitePool;
 
 use crate::entities::closing_price::SharedFetcher;
+use crate::infra::auth::Auth;
 use crate::infra::scheduler::{self, JobRegistry};
 
 /// Build the HTTP router: the web frontend plus all entity and report routes and
@@ -19,19 +20,44 @@ use crate::infra::scheduler::{self, JobRegistry};
 /// the prefix keeps routing and the URLs the frontend emits in agreement: the
 /// app serves the same paths the browser asks for, so a prefixed deployment is
 /// reachable (and testable) without a proxy in front of it.
+///
+/// `auth` is `None` (the default) when `[auth]` is absent from config: the
+/// whole surface then serves exactly as it did before `infra::auth` existed —
+/// no `/login` route, no gate on anything else. `Some` merges the login/logout
+/// routes and applies `infra::auth::require_auth` in front of everything else
+/// merged here (including the web frontend and its `/static` assets, except
+/// the small unauthenticated allowlist `require_auth` itself carves out).
 pub fn router(
     base_path: &str,
     pool: SqlitePool,
     registry: JobRegistry,
     fetcher: SharedFetcher,
+    auth: Option<Auth>,
 ) -> Router {
-    let app = crate::entities::router()
+    let mut app = crate::entities::router()
         .merge(crate::reports::router())
         .merge(scheduler::router())
-        .merge(crate::web::router(base_path))
+        .merge(crate::web::router(base_path, auth.is_some()));
+    if let Some(auth) = &auth {
+        app = app.merge(crate::infra::auth::router(auth.clone(), base_path));
+    }
+    let app = app
         .with_state(pool)
         .layer(Extension(registry))
         .layer(Extension(fetcher));
+    // Applied after the two `Extension` layers (order between `Extension`
+    // layers never matters) and, critically, before the `nest` below: `nest`
+    // strips `base_path` from the request before delegating to `app`, so
+    // `require_auth` — layered onto `app` itself — sees the *unprefixed*
+    // path, matching the plain `"/login"`/`"/static/style.css"` strings its
+    // allowlist checks against.
+    let app = match auth {
+        Some(auth) => app.layer(axum::middleware::from_fn_with_state(
+            crate::infra::auth::AuthState::new(auth, base_path.to_string()),
+            crate::infra::auth::require_auth,
+        )),
+        None => app,
+    };
     if base_path.is_empty() {
         return app;
     }
@@ -59,13 +85,16 @@ pub fn router(
 
 #[cfg(test)]
 mod tests {
+    use crate::infra::auth::Auth;
     use crate::test_support::{ApiClient, test_pool};
     use axum::http::StatusCode;
     use sqlx::SqlitePool;
 
     /// The full application mounted under a reverse-proxy prefix, as `main`
-    /// builds it when `base_path` is set.
-    fn prefixed(pool: &SqlitePool) -> ApiClient {
+    /// builds it when `base_path` is set. `auth` mirrors `router`'s own
+    /// parameter — `None` for the base-path-only tests below,
+    /// `Some` for the one combining a prefix with `[auth]` configured.
+    fn prefixed(pool: &SqlitePool, auth: Option<Auth>) -> ApiClient {
         let fetcher = crate::entities::closing_price::test_support::QuoteStub::default().shared();
         let registry = crate::infra::scheduler::registry(
             pool.clone(),
@@ -79,13 +108,14 @@ mod tests {
             pool.clone(),
             registry,
             fetcher,
+            auth,
         ))
     }
 
     #[tokio::test]
     async fn a_base_path_moves_the_whole_application_under_the_prefix() {
         let pool = test_pool().await;
-        let client = prefixed(&pool);
+        let client = prefixed(&pool, None);
 
         // The SPA shell at the prefix itself.
         let resp = client.get("/share_tracker").await;
@@ -117,7 +147,7 @@ mod tests {
         // Nothing is served at the root: the proxy passes the prefix through,
         // so a request without it is not this application's.
         let pool = test_pool().await;
-        let client = prefixed(&pool);
+        let client = prefixed(&pool, None);
         for uri in ["/", "/static/app.js", "/listings", "/jobs"] {
             assert_eq!(client.get(uri).await.status, StatusCode::NOT_FOUND, "{uri}");
         }
@@ -125,11 +155,127 @@ mod tests {
 
     #[tokio::test]
     async fn an_empty_base_path_serves_everything_at_the_root() {
-        // The default: byte-for-byte the pre-base-path behaviour.
+        // The default: byte-for-byte the pre-base-path behaviour. Also pins
+        // the `auth: None` default end to end: `ApiClient::full` passes
+        // `None`, so every route (including ones an auth-enabled deployment
+        // would gate) is open with no credential in play.
         let pool = test_pool().await;
         let client = ApiClient::full(&pool);
         for uri in ["/", "/static/app.js", "/listings", "/jobs"] {
             assert_eq!(client.get(uri).await.status, StatusCode::OK, "{uri}");
+        }
+    }
+
+    #[tokio::test]
+    async fn no_auth_configured_means_no_login_route_at_all() {
+        // `infra::auth::router` is only merged in when `auth` is `Some` — so
+        // with the default `None`, `/login` isn't a 401/redirect, it simply
+        // doesn't exist.
+        let pool = test_pool().await;
+        let client = ApiClient::full(&pool);
+        assert_eq!(client.get("/login").await.status, StatusCode::NOT_FOUND);
+    }
+
+    fn test_auth() -> Auth {
+        Auth::new(
+            "evan".to_string(),
+            Auth::hash_password("hunter2").unwrap(),
+            None,
+            false,
+        )
+        .unwrap()
+    }
+
+    /// The two deployment knobs (`base_path`, `[auth]`) combine correctly:
+    /// the redirect a browser gets when unauthenticated lands on the
+    /// *prefixed* login route, and the session cookie minted on login is
+    /// scoped (`Path=`) to the prefix rather than the root — both built from
+    /// `base_path` inside `infra::auth`, since `require_auth` itself only
+    /// ever sees the request with the prefix already stripped by `nest`.
+    #[tokio::test]
+    async fn an_authenticated_base_path_deployment_redirects_and_scopes_the_cookie_to_the_prefix() {
+        let pool = test_pool().await;
+        let client = prefixed(&pool, Some(test_auth())).with_header("Accept", "text/html");
+
+        let resp = client.get("/share_tracker/listings").await;
+        assert_eq!(resp.status, StatusCode::SEE_OTHER);
+        assert_eq!(
+            resp.headers.get(axum::http::header::LOCATION).unwrap(),
+            "/share_tracker/login"
+        );
+
+        let login = client
+            .post_bytes(
+                "/share_tracker/login",
+                Some("application/x-www-form-urlencoded"),
+                "username=evan&password=hunter2",
+            )
+            .await;
+        assert_eq!(login.status, StatusCode::SEE_OTHER);
+        assert_eq!(
+            login.headers.get(axum::http::header::LOCATION).unwrap(),
+            "/share_tracker"
+        );
+        let set_cookie = login
+            .headers
+            .get(axum::http::header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(
+            set_cookie.contains("Path=/share_tracker;"),
+            "cookie not scoped to the prefix: {set_cookie}"
+        );
+    }
+
+    /// `require_auth` is layered onto the merged router before `nest`, so it
+    /// covers everything nested under the prefix — one route from each of
+    /// the entity, report, scheduler and web routers merged in `router`,
+    /// mirroring `a_base_path_moves_the_whole_application_under_the_prefix`'s
+    /// own route list but proving each one is actually gated rather than
+    /// just reachable.
+    #[tokio::test]
+    async fn auth_gates_one_route_from_every_merged_router() {
+        let pool = test_pool().await;
+        let client = prefixed(&pool, Some(test_auth()));
+        for uri in [
+            "/share_tracker/static/app.js",
+            "/share_tracker/listings",
+            "/share_tracker/reports/health",
+            "/share_tracker/jobs",
+        ] {
+            assert_eq!(
+                client.get(uri).await.status,
+                StatusCode::UNAUTHORIZED,
+                "{uri}"
+            );
+        }
+
+        let login = client
+            .post_bytes(
+                "/share_tracker/login",
+                Some("application/x-www-form-urlencoded"),
+                "username=evan&password=hunter2",
+            )
+            .await;
+        let cookie = login
+            .headers
+            .get(axum::http::header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_string();
+        let authed = client.with_header("Cookie", cookie);
+        for uri in [
+            "/share_tracker/static/app.js",
+            "/share_tracker/listings",
+            "/share_tracker/reports/health",
+            "/share_tracker/jobs",
+        ] {
+            assert_eq!(authed.get(uri).await.status, StatusCode::OK, "{uri}");
         }
     }
 }

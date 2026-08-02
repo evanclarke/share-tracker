@@ -93,20 +93,36 @@ pre_upgrade_backup() {
   CONF="${CONF:-/usr/local/etc/share-tracker.toml}"
   HOST="127.0.0.1"
   PORT="3000"
+  AUTH_HEADER=""
   if [ -f "$CONF" ]; then
     CONF_HOST=$(toml_value host "$CONF")
     CONF_PORT=$(toml_value port "$CONF")
     [ -n "$CONF_HOST" ] && HOST="$CONF_HOST"
     [ -n "$CONF_PORT" ] && PORT="$CONF_PORT"
+    # [auth].api_token, if configured (see the README's "Authentication"
+    # section) — toml_value matches by key name anywhere in the file, and
+    # api_token appears only under [auth], so no section-awareness is needed.
+    CONF_TOKEN=$(toml_value api_token "$CONF")
+    [ -n "$CONF_TOKEN" ] && AUTH_HEADER="Authorization: Bearer $CONF_TOKEN"
   fi
   # 0.0.0.0 means "listen on every interface", not a reachable address —
   # talk to it over loopback like everything else on this host does.
   [ "$HOST" = "0.0.0.0" ] && HOST="127.0.0.1"
 
   echo "taking pre-upgrade backup (suffix pre-$WANT) via http://$HOST:$PORT ..."
-  if ! curl -fsS -m 900 -X POST \
-      "http://$HOST:$PORT/jobs/backup?suffix=pre-$WANT" >/dev/null; then
+  # Built as positional params (POSIX sh has no arrays) so the optional
+  # -H "Authorization: Bearer ..." pair is passed as one argument to curl
+  # rather than risking it being re-split by the shell.
+  set -- curl -fsS -m 900 -X POST
+  [ -n "$AUTH_HEADER" ] && set -- "$@" -H "$AUTH_HEADER"
+  set -- "$@" "http://$HOST:$PORT/jobs/backup?suffix=pre-$WANT"
+  if ! "$@" >/dev/null; then
     echo "pre-upgrade backup failed; aborting upgrade (database untouched)." >&2
+    if [ -z "$AUTH_HEADER" ] && grep -q '^\[auth\]' "$CONF" 2>/dev/null; then
+      echo "[auth] is configured but no api_token was found in it — add one" >&2
+      echo "(share-tracker gen-token) so this script can authenticate, or" >&2
+      echo "re-run with --no-backup." >&2
+    fi
     echo "see /var/log/share-tracker.log and GET /jobs for the reason." >&2
     exit 1
   fi
