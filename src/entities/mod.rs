@@ -5,6 +5,7 @@ use axum::Router;
 use sqlx::SqlitePool;
 
 pub mod amit_adjustment;
+pub mod amit_adjustment_generation;
 pub mod amma;
 pub mod attachment;
 pub mod buyback_participation;
@@ -55,6 +56,7 @@ pub fn router() -> Router<SqlitePool> {
         .merge(parcel_allocation::router())
         .merge(sell::router())
         .merge(amit_adjustment::router())
+        .merge(amit_adjustment_generation::router())
         .merge(drp_enrolment::router())
         .merge(cgt_settings::router())
         .merge(closing_price::router())

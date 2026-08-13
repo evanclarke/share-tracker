@@ -897,6 +897,11 @@ async function viewAction(action, id) {
         });
         if (allocEditor) body.allocations = allocEditor.read();
       }
+      // An action may gate its POST behind a confirmation built from the
+      // assembled body — e.g. the AMMA generation's preview, which asks the
+      // server what it would create and shows it before anything is written.
+      // Answering false cancels the submit, leaving the form as it was.
+      if (action.confirm && !await action.confirm(action.post(id), body)) return;
       const result = await api('POST', action.post(id), body);
       toast(action.toast(result, listingName, owner));
       location.hash = action.cancel;

@@ -12,8 +12,9 @@
 //! The core financial sections (the disposal schedule, the CGT summary, the
 //! year's [`super::tax_summary::TaxYearSummary`] line) read on one
 //! `pool.begin()` transaction, per the house rule for multi-query reports.
-//! The completeness section's two existing cross-checks
-//! ([`super::amit_cash_cross_check`], [`super::e4_cross_check`]) and the
+//! The completeness section's three existing cross-checks
+//! ([`super::amit_cash_cross_check`], [`super::e4_cross_check`],
+//! [`super::amit_adjustment_cross_check`]) and the
 //! per-record income/franking detail deliberately read on their own
 //! snapshots (their existing pool-based `db_*` functions) rather than folding
 //! into that transaction: they are advisory notes and per-record detail rows
@@ -31,8 +32,8 @@ use crate::infra::fx::FxRates;
 use crate::infra::http::ApiError;
 use crate::reports::realised_gains::DisposalSource;
 use crate::reports::{
-    activity, amit_cash_cross_check, e4_cross_check, franking_at_risk, net_capital_gain,
-    realised_gains, tax_summary,
+    activity, amit_adjustment_cross_check, amit_cash_cross_check, e4_cross_check, franking_at_risk,
+    net_capital_gain, realised_gains, tax_summary,
 };
 use axum::{
     Json, Router,
@@ -93,6 +94,11 @@ pub struct Completeness {
     pub amma_missing: Vec<AmmaMissingAlert>,
     pub amit_cash_alerts: Vec<amit_cash_cross_check::AmitCashAlert>,
     pub e4_alerts: Vec<e4_cross_check::E4CrossCheckAlert>,
+    /// AMMA statements for this year whose per-parcel AMIT adjustment set
+    /// does not reconcile to the statement. An adjustment gap distorts the
+    /// disposal schedule's cost base — this report's central figure — so it
+    /// belongs to the gate the completeness section is.
+    pub amit_adjustment_alerts: Vec<amit_adjustment_cross_check::AmitAdjustmentAlert>,
 }
 
 /// Every AMIT listing with a non-zero opening balance at the start of the
@@ -1125,14 +1131,22 @@ pub async fn db_tax_report(pool: &SqlitePool, tax_year: i32) -> Result<TaxReport
         .into_iter()
         .filter(|a| a.tax_year == tax_year)
         .collect();
+    let amit_adjustment_alerts: Vec<_> =
+        amit_adjustment_cross_check::db_amit_adjustment_alerts(pool)
+            .await?
+            .into_iter()
+            .filter(|a| a.tax_year == tax_year)
+            .collect();
 
     let completeness = Completeness {
         complete: amma_missing_alerts.is_empty()
             && amit_cash_alerts.is_empty()
-            && e4_alerts.is_empty(),
+            && e4_alerts.is_empty()
+            && amit_adjustment_alerts.is_empty(),
         amma_missing: amma_missing_alerts,
         amit_cash_alerts,
         e4_alerts,
+        amit_adjustment_alerts,
     };
 
     let summary_row = all_years_summary
@@ -1550,6 +1564,55 @@ mod tests {
         let report2 = db_tax_report(&pool, 2024).await.unwrap();
         assert!(report2.completeness.amma_missing.is_empty());
         assert!(report2.completeness.complete);
+    }
+
+    /// An AMMA statement whose per-parcel AMIT adjustments are missing drops
+    /// `complete` to false and is listed — the gap distorts the disposal
+    /// schedule's cost base, the report's central figure — and generating
+    /// them clears it. Filtered to the report's year like the other two
+    /// cross-checks.
+    #[tokio::test]
+    async fn amit_adjustment_gap_is_flagged_and_clears_once_generated() {
+        let pool = test_support::test_pool().await;
+        listing_amit(&pool, 1, "AMT").await;
+        test_support::buy(1, 1)
+            .date(ymd(2023, 8, 1))
+            .qty(dec("100"))
+            .price(dec("10"))
+            .insert(&pool)
+            .await;
+        test_support::amma(1, 1)
+            .units(dec("100"))
+            .cost_base_adjustment(dec("0.05"))
+            .with(|a| a.tax_year_end_date = ymd(2024, 6, 30))
+            .insert(&pool)
+            .await;
+
+        let report = db_tax_report(&pool, 2024).await.unwrap();
+        assert!(!report.completeness.complete);
+        assert_eq!(report.completeness.amit_adjustment_alerts.len(), 1);
+        assert_eq!(
+            report.completeness.amit_adjustment_alerts[0].amma_statement_id,
+            1
+        );
+        // The AMMA statement itself is entered, so the other checks are quiet
+        // — this is the gap only the set-level check sees.
+        assert!(report.completeness.amma_missing.is_empty());
+
+        // Another year's report doesn't carry it.
+        let other = db_tax_report(&pool, 2025).await.unwrap();
+        assert!(other.completeness.amit_adjustment_alerts.is_empty());
+
+        crate::entities::amit_adjustment_generation::db_generate(
+            &pool,
+            1,
+            &crate::entities::amit_adjustment_generation::GenerateBody::default(),
+        )
+        .await
+        .unwrap();
+        let cleared = db_tax_report(&pool, 2024).await.unwrap();
+        assert!(cleared.completeness.amit_adjustment_alerts.is_empty());
+        assert!(cleared.completeness.complete);
     }
 
     /// A listing bought and fully sold before the requested year (nothing

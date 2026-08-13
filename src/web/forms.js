@@ -8,6 +8,7 @@
 import {
   el, api, toast, loadOptions, listingNamer, describeTrade,
   addDecimalStrings, decParts, mulToCents, frankingCreditFor, decEq,
+  confirmGeneratedAdjustments,
 } from './util.js';
 
 // ---- field constructors ----------------------------------------------
@@ -282,6 +283,57 @@ export function wireIncomeEntry(form, existing) {
         return trade ? 'Saved and reinvested into ' + describeTrade(trade, listingName) + ' (trade #' + trade.id + ').' : 'Saved and reinvested.';
       } catch (e) {
         toast('Income saved, but the reinvestment failed — ' + e.message + '. Retry from the row’s Reinvest action.', true);
+        return '';
+      }
+    },
+  };
+}
+
+// The AMMA statement form's chain-after-save: entering the statement is only
+// half the entry — its per-unit cost base adjustment reaches no parcel until
+// the per-parcel `amit_adjustments` rows exist, and typing 30 of them by hand
+// is where a set goes wrong. Same shape as the income form's "Reinvested
+// under DRP" tick, with one addition: the generation is previewed and
+// confirmed first (units against the statement's `units_held`), because the
+// question it answers — "are the current positions correct?" — is one only
+// the user can settle. Ticked by default on a new statement (generating is
+// the intended path); off when editing one, which usually already has its
+// adjustments, with a Replace tick for the re-run.
+export function wireAmmaEntry(form, existing) {
+  const genFlag = el('input', { id: 'f_generate_adjustments', name: 'generate_adjustments', type: 'checkbox' });
+  genFlag.checked = !existing;
+  const replaceFlag = el('input', { id: 'f_replace_adjustments', name: 'replace_adjustments', type: 'checkbox' });
+  const replaceField = el('div', { class: 'field' }, [
+    el('label', { for: 'f_replace_adjustments' }, 'Replace existing adjustments'),
+    replaceFlag,
+    el('div', { class: 'hint' }, 'Needed when the statement already has adjustments — they are deleted and regenerated in one transaction. The usual repair after entering a trade that was missing.'),
+  ]);
+  form.appendChild(el('div', { class: 'field' }, [
+    el('label', { for: 'f_generate_adjustments' }, 'Generate AMIT adjustments'),
+    genFlag,
+    el('div', { class: 'hint' }, 'After saving, creates one AMIT adjustment per parcel held at the tax year end, in this statement’s holding account. You confirm the parcels and their total against the units held above before anything is written.'),
+  ]));
+  form.appendChild(replaceField);
+  function applyGen() { replaceField.style.display = genFlag.checked ? '' : 'none'; }
+  genFlag.addEventListener('change', applyGen);
+  applyGen();
+
+  return {
+    afterSave: async function (id) {
+      if (!genFlag.checked) return null;
+      const path = '/amma_statements/' + id + '/generate_adjustments';
+      const body = { replace: replaceFlag.checked };
+      try {
+        if (!await confirmGeneratedAdjustments(path, body)) {
+          return 'Saved. AMIT adjustments not generated — run Generate adjustments from the statement’s row when you are ready.';
+        }
+        const result = await api('POST', path, body);
+        return 'Saved and generated ' + result.created.length + ' AMIT adjustment(s) covering '
+          + result.units_adjusted + ' unit(s)'
+          + (decEq(result.difference, '0') ? '.' : ' — ' + result.difference + ' against the statement’s units held.');
+      } catch (e) {
+        toast('AMMA statement saved, but generating the AMIT adjustments failed — ' + e.message
+          + '. Retry from the row’s Generate adjustments action.', true);
         return '';
       }
     },

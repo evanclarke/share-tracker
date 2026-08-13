@@ -18,6 +18,7 @@ import {
   addDecimalStrings, decParts, mulToCents, frankingCreditFor, decEq,
   looksNumeric, columnKinds, columnLabel, tradeOrigin, periodReturnPct,
   holdingHasActivity, loadPref, savePref, pathSeg, basePath, apiUrl, authEnabled,
+  cellText, adjustmentPreviewText,
 } from './util.js';
 
 // ---- roundDecimalStr ----------------------------------------------------
@@ -448,4 +449,53 @@ test('authEnabled is true when the shell published [auth] as configured', () => 
   } finally {
     delete globalThis.document;
   }
+});
+
+
+// ---- cellText -----------------------------------------------------------
+test('cellText renders a list-valued cell as sentences, not a comma run-on', () => {
+  assert.equal(cellText(['first problem.', 'second problem.']), 'first problem. · second problem.');
+  assert.equal(cellText([]), '');
+  // Everything else is unchanged.
+  assert.equal(cellText(null), '');
+  assert.equal(cellText(true), 'yes');
+  assert.equal(cellText('1234.5'), '1234.5');
+});
+
+// ---- adjustmentPreviewText ----------------------------------------------
+const PARCELS = { 18: 'Buy 509 XASX:HNDQ on 2024-02-28', 19: 'Buy 1302 XASX:HNDQ on 2024-03-01' };
+const label = (id) => PARCELS[id] || 'trade #' + id;
+
+test('a reconciling generation preview lists the parcels and says the totals match', () => {
+  const text = adjustmentPreviewText({
+    created: [
+      { trade_id: 18, quantity: '509' },
+      { trade_id: 19, quantity: '1302' },
+    ],
+    units_adjusted: '1811', units_held: '1811', difference: '0',
+  }, label);
+  assert.match(text, /Create 2 AMIT adjustment/);
+  assert.match(text, /Buy 509 XASX:HNDQ on 2024-02-28 — 509/);
+  assert.match(text, /Buy 1302 XASX:HNDQ on 2024-03-01 — 1302/);
+  assert.match(text, /Adjusted units 1811 vs the statement’s units held 1811 — they match\./);
+  assert.doesNotMatch(text, /MISMATCH/);
+});
+
+test('a mismatch is spelled out, not folded into the total', () => {
+  const text = adjustmentPreviewText({
+    created: [{ trade_id: 18, quantity: '509' }],
+    units_adjusted: '509', units_held: '1811', difference: '-1302',
+  }, label);
+  assert.match(text, /MISMATCH of -1302 units/);
+  assert.match(text, /AMIT Adjustment Cross-Check/);
+});
+
+test('a zero difference written with decimals still reads as matching', () => {
+  const text = adjustmentPreviewText({
+    created: [{ trade_id: 99, quantity: '10.5' }],
+    units_adjusted: '10.50', units_held: '10.5', difference: '0.00',
+  }, label);
+  assert.match(text, /they match\./);
+  // An unlabelled parcel falls back to its id rather than "undefined".
+  assert.match(text, /trade #99 — 10\.5/);
 });

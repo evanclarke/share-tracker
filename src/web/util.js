@@ -113,6 +113,9 @@ export function utcTooltip(v) {
 export function cellText(v) {
   if (v == null) return '';
   if (typeof v === 'boolean') return v ? 'yes' : 'no';
+  // A list-valued cell (the AMIT adjustment cross-check's `problems`) reads
+  // as sentences, not as `String(array)`'s comma run-on.
+  if (Array.isArray(v)) return v.join(' · ');
   if (isTimestamp(v)) return fmtLocalTimestamp(v);
   return String(v);
 }
@@ -398,6 +401,44 @@ export function tradeOrigin(t) {
   return '';
 }
 
+// The confirm text for an AMMA statement's AMIT-adjustment generation: the
+// parcels it will cover, and Σ of their units against what the statement says
+// was held. That comparison is the whole point of previewing — "are the
+// current positions correct?" is checkable here rather than assumed — so a
+// mismatch is spelled out rather than folded into a total. Pure (no DOM, no
+// fetch) so it is unit-tested; `parcelLabel` names a trade id.
+export function adjustmentPreviewText(result, parcelLabel) {
+  const lines = result.created.map(function (a) {
+    return '  • ' + parcelLabel(a.trade_id) + ' — ' + a.quantity;
+  });
+  const totals = 'Adjusted units ' + result.units_adjusted
+    + ' vs the statement’s units held ' + result.units_held;
+  const verdict = decStrEq(result.difference, '0')
+    ? ' — they match.'
+    : '\n\n⚠ MISMATCH of ' + result.difference + ' units. Check the holdings are complete '
+      + 'before proceeding — the AMIT Adjustment Cross-Check will keep this statement flagged '
+      + 'until it is resolved.';
+  return ['Create ' + result.created.length
+    + ' AMIT adjustment(s) from the parcels held at the statement’s year end:']
+    .concat(lines)
+    .concat(['', totals + verdict, '', 'Proceed?'])
+    .join('\n');
+}
+
+// Preview an AMIT-adjustment generation and ask the user to confirm it,
+// answering whether to go ahead. The preview POST writes nothing but answers
+// the same 422 the write would, so a refusal surfaces here rather than after
+// the confirmation. Shared by the AMMA form's chain-after-save tick and the
+// standing Generate action (config.js `confirm`).
+export async function confirmGeneratedAdjustments(path, body) {
+  const preview = await api('POST', path, Object.assign({}, body || {}, { preview: true }));
+  const byId = {};
+  (await loadOptions('buyParcels')).forEach(function (p) { byId[p.value] = p.label; });
+  return window.confirm(adjustmentPreviewText(preview, function (id) {
+    return byId[id] || 'trade #' + id;
+  }));
+}
+
 // Human-readable labels for foreign-key id columns: the stored id keeps
 // driving the API (and edit-form selects), but tables/prose show the
 // referenced row's natural name (e.g. "XNYS:ICE", "CHESS Personal",
@@ -551,6 +592,8 @@ const COLUMN_KINDS = (function () {
     'quantity', 'quantity_allocated', 'securities_held', 'units_held', 'units',
     'original_quantity', 'remaining_quantity', 'quantity_held', 'cgt_discount_eligible_quantity',
     'split_new_units', 'split_old_units', 'bonus_units', 'bonus_held_units',
+    // AMIT adjustment cross-check: the statement's units against the set's.
+    'units_adjusted',
     'rights_units', 'rights_held_units', 'scrip_new_units', 'scrip_old_units',
     'demerger_new_units', 'demerger_held_units',
     // Wash-sale and franking at-risk report unit columns.

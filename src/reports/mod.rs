@@ -14,6 +14,7 @@ use sqlx::SqlitePool;
 pub const TAXPAYER_BASIS: &str = "individual resident: 50% CGT discount; 50% LIC deduction";
 
 pub mod activity;
+pub mod amit_adjustment_cross_check;
 pub mod amit_cash_cross_check;
 pub mod attachments;
 pub mod e4_cross_check;
@@ -84,6 +85,7 @@ pub fn router() -> Router<SqlitePool> {
         .merge(mic_validation::router())
         .merge(settlement_coverage::router())
         .merge(e4_cross_check::router())
+        .merge(amit_adjustment_cross_check::router())
         .merge(amit_cash_cross_check::router())
         .merge(wash_sales::router())
         .merge(row_history::router())

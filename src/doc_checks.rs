@@ -133,6 +133,50 @@ fn amit_cash_only_rows_documented() {
     assert!(README_MD.contains("**AMIT cash cross-check**"));
 }
 
+/// Docs-sync pin for AMIT adjustment cross-check and generation
+/// (REQUIREMENTS 2026-08-13): the API documents the generation endpoint with
+/// each of its refusals, the cross-check report, the write-time duplicate
+/// rejection, and the annual tax report's now-four-part completeness; the
+/// schema records the UNIQUE index that backs the invariant; the README
+/// surfaces the feature and the completeness wording.
+#[test]
+fn amit_adjustment_generation_and_cross_check_documented() {
+    // The generation endpoint, its reconciliation-not-invariant stance, and
+    // its preview mode.
+    assert!(API_MD.contains("### Generating AMIT adjustments"));
+    assert!(API_MD.contains("POST /amma_statements/:id/generate_adjustments"));
+    assert!(API_MD.contains("does not block the write"));
+    assert!(API_MD.contains(r#"`"preview": true` computes the same result and writes nothing"#));
+    // Each 422 refusal.
+    assert!(API_MD.contains("**already has adjustments**"));
+    assert!(API_MD.contains("**no parcels** of the statement's listing were open"));
+    assert!(API_MD.contains("**share split** falls between the covered parcels'"));
+    // The write-time duplicate invariant and the index behind it.
+    assert!(
+        API_MD.contains("**another row already adjusts the same parcel on the same statement**")
+    );
+    assert!(SCHEMA_MD.contains("UNIQUE (amma_statement_id, trade_id)"));
+    // The cross-check report's own section, with each of its four checks.
+    assert!(API_MD.contains("### AMIT adjustment cross-check"));
+    assert!(API_MD.contains("GET /reports/amit_adjustment_cross_check"));
+    for check in [
+        "**no adjustments at all**",
+        "**coverage mismatch**",
+        "**duplicate parcel**",
+        "**parcel outside the statement's year**",
+    ] {
+        assert!(API_MD.contains(check), "missing cross-check bullet {check}");
+    }
+    // The annual tax report's completeness gate is now four lists, and stays
+    // non-blocking.
+    assert!(API_MD.contains("`amit_adjustment_alerts`"));
+    assert!(API_MD.contains("`complete` is true only when all four are empty"));
+    assert!(API_MD.contains("**`completeness`** — non-blocking (never rejects the request)"));
+    // README: the feature line and the completeness wording.
+    assert!(README_MD.contains("**AMIT adjustment generation and cross-check**"));
+    assert!(README_MD.contains("per-parcel AMIT adjustments reconcile to it"));
+}
+
 #[test]
 fn known_limitations_document_gifts_at_market_value() {
     let limitations = known_limitations();

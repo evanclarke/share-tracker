@@ -199,7 +199,10 @@ amit_adjustments             Links a purchase parcel to an AMMA statement
 ├── id                   INTEGER PK
 ├── amma_statement_id    INTEGER FK→amma_statements.id
 ├── trade_id             INTEGER FK→trades.id  Must be Buy or DRP
-└── quantity             TEXT (decimal)       Units of the parcel covered by the adjustment
+└── quantity             TEXT (decimal)       Units of the parcel covered by the adjustment, in the parcel's as-acquired units
+UNIQUE (amma_statement_id, trade_id)  One adjustment per statement per parcel: two rows for the same parcel would
+                                      apply the statement's per-unit cost_base_adjustment to it twice, and CGT event
+                                      E10's nil floor turns an over-reduction into a capital gain never made
 
 ess_statements               Employee share scheme statements — the income side of an ESS interest (Item 12 discount, declared in the year of the taxing point)
 ├── id                          INTEGER PK

@@ -73,14 +73,29 @@ pub enum UpsertError {
     HoldingAccountMismatch,
     #[error("the adjusted quantity exceeds the trade's quantity")]
     QuantityExceedsTrade,
+    /// Another row already adjusts this parcel on this statement. Applying
+    /// the statement's per-unit figure to the same parcel twice reduces its
+    /// cost base twice, and CGT event E10's nil floor turns an over-reduction
+    /// into a capital gain that was never made — so this is a data-model
+    /// invariant, not an advisory cross-check. Also enforced by the
+    /// `amit_adjustments_statement_trade` UNIQUE index (migration 0022).
+    #[error("this parcel already has an adjustment on this AMMA statement")]
+    DuplicateParcel,
 }
 
-pub async fn db_upsert(pool: &SqlitePool, adj: &AmitAdjustment) -> Result<(), UpsertError> {
+/// [`db_upsert`] on a caller-supplied connection, so the AMMA statement's
+/// `generate_adjustments` operation can write a whole generated set inside
+/// one transaction and still go through the same per-row invariants (and the
+/// same `row_history` audit trail) as a hand-entered row.
+pub async fn db_upsert_on(
+    conn: &mut sqlx::SqliteConnection,
+    adj: &AmitAdjustment,
+) -> Result<(), UpsertError> {
     use crate::entities::trade::TradeType;
 
     let trade_type: TradeType = sqlx::query_scalar("SELECT trade_type FROM trades WHERE id = ?")
         .bind(adj.trade_id)
-        .fetch_one(pool)
+        .fetch_one(&mut *conn)
         .await?;
     if !trade_type.is_acquisition() {
         return Err(UpsertError::TradeNotBuyOrDrp);
@@ -89,12 +104,12 @@ pub async fn db_upsert(pool: &SqlitePool, adj: &AmitAdjustment) -> Result<(), Up
     let (trade_listing_id, trade_account_id): (i64, i64) =
         sqlx::query_as("SELECT listing_id, holding_account_id FROM trades WHERE id = ?")
             .bind(adj.trade_id)
-            .fetch_one(pool)
+            .fetch_one(&mut *conn)
             .await?;
     let (amma_listing_id, amma_account_id): (i64, i64) =
         sqlx::query_as("SELECT listing_id, holding_account_id FROM amma_statements WHERE id = ?")
             .bind(adj.amma_statement_id)
-            .fetch_one(pool)
+            .fetch_one(&mut *conn)
             .await?;
     if trade_listing_id != amma_listing_id {
         return Err(UpsertError::ListingMismatch);
@@ -107,13 +122,30 @@ pub async fn db_upsert(pool: &SqlitePool, adj: &AmitAdjustment) -> Result<(), Up
 
     let trade_qty: String = sqlx::query_scalar("SELECT quantity FROM trades WHERE id = ?")
         .bind(adj.trade_id)
-        .fetch_one(pool)
+        .fetch_one(&mut *conn)
         .await?;
     let trade_qty: Decimal = trade_qty
         .parse()
         .map_err(|_| UpsertError::Db(sqlx::Error::Decode("invalid trade quantity".into())))?;
     if adj.quantity > trade_qty {
         return Err(UpsertError::QuantityExceedsTrade);
+    }
+
+    // One adjustment per (statement, parcel): a second row for the same
+    // parcel would apply the statement's per-unit figure to it twice. Checked
+    // here so the rejection carries this module's own wording; the UNIQUE
+    // index behind it (migration 0022) is the backstop for any other writer.
+    let duplicate: Option<i64> = sqlx::query_scalar(
+        "SELECT id FROM amit_adjustments \
+         WHERE amma_statement_id = ? AND trade_id = ? AND id != ?",
+    )
+    .bind(adj.amma_statement_id)
+    .bind(adj.trade_id)
+    .bind(adj.id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    if duplicate.is_some() {
+        return Err(UpsertError::DuplicateParcel);
     }
 
     sqlx::query(
@@ -128,9 +160,14 @@ pub async fn db_upsert(pool: &SqlitePool, adj: &AmitAdjustment) -> Result<(), Up
     .bind(adj.amma_statement_id)
     .bind(adj.trade_id)
     .bind(Money(adj.quantity))
-    .execute(pool)
+    .execute(&mut *conn)
     .await?;
     Ok(())
+}
+
+pub async fn db_upsert(pool: &SqlitePool, adj: &AmitAdjustment) -> Result<(), UpsertError> {
+    let mut conn = pool.acquire().await?;
+    db_upsert_on(&mut conn, adj).await
 }
 
 /// Returns the total AMIT cost base reduction per purchase trade, keyed by `trade_id`.
@@ -255,6 +292,11 @@ impl From<UpsertError> for ApiError {
             UpsertError::QuantityExceedsTrade => {
                 ApiError::unprocessable("the adjusted quantity exceeds the trade's quantity")
             }
+            UpsertError::DuplicateParcel => ApiError::unprocessable(
+                "this parcel already has an adjustment on this AMMA statement — \
+                 edit that row instead, or the statement's per-unit adjustment would \
+                 reduce the parcel's cost base twice",
+            ),
             UpsertError::Db(err) => err.into(),
         }
     }
@@ -451,6 +493,61 @@ mod tests {
         assert!(matches!(err, UpsertError::QuantityExceedsTrade));
     }
 
+    /// One adjustment per (statement, parcel): a second row for the same
+    /// parcel would apply the statement's per-unit figure to it twice, and
+    /// E10's nil floor can turn that over-reduction into a capital gain that
+    /// was never made. Re-saving the *same* row (same id) is still an update.
+    #[tokio::test]
+    async fn db_duplicate_parcel_on_one_statement_rejected() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool, 1, "XASX", "VAF").await;
+        insert_buy_trade(&pool, 1, 1, Decimal::from(100)).await;
+        insert_amma(&pool, 1, 1, "0.05".parse().unwrap()).await;
+        insert_amma(&pool, 2, 1, "0.03".parse().unwrap()).await;
+
+        let first = AmitAdjustment {
+            id: 1,
+            amma_statement_id: 1,
+            trade_id: 1,
+            quantity: Decimal::from(100),
+        };
+        db_upsert(&pool, &first).await.unwrap();
+
+        let err = db_upsert(
+            &pool,
+            &AmitAdjustment {
+                id: 2,
+                ..first.clone()
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, UpsertError::DuplicateParcel));
+
+        // Updating the existing row is not a duplicate of itself.
+        db_upsert(
+            &pool,
+            &AmitAdjustment {
+                quantity: Decimal::from(80),
+                ..first.clone()
+            },
+        )
+        .await
+        .unwrap();
+        // Nor is the same parcel on a *different* statement — each year's
+        // statement adjusts every parcel it covers.
+        db_upsert(
+            &pool,
+            &AmitAdjustment {
+                id: 2,
+                amma_statement_id: 2,
+                ..first
+            },
+        )
+        .await
+        .unwrap();
+    }
+
     #[tokio::test]
     async fn db_cost_base_reduction_calculation() {
         let pool = test_pool().await;
@@ -587,6 +684,30 @@ mod tests {
         });
         let resp = client(&pool).put("/amit_adjustments/1", &body).await;
         assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn api_duplicate_parcel_returns_422() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool, 1, "XASX", "VAF").await;
+        insert_buy_trade(&pool, 1, 1, Decimal::from(100)).await;
+        insert_amma(&pool, 1, 1, "0.05".parse().unwrap()).await;
+
+        let body = serde_json::json!({
+            "amma_statement_id": 1,
+            "trade_id": 1,
+            "quantity": "100"
+        });
+        let c = client(&pool);
+        assert_eq!(
+            c.put("/amit_adjustments/1", &body).await.status,
+            StatusCode::NO_CONTENT
+        );
+        let resp = c.put("/amit_adjustments/2", &body).await;
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
+        let detail = resp.text().to_string();
+        assert!(detail.contains("already has an adjustment"), "{detail}");
+        assert!(db_get(&pool, 2).await.unwrap().is_none());
     }
 
     #[tokio::test]

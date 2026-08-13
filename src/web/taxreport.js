@@ -75,6 +75,14 @@ function completenessSection(c) {
   c.e4_alerts.forEach(function (a) {
     items.push(el('li', null, a.ticker + ' (' + a.date_paid + '): tax-deferred amount ' + moneyText(a.tax_deferred_amount) + ' recorded with no matching Return of Capital action this year.'));
   });
+  // The per-parcel AMIT adjustment set: a gap here distorts the disposal
+  // schedule's cost base, this document's central figure, so each statement's
+  // own problems are printed rather than a bare "doesn't reconcile".
+  c.amit_adjustment_alerts.forEach(function (a) {
+    items.push(el('li', null, a.ticker + ' AMMA statement #' + a.amma_statement_id + ' (' + a.parcel_count
+      + ' parcel adjustment(s) covering ' + a.units_adjusted + ' of ' + a.units_held + ' units held): '
+      + a.problems.join(' ')));
+  });
   return el('div', { class: 'doc-section' }, [
     el('h3', null, 'Data completeness'),
     el('p', { class: 'badge warn' }, '⚠ Issues found for this year — this report may understate income or the cost base until they are resolved:'),

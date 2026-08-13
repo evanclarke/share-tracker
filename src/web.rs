@@ -746,6 +746,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn amit_adjustment_cross_check_ui_present() {
+        let js = app_js_body().await;
+        // The set-level cross-check screen drives GET
+        // /reports/amit_adjustment_cross_check: an AMMA statement's per-parcel
+        // adjustments are validated row by row at write time, so only this
+        // report sees a set that doesn't reconcile to the statement.
+        assert!(js.contains("/reports/amit_adjustment_cross_check"));
+        assert!(js.contains("AMIT Adjustment Cross-Check"));
+        // Its comparison columns are classified, and the problems list renders
+        // as sentences rather than String(array)'s comma run-on.
+        assert!(js.contains("'units_adjusted'"));
+        assert!(js.contains("Array.isArray(v)"));
+        // Generation is reachable both as the AMMA form's chain-after-save
+        // tick and as the statement row's standing action, and both go through
+        // the preview-and-confirm gate before anything is written.
+        assert!(js.contains("Generate AMIT adjustments"));
+        assert!(js.contains("Generate adjustments"));
+        assert!(js.contains("function confirmGeneratedAdjustments"));
+        assert!(js.contains("function adjustmentPreviewText"));
+        assert!(js.contains("preview: true"));
+        assert!(js.contains("Replace existing adjustments"));
+        // The annual tax report prints the alerts as a fourth completeness
+        // bullet.
+        assert!(js.contains("amit_adjustment_alerts"));
+    }
+
+    #[tokio::test]
     async fn amit_cash_cross_check_ui_present() {
         let js = app_js_body().await;
         // The cross-check report screen drives GET /reports/amit_cash_cross_check
@@ -1471,6 +1498,7 @@ mod tests {
             "'demerge'",
             "'recognise'",
             "'sell-rights'",
+            "'generate-adjustments'",
         ] {
             assert!(js.contains(slug), "missing action slug {slug}");
         }
@@ -1483,6 +1511,7 @@ mod tests {
             "/demerge'",
             "/recognise'",
             "/sell_rights'",
+            "/generate_adjustments'",
         ] {
             assert!(js.contains(endpoint), "missing action endpoint {endpoint}");
         }

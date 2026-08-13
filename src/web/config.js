@@ -6,8 +6,8 @@
 // list/form/report/action code does the rest. Adding or changing an entity,
 // report, or action means editing the matching entry here, not adding views.
 //
-import { describeTrade, tradeOrigin, apiUrl } from './util.js';
-import { txt, dec, int, dt, bool, sel, fk, wireGstBrokerage, wireIncomeEntry } from './forms.js';
+import { describeTrade, tradeOrigin, apiUrl, confirmGeneratedAdjustments } from './util.js';
+import { txt, dec, int, dt, bool, sel, fk, wireGstBrokerage, wireIncomeEntry, wireAmmaEntry } from './forms.js';
 
 // Top menu bar order (nav.js's navModel groups ENTITIES/REPORTS by their
 // `menu` field into this order). Reports additionally group into titled
@@ -254,7 +254,11 @@ export const ENTITIES = [
       fk('currency', 'Currency', 'currencies', { required: true, encode: 'string', default: 'AUD' }),
       fk('holding_account_id', 'Holding account', 'holdingAccounts', { required: true, default: '1', hint: 'The registry issues one statement per holder account.' }),
     ],
+    wireForm: wireAmmaEntry,
     columns: ['id', 'listing_id', 'tax_year_end_date', 'units_held', 'cost_base_adjustment', 'currency', 'holding_account_id'],
+    rowActions: function (row) {
+      return [{ label: 'Generate adjustments', href: '#/generate-adjustments/' + row.id }];
+    },
     attachOwner: 'amma_statement_id',
   },
   {
@@ -566,6 +570,7 @@ export const REPORTS = [
   { slug: 'exchange-mic-validation', title: 'Exchange MIC Validation', api: '/reports/exchange_mic_validation', method: 'GET', statusField: 'registry_status', menu: 'Reports', section: 'Cross-checks & alerts', desc: 'Curated exchanges checked against the ISO MIC registry.' },
   { slug: 'settlement-holiday-coverage', title: 'Settlement Holiday Coverage', api: '/reports/settlement_holiday_coverage', method: 'GET', statusField: 'coverage_status', menu: 'Reports', section: 'Cross-checks & alerts', desc: 'Trades whose settlement window falls outside the seeded exchange-holiday calendars (settlement may have skipped weekends only).' },
   { slug: 'e4-cross-check', title: 'Tax-Deferred E4 Cross-Check', api: '/reports/e4_cross_check', method: 'GET', menu: 'Reports', section: 'Cross-checks & alerts', desc: 'Trust income rows whose statement reported a tax-deferred amount (a CGT event E4 cost-base reduction) with no Return of capital corporate action on the listing in the same financial year — enter the action to clear a row.' },
+  { slug: 'amit-adjustment-cross-check', title: 'AMIT Adjustment Cross-Check', api: '/reports/amit_adjustment_cross_check', method: 'GET', menu: 'Reports', section: 'Cross-checks & alerts', desc: 'AMMA statements whose per-parcel AMIT adjustments don’t reconcile to the statement: none entered at all, adjusted units that don’t sum to the units held (split-aware), the same parcel adjusted twice, or a parcel that cannot have been held in the statement’s year. A missed parcel overstates its cost base; a duplicated one over-reduces it, and CGT event E10’s nil floor can turn that into a capital gain that was never made. Generate adjustments from the statement’s row to clear a row.' },
   { slug: 'amit-cash-cross-check', title: 'AMIT Cash Cross-Check', api: '/reports/amit_cash_cross_check', method: 'GET', menu: 'Reports', section: 'Cross-checks & alerts', desc: 'Financial years with AMIT cash distribution rows but no AMMA statement covering the year. AMIT cash rows fund DRP reinvestment only — the AMMA attribution is the assessable record the Tax Summary reports — so a missing AMMA would silently drop the year’s income from the return. Enter the fund’s AMMA statement to clear a row; an AMMA year with no cash rows is fine.' },
   {
     slug: 'wash-sales', title: 'Wash Sales', api: '/reports/wash_sales', method: 'POST',
@@ -763,6 +768,27 @@ export const ACTIONS = [
     toast: function (r, listing, a) {
       return 'Recognised worthless ' + listing(a.listing_id) + ' as a capital loss'
         + ' (closing sell #' + (r && r.sell ? r.sell.id : '?') + ').';
+    },
+  },
+  // AMIT adjustment generation: derives one amit_adjustment per parcel open
+  // at the statement's tax year end, in its own listing and holding account.
+  // The standing counterpart to the AMMA form's chain-after-save tick — this
+  // is the path for generating later, or re-running with `replace` after
+  // correcting a missed trade (a missing parcel usually means a trade was
+  // entered after the statement). `confirm` previews the set and its total
+  // against the statement's units held before anything is written.
+  {
+    slug: 'generate-adjustments', nav: 'amma_statements', ownerApi: '/amma_statements', cancel: '#/e/amma_statements', submit: 'Generate',
+    post: function (id) { return '/amma_statements/' + id + '/generate_adjustments'; },
+    title: function (id, owner, listing) { return 'Generate AMIT adjustments for ' + listing(owner.listing_id) + ' statement #' + id; },
+    desc: function (s, listing) { return 'Creates one AMIT adjustment per ' + listing(s.listing_id) + ' parcel held in this statement’s holding account at ' + s.tax_year_end_date + ', so the statement’s ' + s.cost_base_adjustment + ' per-unit cost base adjustment reaches every affected parcel. You confirm the parcels and their total against the statement’s units held (' + s.units_held + ') before anything is written; a mismatch is surfaced but never blocks, and the AMIT Adjustment Cross-Check keeps the statement flagged until it is resolved. Undo by deleting the rows under AMIT Adjustments.'; },
+    fields: [
+      bool('replace', 'Replace existing adjustments', { hint: 'Required when the statement already has adjustments: they are deleted and regenerated in one transaction.' }),
+    ],
+    confirm: confirmGeneratedAdjustments,
+    toast: function (r) {
+      return 'Generated ' + r.created.length + ' AMIT adjustment(s) covering ' + r.units_adjusted
+        + ' unit(s) against ' + r.units_held + ' units held.';
     },
   },
   // ESS vest (confirm-only): POST takes no parameters — the statement's
