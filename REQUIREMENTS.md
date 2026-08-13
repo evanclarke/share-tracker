@@ -1458,3 +1458,142 @@ Resolution: `GET /reports/health` gains an `unpriced_days` list, the missing-row
 Not in scope: automatically backfilling what it finds. The check reports; closing the hole stays a
 deliberate act (`POST /closing_prices/backfill`, or a manual price for a day the provider can
 never serve), because a silently auto-filled hole is how the wrong series gets in.
+
+## AMIT adjustment cross-check (2026-08-13)
+
+Entering an AMMA statement creates nothing else: the per-parcel `amit_adjustments` rows that
+actually apply the statement's per-unit `cost_base_adjustment` are hand-entered afterwards, one per
+affected parcel (FY2025 VDHG needs 30 of them). `amit_adjustment::db_upsert` checks each row in
+isolation — Buy/DRP only, listing match, holding-account match, `quantity ≤ trade.quantity` — but
+nothing checks the **set** of rows against the statement they belong to. Three silent failure modes
+follow, and all of them corrupt cost base rather than erroring:
+
+- a parcel is missed → the statement's reduction is under-applied, cost base overstated
+- a parcel is entered twice, or over-quantified → over-applied; because CGT event E10 floors the
+  cost base at nil, an over-adjustment can *manufacture* a capital gain, not merely shift one
+- a parcel is linked to the wrong year's statement — nothing tests dates at all, so a parcel
+  acquired after the statement's 30 June, or one wholly disposed of before that year began, is
+  accepted without complaint
+
+The existing cross-checks don't cover this. `reports::amit_cash_cross_check` flags a *missing AMMA
+statement* for a year with cash rows; it says nothing about whether that statement's adjustments
+were entered. `reports::open_parcels` shows the resulting `amit_cost_base_reduction` per parcel,
+which surfaces an outlier but never an omission. `amma_statements.units_held` — the one figure that
+would reconcile the set — is recorded and displayed but feeds no calculation.
+
+Resolution: a new non-blocking report, `GET /reports/amit_adjustment_cross_check`, following the
+pattern of the two existing cross-checks (`e4_cross_check`, `amit_cash_cross_check`): one read
+transaction, an empty result means everything reconciles, and entering the missing/corrected rows
+clears the flag. One row per flagged AMMA statement carrying `amma_statement_id`, `listing_id`,
+`ticker`, `tax_year` (calendar year of the 30 June end, per `domain::tax_year`),
+`holding_account_id`, `units_held`, `units_adjusted`, `parcel_count`, and the list of problems
+found, so the row is actionable without opening another screen.
+
+Checks, each independently reported so one doesn't mask another:
+
+- **No adjustments at all** — a statement with a non-zero `cost_base_adjustment` and zero linked
+  rows. Highest signal: the whole statement's cost-base effect is missing. A statement whose
+  `cost_base_adjustment` is zero is not flagged (there is nothing to apply)
+- **Coverage mismatch** — Σ `amit_adjustments.quantity` ≠ `amma_statements.units_held`, reported
+  with the signed difference. Basis matters: adjustment quantities are in *as-acquired* units while
+  the statement's `units_held` is in the statement year's basis, so the comparison must re-base
+  through the listing's splits before comparing (`corporate_action::adjustments::
+  split_adjusted_quantity` / `as_acquired_quantity`, already used by the cost-base pipeline) —
+  a split between acquisition and the statement year must not produce a false positive
+- **Duplicate parcel** — the same (`amma_statement_id`, `trade_id`) pair appearing more than once.
+  There is no uniqueness constraint on the pair today, and two rows silently double the reduction
+- **Parcel outside the statement's year** — the two unambiguous cases only: the parcel's trade
+  `date` is after the statement's `tax_year_end_date`, or the parcel was fully consumed by
+  allocations whose sale trades all predate 1 July of that financial year. A parcel disposed of
+  *during* the year is legitimate and must not be flagged
+
+Write-time: the duplicate-pair case additionally becomes a `422` from `amit_adjustment::db_upsert`
+(a new `UpsertError` variant, converted in the existing `From<UpsertError> for ApiError` impl) —
+it is a genuine data-model invariant, unlike the others. Verify the live DB has no existing
+duplicate pairs before adding a UNIQUE index in a migration; the repo copy is clean as at
+2026-08-13, but the deployed database is the one that governs. The date and coverage checks stay
+report-only and non-blocking, matching E4/AMIT-cash: a distribution paid in July for the June
+quarter creates a DRP parcel dated after the FY end, and legitimate mid-entry states would
+otherwise be rejected mid-workflow.
+
+- Web UI: a standard `REPORTS` config entry under Reports → Cross-checks & alerts, beside the AMIT
+  Cash Cross-Check, rendered by the generic report view through `filterableTable`
+- The annual tax report's **data-completeness** section picks it up as a fourth list beside
+  `amma_missing`, `amit_cash_alerts` and `e4_alerts`, year-filtered the same way, with `complete`
+  becoming "all four empty". That section is already the "is this year's data sound before I
+  archive the document?" gate, and an AMIT adjustment gap belongs in it more than the other three
+  do: it distorts the disposal schedule's adjusted cost base, the report's central figure.
+  Non-blocking like the rest of the section — generation is never refused. A warning printed onto
+  the archived PDF travels with the document, which a refusal does not, and the report is often
+  generated precisely to find out what is wrong
+- Docs per the standard sync rule: `docs/API.md` (the new endpoint, its response shape and codes,
+  and the new `422`), README's Features list alongside the other cross-checks. No new table and no
+  new column — it reads `amma_statements`, `amit_adjustments`, `trades`, `parcel_allocations`, and
+  `corporate_actions`
+
+### Generating the adjustments from the held position
+
+The report above verifies a hand-entered set, but the set should not be hand-entered in the first
+place: the system already knows every parcel and its open quantity at any date, so the adjustment
+rows for a statement are derivable, not judgement. The rule is exactly
+`domain::open_parcels::load(conn, tax_year_end_date)` — every parcel still open as at the
+statement's 30 June, at its remaining quantity, with the quantity converted back to the
+*as-acquired* basis the `amit_adjustments.quantity` column stores.
+
+That this is the right rule is not a guess: the existing hand-entered data already follows it, and
+the fund's own `units_held` confirms it independently.
+
+| statement            | parcels entered  | open parcels as at FY end                          | Σ qty | `units_held` |
+| -------------------- | ---------------- | -------------------------------------------------- | ----- | ------------ |
+| HNDQ FY2024          | 18, 19           | 18, 19                                              | 1811  | 1811         |
+| HNDQ FY2025          | 18, 19, 20, 61, 64 | the same five — DRP 67 (2025-07-16) correctly excluded | 2620  | 2620         |
+
+Both statements reconcile to the cent, and the FY2025 case shows the year boundary being applied
+by hand exactly as `load(as_of)` would apply it. Every VDHG year reconciles the same way. So the
+generated set is not an unverifiable guess: it is checkable against a figure the fund supplies,
+which is what makes generation safe to offer.
+
+Resolution: `POST /amma_statements/:id/generate_adjustments`, following the established post-record
+operation shape (reinvest, exercise, participate, demerge — `entities::<owner>` operation handler +
+one `ACTIONS` config entry).
+
+- Creates one `amit_adjustment` per open parcel as at `tax_year_end_date`, all in one transaction
+  so a partial set can never be persisted. Rows are written through `amit_adjustment::db_upsert`,
+  not a bulk INSERT: the per-row invariants (Buy/DRP, listing, holding account, quantity cap) and
+  the `row_history` audit trail must apply to generated rows exactly as to typed ones
+- Parcels are filtered to the statement's own `holding_account_id` and `listing_id` — the same pair
+  `db_upsert` enforces per row
+- The response echoes what it created and the reconciliation: `created` (the rows),
+  `units_adjusted`, `units_held`, and their difference. A mismatch does **not** block the write —
+  it is a reconciliation, not a data-model invariant, and a legitimate one exists (a statement
+  stating units at a date other than year end). It is surfaced in the response and stays flagged by
+  the cross-check report above until resolved
+- Refuses with `422` when the statement already has adjustments, unless `replace: true` is passed,
+  which deletes the existing set and regenerates it in the same transaction
+- Refuses with `422` when there are no open parcels as at that date — a statement for a position
+  the system does not have is itself the error, and an empty generated set would hide it
+- Refuses with `422` when the listing has a share split between the earliest covered parcel's
+  acquisition and `tax_year_end_date` such that covered parcels do not share one unit basis. The
+  statement carries a single per-unit `cost_base_adjustment` applied against as-acquired
+  quantities, so parcels acquired before and after a split cannot both be scaled correctly by it.
+  This is a pre-existing modelling limit, not one generation introduces — hand entry has the same
+  problem and no error message. Generation must name it rather than silently emit wrong quantities.
+  Neither AMIT listing held today has a split, so this is a guard, not a blocker
+
+Web UI, per the workflow this should actually have:
+
+- Saving an AMMA statement offers the generation as the next step — the same chain-after-save shape
+  the income form's "Reinvested under DRP" tick uses. The prompt is the real question: *these are
+  the parcels the system holds for this listing and account as at 30 June — are they right?*
+- Before writing, the confirm step previews the parcels and quantities it will create and shows the
+  Σ against the statement's `units_held`, so the answer is checkable rather than assumed. A
+  mismatch is shown prominently; the user can still proceed
+- A standing `ACTIONS` entry on the AMMA statement row runs it later, or re-runs it with `replace`
+  after correcting a missed trade — the common repair path, since a missing parcel usually means a
+  trade was entered after the statement
+- Docs: `docs/API.md` (the new endpoint, its request/response shape and each `422`), README's
+  Features list
+
+Not in scope: generating **without** the confirm step, and inferring a set from anything other than
+the recorded position. Generation is a proposal the held position justifies and the fund's
+`units_held` checks; it is not a substitute for the user knowing their positions are complete.
