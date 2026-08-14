@@ -1143,6 +1143,64 @@ mod tests {
         assert!(trade_exists(&pool, 2).await);
     }
 
+    /// Deleting a Sell returns every parcel it consumed to the open pool at the
+    /// right remaining quantity — across a split, so the restored figures are
+    /// in the sale's own (post-split) unit basis rather than the as-acquired
+    /// one the allocations were re-based against (SCENARIOS A-34).
+    #[tokio::test]
+    async fn db_delete_sell_restores_each_parcel_across_a_split() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
+        insert_buy(&pool, 2, 1, Decimal::from(50)).await;
+        apply_split(&pool, 1, 1, NaiveDate::from_ymd_opt(2024, 3, 1).unwrap()).await;
+
+        // 120 post-split units: 80 from parcel 1 (of its 200), 40 from parcel 2
+        // (of its 100).
+        let body = sell_body(
+            Decimal::from(120),
+            vec![
+                AllocationInput {
+                    purchase_trade_id: 1,
+                    quantity_allocated: Decimal::from(80),
+                },
+                AllocationInput {
+                    purchase_trade_id: 2,
+                    quantity_allocated: Decimal::from(40),
+                },
+            ],
+        );
+        db_upsert_sell(&pool, 3, &body).await.unwrap();
+        assert_eq!(
+            remaining_quantities(&pool).await,
+            vec![(1, Decimal::from(120)), (2, Decimal::from(60)),],
+            "consumed units are out of the open pool, in post-split units"
+        );
+
+        assert_eq!(
+            db_delete_sell(&pool, 3).await.unwrap(),
+            DeleteOutcome::Deleted
+        );
+        assert_eq!(count_allocations(&pool, 3).await, 0);
+        assert_eq!(
+            remaining_quantities(&pool).await,
+            vec![(1, Decimal::from(200)), (2, Decimal::from(100)),],
+            "both parcels are whole again at their full post-split quantity"
+        );
+    }
+
+    /// Each open parcel's `(trade_id, remaining_quantity)` from the open-parcels
+    /// report — the same read every open-holdings view is built on.
+    async fn remaining_quantities(pool: &SqlitePool) -> Vec<(i64, Decimal)> {
+        let mut conn = pool.acquire().await.unwrap();
+        crate::domain::open_parcels::load(&mut conn, None)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|p| (p.parcel.id, p.remaining_as_of))
+            .collect()
+    }
+
     #[tokio::test]
     async fn db_upsert_replaces_previous_allocations() {
         let pool = test_pool().await;
