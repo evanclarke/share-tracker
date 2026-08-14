@@ -103,6 +103,20 @@ mod tests {
         .unwrap();
     }
 
+    /// A second holding account, so a parcel has somewhere to be moved to.
+    async fn insert_second_account(pool: &SqlitePool) {
+        use crate::entities::holding_account::{self, HoldingAccount};
+        holding_account::db_upsert(
+            pool,
+            &HoldingAccount {
+                id: 2,
+                name: "ICE Employee Plan".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+    }
+
     /// Link an AMIT adjustment covering `qty` units of trade `trade_id`
     /// (listing 1), creating the AMMA statement it hangs off.
     async fn insert_amit_adjustment_covering(pool: &SqlitePool, trade_id: i64, qty: Decimal) {
@@ -530,6 +544,167 @@ mod tests {
             .unwrap();
         db_upsert(&pool, &moved).await.unwrap();
         assert_eq!(db_get(&pool, 1).await.unwrap().unwrap().listing_id, 2);
+    }
+
+    /// A Buy's date may not move past a Sell that allocates from it: the
+    /// parcel side of `sell::SellError::PurchaseAfterSale`, which the Sell
+    /// path refuses from its own end. Without it the sale is costed against a
+    /// parcel acquired after it and the discount clock runs backwards
+    /// (SCENARIOS A-09).
+    #[tokio::test]
+    async fn db_date_move_past_an_allocating_sell_is_refused() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        db_upsert(&pool, &buy_trade()).await.unwrap(); // 2024-01-15
+        insert_sell_consuming(&pool, 2, 1, Decimal::from(5)).await; // sale 2024-06-01
+
+        let mut moved = buy_trade();
+        moved.date = ymd(2024, 7, 1);
+        moved.settlement_date = ymd(2024, 7, 3);
+        let err = db_upsert(&pool, &moved).await.unwrap_err();
+        assert!(
+            matches!(err, UpsertError::DateAfterAllocatedSale),
+            "expected DateAfterAllocatedSale, got: {err:?}"
+        );
+        assert_eq!(
+            db_get(&pool, 1).await.unwrap().unwrap().date,
+            ymd(2024, 1, 15)
+        );
+
+        // Up to the sale date itself is fine (a same-day parcel is a valid
+        // allocation on the Sell side too), as is moving earlier.
+        let mut same_day = buy_trade();
+        same_day.date = ymd(2024, 6, 1);
+        same_day.settlement_date = ymd(2024, 6, 3);
+        db_upsert(&pool, &same_day).await.unwrap();
+        assert_eq!(
+            db_get(&pool, 1).await.unwrap().unwrap().date,
+            ymd(2024, 6, 1)
+        );
+    }
+
+    /// The date freeze lifts once nothing allocates from the parcel.
+    #[tokio::test]
+    async fn db_date_move_is_free_while_nothing_allocates() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        db_upsert(&pool, &buy_trade()).await.unwrap();
+
+        let mut moved = buy_trade();
+        moved.date = ymd(2024, 7, 1);
+        moved.settlement_date = ymd(2024, 7, 3);
+        db_upsert(&pool, &moved).await.unwrap();
+        assert_eq!(
+            db_get(&pool, 1).await.unwrap().unwrap().date,
+            ymd(2024, 7, 1)
+        );
+    }
+
+    /// A Buy's holding account is frozen while a Sell allocates from it: a
+    /// sale only disposes of units its own account holds, so moving the parcel
+    /// away would report it held in one account while the realised gain stays
+    /// costed against it in another (SCENARIOS A-13).
+    #[tokio::test]
+    async fn db_account_change_on_allocated_parcel_is_refused() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        insert_second_account(&pool).await;
+        db_upsert(&pool, &buy_trade()).await.unwrap(); // account 1
+        insert_sell_consuming(&pool, 2, 1, Decimal::from(5)).await;
+
+        let mut moved = buy_trade();
+        moved.holding_account_id = 2;
+        let err = db_upsert(&pool, &moved).await.unwrap_err();
+        assert!(
+            matches!(err, UpsertError::AccountChangeReferenced),
+            "expected AccountChangeReferenced, got: {err:?}"
+        );
+        assert_eq!(
+            db_get(&pool, 1).await.unwrap().unwrap().holding_account_id,
+            1
+        );
+    }
+
+    /// The same freeze applies while an AMIT adjustment covers the parcel (a
+    /// statement only adjusts its own account's parcels) — and lifts once
+    /// nothing references it.
+    #[tokio::test]
+    async fn db_account_change_under_amit_adjustment_is_refused_until_unlinked() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        insert_second_account(&pool).await;
+        db_upsert(&pool, &buy_trade()).await.unwrap();
+        insert_amit_adjustment_covering(&pool, 1, Decimal::from(8)).await;
+
+        let mut moved = buy_trade();
+        moved.holding_account_id = 2;
+        let err = db_upsert(&pool, &moved).await.unwrap_err();
+        assert!(
+            matches!(err, UpsertError::AccountChangeReferenced),
+            "expected AccountChangeReferenced, got: {err:?}"
+        );
+        assert_eq!(
+            db_get(&pool, 1).await.unwrap().unwrap().holding_account_id,
+            1
+        );
+
+        // With the adjustment removed the account moves freely again.
+        sqlx::query("DELETE FROM amit_adjustments WHERE trade_id = 1")
+            .execute(&pool)
+            .await
+            .unwrap();
+        db_upsert(&pool, &moved).await.unwrap();
+        assert_eq!(
+            db_get(&pool, 1).await.unwrap().unwrap().holding_account_id,
+            2
+        );
+    }
+
+    /// Both refusals reach the API as a 422 naming the rule, with nothing
+    /// persisted — the states `PUT /sells/:id` itself refuses.
+    #[tokio::test]
+    async fn api_put_trade_moving_date_or_account_off_an_allocating_sell_returns_422() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        insert_second_account(&pool).await;
+        db_upsert(&pool, &buy_trade()).await.unwrap();
+        insert_sell_consuming(&pool, 2, 1, Decimal::from(5)).await;
+
+        let body = |date: &str, account: i64| {
+            serde_json::json!({
+                "trade_type": "Buy",
+                "date": date,
+                "listing_id": 1,
+                "average_price": 100.0,
+                "quantity": 10.0,
+                "currency": "AUD",
+                "brokerage": 9.95,
+                "gst_on_brokerage": 0.995,
+                "brokerage_currency": "AUD",
+                "fx_rate": 1.0,
+                "holding_account_id": account
+            })
+        };
+
+        let moved_date = client(&pool).put("/trades/1", &body("2024-07-01", 1)).await;
+        let (status, detail) = moved_date.status_and_body();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            detail.contains("date cannot move after a Sell"),
+            "expected the date rule, got: {detail}"
+        );
+
+        let moved_account = client(&pool).put("/trades/1", &body("2024-01-15", 2)).await;
+        let (status, detail) = moved_account.status_and_body();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            detail.contains("holding account cannot be changed"),
+            "expected the holding-account rule, got: {detail}"
+        );
+
+        let unchanged = db_get(&pool, 1).await.unwrap().unwrap();
+        assert_eq!(unchanged.date, ymd(2024, 1, 15));
+        assert_eq!(unchanged.holding_account_id, 1);
     }
 
     #[tokio::test]

@@ -61,6 +61,25 @@ pub enum UpsertError {
         "the listing cannot be changed while Sell allocations or AMIT adjustments reference this parcel"
     )]
     ListingChangeReferenced,
+    /// The edit moves the parcel's `date` after a Sell that allocates from
+    /// it: units can't be sold before they were acquired, so the pair would
+    /// be impossible — and the discount clock would run backwards in every
+    /// CGT report. This is the parcel side of `sell::SellError::PurchaseAfterSale`,
+    /// which the Sell path already refuses.
+    #[error("the date cannot move after a Sell that allocates from this parcel")]
+    DateAfterAllocatedSale,
+    /// The edit changes the trade's `holding_account_id` while Sell
+    /// allocations or AMIT adjustments draw on this parcel: a sale only
+    /// disposes of units its own account holds and a statement only adjusts
+    /// its own account's parcels, so accepting it would leave the parcel
+    /// reported as held in one account while its realised gain (or cost-base
+    /// adjustment) stays costed against it in another. This is the parcel
+    /// side of `sell::SellError::PurchaseInDifferentAccount` and
+    /// `amit_adjustment::UpsertError::HoldingAccountMismatch`.
+    #[error(
+        "the holding account cannot be changed while Sell allocations or AMIT adjustments reference this parcel"
+    )]
+    AccountChangeReferenced,
     /// The existing trade is a rights exercise (`rights_action_id` set): its
     /// figures were validated against the rights issue's entitlement, which a
     /// free-form edit could exceed. Delete it and re-exercise instead (see
@@ -145,6 +164,24 @@ pub enum UpsertError {
     Amounts(#[source] AmountsError),
 }
 
+/// The stored row an edit is checked against: the three fields whose *change*
+/// is what dependants care about (`listing_id`, `date`, `holding_account_id`)
+/// plus the provenance links that freeze the trade outright. Read once by
+/// [`db_upsert`] and mapped by column name via `FromRow`.
+#[derive(sqlx::FromRow)]
+struct ExistingTrade {
+    listing_id: i64,
+    date: chrono::NaiveDate,
+    holding_account_id: i64,
+    rights_action_id: Option<i64>,
+    buyback_action_id: Option<i64>,
+    scrip_action_id: Option<i64>,
+    demerger_action_id: Option<i64>,
+    transfer_id: Option<i64>,
+    ess_statement_id: Option<i64>,
+    inheritance_id: Option<i64>,
+}
+
 /// Create or update a trade. Validated and written in one transaction
 /// (symmetric with the Sell-side invariants in `sell::db_upsert_sell`): an
 /// edit may not shrink a Buy/DRP's quantity below what its dependants rely on
@@ -186,46 +223,35 @@ pub async fn db_upsert(pool: &SqlitePool, trade: &Trade) -> Result<(), UpsertErr
     // cost base and deemed acquisition date), which an edit could silently
     // break. (The INSERT below never sets any provenance column, so a normal
     // trade can't become one either.)
-    type ProvenanceRow = (
-        i64,
-        Option<i64>,
-        Option<i64>,
-        Option<i64>,
-        Option<i64>,
-        Option<i64>,
-        Option<i64>,
-        Option<i64>,
-    );
-    let existing_action: Option<ProvenanceRow> = sqlx::query_as(
-        "SELECT listing_id, rights_action_id, buyback_action_id, scrip_action_id, \
+    let existing: Option<ExistingTrade> = sqlx::query_as(
+        "SELECT listing_id, date, holding_account_id, \
+                rights_action_id, buyback_action_id, scrip_action_id, \
                 demerger_action_id, transfer_id, ess_statement_id, inheritance_id \
          FROM trades WHERE id = ?",
     )
     .bind(trade.id)
     .fetch_optional(&mut *tx)
     .await?;
-    let existing_listing_id = existing_action.as_ref().map(|row| row.0);
-    if let Some((_, rights, buyback, scrip, demerger, transfer, ess, inheritance)) = existing_action
-    {
-        if rights.is_some() {
+    if let Some(existing) = &existing {
+        if existing.rights_action_id.is_some() {
             return Err(UpsertError::RightsExerciseTrade);
         }
-        if buyback.is_some() {
+        if existing.buyback_action_id.is_some() {
             return Err(UpsertError::BuyBackTrade);
         }
-        if scrip.is_some() {
+        if existing.scrip_action_id.is_some() {
             return Err(UpsertError::ScripExchangeTrade);
         }
-        if demerger.is_some() {
+        if existing.demerger_action_id.is_some() {
             return Err(UpsertError::DemergerTrade);
         }
-        if transfer.is_some() {
+        if existing.transfer_id.is_some() {
             return Err(UpsertError::TransferTrade);
         }
-        if ess.is_some() {
+        if existing.ess_statement_id.is_some() {
             return Err(UpsertError::EssVestTrade);
         }
-        if inheritance.is_some() {
+        if existing.inheritance_id.is_some() {
             return Err(UpsertError::InheritedParcelTrade);
         }
     }
@@ -272,7 +298,10 @@ pub async fn db_upsert(pool: &SqlitePool, trade: &Trade) -> Result<(), UpsertErr
     // its listing would silently re-associate them to the new security. (This
     // also keeps the capacity re-check below honest — its split re-basing
     // looks up the trade's listing.)
-    if existing_listing_id.is_some_and(|existing| existing != trade.listing_id) {
+    if existing
+        .as_ref()
+        .is_some_and(|e| e.listing_id != trade.listing_id)
+    {
         let referenced: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM parcel_allocations WHERE purchase_trade_id = ?1) \
                  OR EXISTS(SELECT 1 FROM amit_adjustments WHERE trade_id = ?1)",
@@ -282,6 +311,50 @@ pub async fn db_upsert(pool: &SqlitePool, trade: &Trade) -> Result<(), UpsertErr
         .await?;
         if referenced {
             return Err(UpsertError::ListingChangeReferenced);
+        }
+    }
+
+    // The holding account is frozen on the same terms: a Sell allocation only
+    // ever draws on a parcel its own account holds (`sell::db_upsert_sell`)
+    // and an AMMA statement only adjusts its own account's parcels
+    // (`amit_adjustment::db_upsert_on`), so moving the parcel out from under
+    // them would leave it reported as held in one account while its realised
+    // gain / cost-base adjustment stays costed against it in another — a state
+    // neither of those write paths would accept.
+    if existing
+        .as_ref()
+        .is_some_and(|e| e.holding_account_id != trade.holding_account_id)
+    {
+        let referenced: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM parcel_allocations WHERE purchase_trade_id = ?1) \
+                 OR EXISTS(SELECT 1 FROM amit_adjustments WHERE trade_id = ?1)",
+        )
+        .bind(trade.id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if referenced {
+            return Err(UpsertError::AccountChangeReferenced);
+        }
+    }
+
+    // Moving the parcel's date later must not carry it past a Sell that
+    // allocates from it: units can't be sold before they were acquired, and
+    // the resulting pair would run the CGT discount clock backwards. The Sell
+    // path refuses the same pair from its side
+    // (`sell::SellError::PurchaseAfterSale`); this is the parcel side of it.
+    // (Only a *later* date can break it, so an earlier one is left alone —
+    // and a fresh insert has no allocations to break.)
+    if existing.as_ref().is_some_and(|e| trade.date > e.date) {
+        let earliest_sale: Option<chrono::NaiveDate> = sqlx::query_scalar(
+            "SELECT MIN(s.date) FROM parcel_allocations pa \
+             JOIN trades s ON s.id = pa.sale_trade_id \
+             WHERE pa.purchase_trade_id = ?",
+        )
+        .bind(trade.id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if earliest_sale.is_some_and(|sale| trade.date > sale) {
+            return Err(UpsertError::DateAfterAllocatedSale);
         }
     }
 
@@ -488,6 +561,15 @@ impl From<UpsertError> for ApiError {
             UpsertError::ListingChangeReferenced => ApiError::unprocessable(
                 "the listing cannot be changed while Sell allocations or AMIT adjustments \
                  reference this parcel — remove them first",
+            ),
+            UpsertError::AccountChangeReferenced => ApiError::unprocessable(
+                "the holding account cannot be changed while Sell allocations or AMIT \
+                 adjustments reference this parcel — move it with a Transfer, or remove \
+                 them first",
+            ),
+            UpsertError::DateAfterAllocatedSale => ApiError::unprocessable(
+                "the date cannot move after a Sell that allocates from this parcel — units \
+                 can't be sold before they were acquired",
             ),
             UpsertError::RightsExerciseTrade => ApiError::unprocessable(
                 "this trade is a rights exercise and cannot be edited — delete it and \

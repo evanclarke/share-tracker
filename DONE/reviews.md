@@ -494,3 +494,58 @@ router (CRUD round-trip, report POST decode, a 422 reason read as text, `post_by
 and `over` seeing a narrower route table than `full`), so a change that broke the request shape
 fails there rather than in the ~50 modules that depend on it. Full suite 1282 passed / 0 failed,
 `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` clean.
+
+## A Buy's date and holding account escape the Sell-allocation invariants (SCENARIOS A-09, A-13)
+(SCENARIOS.md section A verification pass, 2026-08-14. `PUT /trades/:id` re-checks the dependants
+of the two fields it already guards — `listing_id` (`UpsertError::ListingChangeReferenced`) and a
+`quantity` shrink (`QuantityBelowAllocated` / `QuantityBelowAmitAdjustment`) — but not `date` or
+`holding_account_id`, which are equally load-bearing for a Sell's allocations. Both edits are
+accepted `204` and leave a state `PUT /sells/:id` itself refuses, so the invariant holds only on the
+Sell side of the pair. This is the failure mode CLAUDE.md's data-integrity rule names: a write path
+that can reintroduce a state another path forbids.)
+- [x] A-09 — moving a Buy's `date` after a Sell that allocates from it is accepted. Reproduced:
+  Buy 2022-08-01 ×100, Sell 2023-03-01 ×100 allocating all 100, then `PUT /trades/1` with
+  `date: 2023-05-01` → `204`. The open-parcels and realised-gains reports then show the sale
+  costed against a parcel acquired two months *after* it, `discount_eligible: false` (the discount
+  clock runs backwards); the annual tax report prints the same impossible acquisition/sale pair and
+  still reports `completeness.complete: true`; no cross-check flags it. Re-`PUT`ting the identical
+  Sell body is refused `422 "an allocated parcel is dated after the sale date"`
+  (`sell::SellError::PurchaseAfterSale`, `src/entities/sell.rs:623`) — so the guard exists, just not
+  on this side. Re-check it in `trade::db_upsert` when `date` moves later, against
+  `parcel_allocations JOIN trades s ON s.id = sale_trade_id` (min sale date)
+- [x] A-13 — moving a Buy's `holding_account_id` out of the account a Sell allocating from it sits
+  in is accepted. Reproduced: Buy ×100 in account 1, Sell ×60 in account 1, then `PUT /trades/1`
+  with `holding_account_id: 2` → `204`; the parcel reports as held in account 2 while the realised
+  gain stays costed against it in account 1. Re-`PUT`ting the identical Sell body is refused
+  `422 "an allocated parcel is held in a different holding account from the Sell"`. Same fix shape:
+  re-check in `trade::db_upsert` when the account changes and any allocation references the parcel
+- [x] Tests: `entities::trade::tests` — a date move past an allocating Sell and an account move away
+  from one are each refused `422` naming the rule, and the pre-edit state is unchanged (nothing
+  persisted); the same edits stay allowed while no allocation references the parcel
+- [x] Docs sync: `docs/API.md` Trades section + the Response codes 422 list (the two new refusals,
+  alongside the existing listing-change and quantity-shrink wording)
+
+**Closed 2026-08-14.** Both re-checks live in `trade::db_upsert` (`src/entities/trade/db.rs`),
+inside the same transaction as the existing listing/quantity guards, so a rejected edit persists
+nothing. The stored row they compare against is now read once into a `FromRow` struct
+(`ExistingTrade` — `listing_id`, `date`, `holding_account_id` + the provenance links), replacing the
+8-tuple the provenance check used.
+
+- `UpsertError::DateAfterAllocatedSale` — only a *later* date can break the pair, so the check runs
+  when `trade.date` moves past the stored date, against `MIN(s.date)` over
+  `parcel_allocations JOIN trades s ON s.id = pa.sale_trade_id`. A move to the sale date itself is
+  allowed, matching the Sell side (a same-day parcel is a valid allocation).
+- `UpsertError::AccountChangeReferenced` — refused while *either* a Sell allocation or an AMIT
+  adjustment references the parcel, mirroring `ListingChangeReferenced`'s blanket shape. The AMIT
+  half is the same hole one entity over: `amit_adjustment::db_upsert_on` refuses a trade in a
+  different account from its AMMA statement, so moving the parcel afterwards left a state that write
+  path forbids too. The 422 points at `Transfer` as the supported way to move a parcel.
+
+Both errors carry the rule in the 422 body (`the date cannot move after a Sell that allocates from
+this parcel …`, `the holding account cannot be changed while Sell allocations or AMIT adjustments
+reference this parcel …`). Five tests in `entities::trade::tests`: the two DB-level refusals (state
+unchanged after each), the AMIT variant refused-until-unlinked, the same edits free while nothing
+references the parcel, and one API-level test asserting both 422s and the untouched row.
+`docs/API.md` gains a bullet per refusal in the Trades section and both in the Response codes 422
+row. Full suite 1370 passed / 0 failed; `cargo fmt --check` and
+`cargo clippy --all-targets -- -D warnings` clean.
