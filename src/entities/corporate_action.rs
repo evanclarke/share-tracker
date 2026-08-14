@@ -146,7 +146,7 @@ pub use model::{ActionKind, CorporateAction, WorthlessEvent};
 /// re-export is test-gated to keep the non-test build warning-free — same
 /// reasoning as `trade.rs`'s `UpsertError` re-export.
 #[cfg(test)]
-pub use db::{WriteError, db_delete, db_get, db_list, db_upsert};
+pub use db::{DeleteError, WriteError, db_delete, db_get, db_list, db_upsert};
 
 /// The raw conversion ratio is now used only *inside* `adjustments` — every
 /// caller outside it asks a higher-level question instead
@@ -168,7 +168,8 @@ use sqlx::SqlitePool;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::entities::listing;
+    use crate::entities::sell::{AllocationInput, SellBody, SellError};
+    use crate::entities::{listing, sell};
     use crate::test_support::{self, ApiClient, test_pool};
 
     /// Client over this module's own routes.
@@ -1904,6 +1905,172 @@ mod tests {
             StatusCode::UNPROCESSABLE_ENTITY,
         )
         .await;
+    }
+
+    // Delete-time guard: the three types that create no trades
+    //
+    // `ShareSplit`, `BonusIssue`, and `ReturnOfCapital` re-base or reduce
+    // parcels at read time, so — unlike the five types frozen by their trade
+    // group's foreign key — nothing stops a delete from restating figures the
+    // reports already produced (SCENARIOS A-06, A-20, A-21).
+
+    /// The parcel the guarded actions below act on: 100 units @ $10 on
+    /// 2023-01-10.
+    async fn insert_parcel(pool: &SqlitePool) {
+        test_support::buy(1, 1)
+            .date(d(2023, 1, 10))
+            .insert(pool)
+            .await;
+    }
+
+    /// A Sell of `qty` units, entered on the unit basis in force at `date`,
+    /// allocated wholly against parcel 1 — the write path validates the
+    /// allocation against the parcel's re-based capacity.
+    async fn insert_sell(pool: &SqlitePool, date: NaiveDate, qty: &str) -> Result<(), SellError> {
+        sell::db_upsert_sell(
+            pool,
+            2,
+            &SellBody {
+                brokerage_includes_gst: false,
+                statement_total: None,
+                holding_account_id: 1,
+                date,
+                settlement_date: Some(date),
+                listing_id: 1,
+                average_price: "6".parse().unwrap(),
+                quantity: qty.parse().unwrap(),
+                currency: "AUD".to_string(),
+                brokerage: Decimal::ZERO,
+                gst_on_brokerage: Decimal::ZERO,
+                brokerage_currency: "AUD".to_string(),
+                fx_rate: Decimal::ONE,
+                spot_fx_rate: None,
+                contract_note_ref: None,
+                allocations: vec![AllocationInput {
+                    purchase_trade_id: 1,
+                    quantity_allocated: qty.parse().unwrap(),
+                }],
+            },
+        )
+        .await
+    }
+
+    /// A-20: the split is what makes the 200-unit Sell fit the 100-unit
+    /// parcel, so deleting it would leave allocations the Sell's own write
+    /// path refuses. The delete is refused while that trade stands, and
+    /// allowed again once it is gone.
+    #[tokio::test]
+    async fn db_deleting_a_split_is_refused_while_a_later_trade_is_on_the_post_split_basis() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "SPL").await;
+        insert_parcel(&pool).await;
+        db_upsert(&pool, &split(10, 1, d(2023, 3, 1), "2", "1"))
+            .await
+            .unwrap();
+        insert_sell(&pool, d(2023, 6, 1), "200").await.unwrap();
+
+        let err = db_delete(&pool, 10).await.unwrap_err();
+        assert!(matches!(err, DeleteError::RebasedTrades), "{err:?}");
+        assert!(db_get(&pool, 10).await.unwrap().is_some(), "still there");
+
+        // With the Sell gone the split deletes freely — and the identical Sell
+        // is then refused, which is exactly the state the guard keeps the
+        // delete from leaving behind.
+        assert!(matches!(
+            sell::db_delete_sell(&pool, 2).await.unwrap(),
+            sell::DeleteOutcome::Deleted
+        ));
+        assert!(db_delete(&pool, 10).await.unwrap());
+        assert!(matches!(
+            insert_sell(&pool, d(2023, 6, 1), "200").await,
+            Err(SellError::PurchaseQuantityExceeded)
+        ));
+    }
+
+    /// The same guard for a `BonusIssue` (it folds into the split-event stream
+    /// as its equivalent re-base, and deleting it restates quantities the same
+    /// way), and a trade dated *before* the action does not block the delete.
+    #[tokio::test]
+    async fn db_deleting_a_bonus_issue_is_refused_the_same_way() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BON").await;
+        insert_parcel(&pool).await;
+        db_upsert(&pool, &bonus(10, 1, d(2023, 3, 1), "1", "1"))
+            .await
+            .unwrap();
+
+        // The parcel predates the issue: nothing is recorded on the post-issue
+        // basis yet, so the delete stands.
+        assert!(db_delete(&pool, 10).await.unwrap());
+
+        db_upsert(&pool, &bonus(10, 1, d(2023, 3, 1), "1", "1"))
+            .await
+            .unwrap();
+        insert_sell(&pool, d(2023, 6, 1), "200").await.unwrap();
+        let err = db_delete(&pool, 10).await.unwrap_err();
+        assert!(matches!(err, DeleteError::RebasedTrades), "{err:?}");
+    }
+
+    /// A-21: deleting a return of capital breaks no quantity invariant, but it
+    /// silently restores the cost base it reduced — and drops any CGT event G1
+    /// excess gain already reported for the payment's year. Refused while a
+    /// parcel it reduced exists; a payment before every acquisition (which
+    /// reduces nothing) still deletes.
+    #[tokio::test]
+    async fn db_deleting_a_return_of_capital_is_refused_while_it_reduced_a_parcel() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "RAP").await;
+        insert_parcel(&pool).await;
+
+        db_upsert(&pool, &roc(10, 1, d(2023, 6, 1), "0.50"))
+            .await
+            .unwrap();
+        let err = db_delete(&pool, 10).await.unwrap_err();
+        assert!(matches!(err, DeleteError::ReducedParcels), "{err:?}");
+
+        // Dated before the parcel was acquired, it reduces nothing.
+        db_upsert(&pool, &roc(11, 1, d(2022, 12, 1), "0.50"))
+            .await
+            .unwrap();
+        assert!(db_delete(&pool, 11).await.unwrap());
+    }
+
+    /// The five action types whose trades carry a `*_action_id` back-reference
+    /// keep the foreign key as their guard: with no such trade recorded, the
+    /// delete is not blocked by the new check.
+    #[tokio::test]
+    async fn db_deleting_an_unapplied_trade_creating_action_is_unaffected() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "RIT").await;
+        insert_parcel(&pool).await;
+        db_upsert(&pool, &rights(10, 1, d(2023, 6, 1), "1", "4", "2.00"))
+            .await
+            .unwrap();
+        assert!(db_delete(&pool, 10).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn api_deleting_a_depended_on_action_returns_422_naming_the_dependency() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "SPL").await;
+        insert_parcel(&pool).await;
+        db_upsert(&pool, &split(10, 1, d(2023, 3, 1), "2", "1"))
+            .await
+            .unwrap();
+        insert_sell(&pool, d(2023, 6, 1), "200").await.unwrap();
+
+        let resp = client(&pool).delete("/corporate_actions/10").await;
+        let (status, body) = resp.status_and_body();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(body.contains("trade dated on or after"), "{body}");
+
+        db_upsert(&pool, &roc(11, 1, d(2023, 6, 1), "0.50"))
+            .await
+            .unwrap();
+        let resp = client(&pool).delete("/corporate_actions/11").await;
+        let (status, body) = resp.status_and_body();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(body.contains("reduced the cost base"), "{body}");
     }
 
     #[tokio::test]

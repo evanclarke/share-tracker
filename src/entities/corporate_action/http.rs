@@ -1,6 +1,6 @@
 //! HTTP routes: list/get/upsert/delete over the corporate_actions table.
 
-use super::db::db_upsert;
+use super::db::{db_delete, db_upsert};
 use super::model::{CorporateAction, CorporateActionBody};
 use crate::infra::http::{self, ApiError};
 use axum::{
@@ -23,8 +23,9 @@ pub fn router() -> Router<SqlitePool> {
                 .put(upsert)
                 // Deleting an action still referenced by rights-exercise trades
                 // violates the trades.rights_action_id FK → 422 (delete those
-                // first).
-                .delete(http::delete_handler::<CorporateAction>),
+                // first); the types that create no trades carry their own
+                // delete-time guard in `db_delete`.
+                .delete(delete),
         )
 }
 
@@ -47,4 +48,11 @@ async fn upsert(
     };
     db_upsert(&pool, &action).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn delete(
+    State(pool): State<SqlitePool>,
+    Path(id): Path<i64>,
+) -> Result<StatusCode, ApiError> {
+    http::deleted(db_delete(&pool, id).await?, "corporate action")
 }

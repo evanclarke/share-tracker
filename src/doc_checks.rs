@@ -866,6 +866,28 @@ fn delete_404_reason_documented() {
     assert!(API_MD.contains("`404`-with-a-cause — which includes every `DELETE` of a row"));
 }
 
+/// Docs-sync pin for the delete-time guard on the three read-time corporate
+/// actions (SCENARIOS A-06/A-20/A-21, 2026-08-14): the Corporate actions
+/// section states the guard per type and the direction each one runs in, the
+/// Response-codes `422` row lists both refusals, and the deliberately
+/// *unguarded* `PUT` — the correction path the guard would otherwise close —
+/// is a Known limitations entry rather than silent behaviour. The refusals
+/// themselves are pinned by `entities::corporate_action::tests`.
+#[test]
+fn corporate_action_delete_guard_documented() {
+    assert!(API_MD.contains("**Deleting an action that is already depended on.**"));
+    assert!(API_MD.contains("**any trade dated on or after** the action's `date`"));
+    assert!(API_MD.contains("**any parcel acquired on or before** the payment `date`"));
+    assert!(API_MD.contains("deleting a ShareSplit or BonusIssue whose listing has a trade"));
+    assert!(API_MD.contains("deleting a ReturnOfCapital whose listing has a parcel"));
+    // The edit path stays open by decision, so it is documented as such.
+    let limitations = known_limitations();
+    assert!(limitations.contains(
+        "**Editing a split, bonus issue, or return of capital in place restates prior figures**"
+    ));
+    assert!(limitations.contains("There is no lodged/closed-year concept in the data model"));
+}
+
 /// Docs-sync pin for serving the app under a reverse-proxy sub-path: the
 /// deployment story lives in the README (including the nginx block, whose
 /// two easy-to-get-wrong details — no trailing slash on `proxy_pass`, and

@@ -1,6 +1,8 @@
-//! Persistence: CRUD (`db_list`/`db_get`/`db_upsert`/`db_delete`) and the
+//! Persistence: CRUD (`db_list`/`db_get`/`db_upsert`/`db_delete`), the
 //! write-time invariant that an action referenced by exercise/participation/
-//! exchange/demerger/recognise trades is frozen against edits ([`WriteError`]).
+//! exchange/demerger/recognise trades is frozen against edits ([`WriteError`]),
+//! and the matching delete-time guard for the three types that re-base or
+//! reduce parcels at read time instead of creating trades ([`DeleteError`]).
 
 use super::model::{ActionKind, CorporateAction};
 use crate::infra::decimal::OptMoney;
@@ -280,11 +282,98 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
     Ok(())
 }
 
-/// Delete an action. An action referenced by rights-exercise, buy-back
-/// participation, scrip-for-scrip exchange, or demerger trades is protected
-/// by the corresponding `trades.*_action_id` foreign key — the violation
-/// surfaces as a database error the handler maps to `422`.
-#[cfg(test)]
-pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<bool, sqlx::Error> {
-    crate::infra::http::crud_delete::<CorporateAction>(pool, id).await
+#[derive(thiserror::Error, Debug)]
+pub enum DeleteError {
+    #[error("corporate action delete failed: {0}")]
+    Db(#[from] sqlx::Error),
+    /// A `ShareSplit` or `BonusIssue` whose listing has a trade dated on or
+    /// after the conversion/issue date. Those quantities are recorded in the
+    /// post-action unit basis, and nothing materialises the re-base: every
+    /// open-parcel quantity, allocation capacity check, and realised gain is
+    /// computed from the action at read time. Deleting it re-reads them in the
+    /// pre-action basis, which can leave a Sell's allocations exceeding the
+    /// parcel they draw on — the state `PUT /sells/:id` itself refuses — and a
+    /// generated AMIT adjustment covering more units than its parcel has.
+    /// Mapped to `422`.
+    #[error("this action re-bases parcels that later trades are recorded against")]
+    RebasedTrades,
+    /// A `ReturnOfCapital` whose listing has an acquisition dated on or before
+    /// the payment date — a parcel the payment reduced. The reduction (and any
+    /// CGT event G1 excess gain it produced, reported in the payment's income
+    /// year) is computed from the action at read time, so deleting it restates
+    /// a cost base and can drop an already-reported gain. Mapped to `422`.
+    #[error("this return of capital reduced the cost base of parcels held at its date")]
+    ReducedParcels,
+}
+
+impl From<DeleteError> for ApiError {
+    fn from(e: DeleteError) -> Self {
+        match e {
+            DeleteError::RebasedTrades => ApiError::unprocessable(
+                "this listing has a trade dated on or after this action — those quantities are \
+                 recorded in the post-split unit basis, so deleting it would restate them \
+                 (delete those trades first)",
+            ),
+            DeleteError::ReducedParcels => ApiError::unprocessable(
+                "this payment reduced the cost base of parcels held at its date — deleting it \
+                 would restate those parcels, and any capital gain already reported for the \
+                 excess (delete the parcels first)",
+            ),
+            DeleteError::Db(err) => err.into(),
+        }
+    }
+}
+
+/// Delete an action, `Ok(false)` when no action has that id.
+///
+/// An action referenced by rights-exercise, buy-back participation,
+/// scrip-for-scrip exchange, demerger, or recognise trades is protected by the
+/// corresponding `trades.*_action_id` foreign key — the violation surfaces as a
+/// database error the handler maps to `422`. The three types that create no
+/// trades — `ShareSplit`, `BonusIssue`, `ReturnOfCapital` — have no such
+/// reference to protect them, so their dependants are checked here, in the
+/// delete's own transaction (see [`DeleteError`]).
+pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<bool, DeleteError> {
+    let mut tx = pool.begin().await?;
+    let Some(action) = db_get_tx(&mut *tx, id).await? else {
+        return Ok(false);
+    };
+
+    // The dependants each type leaves behind, in the direction its effect
+    // runs: a split/bonus re-bases everything recorded *after* it, a return of
+    // capital reduces the parcels held (so acquired) *before* it. The other
+    // five types are frozen by their trade group's foreign key instead.
+    let dependants = match &action.kind {
+        ActionKind::ShareSplit { .. } | ActionKind::BonusIssue { .. } => Some((
+            "SELECT EXISTS(SELECT 1 FROM trades WHERE listing_id = ? AND date >= ?)",
+            DeleteError::RebasedTrades,
+        )),
+        ActionKind::ReturnOfCapital { .. } => Some((
+            "SELECT EXISTS(SELECT 1 FROM trades \
+                           WHERE listing_id = ? AND date <= ? AND trade_type IN ('Buy', 'DRP'))",
+            DeleteError::ReducedParcels,
+        )),
+        ActionKind::RightsIssue { .. }
+        | ActionKind::BuyBack { .. }
+        | ActionKind::ScripForScrip { .. }
+        | ActionKind::Demerger { .. }
+        | ActionKind::WorthlessShares { .. } => None,
+    };
+    if let Some((query, err)) = dependants {
+        let dependent: bool = sqlx::query_scalar(query)
+            .bind(action.listing_id)
+            .bind(action.date)
+            .fetch_one(&mut *tx)
+            .await?;
+        if dependent {
+            return Err(err);
+        }
+    }
+
+    sqlx::query("DELETE FROM corporate_actions WHERE id = ?")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(true)
 }

@@ -549,3 +549,59 @@ references the parcel, and one API-level test asserting both 422s and the untouc
 `docs/API.md` gains a bullet per refusal in the Trades section and both in the Response codes 422
 row. Full suite 1370 passed / 0 failed; `cargo fmt --check` and
 `cargo clippy --all-targets -- -D warnings` clean.
+
+## Deleting a split/bonus/return-of-capital silently restates reported gains (SCENARIOS A-06, A-20)
+(SCENARIOS.md section A verification pass, 2026-08-14. `RightsIssue`, `BuyBack`, `ScripForScrip`,
+`Demerger`, and `WorthlessShares` are all frozen while the trades they produced exist. The three
+action types that re-base parcels instead of creating trades — `ShareSplit`, `BonusIssue`,
+`ReturnOfCapital` — carry no delete guard at all, even though every open-parcel quantity, cost base,
+and realised gain is computed from them at read time.)
+- [x] A-20 — deleting a `ShareSplit` after trades were entered on the post-split basis can leave
+  allocations the write path rejects. Reproduced: Buy 2023-01-10 ×100, 2-for-1 split 2023-03-01,
+  Sell 2023-06-01 ×200 (post-split, the whole holding) → realised **gain $200**. `DELETE
+  /corporate_actions/1` → `204`, and the same Sell now reports a **loss of $800** against a parcel
+  it over-consumes: re-`PUT`ting the identical Sell body is refused `422 "the allocations exceed a
+  purchase parcel's available quantity"`. A `BonusIssue` delete has the same shape
+- [x] A-06 — the same delete leaves a generated AMIT adjustment covering more units than the parcel
+  has (quantity materialised in as-acquired units at generation time). The AMIT adjustment
+  cross-check does flag the resulting statement, so this half fails visibly rather than silently
+- [x] A-21 — deleting a `ReturnOfCapital` cannot break a quantity invariant (it changes no unit
+  count), but it does silently drop an already-reported CGT event G1 gain from a prior year's net
+  capital gain (reproduced: G1 gain $50.00 in FY2023 → the year disappears from the report entirely)
+- [x] Decide the guard: refuse the delete while any trade of the listing is dated on/after the
+  action's `date` (the rule the `demerge`/`exchange`/`recognise` operations already apply at the
+  other end), or require an explicit override. Whichever way, a delete must not be able to leave
+  allocations exceeding a parcel — the invariant `PUT /sells/:id` enforces
+- [x] Tests: `entities::corporate_action::tests` — deleting each of the three re-basing types is
+  refused while dependent trades exist, and still allowed when none do
+- [x] Docs sync: `docs/API.md` Corporate actions (the new refusal, per type) + Response codes 422
+
+**Closed 2026-08-14.** The guard is per type, in `corporate_action::db_delete`'s own transaction
+(`src/entities/corporate_action/db.rs`), which replaces the generic `delete_handler` on the route —
+each type is checked in the direction its effect actually runs, rather than one blanket rule:
+
+- `DeleteError::RebasedTrades` — a `ShareSplit`/`BonusIssue` whose listing has **any trade dated on
+  or after** the action's `date`. That is the demerge/exchange/recognise rule the TODO proposed,
+  chosen for consistency and because it is the honest statement of the dependency: those quantities
+  are recorded in the post-action unit basis. It over-refuses in one harmless case (an action
+  before every parcel re-bases nothing), which is the safe direction.
+- `DeleteError::ReducedParcels` — a `ReturnOfCapital` whose listing has **any acquisition dated on
+  or before** the payment date. The "on/after" rule would have guarded nothing here: a return of
+  capital changes no unit count and its dependants are the parcels it *already* reduced, in the
+  other direction. Conservatively "acquired on or before" rather than "still held at the date" — a
+  delete is not worth an open-parcels load.
+
+The other five types keep their `trades.*_action_id` foreign key as the guard (they create trades;
+the three guarded here create none, which is exactly why nothing protected them). A-06 closes with
+A-20: the stranded AMIT adjustment was the same over-consumption seen from the adjustment side.
+
+`PUT` is deliberately **not** guarded the same way — freezing an action the moment anything depends
+on it would mean deleting every later trade of the listing to fix a typo'd ratio. That leaves the
+restatement reachable by editing, now documented as a Known limitation in `docs/API.md` and pinned
+by `doc_checks::corporate_action_delete_guard_documented`; TODO.md carries it as open work under
+*Editing a split/bonus/return-of-capital in place restates the same figures a delete now can't*. Six tests in `entities::corporate_action::tests` (the A-20 repro end to end, including that
+the identical Sell is refused once the split is gone; the bonus-issue shape plus the
+predates-everything case that still deletes; the return-of-capital pair; an unapplied `RightsIssue`
+unaffected; and the two 422 bodies over the router), verified end to end against a running server.
+Full suite 1376 passed / 0 failed; `cargo fmt --check` and `cargo clippy --all-targets -- -D
+warnings` clean.

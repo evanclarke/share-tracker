@@ -1080,11 +1080,15 @@ mod tests {
         assert_eq!(stale_flags(&pool, ymd(2026, 6, 3)).await, vec![false; 3]);
 
         generate(&pool, ymd(2026, 6, 5), now).await.unwrap();
+        // On a second, untraded listing: the delete leg below would otherwise
+        // be refused, since a return of capital is frozen once it has reduced
+        // a parcel held at its date.
+        insert_listing(&pool, 2, "RIO", Some("XASX"), "AUD").await;
         corporate_action::db_upsert(
             &pool,
             &corporate_action::CorporateAction {
                 id: 1,
-                listing_id: 1,
+                listing_id: 2,
                 date: ymd(2026, 6, 4),
                 kind: corporate_action::ActionKind::ReturnOfCapital {
                     amount_per_unit: "0.50".parse().unwrap(),

@@ -10,31 +10,28 @@ findings are all closed in DONE.md), except where a section's heading names anot
 (e.g. REQUIREMENTS). Each section records one finding; sections land in DONE.md as they are fixed
 or decided.
 
-## Deleting a split/bonus/return-of-capital silently restates reported gains (SCENARIOS A-06, A-20)
-(SCENARIOS.md section A verification pass, 2026-08-14. `RightsIssue`, `BuyBack`, `ScripForScrip`,
-`Demerger`, and `WorthlessShares` are all frozen while the trades they produced exist. The three
-action types that re-base parcels instead of creating trades — `ShareSplit`, `BonusIssue`,
-`ReturnOfCapital` — carry no delete guard at all, even though every open-parcel quantity, cost base,
-and realised gain is computed from them at read time.)
-- [ ] A-20 — deleting a `ShareSplit` after trades were entered on the post-split basis can leave
-  allocations the write path rejects. Reproduced: Buy 2023-01-10 ×100, 2-for-1 split 2023-03-01,
-  Sell 2023-06-01 ×200 (post-split, the whole holding) → realised **gain $200**. `DELETE
-  /corporate_actions/1` → `204`, and the same Sell now reports a **loss of $800** against a parcel
-  it over-consumes: re-`PUT`ting the identical Sell body is refused `422 "the allocations exceed a
-  purchase parcel's available quantity"`. A `BonusIssue` delete has the same shape
-- [ ] A-06 — the same delete leaves a generated AMIT adjustment covering more units than the parcel
-  has (quantity materialised in as-acquired units at generation time). The AMIT adjustment
-  cross-check does flag the resulting statement, so this half fails visibly rather than silently
-- [ ] A-21 — deleting a `ReturnOfCapital` cannot break a quantity invariant (it changes no unit
-  count), but it does silently drop an already-reported CGT event G1 gain from a prior year's net
-  capital gain (reproduced: G1 gain $50.00 in FY2023 → the year disappears from the report entirely)
-- [ ] Decide the guard: refuse the delete while any trade of the listing is dated on/after the
-  action's `date` (the rule the `demerge`/`exchange`/`recognise` operations already apply at the
-  other end), or require an explicit override. Whichever way, a delete must not be able to leave
-  allocations exceeding a parcel — the invariant `PUT /sells/:id` enforces
-- [ ] Tests: `entities::corporate_action::tests` — deleting each of the three re-basing types is
-  refused while dependent trades exist, and still allowed when none do
-- [ ] Docs sync: `docs/API.md` Corporate actions (the new refusal, per type) + Response codes 422
+## Editing a split/bonus/return-of-capital in place restates the same figures a delete now can't
+(Found closing *Deleting a split/bonus/return-of-capital silently restates reported gains* — now in
+[DONE/reviews.md](DONE/reviews.md) — 2026-08-14. `PUT /corporate_actions/:id` re-checks only the
+`trades.*_action_id` references (`WriteError::ReferencedByTrade`), so for the three read-time
+action types an edit is unguarded: changing a `ShareSplit`'s ratio from 2:1 to 1:1, or moving its
+`date` past a Sell, restates every quantity, cost base, and realised gain computed from it — the
+same A-20 state the new delete guard refuses, reached one verb over. Documented as a Known
+limitation rather than left silent, because the correction path is worth keeping: the blanket freeze
+would mean deleting years of trades to fix a typo.)
+- [ ] Decide the shape. A blanket freeze is wrong (it closes the only way to fix a mis-keyed
+  ratio). Candidates: refuse only the *breaking* edits — a ratio change, or a `date` move — while
+  dependent trades exist, leaving a same-terms correction free; or accept the edit but validate the
+  resulting state (re-run the affected Sells' allocation checks inside the write transaction and
+  refuse `422` if any would now over-consume its parcel), which is stricter and needs no rule about
+  which fields matter
+- [ ] Whichever way: an edit must not be able to leave allocations exceeding a parcel, the same
+  invariant the delete guard now upholds
+- [ ] Tests: `entities::corporate_action::tests` — the A-20 shape reached by `PUT` is refused, and
+  a correction that breaks nothing still lands
+- [ ] Docs sync: `docs/API.md` Corporate actions + Response codes 422, and retire the Known
+  limitations entry (`Editing a split, bonus issue, or return of capital in place restates prior
+  figures`) plus its `doc_checks` assertions if the edit stops being possible
 
 ## A DELETE blocked by an inbound foreign key says the row does not exist (SCENARIOS A-18, A-23, A-38, A-41)
 (SCENARIOS.md section A verification pass, 2026-08-14. `ApiError`'s `From<sqlx::Error>` maps
@@ -91,7 +88,9 @@ never the tax summary, net capital gain, or annual tax report. `row_history` rec
 the restatement is *auditable* after the fact, but nothing *surfaces* it.)
 - [ ] Reproduced four ways, all `204`/`200` with no flag: changing a lodged year's Buy price
   (FY2023 net capital gain $500 → $1,100, A-15); deleting a `ReturnOfCapital` after its G1 gain was
-  reported (A-21); deleting the `cgt_settings` opening carried-forward loss after later years
+  reported (A-21 — that *delete* is now refused `422`, see DONE/reviews.md; editing the payment
+  amount in place restates the same year, so the finding stands); deleting the `cgt_settings`
+  opening carried-forward loss after later years
   consumed it (FY2024 net gain $500 → $1,000, A-25); deleting the only disposal of a loss year that
   a later year's carry-forward drew on (FY2024 net gain $750 → $1,500, A-35). The annual tax report
   keeps reporting `completeness.complete: true` throughout
