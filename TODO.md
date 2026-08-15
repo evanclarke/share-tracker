@@ -10,25 +10,6 @@ findings are all closed in DONE.md), except where a section's heading names anot
 (e.g. REQUIREMENTS). Each section records one finding; sections land in DONE.md as they are fixed
 or decided.
 
-## Deleting a DRP enrolment period strands its trailing residual (SCENARIOS A-43)
-(SCENARIOS.md section A verification pass, 2026-08-14. Closing a period by setting
-`unenrolment_date` settles the trailing residual — the leftover the period's last reinvestment
-carried forward moves to `residual_paid_out` on that DRP trade, in the same transaction, because the
-registry refunds it at termination (`db_unenrolment_pays_out_trailing_carried_residual` pins this).
-`DELETE /drp_enrolments/:id` ends the period just as finally and does none of it.)
-- [ ] Reproduced: enrol open-ended, reinvest $100 at $10.50 → DRP trade with
-  `residual_carried_forward: 5.5`, `residual_paid_out: 0`. Unenrolling → `carried 0 / paid_out 5.5`.
-  Deleting the period instead → `carried 5.5 / paid_out 0` — cash recorded as carrying forward into
-  a period that no longer exists, and nothing can pick it up (a later reinvestment is refused
-  outright, `"account 'Default' is not enrolled …"`)
-- [ ] Decide: settle the trailing residual on delete the same way unenrolment does, or refuse the
-  delete while the period covers a reinvestment (pointing at unenrolment instead). The second is
-  probably right — deleting a period that already produced DRP trades erases the record of why they
-  exist, and the reinvestment cannot be re-created afterwards
-- [ ] Tests: `entities::drp_enrolment::tests`, mirroring
-  `db_unenrolment_pays_out_trailing_carried_residual` for the delete path
-- [ ] Docs sync: `docs/API.md` DRP enrolments (what deleting a period does to a trailing residual)
-
 ## A closed financial year can be restated with nothing marking it (SCENARIOS A-15, A-21, A-25, A-35)
 (SCENARIOS.md section A verification pass, 2026-08-14. Every tax report is computed live from the
 current facts, so editing a prior year's inputs silently changes figures that may already have been

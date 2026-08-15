@@ -429,7 +429,7 @@ Records when each holding reinvests its distributions, as **dated enrolment peri
 | `GET` | `/drp_enrolments` | List all enrolment periods |
 | `GET` | `/drp_enrolments/:id` | Get one enrolment period |
 | `PUT` | `/drp_enrolments/:id` | Create or update an enrolment period |
-| `DELETE` | `/drp_enrolments/:id` | Remove an enrolment period |
+| `DELETE` | `/drp_enrolments/:id` | Remove an enrolment period (refused once it covers a reinvestment) |
 
 ```
 PUT /drp_enrolments/1
@@ -442,6 +442,8 @@ PUT /drp_enrolments/1
 A (listing, holding account)'s periods must not overlap, and at most one may be open at a time per account — validated atomically at write time (touching periods, where one ends the day the next starts, are allowed; the same listing's periods in another account are independent). Closing a period (unenrolling) settles its trailing residual: the leftover the period's last reinvestment carried forward is moved to `residual_paid_out` on that DRP trade (in the period's account) in the same transaction, since the registry refunds it at termination; it is **not** picked up after a re-enrolment.
 
 Returns `204 No Content`, or `422 Unprocessable Entity` if `listing_id` doesn't reference a listing, the period overlaps another period for the same (listing, holding account) (or would be a second open period in that account), or `unenrolment_date` is not after `enrolment_date`.
+
+**Deleting a period is not how you end one.** `DELETE /drp_enrolments/:id` returns `422 Unprocessable Entity` while the period covers a DRP trade of its own (listing, holding account) — deleting it would erase the record of why that reinvestment exists (and it could not be re-created afterwards: the distribution's ex date would no longer fall in any period), and it would strand the residual the last reinvestment carried forward, since nothing settles it and no later reinvestment can pick it up. End the period by setting `unenrolment_date` instead — that pays the trailing residual out, as the registry does — or delete the reinvestment first. A period that covers no reinvestment deletes normally (`204 No Content`), and a missing id is `404 Not Found`.
 
 ## CGT settings
 

@@ -744,3 +744,57 @@ Tests: `entities::tests::a_delete_blocked_by_a_dependant_names_it_rather_than_de
 `doc_checks::deletes_blocked_by_a_dependant_documented` for the documentation-only half. Full suite
 1388 passed / 0 failed; `cargo build`, `cargo fmt --check`, and `cargo clippy --all-targets -D
 warnings` all clean.
+
+## Deleting a DRP enrolment period strands its trailing residual (SCENARIOS A-43)
+(SCENARIOS.md section A verification pass, 2026-08-14. Closing a period by setting
+`unenrolment_date` settles the trailing residual — the leftover the period's last reinvestment
+carried forward moves to `residual_paid_out` on that DRP trade, in the same transaction, because the
+registry refunds it at termination (`db_unenrolment_pays_out_trailing_carried_residual` pins this).
+`DELETE /drp_enrolments/:id` ends the period just as finally and does none of it.)
+- [x] Reproduced: enrol open-ended, reinvest $100 at $10.50 → DRP trade with
+  `residual_carried_forward: 5.5`, `residual_paid_out: 0`. Unenrolling → `carried 0 / paid_out 5.5`.
+  Deleting the period instead → `carried 5.5 / paid_out 0` — cash recorded as carrying forward into
+  a period that no longer exists, and nothing can pick it up (a later reinvestment is refused
+  outright, `"account 'Default' is not enrolled …"`)
+- [x] Decide: settle the trailing residual on delete the same way unenrolment does, or refuse the
+  delete while the period covers a reinvestment (pointing at unenrolment instead). The second is
+  probably right — deleting a period that already produced DRP trades erases the record of why they
+  exist, and the reinvestment cannot be re-created afterwards
+- [x] Tests: `entities::drp_enrolment::tests`, mirroring
+  `db_unenrolment_pays_out_trailing_carried_residual` for the delete path
+- [x] Docs sync: `docs/API.md` DRP enrolments (what deleting a period does to a trailing residual)
+
+**Resolution (2026-08-15): the second option — the delete is refused while the period covers a
+reinvestment.** Settling the residual on delete would have made the two paths agree numerically
+while leaving the deeper problem in place: the DRP trade would survive with no period explaining why
+it exists, and it could never be re-created, because `drp_reinvestment` matches a distribution to a
+period by date at read time — with the period gone, the ex date falls in no period and the
+reinvestment is refused outright. Deleting a period is "it never existed"; ending one is what
+`unenrolment_date` is for.
+
+`drp_enrolment` therefore drops `http::delete_handler` for a hand-written `db_delete` in the shape
+`corporate_action::db_delete` established: load the period inside the delete's own transaction, test
+for a covering DRP trade over the *same* half-open `[enrolment_date, unenrolment_date)` window and
+the same `(listing_id, holding_account_id)` pair the reinvestment path and the unenrolment
+settlement walk use, and return `DeleteError::CoversReinvestment` if one exists. Nothing references
+`drp_enrolments` by foreign key, so there was no FK for the generic path to trip on — the check has
+to be explicit. The 422 body lives in the `From<DeleteError> for ApiError` arm with every other
+per-entity rejection wording, and points at the way out (set an unenrolment date, which pays the
+residual out, or delete the reinvestment first). A period covering nothing still deletes normally,
+and a missing id still answers the pinned `404` / `no DRP enrolment with that id` via
+`http::deleted`.
+
+The guard is deliberately scoped to the period's own window and account rather than "any DRP trade
+on this listing": a trade before the period, after it, or in another holding account was never
+produced by this enrolment, so it has no claim on it. A *closed* period covering a reinvestment is
+refused too — the record of why the trade exists matters after the residual is settled just as much
+as before.
+
+Tests: `db_delete_refused_while_the_period_covers_a_reinvestment` (the delete counterpart of
+`db_unenrolment_pays_out_trailing_carried_residual` — same fixture, asserting the period and the
+residual chain are both untouched, then that unenrolling settles it, then that the now-closed period
+is still refused), `db_delete_allowed_when_no_reinvestment_falls_in_the_period` (all three
+out-of-scope cases at once), and `api_delete_covering_period_returns_422_pointing_at_unenrolment`.
+`docs/API.md`'s DRP enrolments section gained a "Deleting a period is not how you end one" paragraph
+and a route-table note. Full suite 1391 passed / 0 failed; `cargo build`, `cargo fmt --check`, and
+`cargo clippy --all-targets -D warnings` all clean.

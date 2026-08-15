@@ -17,7 +17,9 @@
 //! leftover cash at unenrolment, so the latest in-period DRP trade's
 //! `residual_carried_forward` is moved to `residual_paid_out` in the same
 //! transaction. Deleting a period record means "it never existed" and settles
-//! nothing.
+//! nothing — so a period that already produced reinvestments cannot be
+//! deleted at all (`422`, [`DeleteError::CoversReinvestment`]): unenrolling is
+//! how a period ends.
 
 use crate::infra::decimal::{Money, parse_dec};
 use crate::infra::http::{self, ApiError, CrudEntity};
@@ -103,7 +105,9 @@ pub fn router() -> Router<SqlitePool> {
             "/drp_enrolments/{id}",
             get(http::get_handler::<DrpEnrolment>)
                 .put(upsert)
-                .delete(http::delete_handler::<DrpEnrolment>),
+                // Hand-written: a period covering a reinvestment is refused
+                // rather than deleted (see `db_delete`).
+                .delete(delete),
         )
 }
 
@@ -209,6 +213,83 @@ pub async fn db_upsert(pool: &SqlitePool, period: &DrpEnrolment) -> Result<(), U
     Ok(())
 }
 
+#[derive(thiserror::Error, Debug)]
+pub enum DeleteError {
+    /// The period covers a DRP trade — a reinvestment that happened *because*
+    /// the holding was enrolled then. Deleting the period erases the record of
+    /// why that trade exists (and the reinvestment cannot be re-created
+    /// afterwards, since the distribution's ex date would no longer fall in any
+    /// period), and it strands the trailing residual the last reinvestment
+    /// carried forward: nothing settles it, and no later reinvestment can pick
+    /// it up. Closing the period instead pays that residual out, exactly as the
+    /// registry does. Mapped to `422`.
+    #[error("this period covers a DRP reinvestment")]
+    CoversReinvestment,
+    #[error("DRP enrolment delete failed: {0}")]
+    Db(#[from] sqlx::Error),
+}
+
+impl From<DeleteError> for ApiError {
+    fn from(e: DeleteError) -> Self {
+        match e {
+            DeleteError::CoversReinvestment => ApiError::unprocessable(
+                "this period covers a DRP reinvestment, so deleting it would erase the record of \
+                 why that trade exists and strand the residual it carried forward — end the \
+                 period by setting an unenrolment date instead (that pays the residual out), or \
+                 delete the reinvestment first",
+            ),
+            DeleteError::Db(err) => err.into(),
+        }
+    }
+}
+
+/// Delete an enrolment period, `Ok(false)` when no period has that id.
+///
+/// Refused while the period covers a DRP trade of its own (listing, holding
+/// account) — see [`DeleteError::CoversReinvestment`]. Nothing references
+/// `drp_enrolments` by foreign key (a reinvestment is matched to its period by
+/// date at read time), so the check is made here, in the delete's own
+/// transaction.
+pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<bool, DeleteError> {
+    let mut tx = pool.begin().await?;
+    let Some(period): Option<DrpEnrolment> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT {} FROM drp_enrolments WHERE id = ?",
+        <DrpEnrolment as CrudEntity>::COLUMNS
+    )))
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await?
+    else {
+        return Ok(false);
+    };
+
+    // The same half-open [enrolment_date, unenrolment_date) window the
+    // reinvestment path matches a distribution against, and the settlement
+    // walk uses — an open period covers everything from its start.
+    let covers_reinvestment: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM trades \
+                       WHERE listing_id = ? AND holding_account_id = ? AND trade_type = 'DRP' \
+                         AND date >= ? AND (? IS NULL OR date < ?))",
+    )
+    .bind(period.listing_id)
+    .bind(period.holding_account_id)
+    .bind(period.enrolment_date)
+    .bind(period.unenrolment_date)
+    .bind(period.unenrolment_date)
+    .fetch_one(&mut *tx)
+    .await?;
+    if covers_reinvestment {
+        return Err(DeleteError::CoversReinvestment);
+    }
+
+    sqlx::query("DELETE FROM drp_enrolments WHERE id = ?")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(true)
+}
+
 async fn upsert(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
@@ -224,6 +305,16 @@ async fn upsert(
     };
     db_upsert(&pool, &period).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn delete(
+    State(pool): State<SqlitePool>,
+    Path(id): Path<i64>,
+) -> Result<StatusCode, ApiError> {
+    http::deleted(
+        db_delete(&pool, id).await?,
+        <DrpEnrolment as CrudEntity>::NOUN,
+    )
 }
 
 impl From<UpsertError> for ApiError {
@@ -681,6 +772,119 @@ mod tests {
             residuals(&pool, 10).await,
             ("5".to_string(), "0".to_string())
         );
+    }
+
+    /// The delete counterpart of `db_unenrolment_pays_out_trailing_carried_residual`:
+    /// the same period, ended by deleting it instead of unenrolling, would
+    /// strand the residual its last reinvestment carried forward — so the
+    /// delete is refused and the trade is left exactly as it was.
+    #[tokio::test]
+    async fn db_delete_refused_while_the_period_covers_a_reinvestment() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        db_upsert(
+            &pool,
+            &period(1, 1, "2024-01-01", None, ResidualHandling::CarryForward),
+        )
+        .await
+        .unwrap();
+        insert_drp_trade(&pool, 10, 1, "2024-09-30", "5.50", "0").await;
+
+        assert!(matches!(
+            db_delete(&pool, 1).await,
+            Err(DeleteError::CoversReinvestment)
+        ));
+        assert!(
+            db_get(&pool, 1).await.unwrap().is_some(),
+            "the refused delete leaves the period in place"
+        );
+        assert_eq!(
+            residuals(&pool, 10).await,
+            ("5.50".to_string(), "0".to_string()),
+            "and leaves the reinvestment's residual chain untouched"
+        );
+
+        // Unenrolling is the way out: it settles the trailing residual.
+        db_upsert(
+            &pool,
+            &period(
+                1,
+                1,
+                "2024-01-01",
+                Some("2025-01-01"),
+                ResidualHandling::CarryForward,
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            residuals(&pool, 10).await,
+            ("0".to_string(), "5.50".to_string())
+        );
+        // Closed, but still covering the reinvestment — still refused.
+        assert!(matches!(
+            db_delete(&pool, 1).await,
+            Err(DeleteError::CoversReinvestment)
+        ));
+    }
+
+    /// The guard is scoped exactly like the period itself: a DRP trade outside
+    /// its dates, or in another holding account, doesn't block the delete.
+    #[tokio::test]
+    async fn db_delete_allowed_when_no_reinvestment_falls_in_the_period() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        crate::entities::holding_account::db_upsert(
+            &pool,
+            &crate::entities::holding_account::HoldingAccount {
+                id: 2,
+                name: "Personal CHESS".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        db_upsert(
+            &pool,
+            &period(
+                1,
+                1,
+                "2024-01-01",
+                Some("2025-01-01"),
+                ResidualHandling::CarryForward,
+            ),
+        )
+        .await
+        .unwrap();
+        // Before the period, after it, and inside it but in another account.
+        insert_drp_trade(&pool, 10, 1, "2023-06-30", "1", "0").await;
+        insert_drp_trade(&pool, 11, 1, "2025-06-30", "1", "0").await;
+        insert_drp_trade(&pool, 12, 1, "2024-06-30", "1", "0").await;
+        sqlx::query("UPDATE trades SET holding_account_id = 2 WHERE id = 12")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        assert!(db_delete(&pool, 1).await.unwrap());
+        assert!(db_get(&pool, 1).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn api_delete_covering_period_returns_422_pointing_at_unenrolment() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        db_upsert(
+            &pool,
+            &period(1, 1, "2024-01-01", None, ResidualHandling::CarryForward),
+        )
+        .await
+        .unwrap();
+        insert_drp_trade(&pool, 10, 1, "2024-09-30", "5.50", "0").await;
+
+        let resp = client(&pool).delete("/drp_enrolments/1").await;
+        let (status, body) = resp.status_and_body();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(body.contains("DRP reinvestment"), "body: {body}");
+        assert!(body.contains("unenrolment date"), "body: {body}");
     }
 
     #[tokio::test]
