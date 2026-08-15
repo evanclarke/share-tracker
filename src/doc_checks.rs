@@ -891,6 +891,38 @@ fn corporate_action_delete_guard_documented() {
     assert!(limitations.contains("There is no lodged/closed-year concept in the data model"));
 }
 
+/// Docs-sync pin for the closed-year decision (SCENARIOS A-15/A-21/A-25/A-35,
+/// 2026-08-15): the restatement exposure is real but not a bug — there is no
+/// lodged-year concept in the data model, and building one (a per-FY lodgement
+/// marker plus a changed-since-lodgement flag over `row_history`) is a feature
+/// deliberately not taken on. That decision is only honest if it is *stated*,
+/// since a user reasonably assumes a prior year's numbers are settled — so
+/// this is a documentation-only requirement, pinned here: the Known
+/// limitations entry, the two properties that make it survivable (auditable
+/// via row history, snapshots don't cover tax reports), the mitigation, the
+/// A-40 exchange-holiday footnote, and the README's own scope-cuts summary.
+#[test]
+fn closed_year_restatement_documented() {
+    let limitations = known_limitations();
+    assert!(limitations.contains(
+        "**A lodged financial year can be restated with nothing marking it** (2026-08-15)"
+    ));
+    assert!(limitations.contains("**no financial year is ever closed**"));
+    // The two facts that bound the exposure: it is recoverable after the fact,
+    // and the one stored-report mechanism that sounds like it would help
+    // deliberately does not.
+    assert!(limitations.contains("auditable after the fact"));
+    assert!(limitations.contains(
+        "[Report snapshots](#report-snapshots) do not help here either; they persist the three \
+         price-dependent reports only, never a tax report"
+    ));
+    // The mitigation the user is left with, and the low-severity companion.
+    assert!(limitations.contains("save the [annual tax report](#annual-tax-report) as a PDF"));
+    assert!(limitations.contains("[`DELETE /exchange_holidays/:mic/:date`](#exchange-holidays)"));
+    assert!(limitations.contains("a record field, not a tax figure"));
+    assert!(README_MD.contains("**no financial year is ever closed**"));
+}
+
 /// Docs-sync pin for the write-time state check that bounds that open edit
 /// path (2026-08-15): a corporate-action write is refused when the resulting
 /// terms would leave a sale allocating more units than its parcel holds, so

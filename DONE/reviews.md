@@ -798,3 +798,62 @@ out-of-scope cases at once), and `api_delete_covering_period_returns_422_pointin
 `docs/API.md`'s DRP enrolments section gained a "Deleting a period is not how you end one" paragraph
 and a route-table note. Full suite 1391 passed / 0 failed; `cargo build`, `cargo fmt --check`, and
 `cargo clippy --all-targets -D warnings` all clean.
+
+## A closed financial year can be restated with nothing marking it (SCENARIOS A-15, A-21, A-25, A-35)
+(SCENARIOS.md section A verification pass, 2026-08-14. Every tax report is computed live from the
+current facts, so editing a prior year's inputs silently changes figures that may already have been
+lodged. Report snapshots do not cover this — they snapshot the three price-dependent reports only,
+never the tax summary, net capital gain, or annual tax report. `row_history` records the change, so
+the restatement is *auditable* after the fact, but nothing *surfaces* it.)
+- [x] Reproduced four ways, all `204`/`200` with no flag: changing a lodged year's Buy price
+  (FY2023 net capital gain $500 → $1,100, A-15); deleting a `ReturnOfCapital` after its G1 gain was
+  reported (A-21 — that *delete* is now refused `422`, see DONE/reviews.md; editing the payment
+  amount in place restates the same year, so the finding stands); deleting the `cgt_settings`
+  opening carried-forward loss after later years
+  consumed it (FY2024 net gain $500 → $1,000, A-25); deleting the only disposal of a loss year that
+  a later year's carry-forward drew on (FY2024 net gain $750 → $1,500, A-35). The annual tax report
+  keeps reporting `completeness.complete: true` throughout
+- [x] Decide the scope: this may be honest "not modelled" — there is no lodged/closed-year concept
+  in the data model, and adding one is a real feature (a lodgement marker per FY, plus a
+  "changed since lodgement" flag driven off `row_history` timestamps). If it stays unmodelled it
+  needs a **Known limitations** entry saying so plainly, since a user reasonably assumes a prior
+  year's numbers are settled. Either way this is a documentation-or-feature decision, not a bug
+- [x] Related, low severity (A-40): `DELETE /exchange_holidays/:mic/:date` has no guard and no flag,
+  and a trade re-saved afterwards without an explicit `settlement_date` silently recomputes against
+  the changed calendar (reproduced: an ASX trade settling 2024-04-02 recomputed to 2024-03-29 — Good
+  Friday itself — once that holiday was deleted). Stored `settlement_date` values are untouched, and
+  no CGT figure reads the column (only the settlement-coverage report and the annual tax report's
+  display do), so the exposure is a record field, not a tax figure. Worth one line wherever the
+  restatement decision above lands
+
+**Resolution (2026-08-15): documented as a Known limitation — the "not modelled" branch.** Closing a
+year properly is a feature, not a fix: a per-FY lodgement marker is a new fact table (with the
+row-history and staleness-trigger decisions any new fact table brings), and the flag that would make
+it useful — "this year changed since you lodged it" — has to be derived by comparing `row_history`
+timestamps against that marker for every table feeding the year. That is a real build, and it is not
+what the system is for; the decision is to leave every year live and say so plainly, since the one
+thing that would be dishonest is letting a user assume a prior year's numbers are settled when
+nothing makes them so.
+
+`docs/API.md`'s Known limitations gained **A lodged financial year can be restated with nothing
+marking it**, placed directly after the corporate-action-edit entry it generalises (that one is one
+instance of this). It states the mechanism (no lodgement marker; every tax figure computed live from
+the current facts, never stored), all four reproductions with their figures, and the point the
+reproductions make between them that no single one does — A-25 and A-35 move a *later* year's
+figures because an *earlier* year's inputs changed, so the restatement need not be in the year you
+edited. It then bounds the exposure with the two facts that make it survivable: `row_history` makes
+every restatement auditable after the fact (but nothing surfaces it — you have to go looking), and
+report snapshots deliberately do not help, covering the three price-dependent reports only. The
+mitigation left to the user is their own record-keeping: save the annual tax report as a PDF at
+lodgement — it is a print document built to be archived for exactly this reason — and compare
+against it before relying on a re-run of a prior year.
+
+A-40 lands as the entry's closing sentence rather than its own limitation, which is the right weight
+for it: same shape (no guard, no flag), but stored `settlement_date` values are untouched and no CGT
+figure reads the column, so it is a record field, not a tax figure.
+
+The README's deliberate-scope-cuts summary gained the matching clause, so the limitation is visible
+without opening `docs/API.md`. Tests: `doc_checks::closed_year_restatement_documented` (the
+documentation-only requirement — the entry, the two bounding properties, the mitigation, the A-40
+footnote, and the README clause). Full suite 1392 passed / 0 failed; `cargo build`, `cargo fmt
+--check`, and `cargo clippy --all-targets -D warnings` all clean.
