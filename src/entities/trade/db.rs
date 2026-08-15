@@ -148,8 +148,7 @@ pub enum UpsertError {
     RightsAnchorParcel,
     /// A supplied statement total failed the cross-check (see
     /// `check_statement_total`): it doesn't reconcile with the trade's own
-    /// figures, or the trade and brokerage currencies differ so there is no
-    /// single-currency total to check.
+    /// figures.
     #[error("the statement total cross-check failed: {0}")]
     StatementTotal(#[source] StatementTotalError),
     /// A supplied spot-rate override was rejected (see
@@ -158,8 +157,9 @@ pub enum UpsertError {
     #[error("the spot FX rate override was rejected: {0}")]
     SpotFxRate(#[source] SpotFxRateError),
     /// A degenerate core figure was rejected (see [`check_amounts`]):
-    /// non-positive quantity or FX rate, negative price/brokerage/GST, or a
-    /// settlement before the trade date.
+    /// non-positive quantity or FX rate, negative price/brokerage/GST, a
+    /// brokerage currency differing from the trade's, or a settlement before
+    /// the trade date.
     #[error("a core trade figure was rejected: {0}")]
     Amounts(#[source] AmountsError),
 }
@@ -199,6 +199,8 @@ pub async fn db_upsert(pool: &SqlitePool, trade: &Trade) -> Result<(), UpsertErr
         fx_rate: trade.fx_rate,
         date: trade.date,
         settlement_date: trade.settlement_date,
+        currency: &trade.currency,
+        brokerage_currency: &trade.brokerage_currency,
     })
     .map_err(UpsertError::Amounts)?;
     // The statement total (when recorded) must reconcile with the trade's own
@@ -207,8 +209,6 @@ pub async fn db_upsert(pool: &SqlitePool, trade: &Trade) -> Result<(), UpsertErr
     check_statement_total(StatementTotalCheck {
         statement_total: trade.statement_total,
         amounts: trade.amounts(),
-        currency: &trade.currency,
-        brokerage_currency: &trade.brokerage_currency,
     })
     .map_err(UpsertError::StatementTotal)?;
     // A deliberate spot-rate override must be usable: positive, and on a

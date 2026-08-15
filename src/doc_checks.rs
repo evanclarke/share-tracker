@@ -451,6 +451,39 @@ fn known_limitations_document_cost_base_fx_timing() {
     assert!(README_MD.contains("s 960-50 translation timing"));
 }
 
+/// Docs pin for the brokerage-currency invariant (SCENARIOS B-02, decided
+/// 2026-08-15): the write-time refusal has its own tests
+/// (`trade::tests::api_brokerage_in_another_currency_than_the_trade_returns_422`,
+/// the Sell twin, and the open-parcels figure), but the *documented* half —
+/// what a user with a foreign-currency fee is supposed to do instead, and why
+/// the strict s 960-50 per-leg translation is not modelled — lives only in the
+/// docs. The Known-limitations entry states the rule, the workaround and the
+/// citation; the Trades section explains what the field means for the cost
+/// base; the schema records the constraint; and the README surfaces it.
+#[test]
+fn known_limitations_document_the_brokerage_currency_invariant() {
+    let limitations = known_limitations();
+    assert!(limitations.contains("**Brokerage is billed in the trade's own currency**"));
+    // The rule, the reason, and the entry route it leaves the user.
+    assert!(limitations.contains("`brokerage_currency` differs from its `currency` is rejected"));
+    assert!(limitations.contains(
+        "**An Australian broker's AUD commission on a US trade is entered converted into the \
+         trade's currency**"
+    ));
+    // The strict rule that is deliberately not modelled, and its mirror.
+    assert!(limitations.contains("s 960-50 translates each amount at its own time"));
+    assert!(limitations.contains("docs/ato/forex-common-transactions.md"));
+    // The Trades section says what the field means for the cost base.
+    assert!(API_MD.contains(
+        "`brokerage_currency` records the currency the fee was billed in, and **must equal the \
+         trade's `currency`**"
+    ));
+    // The schema carries the constraint on the column itself.
+    assert!(SCHEMA_MD.contains("write-time validated to equal `currency` (422 otherwise)"));
+    // Surfaced in the README too.
+    assert!(README_MD.contains("**brokerage is billed in the trade's own currency**"));
+}
+
 /// Docs-sync pin for the backup pipeline hardening (2026-07-13 improvement
 /// review) and the later `--backup-command` off-machine-copy hook: the README
 /// documents verification (integrity check + migrations match, `.bad`

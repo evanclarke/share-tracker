@@ -10,33 +10,6 @@ findings are all closed in DONE.md), except where a section's heading names anot
 (e.g. REQUIREMENTS, SCENARIOS). Each section records one finding; sections land in DONE.md as they
 are fixed or decided.
 
-## Brokerage in a currency other than the trade's is added to the cost base unconverted (SCENARIOS B-02)
-(SCENARIOS.md section B verification pass, 2026-08-15. `domain::cost_base`'s `initial_cost` is
-`average_price × quantity + brokerage + gst_on_brokerage`, summed in the trade's currency and
-converted to AUD as one figure at the acquisition-month rate. `trades.brokerage_currency` is
-FK-validated against `currencies` and then read by exactly one thing — `check_statement_total`,
-which *refuses* the statement-total cross-check when it differs from `currency`. No calculation
-consults it, and the field carries no informational-only comment, so the model invites an entry it
-then mis-costs.)
-- [ ] Reproduced: USD listing, RBA USD rate 0.50 for 2024-01, Buy 10 @ USD 100 with
-  `brokerage: "30"`, `gst_on_brokerage: "3"`, `brokerage_currency: "AUD"` (an Australian broker's
-  AUD fee on a US trade). `/portfolio/open-parcels` reports `original_cost_base` **A$2,066**; the
-  correct figure is **A$2,033** (USD 1,000 ÷ 0.50 = A$2,000, plus the A$33 already in AUD). The
-  A$33 fee was converted as though it were USD
-- [ ] Same on the disposal side: a Sell's proceeds net the brokerage before conversion, so a
-  foreign-currency fee on a foreign-currency sale is netted at the wrong scale
-- [ ] Not covered by any Known limitation, and no test pins a cost base with a mixed
-  brokerage/trade currency (`brokerage_currency` appears in `src/` only in fixtures and the
-  statement-total guard)
-- [ ] Decide the fix: convert the brokerage leg separately at its own currency's rate (element 2 is
-  an amount actually incurred, translated at its own time per s 960-50 — `docs/ato/
-  forex-common-transactions.md`), or refuse a `brokerage_currency` that differs from `currency` at
-  write time the way `statement_total` already does for the same pair. Refusing is honest and
-  cheap; converting is what the field promises
-- [ ] Tests: `domain::cost_base` / `reports::open_parcels` for whichever route, plus the Sell side
-- [ ] Docs sync: `docs/API.md` Trades (what `brokerage_currency` means for the cost base) and
-  `docs/SCHEMA.md`
-
 ## A return of capital has no record date, so it reduces parcels bought after the entitlement was fixed (SCENARIOS B-09)
 (SCENARIOS.md section B verification pass, 2026-08-15. `corporate_actions.date` for a
 `ReturnOfCapital` is the **payment** date, and both the cost-base pipeline and `g1_gains` test

@@ -179,7 +179,6 @@ mod tests {
             .qty(qty)
             .price(price)
             .currency(currency)
-            .with(|t| t.brokerage_currency = "AUD".to_string())
             .brokerage(dec("9.95"))
             .gst_on_brokerage(dec("0.995"))
             .insert(pool)
@@ -402,6 +401,47 @@ mod tests {
         assert_eq!(
             parcels[0].remaining_cost_base,
             "2021.890".parse::<Decimal>().unwrap()
+        );
+    }
+
+    /// SCENARIOS B-02: an Australian broker's AUD fee on a US trade. The
+    /// brokerage leg is part of a single-currency cost base, so a differing
+    /// `brokerage_currency` is refused at write time
+    /// (`trade::AmountsError::BrokerageCurrencyMismatch`); the fee is recorded
+    /// converted into the trade's own currency instead, and the whole cost
+    /// base then converts once at the acquisition month's rate. A$33 of fees
+    /// on USD 1,000 of consideration: USD 16.50 at 0.50 → A$2,033, not the
+    /// A$2,066 an unconverted A$33 would have produced.
+    #[tokio::test]
+    async fn db_foreign_fee_recorded_in_the_trade_currency_costs_at_its_own_scale() {
+        let pool = test_pool().await;
+        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 10).unwrap();
+        insert_listing(&pool, 1, "VTS").await;
+        crate::entities::rba_fx_rate::db_import_rate(
+            &pool,
+            "USD",
+            "2024-01",
+            "0.50".parse().unwrap(),
+        )
+        .await
+        .unwrap();
+        // A$30 brokerage + A$3 GST = A$33, entered as USD 15 + USD 1.50.
+        test_support::buy(1, 1)
+            .date(buy_date)
+            .qty(Decimal::from(10))
+            .price(Decimal::from(100))
+            .currency("USD")
+            .brokerage(Decimal::from(15))
+            .gst_on_brokerage("1.5".parse().unwrap())
+            .insert(&pool)
+            .await;
+
+        let parcels = db_open_parcels(&pool).await.unwrap();
+        assert_eq!(parcels.len(), 1);
+        assert_eq!(
+            parcels[0].original_cost_base,
+            Decimal::from(2033),
+            "USD 1016.50 / 0.50 — the fee converts at the same rate as the consideration"
         );
     }
 

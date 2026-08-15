@@ -152,8 +152,9 @@ pub enum SellError {
     #[error("the spot FX rate override was rejected: {0}")]
     SpotFxRate(#[source] trade::SpotFxRateError),
     /// A degenerate core figure was rejected (see `trade::check_amounts`):
-    /// non-positive quantity or FX rate, negative price/brokerage/GST, or a
-    /// settlement before the sale date.
+    /// non-positive quantity or FX rate, negative price/brokerage/GST, a
+    /// brokerage currency differing from the sale's, or a settlement before
+    /// the sale date.
     #[error("a core trade figure was rejected: {0}")]
     Amounts(#[source] trade::AmountsError),
     /// An allocation's `quantity_allocated` is zero or negative. A negative
@@ -498,6 +499,8 @@ pub(crate) async fn upsert_sell_in_tx(
         fx_rate: body.fx_rate,
         date: body.date,
         settlement_date,
+        currency: &body.currency,
+        brokerage_currency: &body.brokerage_currency,
     })
     .map_err(SellError::Amounts)?;
     trade::check_statement_total(trade::StatementTotalCheck {
@@ -509,8 +512,6 @@ pub(crate) async fn upsert_sell_in_tx(
             brokerage,
             gst_on_brokerage,
         },
-        currency: &body.currency,
-        brokerage_currency: &body.brokerage_currency,
     })
     .map_err(SellError::StatementTotal)?;
     // A deliberate spot-rate override must be usable: positive, and on a
@@ -1430,6 +1431,42 @@ mod tests {
         assert!(
             detail.contains("1490.05"),
             "detail must carry the net proceeds: {detail}"
+        );
+    }
+
+    /// The disposal side of SCENARIOS B-02: a Sell's brokerage is netted off
+    /// the proceeds before they convert to AUD, so a fee billed in another
+    /// currency would be netted at the sale currency's scale. The Sell path
+    /// shares `trade::check_amounts`, so it refuses the mixed pair exactly as
+    /// the trade path does, and nothing is written.
+    #[tokio::test]
+    async fn api_sell_brokerage_in_another_currency_than_the_sale_returns_422() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
+
+        let body = serde_json::json!({
+            "date": "2024-06-03",
+            "listing_id": 1,
+            "average_price": "15",
+            "quantity": "100",
+            "currency": "USD",
+            "brokerage": "30",
+            "gst_on_brokerage": "3",
+            "brokerage_currency": "AUD",
+            "fx_rate": "1.5",
+            "allocations": [ { "purchase_trade_id": 1, "quantity_allocated": "100" } ]
+        });
+        let resp = client(&pool).put("/sells/2", &body).await;
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
+        let detail = resp.text().to_string();
+        assert!(
+            detail.contains("brokerage_currency must equal the trade's currency"),
+            "detail must explain the rejection: {detail}"
+        );
+        assert!(
+            trade::db_get(&pool, 2).await.unwrap().is_none(),
+            "nothing persisted"
         );
     }
 

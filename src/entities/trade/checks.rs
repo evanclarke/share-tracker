@@ -108,6 +108,16 @@ pub(crate) enum AmountsError {
     /// Negative GST on brokerage.
     #[error("the GST on brokerage cannot be negative")]
     GstNegative,
+    /// The brokerage was recorded in a different currency from the trade
+    /// itself. Every figure the brokerage feeds — the parcel's cost base
+    /// (`domain::cost_base`), a Sell's net proceeds, the activity ledger's
+    /// transaction total — is a single-currency sum of consideration and
+    /// costs, so a fee in another currency would be added at the trade
+    /// currency's scale and silently mis-cost the parcel. Rejected at write
+    /// time rather than invented an FX conversion for, matching the
+    /// statement-total cross-check's refusal to reconcile across currencies.
+    #[error("the brokerage currency differs from the trade currency")]
+    BrokerageCurrencyMismatch,
     /// Zero or negative fallback FX rate: the rate divides the amount
     /// (AUD = foreign / rate), so it can never be a real exchange rate.
     #[error("the fallback FX rate must be greater than zero")]
@@ -125,7 +135,7 @@ pub(crate) enum AmountsError {
 /// The core figures every trade/Sell write must satisfy, gathered for
 /// [`check_amounts`]. Named fields keep the adjacent `Decimal` amounts from
 /// being transposed at the call site (mirrors [`StatementTotalCheck`]).
-pub(crate) struct AmountsCheck {
+pub(crate) struct AmountsCheck<'a> {
     pub quantity: Decimal,
     pub average_price: Decimal,
     pub brokerage: Decimal,
@@ -133,13 +143,19 @@ pub(crate) struct AmountsCheck {
     pub fx_rate: Decimal,
     pub date: NaiveDate,
     pub settlement_date: NaiveDate,
+    /// The trade's own currency, and the currency the brokerage was billed
+    /// in — the pair [`AmountsError::BrokerageCurrencyMismatch`] requires to
+    /// be the same.
+    pub currency: &'a str,
+    pub brokerage_currency: &'a str,
 }
 
 /// Validate a trade's core figures: quantity > 0, price ≥ 0, brokerage and
-/// GST ≥ 0, fx_rate > 0, settlement on or after the trade date. Brokerage is
-/// checked post-GST-split (see [`resolve_brokerage`]), so a negative
-/// GST-inclusive entry is caught through its negative parts.
-pub(crate) fn check_amounts(c: &AmountsCheck) -> Result<(), AmountsError> {
+/// GST ≥ 0, brokerage billed in the trade's own currency, fx_rate > 0,
+/// settlement on or after the trade date. Brokerage is checked post-GST-split
+/// (see [`resolve_brokerage`]), so a negative GST-inclusive entry is caught
+/// through its negative parts.
+pub(crate) fn check_amounts(c: &AmountsCheck<'_>) -> Result<(), AmountsError> {
     if c.quantity <= Decimal::ZERO {
         return Err(AmountsError::QuantityNotPositive);
     }
@@ -151,6 +167,9 @@ pub(crate) fn check_amounts(c: &AmountsCheck) -> Result<(), AmountsError> {
     }
     if c.gst_on_brokerage < Decimal::ZERO {
         return Err(AmountsError::GstNegative);
+    }
+    if !c.currency.eq_ignore_ascii_case(c.brokerage_currency) {
+        return Err(AmountsError::BrokerageCurrencyMismatch);
     }
     if c.fx_rate <= Decimal::ZERO {
         return Err(AmountsError::FxRateNotPositive);
@@ -171,6 +190,11 @@ pub(crate) fn amounts_detail(e: &AmountsError) -> &'static str {
         AmountsError::PriceNegative => "average_price cannot be negative",
         AmountsError::BrokerageNegative => "brokerage cannot be negative",
         AmountsError::GstNegative => "gst_on_brokerage cannot be negative",
+        AmountsError::BrokerageCurrencyMismatch => {
+            "brokerage_currency must equal the trade's currency — a fee billed in another \
+             currency has to be entered converted into the trade's currency, since the cost \
+             base, net proceeds and transaction total are all single-currency sums"
+        }
         AmountsError::FxRateNotPositive => {
             "fx_rate must be a positive foreign-per-AUD rate (1 for an AUD trade)"
         }
@@ -182,14 +206,13 @@ pub(crate) fn amounts_detail(e: &AmountsError) -> &'static str {
     }
 }
 
-/// Why a supplied statement total failed to reconcile (both map to 422).
+/// Why a supplied statement total failed to reconcile (maps to 422). A
+/// mixed-currency trade can't reach here: [`check_amounts`] runs first on both
+/// write paths and rejects a `brokerage_currency` differing from the trade's
+/// ([`AmountsError::BrokerageCurrencyMismatch`]), so every trade this check
+/// sees adds up in one currency.
 #[derive(thiserror::Error, Debug, PartialEq)]
 pub(crate) enum StatementTotalError {
-    /// The trade and brokerage currencies differ, so no single-currency
-    /// total exists to check against — supplying one is rejected rather
-    /// than inventing an FX conversion.
-    #[error("the trade and brokerage currencies differ, so no single-currency total exists")]
-    CurrencyMismatch,
     /// The supplied total does not equal the computed figure (carried so
     /// the rejection can say what the trade actually adds up to).
     #[error("the supplied statement total does not equal the computed {expected}")]
@@ -226,13 +249,10 @@ impl TradeAmounts {
 }
 
 /// The figures a recorded statement total is cross-checked against, gathered
-/// for [`check_statement_total`]: the trade's own amounts plus the currencies
-/// that decide whether a single-currency total exists to check at all.
-pub(crate) struct StatementTotalCheck<'a> {
+/// for [`check_statement_total`].
+pub(crate) struct StatementTotalCheck {
     pub statement_total: Option<Decimal>,
     pub amounts: TradeAmounts,
-    pub currency: &'a str,
-    pub brokerage_currency: &'a str,
 }
 
 /// Cross-check an optionally supplied statement total against what the trade
@@ -246,9 +266,6 @@ pub(crate) fn check_statement_total(c: StatementTotalCheck) -> Result<(), Statem
     let Some(total) = c.statement_total else {
         return Ok(());
     };
-    if c.currency != c.brokerage_currency {
-        return Err(StatementTotalError::CurrencyMismatch);
-    }
     let expected = c.amounts.net_transaction_total();
     let cent_rounded =
         expected.round_dp_with_strategy(2, rust_decimal::RoundingStrategy::MidpointAwayFromZero);
@@ -261,11 +278,6 @@ pub(crate) fn check_statement_total(c: StatementTotalCheck) -> Result<(), Statem
 /// Human-readable body for a statement-total 422 (shown by the web UI).
 pub(crate) fn statement_total_detail(e: &StatementTotalError) -> String {
     match e {
-        StatementTotalError::CurrencyMismatch => {
-            "statement_total can only be checked when the trade and brokerage \
-             currencies match — omit it for mixed-currency trades"
-                .to_string()
-        }
         StatementTotalError::TotalMismatch { expected } => {
             format!("statement_total does not reconcile: the trade computes to {expected}")
         }

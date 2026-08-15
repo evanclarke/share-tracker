@@ -161,24 +161,31 @@ mod tests {
             }
         }
 
-        // 'ZZZ' is not a recognised currency → each currency column's FK rejects it.
+        // 'ZZZ' is not a recognised currency → the currency columns' FK
+        // rejects it. Both columns carry it: the write path requires the pair
+        // to match (SCENARIOS B-02), so an unrecognised code can only ever
+        // reach the database on both at once.
         let mut bad_currency = buy_trade();
         bad_currency.currency = "ZZZ".to_string();
+        bad_currency.brokerage_currency = "ZZZ".to_string();
         assert_fk_error(
             db_upsert(&pool, &bad_currency).await.unwrap_err(),
             "currency",
         );
 
-        let mut bad_brokerage = buy_trade();
-        bad_brokerage.brokerage_currency = "ZZZ".to_string();
-        assert_fk_error(
-            db_upsert(&pool, &bad_brokerage).await.unwrap_err(),
-            "brokerage_currency",
-        );
+        // `brokerage_currency` carries its own FK all the same — pinned
+        // directly, since no write path can reach it alone.
+        db_upsert(&pool, &buy_trade()).await.unwrap();
+        let err = sqlx::query("UPDATE trades SET brokerage_currency = 'ZZZ' WHERE id = 1")
+            .execute(&pool)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("FOREIGN KEY"), "{err}");
 
         // A seeded digital-token code (BTC) is a recognised currency and is accepted.
         let mut btc = buy_trade();
         btc.currency = "BTC".to_string();
+        btc.brokerage_currency = "BTC".to_string();
         db_upsert(&pool, &btc).await.unwrap();
     }
 
@@ -1573,35 +1580,64 @@ mod tests {
         );
     }
 
-    /// A total can only be checked when the trade and brokerage currencies
-    /// match — supplying one on a mixed-currency trade is rejected rather
-    /// than inventing an FX conversion.
+    /// A brokerage billed in a currency other than the trade's is rejected at
+    /// write time (SCENARIOS B-02): the cost base, a Sell's net proceeds and
+    /// the activity ledger's transaction total are all single-currency sums,
+    /// so an AUD fee on a USD trade would be added at the USD scale and
+    /// silently mis-cost the parcel. Rejected with or without a statement
+    /// total — the total's own cross-check used to be the only thing reading
+    /// `brokerage_currency`, and now can never see a mixed-currency trade.
     #[tokio::test]
-    async fn api_statement_total_on_mixed_currency_trade_returns_422() {
+    async fn api_brokerage_in_another_currency_than_the_trade_returns_422() {
         let pool = test_pool().await;
         insert_test_listing(&pool).await;
-        let body = serde_json::json!({
-            "trade_type": "Buy",
-            "date": "2024-01-15",
-            "listing_id": 1,
-            "average_price": "100",
-            "quantity": "10",
-            "currency": "USD",
-            "brokerage": "9.95",
-            "brokerage_currency": "AUD",
-            "fx_rate": "1.5",
-            "statement_total": "1009.95"
-        });
-        let (status, detail) = put_trade_json(&pool, 1, body).await;
-        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-        assert!(
-            detail.contains("currencies"),
-            "detail must explain the rejection: {detail}"
-        );
-        assert!(
-            db_get(&pool, 1).await.unwrap().is_none(),
-            "nothing persisted"
-        );
+        let trade = |total: serde_json::Value| {
+            serde_json::json!({
+                "trade_type": "Buy",
+                "date": "2024-01-15",
+                "listing_id": 1,
+                "average_price": "100",
+                "quantity": "10",
+                "currency": "USD",
+                "brokerage": "30",
+                "gst_on_brokerage": "3",
+                "brokerage_currency": "AUD",
+                "fx_rate": "1.5",
+                "statement_total": total
+            })
+        };
+        for (id, total) in [(1, serde_json::Value::Null), (2, serde_json::json!("1033"))] {
+            let (status, detail) = put_trade_json(&pool, id, trade(total)).await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+            assert!(
+                detail.contains("brokerage_currency must equal the trade's currency"),
+                "detail must explain the rejection: {detail}"
+            );
+            assert!(
+                db_get(&pool, id).await.unwrap().is_none(),
+                "nothing persisted"
+            );
+        }
+        // The same fee converted into the trade's own currency is accepted —
+        // the documented way to record it (docs/API.md Known limitations).
+        let (status, _) = put_trade_json(
+            &pool,
+            3,
+            serde_json::json!({
+                "trade_type": "Buy",
+                "date": "2024-01-15",
+                "listing_id": 1,
+                "average_price": "100",
+                "quantity": "10",
+                "currency": "USD",
+                "brokerage": "15",
+                "gst_on_brokerage": "1.5",
+                "brokerage_currency": "USD",
+                "fx_rate": "1.5"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
     }
 
     /// The boolean column is CHECK-constrained to 0/1 in the database.

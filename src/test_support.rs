@@ -526,8 +526,9 @@ impl TradeBuilder {
         self
     }
 
-    /// Sets the trade currency (and the brokerage currency with it — tests
-    /// never split the two).
+    /// Sets the trade currency (and the brokerage currency with it — the two
+    /// can never differ: a brokerage billed in another currency is rejected at
+    /// write time, see `trade::AmountsError::BrokerageCurrencyMismatch`).
     pub fn currency(mut self, currency: &str) -> Self {
         self.t.currency = currency.to_string();
         self.t.brokerage_currency = currency.to_string();

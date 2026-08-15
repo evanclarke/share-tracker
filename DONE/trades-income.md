@@ -92,7 +92,7 @@ Attach supporting documents (trade confirmation PDF, dividend statement, AMMA sc
 (REQUIREMENTS "New Requirements — GST-inclusive brokerage entry and statement-total cross-check", added 2026-06-07. Today `trades.brokerage` is stored ex-GST and `gst_on_brokerage` is entered manually, with cost base = price×qty + brokerage + gst everywhere; broker statements quote brokerage GST-inclusive plus a net transaction total. The flag makes the server do the ÷11 split at write time — stored values keep their existing semantics, so no report changes — and the optional statement total is a pure write-time cross-check against the contract note.)
 - [x] Migration: `trades` gains `brokerage_includes_gst` (INTEGER NOT NULL DEFAULT 0, CHECK in (0,1) — boolean) and `statement_total` (TEXT decimal, nullable, in the brokerage currency; informational/validation-only — no calculation uses it). Plain `ALTER TABLE ADD COLUMN` (constant defaults, no FK) — no rebuild, no data dropped; existing rows get flag 0 / total NULL — migration `0020_gst_inclusive_and_statement_total.sql`; CHECK enforced by `trade::tests::db_brokerage_includes_gst_check_constraint_enforced`
 - [x] GST-inclusive split at write time, shared by `PUT /trades/:id` (Buys/DRP) and `PUT /sells/:id` (one helper — both write the `trades` table): when `brokerage_includes_gst` is true the entered brokerage amount is GST-inclusive — `gst_on_brokerage` = amount × 1/11 rounded to the cent (half away from zero, matching statements), stored `brokerage` = amount − GST, so the pair still sums exactly to the amount paid and the existing cost-base arithmetic (`brokerage + gst_on_brokerage`) is untouched. Any `gst_on_brokerage` supplied in the input is ignored when the flag is set; flag false keeps today's behaviour (ex-GST brokerage, manual GST). The flag persists so a trade round-trips (read back: split values + flag) — `trade::split_gst_inclusive`/`resolve_brokerage`, applied at the API boundary in the trade upsert handler and inside `sell::upsert_sell_in_tx` (the operations pass flag false → identity); tests `split_gst_inclusive_rounds_to_the_cent_and_sums_back_exactly`, `api_gst_inclusive_brokerage_is_split_and_round_trips`, `sell::tests::db_sell_statement_total_checks_net_proceeds_and_gst_splits`, report-level `portfolio::tests::db_cost_base_of_gst_inclusive_buy_equals_amount_paid`
-- [x] Statement-total cross-check at write time inside the write transaction (both PUT paths): when `statement_total` is provided it must numerically equal (1234.50 matches 1234.5) quantity × price + brokerage + GST for a Buy/DRP, or quantity × price − brokerage − GST for a Sell (net payable/receivable); mismatch → 422 with the computed figure in the detail. A total may only be supplied when the trade currency equals the brokerage currency — supplying one on a mixed-currency trade → 422 (no FX conversion invented). Omitted total = no check (existing clients unchanged) — `trade::check_statement_total` (+ `StatementTotalError`, `statement_total_detail` for the 422 body), called from `trade::db_upsert` and `sell::upsert_sell_in_tx`; tests `api_statement_total_cross_check_on_buy` (accept, trailing zeros, mismatch detail, nothing persisted), `api_statement_total_on_mixed_currency_trade_returns_422`, `sell::tests::db_sell_statement_total_checks_net_proceeds_and_gst_splits` (subtraction direction), `api_sell_statement_total_mismatch_returns_422_with_detail`
+- [x] Statement-total cross-check at write time inside the write transaction (both PUT paths): when `statement_total` is provided it must numerically equal (1234.50 matches 1234.5) quantity × price + brokerage + GST for a Buy/DRP, or quantity × price − brokerage − GST for a Sell (net payable/receivable); mismatch → 422 with the computed figure in the detail. A total may only be supplied when the trade currency equals the brokerage currency — supplying one on a mixed-currency trade → 422 (no FX conversion invented). Omitted total = no check (existing clients unchanged) — `trade::check_statement_total` (+ `StatementTotalError`, `statement_total_detail` for the 422 body), called from `trade::db_upsert` and `sell::upsert_sell_in_tx`; tests `api_statement_total_cross_check_on_buy` (accept, trailing zeros, mismatch detail, nothing persisted), `api_statement_total_on_mixed_currency_trade_returns_422` (superseded 2026-08-15 by SCENARIOS B-02: a mixed-currency trade is now refused outright at write time, so the total's own currency guard is unreachable — the test became `api_brokerage_in_another_currency_than_the_trade_returns_422`), `sell::tests::db_sell_statement_total_checks_net_proceeds_and_gst_splits` (subtraction direction), `api_sell_statement_total_mismatch_returns_422_with_detail`
 - [x] Operation-created trades (DRP reinvestment, rights exercise, buy-back participation, scrip exchange, demerger, transfer) are unaffected: their internal trade inserts write flag 0 / total NULL (the columns' defaults; the operations' SellBody constructions pass flag false / total None) — test `drp_reinvestment::tests::reinvestment_trade_is_not_gst_flagged_and_has_no_statement_total`
 - [x] Web UI: the Buy (trades) and Sell forms gain the GST-included checkbox — when ticked the GST field is hidden and the brokerage field is labelled GST-inclusive (the form re-presents brokerage + GST as one inclusive amount when editing a flagged trade) — and the optional statement-total field; the trades and Sells lists show the statement total for eyeballing against statements — shared `wireGstBrokerage` helper (attached to the trades entity config via the new generic `wireForm` hook on `viewEntityForm`, and called directly by `viewSellForm`), with `addDecimalStrings` doing the edit-form recombination as exact decimal-string addition (BigInt — no float drift on money); test `web::tests::gst_inclusive_brokerage_and_statement_total_ui_present`
 - [x] Tests: flagged Buy splits the entered amount (gst = ÷11 rounded to the cent, brokerage = remainder, sum exact) and ignores a supplied GST value; flag round-trips and an edit re-splits; unflagged behaviour unchanged; cost base from a flagged trade equals the inclusive amount paid (report-level); matching statement total accepted on a Buy and on a Sell (subtraction direction); mismatched total → 422; total on a mixed-currency trade → 422; numeric-equality comparison (trailing zeros); omitted total skips the check (every pre-existing test posts no total and passes unchanged); operation-created trades carry flag 0 / NULL total; UI bundle asserts the checkbox, inclusive labelling, statement-total field, and list columns ship — all cited against the items above (10 new tests; suite 649 passing)
@@ -345,3 +345,70 @@ list-valued cell as sentences. Both new screens verified rendering real seeded d
 cross-check section, the duplicate 422, the four-part completeness bullet and the Response-codes
 entries; README the feature line and the completeness wording; SCHEMA.md the UNIQUE index — pinned by
 `doc_checks::amit_adjustment_generation_and_cross_check_documented`.
+
+## Brokerage in a currency other than the trade's is added to the cost base unconverted (SCENARIOS B-02)
+(SCENARIOS.md section B verification pass, 2026-08-15. `domain::cost_base`'s `initial_cost` is
+`average_price × quantity + brokerage + gst_on_brokerage`, summed in the trade's currency and
+converted to AUD as one figure at the acquisition-month rate. `trades.brokerage_currency` is
+FK-validated against `currencies` and then read by exactly one thing — `check_statement_total`,
+which *refuses* the statement-total cross-check when it differs from `currency`. No calculation
+consults it, and the field carries no informational-only comment, so the model invites an entry it
+then mis-costs.)
+- [x] Reproduced: USD listing, RBA USD rate 0.50 for 2024-01, Buy 10 @ USD 100 with
+  `brokerage: "30"`, `gst_on_brokerage: "3"`, `brokerage_currency: "AUD"` (an Australian broker's
+  AUD fee on a US trade). `/portfolio/open-parcels` reports `original_cost_base` **A$2,066**; the
+  correct figure is **A$2,033** (USD 1,000 ÷ 0.50 = A$2,000, plus the A$33 already in AUD). The
+  A$33 fee was converted as though it were USD
+- [x] Same on the disposal side: a Sell's proceeds net the brokerage before conversion, so a
+  foreign-currency fee on a foreign-currency sale is netted at the wrong scale
+- [x] Not covered by any Known limitation, and no test pins a cost base with a mixed
+  brokerage/trade currency (`brokerage_currency` appears in `src/` only in fixtures and the
+  statement-total guard)
+- [x] Decide the fix: convert the brokerage leg separately at its own currency's rate (element 2 is
+  an amount actually incurred, translated at its own time per s 960-50 — `docs/ato/
+  forex-common-transactions.md`), or refuse a `brokerage_currency` that differs from `currency` at
+  write time the way `statement_total` already does for the same pair. Refusing is honest and
+  cheap; converting is what the field promises
+- [x] Tests: `domain::cost_base` / `reports::open_parcels` for whichever route, plus the Sell side
+- [x] Docs sync: `docs/API.md` Trades (what `brokerage_currency` means for the cost base) and
+  `docs/SCHEMA.md`
+
+**Resolution (2026-08-15): refuse the mismatched pair at write time.** Converting each leg at its
+own rate is what s 960-50 says, but the brokerage doesn't feed one figure — it feeds four, each a
+single-currency sum: the Buy/DRP cost base (`domain::cost_base::Parcel::initial_cost`), a Sell's
+proceeds net of costs (`reports::realised_gains`), the performance report's net trade flow
+(`reports::performance`), and `TradeAmounts::net_transaction_total` (the statement-total cross-check
+and the activity ledger's row amount). Threading `FxRates` and a translation month through all four
+leaves any missed site silently wrong, and the ledger's amount has no single currency to be reported
+in at all. One write-time invariant makes the mixed state unrepresentable instead, which is where
+this project puts data-model invariants anyway. The accuracy cost is nil: converting the fee into
+the trade's currency at the trade month's rate reproduces the exact AUD cost base, because the whole
+figure converts at that rate downstream (A$33 → USD 16.50 at 0.50 → A$2,033).
+
+The check lives in `trade::check_amounts` (new `AmountsError::BrokerageCurrencyMismatch`, compared
+case-insensitively), which both write paths — `trade::db_upsert` and `sell::upsert_sell_in_tx` —
+already run before anything is written, so the Buy and Sell sides are covered by one rule and can't
+drift; `AmountsCheck` gained the `currency`/`brokerage_currency` pair it compares. Every internal
+trade-creating path (ESS vest, rights exercise, DRP reinvestment, inheritance, rollover
+replacements, buy-back participation) already binds the same currency to both columns, and
+`test_support`'s `.currency()` setter sets the pair together, so nothing generated could produce a
+mismatch. `StatementTotalError::CurrencyMismatch` became unreachable and was removed with its
+detail wording and the two currency fields on `StatementTotalCheck` — a mixed-currency trade can no
+longer exist for the total to be checked against.
+
+Tests: `trade::tests::api_brokerage_in_another_currency_than_the_trade_returns_422` (with and
+without a statement total, nothing persisted, and the same fee converted into the trade's currency
+accepted — replacing `api_statement_total_on_mixed_currency_trade_returns_422`, whose scenario is
+now refused a step earlier), `sell::tests::api_sell_brokerage_in_another_currency_than_the_sale_returns_422`
+for the disposal side, and
+`reports::open_parcels::tests::db_foreign_fee_recorded_in_the_trade_currency_costs_at_its_own_scale`
+pinning the finding's own figures at A$2,033. `db_unknown_currency_rejected_on_both_currency_columns`
+now carries the unrecognised code on both columns (the only way it can reach the database) and pins
+`brokerage_currency`'s own FK with a direct `UPDATE`, since no write path can reach it alone; the
+`open_parcels` USD fixture no longer forces an AUD fee onto a USD trade. Docs: a Known-limitations
+entry (the rule, the entry route it leaves the user, and the s 960-50 timing it doesn't model), the
+Trades section's `brokerage_currency` paragraph, the statement-total and core-figures paragraphs,
+the Response-codes 422 row, `docs/SCHEMA.md`'s column note, and the README limitations line — pinned
+by `doc_checks::known_limitations_document_the_brokerage_currency_invariant`. Full suite 1403 passed
+/ 0 failed; `cargo build`, `cargo fmt --check`, and `cargo clippy --all-targets -D warnings` all
+clean.
