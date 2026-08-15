@@ -6,7 +6,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use sqlx::error::ErrorKind;
 use sqlx::sqlite::SqliteRow;
-use sqlx::{Sqlite, SqlitePool};
+use sqlx::{Row, Sqlite, SqlitePool};
 
 /// A boxed error source carried by [`ApiError::Internal`].
 pub type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
@@ -174,10 +174,13 @@ pub trait CrudEntity:
 {
     /// The primary key as it appears in the URL path — `i64` for the
     /// rowid-keyed tables, `String` for the code-keyed ones (`exchanges`,
-    /// `currencies`, `mic_registry`).
+    /// `currencies`, `mic_registry`). `Clone` because a blocked delete binds
+    /// it a second time, to count the rows that blocked it (see
+    /// [`fk_dependants_message`]).
     type Key: serde::de::DeserializeOwned
         + for<'q> sqlx::Encode<'q, Sqlite>
         + sqlx::Type<Sqlite>
+        + Clone
         + Send
         + 'static;
 
@@ -264,13 +267,163 @@ pub async fn get_handler<E: CrudEntity>(
 }
 
 /// `DELETE /<entities>/{id}` → 204, or a 404 naming the missing row. A row
-/// still referenced by another table fails its foreign key and surfaces as
-/// 422 through [`ApiError`]'s `From<sqlx::Error>`.
+/// still referenced by another table fails its foreign key and surfaces as a
+/// 422 naming the dependants (see [`fk_dependants_message`]).
 pub async fn delete_handler<E: CrudEntity>(
     State(pool): State<SqlitePool>,
     Path(key): Path<E::Key>,
 ) -> Result<StatusCode, ApiError> {
-    deleted(crud_delete::<E>(&pool, key).await?, E::NOUN)
+    match crud_delete::<E>(&pool, key.clone()).await {
+        Ok(found) => deleted(found, E::NOUN),
+        Err(err) => {
+            match fk_dependants_message(&pool, &err, E::NOUN, E::TABLE, E::KEY_COLUMN, key).await {
+                Ok(Some(body)) => Err(ApiError::Unprocessable(body)),
+                Ok(None) => Err(ApiError::from(err)),
+                Err(scan_err) => Err(ApiError::internal(scan_err)),
+            }
+        }
+    }
+}
+
+/// The plain-text `422` body for a DELETE a foreign key blocked, or `None`
+/// when `err` is any other failure (the caller then classifies it the shared
+/// way, via [`ApiError`]'s `From<sqlx::Error>`).
+///
+/// That shared classification reads a foreign-key violation as an *outgoing*
+/// reference — "the request refers to a record that does not exist", true of a
+/// write naming an unknown listing or currency code. On a delete the same
+/// SQLite error kind means the exact opposite: the row is there, and something
+/// still depends on it. Saying it does not exist states the reverse of the
+/// truth and names nothing the user could act on.
+///
+/// SQLite's message carries no detail either (a bare "FOREIGN KEY constraint
+/// failed"), so the dependants are *discovered* rather than parsed — see
+/// [`fk_dependants`] — and named with their row counts.
+pub async fn fk_dependants_message<K>(
+    pool: &SqlitePool,
+    err: &sqlx::Error,
+    noun: &str,
+    table: &str,
+    key_column: &str,
+    key: K,
+) -> Result<Option<String>, sqlx::Error>
+where
+    K: for<'q> sqlx::Encode<'q, Sqlite> + sqlx::Type<Sqlite> + Clone + Send,
+{
+    if err.as_database_error().map(|db| db.kind()) != Some(ErrorKind::ForeignKeyViolation) {
+        return Ok(None);
+    }
+    let dependants = fk_dependants(pool, table, key_column, key).await?;
+    Ok(Some(still_referenced(noun, &dependants)))
+}
+
+/// The `422` body naming what still depends on the row. With `dependants`
+/// empty — a foreign key blocked the delete but the scan matched nothing, e.g.
+/// a composite key this walk does not model — it still says the row is
+/// referenced, never that it does not exist.
+fn still_referenced(noun: &str, dependants: &[(String, i64)]) -> String {
+    if dependants.is_empty() {
+        return format!("this {noun} is still referenced by another record — remove it first");
+    }
+    let named = dependants
+        .iter()
+        .map(|(table, rows)| format!("{} ({rows})", dependant_label(table)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("this {noun} is still referenced by {named} — remove those records first")
+}
+
+/// Tables whose name humanises badly — acronyms the schema spells lower case.
+/// Anything not listed reads fine with its underscores turned into spaces.
+const DEPENDANT_LABELS: &[(&str, &str)] = &[
+    ("amit_adjustments", "AMIT adjustments"),
+    ("amma_statements", "AMMA statements"),
+    ("drp_enrolments", "DRP enrolment periods"),
+    ("ess_statements", "ESS statements"),
+    ("ess_vests", "ESS vests"),
+    ("rba_fx_rates", "RBA FX rates"),
+    ("cgt_settings", "CGT settings"),
+    ("mic_registry", "the MIC registry"),
+];
+
+fn dependant_label(table: &str) -> String {
+    DEPENDANT_LABELS
+        .iter()
+        .find(|(name, _)| *name == table)
+        .map(|(_, label)| (*label).to_string())
+        .unwrap_or_else(|| table.replace('_', " "))
+}
+
+/// Every table that still references `key_column = key` in `table`, with how
+/// many of its rows do, ordered by table name so the message is stable.
+///
+/// Discovered from the schema rather than maintained by hand: walk each
+/// table's `PRAGMA foreign_key_list`, keep the foreign keys pointing at
+/// `table` whose `on_delete` would actually block (`NO ACTION` / `RESTRICT` —
+/// a `CASCADE` or `SET NULL` child goes with the row, so it is never the
+/// blocker), and count the matching rows on each. A new table with a new
+/// foreign key is therefore named without touching this code.
+async fn fk_dependants<K>(
+    pool: &SqlitePool,
+    table: &str,
+    key_column: &str,
+    key: K,
+) -> Result<Vec<(String, i64)>, sqlx::Error>
+where
+    K: for<'q> sqlx::Encode<'q, Sqlite> + sqlx::Type<Sqlite> + Clone + Send,
+{
+    let tables: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+            .fetch_all(pool)
+            .await?;
+
+    let mut dependants = Vec::new();
+    for child in tables {
+        let keys = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "PRAGMA foreign_key_list(\"{child}\")"
+        )))
+        .fetch_all(pool)
+        .await?;
+
+        let mut clauses = Vec::new();
+        for fk in keys {
+            let parent: String = fk.try_get("table")?;
+            if !parent.eq_ignore_ascii_case(table) {
+                continue;
+            }
+            let on_delete: String = fk.try_get("on_delete")?;
+            if !matches!(on_delete.as_str(), "NO ACTION" | "RESTRICT") {
+                continue;
+            }
+            let from: String = fk.try_get("from")?;
+            // `to` is NULL when the foreign key names no parent column, which
+            // means the parent's primary key — the column the delete keyed on.
+            let to: Option<String> = fk.try_get("to")?;
+            let to = to.unwrap_or_else(|| key_column.to_string());
+            clauses.push(format!(
+                "\"{from}\" IN (SELECT \"{to}\" FROM \"{table}\" WHERE \"{key_column}\" = ?)"
+            ));
+        }
+        if clauses.is_empty() {
+            continue;
+        }
+        // One count over all of the child's foreign keys at once, not one per
+        // key: a `listing_renames` row can name the same exchange as both its
+        // old and its new one, and summing per key would report that single
+        // row twice.
+        let mut count = sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(format!(
+            "SELECT COUNT(*) FROM \"{child}\" WHERE {}",
+            clauses.join(" OR ")
+        )));
+        for _ in &clauses {
+            count = count.bind(key.clone());
+        }
+        let rows_here = count.fetch_one(pool).await?;
+        if rows_here > 0 {
+            dependants.push((child, rows_here));
+        }
+    }
+    Ok(dependants)
 }
 
 /// Classify a database error: a constraint violation (foreign key, check,
@@ -283,6 +436,12 @@ pub async fn delete_handler<E: CrudEntity>(
 /// sentence; it never contains a raw foreign-key id. Anything else —
 /// including a `Decode` failure from a corrupt stored decimal — is an
 /// unexpected server fault: `Internal`, logged when the response is built.
+///
+/// The foreign-key wording is the *write* direction — a body naming a row
+/// that is not there. A DELETE fails the same foreign key for the opposite
+/// reason (the row is there and something depends on it) and must not reach
+/// this arm: deletes classify the violation themselves through
+/// [`fk_dependants_message`], which names the dependants.
 impl From<sqlx::Error> for ApiError {
     fn from(err: sqlx::Error) -> Self {
         if let Some(db) = err.as_database_error() {
@@ -336,6 +495,48 @@ mod tests {
     async fn body_of(resp: Response) -> String {
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         String::from_utf8(bytes.to_vec()).unwrap()
+    }
+
+    /// Table names reach the user, so the ones the schema spells in lower-case
+    /// acronyms are relabelled and the rest are humanised — never printed raw.
+    #[test]
+    fn a_dependant_is_named_the_way_the_screen_names_it() {
+        assert_eq!(dependant_label("amit_adjustments"), "AMIT adjustments");
+        assert_eq!(dependant_label("closing_prices"), "closing prices");
+        assert_eq!(dependant_label("exchange_holidays"), "exchange holidays");
+        assert_eq!(
+            still_referenced(
+                "listing",
+                &[("closing_prices".to_string(), 2), ("trades".to_string(), 1)]
+            ),
+            "this listing is still referenced by closing prices (2), trades (1) — remove those \
+             records first"
+        );
+    }
+
+    /// The scan can come up empty — a composite-key foreign key this walk does
+    /// not model, say. The message still has to be true: the row is there and
+    /// something depends on it. Falling back to `ApiError`'s write-direction
+    /// wording would state the reverse.
+    #[test]
+    fn a_blocked_delete_with_nothing_matched_still_says_the_row_is_referenced() {
+        assert_eq!(
+            still_referenced("exchange", &[]),
+            "this exchange is still referenced by another record — remove it first"
+        );
+    }
+
+    /// Only a foreign-key violation is re-read as a blocked delete; every other
+    /// failure keeps the shared classification (a `CHECK` violation is still a
+    /// 422 quoting the constraint, a decode failure is still a 500).
+    #[tokio::test]
+    async fn only_a_foreign_key_failure_is_treated_as_a_blocked_delete() {
+        let pool = crate::test_support::test_pool().await;
+        let err = sqlx::Error::Decode("invalid decimal in column quantity".into());
+        let message = fk_dependants_message(&pool, &err, "listing", "listings", "id", 1_i64)
+            .await
+            .unwrap();
+        assert_eq!(message, None);
     }
 
     #[tokio::test]

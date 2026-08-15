@@ -963,6 +963,36 @@ fn authentication_documented() {
     assert!(known_limitations().contains("no CSRF token"));
 }
 
+/// Docs-sync pin for deletes blocked by an inbound foreign key (SCENARIOS
+/// A-18, A-23, A-38, A-41). The behaviour itself is tested in
+/// `entities::tests`; what needs pinning here is the documentation half —
+/// the shared explainer, the two directions the same `422` can mean, and the
+/// A-23 dead end (a listing that has ever carried a **manual** closing price
+/// can never be deleted), which is a consequence of two documented rules and
+/// was stated by neither.
+#[test]
+fn deletes_blocked_by_a_dependant_documented() {
+    // The shared section, its wording, and both directions of the 422.
+    assert!(API_MD.contains("## Deletes blocked by a dependant"));
+    assert!(API_MD.contains("this listing is still referenced by closing prices (2)"));
+    assert!(API_MD.contains("the request refers to a record that does not exist"));
+    assert!(API_MD.contains("There is no cascade delete"));
+    // The response-code table and the error-bodies note point at it.
+    assert!(API_MD.contains(
+        "any `DELETE` of a row another table still references — see \
+         [Deletes blocked by a dependant](#deletes-blocked-by-a-dependant)"
+    ));
+    assert!(API_MD.contains("except a blocked delete, whose body names the dependants instead"));
+    // The A-23 dead end, stated where a reader would look for it.
+    assert!(API_MD.contains(
+        "**A listing that has ever had a closing price [entered by hand](#closing-prices) can no \
+         longer be deleted at all.**"
+    ));
+    // The two entity sections whose blocked delete needed explaining.
+    assert!(API_MD.contains("There is no cascade: each adjustment is removed individually"));
+    assert!(API_MD.contains("`DELETE` returns `422` while anything still references the exchange"));
+}
+
 /// Pins for the FreeBSD packaging + versioned-release pipeline (REQUIREMENTS
 /// 2026-07-13). The release workflow and package skeleton are plain text CI
 /// consumes, so these tests keep their load-bearing pieces from silently

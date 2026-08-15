@@ -669,3 +669,78 @@ and the 422 body over the router). Verified end to end against a running server:
 consolidation, after which the reports still compute (`cost_base` 850.00 = $1,000 less a $0.75/unit
 return of capital re-based across the splits). Full suite 1382 passed / 0 failed; `cargo fmt
 --check` and `cargo clippy --all-targets -- -D warnings` clean.
+
+## A DELETE blocked by an inbound foreign key says the row does not exist (SCENARIOS A-18, A-23, A-38, A-41)
+(SCENARIOS.md section A verification pass, 2026-08-14. `ApiError`'s `From<sqlx::Error>` maps
+`ErrorKind::ForeignKeyViolation` to `"the request refers to a record that does not exist"`
+(`src/infra/http.rs:295`) — correct for an *outgoing* FK (a write naming an unknown listing or
+currency), but the same SQLite error kind covers the *incoming* case, where a DELETE is blocked
+because something still references the row. `delete_handler`'s own doc comment (`src/infra/http.rs:266`)
+records that this is the path such deletes take. For a delete the message states the opposite of
+the truth: the row exists, and what is missing is the name of whatever depends on it. It also
+breaks the error-bodies contract in `docs/API.md` ("saying *why* it failed — the failed invariant").)
+- [x] Reproduced on every entity whose delete has no hand-written guard: `DELETE
+  /amma_statements/:id` with generated AMIT adjustments (A-18/A-19 — and the statement is
+  undeletable until they are removed one by one, which the message never says), `DELETE
+  /listings/:id` with stored closing prices (A-23), `DELETE /exchanges/:mic` referenced by a listing
+  or its own holidays (A-41), and `DELETE /corporate_actions/:id` frozen by its trade group (A-38 —
+  `docs/API.md` promises a `422` here, and the status is right, only the reason is wrong)
+- [x] Fix shape: keep the outgoing wording for writes, and give deletes a message that names the
+  dependant — either by parsing the constraint's table out of the SQLite detail (it names the child
+  table) or by adding hand-written guards like `trade`'s and `holding_account`'s. Entities with an
+  explicit guard already answer well ("this account still has trades, income, AMMA statements …")
+- [x] A-23 follow-on to document either way: a listing that has ever had a **manual** closing price
+  entered can never be deleted — the manual price is `status: ok`, so `DELETE /closing_prices/…`
+  refuses it (the documented one-way rule), and the listing's FK refuses while it stands. That
+  dead-end is a consequence of two documented rules but is not itself stated anywhere
+- [x] Tests: `infra::http::tests` (or per-entity) — a delete blocked by a dependant answers `422`
+  naming the dependant, and a write naming an unknown row keeps the existing wording
+- [x] Docs sync: `docs/API.md` Response codes `422` row + the AMMA statements and Listings sections
+  (what blocks a delete and how to clear it)
+
+**Closed 2026-08-15.** Neither of the two shapes the finding offered was taken, because the first
+does not exist: SQLite's foreign-key violation carries **no detail at all** — the message is a bare
+`FOREIGN KEY constraint failed`, naming neither the child table nor the constraint — so there is
+nothing to parse. Hand-written guards per entity were rejected as the general answer for the reason
+the finding itself hints at: they are what the nine `delete_handler` entities were missing, and
+adding nine more would leave the tenth entity to rediscover the bug.
+
+Instead the dependants are **discovered from the schema at the moment of the refusal**
+(`infra::http::fk_dependants`): walk every table's `PRAGMA foreign_key_list`, keep the foreign keys
+that point at the deleted row's table *and* would actually block it (`NO ACTION` / `RESTRICT` — a
+`CASCADE` or `SET NULL` child goes with the row, so an attachment is never named as a blocker), and
+count the matching rows on each. A new table with a new foreign key is therefore named without
+touching this code, which is the property a per-entity guard cannot have. The counting query ORs a
+child's foreign keys into one `COUNT(*)` rather than summing per key: a `listing_renames` row names
+the same exchange as both its old and its new one, and per-key summing would report that single row
+twice (pinned by the ticker-only-rename case in the test).
+
+The wording is one sentence naming each blocking table and its row count —
+`this listing is still referenced by closing prices (2) — remove those records first` — with table
+names humanised (`closing_prices` → `closing prices`) through a small override map for the acronyms
+the schema spells lower-case (`amit_adjustments` → `AMIT adjustments`). If the scan somehow matches
+nothing it still says the row is referenced ("…by another record"), never that it does not exist:
+the one thing the message must not do is state the reverse of the truth.
+
+The write direction is untouched. `ApiError`'s `From<sqlx::Error>` keeps the outgoing wording, and
+deletes never reach that arm — `delete_handler` classifies the violation itself via
+`fk_dependants_message`, which returns `None` for every non-FK failure so a `CHECK` violation is
+still a 422 quoting the constraint and a decode failure still a 500. A-38's hand-written path
+(`corporate_action::db_delete`) takes the same helper and carries the ready-made body in a new
+`DeleteError::StillReferenced`, so the message lives in the `From<DeleteError> for ApiError` arm
+where every other per-entity 422 body lives and the handler still never matches variants.
+
+A-23's dead end is documented rather than fixed, because both halves of it are deliberate: a manual
+closing price is an audited correction the provider does not take back, and a listing anyone has
+priced by hand has real history. `docs/API.md`'s Listings section now states it plainly, and a new
+`## Deletes blocked by a dependant` section carries the shared explainer — the message shape, the
+two opposite meanings the same `422` can carry, and the no-cascade rule — with the Exchanges and
+AMMA statements sections and the Response-codes `422` row pointing at it.
+
+Tests: `entities::tests::a_delete_blocked_by_a_dependant_names_it_rather_than_denying_the_row_exists`
+(all four reproductions end-to-end over the router, asserting the exact bodies) and its companion
+`a_write_naming_an_unknown_row_still_says_the_record_does_not_exist`; three unit tests in
+`infra::http::tests` for the labelling, the empty-scan fallback, and the non-FK passthrough; and
+`doc_checks::deletes_blocked_by_a_dependant_documented` for the documentation-only half. Full suite
+1388 passed / 0 failed; `cargo build`, `cargo fmt --check`, and `cargo clippy --all-targets -D
+warnings` all clean.

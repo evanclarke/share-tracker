@@ -10,34 +10,6 @@ findings are all closed in DONE.md), except where a section's heading names anot
 (e.g. REQUIREMENTS). Each section records one finding; sections land in DONE.md as they are fixed
 or decided.
 
-## A DELETE blocked by an inbound foreign key says the row does not exist (SCENARIOS A-18, A-23, A-38, A-41)
-(SCENARIOS.md section A verification pass, 2026-08-14. `ApiError`'s `From<sqlx::Error>` maps
-`ErrorKind::ForeignKeyViolation` to `"the request refers to a record that does not exist"`
-(`src/infra/http.rs:295`) — correct for an *outgoing* FK (a write naming an unknown listing or
-currency), but the same SQLite error kind covers the *incoming* case, where a DELETE is blocked
-because something still references the row. `delete_handler`'s own doc comment (`src/infra/http.rs:266`)
-records that this is the path such deletes take. For a delete the message states the opposite of
-the truth: the row exists, and what is missing is the name of whatever depends on it. It also
-breaks the error-bodies contract in `docs/API.md` ("saying *why* it failed — the failed invariant").)
-- [ ] Reproduced on every entity whose delete has no hand-written guard: `DELETE
-  /amma_statements/:id` with generated AMIT adjustments (A-18/A-19 — and the statement is
-  undeletable until they are removed one by one, which the message never says), `DELETE
-  /listings/:id` with stored closing prices (A-23), `DELETE /exchanges/:mic` referenced by a listing
-  or its own holidays (A-41), and `DELETE /corporate_actions/:id` frozen by its trade group (A-38 —
-  `docs/API.md` promises a `422` here, and the status is right, only the reason is wrong)
-- [ ] Fix shape: keep the outgoing wording for writes, and give deletes a message that names the
-  dependant — either by parsing the constraint's table out of the SQLite detail (it names the child
-  table) or by adding hand-written guards like `trade`'s and `holding_account`'s. Entities with an
-  explicit guard already answer well ("this account still has trades, income, AMMA statements …")
-- [ ] A-23 follow-on to document either way: a listing that has ever had a **manual** closing price
-  entered can never be deleted — the manual price is `status: ok`, so `DELETE /closing_prices/…`
-  refuses it (the documented one-way rule), and the listing's FK refuses while it stands. That
-  dead-end is a consequence of two documented rules but is not itself stated anywhere
-- [ ] Tests: `infra::http::tests` (or per-entity) — a delete blocked by a dependant answers `422`
-  naming the dependant, and a write naming an unknown row keeps the existing wording
-- [ ] Docs sync: `docs/API.md` Response codes `422` row + the AMMA statements and Listings sections
-  (what blocks a delete and how to clear it)
-
 ## Deleting a DRP enrolment period strands its trailing residual (SCENARIOS A-43)
 (SCENARIOS.md section A verification pass, 2026-08-14. Closing a period by setting
 `unenrolment_date` settles the trailing residual — the leftover the period's last reinvestment

@@ -7,7 +7,7 @@
 use super::adjustments::{as_acquired_quantity, db_splits_for_listing};
 use super::model::{ActionKind, CorporateAction};
 use crate::infra::decimal::{OptMoney, parse_dec};
-use crate::infra::http::{ApiError, CrudEntity};
+use crate::infra::http::{self, ApiError, CrudEntity};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use sqlx::{Row, SqlitePool};
@@ -399,6 +399,13 @@ pub enum DeleteError {
     /// a cost base and can drop an already-reported gain. Mapped to `422`.
     #[error("this return of capital reduced the cost base of parcels held at its date")]
     ReducedParcels,
+    /// The action is frozen by its own trade group: the delete failed the
+    /// `trades.*_action_id` (or `rights_sales.rights_action_id`) foreign key.
+    /// The payload is the ready-made body naming the dependants, built by
+    /// [`http::fk_dependants_message`] — the same wording every other blocked
+    /// delete answers with. Mapped to `422`.
+    #[error("this corporate action is still referenced ({0})")]
+    StillReferenced(String),
 }
 
 impl From<DeleteError> for ApiError {
@@ -414,6 +421,7 @@ impl From<DeleteError> for ApiError {
                  would restate those parcels, and any capital gain already reported for the \
                  excess (delete the parcels first)",
             ),
+            DeleteError::StillReferenced(body) => ApiError::Unprocessable(body),
             DeleteError::Db(err) => err.into(),
         }
     }
@@ -423,11 +431,12 @@ impl From<DeleteError> for ApiError {
 ///
 /// An action referenced by rights-exercise, buy-back participation,
 /// scrip-for-scrip exchange, demerger, or recognise trades is protected by the
-/// corresponding `trades.*_action_id` foreign key — the violation surfaces as a
-/// database error the handler maps to `422`. The three types that create no
-/// trades — `ShareSplit`, `BonusIssue`, `ReturnOfCapital` — have no such
-/// reference to protect them, so their dependants are checked here, in the
-/// delete's own transaction (see [`DeleteError`]).
+/// corresponding `trades.*_action_id` foreign key — the violation is turned
+/// into a `422` naming those dependants ([`DeleteError::StillReferenced`]).
+/// The three types that create no trades — `ShareSplit`, `BonusIssue`,
+/// `ReturnOfCapital` — have no such reference to protect them, so their
+/// dependants are checked here, in the delete's own transaction (see
+/// [`DeleteError`]).
 pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<bool, DeleteError> {
     let mut tx = pool.begin().await?;
     let Some(action) = db_get_tx(&mut *tx, id).await? else {
@@ -465,10 +474,23 @@ pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<bool, DeleteError> 
         }
     }
 
-    sqlx::query("DELETE FROM corporate_actions WHERE id = ?")
+    if let Err(err) = sqlx::query("DELETE FROM corporate_actions WHERE id = ?")
         .bind(id)
         .execute(&mut *tx)
-        .await?;
+        .await
+    {
+        // Roll back before the scan: it counts the blocking rows on the pool,
+        // which the open transaction would otherwise be holding a write lock
+        // against.
+        drop(tx);
+        let noun = <CorporateAction as CrudEntity>::NOUN;
+        return match http::fk_dependants_message(pool, &err, noun, "corporate_actions", "id", id)
+            .await?
+        {
+            Some(body) => Err(DeleteError::StillReferenced(body)),
+            None => Err(DeleteError::Db(err)),
+        };
+    }
     tx.commit().await?;
     Ok(true)
 }
