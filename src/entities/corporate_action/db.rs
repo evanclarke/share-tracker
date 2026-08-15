@@ -20,7 +20,8 @@ const COLUMNS: &str = "id, action_type, listing_id, date, amount_per_unit, curre
                        buyback_market_value, scrip_listing_id, scrip_new_units, \
                        scrip_old_units, scrip_cash_per_unit, scrip_market_value, \
                        scrip_cash_currency, demerger_listing_id, demerger_new_units, \
-                       demerger_held_units, demerger_cost_base_pct, worthless_event";
+                       demerger_held_units, demerger_cost_base_pct, worthless_event, \
+                       record_date";
 
 impl CrudEntity for CorporateAction {
     type Key = i64;
@@ -156,6 +157,7 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
     struct Cols {
         amount_per_unit: OptMoney,
         currency: Option<String>,
+        record_date: Option<NaiveDate>,
         split_new_units: OptMoney,
         split_old_units: OptMoney,
         bonus_units: OptMoney,
@@ -184,9 +186,11 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
         ActionKind::ReturnOfCapital {
             amount_per_unit,
             currency,
+            record_date,
         } => {
             c.amount_per_unit = OptMoney(Some(*amount_per_unit));
             c.currency = Some(currency.clone());
+            c.record_date = *record_date;
         }
         ActionKind::ShareSplit {
             split_new_units,
@@ -294,8 +298,9 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
           scrip_listing_id, scrip_new_units, scrip_old_units, \
           scrip_cash_per_unit, scrip_market_value, scrip_cash_currency, \
           demerger_listing_id, demerger_new_units, demerger_held_units, \
-          demerger_cost_base_pct, worthless_event) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+          demerger_cost_base_pct, worthless_event, record_date) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, \
+                 ?) \
          ON CONFLICT(id) DO UPDATE SET \
              action_type       = excluded.action_type, \
              listing_id        = excluded.listing_id, \
@@ -323,7 +328,8 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
              demerger_new_units     = excluded.demerger_new_units, \
              demerger_held_units    = excluded.demerger_held_units, \
              demerger_cost_base_pct = excluded.demerger_cost_base_pct, \
-             worthless_event        = excluded.worthless_event",
+             worthless_event        = excluded.worthless_event, \
+             record_date            = excluded.record_date",
     )
     .bind(action.id)
     .bind(action.kind.type_str())
@@ -353,6 +359,7 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
     .bind(c.demerger_held_units)
     .bind(c.demerger_cost_base_pct)
     .bind(c.worthless_event)
+    .bind(c.record_date)
     .execute(&mut *tx)
     .await?;
 
@@ -392,8 +399,9 @@ pub enum DeleteError {
     /// Mapped to `422`.
     #[error("this action re-bases parcels that later trades are recorded against")]
     RebasedTrades,
-    /// A `ReturnOfCapital` whose listing has an acquisition dated on or before
-    /// the payment date — a parcel the payment reduced. The reduction (and any
+    /// A `ReturnOfCapital` whose listing has an acquisition the payment
+    /// reached — dated before its record date, or on/before the payment date
+    /// when it carries none. The reduction (and any
     /// CGT event G1 excess gain it produced, reported in the payment's income
     /// year) is computed from the action at read time, so deleting it restates
     /// a cost base and can drop an already-reported gain. Mapped to `422`.
@@ -450,11 +458,29 @@ pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<bool, DeleteError> 
     let dependants = match &action.kind {
         ActionKind::ShareSplit { .. } | ActionKind::BonusIssue { .. } => Some((
             "SELECT EXISTS(SELECT 1 FROM trades WHERE listing_id = ? AND date >= ?)",
+            action.date,
             DeleteError::RebasedTrades,
         )),
-        ActionKind::ReturnOfCapital { .. } => Some((
+        // Which acquisitions the payment actually reached: those held before
+        // its record date, or — with none recorded — those made on or before
+        // the payment date, the same entitlement test the cost-base pipeline
+        // applies (`RocEvent::per_unit_for`). A parcel bought ex-entitlement
+        // was never reduced, so deleting the action restates nothing about it.
+        ActionKind::ReturnOfCapital {
+            record_date: Some(record_date),
+            ..
+        } => Some((
+            "SELECT EXISTS(SELECT 1 FROM trades \
+                           WHERE listing_id = ? AND date < ? AND trade_type IN ('Buy', 'DRP'))",
+            *record_date,
+            DeleteError::ReducedParcels,
+        )),
+        ActionKind::ReturnOfCapital {
+            record_date: None, ..
+        } => Some((
             "SELECT EXISTS(SELECT 1 FROM trades \
                            WHERE listing_id = ? AND date <= ? AND trade_type IN ('Buy', 'DRP'))",
+            action.date,
             DeleteError::ReducedParcels,
         )),
         ActionKind::RightsIssue { .. }
@@ -463,10 +489,10 @@ pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<bool, DeleteError> 
         | ActionKind::Demerger { .. }
         | ActionKind::WorthlessShares { .. } => None,
     };
-    if let Some((query, err)) = dependants {
+    if let Some((query, cutoff, err)) = dependants {
         let dependent: bool = sqlx::query_scalar(query)
             .bind(action.listing_id)
-            .bind(action.date)
+            .bind(cutoff)
             .fetch_one(&mut *tx)
             .await?;
         if dependent {

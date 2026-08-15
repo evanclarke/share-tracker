@@ -499,6 +499,19 @@ mod tests {
     }
 
     async fn apply_roc(pool: &SqlitePool, id: i64, listing_id: i64, date: NaiveDate, amount: &str) {
+        apply_roc_with_record(pool, id, listing_id, date, amount, None).await;
+    }
+
+    /// [`apply_roc`] with the record date that fixed entitlement to the
+    /// payment (`None` = not recorded, so the payment date decides).
+    async fn apply_roc_with_record(
+        pool: &SqlitePool,
+        id: i64,
+        listing_id: i64,
+        date: NaiveDate,
+        amount: &str,
+        record_date: Option<NaiveDate>,
+    ) {
         corporate_action::db_upsert(
             pool,
             &corporate_action::CorporateAction {
@@ -508,6 +521,7 @@ mod tests {
                 kind: corporate_action::ActionKind::ReturnOfCapital {
                     amount_per_unit: amount.parse().unwrap(),
                     currency: "AUD".to_string(),
+                    record_date,
                 },
             },
         )
@@ -703,6 +717,45 @@ mod tests {
         assert_eq!(p.return_of_capital_reduction, Decimal::from(30));
         // remaining = 1010.945 × 60/100 − 30 = 606.567 − 30 = 576.567
         assert_eq!(p.remaining_cost_base, "576.567".parse::<Decimal>().unwrap());
+    }
+
+    /// Entitlement to a return of capital is fixed at its record date, weeks
+    /// before the money arrives (SCENARIOS B-09): a parcel bought after the
+    /// shares went ex-entitlement received nothing, so its cost base is
+    /// untouched — where the parcel bought before the record date is reduced as
+    /// always. With no record date recorded the payment date decides, reducing
+    /// both (the documented fallback every pre-existing action keeps).
+    #[tokio::test]
+    async fn db_return_of_capital_skips_parcels_bought_after_the_record_date() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "RAP").await;
+        let cum = NaiveDate::from_ymd_opt(2025, 2, 1).unwrap();
+        let ex = NaiveDate::from_ymd_opt(2025, 2, 15).unwrap();
+        let record = NaiveDate::from_ymd_opt(2025, 2, 10).unwrap();
+        let paid = NaiveDate::from_ymd_opt(2025, 3, 1).unwrap();
+        insert_buy(&pool, 1, 1, cum, Decimal::from(100), Decimal::from(10)).await;
+        insert_buy(&pool, 2, 1, ex, Decimal::from(100), Decimal::from(10)).await;
+        apply_roc_with_record(&pool, 1, 1, paid, "0.50", Some(record)).await;
+
+        // Sorted by acquisition date: the entitled parcel first.
+        let parcels = db_open_parcels(&pool).await.unwrap();
+        assert_eq!(parcels.len(), 2);
+        assert_eq!(parcels[0].return_of_capital_reduction, Decimal::from(50));
+        assert_eq!(
+            parcels[1].return_of_capital_reduction,
+            Decimal::ZERO,
+            "bought ex-entitlement — the payment never reached it"
+        );
+        assert_eq!(
+            parcels[1].remaining_cost_base,
+            "1010.945".parse::<Decimal>().unwrap(),
+            "its cost base is the one it was acquired at"
+        );
+
+        // The same action without a record date falls back to the payment date.
+        apply_roc_with_record(&pool, 1, 1, paid, "0.50", None).await;
+        let parcels = db_open_parcels(&pool).await.unwrap();
+        assert_eq!(parcels[1].return_of_capital_reduction, Decimal::from(50));
     }
 
     /// G1 floors the remaining cost base at nil — the excess is a capital gain

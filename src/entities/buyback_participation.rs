@@ -508,6 +508,7 @@ mod tests {
                 kind: ActionKind::ReturnOfCapital {
                     amount_per_unit: dec("0.10"),
                     currency: "AUD".to_string(),
+                    record_date: None,
                 },
             },
         )

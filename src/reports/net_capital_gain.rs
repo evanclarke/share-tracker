@@ -354,7 +354,8 @@ async fn cost_base_excess_gains(
     }
 
     let roc_rows = sqlx::query(sqlx::AssertSqlSafe(format!(
-        "SELECT ca.date AS action_date, ca.amount_per_unit, ca.currency AS action_currency, {} \
+        "SELECT ca.date AS action_date, ca.amount_per_unit, ca.currency AS action_currency, \
+                ca.record_date, {} \
          FROM corporate_actions ca \
          JOIN trades t ON t.listing_id = ca.listing_id \
                       AND t.trade_type IN ('Buy', 'DRP') \
@@ -372,21 +373,25 @@ async fn cost_base_excess_gains(
             date: row.try_get("action_date")?,
             amount_per_unit: parse_dec("amount_per_unit", row.try_get("amount_per_unit")?)?,
             currency: row.try_get("action_currency")?,
+            record_date: row.try_get("record_date")?,
         };
         // The payment's own reduction per as-acquired unit
-        // (`RocEvent::per_unit_for`, which carries the currency guard and the
-        // split re-basing — a payment is per unit *at the payment date*, so a
-        // split between acquisition and the payment multiplies the units
-        // receiving it). The join already bounds the payments to this parcel's
-        // holding period, so `per_unit_for` never declines one here.
-        let per_unit = event
-            .per_unit_for(
-                splits_of(&splits, parcel.listing_id),
-                &parcel.currency,
-                parcel.date,
-                None,
-            )?
-            .unwrap_or(Decimal::ZERO);
+        // (`RocEvent::per_unit_for`, which carries the entitlement test, the
+        // currency guard, and the split re-basing — a payment is per unit *at
+        // the payment date*, so a split between acquisition and the payment
+        // multiplies the units receiving it). The join is only the coarse
+        // payment-date bound; a parcel acquired inside the record-to-payment
+        // window is ex-entitlement and declined here, exactly as the cost base
+        // it would otherwise have to disagree with declines it.
+        let Some(per_unit) = event.per_unit_for(
+            splits_of(&splits, parcel.listing_id),
+            &parcel.currency,
+            parcel.date,
+            None,
+        )?
+        else {
+            continue;
+        };
         reductions
             .entry(parcel.id)
             .or_default()
@@ -2001,6 +2006,19 @@ mod tests {
     }
 
     async fn apply_roc(pool: &SqlitePool, id: i64, listing_id: i64, date: NaiveDate, amount: &str) {
+        apply_roc_with_record(pool, id, listing_id, date, amount, None).await;
+    }
+
+    /// [`apply_roc`] with the record date that fixed entitlement to the
+    /// payment (`None` = not recorded, so the payment date decides).
+    async fn apply_roc_with_record(
+        pool: &SqlitePool,
+        id: i64,
+        listing_id: i64,
+        date: NaiveDate,
+        amount: &str,
+        record_date: Option<NaiveDate>,
+    ) {
         corporate_action::db_upsert(
             pool,
             &corporate_action::CorporateAction {
@@ -2010,6 +2028,7 @@ mod tests {
                 kind: corporate_action::ActionKind::ReturnOfCapital {
                     amount_per_unit: amount.parse().unwrap(),
                     currency: "AUD".to_string(),
+                    record_date,
                 },
             },
         )
@@ -2122,6 +2141,64 @@ mod tests {
         assert_eq!(r[0].other_gains, Decimal::from(50));
         assert_eq!(r[0].discount_eligible_gains, Decimal::ZERO);
         assert_eq!(r[0].net_capital_gain, Decimal::from(50));
+    }
+
+    /// The G1 walk tests entitlement the way the cost base does (SCENARIOS
+    /// B-09): a parcel bought after the record date received no payment, so it
+    /// produces no excess gain — only the parcel that was actually paid does.
+    #[tokio::test]
+    async fn db_g1_skips_a_parcel_bought_after_the_record_date() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "RAP").await;
+        // Two identical $100 parcels; only the first is held at the record date.
+        for (id, date) in [
+            (1, NaiveDate::from_ymd_opt(2025, 2, 1).unwrap()),
+            (2, NaiveDate::from_ymd_opt(2025, 2, 15).unwrap()),
+        ] {
+            insert_trade(
+                &pool,
+                id,
+                trade::TradeType::Buy,
+                1,
+                date,
+                Decimal::from(100),
+                Decimal::from(1),
+            )
+            .await;
+        }
+        // $1.50/unit → $50 excess over each entitled parcel's $100 cost base.
+        apply_roc_with_record(
+            &pool,
+            1,
+            1,
+            NaiveDate::from_ymd_opt(2025, 3, 1).unwrap(),
+            "1.50",
+            Some(NaiveDate::from_ymd_opt(2025, 2, 10).unwrap()),
+        )
+        .await;
+
+        let r = db_net_capital_gain(&pool).await.unwrap();
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].tax_year, 2025);
+        assert_eq!(
+            r[0].cgt_event_g1_gain,
+            Decimal::from(50),
+            "one parcel's excess, not both"
+        );
+
+        // Without the record date the payment date decides, and both parcels
+        // are paid: the excess doubles.
+        apply_roc_with_record(
+            &pool,
+            1,
+            1,
+            NaiveDate::from_ymd_opt(2025, 3, 1).unwrap(),
+            "1.50",
+            None,
+        )
+        .await;
+        let r = db_net_capital_gain(&pool).await.unwrap();
+        assert_eq!(r[0].cgt_event_g1_gain, Decimal::from(100));
     }
 
     /// A payment within the cost base produces no gain at all (and G1 can never

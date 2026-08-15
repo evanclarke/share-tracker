@@ -1423,6 +1423,10 @@ mod tests {
         assert!(js.contains("/corporate_actions"));
         assert!(js.contains("ReturnOfCapital"));
         assert!(js.contains("amount_per_unit"));
+        // …including the optional record date that fixes entitlement to a
+        // payment (parcels bought on or after it are not reduced).
+        assert!(js.contains("dt('record_date', 'Record date'"));
+        assert!(js.contains("ex-entitlement"));
         assert!(js.contains("ShareSplit"));
         assert!(js.contains("split_new_units"));
         assert!(js.contains("split_old_units"));

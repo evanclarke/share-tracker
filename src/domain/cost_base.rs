@@ -562,6 +562,7 @@ mod tests {
             date: d,
             amount_per_unit: amount.parse().unwrap(),
             currency: "AUD".to_string(),
+            record_date: None,
         };
         // 50c per unit on 100 units held: cost base 1000 → 950.
         let cb = adjusted_cost_base(
@@ -596,6 +597,7 @@ mod tests {
             date: date(2024, 7, 1),
             amount_per_unit: "0.50".parse().unwrap(),
             currency: "AUD".to_string(),
+            record_date: None,
         };
         // Payment after the up_to (sale) date: the units were no longer held.
         let cb = adjusted_cost_base(
@@ -624,6 +626,7 @@ mod tests {
             date: date(2024, 4, 1),
             amount_per_unit: "0.25".parse().unwrap(),
             currency: "AUD".to_string(),
+            record_date: None,
         };
         let cb = adjusted_cost_base(
             &parcel(100, 10),
@@ -655,6 +658,7 @@ mod tests {
             date: d,
             amount_per_unit: amount.parse().unwrap(),
             currency: "AUD".to_string(),
+            record_date: None,
         };
         let events = [roc("0.25", date(2024, 4, 1)), roc("5", date(2024, 5, 1))];
         let cb = adjusted_cost_base(
@@ -707,6 +711,7 @@ mod tests {
             date: date(2024, 3, 1),
             amount_per_unit: "0.50".parse().unwrap(),
             currency: "USD".to_string(),
+            record_date: None,
         };
         let err = adjusted_cost_base(
             &parcel(100, 10),
@@ -768,6 +773,7 @@ mod tests {
             date: date(2024, 3, 1),
             amount_per_unit: "0.50".parse().unwrap(),
             currency: "USD".to_string(),
+            record_date: None,
         };
         let cb = adjusted_cost_base(&p, Decimal::from(100), Decimal::from(5), &[roc], &[], None)
             .unwrap();

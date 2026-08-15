@@ -691,9 +691,18 @@ fn describe_action(
         ActionKind::ReturnOfCapital {
             amount_per_unit,
             currency,
+            record_date,
         } => (
             "Return of capital".to_string(),
-            format!("{amount_per_unit} {currency} per unit"),
+            // The row is dated by the payment; the record date, when recorded,
+            // is what decided which parcels the payment reached, so it belongs
+            // in the line explaining the row.
+            match record_date {
+                Some(record_date) => {
+                    format!("{amount_per_unit} {currency} per unit (record date {record_date})")
+                }
+                None => format!("{amount_per_unit} {currency} per unit"),
+            },
             None,
         ),
         ActionKind::ShareSplit {
@@ -1124,6 +1133,7 @@ mod tests {
                 kind: ActionKind::ReturnOfCapital {
                     amount_per_unit: dec("0.50"),
                     currency: "AUD".to_string(),
+                    record_date: None,
                 },
             },
         )

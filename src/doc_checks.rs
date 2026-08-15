@@ -928,6 +928,22 @@ fn corporate_action_delete_guard_documented() {
     assert!(limitations.contains("There is no lodged/closed-year concept in the data model"));
 }
 
+/// Docs-sync pin for the return-of-capital record date (SCENARIOS B-09,
+/// 2026-08-15): entitlement is fixed at the record date, and the docs say so
+/// — including what the *absence* of a record date falls back to, which is
+/// the over-reduction the field exists to correct. The behaviour itself is
+/// pinned by `entities::corporate_action::tests` and the report tests.
+#[test]
+fn return_of_capital_record_date_documented() {
+    assert!(API_MD.contains("entitlement is fixed earlier, at the **record date**"));
+    assert!(API_MD.contains("**Leaving `record_date` out keeps the older, coarser rule**"));
+    assert!(API_MD.contains("over-reduces a parcel bought inside the record-to-payment window"));
+    // The schema documents the column, its CHECK, and the same fallback.
+    assert!(SCHEMA_MD.contains("record_date       TEXT (date, nullable)  ReturnOfCapital only"));
+    assert!(SCHEMA_MD.contains("never after `date`"));
+    assert!(SCHEMA_MD.contains("NULL = not recorded, and the payment date decides instead"));
+}
+
 /// Docs-sync pin for the closed-year decision (SCENARIOS A-15/A-21/A-25/A-35,
 /// 2026-08-15): the restatement exposure is real but not a bug — there is no
 /// lodged-year concept in the data model, and building one (a per-FY lodgement

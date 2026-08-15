@@ -13,9 +13,14 @@ use std::collections::HashMap;
 /// A return-of-capital payment, as consumed by the cost-base reports.
 #[derive(Debug, Clone)]
 pub struct RocEvent {
+    /// The payment date.
     pub date: NaiveDate,
     pub amount_per_unit: Decimal,
     pub currency: String,
+    /// The date entitlement to the payment was fixed, when recorded (always on
+    /// or before [`Self::date`]). `None` = not recorded, and entitlement falls
+    /// back to the payment date — see [`Self::per_unit_for`].
+    pub record_date: Option<NaiveDate>,
 }
 
 impl RocEvent {
@@ -24,13 +29,26 @@ impl RocEvent {
     /// held today) — or `None` when the payment does not reach those units at
     /// all.
     ///
-    /// A payment before the parcel was acquired was never received on it, and
-    /// a unit sold before a payment was not held for it, so the payment
-    /// applies only within `[acquired, up_to]`. Each payment is per unit *at
-    /// the payment date*: a split between acquisition and the payment
-    /// multiplies the units receiving it, so the amount is scaled by the split
-    /// ratio over `(acquired, payment date]` to express it per as-acquired
-    /// unit (TD 2000/10).
+    /// Two independent tests, one at each end of the window:
+    ///
+    /// - **Entitlement** — a parcel acquired after the payment was fixed never
+    ///   received it. When the action records a [record date](Self::record_date)
+    ///   that is what fixes it: units held *before* it earn the payment, so a
+    ///   parcel acquired on or after it is ex-entitlement (the convention a
+    ///   `RightsIssue`'s own date already uses). With none recorded the payment
+    ///   date stands in, so a parcel acquired on or before it is treated as
+    ///   entitled — the behaviour every action carried before record dates were
+    ///   modelled, and an over-reduction for a parcel bought inside the
+    ///   record-to-payment window (`docs/API.md`, Corporate actions).
+    /// - **Still held** — a unit sold before the payment was not held for it
+    ///   (CGT event G1 adjusts the cost base of shares owned *at the time of
+    ///   the payment*, `docs/ato/cgt-non-assessable-payments.md`), so a payment
+    ///   dated after `up_to` never applies.
+    ///
+    /// Each payment is per unit *at the payment date*: a split between
+    /// acquisition and the payment multiplies the units receiving it, so the
+    /// amount is scaled by the split ratio over `(acquired, payment date]` to
+    /// express it per as-acquired unit (TD 2000/10).
     ///
     /// Fails loudly when the payment's currency differs from the parcel's —
     /// amounts in different currencies must never be netted against each
@@ -46,7 +64,11 @@ impl RocEvent {
         acquired: NaiveDate,
         up_to: Option<NaiveDate>,
     ) -> Result<Option<Decimal>, sqlx::Error> {
-        if self.date < acquired || up_to.is_some_and(|d| self.date > d) {
+        let entitled = match self.record_date {
+            Some(record_date) => acquired < record_date,
+            None => acquired <= self.date,
+        };
+        if !entitled || up_to.is_some_and(|d| self.date > d) {
             return Ok(None);
         }
         if self.currency != parcel_currency {
@@ -79,7 +101,7 @@ where
     E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
 {
     let rows = sqlx::query(
-        "SELECT listing_id, date, amount_per_unit, currency FROM corporate_actions \
+        "SELECT listing_id, date, amount_per_unit, currency, record_date FROM corporate_actions \
          WHERE action_type = 'ReturnOfCapital' ORDER BY listing_id, date, id",
     )
     .fetch_all(executor)
@@ -92,6 +114,7 @@ where
             date: row.try_get("date")?,
             amount_per_unit: parse_dec("amount_per_unit", row.try_get("amount_per_unit")?)?,
             currency: row.try_get("currency")?,
+            record_date: row.try_get("record_date")?,
         });
     }
     Ok(map)
@@ -249,13 +272,14 @@ pub fn sold_in_acquired_units(
 
 /// Cumulative return-of-capital cost-base reduction per *as-acquired* unit for
 /// a unit acquired on `acquired` and still held at `up_to` (or held today when
-/// `None`): the sum of `amount_per_unit` over the listing's payments dated
-/// within `[acquired, up_to]`. A unit sold before a payment was not held for
-/// it, so the realised report bounds `up_to` at the sale date; the
+/// `None`): the sum of `amount_per_unit` over the listing's payments the unit
+/// was both entitled to and still held for. A unit sold before a payment was
+/// not held for it, so the realised report bounds `up_to` at the sale date; the
 /// open-holdings reports pass `None` (an unsold unit was held for every
 /// payment since acquisition).
 ///
-/// Which payments apply, how a split re-bases each one, and the loud failure
+/// Which payments apply (entitlement at the record date, or the payment date
+/// when none is recorded), how a split re-bases each one, and the loud failure
 /// on a currency mismatch are all [`RocEvent::per_unit_for`]'s — this is only
 /// the sum over the listing's payments.
 pub fn per_unit_reduction(

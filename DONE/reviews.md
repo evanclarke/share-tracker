@@ -857,3 +857,75 @@ without opening `docs/API.md`. Tests: `doc_checks::closed_year_restatement_docum
 documentation-only requirement — the entry, the two bounding properties, the mitigation, the A-40
 footnote, and the README clause). Full suite 1392 passed / 0 failed; `cargo build`, `cargo fmt
 --check`, and `cargo clippy --all-targets -D warnings` all clean.
+
+## A return of capital has no record date, so it reduces parcels bought after the entitlement was fixed (SCENARIOS B-09)
+(SCENARIOS.md section B verification pass, 2026-08-15. `corporate_actions.date` for a
+`ReturnOfCapital` is the **payment** date, and both the cost-base pipeline and `g1_gains` test
+entitlement by it: every parcel with `t.date <= ca.date` is reduced. Entitlement to a return of
+capital is fixed at the **record date**, weeks earlier — shares bought after the ex date carry no
+entitlement.)
+- [x] Reproduced: parcel bought 2025-02-15, `ReturnOfCapital` of $0.50/unit paid 2025-03-01 — the
+  parcel's cost base is reduced by $50 although it was bought ex-entitlement and received nothing.
+  Its cost base is understated, so every later gain on it is overstated
+- [x] The converse is right and stays right: a parcel **sold** between the record date and the
+  payment is unaffected (checked), matching G1's own "own the shares at the time of the payment"
+  test in `docs/ato/cgt-non-assessable-payments.md`
+- [x] `docs/API.md` states the payment-date test as though it were the rule ("reduces the cost base
+  of every parcel of the listing held on the payment date"), so nothing warns the user
+- [x] Decide the fix: add an optional record/ex date to the `ReturnOfCapital` payload and test
+  entitlement by it (falling back to the payment date when absent, so existing rows are unchanged),
+  or document the approximation and the manual correction. Note `income.ex_date` already models
+  exactly this distinction for distributions, and the `RightsIssue` action's own `date` **is** its
+  record date — the concept is present in the model everywhere but here
+- [x] Tests: `reports::open_parcels` / `reports::net_capital_gain` (a parcel inside the window),
+  or `doc_checks` for the documentation-only route
+- [x] Docs sync: `docs/API.md` Corporate actions (`ReturnOfCapital`), `docs/SCHEMA.md`'s
+  `corporate_actions.date` comment, and Known limitations if it is documented rather than modelled
+
+**Resolution (2026-08-15): modelled — an optional `record_date` on the `ReturnOfCapital` payload,
+with the payment date as the fallback.** The alternative (document the approximation) was rejected:
+the same distinction is already modelled everywhere else it arises — `income.ex_date` for a
+distribution, and the `RightsIssue` action's own `date`, which *is* its record date — so a return of
+capital was the one entitlement in the system decided by the wrong date. Migration
+`0023_return_of_capital_record_date.sql` adds a nullable `record_date` column (CHECK: only on
+`ReturnOfCapital` rows, never after the payment `date` — entitlement cannot be fixed after the money
+is paid) and re-creates the table's two `row_history` triggers with it, per the audited-table rule.
+
+The rule itself lives in exactly one place, `RocEvent::per_unit_for`: a payment applies to a parcel
+acquired *before* the record date (a parcel acquired on it is ex-entitlement — the convention
+`RightsIssue` already uses), or, when no record date is recorded, to one acquired on or before the
+payment date, which is byte-for-byte the previous behaviour so no existing row moves. Every
+cost-base consumer inherits it through `domain::cost_base` unchanged; the net-capital-gain report's
+G1 walk, which read the join's coarse payment-date bound directly, now skips a payment
+`per_unit_for` declines, so the reported gain can never disagree with the cost base it is walking
+down. `db_delete`'s return-of-capital guard bounds the acquisitions it looks for by the same date,
+so an action whose only parcels were bought ex-entitlement now deletes freely instead of being held
+by a reduction that never happened.
+
+The second half of the finding needed no change and is now pinned: a parcel entitled at the record
+date but *sold* before the payment stays unaffected — the two ends of the window are independent
+tests, entitlement at the record date and ownership at the payment (G1 adjusts the shares owned at
+the time of the payment, `docs/ato/cgt-non-assessable-payments.md`).
+
+Tests: `corporate_action::tests::per_unit_for_tests_entitlement_at_the_record_date` (both ends of
+the window, plus the fallback), `db_return_of_capital_record_date_round_trips` (round-trips through
+the event stream the reports read, and clears again),
+`db_check_rejects_an_impossible_record_date` (the CHECK, both arms),
+`api_return_of_capital_record_date_round_trip`, `api_invalid_record_dates_return_422` (after the
+payment date; on a `ShareSplit`/`RightsIssue`; and the same-day fixing that is legal),
+`db_deleting_a_return_of_capital_is_refused_while_it_reduced_a_parcel` (extended: the ex-entitlement
+parcel deletes, one day earlier it doesn't);
+`open_parcels::tests::db_return_of_capital_skips_parcels_bought_after_the_record_date` (the
+reproduction — the ex-entitlement parcel keeps its $1,010.945 cost base — and the payment-date
+fallback reducing both parcels);
+`net_capital_gain::tests::db_g1_skips_a_parcel_bought_after_the_record_date` (one parcel's excess,
+not both; $50 → $100 without the record date);
+`realised_gains::tests::db_return_of_capital_needs_both_entitlement_and_holding_at_payment` (both
+ways of missing a payment, in one report);
+`doc_checks::return_of_capital_record_date_documented`; `web::tests::corporate_actions_ui_present`
+(the form field and its ex-entitlement hint). Docs: `docs/API.md`'s `ReturnOfCapital` bullet now
+states both conditions and what leaving `record_date` out falls back to, the delete-guard bullet and
+the `422` catalogue follow the record date, `docs/SCHEMA.md` documents the column and the `date`
+comment, and the web UI gained the field, its hint, and the corrected type description. Full suite
+1411 passed / 0 failed; `cargo build`, `cargo fmt --check`, `cargo clippy --all-targets -D
+warnings`, and `node --test 'src/web/*.test.js'` all clean.

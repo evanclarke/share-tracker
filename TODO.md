@@ -10,30 +10,6 @@ findings are all closed in DONE.md), except where a section's heading names anot
 (e.g. REQUIREMENTS, SCENARIOS). Each section records one finding; sections land in DONE.md as they
 are fixed or decided.
 
-## A return of capital has no record date, so it reduces parcels bought after the entitlement was fixed (SCENARIOS B-09)
-(SCENARIOS.md section B verification pass, 2026-08-15. `corporate_actions.date` for a
-`ReturnOfCapital` is the **payment** date, and both the cost-base pipeline and `g1_gains` test
-entitlement by it: every parcel with `t.date <= ca.date` is reduced. Entitlement to a return of
-capital is fixed at the **record date**, weeks earlier — shares bought after the ex date carry no
-entitlement.)
-- [ ] Reproduced: parcel bought 2025-02-15, `ReturnOfCapital` of $0.50/unit paid 2025-03-01 — the
-  parcel's cost base is reduced by $50 although it was bought ex-entitlement and received nothing.
-  Its cost base is understated, so every later gain on it is overstated
-- [ ] The converse is right and stays right: a parcel **sold** between the record date and the
-  payment is unaffected (checked), matching G1's own "own the shares at the time of the payment"
-  test in `docs/ato/cgt-non-assessable-payments.md`
-- [ ] `docs/API.md` states the payment-date test as though it were the rule ("reduces the cost base
-  of every parcel of the listing held on the payment date"), so nothing warns the user
-- [ ] Decide the fix: add an optional record/ex date to the `ReturnOfCapital` payload and test
-  entitlement by it (falling back to the payment date when absent, so existing rows are unchanged),
-  or document the approximation and the manual correction. Note `income.ex_date` already models
-  exactly this distinction for distributions, and the `RightsIssue` action's own `date` **is** its
-  record date — the concept is present in the model everywhere but here
-- [ ] Tests: `reports::open_parcels` / `reports::net_capital_gain` (a parcel inside the window),
-  or `doc_checks` for the documentation-only route
-- [ ] Docs sync: `docs/API.md` Corporate actions (`ReturnOfCapital`), `docs/SCHEMA.md`'s
-  `corporate_actions.date` comment, and Known limitations if it is documented rather than modelled
-
 ## Two documentation gaps found alongside the section B pass (SCENARIOS B-17, B-20)
 (SCENARIOS.md section B verification pass, 2026-08-15. Neither produces a wrong figure; both leave
 a reader unable to tell what the system did.)

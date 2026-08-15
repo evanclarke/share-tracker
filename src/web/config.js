@@ -339,6 +339,7 @@ export const ENTITIES = [
       dt('date', 'Date', { required: true }),
       dec('amount_per_unit', 'Amount per unit', { optional: true, default: '' }),
       fk('currency', 'Currency', 'currencies', { optional: true, encode: 'string', default: '', hint: 'Currency of the per-unit amount(s).' }),
+      dt('record_date', 'Record date', { optional: true, hint: 'When entitlement to the payment was fixed. Parcels bought on or after it are ex-entitlement and are not reduced. Blank falls back to the payment date.' }),
       dec('split_new_units', 'Split: new units', { optional: true, default: '' }),
       dec('split_old_units', 'Split: old units', { optional: true, default: '' }),
       dec('bonus_units', 'Bonus: units issued', { optional: true, default: '' }),
@@ -368,7 +369,7 @@ export const ENTITIES = [
     // matching typeDescs entry scopes the form's description to the type.
     typeField: 'action_type',
     fieldGroups: {
-      ReturnOfCapital: ['amount_per_unit', 'currency'],
+      ReturnOfCapital: ['amount_per_unit', 'currency', 'record_date'],
       ShareSplit: ['split_new_units', 'split_old_units'],
       BonusIssue: ['bonus_units', 'bonus_held_units'],
       RightsIssue: ['rights_units', 'rights_held_units', 'exercise_price', 'currency'],
@@ -378,7 +379,7 @@ export const ENTITIES = [
       WorthlessShares: ['worthless_event'],
     },
     typeDescs: {
-      ReturnOfCapital: 'Return-of-capital payment (CGT event G1): the per-unit amount reduces the cost base of parcels held on the payment date; any excess over a parcel’s cost base is a capital gain in the Net Capital Gain report.',
+      ReturnOfCapital: 'Return-of-capital payment (CGT event G1): the per-unit amount reduces the cost base of the parcels entitled to it and still held on the payment date — entitlement is fixed at the record date, so parcels bought on or after it are untouched (leave the record date blank and the payment date decides instead); any excess over a parcel’s cost base is a capital gain in the Net Capital Gain report.',
       ShareSplit: 'Share split/consolidation (TD 2000/10): on the conversion date every “old units” become “new units” (2-for-1 split: new 2, old 1; 1-for-10 consolidation: new 1, old 10) — no CGT event, the parcels keep their total cost base and original acquisition date.',
       BonusIssue: 'Bonus issue (non-assessable): on the issue date every “held units” receive “bonus units” extra units (1-for-10 issue: bonus 1, held 10) — no CGT event, the cost base is apportioned over original + bonus shares and the acquisition date is preserved; bonus shares chosen in lieu of a dividend are a DRP trade, not entered here.',
       RightsIssue: 'Rights issue: units held before the record date earn “rights units” per “held units” at the exercise price (1-for-4 issue: rights 1, held 4) — recording the issue changes nothing; use the row’s Exercise action to create the new Buy parcel (acquired at the exercise date, cost base = exercise payment + any amount paid for the rights), or its Sell rights action to dispose of rights instead — sold, lapsed, or paid out as a retail premium (a CGT event on the rights themselves, anchored to the original parcels’ acquisition dates).',
@@ -401,7 +402,7 @@ export const ENTITIES = [
         WorthlessShares: 'Event date',
       },
     },
-    columns: ['id', 'action_type', 'listing_id', 'date', 'amount_per_unit', 'currency', 'split_new_units', 'split_old_units', 'bonus_units', 'bonus_held_units', 'rights_units', 'rights_held_units', 'exercise_price', 'buyback_price', 'buyback_dividend', 'buyback_franking_credit', 'buyback_market_value', 'scrip_listing_id', 'scrip_new_units', 'scrip_old_units', 'scrip_cash_per_unit', 'scrip_market_value', 'scrip_cash_currency', 'demerger_listing_id', 'demerger_new_units', 'demerger_held_units', 'demerger_cost_base_pct', 'worthless_event'],
+    columns: ['id', 'action_type', 'listing_id', 'date', 'amount_per_unit', 'currency', 'record_date', 'split_new_units', 'split_old_units', 'bonus_units', 'bonus_held_units', 'rights_units', 'rights_held_units', 'exercise_price', 'buyback_price', 'buyback_dividend', 'buyback_franking_credit', 'buyback_market_value', 'scrip_listing_id', 'scrip_new_units', 'scrip_old_units', 'scrip_cash_per_unit', 'scrip_market_value', 'scrip_cash_currency', 'demerger_listing_id', 'demerger_new_units', 'demerger_held_units', 'demerger_cost_base_pct', 'worthless_event'],
     rowActions: function (row) {
       if (row.action_type === 'RightsIssue') {
         return [

@@ -1352,6 +1352,19 @@ mod tests {
     // Return of capital (CGT event G1)
 
     async fn apply_roc(pool: &SqlitePool, id: i64, listing_id: i64, date: NaiveDate, amount: &str) {
+        apply_roc_with_record(pool, id, listing_id, date, amount, None).await;
+    }
+
+    /// [`apply_roc`] with the record date that fixed entitlement to the
+    /// payment (`None` = not recorded, so the payment date decides).
+    async fn apply_roc_with_record(
+        pool: &SqlitePool,
+        id: i64,
+        listing_id: i64,
+        date: NaiveDate,
+        amount: &str,
+        record_date: Option<NaiveDate>,
+    ) {
         corporate_action::db_upsert(
             pool,
             &corporate_action::CorporateAction {
@@ -1361,6 +1374,7 @@ mod tests {
                 kind: corporate_action::ActionKind::ReturnOfCapital {
                     amount_per_unit: amount.parse().unwrap(),
                     currency: "AUD".to_string(),
+                    record_date,
                 },
             },
         )
@@ -1720,6 +1734,76 @@ mod tests {
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].cost_base, Decimal::from(1000));
         assert_eq!(result[0].capital_gain_loss, Decimal::from(200));
+    }
+
+    /// The two ends of the window are independent (SCENARIOS B-09/B-10): a
+    /// parcel entitled at the record date but *sold* before the payment is
+    /// still unaffected — CGT event G1 adjusts the cost base of the shares
+    /// owned at the time of the payment — while the parcel bought after the
+    /// record date and held through the payment is unaffected for the other
+    /// reason, having never been entitled to it.
+    #[tokio::test]
+    async fn db_return_of_capital_needs_both_entitlement_and_holding_at_payment() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "RAP").await;
+        // Entitled (bought before the 2025-02-10 record date), sold inside the
+        // window before the 2025-03-01 payment.
+        insert_buy(
+            &pool,
+            1,
+            1,
+            NaiveDate::from_ymd_opt(2025, 2, 1).unwrap(),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
+        insert_sell(
+            &pool,
+            2,
+            1,
+            NaiveDate::from_ymd_opt(2025, 2, 20).unwrap(),
+            Decimal::from(100),
+            Decimal::from(12),
+        )
+        .await;
+        allocate(&pool, 1, 2, 1, Decimal::from(100)).await;
+        // Ex-entitlement (bought after the record date), held past the payment
+        // and sold later.
+        insert_buy(
+            &pool,
+            3,
+            1,
+            NaiveDate::from_ymd_opt(2025, 2, 15).unwrap(),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
+        insert_sell(
+            &pool,
+            4,
+            1,
+            NaiveDate::from_ymd_opt(2025, 6, 1).unwrap(),
+            Decimal::from(100),
+            Decimal::from(12),
+        )
+        .await;
+        allocate(&pool, 3, 4, 3, Decimal::from(100)).await;
+        apply_roc_with_record(
+            &pool,
+            1,
+            1,
+            NaiveDate::from_ymd_opt(2025, 3, 1).unwrap(),
+            "0.50",
+            Some(NaiveDate::from_ymd_opt(2025, 2, 10).unwrap()),
+        )
+        .await;
+
+        let result = db_realised_gains(&pool).await.unwrap();
+        assert_eq!(result.len(), 2);
+        for row in &result {
+            assert_eq!(row.cost_base, Decimal::from(1000));
+            assert_eq!(row.capital_gain_loss, Decimal::from(200));
+        }
     }
 
     // FX conversion

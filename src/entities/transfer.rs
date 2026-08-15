@@ -1367,6 +1367,7 @@ mod tests {
                 kind: corporate_action::ActionKind::ReturnOfCapital {
                     amount_per_unit: dec("2"),
                     currency: "USD".to_string(),
+                    record_date: None,
                 },
             },
         )

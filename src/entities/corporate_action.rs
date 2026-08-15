@@ -194,7 +194,26 @@ mod tests {
             kind: ActionKind::ReturnOfCapital {
                 amount_per_unit: amount.parse().unwrap(),
                 currency: "AUD".to_string(),
+                record_date: None,
             },
+        }
+    }
+
+    /// [`roc`] carrying the record date that fixed entitlement to it.
+    fn roc_with_record(
+        id: i64,
+        listing_id: i64,
+        date: NaiveDate,
+        amount: &str,
+        record: NaiveDate,
+    ) -> CorporateAction {
+        CorporateAction {
+            kind: ActionKind::ReturnOfCapital {
+                amount_per_unit: amount.parse().unwrap(),
+                currency: "AUD".to_string(),
+                record_date: Some(record),
+            },
+            ..roc(id, listing_id, date, amount)
         }
     }
 
@@ -347,6 +366,7 @@ mod tests {
             ActionKind::ReturnOfCapital {
                 amount_per_unit: "0.505".parse().unwrap(),
                 currency: "AUD".to_string(),
+                record_date: None,
             }
         );
     }
@@ -619,6 +639,60 @@ mod tests {
         assert!(db_share_split_events(&pool).await.unwrap().is_empty());
         assert!(db_splits_for_listing(&pool, 1).await.unwrap().is_empty());
         assert!(db_return_of_capital_events(&pool).await.unwrap().is_empty());
+    }
+
+    /// The record date round-trips, reaches the reports through the event
+    /// stream they read, and clears again — the payment-date fallback is a
+    /// state a correction can return to, not just the absence of a first write.
+    #[tokio::test]
+    async fn db_return_of_capital_record_date_round_trips() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "RAP").await;
+        let action = roc_with_record(1, 1, d(2025, 3, 1), "0.50", d(2025, 2, 10));
+        db_upsert(&pool, &action).await.unwrap();
+
+        assert_eq!(db_get(&pool, 1).await.unwrap().unwrap().kind, action.kind);
+        let events = db_return_of_capital_events(&pool).await.unwrap();
+        assert_eq!(events[&1][0].record_date, Some(d(2025, 2, 10)));
+
+        db_upsert(&pool, &roc(1, 1, d(2025, 3, 1), "0.50"))
+            .await
+            .unwrap();
+        let events = db_return_of_capital_events(&pool).await.unwrap();
+        assert_eq!(events[&1][0].record_date, None);
+    }
+
+    /// The record date fixes entitlement to *this* payment, so it can never
+    /// follow it, and no other action type has one (the CHECK of 0023 — the
+    /// last line of defence behind the body validation, reached only by a raw
+    /// SQL write).
+    #[tokio::test]
+    async fn db_check_rejects_an_impossible_record_date() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "RAP").await;
+        db_upsert(&pool, &roc(1, 1, d(2025, 3, 1), "0.50"))
+            .await
+            .unwrap();
+        db_upsert(&pool, &split(2, 1, d(2025, 3, 1), "2", "1"))
+            .await
+            .unwrap();
+
+        for (id, record_date) in [(1, "2025-03-02"), (2, "2025-02-10")] {
+            let result = sqlx::query(sqlx::AssertSqlSafe(format!(
+                "UPDATE corporate_actions SET record_date = '{record_date}' WHERE id = {id}"
+            )))
+            .execute(&pool)
+            .await;
+            assert!(
+                result.is_err(),
+                "record_date {record_date} on action {id} should violate the CHECK"
+            );
+        }
+        // …and the record date the payment does allow still writes.
+        sqlx::query("UPDATE corporate_actions SET record_date = '2025-03-01' WHERE id = 1")
+            .execute(&pool)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -940,16 +1014,19 @@ mod tests {
                 date: d(2024, 1, 1),
                 amount_per_unit: "0.10".parse().unwrap(),
                 currency: "AUD".into(),
+                record_date: None,
             },
             RocEvent {
                 date: d(2024, 6, 1),
                 amount_per_unit: "0.20".parse().unwrap(),
                 currency: "AUD".into(),
+                record_date: None,
             },
             RocEvent {
                 date: d(2025, 1, 1),
                 amount_per_unit: "0.40".parse().unwrap(),
                 currency: "AUD".into(),
+                record_date: None,
             },
         ];
         // Acquired between the first and second events: the first doesn't apply.
@@ -967,11 +1044,13 @@ mod tests {
                 date: d(2024, 6, 1),
                 amount_per_unit: "0.20".parse().unwrap(),
                 currency: "AUD".into(),
+                record_date: None,
             },
             RocEvent {
                 date: d(2025, 1, 1),
                 amount_per_unit: "0.40".parse().unwrap(),
                 currency: "AUD".into(),
+                record_date: None,
             },
         ];
         // Sold between the events: only the payment received while held applies.
@@ -999,12 +1078,14 @@ mod tests {
                 date: d(2024, 3, 1),
                 amount_per_unit: "0.30".parse().unwrap(),
                 currency: "AUD".into(),
+                record_date: None,
             },
             // After a 2-for-1 split: each as-acquired unit receives it twice.
             RocEvent {
                 date: d(2024, 9, 1),
                 amount_per_unit: "0.20".parse().unwrap(),
                 currency: "AUD".into(),
+                record_date: None,
             },
         ];
         let splits = vec![split_event(d(2024, 6, 1), "2", "1")];
@@ -1024,6 +1105,7 @@ mod tests {
             date: d(2024, 6, 1),
             amount_per_unit: "0.20".parse().unwrap(),
             currency: "USD".into(),
+            record_date: None,
         }];
         // Never net amounts across currencies: fail loudly, don't skip or zero.
         assert!(per_unit_reduction(&events, &[], "AUD", d(2024, 1, 1), None).is_err());
@@ -1044,6 +1126,7 @@ mod tests {
             date: d(2024, 6, 1),
             amount_per_unit: "0.20".parse().unwrap(),
             currency: "AUD".into(),
+            record_date: None,
         };
         let pu = |acquired, up_to| {
             payment
@@ -1056,6 +1139,45 @@ mod tests {
             pu(d(2024, 1, 1), Some(d(2024, 5, 1))),
             None,
             "sold before the payment"
+        );
+    }
+
+    /// Entitlement to a return of capital is fixed at its **record date**, weeks
+    /// before the money arrives (SCENARIOS B-09): a parcel bought inside that
+    /// window receives nothing, so nothing reduces it. Without a record date the
+    /// payment date stands in — the behaviour of every action recorded before
+    /// the field existed.
+    #[test]
+    fn per_unit_for_tests_entitlement_at_the_record_date() {
+        let payment = |record_date| RocEvent {
+            date: d(2025, 3, 1),
+            amount_per_unit: "0.50".parse().unwrap(),
+            currency: "AUD".into(),
+            record_date,
+        };
+        let record = d(2025, 2, 10);
+        let pu = |event: RocEvent, acquired, up_to| {
+            event
+                .per_unit_for(&[], "AUD", acquired, up_to)
+                .expect("same currency")
+        };
+        let paid = Some("0.50".parse::<Decimal>().unwrap());
+
+        // Held before the record date: entitled.
+        assert_eq!(pu(payment(Some(record)), d(2025, 2, 9), None), paid);
+        // Bought on the record date, or anywhere in the window up to the
+        // payment: ex-entitlement, so untouched.
+        assert_eq!(pu(payment(Some(record)), record, None), None);
+        assert_eq!(pu(payment(Some(record)), d(2025, 2, 15), None), None);
+        // No record date recorded: the payment date decides, as before.
+        assert_eq!(pu(payment(None), d(2025, 2, 15), None), paid);
+        // The other half of the test is unchanged by a record date: a parcel
+        // entitled at the record date but sold before the payment is still not
+        // reduced (G1 adjusts the shares owned at the time of the payment).
+        assert_eq!(
+            pu(payment(Some(record)), d(2025, 2, 9), Some(d(2025, 2, 20))),
+            None,
+            "sold between the record date and the payment"
         );
     }
 
@@ -1820,6 +1942,89 @@ mod tests {
         }
     }
 
+    /// A return of capital may carry the record date that fixed entitlement to
+    /// it; it round-trips on the flat wire shape like any other field.
+    #[tokio::test]
+    async fn api_return_of_capital_record_date_round_trip() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "RAP").await;
+        api_put_expecting(
+            &pool,
+            serde_json::json!({
+                "action_type": "ReturnOfCapital",
+                "listing_id": 1,
+                "date": "2025-03-01",
+                "amount_per_unit": "0.50",
+                "currency": "AUD",
+                "record_date": "2025-02-10",
+            }),
+            StatusCode::NO_CONTENT,
+        )
+        .await;
+
+        let resp = client(&pool).get("/corporate_actions/1").await;
+        let got: CorporateAction = resp.json();
+        assert_eq!(
+            got.kind,
+            roc_with_record(1, 1, d(2025, 3, 1), "0.50", d(2025, 2, 10)).kind
+        );
+        let raw: serde_json::Value = client(&pool).get("/corporate_actions/1").await.json();
+        assert_eq!(raw["record_date"], "2025-02-10");
+    }
+
+    /// A record date after the payment it entitles the holder to is a
+    /// contradiction, and no other action type has one at all — both rejected
+    /// rather than silently dropped.
+    #[tokio::test]
+    async fn api_invalid_record_dates_return_422() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "RAP").await;
+        for body in [
+            serde_json::json!({
+                "action_type": "ReturnOfCapital",
+                "listing_id": 1,
+                "date": "2025-03-01",
+                "amount_per_unit": "0.50",
+                "currency": "AUD",
+                "record_date": "2025-03-02",
+            }),
+            serde_json::json!({
+                "action_type": "ShareSplit",
+                "listing_id": 1,
+                "date": "2025-03-01",
+                "split_new_units": "2",
+                "split_old_units": "1",
+                "record_date": "2025-02-10",
+            }),
+            serde_json::json!({
+                "action_type": "RightsIssue",
+                "listing_id": 1,
+                "date": "2025-03-01",
+                "rights_units": "1",
+                "rights_held_units": "4",
+                "exercise_price": "1.80",
+                "currency": "AUD",
+                "record_date": "2025-02-10",
+            }),
+        ] {
+            api_put_expecting(&pool, body, StatusCode::UNPROCESSABLE_ENTITY).await;
+        }
+        // The payment date itself is a legal record date (a same-day fixing).
+        api_put_expecting(
+            &pool,
+            serde_json::json!({
+                "action_type": "ReturnOfCapital",
+                "listing_id": 1,
+                "date": "2025-03-01",
+                "amount_per_unit": "0.50",
+                "currency": "AUD",
+                "record_date": "2025-03-01",
+            }),
+            StatusCode::NO_CONTENT,
+        )
+        .await;
+    }
+
     #[tokio::test]
     async fn api_invalid_share_split_payloads_return_422() {
         let pool = test_pool().await;
@@ -2033,6 +2238,28 @@ mod tests {
             .await
             .unwrap();
         assert!(db_delete(&pool, 11).await.unwrap());
+
+        // Nor does a payment the parcel was never entitled to: its record date
+        // (not the payment date) is what decides which parcels it reached, so
+        // the guard bounds the acquisitions it looks for by the same date the
+        // cost-base pipeline does.
+        db_upsert(
+            &pool,
+            &roc_with_record(12, 1, d(2023, 6, 1), "0.50", d(2023, 1, 5)),
+        )
+        .await
+        .unwrap();
+        assert!(db_delete(&pool, 12).await.unwrap());
+
+        // One day later the parcel *is* entitled, and the guard holds again.
+        db_upsert(
+            &pool,
+            &roc_with_record(13, 1, d(2023, 6, 1), "0.50", d(2023, 1, 11)),
+        )
+        .await
+        .unwrap();
+        let err = db_delete(&pool, 13).await.unwrap_err();
+        assert!(matches!(err, DeleteError::ReducedParcels), "{err:?}");
     }
 
     /// The five action types whose trades carry a `*_action_id` back-reference

@@ -53,6 +53,14 @@ pub enum ActionKind {
         /// Per-unit payment amount in `currency` (positive).
         amount_per_unit: Decimal,
         currency: String,
+        /// Optional record date — the date entitlement to the payment was
+        /// fixed, always on or before the action's own (payment) `date`. Units
+        /// held *before* it earn the payment (a parcel acquired on it is
+        /// ex-entitlement), the same convention a `RightsIssue`'s `date` uses.
+        /// `None` falls back to testing entitlement by the payment date, which
+        /// is what every row recorded before the column existed does.
+        #[serde(default)]
+        record_date: Option<NaiveDate>,
     },
     ShareSplit {
         /// Every `split_old_units` existing units become `split_new_units`
@@ -167,7 +175,8 @@ pub struct CorporateAction {
     pub id: i64,
     pub listing_id: i64,
     /// ReturnOfCapital: payment date — parcels acquired on/before it are
-    /// affected. ShareSplit: conversion date — parcels acquired before it are
+    /// affected, unless the action carries a `record_date`, which then decides
+    /// entitlement instead. ShareSplit: conversion date — parcels acquired before it are
     /// converted (a trade dated on the conversion date is already in
     /// post-split units). BonusIssue: issue date — parcels acquired before it
     /// receive bonus units (a trade dated on the issue date is ex-bonus).
@@ -195,6 +204,7 @@ impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for ActionKind {
             "ReturnOfCapital" => Ok(ActionKind::ReturnOfCapital {
                 amount_per_unit: row_dec(row, "amount_per_unit")?,
                 currency: row.try_get("currency")?,
+                record_date: row.try_get("record_date")?,
             }),
             "ShareSplit" => Ok(ActionKind::ShareSplit {
                 split_new_units: row_dec(row, "split_new_units")?,
@@ -266,6 +276,8 @@ pub struct CorporateActionBody {
     #[serde(default)]
     currency: Option<String>,
     #[serde(default)]
+    record_date: Option<NaiveDate>,
+    #[serde(default)]
     split_new_units: Option<Decimal>,
     #[serde(default)]
     split_old_units: Option<Decimal>,
@@ -314,7 +326,10 @@ pub struct CorporateActionBody {
 impl CorporateActionBody {
     /// Each action type carries exactly its own payload (mirrors the table
     /// CHECKs, plus positivity): ReturnOfCapital needs a positive payment and
-    /// a currency; ShareSplit a positive conversion ratio; BonusIssue a
+    /// a currency, and may carry a `record_date` no later than the payment
+    /// date it fixes entitlement for (a later one is rejected, not ignored —
+    /// it would read as an entitlement fixed after the money was paid);
+    /// ShareSplit a positive conversion ratio; BonusIssue a
     /// positive bonus ratio; RightsIssue a positive entitlement ratio,
     /// exercise price, and a currency; BuyBack a positive per-unit price and
     /// a currency (dividend/franking-credit components default to 0; the
@@ -358,6 +373,14 @@ impl CorporateActionBody {
             || self.demerger_held_units.is_some()
             || self.demerger_cost_base_pct.is_some();
         let worthless = self.worthless_event.is_some();
+        // Entitlement can never be fixed after the payment it entitles the
+        // holder to, so a record date past the payment date is rejected rather
+        // than silently ignored (CHECK-enforced too, 0023).
+        let record_date = match self.record_date {
+            Some(rd) if rd > self.date => return None,
+            other => other,
+        };
+        let record = record_date.is_some();
         let positive = |d: Option<Decimal>| d.filter(|v| *v > Decimal::ZERO);
         match self.action_type {
             ActionType::ReturnOfCapital
@@ -366,10 +389,12 @@ impl CorporateActionBody {
                 Some(ActionKind::ReturnOfCapital {
                     amount_per_unit: positive(self.amount_per_unit)?,
                     currency: self.currency?,
+                    record_date,
                 })
             }
             ActionType::ShareSplit
                 if !payment
+                    && !record
                     && !bonus
                     && !rights
                     && !buyback
@@ -385,6 +410,7 @@ impl CorporateActionBody {
             }
             ActionType::BonusIssue
                 if !payment
+                    && !record
                     && !split
                     && !rights
                     && !buyback
@@ -400,6 +426,7 @@ impl CorporateActionBody {
             }
             ActionType::RightsIssue
                 if !payment
+                    && !record
                     && !split
                     && !bonus
                     && !buyback
@@ -416,6 +443,7 @@ impl CorporateActionBody {
             }
             ActionType::ScripForScrip
                 if !payment
+                    && !record
                     && !split
                     && !bonus
                     && !rights
@@ -454,6 +482,7 @@ impl CorporateActionBody {
             }
             ActionType::Demerger
                 if !payment
+                    && !record
                     && !split
                     && !bonus
                     && !rights
@@ -475,7 +504,14 @@ impl CorporateActionBody {
                 })
             }
             ActionType::BuyBack
-                if !payment && !split && !bonus && !rights && !scrip && !demerger && !worthless =>
+                if !payment
+                    && !record
+                    && !split
+                    && !bonus
+                    && !rights
+                    && !scrip
+                    && !demerger
+                    && !worthless =>
             {
                 let buyback_price = positive(self.buyback_price)?;
                 let buyback_dividend = self.buyback_dividend.unwrap_or(Decimal::ZERO);
@@ -503,6 +539,7 @@ impl CorporateActionBody {
             }
             ActionType::WorthlessShares
                 if !payment
+                    && !record
                     && !split
                     && !bonus
                     && !rights
