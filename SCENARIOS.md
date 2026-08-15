@@ -26,6 +26,11 @@ answer can only confirm what the implementer already believed.
 - Anything confirmed wrong becomes a `TODO.md` item; anything confirmed correct
   should leave behind a regression test (`src/ato_examples.rs` when it mirrors
   a published ATO example, otherwise the relevant module's inline tests).
+- When a section has been driven end to end, fill in its row in
+  [Verification status](#verification-status) below — the commit that did the
+  pass, and where its findings went. That row is the only record in this file
+  that a section has been looked at; without it the next reader has to go
+  spelunking in the commit log.
 
 ### Standing probes
 
@@ -48,6 +53,59 @@ are not repeated in the individual entries.
 9. **Annual tax report** for the affected year, and the CSV exports.
 10. **Web UI** — does the affected screen render the change, and does the error
     text surface in the toast rather than a bare status code?
+
+---
+
+## Verification status
+
+453 scenarios in 27 sections. A section counts as **verified** only when every
+scenario in it has been driven and each result either left a regression test
+behind or became a recorded finding.
+
+| Section | Scenarios | Verified | Findings |
+| --- | ---: | --- | --- |
+| A. Deletion and mutation ripple effects | 45 | 2026-08-14 (`0bbde4d`) | 5 raised, all closed — see below |
+| B. Cost base construction and the adjustment pipeline | 24 | — | — |
+| C. The 12-month CGT discount clock | 18 | — | — |
+| D. Sells and parcel allocation | 20 | — | — |
+| E. Corporate actions | 51 | — | — |
+| F. AMIT / AMMA | 25 | — | — |
+| G. Dividends, franking, and the holding-period rule | 25 | — | — |
+| H. Interest, expenses, and other income | 10 | — | — |
+| I. DRP | 14 | — | — |
+| J. Employee share schemes | 14 | — | — |
+| K. Inherited parcels | 10 | — | — |
+| L. Crypto | 15 | — | — |
+| M. Foreign currency and FX | 16 | — | — |
+| N. Holding accounts and transfers | 12 | — | — |
+| O. Net capital gain, losses, and carry-forward | 17 | — | — |
+| P. Tax summary, annual tax report, exports | 12 | — | — |
+| Q. Prices, valuation, and snapshots | 15 | — | — |
+| R. Listing identity and renames | 10 | — | — |
+| S. Settlement, holidays, and dates | 10 | — | — |
+| T. Jobs, backup, and operations | 12 | — | — |
+| U. Audit trail and history | 8 | — | — |
+| V. Back-dated and out-of-order entry | 10 | — | — |
+| W. Precision, rounding, and scale | 8 | — | — |
+| X. Transactional integrity and concurrency | 8 | — | — |
+| Y. Web UI | 12 | — | — |
+| Z. Composite lifecycle scenarios | 12 | — | — |
+| AA. Boundary and out-of-scope scenarios | 20 | — | — |
+
+### Section A findings
+
+Forty of the 45 came back correct. `A-24` and `A-42` cannot arise at all
+(`rba_fx_rates` and `currencies` are read-only, `405`). The five findings, each
+archived in [`DONE/reviews.md`](DONE/reviews.md) under a heading naming its
+scenario ids:
+
+| Finding | Scenarios | Fixed by |
+| --- | --- | --- |
+| A Buy's `date` and `holding_account_id` escape the Sell-allocation invariants | A-09, A-13 | `408459b` |
+| Deleting a split/bonus/return-of-capital silently restates reported gains | A-06, A-20, A-21 | `fca9721`, `6512cb4` |
+| A DELETE blocked by an inbound foreign key says the row does not exist | A-18, A-23, A-38, A-41 | `2af8d4f` |
+| Deleting a DRP enrolment period strands its trailing residual | A-43 | `cb96f00` |
+| A closed financial year can be restated with nothing marking it | A-15, A-21, A-25, A-35, A-40 | `42a6abe` (documented limitation) |
 
 ---
 
