@@ -1751,4 +1751,273 @@ mod tests {
         let got = trade::db_get(&pool, 2).await.unwrap().unwrap();
         assert_eq!(got.spot_fx_rate, Some("0.6543".parse().unwrap()));
     }
+
+    // Parcel-allocation scenarios (SCENARIOS.md section D).
+
+    /// SCENARIOS D-04. The sum check is exact `Decimal` equality, so a
+    /// fractional-unit gap is caught as surely as a whole-unit one — a
+    /// millionth of a unit short or over is still an under-/over-allocated
+    /// Sell, and nothing is persisted either way.
+    #[tokio::test]
+    async fn allocations_must_sum_exactly_down_to_a_millionth_of_a_unit() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        insert_buy(&pool, 1, 1, Decimal::from(200)).await;
+
+        for allocated in ["99.999999", "100.000001"] {
+            let body = sell_body(
+                Decimal::from(100),
+                vec![AllocationInput {
+                    purchase_trade_id: 1,
+                    quantity_allocated: allocated.parse().unwrap(),
+                }],
+            );
+            let err = db_upsert_sell(&pool, 2, &body).await.unwrap_err();
+            assert!(
+                matches!(err, SellError::AllocationMismatch),
+                "{allocated}: {err}"
+            );
+            assert!(!trade_exists(&pool, 2).await);
+        }
+    }
+
+    /// SCENARIOS D-05. Naming one parcel in two allocation rows is allowed —
+    /// the rows are kept as entered — but the capacity check is on their
+    /// *sum*, so two rows can no more overdraw a parcel than one can.
+    #[tokio::test]
+    async fn one_parcel_allocated_across_two_rows_is_capped_by_their_sum() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
+
+        let two_rows = |first: i64, second: i64| {
+            sell_body(
+                Decimal::from(first + second),
+                vec![
+                    AllocationInput {
+                        purchase_trade_id: 1,
+                        quantity_allocated: Decimal::from(first),
+                    },
+                    AllocationInput {
+                        purchase_trade_id: 1,
+                        quantity_allocated: Decimal::from(second),
+                    },
+                ],
+            )
+        };
+        db_upsert_sell(&pool, 2, &two_rows(40, 20)).await.unwrap();
+        assert_eq!(count_allocations(&pool, 2).await, 2);
+
+        // 40 + 40 against the 40 the first Sell left: refused on the sum, not
+        // on either row alone.
+        let err = db_upsert_sell(&pool, 3, &two_rows(40, 40))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SellError::PurchaseQuantityExceeded), "{err}");
+        assert!(!trade_exists(&pool, 3).await);
+    }
+
+    /// SCENARIOS D-06. A long-held DRP holding sells out of hundreds of small
+    /// parcels at once: 200 allocation rows go through as one Sell, and every
+    /// row is persisted.
+    #[tokio::test]
+    async fn a_two_hundred_row_allocation_set_is_written_whole() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        let mut allocations = Vec::new();
+        for id in 1..=200i64 {
+            test_support::drp(id, 1)
+                .date(test_support::ymd(2020, 1, 1) + chrono::Duration::days(id))
+                .qty(Decimal::ONE)
+                .insert(&pool)
+                .await;
+            allocations.push(AllocationInput {
+                purchase_trade_id: id,
+                quantity_allocated: Decimal::ONE,
+            });
+        }
+
+        let body = sell_body(Decimal::from(200), allocations);
+        db_upsert_sell(&pool, 500, &body).await.unwrap();
+        assert_eq!(count_allocations(&pool, 500).await, 200);
+    }
+
+    /// SCENARIOS D-07. A holding spread across three accounts is not one
+    /// disposal the tool will take: allocations may only consume the Sell's
+    /// own account's parcels, so selling the lot means one Sell per account
+    /// (`docs/API.md`, Sells).
+    #[tokio::test]
+    async fn a_holding_split_across_accounts_needs_one_sell_per_account() {
+        use crate::entities::holding_account::{self, HoldingAccount};
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        for (id, name) in [(2, "Broker B"), (3, "Broker C")] {
+            holding_account::db_upsert(
+                &pool,
+                &HoldingAccount {
+                    id,
+                    name: name.to_string(),
+                },
+            )
+            .await
+            .unwrap();
+        }
+        for account in 1..=3i64 {
+            test_support::buy(account, 1)
+                .qty(Decimal::from(100))
+                .account(account)
+                .insert(&pool)
+                .await;
+        }
+
+        let all_three = || {
+            (1..=3i64)
+                .map(|id| AllocationInput {
+                    purchase_trade_id: id,
+                    quantity_allocated: Decimal::from(100),
+                })
+                .collect::<Vec<_>>()
+        };
+        let err = db_upsert_sell(&pool, 10, &sell_body(Decimal::from(300), all_three()))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, SellError::PurchaseInDifferentAccount),
+            "{err}"
+        );
+        assert!(!trade_exists(&pool, 10).await);
+
+        // One Sell per account is the entry route, and all three go through.
+        for account in 1..=3i64 {
+            let mut body = sell_body(
+                Decimal::from(100),
+                vec![AllocationInput {
+                    purchase_trade_id: account,
+                    quantity_allocated: Decimal::from(100),
+                }],
+            );
+            body.holding_account_id = account;
+            db_upsert_sell(&pool, 20 + account, &body).await.unwrap();
+        }
+        assert!(remaining_quantities(&pool).await.is_empty());
+    }
+
+    /// SCENARIOS D-10, D-12. Two Sells drawing on one parcel — the same day or
+    /// a year apart — share its units: the second is capped by what the first
+    /// left, even though the parcel once held enough for both.
+    #[tokio::test]
+    async fn a_second_sell_is_capped_by_what_the_first_left_of_the_parcel() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
+
+        let sixty = || {
+            sell_body(
+                Decimal::from(60),
+                vec![AllocationInput {
+                    purchase_trade_id: 1,
+                    quantity_allocated: Decimal::from(60),
+                }],
+            )
+        };
+        db_upsert_sell(&pool, 2, &sixty()).await.unwrap();
+
+        // Same day…
+        let err = db_upsert_sell(&pool, 3, &sixty()).await.unwrap_err();
+        assert!(matches!(err, SellError::PurchaseQuantityExceeded), "{err}");
+        // …and a year later, where the parcel *once* held 60 spare units.
+        let mut later = sixty();
+        later.date = NaiveDate::from_ymd_opt(2025, 6, 3).unwrap();
+        let err = db_upsert_sell(&pool, 3, &later).await.unwrap_err();
+        assert!(matches!(err, SellError::PurchaseQuantityExceeded), "{err}");
+        assert!(!trade_exists(&pool, 3).await);
+
+        // The 40 the first Sell left are still sellable.
+        let mut rest = sixty();
+        rest.quantity = Decimal::from(40);
+        rest.allocations[0].quantity_allocated = Decimal::from(40);
+        db_upsert_sell(&pool, 4, &rest).await.unwrap();
+    }
+
+    /// SCENARIOS D-11. A Sell entered before the Buy it draws on exists is
+    /// refused whole — the Sell trade row is not left behind for the parcel to
+    /// be attached to later.
+    #[tokio::test]
+    async fn a_sell_naming_a_parcel_that_does_not_exist_persists_nothing() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+
+        let body = sell_body(
+            Decimal::from(100),
+            vec![AllocationInput {
+                purchase_trade_id: 7,
+                quantity_allocated: Decimal::from(100),
+            }],
+        );
+        let err = db_upsert_sell(&pool, 2, &body).await.unwrap_err();
+        assert!(matches!(err, SellError::PurchaseParcelMissing), "{err}");
+        let trades: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM trades")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(trades, 0);
+    }
+
+    /// SCENARIOS D-17. Amending an earlier Sell upward is capped by what a
+    /// later financial year's Sell has already consumed — and the refusal
+    /// leaves both sales' allocations exactly as they were.
+    #[tokio::test]
+    async fn amending_an_earlier_sell_is_capped_by_what_a_later_one_consumed() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        test_support::buy(1, 1)
+            .date(test_support::ymd(2022, 1, 10))
+            .qty(Decimal::from(100))
+            .insert(&pool)
+            .await;
+
+        let sale = |date: NaiveDate, qty: i64| {
+            let mut body = sell_body(
+                Decimal::from(qty),
+                vec![AllocationInput {
+                    purchase_trade_id: 1,
+                    quantity_allocated: Decimal::from(qty),
+                }],
+            );
+            body.date = date;
+            body
+        };
+        let first = NaiveDate::from_ymd_opt(2023, 3, 1).unwrap();
+        db_upsert_sell(&pool, 2, &sale(first, 40)).await.unwrap();
+        db_upsert_sell(
+            &pool,
+            3,
+            &sale(NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(), 60),
+        )
+        .await
+        .unwrap();
+
+        let err = db_upsert_sell(&pool, 2, &sale(first, 50))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SellError::PurchaseQuantityExceeded), "{err}");
+        let allocated: Vec<(i64, String)> = sqlx::query_as(
+            "SELECT sale_trade_id, quantity_allocated FROM parcel_allocations \
+             ORDER BY sale_trade_id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            allocated,
+            vec![(2, "40".to_string()), (3, "60".to_string())]
+        );
+
+        // Amending it *down* frees units and goes through.
+        db_upsert_sell(&pool, 2, &sale(first, 30)).await.unwrap();
+        assert_eq!(
+            remaining_quantities(&pool).await,
+            vec![(1, Decimal::from(10))]
+        );
+    }
 }

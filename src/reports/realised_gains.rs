@@ -2696,4 +2696,120 @@ mod tests {
         assert_eq!(sell.parcels[0].units, Decimal::from(100));
         assert_eq!(sell.parcels[0].capital_gain_loss, Decimal::from(100));
     }
+
+    // Sale scenarios (SCENARIOS.md section D).
+
+    /// SCENARIOS D-09. Bought and sold on the one day: a real disposal with a
+    /// real gain, assessed in full — the discount needs *more* than 12 months
+    /// (`domain::cgt_discount`), so a zero-day holding is the "other" method.
+    #[tokio::test]
+    async fn db_same_day_buy_and_sell_is_assessed_without_the_discount() {
+        let pool = test_pool().await;
+        let day = NaiveDate::from_ymd_opt(2024, 6, 3).unwrap();
+        insert_listing(&pool, 1, "SDY").await;
+        insert_buy(&pool, 1, 1, day, Decimal::from(100), Decimal::from(10)).await;
+        insert_sell(&pool, 2, 1, day, Decimal::from(100), Decimal::from(15)).await;
+        allocate(&pool, 1, 2, 1, Decimal::from(100)).await;
+
+        let result = db_realised_gains(&pool).await.unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].capital_gain_loss, Decimal::from(500));
+        assert_eq!(result[0].non_discountable_gain, Decimal::from(500));
+        assert_eq!(result[0].discount_eligible_gain, Decimal::ZERO);
+        assert!(!result[0].parcels[0].discount_eligible);
+    }
+
+    /// SCENARIOS D-13. An AMMA statement for the year the sale fell in adjusts
+    /// the cost base of the parcel that sale disposed of, even though its year
+    /// end is months after the sale: s 104-107B makes the annual adjustment
+    /// "just before the end of the income year, **or just before the time of a
+    /// relevant CGT event**" (LCR 2015/11 para 13,
+    /// `docs/ato/amit-cost-base-adjustments.md`). Entering the statement
+    /// afterwards restates the sale's gain — as it should.
+    #[tokio::test]
+    async fn db_amit_statement_for_the_sale_year_adjusts_the_parcel_already_sold() {
+        let pool = test_pool().await;
+        test_support::listing(1)
+            .ticker("VDHG")
+            .amit(true)
+            .insert(&pool)
+            .await;
+        insert_buy(
+            &pool,
+            1,
+            1,
+            NaiveDate::from_ymd_opt(2023, 1, 10).unwrap(),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
+        // Sold in October 2023 — inside the year ended 30 June 2024.
+        insert_sell(
+            &pool,
+            2,
+            1,
+            NaiveDate::from_ymd_opt(2023, 10, 3).unwrap(),
+            Decimal::from(100),
+            Decimal::from(15),
+        )
+        .await;
+        allocate(&pool, 1, 2, 1, Decimal::from(100)).await;
+
+        let before = db_realised_gains(&pool).await.unwrap();
+        assert_eq!(before[0].cost_base, Decimal::from(1000));
+        assert_eq!(before[0].capital_gain_loss, Decimal::from(500));
+
+        test_support::amma(1, 1)
+            .cost_base_adjustment("0.50".parse().unwrap())
+            .insert(&pool)
+            .await;
+        test_support::amit_adjustment(&pool, 1, 1, 1, Decimal::from(100)).await;
+
+        let after = db_realised_gains(&pool).await.unwrap();
+        assert_eq!(after[0].cost_base, Decimal::from(950));
+        assert_eq!(after[0].capital_gain_loss, Decimal::from(550));
+    }
+
+    /// SCENARIOS D-15, D-20. A disposal for nothing — worthless shares, or a
+    /// gift entered at the nil consideration that actually changed hands
+    /// rather than the market value the substitution rule requires — realises
+    /// the whole cost base as a loss, and a sale whose costs exceed its
+    /// consideration reports proceeds *below* nil rather than flooring them
+    /// (the sale-side cost convention: costs net off proceeds, `docs/API.md`).
+    #[tokio::test]
+    async fn db_nil_and_negative_net_proceeds_realise_the_full_loss() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "NIL").await;
+        let bought = NaiveDate::from_ymd_opt(2023, 1, 10).unwrap();
+        for id in 1..=2i64 {
+            insert_buy(&pool, id, 1, bought, Decimal::from(100), Decimal::from(10)).await;
+        }
+        insert_sell(
+            &pool,
+            3,
+            1,
+            NaiveDate::from_ymd_opt(2024, 6, 3).unwrap(),
+            Decimal::from(100),
+            Decimal::ZERO,
+        )
+        .await;
+        allocate(&pool, 1, 3, 1, Decimal::from(100)).await;
+        // The second closes at nil consideration but still costs $20 in
+        // brokerage to execute.
+        test_support::sell(4, 1)
+            .date(test_support::ymd(2024, 6, 5))
+            .qty(Decimal::from(100))
+            .price(Decimal::ZERO)
+            .brokerage(Decimal::from(20))
+            .insert(&pool)
+            .await;
+        allocate(&pool, 2, 4, 2, Decimal::from(100)).await;
+
+        let result = db_realised_gains(&pool).await.unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].proceeds, Decimal::ZERO);
+        assert_eq!(result[0].capital_loss, Decimal::from(1000));
+        assert_eq!(result[1].proceeds, Decimal::from(-20));
+        assert_eq!(result[1].capital_loss, Decimal::from(1020));
+    }
 }

@@ -1114,4 +1114,55 @@ mod tests {
         assert_eq!(ex.replacements[0].fx_rate, dec("0.70"));
         assert_eq!(ex.replacements[0].spot_fx_rate, Some(dec("0.6543")));
     }
+
+    /// SCENARIOS D-19. The exchange's closing Sell consumed the original
+    /// parcel outright, so a Sell entered the next day against that parcel has
+    /// nothing to draw on: it is refused on capacity (the units live in the
+    /// replacement parcel now), and nothing is persisted.
+    #[tokio::test]
+    async fn a_parcel_the_exchange_consumed_cannot_be_allocated_to_a_later_sell() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "OLD").await;
+        insert_listing(&pool, 2, "NEW").await;
+        insert_buy(&pool, 1, 1, d(2022, 1, 10), "100", "10").await;
+        insert_scrip(&pool, 10, d(2024, 6, 2)).await;
+        db_exchange(&pool, 10).await.unwrap();
+
+        let err = sell::db_upsert_sell(
+            &pool,
+            60,
+            &SellBody {
+                brokerage_includes_gst: false,
+                statement_total: None,
+                holding_account_id: 1,
+                date: d(2024, 6, 3),
+                settlement_date: Some(d(2024, 6, 3)),
+                listing_id: 1,
+                average_price: dec("15"),
+                quantity: dec("100"),
+                currency: "AUD".to_string(),
+                brokerage: Decimal::ZERO,
+                gst_on_brokerage: Decimal::ZERO,
+                brokerage_currency: "AUD".to_string(),
+                fx_rate: Decimal::ONE,
+                spot_fx_rate: None,
+                contract_note_ref: None,
+                allocations: vec![AllocationInput {
+                    purchase_trade_id: 1,
+                    quantity_allocated: dec("100"),
+                }],
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, sell::SellError::PurchaseQuantityExceeded),
+            "{err}"
+        );
+        let exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM trades WHERE id = 60")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(exists, 0);
+    }
 }

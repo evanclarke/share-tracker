@@ -67,7 +67,7 @@ behind or became a recorded finding.
 | A. Deletion and mutation ripple effects | 45 | 2026-08-14 (`0bbde4d`) | 5 raised, all closed — see below |
 | B. Cost base construction and the adjustment pipeline | 24 | 2026-08-15 | 5 raised, all closed — see below |
 | C. The 12-month CGT discount clock | 18 | 2026-08-15 | 1 raised, closed — see below |
-| D. Sells and parcel allocation | 20 | — | — |
+| D. Sells and parcel allocation | 20 | 2026-08-15 | 2 raised, both open — see below |
 | E. Corporate actions | 51 | — | — |
 | F. AMIT / AMMA | 25 | — | — |
 | G. Dividends, franking, and the holding-period rule | 25 | — | — |
@@ -155,6 +155,44 @@ turned on:
 | Finding | Scenarios | Fixed by |
 | --- | --- | --- |
 | Scrip-for-scrip and demerger rollovers are assumed, not stated as a scope cut | C-09 | documented |
+
+### Section D findings
+
+Eighteen of the 20 came back correct. The allocation invariants are the strong
+part: they live in one place (`sell::upsert_sell_in_tx`), every write goes
+through it — the `PUT /sells/:id` upsert and each operation-built Sell alike —
+and the standalone `parcel_allocations` write routes are disabled, so there is
+no second path to disagree with the first. What each group turned on:
+
+- **The sum and the capacity check.** Allocations must sum to the sale's
+  quantity by exact `Decimal` equality, so a millionth of a unit is caught like
+  a whole one (D-04); each allocation must be positive (D-05); and capacity is
+  re-checked per parcel against *every* allocation drawing on it, so two rows
+  naming one parcel are capped by their sum (D-05), a second Sell is capped by
+  what the first left whether it is the same day or a year later (D-10, D-12),
+  an earlier sale cannot be amended up past what a later one consumed (D-17),
+  and a parcel a scrip exchange consumed is not sellable again (D-19). 200
+  allocation rows go through as one Sell (D-06).
+- **What a sale may draw on.** Same listing, same holding account, not dated
+  after the sale — all three refused with the reason (D-01, D-02, D-03), and a
+  same-day parcel is fine (D-09). A holding spread across three accounts is
+  therefore three Sells, not one, which `docs/API.md` states (D-07). A Sell
+  naming a parcel that does not exist yet persists nothing at all (D-11).
+- **Figures.** Nil proceeds are legitimate and realise the whole cost base as a
+  loss — the entry route for a gift under the market-value substitution rule,
+  where the user supplies the market value (D-15, D-20); a negative price is
+  refused, while costs exceeding the consideration report proceeds below nil
+  under the documented sale-side cost convention (D-15). A non-AUD sale in a
+  month with no imported rate falls back to the trade's own `fx_rate`, as
+  documented, rather than failing or silently passing the figure through
+  (D-16). The wash-sale report flags re-acquisitions on both sides of a loss
+  sale with signed `days_apart` (D-08), and every parcel-optimiser strategy's
+  allocations are accepted by `PUT /sells/:id` verbatim (D-18).
+
+| Finding | Scenarios | Status |
+| --- | --- | --- |
+| An AMIT adjustment covering part of a parcel is diluted across the whole parcel | D-13 | open — `TODO.md` |
+| A return of capital received on units already sold is not recorded anywhere | D-14 | open — `TODO.md` |
 
 ---
 

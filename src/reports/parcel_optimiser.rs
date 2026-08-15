@@ -778,6 +778,66 @@ mod tests {
         assert!(msg.contains("account 'Default'"), "{msg}");
     }
 
+    /// SCENARIOS D-18. What the optimiser proposes, the Sell endpoint must
+    /// accept: each strategy's allocations, submitted verbatim as a Sell's
+    /// `allocations`, pass every write-time invariant — so the report can be
+    /// acted on by copying it, not by re-deriving it.
+    #[tokio::test]
+    async fn every_strategys_allocations_are_accepted_verbatim_by_the_sell_endpoint() {
+        let pool = test_pool().await;
+        strategy_fixture(&pool).await;
+        let (status, body) = post_optimiser(
+            pool.clone(),
+            None,
+            serde_json::json!({
+                "listing_id": 1, "holding_account_id": 1, "units": "150",
+                "sale_date": "2026-06-15", "price": "10"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let resp: OptimiserResponse = serde_json::from_slice(&body).unwrap();
+
+        let sells = ApiClient::over(crate::entities::sell::router().with_state(pool.clone()));
+        for strategy in ALL_STRATEGIES {
+            let allocations: Vec<_> = resp
+                .allocations
+                .iter()
+                .filter(|a| a.strategy == strategy)
+                .map(|a| {
+                    serde_json::json!({
+                        "purchase_trade_id": a.allocation.purchase_trade_id,
+                        "quantity_allocated": a.allocation.units,
+                    })
+                })
+                .collect();
+            assert!(!allocations.is_empty(), "{strategy:?} proposed nothing");
+            let resp = sells
+                .put(
+                    "/sells/50",
+                    &serde_json::json!({
+                        "date": "2026-06-15",
+                        "listing_id": 1,
+                        "average_price": "10",
+                        "quantity": "150",
+                        "currency": "AUD",
+                        "brokerage": "0",
+                        "brokerage_currency": "AUD",
+                        "fx_rate": "1",
+                        "holding_account_id": 1,
+                        "allocations": allocations,
+                    }),
+                )
+                .await;
+            assert_eq!(
+                resp.status,
+                StatusCode::NO_CONTENT,
+                "{strategy:?}: {}",
+                resp.text()
+            );
+        }
+    }
+
     #[tokio::test]
     async fn api_non_positive_units_rejected() {
         let pool = test_pool().await;
