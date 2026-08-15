@@ -65,7 +65,7 @@ behind or became a recorded finding.
 | Section | Scenarios | Verified | Findings |
 | --- | ---: | --- | --- |
 | A. Deletion and mutation ripple effects | 45 | 2026-08-14 (`0bbde4d`) | 5 raised, all closed — see below |
-| B. Cost base construction and the adjustment pipeline | 24 | 2026-08-15 | 5 raised, open — see below |
+| B. Cost base construction and the adjustment pipeline | 24 | 2026-08-15 | 5 raised, all closed — see below |
 | C. The 12-month CGT discount clock | 18 | — | — |
 | D. Sells and parcel allocation | 20 | — | — |
 | E. Corporate actions | 51 | — | — |
@@ -109,17 +109,17 @@ scenario ids:
 
 ### Section B findings
 
-Nineteen of the 24 came back correct. The five findings are listed below;
-those still open are in [`TODO.md`](TODO.md), each under a heading naming its
-scenario ids, and the rest name the commit that closed them:
+Nineteen of the 24 came back correct. All five findings are closed, each
+archived in [`DONE/reviews.md`](DONE/reviews.md) under a heading naming its
+scenario ids, and each naming the commit that closed it:
 
 | Finding | Scenarios | Fixed by |
 | --- | --- | --- |
 | An AMIT cost-base adjustment over a split applies the statement's per-unit figure to the wrong units | B-24 | `305dda8` |
 | A parcel reduced by both an AMIT adjustment and a return of capital loses the excess over its cost base | B-07, B-08 | `83488c2` |
 | Brokerage in a currency other than the trade's is added to the cost base unconverted | B-02 | `04bd0e8` |
-| A return of capital has no record date, so it reduces parcels bought after the entitlement was fixed | B-09 | |
-| Two documentation gaps (sale-side incidental costs; rights bought on-market) | B-17, B-20 | |
+| A return of capital has no record date, so it reduces parcels bought after the entitlement was fixed | B-09 | `14601f5` |
+| Two documentation gaps (sale-side incidental costs; rights bought on-market) | B-17, B-20 | `33a4534` (documented) |
 
 ---
 
