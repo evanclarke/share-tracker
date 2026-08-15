@@ -598,10 +598,74 @@ A-20: the stranded AMIT adjustment was the same over-consumption seen from the a
 `PUT` is deliberately **not** guarded the same way — freezing an action the moment anything depends
 on it would mean deleting every later trade of the listing to fix a typo'd ratio. That leaves the
 restatement reachable by editing, now documented as a Known limitation in `docs/API.md` and pinned
-by `doc_checks::corporate_action_delete_guard_documented`; TODO.md carries it as open work under
-*Editing a split/bonus/return-of-capital in place restates the same figures a delete now can't*. Six tests in `entities::corporate_action::tests` (the A-20 repro end to end, including that
+by `doc_checks::corporate_action_delete_guard_documented`. That open work is the next section here,
+*Editing a split/bonus/return-of-capital in place restates the same figures a delete now can't*,
+closed 2026-08-15. Six tests in `entities::corporate_action::tests` (the A-20 repro end to end, including that
 the identical Sell is refused once the split is gone; the bonus-issue shape plus the
 predates-everything case that still deletes; the return-of-capital pair; an unapplied `RightsIssue`
 unaffected; and the two 422 bodies over the router), verified end to end against a running server.
 Full suite 1376 passed / 0 failed; `cargo fmt --check` and `cargo clippy --all-targets -- -D
 warnings` clean.
+
+## Editing a split/bonus/return-of-capital in place restates the same figures a delete now can't
+(Found closing *Deleting a split/bonus/return-of-capital silently restates reported gains* — now in
+[DONE/reviews.md](DONE/reviews.md) — 2026-08-14. `PUT /corporate_actions/:id` re-checks only the
+`trades.*_action_id` references (`WriteError::ReferencedByTrade`), so for the three read-time
+action types an edit is unguarded: changing a `ShareSplit`'s ratio from 2:1 to 1:1, or moving its
+`date` past a Sell, restates every quantity, cost base, and realised gain computed from it — the
+same A-20 state the new delete guard refuses, reached one verb over. Documented as a Known
+limitation rather than left silent, because the correction path is worth keeping: the blanket freeze
+would mean deleting years of trades to fix a typo.)
+- [x] Decide the shape. A blanket freeze is wrong (it closes the only way to fix a mis-keyed
+  ratio). Candidates: refuse only the *breaking* edits — a ratio change, or a `date` move — while
+  dependent trades exist, leaving a same-terms correction free; or accept the edit but validate the
+  resulting state (re-run the affected Sells' allocation checks inside the write transaction and
+  refuse `422` if any would now over-consume its parcel), which is stricter and needs no rule about
+  which fields matter
+- [x] Whichever way: an edit must not be able to leave allocations exceeding a parcel, the same
+  invariant the delete guard now upholds
+- [x] Tests: `entities::corporate_action::tests` — the A-20 shape reached by `PUT` is refused, and
+  a correction that breaks nothing still lands
+- [x] Docs sync: `docs/API.md` Corporate actions + Response codes 422, and retire the Known
+  limitations entry (`Editing a split, bonus issue, or return of capital in place restates prior
+  figures`) plus its `doc_checks` assertions if the edit stops being possible
+
+**Closed 2026-08-15.** Shape chosen: the **second** candidate — accept the edit, validate the
+resulting state. The first (freeze the *breaking* fields while dependants exist) turns out to be
+nearly a blanket freeze in disguise: a `ShareSplit` row is only `listing_id` + `date` + the ratio,
+so every field of it is breaking, and "leaving a same-terms correction free" would have freed
+almost nothing while closing the correction path the previous section deliberately kept open.
+
+`corporate_action::db_upsert` now re-checks, in the write's own transaction and after the row is
+written, that every parcel of each affected listing still covers the sale allocations drawn on it
+(`allocations_fit_parcels` in `src/entities/corporate_action/db.rs` → `422
+WriteError::AllocationsExceedParcel`). It is the listing-wide form of the per-parcel invariant the
+Sell and trade write paths already uphold from their own sides
+(`sell::SellError::PurchaseQuantityExceeded`, `trade::UpsertError::QuantityBelowAllocated`), and it
+re-bases each allocation through the same shared `as_acquired_quantity` (TD 2000/10) they use — a
+corporate-action write is simply the third way that comparison can move, changing the split stream
+rather than either side of the sum. Two properties fall out of checking the *written state* rather
+than the changed fields:
+
+- it needs no rule about which fields matter, so a re-type, a `date` move, and a `listing_id` move
+  are all covered (a move re-checks **both** listings — the one it lands on and the one whose split
+  stream it leaves);
+- it equally catches a *newly recorded* consolidation over sales already allocated in the
+  pre-consolidation basis, which was the same hole reached by `PUT` of a new id rather than an edit.
+
+A correction that breaks nothing still lands: a wider ratio, a date move that stays before the
+sales, and any `ReturnOfCapital` amount edit (it moves cost base, not quantities, so no quantity
+invariant is at risk). The Known limitations entry is therefore **narrowed, not retired** — the edit
+is still possible and still restates prior figures; what it can no longer do is leave an invalid
+state — and `doc_checks::corporate_action_delete_guard_documented` now pins that narrowing
+alongside the new `doc_checks::corporate_action_write_state_check_documented`.
+
+Five tests in `entities::corporate_action::tests` (the A-20 shape reached by `PUT` — ratio shrunk and
+date moved past the Sell, with the stored terms asserted untouched; the correction that still lands,
+including the `ReturnOfCapital` amount edit; the new-consolidation insert; the cross-listing move;
+and the 422 body over the router). Verified end to end against a running server: the A-20 repro
+(realised gain $200) refuses all three breaking edits with the 422 body, leaves
+`GET /corporate_actions/10` on its original terms, and accepts 2:1 → 4:1 plus a compensating 1-for-2
+consolidation, after which the reports still compute (`cost_base` 850.00 = $1,000 less a $0.75/unit
+return of capital re-based across the splits). Full suite 1382 passed / 0 failed; `cargo fmt
+--check` and `cargo clippy --all-targets -- -D warnings` clean.

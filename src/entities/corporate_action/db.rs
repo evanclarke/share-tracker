@@ -4,10 +4,14 @@
 //! and the matching delete-time guard for the three types that re-base or
 //! reduce parcels at read time instead of creating trades ([`DeleteError`]).
 
+use super::adjustments::{as_acquired_quantity, db_splits_for_listing};
 use super::model::{ActionKind, CorporateAction};
-use crate::infra::decimal::OptMoney;
+use crate::infra::decimal::{OptMoney, parse_dec};
 use crate::infra::http::{ApiError, CrudEntity};
-use sqlx::SqlitePool;
+use chrono::NaiveDate;
+use rust_decimal::Decimal;
+use sqlx::{Row, SqlitePool};
+use std::collections::HashMap;
 
 const COLUMNS: &str = "id, action_type, listing_id, date, amount_per_unit, currency, \
                        split_new_units, split_old_units, bonus_units, bonus_held_units, \
@@ -63,6 +67,17 @@ pub enum WriteError {
     /// referencing rows first. Mapped to `422`.
     #[error("this corporate action is referenced by trades or rights sales and cannot be edited")]
     ReferencedByTrade,
+    /// The terms as written would leave a Sell allocating more units out of a
+    /// parcel than the parcel holds — the state `PUT /sells/:id` itself
+    /// refuses. A `ShareSplit`/`BonusIssue` re-bases quantities at read time,
+    /// so its ratio and date decide how many as-acquired units each sale's
+    /// allocation consumes: shrinking a ratio, moving the event past a sale,
+    /// re-typing the action, moving it to another listing, or recording a new
+    /// consolidation over existing sales can each over-consume a parcel.
+    /// Checked over the resulting state rather than by freezing the row, so a
+    /// correction that breaks nothing still lands. Mapped to `422`.
+    #[error("this action's terms leave a sale allocating more units than its parcel holds")]
+    AllocationsExceedParcel,
 }
 
 impl From<WriteError> for ApiError {
@@ -74,10 +89,64 @@ impl From<WriteError> for ApiError {
                  scrip-for-scrip, demerger, or worthless-shares trades or by rights sales \
                  and cannot be edited — delete those rows first",
             ),
+            // The written terms would leave an over-consumed parcel → 422.
+            WriteError::AllocationsExceedParcel => ApiError::unprocessable(
+                "these terms re-base parcel quantities so that a sale allocates more units than \
+                 the parcel it draws on holds — correct or remove those allocations first",
+            ),
             // Unknown listing/currency FK or enum CHECK violation → 422.
             WriteError::Db(err) => err.into(),
         }
     }
+}
+
+/// Whether every parcel of `listing_id` still covers the sale allocations
+/// drawn on it, read on the caller's own connection so a write can check the
+/// state it is about to commit.
+///
+/// This is the listing-wide form of the per-parcel invariant the Sell and
+/// trade write paths each uphold from their own side
+/// (`sell::SellError::PurchaseQuantityExceeded`,
+/// `trade::UpsertError::QuantityBelowAllocated`): a parcel's quantity is in
+/// as-acquired units while each allocation is in its own sale date's units, so
+/// allocations are re-based back across the listing's splits (TD 2000/10)
+/// before comparing — the same [`as_acquired_quantity`] those paths use. A
+/// corporate-action write is the third way the comparison can move: it changes
+/// the split stream itself rather than either side of the sum.
+async fn allocations_fit_parcels(
+    conn: &mut sqlx::SqliteConnection,
+    listing_id: i64,
+) -> Result<bool, sqlx::Error> {
+    let splits = db_splits_for_listing(&mut *conn, listing_id).await?;
+    let rows = sqlx::query(
+        "SELECT pa.purchase_trade_id, p.date AS acquired, p.quantity AS parcel_quantity, \
+                s.date AS sale_date, pa.quantity_allocated \
+         FROM parcel_allocations pa \
+         JOIN trades p ON p.id = pa.purchase_trade_id \
+         JOIN trades s ON s.id = pa.sale_trade_id \
+         WHERE p.listing_id = ?",
+    )
+    .bind(listing_id)
+    .fetch_all(&mut *conn)
+    .await?;
+
+    // Each parcel's (quantity, allocations consumed so far), in as-acquired
+    // units.
+    let mut consumed: HashMap<i64, (Decimal, Decimal)> = HashMap::new();
+    for row in &rows {
+        let parcel_id: i64 = row.try_get("purchase_trade_id")?;
+        let acquired: NaiveDate = row.try_get("acquired")?;
+        let parcel_quantity = parse_dec("parcel_quantity", row.try_get("parcel_quantity")?)?;
+        let sale_date: NaiveDate = row.try_get("sale_date")?;
+        let allocated = parse_dec("quantity_allocated", row.try_get("quantity_allocated")?)?;
+        let entry = consumed
+            .entry(parcel_id)
+            .or_insert((parcel_quantity, Decimal::ZERO));
+        entry.1 += as_acquired_quantity(allocated, &splits, acquired, sale_date);
+    }
+    Ok(consumed
+        .values()
+        .all(|&(quantity, total)| total <= quantity))
 }
 
 pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<(), WriteError> {
@@ -208,6 +277,14 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
         return Err(WriteError::ReferencedByTrade);
     }
 
+    // Which listing the row is leaving, when an edit moves it (the split
+    // stream it is removed from has to hold up too). `None` for an insert.
+    let previous_listing_id: Option<i64> =
+        sqlx::query_scalar("SELECT listing_id FROM corporate_actions WHERE id = ?")
+            .bind(action.id)
+            .fetch_optional(&mut *tx)
+            .await?;
+
     sqlx::query(
         "INSERT INTO corporate_actions \
          (id, action_type, listing_id, date, amount_per_unit, currency, \
@@ -278,6 +355,24 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
     .bind(c.worthless_event)
     .execute(&mut *tx)
     .await?;
+
+    // Editing an action is deliberately *not* frozen the way deleting one is
+    // (docs/API.md Known limitations: a mis-keyed ratio, date, or amount has
+    // to stay correctable in place) — but the state the edit leaves behind
+    // still has to be a legal one. The written row is checked, not the fields
+    // that changed, so this equally covers a fresh consolidation recorded over
+    // sales that already allocate in the pre-consolidation basis. Inside the
+    // write's own transaction, so a refused write is never persisted.
+    let mut listings = vec![action.listing_id];
+    if let Some(previous) = previous_listing_id.filter(|p| *p != action.listing_id) {
+        listings.push(previous);
+    }
+    for listing_id in listings {
+        if !allocations_fit_parcels(&mut tx, listing_id).await? {
+            return Err(WriteError::AllocationsExceedParcel);
+        }
+    }
+
     tx.commit().await?;
     Ok(())
 }

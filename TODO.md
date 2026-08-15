@@ -10,29 +10,6 @@ findings are all closed in DONE.md), except where a section's heading names anot
 (e.g. REQUIREMENTS). Each section records one finding; sections land in DONE.md as they are fixed
 or decided.
 
-## Editing a split/bonus/return-of-capital in place restates the same figures a delete now can't
-(Found closing *Deleting a split/bonus/return-of-capital silently restates reported gains* — now in
-[DONE/reviews.md](DONE/reviews.md) — 2026-08-14. `PUT /corporate_actions/:id` re-checks only the
-`trades.*_action_id` references (`WriteError::ReferencedByTrade`), so for the three read-time
-action types an edit is unguarded: changing a `ShareSplit`'s ratio from 2:1 to 1:1, or moving its
-`date` past a Sell, restates every quantity, cost base, and realised gain computed from it — the
-same A-20 state the new delete guard refuses, reached one verb over. Documented as a Known
-limitation rather than left silent, because the correction path is worth keeping: the blanket freeze
-would mean deleting years of trades to fix a typo.)
-- [ ] Decide the shape. A blanket freeze is wrong (it closes the only way to fix a mis-keyed
-  ratio). Candidates: refuse only the *breaking* edits — a ratio change, or a `date` move — while
-  dependent trades exist, leaving a same-terms correction free; or accept the edit but validate the
-  resulting state (re-run the affected Sells' allocation checks inside the write transaction and
-  refuse `422` if any would now over-consume its parcel), which is stricter and needs no rule about
-  which fields matter
-- [ ] Whichever way: an edit must not be able to leave allocations exceeding a parcel, the same
-  invariant the delete guard now upholds
-- [ ] Tests: `entities::corporate_action::tests` — the A-20 shape reached by `PUT` is refused, and
-  a correction that breaks nothing still lands
-- [ ] Docs sync: `docs/API.md` Corporate actions + Response codes 422, and retire the Known
-  limitations entry (`Editing a split, bonus issue, or return of capital in place restates prior
-  figures`) plus its `doc_checks` assertions if the edit stops being possible
-
 ## A DELETE blocked by an inbound foreign key says the row does not exist (SCENARIOS A-18, A-23, A-38, A-41)
 (SCENARIOS.md section A verification pass, 2026-08-14. `ApiError`'s `From<sqlx::Error>` maps
 `ErrorKind::ForeignKeyViolation` to `"the request refers to a record that does not exist"`

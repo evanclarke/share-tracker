@@ -880,12 +880,36 @@ fn corporate_action_delete_guard_documented() {
     assert!(API_MD.contains("**any parcel acquired on or before** the payment `date`"));
     assert!(API_MD.contains("deleting a ShareSplit or BonusIssue whose listing has a trade"));
     assert!(API_MD.contains("deleting a ReturnOfCapital whose listing has a parcel"));
-    // The edit path stays open by decision, so it is documented as such.
+    // The edit path stays open by decision, so it is documented as such —
+    // narrowed (2026-08-15) by the write-time state check below, which the
+    // limitation now points at as the bound on what an edit can leave behind.
     let limitations = known_limitations();
     assert!(limitations.contains(
         "**Editing a split, bonus issue, or return of capital in place restates prior figures**"
     ));
+    assert!(limitations.contains("the residual exposure is restatement of valid figures only"));
     assert!(limitations.contains("There is no lodged/closed-year concept in the data model"));
+}
+
+/// Docs-sync pin for the write-time state check that bounds that open edit
+/// path (2026-08-15): a corporate-action write is refused when the resulting
+/// terms would leave a sale allocating more units than its parcel holds, so
+/// the Corporate actions section states what is re-checked (and that both
+/// listings are, on a move), and the Response-codes `422` row lists the
+/// refusal. The behaviour itself is pinned by
+/// `entities::corporate_action::tests`.
+#[test]
+fn corporate_action_write_state_check_documented() {
+    assert!(API_MD.contains("**Writing terms that would over-consume a parcel.**"));
+    assert!(API_MD.contains(
+        "every write of a corporate action re-checks — in the write's own transaction — that \
+         each parcel of the affected listing still covers the allocations drawn on it"
+    ));
+    assert!(API_MD.contains("**both** listings are re-checked"));
+    assert!(API_MD.contains(
+        "writing a corporate action whose terms would leave a sale allocating more units than \
+         the parcel it draws on holds"
+    ));
 }
 
 /// Docs-sync pin for serving the app under a reverse-proxy sub-path: the
