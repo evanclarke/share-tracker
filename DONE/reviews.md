@@ -929,3 +929,48 @@ the `422` catalogue follow the record date, `docs/SCHEMA.md` documents the colum
 comment, and the web UI gained the field, its hint, and the corrected type description. Full suite
 1411 passed / 0 failed; `cargo build`, `cargo fmt --check`, `cargo clippy --all-targets -D
 warnings`, and `node --test 'src/web/*.test.js'` all clean.
+
+## Two documentation gaps found alongside the section B pass (SCENARIOS B-17, B-20)
+(SCENARIOS.md section B verification pass, 2026-08-15. Neither produces a wrong figure; both leave
+a reader unable to tell what the system did.)
+- [x] B-17 — a Sell's brokerage and GST are **netted off `proceeds`** rather than added to the
+  cost base: a 100-unit sale at $12 with $10.945 of costs reports `proceeds: 1189.055` /
+  `cost_base: 1010.945`, where the ATO's own presentation is capital proceeds $1,200 against a cost
+  base including the disposal's incidental costs (`docs/ato/cgt-cost-base.md`, second element:
+  costs "that relate to the CGT event"). The capital gain is identical either way — only the two
+  reported components differ — but `docs/API.md`'s realised-gains section defines neither, so a
+  user reconciling against an ATO worksheet finds two figures that don't match and a gain that
+  does. Document which convention the report uses, and why
+- [x] B-20 — rights **bought on-market** can be exercised only up to the holding's own record-date
+  entitlement: `POST /corporate_actions/:id/exercise` caps cumulative units at the entitlement and
+  answers `the units exercised exceed the entitlement earned by the holding at the record date`.
+  That is a safe refusal, and the cost-base side works (`rights_cost` lands in the parcel's cost
+  base and the discount clock runs from exercise, both checked) — but `rights_cost`'s documentation
+  ("the total paid to acquire the exercised rights, 0 … for rights issued free") implies purchased
+  rights are supported, while Known limitations names only pre-CGT originals and non-renounceable
+  retail premiums. Say that rights acquired beyond the holding's own entitlement are not recordable
+
+**Resolution (2026-08-15): both documented — neither is a wrong figure, and neither needed code.**
+
+B-17: the realised-gains section gained *Where a Sell's brokerage and GST land*, which states the
+convention (netted off `proceeds`, pro-rated across the sale's allocations, never added to
+`cost_base`), contrasts it with the ATO's own presentation (`docs/ato/cgt-cost-base.md`, second
+element — incidental costs "that relate to the CGT event"), and works the TODO's figures through
+both: `proceeds: 1189.055` / `cost_base: 1010.945` here against $1,200.00 / $1,021.89 on a
+worksheet, the same $178.11 gain. It also says *why* the convention is what it is, which is the part
+a user can't infer: netting keeps `proceeds` the cash actually received and keeps `cost_base` the
+same figure the open-parcels and unrealised reports show for that parcel while it is still held, so
+a parcel's cost base doesn't move the moment it is sold. The reader reconciling against a worksheet
+is told what to expect — the gain agrees, the two components differ by the disposal costs.
+
+B-20: the exercise section now says `rights_cost` covers rights **bought on-market** only within the
+entitlement the holding itself earned, and quotes the refusal beyond it; the Known-limitations
+*Rights issues* entry gained rights acquired beyond the holding's own entitlement as a third
+unmodelled case, with the entry route it leaves — the extra shares go in as an ordinary Buy at their
+full acquisition cost. The cap itself was already right and already tested; what was missing was
+that `rights_cost`'s wording implied more support than the endpoints give.
+
+Tests: `doc_checks::sale_side_incidental_costs_convention_documented` and
+`doc_checks::rights_beyond_the_entitlement_documented` (documentation-only requirements — the
+convention, its worked figures, its reason, and the cited ATO mirror's own second-element heading;
+the scope cut and its entry route). Full suite 1411 passed / 0 failed.

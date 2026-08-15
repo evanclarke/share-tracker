@@ -944,6 +944,56 @@ fn return_of_capital_record_date_documented() {
     assert!(SCHEMA_MD.contains("NULL = not recorded, and the payment date decides instead"));
 }
 
+/// Docs-sync pin for the sale-side incidental-costs convention (SCENARIOS
+/// B-17, 2026-08-15). Netting a Sell's brokerage off `proceeds` rather than
+/// adding it to `cost_base` gives the identical capital gain, so nothing is
+/// wrong — but the two *reported components* differ from the ATO's own
+/// presentation, and a user reconciling against a worksheet finds two figures
+/// that don't match and a gain that does. Documented, with the worked figures
+/// and the reason the convention is what it is.
+#[test]
+fn sale_side_incidental_costs_convention_documented() {
+    assert!(API_MD.contains("**Where a Sell's brokerage and GST land.**"));
+    assert!(API_MD.contains("**netted off `proceeds`**"));
+    assert!(API_MD.contains("**The capital gain is identical either way**"));
+    // The worked example both presentations are shown through.
+    assert!(API_MD.contains("`proceeds: 1189.055` / `cost_base: 1010.945`"));
+    assert!(API_MD.contains("$1,200.00 / $1,021.89"));
+    // Why: the parcel's cost base must read the same before and after sale.
+    assert!(API_MD.contains("doesn't move the moment it is sold"));
+    // And the ATO's own definition of the second element.
+    assert!(API_MD.contains("docs/ato/cgt-cost-base.md"));
+    assert!(
+        include_str!("../docs/ato/cgt-cost-base.md").contains(
+            "Second element: incidental costs of acquiring the CGT asset or that relate to the \
+             CGT event"
+        ),
+        "the cited ATO mirror still carries the second-element definition"
+    );
+}
+
+/// Docs-sync pin for rights acquired beyond the holding's own entitlement
+/// (SCENARIOS B-20, 2026-08-15): `rights_cost` reads as though purchased
+/// rights were fully supported, while both endpoints cap cumulative units at
+/// the record-date entitlement and refuse past it. The cap is a safe refusal,
+/// so the gap is documentation — the exercise section and Known limitations
+/// now say what is and isn't recordable, and where the extra shares go.
+#[test]
+fn rights_beyond_the_entitlement_documented() {
+    // The exercise section: purchased rights are in scope only within the
+    // entitlement, with the refusal quoted.
+    assert!(API_MD.contains("`rights_cost` covers rights **bought on-market**"));
+    assert!(API_MD.contains(
+        "the units exercised exceed the entitlement earned by the holding at the record date"
+    ));
+    // Known limitations: the scope cut and the entry route it leaves.
+    let limitations = known_limitations();
+    assert!(limitations.contains("**rights acquired beyond the holding's own entitlement**"));
+    assert!(limitations.contains("supported up to the entitlement the holding earned"));
+    assert!(limitations.contains("a purchase of extra rights has nowhere to be recorded"));
+    assert!(limitations.contains("as an ordinary [Buy](#trades) at their full acquisition cost"));
+}
+
 /// Docs-sync pin for the closed-year decision (SCENARIOS A-15/A-21/A-25/A-35,
 /// 2026-08-15): the restatement exposure is real but not a bug — there is no
 /// lodged-year concept in the data model, and building one (a per-FY lodgement
