@@ -10,40 +10,6 @@ findings are all closed in DONE.md), except where a section's heading names anot
 (e.g. REQUIREMENTS, SCENARIOS). Each section records one finding; sections land in DONE.md as they
 are fixed or decided.
 
-## A parcel reduced by both an AMIT adjustment and a return of capital loses the excess over its cost base (SCENARIOS B-07, B-08)
-(SCENARIOS.md section B verification pass, 2026-08-15. `reports::net_capital_gain`'s `e10_gains`
-and `g1_gains` each walk their own reduction chain from the parcel's **full** initial cost base,
-blind to the other — `g1_gains`' doc comment states the assumption outright: "Independent of the
-AMIT E10 walk above: E10 applies to trust units, G1 to company shares, so the two reduction chains
-never share a parcel in practice." Nothing enforces it: a `ReturnOfCapital` on a listing whose
-`amit` flag is set is accepted `204`.)
-- [ ] Reproduced: AMIT listing, Buy 100 @ $10 (cost base $1,000); `ReturnOfCapital` $6/unit paid
-  2024-09-01; AMMA FY2025 `cost_base_adjustment: "6.00"`. `/portfolio/open-parcels` is right —
-  both $600 reductions reported, `remaining_cost_base` floored to 0 — but
-  `/portfolio/net-capital-gain` shows FY2025 `cgt_event_e10_gain: 0`, `cgt_event_g1_gain: 0`,
-  `net_capital_gain: 0`. The **$200 excess is never reported**
-- [ ] It is lost, not deferred: selling the parcel for $15/unit in FY2026 books a $1,500 gain
-  against the nil cost base, so the year's grossed figure is $1,500 where the correct total across
-  the two years is $1,700
-- [ ] The error is always an understatement, never the reverse: each walk reports
-  `its own reductions − cost base` where the truth is `both reductions − cost base`, so the
-  reported total can only be short (by the cost base, once, whenever both walks fire; by the whole
-  excess when neither individually exceeds)
-- [ ] Order-independent, at least: entering the action before or after the AMMA statement gives
-  identical figures both ways (checked)
-- [ ] Decide the fix, and its scope: walk one combined reduction chain per parcel in date order
-  (the AMMA statement's `tax_year_end_date` against the payment's `date`), attributing each excess
-  to the event that caused it — versus refusing the combination at write time (a `ReturnOfCapital`
-  on an `amit` listing, which SCENARIOS E-04 asks about independently: an AMIT's cost-base movement
-  is the AMMA `cost_base_adjustment`, and `PUT /income` already refuses a `tax_deferred_amount` on
-  an AMIT row for exactly that reason). The refusal is much the smaller change and closes the case
-  that arises in practice; the combined walk is what makes the reports correct for a fund that
-  converts from a non-AMIT MIT mid-history (SCENARIOS F-23)
-- [ ] Tests: `reports::net_capital_gain` — a parcel carrying both reduction kinds, the excess
-  reported once and in the right year; and the write-time refusal if that is the chosen route
-- [ ] Docs sync: `docs/API.md` net capital gain (the CGT event E10 and G1 paragraphs each describe
-  their own walk in isolation) and, if refused at write time, the Income/Corporate actions sections
-
 ## Brokerage in a currency other than the trade's is added to the cost base unconverted (SCENARIOS B-02)
 (SCENARIOS.md section B verification pass, 2026-08-15. `domain::cost_base`'s `initial_cost` is
 `average_price × quantity + brokerage + gst_on_brokerage`, summed in the trade's currency and
