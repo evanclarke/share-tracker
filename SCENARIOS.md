@@ -109,16 +109,17 @@ scenario ids:
 
 ### Section B findings
 
-Nineteen of the 24 came back correct. The five findings are open in
-[`TODO.md`](TODO.md), each under a heading naming its scenario ids:
+Nineteen of the 24 came back correct. The five findings are listed below;
+those still open are in [`TODO.md`](TODO.md), each under a heading naming its
+scenario ids, and the rest name the commit that closed them:
 
-| Finding | Scenarios |
-| --- | --- |
-| An AMIT cost-base adjustment over a split applies the statement's per-unit figure to the wrong units | B-24 |
-| A parcel reduced by both an AMIT adjustment and a return of capital loses the excess over its cost base | B-07, B-08 |
-| Brokerage in a currency other than the trade's is added to the cost base unconverted | B-02 |
-| A return of capital has no record date, so it reduces parcels bought after the entitlement was fixed | B-09 |
-| Two documentation gaps (sale-side incidental costs; rights bought on-market) | B-17, B-20 |
+| Finding | Scenarios | Fixed by |
+| --- | --- | --- |
+| An AMIT cost-base adjustment over a split applies the statement's per-unit figure to the wrong units | B-24 | `305dda8` |
+| A parcel reduced by both an AMIT adjustment and a return of capital loses the excess over its cost base | B-07, B-08 | |
+| Brokerage in a currency other than the trade's is added to the cost base unconverted | B-02 | |
+| A return of capital has no record date, so it reduces parcels bought after the entitlement was fixed | B-09 | |
+| Two documentation gaps (sale-side incidental costs; rights bought on-market) | B-17, B-20 | |
 
 ---
 
