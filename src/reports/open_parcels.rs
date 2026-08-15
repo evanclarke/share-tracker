@@ -562,6 +562,78 @@ mod tests {
         );
     }
 
+    /// SCENARIOS B-12: several re-basing actions in sequence on one parcel —
+    /// a split, a bonus issue, then a consolidation. Each re-bases the unit
+    /// count off the *previous* basis (they compose, not merely the last one
+    /// winning), while the acquisition date and the total cost base never move
+    /// (TD 2000/10, `docs/ato/bonus-shares.md`). The single-action cases above
+    /// can't catch a chain that composes wrongly.
+    #[tokio::test]
+    async fn db_a_chain_of_rebasing_actions_composes_and_preserves_the_cost_base() {
+        let pool = test_pool().await;
+        let buy_date = ymd(2024, 1, 1);
+        insert_listing(&pool, 1, "CHN").await;
+        insert_buy(&pool, 1, 1, buy_date, Decimal::from(100), Decimal::from(10)).await;
+        // 2-for-1 split → 200 units.
+        apply_split(&pool, 1, 1, ymd(2024, 3, 1), "2", "1").await;
+        // 1-for-10 bonus issue on the 200 → 220 units.
+        corporate_action::db_upsert(
+            &pool,
+            &corporate_action::CorporateAction {
+                id: 2,
+                listing_id: 1,
+                date: ymd(2024, 4, 1),
+                kind: corporate_action::ActionKind::BonusIssue {
+                    bonus_units: Decimal::ONE,
+                    bonus_held_units: Decimal::from(10),
+                },
+            },
+        )
+        .await
+        .unwrap();
+        // 1-for-10 consolidation of the 220 → 22 units.
+        apply_split(&pool, 3, 1, ymd(2024, 5, 1), "1", "10").await;
+
+        let parcels = db_open_parcels(&pool).await.unwrap();
+        assert_eq!(parcels.len(), 1);
+        let p = &parcels[0];
+        // 100 → 200 → 220 → 22, and the transacted quantity is untouched.
+        assert_eq!(p.remaining_quantity, Decimal::from(22));
+        assert_eq!(p.original_quantity, Decimal::from(100));
+        assert_eq!(p.acquisition_date, buy_date);
+        // No CGT event happened: 10 × 100 + 9.95 + 0.995, three times over.
+        assert_eq!(p.original_cost_base, dec("1010.945"));
+        assert_eq!(p.remaining_cost_base, dec("1010.945"));
+    }
+
+    /// SCENARIOS B-13: a consolidation leaving a fractional quantity (7-for-10
+    /// on 33 units → 23.1) survives to a sale that consumes it exactly — the
+    /// fraction is neither rounded away at re-basing nor rejected by the
+    /// allocation capacity check, and the parcel closes with no dust left.
+    #[tokio::test]
+    async fn db_a_fractional_consolidated_quantity_is_sellable_in_full() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "FRC").await;
+        insert_buy(
+            &pool,
+            1,
+            1,
+            ymd(2024, 1, 1),
+            Decimal::from(33),
+            Decimal::from(10),
+        )
+        .await;
+        apply_split(&pool, 1, 1, ymd(2024, 3, 1), "7", "10").await;
+
+        let parcels = db_open_parcels(&pool).await.unwrap();
+        assert_eq!(parcels[0].remaining_quantity, dec("23.10"));
+
+        // Selling exactly that fractional quantity closes the parcel.
+        insert_sell(&pool, 2, 1, dec("23.1")).await;
+        allocate(&pool, 1, 2, 1, dec("23.1")).await;
+        assert!(db_open_parcels(&pool).await.unwrap().is_empty());
+    }
+
     /// A return of capital (CGT event G1) is reported per parcel and netted off
     /// the remaining cost base for the units still held
     /// (`docs/ato/cgt-non-assessable-payments.md`).
