@@ -197,6 +197,64 @@ mod tests {
         assert_eq!(trade.holding_account_id, 1);
     }
 
+    /// The CGT clock on ESS-vested shares runs from the **deferred taxing
+    /// point**, where the cost base is reset to market value and the shares
+    /// are taken to be re-acquired (`docs/ato/employee-share-schemes.md`) —
+    /// never from the grant, which is why no grant date is recorded at all.
+    /// Sold 6 months after vesting, the gain is non-discountable no matter
+    /// how long ago the shares were granted (SCENARIOS C-13).
+    #[tokio::test]
+    async fn discount_clock_runs_from_the_taxing_point_not_the_grant() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AUD").await;
+        insert_statement(&pool, 1, "100", "6", "AUD").await;
+        let parcel = db_vest(&pool, 1).await.unwrap();
+        assert_eq!(parcel.date, ymd(2024, 9, 1));
+        assert_eq!(parcel.deemed_acquisition_date, None);
+
+        // Sold 2025-03-01 — six months after the taxing point.
+        crate::entities::sell::db_upsert_sell(
+            &pool,
+            50,
+            &crate::entities::sell::SellBody {
+                brokerage_includes_gst: false,
+                statement_total: None,
+                holding_account_id: parcel.holding_account_id,
+                date: ymd(2025, 3, 1),
+                settlement_date: Some(ymd(2025, 3, 3)),
+                listing_id: 1,
+                average_price: Decimal::from(10),
+                quantity: Decimal::from(100),
+                currency: "AUD".to_string(),
+                brokerage: Decimal::ZERO,
+                gst_on_brokerage: Decimal::ZERO,
+                brokerage_currency: "AUD".to_string(),
+                fx_rate: Decimal::ONE,
+                spot_fx_rate: None,
+                contract_note_ref: None,
+                allocations: vec![crate::entities::sell::AllocationInput {
+                    purchase_trade_id: parcel.id,
+                    quantity_allocated: Decimal::from(100),
+                }],
+            },
+        )
+        .await
+        .unwrap();
+
+        let realised = crate::reports::realised_gains::db_realised_gains(&pool)
+            .await
+            .unwrap();
+        assert_eq!(realised.len(), 1);
+        let g = &realised[0];
+        // Proceeds $1,000 − the market-value cost base $600 = a $400 gain,
+        // entirely on the "other" (non-discountable) method.
+        assert_eq!(g.cost_base, Decimal::from(600));
+        assert_eq!(g.capital_gain_loss, Decimal::from(400));
+        assert_eq!(g.discount_eligible_gain, Decimal::ZERO);
+        assert_eq!(g.non_discountable_gain, Decimal::from(400));
+        assert_eq!(g.parcels[0].acquisition_date, ymd(2024, 9, 1));
+    }
+
     /// The cost base = quantity × market value (price × qty + 0 brokerage), so
     /// the parcel carries the full taxing-point market value as its cost base.
     #[tokio::test]

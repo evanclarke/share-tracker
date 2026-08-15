@@ -66,7 +66,7 @@ behind or became a recorded finding.
 | --- | ---: | --- | --- |
 | A. Deletion and mutation ripple effects | 45 | 2026-08-14 (`0bbde4d`) | 5 raised, all closed — see below |
 | B. Cost base construction and the adjustment pipeline | 24 | 2026-08-15 | 5 raised, all closed — see below |
-| C. The 12-month CGT discount clock | 18 | — | — |
+| C. The 12-month CGT discount clock | 18 | 2026-08-15 | 1 raised, closed — see below |
 | D. Sells and parcel allocation | 20 | — | — |
 | E. Corporate actions | 51 | — | — |
 | F. AMIT / AMMA | 25 | — | — |
@@ -120,6 +120,41 @@ scenario ids, and each naming the commit that closed it:
 | Brokerage in a currency other than the trade's is added to the cost base unconverted | B-02 | `04bd0e8` |
 | A return of capital has no record date, so it reduces parcels bought after the entitlement was fixed | B-09 | `14601f5` |
 | Two documentation gaps (sale-side incidental costs; rights bought on-market) | B-17, B-20 | `33a4534` (documented) |
+
+### Section C findings
+
+Seventeen of the 18 came back correct, and the clock itself held up everywhere
+it was probed. The one rule lives in `domain::cgt_discount::discount_eligible`
+(`event_date > acquired + 12 months`, exclusive of both days) and every
+classifier calls it — realised gains, unrealised gains, the net-capital-gain
+report's E10/G1 excess gains, the parcel optimiser, the annual tax report — so
+there is no second boundary to disagree with the first. What each scenario
+turned on:
+
+- **Anchor date.** Every caller passes `ParcelRow::acquired()` — the deemed
+  date where a rollover, transfer, or inheritance set one, else the trade date
+  — never the raw trade date. That is what makes C-06 through C-15 come out:
+  rights exercise starts a *new* clock at exercise (C-06), scrip-for-scrip and
+  demerger carry the original's (C-07, C-08), a holding-account transfer does
+  not restart it (C-10), an inherited parcel runs from the deceased's
+  acquisition or, for a pre-CGT asset, the death (C-11, C-12), an ESS parcel
+  runs from the deferred taxing point and no grant date is recorded at all
+  (C-13), and each DRP allotment runs its own (C-14).
+- **Dates that must *not* move it.** Contract dates decide, never settlement
+  (C-03) — no gain report reads `settlement_date` at all. Splits and bonus
+  issues re-base quantities only (C-04, C-05), and on a replacement parcel the
+  quantity re-base keys off the trade date while the clock keys off the deemed
+  date, so the two survive each other (C-15).
+- **Boundaries.** Exactly 12 months is not enough; a 29 February parcel first
+  discounts on 1 March (C-01, C-02). Crypto is the same rule with same-day
+  settlement (C-17). Eligibility is per parcel, so a split allocation carries
+  one flag per parcel and never pro-rates across the line (C-16). A sale dated
+  before its parcel is refused from both sides — the Sell's allocation check
+  and the Buy's date-move guard — so the clock can't run backwards (C-18).
+
+| Finding | Scenarios | Fixed by |
+| --- | --- | --- |
+| Scrip-for-scrip and demerger rollovers are assumed, not stated as a scope cut | C-09 | documented |
 
 ---
 

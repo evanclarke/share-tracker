@@ -630,6 +630,105 @@ mod tests {
         assert_eq!(inc.reinvestment_trade_id, Some(trade.id));
     }
 
+    /// Each DRP allotment is a separate acquisition running its own 12-month
+    /// clock from its allotment date (`docs/ato/cgt-dividend-reinvestment-plans.md`)
+    /// — the clock is not inherited from the holding the distribution was paid
+    /// on. Two quarterly reinvestments sold together on 2025-06-25 straddle
+    /// the line: the March parcel is over 12 months, the June parcel is
+    /// 11 months and 25 days old and is not (SCENARIOS C-14).
+    #[tokio::test]
+    async fn each_reinvestment_parcel_runs_its_own_discount_clock() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AUD").await;
+        enrol(&pool, 1, ResidualHandling::CarryForward).await;
+        // $1,000 reinvested at $10 in each of two quarters → 100 units each.
+        insert_distribution_dated(
+            &pool,
+            1,
+            1,
+            "2024-03-31",
+            None,
+            Decimal::from(1000),
+            Decimal::ZERO,
+        )
+        .await;
+        insert_distribution_dated(
+            &pool,
+            2,
+            1,
+            "2024-06-30",
+            None,
+            Decimal::from(1000),
+            Decimal::ZERO,
+        )
+        .await;
+        let march = db_reinvest(&pool, 1, &body("10")).await.unwrap();
+        let june = db_reinvest(&pool, 2, &body("10")).await.unwrap();
+        assert_eq!(
+            march.date,
+            "2024-03-31".parse::<chrono::NaiveDate>().unwrap()
+        );
+        assert_eq!(
+            june.date,
+            "2024-06-30".parse::<chrono::NaiveDate>().unwrap()
+        );
+        assert_eq!(march.quantity, Decimal::from(100));
+        assert_eq!(june.quantity, Decimal::from(100));
+
+        // Both parcels sold on 2025-06-25 at $15.
+        crate::entities::sell::db_upsert_sell(
+            &pool,
+            50,
+            &crate::entities::sell::SellBody {
+                brokerage_includes_gst: false,
+                statement_total: None,
+                holding_account_id: 1,
+                date: "2025-06-25".parse().unwrap(),
+                settlement_date: Some("2025-06-27".parse().unwrap()),
+                listing_id: 1,
+                average_price: Decimal::from(15),
+                quantity: Decimal::from(200),
+                currency: "AUD".to_string(),
+                brokerage: Decimal::ZERO,
+                gst_on_brokerage: Decimal::ZERO,
+                brokerage_currency: "AUD".to_string(),
+                fx_rate: Decimal::ONE,
+                spot_fx_rate: None,
+                contract_note_ref: None,
+                allocations: vec![
+                    crate::entities::sell::AllocationInput {
+                        purchase_trade_id: march.id,
+                        quantity_allocated: Decimal::from(100),
+                    },
+                    crate::entities::sell::AllocationInput {
+                        purchase_trade_id: june.id,
+                        quantity_allocated: Decimal::from(100),
+                    },
+                ],
+            },
+        )
+        .await
+        .unwrap();
+
+        let realised = crate::reports::realised_gains::db_realised_gains(&pool)
+            .await
+            .unwrap();
+        assert_eq!(realised.len(), 1);
+        let g = &realised[0];
+        assert_eq!(g.cost_base, Decimal::from(2000));
+        assert_eq!(g.capital_gain_loss, Decimal::from(1000));
+        // The March parcel's $500 discounts; the June parcel's $500 — five
+        // days short of its own anniversary — does not.
+        assert_eq!(g.discount_eligible_gain, Decimal::from(500));
+        assert_eq!(g.non_discountable_gain, Decimal::from(500));
+        let eligible: Vec<_> = g
+            .parcels
+            .iter()
+            .map(|p| (p.purchase_trade_id, p.discount_eligible))
+            .collect();
+        assert_eq!(eligible, vec![(march.id, true), (june.id, false)]);
+    }
+
     /// Operation-created trades take no part in GST-inclusive entry or the
     /// statement cross-check: a reinvestment trade reads back with the flag
     /// off and no statement total (the columns' defaults).

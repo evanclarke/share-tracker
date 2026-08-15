@@ -1130,6 +1130,141 @@ mod tests {
         assert_eq!(result[0].discount_eligible_gain, Decimal::ZERO);
     }
 
+    /// A 29 February acquisition has no anniversary in the following non-leap
+    /// year: excluding both the acquisition day and the event day, ownership
+    /// to 28 February 2025 is 364 days, so the first discountable disposal
+    /// day is 1 March. Both parcels are bought on the same leap day and sold
+    /// a day apart, so only the boundary separates them (SCENARIOS C-02, the
+    /// report-level half of `domain::cgt_discount`'s own boundary test).
+    #[tokio::test]
+    async fn db_leap_day_parcel_becomes_discountable_on_1_march() {
+        let pool = test_pool().await;
+        let leap_day = NaiveDate::from_ymd_opt(2024, 2, 29).unwrap();
+        insert_listing(&pool, 1, "LEAP").await;
+        insert_buy(&pool, 1, 1, leap_day, Decimal::from(100), Decimal::from(10)).await;
+        insert_buy(&pool, 2, 1, leap_day, Decimal::from(100), Decimal::from(10)).await;
+        // Sale 3: 28 Feb 2025 — a day short. Sale 4: 1 Mar 2025 — over the line.
+        insert_sell(
+            &pool,
+            3,
+            1,
+            NaiveDate::from_ymd_opt(2025, 2, 28).unwrap(),
+            Decimal::from(100),
+            Decimal::from(15),
+        )
+        .await;
+        insert_sell(
+            &pool,
+            4,
+            1,
+            NaiveDate::from_ymd_opt(2025, 3, 1).unwrap(),
+            Decimal::from(100),
+            Decimal::from(15),
+        )
+        .await;
+        allocate(&pool, 1, 3, 1, Decimal::from(100)).await;
+        allocate(&pool, 2, 4, 2, Decimal::from(100)).await;
+
+        let result = db_realised_gains(&pool).await.unwrap();
+        let by_sale = |id: i64| {
+            result
+                .iter()
+                .find(|r| r.sale_trade_id == id)
+                .unwrap_or_else(|| panic!("no row for sale {id}"))
+        };
+        assert_eq!(by_sale(3).capital_gain_loss, Decimal::from(500));
+        assert_eq!(by_sale(3).discount_eligible_gain, Decimal::ZERO);
+        assert_eq!(by_sale(3).non_discountable_gain, Decimal::from(500));
+        assert_eq!(by_sale(4).capital_gain_loss, Decimal::from(500));
+        assert_eq!(by_sale(4).discount_eligible_gain, Decimal::from(500));
+        assert_eq!(by_sale(4).non_discountable_gain, Decimal::ZERO);
+    }
+
+    /// CGT event A1 happens on the **contract** date, not on settlement
+    /// (`docs/ato/cgt-discount.md`, `docs/ato/cgt-event-timing.md`), and the
+    /// clock likewise starts on the buy's contract date. Here both settlement
+    /// dates sit on the far side of the 12-month line while both contract
+    /// dates sit on or inside it: a report reading settlement dates would
+    /// discount this gain, and the correct answer is that it does not
+    /// (SCENARIOS C-03).
+    #[tokio::test]
+    async fn db_discount_clock_runs_on_contract_dates_not_settlement() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "VAS").await;
+        // Contracted 2024-01-01, settled T+2.
+        test_support::buy(1, 1)
+            .date(NaiveDate::from_ymd_opt(2024, 1, 1).unwrap())
+            .settlement(NaiveDate::from_ymd_opt(2024, 1, 3).unwrap())
+            .qty(Decimal::from(100))
+            .price(Decimal::from(10))
+            .insert(&pool)
+            .await;
+        // Sold on the anniversary itself — not eligible — settling five days
+        // later, which is past the line on any settlement-based reading
+        // (settlement-to-settlement: 2024-01-03 → 2025-01-06).
+        test_support::sell(2, 1)
+            .date(NaiveDate::from_ymd_opt(2025, 1, 1).unwrap())
+            .settlement(NaiveDate::from_ymd_opt(2025, 1, 6).unwrap())
+            .qty(Decimal::from(100))
+            .price(Decimal::from(15))
+            .insert(&pool)
+            .await;
+        allocate(&pool, 1, 2, 1, Decimal::from(100)).await;
+
+        let result = db_realised_gains(&pool).await.unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].capital_gain_loss, Decimal::from(500));
+        assert_eq!(result[0].discount_eligible_gain, Decimal::ZERO);
+        assert_eq!(result[0].non_discountable_gain, Decimal::from(500));
+        // The per-allocation row anchors on the parcel's contract date too.
+        assert_eq!(
+            result[0].parcels[0].acquisition_date,
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap()
+        );
+        assert!(!result[0].parcels[0].discount_eligible);
+    }
+
+    /// Crypto has no exchange calendar, so a parcel settles the day it is
+    /// contracted — the clock is the same 12-month rule and the same
+    /// boundary (`docs/ato/crypto-cgt.md`). Sold a day short of the
+    /// anniversary the gain is non-discountable; the eligible side is
+    /// `db_crypto_sale_keeps_satoshi_precision_and_discount` (SCENARIOS C-17).
+    #[tokio::test]
+    async fn db_crypto_sold_a_day_short_of_the_anniversary_is_not_discountable() {
+        let pool = test_pool().await;
+        test_support::listing(1)
+            .crypto()
+            .ticker("BTC")
+            .name("Bitcoin")
+            .insert(&pool)
+            .await;
+        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let qty: Decimal = "0.5".parse().unwrap();
+        test_support::buy(1, 1)
+            .date(buy_date)
+            .settlement(buy_date)
+            .qty(qty)
+            .price(Decimal::from(60000))
+            .insert(&pool)
+            .await;
+        // 31 Dec 2024 — one day inside the 12 months, settling same-day.
+        let sell_date = NaiveDate::from_ymd_opt(2024, 12, 31).unwrap();
+        test_support::sell(2, 1)
+            .date(sell_date)
+            .settlement(sell_date)
+            .qty(qty)
+            .price(Decimal::from(100000))
+            .insert(&pool)
+            .await;
+        allocate(&pool, 1, 2, 1, qty).await;
+
+        let result = db_realised_gains(&pool).await.unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].capital_gain_loss, Decimal::from(20000));
+        assert_eq!(result[0].discount_eligible_gain, Decimal::ZERO);
+        assert_eq!(result[0].non_discountable_gain, Decimal::from(20000));
+    }
+
     #[tokio::test]
     async fn db_loss_not_included_in_discount_eligible() {
         let pool = test_pool().await;

@@ -974,3 +974,41 @@ Tests: `doc_checks::sale_side_incidental_costs_convention_documented` and
 `doc_checks::rights_beyond_the_entitlement_documented` (documentation-only requirements — the
 convention, its worked figures, its reason, and the cited ATO mirror's own second-element heading;
 the scope cut and its entry route). Full suite 1411 passed / 0 failed.
+
+## Scrip-for-scrip and demerger rollovers are assumed, not stated as a scope cut (SCENARIOS C-09)
+(SCENARIOS.md section C verification pass, 2026-08-15. Not a wrong figure — a scope cut that lived
+everywhere except the list a reader scans for scope cuts.)
+- [x] C-09 — a demerged parcel where the **rollover was not chosen** is not modelled: the `Demerger`
+  corporate action and its demerge operation implement Div 125 with rollover, and recording one is
+  in effect the taxpayer's assertion that the rollover applies — nothing checks eligibility, and
+  there is no no-rollover variant of the operation. The behaviour is right for what it models and
+  fails safe (there is no operation to invoke; the user enters the trades by hand), and the cut was
+  stated in `docs/API.md`'s `Demerger` bullet, the README's demerger line, and `docs/ato/demergers.md`'s
+  own *Out of scope* section — but **not** in Known limitations, where the neighbouring `Rights
+  issues` scope cut is. That matters more here than for most omissions because the two cases differ
+  in the *opposite* direction on the discount clock: with rollover the new interests carry the
+  consumed parcel's acquisition date (`deemed_acquisition_date`), so a parcel sold six months after
+  the demerger still discounts off the original acquisition (the ATO's Example 32); without it they
+  are acquired at the demerger date and run their own 12-month clock from it (Example 33). A reader
+  who checks Known limitations, finds nothing, and assumes the general case is handled gets the
+  wrong clock
+
+**Resolution (2026-08-15): documented — the behaviour is correct for the modelled case and needed
+no code.**
+
+Known limitations gained *Rollovers assume the rollover was chosen*, covering both parcel-substituting
+actions (`ScripForScrip` under Subdiv 124-M, `Demerger` under Div 125) rather than the demerger alone,
+since the same assumption and the same silence applied to takeovers. The entry states that recording
+either action *is* the rollover assertion and that nothing verifies eligibility, gives both directions
+of the discount clock explicitly, and names the manual entry route each no-rollover case leaves — a
+Sell plus Buy for an exchange, a Buy dated the demerger date for demerged interests (with the capital
+return as a `ReturnOfCapital` and any assessable demerger dividend as income). Pre-CGT original
+interests, which the ATO's Examples 31 and 33 turn on, are cross-referenced to the existing *Pre-CGT
+holdings* entry — they are unenterable anywhere, so that half cannot arise.
+
+Tests: `doc_checks::rollover_assumed_scope_cut_documented` (the entry, both clock directions, both
+entry routes, and the cited ATO mirror still carrying the no-rollover rule it rests on). The
+rollover side's own behaviour is pinned by
+`entities::demerger::tests::demerged_parcel_sold_six_months_later_discounts_from_the_original_buy`
+and `entities::demerger::tests::deemed_date_and_a_later_split_both_survive_on_a_replacement_parcel`,
+added in the same pass. Full suite 1424 passed / 0 failed.

@@ -570,6 +570,48 @@ mod tests {
         assert_eq!(totals.capital_loss, Decimal::from(100));
     }
 
+    /// Discount eligibility is a property of the *parcel*, so it can never
+    /// vary within one: every unit of a parcel shares its acquisition date.
+    /// Splitting an allocation — taking 30 of a 100-unit eligible parcel and
+    /// 20 of a 100-unit ineligible one — therefore yields one flag per
+    /// allocation and puts each allocation's whole gain in a single bucket,
+    /// with nothing pro-rated across the boundary (SCENARIOS C-16).
+    #[test]
+    fn a_partly_consumed_parcel_carries_one_eligibility_flag() {
+        let sale_date = ymd(2026, 6, 15);
+        let parcel = |trade_id, acquired| CandidateParcel {
+            trade_id,
+            holding_account_id: 1,
+            acquisition_date: acquired,
+            remaining_quantity: Decimal::from(100),
+            // $1/unit, so a $2/unit sale is a clean $1/unit gain.
+            remaining_cost_base: Decimal::from(100),
+        };
+        let parcels = vec![
+            parcel(1, ymd(2023, 1, 1)), // well over 12 months
+            parcel(2, ymd(2026, 3, 1)), // under 12 months
+        ];
+        let picks = vec![(1, Decimal::from(30)), (2, Decimal::from(20))];
+        let (allocs, totals) = disposal_figures(
+            &parcels,
+            &picks,
+            Decimal::from(100), // 50 units at $2
+            Decimal::from(50),
+            sale_date,
+        );
+
+        assert_eq!(allocs.len(), 2, "one allocation per parcel, not per unit");
+        assert!(allocs[0].discount_eligible);
+        assert_eq!(allocs[0].capital_gain_loss, Decimal::from(30));
+        assert!(!allocs[1].discount_eligible);
+        assert_eq!(allocs[1].capital_gain_loss, Decimal::from(20));
+        // Each parcel's gain lands whole in its own bucket.
+        assert_eq!(totals.discount_eligible_gain, Decimal::from(30));
+        assert_eq!(totals.non_discountable_gain, Decimal::from(20));
+        assert_eq!(totals.capital_loss, Decimal::ZERO);
+        assert_eq!(totals.capital_gain_loss, Decimal::from(50));
+    }
+
     /// Proceeds spread by cumulative difference sum exactly to the total
     /// even when the division doesn't terminate (1000/3 per unit).
     #[test]

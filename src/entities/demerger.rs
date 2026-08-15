@@ -451,6 +451,47 @@ mod tests {
         .unwrap();
     }
 
+    /// [`sell_units`] against an arbitrary listing at an arbitrary price —
+    /// for the post-demerger sales, which dispose of the *demerged* listing.
+    #[allow(clippy::too_many_arguments)]
+    async fn sell_listing(
+        pool: &SqlitePool,
+        sell_id: i64,
+        listing_id: i64,
+        parcel_id: i64,
+        date: NaiveDate,
+        qty: &str,
+        price: &str,
+    ) {
+        sell::db_upsert_sell(
+            pool,
+            sell_id,
+            &SellBody {
+                brokerage_includes_gst: false,
+                statement_total: None,
+                holding_account_id: 1,
+                date,
+                settlement_date: Some(date),
+                listing_id,
+                average_price: dec(price),
+                quantity: dec(qty),
+                currency: "AUD".to_string(),
+                brokerage: Decimal::ZERO,
+                gst_on_brokerage: Decimal::ZERO,
+                brokerage_currency: "AUD".to_string(),
+                fx_rate: Decimal::ONE,
+                spot_fx_rate: None,
+                contract_note_ref: None,
+                allocations: vec![AllocationInput {
+                    purchase_trade_id: parcel_id,
+                    quantity_allocated: dec(qty),
+                }],
+            },
+        )
+        .await
+        .unwrap();
+    }
+
     async fn sell_units(
         pool: &SqlitePool,
         sell_id: i64,
@@ -704,6 +745,114 @@ mod tests {
             dm.demerged_replacements[0].deemed_acquisition_date,
             Some(d(2020, 10, 1))
         );
+    }
+
+    /// Sell a demerged-entity parcel 6 months after the demerger, where the
+    /// head parcel had been held 5 years: the new interests' 12-month clock
+    /// runs from the *original* acquisition (the ATO's Example 32), so the
+    /// gain is discount-eligible even though the parcel itself is 6 months
+    /// old. A report anchoring on the replacement Buy's own trade date would
+    /// call the whole gain non-discountable (SCENARIOS C-08).
+    #[tokio::test]
+    async fn demerged_parcel_sold_six_months_later_discounts_from_the_original_buy() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "HEAD").await;
+        insert_listing(&pool, 2, "DEM").await;
+        // 1,000 @ $1.50 = $1,500, held from 2019.
+        insert_buy(&pool, 1, 1, d(2019, 6, 1), "1000", "1.50").await;
+        insert_demerger(&pool, 10, d(2024, 7, 1)).await;
+        let dm = db_demerge(&pool, 10).await.unwrap();
+
+        // 1-for-5 → 200 demerged units carrying 20% of $1,500 = $300.
+        let demerged = &dm.demerged_replacements[0];
+        assert_eq!(demerged.quantity, dec("200"));
+        assert_eq!(demerged.brokerage, dec("300"));
+        assert_eq!(demerged.date, d(2024, 7, 1));
+        assert_eq!(demerged.deemed_acquisition_date, Some(d(2019, 6, 1)));
+
+        sell_listing(&pool, 20, 2, demerged.id, d(2025, 1, 5), "200", "5").await;
+
+        let realised = crate::reports::realised_gains::db_realised_gains(&pool)
+            .await
+            .unwrap();
+        // Only the sale — the demerge's own closing Sell is excluded.
+        assert_eq!(realised.len(), 1);
+        let g = &realised[0];
+        assert_eq!(g.cost_base, dec("300"));
+        assert_eq!(g.proceeds, dec("1000"));
+        assert_eq!(g.capital_gain_loss, dec("700"));
+        assert_eq!(g.discount_eligible_gain, dec("700"));
+        assert_eq!(g.non_discountable_gain, Decimal::ZERO);
+        assert_eq!(g.parcels[0].acquisition_date, d(2019, 6, 1));
+    }
+
+    /// A deemed acquisition date and a split have to survive *each other*:
+    /// the demerged parcel carries a 2019 deemed date on a 2024 trade date,
+    /// and a split on the demerged listing after the demerger re-bases its
+    /// units. The quantity re-base keys off the replacement's own trade date
+    /// (a split before the demerger is already reflected in the units it was
+    /// created with and must not apply twice), while the discount clock keys
+    /// off the deemed date (SCENARIOS C-15).
+    #[tokio::test]
+    async fn deemed_date_and_a_later_split_both_survive_on_a_replacement_parcel() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "HEAD").await;
+        insert_listing(&pool, 2, "DEM").await;
+        insert_buy(&pool, 1, 1, d(2019, 6, 1), "1000", "1.50").await;
+        // A 2-for-1 split on the *head* listing before the demerger: the
+        // parcel is 2,000 units at the demerger, so 1-for-5 gives 400
+        // demerged units.
+        corporate_action::db_upsert(
+            &pool,
+            &CorporateAction {
+                id: 4,
+                listing_id: 1,
+                date: d(2021, 1, 1),
+                kind: ActionKind::ShareSplit {
+                    split_new_units: dec("2"),
+                    split_old_units: dec("1"),
+                },
+            },
+        )
+        .await
+        .unwrap();
+        insert_demerger(&pool, 10, d(2024, 7, 1)).await;
+        let dm = db_demerge(&pool, 10).await.unwrap();
+        let demerged = &dm.demerged_replacements[0];
+        assert_eq!(demerged.quantity, dec("400"));
+        assert_eq!(demerged.brokerage, dec("300"));
+        assert_eq!(demerged.deemed_acquisition_date, Some(d(2019, 6, 1)));
+
+        // A 3-for-1 split on the *demerged* listing after the demerger:
+        // 400 → 1,200 units.
+        corporate_action::db_upsert(
+            &pool,
+            &CorporateAction {
+                id: 11,
+                listing_id: 2,
+                date: d(2024, 10, 1),
+                kind: ActionKind::ShareSplit {
+                    split_new_units: dec("3"),
+                    split_old_units: dec("1"),
+                },
+            },
+        )
+        .await
+        .unwrap();
+        sell_listing(&pool, 20, 2, demerged.id, d(2025, 1, 5), "1200", "1").await;
+
+        let realised = crate::reports::realised_gains::db_realised_gains(&pool)
+            .await
+            .unwrap();
+        assert_eq!(realised.len(), 1);
+        let g = &realised[0];
+        // The whole $300 carried cost base, spread over the split units —
+        // the pre-demerger split is not re-applied on top.
+        assert_eq!(g.cost_base, dec("300"));
+        assert_eq!(g.proceeds, dec("1200"));
+        assert_eq!(g.capital_gain_loss, dec("900"));
+        assert_eq!(g.discount_eligible_gain, dec("900"));
+        assert_eq!(g.parcels[0].acquisition_date, d(2019, 6, 1));
     }
 
     #[tokio::test]

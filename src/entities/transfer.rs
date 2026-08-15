@@ -747,6 +747,78 @@ mod tests {
         assert_eq!(t.deemed_acquisition_date, Some(d(2023, 3, 1)));
     }
 
+    /// Moving a parcel between holding accounts is not a CGT event, so the
+    /// 12-month clock does not restart: bought 2023-03-01, moved 2024-06-01,
+    /// sold 2024-09-01 — only 3 months in the destination account, but
+    /// 18 months of ownership, so the whole gain is discount-eligible. A
+    /// report anchoring on the transfer-in Buy's own date would call it
+    /// non-discountable (SCENARIOS C-10).
+    #[tokio::test]
+    async fn transferred_parcel_keeps_its_discount_clock_through_a_later_sale() {
+        let pool = test_pool().await;
+        test_support::listing(1)
+            .ticker("AAA")
+            .name("AAA")
+            .insert(&pool)
+            .await;
+        test_support::buy(1, 1)
+            .date(d(2023, 3, 1))
+            .settlement(d(2023, 3, 1))
+            .qty(dec("100"))
+            .price(dec("10"))
+            .account(2)
+            .insert(&pool)
+            .await;
+
+        let group = db_transfer(&pool, 1, &body(d(2024, 6, 1), 2, 1, vec![(1, "100")]))
+            .await
+            .unwrap();
+        let parcel = &group.transfer_ins[0];
+        assert_eq!(parcel.date, d(2024, 6, 1));
+        assert_eq!(parcel.deemed_acquisition_date, Some(d(2023, 3, 1)));
+
+        crate::entities::sell::db_upsert_sell(
+            &pool,
+            30,
+            &SellBody {
+                brokerage_includes_gst: false,
+                statement_total: None,
+                holding_account_id: 1,
+                date: d(2024, 9, 1),
+                settlement_date: Some(d(2024, 9, 3)),
+                listing_id: 1,
+                average_price: dec("15"),
+                quantity: dec("100"),
+                currency: "AUD".to_string(),
+                brokerage: Decimal::ZERO,
+                gst_on_brokerage: Decimal::ZERO,
+                brokerage_currency: "AUD".to_string(),
+                fx_rate: Decimal::ONE,
+                spot_fx_rate: None,
+                contract_note_ref: None,
+                allocations: vec![AllocationInput {
+                    purchase_trade_id: parcel.id,
+                    quantity_allocated: dec("100"),
+                }],
+            },
+        )
+        .await
+        .unwrap();
+
+        let realised = crate::reports::realised_gains::db_realised_gains(&pool)
+            .await
+            .unwrap();
+        // The zero-proceeds transfer-out Sell is not a disposal.
+        assert_eq!(realised.len(), 1);
+        let g = &realised[0];
+        assert_eq!(g.cost_base, dec("1000"));
+        assert_eq!(g.proceeds, dec("1500"));
+        assert_eq!(g.capital_gain_loss, dec("500"));
+        assert_eq!(g.discount_eligible_gain, dec("500"));
+        assert_eq!(g.non_discountable_gain, Decimal::ZERO);
+        assert_eq!(g.parcels[0].acquisition_date, d(2023, 3, 1));
+    }
+
     /// Seed an AUD-priced BTC `Crypto` listing (id 1) and a single parcel
     /// (trade id 1) of `qty` units bought at A$`price`/unit on 2023-03-01 in
     /// account 2 — held long enough that a 2024-06-01 disposal is

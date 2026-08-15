@@ -994,6 +994,40 @@ fn rights_beyond_the_entitlement_documented() {
     assert!(limitations.contains("as an ordinary [Buy](#trades) at their full acquisition cost"));
 }
 
+/// Docs-sync pin for the rollover-assumed scope cut (SCENARIOS C-09,
+/// 2026-08-15). `ScripForScrip` and `Demerger` model only the rollover case,
+/// and recording one *is* the assertion that the rollover applies — nothing
+/// checks eligibility. The behaviour is right for what it models and the
+/// no-rollover variant fails safe (there is no operation to invoke; the user
+/// enters the trades by hand), so the gap was that "not modelled" lived only
+/// in the per-action prose and `docs/ato/demergers.md` — never in the Known
+/// limitations list a reader scans for scope cuts, unlike the neighbouring
+/// rights-issue entry. It matters because the two cases differ in the
+/// *opposite* direction on the discount clock: with rollover the new
+/// interests carry the original acquisition date, without it they start
+/// their own at the event date.
+#[test]
+fn rollover_assumed_scope_cut_documented() {
+    let limitations = known_limitations();
+    assert!(limitations.contains("**Rollovers assume the rollover was chosen**"));
+    // Recording the action is the assertion; nothing verifies eligibility.
+    assert!(limitations.contains("the taxpayer's assertion that the rollover applies"));
+    assert!(limitations.contains("nothing checks eligibility"));
+    // The two directions of the discount clock, which is what C-09 turns on.
+    assert!(limitations.contains("`deemed_acquisition_date`"));
+    assert!(limitations.contains("run their own 12-month clock from it"));
+    // The manual entry route each no-rollover case leaves.
+    assert!(limitations.contains("enter a no-rollover exchange as a manual Sell plus Buy"));
+    assert!(limitations.contains("dated the demerger date"));
+    // The ATO mirror cited, still carrying the example the rule comes from.
+    assert!(limitations.contains("docs/ato/demergers.md"));
+    assert!(
+        include_str!("../docs/ato/demergers.md")
+            .contains("you calculate the 12 months from the date of demerger if you did not"),
+        "the cited ATO mirror still carries the no-rollover discount-clock rule"
+    );
+}
+
 /// Docs-sync pin for the closed-year decision (SCENARIOS A-15/A-21/A-25/A-35,
 /// 2026-08-15): the restatement exposure is real but not a bug — there is no
 /// lodged-year concept in the data model, and building one (a per-FY lodgement
