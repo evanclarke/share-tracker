@@ -294,7 +294,7 @@ export const ENTITIES = [
   },
   {
     slug: 'amit_adjustments', title: 'AMIT Adjustments', menu: 'Activity', api: '/amit_adjustments',
-    desc: 'Links a purchase parcel (Buy/DRP trade) to an AMMA statement.',
+    desc: 'Links a purchase parcel (Buy/DRP trade) to an AMMA statement. Quantity is in the parcel’s as-acquired units, exactly as the trade records them; where a share split or bonus issue falls between the parcel’s acquisition and the statement’s year end it is re-based into that year’s units before the statement’s per-unit cost base adjustment is applied, so enter the fund’s figure as stated and scale nothing by hand.',
     keyFields: [int('id', 'ID', { auto: true })],
     fields: [
       fk('amma_statement_id', 'AMMA statement', 'amma', { required: true }),

@@ -88,12 +88,6 @@ pub enum GenerateError {
     /// not have is itself the error — writing an empty set would hide it.
     #[error("no open parcels at the statement's year end")]
     NothingHeld,
-    /// The covered parcels are not all on the same unit basis at the year
-    /// end, because a split falls between some of their acquisition dates and
-    /// it. A statement carries one per-unit figure, which cannot correctly
-    /// scale both sides of a split (hand entry has the same limit, silently).
-    #[error("a split leaves the covered parcels on different unit bases")]
-    SplitAcrossParcels,
     #[error(transparent)]
     Upsert(#[from] amit_adjustment::UpsertError),
 }
@@ -148,28 +142,13 @@ pub async fn db_generate(
         return Err(GenerateError::NothingHeld);
     }
 
-    // One per-unit figure cannot scale two unit bases: refuse when the
-    // covered parcels do not all convert to the year-end basis by the same
-    // ratio. Parcels acquired either side of a split are the case that
-    // matters; a split before every covered parcel scales them all alike and
-    // is fine.
+    // Parcels either side of a split reach the year end on different unit
+    // bases, and that is fine: the statement's per-unit figure is per unit as
+    // the statement year saw them, and `amit_adjustment::reduction_for`
+    // re-bases each parcel's stored as-acquired quantity into that basis
+    // before multiplying. Splits are still needed here to store each
+    // quantity in the parcel's own as-acquired basis.
     let splits = corporate_action::db_splits_for_listing(&mut *tx, listing_id).await?;
-    // What one as-acquired unit of each parcel is worth in the year-end
-    // basis: all equal means one unit basis.
-    let bases: Vec<Decimal> = parcels
-        .iter()
-        .map(|p| {
-            corporate_action::split_adjusted_quantity(
-                Decimal::ONE,
-                &splits,
-                p.parcel.date,
-                Some(year_end),
-            )
-        })
-        .collect();
-    if bases.iter().any(|b| *b != bases[0]) {
-        return Err(GenerateError::SplitAcrossParcels);
-    }
 
     if body.replace {
         // Same transaction as the regeneration below, so a failure mid-way
@@ -252,11 +231,6 @@ impl From<GenerateError> for ApiError {
             GenerateError::NothingHeld => ApiError::unprocessable(
                 "no parcels of the statement's listing were held in its holding account at the \
                  statement's year end — enter the missing trades first",
-            ),
-            GenerateError::SplitAcrossParcels => ApiError::unprocessable(
-                "a share split falls between the covered parcels' acquisition dates and the \
-                 statement's year end, leaving them on different unit bases — one per-unit cost \
-                 base adjustment cannot scale both, so enter the adjustments by hand",
             ),
             GenerateError::Upsert(err) => err.into(),
             GenerateError::Db(err) => err.into(),
@@ -556,15 +530,21 @@ mod tests {
     }
 
     /// A split between one covered parcel's acquisition and the year end
-    /// leaves the parcels on different unit bases: refused, because one
-    /// per-unit figure cannot scale both.
+    /// leaves the parcels on different unit bases at that date — which is the
+    /// basis the statement's per-unit figure is stated in. Both are covered,
+    /// each stored in its own as-acquired units, and the **money** is right
+    /// on each because `amit_adjustment::reduction_for` re-bases the stored
+    /// quantity into the year-end basis before multiplying. (Asserting only
+    /// the quantities is what let SCENARIOS B-24 through: the counts
+    /// reconciled while the reductions were halved.)
     #[tokio::test]
-    async fn db_a_split_across_covered_parcels_is_refused() {
+    async fn db_a_split_across_covered_parcels_is_costed_on_the_year_end_basis() {
         let pool = test_pool().await;
         amit_listing(&pool, 1, "HNDQ").await;
         test_support::buy(1, 1)
             .date(ymd(2023, 8, 1))
             .qty(dec("100"))
+            .price(dec("10"))
             .insert(&pool)
             .await;
         corporate_action::db_upsert(
@@ -584,28 +564,45 @@ mod tests {
         test_support::buy(2, 1)
             .date(ymd(2024, 3, 1))
             .qty(dec("50"))
+            .price(dec("5"))
             .insert(&pool)
             .await;
-        amma(&pool, 6, 1, ymd(2024, 6, 30), "250").await;
+        // FY2024: 250 units at the year end (200 post-split + 50), the fund's
+        // cost base adjustment 50c per unit *of that year's units*.
+        test_support::amma(6, 1)
+            .units(dec("250"))
+            .cost_base_adjustment(dec("0.50"))
+            .with(|a| {
+                a.tax_year_end_date = ymd(2024, 6, 30);
+                a.date_received = ymd(2024, 8, 29);
+            })
+            .insert(&pool)
+            .await;
 
-        let err = db_generate(&pool, 6, &GenerateBody::default())
-            .await
-            .unwrap_err();
-        assert!(matches!(err, GenerateError::SplitAcrossParcels));
-
-        // A split before every covered parcel scales them all alike, so it
-        // generates: the pre-split parcel alone, re-based.
-        sqlx::query("DELETE FROM trades WHERE id = 2")
-            .execute(&pool)
-            .await
-            .unwrap();
         let result = db_generate(&pool, 6, &GenerateBody::default())
             .await
             .unwrap();
-        assert_eq!(result.created.len(), 1);
-        // Stored as-acquired, reported (and reconciled) in the year's basis.
-        assert_eq!(result.created[0].quantity, dec("100"));
-        assert_eq!(result.units_adjusted, dec("200"));
+        assert_eq!(
+            result
+                .created
+                .iter()
+                .map(|a| (a.trade_id, a.quantity))
+                .collect::<Vec<_>>(),
+            // Stored as-acquired, reported (and reconciled) in the year's basis.
+            vec![(1, dec("100")), (2, dec("50"))]
+        );
+        assert_eq!(result.units_adjusted, dec("250"));
+        assert_eq!(result.difference, Decimal::ZERO);
+
+        // The money the fund actually took off: parcel 1's 100 as-acquired
+        // units are 200 units at the year end, so $100 — not the $50 a naive
+        // quantity × per-unit multiplication gives.
+        let mut conn = pool.acquire().await.unwrap();
+        let reductions = amit_adjustment::db_cost_base_reductions(&mut conn)
+            .await
+            .unwrap();
+        assert_eq!(reductions.get(&1).copied(), Some(dec("100")));
+        assert_eq!(reductions.get(&2).copied(), Some(dec("25")));
     }
 
     // API-level tests

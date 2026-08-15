@@ -31,7 +31,7 @@
 
 use crate::domain::cost_base::ParcelRow;
 use crate::domain::tax_year::tax_year_for;
-use crate::entities::corporate_action::RocEvent;
+use crate::entities::corporate_action::{self, RocEvent};
 use crate::infra::decimal::parse_dec;
 use crate::infra::fx::{FxOverride, FxRates};
 use crate::infra::http::ApiError;
@@ -217,6 +217,10 @@ async fn e10_gains(
     conn: &mut sqlx::SqliteConnection,
     fx: &FxRates,
 ) -> Result<Vec<(i32, Decimal, bool)>, sqlx::Error> {
+    // The reduction each row applies is `amit_adjustment::reduction_for`'s —
+    // the same split re-basing the cost-base pipeline uses, so this walk can
+    // never disagree with the cost base it is walking down.
+    let splits = corporate_action::db_share_split_events(&mut *conn).await?;
     let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
         "SELECT aa.quantity AS adj_qty, a.cost_base_adjustment, a.tax_year_end_date, {} \
          FROM amit_adjustments aa \
@@ -225,7 +229,7 @@ async fn e10_gains(
          ORDER BY aa.trade_id, a.tax_year_end_date, a.id",
         ParcelRow::columns_qualified("t")
     )))
-    .fetch_all(conn)
+    .fetch_all(&mut *conn)
     .await?;
 
     let mut out = Vec::new();
@@ -239,6 +243,7 @@ async fn e10_gains(
         let acquired = parcel.acquired();
         let fx_override = parcel.fx_override();
         let mut remaining = parcel.parcel().initial_cost();
+        let parcel_splits = splits.get(&parcel.listing_id).map_or(&[][..], |v| v);
 
         while i < rows.len() && rows[i].try_get::<i64, _>("id")? == trade_id {
             let adj_qty = parse_dec("adj_qty", rows[i].try_get("adj_qty")?)?;
@@ -247,7 +252,13 @@ async fn e10_gains(
                 rows[i].try_get("cost_base_adjustment")?,
             )?;
             let year_end: NaiveDate = rows[i].try_get("tax_year_end_date")?;
-            let reduction = adj_qty * cba;
+            let reduction = crate::entities::amit_adjustment::reduction_for(
+                adj_qty,
+                cba,
+                parcel_splits,
+                parcel.date,
+                year_end,
+            );
             if reduction > remaining {
                 let excess = reduction - remaining;
                 let excess_aud = fx.to_aud(excess, &parcel.currency, acquired, fx_override)?;
@@ -1826,6 +1837,60 @@ mod tests {
         // Held > 12 months at the FY2025 year end → discount-eligible → $30/2 = $15.
         assert_eq!(r[1].discount_eligible_gains, Decimal::from(30));
         assert_eq!(r[1].net_capital_gain, Decimal::from(15));
+    }
+
+    /// SCENARIOS B-24: the E10 walk reduces by the *year-end* unit basis, so a
+    /// split between acquisition and the statement's year end doubles the
+    /// reduction the fund's per-unit figure represents — and with it the
+    /// excess over the cost base. Reduction and cost base must be walked on
+    /// the same basis or the gain silently disappears.
+    #[tokio::test]
+    async fn db_e10_reduction_is_re_based_across_a_split() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "VAF").await;
+        // Buy 100 @ $10 on 1 Aug 2023 → cost base $1,000; 2-for-1 split in
+        // January, so the parcel is 200 units at the FY2024 year end.
+        insert_trade(
+            &pool,
+            1,
+            trade::TradeType::Buy,
+            1,
+            NaiveDate::from_ymd_opt(2023, 8, 1).unwrap(),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
+        apply_split(
+            &pool,
+            1,
+            1,
+            NaiveDate::from_ymd_opt(2024, 1, 15).unwrap(),
+            "2",
+            "1",
+        )
+        .await;
+        // $6.00 per post-split unit × 200 = $1,200 against the $1,000 cost
+        // base → nil cost base and a $200 E10 gain in FY2024.
+        let mut a = make_amma(1, 1, NaiveDate::from_ymd_opt(2024, 6, 30).unwrap());
+        a.cost_base_adjustment = "6.00".parse().unwrap();
+        amma::db_upsert(&pool, &a).await.unwrap();
+        link_adjustment(&pool, 1, 1, 1, Decimal::from(100)).await;
+
+        let r = db_net_capital_gain(&pool).await.unwrap();
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].tax_year, 2024);
+        assert_eq!(r[0].cgt_event_e10_gain, Decimal::from(200));
+        // Held ≤ 12 months at the year end → non-discountable.
+        assert_eq!(r[0].other_gains, Decimal::from(200));
+        assert_eq!(r[0].net_capital_gain, Decimal::from(200));
+
+        // And the cost base the open-parcels view reports is floored at nil,
+        // not the $400 a naive `quantity × per-unit` multiplication leaves.
+        let parcels = crate::reports::open_parcels::db_open_parcels(&pool)
+            .await
+            .unwrap();
+        assert_eq!(parcels.len(), 1);
+        assert_eq!(parcels[0].remaining_cost_base, Decimal::ZERO);
     }
 
     async fn apply_roc(pool: &SqlitePool, id: i64, listing_id: i64, date: NaiveDate, amount: &str) {

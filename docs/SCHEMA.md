@@ -199,7 +199,10 @@ amit_adjustments             Links a purchase parcel to an AMMA statement
 ├── id                   INTEGER PK
 ├── amma_statement_id    INTEGER FK→amma_statements.id
 ├── trade_id             INTEGER FK→trades.id  Must be Buy or DRP
-└── quantity             TEXT (decimal)       Units of the parcel covered by the adjustment, in the parcel's as-acquired units
+└── quantity             TEXT (decimal)       Units of the parcel covered by the adjustment, in the parcel's as-acquired units (the basis trades.quantity caps).
+                                              A split/bonus issue between the parcel's acquisition and the statement's tax_year_end_date is re-based
+                                              automatically: the reduction is (this quantity re-based into the year-end basis) × cost_base_adjustment,
+                                              since the statement's per-unit figure is per unit as its own tax year saw them
 UNIQUE (amma_statement_id, trade_id)  One adjustment per statement per parcel: two rows for the same parcel would
                                       apply the statement's per-unit cost_base_adjustment to it twice, and CGT event
                                       E10's nil floor turns an over-reduction into a capital gain never made

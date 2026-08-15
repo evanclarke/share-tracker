@@ -150,7 +150,11 @@ fn amit_adjustment_generation_and_cross_check_documented() {
     // Each 422 refusal.
     assert!(API_MD.contains("**already has adjustments**"));
     assert!(API_MD.contains("**no parcels** of the statement's listing were open"));
-    assert!(API_MD.contains("**share split** falls between the covered parcels'"));
+    // A split across the covered parcels is *not* a refusal (SCENARIOS
+    // B-24): each parcel's stored as-acquired quantity is re-based into the
+    // statement year's basis before the per-unit figure is applied.
+    assert!(API_MD.contains("**share split** between the covered parcels' acquisition dates"));
+    assert!(API_MD.contains("re-based into the year-end basis × `cost_base_adjustment`"));
     // The write-time duplicate invariant and the index behind it.
     assert!(
         API_MD.contains("**another row already adjusts the same parcel on the same statement**")

@@ -10,46 +10,6 @@ findings are all closed in DONE.md), except where a section's heading names anot
 (e.g. REQUIREMENTS, SCENARIOS). Each section records one finding; sections land in DONE.md as they
 are fixed or decided.
 
-## An AMIT cost-base adjustment over a split applies the statement's per-unit figure to the wrong units (SCENARIOS B-24)
-(SCENARIOS.md section B verification pass, 2026-08-15. `amit_adjustments.quantity` is stored **in
-the parcel's as-acquired units** (SCHEMA.md), while `amma_statements.cost_base_adjustment` is the
-fund's per-unit figure — per unit as the statement year saw them. The reduction is
-`quantity × cost_base_adjustment` (`amit_adjustment::db_cost_base_reductions*`), which multiplies
-two different unit bases whenever a share split or bonus issue falls between the parcel's
-acquisition and the statement's year end.)
-- [ ] Reproduced: Buy 100 @ $10 on 2023-08-01 (cost base $1,000); 2-for-1 `ShareSplit` 2024-01-15;
-  AMMA FY2024 with `units_held: 200`, `cost_base_adjustment: "0.50"` — the fund reduced the cost
-  base by 200 × $0.50 = **$100**. `POST /amma_statements/1/generate_adjustments` writes
-  `quantity: 100` and the reports apply **$50**: `remaining_cost_base` 950.00, not 900.00
-- [ ] Same fixture with `cost_base_adjustment: "6.00"` — the statement's $1,200 on a $1,000 cost
-  base should leave nil plus a **$200 CGT event E10 gain** in FY2024. Reported: cost base 400.00,
-  `cgt_event_e10_gain` 0. A $600 cost-base overstatement and a gain never reported
-- [ ] Neither existing check catches it, because both are counted in units while the error is in
-  money: generation answers `units_adjusted: 200` / `units_held: 200` / `difference: 0` (it
-  re-bases the stored quantity for the reconciliation but not for the multiplication), and
-  `/reports/amit_adjustment_cross_check` returns empty
-- [ ] The generation guard is narrower than it reads: `db_generate` refuses only when the covered
-  parcels convert to the year-end basis by *different* ratios (`SplitAcrossParcels`). Parcels that
-  are uniformly on a pre-split basis pass — the single-parcel case above, and every multi-parcel
-  set acquired wholly before the split
-- [ ] No workaround exists at the right figures: hand-entering `quantity: 200` is refused (`the
-  adjusted quantity exceeds the trade's quantity`, capped by `trades.quantity`), so the only way to
-  land the correct reduction is to double the statement's per-unit figure — which then disagrees
-  with the fund's document and with the row's own `units_held`
-- [ ] Decide the fix: re-base the stored as-acquired `quantity` into the statement year's basis
-  before multiplying (the `units_adjusted` re-basing already computes exactly this factor, via
-  `corporate_action::split_adjusted_quantity`), or store the quantity in the statement year's basis
-  and re-base the other way for the capacity check. The first keeps `quantity`'s documented meaning
-  and the `trades.quantity` cap intact
-- [ ] Tests: `entities::amit_adjustment` (the reduction over a split), `reports::net_capital_gain`
-  (the E10 gain it suppresses), and `entities::amit_adjustment_generation` —
-  `db_a_split_across_covered_parcels_is_refused` already builds this exact fixture and asserts only
-  the quantities (`created[0].quantity == 100`, `units_adjusted == 200`); it needs the money
-  assertion that would have caught this
-- [ ] Docs sync: `docs/SCHEMA.md` (`amit_adjustments.quantity`), `docs/API.md` (AMIT adjustments,
-  Generating AMIT adjustments, and the `ShareSplit` bullet's "AMIT adjustment quantities remain
-  expressed in the parcel's as-acquired units")
-
 ## A parcel reduced by both an AMIT adjustment and a return of capital loses the excess over its cost base (SCENARIOS B-07, B-08)
 (SCENARIOS.md section B verification pass, 2026-08-15. `reports::net_capital_gain`'s `e10_gains`
 and `g1_gains` each walk their own reduction chain from the parcel's **full** initial cost base,
