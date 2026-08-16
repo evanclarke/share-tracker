@@ -787,3 +787,49 @@ so a second, cleverer rule here would have been the inconsistency.
       which was missing from it). Pinned by `doc_checks::amit_return_of_capital_refusal_documented`
 - [x] Verified: `cargo build` and `cargo test` (1476 passed, warning-free), `cargo fmt --check` and
       `cargo clippy --all-targets -- -D warnings` clean
+
+## Fractional entitlements are documented for splits and demergers but not for bonus issues or scrip exchanges (SCENARIOS E-11, E-36)
+(SCENARIOS.md section E verification pass, 2026-08-16. The convention is consistent in the code —
+exact fractional unit counts are kept everywhere, registry rounding and cash-in-lieu are never
+modelled — but `docs/API.md` states it only for `ShareSplit` ("a consolidation that doesn't divide a
+holding evenly keeps the exact fractional quantity") and `Demerger` ("registry cash-in-lieu of
+fractional entitlements are not modelled").)
+- [x] E-11 — a 1-for-10 bonus issue on 105 units reports **115.50** units held, where the registry
+  issues 10 and pays cash for the half. The `BonusIssue` bullet lists only partly paid bonus shares
+  and call payments as unmodelled
+- [x] E-36 — a 1-for-3 exchange of 101 units creates a replacement parcel of
+  **33.666666666666666666666666667** units (now pinned by a test). The `ScripForScrip` bullet lists
+  multiple share classes, pre-CGT originals and loss rollovers as unmodelled, but not the fraction
+- [x] Add the same sentence to both bullets, and say what to do with the cash actually received for
+  a fraction (it is its own small CGT event on the disposed fraction — the honest answer may be
+  "enter it as a Sell of the fractional units", which is worth stating rather than leaving to the
+  reader)
+
+**Resolution (2026-08-16): documented — the behaviour was already right and consistent; only the
+convention and its consequence were unwritten.**
+
+`docs/API.md` gained a *Fractional entitlements* section under Corporate actions, stating the
+convention once for all four ratio-driven actions (`ShareSplit`, `BonusIssue`, `ScripForScrip`,
+`Demerger`) with the worked figures from both findings — 10.5 bonus units on 105, and
+33.666666666666666666666666667 replacement units on 101 — and why the exact figure is kept:
+rounding would silently lose or invent part of a parcel with nothing recording the difference.
+Both registry practices it declines to model are named (rounding the entitlement, and selling the
+aggregated fractions for cash in lieu).
+
+The question that left is answered rather than left to the reader: cash in lieu is the disposal of
+the fraction and its own small CGT event, not a bookkeeping rounding — enter it as an ordinary Sell
+of the fractional units dated the payment date, with the cash as its proceeds, so the fraction's
+share of the cost base (and the discount, where the parcel qualifies) comes out of the same pipeline
+as any other disposal and the holding is left at the whole-unit figure the registry holds. A
+registry that rounds *up* instead has no CGT event to record. The `BonusIssue` and `ScripForScrip`
+bullets now carry the sentence and link to the section; `ShareSplit`'s and `Demerger`'s existing
+mentions link to it too, so all four say the same thing in one place. (The section header's stale
+"Seven action types are modelled" was corrected to eight in the same pass.)
+
+Tests: `doc_checks::fractional_entitlements_documented` (the convention, its reason, both worked
+figures, the cash-in-lieu answer, and all four cross-links) and — E-11's behaviour, which unlike
+E-36's had no pin —
+`reports::open_parcels::tests::db_bonus_issue_keeps_the_exact_fractional_entitlement`
+(105 units + 1-for-10 → 115.5, cost base unchanged). E-36 stays pinned by
+`entities::scrip_exchange`'s existing fractional-replacement tests. Full suite 1481 passed / 0
+failed.

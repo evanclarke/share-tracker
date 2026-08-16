@@ -17,7 +17,10 @@
 //!   `reports::valuation` refuses to value a date with an errored price);
 //! - every listing with a held day whose price was never even attempted —
 //!   the missing-row counterpart of the errored list (see
-//!   [`UnpricedListing`]).
+//!   [`UnpricedListing`]);
+//! - every (listing, action type, date) carrying more than one corporate
+//!   action — the double-entry that silently compounds (see
+//!   [`DuplicateAction`]).
 //!
 //! A database with no prices or FX rates at all reports `stale = false` for
 //! that series: nothing has decayed — a fresh install shows no banner, and a
@@ -90,6 +93,42 @@ pub struct UnpricedListing {
     pub latest_date: NaiveDate,
 }
 
+/// More than one corporate action of the same type, on the same listing and
+/// date. Two such rows are two independent events to every reader — the
+/// cost-base pipeline sums both `ReturnOfCapital` reductions and multiplies
+/// both `ShareSplit` ratios (SCENARIOS E-03, E-15) — so a re-submitted form or
+/// a re-imported statement restates every cost base and quantity of the
+/// listing with nothing to show for it.
+///
+/// Deliberately a **warning, not a constraint**: a genuine same-day pair
+/// exists in principle (two tranches of one capital return), so the pair stays
+/// enterable and this names it for the user to judge.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DuplicateAction {
+    pub listing_id: i64,
+    pub ticker: String,
+    pub action_type: String,
+    pub date: NaiveDate,
+    /// How many actions share this (listing, type, date) — always ≥ 2.
+    pub action_count: i64,
+    /// The ids sharing it, ascending, so the surplus row can be found and
+    /// deleted without a search.
+    pub action_ids: Vec<i64>,
+}
+
+/// The grouped row behind [`DuplicateAction`]: SQLite returns the ids as one
+/// `GROUP_CONCAT` string, split into the public struct's `Vec<i64>` by
+/// [`db_duplicate_actions`].
+#[derive(sqlx::FromRow)]
+struct DuplicateActionRow {
+    listing_id: i64,
+    ticker: String,
+    action_type: String,
+    date: NaiveDate,
+    action_count: i64,
+    action_ids: String,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct HealthReport {
     /// Latest `closing_prices` date stored with status ok, across every
@@ -107,6 +146,10 @@ pub struct HealthReport {
     /// hole first — the oldest is the least recoverable, since a provider
     /// stops serving history long before it stops serving last week.
     pub unpriced_days: Vec<UnpricedListing>,
+    /// Every (listing, action type, date) carrying more than one corporate
+    /// action, newest first. Empty when no two actions of a type share a
+    /// listing and date.
+    pub duplicate_actions: Vec<DuplicateAction>,
 }
 
 /// Business days (Mon–Fri) strictly after `from`, up to and including `today`.
@@ -214,6 +257,50 @@ async fn db_unpriced_days(
     Ok(listings)
 }
 
+/// Corporate actions sharing a (listing, type, date) — see [`DuplicateAction`].
+///
+/// Grouped in SQL and read on the caller's transaction: it is one small
+/// aggregate over `corporate_actions`, not a per-listing walk like
+/// [`db_unpriced_days`].
+async fn db_duplicate_actions(
+    conn: &mut sqlx::SqliteConnection,
+) -> Result<Vec<DuplicateAction>, sqlx::Error> {
+    let rows = sqlx::query_as::<_, DuplicateActionRow>(
+        "SELECT ca.listing_id AS listing_id, l.ticker AS ticker, \
+                ca.action_type AS action_type, ca.date AS date, \
+                COUNT(*) AS action_count, GROUP_CONCAT(ca.id) AS action_ids \
+         FROM corporate_actions ca JOIN listings l ON l.id = ca.listing_id \
+         GROUP BY ca.listing_id, ca.action_type, ca.date \
+         HAVING COUNT(*) > 1 \
+         ORDER BY ca.date DESC, l.ticker, ca.action_type",
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    rows.into_iter()
+        .map(|row| {
+            // GROUP_CONCAT's order is unspecified, so sort rather than trust it.
+            let mut action_ids = row
+                .action_ids
+                .split(',')
+                .map(|id| {
+                    id.parse::<i64>().map_err(|e| {
+                        sqlx::Error::Decode(format!("corporate action id {id}: {e}").into())
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            action_ids.sort_unstable();
+            Ok(DuplicateAction {
+                listing_id: row.listing_id,
+                ticker: row.ticker,
+                action_type: row.action_type,
+                date: row.date,
+                action_count: row.action_count,
+                action_ids,
+            })
+        })
+        .collect()
+}
+
 /// Read the freshness facts on one snapshot. `today` and `now` are parameters
 /// so tests can pin the staleness thresholds and the "close is final yet"
 /// cut-off to fixed dates.
@@ -250,6 +337,7 @@ pub async fn db_health(
     )
     .fetch_all(&mut *tx)
     .await?;
+    let duplicate_actions = db_duplicate_actions(&mut tx).await?;
     tx.commit().await?;
     let unpriced_days = db_unpriced_days(pool, now).await?;
 
@@ -266,6 +354,7 @@ pub async fn db_health(
         failed_jobs,
         errored_prices,
         unpriced_days,
+        duplicate_actions,
     })
 }
 
@@ -284,6 +373,7 @@ pub fn router() -> Router<SqlitePool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::entities::corporate_action;
     use crate::test_support::{self, ApiClient, dec, test_pool, ymd};
     use axum::http::StatusCode;
 
@@ -370,6 +460,7 @@ mod tests {
         assert!(h.failed_jobs.is_empty());
         assert!(h.errored_prices.is_empty());
         assert!(h.unpriced_days.is_empty());
+        assert!(h.duplicate_actions.is_empty());
     }
 
     #[tokio::test]
@@ -743,6 +834,123 @@ mod tests {
         assert_eq!(h.unpriced_days[0].ticker, "OLD");
         assert_eq!(h.unpriced_days[0].earliest_date, ymd(2026, 7, 2));
         assert_eq!(h.unpriced_days[1].ticker, "RECENT");
+    }
+
+    async fn insert_roc(pool: &SqlitePool, id: i64, listing_id: i64, date: NaiveDate) {
+        insert_action(
+            pool,
+            id,
+            listing_id,
+            date,
+            corporate_action::ActionKind::ReturnOfCapital {
+                amount_per_unit: dec("0.50"),
+                currency: "AUD".to_string(),
+                record_date: None,
+            },
+        )
+        .await;
+    }
+
+    async fn insert_split(pool: &SqlitePool, id: i64, listing_id: i64, date: NaiveDate) {
+        insert_action(
+            pool,
+            id,
+            listing_id,
+            date,
+            corporate_action::ActionKind::ShareSplit {
+                split_new_units: dec("2"),
+                split_old_units: dec("1"),
+            },
+        )
+        .await;
+    }
+
+    async fn insert_action(
+        pool: &SqlitePool,
+        id: i64,
+        listing_id: i64,
+        date: NaiveDate,
+        kind: corporate_action::ActionKind,
+    ) {
+        corporate_action::db_upsert(
+            pool,
+            &corporate_action::CorporateAction {
+                id,
+                listing_id,
+                date,
+                kind,
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    /// SCENARIOS E-03 / E-15: a re-submitted form or a re-imported statement
+    /// leaves two identical actions, and the cost-base pipeline reads them as
+    /// two events — the return of capital reduces twice, the split multiplies
+    /// twice. Nothing rejects the pair (a genuine same-day pair exists in
+    /// principle), so health names it, with the ids to delete from.
+    #[tokio::test]
+    async fn duplicated_corporate_actions_are_reported_with_their_ids() {
+        let pool = test_pool().await;
+        test_support::listing(1).ticker("ROCC").insert(&pool).await;
+        test_support::listing(2).ticker("SPLT").insert(&pool).await;
+        insert_roc(&pool, 1, 1, ymd(2026, 3, 10)).await;
+        insert_roc(&pool, 2, 1, ymd(2026, 3, 10)).await;
+        insert_split(&pool, 3, 2, ymd(2026, 6, 1)).await;
+        insert_split(&pool, 4, 2, ymd(2026, 6, 1)).await;
+
+        let h = health(&pool, ymd(2026, 7, 13)).await;
+        // Newest first: the split (June) before the capital return (March).
+        assert_eq!(h.duplicate_actions.len(), 2);
+        let split = &h.duplicate_actions[0];
+        assert_eq!(split.ticker, "SPLT");
+        assert_eq!(split.listing_id, 2);
+        assert_eq!(split.action_type, "ShareSplit");
+        assert_eq!(split.date, ymd(2026, 6, 1));
+        assert_eq!(split.action_count, 2);
+        assert_eq!(split.action_ids, vec![3, 4]);
+        let roc = &h.duplicate_actions[1];
+        assert_eq!(roc.ticker, "ROCC");
+        assert_eq!(roc.action_type, "ReturnOfCapital");
+        assert_eq!(roc.date, ymd(2026, 3, 10));
+        assert_eq!(roc.action_ids, vec![1, 2]);
+    }
+
+    /// The warning is per (listing, action type, date): actions that differ in
+    /// any of the three are ordinary independent events, however close
+    /// together they fall.
+    #[tokio::test]
+    async fn actions_differing_in_listing_type_or_date_are_not_duplicates() {
+        let pool = test_pool().await;
+        test_support::listing(1).ticker("AAA").insert(&pool).await;
+        test_support::listing(2).ticker("BBB").insert(&pool).await;
+        // Same type and date, different listing.
+        insert_roc(&pool, 1, 1, ymd(2026, 3, 10)).await;
+        insert_roc(&pool, 2, 2, ymd(2026, 3, 10)).await;
+        // Same listing and type, different date.
+        insert_roc(&pool, 3, 1, ymd(2026, 9, 10)).await;
+        // Same listing and date, different type.
+        insert_split(&pool, 4, 1, ymd(2026, 3, 10)).await;
+
+        let h = health(&pool, ymd(2026, 7, 13)).await;
+        assert!(h.duplicate_actions.is_empty());
+    }
+
+    /// Three of a kind is one row, not three: the report answers "this
+    /// (listing, type, date) is entered N times", listing every id.
+    #[tokio::test]
+    async fn three_identical_actions_are_one_row_counting_three() {
+        let pool = test_pool().await;
+        test_support::listing(1).ticker("TRIP").insert(&pool).await;
+        insert_roc(&pool, 7, 1, ymd(2026, 3, 10)).await;
+        insert_roc(&pool, 8, 1, ymd(2026, 3, 10)).await;
+        insert_roc(&pool, 9, 1, ymd(2026, 3, 10)).await;
+
+        let h = health(&pool, ymd(2026, 7, 13)).await;
+        assert_eq!(h.duplicate_actions.len(), 1);
+        assert_eq!(h.duplicate_actions[0].action_count, 3);
+        assert_eq!(h.duplicate_actions[0].action_ids, vec![7, 8, 9]);
     }
 
     #[tokio::test]

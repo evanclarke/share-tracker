@@ -532,3 +532,49 @@ that call, while the as-of-dated reports correctly ignore it.)
 - [x] Verified: `cargo build` and `cargo test` (1471 passed, warning-free — the 1467 that passed
       before the change all still pass, so nothing depended on the sentinel reading),
       `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` clean
+
+## A duplicated corporate action is silently compounded (SCENARIOS E-03, E-15)
+(SCENARIOS.md section E verification pass, 2026-08-16. Two actions of the same type, listing and
+date are two independent events to every reader: `db_return_of_capital_events` and
+`db_share_split_events` load both, and the pipeline sums / multiplies them.)
+- [x] E-03 — two identical `ReturnOfCapital` rows ($0.50/unit, same date, same listing) reduce a
+  100-unit parcel by **$100.00**, not $50.00
+- [x] E-15 — two identical 2-for-1 `ShareSplit` rows on one date turn 100 units into **400**
+- [x] Both are plausible double entries (a re-submitted form, a re-imported statement), both restate
+  every cost base and quantity of the listing, and nothing — not the health report, not any
+  cross-check — mentions it. Genuine same-day pairs exist in principle (two tranches of a capital
+  return), so a hard uniqueness constraint would be wrong; the fit is a health-report warning naming
+  the duplicated (listing, type, date), or a confirm step on the second write
+- [x] **Decided 2026-08-16 (Evan): a health-report warning** — one row per duplicated
+  (listing, action type, date), non-blocking, so a genuine same-day pair stays enterable. (A UI
+  confirm step on the second write, and accepting it as a non-issue, were both considered and
+  rejected.) `reports::health` gains the check and `docs/API.md`'s health section the field
+
+**Resolution (2026-08-16): a `reports::health` warning, as decided — non-blocking, no constraint.**
+
+`GET /reports/health` gained `duplicate_actions`: one row per (listing, action type, date) carrying
+more than one corporate action, newest first, as
+`{ listing_id, ticker, action_type, date, action_count, action_ids }` — the ids ascending, so the
+surplus row is opened and deleted without a search. Grouped in SQL on the report's own read
+transaction beside the other freshness reads (it is one small aggregate over `corporate_actions`,
+not a per-listing walk like `unpriced_days`). Every action type is covered, not only the two that
+compound silently: a duplicated `BuyBack` or `Demerger` is the same double entry, and the reader is
+the one who knows whether the pair is real.
+
+The web UI's cross-view banner names it — type, ticker, date and ids, with "each is applied
+separately; delete the duplicate unless both are real" — and links to Corporate Actions beside the
+existing Jobs and Closing Prices links, so the warning is visible from any screen rather than only
+when the report is fetched. Verified end-to-end through `scripts/ui-check.sh` against a seeded pair.
+
+`docs/API.md` states the field, why the effect compounds (both worked figures from E-03 and E-15),
+and — the recorded decision — that this is deliberately *not* a uniqueness constraint, since a
+genuine same-day pair exists in principle; it also names the way out (delete the surplus action,
+`422` while a trade still references it). The README's monitoring bullet and the banner paragraph
+list it alongside the other health surfaces.
+
+Tests: `reports::health::tests::duplicated_corporate_actions_are_reported_with_their_ids` (E-03 and
+E-15 together, newest first, with the ids),
+`actions_differing_in_listing_type_or_date_are_not_duplicates` (the key is all three, so ordinary
+independent events stay silent), `three_identical_actions_are_one_row_counting_three`,
+`empty_database_reports_nothing_stale` (extended), and `web::tests::health_banner_ui_present`.
+Full suite 1481 passed / 0 failed.

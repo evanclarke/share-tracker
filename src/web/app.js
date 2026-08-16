@@ -1052,10 +1052,12 @@ async function viewAttachments(ownerField, ownerId) {
 // ---- health banner ------------------------------------------------------
 // Cross-view strip driven by GET /reports/health: stale closing prices or RBA
 // FX rates (the staleness thresholds live server-side), any job whose latest
-// run failed (linking to Jobs), and any listing with errored closing-price
+// run failed (linking to Jobs), any listing with errored closing-price
 // rows — a wrong/renamed/delisted provider symbol otherwise only shows up
 // indirectly as a missing snapshot (linking to Closing Prices, where the
-// backfill action re-fetches once the symbol is fixed). Refreshed on every
+// backfill action re-fetches once the symbol is fixed) — and any duplicated
+// corporate action, whose effect is silently compounded (linking to Corporate
+// Actions, where the surplus row is deleted). Refreshed on every
 // route render, so fixing the cause clears it on the next navigation. A
 // failing health fetch hides the banner rather than breaking the app.
 async function refreshHealthBanner() {
@@ -1079,6 +1081,12 @@ async function refreshHealthBanner() {
       problems.push(erroredPrices.length + ' listing(s) have errored closing prices ('
         + erroredPrices.map(function (r) { return r.ticker; }).join(', ') + ').');
     }
+    const duplicateActions = h.duplicate_actions || [];
+    duplicateActions.forEach(function (d) {
+      problems.push(d.action_count + ' ' + d.action_type + ' actions on ' + d.ticker + ' dated '
+        + d.date + ' (ids ' + d.action_ids.join(', ')
+        + ') — each is applied separately; delete the duplicate unless both are real.');
+    });
     if (problems.length === 0) {
       banner.hidden = true;
       banner.innerHTML = '';
@@ -1089,6 +1097,9 @@ async function refreshHealthBanner() {
     banner.appendChild(el('a', { href: '#/jobs' }, 'Open Jobs →'));
     if (erroredPrices.length > 0) {
       banner.appendChild(el('a', { href: '#/prices' }, 'Open Closing Prices →'));
+    }
+    if (duplicateActions.length > 0) {
+      banner.appendChild(el('a', { href: '#/e/corporate_actions' }, 'Open Corporate Actions →'));
     }
     banner.hidden = false;
   } catch (e) {

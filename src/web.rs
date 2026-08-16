@@ -1388,6 +1388,13 @@ mod tests {
         assert!(js.contains("fx_stale"));
         assert!(js.contains("failed_jobs"));
         assert!(js.contains("'#/jobs'"));
+        // …plus duplicated corporate actions (silently compounded, so the
+        // strip names the type, ticker, date and ids), linking to the screen
+        // the surplus row is deleted from…
+        assert!(js.contains("duplicate_actions"));
+        assert!(js.contains("each is applied separately"));
+        assert!(js.contains("'#/e/corporate_actions'"));
+        assert!(js.contains("Open Corporate Actions"));
         // …and refreshes on every route render so it appears on the main views.
         assert!(js.contains("refreshHealthBanner(); // deliberately not awaited"));
         // The strip's host element ships in the page shell with its styles.

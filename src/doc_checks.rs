@@ -1268,6 +1268,47 @@ fn deletes_blocked_by_a_dependant_documented() {
     assert!(API_MD.contains("`DELETE` returns `422` while anything still references the exchange"));
 }
 
+/// Docs-sync pin for fractional entitlements (SCENARIOS E-11, E-36). The
+/// behaviour — every ratio-driven action keeping the exact fraction its ratio
+/// produces — is pinned by tests in the corporate-action and rollover modules;
+/// what needed writing down is the *convention* (registry rounding and
+/// cash-in-lieu are deliberately not modelled), stated for all four ratio
+/// actions rather than only `ShareSplit` and `Demerger`, and the answer to the
+/// question it leaves the reader with: what to do with the cash actually
+/// received for a fraction.
+#[test]
+fn fractional_entitlements_documented() {
+    // The shared section: the convention, its reason, and both registry
+    // practices it declines to model.
+    assert!(API_MD.contains("### Fractional entitlements"));
+    assert!(API_MD.contains(
+        "Every ratio-driven action — `ShareSplit`, `BonusIssue`, `ScripForScrip`, `Demerger` — \
+         keeps the **exact fractional quantity** its ratio produces"
+    ));
+    assert!(API_MD.contains("sell the aggregated fractions on-market and pay **cash in lieu**"));
+    assert!(API_MD.contains("would silently lose (or invent) part of a parcel"));
+    // What to do with the cash: a CGT event on the disposed fraction, entered
+    // as an ordinary Sell — not a rounding to be absorbed.
+    assert!(API_MD.contains(
+        "it is the disposal of that fraction and its own (small) CGT event, not a bookkeeping \
+         rounding: enter it as an ordinary [Sell](#sells) of the fractional units"
+    ));
+    assert!(API_MD.contains("A registry that rounds the entitlement *up* to a whole unit instead"));
+    // E-11 / E-36: the two bullets that stated it for neither, with the
+    // worked figures a reader can check their own entry against.
+    assert!(API_MD.contains("a 1-for-10 issue on 105 units gives 10.5 bonus units"));
+    assert!(API_MD.contains(
+        "a 1-for-3 exchange of 101 units gives 33.666666666666666666666666667 replacement units"
+    ));
+    // …and the two that did, now pointing at the shared section.
+    assert_eq!(
+        API_MD
+            .matches("[Fractional entitlements](#fractional-entitlements)")
+            .count(),
+        4
+    );
+}
+
 /// Pins for the FreeBSD packaging + versioned-release pipeline (REQUIREMENTS
 /// 2026-07-13). The release workflow and package skeleton are plain text CI
 /// consumes, so these tests keep their load-bearing pieces from silently

@@ -561,6 +561,64 @@ mod tests {
         .unwrap();
     }
 
+    async fn apply_bonus(
+        pool: &SqlitePool,
+        id: i64,
+        listing_id: i64,
+        date: NaiveDate,
+        bonus: &str,
+        held: &str,
+    ) {
+        corporate_action::db_upsert(
+            pool,
+            &corporate_action::CorporateAction {
+                id,
+                listing_id,
+                date,
+                kind: corporate_action::ActionKind::BonusIssue {
+                    bonus_units: bonus.parse().unwrap(),
+                    bonus_held_units: held.parse().unwrap(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    /// SCENARIOS E-11: a bonus issue whose ratio doesn't divide the holding
+    /// evenly keeps the exact fractional entitlement, the same convention a
+    /// consolidation follows — the registry issues 10 whole units and pays
+    /// cash for the half, and neither the rounding nor the cash in lieu is
+    /// modelled (`docs/API.md` "Fractional entitlements"; the cash received is
+    /// entered as a Sell of the fractional units). The cost base is unchanged:
+    /// a bonus issue is no CGT event, only a re-base.
+    #[tokio::test]
+    async fn db_bonus_issue_keeps_the_exact_fractional_entitlement() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BON").await;
+        insert_buy(
+            &pool,
+            1,
+            1,
+            ymd(2024, 1, 1),
+            Decimal::from(105),
+            Decimal::from(10),
+        )
+        .await;
+        // 1-for-10 on 105 units: 10.5 bonus units, not 10.
+        apply_bonus(&pool, 1, 1, ymd(2024, 3, 1), "1", "10").await;
+
+        let parcels = db_open_parcels(&pool).await.unwrap();
+        assert_eq!(parcels.len(), 1);
+        assert_eq!(parcels[0].remaining_quantity, dec("115.5"));
+        assert_eq!(parcels[0].original_quantity, Decimal::from(105));
+        // Same total cost base, spread over the larger unit count.
+        assert_eq!(
+            parcels[0].remaining_cost_base,
+            parcels[0].original_cost_base
+        );
+    }
+
     /// TD 2000/10 (`docs/ato/share-splits-and-consolidations.md`): the split parcel
     /// keeps its acquisition date and total cost base; the remaining quantity
     /// is reported in post-split units while original_quantity stays as
