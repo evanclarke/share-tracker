@@ -10,33 +10,6 @@ findings are all closed in DONE.md), except where a section's heading names anot
 (e.g. REQUIREMENTS, SCENARIOS). Each section records one finding; sections land in DONE.md as they
 are fixed or decided.
 
-## Two AMMA statements for the same fund and year are silently double-counted (SCENARIOS F-06)
-(SCENARIOS.md section F verification pass, 2026-08-16. `amma::db_upsert`
-(`src/entities/amma.rs:192`) validates only that `tax_year_end_date` is a 30 June date — nothing,
-in Rust or in the schema, stops a second statement for the same `(listing_id, tax_year_end_date,
-holding_account_id)`. Every reader then counts both: the tax summary's `amma_*` lines
-(`src/reports/tax_summary.rs:471`), the net-capital-gain report's gain buckets
-(`src/reports/net_capital_gain.rs:684`), and — because the duplicate-parcel UNIQUE index of
-migration 0022 is per *statement* — a second generated adjustment set reducing every parcel a
-second time. This is the AMMA counterpart of E-03's duplicated corporate action, which was closed
-with a health warning in `e15e60a`.)
-- [ ] F-06 — reproduced: VDHG, Buy ×1000, statement #1 for FY2025 (`other_income` 300,
-  `cgt_discount_gains` 100, `cost_base_adjustment` 0.20), then the fund's **amended** statement
-  entered as #2 (350 / 120 / 0.25) instead of editing #1. Both `PUT`s answer `204`; generation
-  succeeds on each. Result: tax summary `amma_other_income` 650 and `amma_cgt_discount_gains` 220,
-  net capital gain `discount_eligible_gains` 440 (both statements grossed up), and the parcel's
-  `amit_cost_base_reduction` 450 (200 + 250) — every figure the sum of the original and its
-  replacement
-- [ ] Nothing surfaces it: the AMIT adjustment cross-check reconciles both sets (each matches its
-  own statement's `units_held`), the AMIT cash cross-check sees the year as covered, and
-  `/reports/health` has no equivalent of `duplicate_actions` (`src/reports/health.rs:265`)
-- [ ] **Model question for Evan.** Three shapes, as with E-03: (a) refuse a second statement for
-  the same (listing, year, holding account) at write time — safest, but an amended statement then
-  has to be entered by editing the original row, and the audit trail of what the first one said
-  lives only in `row_history`; (b) a non-blocking `duplicate_amma_statements` health warning, the
-  E-03 precedent, keeping both rows enterable; (c) document it. Note the account is part of the
-  key either way (F-03 shows two accounts legitimately have two statements for one fund-year)
-
 ## An AMMA statement for a year with nothing held at 30 June cannot be generated, and its hand-entered set is flagged forever (SCENARIOS F-04, F-17, F-25)
 (SCENARIOS.md section F verification pass, 2026-08-16. `db_generate` refuses with `NothingHeld`
 when no parcel of the listing is open at the statement's `tax_year_end_date`

@@ -1395,6 +1395,13 @@ mod tests {
         assert!(js.contains("each is applied separately"));
         assert!(js.contains("'#/e/corporate_actions'"));
         assert!(js.contains("Open Corporate Actions"));
+        // …plus two AMMA statements for one fund-year and holding account
+        // (SCENARIOS F-06: every figure counted once per statement), linking
+        // to the screen the superseded row is deleted from…
+        assert!(js.contains("duplicate_amma_statements"));
+        assert!(js.contains("every figure is counted once per statement"));
+        assert!(js.contains("'#/e/amma_statements'"));
+        assert!(js.contains("Open AMMA Statements"));
         // …and refreshes on every route render so it appears on the main views.
         assert!(js.contains("refreshHealthBanner(); // deliberately not awaited"));
         // The strip's host element ships in the page shell with its styles.

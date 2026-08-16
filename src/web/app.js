@@ -1055,9 +1055,11 @@ async function viewAttachments(ownerField, ownerId) {
 // run failed (linking to Jobs), any listing with errored closing-price
 // rows — a wrong/renamed/delisted provider symbol otherwise only shows up
 // indirectly as a missing snapshot (linking to Closing Prices, where the
-// backfill action re-fetches once the symbol is fixed) — and any duplicated
+// backfill action re-fetches once the symbol is fixed) — any duplicated
 // corporate action, whose effect is silently compounded (linking to Corporate
-// Actions, where the surplus row is deleted). Refreshed on every
+// Actions, where the surplus row is deleted), and any fund-year with two AMMA
+// statements for one holding account, counted twice in the income, gains and
+// cost-base figures alike (linking to AMMA Statements). Refreshed on every
 // route render, so fixing the cause clears it on the next navigation. A
 // failing health fetch hides the banner rather than breaking the app.
 async function refreshHealthBanner() {
@@ -1087,6 +1089,13 @@ async function refreshHealthBanner() {
         + d.date + ' (ids ' + d.action_ids.join(', ')
         + ') — each is applied separately; delete the duplicate unless both are real.');
     });
+    const duplicateAmma = h.duplicate_amma_statements || [];
+    duplicateAmma.forEach(function (d) {
+      problems.push(d.statement_count + ' AMMA statements for ' + d.ticker + ' FY'
+        + (d.tax_year - 1) + '/' + String(d.tax_year).slice(-2) + ' in one holding account (ids '
+        + d.statement_ids.join(', ')
+        + ') — every figure is counted once per statement; delete the superseded one unless both are real.');
+    });
     if (problems.length === 0) {
       banner.hidden = true;
       banner.innerHTML = '';
@@ -1100,6 +1109,9 @@ async function refreshHealthBanner() {
     }
     if (duplicateActions.length > 0) {
       banner.appendChild(el('a', { href: '#/e/corporate_actions' }, 'Open Corporate Actions →'));
+    }
+    if (duplicateAmma.length > 0) {
+      banner.appendChild(el('a', { href: '#/e/amma_statements' }, 'Open AMMA Statements →'));
     }
     banner.hidden = false;
   } catch (e) {

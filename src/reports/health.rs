@@ -20,13 +20,18 @@
 //!   [`UnpricedListing`]);
 //! - every (listing, action type, date) carrying more than one corporate
 //!   action — the double-entry that silently compounds (see
-//!   [`DuplicateAction`]).
+//!   [`DuplicateAction`]);
+//! - every (listing, financial year, holding account) carrying more than one
+//!   AMMA statement — the same double-entry on the attribution side, counted
+//!   twice in the income, gains and cost-base figures alike (see
+//!   [`DuplicateAmmaStatement`]).
 //!
 //! A database with no prices or FX rates at all reports `stale = false` for
 //! that series: nothing has decayed — a fresh install shows no banner, and a
 //! price/FX import that breaks before ever succeeding surfaces through
 //! `failed_jobs` (and the Jobs page) instead.
 
+use crate::domain::tax_year::tax_year_for;
 use crate::entities::closing_price::{self, HeldTimeline};
 use crate::infra::http::ApiError;
 use axum::{Json, Router, extract::State, routing::get};
@@ -129,6 +134,51 @@ struct DuplicateActionRow {
     action_ids: String,
 }
 
+/// More than one AMMA statement for the same listing, financial year and
+/// holding account. Every reader counts both: the tax summary's `amma_*`
+/// lines and the net-capital-gain report's gain buckets each sum all
+/// statements of the year, and — because the one-adjustment-per-parcel UNIQUE
+/// index is per *statement* — each statement can also generate its own full
+/// set of AMIT adjustments, reducing every parcel a second time
+/// (SCENARIOS F-06). The usual cause is an amended statement entered as a new
+/// row instead of over the original.
+///
+/// Deliberately a **warning, not a constraint**, the same call as
+/// [`DuplicateAction`]: a genuine pair exists in principle (a registry change
+/// mid-year, or a fund merger, leaves two part-year statements for one
+/// account) and an amended statement is easier to check against the original
+/// while both are enterable. The holding account is part of the key because
+/// the statement is issued per holder account — a fund held in two accounts
+/// legitimately has two statements for one year (SCENARIOS F-03).
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DuplicateAmmaStatement {
+    pub listing_id: i64,
+    pub ticker: String,
+    /// The financial year the statements attribute, identified by the
+    /// calendar year of their shared 30 June end (`domain::tax_year`).
+    pub tax_year: i32,
+    pub holding_account_id: i64,
+    /// How many statements share this (listing, year, account) — always ≥ 2.
+    pub statement_count: i64,
+    /// The ids sharing it, ascending, so the superseded row can be found and
+    /// deleted without a search.
+    pub statement_ids: Vec<i64>,
+}
+
+/// The grouped row behind [`DuplicateAmmaStatement`], shaped like
+/// [`DuplicateActionRow`]: SQLite returns the ids as one `GROUP_CONCAT`
+/// string, split into the public struct's `Vec<i64>` by
+/// [`db_duplicate_amma_statements`].
+#[derive(sqlx::FromRow)]
+struct DuplicateAmmaStatementRow {
+    listing_id: i64,
+    ticker: String,
+    tax_year_end_date: NaiveDate,
+    holding_account_id: i64,
+    statement_count: i64,
+    statement_ids: String,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct HealthReport {
     /// Latest `closing_prices` date stored with status ok, across every
@@ -150,6 +200,10 @@ pub struct HealthReport {
     /// action, newest first. Empty when no two actions of a type share a
     /// listing and date.
     pub duplicate_actions: Vec<DuplicateAction>,
+    /// Every (listing, financial year, holding account) carrying more than one
+    /// AMMA statement, newest year first. Empty when no fund-year has two
+    /// statements for one account.
+    pub duplicate_amma_statements: Vec<DuplicateAmmaStatement>,
 }
 
 /// Business days (Mon–Fri) strictly after `from`, up to and including `today`.
@@ -301,6 +355,54 @@ async fn db_duplicate_actions(
         .collect()
 }
 
+/// AMMA statements sharing a (listing, financial year, holding account) — see
+/// [`DuplicateAmmaStatement`].
+///
+/// Grouped in SQL on the caller's transaction, like [`db_duplicate_actions`]:
+/// one small aggregate over `amma_statements`. The year is grouped on
+/// `tax_year_end_date` itself rather than a derived year, which is the same
+/// thing — the column is a 30 June date, enforced at write time
+/// (`entities::amma::UpsertError::NotFinancialYearEnd`).
+async fn db_duplicate_amma_statements(
+    conn: &mut sqlx::SqliteConnection,
+) -> Result<Vec<DuplicateAmmaStatement>, sqlx::Error> {
+    let rows = sqlx::query_as::<_, DuplicateAmmaStatementRow>(
+        "SELECT a.listing_id AS listing_id, l.ticker AS ticker, \
+                a.tax_year_end_date AS tax_year_end_date, \
+                a.holding_account_id AS holding_account_id, \
+                COUNT(*) AS statement_count, GROUP_CONCAT(a.id) AS statement_ids \
+         FROM amma_statements a JOIN listings l ON l.id = a.listing_id \
+         GROUP BY a.listing_id, a.tax_year_end_date, a.holding_account_id \
+         HAVING COUNT(*) > 1 \
+         ORDER BY a.tax_year_end_date DESC, l.ticker, a.holding_account_id",
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    rows.into_iter()
+        .map(|row| {
+            // GROUP_CONCAT's order is unspecified, so sort rather than trust it.
+            let mut statement_ids = row
+                .statement_ids
+                .split(',')
+                .map(|id| {
+                    id.parse::<i64>().map_err(|e| {
+                        sqlx::Error::Decode(format!("AMMA statement id {id}: {e}").into())
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            statement_ids.sort_unstable();
+            Ok(DuplicateAmmaStatement {
+                listing_id: row.listing_id,
+                ticker: row.ticker,
+                tax_year: tax_year_for(row.tax_year_end_date),
+                holding_account_id: row.holding_account_id,
+                statement_count: row.statement_count,
+                statement_ids,
+            })
+        })
+        .collect()
+}
+
 /// Read the freshness facts on one snapshot. `today` and `now` are parameters
 /// so tests can pin the staleness thresholds and the "close is final yet"
 /// cut-off to fixed dates.
@@ -338,6 +440,7 @@ pub async fn db_health(
     .fetch_all(&mut *tx)
     .await?;
     let duplicate_actions = db_duplicate_actions(&mut tx).await?;
+    let duplicate_amma_statements = db_duplicate_amma_statements(&mut tx).await?;
     tx.commit().await?;
     let unpriced_days = db_unpriced_days(pool, now).await?;
 
@@ -355,6 +458,7 @@ pub async fn db_health(
         errored_prices,
         unpriced_days,
         duplicate_actions,
+        duplicate_amma_statements,
     })
 }
 
@@ -461,6 +565,7 @@ mod tests {
         assert!(h.errored_prices.is_empty());
         assert!(h.unpriced_days.is_empty());
         assert!(h.duplicate_actions.is_empty());
+        assert!(h.duplicate_amma_statements.is_empty());
     }
 
     #[tokio::test]
@@ -851,6 +956,33 @@ mod tests {
         .await;
     }
 
+    async fn amit_listing(pool: &SqlitePool, id: i64, ticker: &str) {
+        test_support::listing(id)
+            .ticker(ticker)
+            .amit(true)
+            .insert(pool)
+            .await;
+    }
+
+    /// An AMMA statement for `year_end`, in `holding_account_id`. Only the
+    /// grouping key matters here, so the amounts stay at the fixture's zeros.
+    async fn insert_amma(
+        pool: &SqlitePool,
+        id: i64,
+        listing_id: i64,
+        year_end: NaiveDate,
+        holding_account_id: i64,
+    ) {
+        test_support::amma(id, listing_id)
+            .with(|a| {
+                a.tax_year_end_date = year_end;
+                a.date_received = year_end + Duration::days(60);
+                a.holding_account_id = holding_account_id;
+            })
+            .insert(pool)
+            .await;
+    }
+
     async fn insert_split(pool: &SqlitePool, id: i64, listing_id: i64, date: NaiveDate) {
         insert_action(
             pool,
@@ -951,6 +1083,81 @@ mod tests {
         assert_eq!(h.duplicate_actions.len(), 1);
         assert_eq!(h.duplicate_actions[0].action_count, 3);
         assert_eq!(h.duplicate_actions[0].action_ids, vec![7, 8, 9]);
+    }
+
+    /// SCENARIOS F-06: an amended AMMA statement entered as a second row
+    /// instead of over the original. Both are counted by every reader, so the
+    /// pair is named — newest year first, with the ids ascending.
+    #[tokio::test]
+    async fn duplicated_amma_statements_are_reported_with_their_ids() {
+        let pool = test_pool().await;
+        amit_listing(&pool, 1, "VDHG").await;
+        amit_listing(&pool, 2, "HNDQ").await;
+        // VDHG FY2025: the original and its amendment.
+        insert_amma(&pool, 1, 1, ymd(2025, 6, 30), 1).await;
+        insert_amma(&pool, 2, 1, ymd(2025, 6, 30), 1).await;
+        // HNDQ FY2024: the same mistake a year earlier.
+        insert_amma(&pool, 3, 2, ymd(2024, 6, 30), 1).await;
+        insert_amma(&pool, 4, 2, ymd(2024, 6, 30), 1).await;
+
+        let h = health(&pool, ymd(2026, 7, 13)).await;
+        assert_eq!(h.duplicate_amma_statements.len(), 2);
+        let fy25 = &h.duplicate_amma_statements[0];
+        assert_eq!(fy25.ticker, "VDHG");
+        assert_eq!(fy25.listing_id, 1);
+        assert_eq!(fy25.tax_year, 2025);
+        assert_eq!(fy25.holding_account_id, 1);
+        assert_eq!(fy25.statement_count, 2);
+        assert_eq!(fy25.statement_ids, vec![1, 2]);
+        let fy24 = &h.duplicate_amma_statements[1];
+        assert_eq!(fy24.ticker, "HNDQ");
+        assert_eq!(fy24.tax_year, 2024);
+        assert_eq!(fy24.statement_ids, vec![3, 4]);
+    }
+
+    /// The key is all three parts. Two accounts of one fund-year are the
+    /// legitimate case the warning must stay silent on (SCENARIOS F-03: a
+    /// registry issues one statement per holder account), and two years or
+    /// two listings are ordinary entry.
+    #[tokio::test]
+    async fn statements_differing_in_listing_year_or_account_are_not_duplicates() {
+        let pool = test_pool().await;
+        amit_listing(&pool, 1, "VDHG").await;
+        amit_listing(&pool, 2, "HNDQ").await;
+        crate::entities::holding_account::db_upsert(
+            &pool,
+            &crate::entities::holding_account::HoldingAccount {
+                id: 2,
+                name: "Second".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        // Same listing and year, different holding account.
+        insert_amma(&pool, 1, 1, ymd(2025, 6, 30), 1).await;
+        insert_amma(&pool, 2, 1, ymd(2025, 6, 30), 2).await;
+        // Same listing and account, different year.
+        insert_amma(&pool, 3, 1, ymd(2024, 6, 30), 1).await;
+        // Same year and account, different listing.
+        insert_amma(&pool, 4, 2, ymd(2025, 6, 30), 1).await;
+
+        let h = health(&pool, ymd(2026, 7, 13)).await;
+        assert!(h.duplicate_amma_statements.is_empty());
+    }
+
+    /// Three of a kind is one row counting three, as on the actions side.
+    #[tokio::test]
+    async fn three_statements_for_one_fund_year_are_one_row_counting_three() {
+        let pool = test_pool().await;
+        amit_listing(&pool, 1, "VDHG").await;
+        insert_amma(&pool, 7, 1, ymd(2025, 6, 30), 1).await;
+        insert_amma(&pool, 8, 1, ymd(2025, 6, 30), 1).await;
+        insert_amma(&pool, 9, 1, ymd(2025, 6, 30), 1).await;
+
+        let h = health(&pool, ymd(2026, 7, 13)).await;
+        assert_eq!(h.duplicate_amma_statements.len(), 1);
+        assert_eq!(h.duplicate_amma_statements[0].statement_count, 3);
+        assert_eq!(h.duplicate_amma_statements[0].statement_ids, vec![7, 8, 9]);
     }
 
     #[tokio::test]

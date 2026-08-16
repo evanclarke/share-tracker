@@ -618,3 +618,68 @@ Tests: `reports::amit_cash_cross_check::tests::db_amma_in_another_holding_accoun
 alerts, cleared one at a time), `reports::tax_report::tests::amma_missing_asks_each_holding_account_for_its_own_statement`,
 and `doc_checks::amma_coverage_is_documented_as_per_holding_account`. Full suite 1491 passed / 0
 failed.
+
+## Two AMMA statements for the same fund and year are silently double-counted (SCENARIOS F-06)
+(SCENARIOS.md section F verification pass, 2026-08-16. `amma::db_upsert`
+(`src/entities/amma.rs:192`) validates only that `tax_year_end_date` is a 30 June date — nothing,
+in Rust or in the schema, stops a second statement for the same `(listing_id, tax_year_end_date,
+holding_account_id)`. Every reader then counts both: the tax summary's `amma_*` lines
+(`src/reports/tax_summary.rs:471`), the net-capital-gain report's gain buckets
+(`src/reports/net_capital_gain.rs:684`), and — because the duplicate-parcel UNIQUE index of
+migration 0022 is per *statement* — a second generated adjustment set reducing every parcel a
+second time. This is the AMMA counterpart of E-03's duplicated corporate action, which was closed
+with a health warning in `e15e60a`.)
+- [x] F-06 — reproduced: VDHG, Buy ×1000, statement #1 for FY2025 (`other_income` 300,
+  `cgt_discount_gains` 100, `cost_base_adjustment` 0.20), then the fund's **amended** statement
+  entered as #2 (350 / 120 / 0.25) instead of editing #1. Both `PUT`s answer `204`; generation
+  succeeds on each. Result: tax summary `amma_other_income` 650 and `amma_cgt_discount_gains` 220,
+  net capital gain `discount_eligible_gains` 440 (both statements grossed up), and the parcel's
+  `amit_cost_base_reduction` 450 (200 + 250) — every figure the sum of the original and its
+  replacement
+- [x] Nothing surfaces it: the AMIT adjustment cross-check reconciles both sets (each matches its
+  own statement's `units_held`), the AMIT cash cross-check sees the year as covered, and
+  `/reports/health` has no equivalent of `duplicate_actions` (`src/reports/health.rs:265`)
+- [x] **Decided 2026-08-16 (Evan): a health-report warning, like E-03** — non-blocking, no
+  uniqueness constraint, so an amended statement stays enterable beside the original while the two
+  are compared. The options weighed were: (a) refuse a second statement for
+  the same (listing, year, holding account) at write time — safest, but an amended statement then
+  has to be entered by editing the original row, and the audit trail of what the first one said
+  lives only in `row_history`; (b) a non-blocking `duplicate_amma_statements` health warning, the
+  E-03 precedent, keeping both rows enterable; (c) document it. Note the account is part of the
+  key either way (F-03 shows two accounts legitimately have two statements for one fund-year)
+
+**Resolution (2026-08-16): a `reports::health` warning, as decided — non-blocking, no constraint.**
+
+`GET /reports/health` gained `duplicate_amma_statements`: one row per (listing, financial year,
+holding account) carrying more than one AMMA statement, newest year first, as
+`{ listing_id, ticker, tax_year, holding_account_id, statement_count, statement_ids }` — the ids
+ascending, so the superseded row is opened and deleted without a search. Grouped in SQL on the
+health report's own read transaction, beside `duplicate_actions`, which it is modelled on
+line-for-line.
+
+The holding account is part of the key, not an afterthought: a fund held in two accounts
+legitimately has two statements for one year (SCENARIOS F-03), so keying on (listing, year) alone
+would have made the warning fire on correct data. Grouping is on `tax_year_end_date` itself — the
+column is a 30 June date, enforced at write time — and the reported `tax_year` comes from
+`domain::tax_year::tax_year_for`, so the row reads in the same FY terms as every other report.
+
+The web UI's cross-view banner names it — count, ticker, FY, ids, with "every figure is counted
+once per statement; delete the superseded one unless both are real" — and links to AMMA Statements
+beside the existing Jobs, Closing Prices and Corporate Actions links. Verified end to end against a
+running server: two FY2025 statements for one account produce the banner, and deleting the
+superseded one clears it.
+
+`docs/API.md`'s health section states the field, why it compounds (both the income/gains
+double-count and the second generated adjustment set, since the one-adjustment-per-parcel UNIQUE
+index is per statement), the recorded decision that this is deliberately *not* a uniqueness
+constraint — a registry change mid-year or a fund merger leaves two genuine part-year statements
+for one account — and the way out (delete the superseded statement, `422` while its AMIT
+adjustments are still stored). The README's monitoring bullet lists it alongside the duplicated
+corporate action.
+
+Tests: `reports::health::tests::duplicated_amma_statements_are_reported_with_their_ids` (F-06's
+amended statement, two fund-years, newest first, with the ids),
+`statements_differing_in_listing_year_or_account_are_not_duplicates` (the key is all three parts —
+the two-account case stays silent), `three_statements_for_one_fund_year_are_one_row_counting_three`,
+`empty_database_reports_nothing_stale` (extended), and `web::tests::health_banner_ui_present`.
+Full suite 1494 passed / 0 failed.
