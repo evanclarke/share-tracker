@@ -64,7 +64,11 @@ pub struct TaxYearSummary {
     /// dividend whose shares fail the 45-day at-risk holding-period rule (90
     /// days for preference shares) are excluded, unless the small-shareholder
     /// exemption applies — total attached credits in the year below A$5,000
-    /// (see `reports::franking`).
+    /// (see `reports::franking`). The walk is anchored on the date the units
+    /// went ex (`Income::ex_or_pay_date`); a dividend with no such date
+    /// recorded falls back to the payment date, which cannot see a disposal
+    /// made before it — `reports::franking_at_risk` lists those as
+    /// `untested_no_ex_date` rather than leaving the gap silent.
     pub franking_credits: Decimal,
     /// Franking credits attached but denied by the holding-period rule (the
     /// amount excluded from `franking_credits`).

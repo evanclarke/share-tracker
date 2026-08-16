@@ -298,9 +298,17 @@ pub struct FrankedDividend {
     pub tax_year: i32,
     pub listing_id: i64,
     pub date_paid: NaiveDate,
-    /// Ex-dividend date; falls back to the payment date when not recorded
-    /// (a dividend is never paid before its shares go ex-dividend).
+    /// Ex-dividend date: the recorded one, else a trust row's entitlement
+    /// date (the distribution period's end — when the units went ex), else
+    /// the payment date (a dividend is never paid before its shares go
+    /// ex-dividend). See `Income::ex_or_pay_date`.
     pub ex_date: NaiveDate,
+    /// False when `ex_date` above is the payment-date fallback rather than a
+    /// date the statement fixed — the walk still runs on it, but a disposal
+    /// between the real ex date and the payment date is invisible to it, so
+    /// the answer is not reliable. The franking at-risk report reports these
+    /// as `untested_no_ex_date` (SCENARIOS G-11).
+    pub ex_date_recorded: bool,
     /// Attached franking credits, converted to AUD at the assessment month.
     pub credits_aud: Decimal,
 }
@@ -348,6 +356,7 @@ pub async fn db_franked_dividends(
             listing_id: income.listing_id,
             date_paid: income.date_paid,
             ex_date: income.ex_or_pay_date(),
+            ex_date_recorded: income.ex_date_recorded(),
             credits_aud,
         });
         *attached_by_year.entry(tax_year).or_default() += credits_aud;

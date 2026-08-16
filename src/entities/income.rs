@@ -144,8 +144,8 @@ impl Income {
     }
 
     /// The date the distribution went ex — the date the entitlement to it was
-    /// fixed — falling back to the payment date when the statement didn't
-    /// record one.
+    /// fixed — falling back to a trust row's `entitlement_date` and then to
+    /// the payment date when the statement didn't record one.
     ///
     /// Distinct from [`Self::assessment_date`]: that is *when the income is
     /// taxed*, this is *who was entitled to it*. The two rules the entitlement
@@ -153,11 +153,56 @@ impl Income {
     /// holding when the distribution went ex
     /// (`entities::drp_reinvestment`, since participation is fixed at the
     /// record date), and the start of the franking holding-period window the
-    /// at-risk test measures (`reports::franking`). The fallback is the
-    /// conservative one: with no ex date recorded, the payment date is the
-    /// latest the entitlement can have been fixed.
+    /// at-risk test measures (`reports::franking`).
+    ///
+    /// The middle step is what makes a trust distribution testable at all
+    /// (SCENARIOS G-20). Units go ex at the end of the distribution period,
+    /// and `entitlement_date` *is* that period's end — so on a statement that
+    /// prints no ex date it is the entitlement anchor, and the payment date
+    /// (often weeks later) is not. Anchoring on payment was silently
+    /// anti-conservative for franking: a disposal between the real ex date and
+    /// the payment date left the units unentitled in the walk, so the credits
+    /// the holding-period rule denies were claimed in full.
+    ///
+    /// The last step remains the payment date, the latest the entitlement can
+    /// have been fixed; [`Self::ex_date_recorded`] says when the answer rests
+    /// on it, so a franking test that could not really be run is surfaced
+    /// rather than passing quietly.
     pub fn ex_or_pay_date(&self) -> NaiveDate {
-        self.ex_date.unwrap_or(self.date_paid)
+        self.ex_date
+            .or(self.trust_entitlement_date())
+            .unwrap_or(self.date_paid)
+    }
+
+    /// The entitlement date of a trust row, `None` on any other row — the
+    /// middle step of [`Self::ex_or_pay_date`]. (Write-time validation keeps
+    /// the column off non-trust rows, so the guard only restates that
+    /// invariant, as in [`Self::assessment_date`].)
+    fn trust_entitlement_date(&self) -> Option<NaiveDate> {
+        self.entitlement_date.filter(|_| self.trust_income)
+    }
+
+    /// Whether [`Self::ex_or_pay_date`] is a date the statement actually
+    /// fixed the entitlement on (a recorded `ex_date`, or a trust row's
+    /// `entitlement_date`) rather than the payment-date fallback.
+    ///
+    /// False means the franking holding-period walk is anchored on a date up
+    /// to weeks after the shares really went ex, so its answer is not
+    /// reliable — a disposal in between is invisible to it. The franking
+    /// at-risk report carries such a dividend as `untested_no_ex_date`
+    /// (SCENARIOS G-11), which is why an empty report can be read as an
+    /// all-clear.
+    ///
+    /// A buy-back's dividend component (`buyback_trade_id` set) is true
+    /// without either date: it arises from the tender itself, so its
+    /// `date_paid` — the participation date, written by the operation, not by
+    /// a user — *is* the day the entitlement was fixed, and the walk measures
+    /// exactly the days the tendered units were held before it (SCENARIOS
+    /// E-31). Nothing there is falling back.
+    pub fn ex_date_recorded(&self) -> bool {
+        self.ex_date.is_some()
+            || self.trust_entitlement_date().is_some()
+            || self.buyback_trade_id.is_some()
     }
 
     /// The distribution's gross cash components in its own currency:
@@ -791,6 +836,47 @@ mod tests {
             .build();
         assert_eq!(trust.ex_or_pay_date(), ymd(2024, 6, 20));
         assert_eq!(trust.assessment_date(), ymd(2024, 6, 30));
+    }
+
+    /// SCENARIOS G-20. A trust statement rarely prints an ex date, but its
+    /// entitlement date *is* the distribution period's end — the day the units
+    /// went ex — so it anchors the entitlement in place of the payment date,
+    /// which can be weeks later. `ex_date_recorded` says which rows rest on
+    /// the payment-date fallback and are therefore not really testable.
+    #[test]
+    fn a_trust_rows_entitlement_date_anchors_the_entitlement_before_the_pay_date() {
+        let paid = ymd(2025, 7, 20);
+        let trust = test_support::income(1, 1, paid)
+            .with(|i| {
+                i.trust_income = true;
+                i.entitlement_date = Some(ymd(2025, 6, 30));
+            })
+            .build();
+        assert_eq!(trust.ex_or_pay_date(), ymd(2025, 6, 30));
+        assert!(trust.ex_date_recorded());
+
+        // A recorded ex date still wins over it.
+        let both = test_support::income(1, 1, paid)
+            .with(|i| {
+                i.trust_income = true;
+                i.ex_date = Some(ymd(2025, 7, 1));
+                i.entitlement_date = Some(ymd(2025, 6, 30));
+            })
+            .build();
+        assert_eq!(both.ex_or_pay_date(), ymd(2025, 7, 1));
+
+        // Neither date: the payment-date fallback, flagged as such.
+        let bare = test_support::income(1, 1, paid).build();
+        assert_eq!(bare.ex_or_pay_date(), paid);
+        assert!(!bare.ex_date_recorded());
+
+        // A buy-back's dividend component is fixed by the tender itself, so
+        // its payment date is not a fallback (SCENARIOS E-31).
+        let buyback = test_support::income(1, 1, paid)
+            .with(|i| i.buyback_trade_id = Some(7))
+            .build();
+        assert_eq!(buyback.ex_or_pay_date(), paid);
+        assert!(buyback.ex_date_recorded());
     }
 
     /// `is_foreign_only` is the Australian-side content test the annual tax

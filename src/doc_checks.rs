@@ -225,6 +225,27 @@ fn amma_coverage_is_documented_as_per_holding_account() {
     assert!(README_MD.contains("per holding account"));
 }
 
+/// Docs-sync pin for SCENARIOS G-11/G-20: what anchors the franking
+/// holding-period window, and that a dividend with no such date is reported
+/// rather than passing quietly — the promise that makes an empty franking
+/// at-risk report readable as an all-clear.
+#[test]
+fn the_franking_windows_anchor_and_its_untested_rows_are_documented() {
+    // The fallback chain, on the Income section that owns the dates.
+    assert!(API_MD.contains("the recorded `ex_date`, else — on a trust row — `entitlement_date`"));
+    // The DRP participation check resolves the same way.
+    assert!(API_MD.contains(
+        "falling back to a trust distribution's `entitlement_date` — the distribution period's end"
+    ));
+    // The report's third status, and what closes it.
+    assert!(API_MD.contains(
+        "`untested_no_ex_date` — credits are attached but no entitlement date was recorded"
+    ));
+    assert!(API_MD.contains("an *empty* report can be read as an all-clear"));
+    assert!(API_MD.contains("`ex_date_recorded` (false when that is the payment-date fallback)"));
+    assert!(README_MD.contains("an empty report really does mean every credit is claimable"));
+}
+
 #[test]
 fn known_limitations_document_gifts_at_market_value() {
     let limitations = known_limitations();

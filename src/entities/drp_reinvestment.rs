@@ -1174,6 +1174,50 @@ mod tests {
         assert!(matches!(err, ReinvestError::NotEnrolled { .. }));
     }
 
+    /// SCENARIOS G-20. A trust statement rarely prints an ex date, but its
+    /// entitlement date is the distribution period's end — when the units went
+    /// ex — so it decides participation ahead of the payment date, which can
+    /// be weeks later and on the far side of an unenrolment.
+    #[tokio::test]
+    async fn a_trust_rows_entitlement_date_decides_participation_before_the_pay_date() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AUD").await;
+        enrol_period(
+            &pool,
+            1,
+            1,
+            "2024-01-01",
+            Some("2024-07-05"),
+            ResidualHandling::CarryForward,
+        )
+        .await;
+
+        // Entitled 30 June (inside the period), paid 20 July (after the
+        // unenrolment): the units were enrolled when they went ex.
+        test_support::income(1, 1, "2024-07-20".parse().unwrap())
+            .with(|i| {
+                i.trust_income = true;
+                i.entitlement_date = Some("2024-06-30".parse().unwrap());
+                i.unfranked_amount = Decimal::from(100);
+            })
+            .insert(&pool)
+            .await;
+        let trade = db_reinvest(&pool, 1, &body("9")).await.unwrap();
+        assert_eq!(trade.quantity, Decimal::from(11));
+
+        // The same row without the entitlement date falls back to the pay
+        // date, which the enrolment no longer covers.
+        test_support::income(2, 1, "2024-07-20".parse().unwrap())
+            .with(|i| {
+                i.trust_income = true;
+                i.unfranked_amount = Decimal::from(100);
+            })
+            .insert(&pool)
+            .await;
+        let err = db_reinvest(&pool, 2, &body("9")).await.unwrap_err();
+        assert!(matches!(err, ReinvestError::NotEnrolled { .. }));
+    }
+
     #[tokio::test]
     async fn carried_residual_does_not_cross_an_unenrolment() {
         let pool = test_pool().await;

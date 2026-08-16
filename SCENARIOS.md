@@ -70,7 +70,7 @@ behind or became a recorded finding.
 | D. Sells and parcel allocation | 20 | 2026-08-15 | 2 raised, both closed — see below |
 | E. Corporate actions | 51 | 2026-08-16 | 5 raised, all closed — see below |
 | F. AMIT / AMMA | 25 | 2026-08-16 | 6 raised, all closed — see below |
-| G. Dividends, franking, and the holding-period rule | 25 | 2026-08-16 | 6 raised — see below |
+| G. Dividends, franking, and the holding-period rule | 25 | 2026-08-16 | 6 raised, 1 closed — see below |
 | H. Interest, expenses, and other income | 10 | — | — |
 | I. DRP | 14 | — | — |
 | J. Employee share schemes | 14 | — | — |
@@ -383,7 +383,7 @@ The six findings, each raised as a `TODO.md` section naming its scenario ids:
 
 | Finding | Scenarios | Status |
 | --- | --- | --- |
-| A franked dividend with no ex-date silently passes the holding-period test | G-11, G-20 | open |
+| A franked dividend with no ex-date silently passes the holding-period test | G-11, G-20 | fixed 2026-08-17 — archived in [`DONE/tax-domain.md`](DONE/tax-domain.md) |
 | Conduit foreign income is excluded from assessable income with no stated entry convention | G-03 | open |
 | A franking credit is accepted with no dividend behind it | G-25 | open |
 | Duplicate income rows are silently double-counted | G-24 | open |

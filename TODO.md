@@ -10,32 +10,6 @@ findings are all closed in DONE.md), except where a section's heading names anot
 (e.g. REQUIREMENTS, SCENARIOS). Each section records one finding; sections land in DONE.md as they
 are fixed or decided.
 
-## A franked dividend with no ex-date silently passes the holding-period test (SCENARIOS G-11, G-20)
-(SCENARIOS.md section G verification pass, 2026-08-16. `Income::ex_or_pay_date` falls back to
-`date_paid` when no `ex_date` was recorded, and the whole 45-day walk — entitlement snapshot and
-qualification window alike — is anchored on that date.)
-- [ ] G-11 — 1,000 units bought 1 Jan, 400 sold 20 Jan (19 at-risk days), dividend ex 10 Jan and
-  **paid 10 Feb** with $6,000 of credits attached: with `ex_date` recorded the walk denies $2,400,
-  as it should. With `ex_date` left blank the same facts deny **nothing** — the walk snapshots
-  entitlement at 10 Feb, by which time the 400 units are gone, so they are never entitled and never
-  disqualified. The credits are claimed in full and `GET /reports/franking_at_risk` is empty
-- [ ] The fallback only works when the disposal is *after* the payment date (the shape
-  `tax_summary::tests::db_missing_ex_date_falls_back_to_date_paid` pins). A disposal in the
-  ex-date-to-payment window — the exact window the rule exists to catch — is invisible
-- [ ] G-20 — the common case is a trust distribution: units bought 1 June, **entitlement date
-  30 June**, units sold 5 July, paid 20 July, $6,000 of credits. 33 days at risk, so the credits
-  fail the rule; the system claims all of them. `entitlement_date` is deliberately not the franking
-  anchor (`docs/API.md` Income, REQUIREMENTS 2026-06-xx) and no ex-date is printed on most trust
-  statements, so nothing anchors the walk
-- [ ] **Needs a decision.** Options, not exclusive: (a) reject a row with attached
-  `franking_credits` and no `ex_date` (`422` — the strongest, but every historical row was entered
-  without one); (b) for a trust row fall back to `entitlement_date` before `date_paid` (a distribution
-  goes ex at the period end, so this is the *right* proxy, and it fixes G-20 but not G-11);
-  (c) surface it — a `franking_at_risk` row or health warning "credits attached, no ex-date recorded:
-  the holding-period test could not be applied", which fails safe by naming what wasn't tested
-- [ ] Tests: the G-11 shape denies $2,400 whether or not the ex-date is recorded (or is flagged as
-  untestable), and the G-20 trust shape reaches the same answer as the same facts with an ex-date
-
 ## Conduit foreign income is excluded from assessable income with no stated entry convention (SCENARIOS G-03)
 (SCENARIOS.md section G verification pass, 2026-08-16.)
 - [ ] G-03 — an `income` row with `unfranked_amount` 100 and `conduit_foreign_income` 40 reports
@@ -112,7 +86,10 @@ E-03 `duplicate_actions` and F-06 `duplicate_amma_statements` findings.)
   `franking_credits` field — while that section states "an empty report means every attached credit
   is claimable", which claims more certainty than the recorded data can support
 - [ ] Documentation-only, like the C-09 rollover scope cut: state the two unmodelled tests, and
-  soften the empty-report sentence to the days-held test it actually performs
+  qualify the empty-report sentence with them. Note that G-11's fix has since made that sentence
+  *true for what the report does test* (a dividend the walk cannot anchor is now listed as
+  `untested_no_ex_date`), so the qualification to add is about the tests that are not modelled at
+  all, not about the walk's coverage
 - [ ] Tests: `doc_checks` pins the Known-limitations entry and the reworded report section
 
 ## The LIC capital gain deduction field takes the already-halved figure, undocumented (SCENARIOS G-04)

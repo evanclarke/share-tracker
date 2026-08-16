@@ -1018,3 +1018,76 @@ One incidental fix the migration forced out: `entities::listing_rename` read the
 hand-spelled column list rather than `Listing::COLUMNS`, so the new column broke it at run time
 (seven tests). It now uses the entity's own constant — the rule CLAUDE.md already states, and the
 reason it states it.
+
+## A franked dividend with no ex-date silently passes the holding-period test (SCENARIOS G-11, G-20)
+(SCENARIOS.md section G verification pass, 2026-08-16. `Income::ex_or_pay_date` falls back to
+`date_paid` when no `ex_date` was recorded, and the whole 45-day walk — entitlement snapshot and
+qualification window alike — is anchored on that date.)
+- [x] G-11 — 1,000 units bought 1 Jan, 400 sold 20 Jan (19 at-risk days), dividend ex 10 Jan and
+  **paid 10 Feb** with $6,000 of credits attached: with `ex_date` recorded the walk denies $2,400,
+  as it should. With `ex_date` left blank the same facts deny **nothing** — the walk snapshots
+  entitlement at 10 Feb, by which time the 400 units are gone, so they are never entitled and never
+  disqualified. The credits are claimed in full and `GET /reports/franking_at_risk` is empty
+- [x] The fallback only works when the disposal is *after* the payment date (the shape
+  `tax_summary::tests::db_missing_ex_date_falls_back_to_date_paid` pins). A disposal in the
+  ex-date-to-payment window — the exact window the rule exists to catch — is invisible
+- [x] G-20 — the common case is a trust distribution: units bought 1 June, **entitlement date
+  30 June**, units sold 5 July, paid 20 July, $6,000 of credits. 33 days at risk, so the credits
+  fail the rule; the system claims all of them. `entitlement_date` is deliberately not the franking
+  anchor (`docs/API.md` Income, REQUIREMENTS 2026-06-xx) and no ex-date is printed on most trust
+  statements, so nothing anchors the walk
+- [x] **Needs a decision.** Options, not exclusive: (a) reject a row with attached
+  `franking_credits` and no `ex_date` (`422` — the strongest, but every historical row was entered
+  without one); (b) for a trust row fall back to `entitlement_date` before `date_paid` (a distribution
+  goes ex at the period end, so this is the *right* proxy, and it fixes G-20 but not G-11);
+  (c) surface it — a `franking_at_risk` row or health warning "credits attached, no ex-date recorded:
+  the holding-period test could not be applied", which fails safe by naming what wasn't tested
+- [x] Tests: the G-11 shape denies $2,400 whether or not the ex-date is recorded (or is flagged as
+  untestable), and the G-20 trust shape reaches the same answer as the same facts with an ex-date
+
+- [x] **Decided 2026-08-17 (Evan): options (b) and (c)** — anchor a trust row on its
+  `entitlement_date`, and surface the dividends that still cannot be anchored. Rejecting the write
+  (option a) was considered and rejected: every historical row was entered without an ex date
+
+**Resolution (2026-08-17): the entitlement anchor is a chain, and what it cannot answer is
+reported.**
+
+`Income::ex_or_pay_date` now resolves the date the entitlement was fixed as `ex_date` →
+`entitlement_date` (trust rows only) → `date_paid`, instead of skipping the middle step. That is
+the *right* proxy rather than a convenient one: units go ex at the end of the distribution period,
+and `entitlement_date` is that period's end — which is why a trust statement prints it and no ex
+date. Both readers of the date follow, because both ask the same question (who was entitled):
+the franking holding-period walk (`reports::franking`) and the DRP participation check
+(`entities::drp_reinvestment`, where a distribution entitled inside an enrolment period but paid
+after the unenrolment now correctly reinvests).
+
+The G-20 shape is what changes: units bought 1 June, entitled 30 June, sold 5 July, paid 20 July,
+$6,000 of credits. Anchored on payment, the walk found nothing held at 20 July, so the units were
+never entitled and nothing was denied — the credits were claimed in full. Anchored on 30 June it
+denies all $6,000, the same answer the facts give with an ex date recorded.
+
+The residual case is a dividend with neither date (G-11): the walk still falls back to the payment
+date, which cannot see a disposal made before it. `Income::ex_date_recorded` marks those rows, and
+`GET /reports/franking_at_risk` now lists each one as `status: "untested_no_ex_date"` — nothing
+denied, nothing at risk, just the dividend, its credits and the fact that the rule was never really
+applied to it. Every row also carries `ex_date_recorded`, so a *denial* found on the fallback date
+(which the tax summary does exclude) says the figure rests on it. That is what makes the report's
+standing promise true: an empty report now means every attached credit is claimable. A buy-back's
+dividend component is never untested — its `date_paid` is the tender date, which is exactly when
+the entitlement was fixed (E-31), so nothing there is falling back.
+
+Docs: the Income section states the chain and why anchoring a trust row on payment was wrong in one
+direction only; the DRP reinvestment section resolves its ex date the same way; the franking at-risk
+section lists the three statuses with `ex_date_recorded`; the README's foresight bullet says an
+empty report really does mean every credit is claimable; the report's `desc` in `config.js` explains
+the new status in the UI. No schema change — no new column, no migration.
+
+Tests: `entities::income::tests::a_trust_rows_entitlement_date_anchors_the_entitlement_before_the_pay_date`
+(the chain, including the buy-back exception),
+`reports::franking_at_risk::tests::db_a_trust_rows_entitlement_date_anchors_the_holding_period_walk`
+(G-20 end to end: the same $6,000 denied with and without the ex date recorded),
+`db_a_dividend_with_no_ex_date_is_reported_as_untested` (G-11: the untested row, and recording the
+ex date resolving it into a $2,400 denial), `db_a_denial_found_on_the_fallback_date_is_still_a_denial`,
+`entities::drp_reinvestment::tests::a_trust_rows_entitlement_date_decides_participation_before_the_pay_date`,
+`doc_checks::the_franking_windows_anchor_and_its_untested_rows_are_documented`, and
+`web::tests::franking_at_risk_ui_present` (extended). Full suite 1522 passed / 0 failed.

@@ -1088,6 +1088,9 @@ mod tests {
         assert!(js.contains("/reports/franking_at_risk"));
         assert!(js.contains("'franking-what-if'"));
         assert!(js.contains("/reports/franking_at_risk/what-if"));
+        // The report's third status is explained where the report is described
+        // (SCENARIOS G-11): a row the rule could not be applied to at all.
+        assert!(js.contains("untested_no_ex_date"));
         // Surfaced in the Sell flow: the Sells list and the Sell form link to
         // the foresight reports.
         assert!(js.contains("function sellForesightLinks()"));

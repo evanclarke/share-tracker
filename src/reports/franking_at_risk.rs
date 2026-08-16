@@ -9,6 +9,14 @@
 //! what-if mode injects a contemplated Sell into that walk so disposals can
 //! be timed to keep the credits (selling after a dividend's window end can
 //! no longer disqualify it). See `docs/ato/you-and-your-shares-dividends.md`.
+//!
+//! It also lists the dividends the rule could not be applied to at all —
+//! credits attached, no ex date and (on a trust row) no entitlement date
+//! recorded, so the walk falls back to the payment date and a disposal in
+//! between is invisible to it (`untested_no_ex_date`, SCENARIOS G-11). Those
+//! rows deny nothing; they are here so that an *empty* report can be read as
+//! "every attached credit is claimable", which is the only thing that makes
+//! the silence elsewhere meaningful.
 
 use crate::infra::fx::FxRates;
 use crate::infra::http::ApiError;
@@ -23,7 +31,8 @@ use std::collections::HashMap;
 /// A dividend whose entitled shares fail the holding-period walk — its
 /// credits are denied, unless the year's small-shareholder exemption shields
 /// them (`status` says which; `credits_denied` is what the tax summary
-/// actually excludes).
+/// actually excludes) — or one whose walk could not be anchored at all
+/// (`untested_no_ex_date`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FrankingAtRiskAlert {
     /// The `income` row id.
@@ -33,8 +42,14 @@ pub struct FrankingAtRiskAlert {
     /// Financial year the credits count for (calendar year of its 30 June end).
     pub tax_year: i32,
     pub date_paid: NaiveDate,
-    /// Ex-dividend date (the payment date when no ex-date was recorded).
+    /// The date the walk is anchored on: the recorded ex-date, else a trust
+    /// row's entitlement date, else the payment-date fallback.
     pub ex_date: NaiveDate,
+    /// False when `ex_date` is that fallback — the statement fixed no
+    /// entitlement date, so the window may start weeks late and a disposal in
+    /// between is invisible to the walk. Every figure on such a row is
+    /// unreliable in both directions.
+    pub ex_date_recorded: bool,
     /// 45, or 90 for preference shares — the at-risk days required.
     pub required_days: i64,
     /// The qualification window runs from `ex_date` to here. A disposal
@@ -52,8 +67,13 @@ pub struct FrankingAtRiskAlert {
     /// What the tax summary actually denies: `credits_at_risk`, or zero when
     /// the small-shareholder exemption applies.
     pub credits_denied: Decimal,
-    /// `denied`, or `exempt_small_shareholder` (the year's attached credits
-    /// are under A$5,000, so the rule doesn't apply).
+    /// `denied`; `exempt_small_shareholder` (the year's attached credits are
+    /// under A$5,000, so the rule doesn't apply); or `untested_no_ex_date` —
+    /// credits are attached, no entitlement date was recorded, and the
+    /// payment-date walk found nothing to deny, so the holding-period rule
+    /// was never really applied to this dividend. Record the ex date (or, on
+    /// a trust distribution, the entitlement date) and the row resolves into
+    /// a real answer either way.
     pub status: String,
 }
 
@@ -130,7 +150,13 @@ pub async fn db_franking_at_risk(
     let mut alerts = Vec::new();
     for div in &dividends {
         let test = walks.test(div.listing_id, div.ex_date);
-        if test.disqualified_units.is_zero() {
+        // A dividend the walk cannot anchor is listed even though it denies
+        // nothing (SCENARIOS G-11): its silence is what an empty report must
+        // not be read as. One the walk *did* find a denial in is reported as
+        // that denial — it is what the tax summary excludes — with
+        // `ex_date_recorded` saying the figure rests on the fallback date.
+        let untested = !div.ex_date_recorded && test.disqualified_units.is_zero();
+        if test.disqualified_units.is_zero() && !untested {
             continue;
         }
         let ticker = tickers.get(&div.listing_id).cloned().unwrap_or_default();
@@ -144,6 +170,7 @@ pub async fn db_franking_at_risk(
             tax_year: div.tax_year,
             date_paid: div.date_paid,
             ex_date: div.ex_date,
+            ex_date_recorded: div.ex_date_recorded,
             required_days: days,
             window_end: div.ex_date + Duration::days(days),
             entitled_units: test.entitled_units,
@@ -151,7 +178,9 @@ pub async fn db_franking_at_risk(
             credits_attached: div.credits_aud,
             credits_at_risk: at_risk,
             credits_denied: if exempt { Decimal::ZERO } else { at_risk },
-            status: if exempt {
+            status: if untested {
+                "untested_no_ex_date"
+            } else if exempt {
                 "exempt_small_shareholder"
             } else {
                 "denied"
@@ -583,6 +612,118 @@ mod tests {
         let summary = tax_summary::db_tax_summary(&pool).await.unwrap();
         assert_eq!(summary[0].franking_credits_denied, Decimal::from(2400));
         assert_eq!(summary[0].franking_credits, Decimal::from(3600));
+    }
+
+    /// SCENARIOS G-20. A trust distribution's units go ex at the end of the
+    /// distribution period, which is what `entitlement_date` records — so a
+    /// statement printing no ex date is still tested, and reaches the same
+    /// answer as the same facts with the ex date recorded. Anchoring on the
+    /// payment date (weeks later, after the units were sold) denied nothing.
+    #[tokio::test]
+    async fn db_a_trust_rows_entitlement_date_anchors_the_holding_period_walk() {
+        async fn credits_denied(pool: &SqlitePool, ex_date: Option<NaiveDate>) -> Decimal {
+            insert_listing(pool, 1, "TRU").await;
+            insert_buy(pool, 1, 1, ymd(2025, 6, 1), 1000).await;
+            // Entitled at 30 June, sold 5 July (33 at-risk days), paid 20 July.
+            insert_sell(pool, 2, 1, ymd(2025, 7, 5), 1000).await;
+            test_support::income(1, 1, ymd(2025, 7, 20))
+                .with(|i| {
+                    i.trust_income = true;
+                    i.entitlement_date = Some(ymd(2025, 6, 30));
+                    i.ex_date = ex_date;
+                    i.franked_amount = Decimal::from(14000);
+                    i.franking_credits = Decimal::from(6000);
+                })
+                .insert(pool)
+                .await;
+            let alerts = db_franking_at_risk(pool).await.unwrap();
+            assert_eq!(alerts.len(), 1);
+            assert_eq!(alerts[0].status, "denied");
+            assert!(alerts[0].ex_date_recorded);
+            assert_eq!(alerts[0].entitled_units, Decimal::from(1000));
+            assert_eq!(alerts[0].disqualified_units, Decimal::from(1000));
+            let summary = tax_summary::db_tax_summary(pool).await.unwrap();
+            summary
+                .iter()
+                .find(|s| s.tax_year == 2025)
+                .unwrap()
+                .franking_credits_denied
+        }
+
+        // The statement printed no ex date: the entitlement date anchors it.
+        let pool = test_pool().await;
+        assert_eq!(credits_denied(&pool, None).await, Decimal::from(6000));
+        // With the ex date recorded, the same answer.
+        let pool = test_pool().await;
+        assert_eq!(
+            credits_denied(&pool, Some(ymd(2025, 6, 30))).await,
+            Decimal::from(6000)
+        );
+    }
+
+    /// SCENARIOS G-11. With neither date recorded the walk falls back to the
+    /// payment date, and a disposal between the real ex date and payment is
+    /// invisible to it — it denies nothing. The dividend is listed as
+    /// `untested_no_ex_date` rather than passing silently, so an empty report
+    /// still means every attached credit is claimable.
+    #[tokio::test]
+    async fn db_a_dividend_with_no_ex_date_is_reported_as_untested() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AAA").await;
+        insert_buy(&pool, 1, 1, ymd(2025, 1, 1), 1000).await;
+        insert_sell(&pool, 2, 1, ymd(2025, 1, 20), 400).await; // 19 at-risk days
+        test_support::income(1, 1, ymd(2025, 2, 10))
+            .with(|i| {
+                i.franked_amount = Decimal::from(14000);
+                i.franking_credits = Decimal::from(6000);
+            })
+            .insert(&pool)
+            .await;
+
+        let alerts = db_franking_at_risk(&pool).await.unwrap();
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].status, "untested_no_ex_date");
+        assert!(!alerts[0].ex_date_recorded);
+        assert_eq!(alerts[0].ex_date, ymd(2025, 2, 10)); // the fallback
+        assert_eq!(alerts[0].credits_attached, Decimal::from(6000));
+        // Nothing is denied on the strength of an untestable walk.
+        assert_eq!(alerts[0].credits_at_risk, Decimal::ZERO);
+        assert_eq!(alerts[0].credits_denied, Decimal::ZERO);
+
+        // Recording the ex date resolves it into the real answer.
+        test_support::income(1, 1, ymd(2025, 2, 10))
+            .with(|i| {
+                i.ex_date = Some(ymd(2025, 1, 10));
+                i.franked_amount = Decimal::from(14000);
+                i.franking_credits = Decimal::from(6000);
+            })
+            .insert(&pool)
+            .await;
+        let alerts = db_franking_at_risk(&pool).await.unwrap();
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].status, "denied");
+        assert_eq!(alerts[0].credits_denied, Decimal::from(2400));
+    }
+
+    /// A dividend whose payment-date walk *does* find a disposal is still
+    /// reported as the denial it is — the tax summary excludes it — with
+    /// `ex_date_recorded` false, since the figure rests on the fallback date.
+    #[tokio::test]
+    async fn db_a_denial_found_on_the_fallback_date_is_still_a_denial() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AAA").await;
+        insert_buy(&pool, 1, 1, ymd(2025, 4, 1), 1000).await;
+        insert_sell(&pool, 2, 1, ymd(2025, 4, 20), 1000).await;
+        test_support::income(1, 1, ymd(2025, 4, 8))
+            .with(|i| i.franking_credits = Decimal::from(6000))
+            .insert(&pool)
+            .await;
+
+        let alerts = db_franking_at_risk(&pool).await.unwrap();
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].status, "denied");
+        assert!(!alerts[0].ex_date_recorded);
+        assert_eq!(alerts[0].credits_denied, Decimal::from(6000));
     }
 
     /// SCENARIOS G-22. A rename is the same security — one `listings` row —
