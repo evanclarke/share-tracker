@@ -134,8 +134,9 @@ mod http;
 mod model;
 
 pub use adjustments::{
-    RocEvent, SplitEvent, as_acquired_quantity, db_return_of_capital_events, db_share_split_events,
-    db_splits_for_listing, per_unit_reduction, sold_in_acquired_units, split_adjusted_quantity,
+    RocEvent, SplitEvent, as_acquired_quantity, db_payment_currency_conflict,
+    db_return_of_capital_events, db_share_split_events, db_splits_for_listing, per_unit_reduction,
+    sold_in_acquired_units, split_adjusted_quantity,
 };
 pub use db::db_get_tx;
 pub use http::router;
@@ -2110,6 +2111,162 @@ mod tests {
             StatusCode::UNPROCESSABLE_ENTITY,
         )
         .await;
+    }
+
+    // Currency agreement between a payment and the parcels it reduces
+    //
+    // A return of capital reduces each parcel's cost base in the *parcel's*
+    // own currency, and amounts are never netted across currencies, so
+    // `RocEvent::per_unit_for` refuses to compute the mismatched pair. Nothing
+    // checked it at write time, so the pair was accepted and every cost-base
+    // report of the listing then answered 500 with an empty body (SCENARIOS
+    // E-07, E-39).
+
+    /// E-07: the typo — an AUD holding, a payment keyed as USD.
+    #[tokio::test]
+    async fn api_payment_in_another_currency_than_its_parcels_returns_422() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AAA").await;
+        // 100 units @ $10, in the listing's own AUD.
+        test_support::buy(1, 1)
+            .date(d(2023, 1, 10))
+            .insert(&pool)
+            .await;
+
+        let payment = |currency: &str| {
+            serde_json::json!({
+                "action_type": "ReturnOfCapital",
+                "listing_id": 1,
+                "date": "2024-05-01",
+                "amount_per_unit": "0.50",
+                "currency": currency,
+            })
+        };
+        let resp = client(&pool)
+            .put("/corporate_actions/1", &payment("USD"))
+            .await;
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
+        let detail = resp.text().to_string();
+        assert!(
+            detail.contains("recorded in USD") && detail.contains("held in AUD"),
+            "detail must name both currencies: {detail}"
+        );
+        assert!(
+            db_get(&pool, 1).await.unwrap().is_none(),
+            "nothing persisted"
+        );
+        // The reports the accepted pair used to kill still answer, because the
+        // state that killed them can no longer be written.
+        let full = ApiClient::full(&pool);
+        assert_eq!(
+            full.get("/portfolio/open-parcels").await.status,
+            StatusCode::OK
+        );
+        // The same payment in the parcels' own currency is accepted.
+        api_put_expecting(&pool, payment("AUD"), StatusCode::NO_CONTENT).await;
+    }
+
+    /// E-39: the same trap without a typo — a scrip-for-scrip replacement
+    /// parcel keeps the *original's* currency (docs/API.md), so a USD-listed
+    /// security can hold AUD parcels, and recording that listing's return of
+    /// capital in its own listed currency — the obvious entry — is what breaks
+    /// the reports. Refused with the same 422 naming both sides.
+    #[tokio::test]
+    async fn api_payment_in_the_listed_currency_of_a_carried_over_parcel_returns_422() {
+        let pool = test_pool().await;
+        test_support::listing(1)
+            .ticker("USL")
+            .name("USL")
+            .currency("USD")
+            .security_type(listing::SecurityType::Share)
+            .insert(&pool)
+            .await;
+        // The replacement parcel a rollover leaves behind: AUD cost base
+        // carried onto a USD-listed security.
+        test_support::buy(1, 1)
+            .date(d(2023, 1, 10))
+            .currency("AUD")
+            .insert(&pool)
+            .await;
+
+        let resp = client(&pool)
+            .put(
+                "/corporate_actions/1",
+                &serde_json::json!({
+                    "action_type": "ReturnOfCapital",
+                    "listing_id": 1,
+                    "date": "2024-05-01",
+                    "amount_per_unit": "0.50",
+                    "currency": "USD",
+                }),
+            )
+            .await;
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
+        let detail = resp.text().to_string();
+        assert!(
+            detail.contains("recorded in USD") && detail.contains("held in AUD"),
+            "detail must name both currencies: {detail}"
+        );
+    }
+
+    /// The check is scoped to the parcels the payment actually *reaches* — the
+    /// same entitlement test `RocEvent::per_unit_for` applies — so a parcel in
+    /// another currency that the payment never reduces is no obstacle.
+    #[tokio::test]
+    async fn api_payment_currency_check_covers_only_the_parcels_it_reaches() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AAA").await;
+        test_support::buy(1, 1)
+            .date(d(2023, 1, 10))
+            .insert(&pool)
+            .await;
+        test_support::buy(2, 1)
+            .date(d(2025, 1, 5))
+            .currency("USD")
+            .insert(&pool)
+            .await;
+
+        // Dated before the USD parcel was acquired: it was never entitled.
+        api_put_expecting(
+            &pool,
+            serde_json::json!({
+                "action_type": "ReturnOfCapital",
+                "listing_id": 1,
+                "date": "2024-06-01",
+                "amount_per_unit": "0.50",
+                "currency": "AUD",
+            }),
+            StatusCode::NO_CONTENT,
+        )
+        .await;
+        // With a record date it is entitlement at *that* date that decides: a
+        // parcel acquired on the record date is ex-entitlement …
+        let payment = |record: &str| {
+            serde_json::json!({
+                "action_type": "ReturnOfCapital",
+                "listing_id": 1,
+                "date": "2025-06-01",
+                "amount_per_unit": "0.50",
+                "currency": "AUD",
+                "record_date": record,
+            })
+        };
+        let resp = client(&pool)
+            .put("/corporate_actions/2", &payment("2025-01-05"))
+            .await;
+        assert_eq!(resp.status, StatusCode::NO_CONTENT);
+        // … while one acquired the day before it is not, and the same edit is
+        // refused — the check runs over the state the write would leave.
+        let resp = client(&pool)
+            .put("/corporate_actions/2", &payment("2025-01-06"))
+            .await;
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
+        let stored = db_get(&pool, 2).await.unwrap().unwrap();
+        assert_eq!(
+            stored.kind,
+            roc_with_record(2, 1, d(2025, 6, 1), "0.50", d(2025, 1, 5)).kind,
+            "the refused edit left the stored terms untouched"
+        );
     }
 
     // Delete-time guard: the three types that create no trades

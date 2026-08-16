@@ -10,33 +10,6 @@ findings are all closed in DONE.md), except where a section's heading names anot
 (e.g. REQUIREMENTS, SCENARIOS). Each section records one finding; sections land in DONE.md as they
 are fixed or decided.
 
-## A return of capital in a currency other than its parcels' is accepted, then breaks every cost-base report (SCENARIOS E-07, E-39)
-(SCENARIOS.md section E verification pass, 2026-08-16. `RocEvent::per_unit_for`
-(`src/entities/corporate_action/adjustments.rs:74`) refuses — correctly — to net a payment against a
-parcel in another currency, and raises `sqlx::Error::Decode`. Nothing checks the currency at
-**write** time (`corporate_action::db_upsert`, `src/entities/corporate_action/db.rs:153`, validates
-the payload's shape and the currency's existence, not its agreement with the listing's parcels), so
-the mismatch is only discovered when a report reads it — as an `ApiError::Internal`, i.e. `500` with
-an **empty body**.)
-- [ ] E-07 — reproduced: listing AAA (AUD), Buy ×100 @ $10, then
-  `PUT /corporate_actions/1 {"action_type":"ReturnOfCapital","currency":"USD",…}` → `204`. From that
-  moment `GET /portfolio/open-parcels`, `POST /portfolio/overview`, unrealised gains, realised gains,
-  net capital gain, the annual tax report and snapshot generation all answer `500` with no body — the
-  web UI can only show "HTTP 500". Nothing names the action, and no cross-check or health row points
-  at it
-- [ ] E-39 — the same trap without a typo: exchange an AUD holding into a **USD-listed** replacement
-  (a scrip-for-scrip replacement parcel deliberately keeps the *original's* currency, `docs/API.md`),
-  then record the replacement listing's own return of capital in USD — its listed currency, the
-  obvious entry — and every parcel report dies the same way
-- [ ] The precedent is B-02's brokerage-currency mismatch, refused at write time with a 422 naming
-  the reason (`c7d7137`): the same fix shape applies here — compare the payment's currency against
-  the currencies of the listing's Buy/DRP parcels inside the write transaction (and, symmetrically,
-  refuse a Buy whose currency contradicts an existing payment on the listing, or the hole reopens
-  from the other side)
-- [ ] `docs/API.md` currently documents the 500 ("A payment's `currency` must match the affected
-  trades' currency — the reports never net amounts across currencies and fail loudly (`500`)"). If
-  the write-time refusal lands, that sentence becomes the 422 instead
-
 ## A corporate action dated in the future is applied to today's holdings (SCENARIOS E-14)
 (SCENARIOS.md section E verification pass, 2026-08-16. `domain::open_parcels::load(conn, None)`
 resolves its cutoff with `as_of_or_open` (`src/domain/open_parcels.rs:112`), i.e. the `9999-12-31`

@@ -4,7 +4,9 @@
 //! and the matching delete-time guard for the three types that re-base or
 //! reduce parcels at read time instead of creating trades ([`DeleteError`]).
 
-use super::adjustments::{as_acquired_quantity, db_splits_for_listing};
+use super::adjustments::{
+    as_acquired_quantity, db_payment_currency_conflict, db_splits_for_listing,
+};
 use super::model::{ActionKind, CorporateAction};
 use crate::infra::decimal::{OptMoney, parse_dec};
 use crate::infra::http::{self, ApiError, CrudEntity};
@@ -79,6 +81,19 @@ pub enum WriteError {
     /// correction that breaks nothing still lands. Mapped to `422`.
     #[error("this action's terms leave a sale allocating more units than its parcel holds")]
     AllocationsExceedParcel,
+    /// A `ReturnOfCapital` recorded in one currency while a parcel it reduces
+    /// is held in another. The payment reduces each parcel's cost base in the
+    /// parcel's own currency and amounts are never netted across currencies,
+    /// so the reports refuse to compute the pair
+    /// (`RocEvent::per_unit_for` → `sqlx::Error::Decode` → `500`) — every
+    /// cost-base report of the listing dies at read time on a state nothing
+    /// checked at write time (SCENARIOS E-07, E-39). Refused here instead, so
+    /// the state is unrepresentable. Mapped to `422`.
+    #[error("this payment's currency differs from that of the parcels it reduces")]
+    PaymentCurrencyMismatch {
+        payment_currency: String,
+        parcel_currency: String,
+    },
 }
 
 impl From<WriteError> for ApiError {
@@ -95,6 +110,17 @@ impl From<WriteError> for ApiError {
                 "these terms re-base parcel quantities so that a sale allocates more units than \
                  the parcel it draws on holds — correct or remove those allocations first",
             ),
+            // The payment and the parcels it reduces disagree on currency → 422
+            // naming both, so the typo is findable without opening the trades.
+            WriteError::PaymentCurrencyMismatch {
+                payment_currency,
+                parcel_currency,
+            } => ApiError::Unprocessable(format!(
+                "this return of capital is recorded in {payment_currency} while a parcel it \
+                 reduces is held in {parcel_currency} — a payment reduces each parcel's cost \
+                 base in the parcel's own currency, and amounts are never netted across \
+                 currencies, so record it converted into {parcel_currency}"
+            )),
             // Unknown listing/currency FK or enum CHECK violation → 422.
             WriteError::Db(err) => err.into(),
         }
@@ -378,6 +404,22 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
         if !allocations_fit_parcels(&mut tx, listing_id).await? {
             return Err(WriteError::AllocationsExceedParcel);
         }
+    }
+
+    // A return of capital reduces each parcel's cost base in the *parcel's*
+    // currency, so a payment recorded in another one is a state the cost-base
+    // reports refuse to compute over — checked over the written state, on the
+    // listing the payment now belongs to, inside the write's own transaction.
+    // (Only a payment can introduce the pair from this side: re-typing a
+    // ReturnOfCapital into another kind, or moving it off a listing, can only
+    // remove one.)
+    if matches!(action.kind, ActionKind::ReturnOfCapital { .. })
+        && let Some(conflict) = db_payment_currency_conflict(&mut *tx, action.listing_id).await?
+    {
+        return Err(WriteError::PaymentCurrencyMismatch {
+            payment_currency: conflict.payment_currency,
+            parcel_currency: conflict.parcel_currency,
+        });
     }
 
     tx.commit().await?;

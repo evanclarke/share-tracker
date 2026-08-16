@@ -272,7 +272,7 @@ The five findings, each raised as a `TODO.md` section naming its scenario ids:
 
 | Finding | Scenarios | Status |
 | --- | --- | --- |
-| A return of capital in a currency other than its parcels' is accepted, then breaks every cost-base report | E-07, E-39 | open |
+| A return of capital in a currency other than its parcels' is accepted, then breaks every cost-base report | E-07, E-39 | fixed 2026-08-16 — archived in [`DONE/tax-domain.md`](DONE/tax-domain.md) |
 | A corporate action dated in the future is applied to today's holdings | E-14 | open |
 | A return of capital on an AMIT listing double-reduces alongside the AMMA adjustment | E-04 | open |
 | A duplicated corporate action is silently compounded | E-03, E-15 | open |

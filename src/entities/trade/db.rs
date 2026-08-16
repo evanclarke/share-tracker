@@ -156,6 +156,20 @@ pub enum UpsertError {
     /// could never apply.
     #[error("the spot FX rate override was rejected: {0}")]
     SpotFxRate(#[source] SpotFxRateError),
+    /// The Buy/DRP's currency differs from that of a return-of-capital
+    /// payment recorded on its listing that reaches it. The payment reduces
+    /// each parcel's cost base in the parcel's own currency and amounts are
+    /// never netted across currencies, so every cost-base report of the
+    /// listing would fail loudly at read time
+    /// (`corporate_action::RocEvent::per_unit_for`). This is the parcel side
+    /// of `corporate_action::WriteError::PaymentCurrencyMismatch`, which
+    /// refuses the same pair from the payment's side.
+    #[error("this parcel's currency differs from a return of capital recorded on its listing")]
+    PaymentCurrencyMismatch {
+        payment_date: chrono::NaiveDate,
+        payment_currency: String,
+        parcel_currency: String,
+    },
     /// A degenerate core figure was rejected (see [`check_amounts`]):
     /// non-positive quantity or FX rate, negative price/brokerage/GST, a
     /// brokerage currency differing from the trade's, or a settlement before
@@ -448,6 +462,28 @@ pub async fn db_upsert(pool: &SqlitePool, trade: &Trade) -> Result<(), UpsertErr
     .bind(trade.holding_account_id)
     .execute(&mut *tx)
     .await?;
+
+    // A return of capital on this listing reduces the parcel's cost base in
+    // the *parcel's* own currency, so a Buy/DRP recorded in another one is a
+    // state the cost-base reports refuse to compute over. This is the parcel
+    // side of the same invariant `corporate_action::db_upsert` enforces from
+    // the payment's side; like it, the check runs over the written state
+    // inside the write's own transaction. A Sell holds no cost base, so only
+    // the parcel types can introduce the pair.
+    if trade.trade_type != super::model::TradeType::Sell
+        && let Some(conflict) = crate::entities::corporate_action::db_payment_currency_conflict(
+            &mut *tx,
+            trade.listing_id,
+        )
+        .await?
+    {
+        return Err(UpsertError::PaymentCurrencyMismatch {
+            payment_date: conflict.payment_date,
+            payment_currency: conflict.payment_currency,
+            parcel_currency: conflict.parcel_currency,
+        });
+    }
+
     tx.commit().await?;
     Ok(())
 }
@@ -552,6 +588,18 @@ impl From<UpsertError> for ApiError {
                 ApiError::unprocessable(spot_fx_rate_detail(&detail))
             }
             UpsertError::Amounts(detail) => ApiError::unprocessable(amounts_detail(&detail)),
+            // Names the payment and both currencies, so the disagreeing row is
+            // findable without opening the listing's corporate actions.
+            UpsertError::PaymentCurrencyMismatch {
+                payment_date,
+                payment_currency,
+                parcel_currency,
+            } => ApiError::Unprocessable(format!(
+                "this parcel is held in {parcel_currency} while the return of capital dated \
+                 {payment_date} on its listing is recorded in {payment_currency} — a payment \
+                 reduces each parcel's cost base in the parcel's own currency, and amounts are \
+                 never netted across currencies, so the two must agree"
+            )),
             UpsertError::QuantityBelowAllocated => ApiError::unprocessable(
                 "the new quantity is below what Sell allocations already draw from this parcel",
             ),

@@ -484,6 +484,47 @@ fn known_limitations_document_the_brokerage_currency_invariant() {
     assert!(README_MD.contains("**brokerage is billed in the trade's own currency**"));
 }
 
+/// Docs pin for the return-of-capital currency invariant (SCENARIOS E-07 /
+/// E-39, fixed 2026-08-16): both write-time refusals have their own tests
+/// (`corporate_action::tests::api_payment_in_another_currency_than_its_parcels_returns_422`
+/// and the parcel-side twin in `trade::tests`), but the *documented* half —
+/// which parcels the check covers, that the two entry paths refuse the pair
+/// from either side, and the one residual route into the mismatch (a rollover
+/// carrying a parcel's own currency onto a listing that already has a
+/// differing payment) — lives only in the docs.
+#[test]
+fn return_of_capital_currency_invariant_documented() {
+    // The rule and its scope, in the Corporate actions section.
+    assert!(API_MD.contains(
+        "A `ReturnOfCapital`'s `currency` must match the currency of the parcels it reduces"
+    ));
+    assert!(API_MD.contains("a differing pair is rejected with `422` naming both currencies"));
+    assert!(API_MD.contains(
+        "those acquired before its `record_date`, or on or before the payment date when none is \
+         recorded"
+    ));
+    // A rollover-created parcel keeps the original's currency, so the listed
+    // currency is the wrong one to reach for — and that is the residual route
+    // into the mismatch the reports still fail loudly on.
+    assert!(
+        API_MD.contains("record its return of capital in the parcels' currency, not the listing's")
+    );
+    assert!(API_MD.contains(
+        "a replacement parcel created *after* a differing payment was recorded is the one \
+         remaining way to meet the mismatch"
+    ));
+    // The parcel side of the same rejection, in the Trades section.
+    assert!(API_MD.contains(
+        "`PUT /trades/:id` returns `422` if a Buy/DRP's `currency` differs from that of a \
+         [return of capital](#corporate-actions) recorded on its listing that reaches it"
+    ));
+    // The schema carries the constraint on the column itself.
+    assert!(SCHEMA_MD.contains(
+        "write-time validated to equal the currency of the parcels the payment reaches (422 \
+         otherwise)"
+    ));
+}
+
 /// Docs-sync pin for the backup pipeline hardening (2026-07-13 improvement
 /// review) and the later `--backup-command` off-machine-copy hook: the README
 /// documents verification (integrity check + migrations match, `.bad`

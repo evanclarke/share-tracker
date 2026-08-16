@@ -669,3 +669,65 @@ bullet and net-capital-gain section now name the C2 event, the nil cost base, th
 the record-date requirement — so the one place a user in this position would look no longer reads
 as *nothing to do*. No Known-limitations entry: it is modelled, and the record-date requirement is
 stated where the field is.
+
+
+## A return of capital in a currency other than its parcels' is accepted, then breaks every cost-base report (SCENARIOS E-07, E-39)
+(SCENARIOS.md section E verification pass, 2026-08-16. `RocEvent::per_unit_for`
+(`src/entities/corporate_action/adjustments.rs:74`) refuses — correctly — to net a payment against a
+parcel in another currency, and raises `sqlx::Error::Decode`. Nothing checks the currency at
+**write** time (`corporate_action::db_upsert`, `src/entities/corporate_action/db.rs:153`, validates
+the payload's shape and the currency's existence, not its agreement with the listing's parcels), so
+the mismatch is only discovered when a report reads it — as an `ApiError::Internal`, i.e. `500` with
+an **empty body**.)
+- [x] E-07 — reproduced: listing AAA (AUD), Buy ×100 @ $10, then
+  `PUT /corporate_actions/1 {"action_type":"ReturnOfCapital","currency":"USD",…}` → `204`. From that
+  moment `GET /portfolio/open-parcels`, `POST /portfolio/overview`, unrealised gains, realised gains,
+  net capital gain, the annual tax report and snapshot generation all answer `500` with no body — the
+  web UI can only show "HTTP 500". Nothing names the action, and no cross-check or health row points
+  at it
+- [x] E-39 — the same trap without a typo: exchange an AUD holding into a **USD-listed** replacement
+  (a scrip-for-scrip replacement parcel deliberately keeps the *original's* currency, `docs/API.md`),
+  then record the replacement listing's own return of capital in USD — its listed currency, the
+  obvious entry — and every parcel report dies the same way
+- [x] The precedent is B-02's brokerage-currency mismatch, refused at write time with a 422 naming
+  the reason (`c7d7137`): the same fix shape applies here — compare the payment's currency against
+  the currencies of the listing's Buy/DRP parcels inside the write transaction (and, symmetrically,
+  refuse a Buy whose currency contradicts an existing payment on the listing, or the hole reopens
+  from the other side)
+- [x] `docs/API.md` currently documents the 500 ("A payment's `currency` must match the affected
+  trades' currency — the reports never net amounts across currencies and fail loudly (`500`)"). If
+  the write-time refusal lands, that sentence becomes the 422 instead
+
+**Fixed 2026-08-16** by refusing the pair at write time, the fix shape the section proposed: a
+return of capital reduces each parcel's cost base in the *parcel's own* currency, so a payment and
+a parcel that disagree are now rejected from **either** entry side rather than discovered by a
+report.
+
+One shared read does both directions — `corporate_action::db_payment_currency_conflict`
+(`adjustments.rs`, beside the `RocEvent::per_unit_for` guard it mirrors): the first
+`ReturnOfCapital` on a listing whose currency differs from that of a Buy/DRP parcel it *reaches*,
+run on the caller's own connection so each write checks the state it is about to commit.
+Entitlement is the same test `per_unit_for` applies, expressed in SQL (acquired before the
+`record_date`, or on/before the payment date with none recorded), so a parcel bought
+ex-entitlement in another currency is no obstacle; the "still held" half is deliberately left out,
+since a future sale can't be known at write time. Both callers run it *after* their INSERT, inside
+the transaction, the way `allocations_fit_parcels` already checks written state:
+`corporate_action::db_upsert` for a `ReturnOfCapital` write (`WriteError::PaymentCurrencyMismatch`)
+and `trade::db_upsert` for a Buy/DRP (`UpsertError::PaymentCurrencyMismatch`). Both 422 bodies name
+both currencies — the trade side names the payment's date too — so the disagreeing row is findable
+without opening the other table.
+
+Five tests: E-07's reproduction (the USD payment on an AUD holding now `422`, nothing persisted,
+and `GET /portfolio/open-parcels` still `200` — the state that killed it is unwritable), E-39's
+(an AUD parcel carried onto a USD listing, where the *listed* currency is the obvious wrong entry),
+the entitlement scoping (a later USD parcel is no obstacle; with a record date the day either side
+of it decides, and the refused edit leaves the stored terms untouched), the parcel-side twin in
+`trade::tests`, and the docs pin.
+
+`docs/API.md`'s sentence became the `422` as anticipated, plus the scope and the residual: the
+scrip-for-scrip, demerger and transfer operations carry a parcel's own currency onto its
+replacement without re-checking, so a replacement created *after* a differing payment is the one
+remaining way to meet the mismatch — documented as still failing loudly. That matches B-02's own
+scope (the operation paths bypass `check_amounts` too): the two hand-entry paths are where a
+currency is typed. `docs/SCHEMA.md`'s `currency` column note now records the write-time validation
+instead of the read-time failure.

@@ -120,6 +120,69 @@ where
     Ok(map)
 }
 
+/// A return-of-capital payment recorded against a listing in one currency
+/// while a parcel it reduces is held in another — the state
+/// [`RocEvent::per_unit_for`] refuses to compute over, carried out of
+/// [`db_payment_currency_conflict`] so a write path can name both sides in its
+/// rejection.
+#[derive(Debug, Clone)]
+pub struct CurrencyConflict {
+    pub payment_date: NaiveDate,
+    pub payment_currency: String,
+    pub parcel_currency: String,
+}
+
+/// The first (if any) return-of-capital payment on `listing_id` whose currency
+/// differs from that of a Buy/DRP parcel it reaches — read on the caller's own
+/// connection so a write can check the state it is about to commit.
+///
+/// This is the *write-time* form of [`RocEvent::per_unit_for`]'s currency
+/// guard: the payment reduces each parcel's cost base in the parcel's own
+/// currency, and amounts in different currencies are never netted, so the read
+/// side fails loudly (`sqlx::Error::Decode` → `500`) on a pair it can't
+/// compute. Refusing the pair at write time — from either side, the payment's
+/// or the parcel's — keeps that state unrepresentable, the same shape as the
+/// brokerage-currency invariant (`trade::checks::check_amounts`).
+///
+/// Which parcels a payment reaches is [`RocEvent::per_unit_for`]'s entitlement
+/// test, expressed in SQL: units held *before* a recorded record date, or —
+/// with none recorded — acquired on or before the payment date (the same test
+/// the delete guard in `db.rs` applies). A parcel acquired ex-entitlement was
+/// never reduced by the payment, so its currency is free to differ. The
+/// "still held" half of the window is deliberately *not* applied: a parcel
+/// sold before the payment can't be reduced either, but a future sale can't be
+/// known at write time, so the check is the conservative one.
+pub async fn db_payment_currency_conflict<'e, E>(
+    executor: E,
+    listing_id: i64,
+) -> Result<Option<CurrencyConflict>, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
+    let row = sqlx::query(
+        "SELECT ca.date AS payment_date, ca.currency AS payment_currency, \
+                t.currency AS parcel_currency \
+         FROM corporate_actions ca JOIN trades t ON t.listing_id = ca.listing_id \
+         WHERE ca.action_type = 'ReturnOfCapital' AND ca.listing_id = ? \
+           AND t.trade_type IN ('Buy', 'DRP') \
+           AND (CASE WHEN ca.record_date IS NOT NULL \
+                     THEN t.date < ca.record_date ELSE t.date <= ca.date END) \
+           AND upper(t.currency) <> upper(ca.currency) \
+         ORDER BY ca.date, ca.id, t.date, t.id LIMIT 1",
+    )
+    .bind(listing_id)
+    .fetch_optional(executor)
+    .await?;
+    row.map(|row| {
+        Ok(CurrencyConflict {
+            payment_date: row.try_get("payment_date")?,
+            payment_currency: row.try_get("payment_currency")?,
+            parcel_currency: row.try_get("parcel_currency")?,
+        })
+    })
+    .transpose()
+}
+
 /// A quantity re-basing event, as consumed by the reports and write-time
 /// checks: on `date`, every `old_units` existing units become `new_units`.
 /// A ShareSplit (TD 2000/10) is stored as its ratio directly; a

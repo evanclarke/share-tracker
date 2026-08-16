@@ -1640,6 +1640,70 @@ mod tests {
         assert_eq!(status, StatusCode::NO_CONTENT);
     }
 
+    /// The parcel side of the return-of-capital currency invariant (SCENARIOS
+    /// E-07/E-39): a payment reduces each parcel's cost base in the *parcel's*
+    /// own currency, so a Buy recorded in another currency than a payment that
+    /// reaches it is refused here too — otherwise the hole the
+    /// corporate-action write path closes simply reopens from the parcel side,
+    /// and every cost-base report of the listing dies at read time.
+    #[tokio::test]
+    async fn api_buy_in_another_currency_than_a_payment_on_its_listing_returns_422() {
+        use crate::entities::corporate_action::{ActionKind, CorporateAction};
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        crate::entities::corporate_action::db_upsert(
+            &pool,
+            &CorporateAction {
+                id: 1,
+                listing_id: 1,
+                date: ymd(2024, 5, 1),
+                kind: ActionKind::ReturnOfCapital {
+                    amount_per_unit: dec("0.50"),
+                    currency: "AUD".to_string(),
+                    record_date: None,
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+        let buy = |date: &str, currency: &str| {
+            serde_json::json!({
+                "trade_type": "Buy",
+                "date": date,
+                "listing_id": 1,
+                "average_price": "10",
+                "quantity": "100",
+                "currency": currency,
+                "brokerage": "0",
+                "gst_on_brokerage": "0",
+                "brokerage_currency": currency,
+                "fx_rate": if currency == "AUD" { "1" } else { "1.5" }
+            })
+        };
+        // Acquired before the payment, so the payment reaches it: refused,
+        // naming the payment and both currencies.
+        let (status, detail) = put_trade_json(&pool, 1, buy("2024-01-15", "USD")).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            detail.contains("held in USD")
+                && detail.contains("2024-05-01")
+                && detail.contains("recorded in AUD"),
+            "detail must name the payment and both currencies: {detail}"
+        );
+        assert!(
+            db_get(&pool, 1).await.unwrap().is_none(),
+            "nothing persisted"
+        );
+        // The same parcel in the payment's currency is fine …
+        let (status, _) = put_trade_json(&pool, 1, buy("2024-01-15", "AUD")).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        // … and so is a USD parcel acquired *after* the payment: it was never
+        // entitled to it, so nothing ever nets the two currencies.
+        let (status, _) = put_trade_json(&pool, 2, buy("2024-06-01", "USD")).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+
     /// The boolean column is CHECK-constrained to 0/1 in the database.
     #[tokio::test]
     async fn db_brokerage_includes_gst_check_constraint_enforced() {
