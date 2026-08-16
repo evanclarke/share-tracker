@@ -463,3 +463,72 @@ the whole document register across the portfolio, with a link to download or vie
       and an upload is multipart; confirmed rendered DOM by hand: heading, description, empty state)
       all clean
 
+
+## A corporate action dated in the future is applied to today's holdings (SCENARIOS E-14)
+(SCENARIOS.md section E verification pass, 2026-08-16. `domain::open_parcels::load(conn, None)`
+resolves its cutoff with `as_of_or_open` (`src/domain/open_parcels.rs:112`), i.e. the `9999-12-31`
+sentinel, so the *live* view means "every recorded fact" rather than "everything up to today". A
+split or return of capital recorded ahead of its effective date — normal practice, the terms are
+announced weeks before they take effect — is therefore already in force in every report built on
+that call, while the as-of-dated reports correctly ignore it.)
+- [x] E-14 — reproduced: Buy ×100 on 2023-01-10, `ShareSplit` 2-for-1 dated **2030-03-01**.
+  `GET /portfolio/open-parcels` and `POST /portfolio/overview` report **200 units** (market value
+  $2,000 at $10) today, in 2026; `POST /portfolio/unrealised-gains` for the same day reports **100**
+  ($1,000). Two reports, one database, one day, two answers
+- [x] E-14b — the same with a `ReturnOfCapital` of $1.00/unit dated 2030-03-01: open parcels report
+  `return_of_capital_reduction: 100.00` and `remaining_cost_base: 900.00` today, the overview's
+  `total_cost_base` follows, and the **parcel optimiser** (`POST /portfolio/parcel-optimiser`,
+  `src/reports/parcel_optimiser.rs:109`) prices a contemplated sale off the reduced $9.00/unit,
+  overstating the gain on every candidate strategy. Unrealised gains still show $1,000
+- [x] The write paths are consistent with the *correct* reading — a Sell entered today is validated
+  and costed against the pre-split basis — so it is only the live read that disagrees, which is what
+  makes it silent
+- [x] Fix shape: `load(conn, None)` (and `portfolio::db_holdings(pool, None)`,
+  `open_parcels::db_open_parcels`) should bound at today rather than at the sentinel, so "live" means
+  "as at today" everywhere; a future-dated fact then appears when it takes effect.
+  **Decided 2026-08-16 (Evan): bound everything at today** — trades as well as corporate actions, one
+  rule rather than a carve-out (a future-dated trade is nearly always a typo, and it will surface on
+  its own date). Watch what else keys off the sentinel: `infra::date::as_of_or_open` is shared, so
+  change the callers rather than the helper, and check the snapshot/valuation paths still pass their
+  own explicit dates
+- [ ] Alternative if the bound is unwanted: refuse a corporate action dated after today at write time
+  — but that removes a legitimate entry (recording the terms on announcement), so bounding the read
+  is the better half
+
+**Fixed 2026-08-16 as decided — the live read is bounded at today, nothing is refused at write time**
+(the alternative above stays rejected: recording terms on announcement is the intended workflow).
+- [x] `infra::date` gained `today()` and `as_of_or_today` beside `as_of_or_open`, which is untouched
+      and keeps its "every recorded fact" meaning for the reads that want it (the allocations behind
+      an FY-keyed report, `closing_price::HeldTimeline::held_listing_ids`, the AMIT reduction events)
+      — the caller changed, not the shared helper, exactly as the fix shape asked. Its doc comment
+      now points at the sibling so the next reader picks the right one; tests
+      `infra::date::tests::none_is_today_for_a_live_view` / `some_passes_through_the_live_resolver`
+- [x] `domain::open_parcels::load` resolves `None` to today **once**, at the top, and passes the
+      result on as `Some(cutoff)` to every bound below it (the parcel SELECT, `db_units_sold`,
+      `amit_adjustment::db_cost_base_reduction_events`, `cost_base::Held::AsAt`,
+      `split_adjusted_quantity`). One date for the whole function, so the live view is *identical*
+      to the as-at-today view rather than merely similar — and every view built on the loader
+      (portfolio overview, open parcels, the parcel optimiser and the pre-sale what-if through it,
+      the listing-activity holdings block) is fixed by the one change, with no report-side edits
+- [x] Tests: `domain::open_parcels::tests::the_live_view_ignores_a_future_dated_corporate_action`
+      (E-14/E-14b at the loader — a future split and a $1.00/unit return of capital leave 100 units
+      at $1,000 today, `load(None) == load(Some(today))`, and both take effect on their own date),
+      `the_live_view_ignores_a_future_dated_trade` (the no-carve-out half: a future-dated Buy isn't
+      held yet and a future-dated Sell hasn't consumed its parcel yet), and
+      `the_live_reports_agree_with_todays_unrealised_report_on_a_future_action` (the finding as
+      stated — overview, open parcels, parcel-optimiser candidates and the unrealised report for
+      today all report 100 units / $1,000). The future dates are computed from `today()`, not
+      hardcoded, so the tests can't rot into the past
+- [x] Snapshot and valuation paths re-checked as the fix shape asked: `reports::snapshot` values a
+      day through `portfolio::db_holdings(pool, Some(date))` and
+      `unrealised_gains::db_unrealised_gains(pool, date)`, and `period_performance` through
+      `valuation::held_markets(pool, Some(date))` — all explicit, none relying on the sentinel
+- [x] Docs: `docs/API.md` gained a `### As-at date` subsection under Portfolio reports (the shared
+      convention, beside FX conversion): an undated report is the position as at today, a
+      future-dated trade or corporate action is recorded but not in force, trades are bounded the
+      same way rather than carved out, and the realised/FY-keyed reports deliberately are *not*
+      bounded (a disposal reports in its own financial year). Overview and Open parcels say "as at
+      today" and link to it; pinned by `doc_checks::as_at_today_convention_documented`
+- [x] Verified: `cargo build` and `cargo test` (1471 passed, warning-free — the 1467 that passed
+      before the change all still pass, so nothing depended on the sentinel reading),
+      `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` clean

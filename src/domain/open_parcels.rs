@@ -18,7 +18,9 @@
 //! The one axis of variation is the as-of date: `Some(date)` is the position
 //! as at that date (trades, sales and AMIT statements after it excluded,
 //! return-of-capital payments bounded at it, quantities in that date's unit
-//! basis), `None` the live view of every recorded fact in current units.
+//! basis), `None` the live view — which is the same thing as at *today*, not
+//! "every recorded fact" (a future-dated corporate action or trade is not in
+//! force yet; see [`infra::date::as_of_or_today`](crate::infra::date::as_of_or_today)).
 //! Callers keep their own aggregation and shaping — this module returns
 //! parcels, not report rows.
 //!
@@ -37,7 +39,7 @@ use sqlx::Row;
 
 use crate::domain::cost_base::{self, CostBase, ParcelRow};
 use crate::entities::corporate_action;
-use crate::infra::date::as_of_or_open;
+use crate::infra::date::{as_of_or_open, as_of_or_today};
 use crate::infra::decimal::parse_dec;
 use crate::infra::fx::FxRates;
 
@@ -96,9 +98,9 @@ pub async fn db_units_sold(
 }
 
 /// Every Buy/DRP parcel with units still open as at `as_of` (`None` = the
-/// live view), each with its remaining quantity in that date's unit basis and
-/// the AUD cost base of those units. Parcels fully consumed by sales are
-/// omitted.
+/// live view, i.e. as at today), each with its remaining quantity in that
+/// date's unit basis and the AUD cost base of those units. Parcels fully
+/// consumed by sales are omitted.
 ///
 /// Takes the caller's own connection so it composes into a report's existing
 /// single-snapshot read transaction (the house rule: one report, one
@@ -109,7 +111,14 @@ pub async fn load(
     conn: &mut sqlx::SqliteConnection,
     as_of: Option<NaiveDate>,
 ) -> Result<Vec<OpenParcel>, sqlx::Error> {
-    let cutoff = as_of_or_open(as_of);
+    // "Live" means as at *today*, not "every recorded fact": a split or
+    // return of capital is recorded when its terms are announced, weeks
+    // before it takes effect, and must not restate today's holdings until it
+    // does (`infra::date::as_of_or_today`). Resolving the cutoff here — and
+    // passing it on as `Some(cutoff)` below — keeps every bound in this
+    // function on one date, so the live view is exactly the as-at-today view.
+    let cutoff = as_of_or_today(as_of);
+    let as_of = Some(cutoff);
     let parcels: Vec<ParcelRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {} FROM trades WHERE trade_type IN ('Buy', 'DRP') AND date <= ? ORDER BY id",
         ParcelRow::COLUMNS
@@ -339,6 +348,97 @@ mod tests {
         assert_eq!(open[1].remaining_as_of, dec("50"));
     }
 
+    /// SCENARIOS E-14/E-14b: a corporate action is normally recorded when its
+    /// terms are announced, weeks before it takes effect, so the live view
+    /// must not apply it yet. Before the fix `None` meant the `9999-12-31`
+    /// sentinel — "every recorded fact" — and a split dated years out already
+    /// restated today's quantity while the as-of-dated reports ignored it.
+    #[tokio::test]
+    async fn the_live_view_ignores_a_future_dated_corporate_action() {
+        let pool = test_pool().await;
+        let today = crate::infra::date::today();
+        let future = today + chrono::Days::new(400);
+        test_support::listing(1).insert(&pool).await;
+        test_support::buy(1, 1)
+            .date(ymd(2023, 1, 10))
+            .qty(dec("100"))
+            .price(dec("10"))
+            .insert(&pool)
+            .await;
+        split(&pool, 1, 1, future, "2").await;
+        return_of_capital(&pool, 2, 1, future, "1.00").await;
+
+        let open = load_all(&pool, None).await;
+        assert_eq!(open.len(), 1);
+        assert_eq!(
+            open[0].remaining_as_of,
+            dec("100"),
+            "the split has not happened yet"
+        );
+        assert_eq!(open[0].cost_base.roc_reduction, Decimal::ZERO);
+        assert_eq!(open[0].cost_base.adjusted, dec("1000"));
+
+        // The whole point of the fix: the undated view is exactly the view
+        // as at today, so the two reports can't disagree.
+        let as_at_today = load_all(&pool, Some(today)).await;
+        assert_eq!(as_at_today.len(), open.len());
+        assert_eq!(as_at_today[0].remaining_as_of, open[0].remaining_as_of);
+        assert_eq!(
+            as_at_today[0].cost_base.adjusted,
+            open[0].cost_base.adjusted
+        );
+
+        // And it does take effect on its own date.
+        let later = load_all(&pool, Some(future)).await;
+        assert_eq!(later[0].remaining_as_of, dec("200"));
+        assert_eq!(later[0].cost_base.roc_reduction, dec("200"));
+        assert_eq!(later[0].cost_base.adjusted, dec("800"));
+    }
+
+    /// Trades are bounded at today by the same rule rather than carved out —
+    /// a future-dated Buy is not held yet, and a future-dated Sell has not
+    /// consumed its parcel yet (both nearly always typos, and both surface on
+    /// their own date).
+    #[tokio::test]
+    async fn the_live_view_ignores_a_future_dated_trade() {
+        let pool = test_pool().await;
+        let future = crate::infra::date::today() + chrono::Days::new(30);
+        test_support::listing(1).insert(&pool).await;
+        test_support::buy(1, 1)
+            .date(ymd(2023, 1, 10))
+            .qty(dec("100"))
+            .price(dec("10"))
+            .insert(&pool)
+            .await;
+        test_support::buy(2, 1)
+            .date(future)
+            .qty(dec("50"))
+            .price(dec("11"))
+            .insert(&pool)
+            .await;
+        test_support::sell(3, 1)
+            .date(future)
+            .qty(dec("60"))
+            .price(dec("12"))
+            .insert(&pool)
+            .await;
+        allocate(&pool, 1, 3, 1, dec("60")).await;
+
+        let open = load_all(&pool, None).await;
+        assert_eq!(open.len(), 1, "the future-dated buy is not held yet");
+        assert_eq!(open[0].parcel.id, 1);
+        assert_eq!(
+            open[0].remaining_as_of,
+            dec("100"),
+            "the future-dated sale has not consumed anything yet"
+        );
+
+        let later = load_all(&pool, Some(future)).await;
+        assert_eq!(later.len(), 2);
+        assert_eq!(later[0].remaining_as_of, dec("40"));
+        assert_eq!(later[1].remaining_as_of, dec("50"));
+    }
+
     /// A sale after a 2-for-1 split allocates *post-split* units, so the
     /// remainder must be computed after re-basing them back to as-acquired
     /// units — and the reported quantity re-based forward again. The cost
@@ -522,6 +622,59 @@ mod tests {
                 Some(h.quantity)
             );
         }
+    }
+
+    /// SCENARIOS E-14/E-14b at the report level: with a split and a return of
+    /// capital recorded ahead of their effective date, the undated reports
+    /// (overview, open parcels, and the parcel optimiser priced off them) and
+    /// the unrealised report run for today must give one answer. They didn't
+    /// — the undated ones read to the `9999-12-31` sentinel, so the same
+    /// database on the same day reported 200 units at a $900 cost base one
+    /// way and 100 units at $1,000 the other.
+    #[tokio::test]
+    async fn the_live_reports_agree_with_todays_unrealised_report_on_a_future_action() {
+        use crate::reports::{open_parcels, parcel_optimiser, portfolio, unrealised_gains};
+
+        let pool = test_pool().await;
+        let today = crate::infra::date::today();
+        let future = today + chrono::Days::new(400);
+        test_support::listing(1).insert(&pool).await;
+        test_support::buy(1, 1)
+            .date(ymd(2023, 1, 10))
+            .qty(dec("100"))
+            .price(dec("10"))
+            .insert(&pool)
+            .await;
+        split(&pool, 1, 1, future, "2").await;
+        return_of_capital(&pool, 2, 1, future, "1.00").await;
+
+        let holdings = portfolio::db_holdings(&pool, None).await.unwrap();
+        assert_eq!(holdings.len(), 1);
+        assert_eq!(holdings[0].quantity, dec("100"));
+        assert_eq!(holdings[0].total_cost_base, dec("1000"));
+
+        let parcels = open_parcels::db_open_parcels(&pool).await.unwrap();
+        assert_eq!(parcels.len(), 1);
+        assert_eq!(parcels[0].remaining_quantity, dec("100"));
+        assert_eq!(parcels[0].return_of_capital_reduction, Decimal::ZERO);
+        assert_eq!(parcels[0].remaining_cost_base, dec("1000"));
+
+        // The optimiser prices a contemplated sale off those parcels, so the
+        // reduced $9.00/unit basis would have overstated every strategy's
+        // gain.
+        let candidates = parcel_optimiser::db_candidate_parcels(&pool, 1, None)
+            .await
+            .unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].remaining_quantity, dec("100"));
+        assert_eq!(candidates[0].remaining_cost_base, dec("1000"));
+
+        let unrealised = unrealised_gains::db_unrealised_gains(&pool, today)
+            .await
+            .unwrap();
+        assert_eq!(unrealised.len(), 1);
+        assert_eq!(unrealised[0].quantity, holdings[0].quantity);
+        assert_eq!(unrealised[0].total_cost_base, holdings[0].total_cost_base);
     }
 
     /// [`db_units_sold`] keys by purchase parcel and carries the *sale* date

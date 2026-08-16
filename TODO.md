@@ -10,37 +10,6 @@ findings are all closed in DONE.md), except where a section's heading names anot
 (e.g. REQUIREMENTS, SCENARIOS). Each section records one finding; sections land in DONE.md as they
 are fixed or decided.
 
-## A corporate action dated in the future is applied to today's holdings (SCENARIOS E-14)
-(SCENARIOS.md section E verification pass, 2026-08-16. `domain::open_parcels::load(conn, None)`
-resolves its cutoff with `as_of_or_open` (`src/domain/open_parcels.rs:112`), i.e. the `9999-12-31`
-sentinel, so the *live* view means "every recorded fact" rather than "everything up to today". A
-split or return of capital recorded ahead of its effective date — normal practice, the terms are
-announced weeks before they take effect — is therefore already in force in every report built on
-that call, while the as-of-dated reports correctly ignore it.)
-- [ ] E-14 — reproduced: Buy ×100 on 2023-01-10, `ShareSplit` 2-for-1 dated **2030-03-01**.
-  `GET /portfolio/open-parcels` and `POST /portfolio/overview` report **200 units** (market value
-  $2,000 at $10) today, in 2026; `POST /portfolio/unrealised-gains` for the same day reports **100**
-  ($1,000). Two reports, one database, one day, two answers
-- [ ] E-14b — the same with a `ReturnOfCapital` of $1.00/unit dated 2030-03-01: open parcels report
-  `return_of_capital_reduction: 100.00` and `remaining_cost_base: 900.00` today, the overview's
-  `total_cost_base` follows, and the **parcel optimiser** (`POST /portfolio/parcel-optimiser`,
-  `src/reports/parcel_optimiser.rs:109`) prices a contemplated sale off the reduced $9.00/unit,
-  overstating the gain on every candidate strategy. Unrealised gains still show $1,000
-- [ ] The write paths are consistent with the *correct* reading — a Sell entered today is validated
-  and costed against the pre-split basis — so it is only the live read that disagrees, which is what
-  makes it silent
-- [ ] Fix shape: `load(conn, None)` (and `portfolio::db_holdings(pool, None)`,
-  `open_parcels::db_open_parcels`) should bound at today rather than at the sentinel, so "live" means
-  "as at today" everywhere; a future-dated fact then appears when it takes effect.
-  **Decided 2026-08-16 (Evan): bound everything at today** — trades as well as corporate actions, one
-  rule rather than a carve-out (a future-dated trade is nearly always a typo, and it will surface on
-  its own date). Watch what else keys off the sentinel: `infra::date::as_of_or_open` is shared, so
-  change the callers rather than the helper, and check the snapshot/valuation paths still pass their
-  own explicit dates
-- [ ] Alternative if the bound is unwanted: refuse a corporate action dated after today at write time
-  — but that removes a legitimate entry (recording the terms on announcement), so bounding the read
-  is the better half
-
 ## A return of capital on an AMIT listing double-reduces alongside the AMMA adjustment (SCENARIOS E-04)
 (SCENARIOS.md section E verification pass, 2026-08-16. For an AMIT the cost-base movement is driven
 solely by the AMMA statement's per-unit `cost_base_adjustment` — `docs/API.md` says so in the E4

@@ -1101,6 +1101,37 @@ fn closed_year_restatement_documented() {
     assert!(README_MD.contains("**no financial year is ever closed**"));
 }
 
+/// Docs-sync pin for the as-at-date convention shared by every holdings
+/// report (2026-08-16, SCENARIOS E-14): an undated report is the position as
+/// at *today*, so a corporate action or trade recorded ahead of its effective
+/// date — the normal way terms are recorded — is not in force yet, and the
+/// undated reports can't disagree with the dated ones run for today. The
+/// behaviour itself is pinned by `domain::open_parcels::tests`.
+#[test]
+fn as_at_today_convention_documented() {
+    assert!(API_MD.contains("### As-at date"));
+    assert!(
+        API_MD.contains(
+            "a report that takes no date is as at **today** — never \"every fact on file\""
+        )
+    );
+    assert!(API_MD.contains(
+        "A [trade](#trades) or [corporate action](#corporate-actions) dated in the future is \
+         recorded but not yet in force"
+    ));
+    // The two halves that make it one rule: trades are bounded too, and the
+    // FY-keyed reports deliberately are not.
+    assert!(
+        API_MD.contains("A future-dated *trade* is bounded the same way rather than carved out")
+    );
+    assert!(
+        API_MD.contains("The [realised](#realised-gains) and FY-keyed tax reports are not bounded")
+    );
+    // The undated reports name themselves as as-at-today where they are
+    // documented, not only in the shared section.
+    assert!(API_MD.contains("as at today (see [As-at date](#as-at-date))"));
+}
+
 /// Docs-sync pin for the write-time state check that bounds that open edit
 /// path (2026-08-15): a corporate-action write is refused when the resulting
 /// terms would leave a sale allocating more units than its parcel holds, so

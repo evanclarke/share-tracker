@@ -16,8 +16,34 @@ pub fn open_ended_cutoff() -> NaiveDate {
 
 /// Resolve an optional as-of date to a concrete cutoff: `Some(date)` passes
 /// through; `None` means "no upper bound" and maps to [`open_ended_cutoff`].
+///
+/// This is the *unbounded* reading of `None`, for reads whose job is "every
+/// recorded fact" (the allocations behind an FY-keyed report, the listings a
+/// price import should cover). A read presented to the user as the **live**
+/// position uses [`as_of_or_today`] instead — see its note.
 pub fn as_of_or_open(as_of: Option<NaiveDate>) -> NaiveDate {
     as_of.unwrap_or_else(open_ended_cutoff)
+}
+
+/// Today, in the server's local time zone — the cutoff a live holdings view
+/// means by "now".
+pub fn today() -> NaiveDate {
+    chrono::Local::now().date_naive()
+}
+
+/// Resolve an optional as-of date for a *live* view: `Some(date)` passes
+/// through; `None` means "as at today" ([`today`]), **not** the open-ended
+/// cutoff.
+///
+/// A corporate action is normally recorded when its terms are announced,
+/// weeks before it takes effect, so a live view resolved to
+/// [`open_ended_cutoff`] applies a not-yet-effective split or return of
+/// capital to today's holdings while the as-of-dated reports correctly ignore
+/// it — two reports, one database, one day, two answers. Trades are bounded
+/// the same way rather than carved out: a future-dated trade is nearly always
+/// a typo, and it surfaces on its own date either way.
+pub fn as_of_or_today(as_of: Option<NaiveDate>) -> NaiveDate {
+    as_of.unwrap_or_else(today)
 }
 
 #[cfg(test)]
@@ -36,6 +62,21 @@ mod tests {
             as_of_or_open(None),
             NaiveDate::from_ymd_opt(9999, 12, 31).unwrap()
         );
+    }
+
+    #[test]
+    fn some_passes_through_the_live_resolver() {
+        let d = NaiveDate::from_ymd_opt(2024, 6, 30).unwrap();
+        assert_eq!(as_of_or_today(Some(d)), d);
+    }
+
+    /// The live view's `None` is *today*, not the open-ended cutoff — the two
+    /// resolvers deliberately disagree, and a live holdings read must reach
+    /// for this one (SCENARIOS E-14).
+    #[test]
+    fn none_is_today_for_a_live_view() {
+        assert_eq!(as_of_or_today(None), today());
+        assert_ne!(as_of_or_today(None), as_of_or_open(None));
     }
 
     #[test]
