@@ -374,6 +374,31 @@ mod tests {
         assert_eq!(p.remaining_cost_base, Decimal::ZERO);
     }
 
+    /// SCENARIOS F-13: the year's attribution exceeded the cash actually
+    /// paid, so the AMMA states a net cost base **increase** — a negative
+    /// per-unit figure, which the AMIT regime permits (upward adjustments
+    /// were not allowed before it; `docs/ato/amit-cost-base-adjustments.md`).
+    /// It raises the parcel's cost base by exactly that much, and no floor
+    /// applies in this direction.
+    #[tokio::test]
+    async fn db_a_negative_per_unit_figure_increases_the_cost_base() {
+        let pool = test_pool().await;
+        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        insert_listing(&pool, 1, "VDHG").await;
+        insert_buy(&pool, 1, 1, buy_date, Decimal::from(100), Decimal::from(10)).await;
+        apply_amit(&pool, 1, 1, 1, Decimal::from(100), "-0.30".parse().unwrap()).await;
+
+        let parcels = db_open_parcels(&pool).await.unwrap();
+        let p = &parcels[0];
+        // Reported as a negative reduction — the statement's own sign.
+        assert_eq!(p.amit_cost_base_reduction, Decimal::from(-30));
+        // 1010.945 + 30
+        assert_eq!(
+            p.remaining_cost_base,
+            "1040.945".parse::<Decimal>().unwrap()
+        );
+    }
+
     #[tokio::test]
     async fn db_non_aud_parcel_converted_to_aud() {
         let pool = test_pool().await;

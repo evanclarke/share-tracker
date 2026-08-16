@@ -770,4 +770,165 @@ mod tests {
             .await;
         assert_eq!(resp.status, StatusCode::CREATED);
     }
+
+    /// SCENARIOS F-16: a parcel bought on 30 June itself was held at the
+    /// year end — the boundary is inclusive, in the open-parcels loader and
+    /// therefore here.
+    #[tokio::test]
+    async fn db_a_parcel_acquired_on_the_year_end_itself_is_covered() {
+        let pool = test_pool().await;
+        amit_listing(&pool, 1, "HNDQ").await;
+        test_support::buy(1, 1)
+            .date(ymd(2024, 6, 30))
+            .qty(dec("100"))
+            .price(dec("10"))
+            .insert(&pool)
+            .await;
+        amma(&pool, 6, 1, ymd(2024, 6, 30), "100").await;
+
+        let result = db_generate(&pool, 6, &GenerateBody::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            result
+                .created
+                .iter()
+                .map(|a| (a.trade_id, a.quantity))
+                .collect::<Vec<_>>(),
+            vec![(1, dec("100"))]
+        );
+        assert_eq!(result.difference, Decimal::ZERO);
+    }
+
+    /// SCENARIOS F-05: units bought after the fund's last distribution period
+    /// of the year. The statement's figure is per unit **held at its year
+    /// end**, and the registry's `units_held` counts the late parcel too, so
+    /// it is covered like any other — the year's whole cost-base movement is
+    /// spread across every unit on hand at 30 June, not only the units that
+    /// drew a distribution. Pinned because it is the convention the Σ against
+    /// `units_held` depends on: excluding the late parcel would leave every
+    /// such statement permanently short.
+    #[tokio::test]
+    async fn db_a_parcel_bought_after_the_last_distribution_is_still_covered() {
+        let pool = test_pool().await;
+        amit_listing(&pool, 1, "HNDQ").await;
+        test_support::buy(1, 1)
+            .date(ymd(2023, 8, 1))
+            .qty(dec("1000"))
+            .price(dec("10"))
+            .insert(&pool)
+            .await;
+        // Bought 20 June — after the 31 March distribution period, so this
+        // parcel was attributed nothing by the fund.
+        test_support::buy(2, 1)
+            .date(ymd(2024, 6, 20))
+            .qty(dec("200"))
+            .price(dec("12"))
+            .insert(&pool)
+            .await;
+        amma(&pool, 6, 1, ymd(2024, 6, 30), "1200").await;
+
+        let result = db_generate(&pool, 6, &GenerateBody::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            result
+                .created
+                .iter()
+                .map(|a| (a.trade_id, a.quantity))
+                .collect::<Vec<_>>(),
+            vec![(1, dec("1000")), (2, dec("200"))]
+        );
+        assert_eq!(result.units_adjusted, dec("1200"));
+        assert_eq!(result.difference, Decimal::ZERO);
+        assert!(
+            crate::reports::amit_adjustment_cross_check::db_amit_adjustment_alerts(&pool)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// SCENARIOS F-17: the holding moves to another account mid-year. The
+    /// transfer closes the original parcel and re-creates it in the
+    /// destination, so the receiving account's statement covers the
+    /// **replacement** parcel — the units are held there at the year end, and
+    /// the replacement carries the original's cost base and acquisition date.
+    #[tokio::test]
+    async fn db_a_parcel_transferred_mid_year_is_covered_in_its_new_account() {
+        use crate::entities::holding_account::{self, HoldingAccount};
+        use crate::entities::sell::AllocationInput;
+        use crate::entities::transfer::{self, TransferBody};
+
+        let pool = test_pool().await;
+        amit_listing(&pool, 1, "HNDQ").await;
+        holding_account::db_upsert(
+            &pool,
+            &HoldingAccount {
+                id: 2,
+                name: "Second".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        test_support::buy(1, 1)
+            .date(ymd(2023, 8, 1))
+            .qty(dec("100"))
+            .price(dec("10"))
+            .insert(&pool)
+            .await;
+        let group = transfer::db_transfer(
+            &pool,
+            1,
+            &TransferBody {
+                listing_id: 1,
+                date: ymd(2024, 2, 1),
+                from_account_id: 1,
+                to_account_id: 2,
+                allocations: vec![AllocationInput {
+                    purchase_trade_id: 1,
+                    quantity_allocated: dec("100"),
+                }],
+                fee_allocations: Vec::new(),
+                fee_market_price: None,
+                fee_fx_rate: None,
+            },
+        )
+        .await
+        .unwrap();
+        let replacement = group.transfer_ins[0].id;
+
+        test_support::amma(6, 1)
+            .units(dec("100"))
+            .cost_base_adjustment(dec("0.50"))
+            .with(|a| {
+                a.tax_year_end_date = ymd(2024, 6, 30);
+                a.date_received = ymd(2024, 8, 29);
+                a.holding_account_id = 2;
+            })
+            .insert(&pool)
+            .await;
+
+        let result = db_generate(&pool, 6, &GenerateBody::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            result
+                .created
+                .iter()
+                .map(|a| (a.trade_id, a.quantity))
+                .collect::<Vec<_>>(),
+            vec![(replacement, dec("100"))]
+        );
+        assert_eq!(result.difference, Decimal::ZERO);
+        // …and the reduction lands on the replacement parcel: 100 × 50c off
+        // the cost base it carried over.
+        let parcels = crate::reports::open_parcels::db_open_parcels(&pool)
+            .await
+            .unwrap();
+        assert_eq!(parcels.len(), 1);
+        assert_eq!(parcels[0].trade_id, replacement);
+        assert_eq!(parcels[0].amit_cost_base_reduction, dec("50"));
+        assert_eq!(parcels[0].remaining_cost_base, dec("950"));
+    }
 }

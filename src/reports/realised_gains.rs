@@ -2770,6 +2770,84 @@ mod tests {
         assert_eq!(after[0].capital_gain_loss, Decimal::from(550));
     }
 
+    /// SCENARIOS F-25 — "the most common ETF tax error": a fund held for
+    /// several years, each year's AMMA reducing the parcel's cost base, then
+    /// sold. The sale's cost base must carry **every** prior year's reduction,
+    /// not just the latest, and the year-of-sale statement (entered months
+    /// after the sale, covering units already gone) restates it once more.
+    #[tokio::test]
+    async fn db_a_multi_year_amit_holding_carries_every_years_reduction_into_the_sale() {
+        let pool = test_pool().await;
+        test_support::listing(1)
+            .ticker("VDHG")
+            .amit(true)
+            .insert(&pool)
+            .await;
+        insert_buy(
+            &pool,
+            1,
+            1,
+            NaiveDate::from_ymd_opt(2020, 8, 1).unwrap(),
+            Decimal::from(1000),
+            Decimal::from(50),
+        )
+        .await;
+        // Four full years of attribution: 10c, 15c, 20c, 25c per unit.
+        for (id, year, per_unit) in [
+            (1, 2021, "0.10"),
+            (2, 2022, "0.15"),
+            (3, 2023, "0.20"),
+            (4, 2024, "0.25"),
+        ] {
+            test_support::amma(id, 1)
+                .units(Decimal::from(1000))
+                .cost_base_adjustment(per_unit.parse().unwrap())
+                .with(|a| {
+                    a.tax_year_end_date = NaiveDate::from_ymd_opt(year, 6, 30).unwrap();
+                    a.date_received = NaiveDate::from_ymd_opt(year, 8, 29).unwrap();
+                })
+                .insert(&pool)
+                .await;
+            test_support::amit_adjustment(&pool, id, id, 1, Decimal::from(1000)).await;
+        }
+        // Sold in November 2024, inside FY2025.
+        insert_sell(
+            &pool,
+            2,
+            1,
+            NaiveDate::from_ymd_opt(2024, 11, 1).unwrap(),
+            Decimal::from(1000),
+            Decimal::from(80),
+        )
+        .await;
+        allocate(&pool, 1, 2, 1, Decimal::from(1000)).await;
+
+        // 50,000 − 1000 × (0.10 + 0.15 + 0.20 + 0.25) = 49,300.
+        let gains = db_realised_gains(&pool).await.unwrap();
+        assert_eq!(gains.len(), 1);
+        assert_eq!(gains[0].cost_base, Decimal::from(49300));
+        assert_eq!(gains[0].capital_gain_loss, Decimal::from(30700));
+        assert_eq!(gains[0].discount_eligible_gain, Decimal::from(30700));
+
+        // The FY2025 statement lands in September 2025, after the sale: it
+        // covers the units disposed of during its year (LCR 2015/11 para 13),
+        // and the sale's cost base moves again.
+        test_support::amma(5, 1)
+            .units(Decimal::ZERO)
+            .cost_base_adjustment("0.30".parse().unwrap())
+            .with(|a| {
+                a.tax_year_end_date = NaiveDate::from_ymd_opt(2025, 6, 30).unwrap();
+                a.date_received = NaiveDate::from_ymd_opt(2025, 9, 1).unwrap();
+            })
+            .insert(&pool)
+            .await;
+        test_support::amit_adjustment(&pool, 5, 5, 1, Decimal::from(1000)).await;
+
+        let after = db_realised_gains(&pool).await.unwrap();
+        assert_eq!(after[0].cost_base, Decimal::from(49000));
+        assert_eq!(after[0].capital_gain_loss, Decimal::from(31000));
+    }
+
     /// SCENARIOS D-13. The other half of the rule above: an adjustment row
     /// covering only *part* of the parcel — which is what
     /// `amit_adjustment_generation` writes for every parcel partly sold during

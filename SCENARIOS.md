@@ -69,7 +69,7 @@ behind or became a recorded finding.
 | C. The 12-month CGT discount clock | 18 | 2026-08-15 | 1 raised, closed — see below |
 | D. Sells and parcel allocation | 20 | 2026-08-15 | 2 raised, both closed — see below |
 | E. Corporate actions | 51 | 2026-08-16 | 5 raised, all closed — see below |
-| F. AMIT / AMMA | 25 | — | — |
+| F. AMIT / AMMA | 25 | 2026-08-16 | 6 raised, all open — see below |
 | G. Dividends, franking, and the holding-period rule | 25 | — | — |
 | H. Interest, expenses, and other income | 10 | — | — |
 | I. DRP | 14 | — | — |
@@ -277,6 +277,63 @@ The five findings, each raised as a `TODO.md` section naming its scenario ids:
 | A return of capital on an AMIT listing double-reduces alongside the AMMA adjustment | E-04 | fixed 2026-08-16 — archived in [`DONE/tax-domain.md`](DONE/tax-domain.md) |
 | A duplicated corporate action is silently compounded | E-03, E-15 | fixed 2026-08-16 — archived in [`DONE/reporting.md`](DONE/reporting.md) |
 | Fractional entitlements are documented for splits and demergers but not for bonus issues or scrip exchanges | E-11, E-36 | documented 2026-08-16 — archived in [`DONE/tax-domain.md`](DONE/tax-domain.md) |
+
+### Section F findings
+
+Nineteen of the 25 came back correct. The arithmetic core — what a statement's
+per-unit figure does to a parcel — held up under everything it was probed
+with, and for one structural reason: the figure is multiplied out in exactly
+one place (`amit_adjustment::reduction_for`, over
+`domain::cost_base::AmitReductionEvent`), so the unit basis, the units a row
+reaches, and the nil floor cannot disagree between the open-parcels,
+unrealised, realised and net-capital-gain views. What the six findings have in
+common is the opposite: they are all in the *bookkeeping around* the figure —
+which statement, whose account, which year, which parcel — where more than one
+reader answers the question for itself. What each group turned on:
+
+- **Generation and the confirm gate (F-01–F-03, F-16–F-20).** The
+  preview/confirm path does what it claims: a preview writes nothing and
+  answers the same refusals the write would, a units mismatch is surfaced with
+  its signed difference and never blocks, the missed-trade repair
+  (`"replace": true`) picks up the new parcel and clears the cross-check, and
+  the deleted rows land in `row_history`. The narrowing rules hold in both
+  directions — a statement covers its own listing and holding account only
+  (F-03, F-20), a parcel bought on 30 June itself is inside the boundary
+  (F-16), a mid-year split leaves each parcel's quantity in its own
+  as-acquired basis and re-bases it before multiplying (F-18), and a second
+  row for a parcel already adjusted on the statement is refused (F-19).
+- **The attributed components (F-10–F-12, F-21, F-22).** The discount-method
+  line is the already-halved figure, so it is grossed up ×2 into the gain
+  buckets and halved once at the end — never twice (F-10); indexation and
+  other-method gains are non-discountable; and `capital_losses_applied` stays
+  informational, because those losses were applied at the trust's own level and
+  cannot flow to a member (F-11). Foreign tax credits join the FITO line and
+  cap at the A$1,000 de-minimis with the excess on its own line, the documented
+  limitation behaving as documented (F-12). Both doors into entering the
+  attribution as ordinary income are shut with 422s that name the AMMA
+  statement instead (F-21, F-22), and the cash-only row that remains is
+  excluded from the tax summary and flagged by the cash cross-check until its
+  statement exists.
+- **The cost-base movement (F-13, F-14, F-24, F-25).** A negative per-unit
+  figure raises the cost base, with no floor in that direction (F-13);
+  cumulative reductions past nil floor at nil and produce a CGT event E10 gain
+  in the statement's own year, discountable on the holding period at the
+  statement's year end (F-14); and the headline case works end to end — four
+  years of reductions all reach a sale in year five, and the year-of-sale
+  statement entered months afterwards restates that sale's gain (F-25). A
+  parcel with an adjustment cannot be deleted, and the refusal names the
+  adjustment (F-24).
+
+The six findings, each raised as a `TODO.md` section naming its scenario ids:
+
+| Finding | Scenarios | Status |
+| --- | --- | --- |
+| Two AMMA statements for the same fund and year are silently double-counted | F-06 | open |
+| A statement for a year with nothing held at 30 June cannot be generated, and its hand-entered set is flagged forever | F-04, F-17, F-25 | open |
+| An AMIT adjustment on a parcel closed by a transfer is accepted and reduces nothing | F-17 | open |
+| The `amit` listing flag is retroactive and rewrites every earlier year | F-23 | open |
+| The AMIT cash cross-check ignores the holding account | F-03, F-08 | open |
+| Which parcels a statement's per-unit figure reaches is undocumented | F-05 | open |
 
 ---
 
