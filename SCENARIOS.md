@@ -68,7 +68,7 @@ behind or became a recorded finding.
 | B. Cost base construction and the adjustment pipeline | 24 | 2026-08-15 | 5 raised, all closed — see below |
 | C. The 12-month CGT discount clock | 18 | 2026-08-15 | 1 raised, closed — see below |
 | D. Sells and parcel allocation | 20 | 2026-08-15 | 2 raised, both closed — see below |
-| E. Corporate actions | 51 | 2026-08-16 | 5 raised, open — see below |
+| E. Corporate actions | 51 | 2026-08-16 | 5 raised, all closed — see below |
 | F. AMIT / AMMA | 25 | — | — |
 | G. Dividends, franking, and the holding-period rule | 25 | — | — |
 | H. Interest, expenses, and other income | 10 | — | — |
@@ -275,8 +275,8 @@ The five findings, each raised as a `TODO.md` section naming its scenario ids:
 | A return of capital in a currency other than its parcels' is accepted, then breaks every cost-base report | E-07, E-39 | fixed 2026-08-16 — archived in [`DONE/tax-domain.md`](DONE/tax-domain.md) |
 | A corporate action dated in the future is applied to today's holdings | E-14 | fixed 2026-08-16 — archived in [`DONE/reporting.md`](DONE/reporting.md) |
 | A return of capital on an AMIT listing double-reduces alongside the AMMA adjustment | E-04 | fixed 2026-08-16 — archived in [`DONE/tax-domain.md`](DONE/tax-domain.md) |
-| A duplicated corporate action is silently compounded | E-03, E-15 | open |
-| Fractional entitlements are documented for splits and demergers but not for bonus issues or scrip exchanges | E-11, E-36 | open |
+| A duplicated corporate action is silently compounded | E-03, E-15 | fixed 2026-08-16 — archived in [`DONE/reporting.md`](DONE/reporting.md) |
+| Fractional entitlements are documented for splits and demergers but not for bonus issues or scrip exchanges | E-11, E-36 | documented 2026-08-16 — archived in [`DONE/tax-domain.md`](DONE/tax-domain.md) |
 
 ---
 
