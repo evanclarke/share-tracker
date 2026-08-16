@@ -870,3 +870,70 @@ consequences, and that the cited ATO mirror does state the amount as an annual m
 the behaviour itself stays pinned by
 `entities::amit_adjustment_generation::tests::db_a_parcel_bought_after_the_last_distribution_is_still_covered`
 from the section-F pass. Full suite 1491 passed / 0 failed.
+
+## An AMIT adjustment on a parcel closed by a transfer is accepted and reduces nothing (SCENARIOS F-17)
+(SCENARIOS.md section F verification pass, 2026-08-16. A transfer closes the source parcel and
+writes a replacement Buy carrying the cost base forward as a frozen figure
+(`domain::rollover::insert_replacement_buy`, `src/domain/rollover.rs:255`) — so an AMIT adjustment
+written against the *original* parcel afterwards reaches nothing: the parcel is fully consumed, so
+no open-holdings report shows it, and the transfer's closing Sell is not a disposal, so no realised
+gain nets it off. `amit_adjustment::db_upsert_on` checks the trade type, listing, holding account,
+quantity and duplication — not whether the parcel still exists in any reachable form.)
+- [x] F-17 — reproduced: Buy ×1000 @ $50 in account 1, transferred whole to account 2 on
+  1 Feb 2025, then the sending account's FY2025 statement (0.20/unit) applied by hand to the
+  original parcel (trade 10) → `204`. `GET /portfolio/open-parcels` still shows the replacement
+  parcel at `amit_cost_base_reduction` 0 and `remaining_cost_base` 50,000; realised gains is empty;
+  net capital gain is all zeroes. The $200 reduction is simply gone
+- [x] The receiving account's own statement is fine — it covers the replacement parcel, which is
+  the case pinned by
+  `amit_adjustment_generation::db_a_parcel_transferred_mid_year_is_covered_in_its_new_account`
+- [x] The same shape applies to any parcel-substituting operation (`domain::rollover` also backs
+  scrip-for-scrip and demergers), and to any AMIT adjustment entered *after* one of them: the
+  replacement's cost base was fixed when the operation ran
+- [x] **Decided 2026-08-16 (Evan): option (a)** — refuse the adjustment, naming the replacement
+  parcel. The options weighed were: (a) refuse an adjustment against a parcel that a rollover has
+  closed, naming the replacement parcel to use instead (cheap, and makes the state
+  unrepresentable); (b) carry a later adjustment through to the replacement parcel (correct in
+  substance, but re-opens the "cost base frozen at operation time" decision the rollover design
+  rests on); (c) flag it in the AMIT adjustment cross-check as an unreachable row
+
+**Resolution (2026-08-16): option (a) — refused at write time, naming the replacement parcel and the
+way round.**
+
+`amit_adjustment::db_upsert_on` gained the check, as a natural widening of the existing
+"quantity ≤ the trade's quantity" bound: the units a rollover has already carried away are
+subtracted first, so a row may cover at most `trade.quantity − the units taken`. The three
+parcel-substituting operations are exactly `domain::rollover`'s — transfer, scrip-for-scrip
+exchange, demerger — recognised by the provenance column (`transfer_id` / `scrip_action_id` /
+`demerger_action_id`) their closing Sell and their replacement Buys share. An ordinary Sell, a
+buy-back participation and a worthless recognise are **real disposals** whose gain the reduction
+does reach, so they are deliberately not counted: F-04's hand-entered whole-parcel row on a
+sold-out year still writes, and a test pins that partition.
+
+The refusal carries the units still adjustable (zero once the whole parcel went) and the
+replacement parcel ids, and names the way round — *delete the operation, enter the adjustment, then
+re-run it, so the replacement carries the reduced cost base forward*. That path is not advice taken
+on trust: it is exercised by
+`db_an_adjustment_entered_before_a_rollover_carries_into_the_replacement`, and walked end to end
+against a running server on F-17's own reproduction (transfer deleted, adjustment entered,
+transfer re-run → the replacement parcel carries 49,800 instead of 50,000).
+
+One consequence is worth stating plainly rather than discovering later: an AMMA statement usually
+arrives months after the year end, so a rollover can fall between the two, and **generation is then
+refused as well** — the row-level check fires inside the generation transaction, writing nothing
+partial. That is correct in substance (the reduction genuinely could not reach the replacement) and
+the remedy is the same delete-enter-re-run, but it is a real workflow cost of option (a) over
+option (b)'s carry-through. Pinned by
+`amit_adjustment_generation::db_a_rollover_after_the_year_end_blocks_generation_with_the_reason`
+and documented in the generation section.
+
+Docs: the AMIT adjustments section states the refusal, its reason, the disposals it does *not*
+reach, and the way round; the generation section states the same for a rollover after the year end;
+the 422 catalogue row and the README's AMIT bullet follow.
+
+Tests: `entities::amit_adjustment::tests::db_an_adjustment_on_a_parcel_a_rollover_closed_is_refused`
+(F-17 exactly, with the replacement id), `db_a_partial_rollover_leaves_the_units_it_did_not_take_adjustable`
+(the boundary is exact: 60 writes, 61 is refused), `db_an_adjustment_entered_before_a_rollover_carries_into_the_replacement`,
+`db_a_parcel_closed_by_an_ordinary_sell_stays_adjustable`,
+`api_rollover_replaced_parcel_returns_422_naming_the_replacement`, the generation test above, and
+three `doc_checks` assertions. Full suite 1503 passed / 0 failed.

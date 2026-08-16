@@ -163,6 +163,12 @@ fn amit_adjustment_generation_and_cross_check_documented() {
     assert!(
         API_MD.contains("**another row already adjusts the same parcel on the same statement**")
     );
+    // SCENARIOS F-17: and the rollover refusal, with the way round it and the
+    // disposals it deliberately does not reach.
+    assert!(API_MD.contains("has already carried the parcel's units into a replacement parcel**"));
+    assert!(API_MD.contains("delete the operation, enter the adjustment, then re-run it"));
+    assert!(API_MD.contains("has carried away since**"));
+    assert!(API_MD.contains("**real disposals** whose gain the reduction does reach"));
     assert!(SCHEMA_MD.contains("UNIQUE (amma_statement_id, trade_id)"));
     // The cross-check report's own section, with each of its four checks.
     assert!(API_MD.contains("### AMIT adjustment cross-check"));

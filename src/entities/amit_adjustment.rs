@@ -82,6 +82,26 @@ pub enum UpsertError {
     HoldingAccountMismatch,
     #[error("the adjusted quantity exceeds the trade's quantity")]
     QuantityExceedsTrade,
+    /// Some or all of the parcel's units were carried into a **replacement
+    /// parcel** by a transfer, scrip-for-scrip exchange or demerger
+    /// (`domain::rollover`). Those operations compute the replacement's cost
+    /// base when they run and store it as a fixed figure, so a reduction
+    /// entered against the original afterwards reaches nothing at all: the
+    /// original is fully consumed (no open-holdings report shows it) and its
+    /// closing Sell is not a disposal (no realised gain nets it off), so the
+    /// amount is silently lost (SCENARIOS F-17). Refused here so the state is
+    /// unrepresentable rather than quietly wrong. Mapped to `422`.
+    #[error(
+        "{adjustable} of the parcel's units remain adjustable; the rest were carried into a \
+         replacement parcel by a rollover"
+    )]
+    UnitsCarriedIntoReplacement {
+        /// Units of the parcel a rollover has *not* carried away — the most
+        /// an adjustment on it may cover (zero once the whole parcel went).
+        adjustable: Decimal,
+        /// The replacement parcels the units went into, ascending.
+        replacements: Vec<i64>,
+    },
     /// Another row already adjusts this parcel on this statement. Applying
     /// the statement's per-unit figure to the same parcel twice reduces its
     /// cost base twice, and CGT event E10's nil floor turns an over-reduction
@@ -138,6 +158,78 @@ pub async fn db_upsert_on(
         .map_err(|_| UpsertError::Db(sqlx::Error::Decode("invalid trade quantity".into())))?;
     if adj.quantity > trade_qty {
         return Err(UpsertError::QuantityExceedsTrade);
+    }
+
+    // Units a rollover has already carried into a replacement parcel are
+    // beyond this row's reach: the replacement's cost base was computed and
+    // frozen when the operation ran, and the original's closing Sell is not a
+    // disposal, so a reduction covering them would be silently lost
+    // (SCENARIOS F-17). The three parcel-substituting operations are exactly
+    // `domain::rollover`'s — a transfer, a scrip-for-scrip exchange and a
+    // demerger — recognised by the provenance column their closing Sell and
+    // their replacement Buys share. An ordinary Sell, a buy-back
+    // participation and a worthless recognise are real disposals whose gain
+    // the reduction does reach, so they are not counted here.
+    let rollover_rows = sqlx::query(
+        "SELECT pa.quantity_allocated, s.date, \
+                COALESCE(s.transfer_id, s.scrip_action_id, s.demerger_action_id) AS group_id, \
+                CASE WHEN s.transfer_id IS NOT NULL THEN 'transfer_id' \
+                     WHEN s.scrip_action_id IS NOT NULL THEN 'scrip_action_id' \
+                     ELSE 'demerger_action_id' END AS group_column \
+         FROM parcel_allocations pa JOIN trades s ON s.id = pa.sale_trade_id \
+         WHERE pa.purchase_trade_id = ? \
+           AND (s.transfer_id IS NOT NULL OR s.scrip_action_id IS NOT NULL \
+                OR s.demerger_action_id IS NOT NULL)",
+    )
+    .bind(adj.trade_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    if !rollover_rows.is_empty() {
+        let trade_date: chrono::NaiveDate =
+            sqlx::query_scalar("SELECT date FROM trades WHERE id = ?")
+                .bind(adj.trade_id)
+                .fetch_one(&mut *conn)
+                .await?;
+        let splits = corporate_action::db_splits_for_listing(&mut *conn, trade_listing_id).await?;
+        let mut sales = Vec::with_capacity(rollover_rows.len());
+        let mut groups = Vec::new();
+        for row in &rollover_rows {
+            let date: chrono::NaiveDate = row.try_get("date")?;
+            let qty = parse_dec("quantity_allocated", row.try_get("quantity_allocated")?)?;
+            sales.push((date, qty));
+            groups.push((
+                row.try_get::<String, _>("group_column")?,
+                row.try_get::<i64, _>("group_id")?,
+            ));
+        }
+        // Allocations are in their sale date's units; the parcel's own
+        // quantity — and this row's — are as acquired.
+        let carried = corporate_action::sold_in_acquired_units(&sales, &splits, trade_date);
+        let adjustable = (trade_qty - carried).max(Decimal::ZERO);
+        if adj.quantity > adjustable {
+            groups.sort_unstable();
+            groups.dedup();
+            let mut replacements = Vec::new();
+            for (column, group_id) in groups {
+                // The replacement Buys of the same operation: same provenance
+                // column and id, acquisition side. The column name comes from
+                // the CASE above, never from user input.
+                let ids: Vec<i64> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                    "SELECT id FROM trades \
+                     WHERE {column} = ? AND trade_type IN ('Buy', 'DRP') ORDER BY id"
+                )))
+                .bind(group_id)
+                .fetch_all(&mut *conn)
+                .await?;
+                replacements.extend(ids);
+            }
+            replacements.sort_unstable();
+            replacements.dedup();
+            return Err(UpsertError::UnitsCarriedIntoReplacement {
+                adjustable,
+                replacements,
+            });
+        }
     }
 
     // One adjustment per (statement, parcel): a second row for the same
@@ -320,6 +412,25 @@ impl From<UpsertError> for ApiError {
             ),
             UpsertError::QuantityExceedsTrade => {
                 ApiError::unprocessable("the adjusted quantity exceeds the trade's quantity")
+            }
+            UpsertError::UnitsCarriedIntoReplacement {
+                adjustable,
+                replacements,
+            } => {
+                let list = replacements
+                    .iter()
+                    .map(|id| format!("#{id}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                ApiError::unprocessable(format!(
+                    "a transfer, scrip-for-scrip exchange or demerger has carried this parcel's \
+                     units into replacement parcel(s) {list}, which took their cost base with \
+                     them — a reduction entered here would reach nothing, so at most {adjustable} \
+                     unit(s) of it can still be adjusted. Enter the statement's reduction before \
+                     the operation instead: delete the transfer/exchange/demerger, enter this \
+                     adjustment, then re-run it, so the replacement parcel carries the reduced \
+                     cost base forward"
+                ))
             }
             UpsertError::DuplicateParcel => ApiError::unprocessable(
                 "this parcel already has an adjustment on this AMMA statement — \
@@ -819,6 +930,208 @@ mod tests {
         let detail = resp.text().to_string();
         assert!(detail.contains("already has an adjustment"), "{detail}");
         assert!(db_get(&pool, 2).await.unwrap().is_none());
+    }
+
+    /// Move `quantity` units of parcel `trade_id` to holding account 2,
+    /// returning the replacement parcel's id.
+    async fn transfer_out(pool: &SqlitePool, trade_id: i64, quantity: Decimal) -> i64 {
+        use crate::entities::holding_account::{self, HoldingAccount};
+        use crate::entities::sell::AllocationInput;
+        use crate::entities::transfer::{self, TransferBody};
+
+        // Idempotent: several tests move a parcel into the same second account.
+        holding_account::db_upsert(
+            pool,
+            &HoldingAccount {
+                id: 2,
+                name: "Second".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let group = transfer::db_transfer(
+            pool,
+            1,
+            &TransferBody {
+                listing_id: 1,
+                date: ymd(2024, 5, 1),
+                from_account_id: 1,
+                to_account_id: 2,
+                allocations: vec![AllocationInput {
+                    purchase_trade_id: trade_id,
+                    quantity_allocated: quantity,
+                }],
+                fee_allocations: Vec::new(),
+                fee_market_price: None,
+                fee_fx_rate: None,
+            },
+        )
+        .await
+        .unwrap();
+        group.transfer_ins[0].id
+    }
+
+    /// SCENARIOS F-17: a transfer carries the parcel's units — and their cost
+    /// base — into a replacement parcel, computed and frozen when the
+    /// transfer ran. An adjustment entered against the original afterwards
+    /// would reach nothing at all, so it is refused rather than silently
+    /// swallowed.
+    #[tokio::test]
+    async fn db_an_adjustment_on_a_parcel_a_rollover_closed_is_refused() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool, 1, "XASX", "VDHG").await;
+        insert_buy_trade(&pool, 1, 1, Decimal::from(100)).await;
+        insert_amma(&pool, 1, 1, "0.05".parse().unwrap()).await;
+        let replacement = transfer_out(&pool, 1, Decimal::from(100)).await;
+
+        let err = db_upsert(
+            &pool,
+            &AmitAdjustment {
+                id: 1,
+                amma_statement_id: 1,
+                trade_id: 1,
+                quantity: Decimal::from(100),
+            },
+        )
+        .await
+        .unwrap_err();
+        match err {
+            UpsertError::UnitsCarriedIntoReplacement {
+                adjustable,
+                replacements,
+            } => {
+                assert_eq!(adjustable, Decimal::ZERO);
+                assert_eq!(replacements, vec![replacement]);
+            }
+            other => panic!("expected the rollover refusal, got {other:?}"),
+        }
+        assert!(db_get(&pool, 1).await.unwrap().is_none());
+    }
+
+    /// Only the units the rollover took are out of reach: a partial transfer
+    /// leaves the rest adjustable, and the boundary is exact.
+    #[tokio::test]
+    async fn db_a_partial_rollover_leaves_the_units_it_did_not_take_adjustable() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool, 1, "XASX", "VDHG").await;
+        insert_buy_trade(&pool, 1, 1, Decimal::from(100)).await;
+        insert_amma(&pool, 1, 1, "0.05".parse().unwrap()).await;
+        transfer_out(&pool, 1, Decimal::from(40)).await;
+
+        let row = AmitAdjustment {
+            id: 1,
+            amma_statement_id: 1,
+            trade_id: 1,
+            quantity: Decimal::from(60),
+        };
+        db_upsert(&pool, &row).await.unwrap();
+
+        let err = db_upsert(
+            &pool,
+            &AmitAdjustment {
+                quantity: Decimal::from(61),
+                ..row
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            UpsertError::UnitsCarriedIntoReplacement { adjustable, .. }
+                if adjustable == Decimal::from(60)
+        ));
+    }
+
+    /// The way out the refusal names, end to end: entering the adjustment
+    /// *before* the transfer leaves the replacement parcel carrying the
+    /// reduced cost base — which is why the refusal says to delete the
+    /// operation, enter the row, and re-run it.
+    #[tokio::test]
+    async fn db_an_adjustment_entered_before_a_rollover_carries_into_the_replacement() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool, 1, "XASX", "VDHG").await;
+        insert_buy_trade(&pool, 1, 1, Decimal::from(100)).await;
+        insert_amma(&pool, 1, 1, "0.05".parse().unwrap()).await;
+        db_upsert(
+            &pool,
+            &AmitAdjustment {
+                id: 1,
+                amma_statement_id: 1,
+                trade_id: 1,
+                quantity: Decimal::from(100),
+            },
+        )
+        .await
+        .unwrap();
+        let replacement = transfer_out(&pool, 1, Decimal::from(100)).await;
+
+        // 100 × $100 + 9.95 + 0.995 = 10,010.945, less 100 × 5c.
+        let parcels = crate::reports::open_parcels::db_open_parcels(&pool)
+            .await
+            .unwrap();
+        assert_eq!(parcels.len(), 1);
+        assert_eq!(parcels[0].trade_id, replacement);
+        assert_eq!(
+            parcels[0].remaining_cost_base,
+            "10005.945".parse::<Decimal>().unwrap()
+        );
+    }
+
+    /// An ordinary Sell is not a rollover: it is a real disposal, and a
+    /// statement covering the units it sold reduces that sale's cost base
+    /// (SCENARIOS F-04). The refusal must not reach it.
+    #[tokio::test]
+    async fn db_a_parcel_closed_by_an_ordinary_sell_stays_adjustable() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool, 1, "XASX", "VDHG").await;
+        insert_buy_trade(&pool, 1, 1, Decimal::from(100)).await;
+        insert_sell_trade(&pool, 2, 1, Decimal::from(100)).await;
+        crate::test_support::allocate(&pool, 1, 2, 1, Decimal::from(100)).await;
+        insert_amma(&pool, 1, 1, "0.05".parse().unwrap()).await;
+
+        db_upsert(
+            &pool,
+            &AmitAdjustment {
+                id: 1,
+                amma_statement_id: 1,
+                trade_id: 1,
+                quantity: Decimal::from(100),
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn api_rollover_replaced_parcel_returns_422_naming_the_replacement() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool, 1, "XASX", "VDHG").await;
+        insert_buy_trade(&pool, 1, 1, Decimal::from(100)).await;
+        insert_amma(&pool, 1, 1, "0.05".parse().unwrap()).await;
+        let replacement = transfer_out(&pool, 1, Decimal::from(100)).await;
+
+        let resp = client(&pool)
+            .put(
+                "/amit_adjustments/1",
+                &serde_json::json!({
+                    "amma_statement_id": 1,
+                    "trade_id": 1,
+                    "quantity": "100"
+                }),
+            )
+            .await;
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
+        let detail = resp.text().to_string();
+        assert!(
+            detail.contains(&format!("replacement parcel(s) #{replacement}")),
+            "{detail}"
+        );
+        assert!(detail.contains("at most 0 unit(s)"), "{detail}");
+        assert!(
+            detail.contains("delete the transfer/exchange/demerger"),
+            "{detail}"
+        );
+        assert!(db_get(&pool, 1).await.unwrap().is_none());
     }
 
     #[tokio::test]

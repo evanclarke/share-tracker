@@ -10,31 +10,6 @@ findings are all closed in DONE.md), except where a section's heading names anot
 (e.g. REQUIREMENTS, SCENARIOS). Each section records one finding; sections land in DONE.md as they
 are fixed or decided.
 
-## An AMIT adjustment on a parcel closed by a transfer is accepted and reduces nothing (SCENARIOS F-17)
-(SCENARIOS.md section F verification pass, 2026-08-16. A transfer closes the source parcel and
-writes a replacement Buy carrying the cost base forward as a frozen figure
-(`domain::rollover::insert_replacement_buy`, `src/domain/rollover.rs:255`) — so an AMIT adjustment
-written against the *original* parcel afterwards reaches nothing: the parcel is fully consumed, so
-no open-holdings report shows it, and the transfer's closing Sell is not a disposal, so no realised
-gain nets it off. `amit_adjustment::db_upsert_on` checks the trade type, listing, holding account,
-quantity and duplication — not whether the parcel still exists in any reachable form.)
-- [ ] F-17 — reproduced: Buy ×1000 @ $50 in account 1, transferred whole to account 2 on
-  1 Feb 2025, then the sending account's FY2025 statement (0.20/unit) applied by hand to the
-  original parcel (trade 10) → `204`. `GET /portfolio/open-parcels` still shows the replacement
-  parcel at `amit_cost_base_reduction` 0 and `remaining_cost_base` 50,000; realised gains is empty;
-  net capital gain is all zeroes. The $200 reduction is simply gone
-- [ ] The receiving account's own statement is fine — it covers the replacement parcel, which is
-  the case pinned by
-  `amit_adjustment_generation::db_a_parcel_transferred_mid_year_is_covered_in_its_new_account`
-- [ ] The same shape applies to any parcel-substituting operation (`domain::rollover` also backs
-  scrip-for-scrip and demergers), and to any AMIT adjustment entered *after* one of them: the
-  replacement's cost base was fixed when the operation ran
-- [ ] **Model question for Evan.** (a) Refuse an adjustment against a parcel that a rollover has
-  closed, naming the replacement parcel to use instead (cheap, and makes the state
-  unrepresentable); (b) carry a later adjustment through to the replacement parcel (correct in
-  substance, but re-opens the "cost base frozen at operation time" decision the rollover design
-  rests on); (c) flag it in the AMIT adjustment cross-check as an unreachable row
-
 ## The `amit` listing flag is retroactive and rewrites every earlier year (SCENARIOS F-23)
 (SCENARIOS.md section F verification pass, 2026-08-16. `listings.amit` is a plain boolean with no
 time dimension, and three readers key off it as though it had always been true: the tax summary

@@ -790,6 +790,78 @@ mod tests {
         assert_eq!(resp.status, StatusCode::CREATED);
     }
 
+    /// SCENARIOS F-17, from generation's side: the parcel was open at the
+    /// statement's year end, so it is generated for — but a transfer has
+    /// carried it away since, and the replacement's cost base was frozen when
+    /// the transfer ran. The row-level refusal fires inside the generation
+    /// transaction, so nothing partial is written and the reason names the
+    /// replacement parcel and the way round (enter the adjustment before the
+    /// operation: delete it, enter, re-run).
+    #[tokio::test]
+    async fn db_a_rollover_after_the_year_end_blocks_generation_with_the_reason() {
+        use crate::entities::holding_account::{self, HoldingAccount};
+        use crate::entities::sell::AllocationInput;
+        use crate::entities::transfer::{self, TransferBody};
+
+        let pool = test_pool().await;
+        amit_listing(&pool, 1, "HNDQ").await;
+        test_support::buy(1, 1)
+            .date(ymd(2023, 8, 1))
+            .qty(dec("100"))
+            .price(dec("10"))
+            .insert(&pool)
+            .await;
+        amma(&pool, 6, 1, ymd(2024, 6, 30), "100").await;
+        holding_account::db_upsert(
+            &pool,
+            &HoldingAccount {
+                id: 2,
+                name: "Second".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        // Moved in August, after the year end but before the statement was
+        // entered — the common order, since the statement arrives in spring.
+        transfer::db_transfer(
+            &pool,
+            1,
+            &TransferBody {
+                listing_id: 1,
+                date: ymd(2024, 8, 15),
+                from_account_id: 1,
+                to_account_id: 2,
+                allocations: vec![AllocationInput {
+                    purchase_trade_id: 1,
+                    quantity_allocated: dec("100"),
+                }],
+                fee_allocations: Vec::new(),
+                fee_market_price: None,
+                fee_fx_rate: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let err = db_generate(&pool, 6, &GenerateBody::default())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                GenerateError::Upsert(
+                    amit_adjustment::UpsertError::UnitsCarriedIntoReplacement { .. }
+                )
+            ),
+            "{err:?}"
+        );
+        let stored: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM amit_adjustments")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(stored, 0);
+    }
+
     /// SCENARIOS F-16: a parcel bought on 30 June itself was held at the
     /// year end — the boundary is inclusive, in the open-parcels loader and
     /// therefore here.
