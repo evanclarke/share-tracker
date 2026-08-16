@@ -70,7 +70,7 @@ behind or became a recorded finding.
 | D. Sells and parcel allocation | 20 | 2026-08-15 | 2 raised, both closed — see below |
 | E. Corporate actions | 51 | 2026-08-16 | 5 raised, all closed — see below |
 | F. AMIT / AMMA | 25 | 2026-08-16 | 6 raised, all closed — see below |
-| G. Dividends, franking, and the holding-period rule | 25 | — | — |
+| G. Dividends, franking, and the holding-period rule | 25 | 2026-08-16 | 6 raised — see below |
 | H. Interest, expenses, and other income | 10 | — | — |
 | I. DRP | 14 | — | — |
 | J. Employee share schemes | 14 | — | — |
@@ -335,6 +335,60 @@ closed by 2026-08-16:
 | The `amit` listing flag is retroactive and rewrites every earlier year | F-23 | fixed 2026-08-16 — archived in [`DONE/tax-domain.md`](DONE/tax-domain.md) |
 | The AMIT cash cross-check ignores the holding account | F-03, F-08 | fixed 2026-08-16 — archived in [`DONE/reporting.md`](DONE/reporting.md) |
 | Which parcels a statement's per-unit figure reaches is undocumented | F-05 | documented 2026-08-16 — archived in [`DONE/tax-domain.md`](DONE/tax-domain.md) |
+
+### Section G findings
+
+Nineteen of the 25 came back correct. The holding-period walk itself is the
+strong part, for the same structural reason section D's allocation invariants
+were: there is one walk (`franking::HoldingWalks::test`), the tax summary
+denies by it and the at-risk report explains it from the same load, and both
+draw their candidate dividends from one loader
+(`franking::db_franked_dividends`) — so the explanation and the denial cannot
+disagree. Every one of the six findings is instead about a *figure entered on
+the income row* — which amount, whose date, how many rows — where nothing
+cross-checks what was keyed. What each group turned on:
+
+- **The at-risk count (G-05, G-08–G-10, G-12, G-13).** The days are counted
+  over the whole holding, not only after the ex-date: 40 days before the
+  ex-date plus 10 after is 49 at-risk days and keeps the credits, while
+  Example 6's Matthew fails only because his *whole* holding was 40 days
+  (G-05). Exactly 45 qualifies and 44 does not, both end days excluded (G-08).
+  Preference listings carry 90 days through the flag, the walk and the report
+  row (G-09), LIFO identification reproduces Example 7 (G-10), a DRP parcel is
+  an ordinary acquisition with its own clock (G-13), and a holding-account
+  transfer inside the window disqualifies nothing — its two legs are excluded
+  from the walk like the demerger artifacts, so the original parcel's clock
+  keeps running (G-12).
+- **What the credits are measured against (G-06, G-07, G-11, G-15, G-22).**
+  The small-shareholder threshold is the year's *attached* credits, income
+  plus AMMA, and the boundary is exact: $4,999 exempts, $5,000 does not
+  (G-06, G-07). A partial sale between the ex-date and the payment date denies
+  the disqualified units' proportional share, 6,000 × 400/1,000 (G-11), and
+  the what-if run before that sale predicts the same figure the recorded sale
+  produces (G-15). A rename between the two dates is one listing to the walk,
+  reported under the current ticker (G-22).
+- **Which year, and in what currency (G-16–G-19, G-21, G-23).** A dividend is
+  assessed on payment, so one declared in June and paid in July belongs to the
+  new year (G-18); a trust distribution is assessed on present entitlement, so
+  a 30 June entitlement paid 15 July belongs to the year just ended (G-19),
+  and `entitlement_date` on a non-trust row is refused (G-21). A foreign
+  dividend's withholding joins the FITO line under the A$1,000 de-minimis
+  (G-16), and a foreign-currency row whose rate month was never imported fails
+  the whole report loudly with a `500` rather than converting at a guess —
+  exactly as `docs/API.md`'s FX precedence rule states (G-17). The per-share
+  cross-check catches a one-cent and a whole-unit discrepancy alike, naming the
+  computed product (G-23).
+
+The six findings, each raised as a `TODO.md` section naming its scenario ids:
+
+| Finding | Scenarios | Status |
+| --- | --- | --- |
+| A franked dividend with no ex-date silently passes the holding-period test | G-11, G-20 | open |
+| Conduit foreign income is excluded from assessable income with no stated entry convention | G-03 | open |
+| A franking credit is accepted with no dividend behind it | G-25 | open |
+| Duplicate income rows are silently double-counted | G-24 | open |
+| The related-payments rule and the 30%-at-risk test are not modelled and nowhere documented | G-14 | open |
+| The LIC capital gain deduction field takes the already-halved figure, undocumented | G-04 | open |
 
 ---
 

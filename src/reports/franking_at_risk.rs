@@ -547,6 +547,69 @@ mod tests {
         assert_eq!(alerts[0].window_end, ymd(2025, 3, 14) + Duration::days(90));
     }
 
+    /// SCENARIOS G-11/G-15. A partial sale between the ex-date and the payment
+    /// date denies the disqualified units' *share* of the credits — and the
+    /// what-if run before that sale predicts exactly what recording it costs:
+    /// the contemplated walk's `additional_credits_at_risk` is the recorded
+    /// sale's `credits_at_risk`, so the foresight and the outcome agree.
+    #[tokio::test]
+    async fn db_what_if_predicts_what_the_recorded_sale_actually_denies() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AAA").await;
+        insert_buy(&pool, 1, 1, ymd(2025, 1, 1), 1000).await;
+        // Ex 10 Jan, paid 10 Feb: 400 of the 1,000 entitled units sold on
+        // 20 Jan, 19 at-risk days into a 45-day requirement.
+        insert_dividend(&pool, 1, 1, ymd(2025, 2, 10), ymd(2025, 1, 10), 6000).await;
+
+        let req = WhatIfRequest {
+            listing_id: 1,
+            sale_date: ymd(2025, 1, 20),
+            units: Decimal::from(400),
+        };
+        let what_if = db_franking_what_if(&pool, &req).await.unwrap();
+        assert_eq!(what_if.len(), 1);
+        assert_eq!(what_if[0].additional_credits_at_risk, Decimal::from(2400));
+
+        insert_sell(&pool, 2, 1, ymd(2025, 1, 20), 400).await;
+        let alerts = db_franking_at_risk(&pool).await.unwrap();
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].entitled_units, Decimal::from(1000));
+        assert_eq!(alerts[0].disqualified_units, Decimal::from(400));
+        assert_eq!(
+            alerts[0].credits_at_risk,
+            what_if[0].additional_credits_at_risk
+        );
+        // 6,000 × 400/1,000 — the tax summary denies the same figure.
+        let summary = tax_summary::db_tax_summary(&pool).await.unwrap();
+        assert_eq!(summary[0].franking_credits_denied, Decimal::from(2400));
+        assert_eq!(summary[0].franking_credits, Decimal::from(3600));
+    }
+
+    /// SCENARIOS G-22. A rename is the same security — one `listings` row —
+    /// so a rename between the ex-date and the payment date leaves the walk
+    /// untouched, and the alert carries the current ticker.
+    #[tokio::test]
+    async fn db_rename_between_ex_date_and_payment_keeps_one_walk() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "OLD").await;
+        insert_buy(&pool, 1, 1, ymd(2025, 1, 1), 1000).await;
+        insert_sell(&pool, 2, 1, ymd(2025, 1, 20), 400).await;
+        insert_dividend(&pool, 1, 1, ymd(2025, 2, 10), ymd(2025, 1, 10), 6000).await;
+        ApiClient::full(&pool)
+            .post(
+                "/listings/1/rename",
+                &serde_json::json!({"effective_date": "2025-01-25", "ticker": "NEW"}),
+            )
+            .await
+            .expect_status(StatusCode::CREATED);
+
+        let alerts = db_franking_at_risk(&pool).await.unwrap();
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].ticker, "NEW");
+        assert_eq!(alerts[0].entitled_units, Decimal::from(1000));
+        assert_eq!(alerts[0].credits_at_risk, Decimal::from(2400));
+    }
+
     #[tokio::test]
     async fn api_get_franking_at_risk() {
         let pool = test_pool().await;

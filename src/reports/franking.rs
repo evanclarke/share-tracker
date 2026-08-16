@@ -675,6 +675,77 @@ mod tests {
         assert_eq!(t.disqualified_units, Decimal::ZERO);
     }
 
+    /// SCENARIOS G-05. The at-risk days are counted over the *whole* holding,
+    /// not only the days after the ex-date: the qualification period begins
+    /// the day after acquisition and ends `required_days` after the ex-date,
+    /// so a parcel bought 40 days before the shares went ex and sold 10 days
+    /// after has 49 at-risk days and keeps its credits. (Example 6's Matthew
+    /// fails only because his whole holding was 40 days.)
+    #[tokio::test]
+    async fn db_days_held_before_the_ex_date_count_toward_the_45() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, false).await;
+        // Bought 1 Jan, ex-dividend 10 Feb (40 days later), sold 20 Feb (10
+        // days after the ex-date) — inside the window, 49 at-risk days.
+        insert_trade(&pool, 1, 1, trade::TradeType::Buy, d("2025-01-01"), 1000).await;
+        insert_trade(&pool, 2, 1, trade::TradeType::Sell, d("2025-02-20"), 1000).await;
+        let t = walks(&pool).await.test(1, d("2025-02-10"));
+        assert_eq!(t.entitled_units, Decimal::from(1000));
+        assert_eq!(t.disqualified_units, Decimal::ZERO);
+        // One day less at risk (44) and the same shape is disqualified.
+        insert_listing(&pool, 2, false).await;
+        insert_trade(&pool, 3, 2, trade::TradeType::Buy, d("2025-01-06"), 1000).await;
+        insert_trade(&pool, 4, 2, trade::TradeType::Sell, d("2025-02-20"), 1000).await;
+        let t = walks(&pool).await.test(2, d("2025-02-10"));
+        assert_eq!(t.disqualified_units, Decimal::from(1000));
+    }
+
+    /// SCENARIOS G-12. A holding-account transfer never changes beneficial
+    /// ownership, so — like the demerger artifacts above — its transfer-out
+    /// Sell and transfer-in Buy are excluded from the walk: the original
+    /// parcel's at-risk clock keeps running across a transfer made inside the
+    /// qualification window.
+    #[tokio::test]
+    async fn db_holding_account_transfer_inside_the_window_keeps_the_clock_running() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, false).await;
+        insert_trade(&pool, 1, 1, trade::TradeType::Buy, d("2025-03-01"), 1000).await;
+        crate::entities::holding_account::db_upsert(
+            &pool,
+            &crate::entities::holding_account::HoldingAccount {
+                id: 2,
+                name: "Second".into(),
+            },
+        )
+        .await
+        .unwrap();
+        // Ex-dividend 14 Mar; the whole holding moves accounts on 1 Apr, 30
+        // days into the window.
+        crate::entities::transfer::db_transfer(
+            &pool,
+            1,
+            &crate::entities::transfer::TransferBody {
+                listing_id: 1,
+                date: d("2025-04-01"),
+                from_account_id: 1,
+                to_account_id: 2,
+                allocations: vec![crate::entities::sell::AllocationInput {
+                    purchase_trade_id: 1,
+                    quantity_allocated: Decimal::from(1000),
+                }],
+                fee_allocations: Vec::new(),
+                fee_market_price: None,
+                fee_fx_rate: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let t = walks(&pool).await.test(1, d("2025-03-14"));
+        assert_eq!(t.entitled_units, Decimal::from(1000));
+        assert_eq!(t.disqualified_units, Decimal::ZERO);
+    }
+
     #[test]
     fn denied_is_zero_without_entitled_or_disqualified_units() {
         // No recorded holdings at the ex-date: the rule can't be evaluated, so
