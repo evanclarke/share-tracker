@@ -194,6 +194,7 @@ function cgtSummarySection(s) {
     summaryRow('Capital loss carried forward', s.capital_loss_carried_forward),
     summaryRow('CGT event E10 gain (informational — AMIT cost base exhausted)', s.cgt_event_e10_gain),
     summaryRow('CGT event G1 gain (informational — return of capital exceeded cost base)', s.cgt_event_g1_gain),
+    summaryRow('CGT event C2 gain (informational — return of capital on units sold before payment)', s.cgt_event_c2_gain),
   ];
   return el('div', { class: 'doc-section' }, [
     el('h3', null, 'Gain / loss summary'),

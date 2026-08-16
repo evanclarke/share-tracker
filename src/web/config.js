@@ -547,7 +547,7 @@ export const REPORTS = [
           'scenario', 'tax_year', 'discount_eligible_gains', 'other_gains', 'capital_losses',
           'capital_loss_brought_forward', 'net_discount_eligible_gain', 'net_other_gain',
           'cgt_discount', 'net_capital_gain', 'capital_loss_carried_forward',
-          'cgt_event_e10_gain', 'cgt_event_g1_gain', 'taxpayer_basis',
+          'cgt_event_e10_gain', 'cgt_event_g1_gain', 'cgt_event_c2_gain', 'taxpayer_basis',
         ],
       },
       {

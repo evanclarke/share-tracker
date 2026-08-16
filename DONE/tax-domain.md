@@ -601,3 +601,71 @@ their $600 while the parcel's $1,000 would have absorbed it). The cross-check it
 `units_adjusted` reconciling to `units_held` was never the wrong figure — the application was, and
 now matches. `docs/API.md`'s AMIT adjustments and open-parcels sections say which units a
 `quantity` reaches and what `amit_cost_base_reduction` counts.
+
+## A return of capital received on units already sold is not recorded anywhere (SCENARIOS D-14)
+(SCENARIOS.md section D verification pass, 2026-08-15. Selling between a return of capital's record
+date and its payment date leaves the seller entitled to the payment — that is what the record date
+fixes — but the tool reduces nothing and records nothing, and correctly so as far as CGT event G1
+goes: the units were not owned when the payment was made. The gap is what happens *instead*. The
+ATO's own class rulings on returns of capital put it as CGT event **C2**, happening on the payment
+date to the *right to receive* the payment, with a nil cost base for that right where the share's
+cost base was fully applied in working out the gain or loss on the disposal — so the whole payment
+is a capital gain in the payment's income year, not discountable (the right is held from the record
+date). Nothing in the model can hold it.)
+- [x] D-14 — reproduced: Buy 2023-01-10 ×100 @ $10, Sell 2023-10-03 ×100 @ $15 (gain 500.00), then
+  a `ReturnOfCapital` of $0.50/unit dated 2023-11-01 with `record_date: 2023-09-25`. The sale's
+  realised figures are unchanged (cost base 1000, gain 500) and the net-capital-gain report shows no
+  `cgt_event_g1_gain` — right for G1, but the $50.00 actually received is nowhere: no capital gain,
+  no income row, no cross-check flag. (A payment dated *before* the sale does reduce the sold
+  parcel's cost base, back-dated entry included — that half is correct and pinned by
+  `reports::realised_gains::tests::db_return_of_capital_needs_both_entitlement_and_holding_at_payment`)
+- [x] `docs/API.md`'s `ReturnOfCapital` bullet states the two conditions precisely and says such
+  parcels are left alone, which reads as *nothing to do* — the one place a user in this position
+  would look. At minimum it should name the C2 event and the manual entry route; Known limitations
+  has no entry for it either
+- [x] Decide: document only (a Known-limitations entry plus the `ReturnOfCapital` bullet, with the
+  entry route — there is no path that records a gain on a right, so it would be a manual note), or
+  model it (the payment's units × per-unit as a C2 capital gain in the payment year for parcels
+  entitled at the record date but disposed of before payment, which the existing record-date and
+  allocation data is enough to derive)
+- [x] Tests: `doc_checks` for the documentation route, or `reports::net_capital_gain` for the
+  modelled one
+
+
+**Fixed 2026-08-16** by **modelling** it, the option chosen over documenting it — the payment is real
+money the return would otherwise never see, and the record date, allocations and sale dates already
+in the model are enough to derive it.
+
+Checking the ATO first changed the design. `docs/ato/cgt-non-assessable-payments.md` covers only
+G1, so Class Ruling **CR 2025/59** (*Euroz Hartleys — return of capital*) is now mirrored as
+`docs/ato/return-of-capital-right-to-receive.md` and indexed; the wording is boilerplate across the
+return-of-capital rulings, so it is the general rule. It confirms the event, its timing and the nil
+cost base as this section assumed — but **not** the discount treatment: para 18 puts G1 and C2 under
+the *same* test, "you acquired your share at least 12 months before the Payment Date". The
+discount is measured on the **share**, not on the right, so a C2 gain on a long-held parcel *is*
+discountable. This section's "not discountable (the right is held from the record date)" was wrong,
+and a hard-coded `false` would have overstated the tax on every C2 gain from a parcel held over a
+year.
+
+The report gains a `cgt_event_c2_gain` line beside the existing E10/G1 ones (JSON, CSV export with
+its blank ATO label, the what-if scenario table, the annual tax report's summary, and
+`COLUMN_KINDS` — which was also missing the E10/G1 columns, so all three now format as money).
+`ExcessGain`/`ExcessKind` become `EventGain`/`CgtEventKind` and `cost_base_excess_gains` becomes
+`non_disposal_gains`: a C2 gain is not an excess of anything, and what the three now have in common
+is that they are capital gains with no disposal of the parcel behind them. The gain falls out of
+the per-cohort walk D-13 introduced the day before, at no structural cost — the same question that
+decides which units G1 reduces (was this group still held when the payment was made?) decides which
+units C2 reaches instead, so the two are complementary by construction and a unit entitled at the
+record date produces exactly one of them.
+
+Four tests in `reports::net_capital_gain`: the reproduction (the $50 now reported in the payment's
+FY2024, the sale's own $1,000/$500 untouched); the discount rule measured on the share's holding
+period (the same fixture bought a year earlier: $550 discount-eligible, net $275 — 37 days and
+fully assessable if measured from the record date); a parcel split across all three outcomes (30
+sold before the record date and never entitled, 20 sold inside the window taking C2, 50 still held
+taking the G1 reduction); and the no-record-date case, where entitlement falls back to the payment
+date and nothing is reported until the record date is added. `docs/API.md`'s `ReturnOfCapital`
+bullet and net-capital-gain section now name the C2 event, the nil cost base, the discount test and
+the record-date requirement — so the one place a user in this position would look no longer reads
+as *nothing to do*. No Known-limitations entry: it is modelled, and the record-date requirement is
+stated where the field is.

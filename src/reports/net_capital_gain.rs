@@ -94,6 +94,14 @@ pub struct NetCapitalGainYear {
     /// counted within `discount_eligible_gains` / `other_gains` above per the
     /// holding period at the payment date; surfaced separately for transparency.
     pub cgt_event_g1_gain: Decimal,
+    /// Informational: gross CGT event C2 gains included in this year — a
+    /// [return-of-capital](crate::entities::corporate_action) payment received
+    /// on units entitled at the record date but *sold* before the payment
+    /// date, which ends a right to receive rather than reducing any cost base
+    /// (`docs/ato/return-of-capital-right-to-receive.md`). Already counted
+    /// within `discount_eligible_gains` / `other_gains` above per the holding
+    /// period at the payment date; surfaced separately for transparency.
+    pub cgt_event_c2_gain: Decimal,
     /// Informational: the taxpayer assumption behind the hard-wired rates
     /// (always [`crate::reports::TAXPAYER_BASIS`]) — the 50% discount applied
     /// here is the Australian-resident-individual rate; other entity types are
@@ -138,6 +146,7 @@ const CSV_HEADER: &[&str] = &[
     "capital_loss_carried_forward",
     "cgt_event_e10_gain",
     "cgt_event_g1_gain",
+    "cgt_event_c2_gain",
     "taxpayer_basis",
 ];
 
@@ -161,6 +170,7 @@ const CSV_ATO_LABELS: &[&str] = &[
     "18V",                     // capital_loss_carried_forward
     "",                        // cgt_event_e10_gain (informational)
     "",                        // cgt_event_g1_gain (informational)
+    "",                        // cgt_event_c2_gain (informational)
     "",                        // taxpayer_basis
 ];
 
@@ -174,6 +184,8 @@ struct GrossBuckets {
     e10: Decimal,
     /// Gross CGT event G1 gains folded into the buckets above (informational).
     g1: Decimal,
+    /// Gross CGT event C2 gains folded into the buckets above (informational).
+    c2: Decimal,
     /// The AMMA discount-method distribution component of `discount_eligible`
     /// (grossed up ×2), tracked separately so the annual tax report can show
     /// it on its own ATO-worksheet line ("Discounted Capital Gain
@@ -201,7 +213,7 @@ fn aud_field(
 
 /// One cost-base reduction against a parcel, **per as-acquired unit** and in
 /// the parcel's native currency — the merged input to
-/// [`cost_base_excess_gains`]'s reduction chain. Per-unit rather than
+/// [`non_disposal_gains`]'s reduction chain. Per-unit rather than
 /// whole-parcel because neither kind necessarily reaches every unit of the
 /// parcel: a payment reaches only the units still held for it, and an AMMA
 /// statement's adjustment row reaches only the units it covers.
@@ -217,6 +229,10 @@ enum Reduction {
         date: NaiveDate,
         currency: String,
         per_unit: Decimal,
+        /// The payment's record date where recorded — what decides whether
+        /// units sold before the payment were nonetheless entitled to it, and
+        /// so make a CGT event C2 gain instead of a G1 reduction.
+        record_date: Option<NaiveDate>,
     },
 }
 
@@ -299,27 +315,39 @@ fn unit_cohorts(
     cohorts
 }
 
-/// Which CGT event an excess arose under — the informational split the report
-/// reports the same gain twice under (`cgt_event_e10_gain` / `cgt_event_g1_gain`).
+/// Which CGT event a gain arose under — the informational split the report
+/// reports the same gain twice under (`cgt_event_e10_gain` /
+/// `cgt_event_g1_gain` / `cgt_event_c2_gain`).
 #[derive(PartialEq, Eq, Clone, Copy)]
-enum ExcessKind {
+enum CgtEventKind {
     E10,
     G1,
+    C2,
 }
 
-/// One capital gain arising because a cost-base reduction ran past nil.
-struct ExcessGain {
-    kind: ExcessKind,
+/// One capital gain from a CGT event that is not a disposal of the shares
+/// themselves — so it has no parcel-allocation record and the realised-gains
+/// report never sees it.
+struct EventGain {
+    kind: CgtEventKind,
     tax_year: i32,
     /// Gross gain in AUD.
     amount: Decimal,
     discount_eligible: bool,
 }
 
-/// CGT event E10 and G1 gains: the excess of a parcel's cost-base *reductions*
-/// over its cost base, which the cost base itself floors at nil (see
-/// `docs/ato/amit-cost-base-adjustments.md` and
-/// `docs/ato/cgt-non-assessable-payments.md`).
+/// The capital gains a parcel's AMIT adjustments and return-of-capital
+/// payments produce without any disposal of the parcel itself: CGT events
+/// **E10** and **G1** (a cost-base reduction running past nil, which the cost
+/// base itself floors — `docs/ato/amit-cost-base-adjustments.md`,
+/// `docs/ato/cgt-non-assessable-payments.md`) and CGT event **C2** (a payment
+/// received on units already sold, which reduces no cost base at all —
+/// `docs/ato/return-of-capital-right-to-receive.md`).
+///
+/// The first two both draw down cost base, so they share the walk below; C2
+/// falls out of the same per-cohort pass because the same question — was this
+/// group of units still held when the payment was made? — decides both which
+/// units G1 reduces and which units C2 reaches instead.
 ///
 /// Both reduction kinds draw down **one chain per parcel**, walked in the date
 /// order the reductions arise in (an AMMA statement at its `tax_year_end_date`,
@@ -348,14 +376,24 @@ struct ExcessGain {
 ///   non-AUD payment with no rate fails loudly), and is discount-eligible when
 ///   the units were held more than 12 months at the payment date. G1 can never
 ///   produce a capital loss.
+/// - **C2** falls in the payment's income year too, covers the units entitled
+///   at the payment's **record date** but sold before the payment date, is the
+///   whole payment on those units (the right to receive has a nil cost base
+///   wherever the share's own was fully applied on disposal, which an ordinary
+///   Sell always does), is converted at the payment month's rate like G1, and
+///   is discount-eligible on the **share's** holding period to the payment
+///   date — the same test G1 uses, per CR 2025/59 para 18, and not the right's
+///   own record-date-to-payment life. It needs a recorded `record_date`: with
+///   none, entitlement falls back to the payment date and a unit sold before
+///   then is simply not entitled (`RocEvent::per_unit_for`).
 ///
 /// Once the chain reaches nil it stays there, so every later reduction is an
 /// excess in its own year — until an AMIT *increase* (a negative adjustment)
 /// restores it.
-async fn cost_base_excess_gains(
+async fn non_disposal_gains(
     conn: &mut sqlx::SqliteConnection,
     fx: &FxRates,
-) -> Result<Vec<ExcessGain>, sqlx::Error> {
+) -> Result<Vec<EventGain>, sqlx::Error> {
     // Share splits/consolidations per listing: a payment after a split is per
     // *post-split* unit, and sold units are re-based back to as-acquired
     // units, both via the same helpers the cost-base pipeline uses — so this
@@ -446,6 +484,7 @@ async fn cost_base_excess_gains(
                 date: event.date,
                 currency: event.currency,
                 per_unit,
+                record_date: event.record_date,
             });
     }
 
@@ -490,6 +529,30 @@ async fn cost_base_excess_gains(
         ) {
             let mut remaining = per_unit_cost * units;
             for event in events.iter() {
+                // A payment these units were entitled to at its record date but
+                // no longer held at its payment date reduces nothing — it ends
+                // a *right to receive*, CGT event C2 on the payment date, whose
+                // cost base is nil because the share's own was fully applied on
+                // the disposal (`docs/ato/return-of-capital-right-to-receive.md`).
+                // So the whole payment is the gain, and it is discountable on
+                // the share's holding period exactly as a G1 gain would be.
+                if let Reduction::Roc {
+                    date,
+                    currency,
+                    per_unit,
+                    record_date: Some(record_date),
+                } = event
+                    && disposed_on.is_some_and(|d| d >= *record_date && d < *date)
+                {
+                    out.push(EventGain {
+                        kind: CgtEventKind::C2,
+                        tax_year: tax_year_for(*date),
+                        amount: fx.to_aud(*per_unit * units, currency, *date, FxOverride::None)?,
+                        discount_eligible: crate::domain::cgt_discount::discount_eligible(
+                            acquired, *date,
+                        ),
+                    });
+                }
                 let amount = event.reduction_for_units(trade_qty, units, disposed_on);
                 if amount <= remaining {
                     remaining -= amount;
@@ -498,8 +561,8 @@ async fn cost_base_excess_gains(
                 let excess = amount - remaining;
                 remaining = Decimal::ZERO;
                 match event {
-                    Reduction::Amit(e) => out.push(ExcessGain {
-                        kind: ExcessKind::E10,
+                    Reduction::Amit(e) => out.push(EventGain {
+                        kind: CgtEventKind::E10,
                         tax_year: e.tax_year_end_date.year(),
                         amount: fx.to_aud(
                             excess,
@@ -512,8 +575,8 @@ async fn cost_base_excess_gains(
                             e.tax_year_end_date,
                         ),
                     }),
-                    Reduction::Roc { date, currency, .. } => out.push(ExcessGain {
-                        kind: ExcessKind::G1,
+                    Reduction::Roc { date, currency, .. } => out.push(EventGain {
+                        kind: CgtEventKind::G1,
                         tax_year: tax_year_for(*date),
                         amount: fx.to_aud(excess, currency, *date, FxOverride::None)?,
                         discount_eligible: crate::domain::cgt_discount::discount_eligible(
@@ -643,13 +706,13 @@ async fn gross_buckets(
         b.other += indexation + other;
     }
 
-    // CGT event E10 and G1 gains — the excess of a parcel's AMIT and
-    // return-of-capital reductions over its cost base, off one combined chain
-    // per parcel — are ordinary capital gains: they enter the buckets
+    // CGT event E10, G1 and C2 gains — a parcel's AMIT and return-of-capital
+    // events, which produce capital gains without any disposal of the parcel
+    // itself — are ordinary capital gains: they enter the buckets
     // (discount-eligible or not, per the holding period at the event date), so
     // losses can offset them and the discount applies to the eligible portion.
     // They are also reported on their own informational line per event type.
-    for gain in cost_base_excess_gains(&mut *conn, &fx).await? {
+    for gain in non_disposal_gains(&mut *conn, &fx).await? {
         let b = buckets.entry(gain.tax_year).or_default();
         if gain.discount_eligible {
             b.discount_eligible += gain.amount;
@@ -657,8 +720,9 @@ async fn gross_buckets(
             b.other += gain.amount;
         }
         match gain.kind {
-            ExcessKind::E10 => b.e10 += gain.amount,
-            ExcessKind::G1 => b.g1 += gain.amount,
+            CgtEventKind::E10 => b.e10 += gain.amount,
+            CgtEventKind::G1 => b.g1 += gain.amount,
+            CgtEventKind::C2 => b.c2 += gain.amount,
         }
     }
 
@@ -707,6 +771,7 @@ fn net_years(
                 capital_loss_carried_forward: carried_forward,
                 cgt_event_e10_gain: b.e10,
                 cgt_event_g1_gain: b.g1,
+                cgt_event_c2_gain: b.c2,
                 taxpayer_basis: crate::reports::TAXPAYER_BASIS.to_string(),
                 // Attached by the caller (`db_net_capital_gain` groups the
                 // already-fetched realised rows by tax year); left empty here
@@ -757,6 +822,7 @@ pub(crate) struct CgtSummaryYear {
     pub capital_loss_carried_forward: Decimal,
     pub cgt_event_e10_gain: Decimal,
     pub cgt_event_g1_gain: Decimal,
+    pub cgt_event_c2_gain: Decimal,
     pub taxpayer_basis: String,
 }
 
@@ -801,6 +867,7 @@ pub(crate) async fn db_cgt_summary_year(
             capital_loss_carried_forward: y.capital_loss_carried_forward,
             cgt_event_e10_gain: y.cgt_event_e10_gain,
             cgt_event_g1_gain: y.cgt_event_g1_gain,
+            cgt_event_c2_gain: y.cgt_event_c2_gain,
             taxpayer_basis: y.taxpayer_basis,
         }
     }))
@@ -834,6 +901,7 @@ struct NetCapitalGainYearCsv {
     capital_loss_carried_forward: Decimal,
     cgt_event_e10_gain: Decimal,
     cgt_event_g1_gain: Decimal,
+    cgt_event_c2_gain: Decimal,
     taxpayer_basis: String,
 }
 
@@ -852,6 +920,7 @@ impl From<&NetCapitalGainYear> for NetCapitalGainYearCsv {
             capital_loss_carried_forward: y.capital_loss_carried_forward,
             cgt_event_e10_gain: y.cgt_event_e10_gain,
             cgt_event_g1_gain: y.cgt_event_g1_gain,
+            cgt_event_c2_gain: y.cgt_event_c2_gain,
             taxpayer_basis: y.taxpayer_basis.clone(),
         }
     }
@@ -2292,6 +2361,243 @@ mod tests {
         .await;
         let r = db_net_capital_gain(&pool).await.unwrap();
         assert_eq!(r[0].cgt_event_g1_gain, Decimal::from(100));
+    }
+
+    /// SCENARIOS D-14. The mirror of the entitlement test above, at the other
+    /// end of the window: units owned at the record date but **sold before the
+    /// payment date** are still paid. No cost base is reduced (the units were
+    /// gone, so CGT event G1 cannot apply, and the sale's own figures are
+    /// untouched) — instead CGT event C2 ends the right to receive the payment
+    /// on the payment date, for the whole payment: the right's cost base is nil
+    /// because the share's own was fully applied on the disposal
+    /// (`docs/ato/return-of-capital-right-to-receive.md`, CR 2025/59 paras
+    /// 14–17). Before this the money was simply nowhere.
+    #[tokio::test]
+    async fn db_a_payment_on_units_sold_after_the_record_date_is_a_c2_gain() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "RAP").await;
+        insert_trade(
+            &pool,
+            1,
+            trade::TradeType::Buy,
+            1,
+            NaiveDate::from_ymd_opt(2023, 1, 10).unwrap(),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
+        // Sold 3 October, after the 25 September record date and before the
+        // 1 November payment.
+        insert_trade(
+            &pool,
+            2,
+            trade::TradeType::Sell,
+            1,
+            NaiveDate::from_ymd_opt(2023, 10, 3).unwrap(),
+            Decimal::from(100),
+            Decimal::from(15),
+        )
+        .await;
+        test_support::allocate(&pool, 1, 2, 1, Decimal::from(100)).await;
+        apply_roc_with_record(
+            &pool,
+            1,
+            1,
+            NaiveDate::from_ymd_opt(2023, 11, 1).unwrap(),
+            "0.50",
+            Some(NaiveDate::from_ymd_opt(2023, 9, 25).unwrap()),
+        )
+        .await;
+
+        let r = db_net_capital_gain(&pool).await.unwrap();
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].tax_year, 2024);
+        // The whole $50 payment, in the payment's year, and no G1 (the units
+        // were not held when it was made).
+        assert_eq!(r[0].cgt_event_c2_gain, Decimal::from(50));
+        assert_eq!(r[0].cgt_event_g1_gain, Decimal::ZERO);
+        // The share was held under 12 months, so neither the sale's $500 nor
+        // the C2 $50 is discountable: $550 assessable in full.
+        assert_eq!(r[0].other_gains, Decimal::from(550));
+        assert_eq!(r[0].discount_eligible_gains, Decimal::ZERO);
+        assert_eq!(r[0].net_capital_gain, Decimal::from(550));
+
+        // The sale itself is untouched: no cost-base reduction reached it.
+        let realised = crate::reports::realised_gains::db_realised_gains(&pool)
+            .await
+            .unwrap();
+        assert_eq!(realised[0].cost_base, Decimal::from(1000));
+        assert_eq!(realised[0].capital_gain_loss, Decimal::from(500));
+    }
+
+    /// The C2 discount test is measured on the **share**, from its acquisition
+    /// to the payment date — not on the right to receive, which only exists
+    /// from the record date and so would never qualify. CR 2025/59 para 18
+    /// puts G1 and C2 under the same test, and this is the same fixture as the
+    /// test above with the parcel bought a year earlier.
+    #[tokio::test]
+    async fn db_c2_gain_is_discountable_on_the_shares_own_holding_period() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "RAP").await;
+        insert_trade(
+            &pool,
+            1,
+            trade::TradeType::Buy,
+            1,
+            NaiveDate::from_ymd_opt(2022, 1, 10).unwrap(),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
+        insert_trade(
+            &pool,
+            2,
+            trade::TradeType::Sell,
+            1,
+            NaiveDate::from_ymd_opt(2023, 10, 3).unwrap(),
+            Decimal::from(100),
+            Decimal::from(15),
+        )
+        .await;
+        test_support::allocate(&pool, 1, 2, 1, Decimal::from(100)).await;
+        apply_roc_with_record(
+            &pool,
+            1,
+            1,
+            NaiveDate::from_ymd_opt(2023, 11, 1).unwrap(),
+            "0.50",
+            Some(NaiveDate::from_ymd_opt(2023, 9, 25).unwrap()),
+        )
+        .await;
+
+        let r = db_net_capital_gain(&pool).await.unwrap();
+        assert_eq!(r[0].cgt_event_c2_gain, Decimal::from(50));
+        // The $50 joins the sale's discount-eligible $500 — $550 gross, $275
+        // after the 50% discount. Measured from the record date instead it
+        // would have been 37 days and fully assessable.
+        assert_eq!(r[0].discount_eligible_gains, Decimal::from(550));
+        assert_eq!(r[0].other_gains, Decimal::ZERO);
+        assert_eq!(r[0].net_capital_gain, Decimal::from(275));
+    }
+
+    /// The C2 gain reaches only the units that were both entitled and sold
+    /// inside the window. Units sold *before* the record date were never
+    /// entitled; units still held at the payment date take the ordinary G1
+    /// cost-base reduction instead — so a parcel split across all three
+    /// outcomes is paid on exactly the units the record date names, once.
+    #[tokio::test]
+    async fn db_c2_covers_only_the_units_entitled_and_sold_before_payment() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "RAP").await;
+        insert_trade(
+            &pool,
+            1,
+            trade::TradeType::Buy,
+            1,
+            NaiveDate::from_ymd_opt(2023, 1, 10).unwrap(),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
+        // 30 sold before the record date (never entitled), 20 sold inside the
+        // window (C2), 50 still held at the payment date (G1 reduction).
+        insert_trade(
+            &pool,
+            2,
+            trade::TradeType::Sell,
+            1,
+            NaiveDate::from_ymd_opt(2023, 9, 1).unwrap(),
+            Decimal::from(30),
+            Decimal::from(15),
+        )
+        .await;
+        test_support::allocate(&pool, 1, 2, 1, Decimal::from(30)).await;
+        insert_trade(
+            &pool,
+            3,
+            trade::TradeType::Sell,
+            1,
+            NaiveDate::from_ymd_opt(2023, 10, 3).unwrap(),
+            Decimal::from(20),
+            Decimal::from(15),
+        )
+        .await;
+        test_support::allocate(&pool, 2, 3, 1, Decimal::from(20)).await;
+        apply_roc_with_record(
+            &pool,
+            1,
+            1,
+            NaiveDate::from_ymd_opt(2023, 11, 1).unwrap(),
+            "0.50",
+            Some(NaiveDate::from_ymd_opt(2023, 9, 25).unwrap()),
+        )
+        .await;
+
+        let r = db_net_capital_gain(&pool).await.unwrap();
+        // 20 units × 50c = $10 of C2 gain, and nothing for the 30 sold early.
+        assert_eq!(r[0].cgt_event_c2_gain, Decimal::from(10));
+
+        // The 50 units still held took the reduction instead: 500 − 25.
+        let open = crate::reports::open_parcels::db_open_parcels(&pool)
+            .await
+            .unwrap();
+        assert_eq!(open[0].return_of_capital_reduction, Decimal::from(25));
+        assert_eq!(open[0].remaining_cost_base, Decimal::from(475));
+    }
+
+    /// Without a recorded record date entitlement falls back to the payment
+    /// date, and a unit sold before then is simply not entitled — so there is
+    /// no C2 gain to report. The remedy is to record the date, not to guess.
+    #[tokio::test]
+    async fn db_no_record_date_means_no_c2_gain() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "RAP").await;
+        insert_trade(
+            &pool,
+            1,
+            trade::TradeType::Buy,
+            1,
+            NaiveDate::from_ymd_opt(2023, 1, 10).unwrap(),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
+        insert_trade(
+            &pool,
+            2,
+            trade::TradeType::Sell,
+            1,
+            NaiveDate::from_ymd_opt(2023, 10, 3).unwrap(),
+            Decimal::from(100),
+            Decimal::from(15),
+        )
+        .await;
+        test_support::allocate(&pool, 1, 2, 1, Decimal::from(100)).await;
+        apply_roc(
+            &pool,
+            1,
+            1,
+            NaiveDate::from_ymd_opt(2023, 11, 1).unwrap(),
+            "0.50",
+        )
+        .await;
+
+        let r = db_net_capital_gain(&pool).await.unwrap();
+        assert_eq!(r[0].cgt_event_c2_gain, Decimal::ZERO);
+        assert_eq!(r[0].cgt_event_g1_gain, Decimal::ZERO);
+
+        // Adding the record date surfaces the payment.
+        apply_roc_with_record(
+            &pool,
+            1,
+            1,
+            NaiveDate::from_ymd_opt(2023, 11, 1).unwrap(),
+            "0.50",
+            Some(NaiveDate::from_ymd_opt(2023, 9, 25).unwrap()),
+        )
+        .await;
+        let r = db_net_capital_gain(&pool).await.unwrap();
+        assert_eq!(r[0].cgt_event_c2_gain, Decimal::from(50));
     }
 
     /// A payment within the cost base produces no gain at all (and G1 can never
