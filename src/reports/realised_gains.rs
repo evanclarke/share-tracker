@@ -233,8 +233,9 @@ struct ReportData {
     /// parcel anchorings, surfaced as `source = RightsSale` rows.
     rights_sales: Vec<RightsSaleInfo>,
     rights_allocations: Vec<RightsAllocation>,
-    /// Cumulative AMIT cost-base reduction per purchase parcel.
-    cba_reduction: HashMap<i64, Decimal>,
+    /// AMIT cost-base reductions (CGT event E10) per purchase parcel, one per
+    /// AMMA statement adjusting it.
+    cba_reduction: HashMap<i64, Vec<cost_base::AmitReductionEvent>>,
     /// Return-of-capital payments (CGT event G1) per listing.
     roc_events: HashMap<i64, Vec<RocEvent>>,
     /// Share splits/consolidations per listing (quantity re-basing).
@@ -310,7 +311,7 @@ async fn load_report_data(conn: &mut sqlx::SqliteConnection) -> Result<ReportDat
     .await?;
 
     let cba_reduction =
-        crate::entities::amit_adjustment::db_cost_base_reductions(&mut *conn).await?;
+        crate::entities::amit_adjustment::db_cost_base_reduction_events(&mut *conn, None).await?;
     let roc_events =
         crate::entities::corporate_action::db_return_of_capital_events(&mut *conn).await?;
     // share splits/consolidations per listing (quantity re-basing)
@@ -423,13 +424,12 @@ fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sq
         let alloc_cost = cost_base::adjusted_cost_base(
             &buy.parcel(),
             qty_alloc_acquired,
-            *data
-                .cba_reduction
+            data.cba_reduction
                 .get(&alloc.purchase_trade_id)
-                .unwrap_or(&Decimal::ZERO),
+                .map_or(&[][..], |v| v),
             data.roc_events.get(&buy.listing_id).map_or(&[][..], |v| v),
             splits,
-            Some(sale.date),
+            cost_base::Held::DisposedOn(sale.date),
         )?
         .into_aud_with(&data.fx, &buy.currency, buy.acquired(), buy.fx_override())?
         .adjusted;
@@ -2768,6 +2768,76 @@ mod tests {
         let after = db_realised_gains(&pool).await.unwrap();
         assert_eq!(after[0].cost_base, Decimal::from(950));
         assert_eq!(after[0].capital_gain_loss, Decimal::from(550));
+    }
+
+    /// SCENARIOS D-13. The other half of the rule above: an adjustment row
+    /// covering only *part* of the parcel — which is what
+    /// `amit_adjustment_generation` writes for every parcel partly sold during
+    /// the year, since it covers the units still open at the year end — takes
+    /// the statement's per-unit figure off those units and no others. The
+    /// units already sold are not covered, so their cost base is untouched.
+    ///
+    /// Pooling the row's total across the whole parcel instead spread it over
+    /// units the statement never reached: the sale's cost base came out at
+    /// 388.00 (1000 − 30, pro-rated 40/100) and the remainder at 582.00, when
+    /// the statement itself says 60 units × 50c.
+    #[tokio::test]
+    async fn db_a_partial_amit_row_leaves_the_units_it_does_not_cover_alone() {
+        let pool = test_pool().await;
+        test_support::listing(1)
+            .ticker("VDHG")
+            .amit(true)
+            .insert(&pool)
+            .await;
+        insert_buy(
+            &pool,
+            1,
+            1,
+            NaiveDate::from_ymd_opt(2022, 1, 10).unwrap(),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
+        // 40 units sold in March, inside the year ended 30 June 2024.
+        insert_sell(
+            &pool,
+            2,
+            1,
+            NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(),
+            Decimal::from(40),
+            Decimal::from(15),
+        )
+        .await;
+        allocate(&pool, 1, 2, 1, Decimal::from(40)).await;
+        // The FY2024 statement reduces 50c/unit over the 60 units held at its
+        // year end — the row generation itself would write.
+        test_support::amma(1, 1)
+            .cost_base_adjustment("0.50".parse().unwrap())
+            .with(|a| a.units_held = Decimal::from(60))
+            .insert(&pool)
+            .await;
+        test_support::amit_adjustment(&pool, 1, 1, 1, Decimal::from(60)).await;
+
+        // The sold units keep their full share: 1000 × 40/100.
+        let realised = db_realised_gains(&pool).await.unwrap();
+        assert_eq!(realised.len(), 1);
+        assert_eq!(realised[0].cost_base, Decimal::from(400));
+        assert_eq!(realised[0].capital_gain_loss, Decimal::from(200));
+
+        // The 60 units covered take the stated 50c each — 600 − 30.
+        let open = crate::reports::open_parcels::db_open_parcels(&pool)
+            .await
+            .unwrap();
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].amit_cost_base_reduction, Decimal::from(30));
+        assert_eq!(open[0].remaining_cost_base, Decimal::from(570));
+
+        // Nothing is lost or invented in the split: the statement's whole
+        // 30.00 is accounted for, once.
+        assert_eq!(
+            open[0].remaining_cost_base + realised[0].cost_base,
+            Decimal::from(970)
+        );
     }
 
     /// SCENARIOS D-15, D-20. A disposal for nothing — worthless shares, or a

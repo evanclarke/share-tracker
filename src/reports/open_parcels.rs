@@ -32,8 +32,11 @@ pub struct OpenParcel {
     pub remaining_quantity: Decimal,
     /// Whole-parcel cost base as acquired (price × qty + brokerage + GST), AUD.
     pub original_cost_base: Decimal,
-    /// Cumulative AMIT cost-base reductions applied to the parcel to date, AUD
-    /// (the full reduction, even where CGT event E10 has floored the cost base).
+    /// Cumulative AMIT cost-base reductions reaching the **remaining** units
+    /// to date, AUD (the full reduction, even where CGT event E10 has floored
+    /// the cost base) — the reduction netted off `remaining_cost_base`, not
+    /// the whole parcel's, so a statement that covered only the units still
+    /// held is reported at what it took off them.
     pub amit_cost_base_reduction: Decimal,
     /// Cumulative return-of-capital payments (CGT event G1) received on the
     /// remaining units since acquisition, AUD (the full amount, even where the
@@ -332,7 +335,9 @@ mod tests {
         let buy_date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
         insert_listing(&pool, 1, "VAF").await;
         insert_buy(&pool, 1, 1, buy_date, Decimal::from(100), Decimal::from(10)).await;
-        // AMIT reduction = 100 * 0.05 = 5.00
+        // The statement covers the whole parcel at 5c/unit — 5.00 across 100
+        // units, so every unit is reduced by 5c whether or not it is later
+        // sold.
         apply_amit(&pool, 1, 1, 1, Decimal::from(100), "0.05".parse().unwrap()).await;
         // Partial sell of 40 after the adjustment
         insert_sell(&pool, 2, 1, Decimal::from(40)).await;
@@ -343,8 +348,11 @@ mod tests {
         let p = &parcels[0];
         assert_eq!(p.remaining_quantity, Decimal::from(60));
         assert_eq!(p.original_cost_base, "1010.945".parse::<Decimal>().unwrap());
-        assert_eq!(p.amit_cost_base_reduction, Decimal::from(5));
-        // remaining = (1010.945 - 5.00) * 60 / 100 = 603.567
+        // The 60 units still held carry 60 × 5c of the reduction; the other
+        // $2.00 went with the 40 units sold, and is netted off *their* cost
+        // base in the realised report.
+        assert_eq!(p.amit_cost_base_reduction, Decimal::from(3));
+        // remaining = 1010.945 * 60 / 100 - 3.00 = 603.567
         assert_eq!(p.remaining_cost_base, "603.567".parse::<Decimal>().unwrap());
     }
 

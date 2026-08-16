@@ -598,11 +598,13 @@ mod tests {
         // units are 200 units at the year end, so $100 — not the $50 a naive
         // quantity × per-unit multiplication gives.
         let mut conn = pool.acquire().await.unwrap();
-        let reductions = amit_adjustment::db_cost_base_reductions(&mut conn)
+        let events = amit_adjustment::db_cost_base_reduction_events(&mut conn, None)
             .await
             .unwrap();
-        assert_eq!(reductions.get(&1).copied(), Some(dec("100")));
-        assert_eq!(reductions.get(&2).copied(), Some(dec("25")));
+        let stated =
+            |trade_id: i64| -> Decimal { events[&trade_id].iter().map(|e| e.amount()).sum() };
+        assert_eq!(stated(1), dec("100"));
+        assert_eq!(stated(2), dec("25"));
     }
 
     // API-level tests

@@ -4,11 +4,14 @@
 //! exchanges, demergers, holding-account transfers). The steps, in ATO order:
 //!
 //! 1. **Initial cost base** — price × quantity + brokerage + GST
-//!    (`docs/ato/cost-base.md`: acquisition cost plus incidental costs).
+//!    (`docs/ato/cost-base.md`: acquisition cost plus incidental costs),
+//!    pro-rated to the units being costed.
 //! 2. **AMIT cost-base net reduction**, floored at nil — CGT event E10: an
 //!    AMMA statement's downward adjustment can only take the cost base to
 //!    nil, never negative; the excess is a capital gain reported by the
 //!    net-capital-gain report (`docs/ato/amit-cost-base-adjustments.md`).
+//!    Applied **per unit to the units the statement covers**
+//!    ([`AmitReductionEvent::per_unit_for`]), not pooled across the parcel.
 //! 3. **Return-of-capital payments** (CGT event G1) received while the costed
 //!    units were held — from acquisition up to `up_to` — reduce the cost base
 //!    per as-acquired unit, again flooring at nil with the excess a capital
@@ -158,20 +161,172 @@ impl ParcelRow {
     }
 }
 
+/// What became of the units being costed — the bound on which later events
+/// reach them, and (for an AMIT statement covering only part of a parcel)
+/// which side of the statement's year end they sit on.
+///
+/// The two cases are not interchangeable: a point-in-time view of units still
+/// held (`AsAt(Some(date))`) bounds the events that have *happened yet*, while
+/// a disposal (`DisposedOn(date)`) additionally says the units were gone
+/// afterwards. Both answer [`Self::up_to`] the same way, which is why the two
+/// used to be one `Option<NaiveDate>` — and why a partial AMIT adjustment
+/// could not tell them apart.
+#[derive(Debug, Clone, Copy)]
+pub enum Held {
+    /// Still held as at the given date (`None` = the live view of every
+    /// recorded fact).
+    AsAt(Option<NaiveDate>),
+    /// Disposed of on this date (a sale allocation, or a parcel-substituting
+    /// operation's closing Sell).
+    DisposedOn(NaiveDate),
+}
+
+impl Held {
+    /// The date bounding which events have reached these units: the as-of date
+    /// for held units, the disposal date for sold ones (`None` = unbounded).
+    pub fn up_to(self) -> Option<NaiveDate> {
+        match self {
+            Held::AsAt(date) => date,
+            Held::DisposedOn(date) => Some(date),
+        }
+    }
+
+    /// The disposal date, where these units were disposed of at all.
+    pub fn disposed_on(self) -> Option<NaiveDate> {
+        match self {
+            Held::AsAt(_) => None,
+            Held::DisposedOn(date) => Some(date),
+        }
+    }
+}
+
+/// One AMMA statement's AMIT cost-base reduction against one parcel, as
+/// `entities::amit_adjustment::db_cost_base_reduction_events` reads it: the
+/// statement's per-unit figure, the units of the parcel the adjustment row
+/// covers, and how much of the parcel had already been disposed of by the
+/// statement's year end — everything [`Self::per_unit_for`] needs to answer
+/// *which* units the reduction reaches.
+///
+/// All three quantities are in the parcel's **as-acquired** unit basis; the
+/// per-unit figure is likewise re-based into it, so a split between
+/// acquisition and the statement's year end is already accounted for
+/// (TD 2000/10 — see `entities::amit_adjustment::reduction_for`).
+#[derive(Debug, Clone, Copy)]
+pub struct AmitReductionEvent {
+    pub amma_statement_id: i64,
+    pub tax_year_end_date: NaiveDate,
+    /// The statement's cost-base reduction per as-acquired unit.
+    pub per_unit: Decimal,
+    /// Units of the parcel this adjustment row covers.
+    pub covered: Decimal,
+    /// Units of the parcel disposed of on or before `tax_year_end_date`.
+    pub disposed_by_year_end: Decimal,
+}
+
+impl AmitReductionEvent {
+    /// The whole-parcel-equivalent reduction this row states: the covered
+    /// units times the per-unit figure. This is the amount the row's own
+    /// arithmetic produces, and the total [`Self::per_unit_for`] distributes —
+    /// no more and no less, whichever units it reaches. (Only the tests pin
+    /// that identity directly — every production caller goes through
+    /// [`Self::per_unit_for`], which is the point.)
+    #[cfg(test)]
+    pub fn amount(&self) -> Decimal {
+        self.per_unit * self.covered
+    }
+
+    /// The reduction reaching `units` as-acquired units of a
+    /// `parcel_quantity`-unit parcel disposed of on `disposed_on` (`None` =
+    /// still held).
+    ///
+    /// A row covering the whole parcel reaches every unit at the statement's
+    /// full per-unit figure — including units already sold during the year,
+    /// which is the fund attributing to units held *during* the year
+    /// (s 104-107B: the adjustment is made just before the end of the income
+    /// year, **or just before the time of a relevant CGT event** — LCR 2015/11
+    /// para 13).
+    ///
+    /// A row covering less than the whole parcel covers the units still held
+    /// at the year end **first** — that is what
+    /// `entities::amit_adjustment_generation` means when it writes
+    /// `quantity = remaining_as_of` — and only spills onto the units disposed
+    /// of earlier once it covers more than those. Within each of the two
+    /// groups the coverage is spread evenly, since units of one parcel are
+    /// otherwise indistinguishable. The two rates always reconstruct
+    /// [`Self::amount`] exactly, so which units a row reaches never changes
+    /// how much it takes off in total. The single division comes last so that
+    /// identity holds to the last decimal place even where the covered units
+    /// don't divide evenly into the group.
+    pub fn reduction_for_units(
+        &self,
+        parcel_quantity: Decimal,
+        units: Decimal,
+        disposed_on: Option<NaiveDate>,
+    ) -> Decimal {
+        let held = (parcel_quantity - self.disposed_by_year_end).max(Decimal::ZERO);
+        let sold = parcel_quantity - held;
+        // `disposed_on` on the year end itself counts as sold by it: the
+        // statement's year-end position no longer includes those units, which
+        // is the same boundary `disposed_by_year_end` was counted on.
+        let still_held = disposed_on.is_none_or(|d| d > self.tax_year_end_date);
+        if still_held {
+            if held <= Decimal::ZERO {
+                return Decimal::ZERO;
+            }
+            self.per_unit * self.covered.min(held) * units / held
+        } else {
+            let spill = (self.covered - held).max(Decimal::ZERO);
+            if sold <= Decimal::ZERO {
+                return Decimal::ZERO;
+            }
+            self.per_unit * spill * units / sold
+        }
+    }
+
+    /// [`Self::reduction_for_units`] for a single unit — the per-unit figure
+    /// the itemised adjustment rows display. Presentation only: the amounts
+    /// themselves go through `reduction_for_units`, which keeps its division
+    /// to the end rather than rounding a rate and multiplying it back up.
+    pub fn per_unit_for(
+        &self,
+        parcel_quantity: Decimal,
+        disposed_on: Option<NaiveDate>,
+    ) -> Decimal {
+        self.reduction_for_units(parcel_quantity, Decimal::ONE, disposed_on)
+    }
+}
+
+/// The AMIT cost-base reduction (CGT event E10) reaching `units` as-acquired
+/// units of a `parcel_quantity`-unit parcel — [`AmitReductionEvent::per_unit_for`]
+/// summed over the parcel's statements. Every caller of [`adjusted_cost_base`]
+/// gets this for free; it is public for the net-capital-gain report's own E10
+/// walk, which needs the per-statement figures rather than the total.
+pub fn amit_reduction_for(
+    events: &[AmitReductionEvent],
+    parcel_quantity: Decimal,
+    units: Decimal,
+    disposed_on: Option<NaiveDate>,
+) -> Decimal {
+    events
+        .iter()
+        .map(|e| e.reduction_for_units(parcel_quantity, units, disposed_on))
+        .sum()
+}
+
 /// The cost-base breakdown of some or all of a parcel's units, produced by
 /// [`adjusted_cost_base`]. Native currency until [`CostBase::into_aud_with`].
 #[derive(Debug, Clone, Copy)]
 pub struct CostBase {
     /// Whole-parcel initial cost base: price × quantity + brokerage + GST.
     pub initial_cost: Decimal,
-    /// Cumulative AMIT cost-base reduction applied to the whole parcel (the
-    /// full amount, even where CGT event E10 has floored the cost base).
+    /// AMIT cost-base reduction reaching the costed units (the full amount,
+    /// even where CGT event E10 has floored the cost base).
     pub amit_reduction: Decimal,
     /// Return-of-capital payments received on the costed units (the full
     /// amount, even where CGT event G1 has floored the cost base).
     pub roc_reduction: Decimal,
-    /// Adjusted cost base of the costed units: max(initial − AMIT, 0)
-    /// pro-rated to the costed units, less the return-of-capital payments on
+    /// Adjusted cost base of the costed units: their share of the initial
+    /// cost base, less the AMIT and return-of-capital reductions reaching
     /// them, floored at nil (CGT events E10 and G1 both floor at nil — any
     /// excess is a capital gain in the net-capital-gain report, never a
     /// negative cost base).
@@ -183,33 +338,38 @@ pub struct CostBase {
 ///
 /// `units` is the portion being costed — a sale allocation re-based to
 /// as-acquired units, the unsold remainder, or the moved/exchanged quantity.
-/// `amit_reduction` is the parcel's cumulative AMIT reduction
-/// (`amit_adjustment::db_cost_base_reductions*`). `roc_events` and `splits`
-/// are the parcel's listing's events (`corporate_action::
-/// db_return_of_capital_events` / `db_share_split_events`). `up_to` bounds
-/// which return-of-capital payments the costed units were held for: the sale
-/// date for realised units, the as-of/operation date for point-in-time views,
-/// `None` for the live open-holdings view.
+/// `amit_events` are the parcel's AMMA statements
+/// (`amit_adjustment::db_cost_base_reduction_events`); `roc_events` and
+/// `splits` are the parcel's listing's events (`corporate_action::
+/// db_return_of_capital_events` / `db_share_split_events`). `held` says what
+/// became of the costed units — which bounds the return-of-capital payments
+/// they were held for, and which side of an AMMA statement's year end they
+/// sit on.
 pub fn adjusted_cost_base(
     parcel: &Parcel<'_>,
     units: Decimal,
-    amit_reduction: Decimal,
+    amit_events: &[AmitReductionEvent],
     roc_events: &[RocEvent],
     splits: &[SplitEvent],
-    up_to: Option<NaiveDate>,
+    held: Held,
 ) -> Result<CostBase, sqlx::Error> {
     let initial_cost = parcel.initial_cost();
-    let net_cost = (initial_cost - amit_reduction).max(Decimal::ZERO);
+    let amit_reduction =
+        amit_reduction_for(amit_events, parcel.quantity, units, held.disposed_on());
     let roc_per_unit = per_unit_reduction(
         roc_events,
         splits,
         parcel.currency,
         parcel.trade_date,
-        up_to,
+        held.up_to(),
     )?;
     let roc_reduction = roc_per_unit * units;
     let adjusted = if parcel.quantity > Decimal::ZERO {
-        (net_cost * units / parcel.quantity - roc_reduction).max(Decimal::ZERO)
+        // Both reductions are already stated for the costed units, so they
+        // come off that share of the initial cost base directly — no second
+        // pro-rating, and one floor covers both (each subtraction only ever
+        // moves the balance the same way an earlier floor would have).
+        (initial_cost * units / parcel.quantity - amit_reduction - roc_reduction).max(Decimal::ZERO)
     } else {
         Decimal::ZERO
     };
@@ -219,19 +379,6 @@ pub fn adjusted_cost_base(
         roc_reduction,
         adjusted,
     })
-}
-
-/// One AMMA statement's whole-parcel AMIT cost-base reduction
-/// (`amit_adjustments.quantity × amma_statements.cost_base_adjustment`), the
-/// itemised input [`adjustment_detail`] needs in place of
-/// [`adjusted_cost_base`]'s single pre-summed `amit_reduction` total. Produced
-/// by `entities::amit_adjustment::db_cost_base_reduction_detail`.
-#[derive(Debug, Clone, Copy)]
-pub struct AmitReductionEvent {
-    pub amma_statement_id: i64,
-    pub tax_year_end_date: NaiveDate,
-    /// The whole-parcel reduction from this one statement (native currency).
-    pub amount: Decimal,
 }
 
 /// Which step of the pipeline (see the module doc) a [`CostBaseAdjustment`]
@@ -283,33 +430,43 @@ pub struct CostBaseAdjustment {
 /// walk (steps 2–4 of the module doc) so the two can never disagree — a test
 /// pins the rows summing to the same function's netted totals.
 ///
-/// `amit_events` replaces `adjusted_cost_base`'s single pre-summed
-/// `amit_reduction`: one [`AmitReductionEvent`] per AMMA statement affecting
-/// this parcel (`entities::amit_adjustment::db_cost_base_reduction_detail`),
-/// in `tax_year_end_date` order. `roc_events`, `splits` and `up_to` are the
-/// same inputs as `adjusted_cost_base`.
+/// `amit_events` are the same [`AmitReductionEvent`]s `adjusted_cost_base`
+/// takes (`entities::amit_adjustment::db_cost_base_reduction_events`), in
+/// `tax_year_end_date` order. `roc_events`, `splits` and `held` are its other
+/// inputs unchanged. Every row describes the **costed units**, so the rows sum
+/// to the same reductions that function reports for them.
 pub fn adjustment_detail(
     parcel: &Parcel<'_>,
     units: Decimal,
     amit_events: &[AmitReductionEvent],
     roc_events: &[RocEvent],
     splits: &[SplitEvent],
-    up_to: Option<NaiveDate>,
+    held: Held,
 ) -> Result<Vec<CostBaseAdjustment>, sqlx::Error> {
-    let initial_cost = parcel.initial_cost();
     let mut rows = Vec::new();
 
-    // AMIT reductions (CGT event E10): whole-parcel, in statement-year order.
-    // The running balance floors at nil exactly like adjusted_cost_base's
-    // single `(initial_cost - amit_reduction).max(0)` — flooring after each
-    // step never loses value versus one accumulated subtraction, since every
-    // step only ever subtracts a non-negative amount.
-    let mut running = initial_cost;
+    // The costed units' share of the initial cost base: the pool both
+    // reduction kinds draw down, mirroring adjusted_cost_base's
+    // `initial_cost * units / parcel.quantity` term.
+    let mut running = if parcel.quantity > Decimal::ZERO {
+        parcel.initial_cost() * units / parcel.quantity
+    } else {
+        Decimal::ZERO
+    };
+
+    // AMIT reductions (CGT event E10) on the costed units, in statement-year
+    // order. The running balance floors at nil exactly like
+    // adjusted_cost_base's single `.max(0)` — flooring after each step never
+    // loses value versus one accumulated subtraction, since every step only
+    // ever subtracts a non-negative amount.
     for e in amit_events {
+        // The reduction reaching *these* units, which is the statement's own
+        // per-unit figure only where its row covers them.
+        let amount = e.reduction_for_units(parcel.quantity, units, held.disposed_on());
+        let per_unit = e.per_unit_for(parcel.quantity, held.disposed_on());
         let before = running;
-        running = (running - e.amount).max(Decimal::ZERO);
-        let capped = before <= Decimal::ZERO || e.amount > before;
-        let per_unit = (parcel.quantity != Decimal::ZERO).then(|| e.amount / parcel.quantity);
+        running = (running - amount).max(Decimal::ZERO);
+        let capped = before <= Decimal::ZERO || amount > before;
         rows.push(CostBaseAdjustment {
             kind: AdjustmentKind::AmitCostBase,
             date: e.tax_year_end_date,
@@ -317,29 +474,22 @@ pub fn adjustment_detail(
                 "AMMA statement {} (year ended {})",
                 e.amma_statement_id, e.tax_year_end_date
             ),
-            per_unit,
-            amount: e.amount,
+            per_unit: Some(per_unit),
+            amount,
             capped,
         });
     }
-    let net_cost = running;
 
-    // Return-of-capital payments (CGT event G1), on the costed units only —
-    // the pool they draw down is the costed units' share of the post-AMIT
-    // cost base, mirroring adjusted_cost_base's
-    // `net_cost * units / parcel.quantity` term.
-    let costed_pool = if parcel.quantity > Decimal::ZERO {
-        net_cost * units / parcel.quantity
-    } else {
-        Decimal::ZERO
-    };
-    let mut roc_running = costed_pool;
+    // Return-of-capital payments (CGT event G1), on the costed units too —
+    // drawing down what the AMIT rows left of the same pool.
+    let mut roc_running = running;
     for e in roc_events {
         // Applicability, the currency guard and the split re-basing are the
         // payment's own (`RocEvent::per_unit_for`) — the same call
         // `per_unit_reduction` sums, so the itemised rows can't describe a
         // different set of payments than the totals were computed from.
-        let Some(per_unit) = e.per_unit_for(splits, parcel.currency, parcel.trade_date, up_to)?
+        let Some(per_unit) =
+            e.per_unit_for(splits, parcel.currency, parcel.trade_date, held.up_to())?
         else {
             continue;
         };
@@ -360,7 +510,7 @@ pub fn adjustment_detail(
     // Split/consolidation rebases: informational only (amount 0) — they
     // explain a changed unit count, never a cost-base reduction.
     for s in splits {
-        if s.date < parcel.trade_date || up_to.is_some_and(|d| s.date > d) {
+        if s.date < parcel.trade_date || held.up_to().is_some_and(|d| s.date > d) {
             continue;
         }
         rows.push(CostBaseAdjustment {
@@ -453,6 +603,26 @@ mod tests {
         }
     }
 
+    /// One AMMA statement's adjustment row against a parcel: `per_unit` per
+    /// as-acquired unit over `covered` units, `disposed` units of the parcel
+    /// having already been sold when the statement's year (ending 30 June
+    /// `year`) closed.
+    fn amit(id: i64, year: i32, per_unit: &str, covered: i64, disposed: i64) -> AmitReductionEvent {
+        AmitReductionEvent {
+            amma_statement_id: id,
+            tax_year_end_date: date(year, 6, 30),
+            per_unit: per_unit.parse().unwrap(),
+            covered: Decimal::from(covered),
+            disposed_by_year_end: Decimal::from(disposed),
+        }
+    }
+
+    /// The ordinary case: the row covers the whole parcel and none of it had
+    /// been sold by the year end.
+    fn whole(id: i64, year: i32, per_unit: &str, quantity: i64) -> AmitReductionEvent {
+        amit(id, year, per_unit, quantity, 0)
+    }
+
     #[test]
     fn whole_parcel_initial_cost_includes_brokerage_and_gst() {
         let p = Parcel {
@@ -460,7 +630,8 @@ mod tests {
             gst_on_brokerage: "0.995".parse().unwrap(),
             ..parcel(100, 10)
         };
-        let cb = adjusted_cost_base(&p, Decimal::from(100), Decimal::ZERO, &[], &[], None).unwrap();
+        let cb =
+            adjusted_cost_base(&p, Decimal::from(100), &[], &[], &[], Held::AsAt(None)).unwrap();
         assert_eq!(cb.initial_cost, "1010.945".parse::<Decimal>().unwrap());
         assert_eq!(cb.adjusted, "1010.945".parse::<Decimal>().unwrap());
     }
@@ -470,10 +641,10 @@ mod tests {
         let cb = adjusted_cost_base(
             &parcel(100, 10),
             Decimal::from(40),
-            Decimal::ZERO,
             &[],
             &[],
-            None,
+            &[],
+            Held::AsAt(None),
         )
         .unwrap();
         assert_eq!(cb.adjusted, Decimal::from(400));
@@ -485,10 +656,10 @@ mod tests {
         let cb = adjusted_cost_base(
             &parcel(100, 10),
             Decimal::from(100),
-            Decimal::from(5),
+            &[whole(1, 2024, "0.05", 100)],
             &[],
             &[],
-            None,
+            Held::AsAt(None),
         )
         .unwrap();
         assert_eq!(cb.amit_reduction, Decimal::from(5));
@@ -498,14 +669,140 @@ mod tests {
         let cb = adjusted_cost_base(
             &parcel(100, 10),
             Decimal::from(100),
-            Decimal::from(1100),
+            &[whole(1, 2024, "11", 100)],
             &[],
             &[],
-            None,
+            Held::AsAt(None),
         )
         .unwrap();
         assert_eq!(cb.amit_reduction, Decimal::from(1100));
         assert_eq!(cb.adjusted, Decimal::ZERO);
+    }
+
+    /// SCENARIOS D-13. A row covering only part of a parcel states its
+    /// reduction for *those* units — so the units it covers each lose the
+    /// statement's full per-unit figure, and the units sold before the year
+    /// end (which the row does not cover) lose nothing. Pooling the row's
+    /// total across the whole parcel instead moved reduction from the one to
+    /// the other, understating the sale's cost base and overstating what the
+    /// remainder carried forward.
+    #[test]
+    fn a_partial_row_reduces_only_the_units_it_covers() {
+        // 100 units at $10; 40 sold in March; the AMMA statement for the year
+        // ended 30 June covers the 60 still held at 50c/unit.
+        let sold_on = date(2024, 3, 1);
+        let events = [amit(1, 2024, "0.50", 60, 40)];
+
+        let held = adjusted_cost_base(
+            &parcel(100, 10),
+            Decimal::from(60),
+            &events,
+            &[],
+            &[],
+            Held::AsAt(None),
+        )
+        .unwrap();
+        // 60 units each reduced by the stated 50c: 600 − 30.
+        assert_eq!(held.amit_reduction, Decimal::from(30));
+        assert_eq!(held.adjusted, Decimal::from(570));
+
+        let sold = adjusted_cost_base(
+            &parcel(100, 10),
+            Decimal::from(40),
+            &events,
+            &[],
+            &[],
+            Held::DisposedOn(sold_on),
+        )
+        .unwrap();
+        // The row does not cover these units, so they keep their full share.
+        assert_eq!(sold.amit_reduction, Decimal::ZERO);
+        assert_eq!(sold.adjusted, Decimal::from(400));
+    }
+
+    /// The contrasting entry: a row covering the *whole* parcel after a
+    /// mid-year disposal is the fund attributing to units held during the
+    /// year (s 104-107B / LCR 2015/11 para 13), and must keep reaching the
+    /// sold units — every unit takes the statement's full per-unit figure.
+    #[test]
+    fn a_whole_parcel_row_still_reaches_the_units_already_sold() {
+        let events = [amit(1, 2024, "0.50", 100, 40)];
+
+        let held = adjusted_cost_base(
+            &parcel(100, 10),
+            Decimal::from(60),
+            &events,
+            &[],
+            &[],
+            Held::AsAt(None),
+        )
+        .unwrap();
+        assert_eq!(held.amit_reduction, Decimal::from(30));
+        assert_eq!(held.adjusted, Decimal::from(570));
+
+        let sold = adjusted_cost_base(
+            &parcel(100, 10),
+            Decimal::from(40),
+            &events,
+            &[],
+            &[],
+            Held::DisposedOn(date(2024, 3, 1)),
+        )
+        .unwrap();
+        assert_eq!(sold.amit_reduction, Decimal::from(20));
+        assert_eq!(sold.adjusted, Decimal::from(380));
+    }
+
+    /// Whichever units a row reaches, the total it takes off the parcel is
+    /// exactly the amount its own arithmetic states (covered × per unit) —
+    /// coverage decides the *split*, never the size.
+    #[test]
+    fn the_stated_reduction_is_conserved_however_it_is_split() {
+        for covered in [0, 20, 40, 60, 100] {
+            let e = amit(1, 2024, "0.50", covered, 40);
+            let held = e.reduction_for_units(Decimal::from(100), Decimal::from(60), None);
+            let sold = e.reduction_for_units(
+                Decimal::from(100),
+                Decimal::from(40),
+                Some(date(2024, 3, 1)),
+            );
+            assert_eq!(held + sold, e.amount(), "covered {covered}");
+        }
+    }
+
+    /// A row covering more units than are still held spills the excess evenly
+    /// over the units sold during the year — the two groups' rates only
+    /// coincide when the row covers the whole parcel.
+    #[test]
+    fn coverage_beyond_the_units_still_held_spills_onto_the_sold_ones() {
+        // 80 of 100 units covered, 40 already sold: the 60 still held take the
+        // full 50c, and the remaining 20 units of coverage spread over the 40
+        // sold ones at 25c each.
+        let e = amit(1, 2024, "0.50", 80, 40);
+        assert_eq!(
+            e.per_unit_for(Decimal::from(100), None),
+            "0.50".parse().unwrap()
+        );
+        assert_eq!(
+            e.per_unit_for(Decimal::from(100), Some(date(2024, 3, 1))),
+            "0.25".parse().unwrap()
+        );
+    }
+
+    /// A sale *on* the statement's year end is a disposal by it: those units
+    /// are no longer in the year-end position the row's quantity describes.
+    #[test]
+    fn a_disposal_on_the_year_end_itself_counts_as_sold_by_it() {
+        let e = amit(1, 2024, "0.50", 60, 40);
+        assert_eq!(
+            e.per_unit_for(Decimal::from(100), Some(date(2024, 6, 30))),
+            Decimal::ZERO
+        );
+        // A sale the next day was still held at the year end.
+        assert_eq!(
+            e.per_unit_for(Decimal::from(100), Some(date(2024, 7, 1))),
+            "0.50".parse().unwrap()
+        );
     }
 
     /// `adjustment_detail`'s itemised AMIT rows must sum to exactly the same
@@ -514,20 +811,15 @@ mod tests {
     /// running balance to nil.
     #[test]
     fn itemised_amit_rows_sum_to_the_netted_reduction_including_the_floored_case() {
-        let amit = |id: i64, y: i32, amount: i64| AmitReductionEvent {
-            amma_statement_id: id,
-            tax_year_end_date: date(y, 6, 30),
-            amount: Decimal::from(amount),
-        };
         // Two statements, neither alone exceeding the $1000 cost base.
-        let events = [amit(1, 2024, 500), amit(2, 2025, 600)];
+        let events = [whole(1, 2024, "5", 100), whole(2, 2025, "6", 100)];
         let cb = adjusted_cost_base(
             &parcel(100, 10),
             Decimal::from(100),
-            events.iter().map(|e| e.amount).sum(),
+            &events,
             &[],
             &[],
-            None,
+            Held::AsAt(None),
         )
         .unwrap();
         let rows = adjustment_detail(
@@ -536,7 +828,7 @@ mod tests {
             &events,
             &[],
             &[],
-            None,
+            Held::AsAt(None),
         )
         .unwrap();
         let amit_rows: Vec<_> = rows
@@ -556,6 +848,39 @@ mod tests {
         assert_eq!(amit_rows[1].date, date(2025, 6, 30));
     }
 
+    /// The itemised rows describe the *costed* units, so a partial row shows
+    /// the per-unit figure it actually applied to them — and still sums to
+    /// what `adjusted_cost_base` reported.
+    #[test]
+    fn itemised_amit_rows_describe_the_costed_units_of_a_partial_row() {
+        let events = [amit(1, 2024, "0.50", 60, 40)];
+        let rows = adjustment_detail(
+            &parcel(100, 10),
+            Decimal::from(40),
+            &events,
+            &[],
+            &[],
+            Held::DisposedOn(date(2024, 3, 1)),
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].per_unit, Some(Decimal::ZERO));
+        assert_eq!(rows[0].amount, Decimal::ZERO);
+
+        let rows = adjustment_detail(
+            &parcel(100, 10),
+            Decimal::from(60),
+            &events,
+            &[],
+            &[],
+            Held::AsAt(None),
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].per_unit, Some("0.50".parse().unwrap()));
+        assert_eq!(rows[0].amount, Decimal::from(30));
+    }
+
     #[test]
     fn roc_payments_reduce_and_g1_floors_at_nil() {
         let roc = |amount: &str, d: NaiveDate| RocEvent {
@@ -568,10 +893,10 @@ mod tests {
         let cb = adjusted_cost_base(
             &parcel(100, 10),
             Decimal::from(100),
-            Decimal::ZERO,
+            &[],
             &[roc("0.50", date(2024, 3, 1))],
             &[],
-            None,
+            Held::AsAt(None),
         )
         .unwrap();
         assert_eq!(cb.roc_reduction, Decimal::from(50));
@@ -581,10 +906,10 @@ mod tests {
         let cb = adjusted_cost_base(
             &parcel(100, 10),
             Decimal::from(100),
-            Decimal::ZERO,
+            &[],
             &[roc("11", date(2024, 3, 1))],
             &[],
-            None,
+            Held::AsAt(None),
         )
         .unwrap();
         assert_eq!(cb.roc_reduction, Decimal::from(1100));
@@ -599,14 +924,14 @@ mod tests {
             currency: "AUD".to_string(),
             record_date: None,
         };
-        // Payment after the up_to (sale) date: the units were no longer held.
+        // Payment after the sale date: the units were no longer held.
         let cb = adjusted_cost_base(
             &parcel(100, 10),
             Decimal::from(100),
-            Decimal::ZERO,
+            &[],
             &[roc],
             &[],
-            Some(date(2024, 6, 1)),
+            Held::DisposedOn(date(2024, 6, 1)),
         )
         .unwrap();
         assert_eq!(cb.roc_reduction, Decimal::ZERO);
@@ -631,10 +956,10 @@ mod tests {
         let cb = adjusted_cost_base(
             &parcel(100, 10),
             Decimal::from(100),
-            Decimal::ZERO,
+            &[],
             &[roc],
             &[split],
-            None,
+            Held::AsAt(None),
         )
         .unwrap();
         assert_eq!(cb.roc_reduction, Decimal::from(50));
@@ -664,10 +989,10 @@ mod tests {
         let cb = adjusted_cost_base(
             &parcel(100, 10),
             Decimal::from(100),
-            Decimal::ZERO,
+            &[],
             &events,
             std::slice::from_ref(&split),
-            None,
+            Held::AsAt(None),
         )
         .unwrap();
         let rows = adjustment_detail(
@@ -676,7 +1001,7 @@ mod tests {
             &[],
             &events,
             &[split],
-            None,
+            Held::AsAt(None),
         )
         .unwrap();
 
@@ -716,10 +1041,10 @@ mod tests {
         let err = adjusted_cost_base(
             &parcel(100, 10),
             Decimal::from(100),
-            Decimal::ZERO,
+            &[],
             &[roc],
             &[],
-            None,
+            Held::AsAt(None),
         )
         .unwrap_err();
         assert!(err.to_string().contains("currency"));
@@ -727,8 +1052,15 @@ mod tests {
 
     #[test]
     fn zero_quantity_parcel_costs_nil() {
-        let cb = adjusted_cost_base(&parcel(0, 10), Decimal::ZERO, Decimal::ZERO, &[], &[], None)
-            .unwrap();
+        let cb = adjusted_cost_base(
+            &parcel(0, 10),
+            Decimal::ZERO,
+            &[],
+            &[],
+            &[],
+            Held::AsAt(None),
+        )
+        .unwrap();
         assert_eq!(cb.adjusted, Decimal::ZERO);
     }
 
@@ -737,10 +1069,10 @@ mod tests {
         let cb = adjusted_cost_base(
             &parcel(100, 10),
             Decimal::from(100),
-            Decimal::ZERO,
             &[],
             &[],
-            None,
+            &[],
+            Held::AsAt(None),
         )
         .unwrap();
         let aud = cb
@@ -775,8 +1107,15 @@ mod tests {
             currency: "USD".to_string(),
             record_date: None,
         };
-        let cb = adjusted_cost_base(&p, Decimal::from(100), Decimal::from(5), &[roc], &[], None)
-            .unwrap();
+        let cb = adjusted_cost_base(
+            &p,
+            Decimal::from(100),
+            &[whole(1, 2024, "0.05", 100)],
+            &[roc],
+            &[],
+            Held::AsAt(None),
+        )
+        .unwrap();
         let aud = cb
             .into_aud_with(&rates, "USD", date(2024, 1, 15), fx::FxOverride::None)
             .unwrap();

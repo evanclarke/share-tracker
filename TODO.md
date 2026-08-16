@@ -10,49 +10,6 @@ findings are all closed in DONE.md), except where a section's heading names anot
 (e.g. REQUIREMENTS, SCENARIOS). Each section records one finding; sections land in DONE.md as they
 are fixed or decided.
 
-## An AMIT adjustment covering part of a parcel is diluted across the whole parcel (SCENARIOS D-13)
-(SCENARIOS.md section D verification pass, 2026-08-15. `amit_adjustment::db_cost_base_reductions`
-computes each row's reduction as **covered quantity × the statement's per-unit figure**
-(`reduction_for`, `src/entities/amit_adjustment.rs:190`) — the row's own arithmetic says the amount
-belongs to those units — but `domain::cost_base::adjusted_cost_base` then subtracts it from the
-*whole parcel's* initial cost and pro-rates the remainder over every as-acquired unit:
-`(initial − amit) × units / parcel.quantity` (`src/domain/cost_base.rs:211`). While the row covers
-the whole parcel the two agree exactly. They diverge the moment it covers less — which is not an
-exotic hand entry: `amit_adjustment_generation` writes `quantity = parcel.remaining_as_of`, the
-units still open at the statement's year end, so **every parcel partly sold during the year**
-generates one.)
-- [ ] D-13 — reduction meant for the units still held is spread onto units already sold.
-  Reproduced: Buy 2022-01-10 ×100 @ $10 (cost base 1000), Sell 2024-03-01 ×40, AMMA year ended
-  2024-06-30 with `units_held: 60` and `cost_base_adjustment: 0.50`, one adjustment row covering 60
-  units (reduction 30.00 — what generation itself would write). Realised gains report the 40 sold
-  in March at cost base **388.00** (1000 − 30 pro-rated: (970 × 40/100)), and open parcels report
-  the remaining 60 at `remaining_cost_base` **582.00** with `amit_cost_base_reduction: 30.00` —
-  where 60 units each reduced by the stated $0.50 is 600 − 30 = **570.00**. 12.00 of reduction has
-  moved from the units the statement covers to units it does not, understating the March sale's
-  cost base and overstating what the open parcel carries into its own future disposal. The total is
-  preserved, so the lifetime gain is unchanged — only its split across units and years is wrong
-- [ ] The AMIT adjustment cross-check does not see it (`units_adjusted: 60` equals the statement's
-  `units_held: 60` — the set reconciles; it is the *application* of the reduction that doesn't), so
-  nothing surfaces the figure
-- [ ] Contrast with the other cost-base reduction: a return of capital is applied **per unit** and
-  bounded by `up_to` (`RocEvent::per_unit_for`, `src/entities/corporate_action/adjustments.rs:60`),
-  so units sold before the payment are untouched and units held take the full per-unit amount. The
-  two adjustment types answer the same question — which units does this reduction reach — in
-  different ways, and only one of them matches the amount the row was computed from
-- [ ] Decide the model, which is the part that needs a call rather than code: a per-unit reduction
-  applied to the covered units only (matching ROC, and matching `reduction_for`'s own multiplication)
-  needs a rule for *which* units of a parcel a partial row covers — the units open at the year end
-  is what generation means, but an entry covering the whole parcel after a mid-year disposal (the
-  fund attributing to units held during the year, correct under s 104-107B: the adjustment is made
-  "just before the end of the income year, **or just before the time of a relevant CGT event**",
-  LCR 2015/11 para 13) must keep reaching the sold units, as it does today and as
-  `reports::realised_gains::tests::db_amit_statement_for_the_sale_year_adjusts_the_parcel_already_sold`
-  now pins
-- [ ] Tests: the partly-sold case above, asserting the sold allocation and the open remainder each
-  carry the stated per-unit reduction and no more; plus the existing whole-parcel cases unchanged
-- [ ] Docs sync: `docs/API.md` AMIT adjustments (what `quantity` means for the units it does *not*
-  cover) and, if the pooling stays, a Known-limitations entry saying so
-
 ## A return of capital received on units already sold is not recorded anywhere (SCENARIOS D-14)
 (SCENARIOS.md section D verification pass, 2026-08-15. Selling between a return of capital's record
 date and its payment date leaves the seller entitled to the payment — that is what the record date

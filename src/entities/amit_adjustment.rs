@@ -1,3 +1,4 @@
+use crate::domain::cost_base::AmitReductionEvent;
 use crate::entities::corporate_action;
 use crate::infra::decimal::{Money, parse_dec};
 use crate::infra::http::{self, ApiError, CrudEntity};
@@ -24,6 +25,11 @@ pub struct AmitAdjustment {
     /// [`reduction_for`], which re-bases this quantity into the statement
     /// year's basis before multiplying — enter the statement's per-unit figure
     /// exactly as the fund states it.
+    ///
+    /// It also decides *which* units of the parcel the reduction reaches once
+    /// part of it has been sold: covering less than the whole parcel covers
+    /// the units still held at the statement's year end first
+    /// ([`crate::domain::cost_base::AmitReductionEvent::reduction_for_units`]).
     #[sqlx(try_from = "Money")]
     pub quantity: Decimal,
 }
@@ -173,11 +179,13 @@ pub async fn db_upsert(pool: &SqlitePool, adj: &AmitAdjustment) -> Result<(), Up
     db_upsert_on(&mut conn, adj).await
 }
 
-/// The whole-parcel cost-base reduction one AMMA statement applies to one
-/// parcel — *the* place the two figures are multiplied, so no caller can pair
-/// them on mismatched unit bases.
+/// The cost-base reduction one AMMA statement applies to `quantity` units of
+/// one parcel — *the* place the two figures are multiplied, so no caller can
+/// pair them on mismatched unit bases. [`db_cost_base_reduction_events`] calls
+/// it with a single unit, since it stores the per-unit figure and lets the
+/// pipeline decide which units it reaches.
 ///
-/// `quantity` is the adjustment row's covered units in the parcel's
+/// `quantity` is in the parcel's
 /// *as-acquired* basis (the basis `trades.quantity` caps), while the
 /// statement's per-unit `cost_base_adjustment` is stated per unit as the
 /// statement's own tax year saw them. A share split/consolidation or bonus
@@ -198,104 +206,86 @@ pub fn reduction_for(
         * cost_base_adjustment
 }
 
-/// Returns the total AMIT cost base reduction per purchase trade, keyed by `trade_id`.
-/// reduction = sum of [`reduction_for`] across all linked adjustments.
-/// Shared by the portfolio, realised, and unrealised reports to net AMIT tax-deferred
-/// amounts off the cost base of affected parcels. Takes the caller's own connection
-/// (two reads — the adjustments and the listings' split events) so the scrip-for-scrip
-/// exchange (`entities::scrip_exchange`) and every report can run it inside their own
+/// Every AMMA statement adjusting a purchase parcel, keyed by `trade_id` — the
+/// [`AmitReductionEvent`] input the shared cost-base pipeline
+/// (`domain::cost_base::adjusted_cost_base` / `adjustment_detail`) and the
+/// net-capital-gain report's E10 walk all read. Sorted by `tax_year_end_date`
+/// (then statement id) within each trade, matching the year order those walks'
+/// running floor assumes.
+///
+/// `up_to` bounds the statements to years ending on or before it: an
+/// adjustment arises at its statement's year end, so a report valued as at an
+/// earlier date (a snapshot of a past day) must not include it. `None` = no
+/// bound.
+///
+/// Each event carries the statement's reduction **per as-acquired unit** and
+/// the units the adjustment row covers, rather than one pre-multiplied
+/// whole-parcel total, so the pipeline can apply it to the units the row
+/// actually covers (see [`AmitReductionEvent::per_unit_for`]) instead of
+/// pooling it across the parcel. `disposed_by_year_end` — the units of the
+/// parcel already sold when the statement's year ended — is what tells those
+/// two groups apart, so the allocations are read here too
+/// (`domain::open_parcels::db_units_sold`, the shared allocations read).
+///
+/// Takes the caller's own connection so the scrip-for-scrip exchange
+/// (`entities::scrip_exchange`) and every report can run it inside their own
 /// transaction.
-pub async fn db_cost_base_reductions(
-    conn: &mut sqlx::SqliteConnection,
-) -> Result<HashMap<i64, Decimal>, sqlx::Error> {
-    db_cost_base_reductions_up_to(conn, None).await
-}
-
-/// [`db_cost_base_reductions`] bounded to statements for years ending on or
-/// before `up_to`: an adjustment arises at its statement's year end, so a
-/// report valued as at an earlier date (a snapshot of a past day) must not
-/// include it. `None` = no bound.
-pub async fn db_cost_base_reductions_up_to(
+pub async fn db_cost_base_reduction_events(
     conn: &mut sqlx::SqliteConnection,
     up_to: Option<chrono::NaiveDate>,
-) -> Result<HashMap<i64, Decimal>, sqlx::Error> {
+) -> Result<HashMap<i64, Vec<AmitReductionEvent>>, sqlx::Error> {
     let cutoff = crate::infra::date::as_of_or_open(up_to);
     let splits = corporate_action::db_share_split_events(&mut *conn).await?;
     let rows = sqlx::query(
-        "SELECT aa.trade_id, aa.quantity, a.cost_base_adjustment, a.tax_year_end_date, \
-                t.listing_id, t.date AS trade_date \
+        "SELECT aa.trade_id, a.id AS amma_statement_id, a.tax_year_end_date, aa.quantity, \
+                a.cost_base_adjustment, t.listing_id, t.date AS trade_date \
          FROM amit_adjustments aa \
          JOIN amma_statements a ON a.id = aa.amma_statement_id \
          JOIN trades t ON t.id = aa.trade_id \
-         WHERE a.tax_year_end_date <= ?",
+         WHERE a.tax_year_end_date <= ? \
+         ORDER BY aa.trade_id, a.tax_year_end_date, a.id",
     )
     .bind(cutoff)
     .fetch_all(&mut *conn)
     .await?;
 
-    let mut map: HashMap<i64, Decimal> = HashMap::new();
-    for row in &rows {
-        let tid: i64 = row.try_get("trade_id")?;
-        let listing_id: i64 = row.try_get("listing_id")?;
-        let qty = parse_dec("quantity", row.try_get("quantity")?)?;
-        let cba = parse_dec("cost_base_adjustment", row.try_get("cost_base_adjustment")?)?;
-        *map.entry(tid).or_insert(Decimal::ZERO) += reduction_for(
-            qty,
-            cba,
-            splits.get(&listing_id).map_or(&[][..], |v| v),
-            row.try_get("trade_date")?,
-            row.try_get("tax_year_end_date")?,
-        );
+    if rows.is_empty() {
+        return Ok(HashMap::new());
     }
-    Ok(map)
-}
+    // Sales after `up_to` are already excluded by the year-end filter above
+    // (a statement's year end is never after the cutoff), so this read needs
+    // no bound of its own.
+    let sold = crate::domain::open_parcels::db_units_sold(&mut *conn, None).await?;
 
-/// The itemised detail behind [`db_cost_base_reductions`]: every AMMA
-/// statement adjusting a purchase parcel, keyed by `trade_id`, each carrying
-/// its own whole-parcel reduction ([`reduction_for`]) — the
-/// [`crate::domain::cost_base::AmitReductionEvent`] input
-/// `domain::cost_base::adjustment_detail` needs to itemise the E10 walk
-/// instead of `db_cost_base_reductions`' single summed total. Sorted by
-/// `tax_year_end_date` (then statement id) within each trade, matching the
-/// year-order `adjustment_detail`'s running floor assumes. Takes the caller's
-/// own connection (as [`db_cost_base_reductions`] does, and for the same
-/// reason) so a report can read it on its own transaction.
-pub async fn db_cost_base_reduction_detail(
-    conn: &mut sqlx::SqliteConnection,
-) -> Result<HashMap<i64, Vec<crate::domain::cost_base::AmitReductionEvent>>, sqlx::Error> {
-    let splits = corporate_action::db_share_split_events(&mut *conn).await?;
-    let rows = sqlx::query(
-        "SELECT aa.trade_id, a.id AS amma_statement_id, a.tax_year_end_date, aa.quantity, \
-         a.cost_base_adjustment, t.listing_id, t.date AS trade_date \
-         FROM amit_adjustments aa \
-         JOIN amma_statements a ON a.id = aa.amma_statement_id \
-         JOIN trades t ON t.id = aa.trade_id \
-         ORDER BY aa.trade_id, a.tax_year_end_date, a.id",
-    )
-    .fetch_all(&mut *conn)
-    .await?;
-
-    let mut map: HashMap<i64, Vec<crate::domain::cost_base::AmitReductionEvent>> = HashMap::new();
+    let mut map: HashMap<i64, Vec<AmitReductionEvent>> = HashMap::new();
     for row in &rows {
         let trade_id: i64 = row.try_get("trade_id")?;
         let listing_id: i64 = row.try_get("listing_id")?;
         let amma_statement_id: i64 = row.try_get("amma_statement_id")?;
-        let tax_year_end_date = row.try_get("tax_year_end_date")?;
-        let qty = parse_dec("quantity", row.try_get("quantity")?)?;
+        let tax_year_end_date: chrono::NaiveDate = row.try_get("tax_year_end_date")?;
+        let trade_date: chrono::NaiveDate = row.try_get("trade_date")?;
+        let covered = parse_dec("quantity", row.try_get("quantity")?)?;
         let cba = parse_dec("cost_base_adjustment", row.try_get("cost_base_adjustment")?)?;
-        map.entry(trade_id)
-            .or_default()
-            .push(crate::domain::cost_base::AmitReductionEvent {
-                amma_statement_id,
-                tax_year_end_date,
-                amount: reduction_for(
-                    qty,
-                    cba,
-                    splits.get(&listing_id).map_or(&[][..], |v| v),
-                    row.try_get("trade_date")?,
-                    tax_year_end_date,
-                ),
-            });
+        let splits = splits.get(&listing_id).map_or(&[][..], |v| v);
+        // Units of the parcel already disposed of when the statement's year
+        // ended, re-based back to the parcel's as-acquired basis (an
+        // allocation is in its own sale date's units).
+        let disposed_by_year_end = sold.get(&trade_id).map_or(Decimal::ZERO, |sales| {
+            sales
+                .iter()
+                .filter(|(sale_date, _)| *sale_date <= tax_year_end_date)
+                .map(|&(sale_date, qty)| {
+                    corporate_action::as_acquired_quantity(qty, splits, trade_date, sale_date)
+                })
+                .sum()
+        });
+        map.entry(trade_id).or_default().push(AmitReductionEvent {
+            amma_statement_id,
+            tax_year_end_date,
+            per_unit: reduction_for(Decimal::ONE, cba, splits, trade_date, tax_year_end_date),
+            covered,
+            disposed_by_year_end,
+        });
     }
     Ok(map)
 }
@@ -351,11 +341,28 @@ mod tests {
         ApiClient::over(router().with_state(pool.clone()))
     }
 
-    /// [`db_cost_base_reductions`] over a pool-acquired connection (reports
-    /// call it on their own read transaction).
+    /// The whole-parcel reduction each parcel's statements *state* — every
+    /// event's covered units × its per-unit figure, summed. Which units of the
+    /// parcel that amount then reaches is
+    /// [`AmitReductionEvent::per_unit_for`]'s job, exercised in
+    /// `domain::cost_base`; these tests pin the figure the rows are read as.
     async fn reductions(pool: &SqlitePool) -> HashMap<i64, Decimal> {
+        events(pool)
+            .await
+            .into_iter()
+            .map(|(trade_id, events)| {
+                (trade_id, events.iter().map(|e| e.amount()).sum::<Decimal>())
+            })
+            .collect()
+    }
+
+    /// [`db_cost_base_reduction_events`] over a pool-acquired connection
+    /// (reports call it on their own read transaction).
+    async fn events(pool: &SqlitePool) -> HashMap<i64, Vec<AmitReductionEvent>> {
         let mut conn = pool.acquire().await.unwrap();
-        db_cost_base_reductions(&mut conn).await.unwrap()
+        db_cost_base_reduction_events(&mut conn, None)
+            .await
+            .unwrap()
     }
 
     async fn insert_test_listing(pool: &SqlitePool, id: i64, exchange_mic: &str, ticker: &str) {
@@ -672,11 +679,13 @@ mod tests {
 
         assert_eq!(reductions(&pool).await.get(&1).copied(), Some(dec("100")));
 
-        // The itemised detail the E10 walk reads agrees, figure for figure.
-        let mut conn = pool.acquire().await.unwrap();
-        let detail = db_cost_base_reduction_detail(&mut conn).await.unwrap();
+        // The itemised detail the E10 walk reads agrees, figure for figure —
+        // and states it per as-acquired unit: $1 for each of the 100.
+        let detail = events(&pool).await;
         assert_eq!(detail[&1].len(), 1);
-        assert_eq!(detail[&1][0].amount, dec("100"));
+        assert_eq!(detail[&1][0].per_unit, dec("1"));
+        assert_eq!(detail[&1][0].covered, dec("100"));
+        assert_eq!(detail[&1][0].amount(), dec("100"));
 
         // A parcel bought *after* the split is already on the year end's
         // basis, so nothing is re-based: 50 × $0.50 = $25.

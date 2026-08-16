@@ -513,3 +513,91 @@ the cost base was always right); the same fixture entered in the reverse order; 
 showing the $1,700 two-year total rather than $1,500; and the mirror attribution — an AMMA
 statement that stays within the cost base followed by a payment that overruns it, whose excess is a
 **G1** gain in the payment's year.
+
+## An AMIT adjustment covering part of a parcel is diluted across the whole parcel (SCENARIOS D-13)
+(SCENARIOS.md section D verification pass, 2026-08-15. `amit_adjustment::db_cost_base_reductions`
+computes each row's reduction as **covered quantity × the statement's per-unit figure**
+(`reduction_for`, `src/entities/amit_adjustment.rs:190`) — the row's own arithmetic says the amount
+belongs to those units — but `domain::cost_base::adjusted_cost_base` then subtracts it from the
+*whole parcel's* initial cost and pro-rates the remainder over every as-acquired unit:
+`(initial − amit) × units / parcel.quantity` (`src/domain/cost_base.rs:211`). While the row covers
+the whole parcel the two agree exactly. They diverge the moment it covers less — which is not an
+exotic hand entry: `amit_adjustment_generation` writes `quantity = parcel.remaining_as_of`, the
+units still open at the statement's year end, so **every parcel partly sold during the year**
+generates one.)
+- [x] D-13 — reduction meant for the units still held is spread onto units already sold.
+  Reproduced: Buy 2022-01-10 ×100 @ $10 (cost base 1000), Sell 2024-03-01 ×40, AMMA year ended
+  2024-06-30 with `units_held: 60` and `cost_base_adjustment: 0.50`, one adjustment row covering 60
+  units (reduction 30.00 — what generation itself would write). Realised gains report the 40 sold
+  in March at cost base **388.00** (1000 − 30 pro-rated: (970 × 40/100)), and open parcels report
+  the remaining 60 at `remaining_cost_base` **582.00** with `amit_cost_base_reduction: 30.00` —
+  where 60 units each reduced by the stated $0.50 is 600 − 30 = **570.00**. 12.00 of reduction has
+  moved from the units the statement covers to units it does not, understating the March sale's
+  cost base and overstating what the open parcel carries into its own future disposal. The total is
+  preserved, so the lifetime gain is unchanged — only its split across units and years is wrong
+- [x] The AMIT adjustment cross-check does not see it (`units_adjusted: 60` equals the statement's
+  `units_held: 60` — the set reconciles; it is the *application* of the reduction that doesn't), so
+  nothing surfaces the figure
+- [x] Contrast with the other cost-base reduction: a return of capital is applied **per unit** and
+  bounded by `up_to` (`RocEvent::per_unit_for`, `src/entities/corporate_action/adjustments.rs:60`),
+  so units sold before the payment are untouched and units held take the full per-unit amount. The
+  two adjustment types answer the same question — which units does this reduction reach — in
+  different ways, and only one of them matches the amount the row was computed from
+- [x] Decide the model, which is the part that needs a call rather than code: a per-unit reduction
+  applied to the covered units only (matching ROC, and matching `reduction_for`'s own multiplication)
+  needs a rule for *which* units of a parcel a partial row covers — the units open at the year end
+  is what generation means, but an entry covering the whole parcel after a mid-year disposal (the
+  fund attributing to units held during the year, correct under s 104-107B: the adjustment is made
+  "just before the end of the income year, **or just before the time of a relevant CGT event**",
+  LCR 2015/11 para 13) must keep reaching the sold units, as it does today and as
+  `reports::realised_gains::tests::db_amit_statement_for_the_sale_year_adjusts_the_parcel_already_sold`
+  now pins
+- [x] Tests: the partly-sold case above, asserting the sold allocation and the open remainder each
+  carry the stated per-unit reduction and no more; plus the existing whole-parcel cases unchanged
+- [x] Docs sync: `docs/API.md` AMIT adjustments (what `quantity` means for the units it does *not*
+  cover) and, if the pooling stays, a Known-limitations entry saying so
+
+
+**Fixed 2026-08-16** by making the AMIT reduction *per unit over the units the row covers*, the way
+a return of capital already worked — the option chosen over documenting the pooling. The coverage
+rule the fourth item asked for: a row covering the whole parcel reaches every unit (so the
+already-pinned s 104-107B case is unchanged), and a row covering less covers the units still held
+at the statement's `tax_year_end_date` **first**, spilling onto the units sold earlier only once it
+covers more than those. Within each group the coverage spreads evenly, units of one parcel being
+otherwise indistinguishable. The two rates always reconstruct `covered × per unit` exactly (the
+single division comes last so the identity holds to the last decimal place), so coverage decides
+the *split* and never the size — the reproduction's 30.00 is still 30.00, now 30.00 off the 60
+units the statement names and nothing off the 40 already sold: sale cost base 400.00, remaining
+570.00.
+
+`db_cost_base_reductions`/`_up_to`/`_detail` are replaced by one
+`db_cost_base_reduction_events(conn, up_to)` returning per-parcel `AmitReductionEvent`s carrying
+the statement's per-unit figure, the covered units, and the units disposed of by its year end (read
+via the shared `domain::open_parcels::db_units_sold`) — everything `reduction_for_units` needs.
+`adjusted_cost_base`/`adjustment_detail` take those events instead of a pre-summed scalar, and
+their `up_to: Option<NaiveDate>` becomes a `Held` enum (`AsAt(Option<date>)` / `DisposedOn(date)`):
+the two cases answer `up_to()` identically, which is exactly why one `Option` could not tell held
+units from sold ones, and so why the dilution was invisible. `CostBase::amit_reduction` — and with
+it the open-parcels report's `amit_cost_base_reduction` — now means the reduction reaching the
+*costed* units rather than the whole parcel; the adjusted figures it feeds are unchanged wherever a
+row covers the whole parcel.
+
+The net-capital-gain report's E10/G1 walk had to follow, or it would have measured an overrun
+against a cost base the pipeline no longer uses: `cost_base_excess_gains` now walks **one chain per
+group of units sharing an event history** (one per sale allocation, plus the units still held)
+instead of one pooled whole-parcel chain. Where every reduction reaches every unit the groups'
+chains are proportional and add back up to the pooled one — which is why every existing E10/G1 test
+passed unchanged, including the combined-chain ones — and G1's old "notional whole parcel, then
+scale the excess by held ÷ quantity" trick falls out of group membership instead of being spelled
+out. It also drops the walk's duplicate `reduction_for` call: the reductions come from the same
+loader the pipeline reads.
+
+Tests: `domain::cost_base` gains the partial-row case both ways round (covered units reduced,
+uncovered untouched), the whole-parcel contrast, the conservation identity across coverages,
+spill-over beyond the units held, and the year-end boundary; `reports::realised_gains` pins the
+reproduction end to end across the realised and open-parcels reports; `reports::net_capital_gain`
+pins an E10 excess that only a per-group walk can see (a row covering 60 units at $12 exhausts
+their $600 while the parcel's $1,000 would have absorbed it). The cross-check item needed no code:
+`units_adjusted` reconciling to `units_held` was never the wrong figure — the application was, and
+now matches. `docs/API.md`'s AMIT adjustments and open-parcels sections say which units a
+`quantity` reaches and what `amit_cost_base_reduction` counts.

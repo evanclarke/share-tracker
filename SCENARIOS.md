@@ -191,7 +191,7 @@ no second path to disagree with the first. What each group turned on:
 
 | Finding | Scenarios | Status |
 | --- | --- | --- |
-| An AMIT adjustment covering part of a parcel is diluted across the whole parcel | D-13 | open — `TODO.md` |
+| An AMIT adjustment covering part of a parcel is diluted across the whole parcel | D-13 | fixed — `DONE/tax-domain.md` |
 | A return of capital received on units already sold is not recorded anywhere | D-14 | open — `TODO.md` |
 
 ---

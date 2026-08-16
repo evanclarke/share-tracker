@@ -303,7 +303,7 @@ async fn load_disposal_inputs(
     .collect();
 
     let amit_events =
-        crate::entities::amit_adjustment::db_cost_base_reduction_detail(&mut *conn).await?;
+        crate::entities::amit_adjustment::db_cost_base_reduction_events(&mut *conn, None).await?;
     let roc_events =
         crate::entities::corporate_action::db_return_of_capital_events(&mut *conn).await?;
     let split_events = crate::entities::corporate_action::db_share_split_events(&mut *conn).await?;
@@ -371,7 +371,6 @@ fn disposal_parcel_rows(
                         .amit_events
                         .get(&p.purchase_trade_id)
                         .map_or(&[][..], |v| v);
-                    let amit_total: Decimal = amit.iter().map(|e| e.amount).sum();
                     let roc = inputs
                         .roc_events
                         .get(&buy_row.listing_id)
@@ -382,16 +381,16 @@ fn disposal_parcel_rows(
                         amit,
                         roc,
                         splits,
-                        Some(disposal.sale_date),
+                        cost_base::Held::DisposedOn(disposal.sale_date),
                     )
                     .unwrap_or_default();
                     let native = cost_base::adjusted_cost_base(
                         &buy_row.parcel(),
                         units_acquired,
-                        amit_total,
+                        amit,
                         roc,
                         splits,
-                        Some(disposal.sale_date),
+                        cost_base::Held::DisposedOn(disposal.sale_date),
                     );
                     let rate = inputs
                         .fx

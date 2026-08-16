@@ -127,8 +127,8 @@ pub async fn load(
     // Total AMIT cost-base reduction per parcel (statements for years ending
     // after `as_of` excluded — the adjustment arises at its statement's year
     // end).
-    let amit_reduction =
-        crate::entities::amit_adjustment::db_cost_base_reductions_up_to(&mut *conn, as_of).await?;
+    let amit_events =
+        crate::entities::amit_adjustment::db_cost_base_reduction_events(&mut *conn, as_of).await?;
     // Return-of-capital payments (CGT event G1) per listing.
     let roc_events = corporate_action::db_return_of_capital_events(&mut *conn).await?;
     // Share splits/consolidations per listing (quantity re-basing).
@@ -160,10 +160,10 @@ pub async fn load(
         let cb = cost_base::adjusted_cost_base(
             &parcel.parcel(),
             remaining_as_acquired,
-            *amit_reduction.get(&parcel.id).unwrap_or(&Decimal::ZERO),
+            amit_events.get(&parcel.id).map_or(&[][..], |v| v),
             roc_events.get(&parcel.listing_id).map_or(&[][..], |v| v),
             splits,
-            as_of,
+            cost_base::Held::AsAt(as_of),
         )?
         .into_aud_with(
             &fx,

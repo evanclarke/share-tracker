@@ -41,7 +41,7 @@ use crate::infra::decimal::{Money, OptMoney, parse_dec};
 pub struct CostBaseInputs {
     pub splits: Vec<SplitEvent>,
     roc_events: Vec<RocEvent>,
-    amit_reductions: HashMap<i64, Decimal>,
+    amit_events: HashMap<i64, Vec<cost_base::AmitReductionEvent>>,
 }
 
 impl CostBaseInputs {
@@ -56,12 +56,13 @@ impl CostBaseInputs {
             .await?
             .remove(&listing_id)
             .unwrap_or_default();
-        let amit_reductions =
-            crate::entities::amit_adjustment::db_cost_base_reductions(&mut *conn).await?;
+        let amit_events =
+            crate::entities::amit_adjustment::db_cost_base_reduction_events(&mut *conn, None)
+                .await?;
         Ok(Self {
             splits,
             roc_events,
-            amit_reductions,
+            amit_events,
         })
     }
 
@@ -78,13 +79,12 @@ impl CostBaseInputs {
         Ok(cost_base::adjusted_cost_base(
             &parcel.parcel(),
             units,
-            *self
-                .amit_reductions
-                .get(&parcel.id)
-                .unwrap_or(&Decimal::ZERO),
+            self.amit_events.get(&parcel.id).map_or(&[][..], |v| v),
             &self.roc_events,
             &self.splits,
-            Some(up_to),
+            // These are the units still *open* at the operation date — the
+            // ones a statement for a year ending on or before it covered.
+            cost_base::Held::AsAt(Some(up_to)),
         )?
         .adjusted)
     }

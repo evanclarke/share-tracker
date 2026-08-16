@@ -29,7 +29,7 @@
 //!     discount-eligible gain. Any unused loss is carried forward into the next
 //!     year in the series.
 
-use crate::domain::cost_base::ParcelRow;
+use crate::domain::cost_base::{self, ParcelRow};
 use crate::domain::tax_year::tax_year_for;
 use crate::entities::corporate_action::{self, RocEvent};
 use crate::infra::decimal::parse_dec;
@@ -199,23 +199,24 @@ fn aud_field(
     Ok(fx.to_aud(value, currency, date, FxOverride::None)?)
 }
 
-/// One cost-base reduction against a parcel, on the parcel's own whole-parcel
-/// basis and in its native currency — the merged input to
-/// [`cost_base_excess_gains`]'s single reduction chain.
+/// One cost-base reduction against a parcel, **per as-acquired unit** and in
+/// the parcel's native currency — the merged input to
+/// [`cost_base_excess_gains`]'s reduction chain. Per-unit rather than
+/// whole-parcel because neither kind necessarily reaches every unit of the
+/// parcel: a payment reaches only the units still held for it, and an AMMA
+/// statement's adjustment row reaches only the units it covers.
 enum Reduction {
-    /// An AMMA statement's AMIT cost-base decrease (CGT event E10), already
-    /// re-based into the statement year's unit basis by
-    /// `amit_adjustment::reduction_for`.
-    Amit {
-        year_end: NaiveDate,
-        amount: Decimal,
-    },
-    /// A return-of-capital payment (CGT event G1), the whole-parcel equivalent
-    /// of the per as-acquired unit figure `RocEvent::per_unit_for` produced.
+    /// An AMMA statement's AMIT cost-base decrease (CGT event E10), read
+    /// through the same `amit_adjustment::db_cost_base_reduction_events` the
+    /// cost-base pipeline reads — so this walk applies it to exactly the units
+    /// the cost base it is walking down applies it to.
+    Amit(cost_base::AmitReductionEvent),
+    /// A return-of-capital payment (CGT event G1), the per as-acquired unit
+    /// figure `RocEvent::per_unit_for` produced.
     Roc {
         date: NaiveDate,
         currency: String,
-        amount: Decimal,
+        per_unit: Decimal,
     },
 }
 
@@ -224,14 +225,34 @@ impl Reduction {
     /// payment date. The chain is walked in this order.
     fn date(&self) -> NaiveDate {
         match self {
-            Reduction::Amit { year_end, .. } => *year_end,
+            Reduction::Amit(e) => e.tax_year_end_date,
             Reduction::Roc { date, .. } => *date,
         }
     }
 
-    fn amount(&self) -> Decimal {
+    /// The reduction reaching `units` as-acquired units of a
+    /// `parcel_quantity`-unit parcel disposed of on `disposed_on` (`None` =
+    /// still held) — [`cost_base::AmitReductionEvent::reduction_for_units`]'s
+    /// coverage rule for an AMMA statement, and "was it still held?" for a
+    /// payment.
+    fn reduction_for_units(
+        &self,
+        parcel_quantity: Decimal,
+        units: Decimal,
+        disposed_on: Option<NaiveDate>,
+    ) -> Decimal {
         match self {
-            Reduction::Amit { amount, .. } | Reduction::Roc { amount, .. } => *amount,
+            Reduction::Amit(e) => e.reduction_for_units(parcel_quantity, units, disposed_on),
+            Reduction::Roc { date, per_unit, .. } => {
+                // A unit sold before the payment was not held for it — the
+                // same boundary the cost-base pipeline's `up_to` bound draws
+                // (a payment on the sale date itself still reaches it).
+                if disposed_on.is_none_or(|d| d >= *date) {
+                    *per_unit * units
+                } else {
+                    Decimal::ZERO
+                }
+            }
         }
     }
 
@@ -241,10 +262,41 @@ impl Reduction {
     /// event exhausted the cost base.
     fn rank(&self) -> u8 {
         match self {
-            Reduction::Amit { .. } => 0,
+            Reduction::Amit(_) => 0,
             Reduction::Roc { .. } => 1,
         }
     }
+}
+
+/// The groups of a parcel's units that share an event history: one per sale
+/// allocation (carrying that sale's date), plus whatever is still held. Every
+/// reduction either reaches a whole group or none of it, so walking the
+/// cost base down group by group is what lets the excess be computed against
+/// the cost base those units actually carry.
+///
+/// Allocated quantities are in their own sale date's unit basis, so each is
+/// re-based back to the parcel's as-acquired basis first. Groups with no units
+/// left are dropped.
+fn unit_cohorts(
+    parcel: &ParcelRow,
+    sales: &[(NaiveDate, Decimal)],
+    splits: &[corporate_action::SplitEvent],
+) -> Vec<(Option<NaiveDate>, Decimal)> {
+    let mut cohorts: Vec<(Option<NaiveDate>, Decimal)> = sales
+        .iter()
+        .map(|&(sale_date, qty)| {
+            (
+                Some(sale_date),
+                corporate_action::as_acquired_quantity(qty, splits, parcel.date, sale_date),
+            )
+        })
+        .filter(|&(_, units)| units > Decimal::ZERO)
+        .collect();
+    let still_held = parcel.quantity - cohorts.iter().map(|&(_, u)| u).sum::<Decimal>();
+    if still_held > Decimal::ZERO {
+        cohorts.push((None, still_held));
+    }
+    cohorts
 }
 
 /// Which CGT event an excess arose under — the informational split the report
@@ -304,12 +356,10 @@ async fn cost_base_excess_gains(
     conn: &mut sqlx::SqliteConnection,
     fx: &FxRates,
 ) -> Result<Vec<ExcessGain>, sqlx::Error> {
-    // Share splits/consolidations per listing: the AMIT reduction re-bases the
-    // adjusted quantity into the statement year's basis and a payment after a
-    // split is per *post-split* unit, both via the same helpers the cost-base
-    // pipeline uses — so this walk can never disagree with the cost base it is
-    // walking down. Sold units are re-based back to as-acquired units the same
-    // way.
+    // Share splits/consolidations per listing: a payment after a split is per
+    // *post-split* unit, and sold units are re-based back to as-acquired
+    // units, both via the same helpers the cost-base pipeline uses — so this
+    // walk can never disagree with the cost base it is walking down.
     let splits = corporate_action::db_share_split_events(&mut *conn).await?;
 
     // The parcels carrying either reduction kind, each read once through the
@@ -324,33 +374,30 @@ async fn cost_base_excess_gains(
     let mut order: Vec<i64> = Vec::new();
     let mut reductions: HashMap<i64, Vec<Reduction>> = HashMap::new();
 
-    let amit_rows = sqlx::query(sqlx::AssertSqlSafe(format!(
-        "SELECT aa.quantity AS adj_qty, a.cost_base_adjustment, a.tax_year_end_date, {} \
-         FROM amit_adjustments aa \
-         JOIN trades t ON t.id = aa.trade_id \
-         JOIN amma_statements a ON a.id = aa.amma_statement_id \
-         ORDER BY aa.trade_id, a.tax_year_end_date, a.id",
-        ParcelRow::columns_qualified("t")
+    // The AMIT reductions themselves come from the shared loader, so the
+    // per-unit figure, the covered units and the split re-basing behind them
+    // are the cost-base pipeline's own; this query only reads the parcels they
+    // adjust.
+    let amit_parcels: Vec<ParcelRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT {} FROM trades \
+         WHERE id IN (SELECT trade_id FROM amit_adjustments) ORDER BY id",
+        ParcelRow::COLUMNS
     )))
     .fetch_all(&mut *conn)
     .await?;
+    let amit_events =
+        crate::entities::amit_adjustment::db_cost_base_reduction_events(&mut *conn, None).await?;
 
-    for row in &amit_rows {
-        let parcel = parcel_entry(row, &mut parcels, &mut order)?;
-        let adj_qty = parse_dec("adj_qty", row.try_get("adj_qty")?)?;
-        let cba = parse_dec("cost_base_adjustment", row.try_get("cost_base_adjustment")?)?;
-        let year_end: NaiveDate = row.try_get("tax_year_end_date")?;
-        let amount = crate::entities::amit_adjustment::reduction_for(
-            adj_qty,
-            cba,
-            splits_of(&splits, parcel.listing_id),
-            parcel.date,
-            year_end,
-        );
+    for parcel in amit_parcels {
+        let Some(events) = amit_events.get(&parcel.id) else {
+            continue;
+        };
         reductions
             .entry(parcel.id)
             .or_default()
-            .push(Reduction::Amit { year_end, amount });
+            .extend(events.iter().copied().map(Reduction::Amit));
+        order.push(parcel.id);
+        parcels.insert(parcel.id, parcel);
     }
 
     let roc_rows = sqlx::query(sqlx::AssertSqlSafe(format!(
@@ -398,7 +445,7 @@ async fn cost_base_excess_gains(
             .push(Reduction::Roc {
                 date: event.date,
                 currency: event.currency,
-                amount: per_unit * parcel.quantity,
+                per_unit,
             });
     }
 
@@ -406,17 +453,12 @@ async fn cost_base_excess_gains(
         return Ok(vec![]);
     }
 
-    // Units sold out of each parcel, with the sale date — a unit sold before a
-    // payment was not held for it. The same allocations read the open-parcel
-    // loader does (`domain::open_parcels::db_units_sold`); this walk needs the
-    // per-sale dates rather than a single remainder, so only that read is
-    // shared. (Only the G1 pro-rating consults it: an AMIT adjustment names
-    // the quantity it covers itself.)
-    let sold = if roc_rows.is_empty() {
-        HashMap::new()
-    } else {
-        crate::domain::open_parcels::db_units_sold(&mut *conn, None).await?
-    };
+    // Units sold out of each parcel, with the sale date — the split into
+    // [`unit_cohorts`], and so into what each group of units carried and
+    // received. The same allocations read the open-parcel loader does
+    // (`domain::open_parcels::db_units_sold`); this walk needs the per-sale
+    // dates rather than a single remainder, so only that read is shared.
+    let sold = crate::domain::open_parcels::db_units_sold(&mut *conn, None).await?;
 
     let mut out = Vec::new();
     for trade_id in order {
@@ -429,62 +471,55 @@ async fn cost_base_excess_gains(
         events.sort_by_key(|e| (e.date(), e.rank()));
 
         let trade_qty = parcel.quantity;
+        if trade_qty <= Decimal::ZERO {
+            continue;
+        }
         let acquired = parcel.acquired();
-        // Whole-parcel remaining cost base: remaining ÷ quantity is the
-        // per-unit figure a payment is compared against, kept un-divided for
-        // precision.
-        let mut remaining = parcel.parcel().initial_cost();
+        let per_unit_cost = parcel.parcel().initial_cost() / trade_qty;
 
-        for event in events.iter() {
-            let amount = event.amount();
-            if amount <= remaining {
-                remaining -= amount;
-                continue;
-            }
-            let excess = amount - remaining;
-            remaining = Decimal::ZERO;
-            match event {
-                Reduction::Amit { year_end, .. } => out.push(ExcessGain {
-                    kind: ExcessKind::E10,
-                    tax_year: year_end.year(),
-                    amount: fx.to_aud(excess, &parcel.currency, acquired, parcel.fx_override())?,
-                    discount_eligible: crate::domain::cgt_discount::discount_eligible(
-                        acquired, *year_end,
-                    ),
-                }),
-                Reduction::Roc { date, currency, .. } => {
-                    // Only the units still held at the payment date received it
-                    // (sold units re-based back to as-acquired units).
-                    let held = trade_qty
-                        - sold.get(&trade_id).map_or(Decimal::ZERO, |sales| {
-                            sales
-                                .iter()
-                                .filter(|(d, _)| *d < *date)
-                                .map(|&(d, q)| {
-                                    crate::entities::corporate_action::as_acquired_quantity(
-                                        q,
-                                        splits_of(&splits, parcel.listing_id),
-                                        parcel.date,
-                                        d,
-                                    )
-                                })
-                                .sum()
-                        });
-                    if held > Decimal::ZERO && trade_qty > Decimal::ZERO {
-                        out.push(ExcessGain {
-                            kind: ExcessKind::G1,
-                            tax_year: tax_year_for(*date),
-                            amount: fx.to_aud(
-                                excess * held / trade_qty,
-                                currency,
-                                *date,
-                                FxOverride::None,
-                            )?,
-                            discount_eligible: crate::domain::cgt_discount::discount_eligible(
-                                acquired, *date,
-                            ),
-                        });
-                    }
+        // One chain per group of units that share an event history, rather
+        // than one whole-parcel chain: a reduction reaching only some of the
+        // parcel's units runs past nil exactly when it exhausts *those* units'
+        // cost base, which a pooled chain cannot see. Where every reduction
+        // reaches every unit — the ordinary case — the groups' chains are
+        // proportional to each other and add back up to the pooled one.
+        for (disposed_on, units) in unit_cohorts(
+            parcel,
+            sold.get(&trade_id).map_or(&[][..], |v| v),
+            splits_of(&splits, parcel.listing_id),
+        ) {
+            let mut remaining = per_unit_cost * units;
+            for event in events.iter() {
+                let amount = event.reduction_for_units(trade_qty, units, disposed_on);
+                if amount <= remaining {
+                    remaining -= amount;
+                    continue;
+                }
+                let excess = amount - remaining;
+                remaining = Decimal::ZERO;
+                match event {
+                    Reduction::Amit(e) => out.push(ExcessGain {
+                        kind: ExcessKind::E10,
+                        tax_year: e.tax_year_end_date.year(),
+                        amount: fx.to_aud(
+                            excess,
+                            &parcel.currency,
+                            acquired,
+                            parcel.fx_override(),
+                        )?,
+                        discount_eligible: crate::domain::cgt_discount::discount_eligible(
+                            acquired,
+                            e.tax_year_end_date,
+                        ),
+                    }),
+                    Reduction::Roc { date, currency, .. } => out.push(ExcessGain {
+                        kind: ExcessKind::G1,
+                        tax_year: tax_year_for(*date),
+                        amount: fx.to_aud(excess, currency, *date, FxOverride::None)?,
+                        discount_eligible: crate::domain::cgt_discount::discount_eligible(
+                            acquired, *date,
+                        ),
+                    }),
                 }
             }
         }
@@ -1880,6 +1915,64 @@ mod tests {
         assert_eq!(r[0].other_gains, Decimal::from(50));
         assert_eq!(r[0].discount_eligible_gains, Decimal::ZERO);
         assert_eq!(r[0].net_capital_gain, Decimal::from(50));
+    }
+
+    /// SCENARIOS D-13. The E10 walk runs down the cost base of the units a
+    /// reduction actually reaches, not a pooled whole-parcel balance — because
+    /// that is what the cost base it is walking down does. An adjustment row
+    /// covering only the units still held exhausts *their* cost base while the
+    /// parcel as a whole still has some, and the overrun is an E10 gain the
+    /// pooled walk could not see.
+    #[tokio::test]
+    async fn db_e10_excess_is_measured_against_the_units_the_row_covers() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "VDHG").await;
+        // 100 units at $10 = $1,000 ($10/unit), bought well over a year out.
+        insert_trade(
+            &pool,
+            1,
+            trade::TradeType::Buy,
+            1,
+            NaiveDate::from_ymd_opt(2022, 1, 10).unwrap(),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
+        insert_trade(
+            &pool,
+            2,
+            trade::TradeType::Sell,
+            1,
+            NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(),
+            Decimal::from(40),
+            Decimal::from(10),
+        )
+        .await;
+        test_support::allocate(&pool, 1, 2, 1, Decimal::from(40)).await;
+        // $12/unit over the 60 units still held at the year end: $720 against
+        // the $600 those units carry — $120 past nil — while the parcel's
+        // whole $1,000 would have absorbed it without a murmur.
+        let mut a = make_amma(1, 1, NaiveDate::from_ymd_opt(2024, 6, 30).unwrap());
+        a.cost_base_adjustment = Decimal::from(12);
+        a.units_held = Decimal::from(60);
+        amma::db_upsert(&pool, &a).await.unwrap();
+        link_adjustment(&pool, 1, 1, 1, Decimal::from(60)).await;
+
+        let r = db_net_capital_gain(&pool).await.unwrap();
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].tax_year, 2024);
+        assert_eq!(r[0].cgt_event_e10_gain, Decimal::from(120));
+
+        // And the cost base the walk is describing agrees: the covered units
+        // are floored at nil, the sold ones untouched.
+        let open = crate::reports::open_parcels::db_open_parcels(&pool)
+            .await
+            .unwrap();
+        assert_eq!(open[0].remaining_cost_base, Decimal::ZERO);
+        let realised = crate::reports::realised_gains::db_realised_gains(&pool)
+            .await
+            .unwrap();
+        assert_eq!(realised[0].cost_base, Decimal::from(400));
     }
 
     #[tokio::test]
