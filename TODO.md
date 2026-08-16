@@ -58,9 +58,12 @@ that call, while the as-of-dated reports correctly ignore it.)
   makes it silent
 - [ ] Fix shape: `load(conn, None)` (and `portfolio::db_holdings(pool, None)`,
   `open_parcels::db_open_parcels`) should bound at today rather than at the sentinel, so "live" means
-  "as at today" everywhere; a future-dated fact then appears when it takes effect. Decide whether a
-  future-dated Buy/Sell should equally drop out of the live view (it would, under the same change) or
-  whether corporate actions alone are bounded
+  "as at today" everywhere; a future-dated fact then appears when it takes effect.
+  **Decided 2026-08-16 (Evan): bound everything at today** — trades as well as corporate actions, one
+  rule rather than a carve-out (a future-dated trade is nearly always a typo, and it will surface on
+  its own date). Watch what else keys off the sentinel: `infra::date::as_of_or_open` is shared, so
+  change the callers rather than the helper, and check the snapshot/valuation paths still pass their
+  own explicit dates
 - [ ] Alternative if the bound is unwanted: refuse a corporate action dated after today at write time
   — but that removes a legitimate entry (recording the terms on announcement), so bounding the read
   is the better half
@@ -75,10 +78,12 @@ action on the same listing, and the two reductions simply add.)
   remaining cost base 950.00), then a `ReturnOfCapital` of $0.50/unit dated 2024-05-01 → `204`, and
   the parcel's remaining cost base drops to **900.00**. `e4_cross_check`, `amit_cash_cross_check`,
   `amit_adjustment_cross_check` and `health` are all empty: nothing sees it
-- [ ] Decide the model: refuse a `ReturnOfCapital` on a listing with `amit = 1` (422, pointing at the
-  AMMA statement), or flag it in a cross-check the way an unmatched tax-deferred amount is flagged
-  today, or document it as the user's own call. The E4 cross-check already models the *inverse*
-  direction for non-AMIT trusts, so the shape exists either way
+- [ ] **Decided 2026-08-16 (Evan): refuse it at write time** — a `ReturnOfCapital` on a listing with
+  `amit = 1` answers `422` pointing at the AMMA statement's `cost_base_adjustment` as the place the
+  reduction belongs. (The alternatives considered and rejected: a non-blocking cross-check row, or
+  documenting it as the user's own call.) The refusal needs the usual sweep: the error variant and
+  its 422 body beside `WriteError`, `docs/API.md`'s corporate-actions 422 catalogue, and a note in
+  the AMIT/AMMA sections saying the two paths are mutually exclusive
 - [ ] Note the asymmetry that makes the refusal tempting: the income-row path already refuses the
   same double entry — `tax_deferred_amount` on a non-trust income row is a 422 telling the user to
   record a `ReturnOfCapital` instead — so the corporate-action side is the only unguarded door
@@ -95,8 +100,10 @@ date are two independent events to every reader: `db_return_of_capital_events` a
   cross-check — mentions it. Genuine same-day pairs exist in principle (two tranches of a capital
   return), so a hard uniqueness constraint would be wrong; the fit is a health-report warning naming
   the duplicated (listing, type, date), or a confirm step on the second write
-- [ ] Decide which, or record it as accepted: this is a "flag it" candidate rather than a
-  correctness bug in the arithmetic
+- [ ] **Decided 2026-08-16 (Evan): a health-report warning** — one row per duplicated
+  (listing, action type, date), non-blocking, so a genuine same-day pair stays enterable. (A UI
+  confirm step on the second write, and accepting it as a non-issue, were both considered and
+  rejected.) `reports::health` gains the check and `docs/API.md`'s health section the field
 
 ## Fractional entitlements are documented for splits and demergers but not for bonus issues or scrip exchanges (SCENARIOS E-11, E-36)
 (SCENARIOS.md section E verification pass, 2026-08-16. The convention is consistent in the code —
