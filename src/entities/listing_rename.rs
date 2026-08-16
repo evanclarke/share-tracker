@@ -25,7 +25,7 @@
 //! `ticker`/`exchange_mic` from the row's `old_*` columns.
 
 use crate::entities::listing::{Listing, SecurityType};
-use crate::infra::http::ApiError;
+use crate::infra::http::{ApiError, CrudEntity};
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -159,11 +159,13 @@ pub async fn db_rename(
 ) -> Result<ListingRename, RenameError> {
     let mut tx = pool.begin().await?;
 
-    let current: Option<Listing> = sqlx::query_as(
-        "SELECT id, exchange_mic, ticker, name, isin, security_type, currency, amit, \
-                preference, price_symbol \
-         FROM listings WHERE id = ?",
-    )
+    // The column list is the entity's own (`CrudEntity::COLUMNS`), so a new
+    // listing column can never be forgotten here — spelling it out by hand is
+    // what let `amit_from` (migration 0024) break this read.
+    let current: Option<Listing> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT {} FROM listings WHERE id = ?",
+        Listing::COLUMNS
+    )))
     .bind(listing_id)
     .fetch_optional(&mut *tx)
     .await?;

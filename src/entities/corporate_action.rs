@@ -2346,6 +2346,60 @@ mod tests {
         );
     }
 
+    /// SCENARIOS F-23: on a fund that *converted* to an AMIT, the refusal
+    /// follows the payment's own year. The pre-conversion years' tax-deferred
+    /// amounts were ordinary E4 reductions and stay both enterable and
+    /// editable after the flag goes on — the E4 cross-check asks for them, so
+    /// refusing them left a year that could not be completed at all — while a
+    /// payment dated in an AMIT year is refused as usual.
+    #[tokio::test]
+    async fn api_return_of_capital_on_a_converted_fund_follows_the_payments_year() {
+        let pool = test_pool().await;
+        test_support::listing(1)
+            .ticker("VDHG")
+            .name("VDHG")
+            .amit_from(d(2024, 7, 1)) // first AMIT year: FY2025
+            .insert(&pool)
+            .await;
+
+        let payment = |date: &str, amount: &str| {
+            serde_json::json!({
+                "action_type": "ReturnOfCapital",
+                "listing_id": 1,
+                "date": date,
+                "amount_per_unit": amount,
+                "currency": "AUD",
+            })
+        };
+        let c = client(&pool);
+        // FY2024, before the conversion: accepted…
+        assert_eq!(
+            c.put("/corporate_actions/1", &payment("2024-05-01", "0.50"))
+                .await
+                .status,
+            StatusCode::NO_CONTENT
+        );
+        // …and still editable afterwards (correcting the amount years later).
+        assert_eq!(
+            c.put("/corporate_actions/1", &payment("2024-05-01", "0.55"))
+                .await
+                .status,
+            StatusCode::NO_CONTENT
+        );
+
+        // FY2025, the first AMIT year: refused, pointing at the AMMA.
+        let resp = c
+            .put("/corporate_actions/2", &payment("2025-05-01", "0.50"))
+            .await;
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            resp.text().contains("cost_base_adjustment"),
+            "{}",
+            resp.text()
+        );
+        assert!(db_get(&pool, 2).await.unwrap().is_none());
+    }
+
     /// The refusal is keyed on the listing's `amit` flag, so the E4 path it
     /// exists for is untouched: the same payment on an ordinary trust is
     /// accepted, and *moving* an accepted one onto an AMIT is refused (the

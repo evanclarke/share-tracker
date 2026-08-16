@@ -49,9 +49,10 @@ export const ENTITIES = [
       sel('security_type', 'Security type', ['Share', 'ETF', 'LIC', 'Trust', 'Crypto'], { required: true }),
       fk('currency', 'Currency', 'currencies', { required: true, encode: 'string' }),
       bool('amit', 'AMIT'),
+      dt('amit_from', 'AMIT from', { optional: true, hint: 'Only for a fund that converted: the 1 July its first AMIT financial year began. Earlier years stay ordinary trust income — their distributions keep their franking credits and tax-deferred amounts, and no AMMA statement is expected for them. Leave blank for a fund that has always been an AMIT.' }),
       bool('preference', 'Preference share (90-day franking holding period)'),
     ],
-    columns: ['id', 'exchange_mic', 'ticker', 'name', 'isin', 'security_type', 'currency', 'amit', 'preference'],
+    columns: ['id', 'exchange_mic', 'ticker', 'name', 'isin', 'security_type', 'currency', 'amit', 'amit_from', 'preference'],
   },
   {
     slug: 'holding_accounts', title: 'Holding Accounts', menu: 'Reference Data', api: '/holding_accounts',

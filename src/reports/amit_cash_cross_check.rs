@@ -1,5 +1,6 @@
 use crate::domain::tax_year::tax_year_for;
 use crate::entities::income::Income;
+use crate::entities::listing;
 use crate::infra::fx::{FxOverride, FxRates};
 use crate::infra::http::ApiError;
 use axum::{Json, Router, extract::State, routing::get};
@@ -57,7 +58,7 @@ pub async fn db_amit_cash_alerts(pool: &SqlitePool) -> Result<Vec<AmitCashAlert>
     // can't pair a cash row with a half-entered statement set.
     let mut tx = pool.begin().await?;
     let cash_rows = sqlx::query(
-        "SELECT i.*, l.ticker \
+        "SELECT i.*, l.ticker, l.amit_from \
          FROM income i \
          JOIN listings l ON l.id = i.listing_id \
          WHERE l.amit",
@@ -97,6 +98,15 @@ pub async fn db_amit_cash_alerts(pool: &SqlitePool) -> Result<Vec<AmitCashAlert>
         let income = Income::from_row(row)?;
         let assessed = income.assessment_date();
         let tax_year = tax_year_for(assessed);
+        // A fund that converted to an AMIT part-way through a holding has no
+        // AMMA statement for its pre-conversion years, and should not be
+        // asked for one: those years were ordinary trust income, reported by
+        // the tax summary as such (SCENARIOS F-23). The `l.amit` filter above
+        // narrows to listings that are an AMIT at all; this is the year-level
+        // half of the same question.
+        if !listing::amit_in_tax_year(true, row.try_get("amit_from")?, tax_year) {
+            continue;
+        }
         if covered.contains(&(income.listing_id, income.holding_account_id, tax_year)) {
             continue;
         }
@@ -303,6 +313,30 @@ mod tests {
         assert_eq!(remaining[0].holding_account_id, 2);
 
         insert_amma_in(&pool, 2, 1, ymd(2025, 6, 30), 2).await;
+        assert!(db_amit_cash_alerts(&pool).await.unwrap().is_empty());
+    }
+
+    /// SCENARIOS F-23: a fund that converted to an AMIT for FY2025 has no
+    /// AMMA statement for its earlier years and must not be asked for one —
+    /// those years were ordinary trust income, which the tax summary reports
+    /// as such. Only the AMIT years are cross-checked.
+    #[tokio::test]
+    async fn db_pre_conversion_years_are_not_asked_for_an_amma() {
+        let pool = test_pool().await;
+        test_support::listing(1)
+            .ticker("VDHG")
+            .amit_from(ymd(2024, 7, 1))
+            .insert(&pool)
+            .await;
+        // FY2024, before the conversion, and FY2025, the first AMIT year.
+        insert_cash(&pool, 1, 1, ymd(2024, 2, 15)).await;
+        insert_cash(&pool, 2, 1, ymd(2025, 2, 15)).await;
+
+        let alerts = db_amit_cash_alerts(&pool).await.unwrap();
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].tax_year, 2025);
+
+        insert_amma(&pool, 1, 1, ymd(2025, 6, 30)).await;
         assert!(db_amit_cash_alerts(&pool).await.unwrap().is_empty());
     }
 

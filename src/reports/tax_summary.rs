@@ -1,5 +1,6 @@
 use crate::domain::tax_year::tax_year_for;
 use crate::entities::income::Income;
+use crate::entities::listing;
 use crate::infra::decimal::{parse_dec, row_opt_dec};
 use crate::infra::fx::{FxOverride, FxRates};
 use crate::infra::http::ApiError;
@@ -8,7 +9,7 @@ use axum::{Json, Router, extract::State, response::Response, routing::get};
 use chrono::{Datelike, NaiveDate};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use sqlx::{Row, SqlitePool};
+use sqlx::{FromRow, Row, SqlitePool};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -347,12 +348,35 @@ pub(crate) async fn db_tax_summary_on(
     // drive the DRP chain, and counting its cash alongside the AMMA components
     // would double the year's income (write-time validation already keeps the
     // notional components off these rows, `entities::income`).
-    let income_rows: Vec<Income> = sqlx::query_as(
-        "SELECT i.* FROM income i JOIN listings l ON l.id = i.listing_id \
-         WHERE NOT l.amit",
+    //
+    // The exclusion is per *year*, not per listing: a fund that converted to
+    // an AMIT part-way through a holding was an ordinary trust before its
+    // first AMIT income year, and those years' distributions are assessable
+    // here exactly like any other trust's — dropping them because the fund is
+    // an AMIT *now* would silently delete a year of income from the return
+    // (SCENARIOS F-23). `listing::amit_in_tax_year` is the shared rule.
+    let income_rows: Vec<(Income, bool, Option<NaiveDate>)> = sqlx::query(
+        "SELECT i.*, l.amit AS listing_amit, l.amit_from AS listing_amit_from \
+         FROM income i JOIN listings l ON l.id = i.listing_id",
     )
     .fetch_all(&mut *tx)
-    .await?;
+    .await?
+    .iter()
+    .map(|row| {
+        Ok::<_, sqlx::Error>((
+            Income::from_row(row)?,
+            row.try_get("listing_amit")?,
+            row.try_get("listing_amit_from")?,
+        ))
+    })
+    .collect::<Result<_, _>>()?;
+    let income_rows: Vec<&Income> = income_rows
+        .iter()
+        .filter(|(income, amit, amit_from)| {
+            !listing::amit_in_tax_year(*amit, *amit_from, tax_year_for(income.assessment_date()))
+        })
+        .map(|(income, _, _)| income)
+        .collect();
 
     let interest_rows = sqlx::query(
         "SELECT date_paid, amount, tfn_withholding_tax, foreign_source, foreign_tax_paid, \
@@ -1064,6 +1088,47 @@ mod tests {
     /// An AMIT cash row contributes nothing to any income line, while the
     /// fund's AMMA components and a non-AMIT dividend in the same year report
     /// as before.
+    /// SCENARIOS F-23: a fund that converted to an AMIT for FY2025. The
+    /// exclusion follows the year, not the listing — the pre-conversion
+    /// year's distribution is ordinary trust income and is still reported in
+    /// full, while the AMIT year's cash row is excluded as usual. Flipping
+    /// the flag used to delete the earlier year from the return outright.
+    #[tokio::test]
+    async fn db_a_converted_funds_pre_amit_years_are_still_reported() {
+        let pool = test_pool().await;
+        test_support::listing(1)
+            .ticker("VDHG")
+            .amit_from(NaiveDate::from_ymd_opt(2024, 7, 1).unwrap())
+            .insert(&pool)
+            .await;
+
+        // FY2024, an ordinary trust distribution with its franking credits.
+        let mut before = make_income(1, 1, NaiveDate::from_ymd_opt(2024, 2, 15).unwrap());
+        before.trust_income = true;
+        before.franked_amount = Decimal::from(200);
+        before.unfranked_amount = Decimal::from(300);
+        before.franking_credits = Decimal::from(85);
+        income::db_upsert(&pool, &before).await.unwrap();
+
+        // FY2025, the first AMIT year: cash-only, excluded, with the AMMA
+        // carrying the assessable figures.
+        let mut cash = make_income(2, 1, NaiveDate::from_ymd_opt(2025, 2, 15).unwrap());
+        cash.trust_income = true;
+        cash.unfranked_amount = Decimal::from(400);
+        income::db_upsert(&pool, &cash).await.unwrap();
+        let mut a = make_amma(1, 1, NaiveDate::from_ymd_opt(2025, 6, 30).unwrap());
+        a.other_income = Decimal::from(450);
+        amma::db_upsert(&pool, &a).await.unwrap();
+
+        let result = db_tax_summary(&pool).await.unwrap();
+        let fy24 = result.iter().find(|s| s.tax_year == 2024).expect("FY2024");
+        assert_eq!(fy24.dividends_assessable, Decimal::from(500));
+        assert_eq!(fy24.franking_credits, Decimal::from(85));
+        let fy25 = result.iter().find(|s| s.tax_year == 2025).expect("FY2025");
+        assert_eq!(fy25.dividends_assessable, Decimal::ZERO);
+        assert_eq!(fy25.amma_other_income, Decimal::from(450));
+    }
+
     #[tokio::test]
     async fn db_amit_cash_rows_excluded_from_every_income_line() {
         let pool = test_pool().await;

@@ -335,11 +335,24 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
     // listing's flag is all it takes, so this is checked before the INSERT;
     // an unknown listing falls through to the FK violation as before.
     if matches!(action.kind, ActionKind::ReturnOfCapital { .. }) {
-        let amit: Option<bool> = sqlx::query_scalar("SELECT amit FROM listings WHERE id = ?")
-            .bind(action.listing_id)
-            .fetch_optional(&mut *tx)
-            .await?;
-        if amit == Some(true) {
+        let amit: Option<(bool, Option<chrono::NaiveDate>)> =
+            sqlx::query_as("SELECT amit, amit_from FROM listings WHERE id = ?")
+                .bind(action.listing_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        // Dated, not absolute: a fund that converted to an AMIT part-way
+        // through a holding paid its pre-conversion tax-deferred amounts as an
+        // ordinary trust, and those years' E4 reductions must stay
+        // recordable — and editable — after the flag goes on
+        // (SCENARIOS F-23). `listing::amit_in_tax_year` is the shared rule.
+        let amit_year = amit.is_some_and(|(amit, amit_from)| {
+            crate::entities::listing::amit_in_tax_year(
+                amit,
+                amit_from,
+                crate::domain::tax_year::tax_year_for(action.date),
+            )
+        });
+        if amit_year {
             return Err(WriteError::ReturnOfCapitalOnAmit);
         }
     }

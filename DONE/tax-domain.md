@@ -937,3 +937,84 @@ Tests: `entities::amit_adjustment::tests::db_an_adjustment_on_a_parcel_a_rollove
 `db_a_parcel_closed_by_an_ordinary_sell_stays_adjustable`,
 `api_rollover_replaced_parcel_returns_422_naming_the_replacement`, the generation test above, and
 three `doc_checks` assertions. Full suite 1503 passed / 0 failed.
+
+## The `amit` listing flag is retroactive and rewrites every earlier year (SCENARIOS F-23)
+(SCENARIOS.md section F verification pass, 2026-08-16. `listings.amit` is a plain boolean with no
+time dimension, and three readers key off it as though it had always been true: the tax summary
+excludes *every* income row of an AMIT listing regardless of year (`src/reports/tax_summary.rs:352`
+— `WHERE NOT l.amit`), the AMIT cash cross-check demands an AMMA statement for every year the
+listing has cash rows (`src/reports/amit_cash_cross_check.rs:43`), and the `ReturnOfCapital` write
+refuses the action outright once the flag is set (`src/entities/corporate_action/db.rs:337`,
+E-04's fix). `docs/API.md` states conversion is supported — "a fund that converts to an AMIT
+part-way through a holding keeps the payments recorded while it was an ordinary trust … record the
+pre-conversion payments before flagging the listing" — which holds for the *cost base* but not for
+the income side.)
+- [x] F-23 — reproduced: an ordinary unit trust with an FY2023 distribution (franked 200,
+  unfranked 300, franking credits 85). Tax summary FY2023: `dividends_assessable` 500,
+  `franking_credits` 85. `PUT /listings/1` with `"amit": true` → `204`, and the tax summary is now
+  **empty** — the whole pre-conversion year of assessable income vanished from the return, with no
+  refusal, warning or health row. Only the AMIT cash cross-check notices, and it says the wrong
+  thing: "FY2023 has cash rows with no covering AMMA statement", for a year in which there was no
+  AMMA statement to have
+- [x] The E-04 refusal is also broader than the documented advice: after the flip, *editing* an
+  existing pre-conversion `ReturnOfCapital` (correcting the amount on a payment recorded years
+  earlier) is refused `422` too, not only creating one. The stored reduction keeps applying, so
+  the cost base is right until someone needs to correct it
+- [x] **Decided 2026-08-16 (Evan): option (a)** — date the status on the listing. The options
+  weighed were: (a) an `amit_from` date on the listing (or a
+  small `listing_amit_periods` table), with every reader comparing the record's year against it;
+  (b) drive the AMIT/non-AMIT decision off *which years have an AMMA statement* rather than off
+  the flag, so the flag stays a UI hint; (c) declare mid-history conversion out of scope, document
+  that a converted fund is entered as two listings, and have the write refuse the flag flip while
+  the listing has income rows or a return of capital in an earlier year. Whichever is chosen, the
+  income-side silence is the part that must not survive
+
+**Resolution (2026-08-16): option (a) — `listings.amit_from`, compared by financial year in every
+reader.**
+
+Migration 0024 adds the nullable column (and re-creates the `listings` row_history trigger pair with
+it, per the audited-table rule). NULL keeps the old, undated meaning — the flag covers the whole
+history — so every existing row is already correct and nothing was migrated. Two write-time rules
+pair it: `amit_from` needs `amit` (a date with no status to date means nothing), and it must be a
+**1 July** date — AMIT status is *elected for an income year*
+(`docs/ato/amit-reporting-requirements.md`), so it turns on at a year boundary; a mid-year date
+would leave one financial year partly attributed and partly assessed as ordinary trust income.
+Neither could be a table CHECK: SQLite cannot ALTER one in, and a column CHECK cannot reference
+another column.
+
+The comparison is stated once, in `entities::listing::amit_in_tax_year(amit, amit_from, tax_year)`,
+and all five readers call it: the income entity's write-time checks (by the row's assessment year),
+the tax summary's whole-row exclusion, the AMIT cash cross-check, the annual tax report's
+`amma_missing`, and the `ReturnOfCapital` refusal (by the payment's own year). A converted fund can
+no longer be an AMIT to one reader and an ordinary trust to another.
+
+What that fixes, end to end against a running server: an FY2024 trust distribution (franked 200,
+unfranked 300, credits 85, tax-deferred 100) entered while the fund was an ordinary trust **survives
+the flag flip** — the tax summary still reports 500 assessable and 85 credits, where it previously
+went to zero silently; the cash cross-check no longer demands an AMMA statement for that year; the
+pre-conversion `ReturnOfCapital` is enterable *and* editable after the flip, which the E4
+cross-check needs; and an AMIT-year payment is still refused. The upgrade path was exercised too, on
+a database created before the migration: the column lands NULL, behaviour is unchanged, and the
+rebuilt trigger records it.
+
+Docs: the Listings section states the column, its 1 July rule and its reason, and names every reader
+that compares against it; the Income, tax summary, cash cross-check, completeness, corporate-action
+and net-capital-gain passages that stated the rule absolutely now state it per year; `SCHEMA.md`
+carries the column and the trigger rebuild; the 422 catalogue and the README follow. The web UI's
+listing form gains the dated field with a hint explaining when to use it.
+
+Tests: `entities::listing::tests::db_amit_from_must_be_a_1_july_date_on_an_amit_listing` and
+`amit_in_tax_year_turns_on_with_the_dated_financial_year` (the boundary: 1 July 2023 makes FY2024
+the first AMIT year); `entities::income::tests::db_amit_checks_apply_only_from_the_conversion_year`
+and `db_the_conversion_boundary_is_the_financial_year` (30 June is still ordinary, 1 July is not);
+`reports::tax_summary::tests::db_a_converted_funds_pre_amit_years_are_still_reported`;
+`reports::amit_cash_cross_check::tests::db_pre_conversion_years_are_not_asked_for_an_amma`;
+`entities::corporate_action::tests::api_return_of_capital_on_a_converted_fund_follows_the_payments_year`;
+`reports::tax_report::tests::amma_missing_ignores_years_before_the_fund_became_an_amit`; the 0024
+trigger rebuild pinned in `reports::row_history::tests::audited_tables_match_migration_check_and_triggers`;
+and `doc_checks::dated_amit_status_documented`. Full suite 1512 passed / 0 failed.
+
+One incidental fix the migration forced out: `entities::listing_rename` read the listing with a
+hand-spelled column list rather than `Listing::COLUMNS`, so the new column broke it at run time
+(seven tests). It now uses the entity's own constant — the rule CLAUDE.md already states, and the
+reason it states it.

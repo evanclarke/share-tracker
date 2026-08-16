@@ -1185,8 +1185,8 @@ fn as_at_today_convention_documented() {
 #[test]
 fn amit_return_of_capital_refusal_documented() {
     assert!(API_MD.contains(
-        "A `ReturnOfCapital` on a listing flagged [`amit`](#listings) is rejected with `422` \
-         outright"
+        "A `ReturnOfCapital` dated in a financial year the [listing](#listings) was an `amit` \
+         is rejected with `422`"
     ));
     assert!(API_MD.contains("the two paths are **mutually exclusive**"));
     // The AMIT side names both doors, so a reader arriving from the AMMA
@@ -1196,18 +1196,36 @@ fn amit_return_of_capital_refusal_documented() {
         "a `tax_deferred_amount` on its [income](#income) rows and a `ReturnOfCapital` on the \
          listing are each refused `422`"
     ));
-    // The converted-fund case the cost-base chain still has to handle: the
-    // refusal is on the write, so pre-conversion payments stand.
-    assert!(API_MD.contains("record the pre-conversion payments before flagging the listing"));
-    assert!(
-        API_MD.contains(
-            "since a `ReturnOfCapital` on an already-flagged AMIT is refused at write time"
-        )
-    );
+    // SCENARIOS F-23: the converted-fund case is dated, not absolute — the
+    // refusal follows the payment's own financial year, so the pre-conversion
+    // years stay enterable and editable, and the cost-base chain nets both
+    // kinds against one balance.
+    assert!(API_MD.contains("the refusal then follows the **payment's own financial year**"));
     assert!(API_MD.contains(
-        "a `ReturnOfCapital` on a listing flagged `amit` (an AMIT's cost-base movement is its \
-         AMMA statement's `cost_base_adjustment`, CGT event E10, not E4)"
+        "since a `ReturnOfCapital` dated in one of the listing's AMIT years is refused at write time"
     ));
+    assert!(
+        API_MD.contains("a `ReturnOfCapital` dated in a financial year its listing was an `amit`")
+    );
+}
+
+/// Docs-sync pin for SCENARIOS F-23: the AMIT status is dated, so a fund that
+/// converted part-way through a holding keeps its earlier years as ordinary
+/// trust income. The Listings section states the column, its 1 July rule and
+/// its reason; every reader that compares against it is named; the schema
+/// records the column; and the README surfaces the feature.
+#[test]
+fn dated_amit_status_documented() {
+    assert!(API_MD.contains("**A fund that *converted* to an AMIT.**"));
+    assert!(API_MD.contains("says *from when*, for a MIT that elected into the regime"));
+    assert!(API_MD.contains("AMIT status is *elected for an income year*"));
+    assert!(API_MD.contains("Use the 1 July on which the fund's first AMIT financial year began"));
+    // The readers that compare against it, so a reader of any one of them
+    // finds the rule rather than assuming the flag is absolute.
+    assert!(API_MD.contains("for the years the listing was an AMIT"));
+    assert!(API_MD.contains("only the years the listing was an AMIT are asked about"));
+    assert!(SCHEMA_MD.contains("amit_from    TEXT (nullable)"));
+    assert!(README_MD.contains("A fund that **converted** to an AMIT records the 1 July"));
 }
 
 /// Docs-sync pin for the write-time state check that bounds that open edit

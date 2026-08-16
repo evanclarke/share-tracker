@@ -1,3 +1,4 @@
+use crate::domain::tax_year::tax_year_for;
 use crate::infra::http::{self, ApiError, CrudEntity};
 use axum::{
     Json, Router,
@@ -5,6 +6,7 @@ use axum::{
     http::StatusCode,
     routing::get,
 };
+use chrono::{Datelike, NaiveDate};
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 
@@ -38,6 +40,14 @@ pub struct Listing {
     pub security_type: SecurityType,
     pub currency: String,
     pub amit: bool,
+    /// The date the fund *became* an AMIT, when it was not always one: every
+    /// reader of `amit` compares its record's own date against this, so a
+    /// fund that converted part-way through a holding is an ordinary trust
+    /// for the earlier years and an AMIT from here on (SCENARIOS F-23).
+    /// `None` — the ordinary case — means the flag applies to the whole
+    /// history. Only meaningful on a listing with `amit` set, which
+    /// [`db_upsert`] enforces.
+    pub amit_from: Option<NaiveDate>,
     /// Preference share: the franking-credit holding-period rule requires 90
     /// at-risk days instead of 45 (see `reports::franking`).
     pub preference: bool,
@@ -61,6 +71,8 @@ pub struct ListingBody {
     pub currency: String,
     pub amit: bool,
     #[serde(default)]
+    pub amit_from: Option<NaiveDate>,
+    #[serde(default)]
     pub preference: bool,
     #[serde(default)]
     pub price_symbol: Option<String>,
@@ -82,6 +94,21 @@ pub enum UpsertError {
     /// with no dependents yet stays freely editable.
     #[error("a ticker or exchange change on a listing with history needs POST /rename")]
     IdentityChangeRequiresRename,
+    /// `amit_from` was supplied on a listing that is not an AMIT at all. The
+    /// date says *when the fund became* an AMIT; without the flag there is no
+    /// status for it to date, and a reader comparing against it would treat
+    /// the listing as an ordinary trust forever — a stored value that means
+    /// nothing (SCENARIOS F-23). Mapped to `422`.
+    #[error("amit_from is set on a listing that is not an AMIT")]
+    AmitFromWithoutAmit,
+    /// `amit_from` is not a 1 July date (carries the rejected date). AMIT
+    /// status is *elected for an income year*
+    /// (`docs/ato/amit-reporting-requirements.md`), so it turns on at a year
+    /// boundary: a mid-year date would split one financial year's treatment
+    /// in two, leaving the same year's income partly attributed and partly
+    /// assessed as ordinary trust income. Mapped to `422`.
+    #[error("amit_from {0} is not a 1 July date")]
+    AmitFromNotFinancialYearStart(NaiveDate),
     /// Constraint violations (Crypto with an exchange / non-Crypto without
     /// one, duplicate ticker, unknown exchange or currency) surface here via
     /// the table's CHECKs and FKs.
@@ -99,6 +126,15 @@ impl From<UpsertError> for ApiError {
                 "use POST /listings/:id/rename to record a ticker or exchange change \
                  on a listing with recorded trades, income, or prices",
             ),
+            UpsertError::AmitFromWithoutAmit => ApiError::unprocessable(
+                "amit_from dates when the fund became an AMIT, so it needs amit set — \
+                 leave it out for a listing that is not an AMIT",
+            ),
+            UpsertError::AmitFromNotFinancialYearStart(date) => ApiError::unprocessable(format!(
+                "amit_from {date} is not a 1 July date — AMIT status is elected for a whole \
+                 income year, so it starts at one: use the 1 July the fund's first AMIT \
+                 financial year began"
+            )),
             UpsertError::Db(err) => err.into(),
         }
     }
@@ -107,10 +143,30 @@ impl From<UpsertError> for ApiError {
 impl CrudEntity for Listing {
     type Key = i64;
     const TABLE: &'static str = "listings";
-    const COLUMNS: &'static str = "id, exchange_mic, ticker, name, isin, security_type, currency, amit, preference, \
-         price_symbol";
+    const COLUMNS: &'static str = "id, exchange_mic, ticker, name, isin, security_type, currency, amit, \
+         amit_from, preference, price_symbol";
     const ORDER_BY: &'static str = "exchange_mic, ticker";
     const NOUN: &'static str = "listing";
+}
+
+/// Was this listing an AMIT in the Australian financial year `tax_year`
+/// (identified by the calendar year of its 30 June end)?
+///
+/// *The* rule behind every reader of the flag — the income entity's
+/// write-time checks, the [tax summary](crate::reports::tax_summary)'s
+/// whole-row exclusion, the [AMIT cash
+/// cross-check](crate::reports::amit_cash_cross_check), the annual tax
+/// report's completeness section, and the `ReturnOfCapital` refusal — so a
+/// fund that converted part-way through a holding cannot be an AMIT to one
+/// reader and an ordinary trust to another (SCENARIOS F-23).
+///
+/// `amit_from` is a 1 July date (write-time enforced), so this is a
+/// whole-year comparison: AMIT status is elected for an income year
+/// (`docs/ato/amit-reporting-requirements.md`), never for part of one. `None`
+/// means the flag applies to the whole recorded history — the ordinary case,
+/// a fund that has always been an AMIT.
+pub fn amit_in_tax_year(amit: bool, amit_from: Option<NaiveDate>, tax_year: i32) -> bool {
+    amit && amit_from.is_none_or(|from| tax_year_for(from) <= tax_year)
 }
 
 pub fn router() -> Router<SqlitePool> {
@@ -157,6 +213,20 @@ pub async fn db_upsert(pool: &SqlitePool, listing: &Listing) -> Result<(), Upser
         }
     }
 
+    // The date only means something on a listing that is an AMIT: it says
+    // when the fund *became* one (SCENARIOS F-23). Checked here because
+    // SQLite cannot add a table-level CHECK to an existing table, and a
+    // column CHECK cannot reference another column (migration 0024).
+    if let Some(from) = listing.amit_from {
+        if !listing.amit {
+            return Err(UpsertError::AmitFromWithoutAmit);
+        }
+        // A whole-year boundary: see `amit_in_tax_year`.
+        if (from.month(), from.day()) != (7, 1) {
+            return Err(UpsertError::AmitFromNotFinancialYearStart(from));
+        }
+    }
+
     // A Crypto listing's ticker must be a recognised digital-token code
     // (validated in the write transaction; the mic/Crypto pairing and ticker
     // uniqueness are CHECK/index-enforced by the table itself).
@@ -173,8 +243,10 @@ pub async fn db_upsert(pool: &SqlitePool, listing: &Listing) -> Result<(), Upser
         }
     }
     sqlx::query(
-        "INSERT INTO listings (id, exchange_mic, ticker, name, isin, security_type, currency, amit, preference, price_symbol) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+        "INSERT INTO listings \
+         (id, exchange_mic, ticker, name, isin, security_type, currency, amit, amit_from, \
+          preference, price_symbol) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT(id) DO UPDATE SET \
              exchange_mic  = excluded.exchange_mic, \
              ticker        = excluded.ticker, \
@@ -183,6 +255,7 @@ pub async fn db_upsert(pool: &SqlitePool, listing: &Listing) -> Result<(), Upser
              security_type = excluded.security_type, \
              currency      = excluded.currency, \
              amit          = excluded.amit, \
+             amit_from     = excluded.amit_from, \
              preference    = excluded.preference, \
              price_symbol  = excluded.price_symbol",
     )
@@ -194,6 +267,7 @@ pub async fn db_upsert(pool: &SqlitePool, listing: &Listing) -> Result<(), Upser
     .bind(listing.security_type)
     .bind(listing.currency.as_str())
     .bind(listing.amit)
+    .bind(listing.amit_from)
     .bind(listing.preference)
     .bind(&listing.price_symbol)
     .execute(&mut *tx)
@@ -221,6 +295,7 @@ async fn upsert(
         security_type: body.security_type,
         currency: body.currency,
         amit: body.amit,
+        amit_from: body.amit_from,
         preference: body.preference,
         price_symbol: body.price_symbol,
     };
@@ -231,7 +306,7 @@ async fn upsert(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{ApiClient, test_pool};
+    use crate::test_support::{ApiClient, test_pool, ymd};
 
     /// Client over this module's own routes.
     fn client(pool: &SqlitePool) -> ApiClient {
@@ -273,6 +348,60 @@ mod tests {
     async fn db_get_missing_returns_none() {
         let pool = test_pool().await;
         assert!(db_get(&pool, 999).await.unwrap().is_none());
+    }
+
+    /// SCENARIOS F-23: the AMIT status is dated, and the date is a whole-year
+    /// boundary — AMIT status is elected for an income year, so a mid-year
+    /// date would split one year's treatment in two. It also needs the flag
+    /// it dates.
+    #[tokio::test]
+    async fn db_amit_from_must_be_a_1_july_date_on_an_amit_listing() {
+        let pool = test_pool().await;
+        let with_from = |from: Option<NaiveDate>, amit: bool| {
+            crate::test_support::listing(1)
+                .ticker("VAS")
+                .amit(amit)
+                .with(|l| l.amit_from = from)
+                .build()
+        };
+
+        db_upsert(&pool, &with_from(Some(ymd(2023, 7, 1)), true))
+            .await
+            .unwrap();
+        assert_eq!(
+            db_get(&pool, 1).await.unwrap().unwrap().amit_from,
+            Some(ymd(2023, 7, 1))
+        );
+
+        for bad in [ymd(2023, 6, 30), ymd(2023, 7, 2), ymd(2024, 1, 1)] {
+            let err = db_upsert(&pool, &with_from(Some(bad), true))
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, UpsertError::AmitFromNotFinancialYearStart(d) if d == bad),
+                "{err:?}"
+            );
+        }
+
+        let err = db_upsert(&pool, &with_from(Some(ymd(2023, 7, 1)), false))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, UpsertError::AmitFromWithoutAmit), "{err:?}");
+    }
+
+    /// The shared rule every reader of the flag asks: an undated flag covers
+    /// the whole history, and a dated one turns on with its own financial
+    /// year — 1 July 2023 makes FY2024 the first AMIT year.
+    #[test]
+    fn amit_in_tax_year_turns_on_with_the_dated_financial_year() {
+        assert!(amit_in_tax_year(true, None, 2019));
+        assert!(!amit_in_tax_year(false, None, 2019));
+
+        let from = Some(ymd(2023, 7, 1));
+        assert!(!amit_in_tax_year(true, from, 2022));
+        assert!(!amit_in_tax_year(true, from, 2023));
+        assert!(amit_in_tax_year(true, from, 2024));
+        assert!(amit_in_tax_year(true, from, 2025));
     }
 
     #[tokio::test]

@@ -27,6 +27,7 @@ use crate::domain::listing_identity::RenameHistory;
 use crate::domain::tax_year::tax_year_for;
 use crate::entities::corporate_action::{RocEvent, SplitEvent};
 use crate::entities::income::Income;
+use crate::entities::listing;
 use crate::entities::trade::{Trade, TradeType};
 use crate::infra::fx::FxRates;
 use crate::infra::http::ApiError;
@@ -124,12 +125,30 @@ async fn amma_missing(
 ) -> Result<Vec<AmmaMissingAlert>, sqlx::Error> {
     let (start, end) = period_for(tax_year);
 
-    let tickers: HashMap<i64, String> = sqlx::query("SELECT id, ticker FROM listings WHERE amit")
-        .fetch_all(&mut *conn)
-        .await?
-        .into_iter()
-        .map(|r| Ok::<_, sqlx::Error>((r.try_get("id")?, r.try_get("ticker")?)))
-        .collect::<Result<_, _>>()?;
+    // Listings that are an AMIT *for this year*: one that converted part-way
+    // through a holding has no AMMA statement for its earlier years and must
+    // not be asked for one (SCENARIOS F-23).
+    let tickers: HashMap<i64, String> =
+        sqlx::query("SELECT id, ticker, amit, amit_from FROM listings WHERE amit")
+            .fetch_all(&mut *conn)
+            .await?
+            .into_iter()
+            .map(|r| {
+                Ok::<_, sqlx::Error>((
+                    r.try_get("id")?,
+                    r.try_get("ticker")?,
+                    listing::amit_in_tax_year(
+                        r.try_get("amit")?,
+                        r.try_get("amit_from")?,
+                        tax_year,
+                    ),
+                ))
+            })
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .filter(|(_, _, in_year)| *in_year)
+            .map(|(id, ticker, _)| (id, ticker))
+            .collect();
     if tickers.is_empty() {
         return Ok(vec![]);
     }
@@ -1703,6 +1722,35 @@ mod tests {
             .await;
         let cleared = db_tax_report(&pool, 2024).await.unwrap();
         assert!(cleared.completeness.amma_missing.is_empty());
+    }
+
+    /// SCENARIOS F-23: the completeness gate follows the conversion year. A
+    /// fund that became an AMIT for FY2025 needs no AMMA statement for FY2024
+    /// — that year it was an ordinary trust, reported from its income rows —
+    /// so the earlier year is complete without one.
+    #[tokio::test]
+    async fn amma_missing_ignores_years_before_the_fund_became_an_amit() {
+        let pool = test_support::test_pool().await;
+        test_support::listing(1)
+            .ticker("AMT")
+            .amit_from(ymd(2024, 7, 1))
+            .insert(&pool)
+            .await;
+        test_support::buy(1, 1)
+            .date(ymd(2023, 1, 1))
+            .qty(dec("100"))
+            .price(dec("10"))
+            .insert(&pool)
+            .await;
+
+        let before = db_tax_report(&pool, 2024).await.unwrap();
+        assert!(before.completeness.amma_missing.is_empty());
+        assert!(before.completeness.complete);
+
+        // FY2025, the first AMIT year, does want one.
+        let after = db_tax_report(&pool, 2025).await.unwrap();
+        assert_eq!(after.completeness.amma_missing.len(), 1);
+        assert_eq!(after.completeness.amma_missing[0].listing_id, 1);
     }
 
     /// A listing bought and fully sold before the requested year (nothing

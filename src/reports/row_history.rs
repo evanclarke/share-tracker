@@ -655,6 +655,24 @@ mod tests {
             "both re-created listings triggers must record price_symbol"
         );
 
+        // 0024 added listings.amit_from (SCENARIOS F-23), so the listings
+        // trigger pair was re-created once more with it — the *live* pair now
+        // comes from 0024, and must still carry every earlier column too.
+        let sql24 = include_str!("../../migrations/0024_listing_amit_from.sql");
+        for op in ["update", "delete"] {
+            assert!(
+                sql24.contains(&format!("CREATE TRIGGER listings_row_history_{op}")),
+                "0024 must re-create the listings {op} trigger"
+            );
+        }
+        for col in ["amit", "amit_from", "price_symbol", "preference"] {
+            assert_eq!(
+                sql24.matches(&format!("'{col}', OLD.{col}")).count(),
+                2,
+                "both re-created listings triggers must record {col}"
+            );
+        }
+
         // 0021 added closing_prices, which needed two rebuilds: the table
         // itself (a surrogate `id` for row_history.row_id to key on, the old
         // composite primary key kept as a UNIQUE constraint) and row_history

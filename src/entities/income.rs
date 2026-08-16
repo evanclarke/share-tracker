@@ -434,11 +434,23 @@ pub async fn db_upsert(pool: &SqlitePool, income: &Income) -> Result<(), UpsertE
     // assessable record, so the notional tax components must be entered there
     // — a value here would be stored and silently never reported. An unknown
     // listing falls through to the INSERT's FK rejection.
-    let listing_amit: Option<bool> = sqlx::query_scalar("SELECT amit FROM listings WHERE id = ?")
-        .bind(income.listing_id)
-        .fetch_optional(&mut *tx)
-        .await?;
-    if listing_amit == Some(true) {
+    let listing_amit: Option<(bool, Option<chrono::NaiveDate>)> =
+        sqlx::query_as("SELECT amit, amit_from FROM listings WHERE id = ?")
+            .bind(income.listing_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    // A fund that converted mid-history is an AMIT only from its first AMIT
+    // income year: the pre-conversion years' rows are ordinary trust
+    // distributions, notional components and tax-deferred amounts included
+    // (SCENARIOS F-23). `listing::amit_in_tax_year` is the shared rule.
+    let row_is_amit = listing_amit.is_some_and(|(amit, amit_from)| {
+        crate::entities::listing::amit_in_tax_year(
+            amit,
+            amit_from,
+            crate::domain::tax_year::tax_year_for(income.assessment_date()),
+        )
+    });
+    if row_is_amit {
         if !income.trust_income {
             return Err(UpsertError::AmitNonTrust);
         }
@@ -1487,6 +1499,75 @@ mod tests {
             .amit(true)
             .insert(pool)
             .await;
+    }
+
+    /// SCENARIOS F-23: a fund that converted to an AMIT for FY2025. The
+    /// pre-conversion years were ordinary trust distributions — franking
+    /// credits, LIC deductions and tax-deferred amounts and all — and stay
+    /// recordable after the flag goes on; only the AMIT years are cash-only.
+    #[tokio::test]
+    async fn db_amit_checks_apply_only_from_the_conversion_year() {
+        let pool = test_pool().await;
+        test_support::listing(1)
+            .ticker("VDHG")
+            .amit_from(ymd(2024, 7, 1)) // first AMIT year: FY2025
+            .insert(&pool)
+            .await;
+
+        // FY2024, before the conversion: an ordinary trust distribution with
+        // notional components and a tax-deferred amount.
+        let mut before = test_support::income(1, 1, ymd(2024, 2, 15)).build();
+        before.trust_income = true;
+        before.unfranked_amount = Decimal::from(300);
+        before.franking_credits = Decimal::from(30);
+        before.tax_deferred_amount = Some(Decimal::from(20));
+        db_upsert(&pool, &before).await.unwrap();
+
+        // FY2025, the first AMIT year: the same row shape is refused.
+        let mut after = before.clone();
+        after.id = 2;
+        after.date_paid = ymd(2025, 2, 15);
+        let err = db_upsert(&pool, &after).await.unwrap_err();
+        assert!(
+            matches!(err, UpsertError::AmitNotionalComponent("franking_credits")),
+            "{err:?}"
+        );
+        // …and its cash-only form is accepted.
+        after.franking_credits = Decimal::ZERO;
+        after.tax_deferred_amount = None;
+        db_upsert(&pool, &after).await.unwrap();
+    }
+
+    /// The conversion year boundary is the financial year, not the date: a
+    /// distribution paid in the AMIT year's first days is already an AMIT
+    /// row, and a June payment of the year before is not.
+    #[tokio::test]
+    async fn db_the_conversion_boundary_is_the_financial_year() {
+        let pool = test_pool().await;
+        test_support::listing(1)
+            .ticker("VDHG")
+            .amit_from(ymd(2024, 7, 1))
+            .insert(&pool)
+            .await;
+        let row = |id: i64, date: NaiveDate| {
+            test_support::income(id, 1, date)
+                .with(|i| {
+                    i.trust_income = true;
+                    i.unfranked_amount = Decimal::from(100);
+                    i.franking_credits = Decimal::from(10);
+                })
+                .build()
+        };
+        // 30 June 2024 — the last day of FY2024, still an ordinary trust.
+        db_upsert(&pool, &row(1, ymd(2024, 6, 30))).await.unwrap();
+        // 1 July 2024 — the first day of FY2025, the first AMIT year.
+        let err = db_upsert(&pool, &row(2, ymd(2024, 7, 1)))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, UpsertError::AmitNotionalComponent(_)),
+            "{err:?}"
+        );
     }
 
     /// The cash side stays fully recordable: gross components, source
