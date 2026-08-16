@@ -10,38 +10,6 @@ findings are all closed in DONE.md), except where a section's heading names anot
 (e.g. REQUIREMENTS, SCENARIOS). Each section records one finding; sections land in DONE.md as they
 are fixed or decided.
 
-## An AMMA statement for a year with nothing held at 30 June cannot be generated, and its hand-entered set is flagged forever (SCENARIOS F-04, F-17, F-25)
-(SCENARIOS.md section F verification pass, 2026-08-16. `db_generate` refuses with `NothingHeld`
-when no parcel of the listing is open at the statement's `tax_year_end_date`
-(`src/entities/amit_adjustment_generation.rs:141`), and the cross-check's coverage rule compares Σ
-of the adjustment quantities against the statement's `units_held`
-(`src/reports/amit_adjustment_cross_check.rs:207`). Both are right for the case they were written
-for — a statement whose parcels have not been entered yet — and both misfire on the *correct*
-holding that was fully sold, or transferred out, during the statement's year. The reduction itself
-is right once entered by hand: `AmitReductionEvent::reduction_for_units` spills a whole-parcel row
-onto the units sold during the year, which is what LCR 2015/11 para 13 requires.)
-- [ ] F-04 — reproduced: Buy ×1000 Aug 2024, sold in full 1 Mar 2025, FY2025 statement stating 0
-  units held and 0.20 per unit. `POST /amma_statements/1/generate_adjustments` → `422` "no parcels
-  of the statement's listing were held in its holding account at the statement's year end — **enter
-  the missing trades first**", which is the one thing the user must not do here: the trades are all
-  entered and correct
-- [ ] The hand-entered row is accepted (`PUT /amit_adjustments/1` with `quantity` 1000 → `204`) and
-  reduces the sale's cost base correctly (49,800 from 50,000 — the sale's gain rises by exactly
-  1000 × 0.20). But the cross-check then reports the statement forever: "adjusted units 1000 do not
-  match the statement's units held 0 (difference +1000) — a parcel is missing, duplicated, or
-  covered for the wrong quantity". An honest, complete entry cannot be made to reconcile
-- [ ] F-25 shows the same path is the *normal* one for the year of sale: a multi-year holding sold
-  in November has its FY-of-sale AMMA arrive the following September, and that statement always has
-  0 units held. F-17 hits it from the other side: after a mid-year transfer, the sending account's
-  statement has nothing open in that account at 30 June
-- [ ] **Model question for Evan.** (a) Let generation cover parcels held *during* the year when
-  none is open at year end — one row per parcel the listing had open at any point in the FY, each
-  covering the units it held (this is a real extension: the row quantity for a partly-sold parcel
-  would have to be the units held during the year, not the units remaining); (b) keep the refusal
-  but re-word it, and teach the coverage check that a statement stating fewer units than were
-  adjusted is expected when the difference is units disposed of during the statement's year;
-  (c) document the manual path. (b) is the smaller change and fixes both misfires
-
 ## An AMIT adjustment on a parcel closed by a transfer is accepted and reduces nothing (SCENARIOS F-17)
 (SCENARIOS.md section F verification pass, 2026-08-16. A transfer closes the source parcel and
 writes a replacement Buy carrying the cost base forward as a frozen figure

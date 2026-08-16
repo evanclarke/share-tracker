@@ -84,8 +84,13 @@ pub enum GenerateError {
     #[error("this AMMA statement already has AMIT adjustments")]
     AlreadyGenerated,
     /// Nothing of the statement's listing was open in its holding account at
-    /// the statement's year end. A statement for a position the system does
-    /// not have is itself the error — writing an empty set would hide it.
+    /// the statement's year end. Generation derives its set from the parcels
+    /// open at that date, so there is nothing for it to write — and writing
+    /// an empty set would hide the two quite different situations that reach
+    /// here: the position's trades have not been entered yet, or the holding
+    /// was genuinely sold (or transferred) away during the year, whose
+    /// adjustment rows are entered by hand against the parcels that held the
+    /// units (SCENARIOS F-04). The refusal names both.
     #[error("no open parcels at the statement's year end")]
     NothingHeld,
     #[error(transparent)]
@@ -229,8 +234,11 @@ impl From<GenerateError> for ApiError {
                  \"replace\": true to delete and regenerate them",
             ),
             GenerateError::NothingHeld => ApiError::unprocessable(
-                "no parcels of the statement's listing were held in its holding account at the \
-                 statement's year end — enter the missing trades first",
+                "no parcels of the statement's listing were open in its holding account at the \
+                 statement's year end, so there is nothing to generate from — if trades are \
+                 missing, enter them and run this again; if the holding was sold or transferred \
+                 away during the year, the statement still adjusts the units it covered, so enter \
+                 one AMIT adjustment by hand against each parcel those units came from",
             ),
             GenerateError::Upsert(err) => err.into(),
             GenerateError::Db(err) => err.into(),
@@ -745,6 +753,17 @@ mod tests {
         let (status, body) = nothing_held.status_and_body();
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         assert!(body.contains("no parcels"), "{body}");
+        // SCENARIOS F-04: the refusal names *both* ways to arrive here — the
+        // trades are missing, or the holding was sold/transferred away during
+        // the year and its rows are entered by hand. Telling a user with a
+        // correct, closed holding to "enter the missing trades" sent them
+        // looking for data that was already there.
+        assert!(body.contains("if trades are missing"), "{body}");
+        assert!(
+            body.contains("sold or transferred away during the year"),
+            "{body}"
+        );
+        assert!(body.contains("by hand"), "{body}");
 
         c.post(
             "/amma_statements/6/generate_adjustments",

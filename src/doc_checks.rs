@@ -150,6 +150,10 @@ fn amit_adjustment_generation_and_cross_check_documented() {
     // Each 422 refusal.
     assert!(API_MD.contains("**already has adjustments**"));
     assert!(API_MD.contains("**no parcels** of the statement's listing were open"));
+    // SCENARIOS F-04: that refusal names both ways to reach it, and points a
+    // closed holding at the hand-entered path rather than at missing trades.
+    assert!(API_MD.contains("**sold or transferred away during the year**"));
+    assert!(API_MD.contains("the normal path for the year of a sale"));
     // A split across the covered parcels is *not* a refusal (SCENARIOS
     // B-24): each parcel's stored as-acquired quantity is re-based into the
     // statement year's basis before the per-unit figure is applied.
@@ -163,6 +167,10 @@ fn amit_adjustment_generation_and_cross_check_documented() {
     // The cross-check report's own section, with each of its four checks.
     assert!(API_MD.contains("### AMIT adjustment cross-check"));
     assert!(API_MD.contains("GET /reports/amit_adjustment_cross_check"));
+    // SCENARIOS F-04: the coverage band, not a bare equality — a set covering
+    // units sold during the statement's year reconciles.
+    assert!(API_MD.contains("the units disposed of during the statement's year"));
+    assert!(API_MD.contains("just before a relevant CGT event"));
     for check in [
         "**no adjustments at all**",
         "**coverage mismatch**",

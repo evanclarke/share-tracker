@@ -683,3 +683,80 @@ amended statement, two fund-years, newest first, with the ids),
 the two-account case stays silent), `three_statements_for_one_fund_year_are_one_row_counting_three`,
 `empty_database_reports_nothing_stale` (extended), and `web::tests::health_banner_ui_present`.
 Full suite 1494 passed / 0 failed.
+
+## An AMMA statement for a year with nothing held at 30 June cannot be generated, and its hand-entered set is flagged forever (SCENARIOS F-04, F-17, F-25)
+(SCENARIOS.md section F verification pass, 2026-08-16. `db_generate` refuses with `NothingHeld`
+when no parcel of the listing is open at the statement's `tax_year_end_date`
+(`src/entities/amit_adjustment_generation.rs:141`), and the cross-check's coverage rule compares Σ
+of the adjustment quantities against the statement's `units_held`
+(`src/reports/amit_adjustment_cross_check.rs:207`). Both are right for the case they were written
+for — a statement whose parcels have not been entered yet — and both misfire on the *correct*
+holding that was fully sold, or transferred out, during the statement's year. The reduction itself
+is right once entered by hand: `AmitReductionEvent::reduction_for_units` spills a whole-parcel row
+onto the units sold during the year, which is what LCR 2015/11 para 13 requires.)
+- [x] F-04 — reproduced: Buy ×1000 Aug 2024, sold in full 1 Mar 2025, FY2025 statement stating 0
+  units held and 0.20 per unit. `POST /amma_statements/1/generate_adjustments` → `422` "no parcels
+  of the statement's listing were held in its holding account at the statement's year end — **enter
+  the missing trades first**", which is the one thing the user must not do here: the trades are all
+  entered and correct
+- [x] The hand-entered row is accepted (`PUT /amit_adjustments/1` with `quantity` 1000 → `204`) and
+  reduces the sale's cost base correctly (49,800 from 50,000 — the sale's gain rises by exactly
+  1000 × 0.20). But the cross-check then reports the statement forever: "adjusted units 1000 do not
+  match the statement's units held 0 (difference +1000) — a parcel is missing, duplicated, or
+  covered for the wrong quantity". An honest, complete entry cannot be made to reconcile
+- [x] F-25 shows the same path is the *normal* one for the year of sale: a multi-year holding sold
+  in November has its FY-of-sale AMMA arrive the following September, and that statement always has
+  0 units held. F-17 hits it from the other side: after a mid-year transfer, the sending account's
+  statement has nothing open in that account at 30 June
+- [x] **Decided 2026-08-16 (Evan): option (b)** — keep the refusal, re-word it, and teach the
+  coverage check about units disposed of during the statement's year. The options weighed were:
+  (a) let generation cover parcels held *during* the year when
+  none is open at year end — one row per parcel the listing had open at any point in the FY, each
+  covering the units it held (this is a real extension: the row quantity for a partly-sold parcel
+  would have to be the units held during the year, not the units remaining); (b) keep the refusal
+  but re-word it, and teach the coverage check that a statement stating fewer units than were
+  adjusted is expected when the difference is units disposed of during the statement's year;
+  (c) document the manual path. (b) is the smaller change and fixes both misfires
+
+**Resolution (2026-08-16): option (b) — the refusal re-worded, and the coverage check given the
+year's disposals as an allowance.**
+
+Generation still derives its set from the parcels open at the statement's `tax_year_end_date` and
+still refuses when there are none: writing an empty set would hide the two quite different
+situations that reach it. What changed is that the 422 now names **both** of them — "if trades are
+missing, enter them and run this again; if the holding was sold or transferred away during the
+year, the statement still adjusts the units it covered, so enter one AMIT adjustment by hand
+against each parcel those units came from". The old ending ("enter the missing trades first") was
+the one instruction a user with a correct, closed holding must not follow.
+
+The cross-check's coverage rule is no longer an equality against `units_held` but a band:
+`units_held ..= units_held + the units of the adjusted parcels disposed of during the statement's
+year` (both bounds inclusive, and both terms re-based into the year-end unit basis, so a split
+still cannot false-positive). Below the band a parcel is missing — the old message, unchanged;
+above it, a new message names the excess and what the ceiling was made of. The allowance is the
+same rule the cost-base pipeline already applies: a row may cover units sold during the year
+because s 104-107B makes the adjustment just before the end of the income year *or just before a
+relevant CGT event* (LCR 2015/11 para 13). For a holding sold out or transferred away mid-year
+those are the only units there are, so the honest hand-entered set now reconciles instead of being
+flagged forever. Disposals are counted per parcel, not per row, so a duplicated parcel cannot widen
+the band and mask itself.
+
+Verified end to end against a running server on F-04's own reproduction: Buy ×1000 Aug 2024, sold in
+full 1 Mar 2025, FY2025 statement stating nil units at 0.20/unit. Generation answers the new 422,
+the hand-entered row is accepted, the cross-check comes back **empty**, the sale's cost base carries
+the reduction (49,800 from 50,000, gain 10,200), and the annual tax report reports the year
+complete.
+
+Docs: the generation section's refusal bullet names both cases and points the closed holding at the
+hand-entered path (calling it the normal path for the year of a sale); the cross-check's coverage
+bullet states the band, its statutory reason, and that both terms are split-aware; the README
+feature line and the two web UI descriptions (the cross-check report, and the generate-adjustments
+action) follow.
+
+Tests: `reports::amit_adjustment_cross_check::tests::db_a_statement_covering_units_sold_during_the_year_reconciles`
+(F-04 exactly — nil units held, rows covering the sold units, no alert),
+`db_coverage_beyond_the_units_disposed_of_in_the_year_is_flagged` (the top of the band exactly, then
+100 past it with the excess named), `db_a_disposal_before_the_year_does_not_widen_the_coverage_band`,
+and the re-worded refusal pinned in
+`entities::amit_adjustment_generation::tests::api_each_refusal_returns_422_naming_the_reason`, plus
+two `doc_checks` assertions. Full suite 1497 passed / 0 failed.

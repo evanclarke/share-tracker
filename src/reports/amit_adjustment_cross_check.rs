@@ -173,6 +173,35 @@ pub async fn db_amit_adjustment_alerts(
     Ok(alerts)
 }
 
+/// Units of the adjusted parcels disposed of between `from` and `to`
+/// inclusive, in `to`'s unit basis — the same basis `units_adjusted` is
+/// re-based into, so the two are comparable.
+///
+/// Both bounds are inclusive, matching
+/// [`crate::domain::cost_base::AmitReductionEvent`]'s own boundary: a sale on
+/// the year end itself counts as disposed by it, since the statement's
+/// year-end position no longer includes those units.
+fn disposed_between(
+    adjustments: &[AdjustmentRow],
+    splits: &[SplitEvent],
+    sold: &HashMap<i64, Vec<(NaiveDate, Decimal)>>,
+    from: NaiveDate,
+    to: NaiveDate,
+) -> Decimal {
+    // By parcel, not by row: a parcel adjusted twice (pre-0022 data, flagged
+    // separately below) must not have its disposals counted twice into the
+    // allowance, which would mask the very over-coverage it is.
+    let parcels: std::collections::BTreeSet<i64> = adjustments.iter().map(|a| a.trade_id).collect();
+    parcels
+        .iter()
+        .flat_map(|trade_id| sold.get(trade_id).map_or(&[][..], |v| v))
+        .filter(|(sale_date, _)| *sale_date >= from && *sale_date <= to)
+        .map(|&(sale_date, qty)| {
+            corporate_action::split_adjusted_quantity(qty, splits, sale_date, Some(to))
+        })
+        .sum()
+}
+
 /// Every problem on one statement's adjustment set, in severity order.
 fn problems_for(
     adjustments: &[AdjustmentRow],
@@ -203,13 +232,35 @@ fn problems_for(
     }
 
     // Coverage: Σ of the adjusted quantities against the units the statement
-    // says were held, both in the statement year's unit basis.
-    if units_adjusted != units_held {
+    // says were held, both in the statement year's unit basis — with the
+    // units disposed of *during* the statement's year allowed on top of the
+    // units held at its end.
+    //
+    // A row may legitimately cover units sold during the year: s 104-107B
+    // makes the adjustment just before the end of the income year **or just
+    // before the time of a relevant CGT event** (LCR 2015/11 para 13), which
+    // is why `AmitReductionEvent::reduction_for_units` spills a whole-parcel
+    // row onto them. For a holding sold out or transferred away mid-year that
+    // is the *only* kind of unit there is — the statement then states nil
+    // units held, and every honest row would read as excess coverage
+    // (SCENARIOS F-04, F-17, F-25). So the acceptable band is
+    // `units_held ..= units_held + disposed during the year`: below it a
+    // parcel is missing, above it one is duplicated or covered for too much.
+    let year_start = NaiveDate::from_ymd_opt(year_end.year() - 1, 7, 1).expect("valid FY start");
+    let disposed_in_year = disposed_between(adjustments, splits, sold, year_start, year_end);
+    if units_adjusted < units_held {
         let difference = units_adjusted - units_held;
         problems.push(format!(
             "adjusted units {units_adjusted} do not match the statement's units held \
              {units_held} (difference {difference:+}) — a parcel is missing, duplicated, or \
              covered for the wrong quantity"
+        ));
+    } else if units_adjusted > units_held + disposed_in_year {
+        let excess = units_adjusted - units_held - disposed_in_year;
+        problems.push(format!(
+            "adjusted units {units_adjusted} exceed the statement's units held {units_held} \
+             plus the {disposed_in_year} unit(s) disposed of during the year (excess \
+             {excess}) — a parcel is duplicated or covered for more units than it held"
         ));
     }
 
@@ -234,7 +285,6 @@ fn problems_for(
     // two unambiguous cases: acquired after the year ended, or already fully
     // sold before the year began. A parcel disposed of *during* the year was
     // genuinely held for part of it and is not flagged.
-    let year_start = NaiveDate::from_ymd_opt(year_end.year() - 1, 7, 1).expect("valid FY start");
     for a in adjustments {
         if a.trade_date > year_end {
             problems.push(format!(
@@ -577,6 +627,130 @@ mod tests {
         test_support::amit_adjustment(&pool, 1, 1, 1, dec("509")).await;
 
         assert!(db_amit_adjustment_alerts(&pool).await.unwrap().is_empty());
+    }
+
+    /// SCENARIOS F-04: the holding was sold out during the statement's year,
+    /// so the statement states **nil** units held — and the fund still
+    /// attributes for the year, adjusting the units it covered just before
+    /// the sale (s 104-107B / LCR 2015/11 para 13). The hand-entered rows
+    /// covering those disposed units are the correct entry and must
+    /// reconcile: the units disposed of during the year are allowed on top of
+    /// the units held at its end.
+    #[tokio::test]
+    async fn db_a_statement_covering_units_sold_during_the_year_reconciles() {
+        let pool = test_pool().await;
+        amit_listing(&pool, 1, "HNDQ").await;
+        test_support::buy(1, 1)
+            .date(ymd(2022, 2, 1))
+            .qty(dec("509"))
+            .insert(&pool)
+            .await;
+        test_support::sell(2, 1)
+            .date(ymd(2024, 2, 1)) // inside FY2024
+            .qty(dec("509"))
+            .insert(&pool)
+            .await;
+        allocate(&pool, 1, 2, 1, dec("509")).await;
+        // Nil units held at 30 June — the figure the registry states for a
+        // holding that closed in February.
+        amma(&pool, 1, 1, ymd(2024, 6, 30), "0").await;
+        test_support::amit_adjustment(&pool, 1, 1, 1, dec("509")).await;
+
+        assert!(db_amit_adjustment_alerts(&pool).await.unwrap().is_empty());
+    }
+
+    /// The allowance is exactly the units disposed of during the year, not a
+    /// blank cheque: a row covering more than the parcel held over the year
+    /// is still flagged, and the message says what the ceiling was made of.
+    #[tokio::test]
+    async fn db_coverage_beyond_the_units_disposed_of_in_the_year_is_flagged() {
+        let pool = test_pool().await;
+        amit_listing(&pool, 1, "HNDQ").await;
+        // A 1000-unit parcel of which 509 were sold during FY2024 — so 491 of
+        // it is still open at the year end — and a second parcel of 100 held
+        // throughout. The statement states the 591 held at 30 June.
+        test_support::buy(1, 1)
+            .date(ymd(2022, 2, 1))
+            .qty(dec("1000"))
+            .insert(&pool)
+            .await;
+        test_support::buy(2, 1)
+            .date(ymd(2022, 3, 1))
+            .qty(dec("100"))
+            .insert(&pool)
+            .await;
+        test_support::sell(3, 1)
+            .date(ymd(2024, 2, 1))
+            .qty(dec("509"))
+            .insert(&pool)
+            .await;
+        allocate(&pool, 1, 3, 1, dec("509")).await;
+        amma(&pool, 1, 1, ymd(2024, 6, 30), "591").await;
+        // Whole-parcel rows: 1100 covered against 591 held + 509 disposed of
+        // during the year — the top of the band exactly, so nothing is
+        // flagged.
+        test_support::amit_adjustment(&pool, 1, 1, 1, dec("1000")).await;
+        test_support::amit_adjustment(&pool, 2, 1, 2, dec("100")).await;
+        assert!(db_amit_adjustment_alerts(&pool).await.unwrap().is_empty());
+
+        // Now state 100 fewer units held: the same rows cover 100 more than
+        // the year can account for.
+        amma(&pool, 1, 1, ymd(2024, 6, 30), "491").await;
+
+        let alerts = db_amit_adjustment_alerts(&pool).await.unwrap();
+        assert_eq!(alerts.len(), 1);
+        let problem = &alerts[0].problems[0];
+        assert!(
+            problem.contains("exceed the statement's units held 491"),
+            "{problem}"
+        );
+        assert!(
+            problem.contains("509 unit(s) disposed of during the year"),
+            "{problem}"
+        );
+        assert!(problem.contains("excess 100"), "{problem}");
+    }
+
+    /// A disposal *before* the statement's year buys no allowance: those
+    /// units were not held during it at all.
+    #[tokio::test]
+    async fn db_a_disposal_before_the_year_does_not_widen_the_coverage_band() {
+        let pool = test_pool().await;
+        amit_listing(&pool, 1, "HNDQ").await;
+        test_support::buy(1, 1)
+            .date(ymd(2022, 2, 1))
+            .qty(dec("509"))
+            .insert(&pool)
+            .await;
+        test_support::buy(2, 1)
+            .date(ymd(2022, 3, 1))
+            .qty(dec("100"))
+            .insert(&pool)
+            .await;
+        // Sold in FY2023, a year before the statement's.
+        test_support::sell(3, 1)
+            .date(ymd(2023, 2, 1))
+            .qty(dec("509"))
+            .insert(&pool)
+            .await;
+        allocate(&pool, 1, 3, 1, dec("509")).await;
+        amma(&pool, 1, 1, ymd(2024, 6, 30), "100").await;
+        test_support::amit_adjustment(&pool, 1, 1, 1, dec("509")).await;
+        test_support::amit_adjustment(&pool, 2, 1, 2, dec("100")).await;
+
+        let alerts = db_amit_adjustment_alerts(&pool).await.unwrap();
+        assert_eq!(alerts.len(), 1);
+        // Both the excess coverage and the parcel that was already gone.
+        assert!(
+            alerts[0].problems[0].contains("exceed the statement's units held 100"),
+            "{:?}",
+            alerts[0].problems
+        );
+        assert!(
+            alerts[0].problems[1].contains("was fully sold before"),
+            "{:?}",
+            alerts[0].problems
+        );
     }
 
     #[tokio::test]
