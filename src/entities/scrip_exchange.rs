@@ -764,6 +764,37 @@ mod tests {
         );
     }
 
+    /// SCENARIOS E-36: an exchange ratio that does not divide the holding.
+    /// The replacement keeps the **exact** fractional unit count (registry
+    /// rounding and cash-in-lieu of the fraction are not modelled), and the
+    /// whole cost base rides on it — nothing is dropped in the division.
+    #[tokio::test]
+    async fn a_ratio_that_does_not_divide_keeps_the_exact_fraction() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "OLD").await;
+        insert_listing(&pool, 2, "NEW").await;
+        insert_buy(&pool, 1, 1, d(2022, 1, 10), "101", "10").await;
+        insert_scrip_terms(&pool, 10, 1, 2, d(2024, 3, 1), "1", "3").await;
+
+        let ex = db_exchange(&pool, 10).await.unwrap();
+        assert_eq!(ex.replacements.len(), 1);
+        assert_eq!(
+            ex.replacements[0].quantity,
+            dec("33.666666666666666666666666667")
+        );
+        assert_eq!(ex.replacements[0].brokerage, dec("1010"));
+
+        let parcels = crate::reports::open_parcels::db_open_parcels(&pool)
+            .await
+            .unwrap();
+        assert_eq!(parcels.len(), 1);
+        assert_eq!(
+            parcels[0].remaining_quantity,
+            dec("33.666666666666666666666666667")
+        );
+        assert_eq!(parcels[0].remaining_cost_base, dec("1010"));
+    }
+
     /// A second exchange chains the deemed acquisition date from the first —
     /// the discount clock always runs from the original acquisition.
     #[tokio::test]

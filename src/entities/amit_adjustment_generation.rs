@@ -529,6 +529,68 @@ mod tests {
         assert_eq!(result.created[0].trade_id, 1);
     }
 
+    /// SCENARIOS E-13: the fund splits *after* the statement's year end but
+    /// before its adjustments are generated. The statement's per-unit figure
+    /// is stated in the units held at its own year end, so the generation
+    /// (and the reduction it produces) must ignore the later split entirely —
+    /// the parcel's 100 units, not the 200 it has become by generation day.
+    #[tokio::test]
+    async fn db_a_split_after_the_year_end_does_not_change_the_reduction() {
+        let pool = test_pool().await;
+        amit_listing(&pool, 1, "HNDQ").await;
+        test_support::buy(1, 1)
+            .date(ymd(2023, 8, 1))
+            .qty(dec("100"))
+            .price(dec("10"))
+            .insert(&pool)
+            .await;
+        test_support::amma(6, 1)
+            .units(dec("100"))
+            .cost_base_adjustment(dec("0.50"))
+            .with(|a| {
+                a.tax_year_end_date = ymd(2024, 6, 30);
+                a.date_received = ymd(2024, 8, 29);
+            })
+            .insert(&pool)
+            .await;
+        corporate_action::db_upsert(
+            &pool,
+            &CorporateAction {
+                id: 1,
+                listing_id: 1,
+                date: ymd(2024, 8, 1),
+                kind: ActionKind::ShareSplit {
+                    split_new_units: dec("2"),
+                    split_old_units: Decimal::ONE,
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+        let result = db_generate(&pool, 6, &GenerateBody::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            result
+                .created
+                .iter()
+                .map(|a| (a.trade_id, a.quantity))
+                .collect::<Vec<_>>(),
+            vec![(1, dec("100"))]
+        );
+        assert_eq!(result.units_adjusted, dec("100"));
+        assert_eq!(result.difference, Decimal::ZERO);
+
+        // 100 units × 50c — the post-split 200 units never enter it.
+        let mut conn = pool.acquire().await.unwrap();
+        let events = amit_adjustment::db_cost_base_reduction_events(&mut conn, None)
+            .await
+            .unwrap();
+        let stated: Decimal = events[&1].iter().map(|e| e.amount()).sum();
+        assert_eq!(stated, dec("50"));
+    }
+
     /// A split between one covered parcel's acquisition and the year end
     /// leaves the parcels on different unit bases at that date — which is the
     /// basis the statement's per-unit figure is stated in. Both are covered,

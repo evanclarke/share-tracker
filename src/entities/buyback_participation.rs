@@ -491,6 +491,77 @@ mod tests {
         assert_eq!(sale.discount_eligible_gain, dec("2800.00"));
     }
 
+    /// SCENARIOS E-28: the whole buy-back price paid as the dividend
+    /// component. It is *part* of the price, so a dividend above it is
+    /// refused by the write path — but a dividend equal to it is legitimate,
+    /// and the market-value rule still leaves capital proceeds behind
+    /// (`max(price, market value) − dividend`), here $12.00 − $9.60.
+    #[tokio::test]
+    async fn a_dividend_equal_to_the_price_still_leaves_market_value_proceeds() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        insert_buy(&pool, 1, d(2020, 1, 15), "1000", "5.00").await;
+        insert_buyback_terms(
+            &pool,
+            10,
+            d(2024, 7, 1),
+            "9.60",
+            "9.60",
+            "4.11",
+            Some("12.00"),
+        )
+        .await;
+
+        let p = db_participate(&pool, 10, &body(d(2024, 7, 10), "100", 1))
+            .await
+            .unwrap();
+        assert_eq!(p.trade.average_price, dec("2.40"));
+        assert_eq!(p.income.unwrap().franked_amount, dec("960.00"));
+    }
+
+    /// SCENARIOS E-29: the company scales the offer back and accepts fewer
+    /// units than were tendered. Re-entry is delete-and-re-participate: the
+    /// unaccepted units go back to the parcel, and the dividend component
+    /// follows the accepted quantity down.
+    #[tokio::test]
+    async fn a_scaled_back_buy_back_is_re_entered_for_the_accepted_units() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        insert_buy(&pool, 1, d(2020, 1, 15), "1000", "5.00").await;
+        insert_buyback_terms(&pool, 10, d(2024, 7, 1), "9.60", "1.40", "0.60", None).await;
+
+        // Tendered 1,000 …
+        let tendered = db_participate(&pool, 10, &body(d(2024, 7, 10), "1000", 1))
+            .await
+            .unwrap();
+        // … only 300 accepted.
+        assert_eq!(
+            sell::db_delete_sell(&pool, tendered.trade.id)
+                .await
+                .unwrap(),
+            sell::DeleteOutcome::Deleted
+        );
+        let accepted = db_participate(&pool, 10, &body(d(2024, 7, 10), "300", 1))
+            .await
+            .unwrap();
+
+        assert_eq!(accepted.trade.quantity, dec("300"));
+        assert_eq!(accepted.income.unwrap().franked_amount, dec("420.00"));
+        // The 700 unaccepted units are still held, at their share of the cost
+        // base — and only one income row exists for the buy-back.
+        let parcels = crate::reports::open_parcels::db_open_parcels(&pool)
+            .await
+            .unwrap();
+        assert_eq!(parcels.len(), 1);
+        assert_eq!(parcels[0].remaining_quantity, dec("700"));
+        assert_eq!(parcels[0].remaining_cost_base, dec("3500"));
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM income")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(n, 1);
+    }
+
     #[tokio::test]
     async fn invalid_participations_are_rejected_and_nothing_persisted() {
         let pool = test_pool().await;

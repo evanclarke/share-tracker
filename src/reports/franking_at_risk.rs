@@ -331,6 +331,78 @@ mod tests {
         assert!(db_franking_at_risk(&pool).await.unwrap().is_empty());
     }
 
+    /// SCENARIOS E-31: the holding-period rule over a [buy-back](
+    /// crate::entities::buyback_participation) dividend. The participation's
+    /// Sell is an ordinary disposal to the walk, so the days the tendered
+    /// units were held *before* the buy-back decide it: units bought years
+    /// earlier keep their credits, while units bought a fortnight before
+    /// tendering are disqualified (only the small-shareholder exemption saves
+    /// them, and only while the year's credits stay under A$5,000).
+    #[tokio::test]
+    async fn db_buy_back_dividend_tests_the_days_held_before_tendering() {
+        use crate::entities::buyback_participation::{self, ParticipationBody};
+        use crate::entities::corporate_action::{self, ActionKind, CorporateAction};
+        use crate::entities::sell::AllocationInput;
+
+        async fn buy_back(pool: &SqlitePool, bought: NaiveDate) -> Vec<super::FrankingAtRiskAlert> {
+            insert_listing(pool, 1, "BBK").await;
+            insert_buy(pool, 1, 1, bought, 20000).await;
+            corporate_action::db_upsert(
+                pool,
+                &CorporateAction {
+                    id: 10,
+                    listing_id: 1,
+                    date: ymd(2025, 6, 1),
+                    kind: ActionKind::BuyBack {
+                        buyback_price: Decimal::from(10),
+                        buyback_dividend: Decimal::ONE,
+                        buyback_franking_credit: "0.43".parse().unwrap(),
+                        buyback_market_value: None,
+                        currency: "AUD".to_string(),
+                    },
+                },
+            )
+            .await
+            .unwrap();
+            buyback_participation::db_participate(
+                pool,
+                10,
+                &ParticipationBody {
+                    holding_account_id: 1,
+                    date: ymd(2025, 6, 15),
+                    units: Decimal::from(20000),
+                    allocations: vec![AllocationInput {
+                        purchase_trade_id: 1,
+                        quantity_allocated: Decimal::from(20000),
+                    }],
+                    fx_rate: None,
+                },
+            )
+            .await
+            .unwrap();
+            db_franking_at_risk(pool).await.unwrap()
+        }
+
+        // Held since 2019: nothing at risk, and the $8,600 of credits stand.
+        let pool = test_pool().await;
+        assert!(buy_back(&pool, ymd(2019, 4, 1)).await.is_empty());
+        let summary = tax_summary::db_tax_summary(&pool).await.unwrap();
+        let y2025 = summary.iter().find(|s| s.tax_year == 2025).unwrap();
+        assert_eq!(y2025.franking_credits, Decimal::from(8600));
+        assert_eq!(y2025.franking_credits_denied, Decimal::ZERO);
+
+        // Bought a fortnight before tendering: the whole holding fails the
+        // 45-day test, and above the exemption the credits are denied.
+        let pool = test_pool().await;
+        let alerts = buy_back(&pool, ymd(2025, 6, 1)).await;
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].disqualified_units, Decimal::from(20000));
+        assert_eq!(alerts[0].credits_denied, Decimal::from(8600));
+        let summary = tax_summary::db_tax_summary(&pool).await.unwrap();
+        let y2025 = summary.iter().find(|s| s.tax_year == 2025).unwrap();
+        assert_eq!(y2025.franking_credits_denied, Decimal::from(8600));
+    }
+
     /// Under A$5,000 of attached credits in the year the small-shareholder
     /// exemption shields the failing walk: the row still explains the failure
     /// but shows nothing denied — matching the tax summary.

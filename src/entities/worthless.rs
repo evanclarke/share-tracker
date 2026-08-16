@@ -482,6 +482,105 @@ mod tests {
         assert_eq!(y.capital_loss_carried_forward, dec("2000"));
     }
 
+    /// SCENARIOS E-47: the company is revived after a G3 declaration and its
+    /// shares have value again. The recognised loss stands (the declaration
+    /// was made and the choice exercised), and a fresh purchase is an
+    /// ordinary new parcel — nothing about the closed holding comes back.
+    #[tokio::test]
+    async fn a_revived_company_is_bought_into_as_a_new_parcel() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "DEAD").await;
+        insert_buy(&pool, 1, 1, d(2020, 1, 10), "1000", "2.00").await;
+        insert_worthless(&pool, 10, 1, d(2023, 6, 1), WorthlessEvent::G3Declaration).await;
+        db_recognise(&pool, 10).await.unwrap();
+
+        insert_buy(&pool, 50, 1, d(2024, 9, 1), "100", "0.50").await;
+
+        let parcels = crate::reports::open_parcels::db_open_parcels(&pool)
+            .await
+            .unwrap();
+        assert_eq!(parcels.len(), 1);
+        assert_eq!(parcels[0].trade_id, 50);
+        assert_eq!(parcels[0].acquisition_date, d(2024, 9, 1));
+        assert_eq!(parcels[0].remaining_cost_base, dec("50.00"));
+
+        let gains = crate::reports::realised_gains::db_realised_gains(&pool)
+            .await
+            .unwrap();
+        assert_eq!(gains.len(), 1);
+        assert_eq!(gains[0].capital_loss, dec("2000"));
+    }
+
+    /// SCENARIOS E-48: a liquidator's final distribution on a C2
+    /// cancellation. The recognise itself is always at nil proceeds, so the
+    /// payment is recorded as the `ReturnOfCapital` it is — and which side of
+    /// the cancellation it falls on decides the event: paid *before* it, it
+    /// reduces the cost base the loss is measured against (G1); paid
+    /// *after*, on units the record date entitled but the cancellation had
+    /// already closed, it is a CGT event C2 gain in the payment's own year
+    /// (`docs/ato/return-of-capital-right-to-receive.md`).
+    #[tokio::test]
+    async fn a_final_distribution_lands_on_the_side_of_the_cancellation_it_is_paid() {
+        // Paid before the cancellation: the loss shrinks by the payment.
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "DEAD").await;
+        insert_buy(&pool, 1, 1, d(2020, 1, 10), "1000", "2.00").await;
+        corporate_action::db_upsert(
+            &pool,
+            &CorporateAction {
+                id: 9,
+                listing_id: 1,
+                date: d(2023, 5, 15),
+                kind: ActionKind::ReturnOfCapital {
+                    amount_per_unit: dec("0.05"),
+                    currency: "AUD".to_string(),
+                    record_date: None,
+                },
+            },
+        )
+        .await
+        .unwrap();
+        insert_worthless(&pool, 10, 1, d(2023, 6, 1), WorthlessEvent::C2Cancellation).await;
+        db_recognise(&pool, 10).await.unwrap();
+
+        let gains = crate::reports::realised_gains::db_realised_gains(&pool)
+            .await
+            .unwrap();
+        assert_eq!(gains[0].capital_loss, dec("1950.00"));
+
+        // Paid after it, to the holders of record: a C2 gain that year, with
+        // the recognised loss untouched.
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "DEAD").await;
+        insert_buy(&pool, 1, 1, d(2020, 1, 10), "1000", "2.00").await;
+        insert_worthless(&pool, 10, 1, d(2023, 6, 1), WorthlessEvent::C2Cancellation).await;
+        db_recognise(&pool, 10).await.unwrap();
+        corporate_action::db_upsert(
+            &pool,
+            &CorporateAction {
+                id: 9,
+                listing_id: 1,
+                date: d(2023, 7, 15),
+                kind: ActionKind::ReturnOfCapital {
+                    amount_per_unit: dec("0.05"),
+                    currency: "AUD".to_string(),
+                    record_date: Some(d(2023, 5, 20)),
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+        let years = crate::reports::net_capital_gain::db_net_capital_gain(&pool)
+            .await
+            .unwrap();
+        let recognised = years.iter().find(|y| y.tax_year == 2023).unwrap();
+        assert_eq!(recognised.capital_losses, dec("2000"));
+        let paid = years.iter().find(|y| y.tax_year == 2024).unwrap();
+        assert_eq!(paid.cgt_event_c2_gain, dec("50.00"));
+        assert_eq!(paid.discount_eligible_gains, dec("50.00"));
+    }
+
     #[tokio::test]
     async fn invalid_recognitions_are_rejected_and_nothing_persisted() {
         let pool = test_pool().await;

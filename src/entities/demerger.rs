@@ -624,6 +624,81 @@ mod tests {
         assert_eq!(dm.demerged_replacements[0].quantity, dec("56"));
     }
 
+    /// SCENARIOS E-42: the percentage at either extreme of what the write
+    /// path allows. Neither end may strand a cent — the side that keeps
+    /// almost nothing still carries the remainder exactly, because the head
+    /// leg is computed as `cost − demerged` rather than as its own percentage.
+    #[tokio::test]
+    async fn extreme_percentages_still_apportion_the_whole_cost_base() {
+        for (pct, demerged_cost) in [("0.01", "0.50"), ("99.99", "4999.50")] {
+            let pool = test_pool().await;
+            insert_listing(&pool, 1, "HEAD").await;
+            insert_listing(&pool, 2, "DEM").await;
+            insert_buy(&pool, 1, 1, d(2022, 1, 10), "500", "10").await;
+            insert_demerger_terms(&pool, 10, 1, 2, d(2024, 3, 1), "1", "5", pct).await;
+
+            let dm = db_demerge(&pool, 10).await.unwrap();
+            assert_eq!(dm.demerged_replacements[0].brokerage, dec(demerged_cost));
+            assert_eq!(
+                dm.head_replacements[0].brokerage + dm.demerged_replacements[0].brokerage,
+                dec("5000")
+            );
+        }
+    }
+
+    /// SCENARIOS E-43: the head parcel was inherited — a pre-CGT asset in the
+    /// deceased's hands, so its cost base is the market value at death and
+    /// its discount clock runs from the death (s 115-30). Both are carried
+    /// through the demerger: the two replacement parcels report the death
+    /// date, not the demerger date, and split the inherited cost base.
+    #[tokio::test]
+    async fn an_inherited_head_parcel_carries_its_deemed_date_and_cost_base() {
+        use crate::entities::inheritance::{self, CostBaseRule, Inheritance};
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "HEAD").await;
+        insert_listing(&pool, 2, "DEM").await;
+        inheritance::db_upsert(
+            &pool,
+            &Inheritance {
+                id: 1,
+                listing_id: 1,
+                holding_account_id: 1,
+                quantity: dec("500"),
+                date_of_death: d(2023, 5, 10),
+                cost_base_rule: CostBaseRule::MarketValueAtDeath,
+                cost_base: dec("6000"),
+                lpr_expenditure: Decimal::ZERO,
+                lpr_expenditure_date: None,
+                deceased_acquisition_date: None,
+                currency: "AUD".to_string(),
+                fx_rate: Decimal::ONE,
+            },
+        )
+        .await
+        .unwrap();
+        insert_demerger_terms(&pool, 10, 1, 2, d(2024, 3, 1), "1", "5", "10").await;
+
+        let dm = db_demerge(&pool, 10).await.unwrap();
+        assert_eq!(
+            dm.head_replacements[0].deemed_acquisition_date,
+            Some(d(2023, 5, 10))
+        );
+        assert_eq!(
+            dm.demerged_replacements[0].deemed_acquisition_date,
+            Some(d(2023, 5, 10))
+        );
+        assert_eq!(dm.head_replacements[0].brokerage, dec("5400"));
+        assert_eq!(dm.demerged_replacements[0].brokerage, dec("600"));
+
+        let parcels = crate::reports::open_parcels::db_open_parcels(&pool)
+            .await
+            .unwrap();
+        assert!(
+            parcels.iter().all(|p| p.acquisition_date == d(2023, 5, 10)),
+            "{parcels:?}"
+        );
+    }
+
     /// A partly sold parcel carries only its remaining units' share of the
     /// cost base (incl. brokerage) into the apportionment.
     #[tokio::test]

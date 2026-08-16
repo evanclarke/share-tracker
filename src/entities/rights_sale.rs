@@ -558,6 +558,69 @@ mod tests {
         assert_eq!(parcels[0].remaining_quantity, Decimal::from(1000));
     }
 
+    /// SCENARIOS E-18/E-19: what a disposal of *free* rights realises.
+    /// Letting them lapse is a nil-proceeds/nil-cost non-event that still
+    /// consumes the entitlement (`docs/ato/rights-issues.md`), while a
+    /// renounceable offer's retail premium is capital proceeds on the rights
+    /// — a capital gain, never dividend income (TR 2017/4,
+    /// `docs/ato/retail-premiums.md`) — discountable on the *original*
+    /// parcel's holding period, since free rights are acquired when the
+    /// shares were.
+    #[tokio::test]
+    async fn a_lapse_realises_nothing_while_a_retail_premium_is_a_capital_gain() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        insert_buy(&pool, 1, d(2023, 1, 15), "1000").await;
+        insert_rights_issue(&pool, 10, d(2024, 7, 1)).await; // entitled to 250
+
+        // 100 rights lapse (nil proceeds), 150 attract a $0.55 premium.
+        let mut lapse = body(d(2024, 7, 25), "100", 1);
+        lapse.proceeds_per_right = Some(Decimal::ZERO);
+        db_sell_rights(&pool, 10, &lapse).await.unwrap();
+        let mut premium = body(d(2024, 8, 5), "150", 1);
+        premium.proceeds_per_right = Some("0.55".parse().unwrap());
+        db_sell_rights(&pool, 10, &premium).await.unwrap();
+
+        let gains = crate::reports::realised_gains::db_realised_gains(&pool)
+            .await
+            .unwrap();
+        assert_eq!(gains.len(), 2);
+        // The lapse: nothing realised either way.
+        assert_eq!(gains[0].proceeds, Decimal::ZERO);
+        assert_eq!(gains[0].cost_base, Decimal::ZERO);
+        assert_eq!(gains[0].capital_gain_loss, Decimal::ZERO);
+        assert_eq!(gains[0].capital_loss, Decimal::ZERO);
+        // The premium: the whole 150 × $0.55, discounted on the shares' clock.
+        assert_eq!(gains[1].proceeds, "82.50".parse::<Decimal>().unwrap());
+        assert_eq!(
+            gains[1].discount_eligible_gain,
+            "82.50".parse::<Decimal>().unwrap()
+        );
+        // ... and not a cent of it is income.
+        let summary = crate::reports::tax_summary::db_tax_summary(&pool)
+            .await
+            .unwrap();
+        assert!(summary.is_empty(), "{summary:?}");
+
+        // Both disposals consumed the entitlement: nothing is left to exercise.
+        let err = rights_exercise::db_exercise(
+            &pool,
+            10,
+            &rights_exercise::ExerciseBody {
+                date: d(2024, 8, 20),
+                units: Decimal::ONE,
+                rights_cost: None,
+                fx_rate: None,
+                holding_account_id: 1,
+            },
+        )
+        .await;
+        assert!(matches!(
+            err,
+            Err(rights_exercise::ExerciseError::ExceedsEntitlement)
+        ));
+    }
+
     /// The entitlement is one pool shared with exercises, in both directions:
     /// rights already sold block an exercise and vice versa.
     #[tokio::test]

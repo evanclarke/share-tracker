@@ -527,6 +527,43 @@ mod tests {
             .unwrap();
     }
 
+    /// SCENARIOS E-12: a split between the record date and the exercise. The
+    /// entitlement is fixed in record-date units, and each exercise is
+    /// re-based back into that basis before the cap is applied — so the
+    /// 25-right entitlement is exercised as 50 post-split units, and not one
+    /// unit more.
+    #[tokio::test]
+    async fn split_after_the_record_date_rebases_each_exercise() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        insert_buy(&pool, 1, d(2024, 1, 15), "100", "2.00").await;
+        insert_rights_issue(&pool, 10, d(2024, 7, 1)).await; // 100 units → 25 rights
+        corporate_action::db_upsert(
+            &pool,
+            &CorporateAction {
+                id: 5,
+                listing_id: 1,
+                date: d(2024, 7, 15),
+                kind: ActionKind::ShareSplit {
+                    split_new_units: Decimal::from(2),
+                    split_old_units: Decimal::ONE,
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+        // Half the entitlement, then the rest, then one unit too many.
+        db_exercise(&pool, 10, &body(d(2024, 8, 1), "20"))
+            .await
+            .unwrap();
+        db_exercise(&pool, 10, &body(d(2024, 8, 2), "30"))
+            .await
+            .unwrap();
+        let err = db_exercise(&pool, 10, &body(d(2024, 8, 3), "1")).await;
+        assert!(matches!(err, Err(ExerciseError::ExceedsEntitlement)));
+    }
+
     /// A fractional entitlement rounds up to a whole unit, so the cap is
     /// never tighter than the offer's own rounding.
     #[tokio::test]

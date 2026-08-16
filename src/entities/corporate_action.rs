@@ -2160,6 +2160,94 @@ mod tests {
         .await
     }
 
+    /// SCENARIOS E-09: a consolidation whose ratio does not divide the
+    /// holding evenly, followed by a sale of the whole of it. The reported
+    /// remaining quantity is the exact re-based figure (no rounding — company
+    /// rounding and cash-in-lieu are not modelled), and selling exactly that
+    /// is accepted and consumes the parcel to nothing: the re-basing and its
+    /// inverse agree, so no dust is left behind that could never be sold.
+    #[tokio::test]
+    async fn db_a_consolidation_that_does_not_divide_still_sells_out_exactly() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "CON").await;
+        insert_parcel(&pool).await; // 100 units @ $10 on 2023-01-10
+        db_upsert(
+            &pool,
+            &CorporateAction {
+                id: 1,
+                listing_id: 1,
+                date: d(2024, 3, 1),
+                kind: ActionKind::ShareSplit {
+                    split_new_units: "3".parse().unwrap(),
+                    split_old_units: "7".parse().unwrap(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+        let parcels = crate::reports::open_parcels::db_open_parcels(&pool)
+            .await
+            .unwrap();
+        let remaining = parcels[0].remaining_quantity;
+        assert_eq!(
+            remaining,
+            "42.857142857142857142857142857".parse::<Decimal>().unwrap()
+        );
+
+        insert_sell(&pool, d(2024, 4, 1), &remaining.to_string())
+            .await
+            .unwrap();
+        assert!(
+            crate::reports::open_parcels::db_open_parcels(&pool)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        // The whole $1,000 cost base is in the disposal, undiminished.
+        let gains = crate::reports::realised_gains::db_realised_gains(&pool)
+            .await
+            .unwrap();
+        assert_eq!(gains.len(), 1);
+        assert_eq!(gains[0].cost_base.round_dp(6), "1000".parse().unwrap());
+    }
+
+    /// SCENARIOS E-02: a per-unit payment carried to six decimal places (the
+    /// scale a registry states a small return of capital at). It survives the
+    /// round trip and the reduction is exact — `Decimal` all the way, never a
+    /// float and never rounded to cents on the way in.
+    #[tokio::test]
+    async fn db_a_six_decimal_place_payment_reduces_exactly() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "SIX").await;
+        test_support::buy(1, 1)
+            .date(d(2023, 1, 10))
+            .qty("3333".parse().unwrap())
+            .price(Decimal::ONE)
+            .insert(&pool)
+            .await;
+        db_upsert(&pool, &roc(1, 1, d(2024, 3, 1), "0.123456"))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            db_get(&pool, 1).await.unwrap().unwrap(),
+            roc(1, 1, d(2024, 3, 1), "0.123456")
+        );
+        let parcels = crate::reports::open_parcels::db_open_parcels(&pool)
+            .await
+            .unwrap();
+        // 3,333 × 0.123456 = 411.478848, to the last digit.
+        assert_eq!(
+            parcels[0].return_of_capital_reduction,
+            "411.478848".parse::<Decimal>().unwrap()
+        );
+        assert_eq!(
+            parcels[0].remaining_cost_base,
+            "2921.521152".parse::<Decimal>().unwrap()
+        );
+    }
+
     /// A-20: the split is what makes the 200-unit Sell fit the 100-unit
     /// parcel, so deleting it would leave allocations the Sell's own write
     /// path refuses. The delete is refused while that trade stands, and

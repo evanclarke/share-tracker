@@ -68,7 +68,7 @@ behind or became a recorded finding.
 | B. Cost base construction and the adjustment pipeline | 24 | 2026-08-15 | 5 raised, all closed — see below |
 | C. The 12-month CGT discount clock | 18 | 2026-08-15 | 1 raised, closed — see below |
 | D. Sells and parcel allocation | 20 | 2026-08-15 | 2 raised, both closed — see below |
-| E. Corporate actions | 51 | — | — |
+| E. Corporate actions | 51 | 2026-08-16 | 5 raised, open — see below |
 | F. AMIT / AMMA | 25 | — | — |
 | G. Dividends, franking, and the holding-period rule | 25 | — | — |
 | H. Interest, expenses, and other income | 10 | — | — |
@@ -197,6 +197,86 @@ id, and each naming the commit that closed it:
 | --- | --- | --- |
 | An AMIT adjustment covering part of a parcel is diluted across the whole parcel | D-13 | `04847a4` |
 | A return of capital received on units already sold is not recorded anywhere | D-14 | `14c7e16` |
+
+### Section E findings
+
+Forty-four of the 51 came back correct, and the two structural reasons are worth
+recording. The five action types that *create* trades (rights exercise, buy-back
+participation, scrip exchange, demerge, worthless recognise) all write through
+`sell::upsert_sell_in_tx` and `domain::rollover`, so every allocation invariant
+section D verified holds for them too, and each group is frozen by its own
+`trades.*_action_id` foreign key. The three that apply at *read* time (split,
+bonus issue, return of capital) all go through one pipeline —
+`corporate_action::adjustments` for the events, `domain::cost_base` for the
+money — so a re-basing or entitlement rule is stated once and cannot disagree
+with itself between reports. What each group turned on:
+
+- **Return of capital (E-01–E-07).** The payment is per unit of the *listing*,
+  so a holding spread across accounts is reduced parcel by parcel with no
+  account rule of its own (E-01); six-decimal-place amounts survive to the last
+  digit (E-02); a payment reaching nothing (no holding, or a holding entirely
+  sold before it) changes nothing and reports nothing (E-06); and a non-AMIT
+  trust's tax-deferred amount entered on the income row stays informational —
+  the E4 cross-check flags it until the matching action exists, then clears,
+  with the reduction counted once (E-05).
+- **Splits and bonus issues (E-08–E-15).** A 1-for-1 split is a genuine no-op
+  (E-08), a decimal ratio is carried exactly (E-10, 3.5-for-1 → 350 units), and
+  a consolidation that doesn't divide keeps the exact fraction and still sells
+  out to nothing — the re-base and its inverse agree to the last decimal place
+  (E-09). A split *after* an AMMA statement's year end leaves its adjustment
+  generation and reduction untouched, because both are stated in the statement
+  year's basis (E-13).
+- **Rights (E-16–E-24).** Entitlement is fixed by the record-date holding and
+  shared by one pool: cumulative exercises stop at it (E-16), a sale of rights
+  consumes it too (E-17), and a lapse of free rights is a nil/nil non-event that
+  still consumes it (E-18). Selling the *shares* after the record date leaves
+  the rights exercisable (E-21), a split between record date and exercise
+  re-bases each exercise back into record-date units (E-12), a transfer between
+  accounts nets to no change in the entitlement and the exercise lands in the
+  chosen account (E-23), an out-of-the-money exercise is allowed with the rights
+  cost in the parcel's cost base (E-22), and a renounceable premium is capital
+  proceeds on the rights, never income (E-19) — with the non-renounceable case
+  entered as unfranked income exactly as documented (E-20).
+- **Buy-backs (E-25–E-31).** Capital proceeds are
+  `max(price, market value) − dividend` in every combination probed: the
+  pre-2022 shape with both components (E-25), the post-25-Oct-2022 shape with
+  none — and no income row at all (E-26), a market value above the price (E-27),
+  and a dividend equal to the whole price, which is accepted while one above it
+  is refused (E-28). A scale-back is delete-and-re-enter, and the dividend
+  follows the accepted quantity down (E-29); mixed-eligibility parcels split
+  into their own discount buckets (E-30); and the 45-day rule measures the days
+  the tendered units were held *before* the buy-back, so a long-held holding
+  keeps credits above the small-shareholder threshold while a fortnight-old one
+  loses them (E-31).
+- **Rollovers (E-32–E-46).** Cost base and acquisition date carry across an
+  exchange (E-32), through a second takeover (E-38), across three accounts
+  (E-40) and into a demerger's two legs, which always sum exactly to the
+  original — at 5.063% and at both extremes the write path allows (E-41, E-42).
+  Mixed consideration apportions by market value and assesses only the cash side
+  (E-33); fractional replacements are kept exactly (E-36); a trade dated on the
+  exchange date is refused with the reason rather than silently mis-handled
+  (E-37); an inherited head parcel keeps its death-date clock and market-value
+  cost base through the demerge (E-43); and a later consolidation (E-44),
+  worthless recognition (E-45) or rename (E-46) of either entity behaves as it
+  would on any other parcel. Taking the takeover *without* rollover is the
+  documented manual Sell + Buy, which works (E-34).
+- **Worthless (E-47–E-51).** The recognise closes only what is still held
+  (E-49), in any prior year (E-50); a revived company is simply bought into
+  again as a new parcel, the recognised loss standing (E-47); a liquidator's
+  final distribution lands as a G1 reduction or a C2 gain depending on which
+  side of the cancellation it is paid (E-48); and a suspended listing with no
+  declaration is never valued off a stale price — the holding reports
+  `price_unavailable` and the health report flags the staleness (E-51).
+
+The five findings, each raised as a `TODO.md` section naming its scenario ids:
+
+| Finding | Scenarios | Status |
+| --- | --- | --- |
+| A return of capital in a currency other than its parcels' is accepted, then breaks every cost-base report | E-07, E-39 | open |
+| A corporate action dated in the future is applied to today's holdings | E-14 | open |
+| A return of capital on an AMIT listing double-reduces alongside the AMMA adjustment | E-04 | open |
+| A duplicated corporate action is silently compounded | E-03, E-15 | open |
+| Fractional entitlements are documented for splits and demergers but not for bonus issues or scrip exchanges | E-11, E-36 | open |
 
 ---
 
