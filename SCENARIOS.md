@@ -67,7 +67,7 @@ behind or became a recorded finding.
 | A. Deletion and mutation ripple effects | 45 | 2026-08-14 (`0bbde4d`) | 5 raised, all closed — see below |
 | B. Cost base construction and the adjustment pipeline | 24 | 2026-08-15 | 5 raised, all closed — see below |
 | C. The 12-month CGT discount clock | 18 | 2026-08-15 | 1 raised, closed — see below |
-| D. Sells and parcel allocation | 20 | 2026-08-15 | 2 raised, both open — see below |
+| D. Sells and parcel allocation | 20 | 2026-08-15 | 2 raised, both closed — see below |
 | E. Corporate actions | 51 | — | — |
 | F. AMIT / AMMA | 25 | — | — |
 | G. Dividends, franking, and the holding-period rule | 25 | — | — |
@@ -189,10 +189,14 @@ no second path to disagree with the first. What each group turned on:
   sale with signed `days_apart` (D-08), and every parcel-optimiser strategy's
   allocations are accepted by `PUT /sells/:id` verbatim (D-18).
 
-| Finding | Scenarios | Status |
+Both findings are closed, each archived in
+[`DONE/tax-domain.md`](DONE/tax-domain.md) under a heading naming its scenario
+id, and each naming the commit that closed it:
+
+| Finding | Scenarios | Fixed by |
 | --- | --- | --- |
-| An AMIT adjustment covering part of a parcel is diluted across the whole parcel | D-13 | fixed — `DONE/tax-domain.md` |
-| A return of capital received on units already sold is not recorded anywhere | D-14 | fixed — `DONE/tax-domain.md` |
+| An AMIT adjustment covering part of a parcel is diluted across the whole parcel | D-13 | `04847a4` |
+| A return of capital received on units already sold is not recorded anywhere | D-14 | `14c7e16` |
 
 ---
 
