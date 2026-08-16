@@ -10,26 +10,6 @@ findings are all closed in DONE.md), except where a section's heading names anot
 (e.g. REQUIREMENTS, SCENARIOS). Each section records one finding; sections land in DONE.md as they
 are fixed or decided.
 
-## A return of capital on an AMIT listing double-reduces alongside the AMMA adjustment (SCENARIOS E-04)
-(SCENARIOS.md section E verification pass, 2026-08-16. For an AMIT the cost-base movement is driven
-solely by the AMMA statement's per-unit `cost_base_adjustment` — `docs/API.md` says so in the E4
-cross-check section — but nothing stops the same money being entered *again* as a `ReturnOfCapital`
-action on the same listing, and the two reductions simply add.)
-- [ ] E-04 — reproduced: AMIT listing VDHG, Buy ×100 @ $10, AMMA FY2024 with
-  `cost_base_adjustment: 0.50` generated onto the parcel (`amit_cost_base_reduction: 50.00`,
-  remaining cost base 950.00), then a `ReturnOfCapital` of $0.50/unit dated 2024-05-01 → `204`, and
-  the parcel's remaining cost base drops to **900.00**. `e4_cross_check`, `amit_cash_cross_check`,
-  `amit_adjustment_cross_check` and `health` are all empty: nothing sees it
-- [ ] **Decided 2026-08-16 (Evan): refuse it at write time** — a `ReturnOfCapital` on a listing with
-  `amit = 1` answers `422` pointing at the AMMA statement's `cost_base_adjustment` as the place the
-  reduction belongs. (The alternatives considered and rejected: a non-blocking cross-check row, or
-  documenting it as the user's own call.) The refusal needs the usual sweep: the error variant and
-  its 422 body beside `WriteError`, `docs/API.md`'s corporate-actions 422 catalogue, and a note in
-  the AMIT/AMMA sections saying the two paths are mutually exclusive
-- [ ] Note the asymmetry that makes the refusal tempting: the income-row path already refuses the
-  same double entry — `tax_deferred_amount` on a non-trust income row is a 422 telling the user to
-  record a `ReturnOfCapital` instead — so the corporate-action side is the only unguarded door
-
 ## A duplicated corporate action is silently compounded (SCENARIOS E-03, E-15)
 (SCENARIOS.md section E verification pass, 2026-08-16. Two actions of the same type, listing and
 date are two independent events to every reader: `db_return_of_capital_events` and

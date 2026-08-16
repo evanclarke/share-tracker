@@ -94,6 +94,17 @@ pub enum WriteError {
         payment_currency: String,
         parcel_currency: String,
     },
+    /// A `ReturnOfCapital` on a listing flagged `amit`. An AMIT's cost-base
+    /// movement is its AMMA statement's per-unit `cost_base_adjustment`,
+    /// entered as AMIT adjustments (CGT event E10) — the E4 tax-deferred
+    /// mechanism a `ReturnOfCapital` models is for non-AMIT trusts. Nothing
+    /// relates the two, so the same money entered both ways simply reduces
+    /// the parcel twice and no cross-check sees it (SCENARIOS E-04). The
+    /// income path already refuses the mirror image of this
+    /// (`income::UpsertError::AmitTaxDeferred`); this closes the other door.
+    /// Mapped to `422`.
+    #[error("a return of capital does not apply to an AMIT")]
+    ReturnOfCapitalOnAmit,
 }
 
 impl From<WriteError> for ApiError {
@@ -121,6 +132,14 @@ impl From<WriteError> for ApiError {
                  base in the parcel's own currency, and amounts are never netted across \
                  currencies, so record it converted into {parcel_currency}"
             )),
+            // The AMIT's cost-base movement belongs on its AMMA statement →
+            // 422 naming the field it belongs in, mirroring the income
+            // path's `tax_deferred_amount` refusal.
+            WriteError::ReturnOfCapitalOnAmit => ApiError::unprocessable(
+                "a return of capital does not apply to an AMIT — its cost-base movement is the \
+                 AMMA statement's cost_base_adjustment, entered as AMIT adjustments (CGT event \
+                 E10), not an E4 return of capital",
+            ),
             // Unknown listing/currency FK or enum CHECK violation → 422.
             WriteError::Db(err) => err.into(),
         }
@@ -305,6 +324,24 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
     .await?;
     if referenced {
         return Err(WriteError::ReferencedByTrade);
+    }
+
+    // An AMIT reduces its unit holders' cost base through its AMMA
+    // statement's per-unit `cost_base_adjustment` (CGT event E10); the E4
+    // mechanism a return of capital models is for non-AMIT trusts. Nothing
+    // relates the two, so the same money entered both ways reduces the parcel
+    // twice with no cross-check to catch it (SCENARIOS E-04) — refused here,
+    // the mirror of the income path's `tax_deferred_amount` refusal. The
+    // listing's flag is all it takes, so this is checked before the INSERT;
+    // an unknown listing falls through to the FK violation as before.
+    if matches!(action.kind, ActionKind::ReturnOfCapital { .. }) {
+        let amit: Option<bool> = sqlx::query_scalar("SELECT amit FROM listings WHERE id = ?")
+            .bind(action.listing_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+        if amit == Some(true) {
+            return Err(WriteError::ReturnOfCapitalOnAmit);
+        }
     }
 
     // Which listing the row is leaving, when an edit moves it (the split

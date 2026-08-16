@@ -439,10 +439,13 @@ mod tests {
                 "/cgt_settings/1",
                 json!({ "opening_capital_loss": "1234.567891" }),
             ),
+            // On the non-AMIT listing: a return of capital is the E4
+            // mechanism for a non-AMIT trust, and is refused on an AMIT
+            // (whose cost-base movement is its AMMA statement's).
             RoundTrip::new(
                 "/corporate_actions/10",
                 json!({
-                    "action_type": "ReturnOfCapital", "listing_id": 1, "date": "2024-05-01",
+                    "action_type": "ReturnOfCapital", "listing_id": 3, "date": "2024-05-01",
                     "amount_per_unit": "0.123456", "currency": "AUD",
                     "record_date": "2024-04-20",
                 }),

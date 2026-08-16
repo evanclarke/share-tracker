@@ -1132,6 +1132,40 @@ fn as_at_today_convention_documented() {
     assert!(API_MD.contains("as at today (see [As-at date](#as-at-date))"));
 }
 
+/// Docs-sync pin for the AMIT/E4 mutual exclusion (2026-08-16, SCENARIOS
+/// E-04): a return of capital is refused on a listing flagged `amit`, whose
+/// cost-base movement is its AMMA statement's `cost_base_adjustment`. Both
+/// ends say so — the corporate-actions write rules and the AMIT-adjustments
+/// section — and the Response-codes `422` row lists the refusal. The
+/// behaviour itself is pinned by `entities::corporate_action::tests`.
+#[test]
+fn amit_return_of_capital_refusal_documented() {
+    assert!(API_MD.contains(
+        "A `ReturnOfCapital` on a listing flagged [`amit`](#listings) is rejected with `422` \
+         outright"
+    ));
+    assert!(API_MD.contains("the two paths are **mutually exclusive**"));
+    // The AMIT side names both doors, so a reader arriving from the AMMA
+    // statement sees why neither other path is open to it.
+    assert!(API_MD.contains("**This is an AMIT's only cost-base movement.**"));
+    assert!(API_MD.contains(
+        "a `tax_deferred_amount` on its [income](#income) rows and a `ReturnOfCapital` on the \
+         listing are each refused `422`"
+    ));
+    // The converted-fund case the cost-base chain still has to handle: the
+    // refusal is on the write, so pre-conversion payments stand.
+    assert!(API_MD.contains("record the pre-conversion payments before flagging the listing"));
+    assert!(
+        API_MD.contains(
+            "since a `ReturnOfCapital` on an already-flagged AMIT is refused at write time"
+        )
+    );
+    assert!(API_MD.contains(
+        "a `ReturnOfCapital` on a listing flagged `amit` (an AMIT's cost-base movement is its \
+         AMMA statement's `cost_base_adjustment`, CGT event E10, not E4)"
+    ));
+}
+
 /// Docs-sync pin for the write-time state check that bounds that open edit
 /// path (2026-08-15): a corporate-action write is refused when the resulting
 /// terms would leave a sale allocating more units than its parcel holds, so

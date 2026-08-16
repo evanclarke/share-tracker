@@ -478,16 +478,27 @@ mod tests {
     /// The AMIT cost-base reduction (CGT event E10) and return-of-capital
     /// payments (G1) both reach the remaining units' cost base, and the
     /// as-of date bounds which of them have happened.
+    ///
+    /// The fixture is the one way the two still meet on a parcel now that a
+    /// return of capital is refused on an AMIT listing (SCENARIOS E-04): a
+    /// fund that converts to an AMIT part-way through the holding, whose
+    /// pre-conversion E4 payment was recorded while it was an ordinary trust.
     #[tokio::test]
     async fn amit_and_return_of_capital_reduce_the_remaining_cost_base() {
         let pool = test_pool().await;
-        test_support::listing(1).amit(true).insert(&pool).await;
+        test_support::listing(1).insert(&pool).await;
         test_support::buy(1, 1)
             .date(ymd(2024, 1, 10))
             .qty(dec("100"))
             .price(dec("10"))
             .insert(&pool)
             .await;
+        // 50c/unit return of capital in September 2024, while the trust was
+        // not yet an AMIT…
+        return_of_capital(&pool, 1, 1, ymd(2024, 9, 15), "0.50").await;
+        // …and the conversion, after which its cost-base movement comes from
+        // its AMMA statement instead.
+        test_support::listing(1).amit(true).insert(&pool).await;
         // AMMA statement for the year ended 30 June 2024: a 20c/unit AMIT
         // cost base net amount (positive = a reduction).
         test_support::amma(1, 1)
@@ -496,8 +507,6 @@ mod tests {
             .insert(&pool)
             .await;
         test_support::amit_adjustment(&pool, 1, 1, 1, dec("100")).await;
-        // 50c/unit return of capital in September 2024.
-        return_of_capital(&pool, 1, 1, ymd(2024, 9, 15), "0.50").await;
 
         // Live: both reductions apply — 1000 − 20 − 50 = 930.
         let open = load_all(&pool, None).await;

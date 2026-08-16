@@ -731,3 +731,59 @@ remaining way to meet the mismatch — documented as still failing loudly. That 
 scope (the operation paths bypass `check_amounts` too): the two hand-entry paths are where a
 currency is typed. `docs/SCHEMA.md`'s `currency` column note now records the write-time validation
 instead of the read-time failure.
+
+## A return of capital on an AMIT listing double-reduces alongside the AMMA adjustment (SCENARIOS E-04)
+(SCENARIOS.md section E verification pass, 2026-08-16. For an AMIT the cost-base movement is driven
+solely by the AMMA statement's per-unit `cost_base_adjustment` — `docs/API.md` says so in the E4
+cross-check section — but nothing stops the same money being entered *again* as a `ReturnOfCapital`
+action on the same listing, and the two reductions simply add.)
+- [x] E-04 — reproduced: AMIT listing VDHG, Buy ×100 @ $10, AMMA FY2024 with
+  `cost_base_adjustment: 0.50` generated onto the parcel (`amit_cost_base_reduction: 50.00`,
+  remaining cost base 950.00), then a `ReturnOfCapital` of $0.50/unit dated 2024-05-01 → `204`, and
+  the parcel's remaining cost base drops to **900.00**. `e4_cross_check`, `amit_cash_cross_check`,
+  `amit_adjustment_cross_check` and `health` are all empty: nothing sees it
+- [x] **Decided 2026-08-16 (Evan): refuse it at write time** — a `ReturnOfCapital` on a listing with
+  `amit = 1` answers `422` pointing at the AMMA statement's `cost_base_adjustment` as the place the
+  reduction belongs. (The alternatives considered and rejected: a non-blocking cross-check row, or
+  documenting it as the user's own call.) The refusal needs the usual sweep: the error variant and
+  its 422 body beside `WriteError`, `docs/API.md`'s corporate-actions 422 catalogue, and a note in
+  the AMIT/AMMA sections saying the two paths are mutually exclusive
+- [x] Note the asymmetry that makes the refusal tempting: the income-row path already refuses the
+  same double entry — `tax_deferred_amount` on a non-trust income row is a 422 telling the user to
+  record a `ReturnOfCapital` instead — so the corporate-action side is the only unguarded door
+
+**Fixed 2026-08-16 exactly as decided.** The income path turned out to refuse the *same* pair
+already — `income::UpsertError::AmitTaxDeferred`, a `tax_deferred_amount` on an AMIT listing's row —
+so the corporate-action refusal is that guard's mirror image, down to the 422's wording (it names
+`cost_base_adjustment` and CGT event E10 as where the reduction belongs). That also settles the
+"is a blanket `amit = 1` rule too coarse?" question the fund-converts-to-an-AMIT case raises: the
+flag is already treated as a present-tense, unconditional bar on the E4 path elsewhere in the tree,
+so a second, cleverer rule here would have been the inconsistency.
+- [x] `corporate_action::db::WriteError::ReturnOfCapitalOnAmit` + its `From<WriteError> for ApiError`
+      arm, checked inside `db_upsert`'s own transaction (before the INSERT — the listing's flag is
+      all it takes, and an unknown listing still falls through to the FK violation as before). It
+      runs over the state the write would leave, like its neighbours, so *moving* an accepted
+      payment onto an AMIT listing is refused too; other action types on an AMIT are untouched
+- [x] Tests: `entities::corporate_action::tests::api_return_of_capital_on_an_amit_listing_returns_422`
+      (the E-04 reproduction — the payment is refused with a body naming `cost_base_adjustment` and
+      E10, nothing persists, and the parcel keeps the AMMA statement's reduction alone: 950.00, not
+      the 900.00 the accepted double entry produced) and
+      `api_return_of_capital_is_refused_only_where_the_listing_is_an_amit` (the non-AMIT trust's E4
+      payment still lands, the move onto an AMIT is refused and leaves the stored row alone, and a
+      `ShareSplit` on the AMIT listing is unaffected)
+- [x] `domain::open_parcels::tests::amit_and_return_of_capital_reduce_the_remaining_cost_base` now
+      builds the one fixture that still reaches both reductions on one parcel — the payment recorded
+      while the trust was not yet an AMIT, then the conversion — which is the case
+      `docs/API.md`'s "one chain per parcel" paragraph already promised the cost-base chain handles.
+      `entities::tests::what_a_get_returns_can_be_put_back_unchanged`'s corporate-action round trip
+      moved to the fixture's non-AMIT listing
+- [x] Docs: the corporate-actions write rules state the refusal and that the two paths are mutually
+      exclusive (plus the converted-fund note: the refusal is on the write, so pre-conversion
+      payments stand — record them before flagging the listing); the `ReturnOfCapital` bullet says
+      it is the non-AMIT trust's E4 mechanism; the AMIT-adjustments section gained
+      **This is an AMIT's only cost-base movement**, naming both shut doors from that side; the
+      net-capital-gain "one chain per parcel" paragraph notes when the combination can still arise;
+      and the Response-codes `422` row lists the refusal (alongside the E-07 currency mismatch,
+      which was missing from it). Pinned by `doc_checks::amit_return_of_capital_refusal_documented`
+- [x] Verified: `cargo build` and `cargo test` (1476 passed, warning-free), `cargo fmt --check` and
+      `cargo clippy --all-targets -- -D warnings` clean
