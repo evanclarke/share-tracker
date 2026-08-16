@@ -123,33 +123,3 @@ the income side.)
   that a converted fund is entered as two listings, and have the write refuse the flag flip while
   the listing has income rows or a return of capital in an earlier year. Whichever is chosen, the
   income-side silence is the part that must not survive
-
-## The AMIT cash cross-check ignores the holding account (SCENARIOS F-03, F-08)
-(SCENARIOS.md section F verification pass, 2026-08-16. The report's "covered" set is keyed
-`(listing_id, tax_year)` (`src/reports/amit_cash_cross_check.rs:68`), while a registry issues one
-AMMA statement **per holder account** — which is exactly why `amit_adjustments` are constrained to
-the statement's own account and why generation narrows to it.)
-- [ ] F-08 — reproduced: VDHG cash row in account 1 for FY2025 is flagged while no statement
-  exists; entering a statement for the same fund and year **in account 2** clears the flag,
-  although account 1's income is still unattributed and still excluded from the tax summary
-- [ ] The fix is to key the covered set by `(listing_id, holding_account_id, tax_year)` and report
-  the account on the alert (F-03 confirms the two-account case is otherwise handled correctly
-  throughout: generation, the adjustment cross-check and the cost-base reports all narrow by
-  account)
-
-## Which parcels an AMMA statement's per-unit figure reaches is undocumented (SCENARIOS F-05)
-(SCENARIOS.md section F verification pass, 2026-08-16. Generation applies the statement's per-unit
-`cost_base_adjustment` uniformly to every parcel open at the year end, and the Σ-against-`units_held`
-reconciliation depends on it — but nothing in `docs/API.md` says so, and the ATO's own guidance
-states the AMIT cost base net amount as a member-level annual amount without prescribing how it is
-apportioned across parcels acquired at different times, `docs/ato/amit-cost-base-adjustments.md`.)
-- [ ] F-05 — a parcel bought 20 June, after the fund's final (31 March) distribution period, is
-  covered at the same per-unit figure as a parcel held all year, and the registry's `units_held`
-  at 30 June includes it, so the set reconciles. The year's total movement is therefore right while
-  its split between parcels is an approximation — which matters when only some parcels are later
-  sold. Behaviour pinned by
-  `amit_adjustment_generation::db_a_parcel_bought_after_the_last_distribution_is_still_covered`
-- [ ] Document it in the [Generating AMIT adjustments](docs/API.md) section: the per-unit figure is
-  applied to every unit held at the statement's year end, a member whose statement gives a *total*
-  AMIT cost base net amount derives the per-unit figure by dividing over the units the statement
-  covers, and a member who wants a different apportionment enters the rows by hand

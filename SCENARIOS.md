@@ -69,7 +69,7 @@ behind or became a recorded finding.
 | C. The 12-month CGT discount clock | 18 | 2026-08-15 | 1 raised, closed — see below |
 | D. Sells and parcel allocation | 20 | 2026-08-15 | 2 raised, both closed — see below |
 | E. Corporate actions | 51 | 2026-08-16 | 5 raised, all closed — see below |
-| F. AMIT / AMMA | 25 | 2026-08-16 | 6 raised, all open — see below |
+| F. AMIT / AMMA | 25 | 2026-08-16 | 6 raised, 2 closed — see below |
 | G. Dividends, franking, and the holding-period rule | 25 | — | — |
 | H. Interest, expenses, and other income | 10 | — | — |
 | I. DRP | 14 | — | — |
@@ -332,8 +332,8 @@ The six findings, each raised as a `TODO.md` section naming its scenario ids:
 | A statement for a year with nothing held at 30 June cannot be generated, and its hand-entered set is flagged forever | F-04, F-17, F-25 | open |
 | An AMIT adjustment on a parcel closed by a transfer is accepted and reduces nothing | F-17 | open |
 | The `amit` listing flag is retroactive and rewrites every earlier year | F-23 | open |
-| The AMIT cash cross-check ignores the holding account | F-03, F-08 | open |
-| Which parcels a statement's per-unit figure reaches is undocumented | F-05 | open |
+| The AMIT cash cross-check ignores the holding account | F-03, F-08 | fixed 2026-08-16 — archived in [`DONE/reporting.md`](DONE/reporting.md) |
+| Which parcels a statement's per-unit figure reaches is undocumented | F-05 | documented 2026-08-16 — archived in [`DONE/tax-domain.md`](DONE/tax-domain.md) |
 
 ---
 

@@ -66,11 +66,17 @@ function completenessSection(c) {
     ]);
   }
   const items = [];
+  // Both AMMA-coverage checks are per holding account (a registry issues one
+  // statement per holder account), so each line names the account it is
+  // asking for — two accounts of one fund otherwise print as two identical
+  // sentences.
   c.amma_missing.forEach(function (a) {
-    items.push(el('li', null, 'No AMMA statement for ' + a.ticker + ' — held at some point during the year (checked by holdings, not just cash rows).'));
+    items.push(el('li', null, 'No AMMA statement for ' + a.ticker + ' in account #' + a.holding_account_id
+      + ' — held at some point during the year (checked by holdings, not just cash rows).'));
   });
   c.amit_cash_alerts.forEach(function (a) {
-    items.push(el('li', null, a.ticker + ': ' + a.cash_rows + ' cash distribution row(s) totalling ' + moneyText(a.cash_total_aud) + ' AUD with no covering AMMA statement.'));
+    items.push(el('li', null, a.ticker + ' (account #' + a.holding_account_id + '): ' + a.cash_rows
+      + ' cash distribution row(s) totalling ' + moneyText(a.cash_total_aud) + ' AUD with no covering AMMA statement.'));
   });
   c.e4_alerts.forEach(function (a) {
     items.push(el('li', null, a.ticker + ' (' + a.date_paid + '): tax-deferred amount ' + moneyText(a.tax_deferred_amount) + ' recorded with no matching Return of Capital action this year.'));

@@ -181,6 +181,36 @@ fn amit_adjustment_generation_and_cross_check_documented() {
     assert!(README_MD.contains("per-parcel AMIT adjustments reconcile to it"));
 }
 
+/// Docs-sync pin for SCENARIOS F-05: which parcels a statement's per-unit
+/// `cost_base_adjustment` reaches is a stated convention, not an unwritten
+/// one — a parcel bought after the fund's last distribution period is covered
+/// like any other, a statement quoting a *total* is divided over the units it
+/// covers, and a member wanting another apportionment enters the rows by
+/// hand. The ATO mirror it cites states the amount annually and per member.
+#[test]
+fn the_per_unit_apportionment_across_parcels_is_documented() {
+    assert!(API_MD.contains("**Which parcels the per-unit figure reaches.**"));
+    assert!(API_MD.contains("**uniformly to every unit held at the statement's"));
+    assert!(API_MD.contains("bought *after* the fund's last distribution period"));
+    assert!(API_MD.contains("dividing that total over the units the statement covers"));
+    // The cited ATO mirror does state it as an annual, member-level amount.
+    assert!(
+        include_str!("../docs/ato/amit-cost-base-adjustments.md")
+            .contains("AMIT cost base net amount for the income year in relation to your units")
+    );
+}
+
+/// Docs-sync pin for SCENARIOS F-03/F-08: AMMA coverage is asked per holding
+/// account, in both the cash cross-check and the annual tax report's
+/// completeness section — a registry issues one statement per holder account.
+#[test]
+fn amma_coverage_is_documented_as_per_holding_account() {
+    assert!(API_MD.contains("Coverage is asked **per holding account**"));
+    assert!(API_MD.contains("one record per affected (listing, year, account) triple"));
+    assert!(API_MD.contains("It is asked **per holding account** (each row carries its"));
+    assert!(README_MD.contains("per holding account"));
+}
+
 #[test]
 fn known_limitations_document_gifts_at_market_value() {
     let limitations = known_limitations();

@@ -81,16 +81,21 @@ fn period_for(tax_year: i32) -> (NaiveDate, NaiveDate) {
 pub struct AmmaMissingAlert {
     pub listing_id: i64,
     pub ticker: String,
+    /// The holding account the units were held in. A registry issues one AMMA
+    /// statement per holder account, so a fund held in two accounts needs two
+    /// statements and each account is asked for its own (the same rule the
+    /// [AMIT cash cross-check](super::amit_cash_cross_check) applies).
+    pub holding_account_id: i64,
 }
 
 #[derive(Debug, Serialize)]
 pub struct Completeness {
     pub complete: bool,
-    /// AMIT listings held at any point in the year with no AMMA statement
-    /// covering it — holdings-based, so (unlike
-    /// [`amit_cash_cross_check`](super::amit_cash_cross_check), whose own doc
-    /// comment names the gap) this also catches a fund-year where no cash
-    /// rows were entered at all.
+    /// AMIT listings held at any point in the year, per holding account, with
+    /// no AMMA statement covering that account and year — holdings-based, so
+    /// (unlike [`amit_cash_cross_check`](super::amit_cash_cross_check), whose
+    /// own doc comment names the gap) this also catches a fund-year where no
+    /// cash rows were entered at all.
     pub amma_missing: Vec<AmmaMissingAlert>,
     pub amit_cash_alerts: Vec<amit_cash_cross_check::AmitCashAlert>,
     pub e4_alerts: Vec<e4_cross_check::E4CrossCheckAlert>,
@@ -101,42 +106,50 @@ pub struct Completeness {
     pub amit_adjustment_alerts: Vec<amit_adjustment_cross_check::AmitAdjustmentAlert>,
 }
 
-/// Every AMIT listing with a non-zero opening balance at the start of the
-/// year, or any Buy/DRP trade dated within it — i.e. held at some point
-/// during the year — that has no `amma_statements` row whose
-/// `tax_year_end_date` falls in the year. A simple net-units walk (Buy/DRP
-/// minus Sell quantities, not cost-base aware): good enough for a
-/// held/not-held flag, not a financial figure.
+/// Every (AMIT listing, holding account) with a non-zero opening balance at
+/// the start of the year, or any Buy/DRP trade dated within it — i.e. held at
+/// some point during the year — that has no `amma_statements` row for that
+/// account whose `tax_year_end_date` falls in the year. A simple net-units
+/// walk (Buy/DRP minus Sell quantities, not cost-base aware): good enough for
+/// a held/not-held flag, not a financial figure.
+///
+/// The account is part of the key because the statement is: a registry issues
+/// one AMMA statement per holder account, and one account's statement
+/// attributes only its own units — so a fund held in two accounts with a
+/// statement for one of them is exactly the gap this section exists to catch
+/// (SCENARIOS F-03, F-08).
 async fn amma_missing(
     conn: &mut sqlx::SqliteConnection,
     tax_year: i32,
 ) -> Result<Vec<AmmaMissingAlert>, sqlx::Error> {
     let (start, end) = period_for(tax_year);
 
-    let amit_listings: Vec<(i64, String)> =
-        sqlx::query("SELECT id, ticker FROM listings WHERE amit")
-            .fetch_all(&mut *conn)
-            .await?
-            .into_iter()
-            .map(|r| Ok::<_, sqlx::Error>((r.try_get("id")?, r.try_get("ticker")?)))
-            .collect::<Result<_, _>>()?;
-    if amit_listings.is_empty() {
+    let tickers: HashMap<i64, String> = sqlx::query("SELECT id, ticker FROM listings WHERE amit")
+        .fetch_all(&mut *conn)
+        .await?
+        .into_iter()
+        .map(|r| Ok::<_, sqlx::Error>((r.try_get("id")?, r.try_get("ticker")?)))
+        .collect::<Result<_, _>>()?;
+    if tickers.is_empty() {
         return Ok(vec![]);
     }
 
     let trade_rows = sqlx::query(
-        "SELECT listing_id, trade_type, date, quantity FROM trades \
+        "SELECT listing_id, holding_account_id, trade_type, date, quantity FROM trades \
          WHERE listing_id IN (SELECT id FROM listings WHERE amit) \
            AND trade_type IN ('Buy', 'DRP', 'Sell') \
-         ORDER BY listing_id, date",
+         ORDER BY listing_id, holding_account_id, date",
     )
     .fetch_all(&mut *conn)
     .await?;
 
-    let mut opening: HashMap<i64, Decimal> = HashMap::new();
-    let mut bought_in_year: HashSet<i64> = HashSet::new();
+    let mut opening: HashMap<(i64, i64), Decimal> = HashMap::new();
+    let mut bought_in_year: HashSet<(i64, i64)> = HashSet::new();
     for row in &trade_rows {
-        let listing_id: i64 = row.try_get("listing_id")?;
+        let key: (i64, i64) = (
+            row.try_get("listing_id")?,
+            row.try_get("holding_account_id")?,
+        );
         let trade_type: TradeType = row.try_get("trade_type")?;
         let date: NaiveDate = row.try_get("date")?;
         let qty = crate::infra::decimal::row_dec(row, "quantity")?;
@@ -145,14 +158,14 @@ async fn amma_missing(
             TradeType::Sell => -qty,
         };
         if date < start {
-            *opening.entry(listing_id).or_insert(Decimal::ZERO) += signed;
+            *opening.entry(key).or_insert(Decimal::ZERO) += signed;
         } else if date <= end && trade_type.is_acquisition() {
-            bought_in_year.insert(listing_id);
+            bought_in_year.insert(key);
         }
     }
 
-    let covered: HashSet<i64> = sqlx::query(
-        "SELECT listing_id FROM amma_statements \
+    let covered: HashSet<(i64, i64)> = sqlx::query(
+        "SELECT listing_id, holding_account_id FROM amma_statements \
          WHERE tax_year_end_date BETWEEN ? AND ?",
     )
     .bind(start)
@@ -160,17 +173,31 @@ async fn amma_missing(
     .fetch_all(&mut *conn)
     .await?
     .into_iter()
-    .map(|r| r.try_get("listing_id"))
+    .map(|r| Ok::<_, sqlx::Error>((r.try_get("listing_id")?, r.try_get("holding_account_id")?)))
     .collect::<Result<_, _>>()?;
 
-    Ok(amit_listings
+    // Every (listing, account) the walk saw, held at some point in the year
+    // and not covered — sorted by ticker, then account, so the section reads
+    // in the same order as the cross-check alerts beside it.
+    let mut held: Vec<(i64, i64)> = opening
+        .iter()
+        .filter(|(_, q)| **q > Decimal::ZERO)
+        .map(|(key, _)| *key)
+        .chain(bought_in_year.iter().copied())
+        .filter(|key| !covered.contains(key))
+        .collect();
+    held.sort_unstable_by_key(|(listing_id, account_id)| {
+        (tickers.get(listing_id).cloned(), *account_id, *listing_id)
+    });
+    held.dedup();
+
+    Ok(held
         .into_iter()
-        .filter(|(id, _)| {
-            let held =
-                opening.get(id).is_some_and(|q| *q > Decimal::ZERO) || bought_in_year.contains(id);
-            held && !covered.contains(id)
+        .map(|(listing_id, holding_account_id)| AmmaMissingAlert {
+            listing_id,
+            ticker: tickers.get(&listing_id).cloned().unwrap_or_default(),
+            holding_account_id,
         })
-        .map(|(listing_id, ticker)| AmmaMissingAlert { listing_id, ticker })
         .collect())
 }
 
@@ -1612,6 +1639,70 @@ mod tests {
         let cleared = db_tax_report(&pool, 2024).await.unwrap();
         assert!(cleared.completeness.amit_adjustment_alerts.is_empty());
         assert!(cleared.completeness.complete);
+    }
+
+    /// SCENARIOS F-03/F-08: the fund held in two accounts needs a statement
+    /// for each — a registry issues one per holder account — so the
+    /// completeness check asks per account, and the account with no statement
+    /// keeps the year incomplete.
+    #[tokio::test]
+    async fn amma_missing_asks_each_holding_account_for_its_own_statement() {
+        let pool = test_support::test_pool().await;
+        listing_amit(&pool, 1, "AMT").await;
+        crate::entities::holding_account::db_upsert(
+            &pool,
+            &crate::entities::holding_account::HoldingAccount {
+                id: 2,
+                name: "Second".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        test_support::buy(1, 1)
+            .date(ymd(2023, 1, 1))
+            .qty(dec("100"))
+            .price(dec("10"))
+            .insert(&pool)
+            .await;
+        test_support::buy(2, 1)
+            .date(ymd(2023, 2, 1))
+            .qty(dec("40"))
+            .price(dec("11"))
+            .account(2)
+            .insert(&pool)
+            .await;
+
+        let report = db_tax_report(&pool, 2024).await.unwrap();
+        assert_eq!(
+            report
+                .completeness
+                .amma_missing
+                .iter()
+                .map(|a| (a.listing_id, a.holding_account_id))
+                .collect::<Vec<_>>(),
+            vec![(1, 1), (1, 2)]
+        );
+
+        // The first account's statement clears only its own row.
+        test_support::amma(1, 1).insert(&pool).await;
+        let partly = db_tax_report(&pool, 2024).await.unwrap();
+        assert_eq!(
+            partly
+                .completeness
+                .amma_missing
+                .iter()
+                .map(|a| a.holding_account_id)
+                .collect::<Vec<_>>(),
+            vec![2]
+        );
+        assert!(!partly.completeness.complete);
+
+        test_support::amma(2, 1)
+            .with(|a| a.holding_account_id = 2)
+            .insert(&pool)
+            .await;
+        let cleared = db_tax_report(&pool, 2024).await.unwrap();
+        assert!(cleared.completeness.amma_missing.is_empty());
     }
 
     /// A listing bought and fully sold before the requested year (nothing

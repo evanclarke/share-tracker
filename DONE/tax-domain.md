@@ -833,3 +833,40 @@ E-36's had no pin —
 (105 units + 1-for-10 → 115.5, cost base unchanged). E-36 stays pinned by
 `entities::scrip_exchange`'s existing fractional-replacement tests. Full suite 1481 passed / 0
 failed.
+
+## Which parcels an AMMA statement's per-unit figure reaches is undocumented (SCENARIOS F-05)
+(SCENARIOS.md section F verification pass, 2026-08-16. Generation applies the statement's per-unit
+`cost_base_adjustment` uniformly to every parcel open at the year end, and the Σ-against-`units_held`
+reconciliation depends on it — but nothing in `docs/API.md` says so, and the ATO's own guidance
+states the AMIT cost base net amount as a member-level annual amount without prescribing how it is
+apportioned across parcels acquired at different times, `docs/ato/amit-cost-base-adjustments.md`.)
+- [x] F-05 — a parcel bought 20 June, after the fund's final (31 March) distribution period, is
+  covered at the same per-unit figure as a parcel held all year, and the registry's `units_held`
+  at 30 June includes it, so the set reconciles. The year's total movement is therefore right while
+  its split between parcels is an approximation — which matters when only some parcels are later
+  sold. Behaviour pinned by
+  `amit_adjustment_generation::db_a_parcel_bought_after_the_last_distribution_is_still_covered`
+- [x] Document it in the [Generating AMIT adjustments](docs/API.md) section: the per-unit figure is
+  applied to every unit held at the statement's year end, a member whose statement gives a *total*
+  AMIT cost base net amount derives the per-unit figure by dividing over the units the statement
+  covers, and a member who wants a different apportionment enters the rows by hand
+
+**Resolution (2026-08-16): documented in [Generating AMIT adjustments](docs/API.md#generating-amit-adjustments).**
+
+A "Which parcels the per-unit figure reaches" paragraph states the rule the reconciliation depends
+on — `cost_base_adjustment` applies uniformly to every unit held at the statement's
+`tax_year_end_date` — and then the two consequences a reader actually needs: a parcel bought after
+the fund's last distribution period is covered at the same per-unit figure as one held all year
+(the year's total movement is right; its split between parcels is an apportionment this tool makes,
+not one the fund states), and a statement quoting a **total** AMIT cost base net amount is entered
+by dividing it over the units the statement covers, which makes Σ reconcile by construction. The
+way out is named too: a member wanting a different apportionment enters the rows by hand, where
+`quantity` decides which units each row reaches. The paragraph cites
+`docs/ato/amit-cost-base-adjustments.md`, which states the amount annually and per member without
+prescribing how it is spread across parcels.
+
+Tests: `doc_checks::the_per_unit_apportionment_across_parcels_is_documented` (the paragraph, both
+consequences, and that the cited ATO mirror does state the amount as an annual member-level one);
+the behaviour itself stays pinned by
+`entities::amit_adjustment_generation::tests::db_a_parcel_bought_after_the_last_distribution_is_still_covered`
+from the section-F pass. Full suite 1491 passed / 0 failed.

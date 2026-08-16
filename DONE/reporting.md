@@ -578,3 +578,43 @@ E-15 together, newest first, with the ids),
 independent events stay silent), `three_identical_actions_are_one_row_counting_three`,
 `empty_database_reports_nothing_stale` (extended), and `web::tests::health_banner_ui_present`.
 Full suite 1481 passed / 0 failed.
+
+## The AMIT cash cross-check ignores the holding account (SCENARIOS F-03, F-08)
+(SCENARIOS.md section F verification pass, 2026-08-16. The report's "covered" set is keyed
+`(listing_id, tax_year)` (`src/reports/amit_cash_cross_check.rs:68`), while a registry issues one
+AMMA statement **per holder account** — which is exactly why `amit_adjustments` are constrained to
+the statement's own account and why generation narrows to it.)
+- [x] F-08 — reproduced: VDHG cash row in account 1 for FY2025 is flagged while no statement
+  exists; entering a statement for the same fund and year **in account 2** clears the flag,
+  although account 1's income is still unattributed and still excluded from the tax summary
+- [x] The fix is to key the covered set by `(listing_id, holding_account_id, tax_year)` and report
+  the account on the alert (F-03 confirms the two-account case is otherwise handled correctly
+  throughout: generation, the adjustment cross-check and the cost-base reports all narrow by
+  account)
+
+**Resolution (2026-08-16): coverage keyed by `(listing, holding account, financial year)` in both
+AMMA-coverage checks.**
+
+`reports::amit_cash_cross_check` now builds its covered set from
+`(listing_id, holding_account_id, tax_year_end_date's year)` and aggregates the cash rows per
+`(ticker, listing, FY, account)`, so a statement issued for one holder account clears only that
+account's row. `AmitCashAlert` carries the new `holding_account_id`, and its doc comment says why
+the account is part of the key (the same reason an AMIT adjustment may only touch its statement's
+own account).
+
+The annual tax report's holdings-based `amma_missing` check had the identical blindness and was
+fixed with it — it gates the report's `complete` flag, so leaving it keyed by listing alone would
+have gone on calling a year complete while one account's attribution was missing. Its net-units
+walk and its covered set are now keyed by `(listing, account)`, `AmmaMissingAlert` carries
+`holding_account_id`, and the printed completeness lines name the account ("… for AMT in account
+#2"), which two accounts of one fund would otherwise render as two identical sentences.
+
+Docs: the [AMIT cash cross-check](docs/API.md#amit-cash-cross-check) section states the per-account
+rule, its reason, and the new response field; the annual tax report's completeness bullet says the
+same for `amma_missing`; the README's cross-check bullet and the web UI's report description follow.
+
+Tests: `reports::amit_cash_cross_check::tests::db_amma_in_another_holding_account_does_not_clear_the_flag`
+(F-08 exactly) and `db_each_holding_account_is_flagged_and_cleared_on_its_own` (two accounts, two
+alerts, cleared one at a time), `reports::tax_report::tests::amma_missing_asks_each_holding_account_for_its_own_statement`,
+and `doc_checks::amma_coverage_is_documented_as_per_holding_account`. Full suite 1491 passed / 0
+failed.
