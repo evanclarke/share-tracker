@@ -46,10 +46,10 @@ the only `db_upsert` in the tree with no write-time check at all — it has no e
   is refused `422` naming the computed product (G-23), and `trades.statement_total` reconciles the
   same way. A user who keys 50% and then the *gross* figure as the amount over-claims, and the two
   fields that record the mistake sit inertly beside it
-- [ ] **Needs a decision**: cross-check the pair when both are supplied (`gross × pct`, cent-rounded,
-  must equal `amount` — the `amount_per_security` shape), warn in the health report instead (the
-  `duplicate_*` shape), or state in `docs/API.md` and the UI hint that the pair is a note to self
-  that nothing verifies
+- [ ] **Decided 2026-08-17: cross-check it, the `amount_per_security` way.** When both provenance
+  fields are supplied, `gross × pct` cent-rounded must equal `amount` or the write is refused `422`
+  naming the computed figure. (The alternatives put aside: a health-report warning like the
+  `duplicate_*` lists, or documenting the pair as a note to self that nothing verifies.)
 - [ ] Tests: whichever way it lands, an inconsistent triple is refused/flagged and a consistent one
   (including the exactly-100% and no-percentage cases) is accepted
 
@@ -70,10 +70,10 @@ the only `db_upsert` in the tree with no write-time check at all — it has no e
   `entitlement_date` beside `date_paid` precisely so a 30 June entitlement paid 15 July is assessed
   in the year just ended (G-19). Interest has one date because it needs one — but only if that date
   is named unambiguously
-- [ ] **Needs a decision**: state the convention (rename/relabel toward "date credited", the UI hint,
-  `docs/SCHEMA.md`, `docs/API.md`, and a mirrored `docs/ato/investment-income-timing.md` indexed in
-  OVERVIEW — the shape the conduit-foreign-income convention took, G-03), or record the availability
-  date as a second informational column
+- [ ] **Decided 2026-08-17: state the convention**, the shape the conduit-foreign-income convention
+  took (G-03) — relabel toward "date credited" in the UI hint, `docs/SCHEMA.md` and `docs/API.md`,
+  plus a mirrored `docs/ato/investment-income-timing.md` (QC 72101) indexed in OVERVIEW. No second
+  column: the availability date is not a tax fact, and recording it would invite keying it here
 - [ ] Tests: `doc_checks` pins the stated convention against the mirrored ATO wording
 
 ## An expense covering more than one financial year has nowhere to be apportioned (SCENARIOS H-08)
@@ -97,12 +97,13 @@ the only `db_upsert` in the tree with no write-time check at all — it has no e
 - [ ] Nothing in `docs/API.md`'s Known limitations, the entity's UI description, or
   `docs/ato/investment-income-deductions.md` (which lists borrowing costs as claimable without saying
   over what period) mentions time apportionment
-- [ ] **Needs a decision**: document the workaround (one row per financial year for the apportioned
-  share, a Known limitation naming both rules and a mirrored ATO doc), or model it — a
-  `service_period_start`/`service_period_end` pair the tax summary apportions by days, which is the
-  honest version but a real feature (a new pair of columns, the day-count split, the annual tax
-  report's rows, and the "which year is this row in" question every report currently answers with one
-  date)
+- [ ] **Decided 2026-08-17: document the workaround** — one row per financial year carrying that
+  year's apportioned share, stated as a Known limitation naming both ATO rules (QC 104069 for the
+  5-years-or-loan-term borrowing expenses, the prepaid-expenses guide for the 12-month rule and the
+  day-count formula), a UI hint on the entity, and a mirrored `docs/ato/` doc indexed in OVERVIEW.
+  Not modelled: a `service_period_start`/`service_period_end` pair the tax summary apportions by
+  days is the honest version but a real feature — new columns, the day-count split, the annual tax
+  report's rows, and the "which year is this row in" question every report answers with one date
 - [ ] Tests: whichever way it lands, a multi-year expense reaches the right per-year deduction (or is
   refused/documented), and `doc_checks` pins the stated rule
 
