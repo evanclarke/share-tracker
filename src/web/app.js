@@ -1057,9 +1057,12 @@ async function viewAttachments(ownerField, ownerId) {
 // indirectly as a missing snapshot (linking to Closing Prices, where the
 // backfill action re-fetches once the symbol is fixed) — any duplicated
 // corporate action, whose effect is silently compounded (linking to Corporate
-// Actions, where the surplus row is deleted), and any fund-year with two AMMA
+// Actions, where the surplus row is deleted), any fund-year with two AMMA
 // statements for one holding account, counted twice in the income, gains and
-// cost-base figures alike (linking to AMMA Statements). Refreshed on every
+// cost-base figures alike (linking to AMMA Statements), and any distribution
+// entered twice — identical amounts, same listing, account and payment date —
+// which declares the dividend and its franking credits twice (linking to
+// Income). Refreshed on every
 // route render, so fixing the cause clears it on the next navigation. A
 // failing health fetch hides the banner rather than breaking the app.
 async function refreshHealthBanner() {
@@ -1096,6 +1099,13 @@ async function refreshHealthBanner() {
         + d.statement_ids.join(', ')
         + ') — every figure is counted once per statement; delete the superseded one unless both are real.');
     });
+    const duplicateIncome = h.duplicate_income || [];
+    duplicateIncome.forEach(function (d) {
+      problems.push(d.income_count + ' identical income rows of ' + d.gross_amount + ' '
+        + d.currency + ' for ' + d.ticker + ' paid ' + d.date_paid + ' into one holding account (ids '
+        + d.income_ids.join(', ')
+        + ') — the dividend and its franking credits are counted once per row; delete the duplicate unless both are real.');
+    });
     if (problems.length === 0) {
       banner.hidden = true;
       banner.innerHTML = '';
@@ -1112,6 +1122,9 @@ async function refreshHealthBanner() {
     }
     if (duplicateAmma.length > 0) {
       banner.appendChild(el('a', { href: '#/e/amma_statements' }, 'Open AMMA Statements →'));
+    }
+    if (duplicateIncome.length > 0) {
+      banner.appendChild(el('a', { href: '#/e/income' }, 'Open Income →'));
     }
     banner.hidden = false;
   } catch (e) {

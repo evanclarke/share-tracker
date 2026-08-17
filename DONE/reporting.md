@@ -760,3 +760,67 @@ Tests: `reports::amit_adjustment_cross_check::tests::db_a_statement_covering_uni
 and the re-worded refusal pinned in
 `entities::amit_adjustment_generation::tests::api_each_refusal_returns_422_naming_the_reason`, plus
 two `doc_checks` assertions. Full suite 1497 passed / 0 failed.
+
+## Duplicate income rows are silently double-counted (SCENARIOS G-24)
+(SCENARIOS.md section G verification pass, 2026-08-16 — the `income` counterpart of the closed
+E-03 `duplicate_actions` and F-06 `duplicate_amma_statements` findings.)
+- [x] G-24 — two `income` rows for the same listing, holding account and `date_paid`, with identical
+  amounts, report twice the dividend income and twice the franking credits. `GET /reports/health`
+  says nothing: its duplicate checks cover corporate actions and AMMA statements only
+- [x] The cause is the same as those two (a re-submitted form, a re-imported statement) and so is
+  the shape of the fix: a **warning, not a constraint** — two dividends from one company on one day
+  are legitimate in principle (an ordinary and a special dividend), so the pair must stay enterable
+- [x] Open question: the key. (listing, account, `date_paid`) alone flags the legitimate
+  ordinary + special pair; adding "identical gross amounts" flags only what is almost certainly a
+  double entry
+- [x] Tests: a duplicated pair is reported with its ids (as `duplicate_actions` is), rows differing
+  in listing/account/date/amount are not, and the web banner names it
+
+**Resolution (2026-08-17): a `reports::health` warning, as for E-03 and F-06 — non-blocking, no
+constraint.**
+
+`GET /reports/health` gained `duplicate_income`: one row per (listing, holding account, `date_paid`)
+carrying more than one income row of **identical amounts**, newest first, as
+`{ listing_id, ticker, holding_account_id, date_paid, currency, gross_amount, income_count,
+income_ids }` — the ids ascending, so the surplus row is opened and deleted without a search, and
+`gross_amount` (franked + unfranked + foreign source, via `Income::gross_cash_income`) naming the
+distribution rather than only its date.
+
+The open question is settled the way the finding's own test list implies: **the amounts are part of
+the key**. Keying on (listing, account, date) alone would fire on the legitimate ordinary + special
+pair, which differs in what it pays; requiring every money column *and* the currency to match leaves
+only what is almost certainly one payment entered twice. Non-money differences (an `ex_date` filled
+in on one row only) are ignored — that is how a re-entry differs from the original, not evidence of
+a second payment.
+
+Unlike the other two lists this one is **grouped in Rust, not in SQL**: the amounts are TEXT decimal
+columns, which SQL would compare as strings, so `70.0` and `70.00` — the same dollars written by two
+clients — would slip through. `same_income_entry` compares them as `Decimal`s, over rows the SQL
+already narrows to same-(listing, account, date) clusters via an `EXISTS` subquery, so only the
+handful of same-day pairs a portfolio has is read into memory. One same-day cluster can hold both a
+duplicated pair and a genuine second dividend: the grouping is per amount fingerprint, so the third
+row neither joins the pair nor suppresses it.
+
+The web UI's cross-view banner names it — count, gross amount, currency, ticker, date, ids, with
+"the dividend and its franking credits are counted once per row; delete the duplicate unless both
+are real" — and links to Income beside the existing Jobs, Closing Prices, Corporate Actions and AMMA
+Statements links. Verified end to end against a running server seeded with the demo fixture plus a
+re-entered dividend: `/reports/health` returns the row (VAS, 2757.30 AUD, 2024-07-01, ids 1 and 999)
+and the banner renders it in headless Chrome.
+
+`docs/API.md`'s health section states the field, why it double-counts (the tax summary's dividend
+lines, the franking credits, the foreign income and the FITO limit are each summed row by row), why
+the amounts are in the key, that they are compared as decimals rather than as stored text, the
+recorded decision that this is deliberately *not* a uniqueness constraint, and the way out (delete
+the surplus row, `422` while a DRP reinvestment is still linked). The README's monitoring bullet
+lists it alongside the duplicated corporate action and AMMA statement.
+
+Tests: `reports::health::tests::duplicated_income_rows_are_reported_with_their_ids` (two listings,
+newest first, with the ids and the gross),
+`income_differing_in_listing_account_date_or_amount_is_not_a_duplicate` (the key is all four parts —
+the ordinary + special pair stays silent),
+`amounts_equal_in_value_but_not_in_text_are_still_duplicates`,
+`three_identical_income_rows_are_one_row_counting_three`,
+`a_duplicated_pair_is_reported_beside_a_genuine_second_dividend`,
+`empty_database_reports_nothing_stale` (extended), and `web::tests::health_banner_ui_present`.
+Full suite 1545 passed / 0 failed.

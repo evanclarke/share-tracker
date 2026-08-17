@@ -24,7 +24,11 @@
 //! - every (listing, financial year, holding account) carrying more than one
 //!   AMMA statement — the same double-entry on the attribution side, counted
 //!   twice in the income, gains and cost-base figures alike (see
-//!   [`DuplicateAmmaStatement`]).
+//!   [`DuplicateAmmaStatement`]);
+//! - every (listing, holding account, payment date) carrying more than one
+//!   income row of identical amounts — the same double-entry on the
+//!   distribution side, doubling the dividend income and the franking credits
+//!   (see [`DuplicateIncome`]).
 //!
 //! A database with no prices or FX rates at all reports `stale = false` for
 //! that series: nothing has decayed — a fresh install shows no banner, and a
@@ -33,12 +37,14 @@
 
 use crate::domain::tax_year::tax_year_for;
 use crate::entities::closing_price::{self, HeldTimeline};
+use crate::entities::income::Income;
 use crate::infra::http::ApiError;
 use axum::{Json, Router, extract::State, routing::get};
 use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc, Weekday};
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 /// Prices are stale once the latest ok closing price is more than this many
 /// business days (Mon–Fri) old. The price-import job runs every weekday, so a
@@ -179,6 +185,46 @@ struct DuplicateAmmaStatementRow {
     statement_ids: String,
 }
 
+/// More than one income row for the same listing, holding account and payment
+/// date, carrying **identical amounts**. Every reader counts both: the tax
+/// summary's dividend lines, the franking credits behind them, the foreign
+/// income and the FITO limit are each summed row by row, so a re-submitted
+/// form or a re-imported statement declares the distribution twice
+/// (SCENARIOS G-24).
+///
+/// Deliberately a **warning, not a constraint**, the same call as
+/// [`DuplicateAction`] and [`DuplicateAmmaStatement`]: two dividends from one
+/// company on one day are legitimate in principle (an ordinary and a special
+/// dividend), so the pair stays enterable.
+///
+/// The amounts are part of the key for exactly that reason. (listing, account,
+/// date) alone would flag that legitimate pair, which differs in what it pays;
+/// requiring every money figure to match as well — and the currency they are
+/// stated in — leaves only what is almost certainly one distribution entered
+/// twice. Non-money differences (an `ex_date` filled in on one row only, a
+/// trust flag) are ignored: they are how a re-entry usually differs from the
+/// original, not evidence of a second payment.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DuplicateIncome {
+    pub listing_id: i64,
+    pub ticker: String,
+    pub holding_account_id: i64,
+    pub date_paid: NaiveDate,
+    /// ISO 4217 currency the shared amounts are stated in (part of the key —
+    /// two rows stating the same figures in different currencies are not the
+    /// same payment).
+    pub currency: String,
+    /// The gross cash the duplicated rows each declare
+    /// (`Income::gross_cash_income`, in `currency`), so the warning names the
+    /// distribution rather than only its date.
+    pub gross_amount: Decimal,
+    /// How many rows share this (listing, account, date, amounts) — always ≥ 2.
+    pub income_count: i64,
+    /// The ids sharing it, ascending, so the surplus row can be found and
+    /// deleted without a search.
+    pub income_ids: Vec<i64>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct HealthReport {
     /// Latest `closing_prices` date stored with status ok, across every
@@ -204,6 +250,10 @@ pub struct HealthReport {
     /// AMMA statement, newest year first. Empty when no fund-year has two
     /// statements for one account.
     pub duplicate_amma_statements: Vec<DuplicateAmmaStatement>,
+    /// Every (listing, holding account, payment date) carrying more than one
+    /// income row of identical amounts, newest first. Empty when no two rows
+    /// declare the same payment twice.
+    pub duplicate_income: Vec<DuplicateIncome>,
 }
 
 /// Business days (Mon–Fri) strictly after `from`, up to and including `today`.
@@ -403,6 +453,112 @@ async fn db_duplicate_amma_statements(
         .collect()
 }
 
+/// True when two income rows are the same declared payment: same listing,
+/// holding account and payment date, and identical money figures stated in one
+/// currency — the fingerprint behind [`DuplicateIncome`].
+///
+/// Compared as `Decimal`s rather than as the stored TEXT, so `"10.0"` and
+/// `"10.00"` — the same dollars written by two different clients — are the
+/// match they are, which is also why the grouping cannot be pushed into SQL.
+/// Every money column of the row is compared, including the informational
+/// ones: two rows agreeing on the assessable figures but disagreeing on, say,
+/// `tax_deferred_amount` were entered from different statements.
+fn same_income_entry(a: &Income, b: &Income) -> bool {
+    a.listing_id == b.listing_id
+        && a.holding_account_id == b.holding_account_id
+        && a.date_paid == b.date_paid
+        && a.currency == b.currency
+        && a.franked_amount == b.franked_amount
+        && a.unfranked_amount == b.unfranked_amount
+        && a.foreign_source_income == b.foreign_source_income
+        && a.foreign_tax_paid == b.foreign_tax_paid
+        && a.tfn_withholding_tax == b.tfn_withholding_tax
+        && a.franking_credits == b.franking_credits
+        && a.lic_capital_gain_deduction == b.lic_capital_gain_deduction
+        && a.conduit_foreign_income == b.conduit_foreign_income
+        && a.amount_per_security == b.amount_per_security
+        && a.securities_held == b.securities_held
+        && a.tax_deferred_amount == b.tax_deferred_amount
+}
+
+/// Income rows declaring one payment twice — see [`DuplicateIncome`].
+///
+/// Read on the caller's transaction, but grouped in Rust rather than in SQL:
+/// the amounts are part of the key and they are TEXT decimals, which SQL would
+/// compare as strings (see [`same_income_entry`]). Only rows that already
+/// share a (listing, account, date) with another row are read, so what is
+/// carried into memory is at most the handful of same-day pairs a portfolio
+/// has, not the income table.
+async fn db_duplicate_income(
+    conn: &mut sqlx::SqliteConnection,
+) -> Result<Vec<DuplicateIncome>, sqlx::Error> {
+    let rows: Vec<Income> = sqlx::query_as(
+        "SELECT * FROM income i \
+         WHERE EXISTS (SELECT 1 FROM income o \
+                       WHERE o.listing_id = i.listing_id \
+                         AND o.holding_account_id = i.holding_account_id \
+                         AND o.date_paid = i.date_paid AND o.id <> i.id) \
+         ORDER BY i.id",
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    if rows.is_empty() {
+        return Ok(Vec::new());
+    }
+    let tickers: HashMap<i64, String> =
+        sqlx::query_as::<_, (i64, String)>("SELECT id, ticker FROM listings")
+            .fetch_all(&mut *conn)
+            .await?
+            .into_iter()
+            .collect();
+
+    // Grouped by scanning: the rows here are already narrowed to same-day
+    // clusters, so the quadratic worst case is a handful of comparisons.
+    // Read in id order, so each group's ids come out ascending.
+    let mut groups: Vec<Vec<Income>> = Vec::new();
+    for row in rows {
+        match groups
+            .iter_mut()
+            .find(|group| same_income_entry(&group[0], &row))
+        {
+            Some(group) => group.push(row),
+            None => groups.push(vec![row]),
+        }
+    }
+    let mut duplicates: Vec<DuplicateIncome> = groups
+        .into_iter()
+        .filter(|group| group.len() > 1)
+        .map(|group| {
+            let first = &group[0];
+            DuplicateIncome {
+                listing_id: first.listing_id,
+                ticker: tickers
+                    .get(&first.listing_id)
+                    .cloned()
+                    // The FK guarantees the listing exists; a row read between
+                    // the two queries is the only way here, and an empty
+                    // ticker still names the ids to open.
+                    .unwrap_or_default(),
+                holding_account_id: first.holding_account_id,
+                date_paid: first.date_paid,
+                currency: first.currency.clone(),
+                gross_amount: first.gross_cash_income(),
+                income_count: group.len() as i64,
+                income_ids: group.iter().map(|row| row.id).collect(),
+            }
+        })
+        .collect();
+    // Newest first, matching the other two duplicate lists.
+    duplicates.sort_by(|a, b| {
+        b.date_paid
+            .cmp(&a.date_paid)
+            .then_with(|| a.ticker.cmp(&b.ticker))
+            .then_with(|| a.holding_account_id.cmp(&b.holding_account_id))
+            .then_with(|| a.income_ids.cmp(&b.income_ids))
+    });
+    Ok(duplicates)
+}
+
 /// Read the freshness facts on one snapshot. `today` and `now` are parameters
 /// so tests can pin the staleness thresholds and the "close is final yet"
 /// cut-off to fixed dates.
@@ -441,6 +597,7 @@ pub async fn db_health(
     .await?;
     let duplicate_actions = db_duplicate_actions(&mut tx).await?;
     let duplicate_amma_statements = db_duplicate_amma_statements(&mut tx).await?;
+    let duplicate_income = db_duplicate_income(&mut tx).await?;
     tx.commit().await?;
     let unpriced_days = db_unpriced_days(pool, now).await?;
 
@@ -459,6 +616,7 @@ pub async fn db_health(
         unpriced_days,
         duplicate_actions,
         duplicate_amma_statements,
+        duplicate_income,
     })
 }
 
@@ -566,6 +724,7 @@ mod tests {
         assert!(h.unpriced_days.is_empty());
         assert!(h.duplicate_actions.is_empty());
         assert!(h.duplicate_amma_statements.is_empty());
+        assert!(h.duplicate_income.is_empty());
     }
 
     #[tokio::test]
@@ -1158,6 +1317,153 @@ mod tests {
         assert_eq!(h.duplicate_amma_statements.len(), 1);
         assert_eq!(h.duplicate_amma_statements[0].statement_count, 3);
         assert_eq!(h.duplicate_amma_statements[0].statement_ids, vec![7, 8, 9]);
+    }
+
+    /// A fully franked dividend of `franked` gross, paid on `date` into
+    /// `account` — the shape a duplicated statement entry takes.
+    async fn insert_dividend(
+        pool: &SqlitePool,
+        id: i64,
+        listing_id: i64,
+        date: NaiveDate,
+        account: i64,
+        franked: &str,
+    ) {
+        insert_dividend_amount(pool, id, listing_id, date, account, dec(franked)).await;
+    }
+
+    /// As [`insert_dividend`], taking the franked amount as a `Decimal` so a
+    /// test can control its scale (`10.0` vs `10.00`).
+    async fn insert_dividend_amount(
+        pool: &SqlitePool,
+        id: i64,
+        listing_id: i64,
+        date: NaiveDate,
+        account: i64,
+        franked: Decimal,
+    ) {
+        test_support::income(id, listing_id, date)
+            .with(|i| {
+                i.holding_account_id = account;
+                i.franked_amount = franked;
+            })
+            .insert(pool)
+            .await;
+    }
+
+    /// SCENARIOS G-24: a re-submitted form or a re-imported statement leaves
+    /// two identical dividends, and every reader counts both — twice the
+    /// dividend income, twice the franking credits. Nothing rejects the pair
+    /// (two dividends from one company on one day are legitimate in
+    /// principle), so health names it, with the ids to delete from.
+    #[tokio::test]
+    async fn duplicated_income_rows_are_reported_with_their_ids() {
+        let pool = test_pool().await;
+        test_support::listing(1).ticker("DIVA").insert(&pool).await;
+        test_support::listing(2).ticker("DIVB").insert(&pool).await;
+        insert_dividend(&pool, 1, 1, ymd(2026, 3, 10), 1, "70").await;
+        insert_dividend(&pool, 2, 1, ymd(2026, 3, 10), 1, "70").await;
+        insert_dividend(&pool, 3, 2, ymd(2026, 6, 1), 1, "42.50").await;
+        insert_dividend(&pool, 4, 2, ymd(2026, 6, 1), 1, "42.50").await;
+
+        let h = health(&pool, ymd(2026, 7, 13)).await;
+        // Newest first: June before March, as on the other two lists.
+        assert_eq!(h.duplicate_income.len(), 2);
+        let june = &h.duplicate_income[0];
+        assert_eq!(june.ticker, "DIVB");
+        assert_eq!(june.listing_id, 2);
+        assert_eq!(june.holding_account_id, 1);
+        assert_eq!(june.date_paid, ymd(2026, 6, 1));
+        assert_eq!(june.currency, "AUD");
+        assert_eq!(june.gross_amount, dec("42.50"));
+        assert_eq!(june.income_count, 2);
+        assert_eq!(june.income_ids, vec![3, 4]);
+        let march = &h.duplicate_income[1];
+        assert_eq!(march.ticker, "DIVA");
+        assert_eq!(march.date_paid, ymd(2026, 3, 10));
+        assert_eq!(march.gross_amount, dec("70"));
+        assert_eq!(march.income_ids, vec![1, 2]);
+    }
+
+    /// The key is all four parts. Two payments differing in the amount are the
+    /// legitimate case the warning must stay silent on — an ordinary and a
+    /// special dividend paid the same day — and a different listing, account
+    /// or date is ordinary entry.
+    #[tokio::test]
+    async fn income_differing_in_listing_account_date_or_amount_is_not_a_duplicate() {
+        let pool = test_pool().await;
+        test_support::listing(1).ticker("AAA").insert(&pool).await;
+        test_support::listing(2).ticker("BBB").insert(&pool).await;
+        crate::entities::holding_account::db_upsert(
+            &pool,
+            &crate::entities::holding_account::HoldingAccount {
+                id: 2,
+                name: "Second".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        // Same account, date and amount, different listing.
+        insert_dividend(&pool, 1, 1, ymd(2026, 3, 10), 1, "70").await;
+        insert_dividend(&pool, 2, 2, ymd(2026, 3, 10), 1, "70").await;
+        // Same listing, date and amount, different holding account.
+        insert_dividend(&pool, 3, 1, ymd(2026, 3, 10), 2, "70").await;
+        // Same listing, account and amount, different date.
+        insert_dividend(&pool, 4, 1, ymd(2026, 9, 10), 1, "70").await;
+        // Same listing, account and date, different amount: the ordinary +
+        // special pair.
+        insert_dividend(&pool, 5, 1, ymd(2026, 3, 10), 1, "12.34").await;
+
+        let h = health(&pool, ymd(2026, 7, 13)).await;
+        assert!(h.duplicate_income.is_empty());
+    }
+
+    /// The amounts are compared as decimals, not as the TEXT they are stored
+    /// as: `70.0` and `70.00` are the same dollars entered twice, however the
+    /// two clients wrote them.
+    #[tokio::test]
+    async fn amounts_equal_in_value_but_not_in_text_are_still_duplicates() {
+        let pool = test_pool().await;
+        test_support::listing(1).ticker("DIVA").insert(&pool).await;
+        insert_dividend_amount(&pool, 1, 1, ymd(2026, 3, 10), 1, dec("70.0")).await;
+        insert_dividend_amount(&pool, 2, 1, ymd(2026, 3, 10), 1, dec("70.00")).await;
+
+        let h = health(&pool, ymd(2026, 7, 13)).await;
+        assert_eq!(h.duplicate_income.len(), 1);
+        assert_eq!(h.duplicate_income[0].income_ids, vec![1, 2]);
+    }
+
+    /// Three of a kind is one row counting three, as on the other two lists.
+    #[tokio::test]
+    async fn three_identical_income_rows_are_one_row_counting_three() {
+        let pool = test_pool().await;
+        test_support::listing(1).ticker("TRIP").insert(&pool).await;
+        insert_dividend(&pool, 7, 1, ymd(2026, 3, 10), 1, "70").await;
+        insert_dividend(&pool, 8, 1, ymd(2026, 3, 10), 1, "70").await;
+        insert_dividend(&pool, 9, 1, ymd(2026, 3, 10), 1, "70").await;
+
+        let h = health(&pool, ymd(2026, 7, 13)).await;
+        assert_eq!(h.duplicate_income.len(), 1);
+        assert_eq!(h.duplicate_income[0].income_count, 3);
+        assert_eq!(h.duplicate_income[0].income_ids, vec![7, 8, 9]);
+    }
+
+    /// One same-day cluster can hold both a duplicated pair and an unrelated
+    /// payment: the grouping is per amount fingerprint, not per day, so the
+    /// third row neither joins the pair nor suppresses it.
+    #[tokio::test]
+    async fn a_duplicated_pair_is_reported_beside_a_genuine_second_dividend() {
+        let pool = test_pool().await;
+        test_support::listing(1).ticker("DIVA").insert(&pool).await;
+        insert_dividend(&pool, 1, 1, ymd(2026, 3, 10), 1, "70").await;
+        insert_dividend(&pool, 2, 1, ymd(2026, 3, 10), 1, "70").await;
+        // The special dividend paid the same day.
+        insert_dividend(&pool, 3, 1, ymd(2026, 3, 10), 1, "12.34").await;
+
+        let h = health(&pool, ymd(2026, 7, 13)).await;
+        assert_eq!(h.duplicate_income.len(), 1);
+        assert_eq!(h.duplicate_income[0].gross_amount, dec("70"));
+        assert_eq!(h.duplicate_income[0].income_ids, vec![1, 2]);
     }
 
     #[tokio::test]

@@ -10,21 +10,6 @@ findings are all closed in DONE.md), except where a section's heading names anot
 (e.g. REQUIREMENTS, SCENARIOS). Each section records one finding; sections land in DONE.md as they
 are fixed or decided.
 
-## Duplicate income rows are silently double-counted (SCENARIOS G-24)
-(SCENARIOS.md section G verification pass, 2026-08-16 — the `income` counterpart of the closed
-E-03 `duplicate_actions` and F-06 `duplicate_amma_statements` findings.)
-- [ ] G-24 — two `income` rows for the same listing, holding account and `date_paid`, with identical
-  amounts, report twice the dividend income and twice the franking credits. `GET /reports/health`
-  says nothing: its duplicate checks cover corporate actions and AMMA statements only
-- [ ] The cause is the same as those two (a re-submitted form, a re-imported statement) and so is
-  the shape of the fix: a **warning, not a constraint** — two dividends from one company on one day
-  are legitimate in principle (an ordinary and a special dividend), so the pair must stay enterable
-- [ ] Open question: the key. (listing, account, `date_paid`) alone flags the legitimate
-  ordinary + special pair; adding "identical gross amounts" flags only what is almost certainly a
-  double entry
-- [ ] Tests: a duplicated pair is reported with its ids (as `duplicate_actions` is), rows differing
-  in listing/account/date/amount are not, and the web banner names it
-
 ## The related-payments rule and the 30%-at-risk test are not modelled and nowhere documented (SCENARIOS G-14)
 (SCENARIOS.md section G verification pass, 2026-08-16.)
 - [ ] G-14 — being a "qualified person" needs more than the 45/90-day count: days on which 30% or

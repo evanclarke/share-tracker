@@ -1435,6 +1435,14 @@ mod tests {
         assert!(js.contains("every figure is counted once per statement"));
         assert!(js.contains("'#/e/amma_statements'"));
         assert!(js.contains("Open AMMA Statements"));
+        // …plus one distribution entered twice (SCENARIOS G-24: the dividend
+        // and its franking credits counted once per row), linking to the
+        // screen the duplicate is deleted from…
+        assert!(js.contains("duplicate_income"));
+        assert!(js.contains("identical income rows of"));
+        assert!(js.contains("the dividend and its franking credits are counted once per row"));
+        assert!(js.contains("'#/e/income'"));
+        assert!(js.contains("Open Income"));
         // …and refreshes on every route render so it appears on the main views.
         assert!(js.contains("refreshHealthBanner(); // deliberately not awaited"));
         // The strip's host element ships in the page shell with its styles.
