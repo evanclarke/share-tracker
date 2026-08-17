@@ -10,37 +10,6 @@ findings are all closed in DONE.md), except where a section's heading names anot
 (e.g. REQUIREMENTS, SCENARIOS). Each section records one finding; sections land in DONE.md as they
 are fixed or decided.
 
-## An expense covering more than one financial year has nowhere to be apportioned (SCENARIOS H-08)
-(SCENARIOS.md section H verification pass, 2026-08-17.)
-- [ ] H-08 — one `investment_expenses` row is one `date_incurred`, one financial year, deducted in
-  full in that year (`tax_summary`'s deduction loop buckets by `tax_year_for(date_incurred)`). Two
-  ordinary share-investor expenses do not work that way:
-  - **Borrowing expenses** — loan establishment fees, legal expenses, stamp duty on the loan: "If
-    your expenses total more than $100, apportion them over 5 years or the loan term, whichever is
-    shorter. If your expenses are $100 or less, you can claim a deduction for the full amount in the
-    year you incur them" (ATO, *Dividend income deductions*, QC 104069, retrieved 2026-08-17; s 25-25)
-  - **Prepaid interest** — a prepayment whose eligible service period runs over 12 months, or ends
-    after the last day of the next income year, is apportioned by days across the years it covers
-    (ATO, *Deductions for prepaid expenses*, the Martin example: $1,250 over 397 days → $573 in the
-    first year, $677 in the second). Inside the 12-month rule it *is* immediately deductible, which
-    is the case the current model gets right by construction
-- [ ] So a $2,000 loan establishment fee entered as one row claims 5× the first year's deduction, and
-  nothing refuses it, flags it, or documents the alternative. `gross_amount`/`deductible_percentage`
-  are no help: they describe the private-vs-income-producing split, not a split across time, so there
-  is not even a provenance field saying "this row is one year of five"
-- [ ] Nothing in `docs/API.md`'s Known limitations, the entity's UI description, or
-  `docs/ato/investment-income-deductions.md` (which lists borrowing costs as claimable without saying
-  over what period) mentions time apportionment
-- [ ] **Decided 2026-08-17: document the workaround** — one row per financial year carrying that
-  year's apportioned share, stated as a Known limitation naming both ATO rules (QC 104069 for the
-  5-years-or-loan-term borrowing expenses, the prepaid-expenses guide for the 12-month rule and the
-  day-count formula), a UI hint on the entity, and a mirrored `docs/ato/` doc indexed in OVERVIEW.
-  Not modelled: a `service_period_start`/`service_period_end` pair the tax summary apportions by
-  days is the honest version but a real feature — new columns, the day-count split, the annual tax
-  report's rows, and the "which year is this row in" question every report answers with one date
-- [ ] Tests: whichever way it lands, a multi-year expense reaches the right per-year deduction (or is
-  refused/documented), and `doc_checks` pins the stated rule
-
 ## Duplicate interest and expense rows are silently double-counted (SCENARIOS H-01, H-06)
 (SCENARIOS.md section H verification pass, 2026-08-17, standing probe 6 — the `interest_income` /
 `investment_expenses` counterpart of the closed E-03 `duplicate_actions`, F-06

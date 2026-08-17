@@ -1606,6 +1606,72 @@ fn interest_credited_date_convention_documented() {
     );
 }
 
+/// Docs-sync pin for the multi-year expense convention (SCENARIOS H-08). One
+/// `investment_expenses` row is one financial year and deducts its whole
+/// amount there, which is wrong for the two ordinary share-investor expenses
+/// the ATO spreads across years — a $2,000 loan establishment fee keyed once
+/// claims five years' deduction at once and nothing refuses it. The decision
+/// was to document the one-row-per-year workaround rather than model a service
+/// period, so these pin the limitation, both cited rules, and the mirror they
+/// rest on (the deductions mirror lists borrowing costs as claimable without
+/// saying over what period).
+#[test]
+fn multi_year_expense_apportionment_documented() {
+    const APPORTIONMENT: &str = include_str!("../docs/ato/expense-time-apportionment.md");
+    const ATO_OVERVIEW: &str = include_str!("../docs/ato/OVERVIEW.md");
+    let flat = |s: &str| {
+        s.replace('>', " ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+
+    // The mirror carries both rules verbatim, with both provenance headers.
+    assert!(flat(APPORTIONMENT).contains(
+        "If your expenses total more than $100, apportion them over 5 years or the loan term, \
+         whichever is shorter. If your expenses are $100 or less, you can claim a deduction for \
+         the full amount in the year you incur them."
+    ));
+    assert!(APPORTIONMENT.contains("QC 104069"));
+    assert!(APPORTIONMENT.contains("QC 106556"));
+    assert!(APPORTIONMENT.contains("**Retrieved:** 2026-08-17"));
+    // …the day-count formula and the worked example behind it.
+    assert!(flat(APPORTIONMENT).contains("**A multiplied by (B divided by C)**"));
+    assert!(flat(APPORTIONMENT).contains("$1,250 × (182 ÷ 396) = $572"));
+    assert!(flat(APPORTIONMENT).contains("$1,250 × (215 ÷ 396) = $678"));
+    // …and it is reachable from the index.
+    assert!(ATO_OVERVIEW.contains("expense-time-apportionment.md"));
+
+    // The Known limitation names both rules, their sources, and the workaround.
+    let limits = known_limitations();
+    assert!(limits.contains("An expense covering more than one financial year is not apportioned"));
+    assert!(limits.contains("5 years or the loan term, whichever is shorter"));
+    assert!(limits.contains("QC 104069"));
+    assert!(limits.contains("QC 106556"));
+    assert!(limits.contains("one row per financial year"));
+    assert!(limits.contains("`docs/ato/expense-time-apportionment.md`"));
+    // …including that the 12-month-rule case is the one the model gets right.
+    assert!(limits.contains("*inside* the 12-month rule is immediately deductible"));
+
+    // The entity's own section says the same where the row is written, and
+    // SCHEMA.md's date column carries it too.
+    assert!(
+        API_MD.contains(
+            "**One row is one financial year — a multi-year expense is entered per year:**"
+        )
+    );
+    assert!(README_MD.contains("expense-time-apportionment.md"));
+    let column = SCHEMA_MD
+        .split("├── date_incurred         DATE")
+        .nth(1)
+        .expect("SCHEMA.md documents the investment_expenses.date_incurred column")
+        .split('\n')
+        .next()
+        .expect("split always yields at least one part");
+    assert!(column.contains("One row is one year"), "{column}");
+    assert!(column.contains("expense-time-apportionment.md"), "{column}");
+}
+
 /// Pins for the FreeBSD packaging + versioned-release pipeline (REQUIREMENTS
 /// 2026-07-13). The release workflow and package skeleton are plain text CI
 /// consumes, so these tests keep their load-bearing pieces from silently

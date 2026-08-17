@@ -160,7 +160,7 @@ interest_income              Interest income — bank, term-deposit, or broker-c
 
 investment_expenses          Deductible investment expenses — the cost of earning assessable investment income (interest on borrowed money, management/adviser fees, account-keeping fees, subscriptions). The tax summary nets these against gross assessable investment income per financial year
 ├── id                    INTEGER PK
-├── date_incurred         DATE   Its month sets the ATO FX conversion month and the Australian financial year the deduction falls in (a July date belongs to the next FY)
+├── date_incurred         DATE   Its month sets the ATO FX conversion month and the Australian financial year the deduction falls in (a July date belongs to the next FY). One row is one year: an expense apportioned across years (borrowing expenses over 5 years or the loan term; a prepayment failing the 12-month rule, split by days) is entered as one row per financial year carrying that year's share — docs/ato/expense-time-apportionment.md, a documented Known limitation rather than a modelled split
 ├── expense_type          TEXT   LoanInterest | ManagementFee | AdviceFee | AccountKeepingFee | Subscription | Other (CHECK-enforced enum)
 ├── amount                TEXT (decimal)  The deductible amount — post-apportionment, the figure that goes on the return and the value the tax summary totals; never negative (write-time 422)
 ├── gross_amount          TEXT (decimal, nullable)  Optional provenance (no calculation reads it): the pre-apportionment gross expense; never negative (write-time 422)

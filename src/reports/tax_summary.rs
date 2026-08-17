@@ -2164,6 +2164,61 @@ mod tests {
         assert_eq!(result[1].deductions_total, Decimal::from(200));
     }
 
+    /// The documented workaround for an expense the ATO spreads across years
+    /// (SCENARIOS H-08): a $2,000 loan establishment fee is apportioned over 5
+    /// years (s 25-25, `docs/ato/expense-time-apportionment.md`), and this
+    /// model has one date per row — so it is entered as five rows of $400, one
+    /// per financial year, and each year deducts its own share and no more.
+    /// The single-row entry the convention exists to steer away from is pinned
+    /// alongside it: nothing refuses it, and it claims all five years at once.
+    #[tokio::test]
+    async fn db_a_multi_year_expense_deducts_per_year_when_entered_per_year() {
+        let pool = test_pool().await;
+        // The fee is incurred on 1 August 2024 (FY2025) and spread over
+        // FY2025–FY2029: one row per year, each carrying that year's $400.
+        for (i, year) in (2024..=2028).enumerate() {
+            investment_expense::db_upsert(
+                &pool,
+                &make_expense(
+                    i as i64 + 1,
+                    NaiveDate::from_ymd_opt(year, 8, 1).unwrap(),
+                    ExpenseType::Other,
+                    Decimal::from(400),
+                ),
+            )
+            .await
+            .unwrap();
+        }
+
+        let result = db_tax_summary(&pool).await.unwrap();
+        assert_eq!(result.len(), 5);
+        for (i, s) in result.iter().enumerate() {
+            assert_eq!(s.tax_year, 2025 + i as i32);
+            assert_eq!(s.deductions_other, Decimal::from(400));
+            assert_eq!(s.deductions_total, Decimal::from(400));
+        }
+
+        // Keyed as one row instead, the whole fee lands in the first year —
+        // five years' deduction at once, accepted without complaint. That is
+        // the limitation `docs/API.md` documents, not a computed apportionment.
+        let pool = test_pool().await;
+        investment_expense::db_upsert(
+            &pool,
+            &make_expense(
+                1,
+                NaiveDate::from_ymd_opt(2024, 8, 1).unwrap(),
+                ExpenseType::Other,
+                Decimal::from(2000),
+            ),
+        )
+        .await
+        .unwrap();
+        let result = db_tax_summary(&pool).await.unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].tax_year, 2025);
+        assert_eq!(result[0].deductions_total, Decimal::from(2000));
+    }
+
     /// A non-AUD expense converts to AUD via the ATO rate for the month incurred.
     #[tokio::test]
     async fn db_non_aud_expense_converted_to_aud() {

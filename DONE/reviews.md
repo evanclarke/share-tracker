@@ -1105,3 +1105,73 @@ Tests: `entities::investment_expense::tests::api_apportionment_provenance_must_r
 scenario's own 100-at-50%-claimed-as-900 refused with the computed figure in the body and nothing
 persisted, and the consistent, exactly-100%, no-percentage, no-gross-amount, neither, and
 reconciles-to-the-cent (1000 × 33.3333%) cases all accepted. Full suite 1554 passed / 0 failed.
+
+## An expense covering more than one financial year has nowhere to be apportioned (SCENARIOS H-08)
+(SCENARIOS.md section H verification pass, 2026-08-17.)
+- [x] H-08 — one `investment_expenses` row is one `date_incurred`, one financial year, deducted in
+  full in that year (`tax_summary`'s deduction loop buckets by `tax_year_for(date_incurred)`). Two
+  ordinary share-investor expenses do not work that way:
+  - **Borrowing expenses** — loan establishment fees, legal expenses, stamp duty on the loan: "If
+    your expenses total more than $100, apportion them over 5 years or the loan term, whichever is
+    shorter. If your expenses are $100 or less, you can claim a deduction for the full amount in the
+    year you incur them" (ATO, *Dividend income deductions*, QC 104069, retrieved 2026-08-17; s 25-25)
+  - **Prepaid interest** — a prepayment whose eligible service period runs over 12 months, or ends
+    after the last day of the next income year, is apportioned by days across the years it covers
+    (ATO, *Deductions for prepaid expenses*, the Martin example: $1,250 over 397 days → $573 in the
+    first year, $677 in the second). Inside the 12-month rule it *is* immediately deductible, which
+    is the case the current model gets right by construction
+- [x] So a $2,000 loan establishment fee entered as one row claims 5× the first year's deduction, and
+  nothing refuses it, flags it, or documents the alternative. `gross_amount`/`deductible_percentage`
+  are no help: they describe the private-vs-income-producing split, not a split across time, so there
+  is not even a provenance field saying "this row is one year of five"
+- [x] Nothing in `docs/API.md`'s Known limitations, the entity's UI description, or
+  `docs/ato/investment-income-deductions.md` (which lists borrowing costs as claimable without saying
+  over what period) mentions time apportionment
+- [x] **Decided 2026-08-17: document the workaround** — one row per financial year carrying that
+  year's apportioned share, stated as a Known limitation naming both ATO rules (QC 104069 for the
+  5-years-or-loan-term borrowing expenses, the prepaid-expenses guide for the 12-month rule and the
+  day-count formula), a UI hint on the entity, and a mirrored `docs/ato/` doc indexed in OVERVIEW.
+  Not modelled: a `service_period_start`/`service_period_end` pair the tax summary apportions by
+  days is the honest version but a real feature — new columns, the day-count split, the annual tax
+  report's rows, and the "which year is this row in" question every report answers with one date
+- [x] Tests: whichever way it lands, a multi-year expense reaches the right per-year deduction (or is
+  refused/documented), and `doc_checks` pins the stated rule
+
+**Implemented 2026-08-17 as decided: the workaround is documented, the apportionment is not
+modelled.**
+
+One `investment_expenses` row stays one financial year, deducted in full there — which is right for
+a management fee, an account-keeping fee, a month's loan interest, and any prepayment *inside* the
+12-month rule (immediately deductible, the case the one-date model gets right by construction). For
+the two expenses the ATO spreads across years, the stated entry convention is **one row per
+financial year** carrying that year's apportioned share, with the `description` naming the whole
+expense and its place in the sequence ("loan establishment fee, year 2 of 5"). The apportionment is
+the taxpayer's working, exactly as the private-use percentage beside it already is.
+
+- **The ATO mirror.** `docs/ato/expense-time-apportionment.md` carries both rules verbatim from
+  their own sources: the borrowing-expenses paragraph of *Dividend income deductions* (QC 104069,
+  retrieved 2026-08-17 — over $100 apportioned over 5 years or the loan term, whichever is shorter;
+  $100 or less deductible in full when incurred; ordinary loan *interest* deductible when incurred,
+  which is the distinction that keeps a monthly interest charge a single row), and the non-business
+  prepayment rules of *Deductions for prepaid expenses 2026* (QC 106556 — the 12-month rule, the
+  `A × (B ÷ C)` day-count formula, and both worked examples). The Martin example is mirrored at the
+  ATO's current 2026 figures ($1,250 over 396 days → $572 + $678) with a note that the ATO rolls the
+  example's dates forward each year — the TODO's $573/$677 was the 2025 edition's 397 days. Indexed
+  in `docs/ato/OVERVIEW.md`.
+- **Known limitation.** `docs/API.md` states it as a scope decision naming both rules, both QC
+  numbers, the day-count formula, the workaround, and why it isn't modelled — a
+  `service_period_start`/`service_period_end` pair the tax summary splits by days means new columns,
+  a day-count apportionment, extra annual-tax-report rows, and a different answer to "which year is
+  this row in" than every other dated record gives.
+- **Where the row is written.** A paragraph in the API doc's Investment expenses section, the
+  `date_incurred` column note in `docs/SCHEMA.md`, a README line on the feature bullet, and — the
+  surface that actually catches the mistake — the UI: the entity description and the `Date incurred`
+  field hint both say one row is one year and name the two spread-across-years cases.
+
+Tests: `reports::tax_summary::tests::db_a_multi_year_expense_deducts_per_year_when_entered_per_year`
+(a $2,000 fee entered as five $400 rows deducts $400 in each of FY2025–FY2029 and no more — and the
+same fee keyed as one row lands $2,000 in FY2025, accepted without complaint, which is the
+limitation being documented), `doc_checks::multi_year_expense_apportionment_documented` (both rules
+quoted in the mirror with their QC headers, the formula and worked figures, the index entry, and the
+limitation naming both sources and the workaround), and
+`web::tests::investment_expense_per_year_entry_hint_present`.

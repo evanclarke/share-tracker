@@ -868,6 +868,21 @@ mod tests {
         assert!(js.contains("net_assessable_investment_income"));
     }
 
+    /// A multi-year expense has to be keyed one row per year (SCENARIOS H-08),
+    /// so the form says so where the year-setting date is entered and the
+    /// screen's description says so before the form is reached. The rules and
+    /// their ATO sources are pinned by
+    /// `doc_checks::multi_year_expense_apportionment_documented`.
+    #[tokio::test]
+    async fn investment_expense_per_year_entry_hint_present() {
+        let js = app_js_body().await;
+        assert!(js.contains("One row is one year: an expense spread across years"));
+        assert!(js.contains("5 years or the loan term, whichever is shorter"));
+        assert!(js.contains("one row per financial year carrying that year"));
+        // …and the entity description carries it too.
+        assert!(js.contains("is entered as one row per year carrying that year"));
+    }
+
     #[tokio::test]
     async fn amma_statement_ui_present() {
         let js = app_js_body().await;
