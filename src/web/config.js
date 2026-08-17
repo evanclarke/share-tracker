@@ -631,7 +631,7 @@ export const ACTIONS = [
     fields: function (income) {
       return [
         dec('reinvestment_price', 'Reinvestment price', { required: true, default: '' }),
-        dec('units', 'Units allotted (fractional plans)', { default: '', hint: 'Leave blank for a whole-share registry DRP (units and the carried residual are computed). For a broker plan that allots fractional shares, enter the statement’s exact units — taken verbatim, cross-checked against the reinvestable cash, no residual.' }),
+        dec('units', 'Units allotted (as stated)', { default: '', hint: 'Leave blank to compute the units and the residual from the cash (a whole-share registry DRP). Or enter the statement’s exact figure — taken verbatim, cross-checked against the reinvestable cash. Stated to decimals (a broker’s fractional allotment) it spends the whole distribution and leaves no residual; stated as whole units, whatever the cash did not buy is carried or paid out like any leftover.' }),
         dec('fx_rate', 'FX rate', { default: '1', hint: 'Optional; defaults to 1.' }),
         dt('date', 'Trade date', { optional: true, hint: 'Optional; defaults to the distribution pay date (' + income.date_paid + ').' }),
       ];

@@ -8,16 +8,30 @@
 //! the leftover is carried forward or paid out per the enrolment period's
 //! residual handling.
 //!
-//! A broker plan that allots **fractional shares** (e.g. a US broker DRP)
-//! states the allotted units on its statement and leaves no residual. For
-//! those, the body's optional `units` is the broker's stated figure and is
-//! authoritative: the trade takes exactly that quantity, cross-checked
-//! against the available cash — `units × price` must agree with it to within
-//! one unit-step at the units' stated precision (a figure stated to 3
-//! decimals must be within 0.001 × price), which is the property any
-//! broker-computed allotment has regardless of its rounding direction. The
-//! sub-step difference is statement rounding, not cash: the residual columns
-//! record zero (brought-forward cash, if any, is spent into the purchase).
+//! A plan may instead **state the units it allotted** on its statement (a US
+//! broker DRP allotting fractional shares always does). For those, the body's
+//! optional `units` is the statement's figure and is authoritative: the trade
+//! takes exactly that quantity, cross-checked against the available cash —
+//! `units × price` must agree with it to within one unit-step at the units'
+//! stated precision (a figure stated to 3 decimals must be within
+//! 0.001 × price), which is the property any plan-computed allotment has
+//! regardless of its rounding direction.
+//!
+//! What that allotment did not spend depends on how it was stated. **Whole
+//! units** (no decimals) are an exact count: the plan bought whole units and
+//! left the rest over, so — less than one unit's price, by the check above —
+//! the difference is cash, carried or paid out per the period's handling
+//! exactly as on the computed path (SCENARIOS I-06: it used to be discarded,
+//! up to a share's worth). **Units stated to decimals** are a rounded
+//! allotment: the plan applied all the cash and printed the units to its own
+//! precision, so the difference is the printing rather than money and the
+//! residual columns record zero — a real broker statement misses by several
+//! cents that way, and carrying them would double-count cash the stated units
+//! already include.
+//!
+//! The distribution must be recorded in the listing's own currency: the cash
+//! and the per-unit price are two figures in one division, so a mismatch is
+//! rejected rather than silently mixing currencies (SCENARIOS I-08).
 //!
 //! Enrolment is checked as at the distribution's ex date (registry practice:
 //! DRP participation is fixed at the record date), falling back to the pay
@@ -109,6 +123,13 @@ pub enum ReinvestError {
     /// The distribution already has a reinvestment trade.
     #[error("this distribution already has a reinvestment trade")]
     AlreadyReinvested,
+    /// The distribution's currency is not the listing's, so its cash and the
+    /// reinvestment price are different money and cannot be divided.
+    #[error("the distribution is in {distribution} but the listing trades in {listing}")]
+    CurrencyMismatch {
+        distribution: String,
+        listing: String,
+    },
     /// The reinvestment price is not strictly positive.
     #[error("the reinvestment price must be greater than zero")]
     NonPositivePrice,
@@ -152,6 +173,15 @@ impl From<ReinvestError> for ApiError {
                 "this distribution already has a reinvestment trade — undo it first \
                  (DELETE /income/:id/reinvest) to redo it",
             ),
+            ReinvestError::CurrencyMismatch {
+                distribution,
+                listing,
+            } => ApiError::unprocessable(format!(
+                "this distribution is recorded in {distribution} but the listing trades in \
+                 {listing}, so its cash cannot be divided by a {listing} reinvestment price — \
+                 enter the distribution in {listing} (a registry reinvesting a foreign-currency \
+                 payment converts it, and the statement prints the converted figure)"
+            )),
             ReinvestError::NonPositivePrice => {
                 ApiError::unprocessable("the reinvestment price must be greater than zero")
             }
@@ -276,6 +306,22 @@ pub async fn db_reinvest(
         .fetch_one(&mut *tx)
         .await?;
 
+    // The reinvestment is one calculation over two figures — the
+    // distribution's cash and the plan's per-unit price — so they must be the
+    // same money. The price is the listing's currency (it is what the trade is
+    // stamped with); the cash is the income row's own. Dividing one by the
+    // other unconverted would silently cost the parcel in the wrong currency
+    // (US$100 ÷ A$7 → 14 units costed A$98), which is exactly the mixing
+    // CLAUDE.md forbids. A registry that pays a foreign-currency distribution
+    // into a plan converts it itself and prints the converted figure, so the
+    // entry to correct is the income row's (SCENARIOS I-06, I-08).
+    if income.currency != currency {
+        return Err(ReinvestError::CurrencyMismatch {
+            distribution: income.currency.clone(),
+            listing: currency,
+        });
+    }
+
     // Residual brought forward = the most recent prior DRP trade's
     // carried-forward, *within the same enrolment period and holding
     // account*: an earlier period's trailing residual was paid out at its
@@ -300,29 +346,53 @@ pub async fn db_reinvest(
     };
 
     let available = cash + residual_bf;
-    let (quantity, carried, paid_out) = match body.units {
-        // Broker-stated fractional allotment: the statement's figure is
-        // authoritative, cross-checked to within one unit-step at its stated
-        // precision (any broker rounding direction lands inside that). The
-        // sub-step difference is statement rounding, not a residual.
+    let (quantity, leftover) = match body.units {
+        // Statement-stated allotment: the figure is authoritative, checked
+        // against the cash to within one unit-step at its stated precision
+        // (`step × price`) — the right bound for both kinds of statement: a
+        // fractional plan's product misses the cash by a sliver of a step,
+        // and a whole-share plan always leaves less than one unit's price
+        // over. Beyond it the two figures disagree about something that is
+        // neither rounding nor a leftover.
         Some(units) => {
             let cost = units * body.reinvestment_price;
             let step = Decimal::new(1, units.scale());
             if (available - cost).abs() >= step * body.reinvestment_price {
                 return Err(ReinvestError::UnitsCashMismatch { cost, available });
             }
-            (units, Decimal::ZERO, Decimal::ZERO)
+            // Whether the difference is *cash* or *rounding* is decided by
+            // what the stated units are. A whole number (scale 0) is an exact
+            // allotment: the plan bought whole units and left the rest over,
+            // so — bounded by the check above at less than one unit's price —
+            // the difference is that leftover, cash to be carried or refunded
+            // (SCENARIOS I-06). A figure stated to decimals is a *rounded*
+            // allotment: the plan applied all the cash and printed the units
+            // to its own precision, so the difference is the printing, not
+            // money. It stays zero, as it always has — a real statement
+            // (`morgan_stanley_ice_fractional_statements_reproduce`) misses by
+            // several cents that way, and carrying them would double-count
+            // cash the stated units already include.
+            let leftover = match units.scale() {
+                0 => (available - cost).max(Decimal::ZERO),
+                _ => Decimal::ZERO,
+            };
+            (units, leftover)
         }
-        // Registry default: spend the available cash on whole shares; the
-        // leftover is carried or paid out per the period's handling.
+        // Registry default: spend the available cash on whole shares. The
+        // leftover here is exact arithmetic on the recorded cash — nothing was
+        // rounded to reach it, so it is carried exactly.
         None => {
             let quantity = (available / body.reinvestment_price).floor();
-            let leftover = available - quantity * body.reinvestment_price;
-            match handling {
-                ResidualHandling::CarryForward => (quantity, leftover, Decimal::ZERO),
-                ResidualHandling::PayOut => (quantity, Decimal::ZERO, leftover),
-            }
+            (quantity, available - quantity * body.reinvestment_price)
         }
+    };
+    // Whichever way the units were arrived at, the leftover is cash the plan
+    // did not spend, so it is carried or paid out per the period's handling
+    // (SCENARIOS I-06: a whole-number stated allotment used to discard it —
+    // up to a share's worth of cash, neither carried nor refunded).
+    let (carried, paid_out) = match handling {
+        ResidualHandling::CarryForward => (leftover, Decimal::ZERO),
+        ResidualHandling::PayOut => (Decimal::ZERO, leftover),
     };
 
     // DRP units are issued by the registry, not market-settled, so the
@@ -524,12 +594,21 @@ mod tests {
         cash: Decimal,
         franking: Decimal,
     ) {
+        // In the listing's own currency: a distribution is paid in the money
+        // the holding trades in, and reinvesting one that is not is refused
+        // (`ReinvestError::CurrencyMismatch`).
+        let currency: String = sqlx::query_scalar("SELECT currency FROM listings WHERE id = ?")
+            .bind(listing_id)
+            .fetch_one(pool)
+            .await
+            .unwrap();
         test_support::income(id, listing_id, date_paid.parse().unwrap())
             .with(|i| {
                 i.ex_date = ex_date.map(|d| d.parse().unwrap());
                 i.unfranked_amount = cash;
                 i.franking_credits = franking;
                 i.trust_income = true;
+                i.currency = currency;
             })
             .insert(pool)
             .await;
@@ -840,6 +919,95 @@ mod tests {
         assert_eq!(parcels[0].remaining_cost_base, "999.9936".parse().unwrap());
     }
 
+    /// SCENARIOS I-06. A statement that states **whole** units still leaves
+    /// cash over — its unit-step is a whole unit, so the tolerance that makes
+    /// a fractional allotment exact is a whole share's worth here — and that
+    /// cash is the period's residual, not something to discard: it is carried
+    /// (or paid out) and the next reinvestment spends it, exactly as on the
+    /// computed path.
+    #[tokio::test]
+    async fn stated_whole_units_carry_the_cash_they_left_over() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AUD").await;
+        enrol(&pool, 1, ResidualHandling::CarryForward).await;
+        // $100 at $7 buys 14 whole units for $98; the statement says "14".
+        insert_distribution(&pool, 1, 1, Decimal::from(100), Decimal::ZERO).await;
+        let trade = db_reinvest(&pool, 1, &body_units("7", "14")).await.unwrap();
+        assert_eq!(trade.quantity, Decimal::from(14));
+        assert_eq!(trade.residual_carried_forward, Decimal::TWO);
+        assert_eq!(trade.residual_paid_out, Decimal::ZERO);
+
+        // …and the next reinvestment brings it forward: $12 + $2 = 2 units.
+        insert_distribution(&pool, 2, 1, Decimal::from(12), Decimal::ZERO).await;
+        let next = db_reinvest(&pool, 2, &body("7")).await.unwrap();
+        assert_eq!(next.residual_brought_forward, Decimal::TWO);
+        assert_eq!(next.quantity, Decimal::TWO);
+    }
+
+    /// The same leftover under `PayOut`: the registry refunds it rather than
+    /// holding it, so it lands on the paid-out column and nothing carries.
+    #[tokio::test]
+    async fn stated_whole_units_pay_out_the_leftover_where_the_period_says_so() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AUD").await;
+        enrol(&pool, 1, ResidualHandling::PayOut).await;
+        insert_distribution(&pool, 1, 1, Decimal::from(100), Decimal::ZERO).await;
+
+        let trade = db_reinvest(&pool, 1, &body_units("7", "14")).await.unwrap();
+        assert_eq!(trade.residual_carried_forward, Decimal::ZERO);
+        assert_eq!(trade.residual_paid_out, Decimal::TWO);
+    }
+
+    /// SCENARIOS I-08. The distribution's cash and the reinvestment price are
+    /// two figures in one division, so they must be the same money: a
+    /// distribution recorded in another currency is refused rather than
+    /// divided (US$100 ÷ A$7 would cost the parcel A$98 for cash that was
+    /// US$100). Nothing is persisted.
+    #[tokio::test]
+    async fn a_distribution_in_another_currency_than_its_listing_is_refused() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AUD").await;
+        enrol(&pool, 1, ResidualHandling::CarryForward).await;
+        test_support::income(1, 1, "2024-03-31".parse().unwrap())
+            .with(|i| {
+                i.foreign_source_income = Decimal::from(100);
+                i.currency = "USD".to_string();
+            })
+            .insert(&pool)
+            .await;
+
+        let err = db_reinvest(&pool, 1, &body("7")).await.unwrap_err();
+        assert!(
+            matches!(&err, ReinvestError::CurrencyMismatch { distribution, listing }
+                if distribution == "USD" && listing == "AUD"),
+            "{err:?}"
+        );
+        let response = client(&pool)
+            .post(
+                "/income/1/reinvest",
+                &serde_json::json!({"reinvestment_price": "7"}),
+            )
+            .await;
+        let (status, body) = response.status_and_body();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(body.contains("USD") && body.contains("AUD"), "{body}");
+        assert!(
+            crate::entities::trade::db_list(&pool)
+                .await
+                .unwrap()
+                .is_empty(),
+            "nothing persisted"
+        );
+        assert!(
+            income::db_get(&pool, 1)
+                .await
+                .unwrap()
+                .unwrap()
+                .reinvestment_trade_id
+                .is_none()
+        );
+    }
+
     /// SCENARIOS I-11. On an AMIT the two sides of a reinvested distribution
     /// are recorded separately and neither leaks into the other: the cash row
     /// funds the reinvestment (it is *cash only* — the AMMA attribution is the
@@ -1139,6 +1307,7 @@ mod tests {
                 .with(|inc| {
                     inc.foreign_source_income = gross.parse().unwrap();
                     inc.foreign_tax_paid = withheld.parse().unwrap();
+                    inc.currency = "USD".to_string();
                 })
                 .insert(&pool)
                 .await;

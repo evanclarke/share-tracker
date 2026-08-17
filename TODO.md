@@ -87,13 +87,13 @@ against the available cash to within `1 unit-step at the stated precision × pri
 columns record zero because a fractional allotment leaves no cash behind. The tolerance scales with
 the units' own scale, so at scale 0 it is a *whole unit's* worth of cash — and the discarded
 difference is real money, not statement rounding.)
-- [ ] I-06 — reproduced: $100 available, price $7, `units: "14"` → **`201`**, quantity 14,
+- [x] I-06 — reproduced: $100 available, price $7, `units: "14"` → **`201`**, quantity 14,
   `residual_brought_forward/carried_forward/paid_out` all `0`. The $2 that bought no whole unit is
   neither carried nor paid out; the next reinvestment brings forward nothing. At `units: "14.286"`
   (3 dp, the fractional case the path is for) the tolerance is $0.007 and the same $100 is fully
   spent — the behaviour is right there. A full step off (`14.290`) is correctly refused `422`
   carrying both figures
-- [ ] The entry path makes this reachable: the reinvest form's units field is offered on every
+- [x] The entry path makes this reachable: the reinvest form's units field is offered on every
   distribution, and an ASX registry statement *does* state whole units allotted — keying them in
   is the natural thing to do, and it silently costs the parcel $2 less than the cash applied while
   losing the carry
@@ -103,14 +103,39 @@ difference is real money, not statement rounding.)
   check stays as the sanity bound. Records what actually happened rather than discarding it.
   (Rejected: refusing whole-number `units`; a fixed cent tolerance, which would reject the
   fractional case the field exists for.)
-- [ ] Tests: whole units with a genuine leftover carry it (or are refused, per the decision) and
+- [x] Tests: whole units with a genuine leftover carry it (or are refused, per the decision) and
   the next reinvestment brings it forward; the fractional cases
   (`explicit_units_take_the_statements_fractional_allotment`,
   `explicit_units_tolerate_sub_step_statement_rounding`, `morgan_stanley_ice_fractional_statements_reproduce`)
   are unchanged
-- [ ] Docs sync: `docs/API.md` reinvest `units` semantics + the Response-codes `422` catalogue if a
+- [x] Docs sync: `docs/API.md` reinvest `units` semantics + the Response-codes `422` catalogue if a
   refusal is added; the units hint in `config.js`
 
+
+**Resolution (2026-08-17): the leftover is the period's residual on both paths, and which kind of
+difference it is follows from how the units were stated.**
+
+The stated-units branch of `db_reinvest` no longer returns `(units, ZERO, ZERO)`: it computes
+`available − units × price` like the whole-share branch, and the two share one `match handling`
+that carries or pays it out. Cent-rounding the difference (the first attempt) turned out to be the
+wrong discriminator — the real Morgan Stanley statements in
+`morgan_stanley_ice_fractional_statements_reproduce` miss the cash by up to **5 cents**, because
+0.500 units printed to 3 dp is a *rounded* allotment whose true fraction already spent that cash;
+carrying it would double-count it. The discriminator is the units' own **scale**: a whole number is
+an exact count (the plan bought whole units and left the rest over — cash), a figure stated to
+decimals is a rounded one (the plan applied everything — printing, not money, so zero as before).
+The one-unit-step tolerance is unchanged and is what bounds the whole-unit leftover below one
+unit's price.
+
+Not fixed, and deliberately: the *overspend* direction is still bounded only by that tolerance, so
+stated units costing up to a unit's price **more** than the available cash are accepted with no
+residual (15 units at $7 against $100). Tightening it needs a bound that does not reject a genuine
+fractional statement — a separate question, noted here rather than guessed at.
+
+Tests: `stated_whole_units_carry_the_cash_they_left_over` (14 units at $7 against $100 carries $2,
+and the next reinvestment brings it forward), `stated_whole_units_pay_out_the_leftover_where_the_period_says_so`,
+and the three fractional tests unchanged. `docs/API.md`'s "Stated allotments (`units`)" paragraph
+and the reinvest form's units hint now state both halves.
 ## A reinvested distribution can be edited afterwards with nothing re-checked (SCENARIOS I-01, I-04, I-07)
 (SCENARIOS.md section I verification pass, 2026-08-17. `income::db_upsert` deliberately never writes
 `reinvestment_trade_id` — a client can't forge or drop the link — but it also never *looks* at it,
@@ -148,10 +173,10 @@ row — in the income row's currency — and divides it by a price it stamps wit
 currency. Nothing checks the two agree. CLAUDE.md's rule is explicit: "Convert every non-AUD amount
 to AUD using the record's `fx_rate` before aggregating or comparing — never mix currencies in one
 calculation".)
-- [ ] I-08 — reproduced: AUD listing, income row `currency: "USD"` with `foreign_source_income: 100`
+- [x] I-08 — reproduced: AUD listing, income row `currency: "USD"` with `foreign_source_income: 100`
   → reinvest at `7` answers `201` with quantity **14** and `residual_carried_forward: 2` on an
   **AUD** trade. US$100 was divided by A$7; the parcel is costed A$98 for cash that was US$100
-- [ ] The mismatch is reachable because an income row's currency is free-form (the currencies FK
+- [x] The mismatch is reachable because an income row's currency is free-form (the currencies FK
   aside) and is not tied to its listing's. Whether *that* should be constrained in general is a
   wider question than this section — but the reinvest operation is a single calculation over the
   two, and is where the mixing actually happens
@@ -161,11 +186,23 @@ calculation".)
   what the statement shows, so the user has it. (Rejected: converting at the ATO rate, which invents
   an FX policy the statement already settled; constraining `income.currency` to its listing's
   everywhere — the widest fix, noted as a question for a later pass rather than this section.)
-- [ ] Tests: a distribution whose currency differs from its listing's is refused `422` naming both
+- [x] Tests: a distribution whose currency differs from its listing's is refused `422` naming both
   currencies with nothing persisted; the matching-currency USD case
   (`morgan_stanley_ice_fractional_statements_reproduce`) is unchanged
-- [ ] Docs sync: `docs/API.md` reinvest + the Response-codes `422` catalogue
+- [x] Docs sync: `docs/API.md` reinvest + the Response-codes `422` catalogue
 
+
+**Resolution (2026-08-17): refused, naming both currencies.**
+
+`ReinvestError::CurrencyMismatch { distribution, listing }` is raised in `db_reinvest` beside the
+listing-currency read it already does, before any arithmetic; the 422 body names both currencies
+and says where to correct the entry (a registry reinvesting a foreign-currency payment converts it
+and prints the converted figure). The check also caught the module's own fixtures: three tests set a
+USD listing and left the distribution at the builder's default AUD, so `insert_distribution_dated`
+now stamps the listing's currency and the ICE statements' rows are USD, as the statements are.
+
+Tests: `a_distribution_in_another_currency_than_its_listing_is_refused` — the error variant, the 422
+naming both currencies, and nothing persisted (no trade, no link).
 ## The partial-participation limitation names no workaround (SCENARIOS I-09)
 (SCENARIOS.md section I verification pass, 2026-08-17. The Known limitation is honest — "enrolment
 is all-or-nothing per (listing, holding account): a registry plan that reinvests only a portion of a

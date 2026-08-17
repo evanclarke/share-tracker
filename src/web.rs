@@ -1636,9 +1636,9 @@ mod tests {
         ] {
             assert!(js.contains(endpoint), "missing action endpoint {endpoint}");
         }
-        // The reinvest action form takes a fractional plan's stated units
+        // The reinvest action form takes a statement's stated units
         // (optional — blank keeps the whole-share default).
-        assert!(js.contains("dec('units', 'Units allotted (fractional plans)'"));
+        assert!(js.contains("dec('units', 'Units allotted (as stated)'"));
     }
 
     #[tokio::test]
