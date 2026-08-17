@@ -787,6 +787,171 @@ mod tests {
         assert_eq!(next.quantity, Decimal::ZERO); // 8 < 9, no whole share
     }
 
+    /// SCENARIOS I-10. A plan that allots at a discount to the market price
+    /// costs the new parcel at **the dividend applied**, not at market value:
+    /// "the acquisition cost of the additional shares is the amount of the
+    /// dividends used to acquire them"
+    /// (`docs/ato/cgt-dividend-reinvestment-plans.md`). The discount is not a
+    /// separate amount anywhere — it is simply why the same cash bought more
+    /// units — and the whole distribution stays assessable.
+    #[tokio::test]
+    async fn a_discounted_allotment_costs_the_parcel_at_the_dividend_applied() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AUD").await;
+        enrol(&pool, 1, ResidualHandling::CarryForward).await;
+        // $100 distribution; market $10.00, allotted at a 5% discount.
+        insert_distribution(&pool, 1, 1, Decimal::from(100), Decimal::ZERO).await;
+
+        let trade = db_reinvest(&pool, 1, &body("9.50")).await.unwrap();
+        assert_eq!(trade.quantity, Decimal::from(10));
+        assert_eq!(trade.average_price, "9.50".parse::<Decimal>().unwrap());
+        // $95 of the dividend was applied; the $5 that bought no whole unit is
+        // carried, not capitalised into the parcel.
+        assert_eq!(trade.residual_carried_forward, Decimal::from(5));
+
+        let parcels = crate::reports::open_parcels::db_open_parcels(&pool)
+            .await
+            .unwrap();
+        assert_eq!(parcels.len(), 1);
+        assert_eq!(parcels[0].remaining_cost_base, "95.00".parse().unwrap());
+    }
+
+    /// SCENARIOS I-08. A per-unit DRP price stated to four decimals is held
+    /// exactly: whole units are floored against it and the leftover keeps the
+    /// price's own scale (money is `Decimal` end to end — a `f64` division
+    /// here would round the residual the next reinvestment brings forward).
+    #[tokio::test]
+    async fn a_four_decimal_price_floors_whole_units_and_carries_the_exact_residual() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AUD").await;
+        enrol(&pool, 1, ResidualHandling::CarryForward).await;
+        insert_distribution(&pool, 1, 1, Decimal::from(1000), Decimal::ZERO).await;
+
+        // $1,000 ÷ $12.3456 = 81.00 units and a $0.0064 remainder.
+        let trade = db_reinvest(&pool, 1, &body("12.3456")).await.unwrap();
+        assert_eq!(trade.quantity, Decimal::from(81));
+        assert_eq!(
+            trade.residual_carried_forward,
+            "0.0064".parse::<Decimal>().unwrap()
+        );
+        let parcels = crate::reports::open_parcels::db_open_parcels(&pool)
+            .await
+            .unwrap();
+        assert_eq!(parcels[0].remaining_cost_base, "999.9936".parse().unwrap());
+    }
+
+    /// SCENARIOS I-11. On an AMIT the two sides of a reinvested distribution
+    /// are recorded separately and neither leaks into the other: the cash row
+    /// funds the reinvestment (it is *cash only* — the AMMA attribution is the
+    /// assessable record, so the row itself declares nothing), while the DRP
+    /// parcel it created is an ordinary open parcel of the fund and takes its
+    /// share of the statement's per-unit cost-base movement (CGT event E10).
+    #[tokio::test]
+    async fn an_amit_distributions_cash_funds_the_drp_while_the_amma_attributes_it() {
+        let pool = test_pool().await;
+        test_support::listing(1)
+            .security_type(listing::SecurityType::Trust)
+            .amit(true)
+            .insert(&pool)
+            .await;
+        enrol(&pool, 1, ResidualHandling::CarryForward).await;
+        // $500 of cash distributed in the 2023-24 year, all reinvested at $50.
+        insert_distribution(&pool, 1, 1, Decimal::from(500), Decimal::ZERO).await;
+        let trade = db_reinvest(&pool, 1, &body("50")).await.unwrap();
+        assert_eq!(trade.quantity, Decimal::from(10));
+
+        // The fund's AMMA for the year: $500 attributed, and a $1.50/unit
+        // excess (a cost-base increase).
+        test_support::amma(1, 1)
+            .units(Decimal::from(10))
+            .cost_base_adjustment("-1.5".parse().unwrap())
+            .with(|a| a.australian_dividends_unfranked = Decimal::from(500))
+            .insert(&pool)
+            .await;
+        let generated =
+            crate::entities::amit_adjustment_generation::db_generate(&pool, 1, &Default::default())
+                .await
+                .unwrap();
+        // The DRP parcel is the parcel the statement's units are adjusted on.
+        assert_eq!(generated.created.len(), 1);
+        assert_eq!(generated.created[0].trade_id, trade.id);
+        assert_eq!(generated.difference, Decimal::ZERO);
+
+        // Assessable: the AMMA's attribution, not the cash row — which is why
+        // an AMIT year with cash but no statement is flagged rather than
+        // reported (`reports::amit_cash_cross_check`, empty once entered).
+        let years = crate::reports::tax_summary::db_tax_summary(&pool)
+            .await
+            .unwrap();
+        assert_eq!(years.len(), 1);
+        assert_eq!(years[0].dividends_assessable, Decimal::ZERO);
+        assert_eq!(years[0].amma_dividends_unfranked, Decimal::from(500));
+        assert!(
+            crate::reports::amit_cash_cross_check::db_amit_cash_alerts(&pool)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        // …and the reinvested parcel carries the E10 uplift: $500 + 10 × $1.50.
+        let parcels = crate::reports::open_parcels::db_open_parcels(&pool)
+            .await
+            .unwrap();
+        assert_eq!(parcels.len(), 1);
+        assert_eq!(parcels[0].trade_id, trade.id);
+        assert_eq!(parcels[0].remaining_cost_base, "515.0".parse().unwrap());
+    }
+
+    /// SCENARIOS I-13. A share split after a reinvestment re-bases the DRP
+    /// parcel like any other (the split is applied at read time, so the trade
+    /// keeps its as-acquired units), and undoing the reinvestment afterwards
+    /// still removes exactly that parcel — the split is not a dependant.
+    #[tokio::test]
+    async fn a_split_after_a_reinvestment_re_bases_it_and_undo_still_works() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AUD").await;
+        enrol(&pool, 1, ResidualHandling::CarryForward).await;
+        insert_distribution(&pool, 1, 1, Decimal::from(100), Decimal::ZERO).await;
+        let trade = db_reinvest(&pool, 1, &body("10")).await.unwrap();
+        assert_eq!(trade.quantity, Decimal::from(10));
+
+        // 2-for-1 split after the reinvestment.
+        crate::entities::corporate_action::db_upsert(
+            &pool,
+            &crate::entities::corporate_action::CorporateAction {
+                id: 1,
+                listing_id: 1,
+                date: "2024-05-01".parse().unwrap(),
+                kind: crate::entities::corporate_action::ActionKind::ShareSplit {
+                    split_new_units: Decimal::TWO,
+                    split_old_units: Decimal::ONE,
+                },
+            },
+        )
+        .await
+        .unwrap();
+        let parcels = crate::reports::open_parcels::db_open_parcels(&pool)
+            .await
+            .unwrap();
+        assert_eq!(parcels[0].original_quantity, Decimal::from(10));
+        assert_eq!(parcels[0].remaining_quantity, Decimal::from(20));
+        assert_eq!(parcels[0].remaining_cost_base, Decimal::from(100));
+
+        db_unreinvest(&pool, 1).await.unwrap();
+        assert!(
+            crate::reports::open_parcels::db_open_parcels(&pool)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            crate::entities::trade::db_get(&pool, trade.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
     #[tokio::test]
     async fn franking_credits_are_excluded_from_reinvestable_cash() {
         let pool = test_pool().await;

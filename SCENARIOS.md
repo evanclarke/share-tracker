@@ -72,7 +72,7 @@ behind or became a recorded finding.
 | F. AMIT / AMMA | 25 | 2026-08-16 | 6 raised, all closed — see below |
 | G. Dividends, franking, and the holding-period rule | 25 | 2026-08-16 | 6 raised, all closed — see below |
 | H. Interest, expenses, and other income | 10 | 2026-08-17 | 6 raised, all closed — see below |
-| I. DRP | 14 | — | — |
+| I. DRP | 14 | 2026-08-17 | 6 raised, open in `TODO.md` — see below |
 | J. Employee share schemes | 14 | — | — |
 | K. Inherited parcels | 10 | — | — |
 | L. Crypto | 15 | — | — |
@@ -433,6 +433,62 @@ loses that attribution in the annual tax report (H-07).
 | An expense covering more than one financial year has nowhere to be apportioned | H-08 | fixed 2026-08-17 — archived in [`DONE/reviews.md`](DONE/reviews.md) |
 | Duplicate interest and expense rows are silently double-counted | H-01, H-06 | fixed 2026-08-17 — archived in [`DONE/reporting.md`](DONE/reporting.md) |
 | A deduction's listing attribution never reaches the annual tax report | H-07 | fixed 2026-08-17 — archived in [`DONE/reporting.md`](DONE/reporting.md) |
+
+### Section I findings
+
+The tax side of a DRP is one sentence — "you treat the transaction as though
+you had received the dividend payment and then used it to buy more shares", so
+the acquisition cost is the amount of the dividends applied
+(`docs/ato/cgt-dividend-reinvestment-plans.md`) — and the system holds it
+everywhere it was probed. A plan that allots at a discount to market costs the
+parcel at the dividend applied, not at market value, with the whole
+distribution still assessable (I-10); a 4-decimal per-unit price floors whole
+units and carries an exact `0.0064` remainder (I-08); each reinvestment parcel
+runs its own 12-month clock, so a sale spanning a Buy and a later DRP parcel
+splits into a discountable and a non-discountable half (I-14); a split after a
+reinvestment re-bases it like any other parcel and undoing the reinvestment
+afterwards still removes exactly that parcel (I-13); a hand-entered DRP trade
+is refused, pointing at the operation (I-12); and on an AMIT the two sides stay
+separate — the cash row funds the reinvestment while the AMMA attributes the
+income, and the reinvested parcel takes its share of the statement's per-unit
+E10 movement (I-11). The period model holds too: half-open `[start, end)`
+periods, so touching periods are legal and overlaps, zero-length periods and a
+second open period are each refused (I-03); a distribution in an unenrolment
+gap is refused naming the account, ticker and date (I-02, I-07); undo is LIFO
+and refused while the parcel is drawn on (I-04, I-05).
+
+Where it comes apart is the **residual**, and the reason is one mismatch:
+eligibility is decided on the distribution's **ex date** (right — participation
+is fixed at the record date) while every other question about which enrolment
+period a reinvestment belongs to is decided on the **trade date**, which is the
+payment date. End a plan between a distribution going ex and its payment — the
+ordinary way a DRP is stopped — and the reinvestment lands outside the period
+that authorised it: its leftover is never settled, or is carried into the *next*
+period under that period's handling, and the A-43 guard that refuses to delete a
+period which produced a reinvestment silently stops firing (I-01, I-02, I-04).
+The settlement is also a one-way write, so undoing or correcting an unenrolment
+date leaves the residual paid out and restarts the chain at zero (I-01, I-03).
+Two more are about what a row is allowed to say, section H's theme reappearing:
+the broker-fractional `units` path scales its tolerance with the stated
+precision, so whole-number units silently discard up to a share's worth of cash
+(I-06), and a distribution recorded in a currency other than its listing's is
+divided by a price in the listing's currency with no conversion and no refusal
+(I-06, I-08). One is A-09's pattern on the income side — every field the
+reinvest operation validated against can be edited afterwards with nothing
+re-checked (I-01, I-04, I-07). The last is documentation: partial participation
+is honestly out of scope and fails safe, but names no workaround, though the
+two-row split does produce a defensible cost base (I-09).
+
+The six findings, each raised as a `TODO.md` section naming its scenario ids:
+
+| Finding | Scenarios | Status |
+| --- | --- | --- |
+| A reinvestment paid after its period's unenrolment escapes that period | I-01, I-02, I-04 | open — `TODO.md` |
+| Re-opening or extending an unenrolment does not restore the residual it paid out | I-01, I-03 | open — `TODO.md` |
+| A whole-number stated allotment can swallow a share's worth of cash | I-06 | open — `TODO.md` |
+| A reinvested distribution can be edited afterwards with nothing re-checked | I-01, I-04, I-07 | open — `TODO.md` |
+| A distribution in a currency other than its listing's is reinvested without conversion | I-06, I-08 | open — `TODO.md` |
+| The partial-participation limitation names no workaround | I-09 | open — `TODO.md` |
 
 ---
 

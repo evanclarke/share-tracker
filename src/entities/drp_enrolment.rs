@@ -517,6 +517,39 @@ mod tests {
         assert!(matches!(err, UpsertError::Overlap));
     }
 
+    /// SCENARIOS I-03. Periods are half-open `[start, end)`, so re-enrolling
+    /// on the very day an unenrolment took effect is a legitimate history —
+    /// not an overlap. (A registry that stops and restarts a plan between two
+    /// distributions leaves no gap to record.) The day itself belongs to the
+    /// new period: nothing is covered twice.
+    #[tokio::test]
+    async fn db_touching_periods_are_allowed() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        db_upsert(
+            &pool,
+            &period(
+                1,
+                1,
+                "2023-01-01",
+                Some("2024-01-01"),
+                ResidualHandling::CarryForward,
+            ),
+        )
+        .await
+        .unwrap();
+        db_upsert(
+            &pool,
+            &period(2, 1, "2024-01-01", None, ResidualHandling::PayOut),
+        )
+        .await
+        .unwrap();
+        let all = db_list(&pool).await.unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].unenrolment_date, Some(d("2024-01-01")));
+        assert_eq!(all[1].enrolment_date, d("2024-01-01"));
+    }
+
     #[tokio::test]
     async fn db_empty_period_rejected() {
         let pool = test_pool().await;
