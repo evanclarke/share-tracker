@@ -243,7 +243,65 @@ fn the_franking_windows_anchor_and_its_untested_rows_are_documented() {
     ));
     assert!(API_MD.contains("an *empty* report can be read as an all-clear"));
     assert!(API_MD.contains("`ex_date_recorded` (false when that is the payment-date fallback)"));
-    assert!(README_MD.contains("an empty report really does mean every credit is claimable"));
+    assert!(
+        README_MD.contains(
+            "an empty report really does mean every credit the walk can test is claimable"
+        )
+    );
+}
+
+/// Docs-sync pin for SCENARIOS G-14: being a *qualified person* for a franking
+/// credit needs more than the 45/90-day count the at-risk walk models — the
+/// **30%-at-risk test** (hedges, options, futures) and the **related payments
+/// rule** are separate conditions, and the latter is *not* excused by the
+/// small-shareholder exemption. Neither is modelled and neither a hedge nor a
+/// related payment is recordable, so this is documentation-only (like the C-09
+/// rollover scope cut): the Known-limitations entry states both tests, and the
+/// two places that report on franking entitlement — the at-risk report's
+/// all-clear sentence and the tax summary's `franking_credits` explainer — say
+/// what their answer is conditional on, rather than claiming more certainty
+/// than the recorded data can support.
+#[test]
+fn unmodelled_franking_qualified_person_tests_documented() {
+    let limitations = known_limitations();
+    assert!(
+        limitations.contains("**Franking: the 30%-at-risk test and the related payments rule**")
+    );
+    // Both tests named, with the facts that would drive them unrecordable.
+    assert!(limitations.contains("30% or less of the ordinary financial risks of loss"));
+    assert!(limitations.contains("hedges, options and futures are not recordable"));
+    assert!(limitations.contains("Related payments are not recordable."));
+    // The related payments rule applies separately from the holding period, so
+    // the A$5,000 exemption does not excuse it — the trap in the ATO wording.
+    assert!(limitations.contains("not excused by the A$5,000 threshold"));
+
+    // The at-risk report's all-clear is qualified by what it does not test,
+    // while staying an all-clear for what it does (G-11's `untested_no_ex_date`).
+    assert!(API_MD.contains("an empty report means every attached credit is claimable **on the tests this report models**"));
+    assert!(API_MD.contains("so no dividend leaves the report untested"));
+    assert!(
+        API_MD
+            .contains("assumes the holdings are unhedged and under no related-payment obligation")
+    );
+    // The same qualification on the tax summary's own franking-credit line.
+    assert!(API_MD.contains(
+        "`franking_credits` assumes the holdings are unhedged and under no related-payment obligation"
+    ));
+
+    // The cited ATO mirror still carries both rules.
+    let ato = include_str!("../docs/ato/you-and-your-shares-dividends.md");
+    assert!(
+        ato.contains(
+            "You can't count days on which you have 30% or less of the ordinary financial risks"
+        ),
+        "the cited ATO mirror still carries the 30%-at-risk test"
+    );
+    assert!(
+        ato.contains(
+            "entitled to franking credits for all shares that satisfy the related payments rule"
+        ),
+        "the cited ATO mirror still carries the related-payments condition on the exemption"
+    );
 }
 
 #[test]

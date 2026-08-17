@@ -17,6 +17,15 @@
 //! rows deny nothing; they are here so that an *empty* report can be read as
 //! "every attached credit is claimable", which is the only thing that makes
 //! the silence elsewhere meaningful.
+//!
+//! That reading is bounded by what a *qualified person* actually requires: the
+//! 30%-at-risk test (hedges, options, futures shorten the at-risk days) and
+//! the related payments rule are separate conditions, neither modelled nor
+//! recordable, and the related payments rule is not excused by the
+//! small-shareholder exemption (SCENARIOS G-14). So an empty report is an
+//! all-clear on the tests here, under the assumption that the holdings are
+//! unhedged and carry no related-payment obligation — stated in `docs/API.md`'s
+//! Known limitations and in the report's own section there.
 
 use crate::infra::fx::FxRates;
 use crate::infra::http::ApiError;

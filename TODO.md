@@ -10,25 +10,6 @@ findings are all closed in DONE.md), except where a section's heading names anot
 (e.g. REQUIREMENTS, SCENARIOS). Each section records one finding; sections land in DONE.md as they
 are fixed or decided.
 
-## The related-payments rule and the 30%-at-risk test are not modelled and nowhere documented (SCENARIOS G-14)
-(SCENARIOS.md section G verification pass, 2026-08-16.)
-- [ ] G-14 — being a "qualified person" needs more than the 45/90-day count: days on which 30% or
-  less of the ordinary financial risk of loss and opportunity for gain is retained do not count
-  (hedges, options, futures), and the **related payments rule** applies separately — the
-  small-shareholder exemption itself only exempts a holder "entitled to franking credits for all
-  shares that satisfy the related payments rule"
-  (`docs/ato/you-and-your-shares-dividends.md`)
-- [ ] Neither is modelled (there is nowhere to record a hedge or a related payment) and neither is
-  mentioned in `docs/API.md`'s Known limitations, the franking at-risk section, or the tax summary's
-  `franking_credits` field — while that section states "an empty report means every attached credit
-  is claimable", which claims more certainty than the recorded data can support
-- [ ] Documentation-only, like the C-09 rollover scope cut: state the two unmodelled tests, and
-  qualify the empty-report sentence with them. Note that G-11's fix has since made that sentence
-  *true for what the report does test* (a dividend the walk cannot anchor is now listed as
-  `untested_no_ex_date`), so the qualification to add is about the tests that are not modelled at
-  all, not about the walk's coverage
-- [ ] Tests: `doc_checks` pins the Known-limitations entry and the reworded report section
-
 ## The LIC capital gain deduction field takes the already-halved figure, undocumented (SCENARIOS G-04)
 (SCENARIOS.md section G verification pass, 2026-08-16.)
 - [ ] G-04 — `lic_capital_gain_deduction` is passed straight through to the tax summary's D8 line.

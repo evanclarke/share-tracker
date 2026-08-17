@@ -1121,6 +1121,17 @@ mod tests {
         // The report's third status is explained where the report is described
         // (SCENARIOS G-11): a row the rule could not be applied to at all.
         assert!(js.contains("untested_no_ex_date"));
+        // And the two qualified-person tests that are *not* modelled bound the
+        // all-clear the description offers (SCENARIOS G-14), so the screen
+        // itself doesn't promise more than the recorded data can support.
+        assert!(js.contains(
+            "the 30%-at-risk test (hedges, options, futures) and the related payments rule"
+        ));
+        assert!(
+            js.contains(
+                "assumes the holdings are unhedged and under no related-payment obligation"
+            )
+        );
         // Surfaced in the Sell flow: the Sells list and the Sell form link to
         // the foresight reports.
         assert!(js.contains("function sellForesightLinks()"));

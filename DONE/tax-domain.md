@@ -1250,3 +1250,45 @@ api_franking_credit_above_the_maximum_returns_422_with_detail}`;
 `entities::buyback_participation::tests::an_over_credited_buy_back_cannot_create_its_dividend_component`;
 `doc_checks::franking_credit_ceiling_documented`; and
 `web::tests::income_franking_credit_ceiling_hint_present`. Full suite 1540 passed / 0 failed.
+
+## The related-payments rule and the 30%-at-risk test are not modelled and nowhere documented (SCENARIOS G-14)
+(SCENARIOS.md section G verification pass, 2026-08-16.)
+- [x] G-14 — being a "qualified person" needs more than the 45/90-day count: days on which 30% or
+  less of the ordinary financial risk of loss and opportunity for gain is retained do not count
+  (hedges, options, futures), and the **related payments rule** applies separately — the
+  small-shareholder exemption itself only exempts a holder "entitled to franking credits for all
+  shares that satisfy the related payments rule"
+  (`docs/ato/you-and-your-shares-dividends.md`)
+- [x] Neither is modelled (there is nowhere to record a hedge or a related payment) and neither is
+  mentioned in `docs/API.md`'s Known limitations, the franking at-risk section, or the tax summary's
+  `franking_credits` field — while that section states "an empty report means every attached credit
+  is claimable", which claims more certainty than the recorded data can support
+- [x] Documentation-only, like the C-09 rollover scope cut: state the two unmodelled tests, and
+  qualify the empty-report sentence with them. Note that G-11's fix has since made that sentence
+  *true for what the report does test* (a dividend the walk cannot anchor is now listed as
+  `untested_no_ex_date`), so the qualification to add is about the tests that are not modelled at
+  all, not about the walk's coverage
+- [x] Tests: `doc_checks` pins the Known-limitations entry and the reworded report section
+
+Closed 2026-08-17, documentation-only as scoped. A Known-limitations entry (**Franking: the
+30%-at-risk test and the related payments rule**) states both tests in the ATO's own words, says that
+neither the hedge/derivative position nor the related payment is recordable — so no stored fact could
+test them — and names the trap that makes the second worth stating separately: the small-shareholder
+exemption exempts a holder from the *holding period rule* only, so a related payment is not excused
+by being under A$5,000 the way a short holding is.
+
+The four places that reported on franking entitlement were qualified to say what their answer is
+conditional on, rather than dropped to a hedge: the at-risk report's section in `docs/API.md` ("an
+empty report means every attached credit is claimable **on the tests this report models**", still an
+all-clear for those, since G-11's `untested_no_ex_date` means no dividend leaves the report
+untested), the tax summary's `franking_credits` explainer, the README feature line (which made the
+same unqualified claim — its `doc_checks` pin moved with the wording), and the report's own
+description in the UI (`config.js`), so the screen doesn't promise more than the data can support.
+`reports::franking_at_risk`'s module doc carries the same bound for the next reader of the walk.
+
+Tests: `doc_checks::unmodelled_franking_qualified_person_tests_documented` (the limitations entry,
+both tests named, the not-recordable facts, the exemption trap, the reworded report + tax-summary
+sentences, and the cited ATO mirror still carrying both rules) and
+`web::tests::franking_at_risk_ui_present` (the two unmodelled tests bound the description's
+all-clear). Full suite 1546 passed / 0 failed.
+
