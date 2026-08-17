@@ -22,6 +22,33 @@
 //! A statement may be vested at most once — re-posting is rejected rather than
 //! creating a second Buy. The created Buy is immutable (`PUT /trades` → 422) and
 //! never deleted individually; `DELETE /ess_statements/:id` removes it.
+//!
+//! # The trade write-time checks, and where each is satisfied
+//!
+//! The Buy is written with a raw `INSERT INTO trades`, not through
+//! `trade::db_upsert`, so `trade::check_amounts` never runs over it. That is
+//! deliberate, and this is the list it rests on — every one of that check's
+//! rejections is already impossible here (SCENARIOS J-03):
+//!
+//! - `QuantityNotPositive` / `PriceNegative` — [`VestError::NothingToVest`]
+//!   refuses a statement whose quantity or per-share market value is not
+//!   positive, which is strictly stronger (it rejects a nil price too).
+//! - `BrokerageNegative` / `GstNegative` — both are written as literal `'0'`:
+//!   ESS-vested units are issued by the plan, so there is no broker.
+//! - `BrokerageCurrencyMismatch` — `brokerage_currency` is bound from the same
+//!   `currency` value as the trade's own, in one statement.
+//! - `FxRateNotPositive` — the statement's stated rate is refused at write time
+//!   unless positive (`ess_statement::UpsertError::FxRateNotPositive`), and a
+//!   resolved ATO/RBA rate is positive by import.
+//! - `SettlementBeforeTrade` — `settlement_date` is bound to the trade date
+//!   itself (plan-issued units are not market-settled).
+//! - `PreCgtDate` — the only one with nothing about the *insert* to prevent it,
+//!   since the date comes from the statement. It is refused on the statement
+//!   instead (`ess_statement::UpsertError::PreCgtTaxingPoint`), the earlier and
+//!   better place: the taxing point is what the user typed.
+//!
+//! A new check added to `trade::check_amounts` therefore needs a line here, and
+//! either an argument that the vest satisfies it or a guard that makes it so.
 
 use crate::entities::trade::{self, Trade};
 use crate::infra::decimal::Money;
@@ -641,10 +668,20 @@ mod tests {
             Err(ess_statement::UpsertError::Vested)
         ));
         // …but the income side stays editable (the employer's annual ESS
-        // statement arrives after the vest is recorded).
+        // statement arrives after the vest is recorded). The revision stays
+        // within the vested shares' market value, which the discount can never
+        // exceed (`UpsertError::DiscountExceedsMarketValue`).
         let mut s = ess_statement::db_get(&pool, 1).await.unwrap().unwrap();
-        s.deferral_discount = Decimal::from(700);
+        s.deferral_discount = Decimal::from(500);
         ess_statement::db_upsert(&pool, &s).await.unwrap();
+        assert_eq!(
+            ess_statement::db_get(&pool, 1)
+                .await
+                .unwrap()
+                .unwrap()
+                .deferral_discount,
+            Decimal::from(500)
+        );
 
         // Deleting the statement removes the vest Buy too.
         assert_eq!(

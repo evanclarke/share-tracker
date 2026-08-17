@@ -17,6 +17,14 @@
 //! and a stated `fx_rate` must be positive and is only accepted on a non-AUD
 //! statement. Both are refused `422` rather than reaching a report.
 //!
+//! The amounts are checked the same way ([`validate`]): no negative figure, a
+//! taxing point on or after the start of CGT, the label-A memo no larger than
+//! the discounts it is a memo of, and the discount no larger than the market
+//! value of the shares that vest. Each is refused `422` — an employer's
+//! statement is the source of these figures, so a contradiction between them is
+//! a transcription slip, and every one of them reaches the tax summary and the
+//! printed annual document unchallenged otherwise.
+//!
 //! Integrity mirrors the corporate-action groups: while a statement's vest Buy
 //! exists the statement is **frozen** against edits (`PUT` → 422; delete the
 //! vest first), and deleting the statement removes its vest Buy in the same
@@ -232,9 +240,183 @@ pub enum UpsertError {
     /// Mapped to 422. Same rule as the DRP reinvest path.
     #[error("the ESS statement is in {statement} but its listing is in {listing}")]
     CurrencyNotListings { statement: String, listing: String },
+    /// A negative amount on the statement (carries the field name): an
+    /// employer's statement reports positive (or zero) figures. A negative
+    /// discount label nets against the year's other statements, a negative TFN
+    /// amount withheld is a refund from nowhere, and a negative quantity or
+    /// market value describes a parcel that cannot exist. Mapped to 422.
+    #[error("{0} cannot be negative")]
+    NegativeAmount(&'static str),
+    /// The taxing point is before the start of CGT, 20 September 1985
+    /// (`trade::CGT_START`). The vest Buy this statement creates is dated the
+    /// taxing point, and `trade::db_upsert` refuses exactly that trade — a
+    /// pre-CGT holding is outside CGT and not modelled — so the statement is
+    /// refused at the earlier, better place: what the user typed. Nothing about
+    /// an ESS interest can genuinely predate it (Division 83A dates from 2009,
+    /// its predecessor from 1995), so this is a typo guard. Mapped to 422.
+    #[error("the taxing point is before the start of CGT (20 September 1985)")]
+    PreCgtTaxingPoint,
+    /// The foreign-source memo (label A) exceeds the discount labels it is a
+    /// memo *of* (D + E + F + G — see [`EssStatement::foreign_source_discount`]),
+    /// so it claims more foreign-source income than there is assessable
+    /// discount. Carries which label set was checked (the statement's own
+    /// amounts, or the statement-AUD overrides) and both figures. Same shape as
+    /// income's CFI-within-unfranked check. Mapped to 422.
+    #[error("{label} {foreign} exceeds the {discounts} of discount it is a memo of")]
+    ForeignSourceExceedsDiscounts {
+        label: &'static str,
+        foreign: Decimal,
+        discounts: Decimal,
+    },
+    /// The discount labels total more than the market value of the shares that
+    /// vest (`quantity × market_value_per_share`). The discount *is* market
+    /// value less what the employee paid (docs/ato/employee-share-schemes.md),
+    /// so a larger discount implies a negative payment — the shape a transposed
+    /// column or a foreign-currency discount against an AUD market value makes.
+    /// Only checked when both figures are positive (an income-only statement
+    /// leaves them zero, which is legitimate). Mapped to 422.
+    #[error("the discount labels total {discount}, above the {market_value} that vests")]
+    DiscountExceedsMarketValue {
+        discount: Decimal,
+        market_value: Decimal,
+    },
+}
+
+/// Round half away from zero to the cent, the way employer statements do.
+fn to_cents(v: Decimal) -> Decimal {
+    v.round_dp_with_strategy(2, rust_decimal::RoundingStrategy::MidpointAwayFromZero)
+}
+
+/// The statement's own discount labels (D + E + F + G) — what the tax summary
+/// assesses, and what label A is a memo of.
+fn discount_labels(s: &EssStatement) -> Decimal {
+    s.taxed_upfront_eligible
+        + s.taxed_upfront_not_eligible
+        + s.deferral_discount
+        + s.pre_2009_cessation_discount
+}
+/// The same four labels in AUD from the statement-AUD overrides, when that
+/// total is *knowable*: an override stands for its label, and an absent one is
+/// only known to be nil when the label it overrides is itself nil. A label with
+/// an amount but no override converts at the RBA rate, which is not resolvable
+/// at write time — so the total is `None` and the AUD-side memo check is
+/// skipped rather than guessed at.
+fn aud_discount_labels(s: &EssStatement) -> Option<Decimal> {
+    [
+        (s.aud_taxed_upfront_eligible, s.taxed_upfront_eligible),
+        (
+            s.aud_taxed_upfront_not_eligible,
+            s.taxed_upfront_not_eligible,
+        ),
+        (s.aud_deferral_discount, s.deferral_discount),
+        (
+            s.aud_pre_2009_cessation_discount,
+            s.pre_2009_cessation_discount,
+        ),
+    ]
+    .into_iter()
+    .try_fold(
+        Decimal::ZERO,
+        |sum, (override_aud, label)| match override_aud {
+            Some(aud) => Some(sum + aud),
+            None if label.is_zero() => Some(sum),
+            None => None,
+        },
+    )
+}
+
+/// What the statement may say about itself, decided from the row alone (the
+/// currency and vest-freeze rules that need the database stay in
+/// [`db_upsert`]). Every figure here reaches the tax summary and the printed
+/// annual document, so a contradiction between them is refused at write time
+/// rather than reported.
+fn validate(s: &EssStatement) -> Result<(), UpsertError> {
+    // Negatives first, so a negative figure gets the message naming its field
+    // rather than failing one of the cross-checks below in a confusing way.
+    for (field, value) in [
+        ("quantity", Some(s.quantity)),
+        ("market_value_per_share", Some(s.market_value_per_share)),
+        ("taxed_upfront_eligible", Some(s.taxed_upfront_eligible)),
+        (
+            "taxed_upfront_not_eligible",
+            Some(s.taxed_upfront_not_eligible),
+        ),
+        ("deferral_discount", Some(s.deferral_discount)),
+        (
+            "pre_2009_cessation_discount",
+            Some(s.pre_2009_cessation_discount),
+        ),
+        ("foreign_source_discount", Some(s.foreign_source_discount)),
+        ("tfn_withholding", Some(s.tfn_withholding)),
+        ("aud_taxed_upfront_eligible", s.aud_taxed_upfront_eligible),
+        (
+            "aud_taxed_upfront_not_eligible",
+            s.aud_taxed_upfront_not_eligible,
+        ),
+        ("aud_deferral_discount", s.aud_deferral_discount),
+        (
+            "aud_pre_2009_cessation_discount",
+            s.aud_pre_2009_cessation_discount,
+        ),
+        ("aud_foreign_source_discount", s.aud_foreign_source_discount),
+    ] {
+        if value.is_some_and(|v| v < Decimal::ZERO) {
+            return Err(UpsertError::NegativeAmount(field));
+        }
+    }
+
+    // The vest Buy is dated the taxing point, and `trade::db_upsert` refuses a
+    // pre-CGT trade — the vest writes its Buy directly, so without this the
+    // statement is the one door a parcel can enter below the CGT floor by.
+    if s.taxing_point_date < crate::entities::trade::CGT_START {
+        return Err(UpsertError::PreCgtTaxingPoint);
+    }
+
+    // Label A is a memo *within* the discount labels, not an amount of its own
+    // (see `EssStatement::foreign_source_discount`), so it cannot exceed them —
+    // on the statement's own figures, and on the statement-AUD overrides where
+    // those pin the same total in AUD.
+    let discounts = discount_labels(s);
+    if s.foreign_source_discount > discounts {
+        return Err(UpsertError::ForeignSourceExceedsDiscounts {
+            label: "foreign_source_discount",
+            foreign: s.foreign_source_discount,
+            discounts,
+        });
+    }
+    if let (Some(aud_foreign), Some(aud_discounts)) =
+        (s.aud_foreign_source_discount, aud_discount_labels(s))
+        && aud_foreign > aud_discounts
+    {
+        return Err(UpsertError::ForeignSourceExceedsDiscounts {
+            label: "aud_foreign_source_discount",
+            foreign: aud_foreign,
+            discounts: aud_discounts,
+        });
+    }
+
+    // The discount is the market value less what the employee paid, so it can
+    // at most equal the market value of the shares that vest (an RSU acquired
+    // for nil consideration — the equality case, which must stay accepted).
+    // Both sides round to the cent, since a per-share market value can carry
+    // sub-cent precision while the discount on the statement is cents. Only
+    // when both figures are positive: an income-only statement (no vest
+    // recorded) leaves them zero and is legitimate.
+    if s.quantity > Decimal::ZERO && s.market_value_per_share > Decimal::ZERO {
+        let market_value = s.quantity * s.market_value_per_share;
+        if to_cents(discounts) > to_cents(market_value) {
+            return Err(UpsertError::DiscountExceedsMarketValue {
+                discount: discounts,
+                market_value,
+            });
+        }
+    }
+    Ok(())
 }
 
 pub async fn db_upsert(pool: &SqlitePool, s: &EssStatement) -> Result<(), UpsertError> {
+    validate(s)?;
+
     // A statement-AUD override restates a label the statement already gives in
     // AUD — reject the contradiction before touching the row.
     let has_override = s.aud_taxed_upfront_eligible.is_some()
@@ -491,6 +673,41 @@ impl From<UpsertError> for ApiError {
                  chosen)"
                 ))
             }
+            UpsertError::NegativeAmount(field) => ApiError::unprocessable(format!(
+                "{field} cannot be negative — an Employee share scheme statement reports the \
+                 employer's positive (or zero) figures; a negative discount label nets against \
+                 the year's other statements, a negative TFN amount withheld is a refund from \
+                 nowhere, and a negative quantity or market value is not a parcel"
+            )),
+            UpsertError::PreCgtTaxingPoint => ApiError::unprocessable(
+                "the taxing point is dated before 20 September 1985 — a pre-CGT holding is \
+                 outside CGT and not modelled, and the vest Buy this statement creates would \
+                 be refused for the same reason; no ESS interest can predate CGT in any case \
+                 (Division 83A dates from 2009 and its predecessor from 1995), so check the \
+                 date for a typo",
+            ),
+            UpsertError::ForeignSourceExceedsDiscounts {
+                label,
+                foreign,
+                discounts,
+            } => ApiError::unprocessable(format!(
+                "{label} {foreign} cannot exceed the {discounts} of discount it is a memo of \
+                 — the foreign-source figure (label A) is the foreign-sourced *portion* of \
+                 the discount labels D + E + F + G, recorded within them rather than in \
+                 addition to them (the tax summary surfaces it for the foreign income tax \
+                 offset, never adds it on top); enter the discount labels in full, the \
+                 foreign-source part included"
+            )),
+            UpsertError::DiscountExceedsMarketValue {
+                discount,
+                market_value,
+            } => ApiError::unprocessable(format!(
+                "the discount labels total {discount}, above the {market_value} market value \
+                 of the shares that vest (quantity × market_value_per_share) — the discount \
+                 is the market value less what the employee paid, so it can at most equal it \
+                 (an RSU acquired for nil consideration); check for a transposed column, or a \
+                 discount in another currency against this statement's market value"
+            )),
             UpsertError::Db(err) => err.into(),
         }
     }
@@ -742,6 +959,268 @@ mod tests {
         });
         let resp = client(&pool).put("/ess_statements/1", &body).await;
         assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    /// SCENARIOS J-01/J-09: no figure on a statement may be negative — an
+    /// employer's statement reports positive (or zero) amounts. A negative
+    /// discount label silently nets against the year's other statements, a
+    /// negative TFN amount withheld reports as withholding refunded from
+    /// nowhere, and a negative quantity or market value describes a parcel that
+    /// cannot exist. Each is refused 422 naming the field, and nothing is
+    /// persisted.
+    #[tokio::test]
+    async fn db_negative_amounts_are_refused_naming_the_field() {
+        let pool = test_pool().await;
+        insert_listing_in(&pool, 1, "USD").await; // so the AUD overrides apply
+
+        /// Puts the given amount in one field, so the sweep below can name
+        /// every amount on the row once.
+        type SetAmount = fn(&mut EssStatement, Decimal);
+
+        let negative = Decimal::from(-50);
+        let cases: [(&str, SetAmount); 13] = [
+            ("quantity", |s, v| s.quantity = v),
+            ("market_value_per_share", |s, v| {
+                s.market_value_per_share = v
+            }),
+            ("taxed_upfront_eligible", |s, v| {
+                s.taxed_upfront_eligible = v
+            }),
+            ("taxed_upfront_not_eligible", |s, v| {
+                s.taxed_upfront_not_eligible = v
+            }),
+            ("deferral_discount", |s, v| s.deferral_discount = v),
+            ("pre_2009_cessation_discount", |s, v| {
+                s.pre_2009_cessation_discount = v
+            }),
+            ("foreign_source_discount", |s, v| {
+                s.foreign_source_discount = v
+            }),
+            ("tfn_withholding", |s, v| s.tfn_withholding = v),
+            ("aud_taxed_upfront_eligible", |s, v| {
+                s.aud_taxed_upfront_eligible = Some(v)
+            }),
+            ("aud_taxed_upfront_not_eligible", |s, v| {
+                s.aud_taxed_upfront_not_eligible = Some(v)
+            }),
+            ("aud_deferral_discount", |s, v| {
+                s.aud_deferral_discount = Some(v)
+            }),
+            ("aud_pre_2009_cessation_discount", |s, v| {
+                s.aud_pre_2009_cessation_discount = Some(v)
+            }),
+            ("aud_foreign_source_discount", |s, v| {
+                s.aud_foreign_source_discount = Some(v)
+            }),
+        ];
+        for (field, set) in cases {
+            let mut s = sample(1);
+            s.currency = "USD".to_string();
+            set(&mut s, negative);
+            assert!(
+                matches!(db_upsert(&pool, &s).await, Err(UpsertError::NegativeAmount(f)) if f == field),
+                "a negative {field} must be refused naming it"
+            );
+            assert!(db_get(&pool, 1).await.unwrap().is_none());
+        }
+    }
+
+    /// The 422 body names the offending field, so the web UI can say which one.
+    #[tokio::test]
+    async fn api_negative_tfn_withholding_rejected_422() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        let body = serde_json::json!({
+            "listing_id": 1,
+            "taxing_point_date": "2024-09-01",
+            "deferral_discount": "-1000",
+            "tfn_withholding": "-50",
+        });
+        let resp = client(&pool).put("/ess_statements/1", &body).await;
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
+        let text = resp.text().to_string();
+        assert!(text.contains("deferral_discount"), "{text}");
+    }
+
+    /// SCENARIOS J-13: a taxing point before the start of CGT is refused. The
+    /// vest writes its Buy with a raw INSERT, so without this the statement is
+    /// the one door a parcel can enter below the CGT floor by — `PUT /trades`
+    /// refuses precisely the Buy the vest would create. 20 September 1985
+    /// itself is on the CGT side of the line and stays acceptable.
+    #[tokio::test]
+    async fn db_a_pre_cgt_taxing_point_is_refused_and_the_cutoff_day_accepted() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+
+        let mut s = sample(1);
+        s.taxing_point_date = ymd(1985, 9, 19);
+        assert!(matches!(
+            db_upsert(&pool, &s).await,
+            Err(UpsertError::PreCgtTaxingPoint)
+        ));
+        assert!(db_get(&pool, 1).await.unwrap().is_none());
+
+        s.taxing_point_date = ymd(1985, 9, 20);
+        db_upsert(&pool, &s).await.unwrap();
+        assert_eq!(
+            db_get(&pool, 1).await.unwrap().unwrap().taxing_point_date,
+            ymd(1985, 9, 20)
+        );
+    }
+
+    /// The refusal reaches the API as a 422 whose body says why, and no vest
+    /// Buy can follow — the statement never exists to vest.
+    #[tokio::test]
+    async fn api_pre_cgt_taxing_point_rejected_422() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        let body = serde_json::json!({
+            "listing_id": 1,
+            "taxing_point_date": "1985-01-01",
+            "quantity": "100",
+            "market_value_per_share": "10",
+            "deferral_discount": "1000",
+        });
+        let resp = client(&pool).put("/ess_statements/1", &body).await;
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
+        let text = resp.text().to_string();
+        assert!(text.contains("20 September 1985"), "{text}");
+        assert!(db_get(&pool, 1).await.unwrap().is_none());
+    }
+
+    /// SCENARIOS J-11: label A is a memo *within* labels D + E + F + G, not an
+    /// amount of its own, so a memo larger than what it is a memo of is a
+    /// contradiction — the CFI-within-unfranked shape the income entity already
+    /// enforces. Equality is the ordinary case (a wholly foreign-sourced
+    /// discount) and stays accepted.
+    #[tokio::test]
+    async fn db_the_foreign_source_memo_cannot_exceed_the_discounts_it_memos() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+
+        let mut s = sample(1); // deferral_discount 600
+        s.foreign_source_discount = Decimal::from(5000);
+        assert!(matches!(
+            db_upsert(&pool, &s).await,
+            Err(UpsertError::ForeignSourceExceedsDiscounts { label, foreign, discounts })
+                if label == "foreign_source_discount"
+                    && foreign == Decimal::from(5000)
+                    && discounts == Decimal::from(600)
+        ));
+        assert!(db_get(&pool, 1).await.unwrap().is_none());
+
+        // The whole discount being foreign-sourced is ordinary.
+        s.foreign_source_discount = Decimal::from(600);
+        db_upsert(&pool, &s).await.unwrap();
+    }
+
+    /// The same rule on the statement-AUD overrides, which the tax summary
+    /// reports verbatim: the label-A override cannot exceed the override total
+    /// it is a memo of. Only checked when that total is knowable — a label with
+    /// an amount but no override converts at the RBA rate, which no write-time
+    /// check can resolve, so such a statement is left alone rather than guessed
+    /// at.
+    #[tokio::test]
+    async fn db_the_aud_foreign_source_memo_is_checked_only_when_the_total_is_known() {
+        let pool = test_pool().await;
+        insert_listing_in(&pool, 1, "USD").await;
+
+        let mut s = sample(1); // deferral_discount 600, the only non-zero label
+        s.currency = "USD".to_string();
+        s.aud_deferral_discount = Some(Decimal::from(900));
+        s.foreign_source_discount = Decimal::from(600);
+        s.aud_foreign_source_discount = Some(Decimal::from(1200));
+        assert!(matches!(
+            db_upsert(&pool, &s).await,
+            Err(UpsertError::ForeignSourceExceedsDiscounts { label, foreign, discounts })
+                if label == "aud_foreign_source_discount"
+                    && foreign == Decimal::from(1200)
+                    && discounts == Decimal::from(900)
+        ));
+
+        // Within the override total: accepted.
+        s.aud_foreign_source_discount = Some(Decimal::from(900));
+        db_upsert(&pool, &s).await.unwrap();
+
+        // With no override on the label carrying the discount, the AUD total is
+        // not knowable at write time (it converts at the RBA rate), so the memo
+        // override passes unchecked rather than being compared against nothing.
+        let mut unknowable = sample(2);
+        unknowable.currency = "USD".to_string();
+        unknowable.foreign_source_discount = Decimal::from(600);
+        unknowable.aud_deferral_discount = None;
+        unknowable.aud_foreign_source_discount = Some(Decimal::from(1200));
+        db_upsert(&pool, &unknowable).await.unwrap();
+    }
+
+    /// SCENARIOS J-01: the discount *is* the market value less what the
+    /// employee paid, so a discount above the market value of the shares that
+    /// vest implies a negative payment — the shape a transposed column or a
+    /// foreign-currency discount against an AUD market value makes. Exact
+    /// equality is the RSU case (nil consideration) and must stay accepted.
+    #[tokio::test]
+    async fn db_the_discount_cannot_exceed_the_market_value_that_vests() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+
+        // 100 shares at $10 = $1,000 of market value, against a $15,000 label.
+        let mut s = sample(1);
+        s.quantity = Decimal::from(100);
+        s.market_value_per_share = Decimal::from(10);
+        s.deferral_discount = Decimal::from(15000);
+        assert!(matches!(
+            db_upsert(&pool, &s).await,
+            Err(UpsertError::DiscountExceedsMarketValue { discount, market_value })
+                if discount == Decimal::from(15000) && market_value == Decimal::from(1000)
+        ));
+        assert!(db_get(&pool, 1).await.unwrap().is_none());
+
+        // Nil consideration: the discount is the whole market value.
+        s.deferral_discount = Decimal::from(1000);
+        db_upsert(&pool, &s).await.unwrap();
+
+        // A per-share value carrying sub-cent precision still equals its own
+        // total once both sides round to the cent (400 × 3.795 = 1518).
+        let mut wyatt = sample(2);
+        wyatt.quantity = Decimal::from(400);
+        wyatt.market_value_per_share = "3.795".parse().unwrap();
+        wyatt.deferral_discount = Decimal::from(1518);
+        db_upsert(&pool, &wyatt).await.unwrap();
+    }
+
+    /// An income-only statement — a discount declared with no vest recorded
+    /// against it — leaves quantity and market value zero, which is legitimate:
+    /// the cross-check only applies when both are positive.
+    #[tokio::test]
+    async fn db_an_income_only_statement_keeps_its_discount() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        let mut s = sample(1);
+        s.quantity = Decimal::ZERO;
+        s.market_value_per_share = Decimal::ZERO;
+        s.deferral_discount = Decimal::from(5000);
+        db_upsert(&pool, &s).await.unwrap();
+        assert_eq!(
+            db_get(&pool, 1).await.unwrap().unwrap().deferral_discount,
+            Decimal::from(5000)
+        );
+    }
+
+    #[tokio::test]
+    async fn api_discount_above_the_market_value_rejected_422() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        let body = serde_json::json!({
+            "listing_id": 1,
+            "taxing_point_date": "2024-09-01",
+            "quantity": "100",
+            "market_value_per_share": "10",
+            "deferral_discount": "15000",
+        });
+        let resp = client(&pool).put("/ess_statements/1", &body).await;
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
+        let text = resp.text().to_string();
+        assert!(text.contains("15000") && text.contains("1000"), "{text}");
     }
 
     #[tokio::test]

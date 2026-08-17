@@ -12,63 +12,12 @@ are fixed or decided.
 
 **SCENARIOS.md sections A–I are driven and every finding they raised is closed** in the `DONE/*.md`
 archive. **Section J. Employee share schemes** was driven 2026-08-18; it raised eight findings, of which
-the two currency/FX ones are closed (see [`DONE/reviews.md`](DONE/reviews.md)) and the six below are
-its remaining open work. When they are closed, the next work comes from driving **SCENARIOS.md section
-K. Inherited parcels** the same way — walk its scenarios against the running system, and record each
+four are closed (the two currency/FX ones, plus the two write-time-check ones fixed 2026-08-18 — see
+[`DONE/reviews.md`](DONE/reviews.md)) and the four below are its remaining open work. Three of those
+four carry a **Decide the model** item awaiting Evan; the duplicate-statement one does not — its fix
+is settled and only needs doing. When they are closed, the next work comes from driving
+**SCENARIOS.md section K. Inherited parcels** the same way — walk its scenarios against the running system, and record each
 gap here as its own `## ` section.
-
-## The ESS vest bypasses the trade write-time checks, and creates a Buy `PUT /trades` refuses (SCENARIOS J-03, J-13)
-(SCENARIOS.md section J verification pass, 2026-08-18. `db_vest` writes its Buy with a raw
-`INSERT INTO trades`, not through `trade::db_upsert`, so `checks::check_amounts` never runs. Most of
-that check is satisfied by construction — the vest enforces positive quantity and price itself, sets
-`brokerage_currency = currency`, `fx_rate = 1`, and `settlement_date = date` — with exactly one
-exception: `AmountsError::PreCgtDate`.)
-- [ ] J-13 — reproduced: a statement with `taxing_point_date 1985-01-01` is accepted (`204`) and
-  vests (`201`) a Buy dated 1985-01-01. `PUT /trades/1` with that date answers `422`: "the trade is
-  dated before 20 September 1985 — a pre-CGT holding is outside CGT and not modelled, so recording
-  it would wrongly compute a capital gain or loss". The vest creates precisely the row the trade
-  entity refuses, and the tax summary grows a `tax_year 1985` row
-- [ ] Nothing about ESS can genuinely predate 20 September 1985 (Division 83A dates from 2009, its
-  predecessor from 1995), so this is a typo guard rather than a live case — but it is the one place
-  a parcel can enter the system below the CGT floor, and A-series work has consistently closed those
-- [ ] Fix: reject a pre-CGT `taxing_point_date` in `ess_statement::db_upsert` (the earlier, better
-  place: the statement is what the user typed), and state in `ess_vest`'s module doc which trade
-  checks the vest satisfies by construction so the next reader can see the list is deliberate
-- [ ] Tests: a pre-CGT taxing point is refused `422`; 1985-09-20 itself is accepted
-- [ ] Docs sync: `docs/API.md` ESS statements + the 422 catalogue
-
-## An ESS statement has no write-time checks on what it may say (SCENARIOS J-01, J-09, J-11)
-(SCENARIOS.md section J verification pass, 2026-08-18. Section H's `investment_expenses` finding,
-again: apart from the statement-AUD-override rule, `ess_statement::db_upsert` validates **nothing**
-about its amounts. Every discount label, the foreign-source memo, the TFN withheld, the quantity and
-the market value are taken as typed and reach the tax summary and the printed annual document
-unchallenged.)
-- [ ] J-09 — reproduced: `deferral_discount -1000` with `tfn_withholding -50` → `204`. The tax
-  summary reports `tfn_withholding_tax: "-50"` — negative withholding is a refund from nowhere,
-  and the negative discount silently nets against the other statements' discounts in the same year
-  (four statements totalling A$17,000 of positive labels reported `ess_discount_assessable 16000`)
-- [ ] J-01 — reproduced: `quantity -100`, `market_value_per_share -10` → `204` (the vest then
-  refuses, `NothingToVest`, so the nonsense row simply sits there claiming income)
-- [ ] J-01 — reproduced: 100 shares at $10 (A$1,000 of market value) with `deferral_discount 15000`
-  → `204`. The discount is *by definition* market value less what the employee paid
-  (`docs/ato/employee-share-schemes.md`), so a discount above the vested shares' market value
-  implies a negative payment. The obvious cause is a transposed column or a foreign-currency figure
-  against an AUD market value — the check must only apply when both `quantity` and
-  `market_value_per_share` are positive, since an income-only statement (no vest recorded) leaves
-  them zero and is legitimate
-- [ ] J-11 — reproduced: `foreign_source_discount 5000` against `deferral_discount 1000` → `204`,
-  and the tax summary reports `ess_foreign_source_discount 5000` inside a `ess_discount_assessable`
-  of 1000. Label A is a **memo subset** of D+E+F+G (`docs/API.md`: "a memo already within
-  `ess_discount_assessable`"), so a memo larger than what it is a memo of is a contradiction — the
-  same shape as the CFI-within-unfranked check the income entity already enforces (`0a4e198`)
-- [ ] Fix (the H-section pattern, `db81aab`): refuse at write time, `422` per cause — negative
-  discount label / TFN / quantity / market value; label A above D+E+F+G; and total discount above
-  `quantity × market_value_per_share` when both are positive
-- [ ] Tests: one rejection test per cause, plus the income-only (zero quantity) statement still
-  accepted and the exact-equality boundary (discount == market value, an RSU with nil consideration)
-  accepted
-- [ ] Docs sync: `docs/API.md` ESS statements + the 422 catalogue, and the field hints in
-  `src/web/config.js`
 
 ## Nothing on the product side mentions the ESS 30-day rule (SCENARIOS J-04)
 (SCENARIOS.md section J verification pass, 2026-08-18. A disposal within 30 days after the deferred

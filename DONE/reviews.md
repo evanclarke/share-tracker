@@ -1557,3 +1557,128 @@ The existing foreign-currency ESS fixtures across the suite now hang off USD lis
 shape a real statement has. Docs: `docs/API.md` (ESS statements + the 422 catalogue),
 `docs/SCHEMA.md`'s `ess_statements.currency` line, README's ESS feature line, and the currency field
 hint in `src/web/config.js`.
+
+## The ESS vest bypasses the trade write-time checks, and creates a Buy `PUT /trades` refuses (SCENARIOS J-03, J-13)
+(SCENARIOS.md section J verification pass, 2026-08-18. `db_vest` writes its Buy with a raw
+`INSERT INTO trades`, not through `trade::db_upsert`, so `checks::check_amounts` never runs. Most of
+that check is satisfied by construction — the vest enforces positive quantity and price itself, sets
+`brokerage_currency = currency`, `fx_rate = 1`, and `settlement_date = date` — with exactly one
+exception: `AmountsError::PreCgtDate`.)
+- [x] J-13 — reproduced: a statement with `taxing_point_date 1985-01-01` is accepted (`204`) and
+  vests (`201`) a Buy dated 1985-01-01. `PUT /trades/1` with that date answers `422`: "the trade is
+  dated before 20 September 1985 — a pre-CGT holding is outside CGT and not modelled, so recording
+  it would wrongly compute a capital gain or loss". The vest creates precisely the row the trade
+  entity refuses, and the tax summary grows a `tax_year 1985` row
+- [x] Nothing about ESS can genuinely predate 20 September 1985 (Division 83A dates from 2009, its
+  predecessor from 1995), so this is a typo guard rather than a live case — but it is the one place
+  a parcel can enter the system below the CGT floor, and A-series work has consistently closed those
+- [x] Fix: reject a pre-CGT `taxing_point_date` in `ess_statement::db_upsert` (the earlier, better
+  place: the statement is what the user typed), and state in `ess_vest`'s module doc which trade
+  checks the vest satisfies by construction so the next reader can see the list is deliberate
+- [x] Tests: a pre-CGT taxing point is refused `422`; 1985-09-20 itself is accepted
+- [x] Docs sync: `docs/API.md` ESS statements + the 422 catalogue
+
+**Resolution (2026-08-18): refused on the statement, with the vest's reliance written down.**
+
+`ess_statement::validate` (new — see the section below, which landed in the same pass) refuses a
+`taxing_point_date` before `trade::CGT_START` with `UpsertError::PreCgtTaxingPoint` → `422`. The
+check sits on the statement, not the vest: the taxing point is what the user typed, and an
+income-only statement never reaches the vest at all.
+
+`ess_vest`'s module doc gained a **"The trade write-time checks, and where each is satisfied"**
+section enumerating every `AmountsError` variant against what makes it impossible here —
+`NothingToVest` (stronger than `QuantityNotPositive`/`PriceNegative`, since it rejects a nil price
+too), the literal `'0'` brokerage and GST, `brokerage_currency` bound from the same `currency` value
+in one statement, the statement-level `FxRateNotPositive` check plus positive-by-import ATO rates,
+`settlement_date` bound to the trade date, and `PreCgtDate` now closed on the statement. It closes
+with the standing instruction: a new check in `trade::check_amounts` needs a line there and either
+an argument or a guard.
+
+Tests: `db_a_pre_cgt_taxing_point_is_refused_and_the_cutoff_day_accepted` (1985-09-19 refused with
+nothing persisted, 1985-09-20 accepted and round-tripped — the cutoff day is on the CGT side of the
+line) and `api_pre_cgt_taxing_point_rejected_422` (the 422 body names the date, and no statement
+exists to vest). Docs: `docs/API.md` (ESS statements' new write-time-rules list + the 422
+catalogue), `docs/SCHEMA.md`'s `taxing_point_date` line, and the taxing-point field hint in
+`src/web/config.js`.
+
+## An ESS statement has no write-time checks on what it may say (SCENARIOS J-01, J-09, J-11)
+(SCENARIOS.md section J verification pass, 2026-08-18. Section H's `investment_expenses` finding,
+again: apart from the statement-AUD-override rule, `ess_statement::db_upsert` validates **nothing**
+about its amounts. Every discount label, the foreign-source memo, the TFN withheld, the quantity and
+the market value are taken as typed and reach the tax summary and the printed annual document
+unchallenged.)
+- [x] J-09 — reproduced: `deferral_discount -1000` with `tfn_withholding -50` → `204`. The tax
+  summary reports `tfn_withholding_tax: "-50"` — negative withholding is a refund from nowhere,
+  and the negative discount silently nets against the other statements' discounts in the same year
+  (four statements totalling A$17,000 of positive labels reported `ess_discount_assessable 16000`)
+- [x] J-01 — reproduced: `quantity -100`, `market_value_per_share -10` → `204` (the vest then
+  refuses, `NothingToVest`, so the nonsense row simply sits there claiming income)
+- [x] J-01 — reproduced: 100 shares at $10 (A$1,000 of market value) with `deferral_discount 15000`
+  → `204`. The discount is *by definition* market value less what the employee paid
+  (`docs/ato/employee-share-schemes.md`), so a discount above the vested shares' market value
+  implies a negative payment. The obvious cause is a transposed column or a foreign-currency figure
+  against an AUD market value — the check must only apply when both `quantity` and
+  `market_value_per_share` are positive, since an income-only statement (no vest recorded) leaves
+  them zero and is legitimate
+- [x] J-11 — reproduced: `foreign_source_discount 5000` against `deferral_discount 1000` → `204`,
+  and the tax summary reports `ess_foreign_source_discount 5000` inside a `ess_discount_assessable`
+  of 1000. Label A is a **memo subset** of D+E+F+G (`docs/API.md`: "a memo already within
+  `ess_discount_assessable`"), so a memo larger than what it is a memo of is a contradiction — the
+  same shape as the CFI-within-unfranked check the income entity already enforces (`0a4e198`)
+- [x] Fix (the H-section pattern, `db81aab`): refuse at write time, `422` per cause — negative
+  discount label / TFN / quantity / market value; label A above D+E+F+G; and total discount above
+  `quantity × market_value_per_share` when both are positive
+- [x] Tests: one rejection test per cause, plus the income-only (zero quantity) statement still
+  accepted and the exact-equality boundary (discount == market value, an RSU with nil consideration)
+  accepted
+- [x] Docs sync: `docs/API.md` ESS statements + the 422 catalogue, and the field hints in
+  `src/web/config.js`
+
+**Resolution (2026-08-18): refused at write time, the H-section pattern, in one `validate` pass.**
+
+`ess_statement::validate(&EssStatement)` — everything decidable from the row alone, called first in
+`db_upsert`, leaving the currency and vest-freeze rules that need the database where they were.
+Four causes, four `UpsertError` variants, with the user-facing wording in the
+`From<UpsertError> for ApiError` arms per the project's split between `#[error]` log text and 422
+bodies:
+
+- `NegativeAmount(&'static str)` — the `interest_income`/`investment_expense` shape, over **all
+  thirteen** amounts on the row: quantity, market value, the four discount labels, the label-A memo,
+  the TFN withheld, and the five statement-AUD overrides (which the tax summary reports *verbatim*,
+  so a negative one is as load-bearing as a native label). Checked first, so a negative figure gets
+  the message naming its field rather than tripping a cross-check confusingly.
+- `PreCgtTaxingPoint` — the section above.
+- `ForeignSourceExceedsDiscounts { label, foreign, discounts }` — the income-entity
+  CFI-within-unfranked rule: label A cannot exceed the D+E+F+G it is a memo of. Applied twice, hence
+  the `label` field: once to the statement's own amounts, and once to `aud_foreign_source_discount`
+  against the other four overrides. The AUD side is checked **only where that total is knowable** —
+  `aud_discount_labels` returns `None` when a label carries an amount with no override, since it
+  converts at the RBA rate, which no write-time check can resolve. Equality is ordinary (a wholly
+  foreign-sourced discount) and stays accepted.
+- `DiscountExceedsMarketValue { discount, market_value }` — D+E+F+G cannot exceed
+  `quantity × market_value_per_share`, both cent-rounded (a per-share market value can carry
+  sub-cent precision while the statement's discount is cents), and only when both figures are
+  positive. Exact equality is the RSU case (nil consideration) and is the *normal* entry, not an
+  edge: the ATO's own Example 11 (400 × $3.795 = $1,518 of discount) is pinned in `ato_examples`.
+
+One existing test moved with the rule rather than around it:
+`ess_vest::tests::deleting_the_statement_removes_the_vest_buy` revised its statement's discount
+*down* (600 → 500) instead of up past the vested shares' $600 market value — still the point being
+made (the income side stays editable after the vest), now within the invariant.
+
+Tests: `db_negative_amounts_are_refused_naming_the_field` (a sweep over all thirteen fields, each
+refused naming itself with nothing persisted), `api_negative_tfn_withholding_rejected_422`,
+`db_the_foreign_source_memo_cannot_exceed_the_discounts_it_memos` (refused with both figures
+carried; equality accepted), `db_the_aud_foreign_source_memo_is_checked_only_when_the_total_is_known`
+(refused on the override total; within it accepted; unknowable-total statement passes unchecked),
+`db_the_discount_cannot_exceed_the_market_value_that_vests` (the J-01 15,000-against-1,000 case, the
+nil-consideration equality, and the sub-cent 400 × 3.795 = 1518 case),
+`db_an_income_only_statement_keeps_its_discount`, and
+`api_discount_above_the_market_value_rejected_422`. Full suite 1603 passed / 0 failed.
+
+Docs: `docs/API.md` gained a **What a statement may say** list under ESS statements (one bullet per
+rule, each with the *why*) plus the new causes in the Response-codes `422` catalogue;
+`docs/SCHEMA.md`'s `taxing_point_date` / `quantity` / `market_value_per_share` /
+`foreign_source_discount` / `tfn_withholding` / `aud_foreign_source_discount` column lines now state
+their constraints; and `src/web/config.js`'s ESS field hints say the ceiling, the memo-subset rule,
+the pre-CGT floor, and that zero quantity means an income-only statement.

@@ -212,22 +212,22 @@ ess_statements               Employee share scheme statements — the income sid
 ├── id                          INTEGER PK
 ├── listing_id                  INTEGER FK→listings.id
 ├── holding_account_id          INTEGER FK→holding_accounts.id  The account the interests vest into (defaults to the seeded default account)
-├── taxing_point_date           DATE   The taxing point: sets the assessable financial year and the vest Buy's acquisition/settlement date
-├── quantity                    TEXT (decimal)  Shares that vest — the vest Buy's quantity
-├── market_value_per_share      TEXT (decimal)  Market value per share at the taxing point — the vest Buy's price (the reset cost base)
+├── taxing_point_date           DATE   The taxing point: sets the assessable financial year and the vest Buy's acquisition/settlement date. Must be on or after 20 September 1985 (422 otherwise) — the vest Buy is dated here, and `PUT /trades` refuses a pre-CGT trade for the same reason
+├── quantity                    TEXT (decimal)  Shares that vest — the vest Buy's quantity. Non-negative (422 otherwise); zero is an income-only statement (a discount with no vest recorded)
+├── market_value_per_share      TEXT (decimal)  Market value per share at the taxing point — the vest Buy's price (the reset cost base). Non-negative, and with a positive quantity `quantity × this` caps the discount labels D+E+F+G (the discount is market value less what the employee paid, so at most it equals the market value — 422 above it, cent-rounded either side)
 ├── taxed_upfront_eligible      TEXT (decimal)  Item 12 label D: taxed-upfront discount eligible for the $1,000 reduction
 ├── taxed_upfront_not_eligible  TEXT (decimal)  Item 12 label E: taxed-upfront discount not eligible for the reduction
 ├── deferral_discount           TEXT (decimal)  Item 12 label F: deferral-scheme discount (the RSU case)
 ├── pre_2009_cessation_discount TEXT (decimal)  Pre-1 July 2009 cessation discounts assessable this year (label G)
-├── foreign_source_discount     TEXT (decimal)  Item 12 label A: the foreign-source portion of the above discounts (a memo already within them; surfaced by the tax summary for the FITO calc, not added on top)
-├── tfn_withholding             TEXT (decimal)  Item 12 label C: TFN amounts withheld from the discounts; folded into the tax summary's TFN line
+├── foreign_source_discount     TEXT (decimal)  Item 12 label A: the foreign-source portion of the above discounts (a memo already within them; surfaced by the tax summary for the FITO calc, not added on top). Cannot exceed D+E+F+G (422 otherwise) — a memo is part of what it memos
+├── tfn_withholding             TEXT (decimal)  Item 12 label C: TFN amounts withheld from the discounts; folded into the tax summary's TFN line. Non-negative, like every amount on the row (422 otherwise, naming the field) — a negative withholding is a refund from nowhere
 ├── currency                    TEXT FK→currencies.code   ISO 4217; tax summary converts to AUD by taxing_point_date month (default AUD). Must be the **listing's** currency — market_value_per_share is the market value of that listed share, so the two are the same money (422 otherwise)
 ├── fx_rate                     TEXT (decimal, nullable)  The foreign-per-AUD rate the taxpayer states for this statement (AUD = foreign / rate, the `trades.fx_rate` / `inheritances.fx_rate` convention), used as the **fallback** when the taxing point's month has no imported ATO rate — on both sides: the vest Buy carries it, and the tax summary converts the discount labels through it. NULL = none stated, and then vesting resolves the month's ATO rate and is refused (422) when there is none, rather than costing the parcel at parity. Only accepted on a non-AUD statement and must be positive (422 otherwise)
 ├── aud_taxed_upfront_eligible      TEXT (decimal, nullable)  Statement-AUD override for label D: the employer statement's stated AUD figure (release-date spot rate — what the ATO prefill carries); when present the tax summary reports it verbatim instead of RBA-converting, when absent behaviour is unchanged. Only accepted on a non-AUD statement (422 otherwise)
 ├── aud_taxed_upfront_not_eligible  TEXT (decimal, nullable)  Statement-AUD override for label E (same semantics)
 ├── aud_deferral_discount           TEXT (decimal, nullable)  Statement-AUD override for label F (same semantics; the RSU case)
 ├── aud_pre_2009_cessation_discount TEXT (decimal, nullable)  Statement-AUD override for label G (same semantics)
-└── aud_foreign_source_discount     TEXT (decimal, nullable)  Statement-AUD override for the label A memo (same semantics)
+└── aud_foreign_source_discount     TEXT (decimal, nullable)  Statement-AUD override for the label A memo (same semantics), and held to the same memo-subset rule against the other four overrides — checked only where they pin the total (a label with an amount but no override converts at the RBA rate, unknowable at write time)
                              The assessable discount (D+E+F+G − the applied $1,000 reduction) reaches the tax summary; the vest Buy is created by POST /ess_statements/:id/vest (entities::ess_vest), carrying the statement's fx_rate — or, absent one, the taxing-point month's ATO rate — as the Buy's own `trades.fx_rate`. While the vest Buy exists, the fields it was created from (listing, account, taxing point, quantity, market value, currency, fx_rate) are frozen — the income-side fields (discount labels, TFN withheld, statement-AUD overrides) stay editable, since the employer's annual ESS statement arrives after the vest
 
 parcel_allocations           Links sell parcels to the purchase parcels they consume
