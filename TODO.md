@@ -40,16 +40,14 @@ disagree with the ex-date one: the trailing-residual settlement in `drp_enrolmen
   `db_delete`'s `EXISTS(… trades … date >= ? AND date < ?)` asks the trade-date question, so the
   refusal that exists precisely to keep "the record of why that trade exists" (DONE/reviews.md,
   A-43) never fires for a distribution paid after the unenrolment
-- [ ] **Decide the model** (an `AskUserQuestion` for Evan, not a silent call). The three reads all
-  want *the period that authorised this reinvestment*, which is knowable exactly:
+- [x] **Decided 2026-08-17 (Evan): (a) match by the distribution's entitlement date.** The three
+  reads all want *the period that authorised this reinvestment*, which is knowable exactly:
   `income.reinvestment_trade_id` links the trade back to its distribution, whose `ex_or_pay_date`
-  is the date eligibility was decided on. (a) **Match by the distribution's entitlement date** —
-  join `trades → income` in all three places, so period membership is the same question everywhere;
-  the trade date stops deciding anything. (b) **Refuse the reinvestment** when the trade date falls
-  outside the matched period, telling the user to date the trade inside it — cheap, but it refuses
-  a genuine registry pattern and mis-dates the parcel if the user complies. (c) **Store the period
-  on the trade** (a `drp_enrolment_id` provenance column) — explicit, but a fourth thing to keep in
-  step. (a) looks right: it makes one date govern, and the join already exists
+  is the date eligibility was decided on. Join `trades → income` in all three places, so period
+  membership is the same question everywhere and the trade date stops deciding anything. (Rejected:
+  refusing a trade date outside the period — it refuses a genuine registry pattern and mis-dates
+  the parcel if the user complies; a `drp_enrolment_id` provenance column — a fourth thing to keep
+  in step.)
 - [ ] Tests: the ex-in/paid-after fixture settles its residual at unenrolment; the same fixture with
   an immediate re-enrolment does **not** carry into the new period; `DELETE` of the period is
   refused `422` pointing at unenrolment
@@ -72,13 +70,11 @@ cannot recover.)
   `2021-01-01` and correcting to `2025-01-01` settles the residual under the first window and never
   un-settles it, leaving a mid-chain trade carrying `paid_out` and every later reinvestment in the
   period funded short
-- [ ] **Decide the model.** (a) **Make the settlement a function of the period, not an event** —
-  on every upsert, recompute both residual columns for the period's trades from the period as it
-  now stands (trailing trade settles iff the period is closed; every other trade carries), which
-  makes the edit reversible by construction. (b) **Restore on re-open only** — narrower, but leaves
-  the extend case wrong. (c) **Refuse the edit** once a residual has been settled, requiring the
-  period to be deleted and re-entered (it cannot be: `CoversReinvestment`) — a dead end, listed for
-  completeness. (a) looks right and is not much more code than the current walk
+- [x] **Decided 2026-08-17 (Evan): (a) make the settlement a function of the period, not an
+  event.** On every upsert, recompute both residual columns for the period's trades from the period
+  as it now stands — the trailing trade settles iff the period is closed, every other trade carries
+  — which makes the edit reversible by construction. (Rejected: restoring on re-open only, which
+  leaves the mistyped-then-extended case wrong; documenting it as one-way.)
 - [ ] Tests: unenrol → re-open restores `carried` and the next reinvestment brings it forward;
   unenrol → extend moves the settlement to the new trailing trade and leaves no `paid_out` behind;
   the existing `db_unenrolment_pays_out_trailing_carried_residual` still holds
@@ -101,14 +97,12 @@ difference is real money, not statement rounding.)
   distribution, and an ASX registry statement *does* state whole units allotted — keying them in
   is the natural thing to do, and it silently costs the parcel $2 less than the cash applied while
   losing the carry
-- [ ] **Decide the model.** (a) **Treat the difference as a residual** — compute
+- [x] **Decided 2026-08-17 (Evan): (a) treat the difference as a residual.** Compute
   `available − units × price` as the leftover and apply the period's residual handling to it,
-  cent-rounded so a fractional plan's sub-cent rounding still records zero; the tolerance check
-  stays as the sanity bound. (b) **Refuse whole-number `units`** — direct the user to the
-  compute-it path (leave `units` blank), which is what a whole-share registry DRP wants anyway.
-  (c) **Tighten the tolerance to a fixed epsilon** (a cent) regardless of scale — rejects the
-  legitimate fractional case, so no. (a) records what actually happened; (b) is smaller and steers
-  entry to the path that already handles it
+  cent-rounded so a fractional plan's sub-cent statement rounding still records zero; the tolerance
+  check stays as the sanity bound. Records what actually happened rather than discarding it.
+  (Rejected: refusing whole-number `units`; a fixed cent tolerance, which would reject the
+  fractional case the field exists for.)
 - [ ] Tests: whole units with a genuine leftover carry it (or are refused, per the decision) and
   the next reinvestment brings it forward; the fractional cases
   (`explicit_units_take_the_statements_fractional_allotment`,
@@ -161,14 +155,12 @@ calculation".)
   aside) and is not tied to its listing's. Whether *that* should be constrained in general is a
   wider question than this section — but the reinvest operation is a single calculation over the
   two, and is where the mixing actually happens
-- [ ] **Decide the model.** (a) **Refuse the reinvestment** when the distribution's currency differs
-  from the listing's, naming both — fails safe, one check, no FX policy needed (a registry paying a
-  foreign-currency distribution into a plan converts it itself, and the converted figure is what the
-  statement shows, so the user has it). (b) **Convert the cash** at the ATO rate for the
-  distribution's month before dividing — more general, but it invents an FX policy the statement
-  already settled, and it would need the strict (non-fallback) path since this feeds a cost base.
-  (c) **Constrain `income.currency` to the listing's currency** at write time — the widest fix, and
-  a separate question from DRP. (a) looks right for this section, with (c) noted for a later pass
+- [x] **Decided 2026-08-17 (Evan): (a) refuse the reinvestment** when the distribution's currency
+  differs from the listing's, naming both. Fails safe, one check, no FX policy invented: a registry
+  paying a foreign-currency distribution into a plan converts it itself, and the converted figure is
+  what the statement shows, so the user has it. (Rejected: converting at the ATO rate, which invents
+  an FX policy the statement already settled; constraining `income.currency` to its listing's
+  everywhere — the widest fix, noted as a question for a later pass rather than this section.)
 - [ ] Tests: a distribution whose currency differs from its listing's is refused `422` naming both
   currencies with nothing persisted; the matching-currency USD case
   (`morgan_stanley_ice_fractional_statements_reproduce`) is unchanged
