@@ -678,6 +678,9 @@ const COLUMN_LABELS = {
   // "Owner" beside the "Owner description" column.
   owner_id: 'Owner ID',
   byte_size: 'Size (bytes)',
+  // A memo column: the CFI figure sits *inside* the unfranked amount printed
+  // beside it, so the heading says so — a reader must not add the two.
+  conduit_foreign_income_aud: 'CFI, within unfranked (AUD)',
 };
 
 // The friendly heading for a column: an explicit override, else humanised.

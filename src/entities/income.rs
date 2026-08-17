@@ -31,6 +31,28 @@ pub struct Income {
     pub franking_credits: Decimal,
     #[sqlx(try_from = "Money")]
     pub lic_capital_gain_deduction: Decimal,
+    /// The portion of `unfranked_amount` the payer declared to be **conduit
+    /// foreign income** (CFI, Subdiv 802-A ITAA 1997) — a **memo figure**, not
+    /// an amount of its own: it is recorded *within* `unfranked_amount`, never
+    /// on top of it, and a value exceeding that amount is rejected (`422`).
+    ///
+    /// The convention matters because it decides what is assessable. CFI is
+    /// non-assessable non-exempt only for a **foreign resident** member; for
+    /// the Australian-resident individual this system reports for (the tax
+    /// summary's `taxpayer_basis`) an unfranked dividend declared to be CFI is
+    /// ordinary assessable income — the ATO's AMMA guidance notes put it in
+    /// "Dividends: unfranked amount declared to be CFI", "which forms part of
+    /// the non-primary production income"
+    /// (`docs/ato/amma-statement-guidance-notes.md`, Part B item 13U). Holding
+    /// it inside `unfranked_amount` is what makes it assessable exactly once:
+    /// every report totals `unfranked_amount` and reads this field for
+    /// reference only, so adding it again would double-count the same dollars.
+    ///
+    /// A statement that prints its unfranked amount split into a CFI line and a
+    /// non-CFI line is therefore entered with `unfranked_amount` as the **sum**
+    /// of the two and this field as the CFI line alone. Reported as its own
+    /// memo column by the [annual tax report](crate::reports::tax_report), so
+    /// the entered figure can still be tied back to the statement.
     #[sqlx(try_from = "Money")]
     pub conduit_foreign_income: Decimal,
     pub trust_income: bool,
@@ -95,9 +117,11 @@ pub struct Income {
 impl Income {
     /// True when the distribution carries no Australian-sourced component —
     /// every one of `franked_amount`, `unfranked_amount`, `franking_credits`,
-    /// `lic_capital_gain_deduction`, `conduit_foreign_income` (an Australian
-    /// company's income, only *labelled* conduit — see `tax_summary`, which
-    /// keeps it out of the foreign total) and `tfn_withholding_tax` is zero.
+    /// `lic_capital_gain_deduction`, `conduit_foreign_income` (a memo subset of
+    /// `unfranked_amount`, so it can only be non-zero when that is — an
+    /// Australian company's income, only *labelled* conduit, which is why
+    /// `tax_summary` keeps it out of the foreign total) and
+    /// `tfn_withholding_tax` is zero.
     /// A foreign company's dividend (e.g. a US-listed RSU holding) is entered
     /// this way: `foreign_source_income` and `foreign_tax_paid` alone.
     ///
@@ -364,6 +388,15 @@ pub enum UpsertError {
     /// report. Mapped to `422`.
     #[error("{0} cannot be negative")]
     NegativeAmount(&'static str),
+    /// `conduit_foreign_income` exceeds `unfranked_amount`. The CFI figure is
+    /// a memo *subset* of the unfranked amount (it is assessable to a resident
+    /// through that field — see [`Income::conduit_foreign_income`]), so it can
+    /// never be the larger of the two: a row where it is has almost certainly
+    /// had the statement's CFI line keyed as an amount of its own, which
+    /// understates the year's income. Carries both figures so the rejection
+    /// can name the ceiling. Mapped to `422`.
+    #[error("conduit_foreign_income {cfi} exceeds unfranked_amount {unfranked}")]
+    ConduitExceedsUnfranked { cfi: Decimal, unfranked: Decimal },
 }
 
 /// Why the supplied per-share figures failed to reconcile (both map to 422).
@@ -514,6 +547,18 @@ pub async fn db_upsert(pool: &SqlitePool, income: &Income) -> Result<(), UpsertE
         if income.tax_deferred_amount.is_some() {
             return Err(UpsertError::AmitTaxDeferred);
         }
+    }
+
+    // The CFI figure is a memo subset of the unfranked amount, so it cannot
+    // exceed it (see `Income::conduit_foreign_income`). Checked after the AMIT
+    // block deliberately: an AMIT row must carry no CFI at all, and that
+    // rejection names the reason — the AMMA statement is the tax record — which
+    // is more use than the ceiling wording here.
+    if income.conduit_foreign_income > income.unfranked_amount {
+        return Err(UpsertError::ConduitExceedsUnfranked {
+            cfi: income.conduit_foreign_income,
+            unfranked: income.unfranked_amount,
+        });
     }
 
     // `reinvestment_trade_id` is deliberately absent from both the column
@@ -691,6 +736,16 @@ impl From<UpsertError> for ApiError {
                 "{field} cannot be negative — income figures are the statement's own \
                  positive (or zero) amounts"
             )),
+            UpsertError::ConduitExceedsUnfranked { cfi, unfranked } => {
+                ApiError::unprocessable(format!(
+                    "conduit foreign income {cfi} cannot exceed the unfranked amount \
+                     {unfranked} — the CFI figure is the part of the unfranked dividend \
+                     the payer declared to be conduit foreign income, recorded within \
+                     the unfranked amount rather than in addition to it (to an Australian \
+                     resident it is assessable, and it is counted through the unfranked \
+                     amount); enter the statement's full unfranked amount, CFI included"
+                ))
+            }
             UpsertError::Db(err) => err.into(),
         }
     }
@@ -1444,6 +1499,86 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+
+    /// Conduit foreign income is a memo *within* `unfranked_amount`, so it can
+    /// never exceed it (SCENARIOS G-03). The rejection is what stops the
+    /// silent understatement the convention would otherwise allow: a user who
+    /// keys the statement's CFI line as an amount of its own — leaving the
+    /// unfranked amount at zero or short — is told to enter the full unfranked
+    /// figure with the CFI portion inside it, rather than having the
+    /// difference quietly vanish from the year's assessable income.
+    #[tokio::test]
+    async fn db_conduit_foreign_income_above_the_unfranked_amount_rejected() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        let row = |unfranked: i64, cfi: i64| {
+            test_support::income(1, 1, ymd(2024, 3, 15))
+                .with(move |i: &mut Income| {
+                    i.unfranked_amount = Decimal::from(unfranked);
+                    i.conduit_foreign_income = Decimal::from(cfi);
+                })
+                .build()
+        };
+
+        // The data-entry error the convention invites: the CFI line keyed alone.
+        let err = db_upsert(&pool, &row(0, 40)).await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                UpsertError::ConduitExceedsUnfranked { cfi, unfranked }
+                    if cfi == Decimal::from(40) && unfranked == Decimal::ZERO
+            ),
+            "{err:?}"
+        );
+        assert!(db_get(&pool, 1).await.unwrap().is_none());
+
+        // Partly keyed the same way (60 unfranked entered beside a 100 CFI).
+        assert!(matches!(
+            db_upsert(&pool, &row(60, 100)).await.unwrap_err(),
+            UpsertError::ConduitExceedsUnfranked { .. }
+        ));
+
+        // A proper subset, and a wholly-CFI unfranked dividend (the boundary),
+        // are both ordinary rows.
+        db_upsert(&pool, &row(100, 40)).await.unwrap();
+        assert_eq!(
+            db_get(&pool, 1)
+                .await
+                .unwrap()
+                .unwrap()
+                .conduit_foreign_income,
+            Decimal::from(40)
+        );
+        db_upsert(&pool, &row(100, 100)).await.unwrap();
+    }
+
+    /// The 422 body says which way round the two figures go — the user has to
+    /// know to move the CFI amount *into* the unfranked amount, not just that
+    /// the write failed.
+    #[tokio::test]
+    async fn api_conduit_foreign_income_above_unfranked_returns_422_with_detail() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        let (status, detail) = put_income(
+            &pool,
+            1,
+            serde_json::json!({
+                "listing_id": 1,
+                "date_paid": "2024-03-15",
+                "unfranked_amount": "0",
+                "conduit_foreign_income": "40"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            detail.contains("conduit foreign income")
+                && detail.contains("unfranked")
+                && detail.contains("within"),
+            "detail must state the memo convention, got: {detail}"
+        );
+        assert!(db_get(&pool, 1).await.unwrap().is_none());
     }
 
     // Entitlement date (trust present-entitlement timing,

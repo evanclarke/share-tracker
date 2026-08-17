@@ -10,34 +10,6 @@ findings are all closed in DONE.md), except where a section's heading names anot
 (e.g. REQUIREMENTS, SCENARIOS). Each section records one finding; sections land in DONE.md as they
 are fixed or decided.
 
-## Conduit foreign income is excluded from assessable income with no stated entry convention (SCENARIOS G-03)
-(SCENARIOS.md section G verification pass, 2026-08-16.)
-- [ ] G-03 — an `income` row with `unfranked_amount` 100 and `conduit_foreign_income` 40 reports
-  `dividends_assessable` 100: the CFI figure is excluded from every total
-  (`tax_summary::tests::db_conduit_foreign_income_excluded_from_assessable`, from the requirement
-  "Exclude conduit foreign income from assessable totals")
-- [ ] That is correct **only** if the stored figure is a memo *within* `unfranked_amount`. For an
-  Australian-resident individual — the report's stated `taxpayer_basis` — an unfranked dividend
-  declared to be CFI is assessable: the ATO's AMMA guidance notes
-  (`docs/ato/amma-statement-guidance-notes.md`, Part B item 13U) say to include it in "Dividends:
-  unfranked amount declared to be CFI", "which forms part of the non-primary production income".
-  CFI is NANE for *foreign* residents (Subdiv 802-A), which is not this system's taxpayer
-- [ ] Nothing states which reading the field takes: not `docs/API.md` (it appears only in the
-  no-negative-amounts and AMIT-notional-component lists), not the field itself (the only `Income`
-  field with no doc comment, against CLAUDE.md's every-field rule), not the UI (a bare "Conduit
-  foreign income" input with no hint). A user who keys the statement's CFI line as its own amount
-  understates the year's income silently
-- [ ] No report shows the figure either — the annual tax report's `dividends` rows carry franked,
-  unfranked, credits, LIC and TFN, so a CFI-only row prints as a row of zeros
-- [ ] `docs/ato/OVERVIEW.md` attributes "conduit foreign income (NANE — excluded from assessable
-  income)" to `mytax-managed-funds.md`, which contains no CFI text at all (nor does the live page) —
-  the mirror does not support the claim the index makes for it
-- [ ] **Needs a decision**: document it as a memo subset of `unfranked_amount` (plus a write-time
-  check that it does not exceed that amount, a line in the annual tax report, and an OVERVIEW /
-  SCHEMA.md wording fix), or count it as assessable in its own right
-- [ ] Tests: whichever way it lands, a row carrying CFI reports the resident's assessable figure,
-  and `doc_checks` pins the stated convention
-
 ## A franking credit is accepted with no dividend behind it (SCENARIOS G-25)
 (SCENARIOS.md section G verification pass, 2026-08-16.)
 - [ ] G-25 — `PUT /income/1` with `franking_credits` 300 and every other amount zero returns `204`,

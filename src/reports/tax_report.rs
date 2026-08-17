@@ -634,6 +634,12 @@ pub struct TrustIncomeRow {
     pub entitlement_date: Option<NaiveDate>,
     pub franked_amount_aud: Decimal,
     pub unfranked_amount_aud: Decimal,
+    /// Memo only — the part of `unfranked_amount_aud` the trust declared to be
+    /// conduit foreign income, printed so the entered figure ties back to the
+    /// statement's own CFI line. Never added to a total: it is assessable to a
+    /// resident *through* the unfranked amount it sits inside (see
+    /// [`crate::entities::income::Income::conduit_foreign_income`]).
+    pub conduit_foreign_income_aud: Decimal,
     pub foreign_source_income_aud: Decimal,
     pub tax_deferred_amount: Option<Decimal>,
     pub franking_credits_aud: Decimal,
@@ -671,6 +677,8 @@ pub struct DividendIncomeRow {
     pub ex_date: Option<NaiveDate>,
     pub franked_amount_aud: Decimal,
     pub unfranked_amount_aud: Decimal,
+    /// Memo only — see [`TrustIncomeRow::conduit_foreign_income_aud`].
+    pub conduit_foreign_income_aud: Decimal,
     pub franking_credits_aud: Decimal,
     pub lic_capital_gain_deduction_aud: Decimal,
     pub tfn_withholding_tax_aud: Decimal,
@@ -850,6 +858,9 @@ async fn push_income_rows(
         let fc = aud(income.franking_credits)?;
         let lic = aud(income.lic_capital_gain_deduction)?;
         let tfn = aud(income.tfn_withholding_tax)?;
+        // Memo figure: converted like the rest so it reads on the same basis,
+        // but it is part of `unfranked` and never totalled separately.
+        let cfi = aud(income.conduit_foreign_income)?;
 
         if trust_income {
             out.trust_income.push(TrustIncomeRow {
@@ -860,6 +871,7 @@ async fn push_income_rows(
                 entitlement_date,
                 franked_amount_aud: franked,
                 unfranked_amount_aud: unfranked,
+                conduit_foreign_income_aud: cfi,
                 foreign_source_income_aud: foreign,
                 tax_deferred_amount: income.tax_deferred_amount,
                 franking_credits_aud: fc,
@@ -880,6 +892,7 @@ async fn push_income_rows(
                 ex_date: income.ex_date,
                 franked_amount_aud: franked,
                 unfranked_amount_aud: unfranked,
+                conduit_foreign_income_aud: cfi,
                 franking_credits_aud: fc - alert.map_or(Decimal::ZERO, |a| a.credits_denied),
                 lic_capital_gain_deduction_aud: lic,
                 tfn_withholding_tax_aud: tfn,
@@ -1580,6 +1593,53 @@ mod tests {
             report.income.foreign_income[0].ticker.as_deref(),
             Some("ICE")
         );
+    }
+
+    /// The conduit-foreign-income memo is printed on the dividend and trust
+    /// rows it was entered on, converted like every other figure — so a
+    /// CFI-carrying row is no longer a line the report can't show (SCENARIOS
+    /// G-03), while still totalling only through the unfranked amount it sits
+    /// inside: the year's `dividends_assessable` is the two unfranked amounts,
+    /// not those plus the memo.
+    #[tokio::test]
+    async fn conduit_foreign_income_prints_as_a_memo_column_and_is_not_double_counted() {
+        let pool = test_support::test_pool().await;
+        test_support::listing(1).ticker("T1").insert(&pool).await;
+        test_support::income(1, 1, ymd(2024, 3, 31))
+            .with(|i| {
+                i.unfranked_amount = dec("100");
+                i.conduit_foreign_income = dec("40");
+            })
+            .insert(&pool)
+            .await;
+        test_support::income(2, 1, ymd(2024, 3, 31))
+            .with(|i| {
+                i.trust_income = true;
+                i.unfranked_amount = dec("50");
+                i.conduit_foreign_income = dec("20");
+            })
+            .insert(&pool)
+            .await;
+
+        let report = db_tax_report(&pool, 2024).await.unwrap();
+        assert_eq!(report.income.dividends.len(), 1);
+        assert_eq!(
+            report.income.dividends[0].conduit_foreign_income_aud,
+            dec("40")
+        );
+        assert_eq!(report.income.dividends[0].unfranked_amount_aud, dec("100"));
+        assert_eq!(report.income.trust_income.len(), 1);
+        assert_eq!(
+            report.income.trust_income[0].conduit_foreign_income_aud,
+            dec("20")
+        );
+        // Counted once, through the unfranked amounts — not 210.
+        let assessable = report
+            .tax_summary
+            .iter()
+            .find(|l| l.field == "dividends_assessable")
+            .expect("the year has a dividends_assessable line");
+        assert_eq!(assessable.value, serde_json::json!("150"));
     }
 
     /// The holdings-based completeness check must fire for an AMIT fund held

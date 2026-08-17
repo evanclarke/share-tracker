@@ -261,15 +261,33 @@ function ammaStatementsTable(rows) {
   return table;
 }
 
+// The conduit-foreign-income column is a memo *within* the unfranked amount,
+// not an amount beside it — printed so a figure ties back to the statement's
+// own CFI line, never added to a total. Shown only when the year actually has
+// one, so the note doesn't clutter a report with no CFI in it. (For an
+// Australian resident an unfranked dividend declared to be CFI is assessable;
+// it is NANE only to a foreign resident.)
+function cfiFootnote(inc) {
+  const any = ['dividends', 'trust_income'].some(function (k) {
+    return (inc[k] || []).some(function (r) { return Number(r.conduit_foreign_income_aud) !== 0; });
+  });
+  if (!any) return null;
+  return el('p', { class: 'hint' },
+    'Conduit foreign income is the part of the unfranked amount the payer declared to be CFI — '
+    + 'it is included in the unfranked amount shown, not additional to it, and is assessable to an '
+    + 'Australian resident.');
+}
+
 function incomeSection(inc) {
   return el('div', { class: 'doc-section' }, [
     el('h3', null, 'Income'),
     el('h4', null, 'Trust income'),
-    genericTable(inc.trust_income, ['date_paid', 'ticker', 'entitlement_date', 'franked_amount_aud', 'unfranked_amount_aud', 'foreign_source_income_aud', 'franking_credits_aud', 'tax_deferred_amount']),
+    genericTable(inc.trust_income, ['date_paid', 'ticker', 'entitlement_date', 'franked_amount_aud', 'unfranked_amount_aud', 'conduit_foreign_income_aud', 'foreign_source_income_aud', 'franking_credits_aud', 'tax_deferred_amount']),
     inc.amma_statements.length ? el('p', { class: 'hint' }, 'AMMA statement components for the year:') : null,
     ammaStatementsTable(inc.amma_statements),
     el('h4', null, 'Dividend income'),
-    genericTable(inc.dividends, ['date_paid', 'ticker', 'ex_date', 'franked_amount_aud', 'unfranked_amount_aud', 'franking_credits_aud', 'lic_capital_gain_deduction_aud', 'franking_status']),
+    genericTable(inc.dividends, ['date_paid', 'ticker', 'ex_date', 'franked_amount_aud', 'unfranked_amount_aud', 'conduit_foreign_income_aud', 'franking_credits_aud', 'lic_capital_gain_deduction_aud', 'franking_status']),
+    cfiFootnote(inc),
     el('h4', null, 'Foreign income'),
     genericTable(inc.foreign_income, ['kind', 'ticker', 'date', 'amount_aud', 'foreign_tax_paid_aud']),
     el('h4', null, 'Interest income'),

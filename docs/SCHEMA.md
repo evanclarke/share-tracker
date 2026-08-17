@@ -136,7 +136,7 @@ income
 ├── tfn_withholding_tax       TEXT (decimal)
 ├── franking_credits          TEXT (decimal)
 ├── lic_capital_gain_deduction TEXT (decimal)
-├── conduit_foreign_income    TEXT (decimal)  Excluded from assessable income
+├── conduit_foreign_income    TEXT (decimal)  Memo: the part of unfranked_amount the payer declared to be conduit foreign income (CFI) — recorded within that amount, never in addition to it, and rejected 422 if it exceeds it. To the Australian resident this system reports for, an unfranked dividend declared to be CFI is assessable (docs/ato/amma-statement-guidance-notes.md, Part B item 13U), and it is counted through unfranked_amount; every report reads this column for reference only (the annual tax report prints it as a memo column) so the dollars are never counted twice. CFI is NANE only for a foreign resident
 ├── trust_income              BOOLEAN
 ├── entitlement_date          DATE (nullable)  Trust distributions only (CHECK: NULL unless trust_income; non-trust writes also rejected 422): the date the holder became presently entitled — usually the distribution period's end. Trust income is assessed in the year of present entitlement regardless of payment (ATO QC 23087, docs/ato/trust-income-timing.md), so when set the tax summary attributes every component of the row (FY bucket and AUD-conversion month) by this date; absent, date_paid behaviour is unchanged
 ├── reinvestment_trade_id     INTEGER FK→trades.id (nullable, for DRP linkage)  Read-only provenance managed by the reinvest operation: set by POST /income/:id/reinvest, cleared by DELETE /income/:id/reinvest — PUT /income never writes it (an edit preserves the link); while set, the DRP trade is frozen (PUT/DELETE /trades reject it) and DELETE /income is refused

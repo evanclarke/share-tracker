@@ -31,7 +31,11 @@ pub struct TaxYearSummary {
     /// off the 10L line; the row's `foreign_tax_paid` joins
     /// `foreign_tax_offsets` (docs/ato/tax-return-labels-2026.md).
     pub foreign_interest_income: Decimal,
-    /// Assessable foreign source income (conduit foreign income excluded).
+    /// Assessable foreign source income. Conduit foreign income is not part of
+    /// it: despite the name, an Australian company's dividend declared to be
+    /// CFI is Australian-sourced unfranked income, counted in
+    /// `dividends_assessable` through `unfranked_amount` (see
+    /// [`crate::entities::income::Income::conduit_foreign_income`]).
     pub foreign_source_income: Decimal,
     /// LIC capital gain deduction from income records.
     pub lic_capital_gain_deduction: Decimal,
@@ -110,8 +114,9 @@ pub struct TaxYearSummary {
     /// (`amma_australian_interest`, `amma_dividends_unfranked`,
     /// `amma_franked_dividends`, `amma_net_rent`, `amma_foreign_income`,
     /// `amma_other_income`). It deliberately excludes the franking-credit
-    /// gross-up and FITO (carried as offset lines), conduit foreign income
-    /// (NANE), the ESS discount (employment income, Item 12), and capital gains
+    /// gross-up and FITO (carried as offset lines), the recorded conduit
+    /// foreign income memo (already inside `dividends_assessable`, as part of
+    /// `unfranked_amount`), the ESS discount (employment income, Item 12), and capital gains
     /// (the net-capital-gain report). `net_assessable_investment_income`
     /// subtracts the investment-expense deductions from this.
     pub gross_assessable_investment_income: Decimal,
@@ -943,21 +948,35 @@ mod tests {
         assert_eq!(result[0].franking_credits_denied, Decimal::ZERO);
     }
 
+    /// Conduit foreign income is a **memo inside `unfranked_amount`**, not an
+    /// amount of its own (SCENARIOS G-03): for the Australian-resident
+    /// individual this report is written for, an unfranked dividend declared to
+    /// be CFI is assessable — it is NANE only to a foreign resident
+    /// (Subdiv 802-A; `docs/ato/amma-statement-guidance-notes.md` Part B item
+    /// 13U puts it in the non-primary production income). So the resident's
+    /// assessable figure is the whole unfranked amount, counted once: the CFI
+    /// column is neither added on top nor netted off, and despite its name it
+    /// is Australian-sourced, so it stays out of `foreign_source_income` too.
     #[tokio::test]
-    async fn db_conduit_foreign_income_excluded_from_assessable() {
+    async fn db_conduit_foreign_income_is_assessable_within_the_unfranked_amount() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
         let mut inc = make_income(1, 1, NaiveDate::from_ymd_opt(2024, 3, 15).unwrap());
+        inc.unfranked_amount = Decimal::from(100); // includes the CFI portion
+        inc.conduit_foreign_income = Decimal::from(40); // memo subset of the above
         inc.foreign_source_income = Decimal::from(100);
-        inc.conduit_foreign_income = Decimal::from(40); // must NOT appear in totals
         income::db_upsert(&pool, &inc).await.unwrap();
 
         let result = db_tax_summary(&pool).await.unwrap();
         assert_eq!(result.len(), 1);
-        // Only foreign_source_income is included; conduit_foreign_income is excluded
+        // The full unfranked amount is assessable — not 60, and not 140.
+        assert_eq!(result[0].dividends_assessable, Decimal::from(100));
+        // The CFI memo doesn't leak into the foreign total either.
         assert_eq!(result[0].foreign_source_income, Decimal::from(100));
-        // dividends_assessable is zero (no franked/unfranked)
-        assert_eq!(result[0].dividends_assessable, Decimal::ZERO);
+        assert_eq!(
+            result[0].gross_assessable_investment_income,
+            Decimal::from(200)
+        );
     }
 
     #[tokio::test]
@@ -1054,11 +1073,14 @@ mod tests {
         div.tfn_withholding_tax = Decimal::from(5);
         income::db_upsert(&pool, &div).await.unwrap();
 
-        // Trust distribution FY2024 with conduit foreign income
+        // Trust distribution FY2024 whose unfranked amount includes a
+        // declared conduit-foreign-income portion (a memo within it, not a
+        // component beside it).
         let mut trust = make_income(2, 2, NaiveDate::from_ymd_opt(2024, 6, 30).unwrap());
         trust.foreign_source_income = Decimal::from(30);
         trust.foreign_tax_paid = Decimal::from(9);
-        trust.conduit_foreign_income = Decimal::from(10); // excluded from assessable
+        trust.unfranked_amount = Decimal::from(40);
+        trust.conduit_foreign_income = Decimal::from(10); // 10 of the 40 above
         trust.lic_capital_gain_deduction = Decimal::from(5);
         trust.trust_income = true;
         income::db_upsert(&pool, &trust).await.unwrap();
@@ -1075,8 +1097,11 @@ mod tests {
         assert_eq!(result.len(), 1);
         let s = &result[0];
         assert_eq!(s.tax_year, 2024);
-        assert_eq!(s.dividends_assessable, Decimal::from(200)); // 140 + 60
-        assert_eq!(s.foreign_source_income, Decimal::from(30)); // conduit excluded
+        // 140 + 60 dividend, + the trust's 40 unfranked (its 10 of CFI is
+        // inside that 40, counted once — never added again, never netted off).
+        assert_eq!(s.dividends_assessable, Decimal::from(240));
+        // Despite the name, CFI is Australian-sourced: it stays out of this.
+        assert_eq!(s.foreign_source_income, Decimal::from(30));
         assert_eq!(s.lic_capital_gain_deduction, Decimal::from(5));
         assert_eq!(s.franking_credits, Decimal::from(60)); // only from income (amma.franking_credits = 0)
         assert_eq!(s.foreign_tax_offsets, Decimal::from(12)); // 9 income + 3 amma

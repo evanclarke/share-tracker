@@ -745,6 +745,25 @@ mod tests {
         assert!(js.contains("Tax-Deferred E4 Cross-Check"));
     }
 
+    /// The conduit-foreign-income entry convention has to reach the user at
+    /// the two places they meet the figure (SCENARIOS G-03): the income form,
+    /// where a bare "Conduit foreign income" input invited keying the
+    /// statement's CFI line as an amount of its own, and the annual tax
+    /// report, which now prints it as a memo column headed as one.
+    #[tokio::test]
+    async fn income_conduit_foreign_income_memo_ui_present() {
+        let js = app_js_body().await;
+        // The form hint states the convention and the resident's treatment.
+        assert!(js.contains("already included in that amount"));
+        assert!(js.contains("declared to be conduit foreign income (CFI)"));
+        // The tax report prints the memo column, headed so the two figures
+        // can't be read as additive, with the note under the dividend table.
+        assert!(js.contains("'conduit_foreign_income_aud'"));
+        assert!(js.contains("CFI, within unfranked (AUD)"));
+        assert!(js.contains("cfiFootnote"));
+        assert!(js.contains("not additional to it"));
+    }
+
     #[tokio::test]
     async fn amit_adjustment_cross_check_ui_present() {
         let js = app_js_body().await;

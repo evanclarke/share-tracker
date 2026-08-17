@@ -174,7 +174,7 @@ export const ENTITIES = [
       dec('tfn_withholding_tax', 'TFN withholding tax'),
       dec('franking_credits', 'Franking credits'),
       dec('lic_capital_gain_deduction', 'LIC capital gain deduction'),
-      dec('conduit_foreign_income', 'Conduit foreign income'),
+      dec('conduit_foreign_income', 'Conduit foreign income', { hint: 'The part of the unfranked amount above that the payer declared to be conduit foreign income (CFI) — a memo figure, already included in that amount, not an extra payment. To an Australian resident an unfranked dividend declared to be CFI is assessable, so the unfranked amount must be the statement’s full figure with the CFI portion in it; a value larger than the unfranked amount is rejected.' }),
       bool('trust_income', 'Trust income'),
       dt('entitlement_date', 'Entitlement date', { optional: true, hint: 'Trust distributions only: the date you became presently entitled — usually the distribution period’s end on the statement. Trust income is assessed in this date’s financial year even when the cash arrives later (a June distribution paid in July belongs to the year just ended). Leave empty to assess by the pay date.' }),
       dec('tax_deferred_amount', 'Tax-deferred amount', { optional: true, default: '', hint: 'Non-AMIT trust statements only: the statement’s tax-deferred amount — a CGT event E4 cost-base reduction. Recording it changes nothing by itself: enter the reduction as a Return of capital corporate action on the listing; the E4 cross-check report flags rows still missing one.' }),

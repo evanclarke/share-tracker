@@ -1091,3 +1091,83 @@ ex date resolving it into a $2,400 denial), `db_a_denial_found_on_the_fallback_d
 `entities::drp_reinvestment::tests::a_trust_rows_entitlement_date_decides_participation_before_the_pay_date`,
 `doc_checks::the_franking_windows_anchor_and_its_untested_rows_are_documented`, and
 `web::tests::franking_at_risk_ui_present` (extended). Full suite 1522 passed / 0 failed.
+
+## Conduit foreign income is excluded from assessable income with no stated entry convention (SCENARIOS G-03)
+(SCENARIOS.md section G verification pass, 2026-08-16.)
+- [x] G-03 — an `income` row with `unfranked_amount` 100 and `conduit_foreign_income` 40 reports
+  `dividends_assessable` 100: the CFI figure is excluded from every total
+  (`tax_summary::tests::db_conduit_foreign_income_excluded_from_assessable`, from the requirement
+  "Exclude conduit foreign income from assessable totals")
+- [x] That is correct **only** if the stored figure is a memo *within* `unfranked_amount`. For an
+  Australian-resident individual — the report's stated `taxpayer_basis` — an unfranked dividend
+  declared to be CFI is assessable: the ATO's AMMA guidance notes
+  (`docs/ato/amma-statement-guidance-notes.md`, Part B item 13U) say to include it in "Dividends:
+  unfranked amount declared to be CFI", "which forms part of the non-primary production income".
+  CFI is NANE for *foreign* residents (Subdiv 802-A), which is not this system's taxpayer
+- [x] Nothing states which reading the field takes: not `docs/API.md` (it appears only in the
+  no-negative-amounts and AMIT-notional-component lists), not the field itself (the only `Income`
+  field with no doc comment, against CLAUDE.md's every-field rule), not the UI (a bare "Conduit
+  foreign income" input with no hint). A user who keys the statement's CFI line as its own amount
+  understates the year's income silently
+- [x] No report shows the figure either — the annual tax report's `dividends` rows carry franked,
+  unfranked, credits, LIC and TFN, so a CFI-only row prints as a row of zeros
+- [x] `docs/ato/OVERVIEW.md` attributes "conduit foreign income (NANE — excluded from assessable
+  income)" to `mytax-managed-funds.md`, which contains no CFI text at all (nor does the live page) —
+  the mirror does not support the claim the index makes for it
+- [x] **Needs a decision**: document it as a memo subset of `unfranked_amount` (plus a write-time
+  check that it does not exceed that amount, a line in the annual tax report, and an OVERVIEW /
+  SCHEMA.md wording fix), or count it as assessable in its own right
+- [x] Tests: whichever way it lands, a row carrying CFI reports the resident's assessable figure,
+  and `doc_checks` pins the stated convention
+
+**Decision (2026-08-17): the memo reading — `conduit_foreign_income` is the part of
+`unfranked_amount` the payer declared to be CFI, recorded within it and never in addition to it.**
+
+Counting it as an amount of its own was the alternative, and it is the worse of the two for a
+reason that has nothing to do with which is more natural to key. The two readings are
+indistinguishable in a stored row, so switching the totals to add the column would silently
+double-count every row already entered the memo way — while the memo reading can be *enforced*,
+turning the ambiguous row into a rejected write rather than a wrong number. It is also the reading
+the source documents describe: the statement prints an unfranked amount with a CFI portion declared
+out of it, and item 13U puts that portion in the non-primary production income. Nothing here is
+excluded from assessable income; for the Australian resident this system reports for, the whole
+unfranked amount is assessable and the CFI figure is counted exactly once, through it. (CFI is NANE
+under Subdiv 802-A only for a foreign-resident member — the case this project does not model.)
+
+So the report behaviour is unchanged and now correct *for a stated reason*: totals read
+`unfranked_amount`, and `conduit_foreign_income` is read for reference only. What changed is
+everything that let the wrong entry through unnoticed:
+
+- **Write-time ceiling.** `income::db_upsert` rejects `conduit_foreign_income > unfranked_amount`
+  with `422` (`UpsertError::ConduitExceedsUnfranked`, carrying both figures). That is precisely the
+  data-entry error the old silence invited — the CFI line keyed alone, or beside a short unfranked
+  amount — and the body says which way round the two go rather than only that the write failed. It
+  runs after the AMIT checks deliberately: an AMIT row must carry no CFI at all, and that rejection
+  names the better reason (the AMMA statement is the tax record). No schema CHECK and no migration:
+  existing rows are left to the same rule on their next write.
+- **The field says what it is.** `Income::conduit_foreign_income` carries the doc comment it never
+  had (CLAUDE.md's every-field rule), stating the memo convention, the resident-vs-foreign-resident
+  distinction, its ATO source, and how a split statement is entered (unfranked = the sum of the CFI
+  and non-CFI lines).
+- **The annual tax report prints it.** A `conduit_foreign_income_aud` memo column on both the
+  dividend and trust-income tables, converted like every other figure, headed "CFI, within
+  unfranked (AUD)" so the two columns can't be read as additive, with a note under the dividend
+  table when the year actually has one. `docs/API.md`'s "every AUD figure sums to the matching tax
+  summary line" promise now names this as its one deliberate exception — a memo has no line to sum
+  to. The UI form carries the same convention as a field hint.
+- **Docs.** A dedicated Income paragraph in `docs/API.md` (plus the new 422 in the response-code
+  catalogue), the rewritten `SCHEMA.md` column note, and the tax-summary wording that used to call
+  the exclusion "NANE" — it is not NANE here, it is already counted. `docs/ato/OVERVIEW.md`'s
+  mis-attribution is corrected: the CFI claim is credited to `amma-statement-guidance-notes.md`
+  (Part B item 13U), which does support it, and the `mytax-managed-funds.md` row now says it carries
+  no CFI text — with a test that fails if that ever stops being true.
+
+Tests: `entities::income::tests::db_conduit_foreign_income_above_the_unfranked_amount_rejected`
+(the CFI line keyed alone, keyed beside a short unfranked amount, a proper subset, and the
+wholly-CFI boundary) and `api_conduit_foreign_income_above_unfranked_returns_422_with_detail`;
+`reports::tax_summary::tests::db_conduit_foreign_income_is_assessable_within_the_unfranked_amount`
+(the resident's assessable figure is the whole unfranked amount — not netted, not doubled — and the
+memo stays out of the foreign total) with `db_full_year_mixed_income_types` re-keyed to the
+convention; `reports::tax_report::tests::conduit_foreign_income_prints_as_a_memo_column_and_is_not_double_counted`;
+`doc_checks::conduit_foreign_income_entry_convention_documented`; and
+`web::tests::income_conduit_foreign_income_memo_ui_present`. Full suite 1527 passed / 0 failed.

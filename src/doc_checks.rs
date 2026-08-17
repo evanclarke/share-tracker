@@ -1392,6 +1392,64 @@ fn fractional_entitlements_documented() {
     );
 }
 
+/// Docs-sync pin for the conduit-foreign-income entry convention (SCENARIOS
+/// G-03). The field was previously excluded from every total with nothing
+/// stating why, which is right only if the figure is a memo *within*
+/// `unfranked_amount` — and wrong, silently understating the year's income, if
+/// a user keys the statement's CFI line as an amount of its own. The
+/// convention is now decided and stated, so these pin the statement itself in
+/// the API doc and the schema, the write-time ceiling that enforces it, and the
+/// ATO mirror that supports it (the index used to credit a mirror that says
+/// nothing about CFI at all).
+#[test]
+fn conduit_foreign_income_entry_convention_documented() {
+    // API.md: the convention, its direction, and the resident's treatment.
+    assert!(API_MD.contains("**Conduit foreign income is a memo inside the unfranked amount:**"));
+    assert!(API_MD.contains("within** the unfranked amount, never in addition to it"));
+    assert!(API_MD.contains("non-assessable non-exempt only for a **foreign resident**"));
+    // …the write-time ceiling that keeps the convention true of stored rows.
+    assert!(
+        API_MD
+            .contains("an income `conduit_foreign_income` exceeding the row's `unfranked_amount`")
+    );
+    // …and the memo column the annual tax report prints it as.
+    assert!(API_MD.contains("`conduit_foreign_income_aud`"));
+
+    // SCHEMA.md: the column carries the same convention, not "excluded from
+    // assessable income" (which read as a treatment rather than a memo).
+    let column = SCHEMA_MD
+        .split("├── conduit_foreign_income")
+        .nth(1)
+        .expect("SCHEMA.md documents the income.conduit_foreign_income column")
+        .split('\n')
+        .next()
+        .expect("split always yields at least one part");
+    assert!(column.contains("Memo"), "{column}");
+    assert!(column.contains("within that amount"), "{column}");
+    assert!(
+        !column.contains("Excluded from assessable income"),
+        "{column}"
+    );
+
+    // The ATO mirror the treatment rests on really says it, and the index
+    // attributes it to that mirror rather than to `mytax-managed-funds.md`.
+    const AMMA_NOTES: &str = include_str!("../docs/ato/amma-statement-guidance-notes.md");
+    const ATO_OVERVIEW: &str = include_str!("../docs/ato/OVERVIEW.md");
+    assert!(AMMA_NOTES.contains(
+        "Include an unfranked dividend paid out of conduit foreign income in \
+         **Dividends: unfranked amount declared to be CFI**, which forms part of the \
+         non-primary production income."
+    ));
+    assert!(
+        !include_str!("../docs/ato/mytax-managed-funds.md")
+            .to_lowercase()
+            .contains("conduit"),
+        "the mirror the index once credited still says nothing about CFI — \
+         if that changes, revisit the attribution rather than deleting this"
+    );
+    assert!(ATO_OVERVIEW.contains("Part B item 13U"));
+}
+
 /// Pins for the FreeBSD packaging + versioned-release pipeline (REQUIREMENTS
 /// 2026-07-13). The release workflow and package skeleton are plain text CI
 /// consumes, so these tests keep their load-bearing pieces from silently
