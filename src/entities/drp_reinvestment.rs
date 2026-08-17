@@ -66,7 +66,7 @@
 //! last-in-first-out.
 
 use crate::entities::{
-    drp_enrolment::ResidualHandling,
+    drp_enrolment::{self, ResidualHandling},
     income::Income,
     trade::{self, Trade},
 };
@@ -326,13 +326,14 @@ pub async fn db_reinvest(
     // carried-forward, *within the same enrolment period and holding
     // account*: an earlier period's trailing residual was paid out at its
     // unenrolment, and another account runs its own chain, so the chain never
-    // crosses a period boundary or an account boundary.
-    let prior_cf: Option<String> = sqlx::query_scalar(
-        "SELECT residual_carried_forward FROM trades \
-         WHERE listing_id = ? AND holding_account_id = ? AND trade_type = 'DRP' AND date >= ? \
-           AND (? IS NULL OR date < ?) \
-         ORDER BY date DESC, id DESC LIMIT 1",
-    )
+    // crosses a period boundary or an account boundary. Membership is the
+    // period's own question (`drp_enrolment::PERIOD_TRADES_FROM_WHERE`,
+    // matched on each distribution's entitlement date); "most recent" is the
+    // payment order the cash actually moved in.
+    let prior_cf: Option<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT t.residual_carried_forward {} ORDER BY t.date DESC, t.id DESC LIMIT 1",
+        *drp_enrolment::PERIOD_TRADES_FROM_WHERE
+    )))
     .bind(listing_id)
     .bind(holding_account_id)
     .bind(period_start)
@@ -429,6 +430,26 @@ pub async fn db_reinvest(
         .bind(income_id)
         .execute(&mut *tx)
         .await?;
+
+    // The period decides where each of its leftovers sits, so re-derive them
+    // now the new reinvestment has joined it: under `PayOut` this one's
+    // leftover is refunded, and under `CarryForward` it takes over as the
+    // chain's tail — settling straight away when the period is already closed
+    // (a distribution that went ex before an unenrolment but was paid after
+    // it), and handing the previous tail its carry back when the trade is
+    // back-dated into the middle of the chain.
+    drp_enrolment::recompute_residuals(
+        &mut tx,
+        &drp_enrolment::DrpEnrolment {
+            id: 0, // not read: the walk is keyed on the period's own shape
+            listing_id,
+            holding_account_id,
+            enrolment_date: period_start,
+            unenrolment_date: period_end,
+            residual_handling: handling,
+        },
+    )
+    .await?;
 
     tx.commit().await?;
 
@@ -917,6 +938,65 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(parcels[0].remaining_cost_base, "999.9936".parse().unwrap());
+    }
+
+    /// SCENARIOS I-01, I-04. A distribution that went ex under one period but
+    /// is paid under the next — a plan ended between the two dates, which is
+    /// how a DRP is ordinarily stopped — reinvests under the period that
+    /// authorised it, and its leftover stays there. The trade is dated in the
+    /// *next* period's window, so a trade-date rule would have settled it
+    /// under that period's handling and carried it into that period's chain.
+    #[tokio::test]
+    async fn a_reinvestment_paid_under_the_next_period_settles_under_its_own() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AUD").await;
+        enrol_period(
+            &pool,
+            1,
+            1,
+            "2024-01-01",
+            Some("2024-07-01"),
+            ResidualHandling::CarryForward,
+        )
+        .await;
+        enrol_period(&pool, 2, 1, "2024-07-01", None, ResidualHandling::PayOut).await;
+
+        // Ex 20 June (period 1), paid 15 July (inside period 2's window).
+        insert_distribution_dated(
+            &pool,
+            1,
+            1,
+            "2024-07-15",
+            Some("2024-06-20"),
+            Decimal::from(100),
+            Decimal::ZERO,
+        )
+        .await;
+        let first = db_reinvest(&pool, 1, &body("7")).await.unwrap();
+        assert_eq!(first.quantity, Decimal::from(14));
+        // Period 1 is closed, so its trailing leftover is refunded — settled
+        // as the reinvestment is entered, not left waiting for the period to
+        // be saved again.
+        assert_eq!(first.residual_carried_forward, Decimal::ZERO);
+        assert_eq!(first.residual_paid_out, Decimal::TWO);
+
+        // A distribution squarely inside period 2 starts that period's chain
+        // from nothing: the earlier period's leftover was refunded, and a
+        // carry never crosses the boundary.
+        insert_distribution_dated(
+            &pool,
+            2,
+            1,
+            "2024-09-15",
+            Some("2024-09-01"),
+            Decimal::from(100),
+            Decimal::ZERO,
+        )
+        .await;
+        let second = db_reinvest(&pool, 2, &body("7")).await.unwrap();
+        assert_eq!(second.residual_brought_forward, Decimal::ZERO);
+        assert_eq!(second.quantity, Decimal::from(14));
+        assert_eq!(second.residual_paid_out, Decimal::TWO); // period 2 pays out
     }
 
     /// SCENARIOS I-06. A statement that states **whole** units still leaves

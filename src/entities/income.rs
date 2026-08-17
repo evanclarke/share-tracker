@@ -222,6 +222,19 @@ impl Income {
             .unwrap_or(self.date_paid)
     }
 
+    /// [`Self::ex_or_pay_date`] as SQL, over an `income` row aliased `i` — the
+    /// same three steps in the same order, for the queries that must ask the
+    /// question of *rows* rather than of a loaded model.
+    ///
+    /// One caller, and one reason it exists at all: which DRP enrolment period
+    /// a reinvestment belongs to is this date's question, and it is asked of
+    /// the period's whole trade set at once (`entities::drp_enrolment`), which
+    /// a per-row round trip through the model would turn into a query each.
+    /// `ex_or_pay_date_sql_matches_the_model` pins the two against a matrix of
+    /// rows, so the duplication cannot drift.
+    pub const EX_OR_PAY_DATE_SQL: &'static str =
+        "COALESCE(i.ex_date, CASE WHEN i.trust_income THEN i.entitlement_date END, i.date_paid)";
+
     /// The entitlement date of a trust row, `None` on any other row — the
     /// middle step of [`Self::ex_or_pay_date`]. (Write-time validation keeps
     /// the column off non-trust rows, so the guard only restates that
@@ -1383,6 +1396,52 @@ mod tests {
             db_get(&pool, 1).await.unwrap().unwrap().unfranked_amount,
             Decimal::from(200)
         );
+    }
+
+    /// [`Income::EX_OR_PAY_DATE_SQL`] is the row-level twin of
+    /// [`Income::ex_or_pay_date`], and the DRP period walk reads rows through
+    /// it — so the two must answer the same date for every shape of row, and
+    /// this is what says so.
+    #[tokio::test]
+    async fn ex_or_pay_date_sql_matches_the_model() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        let paid = NaiveDate::from_ymd_opt(2024, 7, 15).unwrap();
+        let ex = NaiveDate::from_ymd_opt(2024, 6, 20).unwrap();
+        let entitled = NaiveDate::from_ymd_opt(2024, 6, 30).unwrap();
+        let rows = [
+            // (ex_date, trust_income, entitlement_date)
+            (None, false, None),
+            (Some(ex), false, None),
+            (None, true, None),
+            (None, true, Some(entitled)),
+            (Some(ex), true, Some(entitled)),
+        ];
+        for (id, (ex_date, trust, entitlement)) in rows.iter().enumerate() {
+            let id = id as i64 + 1;
+            let income = test_support::income(id, 1, paid)
+                .with(|i| {
+                    i.ex_date = *ex_date;
+                    i.trust_income = *trust;
+                    i.entitlement_date = *entitlement;
+                    i.unfranked_amount = Decimal::from(10);
+                })
+                .build();
+            db_upsert(&pool, &income).await.unwrap();
+            let from_sql: NaiveDate = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                "SELECT {} FROM income i WHERE i.id = ?",
+                Income::EX_OR_PAY_DATE_SQL
+            )))
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(
+                from_sql,
+                income.ex_or_pay_date(),
+                "row {id}: {ex_date:?} / trust {trust} / {entitlement:?}"
+            );
+        }
     }
 
     #[tokio::test]

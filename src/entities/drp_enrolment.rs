@@ -13,14 +13,27 @@
 //! time (an open period overlaps everything after its start, so non-overlap
 //! implies it); a closed period must end after it starts.
 //!
-//! Closing a period settles its trailing residual: the registry refunds the
-//! leftover cash at unenrolment, so the latest in-period DRP trade's
-//! `residual_carried_forward` is moved to `residual_paid_out` in the same
-//! transaction. Deleting a period record means "it never existed" and settles
-//! nothing — so a period that already produced reinvestments cannot be
-//! deleted at all (`422`, [`DeleteError::CoversReinvestment`]): unenrolling is
-//! how a period ends.
+//! Which reinvestments a period covers is decided by their distributions'
+//! entitlement dates — the date participation was fixed on and eligibility
+//! judged by — never by the DRP trades' own dates, which are payment dates and
+//! can fall outside the period that authorised them (see
+//! [`PERIOD_TRADES_FROM_WHERE`]).
+//!
+//! Where each of those reinvestments' leftover cash went is then *derived*
+//! from the period rather than recorded when it closes: under `PayOut` the
+//! registry refunds every leftover, under `CarryForward` each is picked up by
+//! the next reinvestment except the last, which is refunded once the period
+//! ends ([`recompute_residuals`], run in the same transaction as every period
+//! write). Deriving it is what makes the period editable — clearing a mistaken
+//! unenrolment date restores the carry it paid out, and moving the date moves
+//! the settlement.
+//!
+//! Deleting a period record means "it never existed" and settles nothing — so
+//! a period that already produced reinvestments cannot be deleted at all
+//! (`422`, [`DeleteError::CoversReinvestment`]): unenrolling is how a period
+//! ends.
 
+use crate::entities::income::Income;
 use crate::infra::decimal::{Money, parse_dec};
 use crate::infra::http::{self, ApiError, CrudEntity};
 use axum::{
@@ -33,6 +46,7 @@ use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
+use std::sync::LazyLock;
 
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize, sqlx::Type)]
 pub enum ResidualHandling {
@@ -88,6 +102,33 @@ pub enum UpsertError {
     #[error("DRP enrolment write failed: {0}")]
     Db(#[from] sqlx::Error),
 }
+
+/// `FROM`/`WHERE` selecting **the DRP trades a period covers**, the one place
+/// that question is decided — bind `(listing_id, holding_account_id,
+/// enrolment_date, unenrolment_date, unenrolment_date)`, and read the trade as
+/// `t`, its funding distribution as `i`.
+///
+/// A reinvestment belongs to the period that *authorised* it, which is the one
+/// covering its distribution's entitlement date ([`Income::ex_or_pay_date`]) —
+/// the same date `drp_reinvestment` decides eligibility on. It is deliberately
+/// **not** the trade date: a plan ended between a distribution going ex and
+/// its payment (the ordinary way a DRP is stopped) puts the trade outside the
+/// period that produced it, and every trade-date answer then contradicts the
+/// ex-date one — the leftover settles nowhere, or is carried into the next
+/// period under that period's handling, and a period that plainly produced a
+/// reinvestment becomes deletable (SCENARIOS I-01, I-02, I-04).
+///
+/// The join is total in practice: a DRP trade is created only by the reinvest
+/// operation, which links it to its distribution in the same transaction, and
+/// `PUT /trades` refuses the type outright.
+pub(crate) static PERIOD_TRADES_FROM_WHERE: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "FROM trades t JOIN income i ON i.reinvestment_trade_id = t.id \
+         WHERE t.listing_id = ? AND t.holding_account_id = ? AND t.trade_type = 'DRP' \
+           AND {date} >= ? AND (? IS NULL OR {date} < ?)",
+        date = Income::EX_OR_PAY_DATE_SQL
+    )
+});
 
 impl CrudEntity for DrpEnrolment {
     type Key = i64;
@@ -175,41 +216,82 @@ pub async fn db_upsert(pool: &SqlitePool, period: &DrpEnrolment) -> Result<(), U
     .execute(&mut *tx)
     .await?;
 
-    // Unenrolment pays out the period's trailing residual: the leftover the
-    // latest in-period reinvestment carried forward has no successor to pick it
-    // up, so the registry refunds it. Recorded on that DRP trade by moving
-    // carried-forward to paid-out. Idempotent — once moved, carried is zero —
-    // and re-saving a closed period re-settles after any backdated reinvestment.
-    if let Some(end) = period.unenrolment_date {
-        let trailing: Option<(i64, String, String)> = sqlx::query_as(
-            "SELECT id, residual_carried_forward, residual_paid_out FROM trades \
-             WHERE listing_id = ? AND holding_account_id = ? \
-               AND trade_type = 'DRP' AND date >= ? AND date < ? \
-             ORDER BY date DESC, id DESC LIMIT 1",
-        )
-        .bind(period.listing_id)
-        .bind(period.holding_account_id)
-        .bind(period.enrolment_date)
-        .bind(end)
-        .fetch_optional(&mut *tx)
-        .await?;
-        if let Some((trade_id, carried, paid)) = trailing {
-            let carried = parse_dec("residual_carried_forward", carried)?;
-            let paid = parse_dec("residual_paid_out", paid)?;
-            if carried > Decimal::ZERO {
-                sqlx::query(
-                    "UPDATE trades SET residual_carried_forward = '0', residual_paid_out = ? \
-                     WHERE id = ?",
-                )
-                .bind(Money(paid + carried))
-                .bind(trade_id)
-                .execute(&mut *tx)
-                .await?;
-            }
-        }
-    }
+    recompute_residuals(&mut tx, period).await?;
 
     tx.commit().await?;
+    Ok(())
+}
+
+/// Recompute the split of every leftover in the period between *carried
+/// forward* and *paid out*, from the period as it now stands.
+///
+/// Each of the period's reinvestments left some cash over (its
+/// `residual_carried_forward + residual_paid_out`, one of which is always
+/// zero — the total is what the plan did not spend, and no edit here changes
+/// it). Where that cash went is entirely a function of the period: under
+/// `PayOut` the registry refunds every leftover as it arises; under
+/// `CarryForward` each is picked up by the next reinvestment, except the last,
+/// which has no successor — so it is refunded once the period ends, and is
+/// still carried while the period is open.
+///
+/// Deriving it rather than recording it at the moment of unenrolment is what
+/// makes an edit reversible (SCENARIOS I-01, I-03): clearing a mistaken
+/// unenrolment date restores the carry the closure paid out, moving the date
+/// moves the settlement to whichever reinvestment is trailing under the new
+/// window, and a back-dated reinvestment hands the settlement on to itself.
+/// The one-way write this replaced could only ever move carried → paid, so
+/// every one of those left the chain short by a leftover and the next
+/// reinvestment funded from zero.
+///
+/// Runs on the caller's transaction — the residual split and the period
+/// deciding it are one write. `drp_reinvestment` calls it too, so a
+/// reinvestment entered against an already-closed period settles at once
+/// rather than waiting for the period to be saved again.
+pub(crate) async fn recompute_residuals(
+    conn: &mut sqlx::SqliteConnection,
+    period: &DrpEnrolment,
+) -> Result<(), sqlx::Error> {
+    // In the order the cash moved — payment order, which is the trade date —
+    // so "the last one" is the reinvestment with no successor to pick its
+    // leftover up. Which trades are *in* the period is the entitlement-date
+    // question `PERIOD_TRADES_FROM_WHERE` answers.
+    let trades: Vec<(i64, String, String)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT t.id, t.residual_carried_forward, t.residual_paid_out {} \
+         ORDER BY t.date, t.id",
+        *PERIOD_TRADES_FROM_WHERE
+    )))
+    .bind(period.listing_id)
+    .bind(period.holding_account_id)
+    .bind(period.enrolment_date)
+    .bind(period.unenrolment_date)
+    .bind(period.unenrolment_date)
+    .fetch_all(&mut *conn)
+    .await?;
+
+    let last = trades.len().saturating_sub(1);
+    for (index, (trade_id, carried, paid)) in trades.iter().enumerate() {
+        let carried = parse_dec("residual_carried_forward", carried.clone())?;
+        let paid = parse_dec("residual_paid_out", paid.clone())?;
+        let leftover = carried + paid;
+        let refunded = match period.residual_handling {
+            ResidualHandling::PayOut => true,
+            ResidualHandling::CarryForward => index == last && period.unenrolment_date.is_some(),
+        };
+        let (want_carried, want_paid) = match refunded {
+            true => (Decimal::ZERO, leftover),
+            false => (leftover, Decimal::ZERO),
+        };
+        if want_carried != carried || want_paid != paid {
+            sqlx::query(
+                "UPDATE trades SET residual_carried_forward = ?, residual_paid_out = ? WHERE id = ?",
+            )
+            .bind(Money(want_carried))
+            .bind(Money(want_paid))
+            .bind(trade_id)
+            .execute(&mut *conn)
+            .await?;
+        }
+    }
     Ok(())
 }
 
@@ -263,14 +345,15 @@ pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<bool, DeleteError> 
         return Ok(false);
     };
 
-    // The same half-open [enrolment_date, unenrolment_date) window the
-    // reinvestment path matches a distribution against, and the settlement
-    // walk uses — an open period covers everything from its start.
-    let covers_reinvestment: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM trades \
-                       WHERE listing_id = ? AND holding_account_id = ? AND trade_type = 'DRP' \
-                         AND date >= ? AND (? IS NULL OR date < ?))",
-    )
+    // The same trade set the settlement recomputes and the reinvestment chain
+    // reads back from — matched on the distribution's entitlement date, not
+    // the trade's own (see `PERIOD_TRADES_FROM_WHERE`), so a reinvestment paid
+    // after the unenrolment still counts as the period's and this refusal
+    // still fires.
+    let covers_reinvestment: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT EXISTS(SELECT 1 {})",
+        *PERIOD_TRADES_FROM_WHERE
+    )))
     .bind(period.listing_id)
     .bind(period.holding_account_id)
     .bind(period.enrolment_date)
@@ -632,6 +715,42 @@ mod tests {
         .execute(pool)
         .await
         .unwrap();
+        // …together with the distribution that funded it: a DRP trade only
+        // exists because a reinvestment created it, and which period it
+        // belongs to is that distribution's entitlement-date question. The
+        // fixture states the trade date as the pay date and no ex date, so
+        // the two dates coincide unless a test says otherwise.
+        link_funding_distribution(pool, id, listing_id, date, date).await;
+    }
+
+    /// Insert the income row a DRP trade was reinvested from, linked to it —
+    /// what `drp_reinvestment::db_reinvest` writes in one transaction.
+    async fn link_funding_distribution(
+        pool: &SqlitePool,
+        trade_id: i64,
+        listing_id: i64,
+        ex_date: &str,
+        date_paid: &str,
+    ) {
+        let account: i64 = sqlx::query_scalar("SELECT holding_account_id FROM trades WHERE id = ?")
+            .bind(trade_id)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        test_support::income(1000 + trade_id, listing_id, date_paid.parse().unwrap())
+            .with(|i| {
+                i.ex_date = Some(ex_date.parse().unwrap());
+                i.unfranked_amount = Decimal::from(100);
+                i.holding_account_id = account;
+            })
+            .insert(pool)
+            .await;
+        sqlx::query("UPDATE income SET reinvestment_trade_id = ? WHERE id = ?")
+            .bind(trade_id)
+            .bind(1000 + trade_id)
+            .execute(pool)
+            .await
+            .unwrap();
     }
 
     async fn residuals(pool: &SqlitePool, trade_id: i64) -> (String, String) {
@@ -781,9 +900,14 @@ mod tests {
         )
         .await
         .unwrap();
-        // An in-period DRP trade, but in account 2.
+        // An in-period DRP trade, but in account 2 — as is the distribution
+        // that funded it (a reinvestment lands in its distribution's account).
         insert_drp_trade(&pool, 10, 1, "2024-06-30", "5", "0").await;
         sqlx::query("UPDATE trades SET holding_account_id = 2 WHERE id = 10")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE income SET holding_account_id = 2 WHERE reinvestment_trade_id = 10")
             .execute(&pool)
             .await
             .unwrap();
@@ -804,6 +928,140 @@ mod tests {
         assert_eq!(
             residuals(&pool, 10).await,
             ("5".to_string(), "0".to_string())
+        );
+    }
+
+    /// SCENARIOS I-01, I-03. The settlement is derived from the period, not
+    /// stamped on when it closes — so an edit of the unenrolment date is
+    /// reversible. Clearing a mistaken one restores the carry it refunded (the
+    /// one-way write this replaced left the chain short, and the next
+    /// reinvestment funded from zero); moving it later hands the settlement to
+    /// whichever reinvestment is trailing under the new window.
+    #[tokio::test]
+    async fn re_opening_or_moving_an_unenrolment_re_derives_the_settlement() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        let open = period(1, 1, "2024-01-01", None, ResidualHandling::CarryForward);
+        db_upsert(&pool, &open).await.unwrap();
+        insert_drp_trade(&pool, 10, 1, "2024-03-31", "1", "0").await;
+        insert_drp_trade(&pool, 11, 1, "2024-09-30", "2.50", "0").await;
+
+        // Unenrol by mistake …
+        let closed = period(
+            1,
+            1,
+            "2024-01-01",
+            Some("2024-10-01"),
+            ResidualHandling::CarryForward,
+        );
+        db_upsert(&pool, &closed).await.unwrap();
+        assert_eq!(
+            residuals(&pool, 11).await,
+            ("0".to_string(), "2.50".to_string())
+        );
+
+        // … and correct it: the leftover is carried again, not lost.
+        db_upsert(&pool, &open).await.unwrap();
+        assert_eq!(
+            residuals(&pool, 11).await,
+            ("2.50".to_string(), "0".to_string()),
+            "re-opening the period restores the carry it refunded"
+        );
+
+        // Closing it *between* the two reinvestments instead: the March one is
+        // now the period's last, so it settles and the September one — no
+        // longer covered — is left as it stands.
+        db_upsert(
+            &pool,
+            &period(
+                1,
+                1,
+                "2024-01-01",
+                Some("2024-06-30"),
+                ResidualHandling::CarryForward,
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            residuals(&pool, 10).await,
+            ("0".to_string(), "1".to_string())
+        );
+        assert_eq!(
+            residuals(&pool, 11).await,
+            ("2.50".to_string(), "0".to_string())
+        );
+    }
+
+    /// SCENARIOS I-01, I-02, I-04. Which period a reinvestment belongs to is
+    /// its distribution's entitlement date, not the DRP trade's own date. A
+    /// plan ended between a distribution going ex and its payment — the
+    /// ordinary way a DRP is stopped — leaves the trade dated outside the
+    /// period that authorised it, and every question about it must still find
+    /// it: its leftover settles at the unenrolment, it does not leak into the
+    /// next period's chain, and the period cannot be deleted out from under it.
+    #[tokio::test]
+    async fn a_reinvestment_paid_after_the_unenrolment_still_belongs_to_its_period() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        db_upsert(
+            &pool,
+            &period(
+                1,
+                1,
+                "2024-01-01",
+                Some("2024-07-01"),
+                ResidualHandling::CarryForward,
+            ),
+        )
+        .await
+        .unwrap();
+        // Went ex 20 June (inside the period), paid — and so allotted — on
+        // 15 July, after the unenrolment took effect.
+        insert_drp_trade(&pool, 10, 1, "2024-07-15", "2", "0").await;
+        sqlx::query("UPDATE income SET ex_date = '2024-06-20' WHERE reinvestment_trade_id = 10")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // Re-saving the period settles it: the leftover is refunded, not
+        // stranded on a trade no walk can see.
+        db_upsert(
+            &pool,
+            &period(
+                1,
+                1,
+                "2024-01-01",
+                Some("2024-07-01"),
+                ResidualHandling::CarryForward,
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            residuals(&pool, 10).await,
+            ("0".to_string(), "2".to_string())
+        );
+
+        // The period cannot be deleted: it plainly produced a reinvestment,
+        // even though that trade is dated outside it.
+        assert!(matches!(
+            db_delete(&pool, 1).await,
+            Err(DeleteError::CoversReinvestment)
+        ));
+
+        // And a period re-opened the same day does not adopt the trade: its
+        // own settlement leaves the earlier period's reinvestment alone.
+        db_upsert(
+            &pool,
+            &period(2, 1, "2024-07-01", None, ResidualHandling::PayOut),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            residuals(&pool, 10).await,
+            ("0".to_string(), "2".to_string()),
+            "the trade belongs to the period its distribution went ex in"
         );
     }
 

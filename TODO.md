@@ -25,17 +25,17 @@ going ex and its payment — the ordinary way a DRP is stopped — and then the 
 disagree with the ex-date one: the trailing-residual settlement in `drp_enrolment::db_upsert`, the
 `residual_brought_forward` chain lookup in `drp_reinvestment::db_reinvest`, and the
 `CoversReinvestment` delete guard in `drp_enrolment::db_delete`.)
-- [ ] I-01 — reproduced: period `[2020-01-01, 2024-07-01)` CarryForward; a $100 distribution ex
+- [x] I-01 — reproduced: period `[2020-01-01, 2024-07-01)` CarryForward; a $100 distribution ex
   2024-06-20, paid 2024-07-15, reinvested at $7 → `201`, trade dated **2024-07-15**, 14 units,
   `residual_carried_forward: 2`. That $2 is **stranded**: the period's settlement walk
   (`date >= enrolment_date AND date < unenrolment_date`) never sees the trade, so it is neither
   paid out nor available to any later reinvestment — re-saving the closed period does not reach it
   either. The registry refunds that leftover at termination; the record says it is still carried
-- [ ] I-01 — same fixture, re-enrolling on the same day (`[2024-07-01, …)` PayOut): the trade dated
+- [x] I-01 — same fixture, re-enrolling on the same day (`[2024-07-01, …)` PayOut): the trade dated
   2024-07-15 now falls inside the **new** period, and the next reinvestment (Sep 2024) brings its
   $2 forward — the carry crosses a period boundary the module doc guarantees it never crosses, and
   the *new* period's residual handling settles money the *old* period's plan left over
-- [ ] I-02 — the A-43 guard is defeated by the same mismatch: `DELETE /drp_enrolments/1` on the
+- [x] I-02 — the A-43 guard is defeated by the same mismatch: `DELETE /drp_enrolments/1` on the
   first fixture answers **`204`**, deleting a period that demonstrably produced a reinvestment.
   `db_delete`'s `EXISTS(… trades … date >= ? AND date < ?)` asks the trade-date question, so the
   refusal that exists precisely to keep "the record of why that trade exists" (DONE/reviews.md,
@@ -48,25 +48,46 @@ disagree with the ex-date one: the trailing-residual settlement in `drp_enrolmen
   refusing a trade date outside the period — it refuses a genuine registry pattern and mis-dates
   the parcel if the user complies; a `drp_enrolment_id` provenance column — a fourth thing to keep
   in step.)
-- [ ] Tests: the ex-in/paid-after fixture settles its residual at unenrolment; the same fixture with
+- [x] Tests: the ex-in/paid-after fixture settles its residual at unenrolment; the same fixture with
   an immediate re-enrolment does **not** carry into the new period; `DELETE` of the period is
   refused `422` pointing at unenrolment
-- [ ] Docs sync: `docs/API.md` DRP enrolments (which period a reinvestment belongs to, and that it
+- [x] Docs sync: `docs/API.md` DRP enrolments (which period a reinvestment belongs to, and that it
   is not the trade date), plus the module docs in `entities::drp_enrolment`/`drp_reinvestment` that
   currently state the trade-date rule
 
+
+**Resolution (2026-08-17): one query answers "which trades does this period cover", and it asks the
+entitlement-date question.**
+
+`drp_enrolment::PERIOD_TRADES_FROM_WHERE` is that query's `FROM`/`WHERE` — `trades t JOIN income i
+ON i.reinvestment_trade_id = t.id`, filtered on the listing, the account and the distribution's
+entitlement date — and all three readers now build on it: the settlement recompute, the delete
+guard, and `db_reinvest`'s residual-brought-forward lookup (which still *orders* by trade date, the
+order the cash moved in; only membership changed). The entitlement date in SQL is
+`Income::EX_OR_PAY_DATE_SQL`, the row-level twin of `Income::ex_or_pay_date`, pinned against it by
+`ex_or_pay_date_sql_matches_the_model` so the two cannot drift.
+
+The join is total in practice — a DRP trade exists only because the reinvest operation created it
+and linked it in the same transaction, and `PUT /trades` refuses the type — which the enrolment
+tests' `insert_drp_trade` fixture now reflects: it inserts the funding distribution too.
+
+Tests: `a_reinvestment_paid_after_the_unenrolment_still_belongs_to_its_period` (settles at the
+unenrolment, the period cannot be deleted, and an immediately re-opened period does not adopt it)
+and `a_reinvestment_paid_under_the_next_period_settles_under_its_own` (the same fixture from the
+reinvest side: refunded under period 1's terms as it is entered, and period 2's chain starts from
+nothing).
 ## Re-opening or extending an unenrolment does not restore the residual it paid out (SCENARIOS I-01, I-03)
 (SCENARIOS.md section I verification pass, 2026-08-17. Closing a period moves the trailing
 `residual_carried_forward` to `residual_paid_out` — correct, the registry refunds it. The write is
 one-way: nothing restores it if the closure is undone or moved, and `db_upsert`'s own comment calls
 the settlement "idempotent — once moved, carried is zero", which is exactly why the reverse edit
 cannot recover.)
-- [ ] I-03 — reproduced: open period, $100 reinvested at $7 → 14 units, `carried 2`. Unenrol
+- [x] I-03 — reproduced: open period, $100 reinvested at $7 → 14 units, `carried 2`. Unenrol
   (`carried 0 / paid_out 2` — correct). Then correct the mistake by clearing the unenrolment date:
   the trade still reads `carried 0 / paid_out 2`, and the next reinvestment in the re-opened period
   brings forward **0**, buying 14 units off $100 instead of 14 off $102 (`carried 2` instead of
   `carried 4`). The chain has silently lost $2 — and with a smaller price step it loses a *unit*
-- [ ] I-01 — the realistic version is a mistyped end date, not a change of mind: closing at
+- [x] I-01 — the realistic version is a mistyped end date, not a change of mind: closing at
   `2021-01-01` and correcting to `2025-01-01` settles the residual under the first window and never
   un-settles it, leaving a mid-chain trade carrying `paid_out` and every later reinvestment in the
   period funded short
@@ -75,11 +96,26 @@ cannot recover.)
   as it now stands — the trailing trade settles iff the period is closed, every other trade carries
   — which makes the edit reversible by construction. (Rejected: restoring on re-open only, which
   leaves the mistyped-then-extended case wrong; documenting it as one-way.)
-- [ ] Tests: unenrol → re-open restores `carried` and the next reinvestment brings it forward;
+- [x] Tests: unenrol → re-open restores `carried` and the next reinvestment brings it forward;
   unenrol → extend moves the settlement to the new trailing trade and leaves no `paid_out` behind;
   the existing `db_unenrolment_pays_out_trailing_carried_residual` still holds
-- [ ] Docs sync: `docs/API.md` DRP enrolments (what editing an unenrolment date does to a residual)
+- [x] Docs sync: `docs/API.md` DRP enrolments (what editing an unenrolment date does to a residual)
 
+
+**Resolution (2026-08-17): `recompute_residuals` derives the split from the period on every write.**
+
+Each reinvestment's leftover is `residual_carried_forward + residual_paid_out` — an invariant total,
+since no edit changes what the plan did not spend. Where it sits is now a function of the period:
+`PayOut` refunds every leftover, `CarryForward` carries all but the last, and the last is refunded
+iff the period is closed. `drp_enrolment::db_upsert` runs it in its own transaction, and
+`drp_reinvestment::db_reinvest` runs it too after linking the new trade, so a reinvestment entered
+against an already-closed period settles at once instead of waiting for the period to be saved
+again. The trades' `residual_brought_forward` and quantities are history and are never rewritten.
+
+Tests: `re_opening_or_moving_an_unenrolment_re_derives_the_settlement` — unenrol → re-open restores
+the carry, and closing the period between two reinvestments moves the settlement to the first while
+leaving the now-uncovered second alone. `db_unenrolment_pays_out_trailing_carried_residual` and
+`db_unenrolment_only_settles_trades_inside_the_period` still hold unchanged.
 ## A whole-number stated allotment can swallow a share's worth of cash (SCENARIOS I-06)
 (SCENARIOS.md section I verification pass, 2026-08-17. The optional `units` path exists for broker
 plans that allot **fractional** shares: the statement's figure is authoritative, cross-checked
