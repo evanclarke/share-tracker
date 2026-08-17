@@ -1292,3 +1292,55 @@ sentences, and the cited ATO mirror still carrying both rules) and
 `web::tests::franking_at_risk_ui_present` (the two unmodelled tests bound the description's
 all-clear). Full suite 1546 passed / 0 failed.
 
+## The LIC capital gain deduction field takes the already-halved figure, undocumented (SCENARIOS G-04)
+(SCENARIOS.md section G verification pass, 2026-08-16.)
+- [x] G-04 — `lic_capital_gain_deduction` is passed straight through to the tax summary's D8 line.
+  What a LIC's dividend statement prints, though, is the **LIC capital gain amount (the attributable
+  part)**; an individual deducts **50%** of it (`docs/ato/lic-capital-gain-deduction.md`: Ben's $50
+  attributable part is a $25 deduction). The user must halve it before entering
+- [x] Nothing says so: `docs/API.md`'s label table says only "The 50% LIC capital gain deduction is
+  claimed at question D8", the UI field is a bare "LIC capital gain deduction", and there is no
+  equivalent of the investment-expense field's explicit "enter the deductible figure
+  (post-apportionment)" note. Entering the statement's figure doubles the deduction
+- [x] **Needs a decision**: document the entry convention (a `docs/API.md` Income paragraph + a form
+  hint naming the 50%), or take the attributable part and compute the 50% — which is what CLAUDE.md's
+  "implement a requirement fully" argues for, but would need a migration and a re-reading of every
+  existing row
+- [x] Tests: the ATO example (Ben, $50 attributable part → $25 at D8) reproduced through whichever
+  entry the decision picks
+
+Decided 2026-08-17 (Evan): **take the attributable part and compute the 50%** — the second option, so
+the statement's own figure is what gets entered and the doubling error mode disappears rather than
+being documented around.
+
+`income.lic_capital_gain_deduction` is now `income.lic_capital_gain_amount` (migration `0025`), and
+`entities::income::Income::lic_capital_gain_deduction()` is *the* halving — the tax summary's D8 line
+and the annual tax report's per-dividend `lic_capital_gain_deduction_aud` column both read it, so a
+per-dividend figure can never disagree with the year's total (the report field names are unchanged:
+they always were the deduction). The 50% is the individual rate the whole system assumes; the
+33⅓% super/life rate stays out of scope under the existing *Taxpayer entity type* limitation.
+
+Existing rows hold a deduction under the old convention, so 0025 reads them forward by doubling.
+Money is TEXT decimal and must never round-trip through REAL, so the doubling is done on the
+decimal's own digits as an integer — the digit string without its point, doubled, re-pointed at the
+same scale — which is exact at every scale ('0.07' → '0.14', '1234567.895' → '2469135.790'); zero
+rows (the column default, i.e. every non-LIC distribution) are skipped. `income` is audited, so the
+migration drops and re-creates its two `row_history` triggers with the new column list (a
+`RENAME COLUMN` would leave the JSON *key* saying `lic_capital_gain_deduction` while carrying the
+attributable part). The doubling itself is deliberately un-audited — it runs while the triggers are
+down, being a schema re-reading rather than an edit of a fact, and it inverts exactly (halve) if a
+row turns out to have held the statement's amount already.
+
+Docs: an Income paragraph in `docs/API.md` (enter as printed, with Ben's $50 → $25 worked through and
+the pre-2026-08-17 convention noted), the tax-summary label-table row now naming the computed 50%,
+`docs/SCHEMA.md`'s column, the README income-recording feature line, `docs/ato/OVERVIEW.md`'s row for
+the cited mirror, and a form hint on the field warning that a pre-halved entry claims half the
+deduction.
+
+Tests: `ato_examples::lic_capital_gain_deduction_example_resident_individual` (Ben's $50 attributable
+part entered through the API, $25 at D8), `reports::tax_summary::tests::db_lic_deduction_is_half_the_advised_amount`,
+`reports::tax_report::tests::income_sections_sum_to_tax_year_summary` (the per-dividend LIC column is
+the halved figure and sums to the D8 line), and
+`infra::db::tests::migration_0025_doubles_the_lic_deduction_into_the_advised_amount` (the forward-read
+applied to pre-0025 data at five scales, plus both row-history triggers back and naming the new
+column). Full suite 1547 passed / 0 failed.

@@ -29,8 +29,15 @@ pub struct Income {
     pub tfn_withholding_tax: Decimal,
     #[sqlx(try_from = "Money")]
     pub franking_credits: Decimal,
+    /// The **LIC capital gain amount** printed on a listed investment
+    /// company's dividend statement — the *attributable part* the LIC advises,
+    /// entered verbatim, **not** the deduction claimed from it
+    /// (`docs/ato/lic-capital-gain-deduction.md`). The deduction is 50% of it
+    /// for the resident individual this system reports for, computed by
+    /// [`Income::lic_capital_gain_deduction`]; entering an already-halved
+    /// figure here halves it twice.
     #[sqlx(try_from = "Money")]
-    pub lic_capital_gain_deduction: Decimal,
+    pub lic_capital_gain_amount: Decimal,
     /// The portion of `unfranked_amount` the payer declared to be **conduit
     /// foreign income** (CFI, Subdiv 802-A ITAA 1997) — a **memo figure**, not
     /// an amount of its own: it is recorded *within* `unfranked_amount`, never
@@ -117,7 +124,7 @@ pub struct Income {
 impl Income {
     /// True when the distribution carries no Australian-sourced component —
     /// every one of `franked_amount`, `unfranked_amount`, `franking_credits`,
-    /// `lic_capital_gain_deduction`, `conduit_foreign_income` (a memo subset of
+    /// `lic_capital_gain_amount`, `conduit_foreign_income` (a memo subset of
     /// `unfranked_amount`, so it can only be non-zero when that is — an
     /// Australian company's income, only *labelled* conduit, which is why
     /// `tax_summary` keeps it out of the foreign total) and
@@ -141,12 +148,29 @@ impl Income {
             self.franked_amount,
             self.unfranked_amount,
             self.franking_credits,
-            self.lic_capital_gain_deduction,
+            self.lic_capital_gain_amount,
             self.conduit_foreign_income,
             self.tfn_withholding_tax,
         ]
         .iter()
         .all(|amount| amount.is_zero())
+    }
+
+    /// The **LIC capital gain deduction** claimable from this dividend, in the
+    /// row's own currency: **50%** of the [`lic_capital_gain_amount`] the LIC
+    /// advised (`docs/ato/lic-capital-gain-deduction.md` — Ben's $50
+    /// attributable part is a $25 deduction at question D8).
+    ///
+    /// The 50% is the **individual** rate, per the taxpayer basis every tax
+    /// figure here assumes (a complying superannuation entity or life insurance
+    /// company deducts 33⅓%; a trust or partnership 50% — see `docs/API.md`'s
+    /// Known limitations). *The* place the halving happens: the tax summary's
+    /// D8 line and the annual tax report's per-dividend column both read it, so
+    /// a per-dividend figure can never disagree with the year's total.
+    ///
+    /// [`lic_capital_gain_amount`]: Income::lic_capital_gain_amount
+    pub fn lic_capital_gain_deduction(&self) -> Decimal {
+        self.lic_capital_gain_amount / Decimal::TWO
     }
 
     /// The date the distribution is assessed on — the date every FY-keyed
@@ -275,7 +299,7 @@ pub struct IncomeBody {
     #[serde(default)]
     pub franking_credits: Decimal,
     #[serde(default)]
-    pub lic_capital_gain_deduction: Decimal,
+    pub lic_capital_gain_amount: Decimal,
     #[serde(default)]
     pub conduit_foreign_income: Decimal,
     #[serde(default)]
@@ -310,7 +334,7 @@ impl CrudEntity for Income {
     const TABLE: &'static str = "income";
     const COLUMNS: &'static str = "id, listing_id, date_paid, ex_date, franked_amount, unfranked_amount, \
          foreign_source_income, foreign_tax_paid, tfn_withholding_tax, franking_credits, \
-         lic_capital_gain_deduction, conduit_foreign_income, trust_income, entitlement_date, \
+         lic_capital_gain_amount, conduit_foreign_income, trust_income, entitlement_date, \
          reinvestment_trade_id, currency, buyback_trade_id, holding_account_id, \
          amount_per_security, securities_held, tax_deferred_amount";
     const ORDER_BY: &'static str = "date_paid, id";
@@ -367,7 +391,7 @@ pub enum UpsertError {
     #[error("this listing is an AMIT — its distributions are trust income")]
     AmitNonTrust,
     /// A non-zero notional tax component (`franking_credits`,
-    /// `lic_capital_gain_deduction`, or `conduit_foreign_income`) on an AMIT
+    /// `lic_capital_gain_amount`, or `conduit_foreign_income`) on an AMIT
     /// listing's row. An AMIT cash advice is not a tax document — the fund's
     /// attribution (credits, LIC deduction, CFI) is reported by its AMMA
     /// statement, and the tax summary reads it from there alone; a value here
@@ -484,8 +508,8 @@ pub async fn db_upsert(pool: &SqlitePool, income: &Income) -> Result<(), UpsertE
         ("tfn_withholding_tax", Some(income.tfn_withholding_tax)),
         ("franking_credits", Some(income.franking_credits)),
         (
-            "lic_capital_gain_deduction",
-            Some(income.lic_capital_gain_deduction),
+            "lic_capital_gain_amount",
+            Some(income.lic_capital_gain_amount),
         ),
         (
             "conduit_foreign_income",
@@ -553,10 +577,7 @@ pub async fn db_upsert(pool: &SqlitePool, income: &Income) -> Result<(), UpsertE
         }
         for (field, value) in [
             ("franking_credits", income.franking_credits),
-            (
-                "lic_capital_gain_deduction",
-                income.lic_capital_gain_deduction,
-            ),
+            ("lic_capital_gain_amount", income.lic_capital_gain_amount),
             ("conduit_foreign_income", income.conduit_foreign_income),
         ] {
             if value != Decimal::ZERO {
@@ -613,7 +634,7 @@ pub async fn db_upsert(pool: &SqlitePool, income: &Income) -> Result<(), UpsertE
         "INSERT INTO income \
          (id, listing_id, date_paid, ex_date, franked_amount, unfranked_amount, \
           foreign_source_income, foreign_tax_paid, tfn_withholding_tax, franking_credits, \
-          lic_capital_gain_deduction, conduit_foreign_income, trust_income, entitlement_date, \
+          lic_capital_gain_amount, conduit_foreign_income, trust_income, entitlement_date, \
           currency, holding_account_id, amount_per_security, \
           securities_held, tax_deferred_amount) \
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
@@ -627,7 +648,7 @@ pub async fn db_upsert(pool: &SqlitePool, income: &Income) -> Result<(), UpsertE
              foreign_tax_paid           = excluded.foreign_tax_paid, \
              tfn_withholding_tax        = excluded.tfn_withholding_tax, \
              franking_credits           = excluded.franking_credits, \
-             lic_capital_gain_deduction = excluded.lic_capital_gain_deduction, \
+             lic_capital_gain_amount = excluded.lic_capital_gain_amount, \
              conduit_foreign_income     = excluded.conduit_foreign_income, \
              trust_income               = excluded.trust_income, \
              entitlement_date           = excluded.entitlement_date, \
@@ -647,7 +668,7 @@ pub async fn db_upsert(pool: &SqlitePool, income: &Income) -> Result<(), UpsertE
     .bind(Money(income.foreign_tax_paid))
     .bind(Money(income.tfn_withholding_tax))
     .bind(Money(income.franking_credits))
-    .bind(Money(income.lic_capital_gain_deduction))
+    .bind(Money(income.lic_capital_gain_amount))
     .bind(Money(income.conduit_foreign_income))
     .bind(income.trust_income)
     .bind(income.entitlement_date)
@@ -719,7 +740,7 @@ async fn upsert(
         foreign_tax_paid: body.foreign_tax_paid,
         tfn_withholding_tax: body.tfn_withholding_tax,
         franking_credits: body.franking_credits,
-        lic_capital_gain_deduction: body.lic_capital_gain_deduction,
+        lic_capital_gain_amount: body.lic_capital_gain_amount,
         conduit_foreign_income: body.conduit_foreign_income,
         trust_income: body.trust_income,
         entitlement_date: body.entitlement_date,
@@ -1034,8 +1055,8 @@ mod tests {
                 plus(|i| i.franking_credits = Decimal::ONE),
             ),
             (
-                "lic_capital_gain_deduction",
-                plus(|i| i.lic_capital_gain_deduction = Decimal::ONE),
+                "lic_capital_gain_amount",
+                plus(|i| i.lic_capital_gain_amount = Decimal::ONE),
             ),
             (
                 "conduit_foreign_income",
@@ -1102,7 +1123,7 @@ mod tests {
             foreign_tax_paid: "1.5".parse().unwrap(),
             tfn_withholding_tax: Decimal::ZERO,
             franking_credits: Decimal::ZERO,
-            lic_capital_gain_deduction: Decimal::from(5),
+            lic_capital_gain_amount: Decimal::from(5),
             conduit_foreign_income: Decimal::from(3),
             trust_income: true,
             entitlement_date: None,
@@ -1118,7 +1139,7 @@ mod tests {
         assert!(got.trust_income);
         assert_eq!(got.foreign_source_income, Decimal::from(10));
         assert_eq!(got.conduit_foreign_income, Decimal::from(3));
-        assert_eq!(got.lic_capital_gain_deduction, Decimal::from(5));
+        assert_eq!(got.lic_capital_gain_amount, Decimal::from(5));
     }
 
     #[tokio::test]
@@ -1518,7 +1539,7 @@ mod tests {
             "foreign_tax_paid",
             "tfn_withholding_tax",
             "franking_credits",
-            "lic_capital_gain_deduction",
+            "lic_capital_gain_amount",
             "conduit_foreign_income",
             "amount_per_security",
             "securities_held",
@@ -2019,12 +2040,12 @@ mod tests {
         let mut with_credits = base();
         with_credits.franking_credits = Decimal::from(30);
         let mut with_lic = base();
-        with_lic.lic_capital_gain_deduction = Decimal::from(5);
+        with_lic.lic_capital_gain_amount = Decimal::from(5);
         let mut with_cfi = base();
         with_cfi.conduit_foreign_income = Decimal::from(3);
         let cases = [
             ("franking_credits", with_credits),
-            ("lic_capital_gain_deduction", with_lic),
+            ("lic_capital_gain_amount", with_lic),
             ("conduit_foreign_income", with_cfi),
         ];
         for (field, dist) in cases {

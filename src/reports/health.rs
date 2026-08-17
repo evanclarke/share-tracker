@@ -474,7 +474,7 @@ fn same_income_entry(a: &Income, b: &Income) -> bool {
         && a.foreign_tax_paid == b.foreign_tax_paid
         && a.tfn_withholding_tax == b.tfn_withholding_tax
         && a.franking_credits == b.franking_credits
-        && a.lic_capital_gain_deduction == b.lic_capital_gain_deduction
+        && a.lic_capital_gain_amount == b.lic_capital_gain_amount
         && a.conduit_foreign_income == b.conduit_foreign_income
         && a.amount_per_security == b.amount_per_security
         && a.securities_held == b.securities_held

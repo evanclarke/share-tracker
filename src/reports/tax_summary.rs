@@ -37,7 +37,9 @@ pub struct TaxYearSummary {
     /// `dividends_assessable` through `unfranked_amount` (see
     /// [`crate::entities::income::Income::conduit_foreign_income`]).
     pub foreign_source_income: Decimal,
-    /// LIC capital gain deduction from income records.
+    /// LIC capital gain deduction from income records (question D8): **50%**
+    /// of each dividend's advised `lic_capital_gain_amount`, per
+    /// [`Income::lic_capital_gain_deduction`](crate::entities::income::Income::lic_capital_gain_deduction).
     pub lic_capital_gain_deduction: Decimal,
     /// AMMA attributed Australian interest.
     pub amma_australian_interest: Decimal,
@@ -459,7 +461,9 @@ pub(crate) async fn db_tax_summary_on(
         let foreign_tax = aud(income.foreign_tax_paid)?;
         let tfn_wht = aud(income.tfn_withholding_tax)?;
         let fc = aud(income.franking_credits)?;
-        let lic = aud(income.lic_capital_gain_deduction)?;
+        // 50% of the statement's LIC capital gain amount, not the amount
+        // itself (`Income::lic_capital_gain_deduction`, the shared halving).
+        let lic = aud(income.lic_capital_gain_deduction())?;
 
         let s = map
             .entry(tax_year)
@@ -1048,15 +1052,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn db_lic_deduction_included() {
+    async fn db_lic_deduction_is_half_the_advised_amount() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
         let mut inc = make_income(1, 1, NaiveDate::from_ymd_opt(2024, 3, 15).unwrap());
-        inc.lic_capital_gain_deduction = Decimal::from(15);
+        // The statement's advised LIC capital gain amount (the attributable
+        // part); the individual deducts 50% of it at D8.
+        inc.lic_capital_gain_amount = Decimal::from(15);
         income::db_upsert(&pool, &inc).await.unwrap();
 
         let result = db_tax_summary(&pool).await.unwrap();
-        assert_eq!(result[0].lic_capital_gain_deduction, Decimal::from(15));
+        assert_eq!(
+            result[0].lic_capital_gain_deduction,
+            Decimal::new(75, 1),
+            "D8 is half the advised attributable part"
+        );
     }
 
     #[tokio::test]
@@ -1082,7 +1092,7 @@ mod tests {
         trust.foreign_tax_paid = Decimal::from(9);
         trust.unfranked_amount = Decimal::from(40);
         trust.conduit_foreign_income = Decimal::from(10); // 10 of the 40 above
-        trust.lic_capital_gain_deduction = Decimal::from(5);
+        trust.lic_capital_gain_amount = Decimal::from(5);
         trust.trust_income = true;
         income::db_upsert(&pool, &trust).await.unwrap();
 
@@ -1103,7 +1113,7 @@ mod tests {
         assert_eq!(s.dividends_assessable, Decimal::from(240));
         // Despite the name, CFI is Australian-sourced: it stays out of this.
         assert_eq!(s.foreign_source_income, Decimal::from(30));
-        assert_eq!(s.lic_capital_gain_deduction, Decimal::from(5));
+        assert_eq!(s.lic_capital_gain_deduction, Decimal::new(25, 1)); // 50% of the advised 5
         assert_eq!(s.franking_credits, Decimal::from(60)); // only from income (amma.franking_credits = 0)
         assert_eq!(s.foreign_tax_offsets, Decimal::from(12)); // 9 income + 3 amma
         assert_eq!(s.tfn_withholding_tax, Decimal::from(7)); // 5 income + 2 amma

@@ -524,7 +524,10 @@ const COLUMN_KINDS = (function () {
     // Trade / income / AMMA / settings monetary line items.
     'brokerage', 'gst_on_brokerage', 'statement_total', 'opening_capital_loss',
     'franked_amount', 'unfranked_amount', 'foreign_source_income', 'foreign_tax_paid',
-    'tfn_withholding_tax', 'franking_credits', 'lic_capital_gain_deduction', 'conduit_foreign_income',
+    'tfn_withholding_tax', 'franking_credits', 'conduit_foreign_income',
+    // The income row carries the LIC's advised attributable part; the tax
+    // summary reports the 50% of it deductible at D8. Both are money.
+    'lic_capital_gain_amount', 'lic_capital_gain_deduction',
     'australian_interest', 'australian_dividends_unfranked', 'franked_dividends', 'net_rent',
     'foreign_income', 'foreign_tax_credits', 'other_income', 'cgt_discount_gains',
     'cgt_indexation_gains', 'cgt_other_gains', 'capital_losses_applied', 'tax_deferred_amount',

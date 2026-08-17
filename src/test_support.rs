@@ -662,7 +662,7 @@ pub fn income(id: i64, listing_id: i64, date_paid: NaiveDate) -> IncomeBuilder {
             foreign_tax_paid: Decimal::ZERO,
             tfn_withholding_tax: Decimal::ZERO,
             franking_credits: Decimal::ZERO,
-            lic_capital_gain_deduction: Decimal::ZERO,
+            lic_capital_gain_amount: Decimal::ZERO,
             conduit_foreign_income: Decimal::ZERO,
             trust_income: false,
             entitlement_date: None,

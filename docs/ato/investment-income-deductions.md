@@ -55,7 +55,8 @@ You can claim a deduction for costs you incur to invest in shares, including:
 - the decline in value of your computer
 - 50% of the **listed investment company (LIC) capital gain amount** — if you were an Australian
   resident when a LIC paid you a dividend that included a LIC capital gain amount (modelled
-  separately as the `income.lic_capital_gain_deduction` field, not an investment expense).
+  separately: the statement's advised amount is the `income.lic_capital_gain_amount` field and
+  the 50% is computed for question D8, not an investment expense).
 
 ### What you can't claim
 

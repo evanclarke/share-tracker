@@ -905,6 +905,101 @@ mod tests {
         );
     }
 
+    /// 0025 renames `income.lic_capital_gain_deduction` to
+    /// `lic_capital_gain_amount` — the LIC's advised attributable part, which
+    /// the reports now halve for D8 — and so has to read existing rows forward
+    /// by doubling the already-halved figure they hold (SCENARIOS G-04). The
+    /// doubling is done on the decimal's own digits as an integer, never
+    /// through REAL, so this pins that it is *exact* at every scale, that a
+    /// zero row is left alone, and that the audited table's two row-history
+    /// triggers come back naming the new column.
+    #[tokio::test]
+    async fn migration_0025_doubles_the_lic_deduction_into_the_advised_amount() {
+        let pool = pool_migrated_below(25).await;
+        sqlx::query(
+            "INSERT INTO listings (id, exchange_mic, ticker, name, security_type, currency) \
+             VALUES (1, 'XASX', 'AFI', 'Australian Foundation Investment', 'LIC', 'AUD')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        // Deductions as the old convention stored them: whole dollars, cents,
+        // sub-cent precision, a leading-zero fraction, and the column default.
+        for (id, deduction) in [
+            (1, "25"),
+            (2, "12.34"),
+            (3, "0.07"),
+            (4, "1234567.895"),
+            (5, "0"),
+        ] {
+            sqlx::query(
+                "INSERT INTO income (id, listing_id, date_paid, lic_capital_gain_deduction) \
+                 VALUES (?, 1, '2025-02-21', ?)",
+            )
+            .bind(id)
+            .bind(deduction)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        apply_migration(&pool, 25).await;
+
+        let amounts: Vec<(i64, String)> =
+            sqlx::query_as("SELECT id, lic_capital_gain_amount FROM income ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            amounts
+                .iter()
+                .map(|(id, v)| (*id, v.as_str()))
+                .collect::<Vec<_>>()
+                .as_slice(),
+            [
+                (1, "50"),
+                (2, "24.68"),
+                (3, "0.14"),
+                (4, "2469135.790"),
+                (5, "0"),
+            ],
+            "each stored deduction reads forward as the amount it was half of, exactly"
+        );
+
+        // The audit trail is live again and records the *new* column name, so an
+        // entry can't say "deduction" while carrying the advised amount.
+        sqlx::query("UPDATE income SET lic_capital_gain_amount = '60' WHERE id = 1")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let old_row: String = sqlx::query_scalar(
+            "SELECT old_row FROM row_history WHERE table_name = 'income' AND row_id = 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(
+            old_row.contains("\"lic_capital_gain_amount\":\"50\""),
+            "{old_row}"
+        );
+        let triggers: Vec<(String,)> = sqlx::query_as(
+            "SELECT name FROM sqlite_master \
+             WHERE type = 'trigger' AND name LIKE 'income_row_history%' ORDER BY name",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            triggers
+                .iter()
+                .map(|t| t.0.as_str())
+                .collect::<Vec<_>>()
+                .as_slice(),
+            ["income_row_history_delete", "income_row_history_update"],
+            "both triggers are re-created, not left dropped"
+        );
+    }
+
     #[test]
     fn migrations_do_not_drop_tables_or_columns() {
         let migrations_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");

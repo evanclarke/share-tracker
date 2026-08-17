@@ -856,7 +856,8 @@ async fn push_income_rows(
         let foreign = aud(income.foreign_source_income)?;
         let foreign_tax = aud(income.foreign_tax_paid)?;
         let fc = aud(income.franking_credits)?;
-        let lic = aud(income.lic_capital_gain_deduction)?;
+        // The claimable 50%, so the column sums to the D8 line.
+        let lic = aud(income.lic_capital_gain_deduction())?;
         let tfn = aud(income.tfn_withholding_tax)?;
         // Memo figure: converted like the rest so it reads on the same basis,
         // but it is part of `unfranked` and never totalled separately.
@@ -1485,6 +1486,8 @@ mod tests {
             .with(|i| {
                 i.franked_amount = dec("100");
                 i.unfranked_amount = dec("50");
+                // The LIC's advised attributable part; D8 gets 50% of it.
+                i.lic_capital_gain_amount = dec("50");
             })
             .insert(&pool)
             .await;
@@ -1535,6 +1538,20 @@ mod tests {
             .map(|r| r.franked_amount_aud + r.unfranked_amount_aud)
             .sum();
         assert_eq!(dividends_total, summary.dividends_assessable);
+        // The LIC column is the *deduction* (50% of the advised amount), so it
+        // sums to the D8 line rather than to what was entered.
+        let lic_total: Decimal = report
+            .income
+            .dividends
+            .iter()
+            .map(|r| r.lic_capital_gain_deduction_aud)
+            .sum();
+        assert_eq!(lic_total, summary.lic_capital_gain_deduction);
+        assert_eq!(
+            lic_total,
+            dec("25"),
+            "50% of the advised $50 attributable part"
+        );
         let interest_total: Decimal = report
             .income
             .interest

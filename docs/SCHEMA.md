@@ -135,7 +135,7 @@ income
 ├── foreign_tax_paid          TEXT (decimal)
 ├── tfn_withholding_tax       TEXT (decimal)
 ├── franking_credits          TEXT (decimal)
-├── lic_capital_gain_deduction TEXT (decimal)
+├── lic_capital_gain_amount   TEXT (decimal)  The LIC capital gain amount (the attributable part) a listed investment company advises on its dividend statement, entered as printed — not the deduction claimed from it. An individual deducts 50% of it at question D8, computed by the tax summary and the annual tax report (entities::income::Income::lic_capital_gain_deduction, docs/ato/lic-capital-gain-deduction.md). Renamed from lic_capital_gain_deduction, which took the already-halved figure: migration 0025 doubles existing rows back to the advised amount
 ├── conduit_foreign_income    TEXT (decimal)  Memo: the part of unfranked_amount the payer declared to be conduit foreign income (CFI) — recorded within that amount, never in addition to it, and rejected 422 if it exceeds it. To the Australian resident this system reports for, an unfranked dividend declared to be CFI is assessable (docs/ato/amma-statement-guidance-notes.md, Part B item 13U), and it is counted through unfranked_amount; every report reads this column for reference only (the annual tax report prints it as a memo column) so the dollars are never counted twice. CFI is NANE only for a foreign resident
 ├── trust_income              BOOLEAN
 ├── entitlement_date          DATE (nullable)  Trust distributions only (CHECK: NULL unless trust_income; non-trust writes also rejected 422): the date the holder became presently entitled — usually the distribution period's end. Trust income is assessed in the year of present entitlement regardless of payment (ATO QC 23087, docs/ato/trust-income-timing.md), so when set the tax summary attributes every component of the row (FY bucket and AUD-conversion month) by this date; absent, date_paid behaviour is unchanged
@@ -169,7 +169,7 @@ investment_expenses          Deductible investment expenses — the cost of earn
 ├── description           TEXT (nullable)  Free-text note
 ├── listing_id            INTEGER FK→listings.id (nullable)  The listing the expense relates to; NULL = portfolio-wide
 └── holding_account_id    INTEGER FK→holding_accounts.id (nullable)  The holding account the expense relates to; NULL = portfolio-wide
-                          Brokerage is not recorded here (it forms a trade's CGT cost base); the LIC capital gain deduction is its own income field
+                          Brokerage is not recorded here (it forms a trade's CGT cost base); the LIC capital gain deduction comes from the income row's own lic_capital_gain_amount field
 
 amma_statements              Annual AMIT Member Annual (AMMA) statements
 ├── id                              INTEGER PK

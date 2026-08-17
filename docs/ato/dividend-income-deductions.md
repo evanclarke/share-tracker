@@ -15,8 +15,9 @@ credited to you by Australian companies you held shares in, and include dividend
 **dividend reinvestment plan** or dealt with on your behalf.
 
 If a listed investment company (LIC) pays you a dividend that included a capital gain amount, you
-can claim a deduction of **50%** of the LIC capital gain at this section. (Modelled separately as
-the `income.lic_capital_gain_deduction` field.)
+can claim a deduction of **50%** of the LIC capital gain at this section. (Modelled separately: the
+`income.lic_capital_gain_amount` field records the advised LIC capital gain amount and the 50% is
+computed for the tax summary's D8 line.)
 
 ## What you can claim as a dividend deduction
 

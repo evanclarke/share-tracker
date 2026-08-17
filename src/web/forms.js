@@ -94,7 +94,7 @@ export function wireGstBrokerage(form) {
 const INCOME_ADVANCED_FIELDS = [
   'ex_date', 'franked_amount', 'unfranked_amount', 'foreign_source_income',
   'foreign_tax_paid', 'tfn_withholding_tax', 'franking_credits',
-  'lic_capital_gain_deduction', 'conduit_foreign_income', 'trust_income',
+  'lic_capital_gain_amount', 'conduit_foreign_income', 'trust_income',
   'entitlement_date', 'tax_deferred_amount', 'currency', 'holding_account_id',
 ];
 
@@ -108,7 +108,7 @@ function incomeSimpleShape(existing) {
   if (!existing) return { mode: 'Unfranked', amount: '' };
   const nz = function (v) { return v != null && !decEq(String(v), '0'); };
   if (existing.ex_date != null || nz(existing.foreign_source_income) || nz(existing.foreign_tax_paid)
-    || nz(existing.tfn_withholding_tax) || nz(existing.lic_capital_gain_deduction)
+    || nz(existing.tfn_withholding_tax) || nz(existing.lic_capital_gain_amount)
     || nz(existing.conduit_foreign_income) || existing.tax_deferred_amount != null
     || existing.currency !== 'AUD' || existing.holding_account_id !== 1) return null;
   const franked = nz(existing.franked_amount), credits = nz(existing.franking_credits);

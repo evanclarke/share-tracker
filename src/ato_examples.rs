@@ -1247,8 +1247,9 @@ async fn share_buy_backs_example_ranjini_off_market_buy_back() {
 /// > - Dividends – Franking credit: $30.
 /// > - Dividend deductions: $25 (50% deduction for LIC capital gain).
 ///
-/// The LIC advises the $50 attributable part; the deduction recorded on the
-/// income record is the individual's 50% of it ($25), per the doc.
+/// The income record carries the **$50 attributable part** the LIC advised —
+/// the statement's own figure — and the tax summary's D8 line is the
+/// individual's 50% of it, $25 (`Income::lic_capital_gain_deduction`).
 #[tokio::test]
 async fn lic_capital_gain_deduction_example_resident_individual() {
     let pool = test_pool().await;
@@ -1261,7 +1262,7 @@ async fn lic_capital_gain_deduction_example_resident_individual() {
             "date_paid": "2025-02-21",
             "franked_amount": "70",
             "franking_credits": "30",
-            "lic_capital_gain_deduction": "25",
+            "lic_capital_gain_amount": "50",
             "currency": "AUD",
         }),
     )
@@ -1284,7 +1285,7 @@ async fn lic_capital_gain_deduction_example_resident_individual() {
     assert_eq!(
         y.lic_capital_gain_deduction,
         dec("25"),
-        "Dividend deductions: $25 (50% deduction for LIC capital gain)"
+        "Dividend deductions: $25 (50% deduction for the $50 LIC capital gain amount entered)"
     );
 }
 
