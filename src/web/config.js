@@ -172,7 +172,7 @@ export const ENTITIES = [
       dec('foreign_source_income', 'Foreign source income'),
       dec('foreign_tax_paid', 'Foreign tax paid'),
       dec('tfn_withholding_tax', 'TFN withholding tax'),
-      dec('franking_credits', 'Franking credits'),
+      dec('franking_credits', 'Franking credits', { hint: 'Bounded by the franked amount above: a company can attach at most franked × 30/70 (its 30% tax rate; a base-rate entity’s 25% gives less), so a credit with no franked amount behind it, or above that maximum, is rejected — the usual cause is a transposed column or the wrong statement line. Trust distributions are exempt: the trust’s own deductions can reduce the franked component while the member still claims the full credit.' }),
       dec('lic_capital_gain_deduction', 'LIC capital gain deduction'),
       dec('conduit_foreign_income', 'Conduit foreign income', { hint: 'The part of the unfranked amount above that the payer declared to be conduit foreign income (CFI) — a memo figure, already included in that amount, not an extra payment. To an Australian resident an unfranked dividend declared to be CFI is assessable, so the unfranked amount must be the statement’s full figure with the CFI portion in it; a value larger than the unfranked amount is rejected.' }),
       bool('trust_income', 'Trust income'),

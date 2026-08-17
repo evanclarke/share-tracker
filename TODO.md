@@ -10,26 +10,6 @@ findings are all closed in DONE.md), except where a section's heading names anot
 (e.g. REQUIREMENTS, SCENARIOS). Each section records one finding; sections land in DONE.md as they
 are fixed or decided.
 
-## A franking credit is accepted with no dividend behind it (SCENARIOS G-25)
-(SCENARIOS.md section G verification pass, 2026-08-16.)
-- [ ] G-25 — `PUT /income/1` with `franking_credits` 300 and every other amount zero returns `204`,
-  and the tax summary reports a $300 offset against $0 of dividend income
-- [ ] The same write accepts a credit ten times the dividend ($700 franked, $7,000 credits), which
-  is arithmetically impossible: a company can attach at most `franked_amount × 30/70` (a base-rate
-  entity's 25% gives less). It is the transposed-column / wrong-line data-entry error, and it
-  inflates a *refundable* offset
-- [ ] Scope it to `trust_income = false` rows. A trust row's credit legitimately exceeds the ratio:
-  the "franked distributions from trusts" component can be reduced by the trust's own deductions
-  while the member still claims the full franking credit
-  (`docs/ato/amma-statement-guidance-notes.md`, Part B item 13Q). AMIT rows already reject credits
-  outright
-- [ ] **Needs a decision**: a write-time `422` naming the ceiling (the shape of the per-share
-  cross-check and the no-negative-amounts rule), or a health-report warning (the shape of
-  `duplicate_actions`)
-- [ ] Tests: a non-trust row with credits above `franked_amount × 30/70` is refused/flagged, a
-  fully franked 30% row and a base-rate 25% row are both accepted, and a trust row above the ratio
-  is left alone
-
 ## Duplicate income rows are silently double-counted (SCENARIOS G-24)
 (SCENARIOS.md section G verification pass, 2026-08-16 — the `income` counterpart of the closed
 E-03 `duplicate_actions` and F-06 `duplicate_amma_statements` findings.)

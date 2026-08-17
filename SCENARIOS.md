@@ -385,7 +385,7 @@ The six findings, each raised as a `TODO.md` section naming its scenario ids:
 | --- | --- | --- |
 | A franked dividend with no ex-date silently passes the holding-period test | G-11, G-20 | fixed 2026-08-17 — archived in [`DONE/tax-domain.md`](DONE/tax-domain.md) |
 | Conduit foreign income is excluded from assessable income with no stated entry convention | G-03 | fixed 2026-08-17 — archived in [`DONE/tax-domain.md`](DONE/tax-domain.md) |
-| A franking credit is accepted with no dividend behind it | G-25 | open |
+| A franking credit is accepted with no dividend behind it | G-25 | fixed 2026-08-17 — archived in [`DONE/tax-domain.md`](DONE/tax-domain.md) |
 | Duplicate income rows are silently double-counted | G-24 | open |
 | The related-payments rule and the 30%-at-risk test are not modelled and nowhere documented | G-14 | open |
 | The LIC capital gain deduction field takes the already-halved figure, undocumented | G-04 | open |

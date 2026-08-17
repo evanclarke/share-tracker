@@ -4,6 +4,7 @@
 
 pub mod cgt_discount;
 pub mod cost_base;
+pub mod franking_credit;
 pub mod listing_identity;
 pub mod open_parcels;
 pub mod rollover;

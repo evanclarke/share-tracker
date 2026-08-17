@@ -688,6 +688,26 @@ impl IncomeBuilder {
         self
     }
 
+    /// A fully franked dividend stated by the **franking credit** at stake:
+    /// sets the credit and the franked amount that carries it (credit × 70/30,
+    /// cent-rounded).
+    ///
+    /// The franking tests are all written in terms of the credits — how many
+    /// are denied, whether the year crosses the A$5,000 threshold — and used
+    /// to set the credit alone. That is not a dividend a company could pay:
+    /// the credit is attached to the franked part of a distribution, so
+    /// `income::db_upsert` now rejects a credit with nothing behind it and
+    /// caps it at what the franked amount could carry
+    /// (`domain::franking_credit`). Stating both here keeps those fixtures a
+    /// dividend that could exist, without every test spelling out the
+    /// gross-up.
+    pub fn fully_franked_credits(mut self, credits: Decimal) -> Self {
+        self.i.franking_credits = credits;
+        self.i.franked_amount = (credits * Decimal::from(70) / Decimal::from(30))
+            .round_dp_with_strategy(2, rust_decimal::RoundingStrategy::MidpointAwayFromZero);
+        self
+    }
+
     pub fn build(self) -> income::Income {
         self.i
     }

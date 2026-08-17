@@ -95,6 +95,21 @@ pub enum ParticipationError {
     /// The participation date precedes the action's buy-back date.
     #[error("the participation date is before the buy-back date")]
     BeforeBuyBackDate,
+    /// The dividend component this participation would create carries more
+    /// franking credits than a company could have attached to it
+    /// (`domain::franking_credit`). The per-unit terms are the action's, so
+    /// the figures only become checkable here, once multiplied by the units
+    /// tendered — and the row this would write is one `income::db_upsert`
+    /// would reject. Carries the row's figures and the ceiling. Mapped to
+    /// `422`.
+    #[error(
+        "the dividend component's franking credits {credits} exceed the maximum {ceiling} for a franked amount of {franked}"
+    )]
+    FrankingCreditAboveMaximum {
+        credits: Decimal,
+        franked: Decimal,
+        ceiling: Decimal,
+    },
     /// The Sell-side invariants failed (allocation mismatch, bad parcel,
     /// over-allocation, ...).
     #[error("the buy-back's Sell was rejected: {0}")]
@@ -125,6 +140,16 @@ impl From<ParticipationError> for ApiError {
             ParticipationError::BeforeBuyBackDate => {
                 ApiError::unprocessable("the participation date is before the buy-back date")
             }
+            ParticipationError::FrankingCreditAboveMaximum {
+                credits,
+                franked,
+                ceiling,
+            } => ApiError::unprocessable(format!(
+                "this participation's dividend component would carry franking credits of \
+                 {credits} against a franked amount of {franked}, above the {ceiling} maximum \
+                 a company could attach (the franked amount × 30/70 at the 30% company tax \
+                 rate) — correct the buy-back's per-unit dividend and franking credit"
+            )),
             // Sell-side invariants keep their own per-variant 422 bodies so
             // the caller sees which invariant failed (allocation mismatch,
             // wrong holding account, over-allocation, ...), not a collapsed
@@ -174,6 +199,22 @@ pub async fn db_participate(
     };
     if body.date < action.date {
         return Err(ParticipationError::BeforeBuyBackDate);
+    }
+
+    // The dividend component's figures, checked against the maximum a company
+    // could have attached before anything is written: the per-unit terms only
+    // become a franked amount and a credit once multiplied by the units, and
+    // the row they'd produce must satisfy the same invariant `income` rows
+    // entered by hand do (SCENARIOS G-25).
+    let (franked, credits) = (dividend * body.units, credit * body.units);
+    if let Some(ceiling) =
+        crate::domain::franking_credit::credit_above_ceiling(franked, credits, body.date)
+    {
+        return Err(ParticipationError::FrankingCreditAboveMaximum {
+            credits,
+            franked,
+            ceiling,
+        });
     }
 
     // Capital proceeds per unit (QC 66049): can't be less than the market
@@ -365,6 +406,56 @@ mod tests {
     }
 
     // DB-level tests
+
+    /// The dividend component is an `income` row like any other, so the
+    /// maximum a company could attach binds it too (SCENARIOS G-25). The
+    /// per-unit terms only become a franked amount and a credit once
+    /// multiplied by the units, which is why the check lives here rather than
+    /// on the action: nothing is written, and the rejection names the row's
+    /// own figures. Ranjini's real terms ($1.40 dividend, $0.60 credit — the
+    /// exact 30/70) are unaffected.
+    #[tokio::test]
+    async fn an_over_credited_buy_back_cannot_create_its_dividend_component() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        insert_buy(&pool, 1, d(2020, 1, 15), "10000", "6.00").await;
+        // $1.40 of dividend can carry at most $0.60 of credit; these terms
+        // claim $0.90 — over the ceiling by half as much again.
+        insert_buyback_terms(&pool, 10, d(2024, 7, 1), "9.60", "1.40", "0.90", None).await;
+
+        let err = db_participate(&pool, 10, &body(d(2024, 7, 10), "1000", 1))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ParticipationError::FrankingCreditAboveMaximum {
+                    credits,
+                    franked,
+                    ..
+                } if credits == dec("900") && franked == dec("1400")
+            ),
+            "{err:?}"
+        );
+        // Nothing written: no Sell, no dividend row.
+        assert!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM income")
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+                == 0
+        );
+
+        // The real terms go through, on the maximum rather than under it.
+        insert_buyback_terms(&pool, 10, d(2024, 7, 1), "9.60", "1.40", "0.60", None).await;
+        let p = db_participate(&pool, 10, &body(d(2024, 7, 10), "1000", 1))
+            .await
+            .unwrap();
+        assert_eq!(
+            p.income.expect("a dividend row").franking_credits,
+            dec("600")
+        );
+    }
 
     /// The market-value rule: the buy-back price ($9.60) is below the market
     /// value ($10.20), so capital proceeds use the market value, less the

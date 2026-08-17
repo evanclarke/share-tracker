@@ -397,6 +397,25 @@ pub enum UpsertError {
     /// can name the ceiling. Mapped to `422`.
     #[error("conduit_foreign_income {cfi} exceeds unfranked_amount {unfranked}")]
     ConduitExceedsUnfranked { cfi: Decimal, unfranked: Decimal },
+    /// A franking credit on a non-trust row with no franked dividend behind
+    /// it. The credit is attached to the franked part of a distribution, so
+    /// without one there is nothing it could have come from — the same rule a
+    /// buy-back's terms already carry (`entities::corporate_action`). Mapped
+    /// to `422`.
+    #[error("franking_credits {0} has no franked dividend behind it")]
+    FrankingCreditWithoutDividend(Decimal),
+    /// A franking credit above the maximum a company could have attached to
+    /// the row's franked amount (`domain::franking_credit`, from
+    /// `docs/ato/allocating-franking-credits.md`). Carries the ceiling so the
+    /// rejection can name it. Mapped to `422`.
+    #[error(
+        "franking_credits {credits} exceeds the maximum {ceiling} for a franked amount of {franked}"
+    )]
+    FrankingCreditAboveMaximum {
+        credits: Decimal,
+        franked: Decimal,
+        ceiling: Decimal,
+    },
 }
 
 /// Why the supplied per-share figures failed to reconcile (both map to 422).
@@ -546,6 +565,31 @@ pub async fn db_upsert(pool: &SqlitePool, income: &Income) -> Result<(), UpsertE
         }
         if income.tax_deferred_amount.is_some() {
             return Err(UpsertError::AmitTaxDeferred);
+        }
+    }
+
+    // A company's franking credit is bounded by what it could have attached
+    // to the franked amount (`domain::franking_credit`). Trust rows are out of
+    // scope — the "franked distributions from trusts" component can be reduced
+    // by the trust's own deductions while the member still claims the full
+    // credit (AMMA guidance notes, Part B item 13Q) — and an AMIT row rejects
+    // credits outright above, so this only ever sees a company dividend.
+    if !income.trust_income && income.franking_credits > Decimal::ZERO {
+        if income.franked_amount.is_zero() {
+            return Err(UpsertError::FrankingCreditWithoutDividend(
+                income.franking_credits,
+            ));
+        }
+        if let Some(ceiling) = crate::domain::franking_credit::credit_above_ceiling(
+            income.franked_amount,
+            income.franking_credits,
+            income.date_paid,
+        ) {
+            return Err(UpsertError::FrankingCreditAboveMaximum {
+                credits: income.franking_credits,
+                franked: income.franked_amount,
+                ceiling,
+            });
         }
     }
 
@@ -746,6 +790,25 @@ impl From<UpsertError> for ApiError {
                      amount); enter the statement's full unfranked amount, CFI included"
                 ))
             }
+            UpsertError::FrankingCreditWithoutDividend(credits) => {
+                ApiError::unprocessable(format!(
+                    "franking credits of {credits} have no franked dividend behind them — \
+                     a credit is attached to the franked part of a distribution, so enter \
+                     the statement's franked amount as well (a trust distribution's credits \
+                     go on a row ticked as trust income)"
+                ))
+            }
+            UpsertError::FrankingCreditAboveMaximum {
+                credits,
+                franked,
+                ceiling,
+            } => ApiError::unprocessable(format!(
+                "franking credits of {credits} exceed the {ceiling} maximum a company could \
+                 attach to a franked amount of {franked} (the franked amount × 30/70 at the \
+                 30% company tax rate, less at a base-rate entity's) — check the statement's \
+                 franked amount and credit are not transposed or read from the wrong line; \
+                 only the maximum is claimable in any case"
+            )),
             UpsertError::Db(err) => err.into(),
         }
     }
@@ -1499,6 +1562,128 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+
+    /// A franking credit is attached to the franked part of a distribution, so
+    /// a credit with nothing behind it is not a dividend a company could pay
+    /// (SCENARIOS G-25) — the same rule a buy-back's terms already carry. It
+    /// was accepted, and reported a refundable offset against no income at all.
+    #[tokio::test]
+    async fn db_franking_credit_without_a_dividend_rejected() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        let row = test_support::income(1, 1, ymd(2024, 3, 15))
+            .with(|i: &mut Income| i.franking_credits = Decimal::from(300))
+            .build();
+        let err = db_upsert(&pool, &row).await.unwrap_err();
+        assert!(
+            matches!(err, UpsertError::FrankingCreditWithoutDividend(c) if c == Decimal::from(300)),
+            "{err:?}"
+        );
+        assert!(db_get(&pool, 1).await.unwrap().is_none());
+    }
+
+    /// The credit a company may attach is capped at the franked amount × 30/70
+    /// (`domain::franking_credit`, from `docs/ato/allocating-franking-credits.md`
+    /// — and where a statement shows more, only the maximum is claimable
+    /// anyway). Above it the figure is a data-entry error, and it inflates a
+    /// *refundable* offset, so the write is refused rather than reported.
+    #[tokio::test]
+    async fn db_franking_credit_above_the_company_maximum_rejected() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        let row = |franked: &str, credits: &str| {
+            let (franked, credits) = (franked.to_string(), credits.to_string());
+            test_support::income(1, 1, ymd(2024, 3, 15))
+                .with(move |i: &mut Income| {
+                    i.franked_amount = franked.parse().unwrap();
+                    i.franking_credits = credits.parse().unwrap();
+                })
+                .build()
+        };
+
+        // The transposed-column error: $700 franked against $7,000 of credits.
+        let err = db_upsert(&pool, &row("700", "7000")).await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                UpsertError::FrankingCreditAboveMaximum { ceiling, .. }
+                    if ceiling == "301.50".parse().unwrap()
+            ),
+            "{err:?}"
+        );
+        assert!(db_get(&pool, 1).await.unwrap().is_none());
+
+        // A fully franked 30% dividend sits exactly on the maximum (the ATO's
+        // own Example 2 figures), and a base-rate entity's 25% dividend well
+        // under it — the ceiling is a maximum over every corporate rate.
+        db_upsert(&pool, &row("700", "300")).await.unwrap();
+        db_upsert(&pool, &row("750", "250")).await.unwrap();
+    }
+
+    /// The ceiling is a *company's*. A trust's "franked distributions from
+    /// trusts" component can be reduced by the trust's own deductions while
+    /// the member still claims the full franking credit (AMMA guidance notes,
+    /// Part B item 13Q), so a trust row above the ratio — credits with no
+    /// franked component at all included — is left alone.
+    #[tokio::test]
+    async fn db_a_trust_rows_franking_credits_are_not_capped() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        let trust = test_support::income(1, 1, ymd(2024, 3, 15))
+            .with(|i: &mut Income| {
+                i.trust_income = true;
+                i.franked_amount = Decimal::from(100);
+                i.franking_credits = Decimal::from(900);
+            })
+            .build();
+        db_upsert(&pool, &trust).await.unwrap();
+        assert_eq!(
+            db_get(&pool, 1).await.unwrap().unwrap().franking_credits,
+            Decimal::from(900)
+        );
+    }
+
+    /// The 422 body names the ceiling and what to check, so a transposed pair
+    /// is findable from the message alone.
+    #[tokio::test]
+    async fn api_franking_credit_above_the_maximum_returns_422_with_detail() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        let (status, detail) = put_income(
+            &pool,
+            1,
+            serde_json::json!({
+                "listing_id": 1,
+                "date_paid": "2024-03-15",
+                "franked_amount": "700",
+                "franking_credits": "7000"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            detail.contains("301.50") && detail.contains("30/70") && detail.contains("transposed"),
+            "detail must name the ceiling and what to check, got: {detail}"
+        );
+
+        // …and the no-dividend case says where the credit belongs instead.
+        let (status, detail) = put_income(
+            &pool,
+            1,
+            serde_json::json!({
+                "listing_id": 1,
+                "date_paid": "2024-03-15",
+                "franking_credits": "300"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            detail.contains("no franked dividend behind them") && detail.contains("trust income"),
+            "got: {detail}"
+        );
+        assert!(db_get(&pool, 1).await.unwrap().is_none());
     }
 
     /// Conduit foreign income is a memo *within* `unfranked_amount`, so it can

@@ -745,6 +745,17 @@ mod tests {
         assert!(js.contains("Tax-Deferred E4 Cross-Check"));
     }
 
+    /// The franking-credit ceiling is enforced server-side, so the form has to
+    /// say what the bound is before a user meets the 422 (SCENARIOS G-25) —
+    /// including the trust exemption, which is why an identical-looking row
+    /// with the trust tick is accepted.
+    #[tokio::test]
+    async fn income_franking_credit_ceiling_hint_present() {
+        let js = app_js_body().await;
+        assert!(js.contains("a company can attach at most franked × 30/70"));
+        assert!(js.contains("Trust distributions are exempt"));
+    }
+
     /// The conduit-foreign-income entry convention has to reach the user at
     /// the two places they meet the figure (SCENARIOS G-03): the income form,
     /// where a bare "Conduit foreign income" input invited keying the

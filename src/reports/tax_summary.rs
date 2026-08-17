@@ -1033,6 +1033,7 @@ mod tests {
         insert_listing(&pool, 1).await;
         // Income with $30 franking credits in FY2024
         let mut inc = make_income(1, 1, NaiveDate::from_ymd_opt(2024, 3, 15).unwrap());
+        inc.franked_amount = Decimal::from(70); // the dividend the $30 is attached to
         inc.franking_credits = Decimal::from(30);
         income::db_upsert(&pool, &inc).await.unwrap();
         // AMMA with $8 franking credits for FY2024
@@ -1400,12 +1401,14 @@ mod tests {
         // April 2025 sale — nothing denied.
         let mut aug = make_income(1, 1, ymd(2024, 8, 28));
         aug.ex_date = Some(ymd(2024, 8, 14));
+        aug.franked_amount = Decimal::from(7000);
         aug.franking_credits = Decimal::from(3000);
         income::db_upsert(&pool, &aug).await.unwrap();
         // Ex 14 Mar 2025: LIFO deems the recent 4,000 units sold at 29
         // at-risk days — 4,000/14,000 of its 7,000 credits denied.
         let mut mar = make_income(2, 1, ymd(2025, 3, 28));
         mar.ex_date = Some(ymd(2025, 3, 14));
+        mar.franked_amount = "16333.33".parse().unwrap();
         mar.franking_credits = Decimal::from(7000);
         income::db_upsert(&pool, &mar).await.unwrap();
 
@@ -1479,6 +1482,7 @@ mod tests {
         .await;
         let mut inc = make_income(1, 1, NaiveDate::from_ymd_opt(2025, 4, 8).unwrap());
         inc.ex_date = Some(NaiveDate::from_ymd_opt(2025, 3, 14).unwrap());
+        inc.franked_amount = "11666.67".parse().unwrap();
         inc.franking_credits = Decimal::from(5000);
         income::db_upsert(&pool, &inc).await.unwrap();
 
@@ -1515,6 +1519,7 @@ mod tests {
         // $3,000 income credits alone would be exempt…
         let mut inc = make_income(1, 1, NaiveDate::from_ymd_opt(2025, 4, 8).unwrap());
         inc.ex_date = Some(NaiveDate::from_ymd_opt(2025, 3, 14).unwrap());
+        inc.franked_amount = Decimal::from(7000);
         inc.franking_credits = Decimal::from(3000);
         income::db_upsert(&pool, &inc).await.unwrap();
         // …but $2,500 AMMA credits take the year's total to $5,500.
@@ -1554,6 +1559,7 @@ mod tests {
         .await;
         let mut inc = make_income(1, 1, NaiveDate::from_ymd_opt(2025, 4, 8).unwrap());
         inc.ex_date = None;
+        inc.franked_amount = Decimal::from(14000);
         inc.franking_credits = Decimal::from(6000);
         income::db_upsert(&pool, &inc).await.unwrap();
 
@@ -1579,6 +1585,7 @@ mod tests {
         .await;
         let mut inc = make_income(1, 1, NaiveDate::from_ymd_opt(2025, 4, 8).unwrap());
         inc.ex_date = Some(NaiveDate::from_ymd_opt(2025, 3, 14).unwrap());
+        inc.franked_amount = Decimal::from(14000);
         inc.franking_credits = Decimal::from(6000);
         income::db_upsert(&pool, &inc).await.unwrap();
 
@@ -1693,8 +1700,8 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
         let mut inc = make_income(1, 1, NaiveDate::from_ymd_opt(2024, 3, 15).unwrap());
-        inc.franked_amount = Decimal::from(70);
-        inc.unfranked_amount = Decimal::from(30);
+        inc.franked_amount = Decimal::from(71);
+        inc.unfranked_amount = Decimal::from(29);
         inc.franking_credits = "30.50".parse().unwrap();
         income::db_upsert(&pool, &inc).await.unwrap();
 

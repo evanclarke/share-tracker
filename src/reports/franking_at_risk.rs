@@ -312,10 +312,8 @@ mod tests {
         credits: i64,
     ) {
         test_support::income(id, listing_id, paid)
-            .with(|i| {
-                i.ex_date = Some(ex);
-                i.franking_credits = Decimal::from(credits);
-            })
+            .fully_franked_credits(Decimal::from(credits))
+            .with(|i| i.ex_date = Some(ex))
             .insert(pool)
             .await;
     }
@@ -715,7 +713,7 @@ mod tests {
         insert_buy(&pool, 1, 1, ymd(2025, 4, 1), 1000).await;
         insert_sell(&pool, 2, 1, ymd(2025, 4, 20), 1000).await;
         test_support::income(1, 1, ymd(2025, 4, 8))
-            .with(|i| i.franking_credits = Decimal::from(6000))
+            .fully_franked_credits(Decimal::from(6000))
             .insert(&pool)
             .await;
 

@@ -1171,3 +1171,82 @@ memo stays out of the foreign total) with `db_full_year_mixed_income_types` re-k
 convention; `reports::tax_report::tests::conduit_foreign_income_prints_as_a_memo_column_and_is_not_double_counted`;
 `doc_checks::conduit_foreign_income_entry_convention_documented`; and
 `web::tests::income_conduit_foreign_income_memo_ui_present`. Full suite 1527 passed / 0 failed.
+
+## A franking credit is accepted with no dividend behind it (SCENARIOS G-25)
+(SCENARIOS.md section G verification pass, 2026-08-16.)
+- [x] G-25 — `PUT /income/1` with `franking_credits` 300 and every other amount zero returns `204`,
+  and the tax summary reports a $300 offset against $0 of dividend income
+- [x] The same write accepts a credit ten times the dividend ($700 franked, $7,000 credits), which
+  is arithmetically impossible: a company can attach at most `franked_amount × 30/70` (a base-rate
+  entity's 25% gives less). It is the transposed-column / wrong-line data-entry error, and it
+  inflates a *refundable* offset
+- [x] Scope it to `trust_income = false` rows. A trust row's credit legitimately exceeds the ratio:
+  the "franked distributions from trusts" component can be reduced by the trust's own deductions
+  while the member still claims the full franking credit
+  (`docs/ato/amma-statement-guidance-notes.md`, Part B item 13Q). AMIT rows already reject credits
+  outright
+- [x] **Needs a decision**: a write-time `422` naming the ceiling (the shape of the per-share
+  cross-check and the no-negative-amounts rule), or a health-report warning (the shape of
+  `duplicate_actions`)
+- [x] Tests: a non-trust row with credits above `franked_amount × 30/70` is refused/flagged, a
+  fully franked 30% row and a base-rate 25% row are both accepted, and a trust row above the ratio
+  is left alone
+
+**Decision (2026-08-17): a write-time `422`, not a health-report warning.**
+
+A new ATO mirror settled it. `docs/ato/allocating-franking-credits.md` (QC 47305, fetched for this
+item and indexed in `docs/ato/OVERVIEW.md`) gives the maximum franking credit as
+`frankable distribution × (1 ÷ gross-up rate)`, the gross-up rate being
+`(100% − corporate tax rate for imputation purposes) ÷ that rate` — **franked × 30/70** at the
+standard 30% rate, less at every base-rate-entity rate (27.5%, 26%, 25%) and less again on a partly
+franked distribution, so one ceiling covers every company distribution. More decisively, it settles
+the *member's* side: where a statement shows a credit above the maximum, "the recipient is only
+entitled to a franking credit equal to the maximum amount". The excess is not merely improbable — it
+was never claimable. That is an arithmetic impossibility, not a judgement call, which is what
+separates this from the duplicate-row findings (E-03, F-06, G-24): a duplicate is legitimate in
+principle and so must stay enterable behind a warning, whereas an over-credited company dividend is
+legitimate in no reading. The codebase already took the same view for the same figure on the other
+entry path — a buy-back's terms have always rejected a franking credit with a zero dividend — and
+CLAUDE.md's data-integrity rule puts invariants at write time.
+
+`domain::franking_credit` is the shared rule (it must not diverge between the two writes that create
+franked income), carrying the ATO citations:
+
+- **Two rejections on non-trust rows**, both `422`: `FrankingCreditWithoutDividend` (a credit is
+  attached to the franked part of a distribution — its message says where a trust's credits go
+  instead) and `FrankingCreditAboveMaximum`, whose body names the ceiling and the transposed-column
+  cause. Placed after the AMIT block in `db_upsert`, so an AMIT row still gets its own rejection.
+- **Trust rows are exempt**, per Part B item 13Q — the reason the ratio genuinely need not hold
+  there. A trust row with $900 of credits against $100 franked is left alone.
+- **A rounding tolerance of the greater of one cent and 0.5%.** This was not a guess: a fixed cent
+  rejects the ATO's *own* Example 6 (`you-and-your-shares-dividends.md`: $13,066 fully franked
+  carrying $5,600, which an exact 30/70 puts 29 cents over, because the ATO rounded a $13,066.67
+  dividend). Statements round both printed figures, so the tolerance is relative; it costs nothing
+  in detection power, since the errors this catches are out by multiples.
+- **Pre-1 July 2001 payments are out of scope**, when the corporate rate was 34%/36%/39% and the
+  ceiling would be a wrong rejection. A scope cut, not an approximation — the check does not run.
+- **The buy-back path is closed too.** `POST /corporate_actions/:id/participate` writes its dividend
+  component with its own INSERT, bypassing `db_upsert`, so the invariant would not have held over
+  the table. The check goes in the participation rather than on the action's per-unit terms, because
+  only there are the figures the row will carry known: a per-unit ceiling can't carry a workable
+  rounding tolerance (a cent is proportionally enormous against a per-unit figure, and scales up
+  with the units).
+
+Twenty existing franking fixtures set a credit with no franked amount — an impossible dividend they
+never needed. `test_support::IncomeBuilder::fully_franked_credits(credits)` states such a fixture by
+the credit at stake and derives the franked amount that carries it (credit × 70/30), which is what
+those tests always meant; the rest were given explicit franked amounts.
+
+Docs: an Income paragraph in `docs/API.md` with both scope limits and the trust exemption, the three
+new 422s in the response-code catalogue, a form hint on the field, and the new ATO mirror indexed in
+`docs/ato/OVERVIEW.md`.
+
+Tests: `domain::franking_credit::tests` (the 30% maximum against the ATO's $700 → $300 and the
+project's PLS figures, a base-rate 25% dividend under it, the ATO's own rounded Example 6 accepted,
+the cent floor, the transposed pair reported with its ceiling, and the pre-2001 cut on both sides of
+the boundary date); `entities::income::tests::{db_franking_credit_without_a_dividend_rejected,
+db_franking_credit_above_the_company_maximum_rejected, db_a_trust_rows_franking_credits_are_not_capped,
+api_franking_credit_above_the_maximum_returns_422_with_detail}`;
+`entities::buyback_participation::tests::an_over_credited_buy_back_cannot_create_its_dividend_component`;
+`doc_checks::franking_credit_ceiling_documented`; and
+`web::tests::income_franking_credit_ceiling_hint_present`. Full suite 1540 passed / 0 failed.

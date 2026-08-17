@@ -525,6 +525,15 @@ impl CorporateActionBody {
                 {
                     return None;
                 }
+                // The maximum a company could attach to the dividend is
+                // checked where the income row is actually formed — the
+                // participation, which knows the units these per-unit figures
+                // are multiplied by (`entities::buyback_participation`,
+                // SCENARIOS G-25). A per-unit ceiling can't do that job: the
+                // cent of rounding slack it would need is proportionally
+                // enormous against a per-unit figure and scales up with the
+                // units, so a pair passing here could still make an
+                // over-credited row.
                 let buyback_market_value = match self.buyback_market_value {
                     Some(mv) => Some(positive(Some(mv))?),
                     None => None,

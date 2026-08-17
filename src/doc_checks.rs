@@ -1392,6 +1392,41 @@ fn fractional_entitlements_documented() {
     );
 }
 
+/// Docs-sync pin for the franking-credit ceiling (SCENARIOS G-25): a credit
+/// with no dividend behind it, or above what a company could have attached,
+/// used to be accepted and reported as a refundable offset. The rule, its two
+/// scope limits (the rounding tolerance and the pre-2001 cut), the trust
+/// exemption, and the ATO mirror it rests on are all load-bearing — a reader
+/// hitting the 422 has to be able to find out why.
+#[test]
+fn franking_credit_ceiling_documented() {
+    assert!(API_MD.contains("**Franking credits are bounded by the dividend behind them:**"));
+    assert!(API_MD.contains("`franked_amount × 30/70`"));
+    // The scope limits, both of which decide whether a row is checked at all.
+    assert!(API_MD.contains("before **1 July 2001**"));
+    assert!(API_MD.contains("**Trust rows are exempt entirely**"));
+    // The 422 catalogue carries both breaches and the buy-back's.
+    assert!(API_MD.contains("have no `franked_amount` behind them"));
+    assert!(API_MD.contains("a buy-back participation whose dividend component would breach"));
+
+    // The mirror the ceiling rests on: the formula, and the member-side
+    // sentence that makes it a rejection rather than a warning.
+    const ALLOCATING: &str = include_str!("../docs/ato/allocating-franking-credits.md");
+    assert!(
+        ALLOCATING.contains("allocating-franking-credits"),
+        "source header"
+    );
+    assert!(ALLOCATING.contains("QC 47305"));
+    assert!(
+        ALLOCATING
+            .contains("Amount of the frankable distribution × (1 ÷ Applicable gross-up rate).")
+    );
+    assert!(ALLOCATING.contains(
+        "the recipient is only entitled to a franking credit equal to the maximum amount."
+    ));
+    assert!(include_str!("../docs/ato/OVERVIEW.md").contains("allocating-franking-credits.md"));
+}
+
 /// Docs-sync pin for the conduit-foreign-income entry convention (SCENARIOS
 /// G-03). The field was previously excluded from every total with nothing
 /// stating why, which is right only if the figure is a memo *within*
