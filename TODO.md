@@ -142,7 +142,7 @@ and the reinvest form's units hint now state both halves.
 so every field the reinvest operation validated against can be changed underneath the DRP trade. This
 is A-09/A-13's failure mode on the income side: a write path that reintroduces a state the operation
 itself refuses.)
-- [ ] I-07 — reproduced, all four accepted `204` with the DRP trade untouched:
+- [x] I-07 — reproduced, all four accepted `204` with the DRP trade untouched:
   **listing** moved to another listing (the link now crosses listings — the trade is a parcel of the
   old one, and `POST …/reinvest` would have refused the new one for want of an enrolment);
   **holding account** moved to an account with no enrolment (the trade stays in the old account's
@@ -151,22 +151,39 @@ itself refuses.)
   does not cover it — the very check that gated its creation);
   **cash amounts** changed from $100 to $200 (the trade still says 14 units and `carried 2`, figures
   computed from a distribution that no longer exists)
-- [ ] I-01/I-04 — the cash edit is the one that reaches a report: the parcel's cost base stays at
+- [x] I-01/I-04 — the cash edit is the one that reaches a report: the parcel's cost base stays at
   the old cash while the assessable dividend becomes the new figure, so the ATO identity the whole
   operation rests on — "the acquisition cost is the amount of the dividends used to acquire them"
   (`docs/ato/cgt-dividend-reinvestment-plans.md`) — quietly stops holding, with no cross-check
   flagging it
-- [ ] Fix shape is A-09's, verbatim: re-check in `income::db_upsert`, in its own transaction, when
+- [x] Fix shape is A-09's, verbatim: re-check in `income::db_upsert`, in its own transaction, when
   the stored row has a `reinvestment_trade_id` — refuse a change to `listing_id`,
   `holding_account_id`, the entitlement inputs (`ex_date`/`entitlement_date`/`trust_income`) or any
   cash component, naming the field and pointing at `DELETE /income/:id/reinvest` (the operation's
   own undo, which already exists and is the documented way to redo a reinvestment). Non-load-bearing
   fields (`amount_per_security`, memo columns) stay editable
-- [ ] Tests: each of the four edits is refused `422` naming the rule with nothing persisted; the
+- [x] Tests: each of the four edits is refused `422` naming the rule with nothing persisted; the
   same edits stay allowed on a distribution with no reinvestment; undo → edit → re-reinvest works
-- [ ] Docs sync: `docs/API.md` Income (what is frozen while a distribution is reinvested) + the
+- [x] Docs sync: `docs/API.md` Income (what is frozen while a distribution is reinvested) + the
   Response-codes `422` catalogue
 
+
+**Resolution (2026-08-17): frozen at write time, the way a Buy is frozen while a Sell allocates
+from it.**
+
+`income::db_upsert` already read the stored row to reject a buy-back component; it now reads the
+whole row (one `FromRow` select of `COLUMNS`, replacing the `buyback_trade_id` scalar) and, when
+`reinvestment_trade_id` is set, refuses a change to any of the twelve figures the reinvestment used:
+`listing_id`, `holding_account_id`, `currency`, `date_paid`, `ex_date`, `entitlement_date`,
+`trust_income` and the five cash components. `UpsertError::ReinvestedIncome(&'static str)` carries
+the field name and the 422 names it plus the undo that frees it. The notional and memo figures the
+operation never read — franking credits, LIC, CFI, the per-share pair, `tax_deferred_amount` — stay
+editable, which is what the two existing link-preservation tests now edit.
+
+Tests: `a_reinvested_distribution_freezes_what_the_reinvestment_used` — the seven representative
+edits each refused naming the field, nothing persisted, the 422 body naming the field and
+`/reinvest`, and the same edit going through once the reinvestment is undone. `docs/API.md` (Income
++ the 422 catalogue) and `docs/SCHEMA.md`'s `reinvestment_trade_id` line state the freeze.
 ## A distribution in a currency other than its listing's is reinvested without conversion (SCENARIOS I-06, I-08)
 (SCENARIOS.md section I verification pass, 2026-08-17. `db_reinvest` takes the cash from the income
 row — in the income row's currency — and divides it by a price it stamps with the **listing's**

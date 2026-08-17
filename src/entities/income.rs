@@ -364,6 +364,13 @@ pub enum UpsertError {
     /// removes this row too) and re-participate instead. Mapped to `422`.
     #[error("this income row is a buy-back dividend component and cannot be edited")]
     BuyBackIncome,
+    /// The existing row has been reinvested (`reinvestment_trade_id` set) and
+    /// the edit moves a figure the reinvestment was computed or validated
+    /// against — the listing, holding account, currency, the dates fixing the
+    /// entitlement, or a cash component. Carries the field name. Undo the
+    /// reinvestment (`DELETE /income/:id/reinvest`) first. Mapped to `422`.
+    #[error("{0} cannot be changed while this distribution is reinvested")]
+    ReinvestedIncome(&'static str),
     /// The supplied per-share figures failed the cross-check. Mapped to `422`.
     #[error("the per-share cross-check failed: {0}")]
     PerShare(#[source] PerShareError),
@@ -537,17 +544,81 @@ pub async fn db_upsert(pool: &SqlitePool, income: &Income) -> Result<(), UpsertE
 
     let mut tx = pool.begin().await?;
 
+    let existing: Option<Income> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT {} FROM income WHERE id = ?",
+        <Income as CrudEntity>::COLUMNS
+    )))
+    .bind(income.id)
+    .fetch_optional(&mut *tx)
+    .await?;
+
     // A buy-back dividend-component row is immutable here: it was created
     // from its action's terms by the participation operation. (The INSERT
     // below never sets buyback_trade_id, so a normal row can't become one
     // either.)
-    let existing_buyback: Option<Option<i64>> =
-        sqlx::query_scalar("SELECT buyback_trade_id FROM income WHERE id = ?")
-            .bind(income.id)
-            .fetch_optional(&mut *tx)
-            .await?;
-    if existing_buyback.flatten().is_some() {
-        return Err(UpsertError::BuyBackIncome);
+    if let Some(existing) = &existing {
+        if existing.buyback_trade_id.is_some() {
+            return Err(UpsertError::BuyBackIncome);
+        }
+        // A reinvested distribution's load-bearing figures are frozen while
+        // the link stands. The reinvest operation validated each of them —
+        // the enrolment covering the entitlement date, in this listing and
+        // this account, and the cash the units and residual were computed
+        // from — and the DRP trade it created records the answers. Letting
+        // them move afterwards reintroduces states the operation itself
+        // refuses (SCENARIOS I-07): a link across listings, a trade in
+        // another account's residual chain, a reinvestment resting on an
+        // enrolment that no longer covers it, or a parcel costed from cash
+        // that no longer exists — breaking the identity the whole operation
+        // rests on, that the acquisition cost *is* the dividend applied
+        // (`docs/ato/cgt-dividend-reinvestment-plans.md`). Undo the
+        // reinvestment (`DELETE /income/:id/reinvest`), edit, redo.
+        //
+        // The same shape as a Buy's guards against an allocating Sell
+        // (`trade::db_upsert`, SCENARIOS A-09/A-13). Notional and memo
+        // figures — franking credits, the LIC and CFI amounts, the per-share
+        // cross-check pair — are not part of the reinvestment and stay
+        // editable.
+        if existing.reinvestment_trade_id.is_some() {
+            let frozen = [
+                ("listing_id", existing.listing_id != income.listing_id),
+                (
+                    "holding_account_id",
+                    existing.holding_account_id != income.holding_account_id,
+                ),
+                ("currency", existing.currency != income.currency),
+                ("date_paid", existing.date_paid != income.date_paid),
+                ("ex_date", existing.ex_date != income.ex_date),
+                (
+                    "entitlement_date",
+                    existing.entitlement_date != income.entitlement_date,
+                ),
+                ("trust_income", existing.trust_income != income.trust_income),
+                (
+                    "franked_amount",
+                    existing.franked_amount != income.franked_amount,
+                ),
+                (
+                    "unfranked_amount",
+                    existing.unfranked_amount != income.unfranked_amount,
+                ),
+                (
+                    "foreign_source_income",
+                    existing.foreign_source_income != income.foreign_source_income,
+                ),
+                (
+                    "foreign_tax_paid",
+                    existing.foreign_tax_paid != income.foreign_tax_paid,
+                ),
+                (
+                    "tfn_withholding_tax",
+                    existing.tfn_withholding_tax != income.tfn_withholding_tax,
+                ),
+            ];
+            if let Some((field, _)) = frozen.iter().find(|(_, changed)| *changed) {
+                return Err(UpsertError::ReinvestedIncome(field));
+            }
+        }
     }
 
     // AMIT listings take cash-only income rows: the row funds the DRP chain
@@ -766,6 +837,14 @@ impl From<UpsertError> for ApiError {
                 "this income row is a buy-back dividend component and cannot be edited — \
                  it is managed by the buy-back participation",
             ),
+            // Frozen while the DRP link stands — and the undo that frees it
+            // is one call, so the rejection names it rather than leaving the
+            // user to find it.
+            UpsertError::ReinvestedIncome(field) => ApiError::unprocessable(format!(
+                "{field} cannot be changed while this distribution is reinvested — its DRP trade \
+                 was created from it. Undo the reinvestment (DELETE /income/:id/reinvest, or the \
+                 Undo reinvest action), make the change, then reinvest again"
+            )),
             // The cross-check rejection says what the statement figures
             // multiply to, so a typo is findable without a calculator.
             UpsertError::PerShare(detail) => ApiError::unprocessable(per_share_detail(&detail)),
@@ -1168,7 +1247,10 @@ mod tests {
             .await
             .unwrap();
         inc.reinvestment_trade_id = None;
-        inc.franked_amount = Decimal::from(140);
+        // An editable field: the cash components and the entitlement dates are
+        // frozen while the link stands (`UpsertError::ReinvestedIncome`), but
+        // a notional figure is no part of the reinvestment.
+        inc.lic_capital_gain_amount = Decimal::from(40);
         db_upsert(&pool, &inc).await.unwrap();
         let got = db_get(&pool, 3).await.unwrap().unwrap();
         assert_eq!(
@@ -1176,7 +1258,131 @@ mod tests {
             Some(trade_id),
             "an edit must preserve the existing link"
         );
-        assert_eq!(got.franked_amount, Decimal::from(140));
+        assert_eq!(got.lic_capital_gain_amount, Decimal::from(40));
+    }
+
+    /// SCENARIOS I-07. Everything the reinvest operation validated against —
+    /// the listing and account whose enrolment it checked, the dates that
+    /// fixed the entitlement, the cash it computed units and residual from —
+    /// is frozen while the DRP link stands, the way a Buy's date and account
+    /// are frozen while a Sell allocates from it. Each refusal names the
+    /// field and points at the undo; nothing is persisted.
+    #[tokio::test]
+    async fn a_reinvested_distribution_freezes_what_the_reinvestment_used() {
+        let pool = test_pool().await;
+        crate::test_support::listing(1).insert(&pool).await;
+        crate::test_support::listing(2)
+            .ticker("XYZ")
+            .insert(&pool)
+            .await;
+        crate::entities::holding_account::db_upsert(
+            &pool,
+            &crate::entities::holding_account::HoldingAccount {
+                id: 2,
+                name: "Broker".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        crate::entities::drp_enrolment::db_upsert(
+            &pool,
+            &crate::entities::drp_enrolment::DrpEnrolment {
+                id: 1,
+                listing_id: 1,
+                holding_account_id: 1,
+                enrolment_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                unenrolment_date: None,
+                residual_handling: Default::default(),
+            },
+        )
+        .await
+        .unwrap();
+        let original = test_support::income(1, 1, NaiveDate::from_ymd_opt(2024, 3, 15).unwrap())
+            .with(|i| {
+                i.ex_date = Some(NaiveDate::from_ymd_opt(2024, 3, 1).unwrap());
+                i.unfranked_amount = Decimal::from(100);
+            })
+            .build();
+        db_upsert(&pool, &original).await.unwrap();
+        crate::entities::drp_reinvestment::db_reinvest(
+            &pool,
+            1,
+            &crate::entities::drp_reinvestment::ReinvestBody {
+                reinvestment_price: Decimal::from(7),
+                units: None,
+                fx_rate: None,
+                date: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        for (field, edit) in [
+            (
+                "listing_id",
+                (|i: &mut Income| i.listing_id = 2) as fn(&mut Income),
+            ),
+            ("holding_account_id", |i: &mut Income| {
+                i.holding_account_id = 2
+            }),
+            ("currency", |i: &mut Income| i.currency = "USD".to_string()),
+            ("date_paid", |i: &mut Income| {
+                i.date_paid = NaiveDate::from_ymd_opt(2024, 4, 15).unwrap()
+            }),
+            ("ex_date", |i: &mut Income| {
+                i.ex_date = Some(NaiveDate::from_ymd_opt(2023, 3, 1).unwrap())
+            }),
+            ("unfranked_amount", |i: &mut Income| {
+                i.unfranked_amount = Decimal::from(200)
+            }),
+            ("tfn_withholding_tax", |i: &mut Income| {
+                i.tfn_withholding_tax = Decimal::from(10)
+            }),
+        ] {
+            let mut edited = original.clone();
+            edit(&mut edited);
+            let err = db_upsert(&pool, &edited).await.unwrap_err();
+            assert!(
+                matches!(&err, UpsertError::ReinvestedIncome(f) if *f == field),
+                "editing {field}: {err:?}"
+            );
+        }
+        // Nothing moved, and the DRP trade is where it was.
+        let stored = db_get(&pool, 1).await.unwrap().unwrap();
+        assert_eq!(stored.listing_id, 1);
+        assert_eq!(stored.unfranked_amount, Decimal::from(100));
+        assert_eq!(
+            stored.date_paid,
+            NaiveDate::from_ymd_opt(2024, 3, 15).unwrap()
+        );
+
+        // The 422 names the field and the undo that frees it.
+        let response = client(&pool)
+            .put(
+                "/income/1",
+                &serde_json::json!({
+                    "listing_id": 1, "date_paid": "2024-03-15", "ex_date": "2024-03-01",
+                    "unfranked_amount": "200", "currency": "AUD",
+                }),
+            )
+            .await;
+        let (status, body) = response.status_and_body();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(body.contains("unfranked_amount"), "{body}");
+        assert!(body.contains("/reinvest"), "{body}");
+
+        let mut edited = original.clone();
+        edited.unfranked_amount = Decimal::from(200);
+
+        // Undo the reinvestment and the same edit goes through.
+        crate::entities::drp_reinvestment::db_unreinvest(&pool, 1)
+            .await
+            .unwrap();
+        db_upsert(&pool, &edited).await.unwrap();
+        assert_eq!(
+            db_get(&pool, 1).await.unwrap().unwrap().unfranked_amount,
+            Decimal::from(200)
+        );
     }
 
     #[tokio::test]
@@ -1261,7 +1467,10 @@ mod tests {
         );
 
         // Link it the way the reinvest operation does, then edit the row —
-        // the link must survive (the old contract silently cleared it).
+        // the link must survive (the old contract silently cleared it). The
+        // edit is to a figure the reinvestment did not use: the cash
+        // components and entitlement dates are frozen while it stands
+        // (`a_reinvested_distribution_freezes_what_the_reinvestment_used`).
         sqlx::query("UPDATE income SET reinvestment_trade_id = ? WHERE id = 1")
             .bind(trade_id)
             .execute(&pool)
@@ -1273,14 +1482,15 @@ mod tests {
                 &serde_json::json!({
                     "listing_id": 1,
                     "date_paid": "2024-03-15",
-                    "franked_amount": 75.0
+                    "franked_amount": 70.0,
+                    "lic_capital_gain_amount": 12.0
                 }),
             )
             .await;
         assert_eq!(resp.status, StatusCode::NO_CONTENT);
         let got = db_get(&pool, 1).await.unwrap().unwrap();
         assert_eq!(got.reinvestment_trade_id, Some(trade_id));
-        assert_eq!(got.franked_amount, Decimal::from(75));
+        assert_eq!(got.lic_capital_gain_amount, Decimal::from(12));
     }
 
     #[tokio::test]
