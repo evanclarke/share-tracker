@@ -11,68 +11,11 @@ findings are all closed in DONE.md), except where a section's heading names anot
 are fixed or decided.
 
 **SCENARIOS.md sections A–I are driven and every finding they raised is closed** in the `DONE/*.md`
-archive. **Section J. Employee share schemes** was driven 2026-08-18; the eight findings below are
-its open work. When they are closed, the next work comes from driving **SCENARIOS.md section
+archive. **Section J. Employee share schemes** was driven 2026-08-18; it raised eight findings, of which
+the two currency/FX ones are closed (see [`DONE/reviews.md`](DONE/reviews.md)) and the six below are
+its remaining open work. When they are closed, the next work comes from driving **SCENARIOS.md section
 K. Inherited parcels** the same way — walk its scenarios against the running system, and record each
 gap here as its own `## ` section.
-
-## The ESS vest Buy's FX rate is a hard-coded 1, so a foreign-currency vest can cost at parity (SCENARIOS J-08, J-12)
-(SCENARIOS.md section J verification pass, 2026-08-18. `entities::ess_vest::db_vest` INSERTs the
-cost-base-reset Buy with `fx_rate` literal `'1'`. On the trade that column is **not** a constant —
-`infra::fx::pick_rate` treats it as `FxOverride::Fallback`, the rate used *when no ATO rate exists
-for the month*. So the placeholder becomes a real answer exactly when the RBA rate is missing, and
-the answer is 1 AUD per USD.)
-- [ ] J-12 — reproduced: a USD listing, statement `taxing_point_date 2024-09-01`, 100 shares at
-  US$150, no `rba_fx_rates` row for `USD 2024-09`. `POST /ess_statements/1/vest` → `201` with
-  `currency USD, fx_rate 1`, and `POST /portfolio/overview` answers `total_cost_base 15000` — a
-  **US$15,000 parcel costed at A$15,000**. Importing the month's rate (0.65) moves it to
-  A$23,076.92, so the figure was ~35% understated with nothing marked provisional
-- [ ] J-12 — the two sides disagree about the same missing month: `GET /portfolio/tax-summary`
-  **500s** (`FxError::MissingRate`, documented in `docs/API.md` as "no rate ⇒ fails loudly with
-  `500`") while the price-free CGT reports keep answering off the parity cost base. A user in this
-  state sees the income report break and the capital-gains reports look fine
-- [ ] J-08 — an ICE-style US RSU release has nowhere to put the release-date spot rate on the CGT
-  side at all. The statement-AUD overrides (`aud_deferral_discount` &c.) cover only the **income**
-  labels; every other parcel-creating operation takes a rate — `inheritance.fx_rate` (its own
-  column), `rights_exercise`'s `fx_rate` body field, `drp_reinvestment`'s `fx_rate` body field, and
-  `domain::rollover` carries the consumed parcel's forward. The ESS vest is the only one that
-  invents one
-- [ ] **Decide the model** (an `AskUserQuestion` for Evan, not a silent call). (a) **Give the
-  statement an `fx_rate` column** the vest binds (default 1, refused ≤ 0, and — like
-  `trades.spot_fx_rate` — only accepted on a non-AUD statement), so the taxpayer states the rate
-  they used, matching `inheritance`. (b) **Bind `NULL`/no fallback** so a missing month fails loudly
-  on the CGT side too, the way the income side already does — smallest change, but it leaves a
-  correct-rate month with no way to record the spot rate the employer used. (c) **Bind
-  `spot_fx_rate`** (the existing column, which *outranks* the ATO monthly rate) from a new statement
-  field — the honest mapping for a release-date rate, but it changes the reported cost base for
-  every month, not only missing ones. (a)+(b) together look right: a stated rate when the user has
-  one, a loud failure when neither exists
-- [ ] Tests: a USD vest with the month's rate missing does not answer a parity cost base; with a
-  stated rate it converts at it; an AUD statement rejects the rate field
-- [ ] Docs sync: `docs/SCHEMA.md` (`ess_statements`, `trades.fx_rate` on a vest Buy), `docs/API.md`
-  (ESS statements + the 422 catalogue), README's ESS feature line
-
-## An ESS statement in a currency other than its listing's is vested without conversion (SCENARIOS J-08, J-12)
-(SCENARIOS.md section J verification pass, 2026-08-18. The I-06/I-08 pattern on the ESS side:
-`ess_statement::db_upsert` never compares `currency` with the listing's. `market_value_per_share` is
-the market value of *that listed share*, so a statement whose currency is not the listing's is
-either a data-entry slip or two currencies in one row — and the vest copies the statement's currency
-onto the parcel regardless.)
-- [ ] J-08 — reproduced: an **AUD** ASX listing, statement `currency USD`, 100 shares at 150 →
-  `204`, vest `201` with a **USD** parcel on an AUD-priced security. With `USD 2024-09` imported at
-  0.65 the overview reports `total_cost_base 23076.92` for what the listing says is a A$15,000
-  holding, and a later closing price (AUD, from the exchange) values a USD-costed parcel
-- [ ] Precedent: the DRP side already refuses this (`450b887`, "reinvesting … a distribution
-  recorded in a currency other than its listing's (the cash and the per-unit price are one
-  division, so they must be the same money)"). The same argument holds here: the per-share market
-  value and the listed price are the same money
-- [ ] Fix: refuse at write time in `db_upsert` (`422` naming both currencies), the way the income
-  reinvest path does — no model decision needed unless Evan wants the check on the *vest* instead
-  (a statement can be entered before the listing exists in the right currency; the vest is the
-  first point the currency reaches a parcel)
-- [ ] Tests: a statement whose currency differs from its listing's is refused `422`; the matching
-  case is unaffected; an AUD listing with an AUD statement still vests
-- [ ] Docs sync: `docs/API.md` ESS statements + the 422 catalogue
 
 ## The ESS vest bypasses the trade write-time checks, and creates a Buy `PUT /trades` refuses (SCENARIOS J-03, J-13)
 (SCENARIOS.md section J verification pass, 2026-08-18. `db_vest` writes its Buy with a raw

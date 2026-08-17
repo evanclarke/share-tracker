@@ -12,6 +12,13 @@
 //! The income side (the assessable discount) is already on the statement and
 //! reaches the tax summary directly; the vest is purely the parcel side.
 //!
+//! A non-AUD parcel needs a rate, and the Buy's `fx_rate` is the *fallback*
+//! one — used when no ATO monthly rate exists for the month — so it is never
+//! invented here: the statement's stated `fx_rate` is carried onto the Buy when
+//! the taxpayer gave one, otherwise the taxing-point month's ATO rate is
+//! resolved and carried, and a month with neither is refused (`422`,
+//! [`VestError::MissingFxRate`]) rather than costing the parcel at parity.
+//!
 //! A statement may be vested at most once — re-posting is rejected rather than
 //! creating a second Buy. The created Buy is immutable (`PUT /trades` → 422) and
 //! never deleted individually; `DELETE /ess_statements/:id` removes it.
@@ -42,6 +49,12 @@ pub enum VestError {
     /// there is no parcel to create.
     #[error("the ESS statement's quantity and per-share market value must both be positive")]
     NothingToVest,
+    /// A non-AUD statement whose taxing-point month has no imported ATO rate
+    /// and that states no `fx_rate` of its own: the parcel's cost base has no
+    /// rate to convert at, and binding a placeholder 1 would silently cost it
+    /// at parity. Mapped to 422.
+    #[error("no ATO FX rate for {currency} in {month} and the ESS statement states none")]
+    MissingFxRate { currency: String, month: String },
 }
 
 pub fn router() -> Router<SqlitePool> {
@@ -54,7 +67,7 @@ pub async fn db_vest(pool: &SqlitePool, statement_id: i64) -> Result<Trade, Vest
 
     let row = sqlx::query(
         "SELECT listing_id, holding_account_id, taxing_point_date, quantity, \
-                market_value_per_share, currency \
+                market_value_per_share, currency, fx_rate \
          FROM ess_statements WHERE id = ?",
     )
     .bind(statement_id)
@@ -83,10 +96,34 @@ pub async fn db_vest(pool: &SqlitePool, statement_id: i64) -> Result<Trade, Vest
         row.try_get("market_value_per_share")?,
     )?;
     let currency: String = row.try_get("currency")?;
+    let stated_fx_rate = crate::infra::decimal::row_opt_dec(&row, "fx_rate")?;
 
     if quantity <= Decimal::ZERO || price <= Decimal::ZERO {
         return Err(VestError::NothingToVest);
     }
+
+    // The rate the Buy carries. `trades.fx_rate` is not a constant — it is the
+    // *fallback* applied when no ATO monthly rate exists for the month
+    // (`infra::fx::pick_rate`), so a placeholder 1 would become a real answer
+    // exactly when the month's rate is missing, and cost a US$15,000 parcel at
+    // A$15,000 (SCENARIOS J-08/J-12). The statement's stated rate is bound when
+    // the taxpayer gave one; otherwise the taxing-point month's ATO rate is
+    // resolved and bound (AUD resolves to 1), and a month with neither is
+    // refused rather than invented.
+    let fx = crate::infra::fx::FxRates::load(&mut *tx).await?;
+    let fx_rate = match stated_fx_rate {
+        Some(rate) => rate,
+        None => fx
+            .resolve_rate(
+                &currency,
+                taxing_point_date,
+                crate::infra::fx::FxOverride::None,
+            )
+            .map_err(|_| VestError::MissingFxRate {
+                currency: currency.clone(),
+                month: taxing_point_date.format("%Y-%m").to_string(),
+            })?,
+    };
 
     // The cost-base-reset Buy: market value at the taxing point, dated and
     // settled on that date, in the statement's currency. ESS-vested units are
@@ -99,7 +136,7 @@ pub async fn db_vest(pool: &SqlitePool, statement_id: i64) -> Result<Trade, Vest
          (id, trade_type, date, settlement_date, listing_id, average_price, quantity, \
           currency, brokerage, gst_on_brokerage, brokerage_currency, fx_rate, \
           holding_account_id, ess_statement_id) \
-         VALUES (?, 'Buy', ?, ?, ?, ?, ?, ?, '0', '0', ?, '1', ?, ?)",
+         VALUES (?, 'Buy', ?, ?, ?, ?, ?, ?, '0', '0', ?, ?, ?, ?)",
     )
     .bind(new_id)
     .bind(taxing_point_date)
@@ -109,6 +146,7 @@ pub async fn db_vest(pool: &SqlitePool, statement_id: i64) -> Result<Trade, Vest
     .bind(Money(quantity))
     .bind(&currency)
     .bind(&currency)
+    .bind(Money(fx_rate))
     .bind(holding_account_id)
     .bind(statement_id)
     .execute(&mut *tx)
@@ -140,6 +178,12 @@ impl From<VestError> for ApiError {
                 "the ESS statement's quantity and per-share market value must both be greater \
                  than zero to create the vest parcel",
             ),
+            VestError::MissingFxRate { currency, month } => ApiError::unprocessable(format!(
+                "this ESS statement is in {currency} but no ATO/RBA rate has been imported \
+                 for {currency} in {month} and the statement states no fx_rate — import \
+                 that month's rates or record the rate the employer used on the statement; \
+                 vesting without one would cost the parcel at parity (1 AUD per {currency})"
+            )),
             VestError::Db(err) => err.into(),
         }
     }
@@ -430,10 +474,105 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "USD").await;
         insert_statement(&pool, 1, "100", "6", "USD").await;
+        import_usd_rate(&pool, "2024-09", "0.65").await;
         let trade = db_vest(&pool, 1).await.unwrap();
         assert_eq!(trade.currency, "USD");
         assert_eq!(trade.brokerage_currency, "USD");
+    }
+
+    async fn import_usd_rate(pool: &SqlitePool, month: &str, rate: &str) {
+        crate::entities::rba_fx_rate::db_import_rate(pool, "USD", month, rate.parse().unwrap())
+            .await
+            .unwrap();
+    }
+
+    /// SCENARIOS J-12: `trades.fx_rate` is the rate applied **when no ATO
+    /// monthly rate exists**, so the old hard-coded `'1'` became a real answer
+    /// exactly where it was most wrong — a US$15,000 parcel costed at
+    /// A$15,000. A vest whose taxing-point month has no rate and whose
+    /// statement states none is now refused instead, so no parcel can enter
+    /// the system at parity.
+    #[tokio::test]
+    async fn a_foreign_vest_with_no_rate_anywhere_is_refused_rather_than_costed_at_parity() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "USD").await;
+        insert_statement(&pool, 1, "100", "150", "USD").await; // taxing point 2024-09-01
+
+        assert!(matches!(
+            db_vest(&pool, 1).await,
+            Err(VestError::MissingFxRate { ref currency, ref month })
+                if currency == "USD" && month == "2024-09"
+        ));
+        // Nothing was written: no parcel, and so no cost base to be wrong.
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM trades")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(n, 0);
+
+        // With the month's rate imported the vest goes through and the parcel
+        // costs A$23,076.92… — not the A$15,000 parity figure.
+        import_usd_rate(&pool, "2024-09", "0.65").await;
+        let trade = db_vest(&pool, 1).await.unwrap();
+        assert_eq!(trade.fx_rate, "0.65".parse::<Decimal>().unwrap());
+        let holdings = crate::reports::portfolio::db_holdings(&pool, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            holdings[0].total_cost_base,
+            (Decimal::from(15000) / "0.65".parse::<Decimal>().unwrap())
+        );
+    }
+
+    /// SCENARIOS J-08: an employer's release-date rate has a home. The rate
+    /// stated on the statement is carried onto the vest Buy and costs the
+    /// parcel, with no ATO rate for the month needed.
+    #[tokio::test]
+    async fn a_statements_stated_rate_costs_the_parcel() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "USD").await;
+        test_support::ess_statement(1, 1, ymd(2024, 9, 1))
+            .with(|s| {
+                s.quantity = Decimal::from(100);
+                s.market_value_per_share = Decimal::from(150);
+                s.currency = "USD".to_string();
+                s.fx_rate = Some("0.6".parse().unwrap());
+            })
+            .insert(&pool)
+            .await;
+
+        let trade = db_vest(&pool, 1).await.unwrap();
+        assert_eq!(trade.fx_rate, "0.6".parse::<Decimal>().unwrap());
+        let holdings = crate::reports::portfolio::db_holdings(&pool, None)
+            .await
+            .unwrap();
+        assert_eq!(holdings[0].total_cost_base, Decimal::from(25000)); // 15000 / 0.6
+    }
+
+    /// An AUD statement needs no rate at all: the Buy carries 1, which is what
+    /// an AUD conversion resolves to anyway.
+    #[tokio::test]
+    async fn an_aud_vest_carries_the_parity_rate_because_aud_never_converts() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AUD").await;
+        insert_statement(&pool, 1, "100", "6", "AUD").await;
+        let trade = db_vest(&pool, 1).await.unwrap();
         assert_eq!(trade.fx_rate, Decimal::ONE);
+    }
+
+    /// The vest is refused through the API as a 422 whose body says which
+    /// month is missing and what to do about it.
+    #[tokio::test]
+    async fn api_vest_without_a_rate_returns_422_naming_the_month() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "USD").await;
+        insert_statement(&pool, 1, "100", "150", "USD").await;
+        let resp = ApiClient::over(router().with_state(pool))
+            .post_empty("/ess_statements/1/vest")
+            .await;
+        let (status, body) = resp.status_and_body();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(body.contains("USD") && body.contains("2024-09"), "{body}");
     }
 
     #[tokio::test]

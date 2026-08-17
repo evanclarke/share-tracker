@@ -735,6 +735,7 @@ pub fn ess_statement(id: i64, listing_id: i64, taxing_point: NaiveDate) -> EssSt
             foreign_source_discount: Decimal::ZERO,
             tfn_withholding: Decimal::ZERO,
             currency: "AUD".to_string(),
+            fx_rate: None,
             aud_taxed_upfront_eligible: None,
             aud_taxed_upfront_not_eligible: None,
             aud_deferral_discount: None,

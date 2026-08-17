@@ -11,6 +11,12 @@
 //! cost-base-reset Buy (quantity vested, price = market value at the taxing
 //! point) linked back via `trades.ess_statement_id`.
 //!
+//! Write-time rules on what a statement may say: its `currency` must be its
+//! listing's (the per-share market value and the listed price are the same
+//! money — the rule the DRP reinvest path makes about a distribution's cash),
+//! and a stated `fx_rate` must be positive and is only accepted on a non-AUD
+//! statement. Both are refused `422` rather than reaching a report.
+//!
 //! Integrity mirrors the corporate-action groups: while a statement's vest Buy
 //! exists the statement is **frozen** against edits (`PUT` → 422; delete the
 //! vest first), and deleting the statement removes its vest Buy in the same
@@ -71,7 +77,19 @@ pub struct EssStatement {
     /// ISO 4217 currency the amounts are denominated in. The tax summary
     /// converts non-AUD amounts to AUD via the ATO rate for this currency and
     /// the month of `taxing_point_date` (see `infra::fx::to_aud`). Defaults to AUD.
+    /// Must be the **listing's** currency: `market_value_per_share` is the market
+    /// value of that listed share, so the two are the same money (422 otherwise).
     pub currency: String,
+    /// The foreign-per-AUD rate the taxpayer states for this statement (same
+    /// convention as `trades.fx_rate` / `inheritances.fx_rate`: AUD = foreign /
+    /// rate), used as the **fallback** when no ATO monthly rate exists for the
+    /// taxing point's month — on both sides: the vest Buy carries it, and the
+    /// tax summary converts the discount labels through it. `None` means none
+    /// stated, and then the vest resolves the month's ATO rate or refuses (422)
+    /// rather than costing the parcel at parity. Only accepted on a non-AUD
+    /// statement, and must be positive (422 otherwise).
+    #[sqlx(try_from = "OptMoney")]
+    pub fx_rate: Option<Decimal>,
     /// Statement-AUD overrides, one per discount label: the employer's annual
     /// Employee share scheme statement (and the ATO prefill) states each label
     /// in AUD at the release-date spot rate, which differs from the RBA monthly
@@ -121,6 +139,10 @@ pub struct EssStatementBody {
     pub tfn_withholding: Decimal,
     #[serde(default = "default_currency")]
     pub currency: String,
+    /// Absent/null means none stated (the AUD case, and the non-AUD case that
+    /// relies on the imported ATO rate).
+    #[serde(default)]
+    pub fx_rate: Option<Decimal>,
     #[serde(default)]
     pub aud_taxed_upfront_eligible: Option<Decimal>,
     #[serde(default)]
@@ -162,7 +184,8 @@ pub fn router() -> Router<SqlitePool> {
 pub(crate) const COLUMNS: &str = "id, listing_id, holding_account_id, taxing_point_date, quantity, \
      market_value_per_share, taxed_upfront_eligible, taxed_upfront_not_eligible, \
      deferral_discount, pre_2009_cessation_discount, foreign_source_discount, \
-     tfn_withholding, currency, aud_taxed_upfront_eligible, aud_taxed_upfront_not_eligible, \
+     tfn_withholding, currency, fx_rate, aud_taxed_upfront_eligible, \
+     aud_taxed_upfront_not_eligible, \
      aud_deferral_discount, aud_pre_2009_cessation_discount, aud_foreign_source_discount, \
      (SELECT id FROM trades WHERE trades.ess_statement_id = ess_statements.id) AS vest_trade_id";
 
@@ -194,6 +217,21 @@ pub enum UpsertError {
     /// silently disagree with it. Mapped to 422.
     #[error("a statement-AUD override was supplied on a statement already denominated in AUD")]
     AudOverrideOnAudStatement,
+    /// A stated `fx_rate` that is not positive — it divides the amounts
+    /// (`AUD = foreign / rate`), so zero or negative is not a rate. Mapped to 422.
+    #[error("the statement's fx_rate must be positive")]
+    FxRateNotPositive,
+    /// A stated `fx_rate` on an AUD statement, where no conversion ever
+    /// happens. Mapped to 422.
+    #[error("an fx_rate was supplied on a statement already denominated in AUD")]
+    FxRateOnAudStatement,
+    /// The statement's currency is not its listing's. `market_value_per_share`
+    /// is the market value of that listed share, so the two are the same money
+    /// — differing currencies are a data-entry slip (and the vest would copy
+    /// the statement's currency onto a parcel of a listing priced in another).
+    /// Mapped to 422. Same rule as the DRP reinvest path.
+    #[error("the ESS statement is in {statement} but its listing is in {listing}")]
+    CurrencyNotListings { statement: String, listing: String },
 }
 
 pub async fn db_upsert(pool: &SqlitePool, s: &EssStatement) -> Result<(), UpsertError> {
@@ -208,10 +246,43 @@ pub async fn db_upsert(pool: &SqlitePool, s: &EssStatement) -> Result<(), Upsert
         return Err(UpsertError::AudOverrideOnAudStatement);
     }
 
+    // The stated rate divides the statement's amounts, and an AUD statement
+    // never converts — reject both nonsense forms before touching the row.
+    if let Some(rate) = s.fx_rate {
+        if rate <= Decimal::ZERO {
+            return Err(UpsertError::FxRateNotPositive);
+        }
+        if s.currency == "AUD" {
+            return Err(UpsertError::FxRateOnAudStatement);
+        }
+    }
+
     let mut tx = pool.begin().await?;
 
+    // The statement's currency must be the listing's: `market_value_per_share`
+    // is the market value of *that listed share*, so the price and the listed
+    // price are one money. Otherwise the vest copies the statement's currency
+    // onto a parcel of a security priced in another, and a later closing price
+    // (from the exchange, in the listing's currency) values it — mixing
+    // currencies in one calculation, which CLAUDE.md forbids. The same
+    // argument the DRP reinvest path makes about a distribution's cash.
+    // (An unknown listing_id falls through to the foreign-key rejection.)
+    let listing_currency: Option<String> =
+        sqlx::query_scalar("SELECT currency FROM listings WHERE id = ?")
+            .bind(s.listing_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    if let Some(listing) = listing_currency
+        && listing != s.currency
+    {
+        return Err(UpsertError::CurrencyNotListings {
+            statement: s.currency.clone(),
+            listing,
+        });
+    }
+
     // While its vest exists, the fields the Buy was created from (listing,
-    // account, taxing point, quantity, market value, currency) are frozen —
+    // account, taxing point, quantity, market value, currency, FX rate) are frozen —
     // editing them would desync the Buy. The income side (discount labels, TFN
     // withheld, statement-AUD overrides) stays editable: the employer's annual
     // ESS statement arrives after the vest is recorded. (A new id has no vest,
@@ -239,7 +310,8 @@ pub async fn db_upsert(pool: &SqlitePool, s: &EssStatement) -> Result<(), Upsert
             && old.taxing_point_date == s.taxing_point_date
             && old.quantity == s.quantity
             && old.market_value_per_share == s.market_value_per_share
-            && old.currency == s.currency;
+            && old.currency == s.currency
+            && old.fx_rate == s.fx_rate;
         if !vest_side_unchanged {
             return Err(UpsertError::Vested);
         }
@@ -250,10 +322,10 @@ pub async fn db_upsert(pool: &SqlitePool, s: &EssStatement) -> Result<(), Upsert
          (id, listing_id, holding_account_id, taxing_point_date, quantity, \
           market_value_per_share, taxed_upfront_eligible, taxed_upfront_not_eligible, \
           deferral_discount, pre_2009_cessation_discount, foreign_source_discount, \
-          tfn_withholding, currency, aud_taxed_upfront_eligible, \
+          tfn_withholding, currency, fx_rate, aud_taxed_upfront_eligible, \
           aud_taxed_upfront_not_eligible, aud_deferral_discount, \
           aud_pre_2009_cessation_discount, aud_foreign_source_discount) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT(id) DO UPDATE SET \
              listing_id                      = excluded.listing_id, \
              holding_account_id              = excluded.holding_account_id, \
@@ -267,6 +339,7 @@ pub async fn db_upsert(pool: &SqlitePool, s: &EssStatement) -> Result<(), Upsert
              foreign_source_discount         = excluded.foreign_source_discount, \
              tfn_withholding                 = excluded.tfn_withholding, \
              currency                        = excluded.currency, \
+             fx_rate                         = excluded.fx_rate, \
              aud_taxed_upfront_eligible      = excluded.aud_taxed_upfront_eligible, \
              aud_taxed_upfront_not_eligible  = excluded.aud_taxed_upfront_not_eligible, \
              aud_deferral_discount           = excluded.aud_deferral_discount, \
@@ -286,6 +359,7 @@ pub async fn db_upsert(pool: &SqlitePool, s: &EssStatement) -> Result<(), Upsert
     .bind(Money(s.foreign_source_discount))
     .bind(Money(s.tfn_withholding))
     .bind(&s.currency)
+    .bind(OptMoney(s.fx_rate))
     .bind(OptMoney(s.aud_taxed_upfront_eligible))
     .bind(OptMoney(s.aud_taxed_upfront_not_eligible))
     .bind(OptMoney(s.aud_deferral_discount))
@@ -374,6 +448,7 @@ async fn upsert(
         foreign_source_discount: body.foreign_source_discount,
         tfn_withholding: body.tfn_withholding,
         currency: body.currency,
+        fx_rate: body.fx_rate,
         aud_taxed_upfront_eligible: body.aud_taxed_upfront_eligible,
         aud_taxed_upfront_not_eligible: body.aud_taxed_upfront_not_eligible,
         aud_deferral_discount: body.aud_deferral_discount,
@@ -390,15 +465,32 @@ impl From<UpsertError> for ApiError {
         match e {
             UpsertError::Vested => ApiError::unprocessable(
                 "this ESS statement has been vested: the fields its vest Buy was created \
-                 from (listing, account, taxing point, quantity, market value, currency) \
-                 cannot change — delete the statement (which removes the vest Buy) and \
-                 re-enter instead; the discount labels and statement-AUD overrides stay \
-                 editable",
+                 from (listing, account, taxing point, quantity, market value, currency, \
+                 fx_rate) cannot change — delete the statement (which removes the vest \
+                 Buy) and re-enter instead; the discount labels and statement-AUD \
+                 overrides stay editable",
             ),
             UpsertError::AudOverrideOnAudStatement => ApiError::unprocessable(
                 "statement-AUD override amounts are only accepted on a non-AUD statement \
                  — an AUD statement's discount labels are already the AUD figures",
             ),
+            UpsertError::FxRateNotPositive => ApiError::unprocessable(
+                "the statement's fx_rate must be a positive foreign-per-AUD rate — it \
+                 divides the statement's amounts (AUD = foreign / rate)",
+            ),
+            UpsertError::FxRateOnAudStatement => ApiError::unprocessable(
+                "an fx_rate is only accepted on a non-AUD statement — an AUD amount \
+                 never converts",
+            ),
+            UpsertError::CurrencyNotListings { statement, listing } => {
+                ApiError::unprocessable(format!(
+                    "this ESS statement is recorded in {statement} but its listing is quoted \
+                 in {listing} — the per-share market value and the listed price are the \
+                 same money, so enter the statement in {listing} (an employer statement \
+                 in another currency is converted before entry, or the wrong listing was \
+                 chosen)"
+                ))
+            }
             UpsertError::Db(err) => err.into(),
         }
     }
@@ -430,10 +522,17 @@ mod tests {
     }
 
     async fn insert_listing(pool: &SqlitePool, id: i64) {
+        insert_listing_in(pool, id, "AUD").await;
+    }
+
+    /// A listing quoted in `currency` — a statement is entered in its
+    /// listing's currency, so the non-AUD cases need one to hang off.
+    async fn insert_listing_in(pool: &SqlitePool, id: i64, currency: &str) {
         test_support::listing(id)
             .ticker(&format!("ESS{id}"))
             .name(&format!("ESS {id}"))
             .security_type(listing::SecurityType::Share)
+            .currency(currency)
             .insert(pool)
             .await;
     }
@@ -476,7 +575,7 @@ mod tests {
     #[tokio::test]
     async fn db_round_trips_statement_aud_overrides() {
         let pool = test_pool().await;
-        insert_listing(&pool, 1).await;
+        insert_listing_in(&pool, 1, "USD").await;
         let mut s = sample(1);
         s.currency = "USD".to_string();
         s.aud_deferral_discount = Some("10572.45".parse().unwrap());
@@ -527,6 +626,122 @@ mod tests {
         let resp = client(&pool).get("/ess_statements").await;
         let items: serde_json::Value = resp.json();
         assert_eq!(items[0]["vest_trade_id"], serde_json::json!(vest.id));
+    }
+
+    /// SCENARIOS J-08: a statement's currency must be its listing's. The
+    /// per-share market value is the market value of *that listed share*, so
+    /// the two are the same money — the I-06/I-08 argument the DRP reinvest
+    /// path already makes about a distribution's cash. Otherwise the vest
+    /// copies the statement's currency onto a parcel of an AUD-priced
+    /// security, and the AUD closing price then values a USD-costed parcel.
+    #[tokio::test]
+    async fn a_statement_in_another_currency_than_its_listing_is_refused() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await; // AUD
+        let mut s = sample(1);
+        s.currency = "USD".to_string();
+        assert!(matches!(
+            db_upsert(&pool, &s).await,
+            Err(UpsertError::CurrencyNotListings { ref statement, ref listing })
+                if statement == "USD" && listing == "AUD"
+        ));
+        assert!(db_get(&pool, 1).await.unwrap().is_none());
+
+        // The matching case is untouched: on a USD listing the same statement
+        // is accepted.
+        insert_listing_in(&pool, 2, "USD").await;
+        s.listing_id = 2;
+        db_upsert(&pool, &s).await.unwrap();
+        assert_eq!(db_get(&pool, 1).await.unwrap().unwrap().currency, "USD");
+    }
+
+    #[tokio::test]
+    async fn api_currency_not_the_listings_rejected_422_naming_both() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await; // AUD
+        let body = serde_json::json!({
+            "listing_id": 1,
+            "taxing_point_date": "2024-09-01",
+            "currency": "USD",
+        });
+        let (status, text) = {
+            let resp = client(&pool).put("/ess_statements/1", &body).await;
+            (resp.status, resp.text().to_string())
+        };
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(text.contains("USD") && text.contains("AUD"), "{text}");
+    }
+
+    /// The stated rate divides the statement's amounts, so zero or negative is
+    /// not a rate; and an AUD statement never converts, so a rate on one is a
+    /// figure that could never apply.
+    #[tokio::test]
+    async fn db_fx_rate_must_be_positive_and_only_on_a_non_aud_statement() {
+        let pool = test_pool().await;
+        insert_listing_in(&pool, 1, "USD").await;
+        let mut s = sample(1);
+        s.currency = "USD".to_string();
+        s.fx_rate = Some(Decimal::ZERO);
+        assert!(matches!(
+            db_upsert(&pool, &s).await,
+            Err(UpsertError::FxRateNotPositive)
+        ));
+        s.fx_rate = Some(Decimal::from(-1));
+        assert!(matches!(
+            db_upsert(&pool, &s).await,
+            Err(UpsertError::FxRateNotPositive)
+        ));
+
+        // A positive rate on the non-AUD statement round-trips…
+        s.fx_rate = Some("0.6543210987".parse().unwrap());
+        db_upsert(&pool, &s).await.unwrap();
+        assert_eq!(
+            db_get(&pool, 1).await.unwrap().unwrap().fx_rate,
+            Some("0.6543210987".parse::<Decimal>().unwrap())
+        );
+
+        // …but the same rate on an AUD statement is refused.
+        insert_listing(&pool, 2).await; // AUD
+        let mut aud = sample(2);
+        aud.listing_id = 2;
+        aud.fx_rate = Some(Decimal::from(1));
+        assert!(matches!(
+            db_upsert(&pool, &aud).await,
+            Err(UpsertError::FxRateOnAudStatement)
+        ));
+    }
+
+    /// The stated rate is a vest-side field — the vest Buy carries it — so it
+    /// freezes with the rest of them once the statement is vested.
+    #[tokio::test]
+    async fn a_vested_statements_fx_rate_is_frozen() {
+        let pool = test_pool().await;
+        insert_listing_in(&pool, 1, "USD").await;
+        let mut s = sample(1);
+        s.currency = "USD".to_string();
+        s.fx_rate = Some("0.65".parse().unwrap());
+        db_upsert(&pool, &s).await.unwrap();
+        crate::entities::ess_vest::db_vest(&pool, 1).await.unwrap();
+
+        s.fx_rate = Some("0.70".parse().unwrap());
+        assert!(matches!(
+            db_upsert(&pool, &s).await,
+            Err(UpsertError::Vested)
+        ));
+    }
+
+    #[tokio::test]
+    async fn api_fx_rate_on_an_aud_statement_rejected_422() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        let body = serde_json::json!({
+            "listing_id": 1,
+            "taxing_point_date": "2024-09-01",
+            "currency": "AUD",
+            "fx_rate": "0.65",
+        });
+        let resp = client(&pool).put("/ess_statements/1", &body).await;
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     #[tokio::test]

@@ -306,8 +306,36 @@ pub(crate) fn aud_field(
     currency: &str,
     date: NaiveDate,
 ) -> Result<Decimal, sqlx::Error> {
+    aud_field_with(fx, row, field, currency, date, FxOverride::None)
+}
+
+/// [`aud_field`] for a record that *does* carry a manual rate — an ESS
+/// statement's stated `fx_rate`, which the taxpayer gives when the employer's
+/// release-date rate is the only one they have. The override is arbitrated by
+/// the one precedence rule (`infra::fx::pick_rate`): the ATO monthly rate
+/// still wins where it exists, the stated rate stands in where it does not,
+/// and a record with neither still fails loudly.
+pub(crate) fn aud_field_with(
+    fx: &FxRates,
+    row: &sqlx::sqlite::SqliteRow,
+    field: &str,
+    currency: &str,
+    date: NaiveDate,
+    manual: FxOverride,
+) -> Result<Decimal, sqlx::Error> {
     let value = parse_dec(field, row.try_get(field)?)?;
-    aud_value(fx, value, currency, date)
+    Ok(fx.to_aud(value, currency, date, manual)?)
+}
+
+/// The FX override an `ess_statements` row carries: its stated `fx_rate` as a
+/// fallback, or none. The same rate [`entities::ess_vest`] binds onto the vest
+/// Buy, so one statement's income and CGT sides can never convert at different
+/// rates (SCENARIOS J-12).
+pub(crate) fn ess_fx_override(row: &sqlx::sqlite::SqliteRow) -> Result<FxOverride, sqlx::Error> {
+    Ok(match row_opt_dec(row, "fx_rate")? {
+        Some(rate) => FxOverride::Fallback(rate),
+        None => FxOverride::None,
+    })
 }
 
 /// [`aud_field`] for a figure already decoded off a model struct rather than
@@ -331,10 +359,11 @@ pub(crate) fn aud_label(
     field: &str,
     currency: &str,
     date: NaiveDate,
+    manual: FxOverride,
 ) -> Result<Decimal, sqlx::Error> {
     match row_opt_dec(row, &format!("aud_{field}"))? {
         Some(stated) => Ok(stated),
-        None => aud_field(fx, row, field, currency, date),
+        None => aud_field_with(fx, row, field, currency, date, manual),
     }
 }
 
@@ -409,7 +438,7 @@ pub(crate) async fn db_tax_summary_on(
     let ess_rows = sqlx::query(
         "SELECT taxing_point_date, taxed_upfront_eligible, taxed_upfront_not_eligible, \
          deferral_discount, pre_2009_cessation_discount, foreign_source_discount, \
-         tfn_withholding, currency, aud_taxed_upfront_eligible, \
+         tfn_withholding, currency, fx_rate, aud_taxed_upfront_eligible, \
          aud_taxed_upfront_not_eligible, aud_deferral_discount, \
          aud_pre_2009_cessation_discount, aud_foreign_source_discount \
          FROM ess_statements",
@@ -565,13 +594,16 @@ pub(crate) async fn db_tax_summary_on(
         // Each discount label prefers the statement-AUD override (the
         // employer's stated AUD figure, converted at the release-date spot
         // rate — what the ATO prefill carries) and falls back to the RBA
-        // monthly conversion when absent.
-        let eligible = aud_label(&fx, row, "taxed_upfront_eligible", &currency, d)?;
-        let not_eligible = aud_label(&fx, row, "taxed_upfront_not_eligible", &currency, d)?;
-        let deferral = aud_label(&fx, row, "deferral_discount", &currency, d)?;
-        let pre_2009 = aud_label(&fx, row, "pre_2009_cessation_discount", &currency, d)?;
-        let foreign = aud_label(&fx, row, "foreign_source_discount", &currency, d)?;
-        let tfn = aud_field(&fx, row, "tfn_withholding", &currency, d)?;
+        // monthly conversion when absent — through the statement's own stated
+        // `fx_rate` when the month has no RBA rate, the same rate its vest
+        // parcel carries.
+        let over = ess_fx_override(row)?;
+        let eligible = aud_label(&fx, row, "taxed_upfront_eligible", &currency, d, over)?;
+        let not_eligible = aud_label(&fx, row, "taxed_upfront_not_eligible", &currency, d, over)?;
+        let deferral = aud_label(&fx, row, "deferral_discount", &currency, d, over)?;
+        let pre_2009 = aud_label(&fx, row, "pre_2009_cessation_discount", &currency, d, over)?;
+        let foreign = aud_label(&fx, row, "foreign_source_discount", &currency, d, over)?;
+        let tfn = aud_field_with(&fx, row, "tfn_withholding", &currency, d, over)?;
 
         let s = map
             .entry(tax_year)
@@ -723,6 +755,17 @@ mod tests {
     async fn insert_listing(pool: &SqlitePool, id: i64) {
         test_support::listing(id)
             .ticker(&format!("TST{id}"))
+            .insert(pool)
+            .await;
+    }
+
+    /// A USD-quoted listing. An ESS statement is entered in its listing's
+    /// currency (the per-share market value and the listed price are the same
+    /// money), so every foreign-currency ESS case hangs off one of these.
+    async fn insert_usd_listing(pool: &SqlitePool, id: i64) {
+        test_support::listing(id)
+            .ticker(&format!("USD{id}"))
+            .currency("USD")
             .insert(pool)
             .await;
     }
@@ -1867,7 +1910,7 @@ mod tests {
     #[tokio::test]
     async fn db_ess_foreign_source_converted_and_not_double_counted() {
         let pool = test_pool().await;
-        insert_listing(&pool, 1).await;
+        insert_usd_listing(&pool, 1).await;
         // A$1 = 0.50 USD for Sep 2024 → AUD = USD / 0.50.
         rba_fx_rate::db_import_rate(&pool, "USD", "2024-09", "0.50".parse().unwrap())
             .await
@@ -1890,7 +1933,7 @@ mod tests {
     #[tokio::test]
     async fn db_ess_statement_aud_override_reported_verbatim() {
         let pool = test_pool().await;
-        insert_listing(&pool, 1).await;
+        insert_usd_listing(&pool, 1).await;
         // A$1 = 0.50 USD for Sep 2024 → RBA conversion would double the figure.
         rba_fx_rate::db_import_rate(&pool, "USD", "2024-09", "0.50".parse().unwrap())
             .await
@@ -1916,7 +1959,7 @@ mod tests {
     #[tokio::test]
     async fn db_ess_aud_override_drives_the_taxed_upfront_reduction() {
         let pool = test_pool().await;
-        insert_listing(&pool, 1).await;
+        insert_usd_listing(&pool, 1).await;
         rba_fx_rate::db_import_rate(&pool, "USD", "2024-09", "0.50".parse().unwrap())
             .await
             .unwrap();
@@ -1943,7 +1986,7 @@ mod tests {
     #[tokio::test]
     async fn db_ess_aud_overrides_reproduce_the_employer_ess_statements() {
         let pool = test_pool().await;
-        insert_listing(&pool, 1).await;
+        insert_usd_listing(&pool, 1).await;
         // (taxing point, USD deferral discount, employer-stated AUD figure)
         let releases: [(NaiveDate, &str, Option<&str>); 5] = [
             (ymd(2022, 2, 7), "7533.12", Some("10572")),
@@ -1986,11 +2029,40 @@ mod tests {
         );
     }
 
+    /// SCENARIOS J-12: the statement's own stated `fx_rate` converts its
+    /// labels when the taxing-point month has no ATO rate — the same rate its
+    /// vest parcel is costed at, so the income and CGT sides of one statement
+    /// can never answer off different rates (before, one 500'd while the other
+    /// reported a parity cost base). An imported ATO rate still wins over it.
+    #[tokio::test]
+    async fn db_ess_stated_fx_rate_converts_a_month_with_no_ato_rate() {
+        let pool = test_pool().await;
+        insert_usd_listing(&pool, 1).await;
+        let mut e = make_ess(1, 1, NaiveDate::from_ymd_opt(2024, 9, 1).unwrap());
+        e.currency = "USD".to_string();
+        e.fx_rate = Some("0.50".parse().unwrap());
+        e.deferral_discount = Decimal::from(1000); // USD → 2000 AUD at the stated rate
+        e.tfn_withholding = Decimal::from(100); // → 200 AUD
+        ess_statement::db_upsert(&pool, &e).await.unwrap();
+
+        let result = db_tax_summary(&pool).await.unwrap();
+        assert_eq!(result[0].ess_discount_assessable, Decimal::from(2000));
+        assert_eq!(result[0].tfn_withholding_tax, Decimal::from(200));
+
+        // Once the month's ATO rate is imported it takes precedence — the
+        // stated rate is a fallback, exactly like a trade's `fx_rate`.
+        rba_fx_rate::db_import_rate(&pool, "USD", "2024-09", "0.25".parse().unwrap())
+            .await
+            .unwrap();
+        let result = db_tax_summary(&pool).await.unwrap();
+        assert_eq!(result[0].ess_discount_assessable, Decimal::from(4000));
+    }
+
     /// A non-AUD ESS statement with no ATO rate fails loudly (no silent zero).
     #[tokio::test]
     async fn db_ess_non_aud_without_rate_fails_loudly() {
         let pool = test_pool().await;
-        insert_listing(&pool, 1).await;
+        insert_usd_listing(&pool, 1).await;
         let mut e = make_ess(1, 1, NaiveDate::from_ymd_opt(2024, 9, 1).unwrap());
         e.currency = "USD".to_string();
         e.deferral_discount = Decimal::from(1000);

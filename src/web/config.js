@@ -278,14 +278,15 @@ export const ENTITIES = [
       dec('pre_2009_cessation_discount', 'Pre-2009 cessation discount (G)'),
       dec('foreign_source_discount', 'Foreign-source discount (A)', { hint: 'The foreign-sourced portion of the above discounts (already included in them); for the foreign income tax offset.' }),
       dec('tfn_withholding', 'TFN amounts withheld (C)'),
-      fk('currency', 'Currency', 'currencies', { required: true, encode: 'string', default: 'AUD' }),
+      fk('currency', 'Currency', 'currencies', { required: true, encode: 'string', default: 'AUD', hint: 'Must be the listing’s own currency: the per-share market value and the listed price are the same money, so a statement in another currency is rejected (convert it before entry, or pick the right listing).' }),
+      dec('fx_rate', 'FX rate (foreign per AUD)', { optional: true, default: '', hint: 'Non-AUD statements only: the rate you are using for this statement (AUD = foreign ÷ rate), e.g. the release-date rate on the employer’s statement. It is a fallback — an imported RBA monthly rate for the taxing point’s month still wins — but without it, and without that month’s RBA rate, vesting is refused rather than costing the parcel at parity.' }),
       dec('aud_taxed_upfront_eligible', 'Statement AUD: taxed-upfront eligible (D)', { optional: true, default: '', hint: 'The employer statement’s AUD figure for this label (converted at the release-date spot rate — what the ATO prefill carries). When set, the tax summary reports it verbatim instead of RBA-converting the foreign amount. Non-AUD statements only.' }),
       dec('aud_taxed_upfront_not_eligible', 'Statement AUD: taxed-upfront not eligible (E)', { optional: true, default: '' }),
       dec('aud_deferral_discount', 'Statement AUD: deferral discount (F)', { optional: true, default: '', hint: 'The RSU case: the annual Employee share scheme statement’s label F figure.' }),
       dec('aud_pre_2009_cessation_discount', 'Statement AUD: pre-2009 cessation (G)', { optional: true, default: '' }),
       dec('aud_foreign_source_discount', 'Statement AUD: foreign-source (A)', { optional: true, default: '' }),
     ],
-    columns: ['id', 'listing_id', 'holding_account_id', 'taxing_point_date', 'quantity', 'market_value_per_share', 'deferral_discount', 'aud_deferral_discount', 'taxed_upfront_eligible', 'currency', 'vest_trade_id'],
+    columns: ['id', 'listing_id', 'holding_account_id', 'taxing_point_date', 'quantity', 'market_value_per_share', 'deferral_discount', 'aud_deferral_discount', 'taxed_upfront_eligible', 'currency', 'fx_rate', 'vest_trade_id'],
     // Vest only while unvested — a second vest is rejected by the API (422),
     // so a vested row (vest_trade_id set) shows the linked Buy instead.
     rowActions: function (row) {

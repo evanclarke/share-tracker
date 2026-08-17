@@ -1061,7 +1061,8 @@ async fn push_ess_rows(
     let ess_rows = sqlx::query(
         "SELECT id, listing_id, taxing_point_date, taxed_upfront_eligible, \
                 taxed_upfront_not_eligible, deferral_discount, pre_2009_cessation_discount, \
-                foreign_source_discount, tfn_withholding, currency, aud_taxed_upfront_eligible, \
+                foreign_source_discount, tfn_withholding, currency, fx_rate, \
+                aud_taxed_upfront_eligible, \
                 aud_taxed_upfront_not_eligible, aud_deferral_discount, \
                 aud_pre_2009_cessation_discount, aud_foreign_source_discount \
          FROM ess_statements",
@@ -1076,8 +1077,12 @@ async fn push_ess_rows(
         let currency: String = row.try_get("currency")?;
         let listing_id: i64 = row.try_get("listing_id")?;
         // The discount components carry their own stored AUD figures (the
-        // `aud_*` columns), so they convert through `aud_label`.
-        let label = |column: &str| tax_summary::aud_label(fx, row, column, &currency, taxing_point);
+        // `aud_*` columns), so they convert through `aud_label` — and through
+        // the statement's own stated `fx_rate` where the taxing-point month has
+        // no RBA rate, exactly as the tax summary's totals do.
+        let over = tax_summary::ess_fx_override(row)?;
+        let label =
+            |column: &str| tax_summary::aud_label(fx, row, column, &currency, taxing_point, over);
         let foreign = label("foreign_source_discount")?;
         out.ess.push(EssIncomeRow {
             ess_statement_id: row.try_get("id")?,
@@ -1089,12 +1094,13 @@ async fn push_ess_rows(
             deferral_discount_aud: label("deferral_discount")?,
             pre_2009_cessation_discount_aud: label("pre_2009_cessation_discount")?,
             foreign_source_discount_aud: foreign,
-            tfn_withholding_aud: tax_summary::aud_field(
+            tfn_withholding_aud: tax_summary::aud_field_with(
                 fx,
                 row,
                 "tfn_withholding",
                 &currency,
                 taxing_point,
+                over,
             )?,
         });
         if foreign > Decimal::ZERO {

@@ -1450,3 +1450,110 @@ Tests: `known_limitations_document_the_partial_drp_workaround` (doc_checks, the 
 citation) and
 `the_partial_participation_workaround_costs_the_parcel_at_the_cash_reinvested` — the refusal, then
 the two-row entry producing a $49 cost base for 7 units with the full $100 still declared.
+
+## The ESS vest Buy's FX rate is a hard-coded 1, so a foreign-currency vest can cost at parity (SCENARIOS J-08, J-12)
+(SCENARIOS.md section J verification pass, 2026-08-18. `entities::ess_vest::db_vest` INSERTs the
+cost-base-reset Buy with `fx_rate` literal `'1'`. On the trade that column is **not** a constant —
+`infra::fx::pick_rate` treats it as `FxOverride::Fallback`, the rate used *when no ATO rate exists
+for the month*. So the placeholder becomes a real answer exactly when the RBA rate is missing, and
+the answer is 1 AUD per USD.)
+- [x] J-12 — reproduced: a USD listing, statement `taxing_point_date 2024-09-01`, 100 shares at
+  US$150, no `rba_fx_rates` row for `USD 2024-09`. `POST /ess_statements/1/vest` → `201` with
+  `currency USD, fx_rate 1`, and `POST /portfolio/overview` answers `total_cost_base 15000` — a
+  **US$15,000 parcel costed at A$15,000**. Importing the month's rate (0.65) moves it to
+  A$23,076.92, so the figure was ~35% understated with nothing marked provisional
+- [x] J-12 — the two sides disagree about the same missing month: `GET /portfolio/tax-summary`
+  **500s** (`FxError::MissingRate`, documented in `docs/API.md` as "no rate ⇒ fails loudly with
+  `500`") while the price-free CGT reports keep answering off the parity cost base. A user in this
+  state sees the income report break and the capital-gains reports look fine
+- [x] J-08 — an ICE-style US RSU release has nowhere to put the release-date spot rate on the CGT
+  side at all. The statement-AUD overrides (`aud_deferral_discount` &c.) cover only the **income**
+  labels; every other parcel-creating operation takes a rate — `inheritance.fx_rate` (its own
+  column), `rights_exercise`'s `fx_rate` body field, `drp_reinvestment`'s `fx_rate` body field, and
+  `domain::rollover` carries the consumed parcel's forward. The ESS vest is the only one that
+  invents one
+- [x] **Decide the model** (an `AskUserQuestion` for Evan, not a silent call). (a) **Give the
+  statement an `fx_rate` column** the vest binds (default 1, refused ≤ 0, and — like
+  `trades.spot_fx_rate` — only accepted on a non-AUD statement), so the taxpayer states the rate
+  they used, matching `inheritance`. (b) **Bind `NULL`/no fallback** so a missing month fails loudly
+  on the CGT side too, the way the income side already does — smallest change, but it leaves a
+  correct-rate month with no way to record the spot rate the employer used. (c) **Bind
+  `spot_fx_rate`** (the existing column, which *outranks* the ATO monthly rate) from a new statement
+  field — the honest mapping for a release-date rate, but it changes the reported cost base for
+  every month, not only missing ones. (a)+(b) together look right: a stated rate when the user has
+  one, a loud failure when neither exists
+- [x] Tests: a USD vest with the month's rate missing does not answer a parity cost base; with a
+  stated rate it converts at it; an AUD statement rejects the rate field
+- [x] Docs sync: `docs/SCHEMA.md` (`ess_statements`, `trades.fx_rate` on a vest Buy), `docs/API.md`
+  (ESS statements + the 422 catalogue), README's ESS feature line
+
+**Resolution (2026-08-18): Evan chose (a)+(b) — a stated rate when there is one, a loud failure when
+there is neither.**
+
+`ess_statements.fx_rate` (migration 0026, nullable TEXT decimal; the table is audited, so its two
+`row_history` triggers are dropped and re-created with the column) is the foreign-per-AUD rate the
+taxpayer states for the statement — refused ≤ 0, refused on an AUD statement, and frozen with the
+rest of the vest-side fields once vested.
+
+(b) took one adaptation worth recording: `trades.fx_rate` is `NOT NULL`, and making it nullable
+would have rippled through ~330 references for one entity's case. Instead the *vest* resolves the
+rate through the one precedence rule (`FxRates::resolve_rate`, loaded on its own transaction) and
+binds a real one: the statement's stated rate when there is one, otherwise the taxing-point month's
+ATO rate — and a non-AUD statement with neither is refused `422` (`VestError::MissingFxRate`,
+naming the currency and month) instead of creating a parity parcel. The loud failure therefore
+lands at write time, earlier and more actionable than a report-time 500, and no parcel can enter
+the system costed at parity.
+
+The stated rate also converts the **income** side (`reports::tax_summary`'s ESS loop and the annual
+tax report's, via `aud_label`/`aud_field_with` taking an `FxOverride` and the shared
+`tax_summary::ess_fx_override`), which closes the second finding: one statement's income and CGT
+sides now convert at the same rate, and a statement with no rate anywhere fails loudly on both.
+
+Tests: `a_foreign_vest_with_no_rate_anywhere_is_refused_rather_than_costed_at_parity` (the refusal,
+nothing written, then A$23,076.92… once the month is imported),
+`a_statements_stated_rate_costs_the_parcel`, `an_aud_vest_carries_the_parity_rate_because_aud_never_converts`,
+`api_vest_without_a_rate_returns_422_naming_the_month`,
+`db_fx_rate_must_be_positive_and_only_on_a_non_aud_statement`, `api_fx_rate_on_an_aud_statement_rejected_422`,
+`a_vested_statements_fx_rate_is_frozen`, and
+`db_ess_stated_fx_rate_converts_a_month_with_no_ato_rate` (the income side, and that an imported ATO
+rate still wins). Docs: `docs/SCHEMA.md` (`ess_statements.fx_rate`, `trades.fx_rate` on a vest Buy),
+`docs/API.md` (ESS statements, Vesting, the 422 catalogue), README's ESS feature line, and the field
+hint in `src/web/config.js`.
+
+## An ESS statement in a currency other than its listing's is vested without conversion (SCENARIOS J-08, J-12)
+(SCENARIOS.md section J verification pass, 2026-08-18. The I-06/I-08 pattern on the ESS side:
+`ess_statement::db_upsert` never compares `currency` with the listing's. `market_value_per_share` is
+the market value of *that listed share*, so a statement whose currency is not the listing's is
+either a data-entry slip or two currencies in one row — and the vest copies the statement's currency
+onto the parcel regardless.)
+- [x] J-08 — reproduced: an **AUD** ASX listing, statement `currency USD`, 100 shares at 150 →
+  `204`, vest `201` with a **USD** parcel on an AUD-priced security. With `USD 2024-09` imported at
+  0.65 the overview reports `total_cost_base 23076.92` for what the listing says is a A$15,000
+  holding, and a later closing price (AUD, from the exchange) values a USD-costed parcel
+- [x] Precedent: the DRP side already refuses this (`450b887`, "reinvesting … a distribution
+  recorded in a currency other than its listing's (the cash and the per-unit price are one
+  division, so they must be the same money)"). The same argument holds here: the per-share market
+  value and the listed price are the same money
+- [x] Fix: refuse at write time in `db_upsert` (`422` naming both currencies), the way the income
+  reinvest path does — no model decision needed unless Evan wants the check on the *vest* instead
+  (a statement can be entered before the listing exists in the right currency; the vest is the
+  first point the currency reaches a parcel)
+- [x] Tests: a statement whose currency differs from its listing's is refused `422`; the matching
+  case is unaffected; an AUD listing with an AUD statement still vests
+- [x] Docs sync: `docs/API.md` ESS statements + the 422 catalogue
+
+**Resolution (2026-08-18): refused at write time, as the TODO's default said.**
+
+`ess_statement::db_upsert` reads the listing's currency on its own transaction and answers `422`
+(`UpsertError::CurrencyNotListings`) naming both currencies and saying what to do — convert the
+employer's statement before entry, or choose the listing quoted in its currency. The check sits on
+the statement rather than the vest deliberately: the statement is what the user typed, and an
+income-only statement (never vested) reaches the tax summary too, so the slip must be caught there
+as well.
+
+Tests: `a_statement_in_another_currency_than_its_listing_is_refused` (the refusal, plus the same
+statement accepted on a USD listing) and `api_currency_not_the_listings_rejected_422_naming_both`.
+The existing foreign-currency ESS fixtures across the suite now hang off USD listings, which is the
+shape a real statement has. Docs: `docs/API.md` (ESS statements + the 422 catalogue),
+`docs/SCHEMA.md`'s `ess_statements.currency` line, README's ESS feature line, and the currency field
+hint in `src/web/config.js`.

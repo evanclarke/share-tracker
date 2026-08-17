@@ -328,6 +328,16 @@ mod tests {
             .name("Non AMIT Ltd")
             .insert(pool)
             .await;
+        // A USD listing for the ESS-statement case: a statement is entered in
+        // its listing's currency (the per-share market value and the listed
+        // price are the same money), so a foreign-currency statement needs a
+        // foreign-currency listing to hang off.
+        listing(4)
+            .ticker("USDL")
+            .name("US Listed Inc")
+            .currency("USD")
+            .insert(pool)
+            .await;
         buy(1, 1)
             .qty(dec("100"))
             .date(ymd(2024, 1, 10))
@@ -455,9 +465,10 @@ mod tests {
             RoundTrip::new(
                 "/ess_statements/10",
                 json!({
-                    "listing_id": 1, "taxing_point_date": "2024-03-04",
+                    "listing_id": 4, "taxing_point_date": "2024-03-04",
                     "quantity": "250.5", "market_value_per_share": "12.345678",
                     "deferral_discount": "3091.591239", "currency": "USD",
+                    "fx_rate": "0.6666666667",
                     "aud_deferral_discount": "4637.386859",
                 }),
             ),

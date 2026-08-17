@@ -673,6 +673,34 @@ mod tests {
             );
         }
 
+        // 0026 added ess_statements.fx_rate (SCENARIOS J-08/J-12), so that
+        // table's trigger pair was re-created with it — the *live* pair now
+        // comes from 0026 and must still carry every earlier column too.
+        let sql26 = include_str!("../../migrations/0026_ess_statement_fx_rate.sql");
+        for op in ["update", "delete"] {
+            assert!(
+                sql26.contains(&format!("CREATE TRIGGER ess_statements_row_history_{op} ")),
+                "0026 must re-create the ess_statements {op} trigger"
+            );
+        }
+        // The column list wraps across lines in this migration, so match on a
+        // whitespace-normalised copy rather than the raw text.
+        let flat26 = sql26.split_whitespace().collect::<Vec<_>>().join(" ");
+        for col in [
+            "fx_rate",
+            "currency",
+            "quantity",
+            "market_value_per_share",
+            "taxed_upfront_eligible",
+            "aud_deferral_discount",
+        ] {
+            assert_eq!(
+                flat26.matches(&format!("'{col}', OLD.{col}")).count(),
+                2,
+                "both re-created ess_statements triggers must record {col}"
+            );
+        }
+
         // 0021 added closing_prices, which needed two rebuilds: the table
         // itself (a surrogate `id` for row_history.row_id to key on, the old
         // composite primary key kept as a UNIQUE constraint) and row_history
