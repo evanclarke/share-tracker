@@ -824,3 +824,54 @@ the ordinary + special pair stays silent),
 `a_duplicated_pair_is_reported_beside_a_genuine_second_dividend`,
 `empty_database_reports_nothing_stale` (extended), and `web::tests::health_banner_ui_present`.
 Full suite 1545 passed / 0 failed.
+
+## Duplicate interest and expense rows are silently double-counted (SCENARIOS H-01, H-06)
+(SCENARIOS.md section H verification pass, 2026-08-17, standing probe 6 — the `interest_income` /
+`investment_expenses` counterpart of the closed E-03 `duplicate_actions`, F-06
+`duplicate_amma_statements` and G-24 `duplicate_income` findings.)
+- [x] Two `interest_income` rows with the same `date_paid`, `amount` `250` and `source`
+  "ANZ savings" report `interest_income` `500`; two identical `investment_expenses` rows report
+  `deductions_advice_fee` `200`. `GET /reports/health` says nothing — its duplicate checks cover
+  corporate actions, AMMA statements and income rows only
+- [x] Same cause as the other three (a re-submitted form, a statement keyed twice), and the same
+  shape of fix: a **warning, not a constraint** — two interest credits of the same amount on one day
+  from different accounts are legitimate, which is why `source` (interest) and
+  `expense_type` + `listing_id`/`holding_account_id` + `description` (expenses) belong in the key
+  alongside the date and the amount
+- [x] Group in Rust, not SQL: the amounts are TEXT decimals SQL would compare as strings — the
+  `duplicate_income` pass (G-24) already had to do this, so follow it exactly, banner included
+- [x] Tests: a duplicated pair of each kind is reported with its ids, rows differing in any key field
+  are not, and the web banner names both new lists
+
+**Implemented 2026-08-17: two more warning lists on `GET /reports/health`, shaped exactly like the
+`duplicate_income` pass they follow.**
+
+`duplicate_interest` and `duplicate_expenses` complete the set — every fact table the tax summary
+sums row by row now has a duplicate check. Both are **warnings, never constraints**: a payer really
+can credit the same amount twice in one day (two equal term deposits maturing together), and two
+advice fees of the same amount on one day against different holdings are ordinary entry.
+
+- **The key is the payer identity plus every stored field.** Interest has no listing, so `source`
+  (the free-text "ANZ savings account") and `holding_account_id` stand in for one, alongside the
+  date, the amount, the currency, `foreign_source` and both withholding figures. For an expense the
+  key is the date, the type, the money figures — the `gross_amount` / `deductible_percentage`
+  provenance pair included, since two rows agreeing on what is claimed but not on the gross it was
+  apportioned from came off different invoices — the currency, the description, and both optional
+  attributions. A listing-attributed expense reports its `ticker`, not only the id.
+- **Grouped in Rust, as G-24 had to be.** The amounts are TEXT decimals SQL would compare as
+  strings, so `same_interest_entry` / `same_expense_entry` compare `Decimal`s (`250.0` and `250.00`
+  are the same credit) after a SQL pre-narrowing to rows that share a date with another row. The
+  pre-narrowing is on the date alone here — the rest of each key is nullable, and null-safe
+  comparison in SQL would buy nothing when same-day rows are a handful.
+- **The banner names both**, with its own wording per kind and a link to the screen the surplus row
+  is deleted from (Interest Income, Investment Expenses), joining the three existing duplicate
+  strips.
+
+Tests: `reports::health::tests::duplicated_interest_rows_are_reported_with_their_ids`,
+`interest_differing_in_any_key_field_is_not_a_duplicate` (different source, date, amount, holding
+account, and TFN withholding — five near-misses, none flagged),
+`interest_amounts_equal_in_value_but_not_in_text_are_still_duplicates` (also three-of-a-kind as one
+row counting three), `duplicated_expense_rows_are_reported_with_their_ids` (ticker on the
+listing-attributed group, `null` on the portfolio-wide one),
+`expenses_differing_in_any_key_field_are_not_duplicates`, the extended
+`empty_database_reports_nothing_stale`, and `web::tests::health_banner_ui_present`.

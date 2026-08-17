@@ -10,24 +10,6 @@ findings are all closed in DONE.md), except where a section's heading names anot
 (e.g. REQUIREMENTS, SCENARIOS). Each section records one finding; sections land in DONE.md as they
 are fixed or decided.
 
-## Duplicate interest and expense rows are silently double-counted (SCENARIOS H-01, H-06)
-(SCENARIOS.md section H verification pass, 2026-08-17, standing probe 6 — the `interest_income` /
-`investment_expenses` counterpart of the closed E-03 `duplicate_actions`, F-06
-`duplicate_amma_statements` and G-24 `duplicate_income` findings.)
-- [ ] Two `interest_income` rows with the same `date_paid`, `amount` `250` and `source`
-  "ANZ savings" report `interest_income` `500`; two identical `investment_expenses` rows report
-  `deductions_advice_fee` `200`. `GET /reports/health` says nothing — its duplicate checks cover
-  corporate actions, AMMA statements and income rows only
-- [ ] Same cause as the other three (a re-submitted form, a statement keyed twice), and the same
-  shape of fix: a **warning, not a constraint** — two interest credits of the same amount on one day
-  from different accounts are legitimate, which is why `source` (interest) and
-  `expense_type` + `listing_id`/`holding_account_id` + `description` (expenses) belong in the key
-  alongside the date and the amount
-- [ ] Group in Rust, not SQL: the amounts are TEXT decimals SQL would compare as strings — the
-  `duplicate_income` pass (G-24) already had to do this, so follow it exactly, banner included
-- [ ] Tests: a duplicated pair of each kind is reported with its ids, rows differing in any key field
-  are not, and the web banner names both new lists
-
 ## A deduction's listing attribution never reaches the annual tax report (SCENARIOS H-07)
 (SCENARIOS.md section H verification pass, 2026-08-17.)
 - [ ] H-07 — the correctness side is fine and now pinned

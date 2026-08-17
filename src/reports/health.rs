@@ -28,7 +28,11 @@
 //! - every (listing, holding account, payment date) carrying more than one
 //!   income row of identical amounts — the same double-entry on the
 //!   distribution side, doubling the dividend income and the franking credits
-//!   (see [`DuplicateIncome`]).
+//!   (see [`DuplicateIncome`]);
+//! - every identical pair of interest-income rows, and of investment-expense
+//!   rows — the same double-entry on the two listing-less sides of the tax
+//!   summary, doubling a year's interest or its deduction (see
+//!   [`DuplicateInterest`], [`DuplicateExpense`]).
 //!
 //! A database with no prices or FX rates at all reports `stale = false` for
 //! that series: nothing has decayed — a fresh install shows no banner, and a
@@ -38,6 +42,8 @@
 use crate::domain::tax_year::tax_year_for;
 use crate::entities::closing_price::{self, HeldTimeline};
 use crate::entities::income::Income;
+use crate::entities::interest_income::InterestIncome;
+use crate::entities::investment_expense::{ExpenseType, InvestmentExpense};
 use crate::infra::http::ApiError;
 use axum::{Json, Router, extract::State, routing::get};
 use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc, Weekday};
@@ -225,6 +231,78 @@ pub struct DuplicateIncome {
     pub income_ids: Vec<i64>,
 }
 
+/// More than one interest-income row carrying identical figures on one date
+/// from one source (SCENARIOS H-01). Interest has no listing to key on, so
+/// `source` — the free-text payer, "ANZ savings account" — and the optional
+/// holding account stand in for it: two $250 credits on one day from two
+/// different banks are legitimate and stay unflagged, while the same credit
+/// keyed twice doubles the year's `interest_income` line and any withholding
+/// beside it.
+///
+/// Deliberately a **warning, not a constraint**, the same call as
+/// [`DuplicateIncome`]: a payer really can credit the same amount twice in one
+/// day (two term deposits of equal size maturing together), so the pair stays
+/// enterable.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DuplicateInterest {
+    pub date_paid: NaiveDate,
+    /// ISO 4217 currency the shared amount is stated in (part of the key).
+    pub currency: String,
+    /// The gross interest each duplicated row declares, in `currency`.
+    pub amount: Decimal,
+    /// The free-text source the rows share (part of the key); `None` when none
+    /// of them recorded one.
+    pub source: Option<String>,
+    /// The holding account the rows share (part of the key); `None` for
+    /// interest from outside the portfolio's accounts.
+    pub holding_account_id: Option<i64>,
+    /// How many rows share the whole key — always ≥ 2.
+    pub interest_count: i64,
+    /// The ids sharing it, ascending, so the surplus row can be opened and
+    /// deleted without a search.
+    pub interest_ids: Vec<i64>,
+}
+
+/// More than one investment-expense row carrying identical figures on one date
+/// (SCENARIOS H-06). The deduction is claimed once per row, so a re-submitted
+/// form lifts the year's `deductions_*` line and lowers
+/// `net_assessable_investment_income` by the same amount again.
+///
+/// The key is everything that identifies the expense: the date, the type, the
+/// money figures (including the `gross_amount` / `deductible_percentage`
+/// provenance pair), the currency, the free-text description, and both optional
+/// attributions. Two advice fees of $200 on one day against two different
+/// listings — or with different descriptions — are legitimate and stay
+/// unflagged; the same invoice keyed twice is not.
+///
+/// Deliberately a **warning, not a constraint**, the same call as
+/// [`DuplicateIncome`].
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DuplicateExpense {
+    pub date_incurred: NaiveDate,
+    pub expense_type: ExpenseType,
+    /// ISO 4217 currency the shared amount is stated in (part of the key).
+    pub currency: String,
+    /// The deductible amount each duplicated row claims, in `currency`.
+    pub amount: Decimal,
+    /// The free-text description the rows share (part of the key).
+    pub description: Option<String>,
+    /// The listing the rows are attributed to (part of the key); `None` for a
+    /// portfolio-wide expense.
+    pub listing_id: Option<i64>,
+    /// That listing's ticker, so the warning names the holding rather than only
+    /// its id; `None` for a portfolio-wide expense.
+    pub ticker: Option<String>,
+    /// The holding account the rows are attributed to (part of the key);
+    /// `None` for a portfolio-wide expense.
+    pub holding_account_id: Option<i64>,
+    /// How many rows share the whole key — always ≥ 2.
+    pub expense_count: i64,
+    /// The ids sharing it, ascending, so the surplus row can be opened and
+    /// deleted without a search.
+    pub expense_ids: Vec<i64>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct HealthReport {
     /// Latest `closing_prices` date stored with status ok, across every
@@ -254,6 +332,12 @@ pub struct HealthReport {
     /// income row of identical amounts, newest first. Empty when no two rows
     /// declare the same payment twice.
     pub duplicate_income: Vec<DuplicateIncome>,
+    /// Every group of identical interest-income rows (same date, figures,
+    /// currency, source and holding account), newest first.
+    pub duplicate_interest: Vec<DuplicateInterest>,
+    /// Every group of identical investment-expense rows (same date, type,
+    /// figures, currency, description and attributions), newest first.
+    pub duplicate_expenses: Vec<DuplicateExpense>,
 }
 
 /// Business days (Mon–Fri) strictly after `from`, up to and including `today`.
@@ -559,6 +643,163 @@ async fn db_duplicate_income(
     Ok(duplicates)
 }
 
+/// Whether two interest rows are the same credit entered twice — see
+/// [`DuplicateInterest`]. Every stored field except the id is compared: the
+/// money figures as `Decimal`s rather than as the stored TEXT (so `"250.0"`
+/// and `"250.00"` match), and `source` / `holding_account_id` as the payer
+/// identity that interest has instead of a listing.
+fn same_interest_entry(a: &InterestIncome, b: &InterestIncome) -> bool {
+    a.date_paid == b.date_paid
+        && a.currency == b.currency
+        && a.amount == b.amount
+        && a.tfn_withholding_tax == b.tfn_withholding_tax
+        && a.foreign_source == b.foreign_source
+        && a.foreign_tax_paid == b.foreign_tax_paid
+        && a.source == b.source
+        && a.holding_account_id == b.holding_account_id
+}
+
+/// Whether two expense rows are the same invoice entered twice — see
+/// [`DuplicateExpense`]. Every stored field except the id is compared,
+/// including the optional provenance pair: two rows agreeing on what is claimed
+/// but disagreeing on the gross they were apportioned from came off different
+/// invoices.
+fn same_expense_entry(a: &InvestmentExpense, b: &InvestmentExpense) -> bool {
+    a.date_incurred == b.date_incurred
+        && a.expense_type == b.expense_type
+        && a.currency == b.currency
+        && a.amount == b.amount
+        && a.gross_amount == b.gross_amount
+        && a.deductible_percentage == b.deductible_percentage
+        && a.description == b.description
+        && a.listing_id == b.listing_id
+        && a.holding_account_id == b.holding_account_id
+}
+
+/// Interest rows declaring one credit twice — see [`DuplicateInterest`].
+///
+/// Read on the caller's transaction and grouped in Rust for the same reason as
+/// [`db_duplicate_income`]: the amounts are part of the key and they are TEXT
+/// decimals, which SQL would compare as strings. Only rows sharing a date with
+/// another row are read — the pre-narrowing is on the date alone, since the
+/// rest of the key is nullable (`source`, `holding_account_id`) and would need
+/// null-safe comparison in SQL to no benefit: same-day interest rows are a
+/// handful even in a busy year.
+async fn db_duplicate_interest(
+    conn: &mut sqlx::SqliteConnection,
+) -> Result<Vec<DuplicateInterest>, sqlx::Error> {
+    let rows: Vec<InterestIncome> = sqlx::query_as(
+        "SELECT * FROM interest_income i \
+         WHERE EXISTS (SELECT 1 FROM interest_income o \
+                       WHERE o.date_paid = i.date_paid AND o.id <> i.id) \
+         ORDER BY i.id",
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+
+    // Grouped by scanning, read in id order so each group's ids come out
+    // ascending (the same shape as `db_duplicate_income`).
+    let mut groups: Vec<Vec<InterestIncome>> = Vec::new();
+    for row in rows {
+        match groups
+            .iter_mut()
+            .find(|group| same_interest_entry(&group[0], &row))
+        {
+            Some(group) => group.push(row),
+            None => groups.push(vec![row]),
+        }
+    }
+    let mut duplicates: Vec<DuplicateInterest> = groups
+        .into_iter()
+        .filter(|group| group.len() > 1)
+        .map(|group| {
+            let first = &group[0];
+            DuplicateInterest {
+                date_paid: first.date_paid,
+                currency: first.currency.clone(),
+                amount: first.amount,
+                source: first.source.clone(),
+                holding_account_id: first.holding_account_id,
+                interest_count: group.len() as i64,
+                interest_ids: group.iter().map(|row| row.id).collect(),
+            }
+        })
+        .collect();
+    // Newest first, matching the other duplicate lists.
+    duplicates.sort_by(|a, b| {
+        b.date_paid
+            .cmp(&a.date_paid)
+            .then_with(|| a.source.cmp(&b.source))
+            .then_with(|| a.interest_ids.cmp(&b.interest_ids))
+    });
+    Ok(duplicates)
+}
+
+/// Investment-expense rows claiming one expense twice — see
+/// [`DuplicateExpense`]. Same shape as [`db_duplicate_interest`], plus the
+/// ticker lookup for a listing-attributed row.
+async fn db_duplicate_expenses(
+    conn: &mut sqlx::SqliteConnection,
+) -> Result<Vec<DuplicateExpense>, sqlx::Error> {
+    let rows: Vec<InvestmentExpense> = sqlx::query_as(
+        "SELECT * FROM investment_expenses e \
+         WHERE EXISTS (SELECT 1 FROM investment_expenses o \
+                       WHERE o.date_incurred = e.date_incurred AND o.id <> e.id) \
+         ORDER BY e.id",
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    if rows.is_empty() {
+        return Ok(Vec::new());
+    }
+    let tickers: HashMap<i64, String> =
+        sqlx::query_as::<_, (i64, String)>("SELECT id, ticker FROM listings")
+            .fetch_all(&mut *conn)
+            .await?
+            .into_iter()
+            .collect();
+
+    let mut groups: Vec<Vec<InvestmentExpense>> = Vec::new();
+    for row in rows {
+        match groups
+            .iter_mut()
+            .find(|group| same_expense_entry(&group[0], &row))
+        {
+            Some(group) => group.push(row),
+            None => groups.push(vec![row]),
+        }
+    }
+    let mut duplicates: Vec<DuplicateExpense> = groups
+        .into_iter()
+        .filter(|group| group.len() > 1)
+        .map(|group| {
+            let first = &group[0];
+            DuplicateExpense {
+                date_incurred: first.date_incurred,
+                expense_type: first.expense_type,
+                currency: first.currency.clone(),
+                amount: first.amount,
+                description: first.description.clone(),
+                listing_id: first.listing_id,
+                // The FK guarantees a set listing exists; a row read between
+                // the two queries is the only way to miss it, and the ids are
+                // named either way.
+                ticker: first.listing_id.and_then(|id| tickers.get(&id).cloned()),
+                holding_account_id: first.holding_account_id,
+                expense_count: group.len() as i64,
+                expense_ids: group.iter().map(|row| row.id).collect(),
+            }
+        })
+        .collect();
+    duplicates.sort_by(|a, b| {
+        b.date_incurred
+            .cmp(&a.date_incurred)
+            .then_with(|| a.ticker.cmp(&b.ticker))
+            .then_with(|| a.expense_ids.cmp(&b.expense_ids))
+    });
+    Ok(duplicates)
+}
+
 /// Read the freshness facts on one snapshot. `today` and `now` are parameters
 /// so tests can pin the staleness thresholds and the "close is final yet"
 /// cut-off to fixed dates.
@@ -598,6 +839,8 @@ pub async fn db_health(
     let duplicate_actions = db_duplicate_actions(&mut tx).await?;
     let duplicate_amma_statements = db_duplicate_amma_statements(&mut tx).await?;
     let duplicate_income = db_duplicate_income(&mut tx).await?;
+    let duplicate_interest = db_duplicate_interest(&mut tx).await?;
+    let duplicate_expenses = db_duplicate_expenses(&mut tx).await?;
     tx.commit().await?;
     let unpriced_days = db_unpriced_days(pool, now).await?;
 
@@ -617,6 +860,8 @@ pub async fn db_health(
         duplicate_actions,
         duplicate_amma_statements,
         duplicate_income,
+        duplicate_interest,
+        duplicate_expenses,
     })
 }
 
@@ -725,6 +970,8 @@ mod tests {
         assert!(h.duplicate_actions.is_empty());
         assert!(h.duplicate_amma_statements.is_empty());
         assert!(h.duplicate_income.is_empty());
+        assert!(h.duplicate_interest.is_empty());
+        assert!(h.duplicate_expenses.is_empty());
     }
 
     #[tokio::test]
@@ -1464,6 +1711,267 @@ mod tests {
         assert_eq!(h.duplicate_income.len(), 1);
         assert_eq!(h.duplicate_income[0].gross_amount, dec("70"));
         assert_eq!(h.duplicate_income[0].income_ids, vec![1, 2]);
+    }
+
+    // The two listing-less sides of the tax summary (SCENARIOS H-01, H-06).
+
+    async fn insert_interest(
+        pool: &SqlitePool,
+        id: i64,
+        date: NaiveDate,
+        amount: Decimal,
+        source: Option<&str>,
+    ) {
+        crate::entities::interest_income::db_upsert(
+            pool,
+            &crate::entities::interest_income::InterestIncome {
+                id,
+                date_paid: date,
+                amount,
+                tfn_withholding_tax: Decimal::ZERO,
+                foreign_source: false,
+                foreign_tax_paid: Decimal::ZERO,
+                currency: "AUD".to_string(),
+                source: source.map(str::to_string),
+                holding_account_id: None,
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    fn an_expense(
+        id: i64,
+        date: NaiveDate,
+        expense_type: ExpenseType,
+        amount: Decimal,
+    ) -> InvestmentExpense {
+        InvestmentExpense {
+            id,
+            date_incurred: date,
+            expense_type,
+            amount,
+            gross_amount: None,
+            deductible_percentage: None,
+            currency: "AUD".to_string(),
+            description: None,
+            listing_id: None,
+            holding_account_id: None,
+        }
+    }
+
+    async fn insert_expense(pool: &SqlitePool, expense: &InvestmentExpense) {
+        crate::entities::investment_expense::db_upsert(pool, expense)
+            .await
+            .unwrap();
+    }
+
+    /// A term-deposit credit keyed twice doubles the year's gross interest and
+    /// nothing else notices, so the health report names the pair by id.
+    #[tokio::test]
+    async fn duplicated_interest_rows_are_reported_with_their_ids() {
+        let pool = test_pool().await;
+        insert_interest(&pool, 1, ymd(2026, 3, 10), dec("250"), Some("ANZ savings")).await;
+        insert_interest(&pool, 2, ymd(2026, 3, 10), dec("250"), Some("ANZ savings")).await;
+        insert_interest(&pool, 3, ymd(2026, 6, 30), dec("500"), Some("Term deposit")).await;
+        insert_interest(&pool, 4, ymd(2026, 6, 30), dec("500"), Some("Term deposit")).await;
+
+        let h = health(&pool, ymd(2026, 7, 13)).await;
+        // Newest first, as on every other duplicate list.
+        assert_eq!(h.duplicate_interest.len(), 2);
+        let june = &h.duplicate_interest[0];
+        assert_eq!(june.date_paid, ymd(2026, 6, 30));
+        assert_eq!(june.amount, dec("500"));
+        assert_eq!(june.currency, "AUD");
+        assert_eq!(june.source.as_deref(), Some("Term deposit"));
+        assert_eq!(june.holding_account_id, None);
+        assert_eq!(june.interest_count, 2);
+        assert_eq!(june.interest_ids, vec![3, 4]);
+        let march = &h.duplicate_interest[1];
+        assert_eq!(march.amount, dec("250"));
+        assert_eq!(march.source.as_deref(), Some("ANZ savings"));
+        assert_eq!(march.interest_ids, vec![1, 2]);
+    }
+
+    /// Interest has no listing, so `source` and the holding account carry the
+    /// payer identity: two $250 credits on one day from different accounts are
+    /// legitimate and stay unflagged, as do rows differing in date, amount, or
+    /// any withholding figure.
+    #[tokio::test]
+    async fn interest_differing_in_any_key_field_is_not_a_duplicate() {
+        let pool = test_pool().await;
+        crate::entities::holding_account::db_upsert(
+            &pool,
+            &crate::entities::holding_account::HoldingAccount {
+                id: 2,
+                name: "Second".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        // Same date and amount, different source: two banks, one day.
+        insert_interest(&pool, 1, ymd(2026, 3, 10), dec("250"), Some("ANZ savings")).await;
+        insert_interest(&pool, 2, ymd(2026, 3, 10), dec("250"), Some("CBA savings")).await;
+        // Same source and amount, different date.
+        insert_interest(&pool, 3, ymd(2026, 9, 10), dec("250"), Some("ANZ savings")).await;
+        // Same source and date, different amount.
+        insert_interest(
+            &pool,
+            4,
+            ymd(2026, 3, 10),
+            dec("12.34"),
+            Some("ANZ savings"),
+        )
+        .await;
+        // Same date, amount and source, different holding account.
+        crate::entities::interest_income::db_upsert(
+            &pool,
+            &crate::entities::interest_income::InterestIncome {
+                id: 5,
+                date_paid: ymd(2026, 3, 10),
+                amount: dec("250"),
+                tfn_withholding_tax: Decimal::ZERO,
+                foreign_source: false,
+                foreign_tax_paid: Decimal::ZERO,
+                currency: "AUD".to_string(),
+                source: Some("ANZ savings".to_string()),
+                holding_account_id: Some(2),
+            },
+        )
+        .await
+        .unwrap();
+        // Same everything but the TFN amount withheld — one row was keyed from
+        // a statement that showed the withholding, so they are different rows.
+        crate::entities::interest_income::db_upsert(
+            &pool,
+            &crate::entities::interest_income::InterestIncome {
+                id: 6,
+                date_paid: ymd(2026, 3, 10),
+                amount: dec("250"),
+                tfn_withholding_tax: dec("117.50"),
+                foreign_source: false,
+                foreign_tax_paid: Decimal::ZERO,
+                currency: "AUD".to_string(),
+                source: Some("ANZ savings".to_string()),
+                holding_account_id: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let h = health(&pool, ymd(2026, 7, 13)).await;
+        assert!(h.duplicate_interest.is_empty());
+    }
+
+    /// Grouped on decimal value, not on the stored TEXT — and three of a kind
+    /// is one row counting three, as on every other list.
+    #[tokio::test]
+    async fn interest_amounts_equal_in_value_but_not_in_text_are_still_duplicates() {
+        let pool = test_pool().await;
+        insert_interest(&pool, 1, ymd(2026, 3, 10), dec("250.0"), Some("ANZ")).await;
+        insert_interest(&pool, 2, ymd(2026, 3, 10), dec("250.00"), Some("ANZ")).await;
+        insert_interest(&pool, 3, ymd(2026, 3, 10), dec("250.000"), Some("ANZ")).await;
+
+        let h = health(&pool, ymd(2026, 7, 13)).await;
+        assert_eq!(h.duplicate_interest.len(), 1);
+        assert_eq!(h.duplicate_interest[0].interest_count, 3);
+        assert_eq!(h.duplicate_interest[0].interest_ids, vec![1, 2, 3]);
+    }
+
+    /// A re-submitted expense form claims the deduction twice, lowering the
+    /// year's net assessable investment income by the same amount again.
+    #[tokio::test]
+    async fn duplicated_expense_rows_are_reported_with_their_ids() {
+        let pool = test_pool().await;
+        test_support::listing(1).ticker("FEEA").insert(&pool).await;
+        for id in [1, 2] {
+            let mut e = an_expense(id, ymd(2026, 3, 10), ExpenseType::AdviceFee, dec("200"));
+            e.listing_id = Some(1);
+            e.description = Some("Annual advice fee".to_string());
+            insert_expense(&pool, &e).await;
+        }
+        for id in [3, 4] {
+            insert_expense(
+                &pool,
+                &an_expense(id, ymd(2026, 6, 1), ExpenseType::LoanInterest, dec("1500")),
+            )
+            .await;
+        }
+
+        let h = health(&pool, ymd(2026, 7, 13)).await;
+        assert_eq!(h.duplicate_expenses.len(), 2);
+        let june = &h.duplicate_expenses[0];
+        assert_eq!(june.date_incurred, ymd(2026, 6, 1));
+        assert_eq!(june.expense_type, ExpenseType::LoanInterest);
+        assert_eq!(june.amount, dec("1500"));
+        assert_eq!(june.currency, "AUD");
+        // A portfolio-wide expense names no holding.
+        assert_eq!(june.listing_id, None);
+        assert_eq!(june.ticker, None);
+        assert_eq!(june.expense_ids, vec![3, 4]);
+        let march = &h.duplicate_expenses[1];
+        assert_eq!(march.expense_type, ExpenseType::AdviceFee);
+        assert_eq!(march.amount, dec("200"));
+        assert_eq!(march.listing_id, Some(1));
+        // …and a listing-attributed one is named by ticker, not only by id.
+        assert_eq!(march.ticker.as_deref(), Some("FEEA"));
+        assert_eq!(march.description.as_deref(), Some("Annual advice fee"));
+        assert_eq!(march.expense_count, 2);
+        assert_eq!(march.expense_ids, vec![1, 2]);
+    }
+
+    /// Everything that identifies the expense is in the key: two advice fees of
+    /// the same amount on one day against different listings — or of different
+    /// types, amounts, descriptions, or apportionment provenance — are ordinary
+    /// entry, not a double claim.
+    #[tokio::test]
+    async fn expenses_differing_in_any_key_field_are_not_duplicates() {
+        let pool = test_pool().await;
+        test_support::listing(1).ticker("AAA").insert(&pool).await;
+        test_support::listing(2).ticker("BBB").insert(&pool).await;
+        let base = an_expense(0, ymd(2026, 3, 10), ExpenseType::AdviceFee, dec("200"));
+        // Same date, type and amount, different listing.
+        let mut a = base.clone();
+        a.id = 1;
+        a.listing_id = Some(1);
+        insert_expense(&pool, &a).await;
+        let mut b = base.clone();
+        b.id = 2;
+        b.listing_id = Some(2);
+        insert_expense(&pool, &b).await;
+        // Same listing-less row, different type.
+        let mut c = base.clone();
+        c.id = 3;
+        c.expense_type = ExpenseType::ManagementFee;
+        insert_expense(&pool, &c).await;
+        // …different amount.
+        let mut d = base.clone();
+        d.id = 4;
+        d.amount = dec("12.34");
+        insert_expense(&pool, &d).await;
+        // …different description: one invoice per quarter, keyed the same day.
+        let mut e = base.clone();
+        e.id = 5;
+        e.description = Some("Q1".to_string());
+        insert_expense(&pool, &e).await;
+        let mut f = base.clone();
+        f.id = 6;
+        f.description = Some("Q2".to_string());
+        insert_expense(&pool, &f).await;
+        // …and one carrying the apportionment provenance the other lacks.
+        let mut g = base.clone();
+        g.id = 7;
+        g.gross_amount = Some(dec("400"));
+        g.deductible_percentage = Some(dec("50"));
+        insert_expense(&pool, &g).await;
+        // …plus one on another date entirely.
+        let mut i = base.clone();
+        i.id = 8;
+        i.date_incurred = ymd(2026, 9, 10);
+        insert_expense(&pool, &i).await;
+
+        let h = health(&pool, ymd(2026, 7, 13)).await;
+        assert!(h.duplicate_expenses.is_empty());
     }
 
     #[tokio::test]

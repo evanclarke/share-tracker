@@ -30,8 +30,12 @@ use sqlx::SqlitePool;
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct InterestIncome {
     pub id: i64,
-    /// Date paid/credited: its month sets the ATO FX conversion month and the
-    /// Australian financial year the interest is assessed in.
+    /// The date the interest was **credited** — credited, received, or applied
+    /// or dealt with on the holder's behalf or as they direct, which for a term
+    /// deposit run to maturity is the maturity date and is never the date the
+    /// funds became reachable (docs/ato/investment-income-timing.md, QC 72101).
+    /// Its month sets the ATO FX conversion month and the Australian financial
+    /// year the interest is assessed in.
     pub date_paid: NaiveDate,
     /// Gross interest (including any amount withheld), in `currency`.
     #[sqlx(try_from = "Money")]

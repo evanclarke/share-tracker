@@ -1062,7 +1062,10 @@ async function viewAttachments(ownerField, ownerId) {
 // cost-base figures alike (linking to AMMA Statements), and any distribution
 // entered twice — identical amounts, same listing, account and payment date —
 // which declares the dividend and its franking credits twice (linking to
-// Income). Refreshed on every
+// Income), and the same double-entry on the two listing-less sides of the tax
+// summary: an identical interest credit (linking to Interest Income) or an
+// identical deductible expense (linking to Investment Expenses), each of which
+// is counted once per row. Refreshed on every
 // route render, so fixing the cause clears it on the next navigation. A
 // failing health fetch hides the banner rather than breaking the app.
 async function refreshHealthBanner() {
@@ -1106,6 +1109,20 @@ async function refreshHealthBanner() {
         + d.income_ids.join(', ')
         + ') — the dividend and its franking credits are counted once per row; delete the duplicate unless both are real.');
     });
+    const duplicateInterest = h.duplicate_interest || [];
+    duplicateInterest.forEach(function (d) {
+      problems.push(d.interest_count + ' identical interest rows of ' + d.amount + ' ' + d.currency
+        + (d.source ? ' from ' + d.source : '') + ' credited ' + d.date_paid + ' (ids '
+        + d.interest_ids.join(', ')
+        + ') — the year’s gross interest counts each row; delete the duplicate unless both are real.');
+    });
+    const duplicateExpenses = h.duplicate_expenses || [];
+    duplicateExpenses.forEach(function (d) {
+      problems.push(d.expense_count + ' identical ' + d.expense_type + ' expenses of ' + d.amount
+        + ' ' + d.currency + (d.ticker ? ' for ' + d.ticker : '') + ' incurred ' + d.date_incurred
+        + ' (ids ' + d.expense_ids.join(', ')
+        + ') — the deduction is claimed once per row; delete the duplicate unless both are real.');
+    });
     if (problems.length === 0) {
       banner.hidden = true;
       banner.innerHTML = '';
@@ -1125,6 +1142,12 @@ async function refreshHealthBanner() {
     }
     if (duplicateIncome.length > 0) {
       banner.appendChild(el('a', { href: '#/e/income' }, 'Open Income →'));
+    }
+    if (duplicateInterest.length > 0) {
+      banner.appendChild(el('a', { href: '#/e/interest_income' }, 'Open Interest Income →'));
+    }
+    if (duplicateExpenses.length > 0) {
+      banner.appendChild(el('a', { href: '#/e/investment_expenses' }, 'Open Investment Expenses →'));
     }
     banner.hidden = false;
   } catch (e) {

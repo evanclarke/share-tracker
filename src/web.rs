@@ -1485,6 +1485,19 @@ mod tests {
         assert!(js.contains("the dividend and its franking credits are counted once per row"));
         assert!(js.contains("'#/e/income'"));
         assert!(js.contains("Open Income"));
+        // …plus the same double-entry on the two listing-less sides of the tax
+        // summary (SCENARIOS H-01, H-06: an interest credit or a deductible
+        // expense counted once per row), each linking to its own screen…
+        assert!(js.contains("duplicate_interest"));
+        assert!(js.contains("identical interest rows of"));
+        assert!(js.contains("the year’s gross interest counts each row"));
+        assert!(js.contains("'#/e/interest_income'"));
+        assert!(js.contains("Open Interest Income"));
+        assert!(js.contains("duplicate_expenses"));
+        assert!(js.contains("identical ' + d.expense_type + ' expenses of"));
+        assert!(js.contains("the deduction is claimed once per row"));
+        assert!(js.contains("'#/e/investment_expenses'"));
+        assert!(js.contains("Open Investment Expenses"));
         // …and refreshes on every route render so it appears on the main views.
         assert!(js.contains("refreshHealthBanner(); // deliberately not awaited"));
         // The strip's host element ships in the page shell with its styles.
