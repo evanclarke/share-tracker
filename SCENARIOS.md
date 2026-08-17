@@ -71,7 +71,7 @@ behind or became a recorded finding.
 | E. Corporate actions | 51 | 2026-08-16 | 5 raised, all closed — see below |
 | F. AMIT / AMMA | 25 | 2026-08-16 | 6 raised, all closed — see below |
 | G. Dividends, franking, and the holding-period rule | 25 | 2026-08-16 | 6 raised, all closed — see below |
-| H. Interest, expenses, and other income | 10 | 2026-08-17 | 6 raised — see below |
+| H. Interest, expenses, and other income | 10 | 2026-08-17 | 6 raised, all closed — see below |
 | I. DRP | 14 | — | — |
 | J. Employee share schemes | 14 | — | — |
 | K. Inherited parcels | 10 | — | — |
@@ -427,12 +427,12 @@ loses that attribution in the annual tax report (H-07).
 
 | Finding | Scenarios | Status |
 | --- | --- | --- |
-| A negative investment expense is accepted and adds to assessable income | H-06, H-09 | open |
-| An investment expense's apportionment provenance is never checked against what is claimed | H-06 | open |
-| Nothing states that interest belongs to the year it is credited | H-05 | open |
-| An expense covering more than one financial year has nowhere to be apportioned | H-08 | open |
-| Duplicate interest and expense rows are silently double-counted | H-01, H-06 | open |
-| A deduction's listing attribution never reaches the annual tax report | H-07 | open |
+| A negative investment expense is accepted and adds to assessable income | H-06, H-09 | fixed 2026-08-17 — archived in [`DONE/reviews.md`](DONE/reviews.md) |
+| An investment expense's apportionment provenance is never checked against what is claimed | H-06 | fixed 2026-08-17 — archived in [`DONE/reviews.md`](DONE/reviews.md) |
+| Nothing states that interest belongs to the year it is credited | H-05 | fixed 2026-08-17 — archived in [`DONE/tax-domain.md`](DONE/tax-domain.md) |
+| An expense covering more than one financial year has nowhere to be apportioned | H-08 | fixed 2026-08-17 — archived in [`DONE/reviews.md`](DONE/reviews.md) |
+| Duplicate interest and expense rows are silently double-counted | H-01, H-06 | fixed 2026-08-17 — archived in [`DONE/reporting.md`](DONE/reporting.md) |
+| A deduction's listing attribution never reaches the annual tax report | H-07 | fixed 2026-08-17 — archived in [`DONE/reporting.md`](DONE/reporting.md) |
 
 ---
 
