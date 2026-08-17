@@ -10,49 +10,6 @@ findings are all closed in DONE.md), except where a section's heading names anot
 (e.g. REQUIREMENTS, SCENARIOS). Each section records one finding; sections land in DONE.md as they
 are fixed or decided.
 
-## A negative investment expense is accepted and *adds* to assessable income (SCENARIOS H-06, H-09)
-(SCENARIOS.md section H verification pass, 2026-08-17. `entities::investment_expense::db_upsert` is
-the only `db_upsert` in the tree with no write-time check at all — it has no error enum, returning
-`sqlx::Error` — so every figure on the row is whatever was keyed.)
-- [ ] H-06 — `PUT /investment_expenses/1` with `expense_type` `Other` and `amount` `-500` answers
-  `204`. The tax summary then reports `deductions_other` `-500`, `deductions_total` `-495` (against
-  a legitimate `+5` loan-interest row) and `net_assessable_investment_income` **`495`** on a year
-  whose `gross_assessable_investment_income` is `0`: a negative deduction is arithmetically income,
-  and it inflates the net line above the gross
-- [ ] The sibling entity already refuses exactly this. `interest_income::UpsertError::NegativeAmount`
-  rejects a negative `amount`/`tfn_withholding_tax`/`foreign_tax_paid` with `422` naming the field,
-  "interest figures are the statement's own positive (or zero) amounts" (2026-07-12 review, where
-  negatives "silently reduced the year's gross-interest line"). The expense entity is the one that
-  was missed — the same class of defect, one line further down the same report
-- [ ] `gross_amount` `-100` is accepted too, and `deductible_percentage` takes `150` and `-10` — a
-  percentage outside 0–100 is not a percentage
-- [ ] The fix is the sibling's, verbatim in shape: an `UpsertError` with `NegativeAmount(&'static str)`
-  (plus a percentage-range variant), the `From<UpsertError> for ApiError` arm carrying the
-  user-facing wording, and the new `422` causes in `docs/API.md`'s catalogue
-- [ ] Tests: a negative `amount`/`gross_amount` and an out-of-range `deductible_percentage` are each
-  refused `422` naming the field with nothing persisted, zero stays acceptable, and the tax summary's
-  net line can no longer exceed its gross line from a deduction alone
-
-## An investment expense's apportionment provenance is never checked against what is claimed (SCENARIOS H-06)
-(SCENARIOS.md section H verification pass, 2026-08-17.)
-- [ ] H-06 — the scenario is the ordinary one: a fee that is part income-producing and part private,
-  where the user works out the deductible share. The row records all three figures — `gross_amount`,
-  `deductible_percentage`, `amount` — and nothing relates them. `gross_amount` `100` with
-  `deductible_percentage` `50` and `amount` `900` answers `204`; so does an `amount` nine times a
-  `gross_amount` with no percentage at all
-- [ ] Both fields are documented "optional provenance (informational only)", so this is a deliberate
-  starting point, not an oversight — but the system has the opposite precedent for a supplied pair:
-  `income.amount_per_security × securities_held` must equal the components to the cent or the write
-  is refused `422` naming the computed product (G-23), and `trades.statement_total` reconciles the
-  same way. A user who keys 50% and then the *gross* figure as the amount over-claims, and the two
-  fields that record the mistake sit inertly beside it
-- [ ] **Decided 2026-08-17: cross-check it, the `amount_per_security` way.** When both provenance
-  fields are supplied, `gross × pct` cent-rounded must equal `amount` or the write is refused `422`
-  naming the computed figure. (The alternatives put aside: a health-report warning like the
-  `duplicate_*` lists, or documenting the pair as a note to self that nothing verifies.)
-- [ ] Tests: whichever way it lands, an inconsistent triple is refused/flagged and a consistent one
-  (including the exactly-100% and no-percentage cases) is accepted
-
 ## Nothing states that interest belongs to the year it is *credited* (SCENARIOS H-05)
 (SCENARIOS.md section H verification pass, 2026-08-17.)
 - [ ] H-05 — a term deposit credits $500 of interest on 30 June 2026; the funds are only reachable

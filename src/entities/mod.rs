@@ -409,7 +409,9 @@ mod tests {
                 "/investment_expenses/10",
                 json!({
                     "date_incurred": "2024-03-04", "expense_type": "ManagementFee",
-                    "amount": "88.123456", "gross_amount": "97.135802",
+                    // gross × pct reconciles to the cent (87.90790081 → 87.91),
+                    // which the write-time apportionment check requires.
+                    "amount": "87.907901", "gross_amount": "97.135802",
                     "deductible_percentage": "90.5", "currency": "AUD",
                     "description": "Annual fee", "listing_id": 1,
                 }),

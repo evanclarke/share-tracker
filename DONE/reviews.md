@@ -1012,3 +1012,96 @@ rollover side's own behaviour is pinned by
 `entities::demerger::tests::demerged_parcel_sold_six_months_later_discounts_from_the_original_buy`
 and `entities::demerger::tests::deemed_date_and_a_later_split_both_survive_on_a_replacement_parcel`,
 added in the same pass. Full suite 1424 passed / 0 failed.
+
+## A negative investment expense is accepted and *adds* to assessable income (SCENARIOS H-06, H-09)
+(SCENARIOS.md section H verification pass, 2026-08-17. `entities::investment_expense::db_upsert` is
+the only `db_upsert` in the tree with no write-time check at all — it has no error enum, returning
+`sqlx::Error` — so every figure on the row is whatever was keyed.)
+- [x] H-06 — `PUT /investment_expenses/1` with `expense_type` `Other` and `amount` `-500` answers
+  `204`. The tax summary then reports `deductions_other` `-500`, `deductions_total` `-495` (against
+  a legitimate `+5` loan-interest row) and `net_assessable_investment_income` **`495`** on a year
+  whose `gross_assessable_investment_income` is `0`: a negative deduction is arithmetically income,
+  and it inflates the net line above the gross
+- [x] The sibling entity already refuses exactly this. `interest_income::UpsertError::NegativeAmount`
+  rejects a negative `amount`/`tfn_withholding_tax`/`foreign_tax_paid` with `422` naming the field,
+  "interest figures are the statement's own positive (or zero) amounts" (2026-07-12 review, where
+  negatives "silently reduced the year's gross-interest line"). The expense entity is the one that
+  was missed — the same class of defect, one line further down the same report
+- [x] `gross_amount` `-100` is accepted too, and `deductible_percentage` takes `150` and `-10` — a
+  percentage outside 0–100 is not a percentage
+- [x] The fix is the sibling's, verbatim in shape: an `UpsertError` with `NegativeAmount(&'static str)`
+  (plus a percentage-range variant), the `From<UpsertError> for ApiError` arm carrying the
+  user-facing wording, and the new `422` causes in `docs/API.md`'s catalogue
+- [x] Tests: a negative `amount`/`gross_amount` and an out-of-range `deductible_percentage` are each
+  refused `422` naming the field with nothing persisted, zero stays acceptable, and the tax summary's
+  net line can no longer exceed its gross line from a deduction alone
+
+**Resolution (2026-08-17): fixed as the sibling's shape, together with the apportionment
+cross-check below (one `UpsertError`, one pass over the entity).**
+
+`entities::investment_expense` gained the `UpsertError` enum it was missing —
+`Db(#[from] sqlx::Error)`, `NegativeAmount(&'static str)`, `PercentageOutOfRange(Decimal)` (carrying
+the rejected value) — with the user-facing wording in the `From<UpsertError> for ApiError` arms, per
+the project's split between `#[error]` log wording and 422 bodies. `db_upsert` now returns
+`Result<(), UpsertError>` and rejects a negative `amount`/`gross_amount` naming the field, and a
+`deductible_percentage` outside 0–100 inclusive naming the value. Zero stays acceptable on all three
+(a nil-cost expense, and the 0%/100% boundaries).
+
+`docs/API.md` gained a *No negative amounts, and a percentage is a percentage* paragraph under
+Investment expenses spelling out **why** a negative deduction is income (the tax summary subtracts
+the deduction total from gross, so `-500` lifts the net line above the gross), plus the new causes in
+the Response-codes `422` catalogue; `docs/SCHEMA.md`'s three column lines now state the constraints.
+
+Tests: `entities::investment_expense::tests::api_negative_amounts_rejected_422` (both fields named,
+nothing persisted, zero accepted), `::api_percentage_outside_0_100_rejected_422` (both ends refused
+naming the value, 0 and 100 accepted), and
+`reports::tax_summary::tests::db_a_deduction_alone_cannot_lift_the_net_line_above_the_gross` — the
+scenario's own `-500`/`+5` pair, asserting the negative write is refused and the year that reaches
+the report has `net ≤ gross`. Full suite 1554 passed / 0 failed.
+
+## An investment expense's apportionment provenance is never checked against what is claimed (SCENARIOS H-06)
+(SCENARIOS.md section H verification pass, 2026-08-17.)
+- [x] H-06 — the scenario is the ordinary one: a fee that is part income-producing and part private,
+  where the user works out the deductible share. The row records all three figures — `gross_amount`,
+  `deductible_percentage`, `amount` — and nothing relates them. `gross_amount` `100` with
+  `deductible_percentage` `50` and `amount` `900` answers `204`; so does an `amount` nine times a
+  `gross_amount` with no percentage at all
+- [x] Both fields are documented "optional provenance (informational only)", so this is a deliberate
+  starting point, not an oversight — but the system has the opposite precedent for a supplied pair:
+  `income.amount_per_security × securities_held` must equal the components to the cent or the write
+  is refused `422` naming the computed product (G-23), and `trades.statement_total` reconciles the
+  same way. A user who keys 50% and then the *gross* figure as the amount over-claims, and the two
+  fields that record the mistake sit inertly beside it
+- [x] **Decided 2026-08-17: cross-check it, the `amount_per_security` way.** When both provenance
+  fields are supplied, `gross × pct` cent-rounded must equal `amount` or the write is refused `422`
+  naming the computed figure. (The alternatives put aside: a health-report warning like the
+  `duplicate_*` lists, or documenting the pair as a note to self that nothing verifies.)
+- [x] Tests: whichever way it lands, an inconsistent triple is refused/flagged and a consistent one
+  (including the exactly-100% and no-percentage cases) is accepted
+
+**Resolution (2026-08-17): cross-checked as decided.**
+
+`check_apportionment` runs in `db_upsert` after the negative/range checks (so a degenerate figure
+gets the clearer message first) and mirrors `income::check_per_share`: with **both** provenance
+fields supplied, `gross_amount × deductible_percentage / 100` must equal `amount`, and the refusal
+— `ApportionmentMismatch { product }` → `422` — carries the computed figure. Supplying one of the
+pair, or neither, skips the check: either alone records less than a determination, and the decision
+was explicit that the no-percentage case stays acceptable.
+
+One departure from the `amount_per_security` precedent, deliberate: **both** sides are cent-rounded
+(half away from zero) rather than only the product. Either figure here can legitimately carry
+sub-cent precision — a fee stated to more decimals, a percentage that doesn't divide evenly (the
+existing `db_round_trips_with_decimal_precision_and_provenance` row is 816.4609052 at 75% =
+612.3456789) — while the money that reaches the return is cents, so comparing a cent-rounded product
+against an exact amount would reject faithfully-keyed statements. The `entities::mod` round-trip
+fixture was re-based onto a reconciling triple for the same reason.
+
+`docs/API.md` gained an *Apportionment cross-check* paragraph (the rule, why both sides round, what
+skips the check, and the over-claim it catches) plus the catalogue entry; `docs/SCHEMA.md` states it
+on the column; the two `config.js` field hints now say the pair is cross-checked rather than
+"informational only".
+
+Tests: `entities::investment_expense::tests::api_apportionment_provenance_must_reconcile` — the
+scenario's own 100-at-50%-claimed-as-900 refused with the computed figure in the body and nothing
+persisted, and the consistent, exactly-100%, no-percentage, no-gross-amount, neither, and
+reconciles-to-the-cent (1000 × 33.3333%) cases all accepted. Full suite 1554 passed / 0 failed.

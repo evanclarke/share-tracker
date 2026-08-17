@@ -162,9 +162,9 @@ investment_expenses          Deductible investment expenses — the cost of earn
 ├── id                    INTEGER PK
 ├── date_incurred         DATE   Its month sets the ATO FX conversion month and the Australian financial year the deduction falls in (a July date belongs to the next FY)
 ├── expense_type          TEXT   LoanInterest | ManagementFee | AdviceFee | AccountKeepingFee | Subscription | Other (CHECK-enforced enum)
-├── amount                TEXT (decimal)  The deductible amount — post-apportionment, the figure that goes on the return and the value the tax summary totals
-├── gross_amount          TEXT (decimal, nullable)  Optional provenance (informational only): the pre-apportionment gross expense
-├── deductible_percentage TEXT (decimal, nullable)  Optional provenance (informational only): the percentage of gross_amount the user determined deductible
+├── amount                TEXT (decimal)  The deductible amount — post-apportionment, the figure that goes on the return and the value the tax summary totals; never negative (write-time 422)
+├── gross_amount          TEXT (decimal, nullable)  Optional provenance (no calculation reads it): the pre-apportionment gross expense; never negative (write-time 422)
+├── deductible_percentage TEXT (decimal, nullable)  Optional provenance (no calculation reads it): the percentage of gross_amount the user determined deductible; within 0–100, and — supplied with gross_amount — gross × pct must cent-round to amount (write-time 422)
 ├── currency              TEXT FK→currencies.code   ISO 4217; tax summary converts to AUD by date_incurred month (default AUD)
 ├── description           TEXT (nullable)  Free-text note
 ├── listing_id            INTEGER FK→listings.id (nullable)  The listing the expense relates to; NULL = portfolio-wide

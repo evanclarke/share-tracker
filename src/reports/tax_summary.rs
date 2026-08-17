@@ -2187,6 +2187,45 @@ mod tests {
         assert_eq!(result[0].deductions_total, Decimal::from(200));
     }
 
+    /// SCENARIOS H-06/H-09: a deduction alone can no longer lift the net
+    /// assessable line above the gross. The scenario keyed a `-500` `Other`
+    /// expense beside a legitimate `+5` loan-interest row, which reported
+    /// `deductions_total` `-495` and `net_assessable_investment_income` `495`
+    /// on a year whose gross was `0` — a negative deduction is arithmetically
+    /// income. The write is now refused at the entity, so the year that
+    /// reaches the report carries only the real expense and its net line sits
+    /// below its gross.
+    #[tokio::test]
+    async fn db_a_deduction_alone_cannot_lift_the_net_line_above_the_gross() {
+        let pool = test_pool().await;
+        let d = ymd(2026, 3, 15);
+        investment_expense::db_upsert(
+            &pool,
+            &make_expense(1, d, ExpenseType::LoanInterest, Decimal::from(5)),
+        )
+        .await
+        .unwrap();
+        assert!(
+            investment_expense::db_upsert(
+                &pool,
+                &make_expense(2, d, ExpenseType::Other, Decimal::from(-500)),
+            )
+            .await
+            .is_err(),
+            "a negative expense must never reach the report"
+        );
+
+        let s = &db_tax_summary(&pool).await.unwrap()[0];
+        assert_eq!(s.gross_assessable_investment_income, Decimal::ZERO);
+        assert_eq!(s.deductions_other, Decimal::ZERO);
+        assert_eq!(s.deductions_total, Decimal::from(5));
+        assert_eq!(s.net_assessable_investment_income, Decimal::from(-5));
+        assert!(
+            s.net_assessable_investment_income <= s.gross_assessable_investment_income,
+            "deductions can only reduce the net line, never lift it above the gross"
+        );
+    }
+
     /// A non-AUD expense with no ATO rate fails loudly (no silent zero).
     #[tokio::test]
     async fn db_non_aud_expense_without_rate_fails_loudly() {

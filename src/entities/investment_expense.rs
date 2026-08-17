@@ -7,8 +7,9 @@
 //! `amount` is the **deductible amount** — post-apportionment, the figure that
 //! goes on the return. The ATO's apportionment rules (joint accounts, private vs
 //! income-producing use) are the user's determination, not computed here;
-//! `gross_amount` and `deductible_percentage` are optional provenance only
-//! (informational — no calculation reads them).
+//! `gross_amount` and `deductible_percentage` are optional provenance
+//! (no calculation reads them), but when both are supplied they are
+//! cross-checked against `amount` at write time — see `check_apportionment`.
 //!
 //! The tax summary (`reports::tax_summary`) totals these by expense type and
 //! overall per Australian financial year and nets them against gross assessable
@@ -55,11 +56,15 @@ pub struct InvestmentExpense {
     /// tax summary totals.
     #[sqlx(try_from = "Money")]
     pub amount: Decimal,
-    /// Optional provenance (informational): the pre-apportionment gross expense.
+    /// Optional provenance: the pre-apportionment gross expense. No calculation
+    /// reads it, but supplied alongside `deductible_percentage` it is
+    /// cross-checked against `amount` at write time.
     #[sqlx(try_from = "OptMoney")]
     pub gross_amount: Option<Decimal>,
-    /// Optional provenance (informational): the percentage of `gross_amount` the
-    /// user determined was deductible.
+    /// Optional provenance: the percentage of `gross_amount` the user
+    /// determined was deductible (0–100). No calculation reads it, but supplied
+    /// alongside `gross_amount` it is cross-checked against `amount` at write
+    /// time.
     #[sqlx(try_from = "OptMoney")]
     pub deductible_percentage: Option<Decimal>,
     /// ISO 4217 currency the amount is denominated in. The tax summary converts a
@@ -127,7 +132,89 @@ pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<InvestmentExpen
     http::crud_get(pool, id).await
 }
 
-pub async fn db_upsert(pool: &SqlitePool, e: &InvestmentExpense) -> Result<(), sqlx::Error> {
+#[derive(thiserror::Error, Debug)]
+pub enum UpsertError {
+    #[error("investment expense write failed: {0}")]
+    Db(#[from] sqlx::Error),
+    /// A negative `amount` or `gross_amount` (carries the field name): an
+    /// expense is the invoice's own positive (or zero) figure, and a negative
+    /// deduction is arithmetically income — it lifts the tax summary's net
+    /// assessable line above its gross. Mapped to `422`.
+    #[error("{0} cannot be negative")]
+    NegativeAmount(&'static str),
+    /// `deductible_percentage` outside 0–100 (carries the rejected value): a
+    /// percentage outside that range is not a percentage. Mapped to `422`.
+    #[error("deductible_percentage {0} is outside 0–100")]
+    PercentageOutOfRange(Decimal),
+    /// `gross_amount × deductible_percentage`, cent-rounded, does not equal
+    /// `amount` (carries the computed figure, so the rejection can say what
+    /// the provenance pair actually apportions to). Mapped to `422`.
+    #[error("the apportionment figures compute to {product}, which is not the deductible amount")]
+    ApportionmentMismatch { product: Decimal },
+}
+
+impl From<UpsertError> for ApiError {
+    fn from(e: UpsertError) -> Self {
+        match e {
+            UpsertError::NegativeAmount(field) => ApiError::unprocessable(format!(
+                "{field} cannot be negative — an investment expense is the invoice's own \
+                 positive (or zero) amount; a negative deduction adds to assessable income"
+            )),
+            UpsertError::PercentageOutOfRange(pct) => ApiError::unprocessable(format!(
+                "deductible_percentage {pct} is outside 0–100 — it is the percentage of \
+                 gross_amount you determined was deductible"
+            )),
+            UpsertError::ApportionmentMismatch { product } => ApiError::unprocessable(format!(
+                "apportionment figures do not reconcile: gross_amount × deductible_percentage \
+                 computes to {product}, which must equal amount (the deductible figure)"
+            )),
+            // Unknown currency/listing/account (FK) or a bad enum value (CHECK)
+            // surfaces as 422 with the offending constraint named.
+            UpsertError::Db(err) => err.into(),
+        }
+    }
+}
+
+/// Round half away from zero to the cent, the way statements do.
+fn to_cents(v: Decimal) -> Decimal {
+    v.round_dp_with_strategy(2, rust_decimal::RoundingStrategy::MidpointAwayFromZero)
+}
+
+/// Cross-check the optional apportionment provenance against the deductible
+/// amount: `gross_amount × deductible_percentage / 100`, to the cent, must
+/// equal `amount` to the cent. Both figures are rounded because either may be
+/// carried at sub-cent precision (a fee stated to more decimals, a percentage
+/// that doesn't divide evenly) while the money that reaches the return is
+/// cents. Only checked when **both** are supplied — either alone records less
+/// than a determination (there is nothing to reconcile), and neither means the
+/// apportionment simply wasn't recorded. The same shape as `income`'s
+/// `amount_per_security × securities_held` reconciliation.
+fn check_apportionment(e: &InvestmentExpense) -> Result<(), UpsertError> {
+    let (Some(gross), Some(pct)) = (e.gross_amount, e.deductible_percentage) else {
+        return Ok(());
+    };
+    let product = to_cents(gross * pct / Decimal::ONE_HUNDRED);
+    if product != to_cents(e.amount) {
+        return Err(UpsertError::ApportionmentMismatch { product });
+    }
+    Ok(())
+}
+
+pub async fn db_upsert(pool: &SqlitePool, e: &InvestmentExpense) -> Result<(), UpsertError> {
+    // A negative expense is not an expense: it would reduce the year's
+    // deduction total, and — since the tax summary subtracts that total from
+    // gross assessable investment income — lift the net line above the gross.
+    for (field, value) in [("amount", Some(e.amount)), ("gross_amount", e.gross_amount)] {
+        if value.is_some_and(|v| v < Decimal::ZERO) {
+            return Err(UpsertError::NegativeAmount(field));
+        }
+    }
+    if let Some(pct) = e.deductible_percentage
+        && (pct < Decimal::ZERO || pct > Decimal::ONE_HUNDRED)
+    {
+        return Err(UpsertError::PercentageOutOfRange(pct));
+    }
+    check_apportionment(e)?;
     sqlx::query(
         "INSERT INTO investment_expenses \
          (id, date_incurred, expense_type, amount, gross_amount, deductible_percentage, \
@@ -184,8 +271,6 @@ async fn upsert(
     db_upsert(&pool, &e)
         .await
         .map(|_| StatusCode::NO_CONTENT)
-        // Unknown currency/listing/account (FK) or a bad enum value (CHECK)
-        // surface as 422 with the offending constraint named.
         .map_err(ApiError::from)
 }
 
@@ -295,6 +380,195 @@ mod tests {
         let got = db_get(&pool, 1).await.unwrap().unwrap();
         assert_eq!(got.expense_type, ExpenseType::ManagementFee);
         assert_eq!(got.amount, "120.50".parse::<Decimal>().unwrap());
+    }
+
+    /// SCENARIOS H-06/H-09: a negative `amount` or `gross_amount` is rejected
+    /// with 422 naming the field, and nothing is persisted. A negative
+    /// deduction is arithmetically income — it lifts the tax summary's net
+    /// assessable line above its gross (see
+    /// `a_deduction_alone_cannot_lift_the_net_line_above_the_gross`). Zero
+    /// stays acceptable: a nil-cost expense is legitimate.
+    #[tokio::test]
+    async fn api_negative_amounts_rejected_422() {
+        let pool = test_pool().await;
+        for (field, body) in [
+            (
+                "amount",
+                serde_json::json!({
+                    "date_incurred": "2024-03-15",
+                    "expense_type": "Other",
+                    "amount": "-500"
+                }),
+            ),
+            (
+                "gross_amount",
+                serde_json::json!({
+                    "date_incurred": "2024-03-15",
+                    "expense_type": "Other",
+                    "amount": "100",
+                    "gross_amount": "-100"
+                }),
+            ),
+        ] {
+            let resp = client(&pool).put("/investment_expenses/1", &body).await;
+            assert_eq!(
+                resp.status,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "negative {field} must be rejected"
+            );
+            let detail = resp.text().to_string();
+            assert!(
+                detail.contains(field) && detail.contains("cannot be negative"),
+                "negative {field}: detail must name the field, got: {detail}"
+            );
+            assert!(
+                db_get(&pool, 1).await.unwrap().is_none(),
+                "negative {field}: nothing persisted"
+            );
+        }
+        // Zero is fine on both.
+        let status = put(
+            &pool,
+            1,
+            serde_json::json!({
+                "date_incurred": "2024-03-15",
+                "expense_type": "Other",
+                "amount": "0",
+                "gross_amount": "0"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+
+    /// A `deductible_percentage` outside 0–100 is not a percentage: both ends
+    /// are refused 422 naming the field and the rejected value, with nothing
+    /// persisted, while the boundaries 0 and 100 are accepted.
+    #[tokio::test]
+    async fn api_percentage_outside_0_100_rejected_422() {
+        let pool = test_pool().await;
+        for pct in ["150", "-10"] {
+            let resp = client(&pool)
+                .put(
+                    "/investment_expenses/1",
+                    &serde_json::json!({
+                        "date_incurred": "2024-03-15",
+                        "expense_type": "AdviceFee",
+                        "amount": "100",
+                        "deductible_percentage": pct
+                    }),
+                )
+                .await;
+            assert_eq!(
+                resp.status,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "deductible_percentage {pct} must be rejected"
+            );
+            let detail = resp.text().to_string();
+            assert!(
+                detail.contains("deductible_percentage") && detail.contains(pct),
+                "deductible_percentage {pct}: detail must name field and value, got: {detail}"
+            );
+            assert!(db_get(&pool, 1).await.unwrap().is_none());
+        }
+        for (pct, gross, amount) in [("0", "1000", "0"), ("100", "100", "100")] {
+            let status = put(
+                &pool,
+                1,
+                serde_json::json!({
+                    "date_incurred": "2024-03-15",
+                    "expense_type": "AdviceFee",
+                    "amount": amount,
+                    "gross_amount": gross,
+                    "deductible_percentage": pct
+                }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::NO_CONTENT, "{pct}% must be accepted");
+        }
+    }
+
+    /// SCENARIOS H-06: when both apportionment provenance figures are supplied
+    /// they must reconcile with the deductible amount — `gross × pct`,
+    /// cent-rounded, equals `amount`. The scenario's own case (gross 100 at
+    /// 50% claimed as 900) is refused with the computed figure in the body;
+    /// the consistent case, the exactly-100% case, and the cases where the
+    /// pair is incomplete (nothing to reconcile) are accepted.
+    #[tokio::test]
+    async fn api_apportionment_provenance_must_reconcile() {
+        let pool = test_pool().await;
+        let resp = client(&pool)
+            .put(
+                "/investment_expenses/1",
+                &serde_json::json!({
+                    "date_incurred": "2024-03-15",
+                    "expense_type": "AdviceFee",
+                    "amount": "900",
+                    "gross_amount": "100",
+                    "deductible_percentage": "50"
+                }),
+            )
+            .await;
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
+        let detail = resp.text().to_string();
+        assert!(
+            detail.contains("computes to 50,") && detail.contains("do not reconcile"),
+            "the refusal must carry the computed figure, got: {detail}"
+        );
+        assert!(db_get(&pool, 1).await.unwrap().is_none());
+
+        for (label, body) in [
+            (
+                "consistent pair",
+                serde_json::json!({
+                    "date_incurred": "2024-03-15", "expense_type": "AdviceFee",
+                    "amount": "50", "gross_amount": "100",
+                    "deductible_percentage": "50"
+                }),
+            ),
+            (
+                "exactly 100%",
+                serde_json::json!({
+                    "date_incurred": "2024-03-15", "expense_type": "AdviceFee",
+                    "amount": "100", "gross_amount": "100",
+                    "deductible_percentage": "100"
+                }),
+            ),
+            (
+                "no percentage",
+                serde_json::json!({
+                    "date_incurred": "2024-03-15", "expense_type": "AdviceFee",
+                    "amount": "900", "gross_amount": "100"
+                }),
+            ),
+            (
+                "no gross amount",
+                serde_json::json!({
+                    "date_incurred": "2024-03-15", "expense_type": "AdviceFee",
+                    "amount": "900", "deductible_percentage": "50"
+                }),
+            ),
+            (
+                "neither",
+                serde_json::json!({
+                    "date_incurred": "2024-03-15", "expense_type": "AdviceFee",
+                    "amount": "900"
+                }),
+            ),
+            (
+                // Sub-cent precision on both sides: 1000 × 33.3333% is
+                // 333.333, which is 333.33 in cents, as is the amount.
+                "reconciles to the cent",
+                serde_json::json!({
+                    "date_incurred": "2024-03-15", "expense_type": "AdviceFee",
+                    "amount": "333.3330", "gross_amount": "1000",
+                    "deductible_percentage": "33.3333"
+                }),
+            ),
+        ] {
+            let status = put(&pool, 2, body).await;
+            assert_eq!(status, StatusCode::NO_CONTENT, "{label} must be accepted");
+        }
     }
 
     #[tokio::test]
