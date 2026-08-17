@@ -2443,6 +2443,50 @@ mod tests {
         assert!(db_tax_summary(&pool).await.is_err());
     }
 
+    /// SCENARIOS H-05: interest belongs to the year it is **credited**, not
+    /// the year the money becomes reachable — "You must declare interest
+    /// income in the year it is credited, received or applied or dealt with in
+    /// any way on your behalf or as you direct" (ATO, *Investment income*,
+    /// QC 72101, retrieved 2026-08-17). A term deposit crediting $500 on
+    /// 30 June 2026 whose funds are only available on 2 July is FY2026 income,
+    /// and `date_paid` is the single date the row records: keying the
+    /// availability date instead moves the whole amount into FY2027 (the
+    /// second row here), which is what the entry convention has to prevent.
+    #[tokio::test]
+    async fn db_interest_is_assessed_in_the_year_it_is_credited() {
+        let pool = test_pool().await;
+        // Credited 30 June 2026 — FY2026, even though the funds are only
+        // reachable on 2 July.
+        interest_income::db_upsert(
+            &pool,
+            &make_interest(
+                1,
+                NaiveDate::from_ymd_opt(2026, 6, 30).unwrap(),
+                Decimal::from(500),
+            ),
+        )
+        .await
+        .unwrap();
+        // The same interest keyed at the availability date lands a year later.
+        interest_income::db_upsert(
+            &pool,
+            &make_interest(
+                2,
+                NaiveDate::from_ymd_opt(2026, 7, 2).unwrap(),
+                Decimal::from(500),
+            ),
+        )
+        .await
+        .unwrap();
+
+        let result = db_tax_summary(&pool).await.unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].tax_year, 2026);
+        assert_eq!(result[0].interest_income, Decimal::from(500));
+        assert_eq!(result[1].tax_year, 2027);
+        assert_eq!(result[1].interest_income, Decimal::from(500));
+    }
+
     /// The interest lines (Australian and foreign-source) ship in the CSV export.
     #[tokio::test]
     async fn db_csv_header_carries_interest_column() {

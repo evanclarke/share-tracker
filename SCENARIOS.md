@@ -70,8 +70,8 @@ behind or became a recorded finding.
 | D. Sells and parcel allocation | 20 | 2026-08-15 | 2 raised, both closed — see below |
 | E. Corporate actions | 51 | 2026-08-16 | 5 raised, all closed — see below |
 | F. AMIT / AMMA | 25 | 2026-08-16 | 6 raised, all closed — see below |
-| G. Dividends, franking, and the holding-period rule | 25 | 2026-08-16 | 6 raised, 1 closed — see below |
-| H. Interest, expenses, and other income | 10 | — | — |
+| G. Dividends, franking, and the holding-period rule | 25 | 2026-08-16 | 6 raised, all closed — see below |
+| H. Interest, expenses, and other income | 10 | 2026-08-17 | 6 raised — see below |
 | I. DRP | 14 | — | — |
 | J. Employee share schemes | 14 | — | — |
 | K. Inherited parcels | 10 | — | — |
@@ -387,8 +387,52 @@ The six findings, each raised as a `TODO.md` section naming its scenario ids:
 | Conduit foreign income is excluded from assessable income with no stated entry convention | G-03 | fixed 2026-08-17 — archived in [`DONE/tax-domain.md`](DONE/tax-domain.md) |
 | A franking credit is accepted with no dividend behind it | G-25 | fixed 2026-08-17 — archived in [`DONE/tax-domain.md`](DONE/tax-domain.md) |
 | Duplicate income rows are silently double-counted | G-24 | fixed 2026-08-17 — archived in [`DONE/reporting.md`](DONE/reporting.md) |
-| The related-payments rule and the 30%-at-risk test are not modelled and nowhere documented | G-14 | open |
-| The LIC capital gain deduction field takes the already-halved figure, undocumented | G-04 | open |
+| The related-payments rule and the 30%-at-risk test are not modelled and nowhere documented | G-14 | fixed 2026-08-17 — archived in [`DONE/tax-domain.md`](DONE/tax-domain.md) |
+| The LIC capital gain deduction field takes the already-halved figure, undocumented | G-04 | fixed 2026-08-17 — archived in [`DONE/tax-domain.md`](DONE/tax-domain.md) |
+
+### Section H findings
+
+The smallest section so far, and the one where the *arithmetic* was never in
+doubt: interest and expenses are flat per-year totals with no parcels, no
+clocks and no cost base, and the tax summary already had the lines right.
+Every scenario about where a figure lands came back correct — the Australian
+gross at 10L with its TFN amount on the combined withholding line (H-01), a
+foreign-source row routed to 20E with its withholding under the A$1,000 FITO
+de-minimis (H-02), the classification guard refusing foreign tax on an
+Australian row and a TFN amount on a foreign one, in both directions and
+naming the field to correct (H-03), a non-AUD amount converted at the ATO rate
+for the month and failing the whole report loudly when that month was never
+imported (H-04), a deduction larger than the year's income producing an
+ordinary negative net line (H-09), and a year whose only activity is an
+expense still appearing in the year list and printing its deduction (H-10).
+The expense's listing link survives a rename, and the listing can't be deleted
+out from under it (H-07).
+
+What the six findings have in common is the mirror image of section G's: there
+the walk was sound and every finding was a figure nothing cross-checked; here
+the *report* is sound and every finding is about what the row is allowed to
+say in the first place. `investment_expenses` is the one entity in the tree
+whose `db_upsert` has no write-time check at all — no error enum, no
+validation — so a negative deduction is accepted and arrives as income (H-06,
+H-09), and the apportionment provenance beside it (`gross_amount`,
+`deductible_percentage`) is never related to the amount claimed, though the
+income row's own `amount_per_security` pair is (H-06). Two of the findings are
+about the rule the model can't see: interest is assessed on the date it is
+*credited* and the row carries one date labelled "Date paid" (H-05); borrowing
+expenses over $100 and prepayments outside the 12-month rule are deducted over
+several years and the row carries one financial year (H-08). One is the
+familiar duplicate-detection gap, now for interest and expenses (standing
+probe 6). The last is a print-surface one: a deduction attributed to a listing
+loses that attribution in the annual tax report (H-07).
+
+| Finding | Scenarios | Status |
+| --- | --- | --- |
+| A negative investment expense is accepted and adds to assessable income | H-06, H-09 | open |
+| An investment expense's apportionment provenance is never checked against what is claimed | H-06 | open |
+| Nothing states that interest belongs to the year it is credited | H-05 | open |
+| An expense covering more than one financial year has nowhere to be apportioned | H-08 | open |
+| Duplicate interest and expense rows are silently double-counted | H-01, H-06 | open |
+| A deduction's listing attribution never reaches the annual tax report | H-07 | open |
 
 ---
 

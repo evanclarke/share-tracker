@@ -1855,6 +1855,58 @@ mod tests {
         assert!(report.completeness.complete);
     }
 
+    /// SCENARIOS H-09, H-10: a year whose only activity is an investment
+    /// expense — no income at all — still exists as far as the print document
+    /// is concerned. It is offered in the year list, its deduction prints in
+    /// the Deductions table, and the net assessable investment income line
+    /// carries the negative position (a deduction larger than the year's
+    /// income is an ordinary result: it reduces other assessable income, and
+    /// nothing here quarantines or carries it forward).
+    #[tokio::test]
+    async fn a_year_with_only_an_expense_still_prints_its_deduction() {
+        let pool = test_support::test_pool().await;
+        investment_expense::db_upsert(
+            &pool,
+            &investment_expense::InvestmentExpense {
+                id: 1,
+                date_incurred: ymd(2026, 3, 15), // FY2026
+                expense_type: investment_expense::ExpenseType::LoanInterest,
+                amount: dec("450"),
+                gross_amount: None,
+                deductible_percentage: None,
+                currency: "AUD".to_string(),
+                description: Some("margin loan interest".to_string()),
+                listing_id: None,
+                holding_account_id: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(db_tax_report_years(&pool).await.unwrap(), vec![2026]);
+
+        let report = db_tax_report(&pool, 2026).await.unwrap();
+        assert_eq!(report.income.deductions.len(), 1);
+        let row = &report.income.deductions[0];
+        assert_eq!(row.expense_type, "LoanInterest");
+        assert_eq!(row.amount_aud, dec("450"));
+        assert!(report.income.dividends.is_empty());
+        assert!(report.income.interest.is_empty());
+
+        let line = |field: &str| {
+            report
+                .tax_summary
+                .iter()
+                .find(|l| l.field == field)
+                .unwrap_or_else(|| panic!("no {field} line"))
+                .value
+                .clone()
+        };
+        assert_eq!(line("deductions_loan_interest"), "450");
+        assert_eq!(line("gross_assessable_investment_income"), "0");
+        assert_eq!(line("net_assessable_investment_income"), "-450");
+    }
+
     #[tokio::test]
     async fn years_handler_lists_every_year_with_a_recorded_fact() {
         let pool = test_support::test_pool().await;

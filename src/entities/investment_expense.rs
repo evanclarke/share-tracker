@@ -367,6 +367,56 @@ mod tests {
         assert!(db_get(&pool, 1).await.unwrap().is_none());
     }
 
+    /// SCENARIOS H-07: an expense attributed to a listing survives that
+    /// listing's later life. A rename is the listing's own event — the row
+    /// keeps its `id`, so the expense still names it, in its own financial
+    /// year — and the listing can't be deleted out from under the expense:
+    /// the refusal names the investment expenses that still draw on it (the
+    /// inbound-foreign-key wording, section A) rather than denying the
+    /// listing exists.
+    #[tokio::test]
+    async fn api_expense_survives_a_rename_and_blocks_deleting_its_listing() {
+        let pool = test_pool().await;
+        test_support::listing(1).ticker("OLD").insert(&pool).await;
+        let client = ApiClient::full(&pool);
+        client
+            .put_ok(
+                "/investment_expenses/1",
+                &serde_json::json!({
+                    "date_incurred": "2026-03-15",
+                    "expense_type": "AdviceFee",
+                    "amount": "100",
+                    "listing_id": 1,
+                    "description": "portfolio advice"
+                }),
+            )
+            .await;
+        client
+            .post(
+                "/listings/1/rename",
+                &serde_json::json!({ "effective_date": "2026-04-01", "ticker": "NEW" }),
+            )
+            .await
+            .expect_status(StatusCode::CREATED);
+
+        let got = db_get(&pool, 1).await.unwrap().unwrap();
+        assert_eq!(got.listing_id, Some(1), "the rename keeps the same listing");
+        assert_eq!(
+            got.date_incurred,
+            NaiveDate::from_ymd_opt(2026, 3, 15).unwrap()
+        );
+        assert_eq!(got.amount, Decimal::from(100));
+
+        let resp = client.delete("/listings/1").await;
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
+        let detail = resp.text().to_string();
+        assert!(
+            detail.contains("investment expenses"),
+            "the refusal must name the expense drawing on the listing, got: {detail}"
+        );
+        assert!(db_get(&pool, 1).await.unwrap().is_some());
+    }
+
     #[tokio::test]
     async fn api_list_returns_ok() {
         let pool = test_pool().await;
