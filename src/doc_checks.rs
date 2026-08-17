@@ -324,6 +324,39 @@ fn known_limitations_document_gifts_at_market_value() {
     assert!(README_MD.contains("market-value substitution"));
 }
 
+/// Docs-sync pin for the DRP partial-participation scope cut (SCENARIOS
+/// I-09): the limitation names the refusal *and* the workaround that produces
+/// a defensible cost base — split the distribution into a reinvested row and a
+/// cash row — together with the two things that surprise about it: the
+/// per-share cross-check cannot be used on the halves, and an even split reads
+/// as a duplicate to the health report. A limitation with no way forward sends
+/// the user to invent one.
+#[test]
+fn known_limitations_document_the_partial_drp_workaround() {
+    let limitations = known_limitations();
+    assert!(limitations.contains("**DRP partial participation**"));
+    assert!(limitations.contains("all-or-nothing per (listing, holding account)"));
+    // The refusal, and the two-row workaround it points at.
+    assert!(
+        limitations.contains("Stating the partial allotment as the reinvest `units` is refused")
+    );
+    assert!(limitations.contains("split the distribution into two [income](#income) rows"));
+    assert!(limitations.contains("costed at the dividends actually applied to it"));
+    // Cites the ATO rule the workaround rests on.
+    assert!(limitations.contains("docs/ato/cgt-dividend-reinvestment-plans.md"));
+    assert!(
+        include_str!("../docs/ato/cgt-dividend-reinvestment-plans.md").contains("QC 66050"),
+        "the cited ATO mirror carries its source header"
+    );
+    // The two caveats the workaround carries.
+    assert!(
+        limitations.contains("`amount_per_security` / `securities_held` cross-check off both rows")
+    );
+    assert!(limitations.contains("duplicate-income warning"));
+    // Surfaced in the README's DRP feature line.
+    assert!(README_MD.contains("**Partial** participation is out of scope"));
+}
+
 #[test]
 fn known_limitations_document_pre_cgt_holdings() {
     let limitations = known_limitations();

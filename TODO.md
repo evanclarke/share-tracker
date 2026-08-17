@@ -262,18 +262,32 @@ is all-or-nothing per (listing, holding account): a registry plan that reinvests
 holding's units is not modelled" — and the system fails safe: stating the partial units is refused
 `422` with both figures. What it doesn't say is what to do instead, which the scenario asks to
 verify.)
-- [ ] I-09 — reproduced: a $100 distribution half reinvested, entered as `units: "7"` at $7 → `422`
+- [x] I-09 — reproduced: a $100 distribution half reinvested, entered as `units: "7"` at $7 → `422`
   "the stated units at the reinvestment price spend 49, but the reinvestable cash … is 100". Good
   refusal, no guidance
-- [ ] I-09 — the workaround does produce a defensible cost base, verified end to end: split the
+- [x] I-09 — the workaround does produce a defensible cost base, verified end to end: split the
   distribution into two income rows — the reinvested $50 and the cash $50 — and reinvest the first.
   The parcel costs $49 for 7 units with $1 carried (the dividends actually applied, per
   `docs/ato/cgt-dividend-reinvestment-plans.md`), and the tax summary still declares the full $100
   as assessable dividend income. The per-share cross-check (`amount_per_security`/`securities_held`)
   has to be left off the split rows, since neither half reconciles against the whole holding
-- [ ] Caveat worth stating with it: an exactly half-and-half split trips the `duplicate_income`
+- [x] Caveat worth stating with it: an exactly half-and-half split trips the `duplicate_income`
   health warning (same listing, account, `date_paid` and *identical* amounts — G-24's key), so the
   banner reports a duplicate that is deliberate. Uneven splits don't
-- [ ] Fix: documentation only — extend the Known-limitations entry with the two-row workaround, the
+- [x] Fix: documentation only — extend the Known-limitations entry with the two-row workaround, the
   per-share-cross-check caveat and the duplicate-income note, and pin it in `doc_checks.rs` the way
   the other doc-only requirements are
+
+**Resolution (2026-08-17): the limitation now names the workaround, and the workaround has a test.**
+
+`docs/API.md`'s Known-limitations entry states the refusal, the two-row split (a reinvested row and
+a cash row), why the result is defensible — the parcel is costed at the dividends actually applied
+to it, `docs/ato/cgt-dividend-reinvestment-plans.md` — and both caveats: leave the per-share
+cross-check off the halves, and an exactly even split reads as a duplicate to the health report.
+The README's DRP feature line carries the short version.
+
+Tests: `known_limitations_document_the_partial_drp_workaround` (doc_checks, the entry and its ATO
+citation) and
+`the_partial_participation_workaround_costs_the_parcel_at_the_cash_reinvested` — the refusal, then
+the two-row entry producing a $49 cost base for 7 units with the full $100 still declared.
+

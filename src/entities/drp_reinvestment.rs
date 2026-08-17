@@ -1088,6 +1088,53 @@ mod tests {
         );
     }
 
+    /// SCENARIOS I-09. Partial participation is out of scope — stating the
+    /// part-allotment is refused, since it does not spend the cash — and the
+    /// documented workaround is two income rows, one reinvested and one paid.
+    /// This is what makes that workaround defensible: the parcel is costed at
+    /// the dividends actually applied to it, and the year still declares the
+    /// whole distribution.
+    #[tokio::test]
+    async fn the_partial_participation_workaround_costs_the_parcel_at_the_cash_reinvested() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AUD").await;
+        enrol(&pool, 1, ResidualHandling::CarryForward).await;
+        // A $100 distribution, half of it reinvested at $7: two rows.
+        insert_distribution(&pool, 1, 1, Decimal::from(50), Decimal::ZERO).await;
+        insert_distribution(&pool, 2, 1, Decimal::from(50), Decimal::ZERO).await;
+
+        // Stating the partial allotment against the whole distribution is
+        // refused — the rejection the limitation documents.
+        insert_distribution(&pool, 3, 1, Decimal::from(100), Decimal::ZERO).await;
+        let err = db_reinvest(&pool, 3, &body_units("7", "7"))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ReinvestError::UnitsCashMismatch { .. }),
+            "{err:?}"
+        );
+        crate::entities::income::db_delete(&pool, 3).await.unwrap();
+
+        let trade = db_reinvest(&pool, 1, &body("7")).await.unwrap();
+        assert_eq!(trade.quantity, Decimal::from(7));
+        let parcels = crate::reports::open_parcels::db_open_parcels(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            parcels[0].remaining_cost_base,
+            Decimal::from(49),
+            "the dividends applied to the units, not the whole distribution"
+        );
+        let years = crate::reports::tax_summary::db_tax_summary(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            years[0].dividends_assessable,
+            Decimal::from(100),
+            "both halves are still declared"
+        );
+    }
+
     /// SCENARIOS I-11. On an AMIT the two sides of a reinvested distribution
     /// are recorded separately and neither leaks into the other: the cash row
     /// funds the reinvestment (it is *cash only* — the AMMA attribution is the
