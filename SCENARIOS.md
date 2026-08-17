@@ -72,7 +72,7 @@ behind or became a recorded finding.
 | F. AMIT / AMMA | 25 | 2026-08-16 | 6 raised, all closed — see below |
 | G. Dividends, franking, and the holding-period rule | 25 | 2026-08-16 | 6 raised, all closed — see below |
 | H. Interest, expenses, and other income | 10 | 2026-08-17 | 6 raised, all closed — see below |
-| I. DRP | 14 | 2026-08-17 | 6 raised, open in `TODO.md` — see below |
+| I. DRP | 14 | 2026-08-17 | 6 raised, all closed — see below |
 | J. Employee share schemes | 14 | — | — |
 | K. Inherited parcels | 10 | — | — |
 | L. Crypto | 15 | — | — |
@@ -479,16 +479,18 @@ re-checked (I-01, I-04, I-07). The last is documentation: partial participation
 is honestly out of scope and fails safe, but names no workaround, though the
 two-row split does produce a defensible cost base (I-09).
 
-The six findings, each raised as a `TODO.md` section naming its scenario ids:
+The six findings, each raised as a `TODO.md` section naming its scenario ids, and all six
+closed the same day (four carried a model decision Evan took — the entitlement-date rule, the
+derived settlement, keeping a whole-unit allotment's leftover, and refusing a currency mismatch):
 
 | Finding | Scenarios | Status |
 | --- | --- | --- |
-| A reinvestment paid after its period's unenrolment escapes that period | I-01, I-02, I-04 | open — `TODO.md` |
-| Re-opening or extending an unenrolment does not restore the residual it paid out | I-01, I-03 | open — `TODO.md` |
-| A whole-number stated allotment can swallow a share's worth of cash | I-06 | open — `TODO.md` |
-| A reinvested distribution can be edited afterwards with nothing re-checked | I-01, I-04, I-07 | open — `TODO.md` |
-| A distribution in a currency other than its listing's is reinvested without conversion | I-06, I-08 | open — `TODO.md` |
-| The partial-participation limitation names no workaround | I-09 | open — `TODO.md` |
+| A reinvestment paid after its period's unenrolment escapes that period | I-01, I-02, I-04 | fixed 2026-08-17 (`f351278`) — archived in [`DONE/reviews.md`](DONE/reviews.md) |
+| Re-opening or extending an unenrolment does not restore the residual it paid out | I-01, I-03 | fixed 2026-08-17 (`f351278`) — archived in [`DONE/reviews.md`](DONE/reviews.md) |
+| A whole-number stated allotment can swallow a share's worth of cash | I-06 | fixed 2026-08-17 (`450b887`) — archived in [`DONE/reviews.md`](DONE/reviews.md) |
+| A reinvested distribution can be edited afterwards with nothing re-checked | I-01, I-04, I-07 | fixed 2026-08-17 (`3ed2295`) — archived in [`DONE/reviews.md`](DONE/reviews.md) |
+| A distribution in a currency other than its listing's is reinvested without conversion | I-06, I-08 | fixed 2026-08-17 (`450b887`) — archived in [`DONE/reviews.md`](DONE/reviews.md) |
+| The partial-participation limitation names no workaround | I-09 | fixed 2026-08-17 (`1d6a65f`) — archived in [`DONE/reviews.md`](DONE/reviews.md) |
 
 ---
 
