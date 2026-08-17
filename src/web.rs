@@ -834,6 +834,22 @@ mod tests {
         assert!(js.contains("foreign_interest_income"));
     }
 
+    /// The one date an interest row carries names itself unambiguously
+    /// (SCENARIOS H-05): interest is assessed in the year it is **credited**,
+    /// so the field is labelled and hinted as the credit date — keying the
+    /// date the funds became reachable instead moves a whole year's interest
+    /// into the wrong return. The convention it states is pinned against the
+    /// ATO wording by `doc_checks::interest_credited_date_convention_documented`.
+    #[tokio::test]
+    async fn interest_income_date_credited_hint_present() {
+        let js = app_js_body().await;
+        assert!(js.contains("'date_paid', 'Date credited'"));
+        assert!(js.contains("The date the interest was credited, received, or applied on your"));
+        assert!(js.contains("not the date the funds became reachable"));
+        // The worked case the convention was written for.
+        assert!(js.contains("credited 30 June and withdrawable 2 July"));
+    }
+
     #[tokio::test]
     async fn investment_expenses_ui_present() {
         let js = app_js_body().await;

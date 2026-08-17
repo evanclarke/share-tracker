@@ -1543,6 +1543,69 @@ fn conduit_foreign_income_entry_convention_documented() {
     assert!(ATO_OVERVIEW.contains("Part B item 13U"));
 }
 
+/// Docs-sync pin for the interest-timing convention (SCENARIOS H-05). An
+/// `interest_income` row carries one date, and the calculation that buckets it
+/// into a financial year is right — but nothing said *which* date it wants, so
+/// a term deposit crediting $500 on 30 June with the funds only reachable on
+/// 2 July could be keyed either way, moving a whole year's interest. The
+/// decision was to state the convention rather than model a second column
+/// (availability is not a tax fact), so these pin the statement everywhere a
+/// user meets the field — the API doc, the schema, the UI hint (in `web.rs`'s
+/// `interest_income_date_credited_hint_present`) — against the ATO wording it
+/// rests on.
+#[test]
+fn interest_credited_date_convention_documented() {
+    const TIMING: &str = include_str!("../docs/ato/investment-income-timing.md");
+    const ATO_OVERVIEW: &str = include_str!("../docs/ato/OVERVIEW.md");
+
+    // The mirror really carries the rule (line-wrapped and blockquoted, so
+    // compare on collapsed whitespace) and its provenance header.
+    // The quote is line-wrapped and blockquoted in the mirror, so compare with
+    // the `>` markers and the wrapping collapsed away.
+    let flat = |s: &str| {
+        s.replace('>', " ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    const RULE: &str = "You must declare interest income in the year it is credited, received or \
+                        applied or dealt with in any way on your behalf or as you direct. For term \
+                        deposits this usually means you should declare interest in the year the \
+                        investment matures.";
+    assert!(flat(TIMING).contains(&flat(RULE)), "{}", flat(RULE));
+    assert!(TIMING.contains("QC 72101"));
+    assert!(TIMING.contains("**Retrieved:** 2026-08-17"));
+    // …and the index credits it, so the mirror is reachable from OVERVIEW.
+    assert!(ATO_OVERVIEW.contains("investment-income-timing.md"));
+
+    // API.md states the convention, its cite, and the worked case that made it
+    // ambiguous — plus why there is deliberately no availability column.
+    assert!(API_MD.contains("**`date_paid` is the date credited:**"));
+    assert!(
+        API_MD.contains("credited, received or applied or dealt with in any way on your behalf")
+    );
+    assert!(API_MD.contains("declare interest in the year the investment matures"));
+    assert!(API_MD.contains("`docs/ato/investment-income-timing.md`"));
+    assert!(API_MD.contains("withdrawable on 2 July is FY2026 interest, not FY2027"));
+    assert!(API_MD.contains("no second date column"));
+
+    // SCHEMA.md's column says the same thing, so the field is unambiguous from
+    // the data model alone.
+    let column = SCHEMA_MD
+        .split("├── date_paid             DATE")
+        .nth(1)
+        .expect("SCHEMA.md documents the interest_income.date_paid column")
+        .split('\n')
+        .next()
+        .expect("split always yields at least one part");
+    assert!(column.contains("credited"), "{column}");
+    assert!(column.contains("investment-income-timing.md"), "{column}");
+    assert!(
+        column.contains("Never the date the funds became reachable"),
+        "{column}"
+    );
+}
+
 /// Pins for the FreeBSD packaging + versioned-release pipeline (REQUIREMENTS
 /// 2026-07-13). The release workflow and package skeleton are plain text CI
 /// consumes, so these tests keep their load-bearing pieces from silently

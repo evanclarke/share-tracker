@@ -10,29 +10,6 @@ findings are all closed in DONE.md), except where a section's heading names anot
 (e.g. REQUIREMENTS, SCENARIOS). Each section records one finding; sections land in DONE.md as they
 are fixed or decided.
 
-## Nothing states that interest belongs to the year it is *credited* (SCENARIOS H-05)
-(SCENARIOS.md section H verification pass, 2026-08-17.)
-- [ ] H-05 — a term deposit credits $500 of interest on 30 June 2026; the funds are only reachable
-  on 2 July. The ATO rule is the credit: "You must declare interest income in the year it is
-  credited, received or applied or dealt with in any way on your behalf or as you direct … For term
-  deposits this usually means you should declare interest in the year the investment matures"
-  (*Investment income*, QC 72101, retrieved 2026-08-17)
-- [ ] The calculation is right — `tax_summary::tests::db_interest_is_assessed_in_the_year_it_is_credited`
-  now pins that a 30 June `date_paid` lands in FY2026 and 2 July in FY2027. The gap is that
-  `date_paid` is the *only* date the row carries, and nothing tells the user which of the two dates
-  it wants: the field is labelled "Date paid" in the UI with the hint "Sets the financial year the
-  interest falls in", `docs/SCHEMA.md` says "Date paid/credited", and there is no `docs/ato/` mirror
-  of the rule at all. Key the availability date and a whole year's interest moves
-- [ ] The system already models this distinction where it decided to: a trust distribution carries
-  `entitlement_date` beside `date_paid` precisely so a 30 June entitlement paid 15 July is assessed
-  in the year just ended (G-19). Interest has one date because it needs one — but only if that date
-  is named unambiguously
-- [ ] **Decided 2026-08-17: state the convention**, the shape the conduit-foreign-income convention
-  took (G-03) — relabel toward "date credited" in the UI hint, `docs/SCHEMA.md` and `docs/API.md`,
-  plus a mirrored `docs/ato/investment-income-timing.md` (QC 72101) indexed in OVERVIEW. No second
-  column: the availability date is not a tax fact, and recording it would invite keying it here
-- [ ] Tests: `doc_checks` pins the stated convention against the mirrored ATO wording
-
 ## An expense covering more than one financial year has nowhere to be apportioned (SCENARIOS H-08)
 (SCENARIOS.md section H verification pass, 2026-08-17.)
 - [ ] H-08 — one `investment_expenses` row is one `date_incurred`, one financial year, deducted in

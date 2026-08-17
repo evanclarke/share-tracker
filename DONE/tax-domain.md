@@ -1344,3 +1344,60 @@ the halved figure and sums to the D8 line), and
 `infra::db::tests::migration_0025_doubles_the_lic_deduction_into_the_advised_amount` (the forward-read
 applied to pre-0025 data at five scales, plus both row-history triggers back and naming the new
 column). Full suite 1547 passed / 0 failed.
+
+## Nothing states that interest belongs to the year it is *credited* (SCENARIOS H-05)
+(SCENARIOS.md section H verification pass, 2026-08-17.)
+- [x] H-05 — a term deposit credits $500 of interest on 30 June 2026; the funds are only reachable
+  on 2 July. The ATO rule is the credit: "You must declare interest income in the year it is
+  credited, received or applied or dealt with in any way on your behalf or as you direct … For term
+  deposits this usually means you should declare interest in the year the investment matures"
+  (*Investment income*, QC 72101, retrieved 2026-08-17)
+- [x] The calculation is right — `tax_summary::tests::db_interest_is_assessed_in_the_year_it_is_credited`
+  now pins that a 30 June `date_paid` lands in FY2026 and 2 July in FY2027. The gap is that
+  `date_paid` is the *only* date the row carries, and nothing tells the user which of the two dates
+  it wants: the field is labelled "Date paid" in the UI with the hint "Sets the financial year the
+  interest falls in", `docs/SCHEMA.md` says "Date paid/credited", and there is no `docs/ato/` mirror
+  of the rule at all. Key the availability date and a whole year's interest moves
+- [x] The system already models this distinction where it decided to: a trust distribution carries
+  `entitlement_date` beside `date_paid` precisely so a 30 June entitlement paid 15 July is assessed
+  in the year just ended (G-19). Interest has one date because it needs one — but only if that date
+  is named unambiguously
+- [x] **Decided 2026-08-17: state the convention**, the shape the conduit-foreign-income convention
+  took (G-03) — relabel toward "date credited" in the UI hint, `docs/SCHEMA.md` and `docs/API.md`,
+  plus a mirrored `docs/ato/investment-income-timing.md` (QC 72101) indexed in OVERVIEW. No second
+  column: the availability date is not a tax fact, and recording it would invite keying it here
+- [x] Tests: `doc_checks` pins the stated convention against the mirrored ATO wording
+
+**Implemented 2026-08-17 as decided: the convention is stated, nothing is modelled.**
+
+`interest_income.date_paid` holds the date the interest was **credited** — credited, received, or
+applied or dealt with on the holder's behalf or as they direct — which for a term deposit run to
+maturity is the maturity date, and is never the date the funds became reachable. The calculation
+did not change (it was already right); what changed is that every surface a user meets the field
+through now says which date it wants:
+
+- **The ATO mirror it rests on.** `docs/ato/investment-income-timing.md` (QC 72101, retrieved
+  2026-08-17) carries the rule verbatim plus the three cases around it — a rollover or automatic
+  reinvestment is a credit at the rollover date of the amount that would have been received, and a
+  deposit paying interest away periodically is assessed at each of those payment dates — with a
+  "why this matters" section naming the 30-June/2-July case and why interest gets one date where a
+  trust distribution gets two. Indexed in `docs/ato/OVERVIEW.md` beside `trust-income-timing.md`,
+  which it contrasts with.
+- **The UI.** The field is labelled **"Date credited"** (was "Date paid") and its hint states the
+  rule and the worked case, so the ambiguity is resolved at the point of entry rather than in a doc
+  the user would have to go looking for.
+- **Docs.** A dedicated paragraph in `docs/API.md`'s Interest income section — the quoted rule, its
+  cite, the 30-June/2-July case, and the stated reason there is no second column (a trust
+  distribution's `entitlement_date` exists because present entitlement and payment are two
+  different tax facts; availability is not a tax fact at all, and a column for it would only invite
+  keying it as the assessment date) — plus the rewritten `SCHEMA.md` column note and the
+  tax-summary aggregation line, which now names `date_paid` as the credit date.
+
+No second date column, no schema change, and no migration: the stored data was already right under
+the convention, which is exactly why stating it was enough.
+
+Tests: `doc_checks::interest_credited_date_convention_documented` (the mirror carries the ATO rule
+with its QC header and is indexed; API.md and SCHEMA.md state the convention, the worked case, and
+the no-second-column decision) and `web::tests::interest_income_date_credited_hint_present` (the
+served bundle carries the relabelled field and its hint), over the existing
+`reports::tax_summary::tests::db_interest_is_assessed_in_the_year_it_is_credited`.
