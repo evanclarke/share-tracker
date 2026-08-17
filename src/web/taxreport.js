@@ -295,7 +295,7 @@ function incomeSection(inc) {
     el('h4', null, 'Employee share scheme income'),
     genericTable(inc.ess, ['taxing_point_date', 'ticker', 'taxed_upfront_eligible_aud', 'taxed_upfront_not_eligible_aud', 'deferral_discount_aud', 'pre_2009_cessation_discount_aud']),
     el('h4', null, 'Deductions'),
-    genericTable(inc.deductions, ['date_incurred', 'expense_type', 'amount_aud', 'description']),
+    genericTable(inc.deductions, ['date_incurred', 'expense_type', 'ticker', 'amount_aud', 'description']),
   ]);
 }
 

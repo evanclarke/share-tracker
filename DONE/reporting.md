@@ -875,3 +875,39 @@ row counting three), `duplicated_expense_rows_are_reported_with_their_ids` (tick
 listing-attributed group, `null` on the portfolio-wide one),
 `expenses_differing_in_any_key_field_are_not_duplicates`, the extended
 `empty_database_reports_nothing_stale`, and `web::tests::health_banner_ui_present`.
+
+## A deduction's listing attribution never reaches the annual tax report (SCENARIOS H-07)
+(SCENARIOS.md section H verification pass, 2026-08-17.)
+- [x] H-07 — the correctness side is fine and now pinned
+  (`investment_expense::tests::api_expense_survives_a_rename_and_blocks_deleting_its_listing`): a
+  rename keeps `listing_id`, and deleting the listing is refused `422` naming the investment expenses
+  that draw on it. What is missing is the print surface. `tax_report::DeductionRow` carries
+  `listing_id` and no `ticker` — the only listing-bearing row in the report that doesn't — and
+  `taxreport.js` renders the deductions table as `date_incurred, expense_type, amount_aud,
+  description`, so the attribution is dropped entirely from the document that gets archived as the
+  year's PDF
+- [x] It matters most in exactly the scenario that raised it: after a rename, demerger, or worthless
+  declaration, a bare `listing_id` in the JSON is the only trace of which holding the fee was for,
+  and the printed page has not even that
+- [x] Fix: carry the ticker on `DeductionRow` the way `DividendIncomeRow`/`ForeignIncomeRow` do (the
+  report already loads the listing map), and add the column to the printed table
+- [x] Tests: a listing-attributed expense prints its ticker in the annual tax report, a
+  portfolio-wide one prints blank, and the served bundle carries the column
+
+**Implemented 2026-08-17: `DeductionRow` carries the ticker and the printed table has the column.**
+
+`ticker: Option<String>` beside the existing `listing_id`, resolved through `IncomeContext`'s
+`ticker_as_at` — **as at `date_incurred`**, the same as-at naming every other listing-bearing row in
+the document uses, so a fee incurred before a rename prints the ticker the invoice would have named
+and one incurred after prints the new one. `None` for a portfolio-wide expense, which prints blank
+(`cellText` renders null as an empty cell). `taxreport.js` renders the Deductions table as
+`date_incurred, expense_type, ticker, amount_aud, description`, and `docs/API.md`'s annual-tax-report
+section documents the field and extends its as-at-naming sentence to cover the date incurred.
+
+The correctness side was already right and already pinned
+(`investment_expense::tests::api_expense_survives_a_rename_and_blocks_deleting_its_listing`); this
+closes the print surface, which was the only place the attribution was lost outright.
+
+Tests: `reports::tax_report::tests::a_listing_attributed_deduction_prints_its_ticker_as_at_its_own_date`
+(a fee either side of a rename prints LAAC then LAR, and a portfolio-wide fee prints no ticker at
+all) and the extended `web::tests::annual_tax_report_ui_present`.

@@ -730,6 +730,13 @@ pub struct DeductionRow {
     pub expense_type: String,
     pub amount_aud: Decimal,
     pub listing_id: Option<i64>,
+    /// The attributed listing's ticker as at `date_incurred` (the same
+    /// as-at naming every other listing-bearing row prints), `None` for a
+    /// portfolio-wide expense. Without it the printed document loses the
+    /// attribution entirely — and after a rename, demerger, or worthless
+    /// declaration a bare `listing_id` is the only trace of which holding
+    /// the fee was for (SCENARIOS H-07).
+    pub ticker: Option<String>,
     pub description: Option<String>,
 }
 
@@ -1123,12 +1130,14 @@ async fn push_deduction_rows(
             continue;
         }
         let currency: String = row.try_get("currency")?;
+        let listing_id: Option<i64> = row.try_get("listing_id")?;
         out.deductions.push(DeductionRow {
             investment_expense_id: row.try_get("id")?,
             date_incurred,
             expense_type: row.try_get("expense_type")?,
             amount_aud: tax_summary::aud_field(fx, row, "amount", &currency, date_incurred)?,
-            listing_id: row.try_get("listing_id")?,
+            listing_id,
+            ticker: listing_id.map(|id| ctx.ticker_as_at(id, date_incurred)),
             description: row.try_get("description")?,
         });
     }
@@ -1905,6 +1914,70 @@ mod tests {
         assert_eq!(line("deductions_loan_interest"), "450");
         assert_eq!(line("gross_assessable_investment_income"), "0");
         assert_eq!(line("net_assessable_investment_income"), "-450");
+    }
+
+    /// SCENARIOS H-07: a deduction attributed to a listing prints which
+    /// holding it was for, and prints it the way the listing was named when
+    /// the fee was incurred. Without the ticker the archived PDF carries no
+    /// trace of the attribution at all — and after a rename the bare
+    /// `listing_id` in the JSON would be the only one left. A portfolio-wide
+    /// expense has no holding to name and prints blank.
+    #[tokio::test]
+    async fn a_listing_attributed_deduction_prints_its_ticker_as_at_its_own_date() {
+        let pool = test_support::test_pool().await;
+        test_support::listing(1)
+            .ticker("LAAC")
+            .name("Lithium Americas (Argentina) Corp")
+            .insert(&pool)
+            .await;
+        let expense = |id: i64, date: NaiveDate, listing_id: Option<i64>| {
+            investment_expense::InvestmentExpense {
+                id,
+                date_incurred: date,
+                expense_type: investment_expense::ExpenseType::AdviceFee,
+                amount: dec("200"),
+                gross_amount: None,
+                deductible_percentage: None,
+                currency: "AUD".to_string(),
+                description: None,
+                listing_id,
+                holding_account_id: None,
+            }
+        };
+        // Incurred against the holding before the rename…
+        investment_expense::db_upsert(&pool, &expense(1, ymd(2024, 1, 5), Some(1)))
+            .await
+            .unwrap();
+        crate::entities::listing_rename::db_rename(
+            &pool,
+            1,
+            &crate::entities::listing_rename::RenameBody {
+                effective_date: ymd(2024, 3, 1),
+                ticker: "LAR".to_string(),
+                exchange_mic: None,
+                name: None,
+                price_symbol: None,
+                note: None,
+            },
+        )
+        .await
+        .unwrap();
+        // …and again after it, plus a portfolio-wide fee attributed to nothing.
+        investment_expense::db_upsert(&pool, &expense(2, ymd(2024, 5, 1), Some(1)))
+            .await
+            .unwrap();
+        investment_expense::db_upsert(&pool, &expense(3, ymd(2024, 6, 1), None))
+            .await
+            .unwrap();
+
+        let report = db_tax_report(&pool, 2024).await.unwrap();
+        assert_eq!(report.income.deductions.len(), 3);
+        let rows = &report.income.deductions;
+        assert_eq!(rows[0].listing_id, Some(1));
+        assert_eq!(rows[0].ticker.as_deref(), Some("LAAC"));
+        assert_eq!(rows[1].ticker.as_deref(), Some("LAR"));
+        assert_eq!(rows[2].listing_id, None);
+        assert_eq!(rows[2].ticker, None);
     }
 
     #[tokio::test]

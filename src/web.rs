@@ -1233,6 +1233,13 @@ mod tests {
         assert!(js.contains("Trading activity"));
         assert!(js.contains("Gain / loss summary"));
         assert!(js.contains("Overall tax summary"));
+        // The Deductions table names the holding the expense was attributed to
+        // (SCENARIOS H-07): without the column the archived PDF carries no
+        // trace of the attribution, which is exactly what a rename or demerger
+        // makes irrecoverable.
+        assert!(js.contains(
+            "genericTable(inc.deductions, ['date_incurred', 'expense_type', 'ticker', 'amount_aud', 'description'])"
+        ));
     }
 
     /// The AMMA component breakdown is rendered transposed (components down
