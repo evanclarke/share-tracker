@@ -1980,6 +1980,107 @@ mod tests {
         assert_eq!(rows[2].ticker, None);
     }
 
+    /// SCENARIOS J-09, J-11, J-14: a year with two vests from different grants
+    /// and a sale out of the first. The printed document must keep the two
+    /// sides apart — each statement prints its own Item 12 labels (D/E/F/G, the
+    /// TFN withheld with it) in taxing-point order, while the disposal is
+    /// Item 18 capital gains against the reset cost base — and the summary
+    /// carries the assessable discount **net of** the one $1,000 reduction the
+    /// year allows across both statements (here capped at the $600 eligible
+    /// discount), with the TFN amount joining the withholding line.
+    #[tokio::test]
+    async fn two_vests_and_a_sale_print_their_item_12_labels_and_summary_lines() {
+        let pool = test_support::test_pool().await;
+        test_support::listing(1)
+            .ticker("ICE")
+            .name("Intercontinental")
+            .insert(&pool)
+            .await;
+        // A deferral vest in September 2024 with TFN withheld…
+        test_support::ess_statement(1, 1, ymd(2024, 9, 2))
+            .with(|s| {
+                s.quantity = dec("100");
+                s.market_value_per_share = dec("10");
+                s.deferral_discount = dec("1000");
+                s.tfn_withholding = dec("470");
+            })
+            .insert(&pool)
+            .await;
+        // …and a taxed-upfront eligible one from another grant in March 2025,
+        // both in FY2025.
+        test_support::ess_statement(2, 1, ymd(2025, 3, 3))
+            .with(|s| {
+                s.quantity = dec("50");
+                s.market_value_per_share = dec("12");
+                s.taxed_upfront_eligible = dec("600");
+            })
+            .insert(&pool)
+            .await;
+        let first = crate::entities::ess_vest::db_vest(&pool, 1).await.unwrap();
+        crate::entities::ess_vest::db_vest(&pool, 2).await.unwrap();
+
+        // The September parcel sold in May 2025 at $15: $1,500 − $1,000.
+        crate::entities::sell::db_upsert_sell(
+            &pool,
+            50,
+            &crate::entities::sell::SellBody {
+                brokerage_includes_gst: false,
+                statement_total: None,
+                holding_account_id: 1,
+                date: ymd(2025, 5, 1),
+                settlement_date: None,
+                listing_id: 1,
+                average_price: dec("15"),
+                quantity: dec("100"),
+                currency: "AUD".to_string(),
+                brokerage: Decimal::ZERO,
+                gst_on_brokerage: Decimal::ZERO,
+                brokerage_currency: "AUD".to_string(),
+                fx_rate: Decimal::ONE,
+                spot_fx_rate: None,
+                contract_note_ref: None,
+                allocations: vec![crate::entities::sell::AllocationInput {
+                    purchase_trade_id: first.id,
+                    quantity_allocated: dec("100"),
+                }],
+            },
+        )
+        .await
+        .unwrap();
+
+        let report = db_tax_report(&pool, 2025).await.unwrap();
+        assert_eq!(report.income.ess.len(), 2);
+        let deferral = &report.income.ess[0]; // taxing-point order
+        assert_eq!(deferral.ess_statement_id, 1);
+        assert_eq!(deferral.ticker, "ICE");
+        assert_eq!(deferral.taxing_point_date, ymd(2024, 9, 2));
+        assert_eq!(deferral.deferral_discount_aud, dec("1000"));
+        assert_eq!(deferral.taxed_upfront_eligible_aud, Decimal::ZERO);
+        assert_eq!(deferral.tfn_withholding_aud, dec("470"));
+        let upfront = &report.income.ess[1];
+        assert_eq!(upfront.ess_statement_id, 2);
+        assert_eq!(upfront.taxed_upfront_eligible_aud, dec("600"));
+        assert_eq!(upfront.deferral_discount_aud, Decimal::ZERO);
+
+        // The disposal is the CGT side, against the reset cost base — the
+        // discount is not proceeds and the proceeds are not income.
+        assert_eq!(report.disposals.totals.gain_loss_aud, dec("500"));
+
+        let line = |field: &str| {
+            report
+                .tax_summary
+                .iter()
+                .find(|l| l.field == field)
+                .unwrap_or_else(|| panic!("no {field} line"))
+        };
+        assert_eq!(line("ess_discount_assessable").value, "1000"); // 1600 − 600
+        assert_eq!(line("ess_discount_assessable").ato_label, "12B");
+        assert_eq!(line("ess_taxed_upfront_reduction").value, "600");
+        assert_eq!(line("ess_foreign_source_discount").value, "0");
+        assert_eq!(line("tfn_withholding_tax").value, "470");
+        assert_eq!(line("dividends_assessable").value, "0");
+    }
+
     #[tokio::test]
     async fn years_handler_lists_every_year_with_a_recorded_fact() {
         let pool = test_support::test_pool().await;

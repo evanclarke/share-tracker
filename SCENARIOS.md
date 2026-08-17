@@ -73,7 +73,7 @@ behind or became a recorded finding.
 | G. Dividends, franking, and the holding-period rule | 25 | 2026-08-16 | 6 raised, all closed — see below |
 | H. Interest, expenses, and other income | 10 | 2026-08-17 | 6 raised, all closed — see below |
 | I. DRP | 14 | 2026-08-17 | 6 raised, all closed — see below |
-| J. Employee share schemes | 14 | — | — |
+| J. Employee share schemes | 14 | 2026-08-18 | 8 raised, open — see below |
 | K. Inherited parcels | 10 | — | — |
 | L. Crypto | 15 | — | — |
 | M. Foreign currency and FX | 16 | — | — |
@@ -491,6 +491,66 @@ derived settlement, keeping a whole-unit allotment's leftover, and refusing a cu
 | A reinvested distribution can be edited afterwards with nothing re-checked | I-01, I-04, I-07 | fixed 2026-08-17 (`3ed2295`) — archived in [`DONE/reviews.md`](DONE/reviews.md) |
 | A distribution in a currency other than its listing's is reinvested without conversion | I-06, I-08 | fixed 2026-08-17 (`450b887`) — archived in [`DONE/reviews.md`](DONE/reviews.md) |
 | The partial-participation limitation names no workaround | I-09 | fixed 2026-08-17 (`1d6a65f`) — archived in [`DONE/reviews.md`](DONE/reviews.md) |
+
+### Section J findings
+
+An ESS interest is two facts joined at one date: the assessable **discount** in
+the year of the taxing point, and a CGT parcel **re-acquired** that day at
+market value. Both halves are right where they were probed. The discount is
+assessed in the taxing point's financial year and reported at Item 12 by label,
+net of one $1,000 taxed-upfront reduction per year across every statement, with
+the TFN amount joining the withholding line and the foreign-source memo carried
+without being added on top (J-01, J-03, J-09, J-14). The parcel takes the
+market value as its whole cost base with no brokerage and no deemed acquisition
+date, so its 12-month clock runs from the taxing point and not the grant — half
+a parcel sold on the anniversary is on the other method while the half sold a
+day later is discountable (J-05), and a vest moved to the personal broker
+account carries both the cost base and that clock across the account boundary
+(J-06). Editing after a vest splits exactly where the model says it should:
+the six fields the Buy was built from are frozen while the discount labels stay
+editable, because the employer's annual statement arrives after the release
+(J-07); deleting the statement takes the vest Buy with it, and is refused while
+a sale — or a transfer's closing Sell — draws on that parcel (J-13). The
+statement-AUD overrides on a foreign-currency grant are reported verbatim and
+drive the reduction from the AUD figure (J-08). The 30-day rule's own worked
+example is now reproduced in `ato_examples.rs` (J-04): entering the *amended*
+statement, taxing point moved to the disposal and the discount re-measured at
+the proceeds, produces the ATO's $1,518 in FY2020 and no capital gain at all —
+`docs/ato/OVERVIEW.md` claimed that test existed before it did.
+
+The eight findings divide into three groups. The first is what a statement row
+is allowed to say — section H's theme again: apart from the AUD-override rule
+`ess_statement::db_upsert` validates nothing, so negative discounts and
+negative TFN withholding are accepted (and net against other statements in the
+year), a label-A memo can exceed the discounts it is a memo of, a discount can
+exceed the market value of the shares it is a discount on, and a currency other
+than the listing's rides through to the parcel (J-01, J-08, J-09, J-11). The
+second is the vest's write path: it INSERTs its Buy directly rather than
+through `trade::db_upsert`, so a pre-CGT taxing point creates a parcel the
+trades endpoint explicitly refuses (J-03, J-13), and it hard-codes
+`fx_rate = 1` — which `infra::fx` treats as a *fallback* rate, so a
+foreign-currency vest whose taxing-point month has no RBA rate is costed at
+parity while the income side 500s over the same missing month (J-08, J-12).
+The third is what nothing says: no surface mentions the 30-day rule, so the
+natural entry of a within-30-days sale books the discount in the wrong year and
+invents a capital gain (J-04); a duplicated statement — the shape an *amended*
+statement produces — is caught by no health check, though every other
+income-bearing table has one (J-11); the $1,000 reduction is applied
+unconditionally with no way to record failing the ≤A$180,000 income test and no
+statement of that condition on the printed document (J-02); and the documented
+workaround for a dividend equivalent reports remuneration as an unfranked
+dividend at 11S (J-10).
+
+| Finding | Scenarios | Status |
+| --- | --- | --- |
+| The ESS vest Buy's FX rate is a hard-coded 1, so a foreign-currency vest can cost at parity | J-08, J-12 | open — `TODO.md` |
+| An ESS statement in a currency other than its listing's is vested without conversion | J-08, J-12 | open — `TODO.md` |
+| The ESS vest bypasses the trade write-time checks (a pre-CGT parcel) | J-03, J-13 | open — `TODO.md` |
+| An ESS statement has no write-time checks on what it may say | J-01, J-09, J-11 | open — `TODO.md` |
+| Nothing on the product side mentions the ESS 30-day rule | J-04 | open — `TODO.md` |
+| A duplicated ESS statement is caught by nothing | J-11 | open — `TODO.md` |
+| The $1,000 taxed-upfront reduction is always applied, with no way to record failing the income test | J-02 | open — `TODO.md` |
+| The documented dividend-equivalent workaround reports remuneration as a dividend | J-10 | open — `TODO.md` |
 
 ---
 

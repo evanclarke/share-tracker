@@ -1625,6 +1625,83 @@ async fn ess_example_matt_taxed_upfront_eligible_reduction() {
     assert_eq!(holdings[0].total_cost_base, dec("3600"));
 }
 
+/// `docs/ato/ess-30-day-rule.md` (QC 23058) — "Example 11: Shares acquired
+/// under a tax-deferred scheme and sold within 30 days of the deferred taxing
+/// point" (Wyatt).
+///
+/// > On 23 June 2019 … the deferred taxing point is 23 June 2019. The market
+/// > value of the shares on 23 June 2019 is $1,400 … On 20 July 2019, Wyatt
+/// > sells the 400 shares … for a total of $1,518. As the sale is within 30
+/// > days of the deferred taxing point, the taxing point now becomes
+/// > 20 July 2019 … The market value of the shares on 20 July 2019 is the
+/// > amount Wyatt received from selling the shares, $1,518 … Therefore, the
+/// > discount on the shares is $1,518 … Wyatt must include his discount on his
+/// > 2020 tax return, not his 2019 tax return.
+///
+/// The 30-day rule is not a calculation this system performs — it decides
+/// *which statement is the operative one*, which the employer settles by
+/// issuing an amended statement (here: the 2019 one withdrawn, a 2020 one
+/// issued). What is entered is that amended statement: taxing point
+/// 20 July 2019 at the $3.795 per-share sale price. Vesting it resets the cost
+/// base to the same $1,518 the sale realises, so the discount lands in FY2020
+/// at label F **and there is no separate capital gain** — exactly the ATO's
+/// outcome. Entering the superseded 23 June statement instead would book the
+/// discount in FY2019 and invent a $118 capital gain (SCENARIOS J-04).
+#[tokio::test]
+async fn ess_30_day_rule_example_11_wyatt_amended_statement() {
+    let pool = test_pool().await;
+    put_listing(&pool, 1, "PPL").await; // Pepper Pines Ltd
+
+    // The amended ESS statement: the taxing point moved to the disposal date,
+    // the discount re-measured at what Wyatt received ($1,518 / 400 shares).
+    api_put(
+        &pool,
+        "/ess_statements/1",
+        json!({
+            "listing_id": 1,
+            "taxing_point_date": "2019-07-20",
+            "quantity": "400",
+            "market_value_per_share": "3.795",
+            "deferral_discount": "1518", // label F
+            "currency": "AUD",
+        }),
+    )
+    .await;
+    let vest: Trade = api_post(
+        &pool,
+        "/ess_statements/1/vest",
+        json!({}),
+        StatusCode::CREATED,
+    )
+    .await;
+    assert_eq!(vest.date, "2019-07-20".parse().unwrap());
+    assert_eq!(vest.quantity, dec("400"));
+
+    // The sale, the same day, for the $1,518 that fixed the discount.
+    put_sell(&pool, 50, 1, "2019-07-20", "400", "3.795", "0", vest.id).await;
+
+    // "$1,518 at F item 12 … he also writes $1,518 at B item 12" — in FY2020
+    // (a July date is the next financial year), and in no other year.
+    let years: Vec<TaxYearSummary> = api_get(&pool, "/portfolio/tax-summary").await;
+    assert_eq!(years.len(), 1);
+    assert_eq!(years[0].tax_year, 2020);
+    assert_eq!(years[0].ess_discount_assessable, dec("1518"));
+    assert_eq!(
+        years[0].ess_taxed_upfront_reduction,
+        Decimal::ZERO,
+        "the $1,000 reduction is for taxed-upfront eligible schemes only"
+    );
+
+    // No separate capital gain: the cost base reset to the same market value
+    // the sale realised.
+    let sales: Vec<RealisedGainLoss> = api_get(&pool, "/portfolio/realised-gains").await;
+    assert_eq!(sales.len(), 1);
+    assert_eq!(sales[0].proceeds, dec("1518.000"));
+    assert_eq!(sales[0].cost_base, dec("1518.000"));
+    assert_eq!(sales[0].capital_gain_loss, Decimal::ZERO);
+    assert_eq!(sales[0].capital_loss, Decimal::ZERO);
+}
+
 /// `docs/ato/worthless-shares.md` (QC 52234) — "Capital loss when company
 /// dissolves" (Dave).
 ///

@@ -255,6 +255,165 @@ mod tests {
         assert_eq!(g.parcels[0].acquisition_date, ymd(2024, 9, 1));
     }
 
+    /// SCENARIOS J-05: where that clock falls due. The discount needs the
+    /// shares held for *at least 12 months*, counting neither the acquisition
+    /// day nor the disposal day (`docs/ato/cgt-discount.md`), so a taxing point
+    /// of 1 September 2024 first qualifies on **2 September 2025** — sold on
+    /// the 1st, one day short, the whole gain is on the other method. Half the
+    /// parcel each side of that boundary proves the vest parcel is tested like
+    /// any other, on the taxing point it was re-acquired at.
+    #[tokio::test]
+    async fn the_twelve_month_boundary_falls_a_day_after_the_taxing_point_anniversary() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AUD").await;
+        insert_statement(&pool, 1, "100", "6", "AUD").await; // taxing point 2024-09-01
+        let parcel = db_vest(&pool, 1).await.unwrap();
+
+        for (id, date) in [(50, ymd(2025, 9, 1)), (51, ymd(2025, 9, 2))] {
+            sell_parcel(&pool, id, &parcel, date, Decimal::from(50)).await;
+        }
+
+        let realised = crate::reports::realised_gains::db_realised_gains(&pool)
+            .await
+            .unwrap();
+        assert_eq!(realised.len(), 2);
+        // Each half: $500 proceeds − $300 cost base = a $200 gain.
+        let short = realised.iter().find(|g| g.sale_trade_id == 50).unwrap();
+        assert_eq!(short.capital_gain_loss, Decimal::from(200));
+        assert_eq!(
+            short.discount_eligible_gain,
+            Decimal::ZERO,
+            "the anniversary itself is a day short of 12 months"
+        );
+        assert_eq!(short.non_discountable_gain, Decimal::from(200));
+        let long = realised.iter().find(|g| g.sale_trade_id == 51).unwrap();
+        assert_eq!(long.capital_gain_loss, Decimal::from(200));
+        assert_eq!(long.discount_eligible_gain, Decimal::from(200));
+        assert_eq!(long.non_discountable_gain, Decimal::ZERO);
+    }
+
+    /// SCENARIOS J-06: vested shares released into an employer-plan account and
+    /// then moved to the personal broker account. The transfer is not a
+    /// disposal, so the replacement parcel must carry the taxing point's cost
+    /// base *and* its discount clock (`deemed_acquisition_date`) across the
+    /// account boundary — a sale 13 months after the taxing point but 12 months
+    /// after the transfer is still discountable. While that transferred-in
+    /// parcel stands, the statement can't be deleted: its vest Buy is drawn on
+    /// by the transfer's closing Sell.
+    #[tokio::test]
+    async fn a_vest_parcel_moved_to_another_account_keeps_its_taxing_point_clock() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AUD").await;
+        insert_statement(&pool, 1, "100", "6", "AUD").await; // taxing point 2024-09-01
+        let vest = db_vest(&pool, 1).await.unwrap();
+
+        crate::entities::holding_account::db_upsert(
+            &pool,
+            &crate::entities::holding_account::HoldingAccount {
+                id: 2,
+                name: "Broker".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let moved = crate::entities::transfer::db_transfer(
+            &pool,
+            1,
+            &crate::entities::transfer::TransferBody {
+                listing_id: 1,
+                date: ymd(2024, 10, 1),
+                from_account_id: 1,
+                to_account_id: 2,
+                allocations: vec![crate::entities::sell::AllocationInput {
+                    purchase_trade_id: vest.id,
+                    quantity_allocated: Decimal::from(100),
+                }],
+                fee_allocations: vec![],
+                fee_market_price: None,
+                fee_fx_rate: None,
+            },
+        )
+        .await
+        .unwrap();
+        let transferred_in = &moved.transfer_ins[0];
+        assert_eq!(transferred_in.holding_account_id, 2);
+        assert_eq!(
+            transferred_in.deemed_acquisition_date,
+            Some(ymd(2024, 9, 1)),
+            "the taxing point, not the transfer date, still runs the clock"
+        );
+
+        // The statement's vest Buy is now drawn on by the transfer's closing
+        // Sell, so deleting the statement is refused rather than orphaning it.
+        assert_eq!(
+            ess_statement::db_delete(&pool, 1).await.unwrap(),
+            ess_statement::DeleteOutcome::VestDrawnOn
+        );
+
+        // Sold from the broker account 2025-10-06 — 13 months after the taxing
+        // point, 12 months after the transfer.
+        sell_parcel(
+            &pool,
+            50,
+            transferred_in,
+            ymd(2025, 10, 6),
+            Decimal::from(100),
+        )
+        .await;
+        let realised = crate::reports::realised_gains::db_realised_gains(&pool)
+            .await
+            .unwrap();
+        assert_eq!(realised.len(), 1);
+        let g = &realised[0];
+        assert_eq!(g.holding_account_id, 2);
+        assert_eq!(
+            g.cost_base,
+            Decimal::from(600),
+            "the taxing-point cost base"
+        );
+        assert_eq!(g.capital_gain_loss, Decimal::from(400));
+        assert_eq!(g.discount_eligible_gain, Decimal::from(400));
+        assert_eq!(g.parcels[0].acquisition_date, ymd(2024, 9, 1));
+    }
+
+    /// Sell `qty` units of `parcel` at $10 on `date`, from the parcel's own
+    /// holding account.
+    async fn sell_parcel(
+        pool: &SqlitePool,
+        id: i64,
+        parcel: &Trade,
+        date: NaiveDate,
+        qty: Decimal,
+    ) {
+        crate::entities::sell::db_upsert_sell(
+            pool,
+            id,
+            &crate::entities::sell::SellBody {
+                brokerage_includes_gst: false,
+                statement_total: None,
+                holding_account_id: parcel.holding_account_id,
+                date,
+                settlement_date: None,
+                listing_id: parcel.listing_id,
+                average_price: Decimal::from(10),
+                quantity: qty,
+                currency: "AUD".to_string(),
+                brokerage: Decimal::ZERO,
+                gst_on_brokerage: Decimal::ZERO,
+                brokerage_currency: "AUD".to_string(),
+                fx_rate: Decimal::ONE,
+                spot_fx_rate: None,
+                contract_note_ref: None,
+                allocations: vec![crate::entities::sell::AllocationInput {
+                    purchase_trade_id: parcel.id,
+                    quantity_allocated: qty,
+                }],
+            },
+        )
+        .await
+        .unwrap();
+    }
+
     /// The cost base = quantity × market value (price × qty + 0 brokerage), so
     /// the parcel carries the full taxing-point market value as its cost base.
     #[tokio::test]
