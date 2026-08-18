@@ -37,6 +37,10 @@
 //!   statement of identical figures — the same double-entry on the
 //!   employee-share-scheme side, doubling the year's Item 12 discount and
 //!   vesting the parcel twice (see [`DuplicateEssStatement`]);
+//! - every (listing, holding account, date of death) carrying more than one
+//!   inheritance of identical figures — the same double-entry on the
+//!   deceased-estate side, and the one that doubles a *holding* rather than a
+//!   year's income (see [`DuplicateInheritance`]);
 //! - every disposal of ESS-vested shares within 30 days after the taxing
 //!   point, where the ESS 30-day rule re-measures the discount, moves it into
 //!   the disposal's year and cancels the capital gain — the one entry here
@@ -57,6 +61,7 @@ use crate::domain::tax_year::tax_year_for;
 use crate::entities::closing_price::{self, HeldTimeline};
 use crate::entities::ess_statement::{self, EssStatement};
 use crate::entities::income::Income;
+use crate::entities::inheritance::{self, Inheritance};
 use crate::entities::interest_income::InterestIncome;
 use crate::entities::investment_expense::{ExpenseType, InvestmentExpense};
 use crate::infra::decimal::Money;
@@ -365,6 +370,43 @@ pub struct DuplicateEssStatement {
     pub statement_ids: Vec<i64>,
 }
 
+/// Two or more inheritances of one listing, in one holding account, from one
+/// date of death, carrying **identical figures** (SCENARIOS K-09). Each one
+/// creates its own parcel Buy, so a 100-unit holding entered twice is 200
+/// units held at twice the cost base — every open-parcels, valuation and
+/// realised-gains figure for the listing doubles, and unlike the income-side
+/// duplicates there is no year to bound the error: it persists until the
+/// parcel is sold.
+///
+/// Deliberately a **warning, not a constraint**, the same call as
+/// [`DuplicateEssStatement`]: two inheritances of one listing from one death
+/// are ordinary — two beneficiaries' shares are not modelled, but two holding
+/// accounts, two estates, or a part interest recorded in stages all are. The
+/// figures are part of the key for exactly that reason: two rows differing in
+/// quantity, cost base or LPR expenditure are two inheritances, not one
+/// entered twice.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DuplicateInheritance {
+    pub listing_id: i64,
+    pub ticker: String,
+    pub holding_account_id: i64,
+    pub date_of_death: NaiveDate,
+    /// ISO 4217 currency the shared figures are stated in (part of the key).
+    pub currency: String,
+    /// The units each duplicated row inherits, so the warning names the parcel
+    /// rather than only its date.
+    pub quantity: Decimal,
+    /// The whole cost base each duplicated row carries onto its parcel (first
+    /// element + LPR expenditure, in `currency`) — the figure counted once per
+    /// row.
+    pub cost_base_total: Decimal,
+    /// How many inheritances share the whole key — always ≥ 2.
+    pub inheritance_count: i64,
+    /// The ids sharing it, ascending, so the surplus row can be opened and
+    /// deleted without a search.
+    pub inheritance_ids: Vec<i64>,
+}
+
 /// A disposal of ESS-vested shares **within 30 days after** the statement's
 /// taxing point, where the ESS 30-day rule moves the taxing point to the
 /// disposal date (SCENARIOS J-04, `docs/ato/ess-30-day-rule.md`, QC 23058
@@ -479,6 +521,10 @@ pub struct HealthReport {
     /// ESS statement of identical figures, newest first. Empty when no vest is
     /// declared twice.
     pub duplicate_ess_statements: Vec<DuplicateEssStatement>,
+    /// Every (listing, holding account, date of death) carrying more than one
+    /// inheritance of identical figures, newest death first. Empty when no
+    /// inherited parcel is recorded twice.
+    pub duplicate_inheritances: Vec<DuplicateInheritance>,
     /// Every disposal of ESS-vested shares within 30 days after the statement's
     /// taxing point, newest sale first — where the 30-day rule re-measures the
     /// discount and cancels the capital gain. Empty when no such sale exists.
@@ -1059,6 +1105,100 @@ async fn db_duplicate_ess_statements(
     Ok(duplicates)
 }
 
+/// Whether two inheritances are one parcel entered twice — see
+/// [`DuplicateInheritance`]. Every stored field except the id is compared, the
+/// money figures as `Decimal`s rather than as the stored TEXT (so `"3000.0"`
+/// and `"3000.00"` match). The cost-base *rule* is part of it too: the same
+/// units and the same figure under `DeceasedCostBase` and `MarketValueAtDeath`
+/// are two different claims about the same holding, which is a contradiction
+/// worth showing rather than a duplicate to collapse.
+fn same_inherited_parcel(a: &Inheritance, b: &Inheritance) -> bool {
+    a.listing_id == b.listing_id
+        && a.holding_account_id == b.holding_account_id
+        && a.date_of_death == b.date_of_death
+        && a.currency == b.currency
+        && a.quantity == b.quantity
+        && a.cost_base_rule == b.cost_base_rule
+        && a.cost_base == b.cost_base
+        && a.lpr_expenditure == b.lpr_expenditure
+        && a.lpr_expenditure_date == b.lpr_expenditure_date
+        && a.deceased_acquisition_date == b.deceased_acquisition_date
+        && a.fx_rate == b.fx_rate
+}
+
+/// Inheritances recording one parcel twice — see [`DuplicateInheritance`].
+///
+/// Read on the caller's transaction and grouped in Rust for the same reason as
+/// [`db_duplicate_ess_statements`]: the figures are part of the key and they
+/// are TEXT decimals, which SQL would compare as strings. Only rows already
+/// sharing a (listing, account, date of death) with another row are read, so a
+/// portfolio of unrelated inheritances never reaches memory.
+async fn db_duplicate_inheritances(
+    conn: &mut sqlx::SqliteConnection,
+) -> Result<Vec<DuplicateInheritance>, sqlx::Error> {
+    let rows: Vec<Inheritance> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT {} FROM inheritances \
+         WHERE EXISTS (SELECT 1 FROM inheritances o \
+                       WHERE o.listing_id = inheritances.listing_id \
+                         AND o.holding_account_id = inheritances.holding_account_id \
+                         AND o.date_of_death = inheritances.date_of_death \
+                         AND o.id <> inheritances.id) \
+         ORDER BY inheritances.id",
+        inheritance::COLUMNS
+    )))
+    .fetch_all(&mut *conn)
+    .await?;
+    if rows.is_empty() {
+        return Ok(Vec::new());
+    }
+    let tickers: HashMap<i64, String> =
+        sqlx::query_as::<_, (i64, String)>("SELECT id, ticker FROM listings")
+            .fetch_all(&mut *conn)
+            .await?
+            .into_iter()
+            .collect();
+
+    let mut groups: Vec<Vec<Inheritance>> = Vec::new();
+    for row in rows {
+        match groups
+            .iter_mut()
+            .find(|group| same_inherited_parcel(&group[0], &row))
+        {
+            Some(group) => group.push(row),
+            None => groups.push(vec![row]),
+        }
+    }
+    let mut duplicates: Vec<DuplicateInheritance> = groups
+        .into_iter()
+        .filter(|group| group.len() > 1)
+        .map(|group| {
+            let first = &group[0];
+            DuplicateInheritance {
+                listing_id: first.listing_id,
+                ticker: tickers.get(&first.listing_id).cloned().unwrap_or_default(),
+                holding_account_id: first.holding_account_id,
+                date_of_death: first.date_of_death,
+                currency: first.currency.clone(),
+                quantity: first.quantity,
+                // What the parcel Buy carries: the first element plus the LPR
+                // expenditure, the sum `inheritance::db_upsert` writes.
+                cost_base_total: first.cost_base + first.lpr_expenditure,
+                inheritance_count: group.len() as i64,
+                inheritance_ids: group.iter().map(|row| row.id).collect(),
+            }
+        })
+        .collect();
+    // Newest first, matching the other duplicate lists.
+    duplicates.sort_by(|a, b| {
+        b.date_of_death
+            .cmp(&a.date_of_death)
+            .then_with(|| a.ticker.cmp(&b.ticker))
+            .then_with(|| a.holding_account_id.cmp(&b.holding_account_id))
+            .then_with(|| a.inheritance_ids.cmp(&b.inheritance_ids))
+    });
+    Ok(duplicates)
+}
+
 /// Disposals of ESS-vested shares inside the 30-day window — see
 /// [`EssThirtyDaySale`].
 ///
@@ -1182,6 +1322,7 @@ pub async fn db_health(
     let duplicate_interest = db_duplicate_interest(&mut tx).await?;
     let duplicate_expenses = db_duplicate_expenses(&mut tx).await?;
     let duplicate_ess_statements = db_duplicate_ess_statements(&mut tx).await?;
+    let duplicate_inheritances = db_duplicate_inheritances(&mut tx).await?;
     let ess_30_day_rule = db_ess_30_day_rule(&mut tx).await?;
     tx.commit().await?;
     let unpriced_days = db_unpriced_days(pool, now).await?;
@@ -1205,6 +1346,7 @@ pub async fn db_health(
         duplicate_interest,
         duplicate_expenses,
         duplicate_ess_statements,
+        duplicate_inheritances,
         ess_30_day_rule,
     })
 }
@@ -2617,6 +2759,94 @@ mod tests {
         assert_eq!(h.ess_30_day_rule[1].ess_statement_id, 2);
         assert_eq!(h.ess_30_day_rule[1].days_after, 10);
         assert_eq!(h.ess_30_day_rule[1].units_sold, dec("100"));
+    }
+
+    // The deceased-estate side (SCENARIOS K-09).
+
+    /// An inheritance of `quantity` units at a `cost_base`, all from the one
+    /// 2015 acquisition and 2024 death.
+    async fn insert_inheritance(
+        pool: &SqlitePool,
+        id: i64,
+        listing_id: i64,
+        account: i64,
+        quantity: &str,
+        cost_base: &str,
+    ) {
+        crate::entities::inheritance::db_upsert(
+            pool,
+            &Inheritance {
+                id,
+                listing_id,
+                holding_account_id: account,
+                quantity: dec(quantity),
+                date_of_death: ymd(2024, 3, 1),
+                cost_base_rule: crate::entities::inheritance::CostBaseRule::DeceasedCostBase,
+                cost_base: dec(cost_base),
+                lpr_expenditure: Decimal::ZERO,
+                lpr_expenditure_date: None,
+                deceased_acquisition_date: Some(ymd(2015, 5, 5)),
+                currency: "AUD".to_string(),
+                fx_rate: Decimal::ONE,
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    /// One inherited parcel entered twice: each row creates its own Buy, so
+    /// the holding and its cost base are doubled with nothing else to notice.
+    #[tokio::test]
+    async fn one_inherited_parcel_entered_twice_is_reported() {
+        let pool = test_pool().await;
+        test_support::listing(1).ticker("INHA").insert(&pool).await;
+        insert_inheritance(&pool, 1, 1, 1, "100", "3000").await;
+        insert_inheritance(&pool, 2, 1, 1, "100", "3000").await;
+
+        let h = health(&pool, ymd(2026, 7, 13)).await;
+        assert_eq!(h.duplicate_inheritances.len(), 1);
+        let d = &h.duplicate_inheritances[0];
+        assert_eq!(d.ticker, "INHA");
+        assert_eq!(d.date_of_death, ymd(2024, 3, 1));
+        assert_eq!(d.quantity, dec("100"));
+        assert_eq!(d.cost_base_total, dec("3000"));
+        assert_eq!(d.inheritance_count, 2);
+        assert_eq!(d.inheritance_ids, vec![1, 2]);
+    }
+
+    /// Two inheritances from one death that are not one entered twice: a
+    /// different share of the estate, a different account, a different listing
+    /// — and a different cost-base *rule*, which is a contradiction the
+    /// warning does show.
+    #[tokio::test]
+    async fn inheritances_from_one_death_that_differ_are_not_reported() {
+        let pool = test_pool().await;
+        test_support::listing(1).ticker("INHA").insert(&pool).await;
+        test_support::listing(2).ticker("INHB").insert(&pool).await;
+        crate::entities::holding_account::db_upsert(
+            &pool,
+            &crate::entities::holding_account::HoldingAccount {
+                id: 2,
+                name: "Broker".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+
+        insert_inheritance(&pool, 1, 1, 1, "100", "3000").await;
+        // A second parcel of the same listing from the same death, in a
+        // different quantity — a part interest recorded in stages.
+        insert_inheritance(&pool, 2, 1, 1, "60", "1800").await;
+        // The same figures in another holding account, and on another listing.
+        insert_inheritance(&pool, 3, 1, 2, "100", "3000").await;
+        insert_inheritance(&pool, 4, 2, 1, "100", "3000").await;
+
+        let h = health(&pool, ymd(2026, 7, 13)).await;
+        assert!(
+            h.duplicate_inheritances.is_empty(),
+            "{:?}",
+            h.duplicate_inheritances
+        );
     }
 
     #[tokio::test]

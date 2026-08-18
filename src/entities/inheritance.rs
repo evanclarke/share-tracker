@@ -167,6 +167,14 @@ pub struct InheritanceBody {
     pub fx_rate: Option<Decimal>,
 }
 
+/// The row's stored columns, in `Inheritance`'s field order — the one SELECT
+/// list every read of the table uses (`reports::health`'s duplicate check
+/// included), so a new column is added in one place.
+pub(crate) const COLUMNS: &str = "id, listing_id, holding_account_id, quantity, date_of_death, \
+                                  cost_base_rule, cost_base, lpr_expenditure, \
+                                  lpr_expenditure_date, deceased_acquisition_date, currency, \
+                                  fx_rate";
+
 fn default_currency() -> String {
     "AUD".to_string()
 }
@@ -339,23 +347,17 @@ impl From<UpsertError> for ApiError {
 }
 
 pub async fn db_list(pool: &SqlitePool) -> Result<Vec<Inheritance>, sqlx::Error> {
-    sqlx::query_as(
-        "SELECT id, listing_id, holding_account_id, quantity, date_of_death, cost_base_rule, \
-         cost_base, lpr_expenditure, lpr_expenditure_date, deceased_acquisition_date, currency, \
-         fx_rate \
-         FROM inheritances ORDER BY date_of_death, id",
-    )
+    sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT {COLUMNS} FROM inheritances ORDER BY date_of_death, id"
+    )))
     .fetch_all(pool)
     .await
 }
 
 pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<Inheritance>, sqlx::Error> {
-    sqlx::query_as(
-        "SELECT id, listing_id, holding_account_id, quantity, date_of_death, cost_base_rule, \
-         cost_base, lpr_expenditure, lpr_expenditure_date, deceased_acquisition_date, currency, \
-         fx_rate \
-         FROM inheritances WHERE id = ?",
-    )
+    sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT {COLUMNS} FROM inheritances WHERE id = ?"
+    )))
     .bind(id)
     .fetch_optional(pool)
     .await

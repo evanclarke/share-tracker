@@ -12,9 +12,10 @@ are fixed or decided.
 
 **SCENARIOS.md sections A–J are driven and every finding they raised is closed** in the `DONE/*.md`
 archive. **Section K. Inherited parcels** was driven 2026-08-18; it raised six findings, and the
-three below are the ones still open (the three about what a row may say — the parcel Buy bypassing
-the trade write-time checks, a non-AUD inheritance costed at parity, and a currency other than the
-listing's — are closed and archived in [`DONE/reviews.md`](DONE/reviews.md)). When they are closed, the next work comes from driving **SCENARIOS.md section L. Crypto** the
+two below are the ones still open (the four closed so far — the parcel Buy bypassing the trade
+write-time checks, a non-AUD inheritance costed at parity, a currency other than the listing's, and
+the missing duplicate-inheritance health check — are archived in
+[`DONE/reviews.md`](DONE/reviews.md)). When they are closed, the next work comes from driving **SCENARIOS.md section L. Crypto** the
 same way — walk its scenarios against the running system, and record each gap here as its own `## `
 section.
 
@@ -56,25 +57,6 @@ the expense after the death, by definition a later month and often a much later 
   element at its own rate/currency, and the AUD case is unchanged
 - [ ] Docs sync: `docs/SCHEMA.md` (`inheritances`), `docs/API.md` (Inheritances, Known limitations,
   the FX-conversion section), README's inherited-parcels feature line
-
-## A duplicated inheritance is caught by nothing (SCENARIOS K-09)
-(SCENARIOS.md section K verification pass, 2026-08-18. The G-24 / H / J-11 pattern, one table
-further on: every other statement-shaped fact table now has a duplicate health check —
-`duplicate_income`, `duplicate_interest`, `duplicate_expenses`, `duplicate_amma_statements`,
-`duplicate_ess_statements`, `duplicate_actions` — and `inheritances` has none, though it is the same
-shape: a document-derived row, re-entered by hand, that creates a **parcel**.)
-- [ ] Reproduced: two identical inheritances (same listing, account, date of death, quantity, cost
-  base and rule) → two parcels of 100 units each, `GET /reports/health` completely silent. The
-  holding is doubled and so is every cost base and gain computed off it
-- [ ] The duplicate is indistinguishable from the legitimate case only by its *figures*, which is
-  exactly what the existing checks key on: K-09 (two beneficiaries, or two deaths, or the same death
-  across two accounts) all differ in quantity, cost base or account, so a check keyed on identical
-  figures stays silent for them. Follow `duplicate_ess_statements` exactly — grouped in Rust because
-  the amounts are TEXT decimals SQL would compare as strings
-- [ ] Fix: `duplicate_inheritances` in `reports::health` + the web UI banner, keyed on (listing,
-  holding account, date of death) *plus* identical quantity, cost base, rule and LPR figures
-- [ ] Tests: two identical inheritances are reported; two differing in quantity or account are not
-- [ ] Docs sync: `docs/API.md` Health, README's health-check feature line
 
 ## Nothing states what the deceased's cost-base figure must be net of (SCENARIOS K-02, K-09)
 (SCENARIOS.md section K verification pass, 2026-08-18. The G-03/G-04 shape: the figure is entered by

@@ -2119,3 +2119,51 @@ Tests: `an_inheritance_in_another_currency_than_its_listings_is_refused` — a U
 AUD listing refused with both currencies in the body and nothing persisted, and the matching pair
 accepted either way round (AUD/AUD and USD/USD). Docs: `docs/API.md` (Inheritances' `422` list and
 the 422 catalogue).
+
+## A duplicated inheritance is caught by nothing (SCENARIOS K-09)
+(SCENARIOS.md section K verification pass, 2026-08-18. The G-24 / H / J-11 pattern, one table
+further on: every other statement-shaped fact table now has a duplicate health check —
+`duplicate_income`, `duplicate_interest`, `duplicate_expenses`, `duplicate_amma_statements`,
+`duplicate_ess_statements`, `duplicate_actions` — and `inheritances` has none, though it is the same
+shape: a document-derived row, re-entered by hand, that creates a **parcel**.)
+- [x] Reproduced: two identical inheritances (same listing, account, date of death, quantity, cost
+  base and rule) → two parcels of 100 units each, `GET /reports/health` completely silent. The
+  holding is doubled and so is every cost base and gain computed off it
+- [x] The duplicate is indistinguishable from the legitimate case only by its *figures*, which is
+  exactly what the existing checks key on: K-09 (two beneficiaries, or two deaths, or the same death
+  across two accounts) all differ in quantity, cost base or account, so a check keyed on identical
+  figures stays silent for them. Follow `duplicate_ess_statements` exactly — grouped in Rust because
+  the amounts are TEXT decimals SQL would compare as strings
+- [x] Fix: `duplicate_inheritances` in `reports::health` + the web UI banner, keyed on (listing,
+  holding account, date of death) *plus* identical quantity, cost base, rule and LPR figures
+- [x] Tests: two identical inheritances are reported; two differing in quantity or account are not
+- [x] Docs sync: `docs/API.md` Health, README's health-check feature line
+
+**Resolution (2026-08-18): `duplicate_inheritances`, the `duplicate_ess_statements` shape exactly.**
+
+`reports::health` grew a sixth duplicate list: every (listing, holding account, date of death)
+carrying more than one inheritance whose *figures* also match, newest death first, naming the ticker,
+the units, the whole cost base each row carries onto its parcel (first element + LPR expenditure)
+and the ids to open. Read on the health report's own transaction, grouped in Rust because the
+amounts are TEXT decimals SQL would compare as strings, and pre-filtered in SQL to rows already
+sharing the (listing, account, death) key, so an unrelated portfolio never reaches memory.
+
+The key includes the **cost-base rule**, and deliberately does not collapse across it: the same units
+and the same figure recorded once as the deceased's cost base and once as market value at death are
+two different claims about one holding — a contradiction worth showing, not a duplicate to hide.
+Everything else that identifies the row is compared too, `fx_rate` included.
+
+Warning, not constraint, as with every other duplicate list: two inheritances of one listing from
+one death are ordinary (two holding accounts, two estates, a part interest recorded in stages), which
+is exactly why the figures are in the key.
+
+The read side needed one small tidy: `inheritance::COLUMNS` now holds the SELECT list the entity's
+own `db_list`/`db_get` and the health check all use, instead of the column names being spelled out
+per query.
+
+Tests: `one_inherited_parcel_entered_twice_is_reported` (the pair reported with its ticker, units,
+`3000` cost base and both ids) and `inheritances_from_one_death_that_differ_are_not_reported` (a
+part interest in a different quantity, the same figures in another holding account, and the same
+figures on another listing — all silent), plus the served-bundle assertion in `web.rs` for the
+banner text and its Inheritances link. Docs: `docs/API.md`'s Health list and response shape, and
+the README health feature line.

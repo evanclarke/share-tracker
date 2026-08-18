@@ -1531,6 +1531,13 @@ mod tests {
         assert!(js.contains("the discount is assessed and the parcel vested once per statement"));
         assert!(js.contains("'#/e/ess_statements'"));
         assert!(js.contains("Open ESS Statements"));
+        // …and on the deceased-estate side (SCENARIOS K-09: the one duplicate
+        // that doubles a holding rather than a year's income)…
+        assert!(js.contains("duplicate_inheritances"));
+        assert!(js.contains("identical inheritances of"));
+        assert!(js.contains("the holding and its cost base are doubled"));
+        assert!(js.contains("'#/e/inheritances'"));
+        assert!(js.contains("Open Inheritances"));
         // …plus the one alert that is a date pattern rather than a double entry
         // (SCENARIOS J-04: a sale inside the ESS 30-day rule's window), which
         // names the days apart, the statement, and the remedy — and the two

@@ -1139,6 +1139,15 @@ async function refreshHealthBanner() {
         + ') — the discount is assessed and the parcel vested once per statement;'
         + ' delete the superseded one unless both are real.');
     });
+    const duplicateInheritances = h.duplicate_inheritances || [];
+    duplicateInheritances.forEach(function (d) {
+      problems.push(d.inheritance_count + ' identical inheritances of ' + d.quantity + ' '
+        + d.ticker + ' from the death on ' + d.date_of_death + ', each carrying a '
+        + d.cost_base_total + ' ' + d.currency + ' cost base (ids '
+        + d.inheritance_ids.join(', ')
+        + ') — each creates its own parcel, so the holding and its cost base are doubled until'
+        + ' the surplus row is deleted.');
+    });
     const ess30Day = h.ess_30_day_rule || [];
     ess30Day.forEach(function (d) {
       problems.push('Sale of ' + d.units_sold + ' ' + d.ticker + ' ESS shares on ' + d.sale_date
@@ -1176,6 +1185,9 @@ async function refreshHealthBanner() {
     }
     if (duplicateExpenses.length > 0) {
       banner.appendChild(el('a', { href: '#/e/investment_expenses' }, 'Open Investment Expenses →'));
+    }
+    if (duplicateInheritances.length > 0) {
+      banner.appendChild(el('a', { href: '#/e/inheritances' }, 'Open Inheritances →'));
     }
     if (duplicateEss.length > 0 || ess30Day.length > 0) {
       banner.appendChild(el('a', { href: '#/e/ess_statements' }, 'Open ESS Statements →'));
