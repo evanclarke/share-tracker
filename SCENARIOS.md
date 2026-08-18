@@ -74,7 +74,7 @@ behind or became a recorded finding.
 | H. Interest, expenses, and other income | 10 | 2026-08-17 | 6 raised, all closed — see below |
 | I. DRP | 14 | 2026-08-17 | 6 raised, all closed — see below |
 | J. Employee share schemes | 14 | 2026-08-18 | 8 raised, all closed — see below |
-| K. Inherited parcels | 10 | 2026-08-18 | 6 raised, all open — see below |
+| K. Inherited parcels | 10 | 2026-08-18 | 6 raised — see below |
 | L. Crypto | 15 | — | — |
 | M. Foreign currency and FX | 16 | — | — |
 | N. Holding accounts and transfers | 12 | — | — |
@@ -607,7 +607,7 @@ between beneficiaries.
 
 | Finding | Scenarios | Status |
 | --- | --- | --- |
-| The inheritance's parcel Buy bypasses the trade write-time checks (a zero FX rate, a return-of-capital currency conflict) | K-01, K-02, K-04 | open — `TODO.md` |
+| The inheritance's parcel Buy bypasses the trade write-time checks (a zero FX rate, a return-of-capital currency conflict) | K-01, K-02, K-04 | fixed 2026-08-18 — archived in [`DONE/reviews.md`](DONE/reviews.md) |
 | A non-AUD inheritance with no rate is costed at parity | K-01, K-04 | open — `TODO.md` |
 | An inheritance recorded in a currency other than its listing's rides through to the parcel | K-01 | open — `TODO.md` |
 | LPR expenditure converts at the parcel's acquisition month, not the month it was incurred | K-04 | open — `TODO.md` (carries a model decision) |

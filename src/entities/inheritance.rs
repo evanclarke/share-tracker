@@ -32,6 +32,40 @@
 //! The linked Buy is immutable individually (`PUT`/`DELETE /trades` → 422):
 //! editing and deleting go through the inheritance, and both are refused
 //! while the parcel is drawn on by a Sell allocation or AMIT adjustment.
+//!
+//! # The trade write-time checks, and where each is satisfied
+//!
+//! The Buy is written with a raw `INSERT INTO trades`, not through
+//! `trade::db_upsert`, so `trade::check_amounts` never runs over it (nor could
+//! it: the trade write paths refuse an inheritance-linked Buy outright). That
+//! is deliberate, and this is the list it rests on — every one of that check's
+//! rejections is either impossible here or refused by this entity's own
+//! [`validate`] (SCENARIOS K-01, K-02, K-04):
+//!
+//! - `QuantityNotPositive` — [`UpsertError::QuantityNotPositive`], the same
+//!   rule on the inherited unit count the Buy's quantity is bound from.
+//! - `PriceNegative` — `average_price` is written as the literal `'0'`: an
+//!   inherited parcel has no per-unit price, only a carried cost base.
+//! - `BrokerageNegative` / `GstNegative` — the GST is the literal `'0'` (an
+//!   estate transmission is not a brokered trade), and the brokerage column
+//!   carries the cost base, which [`UpsertError::NegativeAmount`] refuses to
+//!   let either component be negative.
+//! - `BrokerageCurrencyMismatch` — `brokerage_currency` is bound from the same
+//!   `currency` value as the trade's own, in one statement.
+//! - `FxRateNotPositive` — [`UpsertError::FxRateNotPositive`], the same rule.
+//! - `SettlementBeforeTrade` — `settlement_date` is bound to the trade date
+//!   itself (an estate transmission is not market-settled).
+//! - `PreCgtDate` — [`UpsertError::DeathPreCgt`], refused on the date of death,
+//!   which is what the Buy is dated.
+//!
+//! `trade::db_upsert` also cross-checks the written parcel against the
+//! return-of-capital payments on its listing, since a payment reduces a cost
+//! base in the parcel's own currency; that check runs here too, over this
+//! write's own transaction ([`UpsertError::PaymentCurrencyMismatch`]).
+//!
+//! A new check added to `trade::check_amounts` therefore needs a line here, and
+//! either an argument that the inheritance satisfies it or a guard that makes
+//! it so.
 
 use crate::infra::decimal::Money;
 use crate::infra::http::ApiError;
@@ -182,6 +216,26 @@ pub enum UpsertError {
     /// Remove them first.
     #[error("the inherited parcel is drawn on by a sale allocation or AMIT adjustment")]
     ParcelDrawnOn,
+    /// Zero or negative fallback FX rate. The rate divides the amount
+    /// (`AUD = foreign / rate`), so it can never be a real exchange rate —
+    /// and a zero one is not merely wrong: `infra::fx::apply_rate` divides by
+    /// it, so every cost-base report of the listing panics
+    /// (`trade::checks::AmountsError::FxRateNotPositive`, the same rule).
+    #[error("the fallback FX rate must be greater than zero")]
+    FxRateNotPositive,
+    /// The inherited parcel's currency differs from that of a
+    /// return-of-capital payment on its listing that reaches it. The payment
+    /// reduces each parcel's cost base in the parcel's own currency and
+    /// amounts are never netted across currencies, so every cost-base report
+    /// of the listing would fail loudly at read time. The inheritance side of
+    /// `trade::UpsertError::PaymentCurrencyMismatch`, which refuses the same
+    /// pair for an ordinary Buy.
+    #[error("this parcel's currency differs from a return of capital recorded on its listing")]
+    PaymentCurrencyMismatch {
+        payment_date: NaiveDate,
+        payment_currency: String,
+        parcel_currency: String,
+    },
 }
 
 impl From<UpsertError> for ApiError {
@@ -220,6 +274,22 @@ impl From<UpsertError> for ApiError {
                 "the inherited parcel is drawn on by a sale allocation or AMIT adjustment — \
                  remove those first",
             ),
+            UpsertError::FxRateNotPositive => ApiError::unprocessable(
+                "fx_rate must be a positive foreign-per-AUD rate (1 for an AUD inheritance)",
+            ),
+            // The same wording `PUT /trades` answers for the same pair: it
+            // names the payment and both currencies, so the disagreeing row is
+            // findable without opening the listing's corporate actions.
+            UpsertError::PaymentCurrencyMismatch {
+                payment_date,
+                payment_currency,
+                parcel_currency,
+            } => ApiError::Unprocessable(format!(
+                "this parcel is held in {parcel_currency} while the return of capital dated \
+                 {payment_date} on its listing is recorded in {payment_currency} — a payment \
+                 reduces each parcel's cost base in the parcel's own currency, and amounts are \
+                 never netted across currencies, so the two must agree"
+            )),
             UpsertError::Db(err) => err.into(),
         }
     }
@@ -279,6 +349,9 @@ fn validate(inh: &Inheritance) -> Result<(), UpsertError> {
     }
     if inh.cost_base < Decimal::ZERO || inh.lpr_expenditure < Decimal::ZERO {
         return Err(UpsertError::NegativeAmount);
+    }
+    if inh.fx_rate <= Decimal::ZERO {
+        return Err(UpsertError::FxRateNotPositive);
     }
     // Checked before the per-rule acquisition checks so a pre-CGT death gets
     // this message (not misdirected advice to switch cost-base rules).
@@ -413,6 +486,23 @@ pub async fn db_upsert(pool: &SqlitePool, inh: &Inheritance) -> Result<(), Upser
     .bind(inh.deceased_acquisition_date)
     .execute(&mut *tx)
     .await?;
+
+    // A return of capital on this listing reduces the parcel's cost base in
+    // the *parcel's* own currency, so a parcel recorded in another one is a
+    // state the cost-base reports refuse to compute over. `trade::db_upsert`
+    // runs this over an ordinary Buy; the inheritance's Buy does not go
+    // through it, so the same check runs here, over the written state inside
+    // this write's own transaction.
+    if let Some(conflict) =
+        crate::entities::corporate_action::db_payment_currency_conflict(&mut *tx, inh.listing_id)
+            .await?
+    {
+        return Err(UpsertError::PaymentCurrencyMismatch {
+            payment_date: conflict.payment_date,
+            payment_currency: conflict.payment_currency,
+            parcel_currency: conflict.parcel_currency,
+        });
+    }
 
     tx.commit().await?;
     Ok(())
@@ -961,6 +1051,70 @@ mod tests {
         assert_eq!(after.non_discountable_gain, Decimal::ZERO);
     }
 
+    /// The two `trade::check_amounts` rules the inheritance's own validation
+    /// did not cover — a non-positive fallback FX rate, and a parcel currency
+    /// a return of capital on the listing contradicts — are refused here
+    /// rather than left to fail as a `500` from every cost-base report
+    /// (SCENARIOS K-01, K-02, K-04). Both are exactly what `PUT /trades`
+    /// answers for an ordinary Buy.
+    #[tokio::test]
+    async fn the_parcel_buys_trade_checks_are_enforced_here() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "USD").await;
+        let api = ApiClient::full(&pool);
+
+        // `apply_rate` divides by this, so a zero rate is a panicking report,
+        // not merely a wrong figure.
+        for rate in ["0", "-0.65"] {
+            let bad = Inheritance {
+                currency: "USD".to_string(),
+                fx_rate: dec(rate),
+                ..post_cgt(1)
+            };
+            let err = db_upsert(&pool, &bad).await.unwrap_err();
+            assert!(
+                matches!(err, UpsertError::FxRateNotPositive),
+                "rate {rate}: {err:?}"
+            );
+        }
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM trades")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            0,
+            "nothing persisted"
+        );
+
+        // An AUD return of capital on a USD listing: `PUT /trades` refuses a
+        // USD Buy of it, and so must the inheritance.
+        api.put_ok(
+            "/corporate_actions/1",
+            &serde_json::json!({
+                "listing_id": 1, "date": "2025-06-01", "action_type": "ReturnOfCapital",
+                "amount_per_unit": "2.00", "currency": "AUD",
+            }),
+        )
+        .await;
+        let usd = Inheritance {
+            currency: "USD".to_string(),
+            fx_rate: dec("0.65"),
+            ..post_cgt(1)
+        };
+        let err = db_upsert(&pool, &usd).await.unwrap_err();
+        let detail = ApiError::from(err);
+        let ApiError::Unprocessable(body) = detail else {
+            panic!("expected 422");
+        };
+        assert!(body.contains("held in USD"), "body: {body}");
+        assert!(body.contains("recorded in AUD"), "body: {body}");
+
+        // And the report the bad state used to break still answers.
+        api.get("/portfolio/open-parcels")
+            .await
+            .expect_status(StatusCode::OK);
+    }
+
     /// The inherited parcel's two dates do different jobs, and a corporate
     /// action must read the *death*, not the deceased's acquisition
     /// (SCENARIOS K-01, K-04). A return of capital paid while the deceased
@@ -989,7 +1143,7 @@ mod tests {
             .await;
         }
 
-        let parcels = crate::domain::open_parcels::load(&mut *pool.acquire().await.unwrap(), None)
+        let parcels = crate::domain::open_parcels::load(&mut pool.acquire().await.unwrap(), None)
             .await
             .unwrap();
         assert_eq!(parcels.len(), 1);
@@ -1020,7 +1174,7 @@ mod tests {
         )
         .await;
 
-        let parcels = crate::domain::open_parcels::load(&mut *pool.acquire().await.unwrap(), None)
+        let parcels = crate::domain::open_parcels::load(&mut pool.acquire().await.unwrap(), None)
             .await
             .unwrap();
         assert_eq!(parcels.len(), 1);
@@ -1058,7 +1212,7 @@ mod tests {
             .await
             .expect_status(StatusCode::CREATED);
 
-        let parcels = crate::domain::open_parcels::load(&mut *pool.acquire().await.unwrap(), None)
+        let parcels = crate::domain::open_parcels::load(&mut pool.acquire().await.unwrap(), None)
             .await
             .unwrap();
         let head = parcels
@@ -1127,7 +1281,7 @@ mod tests {
         .await
         .expect_status(StatusCode::CREATED);
 
-        let parcels = crate::domain::open_parcels::load(&mut *pool.acquire().await.unwrap(), None)
+        let parcels = crate::domain::open_parcels::load(&mut pool.acquire().await.unwrap(), None)
             .await
             .unwrap();
         assert_eq!(parcels.len(), 1);

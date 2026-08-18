@@ -1971,3 +1971,59 @@ Docs: `docs/SCHEMA.md` gained the column, `docs/API.md` an `income_type` section
 the rewritten Known-limitations entry, the tax-summary unlabelled-columns list and the 422 catalogue,
 README the recordable-payment clause. `docs/ato/ess-dividend-equivalents.md`'s **How this project
 uses it** section (the project's own note, not mirrored ATO text) was updated to match.
+
+## The inheritance's parcel Buy bypasses the trade write-time checks (SCENARIOS K-01, K-02, K-04)
+(SCENARIOS.md section K verification pass, 2026-08-18. J-03/J-13's finding on the inheritance side:
+`inheritance::db_upsert` writes its parcel Buy with a raw `INSERT INTO trades`, not through
+`trade::db_upsert`, so neither `checks::check_amounts` nor the return-of-capital currency
+cross-check runs. `validate()` covers the quantity, the two amounts, the dates and the rule pairing
+— it says nothing at all about `fx_rate` or the currency, and both gaps land as a **500**, not a
+wrong figure.)
+- [x] Reproduced — `fx_rate: "0"`: `PUT /inheritances/1` with `currency USD, fx_rate 0` → `204`, and
+  the Buy is stored with `fx_rate 0`. `GET /portfolio/open-parcels` then **panics** —
+  `rust_decimal … Division by zero` inside `infra::fx::apply_rate` (`AUD = foreign / rate`) — so the
+  report answers `500` and every price-free CGT report on that listing is unusable until the row is
+  found and fixed. A negative rate (`-0.65`) is accepted the same way. `PUT /trades` refuses both:
+  "fx_rate must be a positive foreign-per-AUD rate (1 for an AUD trade)"
+- [x] Reproduced — the return-of-capital currency cross-check: a USD listing carrying an **AUD**
+  `ReturnOfCapital`. `PUT /trades` refuses a USD Buy of it with the full
+  `PaymentCurrencyMismatch` explanation ("a payment reduces each parcel's cost base in the parcel's
+  own currency, and amounts are never netted across currencies, so the two must agree"). The same
+  parcel entered as an inheritance is accepted `204`, and `GET /portfolio/open-parcels` answers
+  `500` — the pipeline's own loud failure, fired at *read* time on every request instead of once at
+  write time with a message naming the fix
+- [x] The pre-CGT floor — the third thing `check_amounts` enforces — is the one the inheritance path
+  already covers itself (`DeathPreCgt`, and the Buy is dated the death), so it is not at issue here
+- [x] Fix: route the Buy through `trade::db_upsert` (the shape `4b77972` gave the ESS vest), or at
+  minimum add both checks to `validate()`; either way state in the module doc which trade checks the
+  inheritance satisfies by construction, so the list is visibly deliberate
+- [x] Tests: a non-positive `fx_rate` is refused `422` (not a 500 from a later report); an
+  inheritance whose currency conflicts with a return of capital on its listing is refused at write
+  time with the same wording `PUT /trades` gives
+- [x] Docs sync: `docs/API.md` Inheritances + the 422 catalogue
+
+**Resolution (2026-08-18): both checks land on the inheritance, with the vest's reliance written down.**
+
+`validate` now refuses a non-positive `fx_rate` (`UpsertError::FxRateNotPositive` → `422`, the same
+wording `PUT /trades` gives: "fx_rate must be a positive foreign-per-AUD rate"), and `db_upsert`
+runs `corporate_action::db_payment_currency_conflict` over the written state inside its own
+transaction — the same call, in the same position, `trade::db_upsert` makes — answering
+`UpsertError::PaymentCurrencyMismatch` with the trade path's verbatim body, which names the payment
+date and both currencies. The Buy stays a direct `INSERT`: routing it through `trade::db_upsert`
+is not available, because the trade write paths refuse an inheritance-linked row outright.
+
+`inheritance`'s module doc gained the **"The trade write-time checks, and where each is satisfied"**
+section `ess_vest` carries, enumerating every `AmountsError` variant against what makes it
+impossible here — `QuantityNotPositive` (the same rule on the inherited unit count), the literal
+`'0'` price and GST, the brokerage bound from the cost base `NegativeAmount` already guards,
+`brokerage_currency` bound from the same `currency` value in one statement, the new
+`FxRateNotPositive`, `settlement_date` bound to the trade date, and `PreCgtDate` closed by
+`DeathPreCgt` on the date the Buy is dated. It closes with the same standing instruction: a new
+check in `trade::check_amounts` needs a line there and either an argument or a guard.
+
+Tests: `the_parcel_buys_trade_checks_are_enforced_here` — `fx_rate` `0` and `-0.65` both refused
+with nothing persisted (the zero was a *panic*, `rust_decimal` "Division by zero" inside
+`infra::fx::apply_rate`, so every cost-base report of the listing answered `500`), a USD inheritance
+of a listing carrying an AUD return of capital refused with both currencies named, and
+`GET /portfolio/open-parcels` still `200` afterwards. Docs: `docs/API.md` (Inheritances' `422` list,
+the parcel-Buy paragraph, and the 422 catalogue).

@@ -11,40 +11,11 @@ findings are all closed in DONE.md), except where a section's heading names anot
 are fixed or decided.
 
 **SCENARIOS.md sections A–J are driven and every finding they raised is closed** in the `DONE/*.md`
-archive. **Section K. Inherited parcels** was driven 2026-08-18; the six findings below are its open
-work. When they are closed, the next work comes from driving **SCENARIOS.md section L. Crypto** the
+archive. **Section K. Inherited parcels** was driven 2026-08-18; it raised six findings, and the
+five below are the ones still open (the first — the parcel Buy bypassing the trade write-time
+checks — is closed and archived in [`DONE/reviews.md`](DONE/reviews.md)). When they are closed, the next work comes from driving **SCENARIOS.md section L. Crypto** the
 same way — walk its scenarios against the running system, and record each gap here as its own `## `
 section.
-
-## The inheritance's parcel Buy bypasses the trade write-time checks (SCENARIOS K-01, K-02, K-04)
-(SCENARIOS.md section K verification pass, 2026-08-18. J-03/J-13's finding on the inheritance side:
-`inheritance::db_upsert` writes its parcel Buy with a raw `INSERT INTO trades`, not through
-`trade::db_upsert`, so neither `checks::check_amounts` nor the return-of-capital currency
-cross-check runs. `validate()` covers the quantity, the two amounts, the dates and the rule pairing
-— it says nothing at all about `fx_rate` or the currency, and both gaps land as a **500**, not a
-wrong figure.)
-- [ ] Reproduced — `fx_rate: "0"`: `PUT /inheritances/1` with `currency USD, fx_rate 0` → `204`, and
-  the Buy is stored with `fx_rate 0`. `GET /portfolio/open-parcels` then **panics** —
-  `rust_decimal … Division by zero` inside `infra::fx::apply_rate` (`AUD = foreign / rate`) — so the
-  report answers `500` and every price-free CGT report on that listing is unusable until the row is
-  found and fixed. A negative rate (`-0.65`) is accepted the same way. `PUT /trades` refuses both:
-  "fx_rate must be a positive foreign-per-AUD rate (1 for an AUD trade)"
-- [ ] Reproduced — the return-of-capital currency cross-check: a USD listing carrying an **AUD**
-  `ReturnOfCapital`. `PUT /trades` refuses a USD Buy of it with the full
-  `PaymentCurrencyMismatch` explanation ("a payment reduces each parcel's cost base in the parcel's
-  own currency, and amounts are never netted across currencies, so the two must agree"). The same
-  parcel entered as an inheritance is accepted `204`, and `GET /portfolio/open-parcels` answers
-  `500` — the pipeline's own loud failure, fired at *read* time on every request instead of once at
-  write time with a message naming the fix
-- [ ] The pre-CGT floor — the third thing `check_amounts` enforces — is the one the inheritance path
-  already covers itself (`DeathPreCgt`, and the Buy is dated the death), so it is not at issue here
-- [ ] Fix: route the Buy through `trade::db_upsert` (the shape `4b77972` gave the ESS vest), or at
-  minimum add both checks to `validate()`; either way state in the module doc which trade checks the
-  inheritance satisfies by construction, so the list is visibly deliberate
-- [ ] Tests: a non-positive `fx_rate` is refused `422` (not a 500 from a later report); an
-  inheritance whose currency conflicts with a return of capital on its listing is refused at write
-  time with the same wording `PUT /trades` gives
-- [ ] Docs sync: `docs/API.md` Inheritances + the 422 catalogue
 
 ## A non-AUD inheritance with no rate is costed at parity (SCENARIOS K-01, K-04)
 (SCENARIOS.md section K verification pass, 2026-08-18. J-08/J-12 exactly, one entity along.
