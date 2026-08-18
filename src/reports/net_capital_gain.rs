@@ -3613,4 +3613,88 @@ mod tests {
         assert_eq!(r.years[1].year.capital_losses, Decimal::from(200));
         assert_eq!(r.years[1].year.net_capital_gain, Decimal::from(300));
     }
+
+    /// Three currencies disposed of in one financial year net to a single AUD
+    /// figure, each leg converted at its own currency's month rate before it
+    /// joins the total (SCENARIOS M-15). The three gains are deliberately
+    /// equal in AUD and different in their native amounts, so a leg converted
+    /// at the wrong currency's rate — or not at all — cannot coincidentally
+    /// land on the same total.
+    #[tokio::test]
+    async fn db_three_currencies_in_one_year_net_to_one_aud_gain() {
+        let pool = test_pool().await;
+        for (id, ticker, currency) in [(1, "BHP", "AUD"), (2, "AAPL", "USD"), (3, "HSBA", "GBP")] {
+            test_support::listing(id)
+                .ticker(ticker)
+                .name(ticker)
+                .mic(if currency == "AUD" { "XASX" } else { "XNYS" })
+                .currency(currency)
+                .insert(&pool)
+                .await;
+        }
+        // A$1 = 0.50 USD and 0.25 GBP in both the buy and the sell month, so
+        // each leg's AUD figures are exact.
+        for (currency, rate) in [("USD", "0.50"), ("GBP", "0.25")] {
+            for month in ["2023-08", "2024-05"] {
+                rba_fx_rate::db_import_rate(&pool, currency, month, rate.parse().unwrap())
+                    .await
+                    .unwrap();
+            }
+        }
+        let buy_date = NaiveDate::from_ymd_opt(2023, 8, 10).unwrap();
+        let sell_date = NaiveDate::from_ymd_opt(2024, 5, 20).unwrap();
+        // Each holding: 100 units, cost A$2,000, proceeds A$3,000 → A$1,000
+        // gain, held under 12 months so nothing is discounted away.
+        for (listing_id, currency, buy_price, sell_price) in [
+            (1, "AUD", "20", "30"),
+            (2, "USD", "10", "15"),
+            (3, "GBP", "5", "7.5"),
+        ] {
+            for (id, trade_type, price) in [
+                (listing_id, trade::TradeType::Buy, buy_price),
+                (listing_id + 10, trade::TradeType::Sell, sell_price),
+            ] {
+                test_support::trade(id, listing_id, trade_type)
+                    .date(if trade_type == trade::TradeType::Buy {
+                        buy_date
+                    } else {
+                        sell_date
+                    })
+                    .qty(Decimal::from(100))
+                    .price(price.parse().unwrap())
+                    .currency(currency)
+                    .fx_rate(if currency == "AUD" {
+                        Decimal::ONE
+                    } else {
+                        // A wrong fallback: the ATO rate must win.
+                        "0.99".parse().unwrap()
+                    })
+                    .insert(&pool)
+                    .await;
+            }
+            allocate(
+                &pool,
+                listing_id,
+                listing_id + 10,
+                listing_id,
+                Decimal::from(100),
+            )
+            .await;
+        }
+
+        let years = db_net_capital_gain(&pool).await.unwrap();
+        assert_eq!(years.len(), 1);
+        let y = &years[0];
+        assert_eq!(y.tax_year, 2024);
+        assert_eq!(y.disposals.len(), 3);
+        for d in &y.disposals {
+            assert_eq!(d.cost_base, Decimal::from(2000));
+            assert_eq!(d.proceeds, Decimal::from(3000));
+            assert_eq!(d.capital_gain_loss, Decimal::from(1000));
+        }
+        // All three held under 12 months, so the whole A$3,000 is other gains.
+        assert_eq!(y.other_gains, Decimal::from(3000));
+        assert_eq!(y.discount_eligible_gains, Decimal::ZERO);
+        assert_eq!(y.net_capital_gain, Decimal::from(3000));
+    }
 }

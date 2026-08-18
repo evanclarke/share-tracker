@@ -76,7 +76,7 @@ behind or became a recorded finding.
 | J. Employee share schemes | 14 | 2026-08-18 | 8 raised, all closed — see below |
 | K. Inherited parcels | 10 | 2026-08-18 | 6 raised, all closed — see below |
 | L. Crypto | 15 | 2026-08-18 | 6 raised, all closed — see below |
-| M. Foreign currency and FX | 16 | — | — |
+| M. Foreign currency and FX | 16 | 2026-08-19 | 8 raised — see below |
 | N. Holding accounts and transfers | 12 | — | — |
 | O. Net capital gain, losses, and carry-forward | 17 | — | — |
 | P. Tax summary, annual tax report, exports | 12 | — | — |
@@ -668,6 +668,75 @@ credentialed ISO 24165 import runs, which the refusal never mentions.
 | The Crypto/exchange pairing refusals answer with a raw CHECK expression | L-09 | fixed 2026-08-18 — archived in [`DONE/reviews.md`](DONE/reviews.md) |
 | A Crypto listing can be marked `amit`, and the annual tax report is then permanently incomplete | L-09 | fixed 2026-08-18 — archived in [`DONE/reviews.md`](DONE/reviews.md) |
 | The recognised digital-token list is BTC and ETH until a credentialed import runs, and the refusal doesn't say so | L-10 | fixed 2026-08-18 — the refusal names the import; archived in [`DONE/reviews.md`](DONE/reviews.md) |
+
+### Section M findings
+
+Everything the FX layer is *asked* to do, it does. A USD parcel bought in one
+rate month and sold in another takes each leg at its own month's ATO rate, and
+the settlement date never enters a conversion — a sale contracted 27 March and
+settled 2 April translates at March's rate (M-01, M-09). The one precedence
+rule holds wherever it was pushed: a deliberate `spot_fx_rate` beats the
+monthly rate, a `fx_rate` is used only where no monthly rate exists, and the
+override survives a transfer onto the replacement parcel so the carried cost
+base is unchanged (M-02, M-04); both spot refusals land, on the Sell path as
+well as the trade path (M-03). The valuation fallback behaves exactly as its
+contract says: a month with no rate yet borrows the previous month's, flags the
+snapshot and every affected row `provisional`, refuses outright once the gap
+passes two months — with a `422` naming the currency and the month — and clears
+the flag the moment an import lands the real rate, the figures moving with it
+(M-05, M-06). No tax path can reach that fallback: a March disposal in a
+March-less rate month rests on the trade's own `fx_rate`, never on February's
+published rate (M-07). Three currencies in one year net to one AUD figure
+(M-15); a non-AUD parcel's AMIT reduction converts at the acquisition month
+exactly as documented (M-10); the FITO de-minimis caps a year's offset at
+A$1,000 and surfaces the excess (M-11); and the period-performance report
+attributes a held-through holding's whole movement to FX, naming the two rates,
+while a holding opened and closed inside the window shows zero FX — the
+documented approximation, with the total still exact (M-16). Three new
+regression tests cover the three of those that had none.
+
+Eight findings. **What the printed document says**: the annual tax report
+prints a disposal's buy-side rate as the rate actually applied — a spot
+override included — and its sell-side rate as the ATO monthly rate regardless,
+so a Sell carrying a spot override prints proceeds of A$40,000 beside a rate
+that computes A$29,411, and a Sell resting on its own fallback prints no rate
+at all beside a figure derived from one. **What a failure says**: a missing ATO
+rate reaches the client as a bare `500` with an empty body, where snapshot
+generation answers the same gap with a `422` naming the currency and month —
+and nothing anywhere lists which (currency, month) rates the recorded data
+actually needs, so a hole in the middle of an imported series (M-14) is
+invisible until a report fails, and every amount silently resting on a
+per-trade fallback is unlisted. **What nothing refuses**: a listing's
+`currency` is freely editable once it has trades, income and prices — where
+`ticker` and `exchange_mic` need the rename path — and changing it silently
+re-denominates every stored closing price (the same stored 200 valued at
+A$298.51 as USD and A$333.33 as EUR) without marking one snapshot stale; and a
+trade may be recorded in a currency other than its listing's, the rule ESS
+statements, inheritances, return-of-capital actions and DRP reinvestments all
+now enforce for the same reason. **What cannot be corrected**: a stored RBA
+rate is immutable — the resource is read-only, the import is `DO NOTHING`, and
+a feed whose value *differs* from what is stored is counted as `skipped`
+exactly like an identical one. **What is claimed in full**: foreign tax on a
+discountable foreign capital gain, where the ATO requires it to be apportioned
+to the assessable part; the AMMA's single `foreign_tax_credits` field cannot
+separate foreign tax on capital gains from foreign tax on other foreign income,
+so the reduction can neither be computed nor asked for. And **what is silent
+where its sibling is refused**: the two documented FX simplifications —
+the K10/K11 settlement window and the acquisition-month conversion of AMIT and
+return-of-capital reductions — each name a case identifiable from stored data,
+and neither is surfaced, where the LPR-expenditure case of the same shape is
+refused at write time.
+
+| Finding | Scenarios | Status |
+| --- | --- | --- |
+| The annual tax report's printed sell-side FX rate is not the rate the proceeds used | M-01, M-02 | open |
+| A missing ATO rate answers a tax report with a bare `500` and an empty body | M-04, M-07 | open |
+| Nothing lists which (currency, month) rates the recorded data needs | M-04, M-14 | open |
+| A listing's `currency` is freely editable, silently re-denominating every stored price | M-08 | open |
+| A trade may be recorded in a currency other than its listing's | M-08 | open |
+| A stored RBA rate can never be corrected, and a differing feed value is silently discarded | M-13 | open |
+| Foreign tax on a discountable foreign capital gain is claimed in full, not apportioned | M-12 | open |
+| The two documented FX simplifications are silent where their sibling is refused | M-09, M-10 | open |
 
 ---
 

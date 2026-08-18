@@ -1132,4 +1132,59 @@ mod tests {
             Err(fx::FxError::MissingRate { .. })
         ));
     }
+
+    /// The documented asymmetry, pinned with *both* months imported so the
+    /// choice is visible rather than incidental: a non-AUD parcel's AMIT
+    /// (CGT event E10) and return-of-capital (G1) reductions convert at the
+    /// **acquisition** month's rate, not at the rate of the month the
+    /// reduction arose in (SCENARIOS M-10, `docs/API.md` Known limitations,
+    /// "Cost-base FX timing"). That keeps `initial − reductions = adjusted`
+    /// true in AUD exactly as in the native currency; strict s 960-50(6)
+    /// translation would use each amount's own month and is not modelled.
+    #[tokio::test]
+    async fn a_reduction_converts_at_the_acquisition_month_not_its_own() {
+        let pool = db::init(":memory:").await.unwrap();
+        // A$1 = 0.50 USD when the parcel was acquired, 1.00 when the
+        // reductions arose — a rate that halves the AUD reduction.
+        rba_fx_rate::db_import_rate(&pool, "USD", "2024-01", "0.50".parse().unwrap())
+            .await
+            .unwrap();
+        rba_fx_rate::db_import_rate(&pool, "USD", "2024-06", "1.00".parse().unwrap())
+            .await
+            .unwrap();
+        let rates = fx::FxRates::load(&pool).await.unwrap();
+        let p = Parcel {
+            currency: "USD",
+            ..parcel(100, 10)
+        };
+        let roc = RocEvent {
+            date: date(2024, 6, 1),
+            amount_per_unit: "0.50".parse().unwrap(),
+            currency: "USD".to_string(),
+            record_date: None,
+        };
+        let cb = adjusted_cost_base(
+            &p,
+            Decimal::from(100),
+            &[whole(1, 2024, "0.05", 100)],
+            &[roc],
+            &[],
+            Held::AsAt(None),
+        )
+        .unwrap();
+        let aud = cb
+            .into_aud_with(&rates, "USD", date(2024, 1, 15), fx::FxOverride::None)
+            .unwrap();
+        // Both reductions take the January rate (US$5 → A$10, US$50 → A$100),
+        // not June's (which would give A$5 and A$50).
+        assert_eq!(aud.amit_reduction, Decimal::from(10));
+        assert_eq!(aud.roc_reduction, Decimal::from(100));
+        // And the breakdown still adds up in AUD, which is what the single
+        // rate buys: 2000 − 10 − 100 = 1890.
+        assert_eq!(
+            aud.adjusted,
+            aud.initial_cost - aud.amit_reduction - aud.roc_reduction
+        );
+        assert_eq!(aud.adjusted, Decimal::from(1890));
+    }
 }

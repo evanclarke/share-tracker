@@ -2060,6 +2060,55 @@ mod tests {
         );
     }
 
+    /// A disposal whose settlement window crosses a rate month converts at the
+    /// **contract** month's rate on both legs — the settlement date never
+    /// enters an FX conversion (SCENARIOS M-09). The movement between the two
+    /// months is the CGT event K10/K11 amount this system deliberately does
+    /// not compute (`docs/API.md` Known limitations); pinning the contract
+    /// month here keeps that omission a decision rather than a drift.
+    #[tokio::test]
+    async fn db_settlement_crossing_a_rate_month_converts_at_the_contract_month() {
+        let pool = test_pool().await;
+        insert_usd_listing(&pool, 1, "AAPL").await;
+        for (month, rate) in [
+            ("2024-01", "0.50"),
+            ("2024-03", "0.60"),
+            ("2024-04", "0.40"),
+        ] {
+            rba_fx_rate::db_import_rate(&pool, "USD", month, rate.parse().unwrap())
+                .await
+                .unwrap();
+        }
+        insert_usd_trade(
+            &pool,
+            1,
+            trade::TradeType::Buy,
+            NaiveDate::from_ymd_opt(2024, 1, 15).unwrap(),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
+        // Contracted 27 March, settled 2 April: the April rate (0.40) would
+        // give A$3750 of proceeds against March's (0.60) A$2500.
+        test_support::sell(2, 1)
+            .date(NaiveDate::from_ymd_opt(2024, 3, 27).unwrap())
+            .settlement(NaiveDate::from_ymd_opt(2024, 4, 2).unwrap())
+            .qty(Decimal::from(100))
+            .price(Decimal::from(15))
+            .currency("USD")
+            .fx_rate("0.99".parse().unwrap())
+            .insert(&pool)
+            .await;
+        allocate(&pool, 1, 2, 1, Decimal::from(100)).await;
+
+        let result = db_realised_gains(&pool).await.unwrap();
+        assert_eq!(result.len(), 1);
+        // US$1500 / 0.60 (March, the contract month) = A$2500 — not A$3750.
+        assert_eq!(result[0].proceeds, Decimal::from(2500));
+        assert_eq!(result[0].cost_base, Decimal::from(2000));
+        assert_eq!(result[0].capital_gain_loss, Decimal::from(500));
+    }
+
     /// Take over listing `from` with listing `to`, 2 new units per 1 old, on
     /// `date`, and run the exchange. Returns the created group.
     async fn exchange_two_for_one(
