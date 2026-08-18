@@ -2226,3 +2226,66 @@ Tests: `doc_checks::inherited_cost_base_entry_conventions_documented` pins the m
 quotes, its refreshed provenance header, its presence in the ATO index, both conventions in the
 Inheritances section, both in the Known limitation, and the README line; the served-bundle
 assertions in `web.rs`'s `inheritance_ui_present` pin the two field hints.
+
+## LPR expenditure converts at the parcel's acquisition month, not the month it was incurred (SCENARIOS K-04)
+(SCENARIOS.md section K verification pass, 2026-08-18. `db_upsert` folds the LPR expenditure into
+the Buy's single `brokerage` figure, so `domain::cost_base` translates the whole parcel — first
+element *and* LPR expenditure together — at one rate: the parcel's (possibly deemed) acquisition
+month. Under `DeceasedCostBase` that month is the **deceased's acquisition**, while the LPR incurred
+the expense after the death, by definition a later month and often a much later one.)
+- [x] Reproduced: a USD listing; deceased acquired 2015-05-05, died 2024-03-01; `cost_base` US$2,000
+  and `lpr_expenditure` US$1,000 incurred 2024-06-01. Rates imported: `USD 2015-05 = 2`,
+  `USD 2024-06 = 0.5`. `GET /portfolio/open-parcels` reports `original_cost_base 1500` (US$3,000 ÷ 2).
+  Translating each element at its own month gives A$1,000 + A$2,000 = **A$3,000** — the LPR element
+  is understated 4×, and it moves the reported cost base by 50%
+- [x] The existing Known limitation does not cover it. "Cost-base FX timing" (2026-07-13) is about
+  the AMIT/return-of-capital **reductions** and argues the single rate "keeps each parcel's
+  cost-base breakdown internally consistent"; it also says the simplification "only bites on a
+  non-AUD holding receiving non-AUD AMIT/return-of-capital reductions, which in practice does not
+  arise". An LPR expense on an inherited foreign parcel is an **addition**, is dated by the user on
+  the row itself, and does arise. `inheritance.rs`'s module doc mentions the single-rate treatment
+  ("LPR expenditure translates with the parcel; its own incurral date is provenance only") but ties
+  it to indexation, and no user-facing surface says it at all
+- [x] The ATO position: s 960-50(6) translates each amount at its own transaction time
+  (`docs/ato/forex-common-transactions.md`, QC 18322 — Lisa's cost base and proceeds each translate
+  at their own date), and QC 66053 has the LPR expense "included on the date the LPR incurred it"
+- [x] **Decide the model** (an `AskUserQuestion` for Evan, not a silent call). (a) **Translate the
+  LPR element at its own month** — correct per s 960-50(6), but it means the parcel's cost base is
+  no longer one currency amount at one rate: either the Buy carries the LPR expenditure in a second
+  column the pipeline converts separately, or the inheritance stores the LPR expenditure already in
+  AUD. Breaks the "initial − reductions = adjusted holds in the native currency" property the
+  pipeline currently guarantees. (b) **Give `lpr_expenditure` its own currency column** and require
+  it in AUD (the realistic case: an Australian LPR bills an Australian estate in AUD, whatever the
+  shares are denominated in), converting nothing — narrower than (a) and matches how the expense is
+  actually incurred. (c) **Document it** as a Known limitation and say so in the field hint —
+  cheapest, and consistent with the 2026-07-13 FX-timing cut, but it leaves a wrong figure the user
+  has to fix by hand. (b) looks strongest: the mismatch is not really an FX-timing subtlety, it is
+  that an AUD fee has nowhere to be recorded as AUD
+- [x] Tests: whichever model is chosen, a foreign inherited parcel with LPR expenditure reports the
+  element at its own rate/currency, and the AUD case is unchanged
+- [x] Docs sync: `docs/SCHEMA.md` (`inheritances`), `docs/API.md` (Inheritances, Known limitations,
+  the FX-conversion section), README's inherited-parcels feature line
+
+**Resolution (2026-08-18): refused on a foreign parcel, and documented — Evan chose option (c'),
+after (b) turned out not to be available as described.**
+
+Implementing (b) — an AUD `lpr_expenditure` that "converts nothing" — proved to need somewhere for
+an **AUD** amount to land in the cost base *after* conversion, which the single-rate pipeline has
+no place for: a new `trades` column (migration + `row_history` trigger rebuild) threaded through
+`domain::cost_base`, its three production `into_aud_with` call sites, and carried + pro-rated
+through all three rollover operations, whose `carried_cost_base` works in the parcel's *own*
+currency. Put back to Evan with that cost measured, the answer was to refuse the pair instead.
+
+So `validate` now rejects a non-zero `lpr_expenditure` on a non-AUD inheritance
+(`UpsertError::LprExpenditureOnForeignParcel` → `422`), and the limitation says why: the fee has no
+home a foreign parcel can hold correctly, and folding it into `cost_base` by hand translates it at
+the same wrong month, so nothing is gained by accepting it. The ordinary case — an Australian LPR
+fee on an Australian holding, where the conversion is the identity — is untouched.
+
+Tests: `lpr_expenditure_is_refused_on_a_foreign_parcel` (a US$1,000 fee on a USD parcel refused with
+the previously accepted row untouched, and the AUD parcel still taking its $200 fee onto the Buy),
+and `doc_checks::lpr_expenditure_on_a_foreign_parcel_documented` pinning the Known limitation
+(including the size of the error it would otherwise report), the Inheritances section, the 422
+catalogue entry, the README line and the SCHEMA column. The module doc's old claim that "LPR
+expenditure translates with the parcel" — true, and the bug — is replaced by the rule and its
+reason. Docs: `docs/API.md`, `docs/SCHEMA.md`, README, and the field hint in `src/web/config.js`.

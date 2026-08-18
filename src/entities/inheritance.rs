@@ -26,8 +26,12 @@
 //! non-AUD cost base (the standard `ParcelRow::acquired()` rule), mirroring
 //! the rollover treatment: a carried deceased's cost base translates at the
 //! deceased's acquisition month, a market-value-at-death figure at the death
-//! month. LPR expenditure translates with the parcel; its own incurral date
-//! is provenance only (indexation, where it would matter, is not modelled).
+//! month. LPR expenditure is folded into that same single-rate conversion,
+//! which is why it is accepted **only on an AUD inheritance**
+//! ([`UpsertError::LprExpenditureOnForeignParcel`]): the LPR incurs it after
+//! the death, so on a foreign parcel it would translate at a month that can
+//! predate the expense by decades (SCENARIOS K-04). Its incurral date is
+//! provenance only — nothing reads it.
 //! `fx_rate` is the *fallback* for that conversion — used only when no ATO
 //! rate exists for the month — so a non-AUD inheritance that leaves it at its
 //! default 1 with no rate imported for the month is refused rather than costed
@@ -238,6 +242,16 @@ pub enum UpsertError {
     /// (`trade::checks::AmountsError::FxRateNotPositive`, the same rule).
     #[error("the fallback FX rate must be greater than zero")]
     FxRateNotPositive,
+    /// A non-zero LPR expenditure on a non-AUD inheritance. The whole parcel
+    /// converts to AUD at one rate — the (possibly deemed) acquisition
+    /// month's — and the LPR incurs their expenditure *after* the death, so
+    /// on a foreign parcel that rate can predate the expense by decades and
+    /// the element would be translated at the wrong month entirely
+    /// (SCENARIOS K-04). An LPR fee is an Australian estate-administration
+    /// cost billed in AUD, so rather than report a figure known to be wrong,
+    /// the pair is refused and documented as a limitation.
+    #[error("LPR expenditure is only recordable on an AUD inheritance")]
+    LprExpenditureOnForeignParcel,
     /// The inheritance's currency is not its listing's. The parcel is a
     /// holding of that listed security, priced by its exchange in the
     /// listing's currency, so the cost base and the market value it will be
@@ -311,6 +325,12 @@ impl From<UpsertError> for ApiError {
             ),
             UpsertError::FxRateNotPositive => ApiError::unprocessable(
                 "fx_rate must be a positive foreign-per-AUD rate (1 for an AUD inheritance)",
+            ),
+            UpsertError::LprExpenditureOnForeignParcel => ApiError::unprocessable(
+                "LPR expenditure can only be recorded on an AUD inheritance — the whole parcel \
+                 converts to AUD at one rate, its (deemed) acquisition month's, while the LPR \
+                 incurs the expenditure after the death, so on a foreign parcel the figure would \
+                 be translated at the wrong month (see Known limitations)",
             ),
             UpsertError::CurrencyNotListings {
                 inheritance,
@@ -482,6 +502,9 @@ fn validate(inh: &Inheritance) -> Result<(), UpsertError> {
         }
         (CostBaseRule::MarketValueAtDeath, None) => {}
         _ => return Err(UpsertError::RuleAcquisitionDateMismatch),
+    }
+    if inh.lpr_expenditure != Decimal::ZERO && !inh.currency.eq_ignore_ascii_case("AUD") {
+        return Err(UpsertError::LprExpenditureOnForeignParcel);
     }
     match inh.lpr_expenditure_date {
         Some(incurred) => {
@@ -768,6 +791,18 @@ mod tests {
         }
     }
 
+    /// [`post_cgt`] in a foreign currency — no LPR expenditure, which is only
+    /// recordable on an AUD inheritance (the LPR incurs it after the death,
+    /// while the parcel converts at its acquisition month).
+    fn post_cgt_usd(id: i64) -> Inheritance {
+        Inheritance {
+            currency: "USD".to_string(),
+            lpr_expenditure: Decimal::ZERO,
+            lpr_expenditure_date: None,
+            ..post_cgt(id)
+        }
+    }
+
     async fn linked_buy(pool: &SqlitePool, inheritance_id: i64) -> trade::Trade {
         let id: i64 = sqlx::query_scalar("SELECT id FROM trades WHERE inheritance_id = ?")
             .bind(inheritance_id)
@@ -860,9 +895,8 @@ mod tests {
         db_upsert(
             &pool,
             &Inheritance {
-                currency: "USD".to_string(),
                 fx_rate: dec("1.5"),
-                ..post_cgt(1)
+                ..post_cgt_usd(1)
             },
         )
         .await
@@ -1184,9 +1218,8 @@ mod tests {
         // not merely a wrong figure.
         for rate in ["0", "-0.65"] {
             let bad = Inheritance {
-                currency: "USD".to_string(),
                 fx_rate: dec(rate),
-                ..post_cgt(1)
+                ..post_cgt_usd(1)
             };
             let err = db_upsert(&pool, &bad).await.unwrap_err();
             assert!(
@@ -1214,9 +1247,8 @@ mod tests {
         )
         .await;
         let usd = Inheritance {
-            currency: "USD".to_string(),
             fx_rate: dec("0.65"),
-            ..post_cgt(1)
+            ..post_cgt_usd(1)
         };
         let err = db_upsert(&pool, &usd).await.unwrap_err();
         let detail = ApiError::from(err);
@@ -1232,6 +1264,60 @@ mod tests {
             .expect_status(StatusCode::OK);
     }
 
+    /// LPR expenditure is only recordable on an AUD inheritance (SCENARIOS
+    /// K-04). The whole parcel converts at one rate — its (deemed)
+    /// acquisition month's — while the LPR incurs the expenditure *after* the
+    /// death, so on a foreign parcel the element would translate at a month
+    /// that can predate the expense by decades. Refused rather than reported
+    /// wrongly; the AUD case, where the conversion is the identity, is
+    /// untouched.
+    #[tokio::test]
+    async fn lpr_expenditure_is_refused_on_a_foreign_parcel() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "USD").await;
+        insert_listing(&pool, 2, "AUD").await;
+        rba_fx_rate::db_import_rate(&pool, "USD", "2020-02", dec("0.5"))
+            .await
+            .unwrap();
+
+        // The deceased's US$3,000 cost base is fine on its own…
+        db_upsert(&pool, &post_cgt_usd(1)).await.unwrap();
+        // …but a US$1,000 LPR fee incurred in 2025 would be translated at the
+        // deceased's 2020-02 rate along with it.
+        let with_lpr = Inheritance {
+            lpr_expenditure: dec("1000"),
+            lpr_expenditure_date: Some(ymd(2025, 3, 1)),
+            ..post_cgt_usd(1)
+        };
+        let err = db_upsert(&pool, &with_lpr).await.unwrap_err();
+        assert!(
+            matches!(err, UpsertError::LprExpenditureOnForeignParcel),
+            "{err:?}"
+        );
+        // The accepted row is untouched by the rejected write.
+        let parcels = crate::domain::open_parcels::load(&mut pool.acquire().await.unwrap(), None)
+            .await
+            .unwrap();
+        assert_eq!(parcels[0].cost_base.adjusted, dec("6000"));
+
+        // An explicit zero is not "a non-zero expenditure", so it passes; and
+        // the AUD parcel takes its LPR fee as before.
+        db_upsert(
+            &pool,
+            &Inheritance {
+                id: 2,
+                listing_id: 2,
+                currency: "AUD".to_string(),
+                fx_rate: Decimal::ONE,
+                ..post_cgt(2)
+            },
+        )
+        .await
+        .unwrap();
+        let buy = linked_buy(&pool, 2).await;
+        assert_eq!(buy.brokerage, dec("3200"), "$3,000 + the $200 LPR fee");
+    }
+
     /// An inheritance's currency is its listing's, or it is refused: the
     /// parcel is a holding of that listed security and the exchange prices it
     /// in the listing's own currency (SCENARIOS K-01).
@@ -1242,9 +1328,8 @@ mod tests {
         insert_listing(&pool, 2, "USD").await;
 
         let mismatched = Inheritance {
-            currency: "USD".to_string(),
             fx_rate: dec("0.65"),
-            ..post_cgt(1)
+            ..post_cgt_usd(1)
         };
         let err = db_upsert(&pool, &mismatched).await.unwrap_err();
         assert!(
@@ -1294,10 +1379,7 @@ mod tests {
         rba_fx_rate::db_import_rate(&pool, "USD", "2025-01", dec("0.62"))
             .await
             .unwrap();
-        let usd = Inheritance {
-            currency: "USD".to_string(),
-            ..post_cgt(1)
-        };
+        let usd = post_cgt_usd(1);
 
         let err = db_upsert(&pool, &usd).await.unwrap_err();
         assert!(
@@ -1323,8 +1405,8 @@ mod tests {
         let parcels = crate::domain::open_parcels::load(&mut pool.acquire().await.unwrap(), None)
             .await
             .unwrap();
-        // US$3,200 at the stated 0.75, not at parity.
-        assert_eq!(parcels[0].cost_base.adjusted.round_dp(2), dec("4266.67"));
+        // US$3,000 at the stated 0.75, not at parity.
+        assert_eq!(parcels[0].cost_base.adjusted, dec("4000"));
 
         // …or the acquisition month's ATO rate, which then outranks it.
         rba_fx_rate::db_import_rate(&pool, "USD", "2020-02", dec("0.80"))
@@ -1334,7 +1416,7 @@ mod tests {
         let parcels = crate::domain::open_parcels::load(&mut pool.acquire().await.unwrap(), None)
             .await
             .unwrap();
-        assert_eq!(parcels[0].cost_base.adjusted, dec("4000"));
+        assert_eq!(parcels[0].cost_base.adjusted, dec("3750"));
     }
 
     /// The inherited parcel's two dates do different jobs, and a corporate

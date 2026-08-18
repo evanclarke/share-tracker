@@ -74,7 +74,7 @@ behind or became a recorded finding.
 | H. Interest, expenses, and other income | 10 | 2026-08-17 | 6 raised, all closed — see below |
 | I. DRP | 14 | 2026-08-17 | 6 raised, all closed — see below |
 | J. Employee share schemes | 14 | 2026-08-18 | 8 raised, all closed — see below |
-| K. Inherited parcels | 10 | 2026-08-18 | 6 raised — see below |
+| K. Inherited parcels | 10 | 2026-08-18 | 6 raised, all closed — see below |
 | L. Crypto | 15 | — | — |
 | M. Foreign currency and FX | 16 | — | — |
 | N. Holding accounts and transfers | 12 | — | — |
@@ -583,7 +583,7 @@ rollover's closing Sell draws on the parcel (K-08, K-10). K-09 is the documented
 boundary it claims to be: one taxpayer, so the beneficiary records their own
 share, and a part share (fractional units included) enters cleanly.
 
-The six findings fall into the same three groups section J's did. What a row is
+All six findings are closed (2026-08-18). They fell into the same three groups section J's did. What a row is
 allowed to say: `validate()` covers the quantity, the amounts, the dates and the
 rule pairing but says nothing about `fx_rate` or the currency, so a non-positive
 rate and a currency conflicting with a return of capital on the listing both
@@ -610,7 +610,7 @@ between beneficiaries.
 | The inheritance's parcel Buy bypasses the trade write-time checks (a zero FX rate, a return-of-capital currency conflict) | K-01, K-02, K-04 | fixed 2026-08-18 — archived in [`DONE/reviews.md`](DONE/reviews.md) |
 | A non-AUD inheritance with no rate is costed at parity | K-01, K-04 | fixed 2026-08-18 — archived in [`DONE/reviews.md`](DONE/reviews.md) |
 | An inheritance recorded in a currency other than its listing's rides through to the parcel | K-01 | fixed 2026-08-18 — archived in [`DONE/reviews.md`](DONE/reviews.md) |
-| LPR expenditure converts at the parcel's acquisition month, not the month it was incurred | K-04 | open — `TODO.md` (carries a model decision) |
+| LPR expenditure converts at the parcel's acquisition month, not the month it was incurred | K-04 | fixed 2026-08-18 — refused on a foreign parcel + documented; archived in [`DONE/reviews.md`](DONE/reviews.md) |
 | A duplicated inheritance is caught by nothing | K-09 | fixed 2026-08-18 — archived in [`DONE/reviews.md`](DONE/reviews.md) |
 | Nothing states what the deceased's cost-base figure must be net of | K-02, K-09 | fixed 2026-08-18 — docs + a refreshed QC 66053 mirror; archived in [`DONE/reviews.md`](DONE/reviews.md) |
 

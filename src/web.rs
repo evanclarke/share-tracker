@@ -962,6 +962,7 @@ mod tests {
         assert!(js.contains("recalculated out first (QC 66053)"));
         assert!(js.contains("what the LPR incurred administering the estate"));
         assert!(js.contains("Not anything billed before the death"));
+        assert!(js.contains("AUD inheritances only"));
         // …and that the FX fallback names the month it would apply to.
         assert!(js.contains("a non-AUD inheritance with no rate either way is refused"));
     }

@@ -1845,6 +1845,45 @@ fn inherited_cost_base_entry_conventions_documented() {
     assert!(README_MD.contains("the cost base you enter is your own share of it"));
 }
 
+/// Docs-sync pin for the LPR-expenditure scope cut (SCENARIOS K-04). The
+/// cost-base pipeline converts a parcel at one rate — its (deemed) acquisition
+/// month's — while the LPR incurs their expenditure after the death, so on a
+/// foreign parcel the fee would translate at a month that can predate it by
+/// decades. Recording it correctly needs a second, separately translated
+/// cost-base element the single-rate design does not have, so the pair is
+/// refused at write time and the omission documented.
+#[test]
+fn lpr_expenditure_on_a_foreign_parcel_documented() {
+    let limits = known_limitations();
+    assert!(limits.contains("**LPR expenditure is only recordable on an AUD inheritance**"));
+    // Named against the FX-timing limitation it follows from, with the size of
+    // the error it would otherwise report.
+    assert!(limits.contains("*Cost-base FX timing*"));
+    assert!(limits.contains("US$1,000 fee incurred at 0.50 reported as A$500"));
+    // …and that the ordinary case is untouched.
+    assert!(limits.contains("Australian LPR fees on Australian holdings"));
+
+    // The entity's section says it where the row is written, and the 422 list
+    // carries the cause.
+    assert!(API_MD.contains("**LPR expenditure is only recordable on an AUD inheritance** (`422`"));
+    assert!(API_MD.contains("a non-zero LPR expenditure is recorded on a non-AUD inheritance"));
+    assert!(README_MD.contains("AUD holdings only — see Known limitations"));
+
+    // SCHEMA.md's column carries the restriction too, so the data model states
+    // it without the API doc.
+    let column = SCHEMA_MD
+        .split("├── lpr_expenditure           TEXT (decimal)")
+        .nth(1)
+        .expect("SCHEMA.md documents the inheritances.lpr_expenditure column")
+        .split('\n')
+        .next()
+        .expect("split always yields at least one part");
+    assert!(
+        column.contains("Only recordable where `currency` is AUD"),
+        "{column}"
+    );
+}
+
 /// Pins for the FreeBSD packaging + versioned-release pipeline (REQUIREMENTS
 /// 2026-07-13). The release workflow and package skeleton are plain text CI
 /// consumes, so these tests keep their load-bearing pieces from silently
