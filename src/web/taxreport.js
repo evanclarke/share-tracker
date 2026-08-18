@@ -121,8 +121,11 @@ function parcelRows(p) {
   if (p.buy_contract_note_ref) notes.push('buy note ' + p.buy_contract_note_ref);
   if (p.sale_contract_note_ref) notes.push('sale note ' + p.sale_contract_note_ref);
   if (p.currency !== 'AUD') {
-    notes.push(p.currency + ' — buy-month rate ' + (p.buy_month_fx_rate != null ? cellText(p.buy_month_fx_rate) : '?')
-      + ', sell-month rate ' + (p.sell_month_fx_rate != null ? cellText(p.sell_month_fx_rate) : '?'));
+    // Each rate is the one its own side's AUD figure was converted at — the
+    // month's ATO rate, a deliberate spot override, or the record's fallback
+    // where the month has none — so the printed arithmetic reconciles.
+    notes.push(p.currency + ' — buy-side rate ' + (p.buy_month_fx_rate != null ? cellText(p.buy_month_fx_rate) : '?')
+      + ', sale-side rate ' + (p.sell_month_fx_rate != null ? cellText(p.sell_month_fx_rate) : '?'));
   }
   if (notes.length) {
     rows.push(el('tr', { class: 'note-row' }, el('td', { colspan: 12 }, notes.join(' · '))));

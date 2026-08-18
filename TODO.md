@@ -25,21 +25,36 @@ document the year is archived as, and each non-AUD disposal row prints `currency
 `buy_month_fx_rate` and `sell_month_fx_rate` beside its AUD figures so the arithmetic can be
 checked. The buy side prints the rate actually applied; the sell side prints the ATO monthly rate
 whatever the proceeds used.)
-- [ ] Reproduced (a): a Sell of US$20,000 carrying `spot_fx_rate: 0.5000` in a month whose ATO rate
+- [x] Reproduced (a): a Sell of US$20,000 carrying `spot_fx_rate: 0.5000` in a month whose ATO rate
   is 0.6800 prints `proceeds_aud: 40000` (= 20000 / 0.50, correct) beside
   `sell_month_fx_rate: 0.6800`, which computes A$29,411.76 — a A$10,588 gap between the printed
   figure and the printed rate, in the document a reader checks the return against
-- [ ] Reproduced (b): a Sell in a month with no imported ATO rate, resting on its own `fx_rate` of
+- [x] Reproduced (b): a Sell in a month with no imported ATO rate, resting on its own `fx_rate` of
   0.55, prints `proceeds_aud: 36363.64` beside `sell_month_fx_rate: null` — the fallback rate the
   buy side *does* print (via `fx_override()`) is hidden on the sell side
-- [ ] Cause: `reports::tax_report`'s `sell_rate` resolves with `FxOverride::None` where `buy_rate`
+- [x] Cause: `reports::tax_report`'s `sell_rate` resolves with `FxOverride::None` where `buy_rate`
   resolves with `bt.fx_override()`. It is also keyed on the *buy* trade existing
   (`buy_trade.and_then(|_| …)`), which is unrelated to the sale's own conversion
-- [ ] Fix: resolve the sell-side rate from the **sale trade's** override, mirroring the buy side, so
+- [x] Fix: resolve the sell-side rate from the **sale trade's** override, mirroring the buy side, so
   the printed rate is always the rate the printed proceeds were computed at
-- [ ] Tests: a spot-override Sell and a fallback Sell each print the rate their proceeds used;
+- [x] Tests: a spot-override Sell and a fallback Sell each print the rate their proceeds used;
   an AUD disposal still prints neither
-- [ ] Docs sync: `docs/API.md`'s Annual tax report section, where the two rate columns are described
+- [x] Docs sync: `docs/API.md`'s Annual tax report section, where the two rate columns are described
+
+**Resolution (2026-08-19): each side prints the rate its own figure was converted at.**
+
+`reports::tax_report`'s `sell_rate` now resolves from the **disposal's own** override, mirroring
+`buy_rate`: a Sell's `fx_override()` (its `spot_fx_rate` when set, else its `fx_rate` fallback), and
+for a rights sale — which is not a trade, so it is not in `DisposalInputs::trades` — that row's
+`fx_rate` against the issue's currency, loaded into a new `rights_sales` map. The rate is no longer
+keyed on the *buy* trade existing.
+
+Tests: `a_disposals_printed_fx_rates_reproduce_its_printed_aud_figures` drives both cases and
+asserts each printed AUD figure equals its native amount divided by the rate printed beside it —
+the property the document is printed for; `an_aud_disposal_prints_no_fx_rates` keeps the AUD case
+printing neither. Docs: `docs/API.md`'s Annual tax report disposal-row description, and the web
+document's own note now reads "buy-side rate / sale-side rate" rather than "buy-month / sell-month",
+which was only true when no override was in play.
 
 ## A missing ATO rate answers a tax report with a bare `500` and an empty body (SCENARIOS M-04, M-07)
 (SCENARIOS.md section M verification pass, 2026-08-19. A non-AUD income or AMMA record has no

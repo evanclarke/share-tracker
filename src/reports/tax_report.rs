@@ -29,6 +29,7 @@ use crate::entities::corporate_action::{RocEvent, SplitEvent};
 use crate::entities::income::{Income, IncomeType};
 use crate::entities::listing;
 use crate::entities::trade::{Trade, TradeType};
+use crate::infra::decimal::parse_dec;
 use crate::infra::fx::FxRates;
 use crate::infra::http::ApiError;
 use crate::reports::realised_gains::DisposalSource;
@@ -308,6 +309,11 @@ pub struct DisposalsSection {
 struct DisposalInputs {
     buys: HashMap<i64, ParcelRow>,
     trades: HashMap<i64, Trade>,
+    /// Each rights sale's `(currency, fx_rate)` — the issue's currency and the
+    /// row's manual fallback rate, which is what `realised_gains` converted
+    /// its proceeds at. A rights sale is not a trade, so it is not in
+    /// `trades`, and the printed sell-side rate has to come from here.
+    rights_sales: HashMap<i64, (String, Decimal)>,
     amit_events: HashMap<i64, Vec<cost_base::AmitReductionEvent>>,
     roc_events: HashMap<i64, Vec<RocEvent>>,
     split_events: HashMap<i64, Vec<SplitEvent>>,
@@ -348,6 +354,21 @@ async fn load_disposal_inputs(
     .into_iter()
     .collect();
 
+    // The issue's currency and each sale's own fallback rate, the pair
+    // `realised_gains` converts a rights sale's proceeds with.
+    let rights_sales: Vec<(i64, String, String)> = sqlx::query_as(
+        "SELECT rs.id, ca.currency, rs.fx_rate \
+         FROM rights_sales rs JOIN corporate_actions ca ON ca.id = rs.rights_action_id",
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    let rights_sales = rights_sales
+        .into_iter()
+        .map(|(id, currency, fx_rate)| {
+            Ok::<_, sqlx::Error>((id, (currency, parse_dec("fx_rate", fx_rate)?)))
+        })
+        .collect::<Result<HashMap<_, _>, _>>()?;
+
     let amit_events =
         crate::entities::amit_adjustment::db_cost_base_reduction_events(&mut *conn, None).await?;
     let roc_events =
@@ -358,6 +379,7 @@ async fn load_disposal_inputs(
     Ok(DisposalInputs {
         buys: buys.into_iter().map(|b| (b.id, b)).collect(),
         trades: all_trades.into_iter().map(|t| (t.id, t)).collect(),
+        rights_sales,
         amit_events,
         roc_events,
         split_events,
@@ -482,16 +504,36 @@ fn disposal_parcel_rows(
             } else {
                 Decimal::ZERO
             };
-            let sell_rate = buy_trade.and_then(|_| {
-                inputs
-                    .fx
-                    .resolve_rate(
-                        &currency,
-                        disposal.sale_date,
-                        crate::infra::fx::FxOverride::None,
-                    )
-                    .ok()
-            });
+            // The rate the *proceeds* were actually converted at, not the
+            // month's published rate: `realised_gains` converts a Sell's
+            // proceeds at the sale's own override (its deliberate spot rate
+            // when set, else its `fx_rate` fallback where the month has no
+            // ATO rate) and a rights sale's at that row's fallback. Printing
+            // the monthly rate instead left the document's own arithmetic
+            // irreconcilable — proceeds of A$40,000 beside a rate computing
+            // A$29,411 (SCENARIOS M-01). Mirrors `buy_rate` below, and a test
+            // pins each against the figure it sits next to.
+            let sell_rate = match disposal.source {
+                DisposalSource::Sell => sale_trade.and_then(|st| {
+                    inputs
+                        .fx
+                        .resolve_rate(&st.currency, st.date, st.fx_override())
+                        .ok()
+                }),
+                DisposalSource::RightsSale => inputs
+                    .rights_sales
+                    .get(&disposal.sale_trade_id)
+                    .and_then(|(rights_currency, fx_rate)| {
+                        inputs
+                            .fx
+                            .resolve_rate(
+                                rights_currency,
+                                disposal.sale_date,
+                                crate::infra::fx::FxOverride::Fallback(*fx_rate),
+                            )
+                            .ok()
+                    }),
+            };
             let buy_rate = buy_trade.and_then(|bt| {
                 inputs
                     .fx
@@ -2240,5 +2282,111 @@ mod tests {
 
         let years = db_tax_report_years(&pool).await.unwrap();
         assert_eq!(years, vec![2023, 2024]);
+    }
+
+    /// The printed FX rates are the rates the printed AUD figures were
+    /// computed at, on both sides (SCENARIOS M-01). This is a print-to-PDF
+    /// document whose arithmetic a reader checks, so a rate that does not
+    /// reproduce the figure beside it is worse than none: a Sell carrying a
+    /// deliberate `spot_fx_rate` used to print the month's published rate
+    /// instead, and a Sell resting on its own `fx_rate` fallback printed no
+    /// rate at all beside a figure derived from one.
+    #[tokio::test]
+    async fn a_disposals_printed_fx_rates_reproduce_its_printed_aud_figures() {
+        for (label, spot, ato_sell_rate, expected_sell_rate) in [
+            // A deliberate spot override wins over the month's published rate.
+            ("spot override", Some("0.5000"), Some("0.6800"), "0.5000"),
+            // No published rate for the sale month: the trade's own fallback.
+            ("fx_rate fallback", None, None, "0.5500"),
+        ] {
+            let pool = test_support::test_pool().await;
+            test_support::listing(1)
+                .ticker("AAPL")
+                .name("AAPL")
+                .mic("XNYS")
+                .currency("USD")
+                .insert(&pool)
+                .await;
+            rba_fx_rate::db_import_rate(&pool, "USD", "2023-03", dec("0.6600"))
+                .await
+                .unwrap();
+            if let Some(rate) = ato_sell_rate {
+                rba_fx_rate::db_import_rate(&pool, "USD", "2024-05", dec(rate))
+                    .await
+                    .unwrap();
+            }
+            test_support::buy(1, 1)
+                .date(ymd(2023, 3, 15))
+                .qty(dec("100"))
+                .price(dec("150"))
+                .currency("USD")
+                .fx_rate(dec("0.6600"))
+                .insert(&pool)
+                .await;
+            let mut sell = test_support::sell(2, 1)
+                .date(ymd(2024, 5, 20))
+                .settlement(ymd(2024, 5, 22))
+                .qty(dec("100"))
+                .price(dec("200"))
+                .currency("USD")
+                .fx_rate(dec("0.5500"));
+            if let Some(spot) = spot {
+                sell = sell.spot_fx_rate(dec(spot));
+            }
+            sell.insert(&pool).await;
+            test_support::allocate(&pool, 1, 2, 1, dec("100")).await;
+
+            let report = db_tax_report(&pool, 2024).await.unwrap();
+            let row = &report.disposals.listings[0].parcels[0];
+            assert_eq!(row.currency, "USD", "{label}");
+            // Buy side: US$15,000 at the March 2023 rate.
+            assert_eq!(row.buy_month_fx_rate, Some(dec("0.6600")), "{label}");
+            assert_eq!(
+                row.initial_cost_base_aud,
+                dec("15000") / row.buy_month_fx_rate.unwrap(),
+                "{label}"
+            );
+            // Sell side: US$20,000 at the rate the proceeds actually used.
+            assert_eq!(
+                row.sell_month_fx_rate,
+                Some(dec(expected_sell_rate)),
+                "{label}"
+            );
+            assert_eq!(
+                row.proceeds_aud,
+                dec("20000") / row.sell_month_fx_rate.unwrap(),
+                "{label}"
+            );
+        }
+    }
+
+    /// An AUD disposal prints neither rate — there is no conversion to show.
+    #[tokio::test]
+    async fn an_aud_disposal_prints_no_fx_rates() {
+        let pool = test_support::test_pool().await;
+        test_support::listing(1)
+            .ticker("BHP")
+            .name("BHP")
+            .insert(&pool)
+            .await;
+        test_support::buy(1, 1)
+            .date(ymd(2023, 3, 15))
+            .qty(dec("100"))
+            .price(dec("40"))
+            .insert(&pool)
+            .await;
+        test_support::sell(2, 1)
+            .date(ymd(2024, 5, 20))
+            .qty(dec("100"))
+            .price(dec("50"))
+            .insert(&pool)
+            .await;
+        test_support::allocate(&pool, 1, 2, 1, dec("100")).await;
+
+        let report = db_tax_report(&pool, 2024).await.unwrap();
+        let row = &report.disposals.listings[0].parcels[0];
+        assert_eq!(row.currency, "AUD");
+        assert_eq!(row.buy_month_fx_rate, None);
+        assert_eq!(row.sell_month_fx_rate, None);
     }
 }
