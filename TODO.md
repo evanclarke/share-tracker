@@ -12,39 +12,11 @@ are fixed or decided.
 
 **SCENARIOS.md sections A–I are driven and every finding they raised is closed** in the `DONE/*.md`
 archive. **Section J. Employee share schemes** was driven 2026-08-18; it raised eight findings, of which
-six are closed (the two currency/FX ones, the two write-time-check ones, the duplicate-statement
-health check and the 30-day-rule alert — all 2026-08-18, see [`DONE/reviews.md`](DONE/reviews.md)) and
-the two below are its remaining open work. Evan decided both models on 2026-08-18: J-02 takes the
-**per-year eligibility flag** (a new dated settings table) beside the printed footnote, and J-10 takes
-the **`income_type` enum**. When they are closed, the next work comes from driving
+seven are closed (all 2026-08-18, see [`DONE/reviews.md`](DONE/reviews.md)) and the one below is its
+remaining open work. Evan decided its model on 2026-08-18: J-10 takes the **`income_type` enum**
+(option (b)), not the documentation-only cut. When it is closed, the next work comes from driving
 **SCENARIOS.md section K. Inherited parcels** the same way — walk its scenarios against the running system, and record each
 gap here as its own `## ` section.
-
-## The $1,000 taxed-upfront reduction is always applied, with no way to record failing the income test (SCENARIOS J-02)
-(SCENARIOS.md section J verification pass, 2026-08-18. The reduction is available only if *adjusted
-taxable income* is ≤ A$180,000 — a taxpayer-level test outside this system's data
-(`docs/ato/employee-share-schemes.md`). The tool applies `min(A$1,000, D)` unconditionally and
-documents the test as the user's responsibility in `README.md`, `docs/API.md` (both the tax-summary
-section and Known limitations) and the ESS screen description — thorough, and the applied amount is
-surfaced as its own `ess_taxed_upfront_reduction` line so it can be added back by hand.)
-- [ ] J-02 — the gap is that "add it back by hand" has no home in the system: there is no
-  per-taxpayer or per-year flag, and the only way to make the summary report the right figure is to
-  enter the discount at label **E** (taxed-upfront *not eligible*), which misstates 12D/12E to get
-  12B right. An ineligible taxpayer's every stored figure and export stays $1,000 light
-- [ ] J-02 — the printed archival document (`/reports/tax-report`, the PDF the accountant gets)
-  prints `ess_taxed_upfront_reduction 1,000` as a bare line with an empty ATO label and no statement
-  of the condition it assumes. `taxreport.js` already carries the precedent for exactly this: the
-  CFI footnote (`cfiFootnote`) explains a figure the reader would otherwise misread
-- [ ] **Decide the model.** (a) **A footnote only** — print the ≤A$180,000 condition under the ESS
-  table whenever a reduction was applied (cheap, honest, matches the CFI precedent). (b) **Plus a
-  `cgt_settings` flag** — the singleton settings entity already carries a taxpayer-level fact (the
-  opening capital loss); an `ess_taxed_upfront_reduction_eligible` boolean (default true) would let
-  the summary report the ineligible position and keep the exports right. (c) **Per-year** rather
-  than singleton, since the income test is answered year by year — more faithful, and the only one
-  that survives a year where the taxpayer crosses $180,000; costs a new dated settings table
-- [ ] Tests: whichever is chosen — a `doc_checks`/bundle assertion for the footnote wording, and a
-  summary test that an ineligible year reports the unreduced discount
-- [ ] Docs sync: `docs/API.md` tax summary + Known limitations, README
 
 ## The documented dividend-equivalent workaround reports remuneration as a dividend (SCENARIOS J-10)
 (SCENARIOS.md section J verification pass, 2026-08-18. A dividend equivalent paid on unvested RSUs

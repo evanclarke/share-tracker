@@ -1821,3 +1821,77 @@ Docs: `docs/API.md` gained the `ess_30_day_rule` field on the Health report and 
 rule is flagged, never applied** Known-limitations entry (what the rule does, why the tool won't do
 it, and what to enter instead); README's health-monitoring feature line gained the clause; and
 `config.js`'s taxing-point hint now states the rule where the date is typed.
+
+## The $1,000 taxed-upfront reduction is always applied, with no way to record failing the income test (SCENARIOS J-02)
+(SCENARIOS.md section J verification pass, 2026-08-18. The reduction is available only if *adjusted
+taxable income* is ≤ A$180,000 — a taxpayer-level test outside this system's data
+(`docs/ato/employee-share-schemes.md`). The tool applies `min(A$1,000, D)` unconditionally and
+documents the test as the user's responsibility in `README.md`, `docs/API.md` (both the tax-summary
+section and Known limitations) and the ESS screen description — thorough, and the applied amount is
+surfaced as its own `ess_taxed_upfront_reduction` line so it can be added back by hand.)
+- [x] J-02 — the gap is that "add it back by hand" has no home in the system: there is no
+  per-taxpayer or per-year flag, and the only way to make the summary report the right figure is to
+  enter the discount at label **E** (taxed-upfront *not eligible*), which misstates 12D/12E to get
+  12B right. An ineligible taxpayer's every stored figure and export stays $1,000 light
+- [x] J-02 — the printed archival document (`/reports/tax-report`, the PDF the accountant gets)
+  prints `ess_taxed_upfront_reduction 1,000` as a bare line with an empty ATO label and no statement
+  of the condition it assumes. `taxreport.js` already carries the precedent for exactly this: the
+  CFI footnote (`cfiFootnote`) explains a figure the reader would otherwise misread
+- [x] **Decide the model.** (a) **A footnote only** — print the ≤A$180,000 condition under the ESS
+  table whenever a reduction was applied (cheap, honest, matches the CFI precedent). (b) **Plus a
+  `cgt_settings` flag** — the singleton settings entity already carries a taxpayer-level fact (the
+  opening capital loss); an `ess_taxed_upfront_reduction_eligible` boolean (default true) would let
+  the summary report the ineligible position and keep the exports right. (c) **Per-year** rather
+  than singleton, since the income test is answered year by year — more faithful, and the only one
+  that survives a year where the taxpayer crosses $180,000; costs a new dated settings table
+- [x] Tests: whichever is chosen — a `doc_checks`/bundle assertion for the footnote wording, and a
+  summary test that an ineligible year reports the unreduced discount
+- [x] Docs sync: `docs/API.md` tax summary + Known limitations, README
+
+**Closed 2026-08-18 — Evan chose (c), the per-year flag, plus (a)'s footnote.** The singleton (b) was
+rejected for a concrete reason rather than a stylistic one: the tax summary reports **every** recorded
+year in one response, so a global flag would strip the reduction from years that never crossed
+A$180,000 — wrong for any taxpayer whose income crosses the threshold partway through their recorded
+history, which is the ordinary case over a working life.
+
+New table `tax_year_settings` (migration 0027), keyed on the financial year itself, with a matching
+entity (`entities::tax_year_settings`), CRUD routes, and a UI screen. Design decisions worth
+recording:
+- **Absent row = eligible.** The flag defaults true, the reader is an *exception list*
+  (`db_ineligible_tax_years`), and an omitted field on a PUT means eligible — so an empty table
+  behaves exactly as the system did before, no existing database's figures move, and no request that
+  forgets the field can silently remove a reduction.
+- **No surrogate key**, unlike closing_prices (0021), which needed one to join the audit trail:
+  `tax_year` is already an integer identity and is what `row_id` records. It is never reused for a
+  different fact either — deleting FY2026's settings and entering them again is the *same*
+  taxpayer-year fact, so inheriting that year's own trail is right rather than a leak. The table is
+  audited for the same reason `cgt_settings` is (a taxpayer-level fact that changes an assessable
+  total), which meant rebuilding `row_history` once more to extend its `table_name` CHECK — the live
+  append-only guards now come from 0027.
+- **Named for the shape, not the field.** It is `tax_year_settings`, not
+  `ess_reduction_eligibility`: it is the per-year counterpart of the `cgt_settings` singleton, and the
+  next taxpayer fact answered year by year is a column here rather than a fourth settings table.
+- The **footnote is printed regardless of the flag**, whenever a reduction was actually applied
+  (`taxreport.js`'s `essReductionFootnote`, on the `cfiFootnote` precedent): the archived document
+  states the condition it rests on and names where to record the other answer. An ineligible year
+  applies no reduction, so no footnote prints — there is nothing conditional left to disclose.
+
+One test-harness change came with it: `row_history`'s end-to-end audit sweep keyed every case on
+`id`, which this table does not have, so its case tuples now carry the key column.
+
+Tests: `tax_year_settings`'s own module (round-trip and in-place replace, the ineligible-only
+exception list, the CRUD API round trip, the omitted-flag default, and the pre-1986 rejection naming
+the year), `tax_summary::db_ess_reduction_is_withheld_from_a_year_recorded_ineligible` (two years,
+only the flagged one unreduced — the whole reason the flag is per year) and
+`db_a_year_recorded_eligible_keeps_its_reduction`, the row-history sweep's new case and its 0027
+migration assertions, `web.rs::tax_year_settings_ui_present`, and
+`doc_checks::per_year_ess_reduction_eligibility_documented`. Full suite 1621 passed / 0 failed;
+`node --test` 69 passed; ui-smoke green. Verified end to end against a running server: the same
+statement reports `ess_discount_assessable 1400 / reduction 1000` by default, `2400 / 0` once FY2026
+is marked ineligible, back to `1400 / 1000` when re-marked eligible, `422` naming the year for
+FY1985, and the flip recorded in `row_history`. The tax-report line the footnote keys on reads
+`1000` then `0` across the same flip.
+
+Docs: `docs/SCHEMA.md` gained the table (and corrected the `row_history` CHECK enum, which was still
+missing `closing_prices`), `docs/API.md` a **Tax year settings** entity section plus the rewritten
+tax-summary and Known-limitations wording and the new 422, README the recorded-per-year clause.
