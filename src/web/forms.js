@@ -96,6 +96,7 @@ const INCOME_ADVANCED_FIELDS = [
   'foreign_tax_paid', 'tfn_withholding_tax', 'franking_credits',
   'lic_capital_gain_amount', 'conduit_foreign_income', 'trust_income',
   'entitlement_date', 'tax_deferred_amount', 'currency', 'holding_account_id',
+  'income_type',
 ];
 
 // Classify a stored row for the simple form: which franking-selector mode
@@ -110,7 +111,10 @@ function incomeSimpleShape(existing) {
   if (existing.ex_date != null || nz(existing.foreign_source_income) || nz(existing.foreign_tax_paid)
     || nz(existing.tfn_withholding_tax) || nz(existing.lic_capital_gain_amount)
     || nz(existing.conduit_foreign_income) || existing.tax_deferred_amount != null
-    || existing.currency !== 'AUD' || existing.holding_account_id !== 1) return null;
+    || existing.currency !== 'AUD' || existing.holding_account_id !== 1
+    // An employment-income row is not a distribution the simple form's
+    // franking selector can describe — open advanced so its kind is visible.
+    || (existing.income_type != null && existing.income_type !== 'Dividend')) return null;
   const franked = nz(existing.franked_amount), credits = nz(existing.franking_credits);
   if (!franked && !credits) {
     return { mode: existing.trust_income ? 'Trust' : 'Unfranked', amount: String(existing.unfranked_amount) };

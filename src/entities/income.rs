@@ -11,6 +11,33 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 
+/// What kind of payment an income row records — where the amount belongs on
+/// the return (SCENARIOS J-10, migration 0028).
+///
+/// Orthogonal to [`Income::trust_income`], which distinguishes two kinds of
+/// *investment* income (a company dividend from a trust distribution); this
+/// says whether the row is investment income **at all**.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+pub enum IncomeType {
+    /// A distribution from the holding: a company dividend, a trust
+    /// distribution, or a buy-back's dividend component. Item 11/13, and what
+    /// every income row was before the kind existed.
+    #[default]
+    Dividend,
+    /// Remuneration paid in connection with the holding rather than by it —
+    /// the **dividend equivalent** paid on unvested RSUs, which is ordinary
+    /// income under s 6-5 and "not a dividend in the employee's hands"
+    /// (TD 2017/26, `docs/ato/ess-dividend-equivalents.md`). It carries no
+    /// franking and is no part of the ESS discount.
+    ///
+    /// It belongs at **item 1/2, salary and wages** — where the employer's STP
+    /// reporting normally prefills it — so the tax summary reports it on its
+    /// own **informational** line and adds it to no assessable total. Recording
+    /// it here aggregates the cash beside the holding it was calculated from
+    /// without any surface calling it a dividend.
+    EmploymentIncome,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Income {
     pub id: i64,
@@ -119,6 +146,10 @@ pub struct Income {
     /// otherwise, mirrored by a schema CHECK).
     #[sqlx(try_from = "OptMoney")]
     pub tax_deferred_amount: Option<Decimal>,
+    /// What kind of payment this row records — see [`IncomeType`]. Defaults to
+    /// `Dividend`, which is what every row was before the kind existed.
+    #[serde(default)]
+    pub income_type: IncomeType,
 }
 
 impl Income {
@@ -336,6 +367,10 @@ pub struct IncomeBody {
     /// See `Income::tax_deferred_amount` — trust rows only, ≥ 0.
     #[serde(default)]
     pub tax_deferred_amount: Option<Decimal>,
+    /// See [`IncomeType`]. Omitted means `Dividend`, so every existing client
+    /// keeps writing distributions.
+    #[serde(default)]
+    pub income_type: IncomeType,
 }
 
 fn default_currency() -> String {
@@ -349,7 +384,7 @@ impl CrudEntity for Income {
          foreign_source_income, foreign_tax_paid, tfn_withholding_tax, franking_credits, \
          lic_capital_gain_amount, conduit_foreign_income, trust_income, entitlement_date, \
          reinvestment_trade_id, currency, buyback_trade_id, holding_account_id, \
-         amount_per_security, securities_held, tax_deferred_amount";
+         amount_per_security, securities_held, tax_deferred_amount, income_type";
     const ORDER_BY: &'static str = "date_paid, id";
     const NOUN: &'static str = "income";
 }
@@ -432,6 +467,15 @@ pub enum UpsertError {
     /// report. Mapped to `422`.
     #[error("{0} cannot be negative")]
     NegativeAmount(&'static str),
+    /// A distribution field was supplied on an
+    /// [`IncomeType::EmploymentIncome`] row (carries the field name). A
+    /// dividend equivalent is remuneration, not a payment of the holding: it
+    /// carries no franking, no foreign-source dividend component, no LIC
+    /// attributable part, no CFI, no tax-deferred amount, no ex/entitlement
+    /// date and no per-share statement figures, and it can never be trust
+    /// income. Mapped to `422`.
+    #[error("{0} cannot be entered on an employment-income row")]
+    EmploymentIncomeComponent(&'static str),
     /// `conduit_foreign_income` exceeds `unfranked_amount`. The CFI figure is
     /// a memo *subset* of the unfranked amount (it is assessable to a resident
     /// through that field — see [`Income::conduit_foreign_income`]), so it can
@@ -497,6 +541,56 @@ fn check_per_share(income: &Income) -> Result<(), PerShareError> {
     Ok(())
 }
 
+/// An [`IncomeType::EmploymentIncome`] row carries the **cash paid and nothing
+/// else**: remuneration has no franking, no foreign-source dividend component,
+/// no LIC attributable part, no CFI, no tax-deferred amount, no ex or
+/// entitlement date, and no per-share statement figures — every one of those is
+/// a distribution concept, and a value in any of them would be stored and then
+/// deliberately ignored by every report that knows the row is not a dividend.
+/// It cannot be trust income either: it is not income of the holding at all.
+///
+/// The amount goes in `unfranked_amount`, the row's plain-cash column (what
+/// `gross_cash_income` sums), and `tfn_withholding_tax` stays nil — an
+/// employer withholds PAYG, which appears on the income statement, not the
+/// no-TFN withholding this column records.
+fn check_employment_income(income: &Income) -> Result<(), UpsertError> {
+    if income.income_type != IncomeType::EmploymentIncome {
+        return Ok(());
+    }
+    if income.trust_income {
+        return Err(UpsertError::EmploymentIncomeComponent("trust_income"));
+    }
+    for (field, amount) in [
+        ("franked_amount", income.franked_amount),
+        ("franking_credits", income.franking_credits),
+        ("foreign_source_income", income.foreign_source_income),
+        ("foreign_tax_paid", income.foreign_tax_paid),
+        ("tfn_withholding_tax", income.tfn_withholding_tax),
+        ("lic_capital_gain_amount", income.lic_capital_gain_amount),
+        ("conduit_foreign_income", income.conduit_foreign_income),
+    ] {
+        if !amount.is_zero() {
+            return Err(UpsertError::EmploymentIncomeComponent(field));
+        }
+    }
+    for (field, value) in [
+        ("tax_deferred_amount", income.tax_deferred_amount),
+        ("amount_per_security", income.amount_per_security),
+        ("securities_held", income.securities_held),
+    ] {
+        if value.is_some() {
+            return Err(UpsertError::EmploymentIncomeComponent(field));
+        }
+    }
+    if income.ex_date.is_some() {
+        return Err(UpsertError::EmploymentIncomeComponent("ex_date"));
+    }
+    if income.entitlement_date.is_some() {
+        return Err(UpsertError::EmploymentIncomeComponent("entitlement_date"));
+    }
+    Ok(())
+}
+
 /// Human-readable body for a per-share 422 (shown by the web UI).
 pub(crate) fn per_share_detail(e: &PerShareError) -> String {
     match e {
@@ -542,6 +636,11 @@ pub async fn db_upsert(pool: &SqlitePool, income: &Income) -> Result<(), UpsertE
             return Err(UpsertError::NegativeAmount(field));
         }
     }
+    // Before the per-share cross-check, so a distribution field on an
+    // employment-income row gets the message naming its kind rather than the
+    // cross-check's confusing "supply both or neither" (the same ordering
+    // reason the negative-amount sweep runs first).
+    check_employment_income(income)?;
     check_per_share(income).map_err(UpsertError::PerShare)?;
     if income.entitlement_date.is_some() && !income.trust_income {
         return Err(UpsertError::EntitlementDateOnNonTrust);
@@ -627,6 +726,9 @@ pub async fn db_upsert(pool: &SqlitePool, income: &Income) -> Result<(), UpsertE
                     "tfn_withholding_tax",
                     existing.tfn_withholding_tax != income.tfn_withholding_tax,
                 ),
+                // Only a distribution is reinvestable, so a reinvested row
+                // cannot become employment income while the link stands.
+                ("income_type", existing.income_type != income.income_type),
             ];
             if let Some((field, _)) = frozen.iter().find(|(_, changed)| *changed) {
                 return Err(UpsertError::ReinvestedIncome(field));
@@ -720,8 +822,8 @@ pub async fn db_upsert(pool: &SqlitePool, income: &Income) -> Result<(), UpsertE
           foreign_source_income, foreign_tax_paid, tfn_withholding_tax, franking_credits, \
           lic_capital_gain_amount, conduit_foreign_income, trust_income, entitlement_date, \
           currency, holding_account_id, amount_per_security, \
-          securities_held, tax_deferred_amount) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+          securities_held, tax_deferred_amount, income_type) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT(id) DO UPDATE SET \
              listing_id                 = excluded.listing_id, \
              date_paid                  = excluded.date_paid, \
@@ -740,7 +842,8 @@ pub async fn db_upsert(pool: &SqlitePool, income: &Income) -> Result<(), UpsertE
              holding_account_id         = excluded.holding_account_id, \
              amount_per_security        = excluded.amount_per_security, \
              securities_held            = excluded.securities_held, \
-             tax_deferred_amount        = excluded.tax_deferred_amount",
+             tax_deferred_amount        = excluded.tax_deferred_amount, \
+             income_type                = excluded.income_type",
     )
     .bind(income.id)
     .bind(income.listing_id)
@@ -761,6 +864,7 @@ pub async fn db_upsert(pool: &SqlitePool, income: &Income) -> Result<(), UpsertE
     .bind(OptMoney(income.amount_per_security))
     .bind(OptMoney(income.securities_held))
     .bind(OptMoney(income.tax_deferred_amount))
+    .bind(income.income_type)
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -837,6 +941,7 @@ async fn upsert(
         amount_per_security: body.amount_per_security,
         securities_held: body.securities_held,
         tax_deferred_amount: body.tax_deferred_amount,
+        income_type: body.income_type,
     };
     db_upsert(&pool, &income).await?;
     Ok(StatusCode::NO_CONTENT)
@@ -892,6 +997,12 @@ impl From<UpsertError> for ApiError {
             UpsertError::NegativeAmount(field) => ApiError::unprocessable(format!(
                 "{field} cannot be negative — income figures are the statement's own \
                  positive (or zero) amounts"
+            )),
+            UpsertError::EmploymentIncomeComponent(field) => ApiError::unprocessable(format!(
+                "{field} cannot be entered on an employment-income row — a dividend \
+                 equivalent is remuneration, not a payment of the holding: it carries no \
+                 franking, no foreign-source or LIC component, no tax-deferred amount and \
+                 no ex/entitlement date. Enter the cash as the unfranked amount alone"
             )),
             UpsertError::ConduitExceedsUnfranked { cfi, unfranked } => {
                 ApiError::unprocessable(format!(
@@ -1203,29 +1314,18 @@ mod tests {
     async fn db_trust_distribution_insert_and_retrieve() {
         let pool = test_pool().await;
         insert_test_listing(&pool).await;
-        let dist = Income {
-            holding_account_id: 1,
-            id: 2,
-            listing_id: 1,
-            date_paid: NaiveDate::from_ymd_opt(2024, 6, 30).unwrap(),
-            ex_date: None,
-            franked_amount: Decimal::ZERO,
-            unfranked_amount: Decimal::from(50),
-            foreign_source_income: Decimal::from(10),
-            foreign_tax_paid: "1.5".parse().unwrap(),
-            tfn_withholding_tax: Decimal::ZERO,
-            franking_credits: Decimal::ZERO,
-            lic_capital_gain_amount: Decimal::from(5),
-            conduit_foreign_income: Decimal::from(3),
-            trust_income: true,
-            entitlement_date: None,
-            reinvestment_trade_id: None,
-            currency: "AUD".to_string(),
-            buyback_trade_id: None,
-            amount_per_security: None,
-            securities_held: None,
-            tax_deferred_amount: None,
-        };
+        // Built from the shared fixture rather than spelled out, so a new
+        // column is added once, in the builder (CLAUDE.md).
+        let dist = crate::test_support::income(2, 1, NaiveDate::from_ymd_opt(2024, 6, 30).unwrap())
+            .with(|i| {
+                i.unfranked_amount = Decimal::from(50);
+                i.foreign_source_income = Decimal::from(10);
+                i.foreign_tax_paid = "1.5".parse().unwrap();
+                i.lic_capital_gain_amount = Decimal::from(5);
+                i.conduit_foreign_income = Decimal::from(3);
+                i.trust_income = true;
+            })
+            .build();
         db_upsert(&pool, &dist).await.unwrap();
         let got = db_get(&pool, 2).await.unwrap().unwrap();
         assert!(got.trust_income);
@@ -2182,6 +2282,101 @@ mod tests {
         assert_eq!(status, StatusCode::NO_CONTENT);
         let got = db_get(&pool, 1).await.unwrap().unwrap();
         assert_eq!(got.tax_deferred_amount, None);
+    }
+
+    // Employment income (SCENARIOS J-10): a dividend equivalent on unvested
+    // RSUs is remuneration under s 6-5 (TD 2017/26), not a payment of the
+    // holding — so the row states its kind, and carries the cash and nothing
+    // else.
+
+    /// The kind defaults to `Dividend`, which is what every row was before it
+    /// existed — so no stored row and no existing client changes meaning.
+    #[tokio::test]
+    async fn api_income_type_defaults_to_dividend() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        let (status, _) = put_income(
+            &pool,
+            1,
+            serde_json::json!({
+                "listing_id": 1, "date_paid": "2025-03-15", "franked_amount": "70"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(
+            db_get(&pool, 1).await.unwrap().unwrap().income_type,
+            IncomeType::Dividend
+        );
+    }
+
+    #[tokio::test]
+    async fn api_employment_income_round_trips_with_the_cash_alone() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        let (status, _) = put_income(
+            &pool,
+            1,
+            serde_json::json!({
+                "listing_id": 1,
+                "date_paid": "2025-03-15",
+                "unfranked_amount": "250",
+                "income_type": "EmploymentIncome"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let got = db_get(&pool, 1).await.unwrap().unwrap();
+        assert_eq!(got.income_type, IncomeType::EmploymentIncome);
+        assert_eq!(got.unfranked_amount, Decimal::from(250));
+    }
+
+    /// Every distribution field is refused on an employment-income row, each
+    /// naming itself: remuneration has no franking, no foreign-source or LIC
+    /// component, no CFI, no tax-deferred amount, no ex/entitlement date and no
+    /// per-share statement figures — and it can never be trust income.
+    #[tokio::test]
+    async fn api_distribution_fields_on_an_employment_income_row_return_422() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        for (field, value) in [
+            ("franked_amount", serde_json::json!("70")),
+            ("franking_credits", serde_json::json!("30")),
+            ("foreign_source_income", serde_json::json!("10")),
+            ("foreign_tax_paid", serde_json::json!("1")),
+            ("tfn_withholding_tax", serde_json::json!("5")),
+            ("lic_capital_gain_amount", serde_json::json!("5")),
+            ("conduit_foreign_income", serde_json::json!("1")),
+            ("tax_deferred_amount", serde_json::json!("5")),
+            ("amount_per_security", serde_json::json!("0.5")),
+            ("securities_held", serde_json::json!("500")),
+            ("ex_date", serde_json::json!("2025-03-01")),
+            ("entitlement_date", serde_json::json!("2025-03-01")),
+            ("trust_income", serde_json::json!(true)),
+        ] {
+            let mut body = serde_json::json!({
+                "listing_id": 1,
+                "date_paid": "2025-03-15",
+                "unfranked_amount": "250",
+                "income_type": "EmploymentIncome"
+            });
+            body[field] = value;
+            let (status, detail) = put_income(&pool, 1, body).await;
+            assert_eq!(
+                status,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{field} must be refused"
+            );
+            assert!(detail.contains(field), "{field}: {detail}");
+            assert!(
+                detail.contains("employment-income row"),
+                "{field}: {detail}"
+            );
+            assert!(
+                db_get(&pool, 1).await.unwrap().is_none(),
+                "{field}: nothing persisted"
+            );
+        }
     }
 
     // AMIT cash-only rows (REQUIREMENTS 2026-06-12): an AMIT listing's income

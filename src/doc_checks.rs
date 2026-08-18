@@ -383,15 +383,27 @@ fn known_limitations_document_rsu_dividend_equivalents() {
     assert!(limitations.contains("**RSU dividend equivalents**"));
     assert!(limitations.contains("dividend equivalents on unvested RSU grants"));
     assert!(limitations.contains("**ordinary income when paid**"));
+    // The payment is recordable as its own kind (SCENARIOS J-10) — the docs
+    // must say so, and must still name the residual limit (item 1/2).
+    assert!(limitations.contains("`income_type: \"EmploymentIncome\"`"));
+    assert!(limitations.contains("no surface calls it a dividend"));
     assert!(
-        limitations.contains("paid out in cash is enterable manually as an [income](#income) row")
+        limitations
+            .contains("**item 1/2, salary and wages, is not something this system reports**")
     );
+    // The entity, tax-summary and printed-document halves of the same change.
+    assert!(API_MD.contains("An `EmploymentIncome` row carries **the cash and nothing else**"));
+    assert!(
+        API_MD.contains("`employment_income` (an [`income_type: EmploymentIncome`](#income) row")
+    );
+    assert!(SCHEMA_MD.contains("Dividend | EmploymentIncome (CHECK-enforced enum, 0028"));
     // Cites the mirrored ATO ruling (TD 2017/26).
     assert!(limitations.contains("docs/ato/ess-dividend-equivalents.md"));
     assert!(include_str!("../docs/ato/ess-dividend-equivalents.md").contains("TD 2017/26"));
     // Surfaced in the README too.
     assert!(README_MD.contains("dividend equivalents on unvested RSU grants"));
     assert!(README_MD.contains("ordinary income when paid"));
+    assert!(README_MD.contains("recordable as an income row of type `EmploymentIncome`"));
 }
 
 /// Docs-sync pin for the per-year ESS reduction eligibility flag (SCENARIOS

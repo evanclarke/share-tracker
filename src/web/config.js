@@ -159,7 +159,7 @@ export const ENTITIES = [
   },
   {
     slug: 'income', title: 'Income', menu: 'Activity', api: '/income',
-    desc: 'Dividends and trust distributions. The form captures what the payment advice prints — amount, franking treatment, the per-share figures — and the advanced toggle reveals the full tax-component breakdown; a DRP statement’s reinvestment can be entered in the same form.',
+    desc: 'Dividends and trust distributions. The form captures what the payment advice prints — amount, franking treatment, the per-share figures — and the advanced toggle reveals the full tax-component breakdown; a DRP statement’s reinvestment can be entered in the same form. A row can also record employment income (a dividend equivalent on unvested rights), which is reported as remuneration rather than as a dividend.',
     keyFields: [int('id', 'ID', { auto: true })],
     fields: [
       fk('listing_id', 'Listing', 'listings', { required: true }),
@@ -176,14 +176,18 @@ export const ENTITIES = [
       dec('lic_capital_gain_amount', 'LIC capital gain amount', { hint: 'A listed investment company’s dividend statement advises how much of the dividend is attributable to a LIC capital gain (the attributable part) — enter that figure as printed, not a share of it. An individual deducts 50% of it, and the Annual Tax Report and Tax Summary compute that halving for question D8 (Dividend deductions), so entering an already-halved figure claims half the deduction you are entitled to.' }),
       dec('conduit_foreign_income', 'Conduit foreign income', { hint: 'The part of the unfranked amount above that the payer declared to be conduit foreign income (CFI) — a memo figure, already included in that amount, not an extra payment. To an Australian resident an unfranked dividend declared to be CFI is assessable, so the unfranked amount must be the statement’s full figure with the CFI portion in it; a value larger than the unfranked amount is rejected.' }),
       bool('trust_income', 'Trust income'),
+      sel('income_type', 'Income type', ['Dividend', 'EmploymentIncome'], { default: 'Dividend', hint: 'Dividend = a payment of the holding (a dividend, trust distribution or buy-back dividend component) — what every row is unless you say otherwise. EmploymentIncome = a dividend equivalent paid on unvested rights, which is remuneration under s 6-5 and not a dividend in your hands (TD 2017/26): enter the cash as the unfranked amount and nothing else — franking, foreign-source, LIC, CFI, tax-deferred, ex/entitlement dates and the per-share figures are all rejected on such a row, and it cannot be reinvested. It reports on its own line, belongs at item 1/2 salary and wages (normally already prefilled from your employer’s STP reporting), and counts in no investment-income total.' }),
       dt('entitlement_date', 'Entitlement date', { optional: true, hint: 'Trust distributions only: the date you became presently entitled — usually the distribution period’s end on the statement. Trust income is assessed in this date’s financial year even when the cash arrives later (a June distribution paid in July belongs to the year just ended). Leave empty to assess by the pay date.' }),
       dec('tax_deferred_amount', 'Tax-deferred amount', { optional: true, default: '', hint: 'Non-AMIT trust statements only: the statement’s tax-deferred amount — a CGT event E4 cost-base reduction. Recording it changes nothing by itself: enter the reduction as a Return of capital corporate action on the listing; the E4 cross-check report flags rows still missing one.' }),
       fk('currency', 'Currency', 'currencies', { required: true, encode: 'string', default: 'AUD' }),
       fk('holding_account_id', 'Holding account', 'holdingAccounts', { required: true, default: '1', hint: 'The account the distribution was paid to — decides whose DRP enrolment applies.' }),
     ],
     wireForm: wireIncomeEntry,
-    columns: ['id', 'listing_id', 'date_paid', 'franked_amount', 'unfranked_amount', 'franking_credits', 'currency', 'holding_account_id', 'reinvestment_trade_id'],
+    columns: ['id', 'listing_id', 'date_paid', 'income_type', 'franked_amount', 'unfranked_amount', 'franking_credits', 'currency', 'holding_account_id', 'reinvestment_trade_id'],
     rowActions: function (row) {
+      // Only a distribution is reinvestable — the API refuses an
+      // employment-income row (422), so the action isn't offered for one.
+      if (row.income_type === 'EmploymentIncome') return [];
       return row.reinvestment_trade_id == null
         ? [{ label: 'Reinvest', href: '#/reinvest/' + row.id }]
         : [{

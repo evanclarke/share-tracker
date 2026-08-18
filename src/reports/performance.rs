@@ -42,7 +42,7 @@
 use crate::domain::cost_base::ParcelRow;
 use crate::domain::open_parcels;
 use crate::entities::closing_price::{self, SharedFetcher};
-use crate::entities::income::Income;
+use crate::entities::income::{Income, IncomeType};
 use crate::entities::trade::TradeType;
 use crate::infra::fx::{FxOverride, FxRates};
 use crate::infra::http::ApiError;
@@ -478,6 +478,13 @@ async fn accumulate(
         .checked_sub_months(Months::new(12))
         .unwrap_or(NaiveDate::MIN);
     for income in &income_rows {
+        // Remuneration recorded against the holding (a dividend equivalent on
+        // unvested RSUs — SCENARIOS J-10) is not a return *on* the holding: it
+        // is paid for services, not by the shares, and counting it would
+        // inflate the income yield of whatever listing it was recorded against.
+        if income.income_type == IncomeType::EmploymentIncome {
+            continue;
+        }
         let date_paid = income.date_paid;
         // Income rows carry no manual fx override: a non-AUD amount with no
         // ATO rate fails loudly (same as the tax summary).

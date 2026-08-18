@@ -67,7 +67,7 @@
 
 use crate::entities::{
     drp_enrolment::{self, ResidualHandling},
-    income::Income,
+    income::{Income, IncomeType},
     trade::{self, Trade},
 };
 use crate::infra::decimal::{Money, parse_dec};
@@ -123,6 +123,13 @@ pub enum ReinvestError {
     /// The distribution already has a reinvestment trade.
     #[error("this distribution already has a reinvestment trade")]
     AlreadyReinvested,
+    /// The income row is not a distribution at all — an employment-income row
+    /// (a dividend equivalent on unvested RSUs; TD 2017/26, SCENARIOS J-10).
+    /// A DRP reinvests a payment *of* the holding into more of it; remuneration
+    /// is paid for services, and no registry plan applies it to shares. Mapped
+    /// to `422`.
+    #[error("an employment-income row is not a distribution and cannot be reinvested")]
+    NotADistribution,
     /// The distribution's currency is not the listing's, so its cash and the
     /// reinvestment price are different money and cannot be divided.
     #[error("the distribution is in {distribution} but the listing trades in {listing}")]
@@ -172,6 +179,11 @@ impl From<ReinvestError> for ApiError {
             ReinvestError::AlreadyReinvested => ApiError::unprocessable(
                 "this distribution already has a reinvestment trade — undo it first \
                  (DELETE /income/:id/reinvest) to redo it",
+            ),
+            ReinvestError::NotADistribution => ApiError::unprocessable(
+                "this income row records employment income (a dividend equivalent), not a \
+                 distribution — a DRP reinvests a payment of the holding into more of it, \
+                 and remuneration is paid for services",
             ),
             ReinvestError::CurrencyMismatch {
                 distribution,
@@ -244,6 +256,9 @@ pub async fn db_reinvest(
 
     if income.reinvestment_trade_id.is_some() {
         return Err(ReinvestError::AlreadyReinvested);
+    }
+    if income.income_type != IncomeType::Dividend {
+        return Err(ReinvestError::NotADistribution);
     }
 
     let Income {

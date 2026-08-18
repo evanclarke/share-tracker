@@ -26,7 +26,7 @@ use crate::domain::cost_base::{self, CostBaseAdjustment, ParcelRow};
 use crate::domain::listing_identity::RenameHistory;
 use crate::domain::tax_year::tax_year_for;
 use crate::entities::corporate_action::{RocEvent, SplitEvent};
-use crate::entities::income::Income;
+use crate::entities::income::{Income, IncomeType};
 use crate::entities::listing;
 use crate::entities::trade::{Trade, TradeType};
 use crate::infra::fx::FxRates;
@@ -688,6 +688,19 @@ pub struct DividendIncomeRow {
     pub franking_credits_denied_aud: Decimal,
 }
 
+/// A non-dividend income row: remuneration recorded against the holding it was
+/// calculated from — a dividend equivalent on unvested RSUs (TD 2017/26,
+/// SCENARIOS J-10). Printed in its own table, never among the dividends, since
+/// the whole point of the kind is that the payment is not one.
+#[derive(Debug, Serialize)]
+pub struct EmploymentIncomeRow {
+    pub income_id: i64,
+    pub listing_id: i64,
+    pub ticker: String,
+    pub date_paid: NaiveDate,
+    pub amount_aud: Decimal,
+}
+
 #[derive(Debug, Serialize)]
 pub struct ForeignIncomeRow {
     pub kind: String,
@@ -750,6 +763,10 @@ pub struct IncomeSections {
     /// excluded rather than printing as an all-zero row; it still appears in
     /// `foreign_income` below.
     pub dividends: Vec<DividendIncomeRow>,
+    /// Cash recorded against a holding that is not income *of* the holding —
+    /// see [`EmploymentIncomeRow`]. Reported at item 1/2, not at item 11, and
+    /// so kept out of `dividends` and out of every investment-income total.
+    pub employment_income: Vec<EmploymentIncomeRow>,
     pub foreign_income: Vec<ForeignIncomeRow>,
     pub interest: Vec<InterestIncomeRow>,
     pub ess: Vec<EssIncomeRow>,
@@ -761,6 +778,7 @@ impl IncomeSections {
     fn sort(&mut self) {
         self.trust_income.sort_by_key(|r| r.date_paid);
         self.dividends.sort_by_key(|r| r.date_paid);
+        self.employment_income.sort_by_key(|r| r.date_paid);
         self.foreign_income.sort_by_key(|r| r.date);
         self.interest.sort_by_key(|r| r.date_paid);
         self.ess.sort_by_key(|r| r.taxing_point_date);
@@ -870,7 +888,19 @@ async fn push_income_rows(
         // but it is part of `unfranked` and never totalled separately.
         let cfi = aud(income.conduit_foreign_income)?;
 
-        if trust_income {
+        if income.income_type == IncomeType::EmploymentIncome {
+            // Remuneration, not a payment of the holding: its own table, and
+            // out of every Item 11/13/20 list below. The write-time rule
+            // leaves such a row only the cash in `unfranked_amount`, so
+            // `unfranked` is the whole payment.
+            out.employment_income.push(EmploymentIncomeRow {
+                income_id,
+                listing_id,
+                ticker,
+                date_paid,
+                amount_aud: unfranked,
+            });
+        } else if trust_income {
             out.trust_income.push(TrustIncomeRow {
                 income_id,
                 listing_id,
@@ -1625,6 +1655,40 @@ mod tests {
             report.income.foreign_income[0].ticker.as_deref(),
             Some("ICE")
         );
+    }
+
+    /// The archived document is the copy an accountant reads, so a dividend
+    /// equivalent must not print among the dividends with a franking status
+    /// (SCENARIOS J-10): it gets its own table, and the ordinary dividend
+    /// beside it is unaffected.
+    #[tokio::test]
+    async fn employment_income_prints_in_its_own_table_not_among_the_dividends() {
+        let pool = test_support::test_pool().await;
+        test_support::listing(1).ticker("EMPA").insert(&pool).await;
+        test_support::income(1, 1, ymd(2024, 3, 31))
+            .with(|i| {
+                i.unfranked_amount = dec("250");
+                i.income_type = IncomeType::EmploymentIncome;
+            })
+            .insert(&pool)
+            .await;
+        test_support::income(2, 1, ymd(2024, 3, 31))
+            .with(|i| {
+                i.franked_amount = dec("70");
+                i.franking_credits = dec("30");
+            })
+            .insert(&pool)
+            .await;
+
+        let report = db_tax_report(&pool, 2024).await.unwrap();
+        assert_eq!(report.income.dividends.len(), 1);
+        assert_eq!(report.income.dividends[0].income_id, 2);
+        assert_eq!(report.income.employment_income.len(), 1);
+        assert_eq!(report.income.employment_income[0].income_id, 1);
+        assert_eq!(report.income.employment_income[0].ticker, "EMPA");
+        assert_eq!(report.income.employment_income[0].amount_aud, dec("250"));
+        // …and it reaches no Item 20 list either.
+        assert!(report.income.foreign_income.is_empty());
     }
 
     /// The conduit-foreign-income memo is printed on the dividend and trust

@@ -691,9 +691,13 @@ async fn db_duplicate_amma_statements(
 /// match they are, which is also why the grouping cannot be pushed into SQL.
 /// Every money column of the row is compared, including the informational
 /// ones: two rows agreeing on the assessable figures but disagreeing on, say,
-/// `tax_deferred_amount` were entered from different statements.
+/// `tax_deferred_amount` were entered from different statements. The row's
+/// **kind** is part of it too — a dividend and a dividend equivalent of the
+/// same amount on one day are two different payments, and the whole point of
+/// the kind is that they are not the same thing (SCENARIOS J-10).
 fn same_income_entry(a: &Income, b: &Income) -> bool {
-    a.listing_id == b.listing_id
+    a.income_type == b.income_type
+        && a.listing_id == b.listing_id
         && a.holding_account_id == b.holding_account_id
         && a.date_paid == b.date_paid
         && a.currency == b.currency

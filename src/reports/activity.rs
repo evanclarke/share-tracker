@@ -23,7 +23,7 @@ use crate::entities::closing_price::{self, SharedFetcher};
 use crate::entities::corporate_action::{ActionKind, CorporateAction, WorthlessEvent};
 use crate::entities::drp_enrolment::DrpEnrolment;
 use crate::entities::ess_statement::EssStatement;
-use crate::entities::income::Income;
+use crate::entities::income::{Income, IncomeType};
 use crate::entities::investment_expense::InvestmentExpense;
 use crate::entities::trade::{Trade, TradeType};
 use crate::entities::transfer::Transfer;
@@ -355,7 +355,11 @@ impl Sources {
         self.incomes
             .iter()
             .map(|i| {
-                let event = if i.buyback_trade_id.is_some() {
+                let event = if i.income_type == IncomeType::EmploymentIncome {
+                    // Remuneration recorded against the holding it was
+                    // calculated from — never called a dividend (TD 2017/26).
+                    "Employment income (dividend equivalent)"
+                } else if i.buyback_trade_id.is_some() {
                     "Dividend (buy-back component)"
                 } else if i.trust_income {
                     "Trust distribution"

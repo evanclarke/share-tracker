@@ -304,6 +304,17 @@ function incomeSection(inc, summaryLines) {
     el('h4', null, 'Dividend income'),
     genericTable(inc.dividends, ['date_paid', 'ticker', 'ex_date', 'franked_amount_aud', 'unfranked_amount_aud', 'conduit_foreign_income_aud', 'franking_credits_aud', 'lic_capital_gain_deduction_aud', 'franking_status']),
     cfiFootnote(inc),
+    inc.employment_income && inc.employment_income.length
+      ? el('h4', null, 'Employment income (not investment income)') : null,
+    inc.employment_income && inc.employment_income.length
+      ? genericTable(inc.employment_income, ['date_paid', 'ticker', 'amount_aud']) : null,
+    inc.employment_income && inc.employment_income.length
+      ? el('p', { class: 'hint' },
+          'Cash recorded against a holding that is not income of that holding — a dividend '
+          + 'equivalent paid on unvested rights is remuneration under s 6-5, not a dividend '
+          + '(TD 2017/26). It belongs at item 1/2 salary and wages, which the employer normally '
+          + 'reports through STP, so it is listed here for reconciliation only and is in none of '
+          + 'the dividend or investment-income totals above.') : null,
     el('h4', null, 'Foreign income'),
     genericTable(inc.foreign_income, ['kind', 'ticker', 'date', 'amount_aud', 'foreign_tax_paid_aud']),
     el('h4', null, 'Interest income'),

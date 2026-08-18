@@ -56,8 +56,16 @@ been assessed to the trustee under s 99A ITAA 1936).
 
 Dividend equivalents accrue on **unvested** RSU grants, which this system does
 not track (unvested grants are not shares — see Known limitations in
-`docs/API.md`). They are therefore **not modelled**: no entry path computes or
-classifies them. A dividend equivalent paid out in cash is ordinary
-employment-connected income in the year received and can be entered manually
-as an income row if the user wants it aggregated here at all — it is not an
-ESS discount, not a dividend, and carries no franking.
+`docs/API.md`). The **accrual** is therefore not modelled: no entry path
+computes one.
+
+The **payment** is recordable, and this ruling is why it has its own kind
+(SCENARIOS J-10, migration 0028). A dividend equivalent paid out in cash is
+entered as an income row with `income_type = 'EmploymentIncome'` and the cash
+in `unfranked_amount`; every dividend-shaped field is refused on such a row,
+because the payment is not an ESS discount, not a dividend, and carries no
+franking. It then reports on the tax summary's informational
+`employment_income` line and prints in its own table in the annual tax report,
+rather than at item 11S with a franking status. Where it actually belongs —
+item 1/2, salary and wages — is outside this system's scope and is normally
+prefilled from the employer's STP reporting.

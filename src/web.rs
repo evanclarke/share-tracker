@@ -677,6 +677,24 @@ mod tests {
         assert!(js.contains("await api('DELETE', a.del)"));
     }
 
+    /// An income row states its kind (SCENARIOS J-10): the selector, its
+    /// explanation of what an employment-income row may carry, the list column,
+    /// and the suppressed Reinvest action — remuneration is not a distribution.
+    #[tokio::test]
+    async fn income_type_ui_present() {
+        let js = app_js_body().await;
+        assert!(js.contains("sel('income_type', 'Income type', ['Dividend', 'EmploymentIncome']"));
+        assert!(js.contains("not a dividend in your hands (TD 2017/26)"));
+        assert!(js.contains("enter the cash as the unfranked amount and nothing else"));
+        assert!(js.contains("if (row.income_type === 'EmploymentIncome') return [];"));
+        // The simple form can't describe one, so a stored row opens advanced.
+        assert!(js.contains("existing.income_type !== 'Dividend'"));
+        // The printed annual document gives it its own table and says why.
+        assert!(js.contains("Employment income (not investment income)"));
+        assert!(js.contains("remuneration under s 6-5, not a dividend "));
+        assert!(js.contains("in none of "));
+    }
+
     #[tokio::test]
     async fn income_simple_entry_ui_present() {
         let js = app_js_body().await;

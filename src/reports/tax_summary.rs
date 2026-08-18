@@ -1,5 +1,5 @@
 use crate::domain::tax_year::tax_year_for;
-use crate::entities::income::Income;
+use crate::entities::income::{Income, IncomeType};
 use crate::entities::listing;
 use crate::entities::tax_year_settings;
 use crate::infra::decimal::{parse_dec, row_opt_dec};
@@ -110,6 +110,18 @@ pub struct TaxYearSummary {
     /// discounts, already counted within `ess_discount_assessable`, surfaced
     /// separately for the foreign-income / FITO calculation. Not added on top.
     pub ess_foreign_source_discount: Decimal,
+    /// **Informational** (AUD): cash recorded against a holding that is *not*
+    /// income of that holding — an [`IncomeType::EmploymentIncome`] row, i.e. a
+    /// dividend equivalent paid on unvested RSUs, which is ordinary income as
+    /// remuneration under s 6-5 and not a dividend in the employee's hands
+    /// (TD 2017/26, `docs/ato/ess-dividend-equivalents.md`, SCENARIOS J-10).
+    ///
+    /// It belongs at **item 1/2, salary and wages**, which this system does not
+    /// otherwise report and which the ATO normally prefills from the employer's
+    /// STP reporting — so it is deliberately **not** added to
+    /// `gross_assessable_investment_income` or to any dividend line: it is here
+    /// to reconcile the cash, not to be entered on the return a second time.
+    pub employment_income: Decimal,
     /// Gross assessable investment income for the year (AUD): the sum of the
     /// report's existing assessable income lines — `dividends_assessable`
     /// (franked + unfranked) + `interest_income` + `foreign_interest_income` +
@@ -184,6 +196,7 @@ pub(crate) const CSV_HEADER: &[&str] = &[
     "ess_discount_assessable",
     "ess_taxed_upfront_reduction",
     "ess_foreign_source_discount",
+    "employment_income",
     "gross_assessable_investment_income",
     "deductions_loan_interest",
     "deductions_management_fee",
@@ -229,6 +242,7 @@ pub(crate) const CSV_ATO_LABELS: &[&str] = &[
     "12B",                     // ess_discount_assessable
     "",                        // ess_taxed_upfront_reduction (inside 12B vs 12D)
     "12A",                     // ess_foreign_source_discount
+    "",                        // employment_income (1/2, prefilled by the employer — informational)
     "",                        // gross_assessable_investment_income (derived)
     "D7 / D8",                 // deductions_loan_interest
     "D7 / D8",                 // deductions_management_fee
@@ -267,6 +281,7 @@ fn zero_summary(tax_year: i32) -> TaxYearSummary {
         ess_discount_assessable: Decimal::ZERO,
         ess_taxed_upfront_reduction: Decimal::ZERO,
         ess_foreign_source_discount: Decimal::ZERO,
+        employment_income: Decimal::ZERO,
         gross_assessable_investment_income: Decimal::ZERO,
         deductions_loan_interest: Decimal::ZERO,
         deductions_management_fee: Decimal::ZERO,
@@ -504,6 +519,15 @@ pub(crate) async fn db_tax_summary_on(
         let s = map
             .entry(tax_year)
             .or_insert_with(|| zero_summary(tax_year));
+        // An employment-income row is remuneration, not a payment of the
+        // holding (TD 2017/26, SCENARIOS J-10): it belongs at item 1/2, not at
+        // 11S, so it reports on its own informational line and joins no
+        // assessable investment total. The write-time rule leaves it only the
+        // cash in `unfranked_amount`, so there is nothing else to attribute.
+        if income.income_type == IncomeType::EmploymentIncome {
+            s.employment_income += unfranked;
+            continue;
+        }
         s.dividends_assessable += franked + unfranked;
         s.foreign_source_income += foreign_income;
         s.lic_capital_gain_deduction += lic;
@@ -1948,6 +1972,45 @@ mod tests {
         // 600 + 900 − 600 = 900 (only the eligible 600 is removed).
         assert_eq!(result[0].ess_discount_assessable, Decimal::from(900));
         assert_eq!(result[0].ess_taxed_upfront_reduction, Decimal::from(600));
+    }
+
+    /// A dividend equivalent on unvested RSUs is remuneration, not a dividend
+    /// (TD 2017/26, SCENARIOS J-10): it reports on its own informational line
+    /// and reaches **no** dividend, franking or investment-income total — where
+    /// before the kind existed the same row read as item 11S unfranked
+    /// dividends and lifted gross assessable investment income.
+    #[tokio::test]
+    async fn db_employment_income_is_not_a_dividend_and_not_investment_income() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        // An ordinary dividend beside it, so the lines are distinguishable.
+        test_support::income(1, 1, NaiveDate::from_ymd_opt(2025, 3, 15).unwrap())
+            .with(|i| i.unfranked_amount = Decimal::from(100))
+            .insert(&pool)
+            .await;
+        test_support::income(2, 1, NaiveDate::from_ymd_opt(2025, 3, 15).unwrap())
+            .with(|i| {
+                i.unfranked_amount = Decimal::from(250);
+                i.income_type = IncomeType::EmploymentIncome;
+            })
+            .insert(&pool)
+            .await;
+
+        let result = db_tax_summary(&pool).await.unwrap();
+        assert_eq!(result.len(), 1);
+        let y = &result[0];
+        assert_eq!(y.employment_income, Decimal::from(250));
+        assert_eq!(
+            y.dividends_assessable,
+            Decimal::from(100),
+            "the dividend equivalent is not a dividend"
+        );
+        assert_eq!(
+            y.gross_assessable_investment_income,
+            Decimal::from(100),
+            "remuneration is not investment income"
+        );
+        assert_eq!(y.franking_credits, Decimal::ZERO);
     }
 
     /// With no taxed-upfront-eligible discount there is no reduction; a pure
