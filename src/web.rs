@@ -1513,6 +1513,18 @@ mod tests {
         assert!(js.contains("the discount is assessed and the parcel vested once per statement"));
         assert!(js.contains("'#/e/ess_statements'"));
         assert!(js.contains("Open ESS Statements"));
+        // …plus the one alert that is a date pattern rather than a double entry
+        // (SCENARIOS J-04: a sale inside the ESS 30-day rule's window), which
+        // names the days apart, the statement, and the remedy — and the two
+        // financial years only when the rule actually moves the discount.
+        assert!(js.contains("ess_30_day_rule"));
+        assert!(js.contains("day(s) after the taxing point of statement"));
+        assert!(js.contains("the 30-day rule moves the taxing point to the sale date"));
+        assert!(js.contains("there is no separate capital gain"));
+        assert!(js.contains("Enter the employer’s amended statement over the"));
+        assert!(js.contains("d.disposal_tax_year === d.statement_tax_year"));
+        // The entry form says the same thing where the taxing point is typed.
+        assert!(js.contains("30-day rule: if you sell within 30 days after the taxing point"));
         // …and refreshes on every route render so it appears on the main views.
         assert!(js.contains("refreshHealthBanner(); // deliberately not awaited"));
         // The strip's host element ships in the page shell with its styles.

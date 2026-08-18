@@ -36,7 +36,17 @@
 //! - every (listing, holding account, taxing point) carrying more than one ESS
 //!   statement of identical figures — the same double-entry on the
 //!   employee-share-scheme side, doubling the year's Item 12 discount and
-//!   vesting the parcel twice (see [`DuplicateEssStatement`]).
+//!   vesting the parcel twice (see [`DuplicateEssStatement`]);
+//! - every disposal of ESS-vested shares within 30 days after the taxing
+//!   point, where the ESS 30-day rule re-measures the discount, moves it into
+//!   the disposal's year and cancels the capital gain — the one entry here
+//!   that is wrong in two years at once (see [`EssThirtyDaySale`]).
+//!
+//! The last is the odd one out in kind: not a double entry but a **date
+//! pattern**, advisory in the way `reports::wash_sales` is. It lives here
+//! rather than in its own report because it needs no parameters and belongs on
+//! the same cross-view banner — the point is to catch the case at entry time
+//! rather than at return time.
 //!
 //! A database with no prices or FX rates at all reports `stale = false` for
 //! that series: nothing has decayed — a fresh install shows no banner, and a
@@ -49,6 +59,7 @@ use crate::entities::ess_statement::{self, EssStatement};
 use crate::entities::income::Income;
 use crate::entities::interest_income::InterestIncome;
 use crate::entities::investment_expense::{ExpenseType, InvestmentExpense};
+use crate::infra::decimal::Money;
 use crate::infra::http::ApiError;
 use axum::{Json, Router, extract::State, routing::get};
 use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc, Weekday};
@@ -62,6 +73,13 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 /// healthy database is at most 1–2 business days behind; 3 leaves headroom for
 /// a long exchange-holiday weekend without a false alarm.
 pub const PRICE_STALE_BUSINESS_DAYS: i64 = 3;
+
+/// The ESS 30-day rule's window: a disposal **within 30 days after** the
+/// deferred taxing point moves the taxing point to the disposal date
+/// (`docs/ato/ess-30-day-rule.md`, QC 23058 Example 11). Unlike the wash-sale
+/// window this is statutory (ITAA 1997 s 83A-115(3)), not a review convention,
+/// so it is a constant rather than a request parameter.
+pub const ESS_THIRTY_DAY_WINDOW: i64 = 30;
 
 /// A job whose most recent recorded run failed.
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
@@ -347,6 +365,81 @@ pub struct DuplicateEssStatement {
     pub statement_ids: Vec<i64>,
 }
 
+/// A disposal of ESS-vested shares **within 30 days after** the statement's
+/// taxing point, where the ESS 30-day rule moves the taxing point to the
+/// disposal date (SCENARIOS J-04, `docs/ato/ess-30-day-rule.md`, QC 23058
+/// Example 11 — ITAA 1997 s 83A-115(3)).
+///
+/// What the rule does, and why silence here is costly: the discount is
+/// re-measured at what the disposal actually realised, and the CGT cost base
+/// resets to that same figure on that same date — so **there is no separate
+/// capital gain**, and the discount can move into the **next financial year**.
+/// A user who enters the employer's *original* statement and then the sale gets
+/// both figures wrong at once, in two different years, from an entry the system
+/// accepts without comment: the original discount assessed in the original
+/// year, plus a capital gain that does not exist.
+///
+/// Advisory only, the same call as `reports::wash_sales`: nothing is rejected
+/// and no figure is rewritten. The correction is an **amended employer
+/// statement** — the employer must issue one within 30 days of becoming aware
+/// of the disposal — and the system cannot know whether one was issued, nor
+/// perform a re-measurement the ATO puts on the employer. Enter the amended
+/// statement over the original (taxing point = the disposal date, market value
+/// = what the disposal realised) and the figures follow.
+///
+/// A disposal **on** the taxing point is never flagged: the rule's effect is a
+/// no-op there — the taxing point is already the disposal date — so the
+/// corrected entry (the amended statement, vested and sold the same day, as in
+/// `ato_examples::ess_30_day_rule_example_11_wyatt_amended_statement`) must not
+/// nag.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct EssThirtyDaySale {
+    /// The Sell whose allocation draws on the vest parcel.
+    pub sale_trade_id: i64,
+    pub listing_id: i64,
+    pub ticker: String,
+    pub sale_date: NaiveDate,
+    /// Units of the vest parcel this sale allocated — the ESS interests
+    /// disposed of, which need not be the whole vest.
+    pub units_sold: Decimal,
+    pub ess_statement_id: i64,
+    /// The statement's vest Buy, i.e. the parcel allocated from.
+    pub vest_trade_id: i64,
+    pub taxing_point_date: NaiveDate,
+    /// `sale_date − taxing_point_date` in days: always 1..=30
+    /// ([`ESS_THIRTY_DAY_WINDOW`]).
+    pub days_after: i64,
+    /// ISO 4217 currency `statement_discount` is stated in (the statement's).
+    pub currency: String,
+    /// The discount the statement currently declares (D + E + F + the pre-2009
+    /// cessation label, in `currency`) — the figure the rule re-measures.
+    pub statement_discount: Decimal,
+    /// The financial year the statement's taxing point falls in, which is where
+    /// that discount is assessed today.
+    pub statement_tax_year: i32,
+    /// The financial year the **disposal** falls in — where the rule moves the
+    /// discount to. Equal to `statement_tax_year` when the window does not
+    /// cross a 30 June, and that is the *common* case: the years differing is
+    /// the Example 11 shape, where the correction also moves a return.
+    pub disposal_tax_year: i32,
+}
+
+/// The joined row behind [`EssThirtyDaySale`]: the statement's own figures are
+/// attached from a second read, so the discount is summed by
+/// `ess_statement::discount_labels` rather than re-added here.
+#[derive(sqlx::FromRow)]
+struct EssThirtyDaySaleRow {
+    sale_trade_id: i64,
+    listing_id: i64,
+    ticker: String,
+    sale_date: NaiveDate,
+    #[sqlx(try_from = "Money")]
+    units_sold: Decimal,
+    ess_statement_id: i64,
+    vest_trade_id: i64,
+    taxing_point_date: NaiveDate,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct HealthReport {
     /// Latest `closing_prices` date stored with status ok, across every
@@ -386,6 +479,10 @@ pub struct HealthReport {
     /// ESS statement of identical figures, newest first. Empty when no vest is
     /// declared twice.
     pub duplicate_ess_statements: Vec<DuplicateEssStatement>,
+    /// Every disposal of ESS-vested shares within 30 days after the statement's
+    /// taxing point, newest sale first — where the 30-day rule re-measures the
+    /// discount and cancels the capital gain. Empty when no such sale exists.
+    pub ess_30_day_rule: Vec<EssThirtyDaySale>,
 }
 
 /// Business days (Mon–Fri) strictly after `from`, up to and including `today`.
@@ -958,6 +1055,87 @@ async fn db_duplicate_ess_statements(
     Ok(duplicates)
 }
 
+/// Disposals of ESS-vested shares inside the 30-day window — see
+/// [`EssThirtyDaySale`].
+///
+/// Read on the caller's transaction. The window is bounded in SQL
+/// (`date(taxing_point, '+30 days')` over ISO-8601 text, which compares and
+/// arithmetics correctly), so an ordinary sale of an ESS parcel years later
+/// never reaches memory. The pairing is per **allocation**: a Sell drawing on
+/// two vest parcels inside their windows is two rows, since each statement
+/// would be amended separately.
+///
+/// Two reads rather than one join, so the discount is summed by
+/// `ess_statement::discount_labels` — the tax summary's own definition of the
+/// discount — instead of being re-added over TEXT columns here.
+async fn db_ess_30_day_rule(
+    conn: &mut sqlx::SqliteConnection,
+) -> Result<Vec<EssThirtyDaySale>, sqlx::Error> {
+    let rows = sqlx::query_as::<_, EssThirtyDaySaleRow>(sqlx::AssertSqlSafe(format!(
+        "SELECT s.id AS sale_trade_id, s.listing_id AS listing_id, l.ticker AS ticker, \
+                s.date AS sale_date, pa.quantity_allocated AS units_sold, \
+                e.id AS ess_statement_id, b.id AS vest_trade_id, \
+                e.taxing_point_date AS taxing_point_date \
+         FROM parcel_allocations pa \
+         JOIN trades s ON s.id = pa.sale_trade_id \
+         JOIN trades b ON b.id = pa.purchase_trade_id \
+         JOIN ess_statements e ON e.id = b.ess_statement_id \
+         JOIN listings l ON l.id = s.listing_id \
+         WHERE s.date > e.taxing_point_date \
+           AND s.date <= date(e.taxing_point_date, '+{ESS_THIRTY_DAY_WINDOW} days') \
+         ORDER BY s.date DESC, s.id, e.id"
+    )))
+    .fetch_all(&mut *conn)
+    .await?;
+    if rows.is_empty() {
+        return Ok(Vec::new());
+    }
+    // The whole (small) statement table, the same pre-loading call as the
+    // ticker maps above: every candidate row needs its statement's figures.
+    let statements: HashMap<i64, EssStatement> =
+        sqlx::query_as::<_, EssStatement>(sqlx::AssertSqlSafe(format!(
+            "SELECT {} FROM ess_statements",
+            ess_statement::COLUMNS
+        )))
+        .fetch_all(&mut *conn)
+        .await?
+        .into_iter()
+        .map(|s| (s.id, s))
+        .collect();
+
+    rows.into_iter()
+        .map(|row| {
+            // The join guarantees the statement exists; a row read between the
+            // two queries is the only way to miss it, and the alert would be
+            // unable to name what it is about.
+            let statement = statements.get(&row.ess_statement_id).ok_or_else(|| {
+                sqlx::Error::Decode(
+                    format!(
+                        "ESS statement {} disappeared mid-read",
+                        row.ess_statement_id
+                    )
+                    .into(),
+                )
+            })?;
+            Ok(EssThirtyDaySale {
+                sale_trade_id: row.sale_trade_id,
+                listing_id: row.listing_id,
+                ticker: row.ticker,
+                sale_date: row.sale_date,
+                units_sold: row.units_sold,
+                ess_statement_id: row.ess_statement_id,
+                vest_trade_id: row.vest_trade_id,
+                taxing_point_date: row.taxing_point_date,
+                days_after: (row.sale_date - row.taxing_point_date).num_days(),
+                currency: statement.currency.clone(),
+                statement_discount: ess_statement::discount_labels(statement),
+                statement_tax_year: tax_year_for(row.taxing_point_date),
+                disposal_tax_year: tax_year_for(row.sale_date),
+            })
+        })
+        .collect()
+}
+
 /// Read the freshness facts on one snapshot. `today` and `now` are parameters
 /// so tests can pin the staleness thresholds and the "close is final yet"
 /// cut-off to fixed dates.
@@ -1000,6 +1178,7 @@ pub async fn db_health(
     let duplicate_interest = db_duplicate_interest(&mut tx).await?;
     let duplicate_expenses = db_duplicate_expenses(&mut tx).await?;
     let duplicate_ess_statements = db_duplicate_ess_statements(&mut tx).await?;
+    let ess_30_day_rule = db_ess_30_day_rule(&mut tx).await?;
     tx.commit().await?;
     let unpriced_days = db_unpriced_days(pool, now).await?;
 
@@ -1022,6 +1201,7 @@ pub async fn db_health(
         duplicate_interest,
         duplicate_expenses,
         duplicate_ess_statements,
+        ess_30_day_rule,
     })
 }
 
@@ -1133,6 +1313,7 @@ mod tests {
         assert!(h.duplicate_interest.is_empty());
         assert!(h.duplicate_expenses.is_empty());
         assert!(h.duplicate_ess_statements.is_empty());
+        assert!(h.ess_30_day_rule.is_empty());
     }
 
     #[tokio::test]
@@ -2275,6 +2456,163 @@ mod tests {
         assert_eq!(h.duplicate_ess_statements.len(), 1);
         assert_eq!(h.duplicate_ess_statements[0].quantity, dec("100"));
         assert_eq!(h.duplicate_ess_statements[0].statement_ids, vec![1, 2]);
+    }
+
+    // The ESS 30-day rule (SCENARIOS J-04).
+
+    /// Enters a 400-share statement worth $3.50 each (a $1,400 deferral
+    /// discount — Example 11's figures) and vests it, answering the vest Buy a
+    /// sale allocates from. Every vest a test needs is created **before** its
+    /// sells: the vest Buy's id is assigned as max+1, so a sell inserted in
+    /// between would have the next vest land on top of it.
+    async fn ess_vest(
+        pool: &SqlitePool,
+        statement_id: i64,
+        listing_id: i64,
+        taxing_point: NaiveDate,
+    ) -> i64 {
+        test_support::ess_statement(statement_id, listing_id, taxing_point)
+            .with(|s| {
+                s.quantity = dec("400");
+                s.market_value_per_share = dec("3.50");
+                s.deferral_discount = dec("1400");
+            })
+            .insert(pool)
+            .await;
+        crate::entities::ess_vest::db_vest(pool, statement_id)
+            .await
+            .unwrap()
+            .id
+    }
+
+    /// Sells `units` of a vest parcel on `sale_date`, allocating them to it.
+    async fn sell_vest_parcel(
+        pool: &SqlitePool,
+        sale_id: i64,
+        listing_id: i64,
+        vest_trade_id: i64,
+        sale_date: NaiveDate,
+        units: Decimal,
+    ) {
+        test_support::sell(sale_id, listing_id)
+            .date(sale_date)
+            .qty(units)
+            .price(dec("3.795"))
+            .insert(pool)
+            .await;
+        test_support::allocate(pool, sale_id, sale_id, vest_trade_id, units).await;
+    }
+
+    /// Example 11 itself, entered the way a user naturally would — the
+    /// employer's *original* statement, then the sale 27 days later. Both the
+    /// discount and its year are wrong, and a phantom capital gain appears;
+    /// the alert names the sale, the statement it draws on, and the two years
+    /// involved.
+    #[tokio::test]
+    async fn a_sale_inside_the_thirty_day_window_is_flagged_with_both_years() {
+        let pool = test_pool().await;
+        test_support::listing(1).ticker("PEPP").insert(&pool).await;
+        let vest = ess_vest(&pool, 1, 1, ymd(2019, 6, 23)).await;
+        sell_vest_parcel(&pool, 101, 1, vest, ymd(2019, 7, 20), dec("400")).await;
+
+        let h = health(&pool, ymd(2019, 8, 1)).await;
+        assert_eq!(h.ess_30_day_rule.len(), 1);
+        let alert = &h.ess_30_day_rule[0];
+        assert_eq!(alert.sale_trade_id, 101);
+        assert_eq!(alert.ticker, "PEPP");
+        assert_eq!(alert.sale_date, ymd(2019, 7, 20));
+        assert_eq!(alert.units_sold, dec("400"));
+        assert_eq!(alert.ess_statement_id, 1);
+        assert_eq!(alert.taxing_point_date, ymd(2019, 6, 23));
+        assert_eq!(alert.days_after, 27);
+        assert_eq!(alert.currency, "AUD");
+        assert_eq!(alert.statement_discount, dec("1400"));
+        // The whole point of the rule: the discount is assessed in FY2019 as
+        // entered, but belongs in FY2020 — two different returns.
+        assert_eq!(alert.statement_tax_year, 2019);
+        assert_eq!(alert.disposal_tax_year, 2020);
+    }
+
+    /// The window is 30 days **after** the taxing point, inclusive — ITAA 1997
+    /// s 83A-115(3). Day 30 is inside it, day 31 is an ordinary post-vest sale
+    /// whose gain is a real capital gain.
+    #[tokio::test]
+    async fn the_window_includes_day_thirty_and_excludes_day_thirty_one() {
+        let pool = test_pool().await;
+        test_support::listing(1).ticker("DAY30").insert(&pool).await;
+        test_support::listing(2).ticker("DAY31").insert(&pool).await;
+        let taxing_point = ymd(2026, 3, 10);
+        let day30 = ess_vest(&pool, 1, 1, taxing_point).await;
+        let day31 = ess_vest(&pool, 2, 2, taxing_point).await;
+        sell_vest_parcel(&pool, 101, 1, day30, ymd(2026, 4, 9), dec("400")).await;
+        sell_vest_parcel(&pool, 102, 2, day31, ymd(2026, 4, 10), dec("400")).await;
+
+        let h = health(&pool, ymd(2026, 5, 1)).await;
+        assert_eq!(h.ess_30_day_rule.len(), 1);
+        assert_eq!(h.ess_30_day_rule[0].ticker, "DAY30");
+        assert_eq!(h.ess_30_day_rule[0].days_after, 30);
+        // Both sides of the boundary fall in one financial year here, which is
+        // the ordinary case — the rule still applies, it just moves no return.
+        assert_eq!(h.ess_30_day_rule[0].statement_tax_year, 2026);
+        assert_eq!(h.ess_30_day_rule[0].disposal_tax_year, 2026);
+    }
+
+    /// The corrected entry must not nag: with the **amended** statement (taxing
+    /// point = the disposal date) the rule's effect is a no-op, and that is
+    /// exactly what `ato_examples::ess_30_day_rule_example_11_wyatt_amended_statement`
+    /// enters. A sale of a non-ESS parcel is likewise none of this check's
+    /// business.
+    #[tokio::test]
+    async fn a_same_day_sale_and_a_non_ess_parcel_are_not_flagged() {
+        let pool = test_pool().await;
+        test_support::listing(1).ticker("PEPP").insert(&pool).await;
+        test_support::listing(2).ticker("ORD").insert(&pool).await;
+        // The amended statement: taxing point *is* the disposal date.
+        let vest = ess_vest(&pool, 1, 1, ymd(2019, 7, 20)).await;
+        sell_vest_parcel(&pool, 101, 1, vest, ymd(2019, 7, 20), dec("400")).await;
+        // An ordinary Buy sold the next day — no ESS statement behind it.
+        test_support::buy(50, 2)
+            .date(ymd(2019, 7, 20))
+            .qty(dec("400"))
+            .insert(&pool)
+            .await;
+        test_support::sell(51, 2)
+            .date(ymd(2019, 7, 21))
+            .qty(dec("400"))
+            .insert(&pool)
+            .await;
+        test_support::allocate(&pool, 51, 51, 50, dec("400")).await;
+
+        let h = health(&pool, ymd(2019, 8, 1)).await;
+        assert!(h.ess_30_day_rule.is_empty());
+    }
+
+    /// One Sell drawing on two vest parcels inside their own windows is two
+    /// alerts: each statement would be amended separately, so each is named.
+    /// A partial disposal reports the units actually allocated, not the vest.
+    #[tokio::test]
+    async fn each_vest_parcel_a_sale_draws_on_is_named_separately() {
+        let pool = test_pool().await;
+        test_support::listing(1).ticker("EMPA").insert(&pool).await;
+        let march2 = ess_vest(&pool, 1, 1, ymd(2026, 3, 2)).await;
+        let march10 = ess_vest(&pool, 2, 1, ymd(2026, 3, 10)).await;
+        test_support::sell(101, 1)
+            .date(ymd(2026, 3, 20))
+            .qty(dec("500"))
+            .insert(&pool)
+            .await;
+        test_support::allocate(&pool, 1, 101, march2, dec("400")).await;
+        test_support::allocate(&pool, 2, 101, march10, dec("100")).await;
+
+        let h = health(&pool, ymd(2026, 5, 1)).await;
+        assert_eq!(h.ess_30_day_rule.len(), 2);
+        // Both sales are the same day, so the tie-break is the statement id.
+        assert_eq!(h.ess_30_day_rule[0].ess_statement_id, 1);
+        assert_eq!(h.ess_30_day_rule[0].days_after, 18);
+        assert_eq!(h.ess_30_day_rule[0].units_sold, dec("400"));
+        assert_eq!(h.ess_30_day_rule[1].ess_statement_id, 2);
+        assert_eq!(h.ess_30_day_rule[1].days_after, 10);
+        assert_eq!(h.ess_30_day_rule[1].units_sold, dec("100"));
     }
 
     #[tokio::test]

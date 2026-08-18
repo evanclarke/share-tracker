@@ -1740,3 +1740,84 @@ against a running server: two identical statements entered over HTTP produce one
 Docs: `docs/API.md`'s Health section gained the `duplicate_ess_statements` bullet (and the field in
 the response shape), README's job/data-freshness feature bullet gained the duplicated-ESS-statement
 clause.
+
+## Nothing on the product side mentions the ESS 30-day rule (SCENARIOS J-04)
+(SCENARIOS.md section J verification pass, 2026-08-18. A disposal within 30 days after the deferred
+taxing point **moves the taxing point to the disposal date**: the discount is re-measured at the
+proceeds and the cost base resets to the same figure, so there is no separate capital gain, and the
+discount can move into the next financial year — `docs/ato/ess-30-day-rule.md`, QC 23058 Example 11.
+The mirror is indexed in `docs/ato/OVERVIEW.md`, but the words "30-day rule" appear nowhere in
+`README.md`, `docs/API.md`, or the ESS screen, and no report flags the pattern.)
+- [x] The corrected entry works and is now pinned: `ato_examples::ess_30_day_rule_example_11_wyatt_amended_statement`
+  enters the *amended* statement (taxing point = the 20 July 2019 disposal, market value = the
+  $3.795 per-share sale price), vests it, and sells the same day — FY2020 discount $1,518, capital
+  gain $0, exactly the ATO's answer. `docs/ato/OVERVIEW.md` already claimed this test existed; it
+  does now
+- [x] J-04 — the *natural* entry is wrong in two ways at once and nothing says so. Entering the
+  employer's original statement (taxing point 23 June 2019, discount $1,400) and then the 20 July
+  sale gives `ess_discount_assessable 1400` in **FY2019** and a **$118 capital gain** in FY2020 —
+  where the ATO's answer is $1,518 of discount in FY2020 and no capital gain. Both figures are
+  wrong, in different years, from an entry the system accepts without comment
+- [x] The trigger is mechanically detectable from data already held: a Sell allocating a parcel
+  whose Buy carries `ess_statement_id`, dated within 30 days after that statement's
+  `taxing_point_date`. `reports::wash_sales` is the precedent for an advisory, non-blocking
+  date-pattern report, and `reports::health` for a banner
+- [x] **Decide the model.** (a) **Documentation only** — a Known-limitations entry plus a hint on
+  the ESS screen's taxing-point field saying an amended statement supersedes the original (cheapest,
+  and the G-14 precedent for a scope cut honestly stated). (b) **Plus an advisory alert** — a
+  `ess_30_day_rule` list in `reports::health` (or its own cross-check report) naming each sale
+  within the window and the statement it draws on, so the case is caught rather than remembered.
+  (c) **Re-measure automatically** — rejected in advance: the system cannot know whether the
+  employer issued an amended statement, and rewriting a user's stated discount would be a
+  calculation the ATO puts on the employer
+- [x] Tests: whichever of (a)/(b) is chosen — a `doc_checks` assertion for the wording, and/or an
+  alert test with a sale on day 30 and day 31 either side of the boundary
+- [x] Docs sync: `docs/API.md` Known limitations (+ the report, if (b)), README Features
+
+**Closed 2026-08-18 — Evan chose (b), documentation *plus* an advisory alert.** (c) stayed rejected
+for the reason the finding gave: the re-measurement is a calculation the ATO puts on the employer,
+and no stored fact says whether an amended statement was issued.
+
+The alert is `ess_30_day_rule` in `reports::health` — the sixth list on that report and the first
+that is a **date pattern** rather than a double entry, which is why it went there rather than into
+its own report: it takes no parameters and belongs on the same cross-view banner, since the point is
+to catch the case at entry time rather than at return time. `reports::wash_sales` remains the
+precedent for the advisory posture (nothing rejected, nothing rewritten).
+
+Four decisions worth recording:
+- **The window is 1..=30 days, not 0..=30.** A sale *on* the taxing point is never flagged: the
+  rule's effect is a no-op there (the taxing point already is the disposal date), and that is
+  precisely the shape of the **corrected** entry — the amended statement vested and sold the same
+  day, which `ato_examples::ess_30_day_rule_example_11_wyatt_amended_statement` enters. Flagging day
+  0 would have nagged on the only entry that is right. The upper bound is statutory (ITAA 1997
+  s 83A-115(3)), so `ESS_THIRTY_DAY_WINDOW` is a constant interpolated into the SQL rather than a
+  request parameter like the wash-sale window, which is only a review convention.
+- **Both financial years are surfaced** (`statement_tax_year`, `disposal_tax_year`). The rule's
+  costliest consequence is that the discount can move *years*, so the alert names where it is
+  assessed today and where it belongs; the banner only mentions the move when the two differ, since
+  a window inside one financial year is the common case.
+- **One row per allocation, not per sale.** A Sell drawing on two vest parcels inside their windows
+  is two alerts — each statement is amended separately — and `units_sold` is what that allocation
+  consumed, not the whole vest.
+- **Two reads rather than one join**, so `statement_discount` is summed by
+  `ess_statement::discount_labels` (the tax summary's own definition of the discount) instead of
+  being re-added over TEXT columns in the report.
+
+Tests: `a_sale_inside_the_thirty_day_window_is_flagged_with_both_years` (Example 11's own dates and
+figures — 27 days, FY2019 → FY2020), `the_window_includes_day_thirty_and_excludes_day_thirty_one`,
+`a_same_day_sale_and_a_non_ess_parcel_are_not_flagged` (the corrected entry stays silent, and an
+ordinary parcel is none of this check's business), `each_vest_parcel_a_sale_draws_on_is_named_separately`,
+the empty-database assertion, `doc_checks::known_limitations_document_the_ess_30_day_rule`, and the
+`web.rs` bundle assertions for the banner text and the form hint. Full suite 1612 passed / 0 failed;
+`node --test` 69 passed; ui-smoke green. Verified end to end against a running server seeded with
+Example 11: the banner reads "Sale of 400 PEPP ESS shares on 2019-07-20 is 27 day(s) after the taxing
+point of statement 1 … moves from FY2019 to FY2020 … no separate capital gain."
+
+One test-fixture gotcha found the hard way: a vest Buy's id is assigned **max+1**, so every vest a
+test needs must be created *before* its sells — otherwise the next vest lands on top of a sell just
+inserted, and `trade::db_upsert` refuses with `EssVestTrade`.
+
+Docs: `docs/API.md` gained the `ess_30_day_rule` field on the Health report and a **The ESS 30-day
+rule is flagged, never applied** Known-limitations entry (what the rule does, why the tool won't do
+it, and what to enter instead); README's health-monitoring feature line gained the clause; and
+`config.js`'s taxing-point hint now states the rule where the date is typed.

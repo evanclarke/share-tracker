@@ -394,6 +394,31 @@ fn known_limitations_document_rsu_dividend_equivalents() {
     assert!(README_MD.contains("ordinary income when paid"));
 }
 
+/// Known-limitation pin (SCENARIOS J-04, 2026-08-18): the ESS 30-day rule is
+/// **detected and named, never applied**. The scope cut is deliberate — the
+/// re-measurement is the employer's amended statement to issue — so the docs
+/// must say both halves: that the pattern is flagged (the health list and the
+/// banner), and what the user does about it (enter the amended statement over
+/// the original, not as a second row).
+#[test]
+fn known_limitations_document_the_ess_30_day_rule() {
+    let limitations = known_limitations();
+    assert!(limitations.contains("**The ESS 30-day rule is flagged, never applied**"));
+    assert!(limitations.contains("within 30 days after** the deferred taxing point"));
+    assert!(limitations.contains("no separate capital gain"));
+    // The remedy, and why the tool won't do it for you.
+    assert!(limitations.contains("amended ESS statement"));
+    assert!(limitations.contains("enter the amended statement **over** the original"));
+    // The detection half: the health list is documented as a field of the report.
+    assert!(API_MD.contains("`ess_30_day_rule` — every disposal of ESS-vested shares"));
+    assert!(API_MD.contains("\"ess_30_day_rule\" }`"));
+    // Cites the mirrored ATO guidance, which carries its QC header.
+    assert!(limitations.contains("docs/ato/ess-30-day-rule.md"));
+    assert!(include_str!("../docs/ato/ess-30-day-rule.md").contains("QC 23058"));
+    // Surfaced in the README's health-monitoring feature line.
+    assert!(README_MD.contains("**ESS sale inside the 30-day rule's window**"));
+}
+
 /// Known-limitation pin (REQUIREMENTS "Ticker and exchange-code changes",
 /// 2026-07-26; narrowed 2026-07-28 to settlement only, once price collection
 /// started resolving its symbol and calendar as at the date fetched): an

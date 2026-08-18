@@ -1067,7 +1067,12 @@ async function viewAttachments(ownerField, ownerId) {
 // identical deductible expense (linking to Investment Expenses), each of which
 // is counted once per row, and the same double-entry on the employee-share
 // scheme side — an identical ESS statement (linking to ESS Statements), whose
-// discount is assessed and whose parcel is vested once per statement.
+// discount is assessed and whose parcel is vested once per statement — and one
+// alert that is a date pattern rather than a double entry: a sale of ESS-vested
+// shares within 30 days after the taxing point, where the ATO's 30-day rule
+// re-measures the discount at the sale proceeds, can move it into the next
+// financial year, and leaves no separate capital gain (also linking to ESS
+// Statements, where the employer's amended statement replaces the original).
 // Refreshed on every
 // route render, so fixing the cause clears it on the next navigation. A
 // failing health fetch hides the banner rather than breaking the app.
@@ -1134,6 +1139,18 @@ async function refreshHealthBanner() {
         + ') — the discount is assessed and the parcel vested once per statement;'
         + ' delete the superseded one unless both are real.');
     });
+    const ess30Day = h.ess_30_day_rule || [];
+    ess30Day.forEach(function (d) {
+      problems.push('Sale of ' + d.units_sold + ' ' + d.ticker + ' ESS shares on ' + d.sale_date
+        + ' is ' + d.days_after + ' day(s) after the taxing point of statement ' + d.ess_statement_id
+        + ' (' + d.taxing_point_date + ') — the 30-day rule moves the taxing point to the sale date,'
+        + ' so the ' + d.statement_discount + ' ' + d.currency + ' discount is re-measured at the'
+        + ' sale proceeds'
+        + (d.disposal_tax_year === d.statement_tax_year
+          ? '' : ' and moves from FY' + d.statement_tax_year + ' to FY' + d.disposal_tax_year)
+        + ', and there is no separate capital gain. Enter the employer’s amended statement over the'
+        + ' original.');
+    });
     if (problems.length === 0) {
       banner.hidden = true;
       banner.innerHTML = '';
@@ -1160,7 +1177,7 @@ async function refreshHealthBanner() {
     if (duplicateExpenses.length > 0) {
       banner.appendChild(el('a', { href: '#/e/investment_expenses' }, 'Open Investment Expenses →'));
     }
-    if (duplicateEss.length > 0) {
+    if (duplicateEss.length > 0 || ess30Day.length > 0) {
       banner.appendChild(el('a', { href: '#/e/ess_statements' }, 'Open ESS Statements →'));
     }
     banner.hidden = false;

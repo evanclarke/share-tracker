@@ -12,45 +12,13 @@ are fixed or decided.
 
 **SCENARIOS.md sections A–I are driven and every finding they raised is closed** in the `DONE/*.md`
 archive. **Section J. Employee share schemes** was driven 2026-08-18; it raised eight findings, of which
-five are closed (the two currency/FX ones, the two write-time-check ones, and the duplicate-statement
-health check — all 2026-08-18, see [`DONE/reviews.md`](DONE/reviews.md)) and the three below are its
-remaining open work. Each of those three carries a **Decide the model** item awaiting Evan — none can
-be finished without that decision. When they are closed, the next work comes from driving
+six are closed (the two currency/FX ones, the two write-time-check ones, the duplicate-statement
+health check and the 30-day-rule alert — all 2026-08-18, see [`DONE/reviews.md`](DONE/reviews.md)) and
+the two below are its remaining open work. Evan decided both models on 2026-08-18: J-02 takes the
+**per-year eligibility flag** (a new dated settings table) beside the printed footnote, and J-10 takes
+the **`income_type` enum**. When they are closed, the next work comes from driving
 **SCENARIOS.md section K. Inherited parcels** the same way — walk its scenarios against the running system, and record each
 gap here as its own `## ` section.
-
-## Nothing on the product side mentions the ESS 30-day rule (SCENARIOS J-04)
-(SCENARIOS.md section J verification pass, 2026-08-18. A disposal within 30 days after the deferred
-taxing point **moves the taxing point to the disposal date**: the discount is re-measured at the
-proceeds and the cost base resets to the same figure, so there is no separate capital gain, and the
-discount can move into the next financial year — `docs/ato/ess-30-day-rule.md`, QC 23058 Example 11.
-The mirror is indexed in `docs/ato/OVERVIEW.md`, but the words "30-day rule" appear nowhere in
-`README.md`, `docs/API.md`, or the ESS screen, and no report flags the pattern.)
-- [x] The corrected entry works and is now pinned: `ato_examples::ess_30_day_rule_example_11_wyatt_amended_statement`
-  enters the *amended* statement (taxing point = the 20 July 2019 disposal, market value = the
-  $3.795 per-share sale price), vests it, and sells the same day — FY2020 discount $1,518, capital
-  gain $0, exactly the ATO's answer. `docs/ato/OVERVIEW.md` already claimed this test existed; it
-  does now
-- [ ] J-04 — the *natural* entry is wrong in two ways at once and nothing says so. Entering the
-  employer's original statement (taxing point 23 June 2019, discount $1,400) and then the 20 July
-  sale gives `ess_discount_assessable 1400` in **FY2019** and a **$118 capital gain** in FY2020 —
-  where the ATO's answer is $1,518 of discount in FY2020 and no capital gain. Both figures are
-  wrong, in different years, from an entry the system accepts without comment
-- [ ] The trigger is mechanically detectable from data already held: a Sell allocating a parcel
-  whose Buy carries `ess_statement_id`, dated within 30 days after that statement's
-  `taxing_point_date`. `reports::wash_sales` is the precedent for an advisory, non-blocking
-  date-pattern report, and `reports::health` for a banner
-- [ ] **Decide the model.** (a) **Documentation only** — a Known-limitations entry plus a hint on
-  the ESS screen's taxing-point field saying an amended statement supersedes the original (cheapest,
-  and the G-14 precedent for a scope cut honestly stated). (b) **Plus an advisory alert** — a
-  `ess_30_day_rule` list in `reports::health` (or its own cross-check report) naming each sale
-  within the window and the statement it draws on, so the case is caught rather than remembered.
-  (c) **Re-measure automatically** — rejected in advance: the system cannot know whether the
-  employer issued an amended statement, and rewriting a user's stated discount would be a
-  calculation the ATO puts on the employer
-- [ ] Tests: whichever of (a)/(b) is chosen — a `doc_checks` assertion for the wording, and/or an
-  alert test with a sale on day 30 and day 31 either side of the boundary
-- [ ] Docs sync: `docs/API.md` Known limitations (+ the report, if (b)), README Features
 
 ## The $1,000 taxed-upfront reduction is always applied, with no way to record failing the income test (SCENARIOS J-02)
 (SCENARIOS.md section J verification pass, 2026-08-18. The reduction is available only if *adjusted
