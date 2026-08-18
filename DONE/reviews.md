@@ -2353,3 +2353,69 @@ untouched.
 Tests: `db_crypto_listing_cannot_be_an_amit` (both the flag and the date refused, nothing persisted,
 a Trust listing still accepted). Docs: `docs/API.md` Listings + the 422 catalogue, and the AMIT
 checkbox's hint in `src/web/config.js`.
+
+## The crypto limitations say "not modelled" where the ordinary entry path already gives the ATO's figures (SCENARIOS L-04, L-05, L-06)
+(SCENARIOS.md section L verification pass, 2026-08-18. `docs/API.md` Known limitations says "Chain
+splits/forks, wrapping, and the personal-use-asset exemption are not modelled", and gives one recipe
+for staking rewards *and* airdrops together. Driving the scenarios against the running system, three
+of those four are not gaps at all — the machinery already produces the ATO's own worked answers, and
+what is missing is the sentence naming the entry path, the way the gift and swap entries do.)
+- [x] **Initial-allocation airdrop** (L-04): the ATO's rule is the opposite of the documented recipe
+  — you derive **no** ordinary income and make no capital gain on receipt, and the tokens have a
+  **cost base of zero** (or what you paid). Reproduced: a Buy of 800 units at price `0` is accepted,
+  opens a nil-cost-base parcel with its clock from receipt, and the later sale reports the ATO's
+  Josh example exactly — $4,000 proceeds, $4,000 discount-eligible gain, $2,000 after the discount.
+  The documented "an income row plus a Buy at receipt-date market value" is wrong for this half of
+  L-04 and would overstate assessable income by the full market value
+- [x] **Chain split** (L-05): the new asset is neither ordinary income nor a capital gain on
+  receipt, has a nil cost base, is acquired at the split, and is discountable after 12 months
+  (QC 69953, Alex's example: 2 Bitcoin Cash for $1,260 → a $630 discount gain). That is the same
+  nil-cost-base Buy dated the split. The page's *other* case — no post-split asset continues the
+  original, so a **CGT event C2** happens to it — is representable too: reproduced with a
+  `WorthlessShares` corporate action carrying `worthless_event: "C2Cancellation"`, whose recognise
+  closed the parcel at nil proceeds for a capital loss of $8,300, Ming's stated figure to the dollar
+- [x] **Wrapping** (L-06): the ATO says wrapping or unwrapping a token *is* a CGT event — you
+  exchange one crypto asset for another, with capital proceeds equal to the market value of the
+  wrapped token received. That is the documented **swap** recipe, already implemented and already
+  covered by `ato_examples.rs`'s Katrina test. Saying "not modelled" beside it invites the opposite
+  reading — that no CGT event arises — which is the expensive mistake
+- [x] **Stablecoins** (L-14) belong in the same rewrite: TD 2014/25 rules that bitcoin is not
+  "foreign currency" for Division 775, and Schedule 2 to the Treasury Laws Amendment (2022 Measures
+  No. 4) Act 2023 excluded digital currency from the definition for income years starting on or
+  after 1 July 2021. So the Div 775 deferral in the same limitation entry **never reaches a
+  stablecoin**: it is a CGT asset like any other crypto, which is exactly what the system does
+  (verified: a stablecoin holding bought at A$1.55 and spent at A$1.60 reports a $500 capital gain).
+  The entry should say so rather than leaving a reader to wonder which half applies
+- [x] Nothing in `docs/ato/` mirrors any of this: `crypto-cgt.md` covers only the CGT basics and the
+  swap, and `OVERVIEW.md` indexes nothing on staking, airdrops, chain splits, or wrapping
+- [x] Fix: mirror the two ATO pages (`staking-rewards-and-airdrops`, `crypto-chain-splits`, plus the
+  wrapped-tokens section of `decentralised-finance-and-wrapping-crypto`) into `docs/ato/` with their
+  source URLs and retrieval date, index them in `docs/ato/OVERVIEW.md`, and rewrite the crypto
+  Known-limitations entry so each case names its entry path — as the gift entry already does
+- [x] Tests: `ato_examples.rs` for Josh (initial-allocation airdrop), Alex (chain split) and Ming
+  (the abandoned original, C2); `doc_checks.rs` for the rewritten limitation text
+- [x] Docs sync: `docs/API.md` Known limitations, README Features (the crypto bullet's parenthetical)
+
+**Resolution (2026-08-18): four ATO mirrors added, the limitation rewritten to name an entry path
+per case, and three of the worked examples reproduced.**
+
+New mirrors, each indexed in `docs/ato/OVERVIEW.md`: `crypto-staking-airdrops.md` (QC 69950),
+`crypto-chain-splits.md` (QC 69953), `crypto-wrapping.md` (QC 73649 — the wrapped-tokens and
+DeFi-rewards sections, the two the entry paths rest on) and `crypto-not-foreign-currency.md`
+(TD 2014/25's Ruling and date of effect, for the Div 775 half).
+
+The Known-limitations entry now opens with the fact that made "not modelled" misleading — there is
+no crypto-specific *operation*, because each of these is a CGT event the ordinary trade entry
+already records — and then gives the entry for each: the swap (wrapping included), the chain split's
+nil-cost-base Buy and the `WorthlessShares` / `C2Cancellation` close of an abandoned original, the
+initial-allocation airdrop as that same nil-cost-base Buy, and the established-token airdrop /
+staking reward as income plus a Buy, with the income half named as the open limitation it is
+(item 24 has no label here — the L-03/L-04 finding). The personal-use-asset exemption stays listed
+as genuinely not modelled, and the Div 775 deferral now says it never reaches a crypto holding.
+
+Tests: `ato_examples.rs` reproduces Alex (chain split: a $1,260 discount gain, $630 after the
+discount), Ming (the abandoned original: a capital loss of $8,300 via C2) and Josh (initial-
+allocation airdrop: nil cost base, $4,000 gain, $2,000 after the discount) — the module doc records
+why Kal, Anastasia, Merindah, Calista, Craig and Bree are not reproduced. `doc_checks::
+known_limitations_document_the_crypto_entry_paths` pins the rewritten entry, each mirror's source
+header, and that OVERVIEW.md indexes all four.

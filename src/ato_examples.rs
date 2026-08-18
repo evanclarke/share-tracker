@@ -57,6 +57,22 @@
 //!   either way the swap is entered as a manual Sell at the swap's market
 //!   value, and which side supplies that valuation is a judgement made
 //!   before entry, so the example would exercise nothing new.
+//! - `docs/ato/crypto-wrapping.md` "Example: CGT treatment when exchanging
+//!   wrapped tokens" (Kal's BTC → WBTC) — wrapping *is* a crypto-to-crypto
+//!   swap, so it is entered exactly as Katrina's example already reproduced
+//!   below (a Sell at the exchange's market value plus a Buy of the wrapped
+//!   token at the same value); the example would exercise nothing new, and no
+//!   wrapped token is a seeded digital-token code.
+//! - `docs/ato/crypto-staking-airdrops.md` Anastasia, Merindah and Calista,
+//!   and `docs/ato/crypto-wrapping.md`'s Craig — each turns on **ordinary
+//!   income** at the receipt-date market value, which has no label to report
+//!   under yet (SCENARIOS L-03/L-04's open finding: `income_type` offers only
+//!   `Dividend` and `EmploymentIncome`). Calista's paid initial allocation is
+//!   also just Josh's example with a non-zero purchase price. Josh's
+//!   nil-cost-base half is reproduced below.
+//! - `docs/ato/crypto-chain-splits.md` "Example: protocol change" (Bree) —
+//!   definitional: which of two post-split assets is the *new* one is a
+//!   judgement made before entry, and it states no figures.
 //! - `docs/ato/forex-common-transactions.md` scenario 1 (Tom) and the FRE 2
 //!   tail of scenario 2 (Lisa's $1,075 forex realisation loss) — both are
 //!   Div 775 forex realisation outcomes on the contract-to-settlement window
@@ -149,6 +165,24 @@ async fn put_listing(pool: &SqlitePool, id: i64, ticker: &str) {
             "name": ticker,
             "isin": null,
             "security_type": "Share",
+            "currency": "AUD",
+            "amit": false,
+        }),
+    )
+    .await;
+}
+
+/// A listing for a crypto asset: exchange-less, and its ticker must be a
+/// recognised digital-token code (BTC/ETH are the seeded ones).
+async fn put_crypto_listing(pool: &SqlitePool, id: i64, ticker: &str) {
+    api_put(
+        pool,
+        &format!("/listings/{id}"),
+        json!({
+            "ticker": ticker,
+            "name": ticker,
+            "isin": null,
+            "security_type": "Crypto",
             "currency": "AUD",
             "amit": false,
         }),
@@ -1552,6 +1586,171 @@ async fn crypto_cgt_example_katrina_coin_swap() {
     assert_eq!(holdings[0].total_cost_base, dec("12000"));
     assert_eq!(holdings[1].quantity, dec("100"));
     assert_eq!(holdings[1].total_cost_base, dec("6000"));
+}
+
+/// `docs/ato/crypto-chain-splits.md` (QC 69953) — "Example: chain split and
+/// sale of new crypto asset" (Alex).
+///
+/// > Alex held 10 Bitcoin as an investment on 1 August 2017, when Bitcoin Cash
+/// > split from Bitcoin. As a result of the chain split, Alex received
+/// > 10 Bitcoin Cash, in addition to the 10 Bitcoin previously held. There
+/// > were no immediate tax consequences for him. On 2 March 2026, Alex sells
+/// > 2 Bitcoin Cash for $1,260. Because the cost base of the Bitcoin Cash is
+/// > zero, he makes a total discount capital gain of $1,260 in the 2025–26
+/// > income year … he reports the capital gain after discount of $630.
+///
+/// A chain split needs no entry path of its own: the new asset is a parcel
+/// with a **nil cost base**, dated the split, which is an ordinary Buy at a
+/// price of zero. The received asset is represented by the seeded ETH token
+/// code (a Crypto listing's ticker must be a recognised digital token, and
+/// Bitcoin Cash is not seeded) — which side of the split it is changes
+/// nothing about the arithmetic.
+#[tokio::test]
+async fn crypto_chain_split_example_alex_bitcoin_cash() {
+    let pool = test_pool().await;
+    put_crypto_listing(&pool, 1, "BTC").await; // the original holding
+    put_crypto_listing(&pool, 2, "ETH").await; // the asset received in the split
+    // 10 Bitcoin held as an investment before the split.
+    put_buy(&pool, 1, 1, "2016-05-04", "10", "700", "0").await;
+    // 1 August 2017: 10 units of the new asset, nil cost base, no tax event.
+    put_buy(&pool, 2, 2, "2017-08-01", "10", "0", "0").await;
+
+    let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net-capital-gain").await;
+    assert!(
+        years.is_empty(),
+        "receiving the new asset is not a CGT event"
+    );
+
+    // 2 March 2026: 2 units sold for $1,260 against a nil cost base.
+    put_sell(&pool, 3, 2, "2026-03-02", "2", "630", "0", 2).await;
+
+    let sales: Vec<RealisedGainLoss> = api_get(&pool, "/portfolio/realised-gains").await;
+    assert_eq!(sales.len(), 1);
+    assert_eq!(sales[0].proceeds, dec("1260"));
+    assert_eq!(sales[0].cost_base, Decimal::ZERO, "ATO: cost base is zero");
+    assert_eq!(
+        sales[0].discount_eligible_gain,
+        dec("1260"),
+        "ATO: a total discount capital gain of $1,260"
+    );
+
+    let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net-capital-gain").await;
+    assert_eq!(years.len(), 1);
+    assert_eq!(years[0].tax_year, 2026);
+    assert_eq!(years[0].cgt_discount, dec("630"));
+    assert_eq!(
+        years[0].net_capital_gain,
+        dec("630"),
+        "ATO: the capital gain after discount is $630"
+    );
+}
+
+/// `docs/ato/crypto-chain-splits.md` (QC 69953) — "Example: no continuing
+/// rights or relationships" (Ming).
+///
+/// > Ming held 10 Bitcoin Cash as an investment just before a chain split on
+/// > 15 November 2018. Ming had acquired the Bitcoin Cash on 6 April 2018 with
+/// > a cost base of $8,300. … A CGT event C2 happens to Ming's original
+/// > Bitcoin Cash when the chain split occurred on 15 November 2018. Ming
+/// > calculates a capital loss of $8,300, which is equal to the cost base of
+/// > his original asset.
+///
+/// The original asset the community abandoned is closed by the same CGT event
+/// C2 the `WorthlessShares` action records for a deregistered company
+/// (`worthless_event: "C2Cancellation"`): its recognise operation closes every
+/// open parcel at nil proceeds, so the capital loss is the remaining cost
+/// base. The two nil-cost-base successors are Alex's case above.
+#[tokio::test]
+async fn crypto_chain_split_example_ming_abandoned_original() {
+    let pool = test_pool().await;
+    put_crypto_listing(&pool, 1, "BTC").await;
+    // 10 units acquired 6 April 2018 for $8,300.
+    put_buy(&pool, 1, 1, "2018-04-06", "10", "830", "0").await;
+
+    // The split of 15 November 2018 leaves no continuation of the original.
+    api_put(
+        &pool,
+        "/corporate_actions/1",
+        json!({
+            "listing_id": 1,
+            "action_type": "WorthlessShares",
+            "date": "2018-11-15",
+            "worthless_event": "C2Cancellation",
+        }),
+    )
+    .await;
+    let _: Value = api_post(
+        &pool,
+        "/corporate_actions/1/recognise",
+        json!({}),
+        StatusCode::CREATED,
+    )
+    .await;
+
+    let sales: Vec<RealisedGainLoss> = api_get(&pool, "/portfolio/realised-gains").await;
+    assert_eq!(sales.len(), 1);
+    assert_eq!(sales[0].sale_date, "2018-11-15".parse().unwrap());
+    assert_eq!(sales[0].proceeds, Decimal::ZERO);
+    assert_eq!(
+        sales[0].capital_loss,
+        dec("8300"),
+        "ATO: a capital loss of $8,300, equal to the cost base"
+    );
+
+    // FY2019: a loss carries forward, never discounted.
+    let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net-capital-gain").await;
+    assert_eq!(years.len(), 1);
+    assert_eq!(years[0].tax_year, 2019);
+    assert_eq!(years[0].capital_losses, dec("8300"));
+    assert_eq!(years[0].net_capital_gain, Decimal::ZERO);
+    assert_eq!(years[0].capital_loss_carried_forward, dec("8300"));
+}
+
+/// `docs/ato/crypto-staking-airdrops.md` (QC 69950) — "Example: capital gain
+/// and CGT discount on initial airdrop token" (Josh).
+///
+/// > Josh is an eligible account holder of the Cswap protocol and received an
+/// > initial allocation of 800 CX tokens on 16 September 2024. Josh doesn't
+/// > derive ordinary income or make a capital gain on receipt of the 800 CX.
+/// > On 25 May 2026, Josh sold the 800 CX for $4,000. Because the cost base of
+/// > the CX tokens was zero, Josh makes a total capital gain of $4,000 …
+/// > [and] is also eligible to reduce his total capital gain using the CGT
+/// > discount.
+///
+/// An **initial-allocation** airdrop is not the ordinary-income case: nothing
+/// is assessable on receipt and the tokens carry a nil cost base, so the entry
+/// is a Buy at a price of zero dated the allocation — the same shape as a
+/// chain split's new asset, and *not* the income row an established-token
+/// airdrop needs. CX is represented by the seeded BTC token code.
+#[tokio::test]
+async fn crypto_initial_airdrop_example_josh_cx_tokens() {
+    let pool = test_pool().await;
+    put_crypto_listing(&pool, 1, "BTC").await;
+    put_buy(&pool, 1, 1, "2024-09-16", "800", "0", "0").await;
+
+    // Nothing is assessable on receipt: no income, no capital gain.
+    let summary: Vec<TaxYearSummary> = api_get(&pool, "/portfolio/tax-summary").await;
+    assert!(summary.is_empty(), "no ordinary income on receipt");
+    let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net-capital-gain").await;
+    assert!(years.is_empty(), "no capital gain on receipt");
+
+    // Sold 25 May 2026 for $4,000, held more than 12 months.
+    put_sell(&pool, 2, 1, "2026-05-25", "800", "5", "0", 1).await;
+
+    let sales: Vec<RealisedGainLoss> = api_get(&pool, "/portfolio/realised-gains").await;
+    assert_eq!(sales.len(), 1);
+    assert_eq!(sales[0].cost_base, Decimal::ZERO, "ATO: cost base was zero");
+    assert_eq!(
+        sales[0].discount_eligible_gain,
+        dec("4000"),
+        "ATO: a total capital gain of $4,000, discount eligible"
+    );
+
+    let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net-capital-gain").await;
+    assert_eq!(years.len(), 1);
+    assert_eq!(years[0].tax_year, 2026);
+    assert_eq!(years[0].cgt_discount, dec("2000"));
+    assert_eq!(years[0].net_capital_gain, dec("2000"));
 }
 
 /// `docs/ato/employee-share-schemes.md` (QC 47628) — "Example: Taxed-upfront

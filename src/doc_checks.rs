@@ -823,6 +823,67 @@ fn backup_suffix_param_documented() {
     assert!(README_MD.contains("never exempt from pruning"));
 }
 
+/// SCENARIOS L-04/L-05/L-06/L-14. The crypto Known-limitations entry names an
+/// entry path for every crypto event the ATO taxes, instead of calling three of
+/// them "not modelled": the swap (wrapping included), the chain split's
+/// nil-cost-base new asset and its abandoned original, the two kinds of
+/// airdrop, and where a staking reward's income still has to be carried by
+/// hand. Each cites its mirror, and each mirror carries its source header.
+#[test]
+fn known_limitations_document_the_crypto_entry_paths() {
+    let limitations = known_limitations();
+    assert!(limitations.contains("**Crypto assets**"));
+    assert!(limitations.contains("There is no crypto-specific *operation*"));
+
+    // Swap, and wrapping as the same swap.
+    assert!(limitations.contains("**Wrapping or unwrapping** a token is that same swap"));
+    assert!(limitations.contains("docs/ato/crypto-wrapping.md"));
+    assert!(include_str!("../docs/ato/crypto-wrapping.md").contains("QC 73649"));
+
+    // Chain split: the nil-cost-base new asset, and the C2 close of an
+    // abandoned original.
+    assert!(limitations.contains("**chain split**'s new asset"));
+    assert!(limitations.contains("a Buy at a price of `0`"));
+    assert!(limitations.contains("`worthless_event: \"C2Cancellation\"`"));
+    assert!(limitations.contains("docs/ato/crypto-chain-splits.md"));
+    assert!(include_str!("../docs/ato/crypto-chain-splits.md").contains("QC 69953"));
+
+    // The two airdrops are opposite entries, and the income half's open limit.
+    assert!(limitations.contains("**initial-allocation airdrop** is the same nil-cost-base Buy"));
+    assert!(limitations.contains("**Staking rewards and established-token airdrops**"));
+    assert!(limitations.contains("**item 24, other income**"));
+    assert!(limitations.contains("carried to item 24 by hand"));
+    assert!(limitations.contains("docs/ato/crypto-staking-airdrops.md"));
+    assert!(include_str!("../docs/ato/crypto-staking-airdrops.md").contains("QC 69950"));
+
+    // What genuinely is not modelled stays named as such.
+    assert!(limitations.contains("**personal-use-asset exemption** is not modelled"));
+
+    // Div 775 never reaches a crypto holding — including a stablecoin.
+    assert!(limitations.contains("not 'foreign currency' for Division 775"));
+    assert!(limitations.contains("docs/ato/crypto-not-foreign-currency.md"));
+    let td = include_str!("../docs/ato/crypto-not-foreign-currency.md");
+    assert!(td.contains("TD 2014/25"));
+    assert!(td.contains("income years starting 1 July 2021"));
+
+    // Surfaced in the README's crypto feature line.
+    assert!(README_MD.contains("have no operation of their own"));
+
+    // …and every new mirror is reachable from the ATO index.
+    const ATO_OVERVIEW: &str = include_str!("../docs/ato/OVERVIEW.md");
+    for mirror in [
+        "crypto-staking-airdrops.md",
+        "crypto-chain-splits.md",
+        "crypto-wrapping.md",
+        "crypto-not-foreign-currency.md",
+    ] {
+        assert!(
+            ATO_OVERVIEW.contains(mirror),
+            "OVERVIEW.md indexes {mirror}"
+        );
+    }
+}
+
 /// Doc-only resolution pin for settlement-window forex — CGT events K10/K11
 /// (REQUIREMENTS 2026-06-12, NEEDS DECISION resolved 2026-06-12 as out of
 /// scope): the Known-limitations entry states the rule (cost-base adjustment
