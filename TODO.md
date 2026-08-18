@@ -115,27 +115,6 @@ for an on-chain network fee.)
   base and the disposal (where there is one) in the gains reports
 - [ ] Docs sync: `docs/API.md` Known limitations (the brokerage-currency entry) + Trades, README
 
-## The Crypto/exchange pairing refusals answer with a raw CHECK expression (SCENARIOS L-09)
-(SCENARIOS.md section L verification pass, 2026-08-18. `listing::db_upsert` validates the
-digital-token ticker itself and returns a sentence for it, but leaves the `exchange_mic`/
-`security_type` pairing to the database's CHECK — so the two mistakes a user is most likely to make
-while adding a crypto listing are answered in SQL.)
-- [ ] Reproduced, both directions, identical body: a `Crypto` listing with `exchange_mic: "XASX"`,
-  and a `Share` listing with no exchange, each return `422` `a value falls outside its allowed set
-  (CHECK constraint failed: (exchange_mic IS NULL) = (security_type = 'Crypto'))`. The web UI shows
-  that string in its toast. It does not say which side is wrong, and the two errors are
-  indistinguishable
-- [ ] Contrast the sibling refusal on the same write: "a Crypto listing's ticker must be a
-  recognised digital-token code". `docs/API.md` documents the pairing as two distinct refusals; the
-  server does not distinguish them
-- [ ] Precedent: A-18 (`2af8d4f`) — a DELETE blocked by an inbound foreign key used to say the row
-  did not exist; the fix classified the violation and named it
-- [ ] Fix: two `UpsertError` variants checked in `db_upsert` (the `UnrecognisedDigitalToken` shape),
-  each with its own message; the CHECK stays as the backstop it is
-- [ ] Tests: each direction returns its own sentence, and the CHECK still holds against a direct DB
-  write
-- [ ] Docs sync: `docs/API.md` Listings + the 422 catalogue wording
-
 ## A Crypto listing can be marked `amit` (SCENARIOS L-09)
 (SCENARIOS.md section L verification pass, 2026-08-18. An AMIT is an attribution managed investment
 **trust**; a crypto asset is not a trust interest — TD 2014/25 says it is not even currency. Nothing

@@ -78,6 +78,17 @@ pub struct ListingBody {
     pub price_symbol: Option<String>,
 }
 
+/// The `422` body for a Crypto listing carrying an exchange. Shared with
+/// `entities::listing_rename`, which can move a listing between exchanges and
+/// so meets the same pairing.
+pub(crate) const CRYPTO_WITH_EXCHANGE: &str = "a Crypto listing has no exchange — a crypto asset trades on no MIC-coded venue, \
+     so leave exchange_mic blank (its ticker is the digital-token code instead)";
+
+/// The `422` body for the other direction: an exchange-listed security with no
+/// exchange.
+pub(crate) const EXCHANGE_REQUIRED: &str = "this listing needs an exchange — only a Crypto listing is exchange-less, so set \
+     exchange_mic to the venue's MIC (or make it a Crypto listing)";
+
 /// Why a listing upsert was refused.
 #[derive(thiserror::Error, Debug)]
 pub enum UpsertError {
@@ -109,9 +120,19 @@ pub enum UpsertError {
     /// assessed as ordinary trust income. Mapped to `422`.
     #[error("amit_from {0} is not a 1 July date")]
     AmitFromNotFinancialYearStart(NaiveDate),
-    /// Constraint violations (Crypto with an exchange / non-Crypto without
-    /// one, duplicate ticker, unknown exchange or currency) surface here via
-    /// the table's CHECKs and FKs.
+    /// A `Crypto` listing was given an `exchange_mic`. The table's CHECK
+    /// catches it too, but only as a raw constraint expression the web UI
+    /// shows verbatim — this variant is what says which side is wrong
+    /// (SCENARIOS L-09).
+    #[error("a Crypto listing was given an exchange")]
+    CryptoWithExchange,
+    /// A non-`Crypto` listing was written with no `exchange_mic`. The other
+    /// half of the same CHECK, and the other half of SCENARIOS L-09.
+    #[error("a non-Crypto listing was written without an exchange")]
+    ExchangeRequired,
+    /// Constraint violations (duplicate ticker, unknown exchange or currency)
+    /// surface here via the table's CHECKs and FKs. The exchange/security-type
+    /// pairing is checked above, before its CHECK can fire.
     #[error("listing write failed: {0}")]
     Db(#[from] sqlx::Error),
 }
@@ -122,6 +143,8 @@ impl From<UpsertError> for ApiError {
             UpsertError::UnrecognisedDigitalToken => ApiError::unprocessable(
                 "a Crypto listing's ticker must be a recognised digital-token code",
             ),
+            UpsertError::CryptoWithExchange => ApiError::unprocessable(CRYPTO_WITH_EXCHANGE),
+            UpsertError::ExchangeRequired => ApiError::unprocessable(EXCHANGE_REQUIRED),
             UpsertError::IdentityChangeRequiresRename => ApiError::unprocessable(
                 "use POST /listings/:id/rename to record a ticker or exchange change \
                  on a listing with recorded trades, income, or prices",
@@ -227,9 +250,22 @@ pub async fn db_upsert(pool: &SqlitePool, listing: &Listing) -> Result<(), Upser
         }
     }
 
+    // The exchange/security-type pairing: a crypto asset trades on no
+    // MIC-coded venue, every other security does. The table CHECKs this too,
+    // but a CHECK can only answer with its own expression, and this is the
+    // pair of mistakes a user makes while adding a crypto listing — so each
+    // direction is named here first (SCENARIOS L-09).
+    match (listing.security_type, &listing.exchange_mic) {
+        (SecurityType::Crypto, Some(_)) => return Err(UpsertError::CryptoWithExchange),
+        (other, None) if other != SecurityType::Crypto => {
+            return Err(UpsertError::ExchangeRequired);
+        }
+        _ => {}
+    }
+
     // A Crypto listing's ticker must be a recognised digital-token code
-    // (validated in the write transaction; the mic/Crypto pairing and ticker
-    // uniqueness are CHECK/index-enforced by the table itself).
+    // (validated in the write transaction; ticker uniqueness stays
+    // index-enforced by the table itself).
     if listing.security_type == SecurityType::Crypto {
         let recognised: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM currencies \
@@ -567,25 +603,38 @@ mod tests {
         ));
     }
 
+    /// SCENARIOS L-09. The exchange/security-type pairing is answered by name
+    /// in each direction, not by the table's CHECK expression — the two
+    /// mistakes a user makes while adding a crypto listing are the two the web
+    /// UI has to be able to explain. The CHECK stays behind them as the
+    /// backstop for a write that never went through `db_upsert`.
     #[tokio::test]
-    async fn db_check_pairs_exchange_with_security_type() {
+    async fn db_pairing_of_exchange_and_security_type_is_refused_by_name() {
         let pool = test_pool().await;
-        // A Crypto listing with an exchange is rejected by the CHECK...
+        // A Crypto listing with an exchange...
         let mut bad = crypto();
         bad.exchange_mic = Some("XASX".to_string());
-        let UpsertError::Db(err) = db_upsert(&pool, &bad).await.unwrap_err() else {
-            panic!("expected a DB error");
-        };
-        assert!(
-            err.to_string().contains("CHECK"),
-            "expected CHECK error, got: {err}"
-        );
-        // ...and so is a non-Crypto listing without one.
+        assert!(matches!(
+            db_upsert(&pool, &bad).await.unwrap_err(),
+            UpsertError::CryptoWithExchange
+        ));
+        // ...and a non-Crypto listing without one.
         let mut bare = xtest();
         bare.exchange_mic = None;
-        let UpsertError::Db(err) = db_upsert(&pool, &bare).await.unwrap_err() else {
-            panic!("expected a DB error");
-        };
+        assert!(matches!(
+            db_upsert(&pool, &bare).await.unwrap_err(),
+            UpsertError::ExchangeRequired
+        ));
+        assert!(db_get(&pool, 2).await.unwrap().is_none());
+
+        // The CHECK still holds against a write that bypasses `db_upsert`.
+        let err = sqlx::query(
+            "INSERT INTO listings (id, exchange_mic, ticker, name, security_type, currency, amit) \
+             VALUES (9, 'XASX', 'BTC', 'Bitcoin', 'Crypto', 'AUD', 0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap_err();
         assert!(
             err.to_string().contains("CHECK"),
             "expected CHECK error, got: {err}"
@@ -721,6 +770,34 @@ mod tests {
                 "body: {body}"
             );
         }
+
+        // Each pairing direction says which side is wrong, in its own words —
+        // never the CHECK expression (SCENARIOS L-09).
+        let resp = client(&pool)
+            .put(
+                "/listings/2",
+                &serde_json::json!({
+                    "exchange_mic": "XASX", "ticker": "BTC", "name": "Bitcoin", "isin": null,
+                    "security_type": "Crypto", "currency": "AUD", "amit": false
+                }),
+            )
+            .await;
+        let detail = resp.text().to_string();
+        assert!(detail.contains("has no exchange"), "detail: {detail}");
+        assert!(!detail.contains("CHECK"), "detail: {detail}");
+
+        let resp = client(&pool)
+            .put(
+                "/listings/2",
+                &serde_json::json!({
+                    "ticker": "VAS", "name": "Vanguard", "isin": null,
+                    "security_type": "ETF", "currency": "AUD", "amit": false
+                }),
+            )
+            .await;
+        let detail = resp.text().to_string();
+        assert!(detail.contains("needs an exchange"), "detail: {detail}");
+        assert!(!detail.contains("CHECK"), "detail: {detail}");
 
         // The unrecognised-digital-token rejection says why, not a bare "HTTP 422".
         let resp = client(&pool)

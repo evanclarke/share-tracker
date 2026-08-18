@@ -2289,3 +2289,40 @@ and `doc_checks::lpr_expenditure_on_a_foreign_parcel_documented` pinning the Kno
 catalogue entry, the README line and the SCHEMA column. The module doc's old claim that "LPR
 expenditure translates with the parcel" — true, and the bug — is replaced by the rule and its
 reason. Docs: `docs/API.md`, `docs/SCHEMA.md`, README, and the field hint in `src/web/config.js`.
+
+## The Crypto/exchange pairing refusals answer with a raw CHECK expression (SCENARIOS L-09)
+(SCENARIOS.md section L verification pass, 2026-08-18. `listing::db_upsert` validates the
+digital-token ticker itself and returns a sentence for it, but leaves the `exchange_mic`/
+`security_type` pairing to the database's CHECK — so the two mistakes a user is most likely to make
+while adding a crypto listing are answered in SQL.)
+- [x] Reproduced, both directions, identical body: a `Crypto` listing with `exchange_mic: "XASX"`,
+  and a `Share` listing with no exchange, each return `422` `a value falls outside its allowed set
+  (CHECK constraint failed: (exchange_mic IS NULL) = (security_type = 'Crypto'))`. The web UI shows
+  that string in its toast. It does not say which side is wrong, and the two errors are
+  indistinguishable
+- [x] Contrast the sibling refusal on the same write: "a Crypto listing's ticker must be a
+  recognised digital-token code". `docs/API.md` documents the pairing as two distinct refusals; the
+  server does not distinguish them
+- [x] Precedent: A-18 (`2af8d4f`) — a DELETE blocked by an inbound foreign key used to say the row
+  did not exist; the fix classified the violation and named it
+- [x] Fix: two `UpsertError` variants checked in `db_upsert` (the `UnrecognisedDigitalToken` shape),
+  each with its own message; the CHECK stays as the backstop it is
+- [x] Tests: each direction returns its own sentence, and the CHECK still holds against a direct DB
+  write
+- [x] Docs sync: `docs/API.md` Listings + the 422 catalogue wording
+
+**Resolution (2026-08-18): both directions named in `listing::db_upsert`, and in the rename that can
+also meet them.**
+
+`UpsertError::CryptoWithExchange` / `ExchangeRequired` are checked before the INSERT, so the table's
+CHECK never has to answer for them; the two bodies live as `listing::CRYPTO_WITH_EXCHANGE` /
+`EXCHANGE_REQUIRED` because `listing_rename` needs the first of them too — a rename may change
+`exchange_mic`, so it is the second way a Crypto listing can be handed an exchange
+(`RenameError::CryptoWithExchange`). The CHECK stays as the backstop for any write that does not go
+through `db_upsert`, and a test pins it there by inserting the violating row directly.
+
+Tests: `db_pairing_of_exchange_and_security_type_is_refused_by_name` (each direction by variant,
+nothing persisted, and the raw INSERT still refused by the CHECK),
+`api_invalid_crypto_listings_return_422` extended to assert each direction's own sentence and the
+absence of "CHECK" from either body, and `db_rename_cannot_give_a_crypto_listing_an_exchange`.
+Docs: `docs/API.md` Listings, Renames, and the 422 catalogue.

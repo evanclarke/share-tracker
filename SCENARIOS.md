@@ -665,7 +665,7 @@ credentialed ISO 24165 import runs, which the refusal never mentions.
 | Staking rewards and airdropped tokens are reported as dividends (11S), with no "other income" label | L-03, L-04 | open — [`TODO.md`](TODO.md) |
 | The crypto limitations say "not modelled" where the ordinary entry path already gives the ATO's figures (initial-allocation airdrop, chain split, wrapping, stablecoins) | L-04, L-05, L-06, L-14 | open — [`TODO.md`](TODO.md) |
 | A trading fee paid in crypto has no stated treatment (the disposal leg is silent) | L-08 | open — [`TODO.md`](TODO.md) |
-| The Crypto/exchange pairing refusals answer with a raw CHECK expression | L-09 | open — [`TODO.md`](TODO.md) |
+| The Crypto/exchange pairing refusals answer with a raw CHECK expression | L-09 | fixed 2026-08-18 — archived in [`DONE/reviews.md`](DONE/reviews.md) |
 | A Crypto listing can be marked `amit`, and the annual tax report is then permanently incomplete | L-09 | open — [`TODO.md`](TODO.md) |
 | The recognised digital-token list is BTC and ETH until a credentialed import runs, and the refusal doesn't say so | L-10 | open — [`TODO.md`](TODO.md) |
 

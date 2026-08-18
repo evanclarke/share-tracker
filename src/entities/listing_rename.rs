@@ -24,7 +24,7 @@
 //! intermediate entry can't be removed out of order), restoring
 //! `ticker`/`exchange_mic` from the row's `old_*` columns.
 
-use crate::entities::listing::{Listing, SecurityType};
+use crate::entities::listing::{self, Listing, SecurityType};
 use crate::infra::http::{ApiError, CrudEntity};
 use axum::{
     Json, Router,
@@ -81,6 +81,11 @@ pub enum RenameError {
     /// (the same rule `listing::db_upsert` enforces).
     #[error("a Crypto listing's ticker must be a recognised digital-token code")]
     UnrecognisedDigitalToken,
+    /// The rename would move a Crypto listing onto an exchange — the pairing
+    /// `listing::db_upsert` refuses, met here because a rename may change
+    /// `exchange_mic` (SCENARIOS L-09).
+    #[error("a rename gave a Crypto listing an exchange")]
+    CryptoWithExchange,
     #[error("listing rename write failed: {0}")]
     Db(#[from] sqlx::Error),
 }
@@ -110,6 +115,9 @@ impl From<RenameError> for ApiError {
             RenameError::UnrecognisedDigitalToken => ApiError::unprocessable(
                 "a Crypto listing's ticker must be a recognised digital-token code",
             ),
+            RenameError::CryptoWithExchange => {
+                ApiError::unprocessable(listing::CRYPTO_WITH_EXCHANGE)
+            }
             RenameError::Db(err) => err.into(),
         }
     }
@@ -188,6 +196,10 @@ pub async fn db_rename(
         && body.effective_date <= latest
     {
         return Err(RenameError::OutOfOrder { latest });
+    }
+
+    if current.security_type == SecurityType::Crypto && new_exchange_mic.is_some() {
+        return Err(RenameError::CryptoWithExchange);
     }
 
     if current.security_type == SecurityType::Crypto {
@@ -502,6 +514,31 @@ mod tests {
         db_rename(&pool, 1, &body("2024-06-01", "ETH"))
             .await
             .unwrap();
+    }
+
+    /// SCENARIOS L-09. A rename can move a listing between exchanges, so it
+    /// meets the same exchange/security-type pairing — and answers it in the
+    /// same words `listing::db_upsert` does, not with the table's CHECK.
+    #[tokio::test]
+    async fn db_rename_cannot_give_a_crypto_listing_an_exchange() {
+        let pool = test_pool().await;
+        test_support::listing(1)
+            .crypto()
+            .ticker("BTC")
+            .insert(&pool)
+            .await;
+        let mut moving = body("2024-06-01", "ETH");
+        moving.exchange_mic = Some("XASX".to_string());
+        assert!(matches!(
+            db_rename(&pool, 1, &moving).await.unwrap_err(),
+            RenameError::CryptoWithExchange
+        ));
+        let err: ApiError = RenameError::CryptoWithExchange.into();
+        assert!(!format!("{err:?}").contains("CHECK"));
+        // The listing is untouched.
+        let got = listing::db_get(&pool, 1).await.unwrap().unwrap();
+        assert_eq!(got.ticker, "BTC");
+        assert_eq!(got.exchange_mic, None);
     }
 
     #[tokio::test]
