@@ -122,13 +122,27 @@ pub struct TaxYearSummary {
     /// `gross_assessable_investment_income` or to any dividend line: it is here
     /// to reconcile the cash, not to be entered on the return a second time.
     pub employment_income: Decimal,
+    /// **Other income** (AUD, ATO label **24**): an
+    /// [`IncomeType::OtherIncome`] row — ordinary income produced by a holding
+    /// that is not a distribution of it, i.e. a crypto staking reward or an
+    /// established-token airdrop, assessable at the tokens' market value when
+    /// received (QC 69950, `docs/ato/crypto-staking-airdrops.md`,
+    /// SCENARIOS L-03/L-04).
+    ///
+    /// Unlike [`Self::employment_income`], which the ATO prefills at item 1/2
+    /// from the employer's STP reporting, **nothing prefills item 24** — so
+    /// this line *is* counted in
+    /// [`Self::gross_assessable_investment_income`]. It joins no dividend
+    /// line: the payment carries no franking and no company made it.
+    pub other_income: Decimal,
     /// Gross assessable investment income for the year (AUD): the sum of the
     /// report's existing assessable income lines — `dividends_assessable`
     /// (franked + unfranked) + `interest_income` + `foreign_interest_income` +
     /// `foreign_source_income` + the six AMMA income components
     /// (`amma_australian_interest`, `amma_dividends_unfranked`,
     /// `amma_franked_dividends`, `amma_net_rent`, `amma_foreign_income`,
-    /// `amma_other_income`). It deliberately excludes the franking-credit
+    /// `amma_other_income`) + `other_income` (item 24, which nothing
+    /// prefills). It deliberately excludes the franking-credit
     /// gross-up and FITO (carried as offset lines), the recorded conduit
     /// foreign income memo (already inside `dividends_assessable`, as part of
     /// `unfranked_amount`), the ESS discount (employment income, Item 12), and capital gains
@@ -197,6 +211,7 @@ pub(crate) const CSV_HEADER: &[&str] = &[
     "ess_taxed_upfront_reduction",
     "ess_foreign_source_discount",
     "employment_income",
+    "other_income",
     "gross_assessable_investment_income",
     "deductions_loan_interest",
     "deductions_management_fee",
@@ -243,6 +258,7 @@ pub(crate) const CSV_ATO_LABELS: &[&str] = &[
     "",                        // ess_taxed_upfront_reduction (inside 12B vs 12D)
     "12A",                     // ess_foreign_source_discount
     "",                        // employment_income (1/2, prefilled by the employer — informational)
+    "24",                      // other_income (staking rewards / established-token airdrops)
     "",                        // gross_assessable_investment_income (derived)
     "D7 / D8",                 // deductions_loan_interest
     "D7 / D8",                 // deductions_management_fee
@@ -282,6 +298,7 @@ fn zero_summary(tax_year: i32) -> TaxYearSummary {
         ess_taxed_upfront_reduction: Decimal::ZERO,
         ess_foreign_source_discount: Decimal::ZERO,
         employment_income: Decimal::ZERO,
+        other_income: Decimal::ZERO,
         gross_assessable_investment_income: Decimal::ZERO,
         deductions_loan_interest: Decimal::ZERO,
         deductions_management_fee: Decimal::ZERO,
@@ -528,6 +545,16 @@ pub(crate) async fn db_tax_summary_on(
             s.employment_income += unfranked;
             continue;
         }
+        // An other-income row is ordinary income produced by the holding but
+        // not paid *as* a distribution — a staking reward or an
+        // established-token airdrop (QC 69950, SCENARIOS L-03/L-04). It
+        // reports at item 24, which nothing prefills, so unlike the
+        // employment kind it joins the gross assessable total below; the
+        // write-time rule leaves it only the cash in `unfranked_amount`.
+        if income.income_type == IncomeType::OtherIncome {
+            s.other_income += unfranked;
+            continue;
+        }
         s.dividends_assessable += franked + unfranked;
         s.foreign_source_income += foreign_income;
         s.lic_capital_gain_deduction += lic;
@@ -745,7 +772,8 @@ pub(crate) async fn db_tax_summary_on(
             + s.amma_franked_dividends
             + s.amma_net_rent
             + s.amma_foreign_income
-            + s.amma_other_income;
+            + s.amma_other_income
+            + s.other_income;
         s.net_assessable_investment_income =
             s.gross_assessable_investment_income - s.deductions_total;
     }
@@ -1972,6 +2000,66 @@ mod tests {
         // 600 + 900 − 600 = 900 (only the eligible 600 is removed).
         assert_eq!(result[0].ess_discount_assessable, Decimal::from(900));
         assert_eq!(result[0].ess_taxed_upfront_reduction, Decimal::from(600));
+    }
+
+    /// A staking reward is ordinary income at item 24 — not a dividend, and
+    /// not the employment kind either (QC 69950, SCENARIOS L-03/L-04): it
+    /// reports on its own line, joins no dividend or franking total, and —
+    /// because nothing prefills item 24 — *is* counted in gross assessable
+    /// investment income, where the employment line deliberately is not.
+    #[tokio::test]
+    async fn db_other_income_reports_at_item_24_and_is_assessable() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        // An ordinary dividend and a dividend equivalent beside it, so all
+        // three lines are distinguishable.
+        test_support::income(1, 1, NaiveDate::from_ymd_opt(2025, 3, 15).unwrap())
+            .with(|i| i.unfranked_amount = Decimal::from(100))
+            .insert(&pool)
+            .await;
+        test_support::income(2, 1, NaiveDate::from_ymd_opt(2025, 3, 15).unwrap())
+            .with(|i| {
+                i.unfranked_amount = Decimal::from(250);
+                i.income_type = IncomeType::EmploymentIncome;
+            })
+            .insert(&pool)
+            .await;
+        test_support::income(3, 1, NaiveDate::from_ymd_opt(2025, 9, 30).unwrap())
+            .with(|i| {
+                i.unfranked_amount = Decimal::from(2000);
+                i.income_type = IncomeType::OtherIncome;
+            })
+            .insert(&pool)
+            .await;
+
+        let result = db_tax_summary(&pool).await.unwrap();
+        assert_eq!(
+            result.len(),
+            2,
+            "the reward falls in the next financial year"
+        );
+        let fy2026 = result.iter().find(|s| s.tax_year == 2026).unwrap();
+        assert_eq!(fy2026.other_income, Decimal::from(2000));
+        assert_eq!(
+            fy2026.dividends_assessable,
+            Decimal::ZERO,
+            "a staking reward is no dividend"
+        );
+        assert_eq!(fy2026.franking_credits, Decimal::ZERO);
+        assert_eq!(
+            fy2026.gross_assessable_investment_income,
+            Decimal::from(2000),
+            "item 24 is prefilled by nothing, so it is counted here"
+        );
+
+        // The other year is untouched: the employment line still joins no total.
+        let fy2025 = result.iter().find(|s| s.tax_year == 2025).unwrap();
+        assert_eq!(fy2025.other_income, Decimal::ZERO);
+        assert_eq!(fy2025.employment_income, Decimal::from(250));
+        assert_eq!(
+            fy2025.gross_assessable_investment_income,
+            Decimal::from(100)
+        );
     }
 
     /// A dividend equivalent on unvested RSUs is remuneration, not a dividend

@@ -75,7 +75,7 @@ behind or became a recorded finding.
 | I. DRP | 14 | 2026-08-17 | 6 raised, all closed — see below |
 | J. Employee share schemes | 14 | 2026-08-18 | 8 raised, all closed — see below |
 | K. Inherited parcels | 10 | 2026-08-18 | 6 raised, all closed — see below |
-| L. Crypto | 15 | 2026-08-18 | 6 raised, all open — see below |
+| L. Crypto | 15 | 2026-08-18 | 6 raised, all closed — see below |
 | M. Foreign currency and FX | 16 | — | — |
 | N. Holding accounts and transfers | 12 | — | — |
 | O. Net capital gain, losses, and carry-forward | 17 | — | — |
@@ -662,7 +662,7 @@ credentialed ISO 24165 import runs, which the refusal never mentions.
 
 | Finding | Scenarios | Status |
 | --- | --- | --- |
-| Staking rewards and airdropped tokens are reported as dividends (11S), with no "other income" label | L-03, L-04 | open — [`TODO.md`](TODO.md) |
+| Staking rewards and airdropped tokens are reported as dividends (11S), with no "other income" label | L-03, L-04 | fixed 2026-08-18 — `IncomeType::OtherIncome` (migration 0029) at item 24; archived in [`DONE/reviews.md`](DONE/reviews.md) |
 | The crypto limitations say "not modelled" where the ordinary entry path already gives the ATO's figures (initial-allocation airdrop, chain split, wrapping, stablecoins) | L-04, L-05, L-06, L-14 | fixed 2026-08-18 — four ATO mirrors + the rewritten entry, three examples reproduced; archived in [`DONE/reviews.md`](DONE/reviews.md) |
 | A trading fee paid in crypto has no stated treatment (the disposal leg is silent) | L-08 | fixed 2026-08-18 — the three cases documented; archived in [`DONE/reviews.md`](DONE/reviews.md) |
 | The Crypto/exchange pairing refusals answer with a raw CHECK expression | L-09 | fixed 2026-08-18 — archived in [`DONE/reviews.md`](DONE/reviews.md) |

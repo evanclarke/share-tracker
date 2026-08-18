@@ -701,6 +701,21 @@ pub struct EmploymentIncomeRow {
     pub amount_aud: Decimal,
 }
 
+/// An [`IncomeType::OtherIncome`] row: ordinary income produced by the holding
+/// that is not a distribution of it — a crypto staking reward or an
+/// established-token airdrop, assessable at the tokens' market value on
+/// receipt (QC 69950, `docs/ato/crypto-staking-airdrops.md`, SCENARIOS
+/// L-03/L-04). Printed in its own table against **item 24**, never among the
+/// dividends.
+#[derive(Debug, Serialize)]
+pub struct OtherIncomeRow {
+    pub income_id: i64,
+    pub listing_id: i64,
+    pub ticker: String,
+    pub date_paid: NaiveDate,
+    pub amount_aud: Decimal,
+}
+
 #[derive(Debug, Serialize)]
 pub struct ForeignIncomeRow {
     pub kind: String,
@@ -767,6 +782,10 @@ pub struct IncomeSections {
     /// see [`EmploymentIncomeRow`]. Reported at item 1/2, not at item 11, and
     /// so kept out of `dividends` and out of every investment-income total.
     pub employment_income: Vec<EmploymentIncomeRow>,
+    /// Ordinary income of the holding that is not a distribution of it — see
+    /// [`OtherIncomeRow`]. Reported at item 24, so it is out of `dividends`
+    /// but, unlike `employment_income`, inside the year's assessable income.
+    pub other_income: Vec<OtherIncomeRow>,
     pub foreign_income: Vec<ForeignIncomeRow>,
     pub interest: Vec<InterestIncomeRow>,
     pub ess: Vec<EssIncomeRow>,
@@ -779,6 +798,7 @@ impl IncomeSections {
         self.trust_income.sort_by_key(|r| r.date_paid);
         self.dividends.sort_by_key(|r| r.date_paid);
         self.employment_income.sort_by_key(|r| r.date_paid);
+        self.other_income.sort_by_key(|r| r.date_paid);
         self.foreign_income.sort_by_key(|r| r.date);
         self.interest.sort_by_key(|r| r.date_paid);
         self.ess.sort_by_key(|r| r.taxing_point_date);
@@ -894,6 +914,17 @@ async fn push_income_rows(
             // leaves such a row only the cash in `unfranked_amount`, so
             // `unfranked` is the whole payment.
             out.employment_income.push(EmploymentIncomeRow {
+                income_id,
+                listing_id,
+                ticker,
+                date_paid,
+                amount_aud: unfranked,
+            });
+        } else if income.income_type == IncomeType::OtherIncome {
+            // Ordinary income at item 24, not a dividend: its own table, and
+            // like the employment kind the write-time rule leaves the row only
+            // the cash in `unfranked_amount`.
+            out.other_income.push(OtherIncomeRow {
                 income_id,
                 listing_id,
                 ticker,
@@ -1688,6 +1719,46 @@ mod tests {
         assert_eq!(report.income.employment_income[0].ticker, "EMPA");
         assert_eq!(report.income.employment_income[0].amount_aud, dec("250"));
         // …and it reaches no Item 20 list either.
+        assert!(report.income.foreign_income.is_empty());
+    }
+
+    /// A staking reward prints in its own item-24 table, not among the
+    /// dividends and not in the employment-income table either (SCENARIOS
+    /// L-03/L-04) — the archived document has to name the label the amount
+    /// belongs at.
+    #[tokio::test]
+    async fn other_income_prints_in_its_own_item_24_table() {
+        let pool = test_support::test_pool().await;
+        test_support::listing(1)
+            .crypto()
+            .ticker("ETH")
+            .name("Ether")
+            .insert(&pool)
+            .await;
+        test_support::listing(2).ticker("BHP").insert(&pool).await;
+        test_support::income(1, 1, ymd(2024, 3, 31))
+            .with(|i| {
+                i.unfranked_amount = dec("2000");
+                i.income_type = IncomeType::OtherIncome;
+            })
+            .insert(&pool)
+            .await;
+        test_support::income(2, 2, ymd(2024, 3, 31))
+            .with(|i| {
+                i.franked_amount = dec("70");
+                i.franking_credits = dec("30");
+            })
+            .insert(&pool)
+            .await;
+
+        let report = db_tax_report(&pool, 2024).await.unwrap();
+        assert_eq!(report.income.dividends.len(), 1);
+        assert_eq!(report.income.dividends[0].income_id, 2);
+        assert!(report.income.employment_income.is_empty());
+        assert_eq!(report.income.other_income.len(), 1);
+        assert_eq!(report.income.other_income[0].income_id, 1);
+        assert_eq!(report.income.other_income[0].ticker, "ETH");
+        assert_eq!(report.income.other_income[0].amount_aud, dec("2000"));
         assert!(report.income.foreign_income.is_empty());
     }
 

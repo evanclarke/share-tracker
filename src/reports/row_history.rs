@@ -836,6 +836,83 @@ mod tests {
             2,
             "row_id is the financial year itself"
         );
+
+        // 0029 widened income_type's CHECK for `OtherIncome` (SCENARIOS
+        // L-03/L-04), which meant rebuilding income — so the *live* income
+        // trigger pair comes from 0029, along with the three staleness
+        // triggers and five indexes that moved with the renamed table. Every
+        // column must still be recorded: a column the trail drops is a version
+        // that cannot be reconstructed.
+        let sql29 = include_str!("../../migrations/0029_income_type_other_income.sql");
+        assert!(
+            sql29.contains("'Dividend', 'EmploymentIncome', 'OtherIncome'"),
+            "0029 must widen the income_type CHECK"
+        );
+        for op in ["update", "delete"] {
+            assert!(
+                sql29.contains(&format!("CREATE TRIGGER income_row_history_{op} ")),
+                "0029 must re-create the income {op} trigger"
+            );
+        }
+        for op in ["insert", "update", "delete"] {
+            assert!(
+                sql29.contains(&format!("CREATE TRIGGER income_stale_snapshots_{op} ")),
+                "0029 must re-create income's {op} staleness trigger"
+            );
+        }
+        for index in [
+            "income_date_paid",
+            "income_listing_id",
+            "income_reinvestment_trade_id",
+            "income_buyback_trade_id",
+            "income_holding_account_id",
+        ] {
+            assert!(
+                sql29.contains(&format!("CREATE INDEX {index} ")),
+                "0029 must re-create {index}"
+            );
+        }
+        let flat29 = sql29.split_whitespace().collect::<Vec<_>>().join(" ");
+        for col in [
+            "id",
+            "listing_id",
+            "date_paid",
+            "ex_date",
+            "franked_amount",
+            "unfranked_amount",
+            "foreign_source_income",
+            "foreign_tax_paid",
+            "tfn_withholding_tax",
+            "franking_credits",
+            "lic_capital_gain_amount",
+            "conduit_foreign_income",
+            "trust_income",
+            "reinvestment_trade_id",
+            "currency",
+            "buyback_trade_id",
+            "holding_account_id",
+            "amount_per_security",
+            "securities_held",
+            "entitlement_date",
+            "tax_deferred_amount",
+            "income_type",
+        ] {
+            assert_eq!(
+                flat29.matches(&format!("'{col}', OLD.{col}")).count(),
+                2,
+                "both re-created income triggers must record {col}"
+            );
+        }
+        // The rebuild runs with foreign keys off, outside a transaction, so
+        // SQLite cannot repoint attachments' income_id at the renamed table —
+        // the pragma pair and the directive are what make that true.
+        assert!(
+            sql29.starts_with("-- no-transaction"),
+            "0029 must run outside a transaction to change PRAGMA foreign_keys"
+        );
+        assert!(sql29.contains("PRAGMA foreign_keys = OFF;"));
+        assert!(sql29.contains("PRAGMA foreign_keys = ON;"));
+        assert!(sql29.contains("BEGIN;") && sql29.contains("COMMIT;"));
     }
 
     /// The migration is purely additive: it creates the trail and its

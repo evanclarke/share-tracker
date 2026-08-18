@@ -63,13 +63,13 @@
 //!   below (a Sell at the exchange's market value plus a Buy of the wrapped
 //!   token at the same value); the example would exercise nothing new, and no
 //!   wrapped token is a seeded digital-token code.
-//! - `docs/ato/crypto-staking-airdrops.md` Anastasia, Merindah and Calista,
-//!   and `docs/ato/crypto-wrapping.md`'s Craig — each turns on **ordinary
-//!   income** at the receipt-date market value, which has no label to report
-//!   under yet (SCENARIOS L-03/L-04's open finding: `income_type` offers only
-//!   `Dividend` and `EmploymentIncome`). Calista's paid initial allocation is
-//!   also just Josh's example with a non-zero purchase price. Josh's
-//!   nil-cost-base half is reproduced below.
+//! - `docs/ato/crypto-staking-airdrops.md` Anastasia and Merindah stop at
+//!   "the money value … is ordinary assessable income" without stating one, so
+//!   there is no figure to assert; the rule they state — ordinary income at
+//!   the receipt-date market value, and that value as the tokens' cost base —
+//!   is reproduced through Craig's example below, which does carry figures.
+//!   Calista's paid initial allocation is Josh's example with a non-zero
+//!   purchase price, exercising nothing new.
 //! - `docs/ato/crypto-chain-splits.md` "Example: protocol change" (Bree) —
 //!   definitional: which of two post-split assets is the *new* one is a
 //!   judgement made before entry, and it states no figures.
@@ -1586,6 +1586,66 @@ async fn crypto_cgt_example_katrina_coin_swap() {
     assert_eq!(holdings[0].total_cost_base, dec("12000"));
     assert_eq!(holdings[1].quantity, dec("100"));
     assert_eq!(holdings[1].total_cost_base, dec("6000"));
+}
+
+/// `docs/ato/crypto-wrapping.md` (QC 73649) — "Example: crypto asset reward
+/// from DeFi platform" (Craig).
+///
+/// > Craig 'lends' 100 stablecoin tokens valued at $10 per token through the
+/// > DeFi platform Compound Finance. The DeFi platform pays a rate of return
+/// > of 1% in the form of newly issued stablecoin tokens. … The income amount
+/// > Craig declares is $10. The cost base of the newly issued tokens is their
+/// > market value at the time Craig acquires them.
+///
+/// The reward is **ordinary income** at the tokens' receipt-date market value
+/// — an `income_type: "OtherIncome"` row, reported at item 24, in no dividend
+/// total — and the tokens themselves are a parcel costed at that same value,
+/// entered as an ordinary Buy. The same pair records a staking reward or an
+/// established-token airdrop (`docs/ato/crypto-staking-airdrops.md`), whose
+/// own examples state no figures. The stablecoin is represented by the seeded
+/// ETH token code.
+#[tokio::test]
+async fn crypto_defi_reward_example_craig_stablecoin_tokens() {
+    let pool = test_pool().await;
+    put_crypto_listing(&pool, 1, "ETH").await;
+    // The 100 tokens Craig already held, at $10 each.
+    put_buy(&pool, 1, 1, "2025-08-01", "100", "10", "0").await;
+    // The 1% reward: $10 of ordinary income, and one token costed at $10.
+    api_put(
+        &pool,
+        "/income/1",
+        json!({
+            "listing_id": 1,
+            "date_paid": "2025-11-30",
+            "unfranked_amount": "10",
+            "income_type": "OtherIncome",
+            "currency": "AUD",
+        }),
+    )
+    .await;
+    put_buy(&pool, 2, 1, "2025-11-30", "1", "10", "0").await;
+
+    // "The income amount Craig declares is $10" — at item 24, and nowhere else.
+    let summary: Vec<TaxYearSummary> = api_get(&pool, "/portfolio/tax-summary").await;
+    assert_eq!(summary.len(), 1);
+    assert_eq!(summary[0].tax_year, 2026);
+    assert_eq!(summary[0].other_income, dec("10"));
+    assert_eq!(summary[0].dividends_assessable, Decimal::ZERO);
+    assert_eq!(summary[0].franking_credits, Decimal::ZERO);
+    assert_eq!(
+        summary[0].gross_assessable_investment_income,
+        dec("10"),
+        "item 24 is prefilled by nothing, so the reward is counted"
+    );
+
+    // "The cost base of the newly issued tokens is their market value at the
+    // time Craig acquires them" — a $10 parcel of its own, clock from receipt.
+    let parcels: Vec<crate::reports::open_parcels::OpenParcel> =
+        api_get(&pool, "/portfolio/open-parcels").await;
+    let reward = parcels.iter().find(|p| p.trade_id == 2).unwrap();
+    assert_eq!(reward.remaining_quantity, dec("1"));
+    assert_eq!(reward.remaining_cost_base, dec("10"));
+    assert_eq!(reward.acquisition_date, "2025-11-30".parse().unwrap());
 }
 
 /// `docs/ato/crypto-chain-splits.md` (QC 69953) — "Example: chain split and

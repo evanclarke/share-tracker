@@ -482,6 +482,10 @@ async fn accumulate(
         // unvested RSUs — SCENARIOS J-10) is not a return *on* the holding: it
         // is paid for services, not by the shares, and counting it would
         // inflate the income yield of whatever listing it was recorded against.
+        // An `OtherIncome` row is the opposite case and is deliberately *not*
+        // skipped: a staking reward or an established-token airdrop is a
+        // return the holding itself produced (SCENARIOS L-03), so it belongs
+        // in the yield exactly as a distribution does.
         if income.income_type == IncomeType::EmploymentIncome {
             continue;
         }

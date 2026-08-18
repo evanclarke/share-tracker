@@ -124,11 +124,13 @@ pub enum ReinvestError {
     #[error("this distribution already has a reinvestment trade")]
     AlreadyReinvested,
     /// The income row is not a distribution at all — an employment-income row
-    /// (a dividend equivalent on unvested RSUs; TD 2017/26, SCENARIOS J-10).
-    /// A DRP reinvests a payment *of* the holding into more of it; remuneration
-    /// is paid for services, and no registry plan applies it to shares. Mapped
-    /// to `422`.
-    #[error("an employment-income row is not a distribution and cannot be reinvested")]
+    /// (a dividend equivalent on unvested RSUs; TD 2017/26, SCENARIOS J-10) or
+    /// an other-income row (a staking reward or established-token airdrop;
+    /// SCENARIOS L-03). A DRP reinvests a payment *of* the holding into more of
+    /// it; remuneration is paid for services and a staking reward is paid in
+    /// the tokens themselves — no registry plan applies either to shares.
+    /// Mapped to `422`.
+    #[error("a non-distribution income row cannot be reinvested")]
     NotADistribution,
     /// The distribution's currency is not the listing's, so its cash and the
     /// reinvestment price are different money and cannot be divided.
@@ -181,9 +183,10 @@ impl From<ReinvestError> for ApiError {
                  (DELETE /income/:id/reinvest) to redo it",
             ),
             ReinvestError::NotADistribution => ApiError::unprocessable(
-                "this income row records employment income (a dividend equivalent), not a \
-                 distribution — a DRP reinvests a payment of the holding into more of it, \
-                 and remuneration is paid for services",
+                "this income row is not a distribution — a DRP reinvests a payment of the \
+                 holding into more of it, and neither employment income (a dividend \
+                 equivalent, paid for services) nor other income (a staking reward or \
+                 airdrop, already paid in the tokens) is one",
             ),
             ReinvestError::CurrencyMismatch {
                 distribution,

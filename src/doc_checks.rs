@@ -392,11 +392,15 @@ fn known_limitations_document_rsu_dividend_equivalents() {
             .contains("**item 1/2, salary and wages, is not something this system reports**")
     );
     // The entity, tax-summary and printed-document halves of the same change.
-    assert!(API_MD.contains("An `EmploymentIncome` row carries **the cash and nothing else**"));
+    assert!(
+        API_MD.contains(
+            "A row of **either non-dividend kind** carries **the cash and nothing else**"
+        )
+    );
     assert!(
         API_MD.contains("`employment_income` (an [`income_type: EmploymentIncome`](#income) row")
     );
-    assert!(SCHEMA_MD.contains("Dividend | EmploymentIncome (CHECK-enforced enum, 0028"));
+    assert!(SCHEMA_MD.contains("Dividend | EmploymentIncome | OtherIncome (CHECK-enforced enum"));
     // Cites the mirrored ATO ruling (TD 2017/26).
     assert!(limitations.contains("docs/ato/ess-dividend-equivalents.md"));
     assert!(include_str!("../docs/ato/ess-dividend-equivalents.md").contains("TD 2017/26"));
@@ -861,7 +865,9 @@ fn known_limitations_document_the_crypto_entry_paths() {
     assert!(limitations.contains("**initial-allocation airdrop** is the same nil-cost-base Buy"));
     assert!(limitations.contains("**Staking rewards and established-token airdrops**"));
     assert!(limitations.contains("**item 24, other income**"));
-    assert!(limitations.contains("carried to item 24 by hand"));
+    assert!(limitations.contains("`income_type: \"OtherIncome\"`"));
+    // What is genuinely left: item 24 is one figure, with no source split.
+    assert!(limitations.contains("not* modelled is any split of that income by source"));
     assert!(limitations.contains("docs/ato/crypto-staking-airdrops.md"));
     assert!(include_str!("../docs/ato/crypto-staking-airdrops.md").contains("QC 69950"));
 

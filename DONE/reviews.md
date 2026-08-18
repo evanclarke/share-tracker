@@ -2495,3 +2495,65 @@ not where a user meets the problem.
 
 Tests: `api_invalid_crypto_listings_return_422` extended to pin the remedy in the body. Docs:
 `docs/API.md` Listings, `src/web/config.js`.
+
+## Staking rewards and airdropped tokens are reported as dividends (SCENARIOS L-03, L-04)
+(SCENARIOS.md section L verification pass, 2026-08-18. The ATO is explicit: the money value of
+staking rewards, and of an **established** token received by airdrop, is **ordinary income at the
+time of receipt**, declared "as **other income**" — item 24 of the individual return, not item 11
+(QC 69950, "Staking rewards and airdrops"; the same page's Anastasia and Merindah examples). The
+documented workaround — README + `docs/API.md` Known limitations, "an income row plus a Buy at
+receipt-date market value" — has nowhere to put that income: `income.income_type` is
+`Dividend | EmploymentIncome`, so the row is a dividend unless it is remuneration.)
+- [x] Reproduced: 0.5 ETH of staking rewards worth A$2,000 entered as an income row on the ETH
+  listing → `GET /portfolio/tax-summary` reports `dividends_assessable: "2000"` against ATO label
+  **`11S + 11T`**, and the annual tax report prints it in the **Dividends** table with
+  `franking_status: "entitled"` — a franking entitlement on a payment no company made. The total
+  assessable income is right; every label on it is wrong
+- [x] `income_type: "EmploymentIncome"` is no better: it reports on the tax summary's
+  `employment_income` line, which `docs/API.md` describes as item 1/2 salary and wages. Staking
+  rewards are neither a distribution of a holding nor remuneration for services
+- [x] The cost-base half is already right: the reward tokens entered as a Buy at receipt-date market
+  value open a parcel at that value with its own 12-month clock, exactly as the ATO states, and the
+  later sale reports correctly (verified). This finding is only about where the *income* lands
+- [x] Precedent: J-10 (`1d76d3f`) is this finding one income type earlier — the dividend-equivalent
+  workaround reported remuneration at 11S, and Evan chose the `income_type` enum over sharpening the
+  wording. The same choice is open here (a third variant reported on its own line and in its own
+  annual-tax-report table, against item 24), against the cheaper alternative of documenting that
+  crypto income must be carried to item 24 by hand
+- [x] The ATO page is now mirrored: `docs/ato/crypto-staking-airdrops.md`, indexed in `docs/ato/OVERVIEW.md` (closed 2026-08-18 with the crypto entry-path documentation finding)
+- [x] **Decided 2026-08-18: Evan chose the third `income_type` variant** — reported on its own tax-summary line against item 24 and in its own annual-tax-report table, out of every dividend total
+- [x] Tests: a staking-reward row reports at its own label, is in no dividend total, and carries no
+  franking status; the annual tax report prints it in its own table
+- [x] Docs sync: `docs/API.md` Income (`income_type`) + the tax-summary/annual-tax-report field
+  tables, README Features / Known limitations
+
+**Resolution (2026-08-18): `IncomeType::OtherIncome` — Evan chose the third variant, as J-10's own
+migration note predicted ("the enum is the extension point").**
+
+Migration 0029 widens the `income_type` CHECK. It is the first rebuild of a table another table
+*references*: `attachments.income_id` points at income, and SQLite rewrites such a reference onto the
+renamed table whenever `foreign_keys` is on — which would have left attachments pointing at
+`income_old`, and its drop would then have cascaded every income attachment away. Neither pragma that
+prevents that can be set inside a transaction, so the migration is `-- no-transaction` and brackets
+its own work in BEGIN/COMMIT: SQLite's documented procedure. Rehearsed against a copy of the live
+database — 47 income rows and 134 attachments (58 of them income-linked) intact, `foreign_key_check`
+and `integrity_check` clean, the rebuilt triggers firing.
+
+An `OtherIncome` row carries the cash and nothing else, exactly as the employment kind does
+(`check_non_distribution_row` now covers both, and names the kind in its rejection), and is equally
+un-reinvestable. Where it differs is the label: item 24 is prefilled by nothing, so the row reports
+on the tax summary's own `other_income` line **and** counts in gross assessable investment income,
+prints in its own *Other income (item 24)* table in the annual tax report, is labelled *Other income
+(staking reward / airdrop)* in the activity ledger, and — unlike a dividend equivalent — **is**
+counted in the performance report's income yield, because a staking reward is a return the holding
+itself produced.
+
+Tests: `api_other_income_round_trips_and_refuses_distribution_fields`,
+`db_other_income_reports_at_item_24_and_is_assessable`,
+`other_income_prints_in_its_own_item_24_table`, the 0029 block of
+`row_history::audited_tables_match_migration_check_and_triggers` (trigger pair, staleness triggers,
+five indexes, every column, and the pragma pair), the web bundle assertions, and
+`ato_examples::crypto_defi_reward_example_craig_stablecoin_tokens` — Craig's DeFi reward (QC 73649),
+whose $10 of ordinary income and $10 cost base is the same pair a staking reward is entered as.
+Docs: `docs/API.md` (Income, the tax-summary label table, Known limitations), `docs/SCHEMA.md`,
+README, and the income form's kind hint in `src/web/config.js`.

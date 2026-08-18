@@ -315,6 +315,17 @@ function incomeSection(inc, summaryLines) {
           + '(TD 2017/26). It belongs at item 1/2 salary and wages, which the employer normally '
           + 'reports through STP, so it is listed here for reconciliation only and is in none of '
           + 'the dividend or investment-income totals above.') : null,
+    inc.other_income && inc.other_income.length
+      ? el('h4', null, 'Other income (item 24)') : null,
+    inc.other_income && inc.other_income.length
+      ? genericTable(inc.other_income, ['date_paid', 'ticker', 'amount_aud']) : null,
+    inc.other_income && inc.other_income.length
+      ? el('p', { class: 'hint' },
+          'Ordinary income produced by a holding but paid as no distribution of it \u2014 a crypto '
+          + 'staking reward, or an airdrop of an established token, assessable at the tokens\u2019 '
+          + 'market value when they were received (QC 69950). It belongs at item 24, other income, '
+          + 'which nothing prefills, and is counted in the assessable investment income above; the '
+          + 'tokens themselves are a parcel costed at that same value.') : null,
     el('h4', null, 'Foreign income'),
     genericTable(inc.foreign_income, ['kind', 'ticker', 'date', 'amount_aud', 'foreign_tax_paid_aud']),
     el('h4', null, 'Interest income'),

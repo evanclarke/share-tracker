@@ -683,10 +683,16 @@ mod tests {
     #[tokio::test]
     async fn income_type_ui_present() {
         let js = app_js_body().await;
-        assert!(js.contains("sel('income_type', 'Income type', ['Dividend', 'EmploymentIncome']"));
+        assert!(js.contains(
+            "sel('income_type', 'Income type', ['Dividend', 'EmploymentIncome', 'OtherIncome']"
+        ));
         assert!(js.contains("not a dividend in your hands (TD 2017/26)"));
-        assert!(js.contains("enter the cash as the unfranked amount and nothing else"));
-        assert!(js.contains("if (row.income_type === 'EmploymentIncome') return [];"));
+        assert!(js.contains("carry the cash as the unfranked amount and nothing else"));
+        assert!(js.contains("if (row.income_type && row.income_type !== 'Dividend') return [];"));
+        // The third kind: ordinary income at item 24, with its own table in the
+        // printed document (SCENARIOS L-03/L-04).
+        assert!(js.contains("a crypto staking reward, or an airdrop of an established token"));
+        assert!(js.contains("Other income (item 24)"));
         // The simple form can't describe one, so a stored row opens advanced.
         assert!(js.contains("existing.income_type !== 'Dividend'"));
         // The printed annual document gives it its own table and says why.

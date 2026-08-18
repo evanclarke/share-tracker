@@ -36,6 +36,49 @@ pub enum IncomeType {
     /// it here aggregates the cash beside the holding it was calculated from
     /// without any surface calling it a dividend.
     EmploymentIncome,
+    /// Ordinary income produced *by* the holding that is not a distribution of
+    /// it — a crypto **staking reward**, or an airdrop of an **established**
+    /// token, whose money value is ordinary income when the tokens are
+    /// received (QC 69950, `docs/ato/crypto-staking-airdrops.md`,
+    /// SCENARIOS L-03/L-04). The tokens themselves are then a parcel costed at
+    /// that same market value, entered as an ordinary Buy.
+    ///
+    /// It belongs at **item 24, other income**, which nothing prefills — so
+    /// unlike [`Self::EmploymentIncome`] it *is* counted in the tax summary's
+    /// gross assessable investment income, on its own line and in no dividend
+    /// total. Like that kind, the row carries the cash and nothing else: an
+    /// initial-allocation airdrop, by contrast, is no income at all and is
+    /// entered only as a nil-cost-base Buy.
+    OtherIncome,
+}
+
+impl IncomeType {
+    /// Why this kind is **not** a payment of the holding, or `None` for a
+    /// [`Self::Dividend`] — which is one. A row of any other kind carries the
+    /// cash in `unfranked_amount` and nothing else (see
+    /// [`check_non_distribution_row`]), and the reason is what the `422`
+    /// explains.
+    pub(crate) fn non_distribution_reason(self) -> Option<&'static str> {
+        match self {
+            IncomeType::Dividend => None,
+            IncomeType::EmploymentIncome => {
+                Some("a dividend equivalent is remuneration, not a payment of the holding")
+            }
+            IncomeType::OtherIncome => Some(
+                "a staking reward or established-token airdrop is ordinary income at item 24 \
+                 (other income), not a payment of the holding",
+            ),
+        }
+    }
+
+    /// The kind's name in a rejection body ("… on an employment-income row").
+    pub(crate) fn row_noun(self) -> &'static str {
+        match self {
+            IncomeType::Dividend => "a dividend",
+            IncomeType::EmploymentIncome => "an employment-income",
+            IncomeType::OtherIncome => "an other-income",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
@@ -467,15 +510,18 @@ pub enum UpsertError {
     /// report. Mapped to `422`.
     #[error("{0} cannot be negative")]
     NegativeAmount(&'static str),
-    /// A distribution field was supplied on an
-    /// [`IncomeType::EmploymentIncome`] row (carries the field name). A
-    /// dividend equivalent is remuneration, not a payment of the holding: it
-    /// carries no franking, no foreign-source dividend component, no LIC
-    /// attributable part, no CFI, no tax-deferred amount, no ex/entitlement
-    /// date and no per-share statement figures, and it can never be trust
-    /// income. Mapped to `422`.
-    #[error("{0} cannot be entered on an employment-income row")]
-    EmploymentIncomeComponent(&'static str),
+    /// A distribution field was supplied on a row whose kind is not a payment
+    /// of the holding — an [`IncomeType::EmploymentIncome`] or
+    /// [`IncomeType::OtherIncome`] row (carries the kind and the field name).
+    /// Neither carries franking, a foreign-source dividend component, a LIC
+    /// attributable part, CFI, a tax-deferred amount, an ex/entitlement date
+    /// or per-share statement figures, and neither can ever be trust income.
+    /// Mapped to `422`.
+    #[error("{field} cannot be entered on {} row", kind.row_noun())]
+    NonDistributionComponent {
+        kind: IncomeType,
+        field: &'static str,
+    },
     /// `conduit_foreign_income` exceeds `unfranked_amount`. The CFI figure is
     /// a memo *subset* of the unfranked amount (it is assessable to a resident
     /// through that field — see [`Income::conduit_foreign_income`]), so it can
@@ -541,24 +587,27 @@ fn check_per_share(income: &Income) -> Result<(), PerShareError> {
     Ok(())
 }
 
-/// An [`IncomeType::EmploymentIncome`] row carries the **cash paid and nothing
-/// else**: remuneration has no franking, no foreign-source dividend component,
-/// no LIC attributable part, no CFI, no tax-deferred amount, no ex or
-/// entitlement date, and no per-share statement figures — every one of those is
-/// a distribution concept, and a value in any of them would be stored and then
+/// A row whose [`IncomeType`] is not `Dividend` carries the **cash paid and
+/// nothing else**: no franking, no foreign-source dividend component, no LIC
+/// attributable part, no CFI, no tax-deferred amount, no ex or entitlement
+/// date, and no per-share statement figures — every one of those is a
+/// distribution concept, and a value in any of them would be stored and then
 /// deliberately ignored by every report that knows the row is not a dividend.
-/// It cannot be trust income either: it is not income of the holding at all.
+/// Neither kind can be trust income either: neither is income *of* the trust.
 ///
 /// The amount goes in `unfranked_amount`, the row's plain-cash column (what
-/// `gross_cash_income` sums), and `tfn_withholding_tax` stays nil — an
-/// employer withholds PAYG, which appears on the income statement, not the
-/// no-TFN withholding this column records.
-fn check_employment_income(income: &Income) -> Result<(), UpsertError> {
-    if income.income_type != IncomeType::EmploymentIncome {
+/// `gross_cash_income` sums), and `tfn_withholding_tax` stays nil — for a
+/// dividend equivalent an employer withholds PAYG, which appears on the income
+/// statement, not the no-TFN withholding this column records; a staking reward
+/// or airdrop is paid by no entity that withholds at all.
+fn check_non_distribution_row(income: &Income) -> Result<(), UpsertError> {
+    let kind = income.income_type;
+    if kind.non_distribution_reason().is_none() {
         return Ok(());
     }
+    let refuse = |field| Err(UpsertError::NonDistributionComponent { kind, field });
     if income.trust_income {
-        return Err(UpsertError::EmploymentIncomeComponent("trust_income"));
+        return refuse("trust_income");
     }
     for (field, amount) in [
         ("franked_amount", income.franked_amount),
@@ -570,7 +619,7 @@ fn check_employment_income(income: &Income) -> Result<(), UpsertError> {
         ("conduit_foreign_income", income.conduit_foreign_income),
     ] {
         if !amount.is_zero() {
-            return Err(UpsertError::EmploymentIncomeComponent(field));
+            return refuse(field);
         }
     }
     for (field, value) in [
@@ -579,14 +628,14 @@ fn check_employment_income(income: &Income) -> Result<(), UpsertError> {
         ("securities_held", income.securities_held),
     ] {
         if value.is_some() {
-            return Err(UpsertError::EmploymentIncomeComponent(field));
+            return refuse(field);
         }
     }
     if income.ex_date.is_some() {
-        return Err(UpsertError::EmploymentIncomeComponent("ex_date"));
+        return refuse("ex_date");
     }
     if income.entitlement_date.is_some() {
-        return Err(UpsertError::EmploymentIncomeComponent("entitlement_date"));
+        return refuse("entitlement_date");
     }
     Ok(())
 }
@@ -640,7 +689,7 @@ pub async fn db_upsert(pool: &SqlitePool, income: &Income) -> Result<(), UpsertE
     // employment-income row gets the message naming its kind rather than the
     // cross-check's confusing "supply both or neither" (the same ordering
     // reason the negative-amount sweep runs first).
-    check_employment_income(income)?;
+    check_non_distribution_row(income)?;
     check_per_share(income).map_err(UpsertError::PerShare)?;
     if income.entitlement_date.is_some() && !income.trust_income {
         return Err(UpsertError::EntitlementDateOnNonTrust);
@@ -998,12 +1047,15 @@ impl From<UpsertError> for ApiError {
                 "{field} cannot be negative — income figures are the statement's own \
                  positive (or zero) amounts"
             )),
-            UpsertError::EmploymentIncomeComponent(field) => ApiError::unprocessable(format!(
-                "{field} cannot be entered on an employment-income row — a dividend \
-                 equivalent is remuneration, not a payment of the holding: it carries no \
-                 franking, no foreign-source or LIC component, no tax-deferred amount and \
-                 no ex/entitlement date. Enter the cash as the unfranked amount alone"
-            )),
+            UpsertError::NonDistributionComponent { kind, field } => {
+                let noun = kind.row_noun();
+                let reason = kind.non_distribution_reason().unwrap_or_default();
+                ApiError::unprocessable(format!(
+                    "{field} cannot be entered on {noun} row — {reason}: it carries no \
+                     franking, no foreign-source or LIC component, no tax-deferred amount \
+                     and no ex/entitlement date. Enter the cash as the unfranked amount alone"
+                ))
+            }
             UpsertError::ConduitExceedsUnfranked { cfi, unfranked } => {
                 ApiError::unprocessable(format!(
                     "conduit foreign income {cfi} cannot exceed the unfranked amount \
@@ -2374,6 +2426,60 @@ mod tests {
             );
             assert!(
                 db_get(&pool, 1).await.unwrap().is_none(),
+                "{field}: nothing persisted"
+            );
+        }
+    }
+
+    /// SCENARIOS L-03/L-04. A staking reward or an established-token airdrop
+    /// is ordinary income at item 24 — a third kind, carrying the cash and
+    /// nothing else exactly as the employment kind does, and refused the same
+    /// distribution fields in its own words.
+    #[tokio::test]
+    async fn api_other_income_round_trips_and_refuses_distribution_fields() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        let (status, _) = put_income(
+            &pool,
+            1,
+            serde_json::json!({
+                "listing_id": 1,
+                "date_paid": "2025-09-30",
+                "unfranked_amount": "2000",
+                "income_type": "OtherIncome"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let got = db_get(&pool, 1).await.unwrap().unwrap();
+        assert_eq!(got.income_type, IncomeType::OtherIncome);
+        assert_eq!(got.unfranked_amount, Decimal::from(2000));
+
+        for (field, value) in [
+            ("franking_credits", serde_json::json!("30")),
+            ("foreign_source_income", serde_json::json!("10")),
+            ("lic_capital_gain_amount", serde_json::json!("5")),
+            ("ex_date", serde_json::json!("2025-09-01")),
+            ("trust_income", serde_json::json!(true)),
+        ] {
+            let mut body = serde_json::json!({
+                "listing_id": 1,
+                "date_paid": "2025-09-30",
+                "unfranked_amount": "2000",
+                "income_type": "OtherIncome"
+            });
+            body[field] = value;
+            let (status, detail) = put_income(&pool, 2, body).await;
+            assert_eq!(
+                status,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{field} must be refused"
+            );
+            assert!(detail.contains(field), "{field}: {detail}");
+            assert!(detail.contains("other-income row"), "{field}: {detail}");
+            assert!(detail.contains("item 24"), "{field}: {detail}");
+            assert!(
+                db_get(&pool, 2).await.unwrap().is_none(),
                 "{field}: nothing persisted"
             );
         }
