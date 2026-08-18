@@ -73,7 +73,7 @@ behind or became a recorded finding.
 | G. Dividends, franking, and the holding-period rule | 25 | 2026-08-16 | 6 raised, all closed — see below |
 | H. Interest, expenses, and other income | 10 | 2026-08-17 | 6 raised, all closed — see below |
 | I. DRP | 14 | 2026-08-17 | 6 raised, all closed — see below |
-| J. Employee share schemes | 14 | 2026-08-18 | 8 raised, open — see below |
+| J. Employee share schemes | 14 | 2026-08-18 | 8 raised, all closed — see below |
 | K. Inherited parcels | 10 | — | — |
 | L. Crypto | 15 | — | — |
 | M. Foreign currency and FX | 16 | — | — |
@@ -543,14 +543,14 @@ dividend at 11S (J-10).
 
 | Finding | Scenarios | Status |
 | --- | --- | --- |
-| The ESS vest Buy's FX rate is a hard-coded 1, so a foreign-currency vest can cost at parity | J-08, J-12 | open — `TODO.md` |
-| An ESS statement in a currency other than its listing's is vested without conversion | J-08, J-12 | open — `TODO.md` |
-| The ESS vest bypasses the trade write-time checks (a pre-CGT parcel) | J-03, J-13 | open — `TODO.md` |
-| An ESS statement has no write-time checks on what it may say | J-01, J-09, J-11 | open — `TODO.md` |
-| Nothing on the product side mentions the ESS 30-day rule | J-04 | open — `TODO.md` |
-| A duplicated ESS statement is caught by nothing | J-11 | open — `TODO.md` |
-| The $1,000 taxed-upfront reduction is always applied, with no way to record failing the income test | J-02 | open — `TODO.md` |
-| The documented dividend-equivalent workaround reports remuneration as a dividend | J-10 | open — `TODO.md` |
+| The ESS vest Buy's FX rate is a hard-coded 1, so a foreign-currency vest can cost at parity | J-08, J-12 | fixed 2026-08-18 (`ef479dd`) — archived in [`DONE/reviews.md`](DONE/reviews.md) |
+| An ESS statement in a currency other than its listing's is vested without conversion | J-08, J-12 | fixed 2026-08-18 (`ef479dd`) — archived in [`DONE/reviews.md`](DONE/reviews.md) |
+| The ESS vest bypasses the trade write-time checks (a pre-CGT parcel) | J-03, J-13 | fixed 2026-08-18 (`4b77972`) — archived in [`DONE/reviews.md`](DONE/reviews.md) |
+| An ESS statement has no write-time checks on what it may say | J-01, J-09, J-11 | fixed 2026-08-18 (`4b77972`) — archived in [`DONE/reviews.md`](DONE/reviews.md) |
+| Nothing on the product side mentions the ESS 30-day rule | J-04 | fixed 2026-08-18 (`af4d0bc`) — advisory alert + docs; archived in [`DONE/reviews.md`](DONE/reviews.md) |
+| A duplicated ESS statement is caught by nothing | J-11 | fixed 2026-08-18 (`f248321`) — archived in [`DONE/reviews.md`](DONE/reviews.md) |
+| The $1,000 taxed-upfront reduction is always applied, with no way to record failing the income test | J-02 | fixed 2026-08-18 (`3d858f8`) — per-year flag + printed footnote; archived in [`DONE/reviews.md`](DONE/reviews.md) |
+| The documented dividend-equivalent workaround reports remuneration as a dividend | J-10 | fixed 2026-08-18 (`1d76d3f`) — `income_type` enum; archived in [`DONE/reviews.md`](DONE/reviews.md) |
 
 ---
 

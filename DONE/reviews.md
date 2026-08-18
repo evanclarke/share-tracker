@@ -1895,3 +1895,79 @@ FY1985, and the flip recorded in `row_history`. The tax-report line the footnote
 Docs: `docs/SCHEMA.md` gained the table (and corrected the `row_history` CHECK enum, which was still
 missing `closing_prices`), `docs/API.md` a **Tax year settings** entity section plus the rewritten
 tax-summary and Known-limitations wording and the new 422, README the recorded-per-year clause.
+
+## The documented dividend-equivalent workaround reports remuneration as a dividend (SCENARIOS J-10)
+(SCENARIOS.md section J verification pass, 2026-08-18. A dividend equivalent paid on unvested RSUs
+is **ordinary income as remuneration** under s 6-5 — "not a dividend in the employee's hands", not
+part of the ESS discount, and carrying no franking (TD 2017/26,
+`docs/ato/ess-dividend-equivalents.md`). `docs/API.md` Known limitations tells the user it is
+"enterable manually as an [income](#income) row if the user wants it aggregated here".)
+- [x] J-10 — reproduced: that row (`unfranked_amount 250` against the employer's listing) reports as
+  `dividends_assessable 250` — **item 11S, unfranked dividends** — counts in
+  `gross_assessable_investment_income`, and prints in the annual document's **Dividend income**
+  table with `franking_status "entitled"`. The one place the amount belongs (salary and wages,
+  item 1/2) is not somewhere this system reports at all
+- [x] The workaround is not wrong so much as unlabelled: aggregating the cash here is fine, but
+  nothing tells the reader the row will be **called a dividend** by every surface it reaches, and
+  the printed document is the one that goes to an accountant
+- [x] **Decide the model.** (a) **Sharpen the documentation** — say plainly that an income row
+  reports at 11S and that the amount must be moved to salary/wages in the return, or say don't enter
+  it here at all (cheapest; keeps the data model unchanged). (b) **Give income rows a kind** — an
+  `income_type` enum (dividend / other) whose non-dividend value reports on its own tax-summary line
+  and prints in its own table; correct, but it touches an audited table, the tax summary, the export
+  header and the printed document. (a) looks proportionate for a payment the system deliberately
+  does not model
+- [x] Tests: a `doc_checks` assertion for the wording (the H/G precedent for documentation-only
+  requirements)
+- [x] Docs sync: `docs/API.md` Known limitations (the RSU dividend-equivalents entry), README
+
+**Closed 2026-08-18 — Evan chose (b), the `income_type` enum**, over the documentation-only cut the
+finding itself leaned towards. So the row now says what it is instead of the docs warning what it
+will be called.
+
+`income_type` (migration 0028) is `Dividend` (the default, and what every existing row is — no
+stored figure moves) or `EmploymentIncome`. Decisions worth recording:
+- **Named for the case, not `Other`.** The option said "dividend / other", but the point of the kind
+  is to say *where the amount belongs on the return*, and only a named kind can carry that: this one
+  is item 1/2, salary and wages. The enum is the extension point, exactly as
+  `corporate_actions.action_type` is — a further non-dividend kind is a new value, not a second flag.
+- **Orthogonal to `trust_income`, not folded into it.** A single three-valued kind
+  (Dividend/Trust/Employment) would be cleaner on paper, but `trust_income` drives assessability
+  timing, the AMIT rules and the franking exemption across the whole codebase; rewriting it would
+  touch every one of those for no gain on this finding. A write-time rule keeps the two consistent
+  instead: an EmploymentIncome row can never be trust income.
+- **The cash goes in `unfranked_amount`, and nothing else is allowed.** Every dividend-shaped field —
+  franking, foreign-source, LIC, CFI, tax-deferred, ex/entitlement dates, the per-share pair — is
+  refused `422` naming itself, and the check runs *before* the per-share cross-check so the message
+  names the kind rather than the confusing "supply both or neither". It is also not reinvestable: a
+  DRP reinvests a payment *of* the holding, and remuneration is paid for services.
+- **The tax-summary line is informational.** `employment_income` carries an empty ATO label and joins
+  no assessable total. The amount belongs at item 1/2, which the ATO normally prefills from the
+  employer's STP reporting — reporting it as assessable here would invite entering it twice, so the
+  line exists to reconcile the cash.
+- **Left out of performance's income yield** as well: remuneration is not a return *on* the holding,
+  and counting it would inflate the yield of whatever listing it was recorded against. Kind also
+  joins the health report's duplicate-income key — a dividend and a dividend equivalent of the same
+  amount on one day are two different payments.
+
+Tests: `income`'s own module (the kind defaults to Dividend; an employment-income row round-trips
+with the cash alone; a sweep over all thirteen distribution fields, each refused naming itself with
+nothing persisted), `tax_summary::db_employment_income_is_not_a_dividend_and_not_investment_income`
+(the dividend beside it unaffected, gross assessable investment income unmoved),
+`tax_report::employment_income_prints_in_its_own_table_not_among_the_dividends`,
+`web.rs::income_type_ui_present`, and the updated
+`doc_checks::known_limitations_document_rsu_dividend_equivalents`. Full suite 1627 passed / 0 failed;
+`node --test` 69 passed; ui-smoke green. Verified end to end against a running server: a $100
+dividend and a $250 dividend equivalent on one day report `dividends_assessable 100 /
+employment_income 250 / gross_assessable_investment_income 100`; the printed document lists the
+dividend and the equivalent in separate tables; a franking credit on the equivalent is `422`;
+reinvesting it is `422`; the activity ledger reads "Employment income (dividend equivalent)".
+
+One thing this does **not** fix, and the Known-limitations entry now says so plainly: salary and
+wages (item 1/2) is still not somewhere this system reports. The kind stops every surface calling
+the payment a dividend; it does not put the amount where it belongs on the return.
+
+Docs: `docs/SCHEMA.md` gained the column, `docs/API.md` an `income_type` section under Income plus
+the rewritten Known-limitations entry, the tax-summary unlabelled-columns list and the 422 catalogue,
+README the recordable-payment clause. `docs/ato/ess-dividend-equivalents.md`'s **How this project
+uses it** section (the project's own note, not mirrored ATO text) was updated to match.
