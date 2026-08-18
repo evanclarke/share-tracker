@@ -2085,3 +2085,37 @@ nothing persisted; a stated 0.75 converts US$3,200 to A$4,266.67; and importing 
 lets the same row through at A$4,000, the ATO rate outranking the fallback. Docs: `docs/API.md`
 (Inheritances' `fx_rate` paragraph, the `422` list, the 422 catalogue) and the field hint in
 `src/web/config.js`.
+
+## An inheritance recorded in a currency other than its listing's rides through to the parcel (SCENARIOS K-01)
+(SCENARIOS.md section K verification pass, 2026-08-18. `inheritance::db_upsert` never compares
+`currency` with the listing's, and the linked Buy takes the inheritance's currency verbatim. The
+same finding closed for ESS statements in `ef479dd` and for DRP distributions in `450b887`.)
+- [x] Reproduced: an **AUD** listing with `currency: "USD"` on the inheritance → `204`, and the
+  parcel is a USD-costed holding of an AUD-priced security. Any closing price for it comes from the
+  exchange in AUD, so the unrealised-gains and portfolio screens compare a USD cost base against an
+  AUD market value
+- [x] The argument is the one already accepted twice: a parcel's cost base and its market price are
+  the same money. For an inheritance it is sharper still — under `MarketValueAtDeath` the figure
+  entered *is* a market value of that listed security
+- [x] Fix: refuse at write time in `db_upsert`, `422` naming both currencies, matching
+  `ess_statement`'s wording ("the per-share market value and the listed price are the same money")
+- [x] Tests: an inheritance whose currency differs from its listing's is refused; the matching case
+  is unaffected
+- [x] Docs sync: `docs/API.md` Inheritances + the 422 catalogue
+
+**Resolution (2026-08-18): refused at write time, the ESS statement's wording.**
+
+`db_upsert` runs `check_listing_currency` first: the listing's `currency` is read on the write's own
+transaction and an inheritance recorded in another is refused with
+`UpsertError::CurrencyNotListings` → `422`, naming both and saying which one to use ("the parcel's
+cost base and the exchange's price for the same security are one money"). An unknown `listing_id`
+falls through to the foreign-key rejection, as it does on the ESS side.
+
+The argument is the one already accepted twice, sharpened by the entity: under
+`MarketValueAtDeath` the figure entered *is* a market value of that listed security, so a currency
+other than the one the exchange quotes it in cannot be right.
+
+Tests: `an_inheritance_in_another_currency_than_its_listings_is_refused` — a USD inheritance of an
+AUD listing refused with both currencies in the body and nothing persisted, and the matching pair
+accepted either way round (AUD/AUD and USD/USD). Docs: `docs/API.md` (Inheritances' `422` list and
+the 422 catalogue).

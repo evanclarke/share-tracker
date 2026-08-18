@@ -230,6 +230,18 @@ pub enum UpsertError {
     /// (`trade::checks::AmountsError::FxRateNotPositive`, the same rule).
     #[error("the fallback FX rate must be greater than zero")]
     FxRateNotPositive,
+    /// The inheritance's currency is not its listing's. The parcel is a
+    /// holding of that listed security, priced by its exchange in the
+    /// listing's currency, so the cost base and the market value it will be
+    /// compared against must be the same money — and under
+    /// [`CostBaseRule::MarketValueAtDeath`] the figure entered *is* a market
+    /// value of that security. Mapped to 422. Same rule as the ESS statement
+    /// and DRP reinvest paths.
+    #[error("the inheritance is in {inheritance} but its listing is in {listing}")]
+    CurrencyNotListings {
+        inheritance: String,
+        listing: String,
+    },
     /// A non-AUD inheritance whose acquisition month has no imported ATO rate
     /// and that states no rate of its own — `fx_rate` still at its default 1.
     /// `fx_rate` is the *fallback* rate, applied exactly when no ATO rate
@@ -292,6 +304,15 @@ impl From<UpsertError> for ApiError {
             UpsertError::FxRateNotPositive => ApiError::unprocessable(
                 "fx_rate must be a positive foreign-per-AUD rate (1 for an AUD inheritance)",
             ),
+            UpsertError::CurrencyNotListings {
+                inheritance,
+                listing,
+            } => ApiError::Unprocessable(format!(
+                "this inheritance is recorded in {inheritance} but its listing is quoted in \
+                 {listing} — the parcel's cost base and the exchange's price for the same \
+                 security are one money, so enter it in {listing} (an estate's figures in \
+                 another currency are converted before entry, or the wrong listing was chosen)"
+            )),
             UpsertError::MissingFxRate { currency, month } => ApiError::Unprocessable(format!(
                 "this inheritance is in {currency} but no ATO/RBA rate has been imported for \
                  {currency} in {month} — the month the parcel's cost base converts at — and the \
@@ -382,6 +403,34 @@ fn conversion_month(inh: &Inheritance) -> String {
 /// own check here rather than at read time because the month in question is
 /// the *deceased's* acquisition month, routinely decades before the RBA import
 /// reaches (SCENARIOS K-01, K-04).
+/// The inheritance's currency must be its listing's: the parcel is a holding
+/// of that listed security, and the exchange prices it in the listing's
+/// currency, so a cost base in another would be compared against a market
+/// value in the first — mixing currencies in one calculation. Sharper still
+/// under [`CostBaseRule::MarketValueAtDeath`], where the figure entered *is* a
+/// market value of that security. The same rule `ess_statement::db_upsert` and
+/// the DRP reinvest path apply (SCENARIOS K-01). An unknown `listing_id` falls
+/// through to the foreign-key rejection.
+async fn check_listing_currency(
+    tx: &mut sqlx::SqliteConnection,
+    inh: &Inheritance,
+) -> Result<(), UpsertError> {
+    let listing_currency: Option<String> =
+        sqlx::query_scalar("SELECT currency FROM listings WHERE id = ?")
+            .bind(inh.listing_id)
+            .fetch_optional(tx)
+            .await?;
+    if let Some(listing) = listing_currency
+        && listing != inh.currency
+    {
+        return Err(UpsertError::CurrencyNotListings {
+            inheritance: inh.currency.clone(),
+            listing,
+        });
+    }
+    Ok(())
+}
+
 async fn check_convertible(
     tx: &mut sqlx::SqliteConnection,
     inh: &Inheritance,
@@ -460,6 +509,7 @@ pub async fn db_upsert(pool: &SqlitePool, inh: &Inheritance) -> Result<(), Upser
 
     let mut tx = pool.begin().await?;
 
+    check_listing_currency(&mut tx, inh).await?;
     check_convertible(&mut tx, inh).await?;
 
     let existing_buy = linked_buy_id(&mut tx, inh.id).await?;
@@ -1178,6 +1228,54 @@ mod tests {
         api.get("/portfolio/open-parcels")
             .await
             .expect_status(StatusCode::OK);
+    }
+
+    /// An inheritance's currency is its listing's, or it is refused: the
+    /// parcel is a holding of that listed security and the exchange prices it
+    /// in the listing's own currency (SCENARIOS K-01).
+    #[tokio::test]
+    async fn an_inheritance_in_another_currency_than_its_listings_is_refused() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AUD").await;
+        insert_listing(&pool, 2, "USD").await;
+
+        let mismatched = Inheritance {
+            currency: "USD".to_string(),
+            fx_rate: dec("0.65"),
+            ..post_cgt(1)
+        };
+        let err = db_upsert(&pool, &mismatched).await.unwrap_err();
+        assert!(
+            matches!(&err, UpsertError::CurrencyNotListings { inheritance, listing }
+                     if inheritance == "USD" && listing == "AUD"),
+            "{err:?}"
+        );
+        let ApiError::Unprocessable(body) = ApiError::from(err) else {
+            panic!("expected 422");
+        };
+        assert!(body.contains("recorded in USD"), "body: {body}");
+        assert!(body.contains("quoted in AUD"), "body: {body}");
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM trades")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            0,
+            "nothing persisted"
+        );
+
+        // The matching pair is unaffected, either way round.
+        db_upsert(&pool, &post_cgt(1)).await.unwrap();
+        db_upsert(
+            &pool,
+            &Inheritance {
+                id: 2,
+                listing_id: 2,
+                ..mismatched
+            },
+        )
+        .await
+        .unwrap();
     }
 
     /// A non-AUD inheritance whose conversion month has no imported ATO rate

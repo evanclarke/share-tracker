@@ -12,28 +12,11 @@ are fixed or decided.
 
 **SCENARIOS.md sections A–J are driven and every finding they raised is closed** in the `DONE/*.md`
 archive. **Section K. Inherited parcels** was driven 2026-08-18; it raised six findings, and the
-four below are the ones still open (the two FX ones — the parcel Buy bypassing the trade write-time
-checks, and a non-AUD inheritance costed at parity — are closed and archived in
-[`DONE/reviews.md`](DONE/reviews.md)). When they are closed, the next work comes from driving **SCENARIOS.md section L. Crypto** the
+three below are the ones still open (the three about what a row may say — the parcel Buy bypassing
+the trade write-time checks, a non-AUD inheritance costed at parity, and a currency other than the
+listing's — are closed and archived in [`DONE/reviews.md`](DONE/reviews.md)). When they are closed, the next work comes from driving **SCENARIOS.md section L. Crypto** the
 same way — walk its scenarios against the running system, and record each gap here as its own `## `
 section.
-
-## An inheritance recorded in a currency other than its listing's rides through to the parcel (SCENARIOS K-01)
-(SCENARIOS.md section K verification pass, 2026-08-18. `inheritance::db_upsert` never compares
-`currency` with the listing's, and the linked Buy takes the inheritance's currency verbatim. The
-same finding closed for ESS statements in `ef479dd` and for DRP distributions in `450b887`.)
-- [ ] Reproduced: an **AUD** listing with `currency: "USD"` on the inheritance → `204`, and the
-  parcel is a USD-costed holding of an AUD-priced security. Any closing price for it comes from the
-  exchange in AUD, so the unrealised-gains and portfolio screens compare a USD cost base against an
-  AUD market value
-- [ ] The argument is the one already accepted twice: a parcel's cost base and its market price are
-  the same money. For an inheritance it is sharper still — under `MarketValueAtDeath` the figure
-  entered *is* a market value of that listed security
-- [ ] Fix: refuse at write time in `db_upsert`, `422` naming both currencies, matching
-  `ess_statement`'s wording ("the per-share market value and the listed price are the same money")
-- [ ] Tests: an inheritance whose currency differs from its listing's is refused; the matching case
-  is unaffected
-- [ ] Docs sync: `docs/API.md` Inheritances + the 422 catalogue
 
 ## LPR expenditure converts at the parcel's acquisition month, not the month it was incurred (SCENARIOS K-04)
 (SCENARIOS.md section K verification pass, 2026-08-18. `db_upsert` folds the LPR expenditure into
