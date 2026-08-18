@@ -120,6 +120,14 @@ pub enum UpsertError {
     /// assessed as ordinary trust income. Mapped to `422`.
     #[error("amit_from {0} is not a 1 July date")]
     AmitFromNotFinancialYearStart(NaiveDate),
+    /// A `Crypto` listing was marked `amit`. An AMIT is an attribution managed
+    /// investment **trust**; a crypto asset is not an interest in one (it is
+    /// not even currency — TD 2014/25), and the flag is not inert: it makes
+    /// the annual tax report demand an AMMA statement no coin will ever issue,
+    /// and refuses every income row on the listing that is not trust income
+    /// (SCENARIOS L-09). Mapped to `422`.
+    #[error("a Crypto listing was marked amit")]
+    CryptoCannotBeAmit,
     /// A `Crypto` listing was given an `exchange_mic`. The table's CHECK
     /// catches it too, but only as a raw constraint expression the web UI
     /// shows verbatim — this variant is what says which side is wrong
@@ -142,6 +150,11 @@ impl From<UpsertError> for ApiError {
         match e {
             UpsertError::UnrecognisedDigitalToken => ApiError::unprocessable(
                 "a Crypto listing's ticker must be a recognised digital-token code",
+            ),
+            UpsertError::CryptoCannotBeAmit => ApiError::unprocessable(
+                "a Crypto listing cannot be an AMIT — an AMIT is an attribution managed \
+                 investment trust, and a crypto asset is not an interest in one: leave amit \
+                 (and amit_from) off",
             ),
             UpsertError::CryptoWithExchange => ApiError::unprocessable(CRYPTO_WITH_EXCHANGE),
             UpsertError::ExchangeRequired => ApiError::unprocessable(EXCHANGE_REQUIRED),
@@ -234,6 +247,16 @@ pub async fn db_upsert(pool: &SqlitePool, listing: &Listing) -> Result<(), Upser
         if has_dependents {
             return Err(UpsertError::IdentityChangeRequiresRename);
         }
+    }
+
+    // An AMIT is a trust, and a crypto asset is no interest in one. The flag
+    // is not harmless there: it leaves the annual tax report permanently
+    // incomplete for want of an AMMA statement, and refuses every income row
+    // on the listing that does not claim to be trust income (SCENARIOS L-09).
+    if listing.security_type == SecurityType::Crypto
+        && (listing.amit || listing.amit_from.is_some())
+    {
+        return Err(UpsertError::CryptoCannotBeAmit);
     }
 
     // The date only means something on a listing that is an AMIT: it says
@@ -639,6 +662,36 @@ mod tests {
             err.to_string().contains("CHECK"),
             "expected CHECK error, got: {err}"
         );
+    }
+
+    /// SCENARIOS L-09. An AMIT is an attribution managed investment trust, so
+    /// the flag has no meaning on a coin — and it is not inert if it gets
+    /// there: the annual tax report is then permanently incomplete for want of
+    /// an AMMA statement, and every income row on the listing is refused
+    /// unless it claims to be trust income. Refused at write time, both
+    /// through the flag and through the date that carries it.
+    #[tokio::test]
+    async fn db_crypto_listing_cannot_be_an_amit() {
+        let pool = test_pool().await;
+        let mut fund = crypto();
+        fund.amit = true;
+        assert!(matches!(
+            db_upsert(&pool, &fund).await.unwrap_err(),
+            UpsertError::CryptoCannotBeAmit
+        ));
+        // The dated form of the same flag (migration 0024) is the same answer.
+        fund.amit = false;
+        fund.amit_from = Some(NaiveDate::from_ymd_opt(2024, 7, 1).unwrap());
+        assert!(matches!(
+            db_upsert(&pool, &fund).await.unwrap_err(),
+            UpsertError::CryptoCannotBeAmit
+        ));
+        assert!(db_get(&pool, 2).await.unwrap().is_none());
+        // An ordinary trust listing is untouched.
+        let mut trust = xtest();
+        trust.security_type = SecurityType::Trust;
+        trust.amit = true;
+        db_upsert(&pool, &trust).await.unwrap();
     }
 
     #[tokio::test]

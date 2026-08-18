@@ -48,7 +48,7 @@ export const ENTITIES = [
       txt('isin', 'ISIN', { optional: true }),
       sel('security_type', 'Security type', ['Share', 'ETF', 'LIC', 'Trust', 'Crypto'], { required: true }),
       fk('currency', 'Currency', 'currencies', { required: true, encode: 'string' }),
-      bool('amit', 'AMIT'),
+      bool('amit', 'AMIT', { hint: 'An attribution managed investment trust. Not available on a Crypto listing — a crypto asset is not an interest in a trust.' }),
       dt('amit_from', 'AMIT from', { optional: true, hint: 'Only for a fund that converted: the 1 July its first AMIT financial year began. Earlier years stay ordinary trust income — their distributions keep their franking credits and tax-deferred amounts, and no AMMA statement is expected for them. Leave blank for a fund that has always been an AMIT.' }),
       bool('preference', 'Preference share (90-day franking holding period)'),
     ],

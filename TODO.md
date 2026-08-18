@@ -115,22 +115,6 @@ for an on-chain network fee.)
   base and the disposal (where there is one) in the gains reports
 - [ ] Docs sync: `docs/API.md` Known limitations (the brokerage-currency entry) + Trades, README
 
-## A Crypto listing can be marked `amit` (SCENARIOS L-09)
-(SCENARIOS.md section L verification pass, 2026-08-18. An AMIT is an attribution managed investment
-**trust**; a crypto asset is not a trust interest — TD 2014/25 says it is not even currency. Nothing
-refuses the flag, and the state it creates is unreachable rather than merely odd.)
-- [ ] Reproduced: `PUT /listings/1` with `security_type: "Crypto", amit: true` → `204`. The annual
-  tax report then answers `completeness.complete: false` with
-  `amma_missing: [{listing_id: 1, ticker: "BTC"}]` — an AMMA statement no coin will ever issue — and
-  every income row on the listing is refused `422` ("this listing is an AMIT — its distributions are
-  trust income") unless it claims to be trust income
-- [ ] `amit_from` (migration 0024) is the same flag dated, so it needs the same refusal
-- [ ] Fix: refuse `amit` / `amit_from` on a `Crypto` listing at write time, in `listing::db_upsert`
-  beside the digital-token check — a write-time invariant, per CLAUDE.md, not a report-time
-  complaint
-- [ ] Tests: the write is refused with a sentence saying why; a non-Crypto listing is unaffected
-- [ ] Docs sync: `docs/API.md` Listings (the crypto paragraph) + the 422 catalogue
-
 ## The recognised digital-token list is BTC and ETH until a credentialed import runs (SCENARIOS L-10)
 (SCENARIOS.md section L verification pass, 2026-08-18. A `Crypto` listing's ticker must be a
 `DigitalToken` row in `currencies`. `0001_schema.sql` seeds exactly two — BTC and ETH — and the rest

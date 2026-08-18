@@ -2326,3 +2326,30 @@ nothing persisted, and the raw INSERT still refused by the CHECK),
 `api_invalid_crypto_listings_return_422` extended to assert each direction's own sentence and the
 absence of "CHECK" from either body, and `db_rename_cannot_give_a_crypto_listing_an_exchange`.
 Docs: `docs/API.md` Listings, Renames, and the 422 catalogue.
+
+## A Crypto listing can be marked `amit` (SCENARIOS L-09)
+(SCENARIOS.md section L verification pass, 2026-08-18. An AMIT is an attribution managed investment
+**trust**; a crypto asset is not a trust interest — TD 2014/25 says it is not even currency. Nothing
+refuses the flag, and the state it creates is unreachable rather than merely odd.)
+- [x] Reproduced: `PUT /listings/1` with `security_type: "Crypto", amit: true` → `204`. The annual
+  tax report then answers `completeness.complete: false` with
+  `amma_missing: [{listing_id: 1, ticker: "BTC"}]` — an AMMA statement no coin will ever issue — and
+  every income row on the listing is refused `422` ("this listing is an AMIT — its distributions are
+  trust income") unless it claims to be trust income
+- [x] `amit_from` (migration 0024) is the same flag dated, so it needs the same refusal
+- [x] Fix: refuse `amit` / `amit_from` on a `Crypto` listing at write time, in `listing::db_upsert`
+  beside the digital-token check — a write-time invariant, per CLAUDE.md, not a report-time
+  complaint
+- [x] Tests: the write is refused with a sentence saying why; a non-Crypto listing is unaffected
+- [x] Docs sync: `docs/API.md` Listings (the crypto paragraph) + the 422 catalogue
+
+**Resolution (2026-08-18): refused at write time, alongside the pairing checks.**
+
+`listing::db_upsert` rejects `amit` — and `amit_from`, the dated form of the same flag — on a
+`Crypto` listing (`UpsertError::CryptoCannotBeAmit` → `422`), so the unreachable state cannot be
+created rather than being complained about by a report afterwards. An ordinary `Trust` listing is
+untouched.
+
+Tests: `db_crypto_listing_cannot_be_an_amit` (both the flag and the date refused, nothing persisted,
+a Trust listing still accepted). Docs: `docs/API.md` Listings + the 422 catalogue, and the AMIT
+checkbox's hint in `src/web/config.js`.
