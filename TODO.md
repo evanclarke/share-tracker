@@ -12,40 +12,11 @@ are fixed or decided.
 
 **SCENARIOS.md sections A–J are driven and every finding they raised is closed** in the `DONE/*.md`
 archive. **Section K. Inherited parcels** was driven 2026-08-18; it raised six findings, and the
-five below are the ones still open (the first — the parcel Buy bypassing the trade write-time
-checks — is closed and archived in [`DONE/reviews.md`](DONE/reviews.md)). When they are closed, the next work comes from driving **SCENARIOS.md section L. Crypto** the
+four below are the ones still open (the two FX ones — the parcel Buy bypassing the trade write-time
+checks, and a non-AUD inheritance costed at parity — are closed and archived in
+[`DONE/reviews.md`](DONE/reviews.md)). When they are closed, the next work comes from driving **SCENARIOS.md section L. Crypto** the
 same way — walk its scenarios against the running system, and record each gap here as its own `## `
 section.
-
-## A non-AUD inheritance with no rate is costed at parity (SCENARIOS K-01, K-04)
-(SCENARIOS.md section K verification pass, 2026-08-18. J-08/J-12 exactly, one entity along.
-`inheritances.fx_rate` defaults to `1` — `InheritanceBody.fx_rate` is `Option<Decimal>` with
-`unwrap_or(Decimal::ONE)`, where `TradeBody.fx_rate` is a **required** field. On the parcel that
-column is not a constant: `infra::fx::pick_rate` treats it as `FxOverride::Fallback`, the rate used
-*when no ATO rate exists for the month*. So the default becomes a real answer exactly when the rate
-is missing, and the answer is 1 AUD per USD.)
-- [ ] Reproduced: a USD listing, `cost_base 3000`, `currency USD`, no `fx_rate` given and no
-  `rba_fx_rates` row for the acquisition month → `204`, and `GET /portfolio/open-parcels` reports
-  `original_cost_base 3000` — a **US$3,000 parcel costed at A$3,000**, with nothing marked
-  provisional
-- [ ] The exposure is larger here than it was for ESS, because the translation month is the
-  *parcel's* (`ParcelRow::acquired()`): under `DeceasedCostBase` that is the **deceased's**
-  acquisition month, which for an inherited holding is routinely decades before anything the RBA
-  import covers. The missing-rate case is the normal case, not the edge case
-- [ ] Precedent to copy: `ef479dd` gave `ess_statements` an `fx_rate` column and made the vest bind
-  the statement's stated rate, else the taxing-point month's ATO rate, else refuse
-  ("vesting an ESS statement whose currency has no imported ATO rate for the taxing point's month
-  and that states no `fx_rate` of its own (the parcel would be costed at parity)"). The column
-  already exists here; what is missing is the refusal
-- [ ] Fix: at write time, when `currency` is not AUD and no `fx_rate` was **stated**, resolve the
-  acquisition month's ATO rate and refuse `422` when there is none. Note the wrinkle the ESS fix did
-  not have: `fx_rate` defaults to 1 rather than being absent, so "stated" has to be distinguishable
-  from "defaulted" — either make the body field required for a non-AUD inheritance, or refuse
-  `fx_rate = 1` on a non-AUD row (the honest reading: parity is not a rate anyone states)
-- [ ] Tests: a non-AUD inheritance with neither a stated rate nor an imported month is refused; with
-  a stated rate it converts at it; with the month imported it converts at the ATO rate; an AUD
-  inheritance is unaffected
-- [ ] Docs sync: `docs/API.md` Inheritances + the 422 catalogue, `docs/SCHEMA.md` (`inheritances.fx_rate`)
 
 ## An inheritance recorded in a currency other than its listing's rides through to the parcel (SCENARIOS K-01)
 (SCENARIOS.md section K verification pass, 2026-08-18. `inheritance::db_upsert` never compares

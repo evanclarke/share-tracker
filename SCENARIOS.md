@@ -608,7 +608,7 @@ between beneficiaries.
 | Finding | Scenarios | Status |
 | --- | --- | --- |
 | The inheritance's parcel Buy bypasses the trade write-time checks (a zero FX rate, a return-of-capital currency conflict) | K-01, K-02, K-04 | fixed 2026-08-18 — archived in [`DONE/reviews.md`](DONE/reviews.md) |
-| A non-AUD inheritance with no rate is costed at parity | K-01, K-04 | open — `TODO.md` |
+| A non-AUD inheritance with no rate is costed at parity | K-01, K-04 | fixed 2026-08-18 — archived in [`DONE/reviews.md`](DONE/reviews.md) |
 | An inheritance recorded in a currency other than its listing's rides through to the parcel | K-01 | open — `TODO.md` |
 | LPR expenditure converts at the parcel's acquisition month, not the month it was incurred | K-04 | open — `TODO.md` (carries a model decision) |
 | A duplicated inheritance is caught by nothing | K-09 | open — `TODO.md` |

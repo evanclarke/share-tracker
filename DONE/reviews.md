@@ -2027,3 +2027,61 @@ with nothing persisted (the zero was a *panic*, `rust_decimal` "Division by zero
 of a listing carrying an AUD return of capital refused with both currencies named, and
 `GET /portfolio/open-parcels` still `200` afterwards. Docs: `docs/API.md` (Inheritances' `422` list,
 the parcel-Buy paragraph, and the 422 catalogue).
+
+## A non-AUD inheritance with no rate is costed at parity (SCENARIOS K-01, K-04)
+(SCENARIOS.md section K verification pass, 2026-08-18. J-08/J-12 exactly, one entity along.
+`inheritances.fx_rate` defaults to `1` — `InheritanceBody.fx_rate` is `Option<Decimal>` with
+`unwrap_or(Decimal::ONE)`, where `TradeBody.fx_rate` is a **required** field. On the parcel that
+column is not a constant: `infra::fx::pick_rate` treats it as `FxOverride::Fallback`, the rate used
+*when no ATO rate exists for the month*. So the default becomes a real answer exactly when the rate
+is missing, and the answer is 1 AUD per USD.)
+- [x] Reproduced: a USD listing, `cost_base 3000`, `currency USD`, no `fx_rate` given and no
+  `rba_fx_rates` row for the acquisition month → `204`, and `GET /portfolio/open-parcels` reports
+  `original_cost_base 3000` — a **US$3,000 parcel costed at A$3,000**, with nothing marked
+  provisional
+- [x] The exposure is larger here than it was for ESS, because the translation month is the
+  *parcel's* (`ParcelRow::acquired()`): under `DeceasedCostBase` that is the **deceased's**
+  acquisition month, which for an inherited holding is routinely decades before anything the RBA
+  import covers. The missing-rate case is the normal case, not the edge case
+- [x] Precedent to copy: `ef479dd` gave `ess_statements` an `fx_rate` column and made the vest bind
+  the statement's stated rate, else the taxing-point month's ATO rate, else refuse
+  ("vesting an ESS statement whose currency has no imported ATO rate for the taxing point's month
+  and that states no `fx_rate` of its own (the parcel would be costed at parity)"). The column
+  already exists here; what is missing is the refusal
+- [x] Fix: at write time, when `currency` is not AUD and no `fx_rate` was **stated**, resolve the
+  acquisition month's ATO rate and refuse `422` when there is none. Note the wrinkle the ESS fix did
+  not have: `fx_rate` defaults to 1 rather than being absent, so "stated" has to be distinguishable
+  from "defaulted" — either make the body field required for a non-AUD inheritance, or refuse
+  `fx_rate = 1` on a non-AUD row (the honest reading: parity is not a rate anyone states)
+- [x] Tests: a non-AUD inheritance with neither a stated rate nor an imported month is refused; with
+  a stated rate it converts at it; with the month imported it converts at the ATO rate; an AUD
+  inheritance is unaffected
+- [x] Docs sync: `docs/API.md` Inheritances + the 422 catalogue, `docs/SCHEMA.md` (`inheritances.fx_rate`)
+
+**Resolution (2026-08-18): refused, on the deceased's acquisition month.**
+
+`db_upsert` runs `check_convertible` first, inside its own transaction: a non-AUD inheritance
+whose `fx_rate` is still the default 1 and whose **conversion month** has no `rba_fx_rates` row is
+refused with `UpsertError::MissingFxRate` → `422`, naming the currency and the month and saying
+what would otherwise happen ("would cost the parcel at parity (1 AUD per USD)"). Everything else
+passes straight through — an AUD inheritance, a stated rate, or an imported month.
+
+The month is the one the cost base actually converts at, spelled out as `conversion_month`:
+`ParcelRow::acquired()`'s rule on the inheritance's own fields — the deceased's acquisition under
+`DeceasedCostBase`, the death under `MarketValueAtDeath`. That is the substantive difference from
+the ESS fix this copies: the ESS taxing point is recent, while an inherited parcel converts at a
+month decades old, so the rate is usually the taxpayer's to state rather than the import's to
+supply.
+
+The "stated" / "defaulted" ambiguity the section raised is answered by testing the condition rather
+than the provenance: the check fires only where the fallback would actually be *used*, so a
+`fx_rate` of 1 on a non-AUD row is refused exactly when it would become the answer, and is
+harmless (and accepted) when the month's ATO rate exists to outrank it. No migration, and no new
+required body field.
+
+Tests: `a_non_aud_inheritance_with_no_rate_is_refused_not_costed_at_parity` — a USD inheritance with
+only the *death* month imported is refused naming `2020-02` (the deceased's acquisition month) with
+nothing persisted; a stated 0.75 converts US$3,200 to A$4,266.67; and importing `2020-02` at 0.80
+lets the same row through at A$4,000, the ATO rate outranking the fallback. Docs: `docs/API.md`
+(Inheritances' `fx_rate` paragraph, the `422` list, the 422 catalogue) and the field hint in
+`src/web/config.js`.

@@ -28,6 +28,13 @@
 //! deceased's acquisition month, a market-value-at-death figure at the death
 //! month. LPR expenditure translates with the parcel; its own incurral date
 //! is provenance only (indexation, where it would matter, is not modelled).
+//! `fx_rate` is the *fallback* for that conversion — used only when no ATO
+//! rate exists for the month — so a non-AUD inheritance that leaves it at its
+//! default 1 with no rate imported for the month is refused rather than costed
+//! at parity ([`UpsertError::MissingFxRate`]). The month is the deceased's
+//! acquisition month under `DeceasedCostBase`, which is routinely decades
+//! before the RBA import reaches, so the rate is usually the taxpayer's to
+//! state.
 //!
 //! The linked Buy is immutable individually (`PUT`/`DELETE /trades` → 422):
 //! editing and deleting go through the inheritance, and both are refused
@@ -223,6 +230,14 @@ pub enum UpsertError {
     /// (`trade::checks::AmountsError::FxRateNotPositive`, the same rule).
     #[error("the fallback FX rate must be greater than zero")]
     FxRateNotPositive,
+    /// A non-AUD inheritance whose acquisition month has no imported ATO rate
+    /// and that states no rate of its own — `fx_rate` still at its default 1.
+    /// `fx_rate` is the *fallback* rate, applied exactly when no ATO rate
+    /// exists for the month, so the default would become a real answer in
+    /// precisely that case and cost the parcel at parity. Refused rather than
+    /// answered wrongly (`ess_vest::VestError::MissingFxRate`, the same rule).
+    #[error("no ATO FX rate for {currency} in {month} and the inheritance states none")]
+    MissingFxRate { currency: String, month: String },
     /// The inherited parcel's currency differs from that of a
     /// return-of-capital payment on its listing that reaches it. The payment
     /// reduces each parcel's cost base in the parcel's own currency and
@@ -277,6 +292,13 @@ impl From<UpsertError> for ApiError {
             UpsertError::FxRateNotPositive => ApiError::unprocessable(
                 "fx_rate must be a positive foreign-per-AUD rate (1 for an AUD inheritance)",
             ),
+            UpsertError::MissingFxRate { currency, month } => ApiError::Unprocessable(format!(
+                "this inheritance is in {currency} but no ATO/RBA rate has been imported for \
+                 {currency} in {month} — the month the parcel's cost base converts at — and the \
+                 inheritance states no fx_rate of its own — import that month's rates or record \
+                 the rate to use; recording it without one would cost the parcel at parity \
+                 (1 AUD per {currency})"
+            )),
             // The same wording `PUT /trades` answers for the same pair: it
             // names the payment and both currencies, so the disagreeing row is
             // findable without opening the listing's corporate actions.
@@ -343,6 +365,46 @@ async fn buy_drawn_on(tx: &mut sqlx::SqliteConnection, buy_id: i64) -> Result<bo
     .await
 }
 
+/// The month the parcel's cost base converts at — `ParcelRow::acquired()`'s
+/// rule spelled out on the inheritance: the deceased's acquisition under
+/// `DeceasedCostBase` (carried as the Buy's deemed date), else the death.
+fn conversion_month(inh: &Inheritance) -> String {
+    inh.deceased_acquisition_date
+        .unwrap_or(inh.date_of_death)
+        .format("%Y-%m")
+        .to_string()
+}
+
+/// Refuse a non-AUD inheritance that has no rate to convert at. `fx_rate` is
+/// the *fallback* (`infra::fx::pick_rate`), used exactly when the ATO rate for
+/// the month is missing, and it defaults to 1 — so leaving it alone costs the
+/// parcel at parity in precisely the case the fallback exists for. Worth its
+/// own check here rather than at read time because the month in question is
+/// the *deceased's* acquisition month, routinely decades before the RBA import
+/// reaches (SCENARIOS K-01, K-04).
+async fn check_convertible(
+    tx: &mut sqlx::SqliteConnection,
+    inh: &Inheritance,
+) -> Result<(), UpsertError> {
+    if inh.currency.eq_ignore_ascii_case("AUD") || inh.fx_rate != Decimal::ONE {
+        return Ok(());
+    }
+    let month = conversion_month(inh);
+    let ato_rate: Option<String> =
+        sqlx::query_scalar("SELECT rate FROM rba_fx_rates WHERE currency = ? AND month = ?")
+            .bind(&inh.currency)
+            .bind(&month)
+            .fetch_optional(tx)
+            .await?;
+    if ato_rate.is_none() {
+        return Err(UpsertError::MissingFxRate {
+            currency: inh.currency.clone(),
+            month,
+        });
+    }
+    Ok(())
+}
+
 fn validate(inh: &Inheritance) -> Result<(), UpsertError> {
     if inh.quantity <= Decimal::ZERO {
         return Err(UpsertError::QuantityNotPositive);
@@ -397,6 +459,8 @@ pub async fn db_upsert(pool: &SqlitePool, inh: &Inheritance) -> Result<(), Upser
     validate(inh)?;
 
     let mut tx = pool.begin().await?;
+
+    check_convertible(&mut tx, inh).await?;
 
     let existing_buy = linked_buy_id(&mut tx, inh.id).await?;
     if let Some(buy_id) = existing_buy
@@ -604,6 +668,7 @@ async fn delete(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::entities::rba_fx_rate;
     use crate::entities::sell::{self, AllocationInput, SellBody};
     use crate::entities::trade::{self, TradeType};
     use crate::test_support::{self, ApiClient, dec, test_pool, ymd};
@@ -1113,6 +1178,63 @@ mod tests {
         api.get("/portfolio/open-parcels")
             .await
             .expect_status(StatusCode::OK);
+    }
+
+    /// A non-AUD inheritance whose conversion month has no imported ATO rate
+    /// and that states no rate of its own is refused, not costed at parity —
+    /// and the month is the *deceased's* acquisition month, so it is the old
+    /// one, not the death's (SCENARIOS K-01, K-04).
+    #[tokio::test]
+    async fn a_non_aud_inheritance_with_no_rate_is_refused_not_costed_at_parity() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "USD").await;
+        // The deceased acquired 2020-02 and died 2025-01: importing the
+        // *death* month is not enough, because the cost base converts at the
+        // deceased's acquisition month.
+        rba_fx_rate::db_import_rate(&pool, "USD", "2025-01", dec("0.62"))
+            .await
+            .unwrap();
+        let usd = Inheritance {
+            currency: "USD".to_string(),
+            ..post_cgt(1)
+        };
+
+        let err = db_upsert(&pool, &usd).await.unwrap_err();
+        assert!(
+            matches!(&err, UpsertError::MissingFxRate { currency, month }
+                     if currency == "USD" && month == "2020-02"),
+            "{err:?}"
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM trades")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            0,
+            "nothing persisted"
+        );
+
+        // Either half of the pair is enough: the taxpayer's own rate…
+        let stated = Inheritance {
+            fx_rate: dec("0.75"),
+            ..usd.clone()
+        };
+        db_upsert(&pool, &stated).await.unwrap();
+        let parcels = crate::domain::open_parcels::load(&mut pool.acquire().await.unwrap(), None)
+            .await
+            .unwrap();
+        // US$3,200 at the stated 0.75, not at parity.
+        assert_eq!(parcels[0].cost_base.adjusted.round_dp(2), dec("4266.67"));
+
+        // …or the acquisition month's ATO rate, which then outranks it.
+        rba_fx_rate::db_import_rate(&pool, "USD", "2020-02", dec("0.80"))
+            .await
+            .unwrap();
+        db_upsert(&pool, &usd).await.unwrap();
+        let parcels = crate::domain::open_parcels::load(&mut pool.acquire().await.unwrap(), None)
+            .await
+            .unwrap();
+        assert_eq!(parcels[0].cost_base.adjusted, dec("4000"));
     }
 
     /// The inherited parcel's two dates do different jobs, and a corporate

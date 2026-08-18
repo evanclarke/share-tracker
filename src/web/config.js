@@ -138,7 +138,7 @@ export const ENTITIES = [
       dec('lpr_expenditure', 'LPR expenditure', { optional: true, default: '', hint: 'Executor costs you can include — e.g. conveyancing on the transfer, legal costs of proving the will. Added to the parcel’s cost base.' }),
       dt('lpr_expenditure_date', 'LPR expenditure date', { optional: true, default: '', hint: 'When the LPR incurred it (on or after the death). Required with a non-zero expenditure.' }),
       fk('currency', 'Currency', 'currencies', { required: true, encode: 'string', default: 'AUD' }),
-      dec('fx_rate', 'Manual FX rate', { default: '1', hint: 'Foreign units per AUD; fallback used only when no ATO rate exists. 1 for AUD.' }),
+      dec('fx_rate', 'Manual FX rate', { default: '1', hint: 'Foreign units per AUD; fallback used only when no ATO rate exists for the month the cost base converts at — the deceased’s acquisition month, or the death for a pre-CGT asset. 1 for AUD; a non-AUD inheritance with no rate either way is refused rather than costed at parity.' }),
     ],
     typeField: 'cost_base_rule',
     fieldGroups: {
