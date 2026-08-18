@@ -74,7 +74,7 @@ behind or became a recorded finding.
 | H. Interest, expenses, and other income | 10 | 2026-08-17 | 6 raised, all closed — see below |
 | I. DRP | 14 | 2026-08-17 | 6 raised, all closed — see below |
 | J. Employee share schemes | 14 | 2026-08-18 | 8 raised, all closed — see below |
-| K. Inherited parcels | 10 | — | — |
+| K. Inherited parcels | 10 | 2026-08-18 | 6 raised, all open — see below |
 | L. Crypto | 15 | — | — |
 | M. Foreign currency and FX | 16 | — | — |
 | N. Holding accounts and transfers | 12 | — | — |
@@ -551,6 +551,68 @@ dividend at 11S (J-10).
 | A duplicated ESS statement is caught by nothing | J-11 | fixed 2026-08-18 (`f248321`) — archived in [`DONE/reviews.md`](DONE/reviews.md) |
 | The $1,000 taxed-upfront reduction is always applied, with no way to record failing the income test | J-02 | fixed 2026-08-18 (`3d858f8`) — per-year flag + printed footnote; archived in [`DONE/reviews.md`](DONE/reviews.md) |
 | The documented dividend-equivalent workaround reports remuneration as a dividend | J-10 | fixed 2026-08-18 (`1d76d3f`) — `income_type` enum; archived in [`DONE/reviews.md`](DONE/reviews.md) |
+
+### Section K findings
+
+An inherited parcel is one Buy carrying two dates that do different jobs, and
+the split holds everywhere it was probed. The parcel is dated (and settled on)
+the **death** — so a return of capital paid while the deceased still held the
+units does not reduce the beneficiary's cost base a second time, and a split
+before the death does not re-base a quantity already stated in date-of-death
+terms — while the s 115-30 discount clock runs from the **deceased's**
+acquisition, carried as `deemed_acquisition_date` (K-01, K-04). A pre-CGT
+holding in the deceased's hands takes the market value at death and runs its
+clock from the death instead: 100 units sold the day before the anniversary are
+non-discountable and the same units a day after are not (K-02, K-06). Both
+refusals land where they should — a death before 20 September 1985, and the
+deceased acquiring after they died — and 20 September 1985 itself is accepted
+(K-03, K-05). LPR expenditure is refused without its date, with a date before
+the death, and as a date with no amount (K-04). The parcel then behaves like
+any other Buy: a demerger carries the deceased's clock into *both* the head and
+demerged replacement parcels and splits the cost base by the action's
+percentage (K-08); an account transfer carries the clock across too; an AMMA
+statement for the year of death generates its adjustment over the inherited
+parcel and the CGT event E10 per-unit reduction lands on the carried cost base,
+with the cross-check silent when the units agree and naming the difference when
+they do not (K-07). Recording an inheritance stales the snapshots covering its
+date, every edit and the delete are in `row_history`, deleting the listing is
+refused naming `inheritances`, and the linked Buy is refused individually by
+both `PUT` and `DELETE /trades` — while an edit or delete of the inheritance
+itself is refused the moment a sale allocation, an AMIT adjustment, or a
+rollover's closing Sell draws on the parcel (K-08, K-10). K-09 is the documented
+boundary it claims to be: one taxpayer, so the beneficiary records their own
+share, and a part share (fractional units included) enters cleanly.
+
+The six findings fall into the same three groups section J's did. What a row is
+allowed to say: `validate()` covers the quantity, the amounts, the dates and the
+rule pairing but says nothing about `fx_rate` or the currency, so a non-positive
+rate and a currency conflicting with a return of capital on the listing both
+ride through the write and surface as a **500** from every cost-base report
+(the parcel Buy is `INSERT`ed directly rather than through `trade::db_upsert`,
+which refuses both), and a currency other than the listing's reaches the parcel
+unchallenged. The FX side: `fx_rate` defaults to 1 where `TradeBody`'s is
+required, and `infra::fx` treats it as a *fallback*, so a non-AUD inheritance
+whose acquisition month has no imported rate is costed at parity — and the
+month in question is the **deceased's** acquisition month, routinely decades
+before anything the RBA import covers, so the missing-rate case is the normal
+one; separately, LPR expenditure incurred after the death is folded into the
+same single-rate conversion and translates at that same long-past month
+(A$1,500 where per-element translation gives A$3,000). And what nothing says: a
+duplicated inheritance is caught by no health check though every other
+statement-shaped table now has one, and the `cost_base` figure — the one number
+the whole parcel rests on — has no hint, no documentation of QC 66053's
+recalculate-the-indexation-out rule for a death on or after 21 September 1999,
+and nothing saying it must be apportioned with the units when a holding is split
+between beneficiaries.
+
+| Finding | Scenarios | Status |
+| --- | --- | --- |
+| The inheritance's parcel Buy bypasses the trade write-time checks (a zero FX rate, a return-of-capital currency conflict) | K-01, K-02, K-04 | open — `TODO.md` |
+| A non-AUD inheritance with no rate is costed at parity | K-01, K-04 | open — `TODO.md` |
+| An inheritance recorded in a currency other than its listing's rides through to the parcel | K-01 | open — `TODO.md` |
+| LPR expenditure converts at the parcel's acquisition month, not the month it was incurred | K-04 | open — `TODO.md` (carries a model decision) |
+| A duplicated inheritance is caught by nothing | K-09 | open — `TODO.md` |
+| Nothing states what the deceased's cost-base figure must be net of | K-02, K-09 | open — `TODO.md` |
 
 ---
 

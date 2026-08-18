@@ -11,9 +11,174 @@ findings are all closed in DONE.md), except where a section's heading names anot
 are fixed or decided.
 
 **SCENARIOS.md sections A–J are driven and every finding they raised is closed** in the `DONE/*.md`
-archive — section J. Employee share schemes was driven 2026-08-18, raised eight findings, and all
-eight were closed the same day (see [`DONE/reviews.md`](DONE/reviews.md)).
+archive. **Section K. Inherited parcels** was driven 2026-08-18; the six findings below are its open
+work. When they are closed, the next work comes from driving **SCENARIOS.md section L. Crypto** the
+same way — walk its scenarios against the running system, and record each gap here as its own `## `
+section.
 
-**Nothing is open.** The next work comes from driving **SCENARIOS.md section K. Inherited parcels**
-the same way — walk its scenarios against the running system, and record each gap here as its own
-`## ` section.
+## The inheritance's parcel Buy bypasses the trade write-time checks (SCENARIOS K-01, K-02, K-04)
+(SCENARIOS.md section K verification pass, 2026-08-18. J-03/J-13's finding on the inheritance side:
+`inheritance::db_upsert` writes its parcel Buy with a raw `INSERT INTO trades`, not through
+`trade::db_upsert`, so neither `checks::check_amounts` nor the return-of-capital currency
+cross-check runs. `validate()` covers the quantity, the two amounts, the dates and the rule pairing
+— it says nothing at all about `fx_rate` or the currency, and both gaps land as a **500**, not a
+wrong figure.)
+- [ ] Reproduced — `fx_rate: "0"`: `PUT /inheritances/1` with `currency USD, fx_rate 0` → `204`, and
+  the Buy is stored with `fx_rate 0`. `GET /portfolio/open-parcels` then **panics** —
+  `rust_decimal … Division by zero` inside `infra::fx::apply_rate` (`AUD = foreign / rate`) — so the
+  report answers `500` and every price-free CGT report on that listing is unusable until the row is
+  found and fixed. A negative rate (`-0.65`) is accepted the same way. `PUT /trades` refuses both:
+  "fx_rate must be a positive foreign-per-AUD rate (1 for an AUD trade)"
+- [ ] Reproduced — the return-of-capital currency cross-check: a USD listing carrying an **AUD**
+  `ReturnOfCapital`. `PUT /trades` refuses a USD Buy of it with the full
+  `PaymentCurrencyMismatch` explanation ("a payment reduces each parcel's cost base in the parcel's
+  own currency, and amounts are never netted across currencies, so the two must agree"). The same
+  parcel entered as an inheritance is accepted `204`, and `GET /portfolio/open-parcels` answers
+  `500` — the pipeline's own loud failure, fired at *read* time on every request instead of once at
+  write time with a message naming the fix
+- [ ] The pre-CGT floor — the third thing `check_amounts` enforces — is the one the inheritance path
+  already covers itself (`DeathPreCgt`, and the Buy is dated the death), so it is not at issue here
+- [ ] Fix: route the Buy through `trade::db_upsert` (the shape `4b77972` gave the ESS vest), or at
+  minimum add both checks to `validate()`; either way state in the module doc which trade checks the
+  inheritance satisfies by construction, so the list is visibly deliberate
+- [ ] Tests: a non-positive `fx_rate` is refused `422` (not a 500 from a later report); an
+  inheritance whose currency conflicts with a return of capital on its listing is refused at write
+  time with the same wording `PUT /trades` gives
+- [ ] Docs sync: `docs/API.md` Inheritances + the 422 catalogue
+
+## A non-AUD inheritance with no rate is costed at parity (SCENARIOS K-01, K-04)
+(SCENARIOS.md section K verification pass, 2026-08-18. J-08/J-12 exactly, one entity along.
+`inheritances.fx_rate` defaults to `1` — `InheritanceBody.fx_rate` is `Option<Decimal>` with
+`unwrap_or(Decimal::ONE)`, where `TradeBody.fx_rate` is a **required** field. On the parcel that
+column is not a constant: `infra::fx::pick_rate` treats it as `FxOverride::Fallback`, the rate used
+*when no ATO rate exists for the month*. So the default becomes a real answer exactly when the rate
+is missing, and the answer is 1 AUD per USD.)
+- [ ] Reproduced: a USD listing, `cost_base 3000`, `currency USD`, no `fx_rate` given and no
+  `rba_fx_rates` row for the acquisition month → `204`, and `GET /portfolio/open-parcels` reports
+  `original_cost_base 3000` — a **US$3,000 parcel costed at A$3,000**, with nothing marked
+  provisional
+- [ ] The exposure is larger here than it was for ESS, because the translation month is the
+  *parcel's* (`ParcelRow::acquired()`): under `DeceasedCostBase` that is the **deceased's**
+  acquisition month, which for an inherited holding is routinely decades before anything the RBA
+  import covers. The missing-rate case is the normal case, not the edge case
+- [ ] Precedent to copy: `ef479dd` gave `ess_statements` an `fx_rate` column and made the vest bind
+  the statement's stated rate, else the taxing-point month's ATO rate, else refuse
+  ("vesting an ESS statement whose currency has no imported ATO rate for the taxing point's month
+  and that states no `fx_rate` of its own (the parcel would be costed at parity)"). The column
+  already exists here; what is missing is the refusal
+- [ ] Fix: at write time, when `currency` is not AUD and no `fx_rate` was **stated**, resolve the
+  acquisition month's ATO rate and refuse `422` when there is none. Note the wrinkle the ESS fix did
+  not have: `fx_rate` defaults to 1 rather than being absent, so "stated" has to be distinguishable
+  from "defaulted" — either make the body field required for a non-AUD inheritance, or refuse
+  `fx_rate = 1` on a non-AUD row (the honest reading: parity is not a rate anyone states)
+- [ ] Tests: a non-AUD inheritance with neither a stated rate nor an imported month is refused; with
+  a stated rate it converts at it; with the month imported it converts at the ATO rate; an AUD
+  inheritance is unaffected
+- [ ] Docs sync: `docs/API.md` Inheritances + the 422 catalogue, `docs/SCHEMA.md` (`inheritances.fx_rate`)
+
+## An inheritance recorded in a currency other than its listing's rides through to the parcel (SCENARIOS K-01)
+(SCENARIOS.md section K verification pass, 2026-08-18. `inheritance::db_upsert` never compares
+`currency` with the listing's, and the linked Buy takes the inheritance's currency verbatim. The
+same finding closed for ESS statements in `ef479dd` and for DRP distributions in `450b887`.)
+- [ ] Reproduced: an **AUD** listing with `currency: "USD"` on the inheritance → `204`, and the
+  parcel is a USD-costed holding of an AUD-priced security. Any closing price for it comes from the
+  exchange in AUD, so the unrealised-gains and portfolio screens compare a USD cost base against an
+  AUD market value
+- [ ] The argument is the one already accepted twice: a parcel's cost base and its market price are
+  the same money. For an inheritance it is sharper still — under `MarketValueAtDeath` the figure
+  entered *is* a market value of that listed security
+- [ ] Fix: refuse at write time in `db_upsert`, `422` naming both currencies, matching
+  `ess_statement`'s wording ("the per-share market value and the listed price are the same money")
+- [ ] Tests: an inheritance whose currency differs from its listing's is refused; the matching case
+  is unaffected
+- [ ] Docs sync: `docs/API.md` Inheritances + the 422 catalogue
+
+## LPR expenditure converts at the parcel's acquisition month, not the month it was incurred (SCENARIOS K-04)
+(SCENARIOS.md section K verification pass, 2026-08-18. `db_upsert` folds the LPR expenditure into
+the Buy's single `brokerage` figure, so `domain::cost_base` translates the whole parcel — first
+element *and* LPR expenditure together — at one rate: the parcel's (possibly deemed) acquisition
+month. Under `DeceasedCostBase` that month is the **deceased's acquisition**, while the LPR incurred
+the expense after the death, by definition a later month and often a much later one.)
+- [ ] Reproduced: a USD listing; deceased acquired 2015-05-05, died 2024-03-01; `cost_base` US$2,000
+  and `lpr_expenditure` US$1,000 incurred 2024-06-01. Rates imported: `USD 2015-05 = 2`,
+  `USD 2024-06 = 0.5`. `GET /portfolio/open-parcels` reports `original_cost_base 1500` (US$3,000 ÷ 2).
+  Translating each element at its own month gives A$1,000 + A$2,000 = **A$3,000** — the LPR element
+  is understated 4×, and it moves the reported cost base by 50%
+- [ ] The existing Known limitation does not cover it. "Cost-base FX timing" (2026-07-13) is about
+  the AMIT/return-of-capital **reductions** and argues the single rate "keeps each parcel's
+  cost-base breakdown internally consistent"; it also says the simplification "only bites on a
+  non-AUD holding receiving non-AUD AMIT/return-of-capital reductions, which in practice does not
+  arise". An LPR expense on an inherited foreign parcel is an **addition**, is dated by the user on
+  the row itself, and does arise. `inheritance.rs`'s module doc mentions the single-rate treatment
+  ("LPR expenditure translates with the parcel; its own incurral date is provenance only") but ties
+  it to indexation, and no user-facing surface says it at all
+- [ ] The ATO position: s 960-50(6) translates each amount at its own transaction time
+  (`docs/ato/forex-common-transactions.md`, QC 18322 — Lisa's cost base and proceeds each translate
+  at their own date), and QC 66053 has the LPR expense "included on the date the LPR incurred it"
+- [ ] **Decide the model** (an `AskUserQuestion` for Evan, not a silent call). (a) **Translate the
+  LPR element at its own month** — correct per s 960-50(6), but it means the parcel's cost base is
+  no longer one currency amount at one rate: either the Buy carries the LPR expenditure in a second
+  column the pipeline converts separately, or the inheritance stores the LPR expenditure already in
+  AUD. Breaks the "initial − reductions = adjusted holds in the native currency" property the
+  pipeline currently guarantees. (b) **Give `lpr_expenditure` its own currency column** and require
+  it in AUD (the realistic case: an Australian LPR bills an Australian estate in AUD, whatever the
+  shares are denominated in), converting nothing — narrower than (a) and matches how the expense is
+  actually incurred. (c) **Document it** as a Known limitation and say so in the field hint —
+  cheapest, and consistent with the 2026-07-13 FX-timing cut, but it leaves a wrong figure the user
+  has to fix by hand. (b) looks strongest: the mismatch is not really an FX-timing subtlety, it is
+  that an AUD fee has nowhere to be recorded as AUD
+- [ ] Tests: whichever model is chosen, a foreign inherited parcel with LPR expenditure reports the
+  element at its own rate/currency, and the AUD case is unchanged
+- [ ] Docs sync: `docs/SCHEMA.md` (`inheritances`), `docs/API.md` (Inheritances, Known limitations,
+  the FX-conversion section), README's inherited-parcels feature line
+
+## A duplicated inheritance is caught by nothing (SCENARIOS K-09)
+(SCENARIOS.md section K verification pass, 2026-08-18. The G-24 / H / J-11 pattern, one table
+further on: every other statement-shaped fact table now has a duplicate health check —
+`duplicate_income`, `duplicate_interest`, `duplicate_expenses`, `duplicate_amma_statements`,
+`duplicate_ess_statements`, `duplicate_actions` — and `inheritances` has none, though it is the same
+shape: a document-derived row, re-entered by hand, that creates a **parcel**.)
+- [ ] Reproduced: two identical inheritances (same listing, account, date of death, quantity, cost
+  base and rule) → two parcels of 100 units each, `GET /reports/health` completely silent. The
+  holding is doubled and so is every cost base and gain computed off it
+- [ ] The duplicate is indistinguishable from the legitimate case only by its *figures*, which is
+  exactly what the existing checks key on: K-09 (two beneficiaries, or two deaths, or the same death
+  across two accounts) all differ in quantity, cost base or account, so a check keyed on identical
+  figures stays silent for them. Follow `duplicate_ess_statements` exactly — grouped in Rust because
+  the amounts are TEXT decimals SQL would compare as strings
+- [ ] Fix: `duplicate_inheritances` in `reports::health` + the web UI banner, keyed on (listing,
+  holding account, date of death) *plus* identical quantity, cost base, rule and LPR figures
+- [ ] Tests: two identical inheritances are reported; two differing in quantity or account are not
+- [ ] Docs sync: `docs/API.md` Health, README's health-check feature line
+
+## Nothing states what the deceased's cost-base figure must be net of (SCENARIOS K-02, K-09)
+(SCENARIOS.md section K verification pass, 2026-08-18. The G-03/G-04 shape: the figure is entered by
+hand, one number, and two ATO rules about what that number must already have had done to it are
+recorded nowhere the user will see. `cost_base`'s form field is labelled "Cost base" and carries no
+hint, where `lpr_expenditure`, `lpr_expenditure_date` and `deceased_acquisition_date` — the fields
+with rules attached — each carry one, and the per-rule `typeDescs` prose describes *which* figure
+to enter without saying what it must be net of.)
+- [ ] **Indexation recalculated out.** QC 66053 (`docs/ato/inherited-assets-cost-base.md`): where
+  the deceased died **on or after 21 September 1999**, indexation is unavailable to the beneficiary
+  "and any indexation inside the deceased's cost base must be recalculated out". A deceased who
+  acquired before 21 September 1999 may well have been carrying an indexed cost base, so the figure
+  copied off the estate's records is the wrong one — silently overstating the cost base and
+  understating every later gain. Nothing in the UI, `docs/API.md` or the README says this; the
+  mirror says it and is not a user surface. The existing Known-limitations entry covers only the
+  indexation *alternative* not being modelled, which is the opposite direction
+- [ ] **Apportionment between beneficiaries.** K-09 verified as the documented boundary — one
+  taxpayer, so the beneficiary records their own share and there is nowhere to represent the other
+  beneficiaries — and entering a part share works cleanly (500 of the estate's 1,000 units at
+  $10,000 of its $20,000 cost base gives the expected parcel, fractional quantities included). What
+  is missing is that the *cost base* must be apportioned with the units: a user who takes half a
+  holding and types the deceased's whole cost base doubles their cost base, and no check can see it
+  (a 500-unit inheritance at a $20,000 cost base is a perfectly ordinary row). The Known-limitations
+  entry says only that the estate/LPR side is out of scope
+- [ ] Fix (documentation, unless Evan wants more): a hint on the `cost_base` field for each rule
+  (`typeDescs` already carries per-rule prose to extend), a sentence in `docs/API.md`'s Inheritances
+  section, and an extension of the inherited-parcels Known limitation. A `doc_checks.rs` test pins
+  the text, per the "a doc-only requirement is done when a test asserts it" rule
+- [ ] Tests: `doc_checks.rs` assertions on the API.md/README text, and the served-bundle assertion
+  for the field hints
+- [ ] Docs sync: `docs/API.md` (Inheritances + Known limitations), README's inherited-parcels
+  feature line, `src/web/config.js`

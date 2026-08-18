@@ -961,6 +961,188 @@ mod tests {
         assert_eq!(after.non_discountable_gain, Decimal::ZERO);
     }
 
+    /// The inherited parcel's two dates do different jobs, and a corporate
+    /// action must read the *death*, not the deceased's acquisition
+    /// (SCENARIOS K-01, K-04). A return of capital paid while the deceased
+    /// still held the units was received by them — it is already inside the
+    /// cost base at death that carries over (QC 66053), so it must not
+    /// reduce the beneficiary's parcel a second time; one paid after the
+    /// death reaches it as CGT event G1 like any parcel's.
+    #[tokio::test]
+    async fn a_payment_before_the_death_does_not_reduce_the_inherited_parcel() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AUD").await;
+        // Deceased acquired 2020-02-01, died 2025-01-10, $3,200 cost base.
+        db_upsert(&pool, &post_cgt(1)).await.unwrap();
+        let api = ApiClient::full(&pool);
+
+        // $1.00/unit paid while the deceased held the units, and $2.00/unit
+        // paid after the beneficiary inherited them.
+        for (id, date, amount) in [(1, "2022-06-01", "1.00"), (2, "2025-06-01", "2.00")] {
+            api.put_ok(
+                &format!("/corporate_actions/{id}"),
+                &serde_json::json!({
+                    "listing_id": 1, "date": date, "action_type": "ReturnOfCapital",
+                    "amount_per_unit": amount, "currency": "AUD",
+                }),
+            )
+            .await;
+        }
+
+        let parcels = crate::domain::open_parcels::load(&mut *pool.acquire().await.unwrap(), None)
+            .await
+            .unwrap();
+        assert_eq!(parcels.len(), 1);
+        // Only the post-death payment: 100 × $2.00, not 100 × $3.00.
+        assert_eq!(parcels[0].cost_base.roc_reduction, dec("200"));
+        assert_eq!(parcels[0].cost_base.adjusted, dec("3000"));
+    }
+
+    /// The same division of labour for a split: the inherited quantity is
+    /// stated in date-of-death terms, so a split *before* the death is
+    /// already in it and must not re-base the parcel — even though the
+    /// discount clock reaches back past it to the deceased's acquisition
+    /// (SCENARIOS K-01).
+    #[tokio::test]
+    async fn a_split_before_the_death_does_not_rebase_the_inherited_quantity() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AUD").await;
+        db_upsert(&pool, &post_cgt(1)).await.unwrap();
+        let api = ApiClient::full(&pool);
+
+        // A 2-for-1 split after the deceased acquired but before they died.
+        api.put_ok(
+            "/corporate_actions/1",
+            &serde_json::json!({
+                "listing_id": 1, "date": "2022-06-01", "action_type": "ShareSplit",
+                "split_new_units": "2", "split_old_units": "1",
+            }),
+        )
+        .await;
+
+        let parcels = crate::domain::open_parcels::load(&mut *pool.acquire().await.unwrap(), None)
+            .await
+            .unwrap();
+        assert_eq!(parcels.len(), 1);
+        assert_eq!(
+            parcels[0].remaining_as_of,
+            dec("100"),
+            "not re-based to 200"
+        );
+        assert_eq!(parcels[0].parcel.acquired(), ymd(2020, 2, 1));
+    }
+
+    /// K-08: an inherited parcel that is subsequently demerged. The rollover
+    /// carries the *deceased's* acquisition date into both the head and the
+    /// demerged replacement parcels, so each still discounts off s 115-30 and
+    /// not off the demerger date, and the cost base splits by the action's
+    /// percentage.
+    #[tokio::test]
+    async fn a_demerged_inherited_parcel_carries_the_deceaseds_clock() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AUD").await;
+        insert_listing(&pool, 2, "AUD").await;
+        db_upsert(&pool, &post_cgt(1)).await.unwrap();
+        let api = ApiClient::full(&pool);
+
+        api.put_ok(
+            "/corporate_actions/1",
+            &serde_json::json!({
+                "listing_id": 1, "date": "2025-09-01", "action_type": "Demerger",
+                "demerger_listing_id": 2, "demerger_new_units": "1",
+                "demerger_held_units": "5", "demerger_cost_base_pct": "10",
+            }),
+        )
+        .await;
+        api.post("/corporate_actions/1/demerge", &serde_json::json!({}))
+            .await
+            .expect_status(StatusCode::CREATED);
+
+        let parcels = crate::domain::open_parcels::load(&mut *pool.acquire().await.unwrap(), None)
+            .await
+            .unwrap();
+        let head = parcels
+            .iter()
+            .find(|p| p.parcel.listing_id == 1)
+            .expect("head parcel");
+        let demerged = parcels
+            .iter()
+            .find(|p| p.parcel.listing_id == 2)
+            .expect("demerged parcel");
+        assert_eq!(head.parcel.acquired(), ymd(2020, 2, 1));
+        assert_eq!(demerged.parcel.acquired(), ymd(2020, 2, 1));
+        assert_eq!(head.cost_base.adjusted, dec("2880"), "90% of $3,200");
+        assert_eq!(demerged.cost_base.adjusted, dec("320"), "10% of $3,200");
+        assert_eq!(demerged.remaining_as_of, dec("20"), "1 new unit per 5 held");
+
+        // The closing Sell now draws on the inherited parcel, so the
+        // inheritance itself is frozen.
+        let refused = api.delete("/inheritances/1").await;
+        let (status, body) = refused.status_and_body();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(body.contains("drawn on"), "body: {body}");
+    }
+
+    /// K-07: an inherited parcel of an AMIT fund, with the fund's AMMA
+    /// statement for the year of death. The statement's units are the ones
+    /// the beneficiary held at year end, so generation covers the inherited
+    /// parcel and its per-unit CGT event E10 reduction reaches the carried
+    /// cost base.
+    #[tokio::test]
+    async fn an_amma_statement_for_the_year_of_death_adjusts_the_inherited_parcel() {
+        let pool = test_pool().await;
+        test_support::listing(1)
+            .ticker("VDHG")
+            .name("Vanguard Diversified High Growth")
+            .amit(true)
+            .amit_from(ymd(2015, 7, 1))
+            .insert(&pool)
+            .await;
+        // Died 2024-11-15, mid-FY2025: 1,000 units at a $50,000 cost base.
+        let inherited = Inheritance {
+            quantity: dec("1000"),
+            date_of_death: ymd(2024, 11, 15),
+            cost_base: dec("50000"),
+            lpr_expenditure: Decimal::ZERO,
+            lpr_expenditure_date: None,
+            deceased_acquisition_date: Some(ymd(2018, 3, 1)),
+            ..post_cgt(1)
+        };
+        db_upsert(&pool, &inherited).await.unwrap();
+        let api = ApiClient::full(&pool);
+
+        api.put_ok(
+            "/amma_statements/1",
+            &serde_json::json!({
+                "listing_id": 1, "tax_year_end_date": "2025-06-30", "units_held": "1000",
+                "date_received": "2025-08-01", "australian_dividends_unfranked": "300",
+                "cost_base_adjustment": "0.25", "holding_account_id": 1,
+            }),
+        )
+        .await;
+        api.post(
+            "/amma_statements/1/generate_adjustments",
+            &serde_json::json!({}),
+        )
+        .await
+        .expect_status(StatusCode::CREATED);
+
+        let parcels = crate::domain::open_parcels::load(&mut *pool.acquire().await.unwrap(), None)
+            .await
+            .unwrap();
+        assert_eq!(parcels.len(), 1);
+        // 1,000 × $0.25 off the carried $50,000, per CGT event E10.
+        assert_eq!(parcels[0].cost_base.amit_reduction, dec("250.00"));
+        assert_eq!(parcels[0].cost_base.adjusted, dec("49750.00"));
+        assert_eq!(parcels[0].parcel.acquired(), ymd(2018, 3, 1));
+
+        // Nothing is left unexplained: the statement's units and the units
+        // adjusted agree, so the cross-check is silent.
+        let problems: Vec<serde_json::Value> =
+            api.get_json("/reports/amit_adjustment_cross_check").await;
+        assert!(problems.is_empty(), "cross-check: {problems:?}");
+    }
+
     // API-level tests
 
     #[tokio::test]
