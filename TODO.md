@@ -12,9 +12,7 @@ are fixed or decided.
 
 **SCENARIOS.md sections A–J are driven and every finding they raised is closed** in the `DONE/*.md`
 archive. **Section K. Inherited parcels** was driven 2026-08-18; it raised six findings, and the
-two below are the ones still open (the four closed so far — the parcel Buy bypassing the trade
-write-time checks, a non-AUD inheritance costed at parity, a currency other than the listing's, and
-the missing duplicate-inheritance health check — are archived in
+one below is the only one still open (the other five are closed and archived in
 [`DONE/reviews.md`](DONE/reviews.md)). When they are closed, the next work comes from driving **SCENARIOS.md section L. Crypto** the
 same way — walk its scenarios against the running system, and record each gap here as its own `## `
 section.
@@ -58,34 +56,3 @@ the expense after the death, by definition a later month and often a much later 
 - [ ] Docs sync: `docs/SCHEMA.md` (`inheritances`), `docs/API.md` (Inheritances, Known limitations,
   the FX-conversion section), README's inherited-parcels feature line
 
-## Nothing states what the deceased's cost-base figure must be net of (SCENARIOS K-02, K-09)
-(SCENARIOS.md section K verification pass, 2026-08-18. The G-03/G-04 shape: the figure is entered by
-hand, one number, and two ATO rules about what that number must already have had done to it are
-recorded nowhere the user will see. `cost_base`'s form field is labelled "Cost base" and carries no
-hint, where `lpr_expenditure`, `lpr_expenditure_date` and `deceased_acquisition_date` — the fields
-with rules attached — each carry one, and the per-rule `typeDescs` prose describes *which* figure
-to enter without saying what it must be net of.)
-- [ ] **Indexation recalculated out.** QC 66053 (`docs/ato/inherited-assets-cost-base.md`): where
-  the deceased died **on or after 21 September 1999**, indexation is unavailable to the beneficiary
-  "and any indexation inside the deceased's cost base must be recalculated out". A deceased who
-  acquired before 21 September 1999 may well have been carrying an indexed cost base, so the figure
-  copied off the estate's records is the wrong one — silently overstating the cost base and
-  understating every later gain. Nothing in the UI, `docs/API.md` or the README says this; the
-  mirror says it and is not a user surface. The existing Known-limitations entry covers only the
-  indexation *alternative* not being modelled, which is the opposite direction
-- [ ] **Apportionment between beneficiaries.** K-09 verified as the documented boundary — one
-  taxpayer, so the beneficiary records their own share and there is nowhere to represent the other
-  beneficiaries — and entering a part share works cleanly (500 of the estate's 1,000 units at
-  $10,000 of its $20,000 cost base gives the expected parcel, fractional quantities included). What
-  is missing is that the *cost base* must be apportioned with the units: a user who takes half a
-  holding and types the deceased's whole cost base doubles their cost base, and no check can see it
-  (a 500-unit inheritance at a $20,000 cost base is a perfectly ordinary row). The Known-limitations
-  entry says only that the estate/LPR side is out of scope
-- [ ] Fix (documentation, unless Evan wants more): a hint on the `cost_base` field for each rule
-  (`typeDescs` already carries per-rule prose to extend), a sentence in `docs/API.md`'s Inheritances
-  section, and an extension of the inherited-parcels Known limitation. A `doc_checks.rs` test pins
-  the text, per the "a doc-only requirement is done when a test asserts it" rule
-- [ ] Tests: `doc_checks.rs` assertions on the API.md/README text, and the served-bundle assertion
-  for the field hints
-- [ ] Docs sync: `docs/API.md` (Inheritances + Known limitations), README's inherited-parcels
-  feature line, `src/web/config.js`

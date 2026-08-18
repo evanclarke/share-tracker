@@ -2167,3 +2167,62 @@ part interest in a different quantity, the same figures in another holding accou
 figures on another listing — all silent), plus the served-bundle assertion in `web.rs` for the
 banner text and its Inheritances link. Docs: `docs/API.md`'s Health list and response shape, and
 the README health feature line.
+
+## Nothing states what the deceased's cost-base figure must be net of (SCENARIOS K-02, K-09)
+(SCENARIOS.md section K verification pass, 2026-08-18. The G-03/G-04 shape: the figure is entered by
+hand, one number, and two ATO rules about what that number must already have had done to it are
+recorded nowhere the user will see. `cost_base`'s form field is labelled "Cost base" and carries no
+hint, where `lpr_expenditure`, `lpr_expenditure_date` and `deceased_acquisition_date` — the fields
+with rules attached — each carry one, and the per-rule `typeDescs` prose describes *which* figure
+to enter without saying what it must be net of.)
+- [x] **Indexation recalculated out.** QC 66053 (`docs/ato/inherited-assets-cost-base.md`): where
+  the deceased died **on or after 21 September 1999**, indexation is unavailable to the beneficiary
+  "and any indexation inside the deceased's cost base must be recalculated out". A deceased who
+  acquired before 21 September 1999 may well have been carrying an indexed cost base, so the figure
+  copied off the estate's records is the wrong one — silently overstating the cost base and
+  understating every later gain. Nothing in the UI, `docs/API.md` or the README says this; the
+  mirror says it and is not a user surface. The existing Known-limitations entry covers only the
+  indexation *alternative* not being modelled, which is the opposite direction
+- [x] **Apportionment between beneficiaries.** K-09 verified as the documented boundary — one
+  taxpayer, so the beneficiary records their own share and there is nowhere to represent the other
+  beneficiaries — and entering a part share works cleanly (500 of the estate's 1,000 units at
+  $10,000 of its $20,000 cost base gives the expected parcel, fractional quantities included). What
+  is missing is that the *cost base* must be apportioned with the units: a user who takes half a
+  holding and types the deceased's whole cost base doubles their cost base, and no check can see it
+  (a 500-unit inheritance at a $20,000 cost base is a perfectly ordinary row). The Known-limitations
+  entry says only that the estate/LPR side is out of scope
+- [x] Fix (documentation, unless Evan wants more): a hint on the `cost_base` field for each rule
+  (`typeDescs` already carries per-rule prose to extend), a sentence in `docs/API.md`'s Inheritances
+  section, and an extension of the inherited-parcels Known limitation. A `doc_checks.rs` test pins
+  the text, per the "a doc-only requirement is done when a test asserts it" rule
+- [x] Tests: `doc_checks.rs` assertions on the API.md/README text, and the served-bundle assertion
+  for the field hints
+- [x] Docs sync: `docs/API.md` (Inheritances + Known limitations), README's inherited-parcels
+  feature line, `src/web/config.js`
+
+**Resolution (2026-08-18): documented on every surface, and the mirror it rests on refreshed.**
+
+Re-fetching QC 66053 to check the indexation wording found the page had moved on since the
+2026-06-10 capture (now "last updated 22 June 2026"): the Maria example's dates had rolled forward,
+several rules the mirror had *summarised* are now quoted, and a whole **"Legal costs incurred by a
+legal personal representative"** section with two worked examples (Annie — probate and
+will-validity costs are in the cost base; Cassie — the same solicitor's pre-death charges are not)
+had been added. `docs/ato/inherited-assets-cost-base.md` is rebuilt from that fetch, and the
+companion QC 69713 mirror was re-verified word for word (only its "last updated" moved).
+
+The indexation rule is verbatim: "If the deceased died on or after 21 September 1999, you can't use
+indexation. If the deceased's cost base includes indexation, you must recalculate the first element
+of your cost base to exclude it."
+
+Both conventions are now stated where the figure is typed — a new **"What the `cost_base` figure
+must already be net of"** block in `docs/API.md`'s Inheritances section, the inherited-parcels
+Known limitation, the README feature line, and a hint on the `cost_base` field itself ("Your share
+of it: half the units carry half the deceased's cost base…"). The LPR field's hint gained the
+Annie/Cassie test ("what the LPR incurred administering the estate… Not anything billed before the
+death"), and the section now says that several LPR expenses are entered as their total, since one
+row carries one figure and one date and nothing reads the date.
+
+Tests: `doc_checks::inherited_cost_base_entry_conventions_documented` pins the mirror's three
+quotes, its refreshed provenance header, its presence in the ATO index, both conventions in the
+Inheritances section, both in the Known limitation, and the README line; the served-bundle
+assertions in `web.rs`'s `inheritance_ui_present` pin the two field hints.

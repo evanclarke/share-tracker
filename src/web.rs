@@ -956,6 +956,14 @@ mod tests {
         assert!(js.contains("lpr_expenditure"));
         assert!(js.contains("lpr_expenditure_date"));
         assert!(js.contains("'lpr_expenditure'"));
+        // The two conventions the cost-base figure carries, where it is typed
+        // (SCENARIOS K-02, K-09), and the LPR test beside its own field.
+        assert!(js.contains("half the units carry half the deceased\u{2019}s cost base"));
+        assert!(js.contains("recalculated out first (QC 66053)"));
+        assert!(js.contains("what the LPR incurred administering the estate"));
+        assert!(js.contains("Not anything billed before the death"));
+        // …and that the FX fallback names the month it would apply to.
+        assert!(js.contains("a non-AUD inheritance with no rate either way is refused"));
     }
 
     #[tokio::test]

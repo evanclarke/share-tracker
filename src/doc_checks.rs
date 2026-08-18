@@ -1783,6 +1783,68 @@ fn multi_year_expense_apportionment_documented() {
     assert!(column.contains("expense-time-apportionment.md"), "{column}");
 }
 
+/// Docs-sync pin for what the inherited `cost_base` figure must already be net
+/// of (SCENARIOS K-02, K-09). It is one number typed off an estate's records,
+/// and two ATO rules can make it wrong in a way no stored fact can check — the
+/// indexation a pre-1999 acquirer may have been carrying, and the
+/// apportionment a holding split between beneficiaries needs. Neither is
+/// modellable here (the estate side and the other beneficiaries are both out of
+/// scope), so the requirement is satisfied by documentation, and these pin it
+/// on every surface plus the mirror it rests on.
+#[test]
+fn inherited_cost_base_entry_conventions_documented() {
+    const INHERITED_COST_BASE: &str = include_str!("../docs/ato/inherited-assets-cost-base.md");
+    const ATO_OVERVIEW: &str = include_str!("../docs/ato/OVERVIEW.md");
+    let flat = |s: &str| {
+        s.replace('>', " ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+
+    // The mirror carries the indexation rule verbatim, and the LPR test the
+    // field's own hint rests on — both re-fetched 2026-08-18, when the page
+    // had gained the legal-costs section.
+    assert!(flat(INHERITED_COST_BASE).contains(
+        "If the deceased died on or after 21 September 1999, you can't use indexation. If the \
+         deceased's cost base includes indexation, you must recalculate the first element of \
+         your cost base to exclude it."
+    ));
+    assert!(
+        flat(INHERITED_COST_BASE)
+            .contains("You include the expenditure on the date the LPR incurred it.")
+    );
+    assert!(flat(INHERITED_COST_BASE).contains(
+        "if a LPR incurs costs to confirm the validity of the deceased's will or defend a claim \
+         for control of the estate, these costs form part of the cost base of the estate's assets"
+    ));
+    assert!(flat(INHERITED_COST_BASE).contains(
+        "Any charges for Cassie's solicitor services prior to the deceased's death can't be \
+         included in the cost base of the estate's assets."
+    ));
+    assert!(INHERITED_COST_BASE.contains("QC 66053, last updated 22 June 2026"));
+    assert!(INHERITED_COST_BASE.contains("re-fetched and expanded 2026-08-18"));
+    assert!(ATO_OVERVIEW.contains("inherited-assets-cost-base.md"));
+
+    // The entity's own section states both conventions where the row is
+    // written, with the rule cited.
+    assert!(API_MD.contains("**What the `cost_base` figure must already be net of.**"));
+    assert!(API_MD.contains(
+        "**Indexation is recalculated out** where the death was **on or after 21 September 1999**"
+    ));
+    assert!(API_MD.contains("**It is apportioned with the units.**"));
+    assert!(API_MD.contains("half the units carry half the deceased's cost base"));
+    // …and the LPR test, so a pre-death solicitor's bill is not entered.
+    assert!(API_MD.contains("anything the same solicitor billed before the death is out"));
+
+    // The Known limitation says the same, so a reader who never opens the
+    // Inheritances section still meets it.
+    let limits = known_limitations();
+    assert!(limits.contains("indexation recalculated out"));
+    assert!(limits.contains("apportioned to your own share"));
+    assert!(README_MD.contains("the cost base you enter is your own share of it"));
+}
+
 /// Pins for the FreeBSD packaging + versioned-release pipeline (REQUIREMENTS
 /// 2026-07-13). The release workflow and package skeleton are plain text CI
 /// consumes, so these tests keep their load-bearing pieces from silently

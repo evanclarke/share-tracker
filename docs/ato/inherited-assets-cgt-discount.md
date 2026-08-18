@@ -2,10 +2,11 @@
 
 > **Source:**
 > https://www.ato.gov.au/individuals-and-families/investments-and-assets/capital-gains-tax/inherited-assets-and-capital-gains-tax/how-cgt-applies-to-inherited-assets
-> ("How CGT applies to inherited assets", QC 69713, last updated 6 November 2025), part of
+> ("How CGT applies to inherited assets", QC 69713, last updated 22 June 2026), part of
 > https://www.ato.gov.au/individuals-and-families/investments-and-assets/capital-gains-tax/inherited-assets-and-capital-gains-tax
 > ("Inherited assets and capital gains tax", QC 66052)
-> **Retrieved:** 2026-06-10
+> **Retrieved:** 2026-06-10; **re-verified 2026-08-18** — the page's "last
+> updated" moved but every rule below still matches it word for word.
 > The live ATO site is authoritative; this is a convenience mirror.
 
 ## The 12-month discount clock for an inherited asset
