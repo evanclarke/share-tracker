@@ -278,7 +278,23 @@ function cfiFootnote(inc) {
     + 'Australian resident.');
 }
 
-function incomeSection(inc) {
+// The $1,000 taxed-upfront ESS reduction rests on a condition this system
+// cannot check — the taxpayer's adjusted taxable income for the year being
+// A$180,000 or less — and the printed document is the copy an accountant reads,
+// where `ess_taxed_upfront_reduction` would otherwise be a bare line with an
+// empty ATO label. Same call as `cfiFootnote`: print the condition only when a
+// reduction was actually applied, and say where to record the other answer.
+function essReductionFootnote(lines) {
+  const line = (lines || []).find(function (l) { return l.field === 'ess_taxed_upfront_reduction'; });
+  if (!line || Number(line.value) === 0) return null;
+  return el('p', { class: 'hint' },
+    'The $1,000 taxed-upfront reduction shown in the summary assumes adjusted taxable income of '
+    + '$180,000 or less for this year — a test outside this system\u2019s data. If the year exceeds it, '
+    + 'record the year as ineligible under Tax Year Settings and regenerate: the discount is then '
+    + 'reported unreduced.');
+}
+
+function incomeSection(inc, summaryLines) {
   return el('div', { class: 'doc-section' }, [
     el('h3', null, 'Income'),
     el('h4', null, 'Trust income'),
@@ -294,6 +310,7 @@ function incomeSection(inc) {
     genericTable(inc.interest, ['date_paid', 'source', 'amount_aud', 'foreign_source', 'foreign_tax_paid_aud', 'tfn_withholding_tax_aud']),
     el('h4', null, 'Employee share scheme income'),
     genericTable(inc.ess, ['taxing_point_date', 'ticker', 'taxed_upfront_eligible_aud', 'taxed_upfront_not_eligible_aud', 'deferral_discount_aud', 'pre_2009_cessation_discount_aud']),
+    essReductionFootnote(summaryLines),
     el('h4', null, 'Deductions'),
     genericTable(inc.deductions, ['date_incurred', 'expense_type', 'ticker', 'amount_aud', 'description']),
   ]);
@@ -334,7 +351,7 @@ function renderReport(report) {
     completenessSection(report.completeness),
     disposalsSection(report.disposals),
     cgtSummarySection(report.cgt_summary),
-    incomeSection(report.income),
+    incomeSection(report.income, report.tax_summary),
     taxSummarySection(report.tax_summary),
   ]);
   return wrap;

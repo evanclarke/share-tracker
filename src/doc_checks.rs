@@ -394,6 +394,47 @@ fn known_limitations_document_rsu_dividend_equivalents() {
     assert!(README_MD.contains("ordinary income when paid"));
 }
 
+/// Docs-sync pin for the per-year ESS reduction eligibility flag (SCENARIOS
+/// J-02, 2026-08-18): the ≤A$180,000 income test stays the user's answer, but
+/// it is now *recordable* rather than only documented — the API documents the
+/// entity and what an absent row means, the schema documents the table and its
+/// audit identity, the tax summary says the ineligible year reports unreduced,
+/// and the Known-limitations entry stops calling it merely the user's
+/// responsibility.
+#[test]
+fn per_year_ess_reduction_eligibility_documented() {
+    // The entity section, its default, and the reason it is per year.
+    assert!(API_MD.contains("## Tax year settings"));
+    assert!(API_MD.contains("PUT /tax_year_settings/2026"));
+    assert!(API_MD.contains("**An absent row means every setting takes its default**"));
+    assert!(API_MD.contains(
+        "a single global flag would strip the reduction from years that never crossed the threshold"
+    ));
+    // The tax summary's own wording, and the printed document's footnote.
+    assert!(API_MD.contains("reports its taxed-upfront discount **unreduced**"));
+    assert!(
+        API_MD.contains(
+            "footnotes the condition under its ESS table whenever a reduction was applied"
+        )
+    );
+    // The limitation is now "answered by you", not "unrecordable".
+    assert!(
+        known_limitations().contains("≤A$180,000 income test is answered by you, not computed")
+    );
+    // SCHEMA: the table, its year key, and its audit identity.
+    assert!(
+        SCHEMA_MD.contains("tax_year_settings            Per-financial-year taxpayer settings")
+    );
+    assert!(SCHEMA_MD.contains("ess_taxed_upfront_reduction_eligible INTEGER"));
+    assert!(
+        SCHEMA_MD
+            .contains("for tax_year_settings, whose identity is the financial year, that year")
+    );
+    // README surfaces it where the ESS feature is described.
+    assert!(README_MD.contains("**Tax Year Settings**"));
+    assert!(README_MD.contains("recorded per financial year"));
+}
+
 /// Known-limitation pin (SCENARIOS J-04, 2026-08-18): the ESS 30-day rule is
 /// **detected and named, never applied**. The scope cut is deliberate — the
 /// re-measurement is the employer's amended statement to issue — so the docs

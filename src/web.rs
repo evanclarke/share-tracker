@@ -1550,6 +1550,25 @@ mod tests {
         assert!(js.contains("opening_capital_loss"));
     }
 
+    /// The per-year taxpayer settings screen (SCENARIOS J-02): where an
+    /// ineligible year is recorded, and where the printed report's footnote
+    /// sends the reader.
+    #[tokio::test]
+    async fn tax_year_settings_ui_present() {
+        let js = app_js_body().await;
+        assert!(js.contains("/tax_year_settings"));
+        assert!(js.contains("ess_taxed_upfront_reduction_eligible"));
+        assert!(js.contains("Tax Year Settings"));
+        // The field says what the flag is for and what an absent row means.
+        assert!(js.contains("$180,000 or less"));
+        assert!(js.contains("no row at all) applies the reduction as before"));
+        // The printed annual document footnotes the condition whenever a
+        // reduction was actually applied — the cfiFootnote precedent — and
+        // names where to record the other answer.
+        assert!(js.contains("function essReductionFootnote"));
+        assert!(js.contains("record the year as ineligible under Tax Year Settings"));
+    }
+
     #[tokio::test]
     async fn corporate_actions_ui_present() {
         let js = app_js_body().await;

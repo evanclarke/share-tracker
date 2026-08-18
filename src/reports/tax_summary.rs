@@ -1,6 +1,7 @@
 use crate::domain::tax_year::tax_year_for;
 use crate::entities::income::Income;
 use crate::entities::listing;
+use crate::entities::tax_year_settings;
 use crate::infra::decimal::{parse_dec, row_opt_dec};
 use crate::infra::fx::{FxOverride, FxRates};
 use crate::infra::http::ApiError;
@@ -446,6 +447,12 @@ pub(crate) async fn db_tax_summary_on(
     .fetch_all(&mut *tx)
     .await?;
 
+    // Years the taxpayer recorded as failing the ESS reduction's ≤A$180,000
+    // adjusted-taxable-income test; every other year keeps the reduction (see
+    // `entities::tax_year_settings`). Read on the same snapshot as the
+    // statements it applies to.
+    let ess_ineligible_years = tax_year_settings::db_ineligible_tax_years(&mut *tx).await?;
+
     let expense_rows = sqlx::query(
         "SELECT date_incurred, expense_type, amount, currency FROM investment_expenses",
     )
@@ -616,8 +623,14 @@ pub(crate) async fn db_tax_summary_on(
     }
     // Apply the taxed-upfront $1,000 reduction per year: reduce the assessable
     // discount by min(A$1,000, the year's eligible discount), and surface the
-    // amount applied (the ≤A$180,000 income test is the user's responsibility).
+    // amount applied. The ≤A$180,000 adjusted-taxable-income test is over
+    // income this system does not hold, so it is *recorded* per year rather
+    // than computed — a year the taxpayer marked ineligible gets no reduction
+    // at all, and the discount stands at its full 12D figure (SCENARIOS J-02).
     for (tax_year, eligible_total) in ess_eligible_by_year {
+        if ess_ineligible_years.contains(&tax_year) {
+            continue;
+        }
         let reduction = eligible_total.min(ess_reduction_cap_aud());
         if reduction > Decimal::ZERO {
             let s = map
@@ -1849,6 +1862,75 @@ mod tests {
         assert_eq!(result[0].dividends_assessable, Decimal::ZERO);
         // ESS TFN joins the existing TFN line.
         assert_eq!(result[0].tfn_withholding_tax, Decimal::from(30));
+    }
+
+    /// A year the taxpayer recorded as failing the ≤A$180,000 adjusted-taxable-
+    /// income test gets **no** reduction: the discount stands at its full 12D
+    /// figure (SCENARIOS J-02). Only the flagged year is affected — an
+    /// unflagged year beside it keeps its reduction, which is the whole reason
+    /// the flag is per year rather than a global setting.
+    #[tokio::test]
+    async fn db_ess_reduction_is_withheld_from_a_year_recorded_ineligible() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        let mut fy2025 = make_ess(1, 1, NaiveDate::from_ymd_opt(2024, 9, 1).unwrap());
+        fy2025.taxed_upfront_eligible = Decimal::from(2400);
+        ess_statement::db_upsert(&pool, &fy2025).await.unwrap();
+        let mut fy2026 = make_ess(2, 1, NaiveDate::from_ymd_opt(2025, 9, 1).unwrap());
+        fy2026.taxed_upfront_eligible = Decimal::from(2400);
+        ess_statement::db_upsert(&pool, &fy2026).await.unwrap();
+
+        // Both years reduce while nothing is recorded.
+        let before = db_tax_summary(&pool).await.unwrap();
+        assert_eq!(before[0].ess_discount_assessable, Decimal::from(1400));
+        assert_eq!(before[1].ess_discount_assessable, Decimal::from(1400));
+
+        tax_year_settings::db_upsert(
+            &pool,
+            &tax_year_settings::TaxYearSettings {
+                tax_year: 2026,
+                ess_taxed_upfront_reduction_eligible: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        let after = db_tax_summary(&pool).await.unwrap();
+        assert_eq!(after[0].tax_year, 2025);
+        assert_eq!(after[0].ess_discount_assessable, Decimal::from(1400));
+        assert_eq!(after[0].ess_taxed_upfront_reduction, Decimal::from(1000));
+        assert_eq!(after[1].tax_year, 2026);
+        assert_eq!(
+            after[1].ess_discount_assessable,
+            Decimal::from(2400),
+            "an ineligible year reports the unreduced discount"
+        );
+        assert_eq!(after[1].ess_taxed_upfront_reduction, Decimal::ZERO);
+    }
+
+    /// Recording a year as *eligible* is the same as saying nothing — the
+    /// reduction applies. So an existing database, which has no rows at all,
+    /// cannot have a figure move under it.
+    #[tokio::test]
+    async fn db_a_year_recorded_eligible_keeps_its_reduction() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        let mut e = make_ess(1, 1, NaiveDate::from_ymd_opt(2024, 9, 1).unwrap());
+        e.taxed_upfront_eligible = Decimal::from(2400);
+        ess_statement::db_upsert(&pool, &e).await.unwrap();
+        tax_year_settings::db_upsert(
+            &pool,
+            &tax_year_settings::TaxYearSettings {
+                tax_year: 2025,
+                ess_taxed_upfront_reduction_eligible: true,
+            },
+        )
+        .await
+        .unwrap();
+
+        let result = db_tax_summary(&pool).await.unwrap();
+        assert_eq!(result[0].ess_discount_assessable, Decimal::from(1400));
+        assert_eq!(result[0].ess_taxed_upfront_reduction, Decimal::from(1000));
     }
 
     /// An eligible discount of $1,000 or less is reduced by the whole of it (not

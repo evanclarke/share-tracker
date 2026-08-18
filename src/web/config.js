@@ -426,6 +426,18 @@ export const ENTITIES = [
     fields: [dec('opening_capital_loss', 'Opening capital loss carried forward', { required: true })],
     columns: ['id', 'opening_capital_loss'],
   },
+  {
+    slug: 'tax_year_settings', title: 'Tax Year Settings', menu: 'Activity', api: '/tax_year_settings',
+    desc: 'Taxpayer facts answered year by year, rather than once. Only years that differ from the default need a row at all — an empty list means every year takes the default, which is what the system assumed before this screen existed.',
+    keyFields: [int('tax_year', 'Financial year', { required: true, hint: 'By the calendar year of its 30 June end — FY2025/26 is 2026. From 1986 (CGT starts 20 September 1985).' })],
+    fields: [
+      bool('ess_taxed_upfront_reduction_eligible', '$1,000 ESS reduction: eligible', {
+        default: true,
+        hint: 'The $1,000 taxed-upfront ESS reduction applies only where your adjusted taxable income for the year was $180,000 or less — a test over income this tool cannot see, so it is recorded here. Untick to have the Tax Summary and the Annual Tax Report show the year’s taxed-upfront discount unreduced. Ticked (or no row at all) applies the reduction as before.',
+      }),
+    ],
+    columns: ['tax_year', 'ess_taxed_upfront_reduction_eligible'],
+  },
 ];
 
 // Menu/section placement for the Reports mega-menu: which top-level menu an
@@ -608,9 +620,9 @@ export const REPORTS = [
         'corporate_actions', 'inheritances', 'rights_sales',
         'rights_sale_allocations', 'investment_expenses', 'drp_enrolments',
         'cgt_settings', 'attachments', 'listings', 'listing_renames',
-        'closing_prices',
+        'closing_prices', 'tax_year_settings',
       ], { required: true, default: 'trades' }),
-      int('row_id', 'Row ID', { required: true, hint: "The record's id as shown in its entity list." }),
+      int('row_id', 'Row ID', { required: true, hint: "The record's id as shown in its entity list — for tax_year_settings, the financial year itself (e.g. 2026)." }),
     ],
   },
 ];

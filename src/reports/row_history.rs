@@ -17,10 +17,11 @@ use sqlx::{Row, SqlitePool};
 /// The audited tables, exactly as migration 0013 enumerates them in the
 /// `row_history.table_name` CHECK and its per-table trigger pairs — a test
 /// pins the three lists to each other, and the web UI's table picker is
-/// asserted against this list too. Two joined later: `listing_renames` (0018)
-/// and `closing_prices` (0021, once 0020 made a price hand-enterable), each
-/// migration rebuilding `row_history` to extend the CHECK.
-pub const AUDITED_TABLES: [&str; 19] = [
+/// asserted against this list too. Three joined later: `listing_renames`
+/// (0018), `closing_prices` (0021, once 0020 made a price hand-enterable) and
+/// `tax_year_settings` (0027), each migration rebuilding `row_history` to
+/// extend the CHECK.
+pub const AUDITED_TABLES: [&str; 20] = [
     "trades",
     "parcel_allocations",
     "income",
@@ -40,14 +41,16 @@ pub const AUDITED_TABLES: [&str; 19] = [
     "listings",
     "listing_renames",
     "closing_prices",
+    "tax_year_settings",
 ];
 
 #[derive(Debug, Deserialize)]
 pub struct RowHistoryRequest {
     /// One of [`AUDITED_TABLES`]; anything else is rejected 422.
     pub table: String,
-    /// The audited row's `id`. A row with no recorded history (never updated
-    /// or deleted since the trail began) returns an empty array.
+    /// The audited row's `id` — for `tax_year_settings`, whose identity *is*
+    /// the financial year, that year. A row with no recorded history (never
+    /// updated or deleted since the trail began) returns an empty array.
     pub row_id: i64,
 }
 
@@ -367,36 +370,56 @@ mod tests {
             .await
             .unwrap();
 
-        // (table, insert-if-any, id, editable column, new value)
-        let cases: Vec<(&str, Option<&str>, i64, &str, &str)> = vec![
-            ("trades", None, 1, "quantity", "'42'"),
-            ("parcel_allocations", None, 1, "quantity_allocated", "'4'"),
-            ("income", None, 3, "unfranked_amount", "'9'"),
+        // (table, insert-if-any, key column, key, editable column, new value).
+        // The key column is `id` everywhere but tax_year_settings, which is
+        // keyed on the financial year itself.
+        type UpdateCase = (
+            &'static str,
+            Option<&'static str>,
+            &'static str,
+            i64,
+            &'static str,
+            &'static str,
+        );
+        let cases: Vec<UpdateCase> = vec![
+            ("trades", None, "id", 1, "quantity", "'42'"),
+            (
+                "parcel_allocations",
+                None,
+                "id",
+                1,
+                "quantity_allocated",
+                "'4'",
+            ),
+            ("income", None, "id", 3, "unfranked_amount", "'9'"),
             (
                 "interest_income",
                 Some(
                     "INSERT INTO interest_income (id, date_paid, amount) VALUES (6, '2024-01-01', '5')",
                 ),
+                "id",
                 6,
                 "amount",
                 "'6'",
             ),
-            ("amma_statements", None, 4, "units_held", "'7'"),
+            ("amma_statements", None, "id", 4, "units_held", "'7'"),
             (
                 "amit_adjustments",
                 Some(
                     "INSERT INTO amit_adjustments (id, amma_statement_id, trade_id, quantity) VALUES (8, 4, 1, '1')",
                 ),
+                "id",
                 8,
                 "quantity",
                 "'2'",
             ),
-            ("ess_statements", None, 5, "quantity", "'3'"),
+            ("ess_statements", None, "id", 5, "quantity", "'3'"),
             (
                 "transfers",
                 Some(
                     "INSERT INTO transfers (id, listing_id, date, from_account_id, to_account_id) VALUES (9, 1, '2024-01-01', 1, 2)",
                 ),
+                "id",
                 9,
                 "date",
                 "'2024-01-02'",
@@ -406,6 +429,7 @@ mod tests {
                 Some(
                     "INSERT INTO corporate_actions (id, action_type, listing_id, date, amount_per_unit, currency) VALUES (10, 'ReturnOfCapital', 1, '2024-01-01', '1', 'AUD')",
                 ),
+                "id",
                 10,
                 "amount_per_unit",
                 "'2'",
@@ -415,6 +439,7 @@ mod tests {
                 Some(
                     "INSERT INTO inheritances (id, listing_id, quantity, date_of_death, cost_base_rule, cost_base, deceased_acquisition_date) VALUES (11, 1, '10', '2024-01-01', 'DeceasedCostBase', '100', '2020-01-01')",
                 ),
+                "id",
                 11,
                 "cost_base",
                 "'110'",
@@ -425,6 +450,7 @@ mod tests {
                     "INSERT INTO corporate_actions (id, action_type, listing_id, date, rights_units, rights_held_units, exercise_price, currency) VALUES (12, 'RightsIssue', 1, '2024-01-01', '1', '10', '1', 'AUD'); \
                       INSERT INTO rights_sales (id, rights_action_id, date, units) VALUES (13, 12, '2024-01-02', '5')",
                 ),
+                "id",
                 13,
                 "units",
                 "'4'",
@@ -434,6 +460,7 @@ mod tests {
                 Some(
                     "INSERT INTO rights_sale_allocations (id, rights_sale_id, purchase_trade_id, units) VALUES (14, 13, 1, '5')",
                 ),
+                "id",
                 14,
                 "units",
                 "'4'",
@@ -443,6 +470,7 @@ mod tests {
                 Some(
                     "INSERT INTO investment_expenses (id, date_incurred, expense_type, amount) VALUES (15, '2024-01-01', 'ManagementFee', '10')",
                 ),
+                "id",
                 15,
                 "amount",
                 "'11'",
@@ -452,6 +480,7 @@ mod tests {
                 Some(
                     "INSERT INTO drp_enrolments (id, listing_id, enrolment_date) VALUES (16, 1, '2024-01-01')",
                 ),
+                "id",
                 16,
                 "enrolment_date",
                 "'2024-01-02'",
@@ -459,6 +488,7 @@ mod tests {
             (
                 "cgt_settings",
                 Some("INSERT INTO cgt_settings (id, opening_capital_loss) VALUES (1, '0')"),
+                "id",
                 1,
                 "opening_capital_loss",
                 "'5'",
@@ -468,16 +498,18 @@ mod tests {
                 Some(
                     "INSERT INTO attachments (id, trade_id, filename, content_type, byte_size, checksum, uploaded_at, content) VALUES (17, 1, 'a.pdf', 'application/pdf', 1, 'x', '2024-01-01T00:00:00Z', X'00')",
                 ),
+                "id",
                 17,
                 "filename",
                 "'b.pdf'",
             ),
-            ("listings", None, 2, "name", "'Renamed'"),
+            ("listings", None, "id", 2, "name", "'Renamed'"),
             (
                 "listing_renames",
                 Some(
                     "INSERT INTO listing_renames (id, listing_id, effective_date, old_ticker, new_ticker) VALUES (18, 1, '2024-01-01', 'OLD', 'NEW')",
                 ),
+                "id",
                 18,
                 "note",
                 "'edited note'",
@@ -487,14 +519,25 @@ mod tests {
                 Some(
                     "INSERT INTO closing_prices (id, listing_id, price_date, price, source, fetched_at, status, origin) VALUES (19, 1, '2024-01-02', '10', 'yahoo', '2024-01-02T08:00:00Z', 'ok', 'fetched')",
                 ),
+                "id",
                 19,
                 "price",
                 "'11'",
             ),
+            (
+                "tax_year_settings",
+                Some(
+                    "INSERT INTO tax_year_settings (tax_year, ess_taxed_upfront_reduction_eligible) VALUES (2026, 0)",
+                ),
+                "tax_year",
+                2026,
+                "ess_taxed_upfront_reduction_eligible",
+                "1",
+            ),
         ];
         assert_eq!(cases.len(), AUDITED_TABLES.len());
 
-        for (table, setup, id, column, new_value) in cases {
+        for (table, setup, key_column, id, column, new_value) in cases {
             assert!(AUDITED_TABLES.contains(&table), "{table} not in the const");
             if let Some(setup) = setup {
                 for stmt in setup.split(';') {
@@ -502,7 +545,7 @@ mod tests {
                 }
             }
             sqlx::query(sqlx::AssertSqlSafe(format!(
-                "UPDATE {table} SET {column} = {new_value} WHERE id = {id}"
+                "UPDATE {table} SET {column} = {new_value} WHERE {key_column} = {id}"
             )))
             .execute(&pool)
             .await
@@ -516,31 +559,32 @@ mod tests {
         // the two rows deleted only to clear FK paths — the Sell trade and
         // the RightsIssue action were never updated, so their trail is the
         // single DELETE entry (expected 1).
-        for (table, id, expected) in [
-            ("attachments", 17i64, 2i64),
-            ("rights_sale_allocations", 14, 2),
-            ("rights_sales", 13, 2),
-            ("corporate_actions", 12, 1),
-            ("amit_adjustments", 8, 2),
-            ("parcel_allocations", 1, 2),
-            ("trades", 2, 1),
-            ("investment_expenses", 15, 2),
-            ("drp_enrolments", 16, 2),
-            ("inheritances", 11, 2),
-            ("interest_income", 6, 2),
-            ("transfers", 9, 2),
-            ("income", 3, 2),
-            ("amma_statements", 4, 2),
-            ("ess_statements", 5, 2),
-            ("cgt_settings", 1, 2),
-            ("trades", 1, 2),
-            ("corporate_actions", 10, 2),
-            ("closing_prices", 19, 2),
-            ("listings", 2, 2),
-            ("listing_renames", 18, 2),
+        for (table, key_column, id, expected) in [
+            ("attachments", "id", 17i64, 2i64),
+            ("rights_sale_allocations", "id", 14, 2),
+            ("rights_sales", "id", 13, 2),
+            ("corporate_actions", "id", 12, 1),
+            ("amit_adjustments", "id", 8, 2),
+            ("parcel_allocations", "id", 1, 2),
+            ("trades", "id", 2, 1),
+            ("investment_expenses", "id", 15, 2),
+            ("drp_enrolments", "id", 16, 2),
+            ("inheritances", "id", 11, 2),
+            ("interest_income", "id", 6, 2),
+            ("transfers", "id", 9, 2),
+            ("income", "id", 3, 2),
+            ("amma_statements", "id", 4, 2),
+            ("ess_statements", "id", 5, 2),
+            ("cgt_settings", "id", 1, 2),
+            ("trades", "id", 1, 2),
+            ("corporate_actions", "id", 10, 2),
+            ("closing_prices", "id", 19, 2),
+            ("listings", "id", 2, 2),
+            ("listing_renames", "id", 18, 2),
+            ("tax_year_settings", "tax_year", 2026, 2),
         ] {
             sqlx::query(sqlx::AssertSqlSafe(format!(
-                "DELETE FROM {table} WHERE id = {id}"
+                "DELETE FROM {table} WHERE {key_column} = {id}"
             )))
             .execute(&pool)
             .await
@@ -563,9 +607,9 @@ mod tests {
         let sql = include_str!("../../migrations/0013_row_history.sql");
         // listing_renames (0018) and closing_prices (0021) postdate 0013, and
         // are checked below — every other table was audited from the start.
-        let tables_as_of_0013 = AUDITED_TABLES
-            .into_iter()
-            .filter(|&t| t != "listing_renames" && t != "closing_prices");
+        let tables_as_of_0013 = AUDITED_TABLES.into_iter().filter(|&t| {
+            t != "listing_renames" && t != "closing_prices" && t != "tax_year_settings"
+        });
         let mut count = 0;
         for table in tables_as_of_0013 {
             count += 1;
@@ -755,6 +799,43 @@ mod tests {
                 "both closing_prices triggers must record {col}"
             );
         }
+
+        // 0027 added tax_year_settings (SCENARIOS J-02), which — like 0021 —
+        // needed row_history rebuilt to extend the table_name CHECK, and so
+        // re-created its own append-only guards alongside the new audit pair.
+        // No surrogate key this time: `tax_year` is already an integer
+        // identity, and it is what row_id records.
+        let sql27 = include_str!("../../migrations/0027_tax_year_settings.sql");
+        assert!(
+            sql27.contains("'tax_year_settings'"),
+            "0027 must add tax_year_settings to the table_name CHECK"
+        );
+        for op in ["update", "delete"] {
+            assert!(
+                sql27.contains(&format!(
+                    "CREATE TRIGGER tax_year_settings_row_history_{op} "
+                )),
+                "0027 must create the tax_year_settings {op} trigger"
+            );
+            assert!(
+                sql27.contains(&format!("CREATE TRIGGER row_history_append_only_{op} ")),
+                "0027 must re-create the row_history {op} guard"
+            );
+        }
+        let flat27 = sql27.split_whitespace().collect::<Vec<_>>().join(" ");
+        for col in ["tax_year", "ess_taxed_upfront_reduction_eligible"] {
+            assert_eq!(
+                flat27.matches(&format!("'{col}', OLD.{col}")).count(),
+                2,
+                "both tax_year_settings triggers must record {col}"
+            );
+        }
+        assert_eq!(
+            sql27.matches("OLD.tax_year, 'UPDATE'").count()
+                + sql27.matches("OLD.tax_year, 'DELETE'").count(),
+            2,
+            "row_id is the financial year itself"
+        );
     }
 
     /// The migration is purely additive: it creates the trail and its
