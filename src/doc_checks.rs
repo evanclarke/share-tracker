@@ -716,6 +716,15 @@ fn known_limitations_document_the_brokerage_currency_invariant() {
     assert!(SCHEMA_MD.contains("write-time validated to equal `currency` (422 otherwise)"));
     // Surfaced in the README too.
     assert!(README_MD.contains("**brokerage is billed in the trade's own currency**"));
+
+    // SCENARIOS L-08: the crypto shape of the same rule, and which of its
+    // three cases is a second CGT event.
+    assert!(limitations.contains("**A crypto exchange's fee billed in crypto**"));
+    assert!(limitations.contains("netted out of the units you receive"));
+    assert!(limitations.contains("taken from the units you sold"));
+    assert!(limitations.contains("paid in a third asset you hold"));
+    assert!(limitations.contains("*is* a disposal of those units at their market value"));
+    assert!(limitations.contains("a trade does not"));
 }
 
 /// Docs pin for the return-of-capital currency invariant (SCENARIOS E-07 /

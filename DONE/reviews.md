@@ -2419,3 +2419,79 @@ allocation airdrop: nil cost base, $4,000 gain, $2,000 after the discount) — t
 why Kal, Anastasia, Merindah, Calista, Craig and Bree are not reproduced. `doc_checks::
 known_limitations_document_the_crypto_entry_paths` pins the rewritten entry, each mirror's source
 header, and that OVERVIEW.md indexes all four.
+
+## A trading fee paid in crypto has no stated treatment (SCENARIOS L-08)
+(SCENARIOS.md section L verification pass, 2026-08-18. Exchanges commonly bill the trading fee in a
+crypto asset — the one being traded, or a third token. `PUT /trades` refuses a `brokerage_currency`
+other than the trade's, with the documented "enter it converted into the trade's currency". That is
+right for the *incidental-cost* leg, and silent about the other one: crypto spent on a fee is itself
+a **disposal**, the very rule the holding-account transfer's `fee_allocations` already implements
+for an on-chain network fee.)
+- [x] Reproduced: a 1 BTC buy with `brokerage: "0.001", brokerage_currency: "BTC"` → `422`
+  "brokerage_currency must equal the trade's currency…"; the same fee entered as `"50"` AUD is
+  accepted and lands in the cost base. Nothing anywhere says whether the 0.001 BTC also had to be
+  disposed of — and the answer differs by case
+- [x] The three cases a user actually meets: a fee **netted out of the crypto received** (you simply
+  acquired fewer units — enter the net quantity, no disposal); a fee **taken from the crypto sold**
+  (its AUD value is an incidental cost of the sale — brokerage in the trade's currency, no second
+  disposal); a fee **paid in a third asset you hold** (a disposal of those units at market value,
+  entered as a Sell, *and* the same AUD value as the trade's brokerage). Only the middle one is
+  what the current sentence describes
+- [x] This is live data, not a hypothetical: the 2026-07-13 crypto reconciliation traced a $4.14
+  gap to a Binance trade fee charged in ETH
+- [x] Fix (decision): documentation naming the three cases beside the existing brokerage-currency
+  limitation, or an entry path — `fee_allocations` on a Buy/Sell, the shape `transfers` already has,
+  which would make the disposal atomic with the trade instead of a second row the user must
+  remember
+- [x] Tests: whichever way it goes, a fee-in-crypto entry reports the incidental cost in the cost
+  base and the disposal (where there is one) in the gains reports
+- [x] Docs sync: `docs/API.md` Known limitations (the brokerage-currency entry) + Trades, README
+
+
+**Resolution (2026-08-18): documented, with the three cases separated — Evan chose the paragraph
+over an entry path.**
+
+The brokerage-currency Known limitation now carries the crypto shape of the same rule and says which
+of its three cases is a second CGT event: a fee netted out of the units received is not a fee at all
+(enter the net quantity), a fee taken from the units sold is an incidental cost already inside the
+Sell's quantity (brokerage, no second disposal), and a fee paid in a third asset you hold *is* a
+disposal of those units at market value (a Sell of that listing beside the trade, and the same value
+as the trade's brokerage). The note also says why the disposal leg cannot be inferred: a transfer
+states which parcels were burned to pay its network fee, and a trade does not.
+
+Tests: `doc_checks::known_limitations_document_the_brokerage_currency_invariant` extended to pin the
+three cases and the reason. Docs: `docs/API.md` Known limitations.
+
+## The recognised digital-token list is BTC and ETH until a credentialed import runs (SCENARIOS L-10)
+(SCENARIOS.md section L verification pass, 2026-08-18. A `Crypto` listing's ticker must be a
+`DigitalToken` row in `currencies`. `0001_schema.sql` seeds exactly two — BTC and ETH — and the rest
+come from the ISO 24165 (DTIF) import, which is **skipped with a log warning** unless
+`DTI_REGISTRY_USER_ID` / `DTI_REGISTRY_PASSWORD` are set. Out of the box, therefore, no other crypto
+asset can be recorded at all, and the refusal does not say why or what to do.)
+- [x] Reproduced: `DOGE`, `USDT` and `WETH` are each refused with the same sentence — "a Crypto
+  listing's ticker must be a recognised digital-token code" — with no hint that the list is two rows
+  long, that an import fills it, or that the import needs credentials. The live database confirms
+  the shape: 178 fiat rows, 2 digital-token rows
+- [x] It is what blocks two of this section's own scenarios from being entered under their real
+  tickers (L-06's WETH, L-14's USDT), and would block any real portfolio holding SOL, USDC or ADA
+- [x] The credential requirement *is* documented, in `docs/API.md`'s Currencies import paragraph —
+  which is not where a user meets the problem
+- [x] Fix: name the remedy in the refusal itself (import the ISO 24165 registry; the credentials it
+  needs), and consider a `reports::health` line when the token list is still only the seeds, the way
+  `prices_stale` / `fx_stale` surface a feed that has not run
+- [x] Tests: the refusal names the import; the health line appears only while the list is unimported
+- [x] Docs sync: `docs/API.md` Listings + Currencies, README (setup — what the crypto feature needs
+  before it works)
+
+**Resolution (2026-08-18): the refusal names the remedy — Evan chose the message without a health
+line.**
+
+`listing::UNRECOGNISED_DIGITAL_TOKEN` is now the shared `422` body for both the listing write and
+the rename that can meet the same rule: it says the seeded list is just BTC and ETH and names the
+ISO 24165 (DTIF) import — endpoint and credential environment variables — as the way to widen it.
+The listings screen's description says the same thing where the listing is created, and the API doc
+says it in the crypto-listings paragraph rather than only in the Currencies import section, which is
+not where a user meets the problem.
+
+Tests: `api_invalid_crypto_listings_return_422` extended to pin the remedy in the body. Docs:
+`docs/API.md` Listings, `src/web/config.js`.

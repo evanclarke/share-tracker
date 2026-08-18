@@ -39,7 +39,7 @@ export const ENTITIES = [
   },
   {
     slug: 'listings', title: 'Listings', menu: 'Reference Data', api: '/listings',
-    desc: 'Securities you trade, each on a curated exchange — except Crypto listings, which have no exchange (leave it blank), settle same-day, and need a recognised digital-token ticker (e.g. BTC).',
+    desc: 'Securities you trade, each on a curated exchange — except Crypto listings, which have no exchange (leave it blank), settle same-day, and need a recognised digital-token ticker (e.g. BTC). Only BTC and ETH are recognised until the ISO 24165 (DTIF) registry has been imported \u2014 run the currency-import job with its DTI credentials to widen the list.',
     keyFields: [int('id', 'ID', { auto: true })],
     fields: [
       fk('exchange_mic', 'Exchange', 'exchanges', { optional: true, encode: 'string', hint: 'Required except for Crypto; must be blank for Crypto.' }),

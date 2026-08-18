@@ -78,6 +78,16 @@ pub struct ListingBody {
     pub price_symbol: Option<String>,
 }
 
+/// The `422` body for a ticker that is not a recognised digital token. It
+/// names the remedy because the seeded list is two rows long — BTC and ETH —
+/// and everything else arrives with the ISO 24165 import, which is skipped
+/// without its credentials, so "not recognised" is otherwise a dead end
+/// (SCENARIOS L-10). Shared with `entities::listing_rename`.
+pub(crate) const UNRECOGNISED_DIGITAL_TOKEN: &str = "a Crypto listing's ticker must be a recognised digital-token code — the seeded list is \
+     just BTC and ETH, so import the ISO 24165 (DTIF) registry to recognise any other token \
+     (POST /currencies/import, which needs the DTI_REGISTRY_USER_ID / DTI_REGISTRY_PASSWORD \
+     credentials)";
+
 /// The `422` body for a Crypto listing carrying an exchange. Shared with
 /// `entities::listing_rename`, which can move a listing between exchanges and
 /// so meets the same pairing.
@@ -148,9 +158,9 @@ pub enum UpsertError {
 impl From<UpsertError> for ApiError {
     fn from(e: UpsertError) -> Self {
         match e {
-            UpsertError::UnrecognisedDigitalToken => ApiError::unprocessable(
-                "a Crypto listing's ticker must be a recognised digital-token code",
-            ),
+            UpsertError::UnrecognisedDigitalToken => {
+                ApiError::unprocessable(UNRECOGNISED_DIGITAL_TOKEN)
+            }
             UpsertError::CryptoCannotBeAmit => ApiError::unprocessable(
                 "a Crypto listing cannot be an AMIT — an AMIT is an attribution managed \
                  investment trust, and a crypto asset is not an interest in one: leave amit \
@@ -864,6 +874,11 @@ mod tests {
             .await;
         let detail = resp.text().to_string();
         assert!(detail.contains("digital-token"), "detail: {detail}");
+        // …and it names the way out: the seeded list is two rows long, so a
+        // token that is not BTC or ETH needs the ISO 24165 import first
+        // (SCENARIOS L-10).
+        assert!(detail.contains("just BTC and ETH"), "detail: {detail}");
+        assert!(detail.contains("/currencies/import"), "detail: {detail}");
     }
 
     #[tokio::test]

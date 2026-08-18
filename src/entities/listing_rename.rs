@@ -112,9 +112,9 @@ impl From<RenameError> for ApiError {
             RenameError::OutOfOrder { latest } => ApiError::unprocessable(format!(
                 "effective_date must be after this listing's most recent rename ({latest})"
             )),
-            RenameError::UnrecognisedDigitalToken => ApiError::unprocessable(
-                "a Crypto listing's ticker must be a recognised digital-token code",
-            ),
+            RenameError::UnrecognisedDigitalToken => {
+                ApiError::unprocessable(listing::UNRECOGNISED_DIGITAL_TOKEN)
+            }
             RenameError::CryptoWithExchange => {
                 ApiError::unprocessable(listing::CRYPTO_WITH_EXCHANGE)
             }
