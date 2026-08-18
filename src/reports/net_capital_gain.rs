@@ -1955,6 +1955,47 @@ mod tests {
         assert_eq!(r[1].tax_year, 2025);
     }
 
+    /// SCENARIOS L-13. A crypto asset settles the day it is contracted (no
+    /// T+n, no holiday calendar — `entities::trade`'s
+    /// `api_settlement_date_same_day_for_crypto` pins the auto-population), so
+    /// the financial year a disposal falls in rests on the contract date alone
+    /// (`domain::tax_year`): bought 30 June and sold 1 July, the gain is the
+    /// *later* year's and the parcel was held a single day.
+    #[tokio::test]
+    async fn db_crypto_bought_30_june_and_sold_1_july_is_the_later_year() {
+        let pool = test_pool().await;
+        test_support::listing(1)
+            .crypto()
+            .ticker("BTC")
+            .name("Bitcoin")
+            .insert(&pool)
+            .await;
+        let buy_date = NaiveDate::from_ymd_opt(2025, 6, 30).unwrap();
+        let sell_date = NaiveDate::from_ymd_opt(2025, 7, 1).unwrap();
+        test_support::buy(1, 1)
+            .date(buy_date)
+            .settlement(buy_date)
+            .qty(Decimal::ONE)
+            .price(Decimal::from(50000))
+            .insert(&pool)
+            .await;
+        test_support::sell(2, 1)
+            .date(sell_date)
+            .settlement(sell_date)
+            .qty(Decimal::ONE)
+            .price(Decimal::from(60000))
+            .insert(&pool)
+            .await;
+        allocate(&pool, 1, 2, 1, Decimal::ONE).await;
+
+        let r = db_net_capital_gain(&pool).await.unwrap();
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].tax_year, 2026, "1 July is the next financial year");
+        assert_eq!(r[0].other_gains, Decimal::from(10000));
+        assert_eq!(r[0].discount_eligible_gains, Decimal::ZERO, "held one day");
+        assert_eq!(r[0].net_capital_gain, Decimal::from(10000));
+    }
+
     #[tokio::test]
     async fn db_e10_excess_reduction_becomes_capital_gain() {
         let pool = test_pool().await;

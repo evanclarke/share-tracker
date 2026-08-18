@@ -807,6 +807,48 @@ mod tests {
         assert_eq!(count_allocations(&pool, 2).await, 0);
     }
 
+    /// SCENARIOS L-12. Crypto quantities run to 18 decimal places (a wei of
+    /// ether), and the allocation invariant is an exact decimal comparison at
+    /// whatever scale the units are entered in: a sale of one wei allocates
+    /// against the parcel to the digit, and a sale one wei larger than its
+    /// allocations is refused like any other under-allocated Sell — the sum is
+    /// never quietly rounded to a "close enough" match.
+    #[tokio::test]
+    async fn db_wei_scale_allocations_must_match_to_the_last_digit() {
+        let pool = test_pool().await;
+        test_support::listing(1)
+            .crypto()
+            .ticker("ETH")
+            .name("Ether")
+            .insert(&pool)
+            .await;
+        let parcel: Decimal = "1.234567890123456789".parse().unwrap();
+        insert_buy(&pool, 1, 1, parcel).await;
+
+        let wei: Decimal = "0.000000000000000001".parse().unwrap();
+        let body = sell_body(
+            wei,
+            vec![AllocationInput {
+                purchase_trade_id: 1,
+                quantity_allocated: wei,
+            }],
+        );
+        db_upsert_sell(&pool, 2, &body).await.unwrap();
+        assert_eq!(count_allocations(&pool, 2).await, 1);
+
+        // Two wei sold, one wei allocated: one digit out is still out.
+        let body = sell_body(
+            wei + wei,
+            vec![AllocationInput {
+                purchase_trade_id: 1,
+                quantity_allocated: wei,
+            }],
+        );
+        let err = db_upsert_sell(&pool, 3, &body).await.unwrap_err();
+        assert!(matches!(err, SellError::AllocationMismatch));
+        assert!(!trade_exists(&pool, 3).await);
+    }
+
     #[tokio::test]
     async fn db_over_allocated_sell_is_rejected() {
         let pool = test_pool().await;

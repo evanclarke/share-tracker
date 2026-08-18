@@ -75,7 +75,7 @@ behind or became a recorded finding.
 | I. DRP | 14 | 2026-08-17 | 6 raised, all closed — see below |
 | J. Employee share schemes | 14 | 2026-08-18 | 8 raised, all closed — see below |
 | K. Inherited parcels | 10 | 2026-08-18 | 6 raised, all closed — see below |
-| L. Crypto | 15 | — | — |
+| L. Crypto | 15 | 2026-08-18 | 6 raised, all open — see below |
 | M. Foreign currency and FX | 16 | — | — |
 | N. Holding accounts and transfers | 12 | — | — |
 | O. Net capital gain, losses, and carry-forward | 17 | — | — |
@@ -613,6 +613,61 @@ between beneficiaries.
 | LPR expenditure converts at the parcel's acquisition month, not the month it was incurred | K-04 | fixed 2026-08-18 — refused on a foreign parcel + documented; archived in [`DONE/reviews.md`](DONE/reviews.md) |
 | A duplicated inheritance is caught by nothing | K-09 | fixed 2026-08-18 — archived in [`DONE/reviews.md`](DONE/reviews.md) |
 | Nothing states what the deceased's cost-base figure must be net of | K-02, K-09 | fixed 2026-08-18 — docs + a refreshed QC 66053 mirror; archived in [`DONE/reviews.md`](DONE/reviews.md) |
+
+### Section L findings
+
+A crypto asset is a CGT asset with no exchange behind it, and the arithmetic
+that follows from those two facts holds everywhere it was probed. Same-day
+settlement means the contract date alone decides both the 12-month clock and
+the financial year: bought 30 June and sold 1 July the gain is the later year's
+and the parcel was held a day, while the discount boundary sits where it does
+for shares — the anniversary itself is not enough, the day after is (L-01,
+L-13). Satoshi- and wei-scale quantities stay exact through cost base,
+proceeds, gain and the allocation invariant, which is an exact decimal
+comparison, not a tolerance: a sale one wei larger than its allocations is
+refused (L-12). The swap is the Katrina example already in `ato_examples.rs`
+(L-02); a wallet-to-wallet transfer moves parcels with their cost base and
+acquisition date while the crypto burned on the network fee is disposed of at
+market value and does surface in the gains reports (L-07); the listing refusals
+land where `docs/API.md` says they do, exchange-less tickers are unique, and
+the token whitelist really is enforced (L-09, L-10, L-11). A day the provider
+serves no candle for stores an **errored** row that blocks snapshot generation
+with a `422` naming it, leaves the portfolio screen's price null rather than
+guessing, and clears the moment a manual price is entered — and because a
+crypto asset trades every calendar day, that manual price is accepted on a
+Saturday where an exchange listing's is refused (L-15). Three new regression
+tests cover the three of those that had none.
+
+Six findings. Where the income goes: the ATO says staking rewards and
+established-token airdrops are ordinary income declared as **other income**
+(item 24), and `income_type` offers only `Dividend` or `EmploymentIncome`, so
+the documented workaround reports them at **11S** with a franking status
+attached — J-10 exactly, one income type later. What the documentation says:
+"chain splits/forks, wrapping … are not modelled" understates the system three
+times over, because the ordinary entry path already reproduces the ATO's own
+worked figures for an initial-allocation airdrop (Josh: nil cost base, $4,000
+gain, $2,000 after the discount), for a chain split (Alex; and Ming's abandoned
+original as a `WorthlessShares` C2 recognise, an $8,300 loss to the dollar) and
+for wrapping (which *is* a swap, so calling it unmodelled invites the reading
+that no CGT event arises) — and none of those ATO pages is mirrored in
+`docs/ato/` at all. What nothing says: a trading fee billed in crypto is
+refused with "enter it converted", which is right for the incidental-cost leg
+and silent on the disposal leg the transfer's own network fee already models.
+And what nothing refuses: the `Crypto`/`exchange_mic` pairing is left to the
+database, so both directions answer with a raw `CHECK constraint failed` string
+the web UI shows verbatim; `amit: true` is accepted on a coin, after which the
+annual tax report is permanently incomplete for want of an AMMA statement no
+coin will issue; and the recognised-token list is the two seeded rows until a
+credentialed ISO 24165 import runs, which the refusal never mentions.
+
+| Finding | Scenarios | Status |
+| --- | --- | --- |
+| Staking rewards and airdropped tokens are reported as dividends (11S), with no "other income" label | L-03, L-04 | open — [`TODO.md`](TODO.md) |
+| The crypto limitations say "not modelled" where the ordinary entry path already gives the ATO's figures (initial-allocation airdrop, chain split, wrapping, stablecoins) | L-04, L-05, L-06, L-14 | open — [`TODO.md`](TODO.md) |
+| A trading fee paid in crypto has no stated treatment (the disposal leg is silent) | L-08 | open — [`TODO.md`](TODO.md) |
+| The Crypto/exchange pairing refusals answer with a raw CHECK expression | L-09 | open — [`TODO.md`](TODO.md) |
+| A Crypto listing can be marked `amit`, and the annual tax report is then permanently incomplete | L-09 | open — [`TODO.md`](TODO.md) |
+| The recognised digital-token list is BTC and ETH until a credentialed import runs, and the refusal doesn't say so | L-10 | open — [`TODO.md`](TODO.md) |
 
 ---
 

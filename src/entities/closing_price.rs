@@ -2551,6 +2551,43 @@ mod tests {
         );
     }
 
+    /// SCENARIOS L-15. A crypto asset trades every calendar day, so the
+    /// trading-day gate that refuses a weekend price on an exchange listing
+    /// must let the same Saturday through for an exchange-less one — otherwise
+    /// the way out of a day the provider has no candle for (a hand-entered
+    /// price) would be closed on two days in every seven.
+    #[tokio::test]
+    async fn api_manual_price_accepts_a_weekend_day_for_crypto_only() {
+        let pool = test_pool().await;
+        insert_crypto_listing(&pool, 1, "BTC").await;
+        insert_listing(&pool, 2, "BHP", "XASX", "AUD").await;
+        let app = full_router(pool.clone(), StubFetcher::default());
+
+        // 2026-06-06 is a Saturday: a trading day for BTC, not for the ASX.
+        let (status, bytes) =
+            put_json(&app, "/closing_prices/1/2026-06-06", manual_body("91000")).await;
+        assert_eq!(
+            status,
+            StatusCode::NO_CONTENT,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let stored = db_get_one(&pool, 1, ymd(2026, 6, 6))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.price, Some(Decimal::from(91000)));
+
+        let (status, bytes) =
+            put_json(&app, "/closing_prices/2/2026-06-06", manual_body("62.48")).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            String::from_utf8_lossy(&bytes).contains("not a trading day"),
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+    }
+
     #[tokio::test]
     async fn api_manual_price_unknown_listing_is_404() {
         let pool = test_pool().await;
