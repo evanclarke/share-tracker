@@ -12,10 +12,10 @@ are fixed or decided.
 
 **SCENARIOS.md sections A–I are driven and every finding they raised is closed** in the `DONE/*.md`
 archive. **Section J. Employee share schemes** was driven 2026-08-18; it raised eight findings, of which
-four are closed (the two currency/FX ones, plus the two write-time-check ones fixed 2026-08-18 — see
-[`DONE/reviews.md`](DONE/reviews.md)) and the four below are its remaining open work. Three of those
-four carry a **Decide the model** item awaiting Evan; the duplicate-statement one does not — its fix
-is settled and only needs doing. When they are closed, the next work comes from driving
+five are closed (the two currency/FX ones, the two write-time-check ones, and the duplicate-statement
+health check — all 2026-08-18, see [`DONE/reviews.md`](DONE/reviews.md)) and the three below are its
+remaining open work. Each of those three carries a **Decide the model** item awaiting Evan — none can
+be finished without that decision. When they are closed, the next work comes from driving
 **SCENARIOS.md section K. Inherited parcels** the same way — walk its scenarios against the running system, and record each
 gap here as its own `## ` section.
 
@@ -51,27 +51,6 @@ The mirror is indexed in `docs/ato/OVERVIEW.md`, but the words "30-day rule" app
 - [ ] Tests: whichever of (a)/(b) is chosen — a `doc_checks` assertion for the wording, and/or an
   alert test with a sale on day 30 and day 31 either side of the boundary
 - [ ] Docs sync: `docs/API.md` Known limitations (+ the report, if (b)), README Features
-
-## A duplicated ESS statement is caught by nothing (SCENARIOS J-11)
-(SCENARIOS.md section J verification pass, 2026-08-18. `reports::health` warns on duplicate
-corporate actions (E-03), AMMA statements (F), income (G-24), interest and expenses (H) —
-`ess_statements` is the one income-bearing fact table with no such check.)
-- [ ] J-11 — reproduced: the same statement entered twice (same listing, account, taxing point,
-  quantity, market value and discount) is accepted, vests **two** parcels, and doubles both the
-  Item 12 discount (`ess_discount_assessable 2000` for a $1,000 grant) and the holding
-  (`quantity 200`). The health report answers with every list empty
-- [ ] The 30-day rule makes this the *expected* accident rather than a hypothetical: the employer
-  issues an **amended** statement for the same vest (`docs/ato/ess-30-day-rule.md` — an amended 2019
-  statement and a new 2020 one for one grant), and a user who enters both has exactly this shape
-- [ ] J-11 — the legitimate case must stay silent: two vests on the same date from different grants
-  are ordinary. The G-24 key (identical amounts as part of the key, grouped in Rust because the
-  amounts are TEXT decimals SQL would compare as strings) already handles that — differing
-  quantities or discounts are not duplicates
-- [ ] Fix: `duplicate_ess_statements` in `reports::health` + the UI banner, keyed on listing,
-  holding account, `taxing_point_date` *and* identical quantity / market value / discount labels
-- [ ] Tests: the doubled statement is reported with both ids; two same-date statements from
-  different grants (different quantity or discount) are not
-- [ ] Docs sync: `docs/API.md` health report, README
 
 ## The $1,000 taxed-upfront reduction is always applied, with no way to record failing the income test (SCENARIOS J-02)
 (SCENARIOS.md section J verification pass, 2026-08-18. The reduction is available only if *adjusted

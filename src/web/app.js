@@ -1065,7 +1065,10 @@ async function viewAttachments(ownerField, ownerId) {
 // Income), and the same double-entry on the two listing-less sides of the tax
 // summary: an identical interest credit (linking to Interest Income) or an
 // identical deductible expense (linking to Investment Expenses), each of which
-// is counted once per row. Refreshed on every
+// is counted once per row, and the same double-entry on the employee-share
+// scheme side — an identical ESS statement (linking to ESS Statements), whose
+// discount is assessed and whose parcel is vested once per statement.
+// Refreshed on every
 // route render, so fixing the cause clears it on the next navigation. A
 // failing health fetch hides the banner rather than breaking the app.
 async function refreshHealthBanner() {
@@ -1123,6 +1126,14 @@ async function refreshHealthBanner() {
         + ' (ids ' + d.expense_ids.join(', ')
         + ') — the deduction is claimed once per row; delete the duplicate unless both are real.');
     });
+    const duplicateEss = h.duplicate_ess_statements || [];
+    duplicateEss.forEach(function (d) {
+      problems.push(d.statement_count + ' identical ESS statements for ' + d.ticker + ' vesting '
+        + d.quantity + ' shares at ' + d.taxing_point_date + ' with a ' + d.discount_total + ' '
+        + d.currency + ' discount (ids ' + d.statement_ids.join(', ')
+        + ') — the discount is assessed and the parcel vested once per statement;'
+        + ' delete the superseded one unless both are real.');
+    });
     if (problems.length === 0) {
       banner.hidden = true;
       banner.innerHTML = '';
@@ -1148,6 +1159,9 @@ async function refreshHealthBanner() {
     }
     if (duplicateExpenses.length > 0) {
       banner.appendChild(el('a', { href: '#/e/investment_expenses' }, 'Open Investment Expenses →'));
+    }
+    if (duplicateEss.length > 0) {
+      banner.appendChild(el('a', { href: '#/e/ess_statements' }, 'Open ESS Statements →'));
     }
     banner.hidden = false;
   } catch (e) {

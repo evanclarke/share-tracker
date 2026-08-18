@@ -288,8 +288,9 @@ fn to_cents(v: Decimal) -> Decimal {
 }
 
 /// The statement's own discount labels (D + E + F + G) — what the tax summary
-/// assesses, and what label A is a memo of.
-fn discount_labels(s: &EssStatement) -> Decimal {
+/// assesses, and what label A is a memo of. Also what `reports::health` names a
+/// duplicated statement by, so the two agree on what "the discount" is.
+pub(crate) fn discount_labels(s: &EssStatement) -> Decimal {
     s.taxed_upfront_eligible
         + s.taxed_upfront_not_eligible
         + s.deferral_discount

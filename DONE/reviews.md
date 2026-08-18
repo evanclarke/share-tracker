@@ -1682,3 +1682,61 @@ rule, each with the *why*) plus the new causes in the Response-codes `422` catal
 `foreign_source_discount` / `tfn_withholding` / `aud_foreign_source_discount` column lines now state
 their constraints; and `src/web/config.js`'s ESS field hints say the ceiling, the memo-subset rule,
 the pre-CGT floor, and that zero quantity means an income-only statement.
+
+## A duplicated ESS statement is caught by nothing (SCENARIOS J-11)
+(SCENARIOS.md section J verification pass, 2026-08-18. `reports::health` warns on duplicate
+corporate actions (E-03), AMMA statements (F), income (G-24), interest and expenses (H) —
+`ess_statements` is the one income-bearing fact table with no such check.)
+- [x] J-11 — reproduced: the same statement entered twice (same listing, account, taxing point,
+  quantity, market value and discount) is accepted, vests **two** parcels, and doubles both the
+  Item 12 discount (`ess_discount_assessable 2000` for a $1,000 grant) and the holding
+  (`quantity 200`). The health report answers with every list empty
+- [x] The 30-day rule makes this the *expected* accident rather than a hypothetical: the employer
+  issues an **amended** statement for the same vest (`docs/ato/ess-30-day-rule.md` — an amended 2019
+  statement and a new 2020 one for one grant), and a user who enters both has exactly this shape
+- [x] J-11 — the legitimate case must stay silent: two vests on the same date from different grants
+  are ordinary. The G-24 key (identical amounts as part of the key, grouped in Rust because the
+  amounts are TEXT decimals SQL would compare as strings) already handles that — differing
+  quantities or discounts are not duplicates
+- [x] Fix: `duplicate_ess_statements` in `reports::health` + the UI banner, keyed on listing,
+  holding account, `taxing_point_date` *and* identical quantity / market value / discount labels
+- [x] Tests: the doubled statement is reported with both ids; two same-date statements from
+  different grants (different quantity or discount) are not
+- [x] Docs sync: `docs/API.md` health report, README
+
+**Closed 2026-08-18.** `reports::health` gained a sixth duplicate list, `duplicate_ess_statements`,
+built on the `db_duplicate_income` shape rather than the SQL-grouped `db_duplicate_actions` one: the
+figures are part of the key and they are TEXT decimals SQL would compare as strings, so the SELECT
+narrows to rows already sharing a (listing, holding account, `taxing_point_date`) with another row
+and the fingerprint match happens in Rust over `Decimal`s (`same_ess_entry`) — `1000.0` and
+`1000.00` are the one grant however two clients wrote them. It selects `ess_statement::COLUMNS`
+rather than `*`, since `vest_trade_id` is a derived back-link the row mapping requires.
+
+Three decisions worth recording:
+- **Every stored money field is in the key**, including `fx_rate` and the five statement-AUD
+  overrides — the `same_income_entry` precedent (two rows agreeing on the assessable figures but
+  not on an informational one came off different statements). Two same-date statements differing in
+  quantity, market value or any discount label are two grants vesting the same day, which is
+  ordinary and stays silent.
+- **`vest_trade_id` is deliberately *not* in the key.** It is derived, not stored, and whether the
+  surplus statement has been vested yet says nothing about whether it is a duplicate — the pair must
+  still be reported after vesting, which is exactly when the doubled *holding* exists.
+- **`discount_total` reuses `ess_statement::discount_labels`** (D+E+F+G), promoted from private to
+  `pub(crate)` rather than re-summed here, so the warning and the tax summary can never disagree on
+  what "the discount" is.
+
+Tests (`reports::health`): `duplicated_ess_statements_are_reported_with_their_ids` (two grants on
+two listings, newest taxing point first, both ids ascending, `discount_total` naming the grant),
+`ess_statements_differing_in_any_key_field_are_not_duplicates` (a sweep over listing, holding
+account, taxing point, quantity and discount — six statements, nothing reported),
+`ess_figures_equal_in_value_but_not_in_text_are_still_duplicates`, and
+`a_duplicated_ess_pair_is_reported_beside_a_second_grant_and_after_vesting` (the pair survives both
+an unrelated same-day tranche and `ess_vest::db_vest`). The empty-database assertion gained the new
+list, and `web.rs`'s health-banner bundle test pins the wording and the `#/e/ess_statements` link.
+Full suite 1607 passed / 0 failed; `node --test` 69 passed; ui-smoke green. Verified end to end
+against a running server: two identical statements entered over HTTP produce one
+`duplicate_ess_statements` row naming ids [1, 2].
+
+Docs: `docs/API.md`'s Health section gained the `duplicate_ess_statements` bullet (and the field in
+the response shape), README's job/data-freshness feature bullet gained the duplicated-ESS-statement
+clause.

@@ -1505,6 +1505,14 @@ mod tests {
         assert!(js.contains("the deduction is claimed once per row"));
         assert!(js.contains("'#/e/investment_expenses'"));
         assert!(js.contains("Open Investment Expenses"));
+        // …plus the same double-entry on the employee-share-scheme side
+        // (SCENARIOS J-11: the discount assessed and the parcel vested once per
+        // statement), linking to the screen the superseded row is deleted from…
+        assert!(js.contains("duplicate_ess_statements"));
+        assert!(js.contains("identical ESS statements for"));
+        assert!(js.contains("the discount is assessed and the parcel vested once per statement"));
+        assert!(js.contains("'#/e/ess_statements'"));
+        assert!(js.contains("Open ESS Statements"));
         // …and refreshes on every route render so it appears on the main views.
         assert!(js.contains("refreshHealthBanner(); // deliberately not awaited"));
         // The strip's host element ships in the page shell with its styles.

@@ -32,7 +32,11 @@
 //! - every identical pair of interest-income rows, and of investment-expense
 //!   rows — the same double-entry on the two listing-less sides of the tax
 //!   summary, doubling a year's interest or its deduction (see
-//!   [`DuplicateInterest`], [`DuplicateExpense`]).
+//!   [`DuplicateInterest`], [`DuplicateExpense`]);
+//! - every (listing, holding account, taxing point) carrying more than one ESS
+//!   statement of identical figures — the same double-entry on the
+//!   employee-share-scheme side, doubling the year's Item 12 discount and
+//!   vesting the parcel twice (see [`DuplicateEssStatement`]).
 //!
 //! A database with no prices or FX rates at all reports `stale = false` for
 //! that series: nothing has decayed — a fresh install shows no banner, and a
@@ -41,6 +45,7 @@
 
 use crate::domain::tax_year::tax_year_for;
 use crate::entities::closing_price::{self, HeldTimeline};
+use crate::entities::ess_statement::{self, EssStatement};
 use crate::entities::income::Income;
 use crate::entities::interest_income::InterestIncome;
 use crate::entities::investment_expense::{ExpenseType, InvestmentExpense};
@@ -303,6 +308,45 @@ pub struct DuplicateExpense {
     pub expense_ids: Vec<i64>,
 }
 
+/// More than one ESS statement for the same listing, holding account and
+/// taxing point, carrying **identical figures** (SCENARIOS J-11). Every reader
+/// counts both: the tax summary's Item 12 discount labels (and the $1,000
+/// taxed-upfront reduction computed over them) sum statement by statement, and
+/// each statement vests its **own** parcel — so a $1,000 grant of 100 shares
+/// entered twice reports $2,000 of discount and 200 shares held.
+///
+/// The 30-day rule makes this the expected accident rather than a hypothetical:
+/// an employer issues an **amended** statement for one vest
+/// (`docs/ato/ess-30-day-rule.md`), and a user who enters both instead of
+/// editing the original has exactly this shape.
+///
+/// Deliberately a **warning, not a constraint**, the same call as
+/// [`DuplicateIncome`]: two vests on one date from different grants are
+/// ordinary, so the pair stays enterable. The figures are part of the key for
+/// exactly that reason — two same-date statements differing in quantity, market
+/// value or any discount label are two grants, not one entered twice.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DuplicateEssStatement {
+    pub listing_id: i64,
+    pub ticker: String,
+    pub holding_account_id: i64,
+    pub taxing_point_date: NaiveDate,
+    /// ISO 4217 currency the shared figures are stated in (part of the key).
+    pub currency: String,
+    /// The shares each duplicated statement vests, so the warning names the
+    /// grant rather than only its date.
+    pub quantity: Decimal,
+    /// The total Item 12 discount each duplicated statement declares (D + E +
+    /// F + the pre-2009 cessation label, in `currency`) — the figure that is
+    /// counted once per statement.
+    pub discount_total: Decimal,
+    /// How many statements share the whole key — always ≥ 2.
+    pub statement_count: i64,
+    /// The ids sharing it, ascending, so the surplus row can be opened and
+    /// deleted without a search.
+    pub statement_ids: Vec<i64>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct HealthReport {
     /// Latest `closing_prices` date stored with status ok, across every
@@ -338,6 +382,10 @@ pub struct HealthReport {
     /// Every group of identical investment-expense rows (same date, type,
     /// figures, currency, description and attributions), newest first.
     pub duplicate_expenses: Vec<DuplicateExpense>,
+    /// Every (listing, holding account, taxing point) carrying more than one
+    /// ESS statement of identical figures, newest first. Empty when no vest is
+    /// declared twice.
+    pub duplicate_ess_statements: Vec<DuplicateEssStatement>,
 }
 
 /// Business days (Mon–Fri) strictly after `from`, up to and including `today`.
@@ -800,6 +848,116 @@ async fn db_duplicate_expenses(
     Ok(duplicates)
 }
 
+/// Whether two ESS statements are one vest entered twice — see
+/// [`DuplicateEssStatement`]. Every stored field except the id is compared: the
+/// money figures as `Decimal`s rather than as the stored TEXT (so `"1000.0"`
+/// and `"1000.00"` match), the statement-AUD overrides included — two rows
+/// agreeing on the foreign labels but disagreeing on the AUD the employer
+/// stated for them came off different statements. `vest_trade_id` is derived,
+/// not stored, and is deliberately not part of the key: whether the surplus
+/// statement has been vested yet says nothing about whether it is a duplicate.
+fn same_ess_entry(a: &EssStatement, b: &EssStatement) -> bool {
+    a.listing_id == b.listing_id
+        && a.holding_account_id == b.holding_account_id
+        && a.taxing_point_date == b.taxing_point_date
+        && a.currency == b.currency
+        && a.quantity == b.quantity
+        && a.market_value_per_share == b.market_value_per_share
+        && a.taxed_upfront_eligible == b.taxed_upfront_eligible
+        && a.taxed_upfront_not_eligible == b.taxed_upfront_not_eligible
+        && a.deferral_discount == b.deferral_discount
+        && a.pre_2009_cessation_discount == b.pre_2009_cessation_discount
+        && a.foreign_source_discount == b.foreign_source_discount
+        && a.tfn_withholding == b.tfn_withholding
+        && a.fx_rate == b.fx_rate
+        && a.aud_taxed_upfront_eligible == b.aud_taxed_upfront_eligible
+        && a.aud_taxed_upfront_not_eligible == b.aud_taxed_upfront_not_eligible
+        && a.aud_deferral_discount == b.aud_deferral_discount
+        && a.aud_pre_2009_cessation_discount == b.aud_pre_2009_cessation_discount
+        && a.aud_foreign_source_discount == b.aud_foreign_source_discount
+}
+
+/// ESS statements declaring one vest twice — see [`DuplicateEssStatement`].
+///
+/// Read on the caller's transaction and grouped in Rust for the same reason as
+/// [`db_duplicate_income`]: the figures are part of the key and they are TEXT
+/// decimals, which SQL would compare as strings. Only rows already sharing a
+/// (listing, account, taxing point) with another row are read, so what is
+/// carried into memory is at most the handful of same-day vests a plan has.
+/// Selects the entity's own `COLUMNS` rather than `*`, since `vest_trade_id` is
+/// a derived back-link the row mapping requires.
+async fn db_duplicate_ess_statements(
+    conn: &mut sqlx::SqliteConnection,
+) -> Result<Vec<DuplicateEssStatement>, sqlx::Error> {
+    let rows: Vec<EssStatement> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT {} FROM ess_statements \
+         WHERE EXISTS (SELECT 1 FROM ess_statements o \
+                       WHERE o.listing_id = ess_statements.listing_id \
+                         AND o.holding_account_id = ess_statements.holding_account_id \
+                         AND o.taxing_point_date = ess_statements.taxing_point_date \
+                         AND o.id <> ess_statements.id) \
+         ORDER BY ess_statements.id",
+        ess_statement::COLUMNS
+    )))
+    .fetch_all(&mut *conn)
+    .await?;
+    if rows.is_empty() {
+        return Ok(Vec::new());
+    }
+    let tickers: HashMap<i64, String> =
+        sqlx::query_as::<_, (i64, String)>("SELECT id, ticker FROM listings")
+            .fetch_all(&mut *conn)
+            .await?
+            .into_iter()
+            .collect();
+
+    // Grouped by scanning, read in id order so each group's ids come out
+    // ascending (the same shape as `db_duplicate_income`).
+    let mut groups: Vec<Vec<EssStatement>> = Vec::new();
+    for row in rows {
+        match groups
+            .iter_mut()
+            .find(|group| same_ess_entry(&group[0], &row))
+        {
+            Some(group) => group.push(row),
+            None => groups.push(vec![row]),
+        }
+    }
+    let mut duplicates: Vec<DuplicateEssStatement> = groups
+        .into_iter()
+        .filter(|group| group.len() > 1)
+        .map(|group| {
+            let first = &group[0];
+            DuplicateEssStatement {
+                listing_id: first.listing_id,
+                ticker: tickers
+                    .get(&first.listing_id)
+                    .cloned()
+                    // The FK guarantees the listing exists; a row read between
+                    // the two queries is the only way here, and an empty
+                    // ticker still names the ids to open.
+                    .unwrap_or_default(),
+                holding_account_id: first.holding_account_id,
+                taxing_point_date: first.taxing_point_date,
+                currency: first.currency.clone(),
+                quantity: first.quantity,
+                discount_total: ess_statement::discount_labels(first),
+                statement_count: group.len() as i64,
+                statement_ids: group.iter().map(|row| row.id).collect(),
+            }
+        })
+        .collect();
+    // Newest first, matching the other duplicate lists.
+    duplicates.sort_by(|a, b| {
+        b.taxing_point_date
+            .cmp(&a.taxing_point_date)
+            .then_with(|| a.ticker.cmp(&b.ticker))
+            .then_with(|| a.holding_account_id.cmp(&b.holding_account_id))
+            .then_with(|| a.statement_ids.cmp(&b.statement_ids))
+    });
+    Ok(duplicates)
+}
+
 /// Read the freshness facts on one snapshot. `today` and `now` are parameters
 /// so tests can pin the staleness thresholds and the "close is final yet"
 /// cut-off to fixed dates.
@@ -841,6 +999,7 @@ pub async fn db_health(
     let duplicate_income = db_duplicate_income(&mut tx).await?;
     let duplicate_interest = db_duplicate_interest(&mut tx).await?;
     let duplicate_expenses = db_duplicate_expenses(&mut tx).await?;
+    let duplicate_ess_statements = db_duplicate_ess_statements(&mut tx).await?;
     tx.commit().await?;
     let unpriced_days = db_unpriced_days(pool, now).await?;
 
@@ -862,6 +1021,7 @@ pub async fn db_health(
         duplicate_income,
         duplicate_interest,
         duplicate_expenses,
+        duplicate_ess_statements,
     })
 }
 
@@ -972,6 +1132,7 @@ mod tests {
         assert!(h.duplicate_income.is_empty());
         assert!(h.duplicate_interest.is_empty());
         assert!(h.duplicate_expenses.is_empty());
+        assert!(h.duplicate_ess_statements.is_empty());
     }
 
     #[tokio::test]
@@ -1972,6 +2133,148 @@ mod tests {
 
         let h = health(&pool, ymd(2026, 7, 13)).await;
         assert!(h.duplicate_expenses.is_empty());
+    }
+
+    // The employee-share-scheme side (SCENARIOS J-11).
+
+    /// A statement that vests `quantity` shares worth `market_value` each, all
+    /// of it a deferral-scheme (label F) discount — the RSU shape.
+    async fn insert_ess(
+        pool: &SqlitePool,
+        id: i64,
+        listing_id: i64,
+        taxing_point: NaiveDate,
+        quantity: &str,
+        market_value: &str,
+    ) {
+        test_support::ess_statement(id, listing_id, taxing_point)
+            .with(|s| {
+                s.quantity = dec(quantity);
+                s.market_value_per_share = dec(market_value);
+                s.deferral_discount = dec(quantity) * dec(market_value);
+            })
+            .insert(pool)
+            .await;
+    }
+
+    /// The same statement entered twice — the accident the 30-day rule makes
+    /// likely, an amended employer statement keyed as a new row — doubles the
+    /// year's Item 12 discount and vests the parcel twice. Reported with both
+    /// ids, newest taxing point first.
+    #[tokio::test]
+    async fn duplicated_ess_statements_are_reported_with_their_ids() {
+        let pool = test_pool().await;
+        test_support::listing(1).ticker("EMPA").insert(&pool).await;
+        test_support::listing(2).ticker("EMPB").insert(&pool).await;
+        insert_ess(&pool, 1, 1, ymd(2026, 3, 10), "100", "10").await;
+        insert_ess(&pool, 2, 1, ymd(2026, 3, 10), "100", "10").await;
+        insert_ess(&pool, 3, 2, ymd(2026, 6, 1), "50", "4.25").await;
+        insert_ess(&pool, 4, 2, ymd(2026, 6, 1), "50", "4.25").await;
+
+        let h = health(&pool, ymd(2026, 7, 13)).await;
+        // Newest first, as on the other duplicate lists.
+        assert_eq!(h.duplicate_ess_statements.len(), 2);
+        let june = &h.duplicate_ess_statements[0];
+        assert_eq!(june.ticker, "EMPB");
+        assert_eq!(june.listing_id, 2);
+        assert_eq!(june.holding_account_id, 1);
+        assert_eq!(june.taxing_point_date, ymd(2026, 6, 1));
+        assert_eq!(june.currency, "AUD");
+        assert_eq!(june.quantity, dec("50"));
+        assert_eq!(june.discount_total, dec("212.50"));
+        assert_eq!(june.statement_count, 2);
+        assert_eq!(june.statement_ids, vec![3, 4]);
+        let march = &h.duplicate_ess_statements[1];
+        assert_eq!(march.ticker, "EMPA");
+        assert_eq!(march.taxing_point_date, ymd(2026, 3, 10));
+        assert_eq!(march.discount_total, dec("1000"));
+        assert_eq!(march.statement_ids, vec![1, 2]);
+    }
+
+    /// The legitimate case must stay silent: two vests on one date from
+    /// different grants are ordinary, and so is a different listing, account or
+    /// taxing point. The figures are part of the key for exactly that reason —
+    /// a different quantity or a different discount is a second grant.
+    #[tokio::test]
+    async fn ess_statements_differing_in_any_key_field_are_not_duplicates() {
+        let pool = test_pool().await;
+        test_support::listing(1).ticker("AAA").insert(&pool).await;
+        test_support::listing(2).ticker("BBB").insert(&pool).await;
+        crate::entities::holding_account::db_upsert(
+            &pool,
+            &crate::entities::holding_account::HoldingAccount {
+                id: 2,
+                name: "Second".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        insert_ess(&pool, 1, 1, ymd(2026, 3, 10), "100", "10").await;
+        // Same account, taxing point and figures, different listing.
+        insert_ess(&pool, 2, 2, ymd(2026, 3, 10), "100", "10").await;
+        // Same listing, taxing point and figures, different holding account.
+        test_support::ess_statement(3, 1, ymd(2026, 3, 10))
+            .with(|s| {
+                s.holding_account_id = 2;
+                s.quantity = dec("100");
+                s.market_value_per_share = dec("10");
+                s.deferral_discount = dec("1000");
+            })
+            .insert(&pool)
+            .await;
+        // Same listing, account and figures, different taxing point.
+        insert_ess(&pool, 4, 1, ymd(2026, 9, 10), "100", "10").await;
+        // Same listing, account and taxing point, different quantity: a second
+        // tranche vesting the same day.
+        insert_ess(&pool, 5, 1, ymd(2026, 3, 10), "40", "10").await;
+        // …and one of the same size whose discount differs (shares part-paid
+        // for under the plan), which is likewise a second grant.
+        test_support::ess_statement(6, 1, ymd(2026, 3, 10))
+            .with(|s| {
+                s.quantity = dec("100");
+                s.market_value_per_share = dec("10");
+                s.deferral_discount = dec("600");
+            })
+            .insert(&pool)
+            .await;
+
+        let h = health(&pool, ymd(2026, 7, 13)).await;
+        assert!(h.duplicate_ess_statements.is_empty());
+    }
+
+    /// The figures are compared as decimals, not as the TEXT they are stored
+    /// as: `1000.0` and `1000.00` are one grant entered twice.
+    #[tokio::test]
+    async fn ess_figures_equal_in_value_but_not_in_text_are_still_duplicates() {
+        let pool = test_pool().await;
+        test_support::listing(1).ticker("EMPA").insert(&pool).await;
+        insert_ess(&pool, 1, 1, ymd(2026, 3, 10), "100.0", "10.0").await;
+        insert_ess(&pool, 2, 1, ymd(2026, 3, 10), "100.00", "10.00").await;
+
+        let h = health(&pool, ymd(2026, 7, 13)).await;
+        assert_eq!(h.duplicate_ess_statements.len(), 1);
+        assert_eq!(h.duplicate_ess_statements[0].statement_ids, vec![1, 2]);
+    }
+
+    /// One same-day cluster can hold both a duplicated pair and an unrelated
+    /// grant: the grouping is per figure fingerprint, not per taxing point, so
+    /// the third statement neither joins the pair nor suppresses it. The pair
+    /// is still reported once it has been vested — `vest_trade_id` is derived,
+    /// not part of the key.
+    #[tokio::test]
+    async fn a_duplicated_ess_pair_is_reported_beside_a_second_grant_and_after_vesting() {
+        let pool = test_pool().await;
+        test_support::listing(1).ticker("EMPA").insert(&pool).await;
+        insert_ess(&pool, 1, 1, ymd(2026, 3, 10), "100", "10").await;
+        insert_ess(&pool, 2, 1, ymd(2026, 3, 10), "100", "10").await;
+        // The second tranche vesting the same day.
+        insert_ess(&pool, 3, 1, ymd(2026, 3, 10), "40", "10").await;
+        crate::entities::ess_vest::db_vest(&pool, 1).await.unwrap();
+
+        let h = health(&pool, ymd(2026, 7, 13)).await;
+        assert_eq!(h.duplicate_ess_statements.len(), 1);
+        assert_eq!(h.duplicate_ess_statements[0].quantity, dec("100"));
+        assert_eq!(h.duplicate_ess_statements[0].statement_ids, vec![1, 2]);
     }
 
     #[tokio::test]
