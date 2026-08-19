@@ -1470,22 +1470,68 @@ async fn tax_report_handler(
     db_tax_report(&pool, req.tax_year).await.map(Json)
 }
 
-/// Every Australian financial year with any recorded fact touching a tax
-/// figure (trades, income, interest, AMMA/ESS statements, investment
-/// expenses) — for the UI's year dropdown, cheaper than pulling a full
-/// report per year.
+/// Every Australian financial year this report has content for — the union of
+/// everything it can report on, ascending and deduped (SCENARIOS
+/// P-02/P-03/P-04):
+///
+/// - the CGT side, as [`net_capital_gain::db_cgt_years`] — realised disposals,
+///   rights sales, the AMMA components and the E10/G1/C2 events, plus every
+///   quiet year still carrying a capital loss forward. Reusing that walk is
+///   the point: a second derivation of "which years have CGT content" could
+///   offer a year whose `cgt_summary` then comes back `null`, or hide one that
+///   has a whole worksheet behind it (a G1 excess or a rights sale against a
+///   parcel bought years earlier used to leave only the *purchase* year on the
+///   list);
+/// - income by its **assessment date**, not `date_paid` — a trust distribution
+///   with a 30 June entitlement date paid in July is assessed in the FY just
+///   ended ([`Income::assessment_date`], the rule the tax summary and this
+///   report's own income tables both apply), so `date_paid` offered a year
+///   the distribution does not belong to and hid the one it does. There is no
+///   SQL twin of that rule (unlike `Income::EX_OR_PAY_DATE_SQL`) and this read
+///   does not need one: the rows are decoded and asked, exactly as
+///   [`tax_summary`] does;
+/// - the remaining facts, each bucketed by the date column that *is* its
+///   assessment date — trades, interest, AMMA/ESS statements and investment
+///   expenses.
+///
+/// The trade-off is cost: the CGT walk is the realised-gains read plus the
+/// AMMA/E10/G1/C2 walks — roughly one `cgt_summary`'s worth of work — where
+/// the old list was a single six-way `UNION` of date columns. That is
+/// deliberate. The picker is a closed `<select>` and the *only* way to reach
+/// the report from the UI, so a year missing from it is a year that cannot be
+/// generated at all; one report-sized query behind a dropdown that opens once
+/// per session is the cheaper failure.
+///
+/// Bounded to [`MIN_TAX_YEAR`]..=[`MAX_TAX_YEAR`] so the list and
+/// [`TaxYear::new`] agree: the list never offers a year `POST
+/// /reports/tax-report` would refuse `422`.
 async fn db_tax_report_years(pool: &SqlitePool) -> Result<Vec<i32>, sqlx::Error> {
+    // One read transaction over every input, per the house rule for
+    // multi-query reports: an interleaved write can't land a fact between the
+    // CGT walk and the date reads and leave the list internally inconsistent.
+    let mut tx = pool.begin().await?;
     let dates: Vec<NaiveDate> = sqlx::query_scalar(
         "SELECT date FROM trades \
-         UNION SELECT date_paid FROM income \
          UNION SELECT date_paid FROM interest_income \
          UNION SELECT tax_year_end_date FROM amma_statements \
          UNION SELECT taxing_point_date FROM ess_statements \
          UNION SELECT date_incurred FROM investment_expenses",
     )
-    .fetch_all(pool)
+    .fetch_all(&mut *tx)
     .await?;
-    let mut years: Vec<i32> = dates.into_iter().map(tax_year_for).collect();
+    let income_rows: Vec<Income> = sqlx::query_as("SELECT * FROM income")
+        .fetch_all(&mut *tx)
+        .await?;
+    let cgt_years = net_capital_gain::db_cgt_years(&mut tx).await?;
+    tx.commit().await?;
+
+    let mut years: Vec<i32> = dates
+        .into_iter()
+        .chain(income_rows.iter().map(Income::assessment_date))
+        .map(tax_year_for)
+        .chain(cgt_years)
+        .filter(|y| (MIN_TAX_YEAR..=MAX_TAX_YEAR).contains(y))
+        .collect();
     years.sort_unstable();
     years.dedup();
     Ok(years)
@@ -2535,6 +2581,14 @@ mod tests {
         assert_eq!(line("dividends_assessable").value, "0");
     }
 
+    /// The year list over HTTP — the surface the UI's closed `<select>` is
+    /// built from, so a year missing here cannot be generated at all.
+    async fn listed_years(pool: &SqlitePool) -> Vec<i32> {
+        test_support::ApiClient::full(pool)
+            .get_json("/reports/tax-report/years")
+            .await
+    }
+
     #[tokio::test]
     async fn years_handler_lists_every_year_with_a_recorded_fact() {
         let pool = test_support::test_pool().await;
@@ -2551,8 +2605,213 @@ mod tests {
             .insert(&pool)
             .await;
 
-        let years = db_tax_report_years(&pool).await.unwrap();
-        assert_eq!(years, vec![2023, 2024]);
+        // Exactly the two years with a fact — nothing carries a loss forward
+        // here, so the list stays sparse: no filler for the years between or
+        // after them.
+        assert_eq!(db_tax_report_years(&pool).await.unwrap(), vec![2023, 2024]);
+        assert_eq!(listed_years(&pool).await, vec![2023, 2024]);
+    }
+
+    /// SCENARIOS P-04: a trust distribution with a 30 June entitlement date
+    /// paid in mid-July is assessed in the FY just ended
+    /// (`Income::assessment_date`, the rule the tax summary and this report's
+    /// own income tables apply). The year list buckets income by that date
+    /// too, so the year the distribution belongs to is the year offered — it
+    /// used to offer the *payment* year, which has nothing in it, and hide
+    /// FY2025 entirely.
+    #[tokio::test]
+    async fn the_year_list_buckets_trust_income_by_its_assessment_date() {
+        let pool = test_support::test_pool().await;
+        test_support::listing(1)
+            .ticker("VDHG")
+            .name("Vanguard Diversified High Growth")
+            .insert(&pool)
+            .await;
+        test_support::income(1, 1, ymd(2025, 7, 15))
+            .with(|i| {
+                i.trust_income = true;
+                i.entitlement_date = Some(ymd(2025, 6, 30)); // FY2025
+                i.unfranked_amount = dec("100");
+            })
+            .insert(&pool)
+            .await;
+
+        assert_eq!(listed_years(&pool).await, vec![2025]);
+        // And the document for that year does carry the distribution.
+        let report = db_tax_report(&pool, 2025).await.unwrap();
+        assert_eq!(report.income.trust_income.len(), 1);
+    }
+
+    /// SCENARIOS P-03: a CGT event that is not a trade puts its year on the
+    /// list. A return of capital above the parcel's cost base (CGT event G1)
+    /// makes a capital gain in the payment's year with no disposal at all —
+    /// the list used to offer only the *purchase* year, so the year with the
+    /// gain in it could not be generated.
+    #[tokio::test]
+    async fn the_year_list_offers_a_g1_excess_year_with_no_trade_in_it() {
+        use crate::entities::corporate_action;
+        let pool = test_support::test_pool().await;
+        test_support::listing(1)
+            .ticker("RAP")
+            .name("Return A Plenty")
+            .insert(&pool)
+            .await;
+        // FY2023 purchase: 100 units @ $1 → cost base $100.
+        test_support::buy(1, 1)
+            .date(ymd(2022, 8, 1))
+            .qty(dec("100"))
+            .price(dec("1"))
+            .insert(&pool)
+            .await;
+        // FY2026 return of capital of $3/unit → $200 excess over the cost base.
+        corporate_action::db_upsert(
+            &pool,
+            &corporate_action::CorporateAction {
+                id: 10,
+                listing_id: 1,
+                date: ymd(2025, 9, 15),
+                kind: corporate_action::ActionKind::ReturnOfCapital {
+                    amount_per_unit: dec("3"),
+                    currency: "AUD".to_string(),
+                    record_date: None,
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+        let years = listed_years(&pool).await;
+        assert!(years.contains(&2026), "{years:?} omits the G1 year");
+        assert!(years.contains(&2023), "{years:?} omits the purchase year");
+        // Honest in the other direction: FY2024 and FY2025 have nothing in
+        // them and no loss balance to carry, so they stay off the list.
+        assert!(!years.contains(&2024), "{years:?} invents FY2024");
+        assert!(!years.contains(&2025), "{years:?} invents FY2025");
+
+        let report = db_tax_report(&pool, 2026).await.unwrap();
+        let summary = report.cgt_summary.expect("the G1 year has a worksheet");
+        assert_eq!(summary.cgt_event_g1_gain, dec("200"));
+    }
+
+    /// SCENARIOS P-03: the same for a rights sale as a year's only fact —
+    /// `rights_sales` is in no date union, and the parcel it is anchored to
+    /// was bought years earlier.
+    #[tokio::test]
+    async fn the_year_list_offers_a_rights_sale_only_year() {
+        use crate::entities::{corporate_action, rights_sale};
+        let pool = test_support::test_pool().await;
+        test_support::listing(1)
+            .ticker("RTS")
+            .name("Rights Co")
+            .insert(&pool)
+            .await;
+        // FY2022 purchase.
+        test_support::buy(1, 1)
+            .date(ymd(2021, 9, 1))
+            .qty(dec("1000"))
+            .price(dec("2"))
+            .insert(&pool)
+            .await;
+        corporate_action::db_upsert(
+            &pool,
+            &corporate_action::CorporateAction {
+                id: 10,
+                listing_id: 1,
+                date: ymd(2024, 7, 1),
+                kind: corporate_action::ActionKind::RightsIssue {
+                    rights_units: dec("1"),
+                    rights_held_units: dec("4"),
+                    exercise_price: dec("1.80"),
+                    currency: "AUD".to_string(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+        // 250 rights sold at 20c in July 2024 → a $50 gross FY2025 gain,
+        // $25 after the discount.
+        rights_sale::db_sell_rights(
+            &pool,
+            10,
+            &rights_sale::SellRightsBody {
+                date: ymd(2024, 7, 20),
+                units: dec("250"),
+                proceeds_per_right: Some(dec("0.20")),
+                rights_cost: None,
+                fx_rate: None,
+                holding_account_id: 1,
+                allocations: vec![rights_sale::AllocationInput {
+                    purchase_trade_id: 1,
+                    units: dec("250"),
+                }],
+            },
+        )
+        .await
+        .unwrap();
+
+        let years = listed_years(&pool).await;
+        assert!(
+            years.contains(&2025),
+            "{years:?} omits the rights-sale year"
+        );
+        let report = db_tax_report(&pool, 2025).await.unwrap();
+        assert_eq!(
+            report
+                .cgt_summary
+                .expect("the rights-sale year has a worksheet")
+                .net_capital_gain,
+            dec("25")
+        );
+    }
+
+    /// SCENARIOS P-02 (and O-03/O-04): a quiet year carrying a capital loss
+    /// forward is offered too. `a_quiet_year_still_reports_its_carried_forward_loss`
+    /// pins that the document prints such a year's label 18V figure; this
+    /// pins that the picker can actually reach it. Every listed year is one
+    /// `POST /reports/tax-report` accepts, so the list and the `tax_year`
+    /// range validator agree.
+    #[tokio::test]
+    async fn the_year_list_offers_a_quiet_carry_forward_year() {
+        let pool = test_support::test_pool().await;
+        test_support::listing(1)
+            .ticker("T1")
+            .name("Test One")
+            .insert(&pool)
+            .await;
+        // FY2025: a $4,000 capital loss, nothing to offset it.
+        test_support::buy(1, 1)
+            .date(ymd(2024, 8, 1))
+            .qty(dec("100"))
+            .price(dec("50"))
+            .insert(&pool)
+            .await;
+        test_support::sell(2, 1)
+            .date(ymd(2025, 5, 1))
+            .qty(dec("100"))
+            .price(dec("10"))
+            .insert(&pool)
+            .await;
+        test_support::allocate(&pool, 1, 2, 1, dec("100")).await;
+
+        let years = listed_years(&pool).await;
+        assert!(years.contains(&2025), "{years:?} omits the loss year");
+        assert!(
+            years.contains(&2026),
+            "{years:?} omits the quiet year carrying the loss forward"
+        );
+        // The list never reaches back before the first fact.
+        assert!(!years.contains(&2024), "{years:?} invents FY2024");
+        // Every offered year is one the report accepts (TaxYear's range).
+        let client = test_support::ApiClient::full(&pool);
+        for year in years {
+            client
+                .post(
+                    "/reports/tax-report",
+                    &serde_json::json!({ "tax_year": year }),
+                )
+                .await
+                .expect_status(StatusCode::OK);
+        }
     }
 
     /// The printed FX rates are the rates the printed AUD figures were

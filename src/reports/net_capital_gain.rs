@@ -873,6 +873,32 @@ pub(crate) struct CgtSummaryYear {
     pub taxpayer_basis: String,
 }
 
+/// Every tax year this report emits a row for — the year list itself, with
+/// no per-year figures attached.
+///
+/// *The* answer to "which years have CGT content", for the annual tax
+/// report's year picker (`reports::tax_report::db_tax_report_years`, SCENARIOS
+/// P-02/P-03/P-04). It runs the very same `gross_buckets`/[`net_years`]
+/// pipeline [`db_net_capital_gain`] and [`db_cgt_summary_year`] do, so the
+/// picker cannot offer a year the CGT summary would then answer `None` for,
+/// nor omit one it would answer `Some` for. Deriving the years a second time
+/// from the fact tables would have to re-derive realised disposals, rights
+/// sales, the E10/G1/C2 walks *and* the loss-carry-forward chain — exactly the
+/// divergence this shares the walk to avoid.
+///
+/// Runs on the caller's connection so it joins the caller's read transaction.
+pub(crate) async fn db_cgt_years(
+    conn: &mut sqlx::SqliteConnection,
+) -> Result<Vec<i32>, sqlx::Error> {
+    let realised = super::realised_gains::db_realised_gains_on(&mut *conn).await?;
+    let buckets = gross_buckets(&mut *conn, &realised).await?;
+    let opening = crate::entities::cgt_settings::db_opening_capital_loss(&mut *conn).await?;
+    Ok(net_years(buckets, opening, current_tax_year())
+        .into_iter()
+        .map(|y| y.tax_year)
+        .collect())
+}
+
 /// [`CgtSummaryYear`] for one tax year — `None` when the year has neither
 /// recorded gain/loss activity nor a capital loss brought forward into it
 /// (matches [`NetCapitalGainYear`]'s own behaviour of only emitting a row for

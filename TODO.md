@@ -38,13 +38,13 @@ findings below are open.
 `ess_statements.taxing_point_date`, `investment_expenses.date_incurred`). Three kinds of year the
 report *does* produce content for are missing from it — each reproduced against the running system:
 
-- [ ] **Trust income is bucketed by `date_paid`, not by its assessment date.** A trust distribution
+- [x] **Trust income is bucketed by `date_paid`, not by its assessment date.** A trust distribution
   with a 30 June 2025 entitlement date paid 15 July 2025 (P-04, the exact case that scenario names)
   is assessed in **FY2025** — `Income::assessment_date` / `domain::tax_year::tax_year_for`, the rule
   the tax summary and the report's own `push_income_rows` both apply. `GET /portfolio/tax-summary`
   reports it under `tax_year: 2025`; the year list answers `[2026]`. FY2025 — the year the
   distribution belongs to — is unreachable.
-- [ ] **A CGT event that is not a trade puts no year on the list.** A return of capital above the
+- [x] **A CGT event that is not a trade puts no year on the list.** A return of capital above the
   cost base (CGT event G1) dated 15 September 2025 against a parcel bought in FY2023 gives FY2026 a
   `net_capital_gain` of $200 and a full `cgt_summary`; the year list answers `[2023]`. Likewise a
   rights sale as a year's only fact: a $25 FY2025 net capital gain, year list `[2022]`. `rights_sales`
@@ -52,7 +52,7 @@ report *does* produce content for are missing from it — each reproduced agains
   applies to an AMIT E10 excess. `docs/API.md` describes the endpoint as "every Australian financial
   year with any recorded fact touching a tax figure", which these *are* — so the doc and the code
   disagree, not just the code and the need.
-- [ ] **A quiet year that carries a capital loss forward.** O's fix made
+- [x] **A quiet year that carries a capital loss forward.** O's fix made
   `net_capital_gain::net_years` emit such a year, and `tax_report`'s own
   `a_quiet_year_still_reports_its_carried_forward_loss` pins that the document prints its label 18V
   figure — but the year list still doesn't offer it (FY2025 loss, `years: [2025]`, FY2026 carries
@@ -66,6 +66,26 @@ walk emits (which already covers realised disposals, rights sales, G1, E10, C2 a
 carry-forward years, so it subsumes the second and third bullets in one read), plus the interest /
 AMMA / ESS / expense dates already there. `docs/API.md`'s description of the endpoint and its
 "request a quiet year by `tax_year` directly" note both need updating.
+
+**Done 2026-08-20.** `db_tax_report_years` now reads on one transaction and unions: the trade /
+interest / AMMA / ESS / expense dates as before; `income` rows decoded and bucketed by
+`Income::assessment_date` (no SQL twin of that rule exists and none was added — the read decodes the
+rows and asks the model, as `tax_summary` does); and `net_capital_gain::db_cgt_years`, a new
+`pub(crate)` entry point running the *same* `gross_buckets`/`net_years` pipeline `db_net_capital_gain`
+and `db_cgt_summary_year` run, on the caller's connection. Reusing that walk (rather than re-deriving
+CGT-event years from the fact tables) is what makes the picker and `cgt_summary` unable to disagree.
+The list is filtered to `MIN_TAX_YEAR..=MAX_TAX_YEAR`, so it can never offer a year `TaxYear::new`
+would refuse `422`. **Cost trade-off, stated in the code comment:** the list went from one six-way
+date `UNION` to roughly one `cgt_summary`'s worth of work — accepted deliberately, since the picker is
+a closed `<select>` and the only way to reach the report, so a missing year is a report that cannot be
+generated at all. Tests (all over HTTP through `ApiClient`):
+`the_year_list_buckets_trust_income_by_its_assessment_date` (P-04),
+`the_year_list_offers_a_g1_excess_year_with_no_trade_in_it` (P-03, which also pins that the two years
+with nothing in them stay off the list), `the_year_list_offers_a_rights_sale_only_year` (P-03),
+`the_year_list_offers_a_quiet_carry_forward_year` (P-02/O-03, which also posts every listed year and
+requires `200`), and the widened `years_handler_lists_every_year_with_a_recorded_fact`. `docs/API.md`'s
+endpoint description is rewritten and the "request a quiet year by `tax_year` directly" note is gone,
+pinned by `doc_checks::tax_report_year_picker_scope_documented`.
 
 ## SCENARIOS P-01/P-07: a converted fund's pre-conversion income is totalled but has no rows behind it, and its franking credits are never tested
 

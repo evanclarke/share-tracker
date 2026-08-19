@@ -699,6 +699,31 @@ fn known_limitations_document_quarantined_collectable_losses() {
     assert!(mirror.contains("$1,260"));
 }
 
+/// Docs-sync pin for what the annual tax report's year picker offers
+/// (SCENARIOS P-02/P-03/P-04, 2026-08-20): the picker is a closed `<select>`
+/// and the only way to reach the report, so it lists every year the report has
+/// content for — income by its **assessment date**, every year the
+/// net-capital-gain walk emits (the CGT events that are not trades, plus the
+/// quiet carry-forward years), and the remaining fact dates — while a year
+/// with nothing in it stays absent and no year outside the accepted
+/// `tax_year` range is ever offered.
+#[test]
+fn tax_report_year_picker_scope_documented() {
+    assert!(API_MD.contains("every Australian financial year this report has content for"));
+    assert!(API_MD.contains("**income by its assessment date**"));
+    assert!(API_MD.contains(
+        "every year the [net capital gain](#net-capital-gain) report's own year walk emits"
+    ));
+    assert!(API_MD.contains("realised disposals, rights sales, CGT events E10/G1/C2"));
+    assert!(API_MD.contains("plus every quiet year still carrying a capital loss forward"));
+    // Honest in both directions, and never offering a year the POST refuses.
+    assert!(API_MD.contains("A year with nothing in it and no loss balance is still absent"));
+    assert!(API_MD.contains("every listed year is one `POST /reports/tax-report` answers"));
+    // The superseded note — "request a quiet year by `tax_year` directly" —
+    // described a picker that could not reach such a year, and is gone.
+    assert!(!API_MD.contains("request a quiet year by `tax_year` directly"));
+}
+
 /// Docs-sync pin for which years the net-capital-gain series covers
 /// (SCENARIOS O-03/O-04/O-12, 2026-08-19): a quiet year carrying a capital
 /// loss forward is reported — label 18V is reported every year until the loss
