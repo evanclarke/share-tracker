@@ -229,6 +229,98 @@ impl Provenance {
     }
 }
 
+/// How deep a chain of rollovers [`replacement_descendants`] and
+/// [`source_ancestors`] will follow. A parcel transferred between accounts,
+/// caught in a takeover and then demerged is three; ten is far past anything
+/// real and stops a cycle (which the write paths cannot create) from looping.
+const MAX_ROLLOVER_DEPTH: usize = 10;
+
+/// The provenance columns a replacement Buy and its closing Sell share, in the
+/// order [`Provenance`] lists them. The chain walks are the only readers that
+/// need all three at once — a specific operation always knows its own.
+const PROVENANCE_COLUMNS: [&str; 3] = ["scrip_action_id", "demerger_action_id", "transfer_id"];
+
+/// The rollover groups a parcel's units were carried into: one entry per
+/// (column, id) pair whose closing Sell consumed part of `parcel_id`.
+async fn groups_consuming(
+    conn: &mut sqlx::SqliteConnection,
+    parcel_id: i64,
+) -> Result<Vec<(&'static str, i64)>, sqlx::Error> {
+    let mut out = Vec::new();
+    for column in PROVENANCE_COLUMNS {
+        let ids: Vec<i64> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "SELECT DISTINCT s.{column} FROM parcel_allocations pa \
+             JOIN trades s ON s.id = pa.sale_trade_id \
+             WHERE pa.purchase_trade_id = ? AND s.{column} IS NOT NULL"
+        )))
+        .bind(parcel_id)
+        .fetch_all(&mut *conn)
+        .await?;
+        out.extend(ids.into_iter().map(|id| (column, id)));
+    }
+    Ok(out)
+}
+
+/// The replacement parcels a rollover group created (its acquisition side).
+async fn group_replacements(
+    conn: &mut sqlx::SqliteConnection,
+    column: &'static str,
+    group_id: i64,
+) -> Result<Vec<i64>, sqlx::Error> {
+    // The column name comes from `PROVENANCE_COLUMNS`, never from user input.
+    sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT id FROM trades WHERE {column} = ? AND trade_type IN ('Buy', 'DRP') ORDER BY id"
+    )))
+    .bind(group_id)
+    .fetch_all(&mut *conn)
+    .await
+}
+
+/// Every parcel a rollover has carried `parcel_id`'s units into — directly, or
+/// through a chain of them — ascending by id, with `parcel_id` itself excluded.
+/// Empty when no rollover consumed it.
+///
+/// This is the forward half of the rollover chain, and it exists because a
+/// replacement Buy carries no link to the individual parcel it replaced: the
+/// only record is the group both sides share (`trades.transfer_id` /
+/// `scrip_action_id` / `demerger_action_id`). So where one operation moved
+/// several parcels at once, every replacement of that group is a descendant of
+/// each of its sources — the walk cannot be finer than the data. Callers must
+/// therefore read the result as "the parcels these units *could* now sit in",
+/// which is what an advisory alert (`reports::health`'s `ess_30_day_rule`)
+/// needs, and is why it does not claim a one-to-one substitution.
+///
+/// Bounded by [`MAX_ROLLOVER_DEPTH`] and by a visited set — a demerger's two
+/// replacement parcels reconverging on one source would otherwise be counted
+/// twice.
+pub async fn replacement_descendants(
+    conn: &mut sqlx::SqliteConnection,
+    parcel_id: i64,
+) -> Result<Vec<i64>, sqlx::Error> {
+    let mut seen = std::collections::HashSet::from([parcel_id]);
+    let mut frontier = vec![parcel_id];
+    let mut found = Vec::new();
+    for _ in 0..MAX_ROLLOVER_DEPTH {
+        let mut next = Vec::new();
+        for id in frontier {
+            for (column, group_id) in groups_consuming(&mut *conn, id).await? {
+                for candidate in group_replacements(&mut *conn, column, group_id).await? {
+                    if seen.insert(candidate) {
+                        found.push(candidate);
+                        next.push(candidate);
+                    }
+                }
+            }
+        }
+        if next.is_empty() {
+            break;
+        }
+        frontier = next;
+    }
+    found.sort_unstable();
+    Ok(found)
+}
+
 /// A replacement Buy to write: the substituted parcel's units and the cost
 /// base they carry forward.
 pub struct ReplacementBuy<'a> {
@@ -299,4 +391,93 @@ pub async fn created_trades(
         );
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::entities::holding_account::{self, HoldingAccount};
+    use crate::entities::sell::AllocationInput;
+    use crate::entities::transfer::{self, TransferBody};
+    use crate::test_support::{self, dec, test_pool, ymd};
+
+    /// A parcel moved twice — plan account → broker A → broker B — reports both
+    /// replacements, not just the first: the walk follows the chain, which is
+    /// what makes an ESS statement (or an AMMA one) still reachable from where
+    /// the units ended up.
+    #[tokio::test]
+    async fn descendants_follow_a_chain_of_transfers() {
+        let pool = test_pool().await;
+        test_support::listing(1).ticker("AAA").insert(&pool).await;
+        for (id, name) in [(2, "Broker A"), (3, "Broker B")] {
+            holding_account::db_upsert(
+                &pool,
+                &HoldingAccount {
+                    id,
+                    name: name.to_string(),
+                },
+            )
+            .await
+            .unwrap();
+        }
+        test_support::buy(1, 1)
+            .date(ymd(2023, 1, 10))
+            .qty(dec("100"))
+            .insert(&pool)
+            .await;
+
+        let move_to = async |transfer_id: i64, parcel: i64, from: i64, to: i64, date| {
+            transfer::db_transfer(
+                &pool,
+                transfer_id,
+                &TransferBody {
+                    listing_id: 1,
+                    date,
+                    from_account_id: from,
+                    to_account_id: to,
+                    allocations: vec![AllocationInput {
+                        purchase_trade_id: parcel,
+                        quantity_allocated: dec("100"),
+                    }],
+                    fee_allocations: Vec::new(),
+                    fee_market_price: None,
+                    fee_fx_rate: None,
+                },
+            )
+            .await
+            .unwrap()
+            .transfer_ins[0]
+                .id
+        };
+        let first = move_to(1, 1, 1, 2, ymd(2023, 3, 1)).await;
+        let second = move_to(2, first, 2, 3, ymd(2023, 5, 1)).await;
+
+        let mut conn = pool.acquire().await.unwrap();
+        assert_eq!(
+            replacement_descendants(&mut conn, 1).await.unwrap(),
+            vec![first, second]
+        );
+        assert_eq!(
+            replacement_descendants(&mut conn, first).await.unwrap(),
+            vec![second]
+        );
+        // The end of the chain, and a parcel no rollover touched, have none.
+        assert!(
+            replacement_descendants(&mut conn, second)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        test_support::buy(50, 1)
+            .date(ymd(2023, 1, 10))
+            .qty(dec("10"))
+            .insert(&pool)
+            .await;
+        assert!(
+            replacement_descendants(&mut conn, 50)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
 }

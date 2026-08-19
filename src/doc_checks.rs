@@ -476,6 +476,31 @@ fn known_limitations_document_the_ess_30_day_rule() {
     assert!(README_MD.contains("**ESS sale inside the 30-day rule's window**"));
 }
 
+/// Doc pin (SCENARIOS N-08): the 30-day rule turns on a **disposal**, so the
+/// health alert's documented scope must say which Sells are one. A
+/// holding-account transfer is not (the same owner holds the same interests),
+/// and it is the ordinary RSU move, so the alert excludes it and follows the
+/// rollover chain to keep a *later* real sale visible. A scrip-exchange or
+/// demerger closing Sell is kept and labelled instead of being decided here,
+/// because ITAA 1997 s 83A-130's conditions are facts this tool never records.
+#[test]
+fn health_documents_what_counts_as_a_disposal_for_the_ess_30_day_rule() {
+    assert!(API_MD.contains("**What counts as a disposal**"));
+    assert!(API_MD.contains("docs/ato/ess-takeovers-and-restructures.md"));
+    assert!(API_MD.contains("`disposal_kind: \"TakeoverOrRestructure\"`"));
+    assert!(API_MD.contains("The alert **follows the rollover chain**"));
+    // The mirrored provision, with the subsections the wording above leans on.
+    let mirror = include_str!("../docs/ato/ess-takeovers-and-restructures.md");
+    assert!(mirror.contains("SECTION 83A-130") || mirror.contains("s 83A-130"));
+    assert!(mirror.contains("**83A-130(2)**"));
+    assert!(mirror.contains("**83A-130(5)**"));
+    assert!(mirror.contains("**83A-130(9)**"));
+    // Indexed in the ATO overview, which is where a reader is told to start.
+    assert!(
+        include_str!("../docs/ato/OVERVIEW.md").contains("[`ess-takeovers-and-restructures.md`]")
+    );
+}
+
 /// Known-limitation pin (SCENARIOS M-12, decided 2026-08-19): the FITO line
 /// reaches a foreign-taxed **capital gain** only through the trust path — an
 /// AMMA statement's `foreign_tax_credits_capital_gains`, apportioned to its

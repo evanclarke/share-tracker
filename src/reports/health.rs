@@ -57,6 +57,7 @@
 //! price/FX import that breaks before ever succeeding surfaces through
 //! `failed_jobs` (and the Jobs page) instead.
 
+use crate::domain::rollover;
 use crate::domain::tax_year::tax_year_for;
 use crate::entities::closing_price::{self, HeldTimeline};
 use crate::entities::ess_statement::{self, EssStatement};
@@ -434,6 +435,27 @@ pub struct DuplicateInheritance {
 /// corrected entry (the amended statement, vested and sold the same day, as in
 /// `ato_examples::ess_30_day_rule_example_11_wyatt_amended_statement`) must not
 /// nag.
+///
+/// # What counts as a disposal (SCENARIOS N-08)
+///
+/// The rule turns on a *disposal*, so the Sells that are not one are not
+/// candidates — `docs/ato/ess-takeovers-and-restructures.md` (ITAA 1997
+/// s 83A-130) is the source for the two rollover cases:
+///
+/// - A **holding-account transfer**'s closing Sell (`trades.transfer_id`) is
+///   excluded in SQL. Nothing is disposed of — the same beneficial owner holds
+///   the same interests before and after, which is why no CGT event arises
+///   either — and it is not a takeover or restructure, so s 83A-130 does not
+///   even come into it. This is the RSU-plan-to-broker move `entities::transfer`
+///   exists for, so leaving it in flagged the *ordinary* use of the feature and
+///   invited an amended return over a change of custody.
+/// - A **scrip-for-scrip exchange** or **demerger** closing Sell stays, carrying
+///   [`EssDisposalKind::TakeoverOrRestructure`]: s 83A-130(2) treats matching
+///   replacement interests as a continuation, so the taxing point normally does
+///   *not* move — but that rests on facts this system does not record ((4)'s
+///   ordinary-shares test, (9)'s continuing-employment and two 10% tests), and
+///   (5) makes a partial-rollover's cash component a disposal to that extent.
+///   Advisory is the honest answer there, not silence.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct EssThirtyDaySale {
     /// The Sell whose allocation draws on the vest parcel.
@@ -464,6 +486,24 @@ pub struct EssThirtyDaySale {
     /// cross a 30 June, and that is the *common* case: the years differing is
     /// the Example 11 shape, where the correction also moves a return.
     pub disposal_tax_year: i32,
+    /// Whether the Sell is an ordinary disposal or a rollover operation's
+    /// closing Sell, which changes what the row is asking the user to check.
+    pub disposal_kind: EssDisposalKind,
+}
+
+/// What kind of Sell reached the 30-day-rule alert — see
+/// [`EssThirtyDaySale`]'s "What counts as a disposal".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EssDisposalKind {
+    /// An ordinary disposal: the rule applies, and the correction is an amended
+    /// employer statement.
+    Sale,
+    /// A scrip-for-scrip exchange or demerger closing Sell. ITAA 1997
+    /// s 83A-130(2) treats matching replacement interests as a **continuation**
+    /// of the old ESS interests, so the deferred taxing point normally does not
+    /// move — subject to (4)/(9), which this system cannot test, and to (5),
+    /// which does treat a partial-rollover's cash component as a disposal.
+    TakeoverOrRestructure,
 }
 
 /// The joined row behind [`EssThirtyDaySale`]: the statement's own figures are
@@ -477,9 +517,13 @@ struct EssThirtyDaySaleRow {
     sale_date: NaiveDate,
     #[sqlx(try_from = "Money")]
     units_sold: Decimal,
-    ess_statement_id: i64,
-    vest_trade_id: i64,
-    taxing_point_date: NaiveDate,
+    /// The parcel the allocation consumed — a vest parcel, or a replacement one
+    /// down its rollover chain; the statement and vest parcel are looked up
+    /// from it.
+    parcel_id: i64,
+    /// Set when the Sell is a scrip-for-scrip exchange or demerger closing
+    /// Sell (the transfer case never reaches here — it is filtered in SQL).
+    rollover_action_id: Option<i64>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1202,35 +1246,81 @@ async fn db_duplicate_inheritances(
 /// Disposals of ESS-vested shares inside the 30-day window — see
 /// [`EssThirtyDaySale`].
 ///
-/// Read on the caller's transaction. The window is bounded in SQL
-/// (`date(taxing_point, '+30 days')` over ISO-8601 text, which compares and
-/// arithmetics correctly), so an ordinary sale of an ESS parcel years later
-/// never reaches memory. The pairing is per **allocation**: a Sell drawing on
-/// two vest parcels inside their windows is two rows, since each statement
-/// would be amended separately.
+/// Read on the caller's transaction, starting from the **vest parcels** rather
+/// than from the allocations: each ESS statement's own vest Buy, plus every
+/// parcel a rollover has since carried its units into
+/// (`domain::rollover::replacement_descendants`). Following the chain is what
+/// makes the alert work on the ordinary RSU path (SCENARIOS N-08) — vest into
+/// the employer's plan account, move the shares to a personal broker account,
+/// sell there — where the parcel actually sold carries no `ess_statement_id` of
+/// its own, so joining `trades.ess_statement_id` to the allocation saw nothing
+/// at all. Only the ESS parcels' own allocations are read, so an unrelated
+/// disposal never reaches memory; the window itself is applied in Rust, since
+/// the candidate set is now the small one.
 ///
-/// Two reads rather than one join, so the discount is summed by
-/// `ess_statement::discount_labels` — the tax summary's own definition of the
-/// discount — instead of being re-added over TEXT columns here.
+/// The pairing is per **allocation × statement**: a Sell drawing on two vest
+/// parcels inside their windows is two rows, since each statement would be
+/// amended separately. Where one rollover moved several parcels at once, its
+/// replacements descend from all of that group's sources (the data records no
+/// finer link — see `replacement_descendants`), so such a sale can report
+/// against more than one statement; the alert is advisory, and each row names
+/// the vest parcel and statement it is about.
+///
+/// The statements are read separately rather than joined, so the discount is
+/// summed by `ess_statement::discount_labels` — the tax summary's own definition
+/// of the discount — instead of being re-added over TEXT columns here.
 async fn db_ess_30_day_rule(
     conn: &mut sqlx::SqliteConnection,
 ) -> Result<Vec<EssThirtyDaySale>, sqlx::Error> {
-    let rows = sqlx::query_as::<_, EssThirtyDaySaleRow>(sqlx::AssertSqlSafe(format!(
-        "SELECT s.id AS sale_trade_id, s.listing_id AS listing_id, l.ticker AS ticker, \
-                s.date AS sale_date, pa.quantity_allocated AS units_sold, \
-                e.id AS ess_statement_id, b.id AS vest_trade_id, \
-                e.taxing_point_date AS taxing_point_date \
-         FROM parcel_allocations pa \
-         JOIN trades s ON s.id = pa.sale_trade_id \
-         JOIN trades b ON b.id = pa.purchase_trade_id \
-         JOIN ess_statements e ON e.id = b.ess_statement_id \
-         JOIN listings l ON l.id = s.listing_id \
-         WHERE s.date > e.taxing_point_date \
-           AND s.date <= date(e.taxing_point_date, '+{ESS_THIRTY_DAY_WINDOW} days') \
-         ORDER BY s.date DESC, s.id, e.id"
-    )))
+    // Every vest parcel, and the statement behind it.
+    let vests: Vec<(i64, i64)> = sqlx::query_as(
+        "SELECT id, ess_statement_id FROM trades \
+         WHERE ess_statement_id IS NOT NULL AND trade_type IN ('Buy', 'DRP') ORDER BY id",
+    )
     .fetch_all(&mut *conn)
     .await?;
+    if vests.is_empty() {
+        return Ok(Vec::new());
+    }
+    // Which (vest parcel, statement) each parcel now holding ESS units answers
+    // for — the vest parcel itself, and every replacement down the chain.
+    let mut ess_parcels: HashMap<i64, Vec<(i64, i64)>> = HashMap::new();
+    for (vest_trade_id, ess_statement_id) in vests {
+        ess_parcels
+            .entry(vest_trade_id)
+            .or_default()
+            .push((vest_trade_id, ess_statement_id));
+        for descendant in rollover::replacement_descendants(&mut *conn, vest_trade_id).await? {
+            ess_parcels
+                .entry(descendant)
+                .or_default()
+                .push((vest_trade_id, ess_statement_id));
+        }
+    }
+
+    // Their allocations, with the disposing Sell. A transfer-out Sell is not a
+    // disposal at all and is excluded here (see `EssThirtyDaySale`); a
+    // scrip-exchange/demerger closing Sell is kept and labelled.
+    let placeholders = std::iter::repeat_n("?", ess_parcels.len())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut query = sqlx::query_as::<_, EssThirtyDaySaleRow>(sqlx::AssertSqlSafe(format!(
+        "SELECT s.id AS sale_trade_id, s.listing_id AS listing_id, l.ticker AS ticker, \
+                s.date AS sale_date, pa.quantity_allocated AS units_sold, \
+                pa.purchase_trade_id AS parcel_id, \
+                COALESCE(s.scrip_action_id, s.demerger_action_id) AS rollover_action_id \
+         FROM parcel_allocations pa \
+         JOIN trades s ON s.id = pa.sale_trade_id \
+         JOIN listings l ON l.id = s.listing_id \
+         WHERE pa.purchase_trade_id IN ({placeholders}) AND s.transfer_id IS NULL \
+         ORDER BY s.date DESC, s.id"
+    )));
+    let mut parcel_ids: Vec<i64> = ess_parcels.keys().copied().collect();
+    parcel_ids.sort_unstable();
+    for id in &parcel_ids {
+        query = query.bind(id);
+    }
+    let rows = query.fetch_all(&mut *conn).await?;
     if rows.is_empty() {
         return Ok(Vec::new());
     }
@@ -1247,37 +1337,54 @@ async fn db_ess_30_day_rule(
         .map(|s| (s.id, s))
         .collect();
 
-    rows.into_iter()
-        .map(|row| {
-            // The join guarantees the statement exists; a row read between the
-            // two queries is the only way to miss it, and the alert would be
-            // unable to name what it is about.
-            let statement = statements.get(&row.ess_statement_id).ok_or_else(|| {
+    let mut alerts = Vec::new();
+    for row in rows {
+        // Every (vest parcel, statement) this parcel answers for; the map was
+        // built from the same read, so the entry is always there.
+        for &(vest_trade_id, ess_statement_id) in
+            ess_parcels.get(&row.parcel_id).into_iter().flatten()
+        {
+            // A row read between the two queries is the only way to miss the
+            // statement, and the alert would be unable to name what it is about.
+            let statement = statements.get(&ess_statement_id).ok_or_else(|| {
                 sqlx::Error::Decode(
-                    format!(
-                        "ESS statement {} disappeared mid-read",
-                        row.ess_statement_id
-                    )
-                    .into(),
+                    format!("ESS statement {ess_statement_id} disappeared mid-read").into(),
                 )
             })?;
-            Ok(EssThirtyDaySale {
+            let days_after = (row.sale_date - statement.taxing_point_date).num_days();
+            if !(1..=ESS_THIRTY_DAY_WINDOW).contains(&days_after) {
+                continue;
+            }
+            alerts.push(EssThirtyDaySale {
                 sale_trade_id: row.sale_trade_id,
                 listing_id: row.listing_id,
-                ticker: row.ticker,
+                ticker: row.ticker.clone(),
                 sale_date: row.sale_date,
                 units_sold: row.units_sold,
-                ess_statement_id: row.ess_statement_id,
-                vest_trade_id: row.vest_trade_id,
-                taxing_point_date: row.taxing_point_date,
-                days_after: (row.sale_date - row.taxing_point_date).num_days(),
+                ess_statement_id,
+                vest_trade_id,
+                taxing_point_date: statement.taxing_point_date,
+                days_after,
                 currency: statement.currency.clone(),
                 statement_discount: ess_statement::discount_labels(statement),
-                statement_tax_year: tax_year_for(row.taxing_point_date),
+                statement_tax_year: tax_year_for(statement.taxing_point_date),
                 disposal_tax_year: tax_year_for(row.sale_date),
-            })
-        })
-        .collect()
+                disposal_kind: match row.rollover_action_id {
+                    Some(_) => EssDisposalKind::TakeoverOrRestructure,
+                    None => EssDisposalKind::Sale,
+                },
+            });
+        }
+    }
+    // Newest sale first, then the sale's own id, then the statement — the order
+    // the SQL used to produce, now that the window is applied in Rust.
+    alerts.sort_by(|a, b| {
+        b.sale_date
+            .cmp(&a.sale_date)
+            .then_with(|| a.sale_trade_id.cmp(&b.sale_trade_id))
+            .then_with(|| a.ess_statement_id.cmp(&b.ess_statement_id))
+    });
+    Ok(alerts)
 }
 
 /// Read the freshness facts on one snapshot. `today` and `now` are parameters
@@ -1367,6 +1474,7 @@ pub fn router() -> Router<SqlitePool> {
 mod tests {
     use super::*;
     use crate::entities::corporate_action;
+    use crate::entities::holding_account;
     use crate::test_support::{self, ApiClient, dec, test_pool, ymd};
     use axum::http::StatusCode;
 
@@ -2640,10 +2748,34 @@ mod tests {
         sale_date: NaiveDate,
         units: Decimal,
     ) {
+        sell_vest_parcel_in_account(
+            pool,
+            sale_id,
+            listing_id,
+            vest_trade_id,
+            sale_date,
+            units,
+            1,
+        )
+        .await;
+    }
+
+    /// [`sell_vest_parcel`] in a named holding account — a Sell must sit in the
+    /// account holding the parcel it allocates.
+    async fn sell_vest_parcel_in_account(
+        pool: &SqlitePool,
+        sale_id: i64,
+        listing_id: i64,
+        vest_trade_id: i64,
+        sale_date: NaiveDate,
+        units: Decimal,
+        account: i64,
+    ) {
         test_support::sell(sale_id, listing_id)
             .date(sale_date)
             .qty(units)
             .price(dec("3.795"))
+            .account(account)
             .insert(pool)
             .await;
         test_support::allocate(pool, sale_id, sale_id, vest_trade_id, units).await;
@@ -2759,6 +2891,122 @@ mod tests {
         assert_eq!(h.ess_30_day_rule[1].ess_statement_id, 2);
         assert_eq!(h.ess_30_day_rule[1].days_after, 10);
         assert_eq!(h.ess_30_day_rule[1].units_sold, dec("100"));
+    }
+
+    /// SCENARIOS N-08: moving vested shares out of the employer's plan account
+    /// into the holder's own broker account inside the window is **not** a
+    /// disposal — the same beneficial owner holds the same interests, no CGT
+    /// event arises, and s 83A-130 does not reach it either
+    /// (`docs/ato/ess-takeovers-and-restructures.md`). It is also the move
+    /// `entities::transfer` exists for, so flagging it nagged about the
+    /// ordinary use of the feature and invited an amended return over a change
+    /// of custody. A real sale in the same window still fires.
+    #[tokio::test]
+    async fn a_holding_account_transfer_inside_the_window_is_not_a_disposal() {
+        let pool = test_pool().await;
+        test_support::listing(1).ticker("ICE").insert(&pool).await;
+        holding_account::db_upsert(
+            &pool,
+            &holding_account::HoldingAccount {
+                id: 2,
+                name: "ICE Employee Plan".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let taxing_point = ymd(2024, 3, 1);
+        let vest = ess_vest(&pool, 1, 1, taxing_point).await;
+        let group = crate::entities::transfer::db_transfer(
+            &pool,
+            1,
+            &crate::entities::transfer::TransferBody {
+                listing_id: 1,
+                date: ymd(2024, 3, 11),
+                from_account_id: 1,
+                to_account_id: 2,
+                allocations: vec![crate::entities::sell::AllocationInput {
+                    purchase_trade_id: vest,
+                    quantity_allocated: dec("400"),
+                }],
+                fee_allocations: Vec::new(),
+                fee_market_price: None,
+                fee_fx_rate: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let h = health(&pool, ymd(2024, 4, 1)).await;
+        assert!(
+            h.ess_30_day_rule.is_empty(),
+            "a transfer between the taxpayer's own accounts is not a disposal: {:?}",
+            h.ess_30_day_rule
+        );
+
+        // A real sale of those same units after the move is a disposal, and is
+        // reported as an ordinary one — reached through the transfer chain,
+        // since the transferred-in parcel carries no `ess_statement_id` of its
+        // own (SCENARIOS N-08).
+        let transferred_in = group.transfer_ins[0].id;
+        sell_vest_parcel_in_account(
+            &pool,
+            101,
+            1,
+            transferred_in,
+            ymd(2024, 3, 20),
+            dec("400"),
+            2,
+        )
+        .await;
+        let h = health(&pool, ymd(2024, 4, 1)).await;
+        assert_eq!(h.ess_30_day_rule.len(), 1);
+        assert_eq!(h.ess_30_day_rule[0].sale_trade_id, 101);
+        assert_eq!(h.ess_30_day_rule[0].days_after, 19);
+        assert_eq!(h.ess_30_day_rule[0].disposal_kind, EssDisposalKind::Sale);
+        assert_eq!(h.ess_30_day_rule[0].vest_trade_id, vest);
+    }
+
+    /// A scrip-for-scrip exchange's closing Sell inside the window stays on the
+    /// list, labelled: ITAA 1997 s 83A-130(2) normally treats the replacement
+    /// interests as a continuation (so the taxing point does not move), but that
+    /// rests on (4)/(9) facts this system does not record, and (5) makes a
+    /// partial rollover's cash a disposal to that extent — advisory, not
+    /// silence.
+    #[tokio::test]
+    async fn a_scrip_exchange_closing_sell_is_flagged_as_a_takeover_or_restructure() {
+        let pool = test_pool().await;
+        test_support::listing(1).ticker("OLD").insert(&pool).await;
+        test_support::listing(2).ticker("NEW").insert(&pool).await;
+        let taxing_point = ymd(2024, 3, 1);
+        let vest = ess_vest(&pool, 1, 1, taxing_point).await;
+        corporate_action::db_upsert(
+            &pool,
+            &corporate_action::CorporateAction {
+                id: 1,
+                listing_id: 1,
+                date: ymd(2024, 3, 11),
+                kind: corporate_action::ActionKind::ScripForScrip {
+                    scrip_listing_id: 2,
+                    scrip_new_units: Decimal::ONE,
+                    scrip_old_units: Decimal::ONE,
+                    scrip_cash_per_unit: None,
+                    scrip_market_value: None,
+                    scrip_cash_currency: None,
+                },
+            },
+        )
+        .await
+        .unwrap();
+        crate::entities::scrip_exchange::db_exchange(&pool, 1)
+            .await
+            .unwrap();
+
+        let h = health(&pool, ymd(2024, 4, 1)).await;
+        assert_eq!(h.ess_30_day_rule.len(), 1);
+        let alert = &h.ess_30_day_rule[0];
+        assert_eq!(alert.vest_trade_id, vest);
+        assert_eq!(alert.days_after, 10);
+        assert_eq!(alert.disposal_kind, EssDisposalKind::TakeoverOrRestructure);
     }
 
     // The deceased-estate side (SCENARIOS K-09).
