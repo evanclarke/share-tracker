@@ -624,7 +624,7 @@ export const REPORTS = [
         'corporate_actions', 'inheritances', 'rights_sales',
         'rights_sale_allocations', 'investment_expenses', 'drp_enrolments',
         'cgt_settings', 'attachments', 'listings', 'listing_renames',
-        'closing_prices', 'tax_year_settings',
+        'closing_prices', 'tax_year_settings', 'rba_fx_rates',
       ], { required: true, default: 'trades' }),
       int('row_id', 'Row ID', { required: true, hint: "The record's id as shown in its entity list — for tax_year_settings, the financial year itself (e.g. 2026)." }),
     ],

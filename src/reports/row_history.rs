@@ -17,11 +17,12 @@ use sqlx::{Row, SqlitePool};
 /// The audited tables, exactly as migration 0013 enumerates them in the
 /// `row_history.table_name` CHECK and its per-table trigger pairs — a test
 /// pins the three lists to each other, and the web UI's table picker is
-/// asserted against this list too. Three joined later: `listing_renames`
-/// (0018), `closing_prices` (0021, once 0020 made a price hand-enterable) and
-/// `tax_year_settings` (0027), each migration rebuilding `row_history` to
-/// extend the CHECK.
-pub const AUDITED_TABLES: [&str; 20] = [
+/// asserted against this list too. Four joined later: `listing_renames`
+/// (0018), `closing_prices` (0021, once 0020 made a price hand-enterable),
+/// `tax_year_settings` (0027) and `rba_fx_rates` (0031, once a stored rate
+/// became correctable) — each migration rebuilding `row_history` to extend
+/// the CHECK.
+pub const AUDITED_TABLES: [&str; 21] = [
     "trades",
     "parcel_allocations",
     "income",
@@ -42,6 +43,7 @@ pub const AUDITED_TABLES: [&str; 20] = [
     "listing_renames",
     "closing_prices",
     "tax_year_settings",
+    "rba_fx_rates",
 ];
 
 #[derive(Debug, Deserialize)]
@@ -534,6 +536,16 @@ mod tests {
                 "ess_taxed_upfront_reduction_eligible",
                 "1",
             ),
+            (
+                "rba_fx_rates",
+                Some(
+                    "INSERT INTO rba_fx_rates (id, currency, month, rate) VALUES (20, 'USD', '2024-03', '0.65')",
+                ),
+                "id",
+                20,
+                "rate",
+                "'0.6512'",
+            ),
         ];
         assert_eq!(cases.len(), AUDITED_TABLES.len());
 
@@ -608,7 +620,10 @@ mod tests {
         // listing_renames (0018) and closing_prices (0021) postdate 0013, and
         // are checked below — every other table was audited from the start.
         let tables_as_of_0013 = AUDITED_TABLES.into_iter().filter(|&t| {
-            t != "listing_renames" && t != "closing_prices" && t != "tax_year_settings"
+            t != "listing_renames"
+                && t != "closing_prices"
+                && t != "tax_year_settings"
+                && t != "rba_fx_rates"
         });
         let mut count = 0;
         for table in tables_as_of_0013 {
@@ -836,6 +851,36 @@ mod tests {
             2,
             "row_id is the financial year itself"
         );
+
+        // 0031 added rba_fx_rates (SCENARIOS M-13): a stored rate became
+        // correctable, so — the closing_prices story of 0021 — the superseded
+        // figure every earlier report was computed at has to stay recoverable.
+        // Again row_history was rebuilt to extend the CHECK, so the *live*
+        // append-only guards now come from 0031. No surrogate key was needed:
+        // rba_fx_rates.id has been AUTOINCREMENT since 0001.
+        let sql31 = include_str!("../../migrations/0031_audit_rba_fx_rates.sql");
+        assert!(
+            sql31.contains("'rba_fx_rates'"),
+            "0031 must add rba_fx_rates to the table_name CHECK"
+        );
+        for op in ["update", "delete"] {
+            assert!(
+                sql31.contains(&format!("CREATE TRIGGER rba_fx_rates_row_history_{op} ")),
+                "0031 must create the rba_fx_rates {op} trigger"
+            );
+            assert!(
+                sql31.contains(&format!("CREATE TRIGGER row_history_append_only_{op} ")),
+                "0031 must re-create the row_history {op} guard"
+            );
+        }
+        let flat31 = sql31.split_whitespace().collect::<Vec<_>>().join(" ");
+        for col in ["id", "currency", "month", "rate"] {
+            assert_eq!(
+                flat31.matches(&format!("'{col}', OLD.{col}")).count(),
+                2,
+                "both rba_fx_rates triggers must record {col}"
+            );
+        }
 
         // 0029 widened income_type's CHECK for `OtherIncome` (SCENARIOS
         // L-03/L-04), which meant rebuilding income — so the *live* income

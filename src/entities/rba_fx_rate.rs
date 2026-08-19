@@ -1,7 +1,8 @@
 use crate::infra::http::{self, ApiError, CrudEntity};
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{Path, State},
+    http::StatusCode,
     routing::{get, post},
 };
 use chrono::NaiveDate;
@@ -40,11 +41,33 @@ pub enum ImportError {
     Db(#[from] sqlx::Error),
 }
 
-/// Outcome of an import run: how many new rows were inserted vs already present.
+/// A (currency, month) the feed carries at a **different** rate from the one
+/// already stored. The import never overwrites — re-running it must not
+/// rewrite history unasked — so the row is left alone and reported here
+/// instead: without this, a revised or mis-imported rate is indistinguishable
+/// from an identical one, both counted only as `skipped` (SCENARIOS M-13).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RateConflict {
+    pub id: i64,
+    pub currency: String,
+    pub month: String,
+    /// The rate already stored, which every figure in that month rests on.
+    pub stored: Decimal,
+    /// What the feed says instead. Applying it is a deliberate act:
+    /// `PUT /rba_fx_rates/{id}`.
+    pub feed: Decimal,
+}
+
+/// Outcome of an import run: how many new rows were inserted, how many the
+/// feed repeated unchanged, and every row where it disagreed.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ImportSummary {
     pub inserted: usize,
     pub skipped: usize,
+    /// Empty on an ordinary run. Non-empty means the feed and the database
+    /// disagree about a month already imported — nothing was changed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conflicted: Vec<RateConflict>,
 }
 
 /// What the manual import endpoint returns: the import summary plus the
@@ -88,12 +111,71 @@ impl CrudEntity for RbaFxRate {
     const NOUN: &'static str = "FX rate";
 }
 
+/// The body of a rate correction: the rate to store, and nothing else — a
+/// row's (currency, month) is its identity and is not editable, since changing
+/// it would silently re-point every conversion that used it.
+#[derive(Debug, Deserialize)]
+pub struct CorrectionBody {
+    pub rate: Decimal,
+}
+
+/// Why a correction was refused.
+#[derive(thiserror::Error, Debug)]
+pub enum CorrectionError {
+    /// A rate must be a positive foreign-per-AUD figure: `AUD = foreign / rate`
+    /// divides by it, and `apply_rate` *panics* on zero.
+    #[error("the corrected rate {0} is not positive")]
+    NotPositive(Decimal),
+    #[error("FX rate correction failed: {0}")]
+    Db(#[from] sqlx::Error),
+}
+
+impl From<CorrectionError> for ApiError {
+    fn from(e: CorrectionError) -> Self {
+        match e {
+            CorrectionError::NotPositive(rate) => ApiError::unprocessable(format!(
+                "the corrected rate {rate} is not positive — an ATO/RBA rate is foreign currency \
+                 units per 1 AUD, which every conversion divides by"
+            )),
+            CorrectionError::Db(err) => err.into(),
+        }
+    }
+}
+
 pub fn router() -> Router<SqlitePool> {
     Router::new()
         .route("/rba_fx_rates", get(http::list_handler::<RbaFxRate>))
-        .route("/rba_fx_rates/{id}", get(http::get_handler::<RbaFxRate>))
+        .route(
+            "/rba_fx_rates/{id}",
+            get(http::get_handler::<RbaFxRate>).put(correct),
+        )
         // Manual trigger for retries / missed runs. Read-only for clients otherwise.
         .route("/rba_fx_rates/import", post(import))
+}
+
+/// Correct one stored rate. The import never overwrites (see
+/// [`db_import_rate`]), so this is the only way to change a figure that landed
+/// wrong — a typo in a hand-pasted retry CSV, a truncated download, an
+/// upstream revision the feed now disagrees with (`conflicted` in the import
+/// response names those rows and their ids). Deliberate by construction: it
+/// addresses one row by id and carries only the new rate. The write is audited
+/// and stales every snapshot from that month on (migration 0031).
+async fn correct(
+    State(pool): State<SqlitePool>,
+    Path(id): Path<i64>,
+    Json(body): Json<CorrectionBody>,
+) -> Result<StatusCode, ApiError> {
+    if body.rate <= Decimal::ZERO {
+        return Err(CorrectionError::NotPositive(body.rate).into());
+    }
+    let updated = db_correct_rate(&pool, id, body.rate)
+        .await
+        .map_err(CorrectionError::from)?;
+    if !updated {
+        return Err(ApiError::not_found("no FX rate with that id"));
+    }
+    tracing::info!(%id, rate = %body.rate, "ATO/RBA FX rate corrected");
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[cfg(test)]
@@ -106,15 +188,27 @@ pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<RbaFxRate>, sql
     http::crud_get(pool, id).await
 }
 
-/// Insert a rate for a (currency, month) only if absent, leaving any existing row
-/// unchanged. Returns `true` when a new row was inserted. The `UNIQUE(currency,
-/// month)` constraint plus `DO NOTHING` make re-running the import idempotent.
+/// What one feed row did: inserted, repeated what was stored, or disagreed
+/// with it (carrying the stored row, so the caller can report the pair).
+pub enum ImportOutcomeRow {
+    Inserted,
+    Skipped,
+    Conflicted(RateConflict),
+}
+
+/// Insert a rate for a (currency, month) only if absent, leaving any existing
+/// row unchanged. The `UNIQUE(currency, month)` constraint plus `DO NOTHING`
+/// make re-running the import idempotent — deliberately: a scheduled import
+/// must never rewrite a figure last year's return was computed at without
+/// being asked. Where a row already exists, its stored rate is compared with
+/// the feed's so a *disagreement* is reported rather than silently counted as
+/// a repeat ([`RateConflict`]); applying one is [`db_correct_rate`].
 pub async fn db_import_rate(
     pool: &SqlitePool,
     currency: &str,
     month: &str,
     rate: Decimal,
-) -> Result<bool, sqlx::Error> {
+) -> Result<ImportOutcomeRow, sqlx::Error> {
     let result = sqlx::query(
         "INSERT INTO rba_fx_rates (currency, month, rate) VALUES (?, ?, ?) \
          ON CONFLICT(currency, month) DO NOTHING",
@@ -124,6 +218,45 @@ pub async fn db_import_rate(
     .bind(Money(rate))
     .execute(pool)
     .await?;
+    if result.rows_affected() > 0 {
+        return Ok(ImportOutcomeRow::Inserted);
+    }
+    let stored: (i64, String) =
+        sqlx::query_as("SELECT id, rate FROM rba_fx_rates WHERE currency = ? AND month = ?")
+            .bind(currency)
+            .bind(month)
+            .fetch_one(pool)
+            .await?;
+    let stored_rate = crate::infra::decimal::parse_dec("rate", stored.1)?;
+    if stored_rate == rate {
+        return Ok(ImportOutcomeRow::Skipped);
+    }
+    Ok(ImportOutcomeRow::Conflicted(RateConflict {
+        id: stored.0,
+        currency: currency.to_string(),
+        month: month.to_string(),
+        stored: stored_rate,
+        feed: rate,
+    }))
+}
+
+/// Correct a stored rate in place. The one write path that overwrites one, and
+/// deliberately separate from the import: `rba_fx_rates` is audited (migration
+/// 0031), so the superseded figure lands in [row history] and every snapshot
+/// from that month on is staled by the same migration's trigger. Returns
+/// `false` when no row has that id.
+///
+/// [row history]: crate::reports::row_history
+pub async fn db_correct_rate(
+    pool: &SqlitePool,
+    id: i64,
+    rate: Decimal,
+) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query("UPDATE rba_fx_rates SET rate = ? WHERE id = ?")
+        .bind(Money(rate))
+        .bind(id)
+        .execute(pool)
+        .await?;
     Ok(result.rows_affected() > 0)
 }
 
@@ -204,12 +337,24 @@ pub async fn import_from_content(
     let mut summary = ImportSummary {
         inserted: 0,
         skipped: 0,
+        conflicted: Vec::new(),
     };
     for (currency, month, rate) in rates {
-        if db_import_rate(pool, &currency, &month, rate).await? {
-            summary.inserted += 1;
-        } else {
-            summary.skipped += 1;
+        match db_import_rate(pool, &currency, &month, rate).await? {
+            ImportOutcomeRow::Inserted => summary.inserted += 1,
+            ImportOutcomeRow::Skipped => summary.skipped += 1,
+            ImportOutcomeRow::Conflicted(conflict) => {
+                // Logged as well as returned: a *scheduled* run's response
+                // goes nowhere, so the log line is where the operator sees it.
+                tracing::warn!(
+                    currency = %conflict.currency,
+                    month = %conflict.month,
+                    stored = %conflict.stored,
+                    feed = %conflict.feed,
+                    "RBA FX feed disagrees with the stored rate; left unchanged"
+                );
+                summary.conflicted.push(conflict);
+            }
         }
     }
     Ok(summary)
@@ -295,13 +440,25 @@ mod tests {
 
     // DB-level tests
 
+    /// A feed row's outcome as a plain word, for the assertions below.
+    fn outcome(row: ImportOutcomeRow) -> &'static str {
+        match row {
+            ImportOutcomeRow::Inserted => "inserted",
+            ImportOutcomeRow::Skipped => "skipped",
+            ImportOutcomeRow::Conflicted(_) => "conflicted",
+        }
+    }
+
     #[tokio::test]
     async fn db_insert_and_retrieve() {
         let pool = test_pool().await;
-        assert!(
-            db_import_rate(&pool, "USD", "2024-01", "1.5".parse().unwrap())
-                .await
-                .unwrap()
+        assert_eq!(
+            outcome(
+                db_import_rate(&pool, "USD", "2024-01", "1.5".parse().unwrap())
+                    .await
+                    .unwrap()
+            ),
+            "inserted"
         );
         let rows = db_list(&pool).await.unwrap();
         assert_eq!(rows.len(), 1);
@@ -316,16 +473,24 @@ mod tests {
     #[tokio::test]
     async fn db_currency_month_uniqueness_enforced() {
         let pool = test_pool().await;
-        assert!(
-            db_import_rate(&pool, "USD", "2024-01", "1.5".parse().unwrap())
-                .await
-                .unwrap()
+        assert_eq!(
+            outcome(
+                db_import_rate(&pool, "USD", "2024-01", "1.5".parse().unwrap())
+                    .await
+                    .unwrap()
+            ),
+            "inserted"
         );
-        // Same (currency, month): no new row, existing left unchanged.
-        assert!(
-            !db_import_rate(&pool, "USD", "2024-01", "1.6".parse().unwrap())
-                .await
-                .unwrap()
+        // Same (currency, month) at a different rate: no new row, existing
+        // left unchanged, and the disagreement reported rather than counted
+        // as a repeat (SCENARIOS M-13).
+        assert_eq!(
+            outcome(
+                db_import_rate(&pool, "USD", "2024-01", "1.6".parse().unwrap())
+                    .await
+                    .unwrap()
+            ),
+            "conflicted"
         );
 
         let rows = db_list(&pool).await.unwrap();
@@ -420,20 +585,40 @@ mod tests {
             first,
             ImportSummary {
                 inserted: 5,
-                skipped: 0
+                skipped: 0,
+                conflicted: Vec::new(),
             }
         );
 
-        // Re-running stores no duplicates and leaves existing rows unchanged, even
-        // if the feed carries a different rate for an existing (currency, month).
-        let altered = SAMPLE_CSV.replace("0.8909", "9.9999");
-        let second = import_from_content(&pool, &altered).await.unwrap();
+        // Re-running the identical feed changes nothing and reports no
+        // disagreement.
         assert_eq!(
-            second,
+            import_from_content(&pool, SAMPLE_CSV).await.unwrap(),
             ImportSummary {
                 inserted: 0,
-                skipped: 5
+                skipped: 5,
+                conflicted: Vec::new(),
             }
+        );
+
+        // A feed carrying a *different* rate for a month already stored still
+        // leaves the row alone — a scheduled import must never rewrite a
+        // figure a lodged return was computed at — but the disagreement is
+        // reported rather than counted as a repeat, naming the row so it can
+        // be corrected deliberately (SCENARIOS M-13).
+        let altered = SAMPLE_CSV.replace("0.8909", "9.9999");
+        let second = import_from_content(&pool, &altered).await.unwrap();
+        assert_eq!(second.inserted, 0);
+        assert_eq!(second.skipped, 4);
+        assert_eq!(
+            second.conflicted,
+            vec![RateConflict {
+                id: 1,
+                currency: "USD".to_string(),
+                month: "2010-01".to_string(),
+                stored: "0.8909".parse().unwrap(),
+                feed: "9.9999".parse().unwrap(),
+            }]
         );
 
         let rows = db_list(&pool).await.unwrap();
@@ -449,6 +634,74 @@ mod tests {
         );
     }
 
+    /// A rate that landed wrong is correctable — the one write path that
+    /// overwrites one — and the correction is audited, with every snapshot
+    /// from that month on marked stale (migration 0031, SCENARIOS M-13).
+    #[tokio::test]
+    async fn api_a_stored_rate_is_correctable_audited_and_stales_snapshots() {
+        let pool = test_pool().await;
+        db_import_rate(&pool, "USD", "2024-03", "0.6500".parse().unwrap())
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO report_snapshots \
+             (report, snapshot_date, generated_at, rows_json, stale) VALUES \
+             ('portfolio_overview', '2024-02-28', '2024-03-01T00:00:00Z', '[]', 0), \
+             ('unrealised_gains', '2024-03-15', '2024-03-16T00:00:00Z', '[]', 0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let c = client(&pool);
+        // A non-positive correction is refused: every conversion divides by it.
+        let resp = c
+            .put("/rba_fx_rates/1", &serde_json::json!({"rate": "0"}))
+            .await;
+        let (status, detail) = resp.status_and_body();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(detail.contains("not positive"), "{detail}");
+        // An unknown id is a 404 naming what was missing.
+        let resp = c
+            .put("/rba_fx_rates/99", &serde_json::json!({"rate": "0.66"}))
+            .await;
+        assert_eq!(resp.status, StatusCode::NOT_FOUND);
+        assert!(resp.text().contains("no FX rate with that id"));
+
+        c.put("/rba_fx_rates/1", &serde_json::json!({"rate": "0.6512"}))
+            .await
+            .expect_status(StatusCode::NO_CONTENT);
+        assert_eq!(
+            db_get(&pool, 1).await.unwrap().unwrap().rate,
+            "0.6512".parse::<Decimal>().unwrap()
+        );
+
+        // The superseded figure is recoverable from the audit trail …
+        let history: Vec<(String, String)> = sqlx::query_as(
+            "SELECT operation, old_row FROM row_history \
+             WHERE table_name = 'rba_fx_rates' AND row_id = 1",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].0, "UPDATE");
+        assert!(history[0].1.contains("0.6500"), "{}", history[0].1);
+
+        // … and every snapshot from the rate's own month on is stale, while an
+        // earlier one is untouched.
+        let stale: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT snapshot_date, stale FROM report_snapshots ORDER BY snapshot_date",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            stale,
+            vec![("2024-02-28".to_string(), 0), ("2024-03-15".to_string(), 1)]
+        );
+    }
+
     #[tokio::test]
     async fn import_adds_only_new_rows_on_rerun() {
         let pool = test_pool().await;
@@ -460,7 +713,8 @@ mod tests {
             summary,
             ImportSummary {
                 inserted: 3,
-                skipped: 5
+                skipped: 5,
+                conflicted: Vec::new(),
             }
         );
         assert_eq!(db_list(&pool).await.unwrap().len(), 8);
@@ -514,7 +768,8 @@ mod tests {
             summary,
             ImportSummary {
                 inserted: 5,
-                skipped: 0
+                skipped: 0,
+                conflicted: Vec::new(),
             }
         );
         assert_eq!(db_list(&pool).await.unwrap().len(), 5);

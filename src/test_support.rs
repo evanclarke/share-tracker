@@ -652,11 +652,6 @@ impl AmmaBuilder {
         self
     }
 
-    pub fn currency(mut self, currency: &str) -> Self {
-        self.a.currency = currency.to_string();
-        self
-    }
-
     /// Escape hatch for fields without a dedicated setter.
     pub fn with(mut self, f: impl FnOnce(&mut amma::AmmaStatement)) -> Self {
         f(&mut self.a);
@@ -671,9 +666,10 @@ impl AmmaBuilder {
     /// applies. A statement still carrying the builder's default AUD takes the
     /// **listing's** currency instead, which is what `db_upsert` requires
     /// (SCENARIOS M-08) — the same defaulting [`TradeBuilder::insert`] does,
-    /// and for the same reason. A test that wants to *check* the refusal names
-    /// a currency explicitly (which is then left alone) or calls `db_upsert`
-    /// directly.
+    /// and for the same reason. A statement given a currency of its own (via
+    /// [`Self::with`]) is left exactly as written, so a test that wants the
+    /// mismatch *refused* names a non-AUD one — or drives the API, which is
+    /// where that refusal is asserted.
     pub async fn insert(mut self, pool: &SqlitePool) {
         if self.a.currency == "AUD"
             && let Some(listing) =

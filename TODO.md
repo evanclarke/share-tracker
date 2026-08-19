@@ -236,15 +236,15 @@ stated), AMMA statements, and the 422 catalogue.
 (SCENARIOS.md section M verification pass, 2026-08-19. `rba_fx_rates` is written only by the import,
 which is `INSERT … ON CONFLICT DO NOTHING`, and the resource is read-only over HTTP — no `PUT`, no
 `DELETE`. First value wins, permanently.)
-- [ ] Reproduced: importing `29-Mar-2024,0.6500` then `29-Mar-2024,0.6512` answers
+- [x] Reproduced: importing `29-Mar-2024,0.6500` then `29-Mar-2024,0.6512` answers
   `{"inserted": 0, "skipped": 1}` and stores 0.6500. The response cannot distinguish "the feed
   repeated what we had" from "the feed disagreed with what we had"
-- [ ] Consequence: a rate that lands wrong — a hand-supplied retry body with a typo (the endpoint
+- [x] Consequence: a rate that lands wrong — a hand-supplied retry body with a typo (the endpoint
   accepts a pasted CSV precisely for retries), a truncated download, or an upstream revision — can
   be fixed only by editing the database by hand, and every tax figure in that currency-month rests
   on it. `rba_fx_rates` is also **not** in `row_history::AUDITED_TABLES`, so a hand-edit leaves no
   trace either
-- [ ] The idempotency the `DO NOTHING` buys is worth keeping: re-running the import must not
+- [x] The idempotency the `DO NOTHING` buys is worth keeping: re-running the import must not
   rewrite history unasked, and a silently-changing rate would be worse than a stuck one
 **Decision (2026-08-19, Evan): option (b) — report the disagreement *and* add the correction path,
 with `rba_fx_rates` audited.**
@@ -258,10 +258,38 @@ with `rba_fx_rates` audited.**
     and the snapshots it fed marked stale
   - **(c)** Documentation only: state in `docs/API.md` that the first imported value for a
     (currency, month) is final and a correction needs direct database access
-- [ ] Tests: per the option — a differing re-import is counted and named; an identical one is not;
+- [x] Tests: per the option — a differing re-import is counted and named; an identical one is not;
   a correction (if (b)) restages the affected snapshots and writes a history row
-- [ ] Docs sync: `docs/API.md` RBA FX rates + Response codes; `docs/SCHEMA.md` and the three audited
+- [x] Docs sync: `docs/API.md` RBA FX rates + Response codes; `docs/SCHEMA.md` and the three audited
   -table lists if (b)
+
+**Resolution (2026-08-19): the disagreement is reported, and a stored rate is correctable — audited,
+and staling the snapshots it fed.**
+
+`db_import_rate` now answers an `ImportOutcomeRow` (`Inserted` | `Skipped` | `Conflicted`) instead
+of a bool: where a `(currency, month)` already exists, its stored rate is compared with the feed's,
+so a *disagreement* is separated from a repeat. `ImportSummary` carries `conflicted:
+[{id, currency, month, stored, feed}]` (omitted when empty) and each one is logged at warn — a
+scheduled run's response goes nowhere, so the log line is where the operator sees it. The import
+itself is unchanged: `ON CONFLICT DO NOTHING`, because a scheduled run must never rewrite a figure a
+lodged return was computed at.
+
+`PUT /rba_fx_rates/:id` is the correction — one row by id, carrying only the new rate, since
+`(currency, month)` is the row's identity and re-pointing it would silently move every conversion
+that used it. `422` for a non-positive rate (every conversion divides by it; `apply_rate` panics on
+zero), `404` naming what was missing. Migration `0031` puts `rba_fx_rates` in the audit trail — the
+`closing_prices` story of 0021 exactly, and the same `row_history` rebuild to extend its
+`table_name` CHECK — so the superseded figure stays recoverable, and adds the staleness trigger that
+marks every snapshot from that month on stale when the rate itself changes.
+
+Tests: `db_currency_month_uniqueness_enforced` and `import_is_idempotent` now separate the identical
+re-import from the disagreeing one (naming the row and both rates);
+`api_a_stored_rate_is_correctable_audited_and_stales_snapshots` drives the refusals, the correction,
+the recovered old figure in `row_history`, and that a snapshot before the rate's month is untouched
+while one inside it is stale. `row_history`'s three-list pin and its per-migration block cover 0031.
+Docs: `docs/API.md` RBA FX rates + Row history + the 422 catalogue, `docs/SCHEMA.md`'s
+`rba_fx_rates` block, audited-set paragraph and Relationships, and the UI's row-history table
+picker.
 
 ## Foreign tax on a discountable foreign capital gain is claimed in full, not apportioned (SCENARIOS M-12)
 (SCENARIOS.md section M verification pass, 2026-08-19. The FITO guide's "Foreign income tax paid on
