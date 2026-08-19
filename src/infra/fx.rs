@@ -337,6 +337,25 @@ impl FxRates {
         })
     }
 
+    /// The imported ATO rate for `currency` in `month` (`'YYYY-MM'`), if
+    /// there is one — the map read without the precedence rule around it, for
+    /// the [FX coverage cross-check](crate::reports::fx_coverage), whose whole
+    /// question is which months are *not* imported.
+    pub fn rate_for(&self, currency: &str, month: &str) -> Option<Decimal> {
+        if currency.eq_ignore_ascii_case("AUD") {
+            return Some(Decimal::ONE);
+        }
+        self.rates
+            .get(&(currency.to_string(), month.to_string()))
+            .copied()
+    }
+
+    /// Whether an ATO rate has been imported for `currency` in `month`. AUD
+    /// always has one (it converts at 1 without any import).
+    pub fn has_rate(&self, currency: &str, month: &str) -> bool {
+        self.rate_for(currency, month).is_some()
+    }
+
     /// [`to_aud`], over the pre-loaded map.
     pub fn to_aud(
         &self,

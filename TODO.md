@@ -103,25 +103,33 @@ the 422 catalogue.
 (SCENARIOS.md section M verification pass, 2026-08-19. `GET /reports/health` reports
 `latest_fx_month` and `fx_stale` — the newest imported month across all currencies, and whether it
 is old. That answers "has the import run lately", not "is every amount I have recorded convertible".)
-- [ ] Reproduced (M-14): an F11 CSV with an empty February cell imports January and March and skips
+- [x] Reproduced (M-14): an F11 CSV with an empty February cell imports January and March and skips
   February silently (`{"inserted": 2}`); health then reports `latest_fx_month: "2024-03"` — healthy
   by its own measure — while a February USD trade is costed from its own `fx_rate` of 0.99 at
   A$15,151 where the real rate would give A$22,727, and a February income row would `500`
-- [ ] The gap is invisible in both directions: a *silent* one (an amount resting on a per-trade
+- [x] The gap is invisible in both directions: a *silent* one (an amount resting on a per-trade
   `fx_rate` fallback because its month is missing) and a *fatal* one (an income/AMMA amount with no
   fallback at all, which fails the whole report)
-- [ ] The analogous reference-data gap already has its own report: `reports::settlement_coverage`
+- [x] The analogous reference-data gap already has its own report: `reports::settlement_coverage`
   lists every trade whose settlement window falls outside the seeded exchange-holiday years,
   non-blocking, "an empty report means every settlement window was computed against a complete
   calendar". FX has no twin
-- [ ] Fix: a coverage cross-check in `reports/` on that model — for every (currency, month) some
-  recorded amount converts at, whether an ATO rate exists, and for each miss what the amount
-  currently rests on (a trade's own `fx_rate`, a spot override, or nothing at all → the report will
-  fail). Registered like its siblings in `reports::mod`, a `REPORTS` entry in `config.js`, and worth
-  a health-banner line since a fatal gap is not something to discover at tax time
-- [ ] Tests: a complete series reports empty; a hole in the middle names the currency and month and
+- [x] Fix: a coverage cross-check in `reports/` on that model
+- [x] Tests: a complete series reports empty; a hole in the middle names the currency and month and
   what each affected amount rests on; an AUD-only portfolio reports empty
-- [ ] Docs sync: `docs/API.md` (a new report section + the reports list), README Features
+- [x] Docs sync: `docs/API.md` (a new report section + the reports list), README Features
+
+**Resolution (2026-08-19): `GET /reports/fx_coverage`, on the settlement-coverage model.**
+
+`reports::fx_coverage` lists every recorded amount whose conversion month has no imported ATO rate,
+with `resting_on` saying what it converts at meanwhile — `spot_override` (a deliberate
+transaction-date rate, so nothing is missing), `record_fx_rate` (the record's own fallback, applied
+*silently*), or `nothing` (income, an AMMA statement, a return of capital — the report fails until
+the month lands). It covers trades, income, AMMA and ESS statements, interest income, investment
+expenses and returns of capital; an inheritance and an ESS vest are deliberately absent, since each
+resolves its rate once and carries it onto the parcel Buy that *is* listed. Non-blocking like its
+sibling: an empty report is the statement that every non-AUD amount converts at a published rate.
+The other two alert kinds are the sibling finding below.
 
 ## A listing's `currency` is freely editable, silently re-denominating every stored price (SCENARIOS M-08)
 (SCENARIOS.md section M verification pass, 2026-08-19. `listing::db_upsert` freezes `ticker` and
@@ -367,22 +375,36 @@ and both behave exactly as documented — the verification confirmed each. What 
 surface telling a user that *their* data has hit it, though in both cases the affected rows are
 identifiable from stored facts. The third member of the family, LPR expenditure on a foreign
 inherited parcel, was refused outright at write time in the section K pass for the same reason.)
-- [ ] **K10/K11 (M-09)**: reproduced with a US$1.5m disposal contracted 27 March (rate 0.66) and
+- [x] **K10/K11 (M-09)**: reproduced with a US$1.5m disposal contracted 27 March (rate 0.66) and
   settled 2 April (rate 0.60). Proceeds convert at the contract month, correctly; the A$227,272 of
   settlement-window movement is a CGT event K10 gain or K11 loss the system does not compute, per
   the Known-limitations entry. A trade at risk is exactly identifiable: non-AUD, and
   `date`'s month ≠ `settlement_date`'s month
-- [ ] **Cost-base FX timing (M-10)**: reproduced with a USD parcel acquired at 0.70 taking a USD
+- [x] **Cost-base FX timing (M-10)**: reproduced with a USD parcel acquired at 0.70 taking a USD
   AMIT reduction whose own month is 0.60 — the reduction converts at 0.70 (A$2,857 where its own
   month gives A$3,333), keeping `initial − reductions = adjusted` exact in AUD. Affected rows are
   likewise identifiable: a non-AUD parcel with a non-AUD AMIT or return-of-capital reduction. The
   limitation says this "in practice does not arise"; nothing checks whether it has
-- [ ] Fix: surface both, non-blocking, on the `reports::settlement_coverage` model — one alert per
-  affected trade/parcel naming the two months and what the omission is. Natural home is the FX
-  coverage report proposed in the sibling finding above, as a second alert kind, or the health
-  report if that one is not taken
-- [ ] Tests: a same-month settlement and an AUD trade produce no alert; a cross-month non-AUD
+- [x] Fix: surface both, non-blocking, on the `reports::settlement_coverage` model
+- [x] Tests: a same-month settlement and an AUD trade produce no alert; a cross-month non-AUD
   settlement does; a non-AUD parcel with a non-AUD reduction does; an AUD fund with an AMIT
   reduction does not
-- [ ] Docs sync: `docs/API.md` — both Known-limitations entries gain the sentence naming where the
+- [x] Docs sync: `docs/API.md` — both Known-limitations entries gain the sentence naming where the
   affected rows are listed
+
+**Resolution (2026-08-19): both are alert kinds on the new FX coverage report.**
+
+`settlement_crosses_rate_month` lists every non-AUD trade whose contract and settlement months
+differ — inside one month the K10/K11 component is nil by construction, so nothing is reported.
+`reduction_converted_at_acquisition_month` lists every non-AUD parcel taking an AMIT or
+return-of-capital reduction from another month, and where both months' rates are imported the
+detail **names them both**, so the row says what the difference costs rather than only that one
+exists. An AUD parcel is never listed: with one currency there is no conversion for the month to
+matter to. Both Known-limitations entries now name the report, so "in practice does not arise" is
+checkable against the data instead of assumed.
+
+Tests: `db_a_settlement_crossing_a_rate_month_is_flagged` (a same-month settlement and an AUD trade
+stay silent), `db_a_reduction_from_another_month_is_flagged_with_both_rates`,
+`db_an_aud_parcels_reduction_is_not_flagged` and
+`db_a_return_of_capital_from_another_month_is_flagged` (a parcel acquired after the payment is never
+reached by it).
