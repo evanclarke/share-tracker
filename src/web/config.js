@@ -498,7 +498,7 @@ export const REPORTS = [
       fk('listing_id', 'Listing', 'listings', { required: true }),
       fk('holding_account_id', 'Holding account', 'holdingAccounts', { required: true, default: '1', hint: 'The account the Sell would happen in — a Sell may only consume its own account’s parcels.' }),
       dec('units', 'Units to sell', { required: true, default: '' }),
-      dt('sale_date', 'Sale date', { optional: true, hint: 'Blank = today. Drives the 12-month discount clock.' }),
+      dt('sale_date', 'Sale date', { optional: true, hint: 'Blank = today. Drives the 12-month discount clock, and the candidates are the parcels open on this date — the ones a Sell dated then could allocate.' }),
       dec('price', 'Price per unit (AUD)', { optional: true, default: '', hint: 'Blank = the live price from the price source.' }),
     ],
     tables: [
@@ -547,7 +547,7 @@ export const REPORTS = [
       fk('holding_account_id', 'Holding account', 'holdingAccounts', { optional: true, default: '', hint: 'Blank = parcels from any account.' }),
       dec('units', 'Units to sell', { required: true, default: '' }),
       dec('proceeds', 'Total proceeds (AUD)', { required: true, default: '' }),
-      dt('date', 'Sale date', { required: true }),
+      dt('date', 'Sale date', { required: true, hint: 'The parcels drawn on are the ones open on this date — the ones a Sell dated then could allocate.' }),
       sel('strategy', 'Parcel-selection strategy', [
         { value: 'fifo', label: 'FIFO (oldest first)' },
         { value: 'min_gain', label: 'Minimise current-year gain' },

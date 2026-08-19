@@ -12,9 +12,11 @@
 //! allocation and the resulting gross gain / discountable split, so the user
 //! can pick allocations for the real Sell. Read-only: nothing is persisted.
 //!
-//! The candidate parcels are the open-parcels report's rows (current units,
-//! adjusted AUD cost base), so every cost-base rule — AMIT/E10, return of
-//! capital/G1, splits, rollover carried dates — flows through unchanged. The
+//! The candidate parcels are the open-parcels report's rows **as at the
+//! contemplated sale's date** (units in that date's basis, adjusted AUD cost
+//! base) — the same set a real Sell dated then could allocate — so every
+//! cost-base rule — AMIT/E10, return of capital/G1, splits, rollover carried
+//! dates — flows through unchanged. The
 //! hypothetical sale carries no brokerage (it isn't known yet), and the
 //! 12-month discount clock is the shared ownership rule
 //! (`domain::cgt_discount`), run from the parcel's (possibly deemed)
@@ -85,16 +87,25 @@ impl CandidateParcel {
     }
 }
 
-/// The open parcels a hypothetical sale of `listing_id` can draw on,
-/// optionally restricted to one holding account (a real Sell's allocations
-/// may only consume its own account's parcels), in FIFO order.
+/// The open parcels a hypothetical sale of `listing_id` **as at `as_of`** can
+/// draw on, optionally restricted to one holding account (a real Sell's
+/// allocations may only consume its own account's parcels), in FIFO order.
+///
+/// `as_of` is the contemplated sale's own date (`None` = the live view, as at
+/// today): the candidates are the parcels open on that date, which is exactly
+/// the set a real Sell dated then could allocate — a parcel acquired after it
+/// does not exist yet (the Sell path refuses such an allocation outright), and
+/// one sold since was still there to sell. Quantities come back in that date's
+/// unit basis (`docs/API.md`'s As-at date section), so the caller's `units`
+/// and per-unit price must be on that basis too.
 pub async fn db_candidate_parcels(
     pool: &SqlitePool,
     listing_id: i64,
     holding_account_id: Option<i64>,
+    as_of: Option<NaiveDate>,
 ) -> Result<Vec<CandidateParcel>, sqlx::Error> {
     let mut tx = pool.begin().await?;
-    let parcels = db_candidate_parcels_on(&mut tx, listing_id, holding_account_id).await?;
+    let parcels = db_candidate_parcels_on(&mut tx, listing_id, holding_account_id, as_of).await?;
     tx.commit().await?;
     Ok(parcels)
 }
@@ -105,8 +116,9 @@ pub async fn db_candidate_parcels_on(
     conn: &mut sqlx::SqliteConnection,
     listing_id: i64,
     holding_account_id: Option<i64>,
+    as_of: Option<NaiveDate>,
 ) -> Result<Vec<CandidateParcel>, sqlx::Error> {
-    let mut parcels: Vec<CandidateParcel> = open_parcels::db_open_parcels_on(conn)
+    let mut parcels: Vec<CandidateParcel> = open_parcels::db_open_parcels_on(conn, as_of)
         .await?
         .iter()
         .filter(|p| {
@@ -346,9 +358,18 @@ async fn optimiser_handler(
         .sale_date
         .unwrap_or_else(|| chrono::Local::now().date_naive());
 
-    let parcels = db_candidate_parcels(&pool, req.listing_id, Some(req.holding_account_id))
-        .await
-        .map_err(ApiError::from)?;
+    // Candidates as at the contemplated sale's own date, not today: a parcel
+    // acquired after it can't be sold on it, and one sold since was still
+    // there to sell. `units` and `price` are read in that date's unit basis,
+    // which is the basis the candidates come back in.
+    let parcels = db_candidate_parcels(
+        &pool,
+        req.listing_id,
+        Some(req.holding_account_id),
+        Some(sale_date),
+    )
+    .await
+    .map_err(ApiError::from)?;
     let open: Decimal = parcels.iter().map(|p| p.remaining_quantity).sum();
     if req.units > open {
         return Err(ApiError::Unprocessable(format!(
@@ -471,7 +492,7 @@ mod tests {
     }
 
     async fn fixture_picks(pool: &SqlitePool, strategy: Strategy) -> Vec<(i64, Decimal)> {
-        let parcels = db_candidate_parcels(pool, 1, None).await.unwrap();
+        let parcels = db_candidate_parcels(pool, 1, None, None).await.unwrap();
         let (units, price, sale_date) = fixture_sale();
         allocate_strategy(&parcels, units, price, sale_date, strategy)
     }
@@ -549,7 +570,7 @@ mod tests {
     async fn disposal_totals_split_gains_losses_and_sum_exactly() {
         let pool = test_pool().await;
         strategy_fixture(&pool).await;
-        let parcels = db_candidate_parcels(&pool, 1, None).await.unwrap();
+        let parcels = db_candidate_parcels(&pool, 1, None, None).await.unwrap();
         let (units, price, sale_date) = fixture_sale();
         let picks = allocate_strategy(&parcels, units, price, sale_date, Strategy::Fifo);
         let (allocs, totals) = disposal_figures(&parcels, &picks, price * units, units, sale_date);
@@ -653,12 +674,296 @@ mod tests {
             .await;
         allocate(&pool, 1, 4, 3, Decimal::from(40)).await;
 
-        let parcels = db_candidate_parcels(&pool, 1, Some(1)).await.unwrap();
+        let parcels = db_candidate_parcels(&pool, 1, Some(1), None).await.unwrap();
         assert_eq!(parcels.len(), 1);
         assert_eq!(parcels[0].trade_id, 1);
         // Wrong account: nothing.
-        let parcels = db_candidate_parcels(&pool, 1, Some(99)).await.unwrap();
+        let parcels = db_candidate_parcels(&pool, 1, Some(99), None)
+            .await
+            .unwrap();
         assert!(parcels.is_empty());
+    }
+
+    /// The as-at fixture (sale at $10/unit), spanning a past sale date of
+    /// 2023-06-15:
+    ///  - parcel 1: acq 2020-01-01, 100 u @ $12 → loss −2/u
+    ///  - parcel 2: acq 2021-01-01, 100 u @ $5  → gain +5/u, eligible then
+    ///  - parcel 3: acq 2023-01-01, 100 u @ $4  → gain +6/u, NOT eligible then
+    ///  - parcel 4: acq 2025-01-01, 100 u @ $8  → acquired *after* that date
+    async fn as_at_fixture(pool: &SqlitePool) {
+        insert_listing(pool, 1, "AST").await;
+        for (id, date, price) in [
+            (1, ymd(2020, 1, 1), "12"),
+            (2, ymd(2021, 1, 1), "5"),
+            (3, ymd(2023, 1, 1), "4"),
+            (4, ymd(2025, 1, 1), "8"),
+        ] {
+            insert_buy(pool, id, 1, date, Decimal::from(100), dec(price)).await;
+        }
+    }
+
+    /// SCENARIOS O-15. The candidates are the parcels open **as at the sale
+    /// date**, not today: a parcel acquired after the contemplated sale can't
+    /// be sold on it (the Sell path refuses exactly that allocation), so it is
+    /// not offered — and with it gone the discount clock runs forward again
+    /// and the four strategies stop collapsing onto one answer.
+    #[tokio::test]
+    async fn api_past_dated_request_excludes_parcels_acquired_after_it() {
+        let pool = test_pool().await;
+        as_at_fixture(&pool).await;
+        let (status, body) = post_optimiser(
+            pool,
+            None,
+            serde_json::json!({
+                "listing_id": 1, "holding_account_id": 1, "units": "150",
+                "sale_date": "2023-06-15", "price": "10"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let r: OptimiserResponse = serde_json::from_slice(&body).unwrap();
+
+        // Parcel 4 (acquired 2025-01-01) did not exist on 2023-06-15.
+        assert!(
+            r.allocations
+                .iter()
+                .all(|a| a.allocation.purchase_trade_id != 4),
+            "a parcel acquired after the sale date was offered"
+        );
+
+        let picks = |strategy: Strategy| -> Vec<(i64, Decimal)> {
+            r.allocations
+                .iter()
+                .filter(|a| a.strategy == strategy)
+                .map(|a| (a.allocation.purchase_trade_id, a.allocation.units))
+                .collect()
+        };
+        // FIFO opens on the oldest parcel (the loss); max_discount takes the
+        // discount-eligible *gain* parcel first — the two candidates differ,
+        // where reading today's parcels made every strategy identical.
+        assert_eq!(
+            picks(Strategy::Fifo),
+            vec![(1, Decimal::from(100)), (2, Decimal::from(50))]
+        );
+        assert_eq!(
+            picks(Strategy::MaxDiscount),
+            vec![(2, Decimal::from(100)), (1, Decimal::from(50))]
+        );
+
+        // Held from 2021-01-01 to 2023-06-15 — over 12 months, so the gain is
+        // discountable. The bug classified every parcel non-discountable.
+        let eligible = r
+            .allocations
+            .iter()
+            .find(|a| a.strategy == Strategy::MaxDiscount && a.allocation.purchase_trade_id == 2)
+            .unwrap();
+        assert!(eligible.allocation.discount_eligible);
+        let max_discount = r
+            .strategies
+            .iter()
+            .find(|s| s.strategy == Strategy::MaxDiscount)
+            .unwrap();
+        assert_eq!(
+            max_discount.totals.discount_eligible_gain,
+            Decimal::from(500)
+        );
+        assert_eq!(max_discount.totals.non_discountable_gain, Decimal::ZERO);
+    }
+
+    /// Parcel 3 was acquired 2023-01-01, less than 12 months before the
+    /// 2023-06-15 sale date: an as-at read must still classify it as the
+    /// non-discountable gain it is, not drop the distinction.
+    #[tokio::test]
+    async fn api_past_dated_request_classifies_a_short_held_parcel_as_non_discountable() {
+        let pool = test_pool().await;
+        as_at_fixture(&pool).await;
+        let (status, body) = post_optimiser(
+            pool,
+            None,
+            serde_json::json!({
+                "listing_id": 1, "holding_account_id": 1, "units": "300",
+                "sale_date": "2023-06-15", "price": "10"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let r: OptimiserResponse = serde_json::from_slice(&body).unwrap();
+        let flags: HashMap<i64, bool> = r
+            .allocations
+            .iter()
+            .filter(|a| a.strategy == Strategy::Fifo)
+            .map(|a| {
+                (
+                    a.allocation.purchase_trade_id,
+                    a.allocation.discount_eligible,
+                )
+            })
+            .collect();
+        assert_eq!(flags.get(&1), Some(&true));
+        assert_eq!(flags.get(&2), Some(&true));
+        assert_eq!(flags.get(&3), Some(&false));
+        assert_eq!(flags.get(&4), None);
+    }
+
+    /// The over-request bound moves with the date: only 300 of the 400 units
+    /// held today were open on 2023-06-15.
+    #[tokio::test]
+    async fn api_past_dated_open_quantity_is_what_was_open_then() {
+        let pool = test_pool().await;
+        as_at_fixture(&pool).await;
+        let (status, body) = post_optimiser(
+            pool,
+            None,
+            serde_json::json!({
+                "listing_id": 1, "holding_account_id": 1, "units": "301",
+                "sale_date": "2023-06-15", "price": "10"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        let msg = String::from_utf8(body).unwrap();
+        assert!(msg.contains("only 300"), "{msg}");
+    }
+
+    /// The boundary the Sell path draws: a parcel acquired **on** the sale
+    /// date is legitimate, and stays a candidate.
+    #[tokio::test]
+    async fn api_a_parcel_acquired_on_the_sale_date_is_still_a_candidate() {
+        let pool = test_pool().await;
+        as_at_fixture(&pool).await;
+        let (status, body) = post_optimiser(
+            pool,
+            None,
+            serde_json::json!({
+                "listing_id": 1, "holding_account_id": 1, "units": "400",
+                "sale_date": "2025-01-01", "price": "10"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let r: OptimiserResponse = serde_json::from_slice(&body).unwrap();
+        assert!(
+            r.allocations
+                .iter()
+                .any(|a| a.allocation.purchase_trade_id == 4),
+            "the same-day parcel was dropped"
+        );
+    }
+
+    /// The other direction of the same read: a parcel sold *since* the sale
+    /// date was there to be sold on it, so a past-dated request offers it.
+    #[tokio::test]
+    async fn api_past_dated_request_offers_a_parcel_sold_since() {
+        let pool = test_pool().await;
+        as_at_fixture(&pool).await;
+        // Parcel 2 is fully sold in 2024 — after the 2023-06-15 sale date.
+        test_support::sell(5, 1)
+            .date(ymd(2024, 3, 1))
+            .qty(Decimal::from(100))
+            .price(Decimal::from(11))
+            .insert(&pool)
+            .await;
+        allocate(&pool, 1, 5, 2, Decimal::from(100)).await;
+
+        // Today it is gone…
+        let live = db_candidate_parcels(&pool, 1, None, None).await.unwrap();
+        assert!(live.iter().all(|p| p.trade_id != 2));
+
+        // …but it was open on 2023-06-15, so a request for that date has it.
+        let (status, body) = post_optimiser(
+            pool,
+            None,
+            serde_json::json!({
+                "listing_id": 1, "holding_account_id": 1, "units": "300",
+                "sale_date": "2023-06-15", "price": "10"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let r: OptimiserResponse = serde_json::from_slice(&body).unwrap();
+        assert!(
+            r.allocations
+                .iter()
+                .any(|a| a.allocation.purchase_trade_id == 2),
+            "a parcel open at the sale date but sold since was under-reported"
+        );
+    }
+
+    /// Quantities come back in the unit basis of the sale date — the project's
+    /// as-at convention (`docs/API.md`) — so the units the caller states and
+    /// the units the candidates report are on one basis: a 2-for-1 split in
+    /// 2025 does not restate what was held in 2024.
+    #[tokio::test]
+    async fn api_past_dated_candidates_are_in_that_dates_unit_basis() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "SPL").await;
+        insert_buy(&pool, 1, 1, ymd(2020, 1, 1), Decimal::from(100), dec("5")).await;
+        crate::entities::corporate_action::db_upsert(
+            &pool,
+            &crate::entities::corporate_action::CorporateAction {
+                id: 1,
+                listing_id: 1,
+                date: ymd(2025, 1, 1),
+                kind: crate::entities::corporate_action::ActionKind::ShareSplit {
+                    split_new_units: Decimal::from(2),
+                    split_old_units: Decimal::ONE,
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+        let before = db_candidate_parcels(&pool, 1, None, Some(ymd(2024, 6, 30)))
+            .await
+            .unwrap();
+        assert_eq!(before[0].remaining_quantity, Decimal::from(100));
+        let after = db_candidate_parcels(&pool, 1, None, None).await.unwrap();
+        assert_eq!(after[0].remaining_quantity, Decimal::from(200));
+        // The split never touches the cost base (TD 2000/10).
+        assert_eq!(before[0].remaining_cost_base, after[0].remaining_cost_base);
+    }
+
+    /// A future-dated request is unchanged: every parcel open today is a
+    /// legitimate candidate for a sale contemplated later, and the answer
+    /// matches the same request run for today.
+    #[tokio::test]
+    async fn api_future_dated_request_still_sees_every_open_parcel() {
+        let pool = test_pool().await;
+        as_at_fixture(&pool).await;
+        let today = crate::infra::date::today();
+        let later = today + chrono::Duration::days(400);
+        let run = async |date: NaiveDate| {
+            let (status, body) = post_optimiser(
+                pool.clone(),
+                None,
+                serde_json::json!({
+                    "listing_id": 1, "holding_account_id": 1, "units": "400",
+                    "sale_date": date.to_string(), "price": "10"
+                }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            serde_json::from_slice::<OptimiserResponse>(&body).unwrap()
+        };
+        let now = run(today).await;
+        let future = run(later).await;
+        // All four parcels, both times — the whole 400 units held today.
+        for r in [&now, &future] {
+            let ids: std::collections::BTreeSet<i64> = r
+                .allocations
+                .iter()
+                .filter(|a| a.strategy == Strategy::Fifo)
+                .map(|a| a.allocation.purchase_trade_id)
+                .collect();
+            assert_eq!(ids, (1..=4).collect::<std::collections::BTreeSet<i64>>());
+        }
+        let totals = |r: &OptimiserResponse| {
+            r.strategies
+                .iter()
+                .map(|s| (s.totals.cost_base, s.totals.capital_gain_loss))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(totals(&now), totals(&future));
     }
 
     // ---- API ---------------------------------------------------------------

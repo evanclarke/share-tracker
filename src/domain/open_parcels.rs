@@ -671,7 +671,7 @@ mod tests {
         // The optimiser prices a contemplated sale off those parcels, so the
         // reduced $9.00/unit basis would have overstated every strategy's
         // gain.
-        let candidates = parcel_optimiser::db_candidate_parcels(&pool, 1, None)
+        let candidates = parcel_optimiser::db_candidate_parcels(&pool, 1, None, None)
             .await
             .unwrap();
         assert_eq!(candidates.len(), 1);

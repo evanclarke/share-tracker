@@ -3368,3 +3368,94 @@ annual document's `cgt_summary`, over `db_tax_report` and `POST /reports/tax-rep
 `db_earlier_year_loss_reduces_later_year_gain` extended to pin the quiet year *between* two active
 ones. Docs: `docs/API.md` gains a "Which years get a record" paragraph in Net capital gain, the CSV
 export note, and the `cgt_summary` `null` wording, pinned by `doc_checks::net_capital_gain_year_series_documented`.
+
+## The pre-sale what-if and the parcel optimiser model a disposal dated before the parcels existed (SCENARIOS O-14, O-15, O-16)
+(SCENARIOS.md section O verification pass, 2026-08-19. Both endpoints read their candidates through
+`parcel_optimiser::db_candidate_parcels_on`, which calls `open_parcels::db_open_parcels_on(conn)`
+with **no as-at date** — the parcels open *today*, whatever `date` / `sale_date` the request names.)
+- [x] Reproduced: a parcel acquired **2022-01-01**, and
+  `POST /portfolio/net-capital-gain/what-if` for a disposal dated **2021-12-31** allocating it
+  explicitly. Accepted `200`, projecting a $10,000 non-discountable gain into FY2021. The identical
+  allocation on `PUT /sells/:id` is refused `422` — *"an allocated parcel is dated after the sale
+  date"* — so the what-if answers with figures for a sale that can never be recorded
+- [x] Boundary probed: a disposal dated **on** the acquisition date is legitimate on both paths (a
+  same-day parcel is fine on a real Sell); the day before is the first refused on the Sell path and
+  the first wrongly accepted here. Exactly the Sell's rule, one endpoint short
+- [x] The discount clock runs backwards with it: every parcel acquired after the disposal date is
+  classified `discount_eligible: false`. `POST /portfolio/parcel-optimiser` with `sale_date`
+  2021-01-01 returned **all four strategies identical** (`fifo`, `min_gain`, `max_discount`,
+  `harvest_losses` — same parcels, same $7,000), because nothing was discountable and the orderings
+  collapsed. The screen exists to show the choice, and it silently shows none
+- [x] The other half of the same read: a parcel that *was* open at the disposal date but has since
+  been sold is **excluded** from the candidates, so a past-dated what-if also under-reports what
+  could have been sold. One cause, both directions
+- [x] Reachable from the UI: the Pre-Sale What-If's `Sale date` field is `required` with **no
+  default** (`config.js`), so nothing steers the user to today, and O-14's own question — would
+  selling in June instead of July consume a different year's losses — invites a date in the past
+- [x] A *future*-dated request is unaffected: every currently-open parcel is a legitimate candidate
+- [x] **Decided 2026-08-19 (Evan): option (a)** — read the candidates as at the request's date.
+- [x] A model decision, four options:
+  - **(a)** ← **chosen.** Read the candidates **as at the request's date** — `db_open_parcels_on` already takes an
+    as-of date everywhere else (`docs/API.md`'s [As-at date](docs/API.md#as-at-date) section), so
+    both endpoints would model the holding as it actually stood. The fullest answer, and the one
+    that makes a past-dated what-if mean "what if I had sold then"; note it then offers parcels that
+    have since been sold, which for a *contemplated* sale is advice the user cannot act on
+  - **(b)** Keep "open today" and add the Sell path's own refusal: reject an allocation naming a
+    parcel dated after the disposal date (`422`, the Sell's wording), and drop such parcels from a
+    strategy's candidate list. Fails safe, no semantic change, no new as-at reads
+  - **(c)** Refuse a past-dated request outright — these are *pre-sale* tools; `422` naming the date
+  - **(d)** Documentation only: state that both endpoints value a contemplated sale against today's
+    holding and that a past `date` is only meaningful for the tax-year and discount-clock arithmetic
+- [x] Tests: the reproduction above (what-if and optimiser), the same-day boundary staying accepted,
+  and — per the option — the refusal or the as-at candidate set
+- [x] Docs sync: `docs/API.md`'s [Parcel-selection optimiser](docs/API.md#parcel-selection-optimiser)
+  and [Pre-sale what-if](docs/API.md#pre-sale-what-if) sections, and the 422 catalogue row if (b)/(c)
+
+**Implemented 2026-08-19 (option (a)).** `domain::open_parcels::load` already took an `as_of`; the
+two pre-sale tools were the only holdings readers not passing one. `reports::open_parcels::db_open_parcels_on`
+and `parcel_optimiser::db_candidate_parcels`/`db_candidate_parcels_on` each gained an
+`as_of: Option<NaiveDate>` parameter, and the two handlers pass their own request's date — the
+optimiser its `sale_date` (already defaulted to today before the read), the what-if its required
+`date`, inside the same single `pool.begin()` snapshot it already used. `GET /portfolio/open-parcels`
+keeps `None`, the live view, so the ~30 other callers of `db_open_parcels(pool)` are untouched.
+
+The candidate set is now exactly the set a real Sell dated then could allocate, which closes both
+directions at once: a parcel acquired after the disposal date is no longer offered by a strategy and
+an explicit allocation naming it is refused (`parcel N is not an open parcel of …` — the what-if's
+own existing 422, matching the Sell's `an allocated parcel is dated after the sale date`), and a
+parcel that was open then but has since been sold is offered again. The same-day boundary is
+untouched: `load`'s bounds are all `<= as_of`.
+
+**Unit basis.** An as-at read returns quantities in that date's basis, so a split between the request
+date and today no longer restates the candidates the request is about. The caller's `units` and the
+per-unit price (explicit, live-fetched, or the what-if's implied `proceeds ÷ units`) are read on that
+same basis — the project's existing as-at convention rather than a new rule — and both call sites
+carry a comment saying so; `docs/API.md`'s As-at date section now states it for both endpoints.
+
+**A future date.** Passed straight through, deliberately un-clamped: `as_of_or_today` only substitutes
+today for `None`, so `load(conn, Some(future))` is the position as at that future date. With no
+future-dated facts recorded that is identical to today's view (the finding's own observation), and
+where a future-dated Buy *is* recorded, offering it for a sale contemplated after it is precisely the
+Sell path's rule again — clamping at today would have reintroduced the divergence in the other
+direction.
+
+The over-request wording (`only {open} unit(s) of {listing} are open …`) is unchanged; it now means
+"open as at the date", which the docs state. Its missing account name is the separate open TODO
+section and was deliberately left alone.
+
+Tests — optimiser: `api_past_dated_request_excludes_parcels_acquired_after_it` (the strategies stop
+collapsing: FIFO opens on the loss parcel, `max_discount` on the discount-eligible gain),
+`api_past_dated_request_classifies_a_short_held_parcel_as_non_discountable`,
+`api_past_dated_open_quantity_is_what_was_open_then` (the 422 bound moves with the date),
+`api_a_parcel_acquired_on_the_sale_date_is_still_a_candidate` (the boundary),
+`api_past_dated_request_offers_a_parcel_sold_since`,
+`api_past_dated_candidates_are_in_that_dates_unit_basis` (a 2-for-1 split in 2025 leaves a 2024-dated
+request at 100 units, cost base unmoved), `api_future_dated_request_still_sees_every_open_parcel`.
+What-if: `api_what_if_refuses_a_parcel_acquired_after_the_disposal_date` (the reproduction verbatim),
+`api_what_if_accepts_a_parcel_acquired_on_the_disposal_date`,
+`api_what_if_strategy_ignores_parcels_acquired_after_the_disposal_date`,
+`api_what_if_offers_a_parcel_sold_since_the_disposal_date`,
+`api_what_if_dated_in_the_future_still_sees_every_open_parcel`. Docs: the As-at date, Parcel-selection
+optimiser and Pre-sale what-if sections plus the 422 catalogue row, pinned by
+`doc_checks::presale_tools_read_candidates_as_at_the_request_date`; both `config.js` date-field hints
+now say which parcels the date selects.

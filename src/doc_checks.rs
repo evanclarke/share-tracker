@@ -2091,6 +2091,50 @@ fn lpr_expenditure_on_a_foreign_parcel_documented() {
     );
 }
 
+/// Docs-sync pin for the pre-sale tools' as-at candidate read (SCENARIOS
+/// O-14/O-15/O-16). Both the [parcel-selection optimiser] and the [pre-sale
+/// what-if] used to read the parcels open *today*, whatever date the request
+/// named — so a past-dated request offered parcels that did not exist yet
+/// (which a real Sell refuses) and withheld parcels sold since. The behaviour
+/// is now the as-at rule the rest of the reports follow, and the two sections
+/// plus the As-at date section have to say so, because the unit basis of a
+/// caller's `units` and `price` depends on it.
+#[test]
+fn presale_tools_read_candidates_as_at_the_request_date() {
+    // The As-at date section names them and states the unit basis.
+    let as_at = API_MD
+        .split("### As-at date")
+        .nth(1)
+        .expect("docs/API.md has an As-at date section")
+        .split("\n### ")
+        .next()
+        .expect("split always yields at least one part");
+    assert!(as_at.contains("[parcel-selection optimiser](#parcel-selection-optimiser)"));
+    assert!(as_at.contains("[pre-sale what-if](#pre-sale-what-if)"));
+    assert!(as_at.contains("as at the request's `sale_date` / `date`"));
+    assert!(as_at.contains("that date's** unit basis"));
+
+    // Each endpoint's own section states the dated read and both directions.
+    assert!(API_MD.contains(
+        "The candidate parcels are the [open-parcels](#open-parcels) rows **as at `sale_date`**"
+    ));
+    assert!(API_MD.contains("A parcel acquired *after* `sale_date` is not a candidate"));
+    assert!(API_MD.contains("a parcel sold *since* `sale_date` is, because it was open then"));
+    assert!(
+        API_MD.contains("drawn from the listing's [open parcels](#open-parcels) **as at `date`**")
+    );
+    assert!(API_MD.contains("open **as at `date`** with enough remaining units then"));
+    assert!(API_MD.contains("beyond the quantity open as at `date`"));
+
+    // The 422 catalogue carries the dated bound for both causes.
+    assert!(
+        API_MD.contains(
+            "more units than the listing's open quantity **as at the request's sale date**"
+        )
+    );
+    assert!(API_MD.contains("a parcel not open as at that date (including one acquired after it"));
+}
+
 /// Pins for the FreeBSD packaging + versioned-release pipeline (REQUIREMENTS
 /// 2026-07-13). The release workflow and package skeleton are plain text CI
 /// consumes, so these tests keep their load-bearing pieces from silently

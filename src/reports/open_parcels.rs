@@ -61,7 +61,8 @@ pub async fn db_open_parcels(pool: &SqlitePool) -> Result<Vec<OpenParcel>, sqlx:
     // so an interleaved write can't yield e.g. an allocation whose parcel is
     // missing from the same read.
     let mut tx = pool.begin().await?;
-    let parcels = db_open_parcels_on(&mut tx).await?;
+    // `None`: this endpoint is the live schedule, as at today.
+    let parcels = db_open_parcels_on(&mut tx, None).await?;
     tx.commit().await?;
     Ok(parcels)
 }
@@ -69,15 +70,22 @@ pub async fn db_open_parcels(pool: &SqlitePool) -> Result<Vec<OpenParcel>, sqlx:
 /// The same report read on the caller's own connection, for callers (the
 /// parcel optimiser, and through it the what-if) that fold the open parcels
 /// into a wider single-snapshot read transaction.
+///
+/// `as_of` is the position's date — `None` the live view (as at today), and
+/// `Some(date)` the holding as it stood on that date, with quantities in that
+/// date's unit basis (see `docs/API.md`'s As-at date section). The optimiser
+/// and pre-sale what-if pass their own request's sale date, so the candidate
+/// parcels are exactly the ones a real Sell on that date could allocate.
 pub async fn db_open_parcels_on(
     conn: &mut sqlx::SqliteConnection,
+    as_of: Option<NaiveDate>,
 ) -> Result<Vec<OpenParcel>, sqlx::Error> {
     // The open parcels and their AUD cost bases come from the shared loader
-    // (`domain::open_parcels`) — `as_of: None`, the live view: an unsold unit
-    // was held for every recorded payment, and quantities come back in
-    // current units. This report adds only the joined ticker and the shaping
-    // into the printable schedule.
-    let open = open_parcels::load(&mut *conn, None).await?;
+    // (`domain::open_parcels`): with `as_of: None` the live view — an unsold
+    // unit was held for every recorded payment, quantities in current units —
+    // and with a date, the same read bounded at it. This report adds only the
+    // joined ticker and the shaping into the printable schedule.
+    let open = open_parcels::load(&mut *conn, as_of).await?;
 
     // Ticker per listing, as a separate lookup rather than a join option on
     // the shared loader (only this report wants it). Every trade's listing_id

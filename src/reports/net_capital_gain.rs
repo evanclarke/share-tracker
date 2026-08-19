@@ -1072,10 +1072,19 @@ async fn what_if_handler(
     // dry-run works from a single consistent snapshot, exactly like the
     // report proper. Everything after the commit is pure computation.
     let mut tx = pool.begin().await.map_err(ApiError::from)?;
-    let parcels =
-        parcel_optimiser::db_candidate_parcels_on(&mut tx, req.listing_id, req.holding_account_id)
-            .await
-            .map_err(ApiError::from)?;
+    // Candidates as at the hypothetical disposal's own date, not today: a
+    // parcel acquired after it can't be sold on it (the Sell path refuses
+    // exactly that allocation), and one sold since was still there to sell.
+    // `units` and the implied per-unit price `proceeds ÷ units` are read in
+    // that date's unit basis — the basis the candidates come back in.
+    let parcels = parcel_optimiser::db_candidate_parcels_on(
+        &mut tx,
+        req.listing_id,
+        req.holding_account_id,
+        Some(req.date),
+    )
+    .await
+    .map_err(ApiError::from)?;
     let realised = super::realised_gains::db_realised_gains_on(&mut tx)
         .await
         .map_err(ApiError::from)?;
@@ -3797,6 +3806,206 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    /// SCENARIOS O-14. The candidates are the parcels open **as at the
+    /// disposal's date**: a parcel acquired after it cannot be sold on it, and
+    /// the explicit allocation naming it is refused — the Sell path's own
+    /// rule ("an allocated parcel is dated after the sale date"), which the
+    /// what-if used to answer with figures for a sale that can never be
+    /// recorded.
+    #[tokio::test]
+    async fn api_what_if_refuses_a_parcel_acquired_after_the_disposal_date() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "VAS").await;
+        insert_trade(
+            &pool,
+            1,
+            trade::TradeType::Buy,
+            1,
+            NaiveDate::from_ymd_opt(2022, 1, 1).unwrap(),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
+
+        let (status, body) = post_what_if(
+            pool,
+            serde_json::json!({
+                "listing_id": 1, "units": "100", "proceeds": "11000",
+                "date": "2021-12-31",
+                "allocations": [ { "purchase_trade_id": 1, "units": "100" } ]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        let msg = String::from_utf8(body).unwrap();
+        assert!(msg.contains("not an open parcel"), "{msg}");
+        assert!(msg.contains("VAS"), "{msg}");
+    }
+
+    /// The boundary the Sell path draws, kept: a parcel acquired **on** the
+    /// disposal date is a legitimate allocation, here and there.
+    #[tokio::test]
+    async fn api_what_if_accepts_a_parcel_acquired_on_the_disposal_date() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "VAS").await;
+        insert_trade(
+            &pool,
+            1,
+            trade::TradeType::Buy,
+            1,
+            NaiveDate::from_ymd_opt(2022, 1, 1).unwrap(),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
+
+        let (status, body) = post_what_if(
+            pool,
+            serde_json::json!({
+                "listing_id": 1, "units": "100", "proceeds": "2000",
+                "date": "2022-01-01",
+                "allocations": [ { "purchase_trade_id": 1, "units": "100" } ]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        let r: WhatIfResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(r.allocations.len(), 1);
+        // Sold the day it was bought — a gain, and not a discountable one.
+        assert!(!r.allocations[0].discount_eligible);
+        assert_eq!(r.hypothetical.non_discountable_gain, Decimal::from(1000));
+    }
+
+    /// The strategy branch reads the same candidates, so a later parcel is
+    /// neither allocated nor counted in the open quantity the over-request
+    /// check bounds by.
+    #[tokio::test]
+    async fn api_what_if_strategy_ignores_parcels_acquired_after_the_disposal_date() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "VAS").await;
+        for (id, year) in [(1, 2020), (2, 2022)] {
+            insert_trade(
+                &pool,
+                id,
+                trade::TradeType::Buy,
+                1,
+                NaiveDate::from_ymd_opt(year, 1, 1).unwrap(),
+                Decimal::from(100),
+                Decimal::from(10),
+            )
+            .await;
+        }
+
+        // 200 units are open today, but only 100 were open on 2021-06-30.
+        let (status, body) = post_what_if(
+            pool.clone(),
+            serde_json::json!({
+                "listing_id": 1, "units": "150", "proceeds": "3000",
+                "date": "2021-06-30", "strategy": "fifo"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            String::from_utf8(body).unwrap().contains("only 100"),
+            "the open quantity must be what was open at the disposal date"
+        );
+
+        // Within that bound, only the parcel that existed is allocated.
+        let (status, body) = post_what_if(
+            pool,
+            serde_json::json!({
+                "listing_id": 1, "units": "100", "proceeds": "2000",
+                "date": "2021-06-30", "strategy": "fifo"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        let r: WhatIfResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(r.allocations.len(), 1);
+        assert_eq!(r.allocations[0].purchase_trade_id, 1);
+        // Held from 2020-01-01 to 2021-06-30 — over 12 months.
+        assert!(r.allocations[0].discount_eligible);
+        assert_eq!(r.hypothetical.discount_eligible_gain, Decimal::from(1000));
+    }
+
+    /// The other direction of the same read: a parcel sold *since* the
+    /// disposal date was there to be sold on it, so a past-dated what-if
+    /// offers it rather than under-reporting what could have been sold.
+    #[tokio::test]
+    async fn api_what_if_offers_a_parcel_sold_since_the_disposal_date() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "VAS").await;
+        insert_trade(
+            &pool,
+            1,
+            trade::TradeType::Buy,
+            1,
+            NaiveDate::from_ymd_opt(2020, 1, 1).unwrap(),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
+        // Fully sold in 2024 — after the 2023-06-15 disposal being modelled.
+        insert_trade(
+            &pool,
+            2,
+            trade::TradeType::Sell,
+            1,
+            NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(),
+            Decimal::from(100),
+            Decimal::from(12),
+        )
+        .await;
+        allocate(&pool, 1, 2, 1, Decimal::from(100)).await;
+
+        let (status, body) = post_what_if(
+            pool,
+            serde_json::json!({
+                "listing_id": 1, "units": "100", "proceeds": "2000",
+                "date": "2023-06-15", "strategy": "fifo"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        let r: WhatIfResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(r.allocations.len(), 1);
+        assert_eq!(r.allocations[0].purchase_trade_id, 1);
+    }
+
+    /// A future-dated disposal is unchanged: every parcel open today is a
+    /// legitimate candidate for a sale contemplated later.
+    #[tokio::test]
+    async fn api_what_if_dated_in_the_future_still_sees_every_open_parcel() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "VAS").await;
+        insert_trade(
+            &pool,
+            1,
+            trade::TradeType::Buy,
+            1,
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
+        let later = crate::infra::date::today() + chrono::Duration::days(400);
+
+        let (status, body) = post_what_if(
+            pool,
+            serde_json::json!({
+                "listing_id": 1, "units": "100", "proceeds": "2000",
+                "date": later.to_string(), "strategy": "fifo"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        let r: WhatIfResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(r.allocations.len(), 1);
+        assert_eq!(r.allocations[0].purchase_trade_id, 1);
+        assert!(r.allocations[0].discount_eligible);
     }
 
     /// A hypothetical loss enters the year's loss pool: it offsets the
