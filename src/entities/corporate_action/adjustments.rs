@@ -62,6 +62,7 @@ impl RocEvent {
         splits: &[SplitEvent],
         parcel_currency: &str,
         acquired: NaiveDate,
+        rolled_over_on: Option<NaiveDate>,
         up_to: Option<NaiveDate>,
     ) -> Result<Option<Decimal>, sqlx::Error> {
         let entitled = match self.record_date {
@@ -69,6 +70,21 @@ impl RocEvent {
             None => acquired <= self.date,
         };
         if !entitled || up_to.is_some_and(|d| self.date > d) {
+            return Ok(None);
+        }
+        // A rollover replacement parcel's cost base was computed when the
+        // operation ran, and `domain::rollover` folded into it every payment the
+        // consumed parcels had received up to **and including** the operation
+        // date. The entitlement test above admits a payment dated exactly on
+        // that date — the replacement's own trade date — so without this the
+        // same payment would come off the units twice: the carried cost base and
+        // again here (SCENARIOS N-06, where a $1/unit return of capital paid on
+        // the transfer date reported a $300 cost base for a $500 parcel that had
+        // received $100). The operation date belongs to the operation, which is
+        // also the only side that can account for it when the replacement is of
+        // a *different* listing (a scrip-for-scrip exchange) or splits one
+        // parcel's cost base across two (a demerger).
+        if rolled_over_on.is_some_and(|rolled| self.date <= rolled) {
             return Ok(None);
         }
         if self.currency != parcel_currency {
@@ -342,19 +358,23 @@ pub fn sold_in_acquired_units(
 /// payment since acquisition).
 ///
 /// Which payments apply (entitlement at the record date, or the payment date
-/// when none is recorded), how a split re-bases each one, and the loud failure
-/// on a currency mismatch are all [`RocEvent::per_unit_for`]'s — this is only
-/// the sum over the listing's payments.
+/// when none is recorded), what a rollover replacement parcel's `rolled_over_on`
+/// date already accounts for, how a split re-bases each one, and the loud
+/// failure on a currency mismatch are all [`RocEvent::per_unit_for`]'s — this is
+/// only the sum over the listing's payments.
 pub fn per_unit_reduction(
     events: &[RocEvent],
     splits: &[SplitEvent],
     trade_currency: &str,
     acquired: NaiveDate,
+    rolled_over_on: Option<NaiveDate>,
     up_to: Option<NaiveDate>,
 ) -> Result<Decimal, sqlx::Error> {
     let mut total = Decimal::ZERO;
     for e in events {
-        if let Some(per_unit) = e.per_unit_for(splits, trade_currency, acquired, up_to)? {
+        if let Some(per_unit) =
+            e.per_unit_for(splits, trade_currency, acquired, rolled_over_on, up_to)?
+        {
             total += per_unit;
         }
     }

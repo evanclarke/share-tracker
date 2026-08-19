@@ -1491,6 +1491,75 @@ mod tests {
         assert_eq!(group.transfer_ins[0].brokerage, dec("11700"));
     }
 
+    /// SCENARIOS N-06: a return of capital paid **on** the transfer date is the
+    /// boundary between what the operation folds into the carried cost base and
+    /// what the reports still apply to the replacement parcel. It used to fall
+    /// inside both, so the payment came off the units twice — a $500 parcel
+    /// that had received $100 reported a $400 carried figure and a $300 cost
+    /// base. The operation date belongs to the operation.
+    #[tokio::test]
+    async fn a_return_of_capital_on_the_transfer_date_is_counted_once() {
+        // The reported figures are AUD (the vest listing is USD), so the claim
+        // is that all three boundary dates agree — one $200 reduction, wherever
+        // it is applied — not a spelled-out AUD amount.
+        let mut reported = Vec::new();
+        for (payment_date, expected_carried) in [
+            (d(2024, 5, 31), dec("11800")),
+            (d(2024, 6, 1), dec("11800")),
+            (d(2024, 6, 2), dec("12000")),
+        ] {
+            let pool = test_pool().await;
+            insert_listing(&pool, 1, "ICE").await;
+            insert_vest(&pool, 1, d(2023, 3, 1), "100", "120").await; // $12,000
+            corporate_action::db_upsert(
+                &pool,
+                &corporate_action::CorporateAction {
+                    id: 5,
+                    listing_id: 1,
+                    date: payment_date,
+                    kind: corporate_action::ActionKind::ReturnOfCapital {
+                        amount_per_unit: dec("2"),
+                        currency: "USD".to_string(),
+                        record_date: None,
+                    },
+                },
+            )
+            .await
+            .unwrap();
+
+            let group = db_transfer(&pool, 1, &body(d(2024, 6, 1), 2, 1, vec![(1, "100")]))
+                .await
+                .unwrap();
+            assert_eq!(
+                group.transfer_ins[0].brokerage, expected_carried,
+                "carried cost base for a payment dated {payment_date}"
+            );
+
+            // Whichever side of the boundary the payment falls on, the units'
+            // reported cost base is the same $11,800 — the payment reduces them
+            // exactly once.
+            let parcels = crate::domain::open_parcels::load(
+                &mut pool.acquire().await.unwrap(),
+                Some(d(2024, 6, 30)),
+            )
+            .await
+            .unwrap();
+            let replacement = parcels
+                .iter()
+                .find(|p| p.parcel.id == group.transfer_ins[0].id)
+                .expect("the replacement parcel is open");
+            reported.push(replacement.cost_base.adjusted);
+        }
+        assert_eq!(
+            reported[0], reported[1],
+            "a payment on the transfer date must reduce the units once, like one the day before"
+        );
+        assert_eq!(
+            reported[1], reported[2],
+            "and like one the day after, which the replacement parcel receives itself"
+        );
+    }
+
     // API-level tests
 
     #[tokio::test]

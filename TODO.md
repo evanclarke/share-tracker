@@ -75,6 +75,37 @@ frozen figure.)
 - [ ] Docs sync: `docs/API.md` (the 422 catalogue and/or the new report), README Known limitations,
   `docs/SCHEMA.md` if a report is added
 
+## A return of capital paid on the rollover date reduces the cost base twice (SCENARIOS N-06, N-07)
+(SCENARIOS.md section N verification pass, 2026-08-19 — found while probing the boundary of the
+finding above. `domain::rollover` folds every return-of-capital payment dated **on or before** the
+operation date into the replacement parcel's carried cost base, while `RocEvent::per_unit_for` tests
+entitlement against the parcel's own **trade date** — which for a replacement parcel *is* the
+operation date. The two windows overlap on exactly one day.)
+- [x] Reproduced: 100 units bought 2023-01-10 for $500, transferred 2023-08-01, with a $1.00/unit
+  return of capital dated 2023-07-31, 2023-08-01 and 2023-08-02 in turn. The day before and the day
+  after both report a $400 cost base (correct — the payment comes off once, from the carried figure
+  and from the replacement parcel respectively). Dated **on the transfer date** it reports **$300**:
+  the carried cost base is $400 *and* the pipeline takes the $100 again
+- [x] Consequence: the cost base is understated by the whole payment, so the capital gain on those
+  units is **overstated** by it — silently, and on all three of `domain::rollover`'s operations. A
+  capital return or special distribution paid on a scheme's implementation date is the ordinary case,
+  not an edge one
+- [x] Splits are not affected: the pipeline re-bases a parcel only for splits dated strictly after
+  its trade date, and the fold converts the moved quantity for splits up to the operation date, so
+  the boundary is already disjoint (verified at all three dates — 200 units, $500, throughout)
+- [x] Fixed: the **operation date belongs to the operation**. `cost_base::Parcel` carries
+  `rolled_over_on` (the replacement parcel's own trade date, `None` for an ordinary *or inherited*
+  parcel — an inheritance also has a deemed acquisition date but states its cost base rather than
+  carrying it), and `RocEvent::per_unit_for` declines a payment dated on or before it. The
+  alternative — folding only up to the day before and letting the pipeline apply the same-day
+  payment — is wrong on the merits: a scrip-for-scrip replacement parcel is a *different listing*,
+  whose ROC events it would never see, and a demerger apportions one parcel's cost base across two,
+  so the reduction has to be inside the figure being apportioned
+- [x] Tests: the three boundary dates as a regression test; the existing G1/E10 walks and every
+  cost-base report still green (1696 tests)
+- [ ] Docs sync: `docs/SCHEMA.md` if the `trades` provenance columns' role in the cost base is
+  described there; the cost-base pipeline's own doc comment carries the rule
+
 ## An AMMA statement whose units a transfer has moved can be recorded nowhere (SCENARIOS N-06)
 (SCENARIOS.md section N verification pass, 2026-08-19. The sibling of the finding above, on the
 guarded path: F-17 refuses the adjustment against the source parcel, and the per-account rule

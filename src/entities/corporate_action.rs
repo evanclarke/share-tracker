@@ -1031,10 +1031,10 @@ mod tests {
             },
         ];
         // Acquired between the first and second events: the first doesn't apply.
-        let pu = per_unit_reduction(&events, &[], "AUD", d(2024, 3, 1), None).unwrap();
+        let pu = per_unit_reduction(&events, &[], "AUD", d(2024, 3, 1), None, None).unwrap();
         assert_eq!(pu, "0.60".parse::<Decimal>().unwrap());
         // Acquired on the event date: held on the payment date, so it applies.
-        let pu = per_unit_reduction(&events, &[], "AUD", d(2024, 6, 1), None).unwrap();
+        let pu = per_unit_reduction(&events, &[], "AUD", d(2024, 6, 1), None, None).unwrap();
         assert_eq!(pu, "0.60".parse::<Decimal>().unwrap());
     }
 
@@ -1055,16 +1055,37 @@ mod tests {
             },
         ];
         // Sold between the events: only the payment received while held applies.
-        let pu =
-            per_unit_reduction(&events, &[], "AUD", d(2024, 1, 1), Some(d(2024, 9, 1))).unwrap();
+        let pu = per_unit_reduction(
+            &events,
+            &[],
+            "AUD",
+            d(2024, 1, 1),
+            None,
+            Some(d(2024, 9, 1)),
+        )
+        .unwrap();
         assert_eq!(pu, "0.20".parse::<Decimal>().unwrap());
         // Sold on the payment date: still held at the payment, so it applies.
-        let pu =
-            per_unit_reduction(&events, &[], "AUD", d(2024, 1, 1), Some(d(2025, 1, 1))).unwrap();
+        let pu = per_unit_reduction(
+            &events,
+            &[],
+            "AUD",
+            d(2024, 1, 1),
+            None,
+            Some(d(2025, 1, 1)),
+        )
+        .unwrap();
         assert_eq!(pu, "0.60".parse::<Decimal>().unwrap());
         // Sold before any payment: unaffected.
-        let pu =
-            per_unit_reduction(&events, &[], "AUD", d(2024, 1, 1), Some(d(2024, 5, 1))).unwrap();
+        let pu = per_unit_reduction(
+            &events,
+            &[],
+            "AUD",
+            d(2024, 1, 1),
+            None,
+            Some(d(2024, 5, 1)),
+        )
+        .unwrap();
         assert_eq!(pu, Decimal::ZERO);
     }
 
@@ -1090,13 +1111,13 @@ mod tests {
             },
         ];
         let splits = vec![split_event(d(2024, 6, 1), "2", "1")];
-        let pu = per_unit_reduction(&events, &splits, "AUD", d(2024, 1, 1), None).unwrap();
+        let pu = per_unit_reduction(&events, &splits, "AUD", d(2024, 1, 1), None, None).unwrap();
         // 0.30 + 0.20 × 2 = 0.70 per as-acquired unit.
         assert_eq!(pu, "0.70".parse::<Decimal>().unwrap());
 
         // A parcel acquired after the split holds post-split units already:
         // the later payment applies unscaled.
-        let pu = per_unit_reduction(&events, &splits, "AUD", d(2024, 7, 1), None).unwrap();
+        let pu = per_unit_reduction(&events, &splits, "AUD", d(2024, 7, 1), None, None).unwrap();
         assert_eq!(pu, "0.20".parse::<Decimal>().unwrap());
     }
 
@@ -1109,10 +1130,10 @@ mod tests {
             record_date: None,
         }];
         // Never net amounts across currencies: fail loudly, don't skip or zero.
-        assert!(per_unit_reduction(&events, &[], "AUD", d(2024, 1, 1), None).is_err());
+        assert!(per_unit_reduction(&events, &[], "AUD", d(2024, 1, 1), None, None).is_err());
         // An out-of-range event in another currency is not an error — it doesn't
         // participate in the calculation at all.
-        assert!(per_unit_reduction(&events, &[], "AUD", d(2024, 7, 1), None).is_ok());
+        assert!(per_unit_reduction(&events, &[], "AUD", d(2024, 7, 1), None, None).is_ok());
     }
 
     /// The window, the currency guard and the split re-basing above are all
@@ -1131,7 +1152,7 @@ mod tests {
         };
         let pu = |acquired, up_to| {
             payment
-                .per_unit_for(&[], "AUD", acquired, up_to)
+                .per_unit_for(&[], "AUD", acquired, None, up_to)
                 .expect("same currency")
         };
         assert_eq!(pu(d(2024, 1, 1), None), Some("0.20".parse().unwrap()));
@@ -1159,7 +1180,7 @@ mod tests {
         let record = d(2025, 2, 10);
         let pu = |event: RocEvent, acquired, up_to| {
             event
-                .per_unit_for(&[], "AUD", acquired, up_to)
+                .per_unit_for(&[], "AUD", acquired, None, up_to)
                 .expect("same currency")
         };
         let paid = Some("0.50".parse::<Decimal>().unwrap());

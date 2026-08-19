@@ -64,6 +64,13 @@ pub struct Parcel<'a> {
     /// parcels), where different, only drives the discount clock and the AUD
     /// translation month, never which events touch the parcel.
     pub trade_date: NaiveDate,
+    /// Set — to [`Self::trade_date`] — when a rollover created this parcel: the
+    /// operation folded every return-of-capital payment up to **and including**
+    /// its own date into the cost base this parcel carries, so those payments
+    /// must not reduce it a second time here
+    /// (`RocEvent::per_unit_for`, SCENARIOS N-06). `None` on an ordinary parcel,
+    /// and on an inherited one, whose cost base is stated rather than carried.
+    pub rolled_over_on: Option<NaiveDate>,
 }
 
 impl Parcel<'_> {
@@ -109,6 +116,14 @@ pub struct ParcelRow {
     /// consumed parcel's acquisition date, carried so the combined holding
     /// period drives the discount clock and the AUD translation month.
     pub deemed_acquisition_date: Option<NaiveDate>,
+    /// The operation that created this parcel, where one did
+    /// (`domain::rollover`'s three): a scrip-for-scrip exchange, a demerger, or
+    /// a holding-account transfer. Only one is ever set. They are read together
+    /// as [`Self::rolled_over_on`] — an *inherited* parcel also carries a deemed
+    /// acquisition date, so that field cannot stand in for this one.
+    pub scrip_action_id: Option<i64>,
+    pub demerger_action_id: Option<i64>,
+    pub transfer_id: Option<i64>,
 }
 
 impl ParcelRow {
@@ -116,7 +131,7 @@ impl ParcelRow {
     /// queries against `trades`.
     pub const COLUMNS: &'static str = "id, listing_id, holding_account_id, date, quantity, \
          average_price, brokerage, gst_on_brokerage, currency, fx_rate, spot_fx_rate, \
-         deemed_acquisition_date";
+         deemed_acquisition_date, scrip_action_id, demerger_action_id, transfer_id";
 
     /// [`Self::COLUMNS`] qualified by a table alias and re-aliased back to the
     /// plain names, for a query that joins `trades` to a table carrying
@@ -148,6 +163,17 @@ impl ParcelRow {
         fx::FxOverride::from_trade(self.fx_rate, self.spot_fx_rate)
     }
 
+    /// The date a rollover carried this parcel's cost base forward on, when it
+    /// is a replacement parcel — its own trade date, which is also the operation
+    /// date. `None` for an ordinary (or inherited) parcel. See
+    /// [`Parcel::rolled_over_on`].
+    pub fn rolled_over_on(&self) -> Option<NaiveDate> {
+        (self.scrip_action_id.is_some()
+            || self.demerger_action_id.is_some()
+            || self.transfer_id.is_some())
+        .then_some(self.date)
+    }
+
     /// The row as [`adjusted_cost_base`]'s input.
     pub fn parcel(&self) -> Parcel<'_> {
         Parcel {
@@ -157,6 +183,7 @@ impl ParcelRow {
             gst_on_brokerage: self.gst_on_brokerage,
             currency: &self.currency,
             trade_date: self.date,
+            rolled_over_on: self.rolled_over_on(),
         }
     }
 }
@@ -361,6 +388,7 @@ pub fn adjusted_cost_base(
         splits,
         parcel.currency,
         parcel.trade_date,
+        parcel.rolled_over_on,
         held.up_to(),
     )?;
     let roc_reduction = roc_per_unit * units;
@@ -488,8 +516,13 @@ pub fn adjustment_detail(
         // payment's own (`RocEvent::per_unit_for`) — the same call
         // `per_unit_reduction` sums, so the itemised rows can't describe a
         // different set of payments than the totals were computed from.
-        let Some(per_unit) =
-            e.per_unit_for(splits, parcel.currency, parcel.trade_date, held.up_to())?
+        let Some(per_unit) = e.per_unit_for(
+            splits,
+            parcel.currency,
+            parcel.trade_date,
+            parcel.rolled_over_on,
+            held.up_to(),
+        )?
         else {
             continue;
         };
@@ -600,6 +633,7 @@ mod tests {
             gst_on_brokerage: Decimal::ZERO,
             currency: "AUD",
             trade_date: date(2024, 1, 1),
+            rolled_over_on: None,
         }
     }
 

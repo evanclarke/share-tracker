@@ -713,6 +713,9 @@ mod tests {
             fx_rate: Decimal::ONE,
             spot_fx_rate: None,
             deemed_acquisition_date: None,
+            scrip_action_id: None,
+            demerger_action_id: None,
+            transfer_id: None,
         }
     }
 

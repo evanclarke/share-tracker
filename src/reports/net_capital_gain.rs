@@ -472,6 +472,11 @@ async fn non_disposal_gains(
             splits_of(&splits, parcel.listing_id),
             &parcel.currency,
             parcel.date,
+            // A payment already inside a replacement parcel's carried cost base
+            // is not a G1 reduction of it (SCENARIOS N-06) — the same call the
+            // cost-base pipeline makes, so this walk cannot describe a different
+            // set of payments than the cost base it compares against.
+            parcel.rolled_over_on(),
             None,
         )?
         else {
