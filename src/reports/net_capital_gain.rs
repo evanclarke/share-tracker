@@ -1148,8 +1148,17 @@ async fn what_if_handler(
         (None, Some(strategy)) => {
             let open: Decimal = parcels.iter().map(|p| p.remaining_quantity).sum();
             if req.units > open {
+                // Name the account the request scoped the candidates to —
+                // otherwise the refusal reads as a claim about every unit
+                // held, which is false whenever another account holds more.
+                // Same wording as the allocations branch above and the
+                // optimiser's own over-request refusal.
+                let in_account = match req.holding_account_id {
+                    Some(h) => format!(" in {}", super::account_label(&pool, h).await?),
+                    None => String::new(),
+                };
                 return Err(ApiError::Unprocessable(format!(
-                    "only {open} unit(s) of {} are open",
+                    "only {open} unit(s) of {} are open{in_account}",
                     super::listing_label(&pool, req.listing_id).await?
                 )));
             }
@@ -3806,6 +3815,83 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    /// A second holding account, so a listing can be held in two places at
+    /// once.
+    async fn insert_second_account(pool: &SqlitePool) {
+        use crate::entities::holding_account::{self, HoldingAccount};
+        holding_account::db_upsert(
+            pool,
+            &HoldingAccount {
+                id: 2,
+                name: "ICE Employee Plan".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    /// 2,000 units of TSTG open in the default account and 5,000 in a second
+    /// one — the shape that makes an unqualified over-request refusal false.
+    async fn two_account_fixture(pool: &SqlitePool) {
+        insert_listing(pool, 1, "TSTG").await;
+        insert_second_account(pool).await;
+        for (id, account, qty) in [(1, 1, 2000), (2, 2, 5000)] {
+            test_support::buy(id, 1)
+                .account(account)
+                .date(NaiveDate::from_ymd_opt(2020, 1, 1).unwrap())
+                .qty(Decimal::from(qty))
+                .price(Decimal::from(10))
+                .insert(pool)
+                .await;
+        }
+    }
+
+    /// SCENARIOS O-16. The strategy branch's over-request refusal names the
+    /// account the request scoped the candidates to. Without it, "only 2000
+    /// unit(s) of TSTG are open" is simply false of the 7,000 units held —
+    /// and the same endpoint's allocations branch, and the optimiser's own
+    /// refusal, both name it.
+    #[tokio::test]
+    async fn api_what_if_over_request_names_the_account_it_was_scoped_to() {
+        let pool = test_pool().await;
+        two_account_fixture(&pool).await;
+
+        let (status, body) = post_what_if(
+            pool,
+            serde_json::json!({
+                "listing_id": 1, "holding_account_id": 1, "units": "3000",
+                "proceeds": "30000", "date": "2026-06-15", "strategy": "fifo"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        let msg = String::from_utf8(body).unwrap();
+        assert_eq!(
+            msg,
+            "only 2000 unit(s) of TSTG are open in account 'Default'"
+        );
+    }
+
+    /// The other half of the same rule: an unscoped request bounds by every
+    /// account's parcels, so there is no account to name and none is named.
+    #[tokio::test]
+    async fn api_what_if_unscoped_over_request_names_no_account() {
+        let pool = test_pool().await;
+        two_account_fixture(&pool).await;
+
+        let (status, body) = post_what_if(
+            pool,
+            serde_json::json!({
+                "listing_id": 1, "units": "8000", "proceeds": "80000",
+                "date": "2026-06-15", "strategy": "fifo"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        let msg = String::from_utf8(body).unwrap();
+        assert_eq!(msg, "only 7000 unit(s) of TSTG are open");
     }
 
     /// SCENARIOS O-14. The candidates are the parcels open **as at the
