@@ -466,16 +466,44 @@ impl From<sqlx::Error> for ApiError {
             };
             return ApiError::Unprocessable(body);
         }
+        // An FX gap travels through report code as a decode error (see
+        // `impl From<FxError> for sqlx::Error`), carrying the `FxError`
+        // itself so it can be recovered here rather than answered as an
+        // opaque 500 the user can do nothing with (SCENARIOS M-04).
+        if let sqlx::Error::Decode(source) = &err
+            && let Some(fx) = source.downcast_ref::<crate::infra::fx::FxError>()
+            && let Some(response) = missing_rate_unprocessable(fx)
+        {
+            return response;
+        }
         ApiError::Internal(err.into())
     }
 }
 
-/// An FX failure surfaces like the `sqlx::Error` it converts to elsewhere: a
-/// missing rate is an internal fault of the data (an unimported month), not a
-/// client error — it must be logged, never silently zeroed.
+/// The `422` a missing ATO rate deserves: it is a gap in imported reference
+/// data the user closes by running the RBA import, not an internal fault they
+/// can do nothing about, so the body names the currency and the month — the
+/// same answer [report-snapshot generation] already gives for the same gap,
+/// where every other report answered a bare `500` with an empty body
+/// (SCENARIOS M-04, M-07). `None` for any other `FxError`: a failed rate
+/// *lookup* is a genuine server fault and stays a `500`.
+///
+/// [report-snapshot generation]: crate::reports::snapshot
+fn missing_rate_unprocessable(err: &crate::infra::fx::FxError) -> Option<ApiError> {
+    let crate::infra::fx::FxError::MissingRate { currency, month } = err else {
+        return None;
+    };
+    tracing::warn!(%currency, %month, "report blocked by a missing ATO FX rate");
+    Some(ApiError::Unprocessable(format!(
+        "{err} — import that month's rates with POST /rba_fx_rates/import"
+    )))
+}
+
+/// An FX failure raised directly (not through a `sqlx::Error`) classifies the
+/// same way: a missing rate is the user's to close, anything else is a fault.
 impl From<crate::infra::fx::FxError> for ApiError {
     fn from(err: crate::infra::fx::FxError) -> Self {
-        ApiError::Internal(err.into())
+        missing_rate_unprocessable(&err).unwrap_or_else(|| ApiError::Internal(err.into()))
     }
 }
 
@@ -495,6 +523,37 @@ mod tests {
     async fn body_of(resp: Response) -> String {
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         String::from_utf8(bytes.to_vec()).unwrap()
+    }
+
+    /// A missing ATO rate is a data gap the user closes, so it answers `422`
+    /// naming the currency and month wherever it surfaces — raised directly
+    /// or carried through a report's `sqlx::Error` — while a genuine decode
+    /// failure stays the `500` it should be (SCENARIOS M-04).
+    #[tokio::test]
+    async fn a_missing_fx_rate_is_a_422_naming_the_currency_and_month() {
+        let missing = || crate::infra::fx::FxError::MissingRate {
+            currency: "USD".to_string(),
+            month: "2023-05".to_string(),
+        };
+        for (label, error) in [
+            ("raised directly", ApiError::from(missing())),
+            (
+                "through a report",
+                ApiError::from(sqlx::Error::from(missing())),
+            ),
+        ] {
+            let resp = error.into_response();
+            assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY, "{label}");
+            let body = body_of(resp).await;
+            assert!(body.contains("USD"), "{label}: {body}");
+            assert!(body.contains("2023-05"), "{label}: {body}");
+            assert!(body.contains("/rba_fx_rates/import"), "{label}: {body}");
+        }
+        // A decode failure that is not an FX gap — a malformed stored decimal —
+        // is a server fault and must not be reclassified with it.
+        let resp = ApiError::from(sqlx::Error::Decode("not a decimal".into())).into_response();
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body_of(resp).await, "");
     }
 
     /// Table names reach the user, so the ones the schema spells in lower-case

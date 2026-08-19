@@ -84,12 +84,19 @@ pub enum FxError {
 
 /// Surface an FX failure through report code that returns `sqlx::Error`: a DB
 /// error passes through unchanged; a missing rate becomes a decode error so it
-/// fails loudly (HTTP 500) rather than being silently swallowed or zeroed.
+/// fails loudly rather than being silently swallowed or zeroed.
+///
+/// The [`FxError`] itself is boxed, not stringified, so the far end can get it
+/// back: `impl From<sqlx::Error> for ApiError` downcasts a decode error to
+/// [`FxError`] and answers `422` naming the currency and month, where an
+/// unrecognised decode failure stays the `500` it should be. A missing rate is
+/// a gap in imported reference data that the user closes by running the RBA
+/// import — not an internal fault they can do nothing about (SCENARIOS M-04).
 impl From<FxError> for sqlx::Error {
     fn from(e: FxError) -> Self {
         match e {
             FxError::Db(inner) => inner,
-            missing => sqlx::Error::Decode(missing.to_string().into()),
+            missing => sqlx::Error::Decode(Box::new(missing)),
         }
     }
 }

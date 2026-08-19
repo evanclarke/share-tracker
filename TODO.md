@@ -61,25 +61,43 @@ which was only true when no override was in play.
 per-record fallback by design, so a month with no imported rate is a loud failure — the right
 behaviour. What reaches the user is `500 Internal Server Error` with an empty body, which the web UI
 can only show as "HTTP 500".)
-- [ ] Reproduced: one USD income row in a month with no `rba_fx_rates` row → `GET
+- [x] Reproduced: one USD income row in a month with no `rba_fx_rates` row → `GET
   /portfolio/tax-summary` answers `500`, body empty. The cause is named precisely in the server log
   (`no ATO FX rate for USD in 2023-05 and no manual override supplied`) and nowhere else
-- [ ] The same gap in the *valuation* path already answers well: `POST /report_snapshots/generate`
+- [x] The same gap in the *valuation* path already answers well: `POST /report_snapshots/generate`
   returns `422 AAPL: no ATO FX rate for USD in 2024-05 and no manual override supplied`. One class
   of problem, two answers
-- [ ] This is not an internal detail: it is a data gap the user fixes by running the RBA import (or
+- [x] This is not an internal detail: it is a data gap the user fixes by running the RBA import (or
   entering the rate the record converted at), and they cannot act on a blank 500
-- [ ] Cause: `impl From<FxError> for sqlx::Error` turns a `MissingRate` into `sqlx::Error::Decode`
+- [x] Cause: `impl From<FxError> for sqlx::Error` turns a `MissingRate` into `sqlx::Error::Decode`
   so it cannot be swallowed, and `ApiError`'s `From<sqlx::Error>` then classifies every Decode as
   `Internal`. The classification is right for a malformed stored decimal and wrong for this
-- [ ] Fix: carry the missing-rate case through the report error path so it lands as `422` naming the
-  currency and month, like the snapshot path. Note the report enums (`reports::valuation`,
-  `snapshot`, `period_performance`) already hand-write `From<sqlx::Error>` for a related reason —
-  see CLAUDE.md's list of the four deliberate hand-written impls
-- [ ] Tests: the tax summary, net capital gain, realised gains and annual tax report each answer
-  `422` naming the currency and month; a genuine decode failure still answers `500`
-- [ ] Docs sync: `docs/API.md` Response codes (the 422 catalogue) and the FX conversion section,
-  which currently states the failure as `500`
+- [x] Fix: carry the missing-rate case through the report error path so it lands as `422` naming the
+  currency and month, like the snapshot path
+- [x] Tests: the affected reports answer `422` naming the currency and month; a genuine decode
+  failure still answers `500`
+- [x] Docs sync: `docs/API.md` Response codes (the 422 catalogue) and the FX conversion section,
+  which stated the failure as `500`
+
+**Resolution (2026-08-19): the `FxError` is carried, not stringified, and a missing rate answers
+`422` naming the currency and month.**
+
+`impl From<FxError> for sqlx::Error` now boxes the `FxError` itself into `sqlx::Error::Decode`
+instead of its `to_string()`, so the far end can get it back. `impl From<sqlx::Error> for ApiError`
+downcasts a decode error to `FxError` and routes a `MissingRate` through the new
+`missing_rate_unprocessable` — a `422` whose body is the error's own sentence plus the remedy
+(`import that month's rates with POST /rba_fx_rates/import`), logged at warn with the currency and
+month. Every other decode failure — a malformed stored decimal, the case the classification was
+written for — stays the `500` it should be, and `FxError::Db` (a failed lookup, a genuine fault)
+does too. `impl From<FxError> for ApiError` classifies the same way, so a rate raised directly and
+one carried through a report answer identically.
+
+Tests: `infra::http`'s `a_missing_fx_rate_is_a_422_naming_the_currency_and_month` (both routes into
+the classification, plus a non-FX decode error still 500 with an empty body) and
+`tax_summary`'s `api_a_month_with_no_ato_rate_is_a_422_naming_it_not_a_bare_500` (the tax summary,
+its CSV export and the annual tax report end to end, and that importing the month unblocks them).
+Docs: the FX conversion section's rule 4 and every "fails loudly with `500`" in `docs/API.md`, plus
+the 422 catalogue.
 
 ## Nothing lists which (currency, month) rates the recorded data needs (SCENARIOS M-04, M-14)
 (SCENARIOS.md section M verification pass, 2026-08-19. `GET /reports/health` reports

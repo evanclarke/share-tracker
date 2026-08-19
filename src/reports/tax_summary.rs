@@ -2913,4 +2913,63 @@ mod tests {
             CSV_HEADER.join(",") + "\n" + &CSV_ATO_LABELS.join(",") + "\n"
         );
     }
+
+    /// A non-AUD income row whose month has no imported ATO rate blocks every
+    /// report that has to convert it — correctly: there is no per-record
+    /// fallback on an income or AMMA row, and a silently unconverted amount
+    /// would corrupt the totals. What the user gets back must say so: a `422`
+    /// naming the currency and the month, the same answer report-snapshot
+    /// generation gives for the same gap, rather than the bare `500` with an
+    /// empty body it used to be (SCENARIOS M-04, M-07).
+    #[tokio::test]
+    async fn api_a_month_with_no_ato_rate_is_a_422_naming_it_not_a_bare_500() {
+        let pool = test_pool().await;
+        test_support::listing(1)
+            .ticker("AAPL")
+            .name("AAPL")
+            .mic("XNYS")
+            .currency("USD")
+            .insert(&pool)
+            .await;
+        test_support::income(1, 1, ymd(2023, 5, 10))
+            .with(|i| {
+                i.currency = "USD".to_string();
+                i.franked_amount = Decimal::ZERO;
+                i.unfranked_amount = Decimal::from(100);
+                i.franking_credits = Decimal::ZERO;
+            })
+            .insert(&pool)
+            .await;
+
+        let c = ApiClient::full(&pool);
+        // The reports that convert an income or AMMA amount, which have no
+        // per-record fallback to rest on (a trade always carries its own
+        // `fx_rate`, so a disposal never reaches this).
+        for path in ["/portfolio/tax-summary", "/portfolio/tax-summary/export"] {
+            let resp = c.get(path).await;
+            let (status, body) = resp.status_and_body();
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{path}");
+            assert!(
+                body.contains("USD") && body.contains("2023-05"),
+                "{path}: {body}"
+            );
+        }
+        let resp = c
+            .post(
+                "/reports/tax-report",
+                &serde_json::json!({"tax_year": 2023}),
+            )
+            .await;
+        let (status, body) = resp.status_and_body();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(body.contains("USD") && body.contains("2023-05"), "{body}");
+
+        // Importing the month's rate unblocks every one of them.
+        rba_fx_rate::db_import_rate(&pool, "USD", "2023-05", "0.66".parse().unwrap())
+            .await
+            .unwrap();
+        c.get("/portfolio/tax-summary")
+            .await
+            .expect_status(StatusCode::OK);
+    }
 }
