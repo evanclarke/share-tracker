@@ -96,6 +96,16 @@ where the grossed-up gains are `2 × cgt_discount_gains + cgt_indexation_gains +
 `cgt_discount_gains + cgt_indexation_gains + cgt_other_gains`. With only discount gains present
 this is the halving the page describes; with a mix it apportions across the three methods.
 
+**Only the trust path is recordable** (decision 2026-08-19, SCENARIOS M-12): the page's own
+framing — a taxpayer disposing of an asset a foreign country taxes, as in Examples 11 and 12 — has
+no field in this system, because a Sell carries no foreign-tax column. Under the usual treaty
+position a source country taxes a non-resident's gain on **real property** and land-rich
+interests, assets this system does not record at all, so the disposal the tax would attach to
+could not be entered either. The AMIT/MIT distribution the page goes on to describe is where a
+listed-share investor meets a foreign-taxed capital gain, and that is the path implemented above;
+the direct case is a documented scope cut (docs/API.md, Known limitations) claimed outside this
+tool.
+
 **Not modelled from this page:** the loss-ordering *choice* (Example 11 — offsetting capital losses
 first against domestic gains to maximise the foreign-taxed component of the net gain) and the
 no-net-gain case (Example 12, where the offset falls to nil). The net-capital-gain report applies

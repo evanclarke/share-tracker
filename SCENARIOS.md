@@ -735,7 +735,7 @@ refused at write time.
 | A listing's `currency` is freely editable, silently re-denominating every stored price | M-08 | fixed 2026-08-19 — refused with history, plus the `listings` staleness trigger (0030); archived in [`DONE/reviews.md`](DONE/reviews.md) |
 | A trade may be recorded in a currency other than its listing's | M-08 | fixed 2026-08-19 — trades, Sells and AMMA statements take the rule; archived in [`DONE/reviews.md`](DONE/reviews.md) |
 | A stored RBA rate can never be corrected, and a differing feed value is silently discarded | M-13 | fixed 2026-08-19 — `conflicted` reported + an audited `PUT` correction (0031); archived in [`DONE/reviews.md`](DONE/reviews.md) |
-| Foreign tax on a discountable foreign capital gain is claimed in full, not apportioned | M-12 | fixed 2026-08-19 — the AMMA's second foreign-tax line (0032) apportioned; the direct-disposal path stays open in `TODO.md`; archived in [`DONE/reviews.md`](DONE/reviews.md) |
+| Foreign tax on a discountable foreign capital gain is claimed in full, not apportioned | M-12 | fixed 2026-08-19 — the AMMA's second foreign-tax line (0032) apportioned; the direct-disposal path decided out of scope the same day (a Sell carries no foreign-tax column; documented in Known limitations); archived in [`DONE/reviews.md`](DONE/reviews.md) |
 | The two documented FX simplifications are silent where their sibling is refused | M-09, M-10 | fixed 2026-08-19 — both are alert kinds on `fx_coverage`; archived in [`DONE/reviews.md`](DONE/reviews.md) |
 
 ---

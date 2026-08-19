@@ -14,25 +14,8 @@ are fixed or decided.
 archive — section M. Foreign currency and FX was driven 2026-08-19, raised eight findings, and all
 eight were closed the same day (see [`DONE/reviews.md`](DONE/reviews.md)).
 
-One residual scope question is open below. Beyond it, the next work comes from driving
+The residual M-12 scope question is now decided too (2026-08-19, option (b): the direct
+foreign-taxed-disposal path is documented rather than modelled — archived in
+[`DONE/reviews.md`](DONE/reviews.md)), so **nothing is open**. The next work comes from driving
 **SCENARIOS.md section N. Holding accounts and transfers** the same way — walk its scenarios against
 the running system, and record each gap here as its own `## ` section.
-
-## Foreign tax on a directly-realised foreign capital gain has nowhere to be recorded (SCENARIOS M-12)
-(Split off from the section M finding that added `amma_statements.foreign_tax_credits_capital_gains`,
-2026-08-19 — that fix covers the AMIT/MIT distribution path, which is where a listed-share investor
-actually meets a foreign-taxed capital gain. This is the other path.)
-- [ ] Foreign tax paid on a capital gain the taxpayer realises **themselves** — a disposal the
-  foreign country taxes — has no field anywhere: `income.foreign_tax_paid` sits on an income row,
-  and a Sell carries no foreign-tax column. So such an amount cannot reach the FITO line at all,
-  where the AMMA path now reaches it apportioned
-- [ ] Narrower than it looks, which is why it was split rather than fixed: a foreign country rarely
-  taxes a non-resident's gain on listed shares (the usual treaty position), so the case arises for
-  foreign *real property* and similar assets this system does not record in the first place
-- [ ] A model decision either way:
-  - **(a)** A `foreign_tax_paid` column on Sells (audited table ⇒ its two `*_row_history_*` triggers
-    re-created), apportioned by the same `apportion_capital_gains_foreign_tax` rule against that
-    disposal's own discount eligibility. Small, and symmetrical with the AMMA side
-  - **(b)** A Known-limitations entry saying the direct path is not recordable, and that such a
-    taxpayer claims it outside this tool
-- [ ] Tests / docs sync per the option

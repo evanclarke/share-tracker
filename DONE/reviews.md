@@ -2859,10 +2859,12 @@ the reduction is the investor's job — this system's job.)
   "foreign tax on foreign income" and "foreign tax on foreign capital gains", which the AMMA's own
   Part C reports as separate lines. The apportionment applies only to the second, so it cannot be
   computed from what is stored
-- [ ] The same is true of a *direct* foreign-taxed disposal: foreign tax paid on a capital gain the
-  taxpayer realises themselves has nowhere to be recorded at all — **left open**, and narrower than
-  it looks: a foreign country rarely taxes a non-resident's gain on listed shares, and the AMIT
-  distribution path above is where a listed-share investor actually meets a foreign-taxed gain
+- [x] The same is true of a *direct* foreign-taxed disposal: foreign tax paid on a capital gain the
+  taxpayer realises themselves has nowhere to be recorded at all — **split off** into its own
+  section (below: *Foreign tax on a directly-realised foreign capital gain has nowhere to be
+  recorded*), and narrower than it looks: a foreign country rarely taxes a non-resident's gain on
+  listed shares, and the AMIT distribution path above is where a listed-share investor actually
+  meets a foreign-taxed gain
 **Decision (2026-08-19, Evan): option (a) — split the field and compute the apportionment.**
 
 - [x] A model decision, two options:
@@ -2947,3 +2949,49 @@ stay silent), `db_a_reduction_from_another_month_is_flagged_with_both_rates`,
 `db_an_aud_parcels_reduction_is_not_flagged` and
 `db_a_return_of_capital_from_another_month_is_flagged` (a parcel acquired after the payment is never
 reached by it).
+
+## Foreign tax on a directly-realised foreign capital gain has nowhere to be recorded (SCENARIOS M-12)
+(Split off from the section M finding that added `amma_statements.foreign_tax_credits_capital_gains`,
+2026-08-19 — that fix covers the AMIT/MIT distribution path, which is where a listed-share investor
+actually meets a foreign-taxed capital gain. This is the other path.)
+- [x] Foreign tax paid on a capital gain the taxpayer realises **themselves** — a disposal the
+  foreign country taxes — has no field anywhere: `income.foreign_tax_paid` sits on an income row,
+  and a Sell carries no foreign-tax column. So such an amount cannot reach the FITO line at all,
+  where the AMMA path now reaches it apportioned
+- [x] Narrower than it looks, which is why it was split rather than fixed: a foreign country rarely
+  taxes a non-resident's gain on listed shares (the usual treaty position), so the case arises for
+  foreign *real property* and similar assets this system does not record in the first place
+
+**Decision (2026-08-19, Evan): option (b) — document it, don't model it.** The deciding fact is the
+one the finding already names: the assets a source country may actually tax a non-resident's gain on
+are foreign real property and land-rich interests, and those are not recordable here in the first
+place — so the *disposal* the foreign tax attaches to could not be entered either, and a
+`foreign_tax_paid` column on Sells would be a field with no live population path for the asset
+classes this system does record. The counter-argument was weighed and rejected as too narrow to
+carry a migration: a handful of jurisdictions do tax non-residents on listed securities, so a
+directly held listing on such an exchange is a real if rare case — it is given an explicit
+work-it-out-yourself route in the docs instead.
+
+- [x] A model decision either way:
+  - **(a)** A `foreign_tax_paid` column on Sells (audited table ⇒ its two `*_row_history_*` triggers
+    re-created), apportioned by the same `apportion_capital_gains_foreign_tax` rule against that
+    disposal's own discount eligibility. Small, and symmetrical with the AMMA side — **not taken**
+  - **(b)** A Known-limitations entry saying the direct path is not recordable, and that such a
+    taxpayer claims it outside this tool — **taken**
+- [x] Tests / docs sync per the option
+
+Docs: a Known-limitations entry in `docs/API.md` (*Foreign tax on a capital gain you realise
+yourself is not recordable*) stating the two paths that **do** reach `foreign_tax_offsets` (an
+income row's `foreign_tax_paid`; an AMMA's `foreign_tax_credits` + `foreign_tax_credits_capital_gains`)
+and the one that does not, why the gap is narrow rather than an oversight, what the taxpayer does
+instead (work the offset out separately and add it to **20O**, apportioning it by the same
+Division 115 rule the AMMA path applies here), and why the obvious workaround is not one — faking it
+as an income row reports a distribution that never happened in the income list, the listing activity
+ledger and the annual tax report's per-record detail, *and* joins 20O un-apportioned, over-claiming a
+discounted gain by exactly the half the AMMA path reduces away. Cross-linked from the tax summary's
+FITO paragraph, surfaced in the README's scope-cut list, and recorded beside the calculation it
+bounds in `docs/ato/fito-capital-gains-apportionment.md` (*Only the trust path is recordable*).
+Test: `doc_checks::known_limitations_document_foreign_tax_on_a_direct_disposal` pins every one of
+those — the entry, both reaching paths, the missing column, the narrowness, the remedy, the
+anti-workaround, the mirror's QC 104349 header and its decision note, the tax-summary cross-link and
+the README clause.

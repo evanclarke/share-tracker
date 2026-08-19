@@ -476,6 +476,49 @@ fn known_limitations_document_the_ess_30_day_rule() {
     assert!(README_MD.contains("**ESS sale inside the 30-day rule's window**"));
 }
 
+/// Known-limitation pin (SCENARIOS M-12, decided 2026-08-19): the FITO line
+/// reaches a foreign-taxed **capital gain** only through the trust path — an
+/// AMMA statement's `foreign_tax_credits_capital_gains`, apportioned to its
+/// assessable part. Foreign tax on a disposal the taxpayer makes themselves
+/// has no field: a Sell carries no foreign-tax column. The option of adding
+/// one was weighed and cut, because the assets a source country actually taxes
+/// a non-resident on (foreign real property, land-rich interests) are not
+/// recordable here either — so the docs must state the gap, why it is narrow,
+/// what the taxpayer does instead, and why the income-row workaround is wrong.
+#[test]
+fn known_limitations_document_foreign_tax_on_a_direct_disposal() {
+    let limitations = known_limitations();
+    assert!(
+        limitations
+            .contains("**Foreign tax on a capital gain you realise yourself is not recordable**")
+    );
+    // The two paths that do reach the offset, and the one that does not.
+    assert!(limitations.contains("an [income](#income) row's `foreign_tax_paid`"));
+    assert!(limitations.contains("`foreign_tax_credits_capital_gains`"));
+    assert!(limitations.contains("a [Sell](#sells) carries **no foreign-tax column**"));
+    // Why the gap is narrow rather than an oversight.
+    assert!(limitations.contains("**real property** and land-rich interests"));
+    assert!(limitations.contains("could not be entered either"));
+    // What the taxpayer does instead.
+    assert!(limitations.contains("**work that offset out separately and add it to 20O yourself**"));
+    assert!(limitations.contains("Division 115 rule this report applies to the AMMA path"));
+    // And why the obvious workaround is not one.
+    assert!(limitations.contains("**Do not fake it as an income row**"));
+    assert!(limitations.contains("join 20O **unapportioned**"));
+    // Cites the mirrored ATO guidance, which carries its QC header and records
+    // the same decision beside the calculation it bounds.
+    assert!(limitations.contains("docs/ato/fito-capital-gains-apportionment.md"));
+    let mirror = include_str!("../docs/ato/fito-capital-gains-apportionment.md");
+    assert!(mirror.contains("QC 104349"));
+    assert!(mirror.contains("**Only the trust path is recordable**"));
+    // The tax-summary section says so where the AMMA apportionment is defined.
+    assert!(API_MD.contains("**The trust path is the only capital-gains route to this line**"));
+    // Surfaced in the README's scope-cut list.
+    assert!(
+        README_MD.contains("**foreign tax on a capital gain you realise yourself** has no field")
+    );
+}
+
 /// Known-limitation pin (REQUIREMENTS "Ticker and exchange-code changes",
 /// 2026-07-26; narrowed 2026-07-28 to settlement only, once price collection
 /// started resolving its symbol and calendar as at the date fetched): an
