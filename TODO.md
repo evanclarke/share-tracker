@@ -152,13 +152,13 @@ column table, and `config.js`.
 single-taxpayer assumption every hard-wired rate rests on. It is reported on `TaxYearSummary`, on
 `NetCapitalGainYear` (and the what-if's scenario rows), and in the annual tax report's `meta`.
 
-- [ ] `POST /portfolio/parcel-optimiser` does not carry it, and it is the surface where the
+- [x] `POST /portfolio/parcel-optimiser` does not carry it, and it is the surface where the
   assumption bites hardest: it halves each candidate parcel's gain (`g / Decimal::from(2)` where
   `discount_eligible`) and then **ranks four strategies against each other on the result** — so for a
   taxpayer the 50% rate doesn't apply to (a company, a super fund at 33⅓%, a non-resident), it does
   not merely report a wrong number, it recommends the wrong parcels. Verified: a 200 response with no
   `taxpayer_basis` anywhere in it.
-- [ ] `GET /portfolio/realised-gains` likewise carries `discount_eligible` / `discount_eligible_gain`
+- [x] `GET /portfolio/realised-gains` likewise carries `discount_eligible` / `discount_eligible_gain`
   per disposal with no statement of the basis. Lower stakes (it reports rather than advises) but the
   same gap.
 

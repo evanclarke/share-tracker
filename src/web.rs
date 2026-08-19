@@ -452,6 +452,26 @@ mod tests {
         assert!(js.contains("report.tables"));
     }
 
+    /// SCENARIOS P-12: the taxpayer assumption behind the 50% discount is on
+    /// screen wherever the discount is applied — as a table column on the
+    /// reports whose rows each carry `taxpayer_basis` (realised gains, net
+    /// capital gain, tax summary), and as a note under the header on the
+    /// parcel optimiser, whose response states it once because the basis
+    /// governs how the strategies are ranked against each other.
+    #[tokio::test]
+    async fn taxpayer_basis_is_shown_wherever_the_discount_applies() {
+        let js = app_js_body().await;
+        // The note is field-driven (any object response carrying the field),
+        // not a bespoke view for one slug.
+        assert!(js.contains("rows.taxpayer_basis"));
+        assert!(js.contains("'Figures assume '"));
+        // The reports it is stated on, by the API paths their screens drive.
+        assert!(js.contains("/portfolio/parcel-optimiser"));
+        assert!(js.contains("/portfolio/realised-gains"));
+        // The what-if states it on its scenario rows, listed explicitly there.
+        assert!(js.contains("'taxpayer_basis'"));
+    }
+
     #[tokio::test]
     async fn row_history_ui_present() {
         let js = app_js_body().await;

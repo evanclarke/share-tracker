@@ -56,6 +56,13 @@ pub struct RealisedGainLoss {
     /// can drill into which parcel contributed what. Sorted by acquisition
     /// date then purchase trade id.
     pub parcels: Vec<ParcelDetail>,
+    /// Informational: the taxpayer assumption behind the hard-wired rates
+    /// (always [`crate::reports::TAXPAYER_BASIS`]) — the 12-month split into
+    /// `discount_eligible_gain` / `non_discountable_gain` reported here is the
+    /// Australian-resident-individual 50% discount's; other entity types are
+    /// not modelled. Stated per row, as the tax-summary and net-capital-gain
+    /// rows state it.
+    pub taxpayer_basis: String,
 }
 
 /// One parcel's share of a realised disposal — the per-allocation figures
@@ -513,6 +520,7 @@ fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sq
                 non_discountable_gain: non_discount_gain,
                 capital_loss: loss,
                 parcels,
+                taxpayer_basis: crate::reports::TAXPAYER_BASIS.to_string(),
             })
         })
         .collect();
@@ -607,6 +615,7 @@ fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sq
             non_discountable_gain: non_discount_gain,
             capital_loss: loss,
             parcels,
+            taxpayer_basis: crate::reports::TAXPAYER_BASIS.to_string(),
         });
     }
 
@@ -1485,6 +1494,35 @@ mod tests {
         assert_eq!(result[0].capital_gain_loss, Decimal::from(500));
         // held > 12 months
         assert_eq!(result[0].discount_eligible_gain, Decimal::from(500));
+    }
+
+    /// SCENARIOS P-12: the report splits every disposal's gain by 12-month
+    /// discount eligibility, so each row states the taxpayer basis that split
+    /// is for — the assumption is never left implicit (the tax-summary and
+    /// net-capital-gain rows state theirs the same way).
+    #[tokio::test]
+    async fn api_realised_gains_states_the_taxpayer_basis() {
+        let pool = test_pool().await;
+        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let sell_date = NaiveDate::from_ymd_opt(2025, 6, 1).unwrap();
+        insert_listing(&pool, 1, "VAS").await;
+        insert_buy(&pool, 1, 1, buy_date, Decimal::from(100), Decimal::from(10)).await;
+        insert_sell(
+            &pool,
+            2,
+            1,
+            sell_date,
+            Decimal::from(100),
+            Decimal::from(15),
+        )
+        .await;
+        allocate(&pool, 1, 2, 1, Decimal::from(100)).await;
+
+        let result: Vec<RealisedGainLoss> = ApiClient::over(router().with_state(pool))
+            .get_json("/portfolio/realised-gains")
+            .await;
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].taxpayer_basis, crate::reports::TAXPAYER_BASIS);
     }
 
     // Return of capital (CGT event G1)

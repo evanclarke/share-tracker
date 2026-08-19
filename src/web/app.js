@@ -1961,10 +1961,26 @@ async function viewReport(report) {
     return line;
   }
 
+  // The taxpayer assumption behind the hard-wired CGT/LIC rates
+  // (`reports::TAXPAYER_BASIS`). A report whose rows each state it (tax
+  // summary, net capital gain, realised gains) shows it as a table column; one
+  // that states it once for the whole response — the parcel optimiser, whose
+  // strategies are *ranked against each other* on the 50% discount, so the
+  // basis governs the comparison rather than any one row — has no column to
+  // put it in, and gets this note instead. Field-driven, not slug-driven: any
+  // object response carrying `taxpayer_basis` renders it.
+  function basisNote(rows) {
+    const basis = rows && !Array.isArray(rows) && typeof rows === 'object' ? rows.taxpayer_basis : null;
+    if (!basis) return null;
+    return el('p', { class: 'hint' }, 'Figures assume ' + basis + '.');
+  }
+
   async function render(rows) {
     result.innerHTML = '';
     const asAt = asAtSummary(Array.isArray(rows) ? rows : [rows]);
     if (asAt) result.appendChild(asAt);
+    const basis = basisNote(rows);
+    if (basis) result.appendChild(basis);
     // Reports with `tables` return one object whose listed keys each render
     // as a titled table (a non-array value renders as a one-row table).
     if (report.tables) {

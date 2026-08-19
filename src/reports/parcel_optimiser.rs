@@ -338,6 +338,16 @@ pub struct OptimiserResponse {
     pub price_as_of: Option<String>,
     pub strategies: Vec<StrategySummary>,
     pub allocations: Vec<StrategyAllocation>,
+    /// Informational: the taxpayer assumption behind the hard-wired rates
+    /// (always [`crate::reports::TAXPAYER_BASIS`]) — the 50% discount the
+    /// strategies weight discount-eligible gains at is the
+    /// Australian-resident-individual rate; other entity types are not
+    /// modelled. Stated once for the whole response rather than repeated per
+    /// strategy row because it is not a property of any one candidate: it is
+    /// the basis the candidates are *ranked against each other* on, so on a
+    /// different basis (a company, a super fund at 33⅓%, a non-resident) the
+    /// recommendation itself — not merely a figure on it — would differ.
+    pub taxpayer_basis: String,
 }
 
 pub fn router() -> Router<SqlitePool> {
@@ -436,6 +446,7 @@ async fn optimiser_handler(
         price_as_of,
         strategies,
         allocations,
+        taxpayer_basis: crate::reports::TAXPAYER_BASIS.to_string(),
     }))
 }
 
@@ -1020,6 +1031,28 @@ mod tests {
                 .sum();
             assert_eq!(total, Decimal::from(150));
         }
+    }
+
+    /// SCENARIOS P-12: the strategies are *ranked against each other* on the
+    /// 50% discount, so the response states the taxpayer basis that ranking
+    /// assumes — once for the whole response, since it governs the comparison
+    /// between the candidates rather than any one of them.
+    #[tokio::test]
+    async fn api_optimiser_states_the_taxpayer_basis_behind_its_ranking() {
+        let pool = test_pool().await;
+        strategy_fixture(&pool).await;
+        let (status, body) = post_optimiser(
+            pool,
+            None,
+            serde_json::json!({
+                "listing_id": 1, "holding_account_id": 1, "units": "150",
+                "sale_date": "2026-06-15", "price": "10"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let r: OptimiserResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(r.taxpayer_basis, crate::reports::TAXPAYER_BASIS);
     }
 
     #[tokio::test]
