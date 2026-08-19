@@ -224,9 +224,11 @@ impl CrudEntity for Listing {
 /// write-time checks, the [tax summary](crate::reports::tax_summary)'s
 /// whole-row exclusion, the [AMIT cash
 /// cross-check](crate::reports::amit_cash_cross_check), the annual tax
-/// report's completeness section, and the `ReturnOfCapital` refusal — so a
-/// fund that converted part-way through a holding cannot be an AMIT to one
-/// reader and an ordinary trust to another (SCENARIOS F-23).
+/// report's completeness section *and* its printed income rows, the
+/// [franking](crate::reports::franking) loader's candidate dividends, and the
+/// `ReturnOfCapital` refusal — so a fund that converted part-way through a
+/// holding cannot be an AMIT to one reader and an ordinary trust to another
+/// (SCENARIOS F-23, P-01/P-07).
 ///
 /// `amit_from` is a 1 July date (write-time enforced), so this is a
 /// whole-year comparison: AMIT status is elected for an income year

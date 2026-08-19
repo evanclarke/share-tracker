@@ -19,12 +19,13 @@
 use crate::domain::tax_year::tax_year_for;
 use crate::entities::corporate_action::{self, SplitEvent};
 use crate::entities::income::Income;
+use crate::entities::listing;
 use crate::entities::trade::TradeType;
 use crate::infra::decimal::parse_dec;
 use crate::infra::fx::{FxOverride, FxRates};
 use chrono::{Datelike, Duration, NaiveDate};
 use rust_decimal::Decimal;
-use sqlx::{Row, SqliteConnection};
+use sqlx::{FromRow, Row, SqliteConnection};
 use std::collections::HashMap;
 
 /// Small-shareholder exemption threshold (A$): with total franking credits in
@@ -329,13 +330,33 @@ pub async fn db_franked_dividends(
     // AMIT listings' cash rows carry no attributable credits (write-time
     // validated; the fund's credits arrive via its AMMA statement below), so
     // they are excluded here just as the tax summary excludes them.
-    let income_rows: Vec<Income> = sqlx::query_as(
-        "SELECT i.* FROM income i JOIN listings l ON l.id = i.listing_id \
-         WHERE NOT l.amit",
+    //
+    // The exclusion is per *year*, not per listing: a fund that converted to
+    // an AMIT part-way through a holding was an ordinary trust before its
+    // first AMIT income year, so its earlier years' distributions do carry
+    // attached credits — credits that must be holding-period tested and must
+    // count toward that year's small-shareholder total (SCENARIOS F-23).
+    // `listing::amit_in_tax_year` is the shared rule, applied exactly as
+    // `tax_summary::db_tax_summary_on` applies it.
+    let income_rows: Vec<(Income, bool, Option<NaiveDate>)> = sqlx::query(
+        "SELECT i.*, l.amit AS listing_amit, l.amit_from AS listing_amit_from \
+         FROM income i JOIN listings l ON l.id = i.listing_id",
     )
     .fetch_all(&mut *conn)
-    .await?;
-    for income in &income_rows {
+    .await?
+    .iter()
+    .map(|row| {
+        Ok::<_, sqlx::Error>((
+            Income::from_row(row)?,
+            row.try_get("listing_amit")?,
+            row.try_get("listing_amit_from")?,
+        ))
+    })
+    .collect::<Result<_, _>>()?;
+    for (income, amit, amit_from) in &income_rows {
+        if listing::amit_in_tax_year(*amit, *amit_from, tax_year_for(income.assessment_date())) {
+            continue;
+        }
         // Assessed per `Income::assessment_date` — present entitlement for a
         // trust row, payment otherwise — the same attribution the tax summary
         // applies to every component.
@@ -420,6 +441,45 @@ mod tests {
 
     fn d(s: &str) -> NaiveDate {
         s.parse().unwrap()
+    }
+
+    /// SCENARIOS P-07: the AMIT exclusion follows the *year*, not the
+    /// listing. A fund that converted to an AMIT for FY2025 carried ordinary
+    /// trust distributions before it, credits and all — those are candidates
+    /// for the holding-period walk and count toward the year's attached
+    /// total, while a row in an AMIT year (only reachable as legacy data:
+    /// the write-time rule refuses credits on one) stays excluded from both.
+    #[tokio::test]
+    async fn db_franked_dividends_follow_the_funds_conversion_year() {
+        let pool = test_pool().await;
+        // Both rows entered while the fund is still an ordinary trust, then
+        // the conversion is recorded — the AMIT year's row is exactly the
+        // legacy shape the report-level exclusion exists for.
+        test_support::listing(1).ticker("VDHG").insert(&pool).await;
+        for (id, paid, credits) in [(1_i64, d("2024-02-15"), 300_i64), (2, d("2025-02-15"), 900)] {
+            test_support::income(id, 1, paid)
+                .fully_franked_credits(Decimal::from(credits))
+                .with(|i| i.trust_income = true)
+                .insert(&pool)
+                .await;
+        }
+        test_support::listing(1)
+            .ticker("VDHG")
+            .amit_from(d("2024-07-01"))
+            .insert(&pool)
+            .await;
+
+        let mut tx = pool.begin().await.unwrap();
+        let fx = FxRates::load(&mut *tx).await.unwrap();
+        let (dividends, attached_by_year) = db_franked_dividends(&mut tx, &fx).await.unwrap();
+        tx.commit().await.unwrap();
+
+        assert_eq!(dividends.len(), 1);
+        assert_eq!(dividends[0].income_id, 1);
+        assert_eq!(dividends[0].tax_year, 2024);
+        assert_eq!(dividends[0].credits_aud, Decimal::from(300));
+        assert_eq!(attached_by_year.get(&2024), Some(&Decimal::from(300)));
+        assert_eq!(attached_by_year.get(&2025), None);
     }
 
     #[tokio::test]

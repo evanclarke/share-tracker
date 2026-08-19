@@ -462,6 +462,77 @@ mod tests {
         assert_eq!(y2025.franking_credits_denied, Decimal::ZERO);
     }
 
+    /// SCENARIOS P-07: a fund that converted to an AMIT was an ordinary trust
+    /// before its first AMIT income year, so its earlier years' distributions
+    /// do carry attached credits — credits the holding-period rule applies to,
+    /// and which count toward the year's A$5,000 small-shareholder total. The
+    /// loader used to drop them on a flat `NOT l.amit`, which not only left
+    /// the fund's own credits untested but under-counted the year's attached
+    /// total, wrongly exempting the *other* dividends near the threshold.
+    #[tokio::test]
+    async fn db_a_converted_funds_pre_amit_dividend_is_tested_and_counts_toward_the_threshold() {
+        let pool = test_pool().await;
+        // The fund: an AMIT from FY2025, an ordinary trust before it.
+        test_support::listing(1)
+            .ticker("VDHG")
+            .name("VDHG")
+            .amit_from(ymd(2024, 7, 1))
+            .insert(&pool)
+            .await;
+        insert_listing(&pool, 2, "TLS").await;
+
+        // FY2024, pre-conversion: a trust distribution with $4,000 of
+        // credits, its entitled units sold inside the qualification window.
+        insert_buy(&pool, 1, 1, ymd(2024, 3, 1), 1000).await;
+        insert_sell(&pool, 2, 1, ymd(2024, 4, 10), 1000).await;
+        test_support::income(1, 1, ymd(2024, 3, 28))
+            .fully_franked_credits(Decimal::from(4000))
+            .with(|i| {
+                i.trust_income = true;
+                i.ex_date = Some(ymd(2024, 3, 14));
+            })
+            .insert(&pool)
+            .await;
+
+        // An ordinary short-held dividend in the same year: $1,500 of credits,
+        // under the threshold on its own.
+        insert_buy(&pool, 3, 2, ymd(2024, 3, 1), 1000).await;
+        insert_sell(&pool, 4, 2, ymd(2024, 4, 10), 1000).await;
+        insert_dividend(&pool, 2, 2, ymd(2024, 3, 28), ymd(2024, 3, 14), 1500).await;
+
+        let resp = ApiClient::over(router().with_state(pool.clone()))
+            .get("/reports/franking_at_risk")
+            .await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let alerts: Vec<FrankingAtRiskAlert> = resp.json();
+
+        // The fund's own pre-conversion dividend is a candidate for the walk.
+        let fund = alerts
+            .iter()
+            .find(|a| a.income_id == 1)
+            .expect("the pre-conversion distribution is tested");
+        assert_eq!(fund.ticker, "VDHG");
+        assert_eq!(fund.tax_year, 2024);
+        assert_eq!(fund.disqualified_units, Decimal::from(1000));
+        assert_eq!(fund.credits_attached, Decimal::from(4000));
+        assert_eq!(fund.credits_denied, Decimal::from(4000));
+        assert_eq!(fund.status, "denied");
+
+        // And its credits count toward the year's total: 4,000 + 1,500 is
+        // over A$5,000, so the other dividend is denied rather than exempt.
+        let other = alerts
+            .iter()
+            .find(|a| a.income_id == 2)
+            .expect("the ordinary dividend is tested");
+        assert_eq!(other.status, "denied");
+        assert_eq!(other.credits_denied, Decimal::from(1500));
+
+        // The tax summary denies exactly the same, by the same loader.
+        let summary = tax_summary::db_tax_summary(&pool).await.unwrap();
+        let y2024 = summary.iter().find(|s| s.tax_year == 2024).unwrap();
+        assert_eq!(y2024.franking_credits_denied, Decimal::from(5500));
+    }
+
     /// The report's denied amounts are the tax summary's denial, per year —
     /// Jessica's partial-LIFO shape (Example 7): 4,000 of 14,000 entitled
     /// units disqualified, so 2,000 of the 7,000 credits are denied by both.

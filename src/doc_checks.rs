@@ -1621,6 +1621,23 @@ fn dated_amit_status_documented() {
     // finds the rule rather than assuming the flag is absolute.
     assert!(API_MD.contains("for the years the listing was an AMIT"));
     assert!(API_MD.contains("only the years the listing was an AMIT are asked about"));
+    // SCENARIOS P-01/P-07: the two readers that had drifted to a flat `amit`
+    // filter — the annual tax report's printed income rows and the franking
+    // holding-period walk — are named beside the rest, and what the per-year
+    // rule means for each is stated where that report documents itself.
+    assert!(API_MD.contains("completeness section *and* its printed income rows"));
+    assert!(API_MD.contains(
+        "still holding-period tested and still count toward the year's A$5,000 small-shareholder \
+         total"
+    ));
+    assert!(API_MD.contains(
+        "so a converted fund's pre-conversion distributions print here, behind the tax-summary \
+         total that counts them"
+    ));
+    assert!(API_MD.contains(
+        "a converted fund's pre-conversion distributions are ordinary trust income, so they are \
+         tested here and their credits count toward the year's A$5,000 total"
+    ));
     assert!(SCHEMA_MD.contains("amit_from    TEXT (nullable)"));
     assert!(README_MD.contains("A fund that **converted** to an AMIT records the 1 July"));
 }

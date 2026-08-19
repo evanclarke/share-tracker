@@ -74,7 +74,7 @@ a holding (`listings.amit_from`, migration 0024, SCENARIOS F-23) was an ordinary
 first AMIT income year — its earlier years' distributions are assessable exactly like any other
 trust's. Five readers call it. **Two don't**, and both use a flat `WHERE NOT l.amit` instead:
 
-- [ ] `reports::tax_report::push_income_rows` (`src/reports/tax_report.rs:930`). Reproduced: a fund
+- [x] `reports::tax_report::push_income_rows` (`src/reports/tax_report.rs:930`). Reproduced: a fund
   with `amit = true`, `amit_from = 2024-07-01` and one FY2023 trust distribution of $600 franked +
   $400 unfranked with $257.14 of credits. `GET /portfolio/tax-summary` reports FY2023
   `dividends_assessable: 1000`, `franking_credits: 257.14`, and the annual tax report's own
@@ -82,7 +82,7 @@ trust's. Five readers call it. **Two don't**, and both use a flat `WHERE NOT l.a
   `dividends` tables are both `[]`. The archived document states a $1,000 income total with nothing
   behind it, in a report whose stated purpose is "enough detail to hand-check every figure against
   the source contract notes and statements".
-- [ ] `reports::franking::db_franked_dividends` (`src/reports/franking.rs:334`). The same rows are
+- [x] `reports::franking::db_franked_dividends` (`src/reports/franking.rs:334`). The same rows are
   invisible to the holding-period walk: `GET /reports/franking_at_risk` returns `[]` for that
   dividend, and its credits never join `attached_credits_by_year`, so they don't count toward the
   A$5,000 small-shareholder threshold either — meaning in a year near the threshold the *other*
@@ -93,6 +93,26 @@ trust's. Five readers call it. **Two don't**, and both use a flat `WHERE NOT l.a
 `tax_summary::db_tax_summary_on` already does. No model decision: the tax summary's per-year rule is
 already the decided behaviour and these two surfaces simply drifted from it. Regression tests belong
 beside the existing F-23 ones.
+
+**Done 2026-08-20.** Both call sites now select `l.amit`/`l.amit_from` and filter through
+`listing::amit_in_tax_year` against `tax_year_for(income.assessment_date())`, the same shape
+`tax_summary::db_tax_summary_on` uses. A sweep for other flat AMIT filters found a **third** drift in
+the same family: `tax_report::amma_missing`'s net-units walk read `WHERE listing_id IN (SELECT id
+FROM listings WHERE amit)` and never re-filtered to the per-year AMIT set, so a converted fund held
+beside a lifelong AMIT was flagged as missing a statement it could never have (the existing F-23 test
+missed it because with one AMIT listing the empty-`tickers` early-out fires first). Fixed the same
+way. The remaining `l.amit` filters — `amit_cash_cross_check` (an AMIT-side report; per-year checked
+inside) and the two write-time checks (`income`, `corporate_action`) — are correct as they stand, so
+`amit_in_tax_year` now has **seven** call sites. Tests:
+`reports::tax_report::tests::a_converted_funds_pre_amit_income_prints_behind_its_tax_summary_line`
+(the row prints *and* equals its tax-summary line; the AMIT year still excludes the cash row),
+`reports::tax_report::tests::amma_missing_ignores_a_converted_fund_beside_a_lifelong_amit`,
+`reports::franking_at_risk::tests::db_a_converted_funds_pre_amit_dividend_is_tested_and_counts_toward_the_threshold`
+(the credits are walked *and* tip the year's other dividend out of the small-shareholder exemption),
+and `reports::franking::tests::db_franked_dividends_follow_the_funds_conversion_year` (the AMIT
+year's legacy row stays out of both the candidates and `attached_by_year`). `docs/API.md`'s
+converted-fund paragraph, annual-tax-report `income` bullet and franking at-risk section state the
+per-year rule, pinned by `doc_checks::dated_amit_status_documented`.
 
 ## SCENARIOS P-08: every investment-expense deduction is exported at `D7 / D8`, including the ones the ATO says don't go there
 

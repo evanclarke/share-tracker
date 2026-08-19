@@ -45,7 +45,7 @@ use axum::{
 use chrono::{NaiveDate, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use sqlx::{Row, SqlitePool};
+use sqlx::{FromRow, Row, SqlitePool};
 use std::collections::{HashMap, HashSet};
 
 pub fn router() -> Router<SqlitePool> {
@@ -224,6 +224,12 @@ async fn amma_missing(
             row.try_get("listing_id")?,
             row.try_get("holding_account_id")?,
         );
+        // The SQL above matches every listing that is an AMIT *now*; only the
+        // ones that were one in this year can be missing a statement for it
+        // (SCENARIOS F-23), and `tickers` is that per-year set.
+        if !tickers.contains_key(&key.0) {
+            continue;
+        }
         let trade_type: TradeType = row.try_get("trade_type")?;
         let date: NaiveDate = row.try_get("date")?;
         let qty = crate::infra::decimal::row_dec(row, "quantity")?;
@@ -976,14 +982,36 @@ async fn push_income_rows(
     out: &mut IncomeSections,
 ) -> Result<(), sqlx::Error> {
     let (tax_year, fx) = (ctx.tax_year.year(), &ctx.fx);
-    let income_rows: Vec<Income> = sqlx::query_as(
-        "SELECT i.* FROM income i JOIN listings l ON l.id = i.listing_id \
-         WHERE NOT l.amit",
+    // An AMIT listing's cash rows are excluded: for an AMIT the AMMA
+    // attribution is the only assessable record, and it prints below.
+    //
+    // The exclusion is per *year*, not per listing: a fund that converted to
+    // an AMIT part-way through a holding was an ordinary trust before its
+    // first AMIT income year, and those years' distributions print here
+    // exactly like any other trust's — dropping them because the fund is an
+    // AMIT *now* would leave the year's tax-summary income total with no rows
+    // behind it (SCENARIOS F-23). `listing::amit_in_tax_year` is the shared
+    // rule, applied exactly as `tax_summary::db_tax_summary_on` applies it.
+    let income_rows: Vec<(Income, bool, Option<NaiveDate>)> = sqlx::query(
+        "SELECT i.*, l.amit AS listing_amit, l.amit_from AS listing_amit_from \
+         FROM income i JOIN listings l ON l.id = i.listing_id",
     )
     .fetch_all(&mut *conn)
-    .await?;
+    .await?
+    .iter()
+    .map(|row| {
+        Ok::<_, sqlx::Error>((
+            Income::from_row(row)?,
+            row.try_get("listing_amit")?,
+            row.try_get("listing_amit_from")?,
+        ))
+    })
+    .collect::<Result<_, _>>()?;
 
-    for income in &income_rows {
+    for (income, amit, amit_from) in &income_rows {
+        if listing::amit_in_tax_year(*amit, *amit_from, tax_year_for(income.assessment_date())) {
+            continue;
+        }
         let Income {
             id: income_id,
             listing_id,
@@ -2144,6 +2172,125 @@ mod tests {
         let after = db_tax_report(&pool, 2025).await.unwrap();
         assert_eq!(after.completeness.amma_missing.len(), 1);
         assert_eq!(after.completeness.amma_missing[0].listing_id, 1);
+    }
+
+    /// The same rule, with a second AMIT fund in the year so the completeness
+    /// section's early-out (no AMIT-in-year listings at all) cannot be what
+    /// makes the pre-conversion year clean: the converted fund must be
+    /// dropped from the net-units walk itself, not merely from the ticker
+    /// map, or it is flagged as missing a statement it could never have
+    /// (SCENARIOS F-23).
+    #[tokio::test]
+    async fn amma_missing_ignores_a_converted_fund_beside_a_lifelong_amit() {
+        let pool = test_support::test_pool().await;
+        test_support::listing(1)
+            .ticker("CONV")
+            .name("CONV")
+            .amit_from(ymd(2024, 7, 1))
+            .insert(&pool)
+            .await;
+        listing_amit(&pool, 2, "AMT").await;
+        test_support::buy(1, 1)
+            .date(ymd(2023, 1, 1))
+            .qty(dec("100"))
+            .price(dec("10"))
+            .insert(&pool)
+            .await;
+        test_support::buy(2, 2)
+            .date(ymd(2023, 1, 1))
+            .qty(dec("100"))
+            .price(dec("10"))
+            .insert(&pool)
+            .await;
+
+        // FY2024: only the lifelong AMIT is asked for a statement.
+        let before = db_tax_report(&pool, 2024).await.unwrap();
+        assert_eq!(before.completeness.amma_missing.len(), 1);
+        assert_eq!(before.completeness.amma_missing[0].listing_id, 2);
+        assert_eq!(before.completeness.amma_missing[0].ticker, "AMT");
+
+        // FY2025: both are AMITs for the year, so both are.
+        let after = db_tax_report(&pool, 2025).await.unwrap();
+        let flagged: Vec<i64> = after
+            .completeness
+            .amma_missing
+            .iter()
+            .map(|a| a.listing_id)
+            .collect();
+        assert_eq!(flagged, vec![2, 1]);
+    }
+
+    /// SCENARIOS P-01: the printed document must carry the rows behind every
+    /// figure it totals. A fund that converted to an AMIT was an ordinary
+    /// trust before its first AMIT income year, so the earlier years'
+    /// distributions are assessable and the tax summary counts them — while
+    /// this section used to drop them on a flat `NOT l.amit`, printing a
+    /// four-figure income total with an empty table behind it. The AMIT
+    /// year's own cash row stays excluded, as always.
+    #[tokio::test]
+    async fn a_converted_funds_pre_amit_income_prints_behind_its_tax_summary_line() {
+        let pool = test_support::test_pool().await;
+        test_support::listing(1)
+            .ticker("VDHG")
+            .name("VDHG")
+            .amit_from(ymd(2024, 7, 1))
+            .insert(&pool)
+            .await;
+        // FY2023, an ordinary trust distribution with its franking credits.
+        test_support::income(1, 1, ymd(2023, 2, 15))
+            .with(|i| {
+                i.trust_income = true;
+                i.franked_amount = dec("600");
+                i.unfranked_amount = dec("400");
+                i.franking_credits = dec("257.14");
+            })
+            .insert(&pool)
+            .await;
+        // FY2025, the first AMIT year: cash only, assessable via the AMMA.
+        test_support::income(2, 1, ymd(2025, 2, 15))
+            .with(|i| {
+                i.trust_income = true;
+                i.unfranked_amount = dec("400");
+            })
+            .insert(&pool)
+            .await;
+
+        let summary = |report: &TaxReport, field: &str| -> Decimal {
+            report
+                .tax_summary
+                .iter()
+                .find(|l| l.field == field)
+                .unwrap_or_else(|| panic!("no {field} line"))
+                .value
+                .as_str()
+                .expect("a decimal string")
+                .parse()
+                .expect("a decimal")
+        };
+
+        let before = db_tax_report(&pool, 2023).await.unwrap();
+        assert_eq!(before.income.trust_income.len(), 1);
+        let row = &before.income.trust_income[0];
+        assert_eq!(row.income_id, 1);
+        assert_eq!(row.franked_amount_aud, dec("600"));
+        assert_eq!(row.unfranked_amount_aud, dec("400"));
+        assert_eq!(row.franking_credits_aud, dec("257.14"));
+        // The document's stated invariant: every income figure sums to its
+        // tax-summary line.
+        assert_eq!(
+            row.franked_amount_aud + row.unfranked_amount_aud,
+            summary(&before, "dividends_assessable")
+        );
+        assert_eq!(
+            row.franking_credits_aud,
+            summary(&before, "franking_credits")
+        );
+
+        // FY2025 is a real AMIT year: the cash row is excluded from the
+        // printed tables, exactly as the tax summary excludes it.
+        let after = db_tax_report(&pool, 2025).await.unwrap();
+        assert!(after.income.trust_income.is_empty());
+        assert!(after.income.dividends.is_empty());
     }
 
     /// A listing bought and fully sold before the requested year (nothing
