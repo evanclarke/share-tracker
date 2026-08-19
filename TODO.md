@@ -135,7 +135,9 @@ just as much part of the listing's identity: every stored closing price is denom
   fact, two AUD valuations, nothing marked
 - [ ] Trades keep their own `currency`, so cost bases are unaffected; the damage is to every
   price-derived figure (the overview, unrealised gains, performance, every snapshot in the series)
-- [ ] Two questions for the model, worth asking together:
+**Decision (2026-08-19, Evan): refuse it once there is history — option (a) — and add the triggers.**
+
+- [x] Two questions for the model, worth asking together:
   - **(a)** What should a currency change *be*? A redenomination is a real event (a listing moving
     quote currency, a currency replaced) — so either it joins the rename path as a recorded event
     with an effective date (prices before it are in the old currency, after it in the new), or it is
@@ -157,7 +159,10 @@ currency drives the cost base, has no such check.)
 - [ ] Reproduced: `PUT /trades/1` with `currency: "USD"` on an AUD-quoted ASX listing → `204`. The
   parcel is then costed by dividing an AUD price by a USD rate. `PUT /income/1`, `PUT
   /amma_statements/1` and `PUT /investment_expenses/1` accept the same mismatch
-- [ ] The four cases are not equally strong, which is the decision to take:
+**Decision (2026-08-19, Evan): trades and AMMA statements take the rule; income and investment
+expenses stay free.**
+
+- [x] The four cases are not equally strong, which is the decision to take:
   - **Trades** are the strong case, and the same argument the ESS refusal already makes:
     `average_price × quantity` is the security's own price, so it is the listed currency by
     construction. A Sell shares the check via the Sell path
@@ -189,7 +194,10 @@ which is `INSERT … ON CONFLICT DO NOTHING`, and the resource is read-only over
   trace either
 - [ ] The idempotency the `DO NOTHING` buys is worth keeping: re-running the import must not
   rewrite history unasked, and a silently-changing rate would be worse than a stuck one
-- [ ] A model decision, three options:
+**Decision (2026-08-19, Evan): option (b) — report the disagreement *and* add the correction path,
+with `rba_fx_rates` audited.**
+
+- [x] A model decision, three options:
   - **(a)** Keep the import idempotent but *report* the disagreement: count `conflicted` separately
     from `skipped`, listing each (currency, month, stored, feed), and surface it in the job's
     failure detail and the health report. Nothing changes without the user asking
@@ -226,7 +234,9 @@ the reduction is the investor's job — this system's job.)
   computed from what is stored
 - [ ] The same is true of a *direct* foreign-taxed disposal: foreign tax paid on a capital gain the
   taxpayer realises themselves has nowhere to be recorded at all
-- [ ] A model decision, two options:
+**Decision (2026-08-19, Evan): option (a) — split the field and compute the apportionment.**
+
+- [x] A model decision, two options:
   - **(a)** Split the field — a new `foreign_tax_credits_capital_gains` column (migration; the AMMA
     is audited, so its two `*_row_history_*` triggers must be dropped and re-created) — and apply
     the Division 115 reduction to that half in the tax summary, with the AMMA screen's field hint
