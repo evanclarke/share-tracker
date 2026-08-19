@@ -152,11 +152,11 @@ do; `docs/API.md` gains the field on both endpoints.
 `NaiveDate::from_ymd_opt(tax_year - 1, 7, 1).expect("valid period start")`. `TaxReportRequest`
 validates nothing, so a year `chrono` cannot represent aborts the handler:
 
-- [ ] `POST /reports/tax-report {"tax_year": 300000}` **panics** at `src/reports/tax_report.rs:75`
+- [x] `POST /reports/tax-report {"tax_year": 300000}` **panics** at `src/reports/tax_report.rs:75`
   (`valid period start`) rather than answering `422`. A panicking handler bypasses `infra::http`'s
   one-error-type contract entirely — no classified status, no `tracing::error!` with the cause, the
   connection simply drops.
-- [ ] Below that, nonsense is accepted silently: `tax_year: 0` returns `200` with
+- [x] Below that, nonsense is accepted silently: `tax_year: 0` returns `200` with
   `period_start: "-0001-07-01"`, and `tax_year: -1` a period ending `-0001-06-30`.
 
 **Fix.** Validate `tax_year` in the handler and answer `422` naming the accepted range — an

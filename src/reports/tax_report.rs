@@ -70,10 +70,57 @@ pub struct TaxReportMeta {
     pub taxpayer_basis: String,
 }
 
-fn period_for(tax_year: i32) -> (NaiveDate, NaiveDate) {
+/// The `tax_year` values this report accepts, each naming the calendar year
+/// its Australian financial year *ends* in (2026 = 1 July 2025 – 30 June 2026).
+///
+/// The bounds are deliberately far wider than anything anyone will ask for,
+/// because refusing a legitimate year is the worse failure of the two: this
+/// system holds parcels acquired decades ago (the ATO acceptance tests run
+/// years dated 1998 and 2001), and it reports the financial year in progress
+/// and — for a draft or a projection — years beyond it. So the floor sits well
+/// below the first year CGT can reach (20 September 1985, inside FY1986; and
+/// only *trade* dates are floored there — income, interest and expense rows
+/// carry no such limit), and the ceiling a thousand years past the year in
+/// progress. What the range does exclude is input that is not a financial year
+/// at all: `0`, a negative year, or a value `chrono` cannot build a date from,
+/// which used to panic the handler (SCENARIOS P-02). Both bounds are far
+/// inside `chrono`'s own ±262,143-year limit, and that is what makes
+/// [`period_for`] total.
+const MIN_TAX_YEAR: i32 = 1900;
+const MAX_TAX_YEAR: i32 = 2999;
+
+/// A `tax_year` checked against [`MIN_TAX_YEAR`]..=[`MAX_TAX_YEAR`]. It is the
+/// only way to reach [`period_for`], so a year `chrono` cannot represent can
+/// never get there: the panic SCENARIOS P-02 found is unreachable by
+/// construction rather than merely unlikely.
+#[derive(Clone, Copy, Debug)]
+struct TaxYear(i32);
+
+impl TaxYear {
+    fn new(tax_year: i32) -> Result<Self, ApiError> {
+        if !(MIN_TAX_YEAR..=MAX_TAX_YEAR).contains(&tax_year) {
+            return Err(ApiError::Unprocessable(format!(
+                "tax_year {tax_year} is out of range — give the calendar year the Australian \
+                 financial year ends in, between {MIN_TAX_YEAR} and {MAX_TAX_YEAR} \
+                 (e.g. 2026 for 1 July 2025 – 30 June 2026)"
+            )));
+        }
+        Ok(Self(tax_year))
+    }
+
+    fn year(self) -> i32 {
+        self.0
+    }
+}
+
+fn period_for(tax_year: TaxYear) -> (NaiveDate, NaiveDate) {
+    let year = tax_year.year();
+    // Infallible: a `TaxYear` cannot hold a year outside MIN_TAX_YEAR..=
+    // MAX_TAX_YEAR, so both dates are well inside chrono's range and neither
+    // `from_ymd_opt` can be `None` (SCENARIOS P-02).
     (
-        NaiveDate::from_ymd_opt(tax_year - 1, 7, 1).expect("valid period start"),
-        NaiveDate::from_ymd_opt(tax_year, 6, 30).expect("valid period end"),
+        NaiveDate::from_ymd_opt(year - 1, 7, 1).expect("in range by TaxYear::new"),
+        NaiveDate::from_ymd_opt(year, 6, 30).expect("in range by TaxYear::new"),
     )
 }
 
@@ -129,7 +176,7 @@ pub struct Completeness {
 /// (SCENARIOS F-03, F-08).
 async fn amma_missing(
     conn: &mut sqlx::SqliteConnection,
-    tax_year: i32,
+    tax_year: TaxYear,
 ) -> Result<Vec<AmmaMissingAlert>, sqlx::Error> {
     let (start, end) = period_for(tax_year);
 
@@ -148,7 +195,7 @@ async fn amma_missing(
                     listing::amit_in_tax_year(
                         r.try_get("amit")?,
                         r.try_get("amit_from")?,
-                        tax_year,
+                        tax_year.year(),
                     ),
                 ))
             })
@@ -864,14 +911,17 @@ impl IncomeSections {
 /// convert with, and the naming history to print each row's ticker as at its
 /// own date.
 struct IncomeContext {
-    tax_year: i32,
+    tax_year: TaxYear,
     fx: FxRates,
     tickers: HashMap<i64, String>,
     renames: RenameHistory,
 }
 
 impl IncomeContext {
-    async fn load(conn: &mut sqlx::SqliteConnection, tax_year: i32) -> Result<Self, sqlx::Error> {
+    async fn load(
+        conn: &mut sqlx::SqliteConnection,
+        tax_year: TaxYear,
+    ) -> Result<Self, sqlx::Error> {
         let fx = FxRates::load(&mut *conn).await?;
         let tickers: HashMap<i64, String> = sqlx::query("SELECT id, ticker FROM listings")
             .fetch_all(&mut *conn)
@@ -903,7 +953,7 @@ impl IncomeContext {
 
 async fn income_section(
     conn: &mut sqlx::SqliteConnection,
-    tax_year: i32,
+    tax_year: TaxYear,
     franking_alerts: &HashMap<i64, franking_at_risk::FrankingAtRiskAlert>,
 ) -> Result<IncomeSections, sqlx::Error> {
     let ctx = IncomeContext::load(&mut *conn, tax_year).await?;
@@ -925,7 +975,7 @@ async fn push_income_rows(
     franking_alerts: &HashMap<i64, franking_at_risk::FrankingAtRiskAlert>,
     out: &mut IncomeSections,
 ) -> Result<(), sqlx::Error> {
-    let (tax_year, fx) = (ctx.tax_year, &ctx.fx);
+    let (tax_year, fx) = (ctx.tax_year.year(), &ctx.fx);
     let income_rows: Vec<Income> = sqlx::query_as(
         "SELECT i.* FROM income i JOIN listings l ON l.id = i.listing_id \
          WHERE NOT l.amit",
@@ -1122,7 +1172,7 @@ async fn push_interest_rows(
     ctx: &IncomeContext,
     out: &mut IncomeSections,
 ) -> Result<(), sqlx::Error> {
-    let (tax_year, fx) = (ctx.tax_year, &ctx.fx);
+    let (tax_year, fx) = (ctx.tax_year.year(), &ctx.fx);
     let interest_rows = sqlx::query(
         "SELECT id, date_paid, amount, tfn_withholding_tax, foreign_source, foreign_tax_paid, \
                 currency, source \
@@ -1174,7 +1224,7 @@ async fn push_ess_rows(
     ctx: &IncomeContext,
     out: &mut IncomeSections,
 ) -> Result<(), sqlx::Error> {
-    let (tax_year, fx) = (ctx.tax_year, &ctx.fx);
+    let (tax_year, fx) = (ctx.tax_year.year(), &ctx.fx);
     let ess_rows = sqlx::query(
         "SELECT id, listing_id, taxing_point_date, taxed_upfront_eligible, \
                 taxed_upfront_not_eligible, deferral_discount, pre_2009_cessation_discount, \
@@ -1240,7 +1290,7 @@ async fn push_deduction_rows(
     ctx: &IncomeContext,
     out: &mut IncomeSections,
 ) -> Result<(), sqlx::Error> {
-    let (tax_year, fx) = (ctx.tax_year, &ctx.fx);
+    let (tax_year, fx) = (ctx.tax_year.year(), &ctx.fx);
     let expense_rows = sqlx::query(
         "SELECT id, date_incurred, expense_type, amount, currency, listing_id, description \
          FROM investment_expenses",
@@ -1288,8 +1338,11 @@ pub struct TaxReport {
     pub tax_summary: Vec<TaxSummaryLine>,
 }
 
-pub async fn db_tax_report(pool: &SqlitePool, tax_year: i32) -> Result<TaxReport, sqlx::Error> {
-    let (period_start, period_end) = period_for(tax_year);
+/// Rejects a `tax_year` outside [`MIN_TAX_YEAR`]..=[`MAX_TAX_YEAR`] with a
+/// `422` naming the range, before any date is built from it (SCENARIOS P-02).
+pub async fn db_tax_report(pool: &SqlitePool, tax_year: i32) -> Result<TaxReport, ApiError> {
+    let year = TaxYear::new(tax_year)?;
+    let (period_start, period_end) = period_for(year);
 
     // Every franked dividend's holding-period-walk result, on its own
     // snapshot (see the module doc's note on why) — read before the main
@@ -1303,10 +1356,10 @@ pub async fn db_tax_report(pool: &SqlitePool, tax_year: i32) -> Result<TaxReport
             .collect();
 
     let mut tx = pool.begin().await?;
-    let amma_missing_alerts = amma_missing(&mut tx, tax_year).await?;
+    let amma_missing_alerts = amma_missing(&mut tx, year).await?;
     let disposals = disposals_section(&mut tx, tax_year).await?;
     let cgt_summary = net_capital_gain::db_cgt_summary_year(&mut tx, tax_year).await?;
-    let income = income_section(&mut tx, tax_year, &franking_alerts).await?;
+    let income = income_section(&mut tx, year, &franking_alerts).await?;
     let all_years_summary = tax_summary::db_tax_summary_on(&mut tx).await?;
     tx.commit().await?;
 
@@ -1386,10 +1439,7 @@ async fn tax_report_handler(
     State(pool): State<SqlitePool>,
     Json(req): Json<TaxReportRequest>,
 ) -> Result<Json<TaxReport>, ApiError> {
-    db_tax_report(&pool, req.tax_year)
-        .await
-        .map(Json)
-        .map_err(ApiError::from)
+    db_tax_report(&pool, req.tax_year).await.map(Json)
 }
 
 /// Every Australian financial year with any recorded fact touching a tax
@@ -1425,6 +1475,7 @@ mod tests {
     use super::*;
     use crate::entities::{interest_income, investment_expense, rba_fx_rate};
     use crate::test_support::{self, dec, ymd};
+    use axum::http::StatusCode;
 
     async fn listing_amit(pool: &SqlitePool, id: i64, ticker: &str) {
         test_support::listing(id)
@@ -2461,5 +2512,117 @@ mod tests {
         assert_eq!(row.currency, "AUD");
         assert_eq!(row.buy_month_fx_rate, None);
         assert_eq!(row.sell_month_fx_rate, None);
+    }
+
+    /// SCENARIOS P-02 (boundary): a `tax_year` no date can be built from used
+    /// to **panic** the handler at `period_for`'s `expect` — bypassing
+    /// `infra::http`'s one-error-type contract entirely (no classified status,
+    /// no logged cause, the connection simply dropped). It is now a `422`
+    /// whose body names the accepted range, so the UI toast says what to do.
+    #[tokio::test]
+    async fn an_absurd_tax_year_is_refused_naming_the_range_not_panicking() {
+        let pool = test_support::test_pool().await;
+        let client = test_support::ApiClient::full(&pool);
+        for year in [300_000, MAX_TAX_YEAR + 1, i32::MAX] {
+            let resp = client
+                .post(
+                    "/reports/tax-report",
+                    &serde_json::json!({"tax_year": year}),
+                )
+                .await;
+            let (status, body) = resp.status_and_body();
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{year}: {body}");
+            assert!(
+                body.contains(&MIN_TAX_YEAR.to_string())
+                    && body.contains(&MAX_TAX_YEAR.to_string()),
+                "the refusal must name the accepted range: {body}"
+            );
+        }
+    }
+
+    /// SCENARIOS P-02 (boundary): below the range, nonsense was accepted
+    /// *silently* — `tax_year: 0` answered `200` with `period_start:
+    /// "-0001-07-01"`. A year that is not a financial year at all is refused
+    /// the same way as one chrono cannot represent.
+    #[tokio::test]
+    async fn a_nonsense_low_tax_year_is_refused_rather_than_reported_on() {
+        let pool = test_support::test_pool().await;
+        let client = test_support::ApiClient::full(&pool);
+        for year in [0, -1, MIN_TAX_YEAR - 1, i32::MIN] {
+            let resp = client
+                .post(
+                    "/reports/tax-report",
+                    &serde_json::json!({"tax_year": year}),
+                )
+                .await;
+            let (status, body) = resp.status_and_body();
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{year}: {body}");
+            assert!(
+                body.contains(&MIN_TAX_YEAR.to_string())
+                    && body.contains(&MAX_TAX_YEAR.to_string()),
+                "the refusal must name the accepted range: {body}"
+            );
+        }
+    }
+
+    /// SCENARIOS P-02 (boundary): the range exists to refuse non-years, never
+    /// a financial year someone could legitimately ask for. A parcel bought
+    /// last century and sold in FY1999 still reports, and so does the year
+    /// after the one in progress (a draft or a projection).
+    #[tokio::test]
+    async fn a_far_past_and_a_future_financial_year_still_report() {
+        let pool = test_support::test_pool().await;
+        test_support::listing(1)
+            .ticker("T1")
+            .name("Test One")
+            .insert(&pool)
+            .await;
+        test_support::buy(1, 1)
+            .date(ymd(1997, 3, 3))
+            .qty(dec("100"))
+            .price(dec("5"))
+            .insert(&pool)
+            .await;
+        test_support::sell(2, 1)
+            .date(ymd(1998, 12, 1))
+            .qty(dec("100"))
+            .price(dec("8"))
+            .insert(&pool)
+            .await;
+        test_support::allocate(&pool, 1, 2, 1, dec("100")).await;
+        let client = test_support::ApiClient::full(&pool);
+
+        let body: serde_json::Value = client
+            .post_json(
+                "/reports/tax-report",
+                &serde_json::json!({"tax_year": 1999}),
+            )
+            .await;
+        assert_eq!(body["meta"]["period_start"], "1998-07-01");
+        assert_eq!(body["meta"]["period_end"], "1999-06-30");
+        assert_eq!(
+            body["disposals"]["listings"]
+                .as_array()
+                .expect("the FY1999 disposal schedule")
+                .len(),
+            1
+        );
+
+        // The financial year after the one in progress: no activity, so a
+        // zeroed document — but a document, not a refusal.
+        let next_year = tax_year_for(Utc::now().date_naive()) + 1;
+        let body: serde_json::Value = client
+            .post_json(
+                "/reports/tax-report",
+                &serde_json::json!({"tax_year": next_year}),
+            )
+            .await;
+        assert_eq!(body["meta"]["tax_year"], next_year);
+        assert!(
+            body["disposals"]["listings"]
+                .as_array()
+                .expect("a zeroed disposal schedule")
+                .is_empty()
+        );
     }
 }
