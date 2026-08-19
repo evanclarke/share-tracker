@@ -69,6 +69,13 @@ struct AdjustmentRow {
     quantity: Decimal,
     trade_date: NaiveDate,
     trade_quantity: Decimal,
+    /// True when the parcel is a **rollover replacement** (a transfer,
+    /// scrip-for-scrip exchange or demerger created it). Such a parcel is dated
+    /// the operation, which may be *after* the statement's year end while still
+    /// holding units the statement covered — the reach-through the write path
+    /// accepts (SCENARIOS N-06) — so the acquired-after-the-year-end check must
+    /// not fire on it.
+    rollover_replacement: bool,
 }
 
 /// The statement's own figures the checks compare against.
@@ -98,7 +105,9 @@ pub async fn db_amit_adjustment_alerts(
     .await?;
     let adjustment_rows = sqlx::query(
         "SELECT aa.amma_statement_id, aa.trade_id, aa.quantity, \
-                t.date AS trade_date, t.quantity AS trade_quantity \
+                t.date AS trade_date, t.quantity AS trade_quantity, \
+                COALESCE(t.transfer_id, t.scrip_action_id, t.demerger_action_id) \
+                    IS NOT NULL AS rollover_replacement \
          FROM amit_adjustments aa JOIN trades t ON t.id = aa.trade_id \
          ORDER BY aa.amma_statement_id, t.date, aa.id",
     )
@@ -120,6 +129,7 @@ pub async fn db_amit_adjustment_alerts(
                 quantity: row_dec(row, "quantity")?,
                 trade_date: row.try_get("trade_date")?,
                 trade_quantity: row_dec(row, "trade_quantity")?,
+                rollover_replacement: row.try_get("rollover_replacement")?,
             });
     }
 
@@ -286,12 +296,23 @@ fn problems_for(
     // sold before the year began. A parcel disposed of *during* the year was
     // genuinely held for part of it and is not flagged.
     for a in adjustments {
-        if a.trade_date > year_end {
+        // A rollover replacement parcel is exempt from the date test: it is
+        // dated its operation, which routinely postdates the year end (an AMMA
+        // statement arrives in spring, and a transfer in between is the ordinary
+        // case), while the units it holds are the ones the statement covered.
+        // The write path only accepts such a row when the units trace back to
+        // the statement's own account, so the "cannot have been held" reasoning
+        // does not apply — flagging it would have made the supported entry look
+        // like an error forever (SCENARIOS N-06).
+        if a.trade_date > year_end && !a.rollover_replacement {
             problems.push(format!(
                 "parcel (trade #{}) was acquired {} — after the statement's year ended {} — so \
                  the statement cannot cover it",
                 a.trade_id, a.trade_date, year_end
             ));
+            continue;
+        }
+        if a.rollover_replacement && a.trade_date > year_end {
             continue;
         }
         let sold_before_year = corporate_action::sold_in_acquired_units(

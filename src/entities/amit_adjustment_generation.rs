@@ -72,6 +72,30 @@ pub struct GeneratedAdjustments {
     pub difference: Decimal,
     /// True when nothing was written.
     pub preview: bool,
+    /// Units the statement covered that a **scrip-for-scrip exchange or
+    /// demerger** has since carried into replacement parcels, which this
+    /// operation does not attribute for you: those replacements' quantities are
+    /// ratio-scaled and the data records no link between a replacement and the
+    /// individual parcel it replaced, so choosing one would be a guess
+    /// (SCENARIOS N-06). A **transfer** is attributed — its replacement carries
+    /// exactly the units moved, under the source parcel's own acquisition date —
+    /// so these entries are the residue. Enter one adjustment by hand against
+    /// each named replacement parcel: that is accepted now, because the units
+    /// are traceable back to this statement's account.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub unattributed: Vec<UnattributedUnits>,
+}
+
+/// One source parcel's units that a rollover carried away and generation left
+/// for hand entry — see [`GeneratedAdjustments::unattributed`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnattributedUnits {
+    /// The parcel the statement's account held at year end.
+    pub source_trade_id: i64,
+    /// Units of it the operation carried away, in the operation date's basis.
+    pub units: Decimal,
+    /// The replacement parcels of that operation, one of which now holds them.
+    pub replacements: Vec<i64>,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -88,9 +112,14 @@ pub enum GenerateError {
     /// open at that date, so there is nothing for it to write — and writing
     /// an empty set would hide the two quite different situations that reach
     /// here: the position's trades have not been entered yet, or the holding
-    /// was genuinely sold (or transferred) away during the year, whose
-    /// adjustment rows are entered by hand against the parcels that held the
-    /// units (SCENARIOS F-04). The refusal names both.
+    /// was genuinely sold (or moved) away *during* the year, whose adjustment
+    /// rows are entered by hand (SCENARIOS F-04). The refusal names both, and
+    /// says where the hand-entered row goes in each case: against the parcels
+    /// the units came from for a sale, and against the **replacement parcel**
+    /// for a transfer/exchange/demerger, which is accepted because the units are
+    /// traceable back to this statement's account (SCENARIOS N-06). A move
+    /// *after* the year end needs none of this — the parcel is still open at the
+    /// year end, and generation follows the operation itself.
     #[error("no open parcels at the statement's year end")]
     NothingHeld,
     #[error(transparent)]
@@ -99,6 +128,96 @@ pub enum GenerateError {
 
 pub fn router() -> Router<SqlitePool> {
     Router::new().route("/amma_statements/{id}/generate_adjustments", post(generate))
+}
+
+/// One rollover that carried units out of a parcel: the operation's date, the
+/// units it took (in that date's basis, as the allocation records them), and the
+/// replacement parcels it created.
+struct Movement {
+    date: NaiveDate,
+    units: Decimal,
+    /// Whether the operation was a holding-account transfer, whose replacement
+    /// carries exactly the units moved.
+    is_transfer: bool,
+    /// The group's replacement parcels of the **same listing** (a demerger's
+    /// demerged parcel is another listing and never adjustable by this
+    /// statement), each with its quantity and carried acquisition date.
+    replacements: Vec<i64>,
+    replacement_facts: Vec<(i64, Decimal, Option<NaiveDate>)>,
+}
+
+impl Movement {
+    /// The replacement parcel holding `units` of a parcel acquired on
+    /// `acquired`, where that can be told without guessing: a transfer's
+    /// replacement carries exactly those units under that acquisition date. A
+    /// scrip exchange or demerger scales the quantity by its own ratio, so
+    /// there is no such match and the caller reports the units instead.
+    fn matching_replacement(&self, acquired: NaiveDate, units: Decimal) -> Option<i64> {
+        if !self.is_transfer {
+            return None;
+        }
+        self.replacement_facts
+            .iter()
+            .find(|(_, quantity, deemed)| *quantity == units && *deemed == Some(acquired))
+            .map(|(id, _, _)| *id)
+    }
+}
+
+/// Every rollover that consumed part of `parcel_id`, oldest first.
+async fn db_rollovers_of(
+    conn: &mut sqlx::SqliteConnection,
+    parcel_id: i64,
+) -> Result<Vec<Movement>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT s.date, pa.quantity_allocated, s.listing_id, \
+                s.transfer_id, s.scrip_action_id, s.demerger_action_id \
+         FROM parcel_allocations pa JOIN trades s ON s.id = pa.sale_trade_id \
+         WHERE pa.purchase_trade_id = ? \
+           AND (s.transfer_id IS NOT NULL OR s.scrip_action_id IS NOT NULL \
+                OR s.demerger_action_id IS NOT NULL) \
+         ORDER BY s.date, s.id",
+    )
+    .bind(parcel_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut out = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let listing_id: i64 = row.try_get("listing_id")?;
+        let (column, group_id, is_transfer) =
+            if let Some(id) = row.try_get::<Option<i64>, _>("transfer_id")? {
+                ("transfer_id", id, true)
+            } else if let Some(id) = row.try_get::<Option<i64>, _>("scrip_action_id")? {
+                ("scrip_action_id", id, false)
+            } else {
+                let id: Option<i64> = row.try_get("demerger_action_id")?;
+                ("demerger_action_id", id.unwrap_or_default(), false)
+            };
+        // The column name is one of the three literals above, never user input.
+        let replacement_rows = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SELECT id, quantity, deemed_acquisition_date FROM trades \
+             WHERE {column} = ? AND trade_type IN ('Buy', 'DRP') AND listing_id = ? ORDER BY id"
+        )))
+        .bind(group_id)
+        .bind(listing_id)
+        .fetch_all(&mut *conn)
+        .await?;
+        let mut replacement_facts = Vec::with_capacity(replacement_rows.len());
+        for r in &replacement_rows {
+            replacement_facts.push((
+                r.try_get("id")?,
+                row_dec(r, "quantity")?,
+                r.try_get("deemed_acquisition_date")?,
+            ));
+        }
+        out.push(Movement {
+            date: row.try_get("date")?,
+            units: row_dec(row, "quantity_allocated")?,
+            is_transfer,
+            replacements: replacement_facts.iter().map(|(id, _, _)| *id).collect(),
+            replacement_facts,
+        });
+    }
+    Ok(out)
 }
 
 /// Generate (or preview) the statement's per-parcel adjustment set.
@@ -170,6 +289,7 @@ pub async fn db_generate(
             .await?;
     let mut created = Vec::with_capacity(parcels.len());
     let mut units_adjusted = Decimal::ZERO;
+    let mut unattributed = Vec::new();
     for parcel in &parcels {
         // `remaining_as_of` is in the year-end unit basis; the quantity
         // column stores as-acquired units (the basis `trade.quantity` caps).
@@ -179,18 +299,80 @@ pub async fn db_generate(
             parcel.parcel.date,
             year_end,
         );
-        let adjustment = AmitAdjustment {
-            id: next_id,
-            amma_statement_id: statement_id,
-            trade_id: parcel.parcel.id,
-            quantity,
-        };
-        if !body.preview {
-            amit_adjustment::db_upsert_on(&mut tx, &adjustment).await?;
+        // Units of this parcel a rollover has since carried into a replacement
+        // parcel cannot be adjusted here — the replacement took their cost base
+        // with it (`amit_adjustment::UpsertError::UnitsCarriedIntoReplacement`),
+        // and the statement's reduction has to follow them. This is the ordinary
+        // case, not an edge one: an AMMA statement for a year ended 30 June
+        // arrives in August or September, so any move in between lands in it
+        // (SCENARIOS N-06).
+        let moves = db_rollovers_of(&mut tx, parcel.parcel.id).await?;
+        let mut source_quantity = quantity;
+        for movement in &moves {
+            let carried = corporate_action::as_acquired_quantity(
+                movement.units,
+                &splits,
+                parcel.parcel.date,
+                movement.date,
+            );
+            let from_this_statement = source_quantity.min(carried);
+            if from_this_statement <= Decimal::ZERO {
+                continue;
+            }
+            source_quantity -= from_this_statement;
+            // A transfer's replacement carries exactly the units moved under the
+            // source parcel's own acquisition date, so it is identified without
+            // guessing. A scrip exchange or demerger scales the quantity by its
+            // ratio and (for a demerger) creates two parcels, and nothing links
+            // a replacement to the individual parcel it replaced — so those are
+            // reported for hand entry rather than attributed by inference.
+            match movement.matching_replacement(parcel.parcel.acquired(), movement.units) {
+                Some(replacement) => {
+                    let adjustment = AmitAdjustment {
+                        id: next_id,
+                        amma_statement_id: statement_id,
+                        trade_id: replacement,
+                        // Both figures are in the operation date's basis.
+                        quantity: movement.units,
+                    };
+                    if !body.preview {
+                        amit_adjustment::db_upsert_on(&mut tx, &adjustment).await?;
+                    }
+                    next_id += 1;
+                    units_adjusted += corporate_action::split_adjusted_quantity(
+                        from_this_statement,
+                        &splits,
+                        parcel.parcel.date,
+                        Some(year_end),
+                    );
+                    created.push(adjustment);
+                }
+                None => unattributed.push(UnattributedUnits {
+                    source_trade_id: parcel.parcel.id,
+                    units: movement.units,
+                    replacements: movement.replacements.clone(),
+                }),
+            }
         }
-        next_id += 1;
-        units_adjusted += parcel.remaining_as_of;
-        created.push(adjustment);
+        if source_quantity > Decimal::ZERO {
+            let adjustment = AmitAdjustment {
+                id: next_id,
+                amma_statement_id: statement_id,
+                trade_id: parcel.parcel.id,
+                quantity: source_quantity,
+            };
+            if !body.preview {
+                amit_adjustment::db_upsert_on(&mut tx, &adjustment).await?;
+            }
+            next_id += 1;
+            units_adjusted += corporate_action::split_adjusted_quantity(
+                source_quantity,
+                &splits,
+                parcel.parcel.date,
+                Some(year_end),
+            );
+            created.push(adjustment);
+        }
     }
 
     if body.preview {
@@ -205,6 +387,7 @@ pub async fn db_generate(
         units_held,
         difference: units_adjusted - units_held,
         preview: body.preview,
+        unattributed,
     })
 }
 
@@ -236,9 +419,12 @@ impl From<GenerateError> for ApiError {
             GenerateError::NothingHeld => ApiError::unprocessable(
                 "no parcels of the statement's listing were open in its holding account at the \
                  statement's year end, so there is nothing to generate from — if trades are \
-                 missing, enter them and run this again; if the holding was sold or transferred \
-                 away during the year, the statement still adjusts the units it covered, so enter \
-                 one AMIT adjustment by hand against each parcel those units came from",
+                 missing, enter them and run this again; if the holding was sold during the year, \
+                 the statement still adjusts the units it covered, so enter one AMIT adjustment by \
+                 hand against each parcel those units came from; and if it was transferred, \
+                 exchanged or demerged away during the year, enter them against the replacement \
+                 parcels that now hold those units, which is accepted because the units trace back \
+                 to this account",
             ),
             GenerateError::Upsert(err) => err.into(),
             GenerateError::Db(err) => err.into(),
@@ -759,8 +945,17 @@ mod tests {
         // correct, closed holding to "enter the missing trades" sent them
         // looking for data that was already there.
         assert!(body.contains("if trades are missing"), "{body}");
+        assert!(body.contains("sold during the year"), "{body}");
+        // And (SCENARIOS N-06) where the row goes in each case: the parcels the
+        // units came from for a sale, the replacement parcels for a move — which
+        // is what makes the advice followable, since the per-account rule accepts
+        // a replacement parcel of the account the units came from.
         assert!(
-            body.contains("sold or transferred away during the year"),
+            body.contains("transferred, exchanged or demerged away"),
+            "{body}"
+        );
+        assert!(
+            body.contains("against the replacement parcels that now hold those units"),
             "{body}"
         );
         assert!(body.contains("by hand"), "{body}");
@@ -790,15 +985,18 @@ mod tests {
         assert_eq!(resp.status, StatusCode::CREATED);
     }
 
-    /// SCENARIOS F-17, from generation's side: the parcel was open at the
-    /// statement's year end, so it is generated for — but a transfer has
-    /// carried it away since, and the replacement's cost base was frozen when
-    /// the transfer ran. The row-level refusal fires inside the generation
-    /// transaction, so nothing partial is written and the reason names the
-    /// replacement parcel and the way round (enter the adjustment before the
-    /// operation: delete it, enter, re-run).
+    /// SCENARIOS F-17, from generation's side — **and its answer, N-06**: the
+    /// parcel was open at the statement's year end, so it is generated for, but
+    /// a transfer has carried the units away since. This used to fail the whole
+    /// generation on F-17's row-level refusal, which (with the per-account rule
+    /// refusing the replacement parcel from the other side) left the statement's
+    /// reduction with nowhere at all to be recorded — for the *ordinary* order of
+    /// events, since an AMMA statement for a year ended 30 June arrives in
+    /// spring. Generation now follows the transfer: the row is written against
+    /// the replacement parcel, which holds exactly those units under the source
+    /// parcel's own acquisition date.
     #[tokio::test]
-    async fn db_a_rollover_after_the_year_end_blocks_generation_with_the_reason() {
+    async fn db_a_rollover_after_the_year_end_generates_against_the_replacement() {
         use crate::entities::holding_account::{self, HoldingAccount};
         use crate::entities::sell::AllocationInput;
         use crate::entities::transfer::{self, TransferBody};
@@ -843,23 +1041,39 @@ mod tests {
         .await
         .unwrap();
 
-        let err = db_generate(&pool, 6, &GenerateBody::default())
-            .await
-            .unwrap_err();
-        assert!(
-            matches!(
-                &err,
-                GenerateError::Upsert(
-                    amit_adjustment::UpsertError::UnitsCarriedIntoReplacement { .. }
-                )
-            ),
-            "{err:?}"
-        );
-        let stored: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM amit_adjustments")
-            .fetch_one(&pool)
+        // The transfer-in Buy: transfer 1's replacement parcel.
+        let replacement: i64 = sqlx::query_scalar(
+            "SELECT id FROM trades WHERE transfer_id = 1 AND trade_type = 'Buy'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        let result = db_generate(&pool, 6, &GenerateBody::default())
             .await
             .unwrap();
-        assert_eq!(stored, 0);
+        assert_eq!(result.created.len(), 1);
+        assert_eq!(result.created[0].trade_id, replacement);
+        assert_eq!(result.created[0].quantity, dec("100"));
+        // The coverage figures still reconcile against the statement's units.
+        assert_eq!(result.units_adjusted, dec("100"));
+        assert_eq!(result.difference, Decimal::ZERO);
+        assert!(result.unattributed.is_empty());
+
+        // And the reduction reaches the units: this statement's per-unit figure
+        // is a cost-base *increase* (a negative adjustment) of 2.0257290076 over
+        // 100 units, so the replacement parcel's cost base is $1,000 plus
+        // $202.5729007600 — the reduction applies to the parcel the units are in
+        // now, which is the whole point.
+        let parcels = crate::domain::open_parcels::load(&mut pool.acquire().await.unwrap(), None)
+            .await
+            .unwrap();
+        let moved = parcels
+            .iter()
+            .find(|p| p.parcel.id == replacement)
+            .expect("the replacement parcel is open");
+        assert_eq!(moved.cost_base.amit_reduction, dec("-202.5729007600"));
+        assert_eq!(moved.cost_base.adjusted, dec("1202.5729007600"));
     }
 
     /// SCENARIOS F-16: a parcel bought on 30 June itself was held at the

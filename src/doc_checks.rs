@@ -150,9 +150,12 @@ fn amit_adjustment_generation_and_cross_check_documented() {
     // Each 422 refusal.
     assert!(API_MD.contains("**already has adjustments**"));
     assert!(API_MD.contains("**no parcels** of the statement's listing were open"));
-    // SCENARIOS F-04: that refusal names both ways to reach it, and points a
-    // closed holding at the hand-entered path rather than at missing trades.
-    assert!(API_MD.contains("**sold or transferred away during the year**"));
+    // SCENARIOS F-04: that refusal names every way to reach it, and points a
+    // closed holding at the hand-entered path rather than at missing trades —
+    // with the row's destination said for each (SCENARIOS N-06): the parcels the
+    // units came from for a sale, the replacement parcels for a move.
+    assert!(API_MD.contains("**sold during the year**"));
+    assert!(API_MD.contains("**transferred, exchanged or demerged away during the year**"));
     assert!(API_MD.contains("the normal path for the year of a sale"));
     // A split across the covered parcels is *not* a refusal (SCENARIOS
     // B-24): each parcel's stored as-acquired quantity is re-based into the
@@ -164,10 +167,14 @@ fn amit_adjustment_generation_and_cross_check_documented() {
         API_MD.contains("**another row already adjusts the same parcel on the same statement**")
     );
     // SCENARIOS F-17: and the rollover refusal, with the way round it and the
-    // disposals it deliberately does not reach.
+    // disposals it deliberately does not reach. The way round changed with
+    // SCENARIOS N-06: the row goes against the replacement parcel, which the
+    // per-account rule now accepts, and generation follows a transfer itself
+    // rather than refusing the whole run.
     assert!(API_MD.contains("has already carried the parcel's units into a replacement parcel**"));
-    assert!(API_MD.contains("delete the operation, enter the adjustment, then re-run it"));
-    assert!(API_MD.contains("has carried away since**"));
+    assert!(API_MD.contains("enter the rest **against the replacement parcel**"));
+    assert!(API_MD.contains("**A rollover after the year end is followed, not refused.**"));
+    assert!(API_MD.contains("`unattributed`"));
     assert!(API_MD.contains("**real disposals** whose gain the reduction does reach"));
     assert!(SCHEMA_MD.contains("UNIQUE (amma_statement_id, trade_id)"));
     // The cross-check report's own section, with each of its four checks.

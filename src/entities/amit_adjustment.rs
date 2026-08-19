@@ -1,4 +1,5 @@
 use crate::domain::cost_base::AmitReductionEvent;
+use crate::domain::rollover;
 use crate::entities::corporate_action;
 use crate::infra::decimal::{Money, parse_dec};
 use crate::infra::http::{self, ApiError, CrudEntity};
@@ -144,9 +145,37 @@ pub async fn db_upsert_on(
         return Err(UpsertError::ListingMismatch);
     }
     // A statement only ever adjusts parcels in its own holding account (the
-    // registry issues one AMMA statement per holder account).
+    // registry issues one AMMA statement per holder account) — with one
+    // exception, which is the whole answer to SCENARIOS N-06: where a rollover
+    // has since carried the statement's units into a **replacement parcel**,
+    // that parcel is where the reduction has to land, and it sits in whatever
+    // account the operation moved them to. An AMMA statement for a year ended
+    // 30 June arrives in August or September, so a transfer between the year end
+    // and data entry is the ordinary case; refusing it here (while F-17's
+    // `UnitsCarriedIntoReplacement` refuses the source parcel, correctly)
+    // left the statement's reduction with nowhere to go at all.
+    //
+    // The chain is followed, not just one step, so a holding moved twice is
+    // still reachable. The parcel's listing is already pinned to the
+    // statement's above, which is what keeps a demerger's *demerged* parcel —
+    // another listing, another trust — out of it.
     if trade_account_id != amma_account_id {
-        return Err(UpsertError::HoldingAccountMismatch);
+        let ancestors = rollover::source_ancestors(&mut *conn, adj.trade_id).await?;
+        let mut reachable = false;
+        for ancestor in ancestors {
+            let account: Option<i64> =
+                sqlx::query_scalar("SELECT holding_account_id FROM trades WHERE id = ?")
+                    .bind(ancestor)
+                    .fetch_optional(&mut *conn)
+                    .await?;
+            if account == Some(amma_account_id) {
+                reachable = true;
+                break;
+            }
+        }
+        if !reachable {
+            return Err(UpsertError::HoldingAccountMismatch);
+        }
     }
 
     let trade_qty: String = sqlx::query_scalar("SELECT quantity FROM trades WHERE id = ?")
@@ -294,8 +323,27 @@ pub fn reduction_for(
     acquired: chrono::NaiveDate,
     tax_year_end_date: chrono::NaiveDate,
 ) -> Decimal {
-    corporate_action::split_adjusted_quantity(quantity, splits, acquired, Some(tax_year_end_date))
-        * cost_base_adjustment
+    // The re-basing runs in whichever direction the two dates sit. Ordinarily
+    // the parcel predates the year end and its units are scaled *forward* into
+    // the year-end basis. A **rollover replacement** parcel can postdate it
+    // (SCENARIOS N-06: an AMMA statement arrives after a transfer has moved the
+    // units it covers, and the reduction belongs on the parcel now holding
+    // them), and then the parcel's own basis is the later one — a split between
+    // the year end and the operation date has already scaled it — so the
+    // quantity is converted *back* to the year-end basis instead. Multiplying
+    // by 1 in that case, which a one-directional window would do, would apply
+    // the statement's per-unit figure to post-split units.
+    let in_year_end_basis = if acquired <= tax_year_end_date {
+        corporate_action::split_adjusted_quantity(
+            quantity,
+            splits,
+            acquired,
+            Some(tax_year_end_date),
+        )
+    } else {
+        corporate_action::as_acquired_quantity(quantity, splits, tax_year_end_date, acquired)
+    };
+    in_year_end_basis * cost_base_adjustment
 }
 
 /// Every AMMA statement adjusting a purchase parcel, keyed by `trade_id` — the
@@ -426,10 +474,10 @@ impl From<UpsertError> for ApiError {
                     "a transfer, scrip-for-scrip exchange or demerger has carried this parcel's \
                      units into replacement parcel(s) {list}, which took their cost base with \
                      them — a reduction entered here would reach nothing, so at most {adjustable} \
-                     unit(s) of it can still be adjusted. Enter the statement's reduction before \
-                     the operation instead: delete the transfer/exchange/demerger, enter this \
-                     adjustment, then re-run it, so the replacement parcel carries the reduced \
-                     cost base forward"
+                     unit(s) of it can still be adjusted. Enter the rest against the replacement \
+                     parcel instead, where those units now are: that is accepted for a statement \
+                     of the account they came from, and generating the statement's set does it for \
+                     you"
                 ))
             }
             UpsertError::DuplicateParcel => ApiError::unprocessable(
@@ -1102,6 +1150,70 @@ mod tests {
         .unwrap();
     }
 
+    /// SCENARIOS N-06, the answer to the refusal below: the statement's units
+    /// are now in the replacement parcel, in **another holding account**, and
+    /// that is where its reduction belongs. Refusing it there (while F-17
+    /// refuses the source parcel) left an AMMA statement for the year before a
+    /// transfer recordable *nowhere* — the ordinary order of events, since a
+    /// statement for a year ended 30 June arrives in spring. A parcel in an
+    /// unrelated account is still refused: the rule is that the units trace back
+    /// to the statement's account, not that any account will do.
+    #[tokio::test]
+    async fn db_a_replacement_parcel_in_another_account_is_adjustable() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool, 1, "XASX", "VDHG").await;
+        insert_buy_trade(&pool, 1, 1, Decimal::from(100)).await;
+        insert_amma(&pool, 1, 1, "0.05".parse().unwrap()).await;
+        // The statement is account 1's; the transfer moves the units to 2.
+        let replacement = transfer_out(&pool, 1, Decimal::from(100)).await;
+
+        db_upsert(
+            &pool,
+            &AmitAdjustment {
+                id: 1,
+                amma_statement_id: 1,
+                trade_id: replacement,
+                quantity: Decimal::from(100),
+            },
+        )
+        .await
+        .unwrap();
+        // And it reaches the units: $10,010.945 initial cost less $0.05 × 100.
+        let parcels = crate::domain::open_parcels::load(&mut pool.acquire().await.unwrap(), None)
+            .await
+            .unwrap();
+        let moved = parcels
+            .iter()
+            .find(|p| p.parcel.id == replacement)
+            .expect("the replacement parcel is open");
+        assert_eq!(moved.cost_base.amit_reduction, Decimal::from(5));
+
+        // An unrelated parcel in account 2 — nothing to do with this statement's
+        // account — is still refused.
+        test_support::buy(50, 1)
+            .date(ymd(2024, 2, 1))
+            .qty(Decimal::from(10))
+            .price(Decimal::from(100))
+            .account(2)
+            .insert(&pool)
+            .await;
+        let err = db_upsert(
+            &pool,
+            &AmitAdjustment {
+                id: 2,
+                amma_statement_id: 1,
+                trade_id: 50,
+                quantity: Decimal::from(10),
+            },
+        )
+        .await
+        .expect_err("a parcel that never held this account's units");
+        assert!(
+            matches!(err, UpsertError::HoldingAccountMismatch),
+            "{err:?}"
+        );
+    }
+
     #[tokio::test]
     async fn api_rollover_replaced_parcel_returns_422_naming_the_replacement() {
         let pool = test_pool().await;
@@ -1127,8 +1239,13 @@ mod tests {
             "{detail}"
         );
         assert!(detail.contains("at most 0 unit(s)"), "{detail}");
+        // The recovery the message names changed with SCENARIOS N-06: the row
+        // now goes against the replacement parcel (which the account rule
+        // accepts, since the units trace back to the statement's account), and
+        // generating the statement's set does exactly that — rather than the old
+        // advice to delete the operation and redo it.
         assert!(
-            detail.contains("delete the transfer/exchange/demerger"),
+            detail.contains("against the replacement parcel instead"),
             "{detail}"
         );
         assert!(db_get(&pool, 1).await.unwrap().is_none());

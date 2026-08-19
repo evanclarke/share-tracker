@@ -276,6 +276,84 @@ async fn group_replacements(
     .await
 }
 
+/// The parcels a rollover group consumed (its disposal side).
+async fn group_sources(
+    conn: &mut sqlx::SqliteConnection,
+    column: &'static str,
+    group_id: i64,
+) -> Result<Vec<i64>, sqlx::Error> {
+    sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT DISTINCT pa.purchase_trade_id FROM parcel_allocations pa \
+         JOIN trades s ON s.id = pa.sale_trade_id \
+         WHERE s.{column} = ? AND s.trade_type = 'Sell' ORDER BY pa.purchase_trade_id"
+    )))
+    .bind(group_id)
+    .fetch_all(&mut *conn)
+    .await
+}
+
+/// The rollover group that created `parcel_id`, if it is a replacement parcel.
+/// At most one — a trade carries at most one provenance column.
+async fn group_creating(
+    conn: &mut sqlx::SqliteConnection,
+    parcel_id: i64,
+) -> Result<Option<(&'static str, i64)>, sqlx::Error> {
+    let row = sqlx::query(
+        "SELECT scrip_action_id, demerger_action_id, transfer_id FROM trades WHERE id = ?",
+    )
+    .bind(parcel_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    for column in PROVENANCE_COLUMNS {
+        if let Some(id) = row.try_get::<Option<i64>, _>(column)? {
+            return Ok(Some((column, id)));
+        }
+    }
+    Ok(None)
+}
+
+/// The mirror of [`replacement_descendants`]: every parcel whose units a
+/// rollover carried into `parcel_id`, directly or through a chain of them,
+/// ascending by id and excluding `parcel_id` itself. Empty when it is not a
+/// replacement parcel.
+///
+/// Same coarseness, for the same reason — where one operation moved several
+/// parcels at once, each of its replacements descends from all of that group's
+/// sources. `entities::amit_adjustment` uses it to answer "could this parcel be
+/// holding the units that statement's account held?", which is a reachability
+/// question, not a claim about which source parcel became which replacement.
+pub async fn source_ancestors(
+    conn: &mut sqlx::SqliteConnection,
+    parcel_id: i64,
+) -> Result<Vec<i64>, sqlx::Error> {
+    let mut seen = std::collections::HashSet::from([parcel_id]);
+    let mut frontier = vec![parcel_id];
+    let mut found = Vec::new();
+    for _ in 0..MAX_ROLLOVER_DEPTH {
+        let mut next = Vec::new();
+        for id in frontier {
+            let Some((column, group_id)) = group_creating(&mut *conn, id).await? else {
+                continue;
+            };
+            for candidate in group_sources(&mut *conn, column, group_id).await? {
+                if seen.insert(candidate) {
+                    found.push(candidate);
+                    next.push(candidate);
+                }
+            }
+        }
+        if next.is_empty() {
+            break;
+        }
+        frontier = next;
+    }
+    found.sort_unstable();
+    Ok(found)
+}
+
 /// Every parcel a rollover has carried `parcel_id`'s units into — directly, or
 /// through a chain of them — ascending by id, with `parcel_id` itself excluded.
 /// Empty when no rollover consumed it.
