@@ -188,7 +188,15 @@ amma_statements              Annual AMIT Member Annual (AMMA) statements
 ├── franking_credits                TEXT (decimal)
 ├── net_rent                        TEXT (decimal)
 ├── foreign_income                  TEXT (decimal)
-├── foreign_tax_credits             TEXT (decimal)
+├── foreign_tax_credits             TEXT (decimal)   Part C's FITO on foreign INCOME — claimable in full
+├── foreign_tax_credits_capital_gains
+│                                   TEXT (decimal, 0032, default '0')  Part C's FITO on the statement's
+│                                   CAPITAL GAINS, entered grossed up as the trustee reports it. The tax
+│                                   summary apportions it to the assessable part of those gains (Division
+│                                   115 halves it) before claiming — docs/ato/fito-capital-gains-
+│                                   apportionment.md. Additional to the line above, not a split of it, so
+│                                   an existing combined figure reads forward unchanged; 422 if stated
+│                                   with no CGT gains on the statement
 ├── other_income                    TEXT (decimal)
 ├── cgt_discount_gains              TEXT (decimal)
 ├── cgt_indexation_gains            TEXT (decimal)

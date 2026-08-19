@@ -245,6 +245,7 @@ function genericTable(rows, columns) {
 const AMMA_COMPONENTS = [
   'australian_interest_aud', 'australian_dividends_unfranked_aud', 'franked_dividends_aud',
   'franking_credits_aud', 'net_rent_aud', 'foreign_income_aud', 'foreign_tax_credits_aud',
+  'foreign_tax_credits_capital_gains_aud',
   'other_income_aud', 'cgt_discount_gains_aud', 'cgt_indexation_gains_aud', 'cgt_other_gains_aud',
   'capital_losses_applied_aud', 'tfn_withholding_tax_aud', 'tax_deferred_amount', 'tax_free_amount',
 ];

@@ -36,8 +36,28 @@ pub struct AmmaStatement {
     pub net_rent: Decimal,
     #[sqlx(try_from = "Money")]
     pub foreign_income: Decimal,
+    /// Part C's foreign income tax offset on foreign **income** — claimable in
+    /// full (subject to the year's A$1,000 de-minimis). Foreign tax paid on
+    /// the statement's foreign *capital gains* is the separate line below.
     #[sqlx(try_from = "Money")]
     pub foreign_tax_credits: Decimal,
+    /// Part C's foreign income tax offset applicable to the statement's
+    /// **capital gains**, as the trustee reports it: **grossed up**, not
+    /// reduced for any discount applied at trust level (the AMMA guidance
+    /// notes are explicit that FITO is not reduced there). Where only part of
+    /// a foreign capital gain is assessable — the Division 115 discount being
+    /// the ordinary case — the ATO requires the foreign tax to be apportioned
+    /// to the assessable part, and that reduction is the *investor's* step:
+    /// `reports::tax_summary` does it, over the three CGT gain figures below
+    /// (`docs/ato/fito-capital-gains-apportionment.md`, SCENARIOS M-12).
+    ///
+    /// Additional to [`Self::foreign_tax_credits`], not a split of it
+    /// (migration 0032 defaults it to `0`), because the two are separate Part
+    /// C lines claimed differently. A statement whose Part C reports one
+    /// combined figure needs its capital-gains portion moved across by hand —
+    /// nothing can infer the split from the total.
+    #[sqlx(try_from = "Money")]
+    pub foreign_tax_credits_capital_gains: Decimal,
     #[sqlx(try_from = "Money")]
     pub other_income: Decimal,
     #[sqlx(try_from = "Money")]
@@ -100,6 +120,8 @@ pub struct AmmaStatementBody {
     #[serde(default)]
     pub foreign_tax_credits: Decimal,
     #[serde(default)]
+    pub foreign_tax_credits_capital_gains: Decimal,
+    #[serde(default)]
     pub other_income: Decimal,
     #[serde(default)]
     pub cgt_discount_gains: Decimal,
@@ -136,6 +158,14 @@ pub enum UpsertError {
     /// year — a mid-year date would silently land in the wrong FY. Mapped to `422`.
     #[error("tax_year_end_date {0} is not a 30 June date")]
     NotFinancialYearEnd(NaiveDate),
+    /// A capital-gains foreign tax figure with no capital gains to apportion
+    /// it over. The amount is claimable only in the proportion of the gains
+    /// it was paid on that is assessable here
+    /// (`docs/ato/fito-capital-gains-apportionment.md`), so with no gains
+    /// stated there is no proportion to compute and the whole figure would
+    /// pass through unreduced. Mapped to `422`.
+    #[error("foreign_tax_credits_capital_gains {0} is stated with no capital gains")]
+    CapitalGainsTaxWithoutGains(Decimal),
     /// The statement's currency is not its listing's. An AMMA attributes the
     /// income and capital gains of *that listed trust*, and the tax summary
     /// converts every component at this currency's rate for the month of
@@ -158,6 +188,13 @@ impl From<UpsertError> for ApiError {
                  covers the Australian financial year ending 30 June, and reports \
                  attribute it to the year of that date"
             )),
+            UpsertError::CapitalGainsTaxWithoutGains(amount) => ApiError::unprocessable(format!(
+                "foreign_tax_credits_capital_gains of {amount} is stated but the statement reports \
+                 no capital gains — that figure is claimable only in proportion to the part of the \
+                 gains it was paid on that is assessable here, so it needs the CGT gain lines it \
+                 belongs to. Foreign tax on the statement's foreign *income* goes in \
+                 foreign_tax_credits instead"
+            )),
             UpsertError::CurrencyNotListings { statement, listing } => {
                 ApiError::unprocessable(format!(
                     "this AMMA statement is recorded in {statement} but its listing is quoted in \
@@ -176,7 +213,8 @@ impl CrudEntity for AmmaStatement {
     const TABLE: &'static str = "amma_statements";
     const COLUMNS: &'static str = "id, listing_id, tax_year_end_date, units_held, date_received, \
          australian_interest, australian_dividends_unfranked, franked_dividends, \
-         franking_credits, net_rent, foreign_income, foreign_tax_credits, other_income, \
+         franking_credits, net_rent, foreign_income, foreign_tax_credits, \
+         foreign_tax_credits_capital_gains, other_income, \
          cgt_discount_gains, cgt_indexation_gains, cgt_other_gains, capital_losses_applied, \
          tax_deferred_amount, tax_free_amount, cost_base_adjustment, tfn_withholding_tax, \
          currency, holding_account_id";
@@ -214,16 +252,30 @@ pub async fn db_upsert(pool: &SqlitePool, stmt: &AmmaStatement) -> Result<(), Up
     if (stmt.tax_year_end_date.month(), stmt.tax_year_end_date.day()) != (6, 30) {
         return Err(UpsertError::NotFinancialYearEnd(stmt.tax_year_end_date));
     }
+    // A capital-gains foreign tax figure needs the gains it was paid on: the
+    // tax summary apportions it over them (SCENARIOS M-12), and with none
+    // stated there is nothing to apportion — the figure would be claimed in
+    // full, which is exactly the over-claim the split exists to fix.
+    if stmt.foreign_tax_credits_capital_gains != Decimal::ZERO
+        && stmt.cgt_discount_gains == Decimal::ZERO
+        && stmt.cgt_indexation_gains == Decimal::ZERO
+        && stmt.cgt_other_gains == Decimal::ZERO
+    {
+        return Err(UpsertError::CapitalGainsTaxWithoutGains(
+            stmt.foreign_tax_credits_capital_gains,
+        ));
+    }
     let mut tx = pool.begin().await?;
     sqlx::query(
         "INSERT INTO amma_statements \
          (id, listing_id, tax_year_end_date, units_held, date_received, \
           australian_interest, australian_dividends_unfranked, franked_dividends, \
-          franking_credits, net_rent, foreign_income, foreign_tax_credits, other_income, \
+          franking_credits, net_rent, foreign_income, foreign_tax_credits, \
+         foreign_tax_credits_capital_gains, other_income, \
           cgt_discount_gains, cgt_indexation_gains, cgt_other_gains, capital_losses_applied, \
           tax_deferred_amount, tax_free_amount, cost_base_adjustment, tfn_withholding_tax, \
           currency, holding_account_id) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT(id) DO UPDATE SET \
              listing_id                      = excluded.listing_id, \
              tax_year_end_date               = excluded.tax_year_end_date, \
@@ -236,6 +288,7 @@ pub async fn db_upsert(pool: &SqlitePool, stmt: &AmmaStatement) -> Result<(), Up
              net_rent                        = excluded.net_rent, \
              foreign_income                  = excluded.foreign_income, \
              foreign_tax_credits             = excluded.foreign_tax_credits, \
+             foreign_tax_credits_capital_gains = excluded.foreign_tax_credits_capital_gains, \
              other_income                    = excluded.other_income, \
              cgt_discount_gains              = excluded.cgt_discount_gains, \
              cgt_indexation_gains            = excluded.cgt_indexation_gains, \
@@ -260,6 +313,7 @@ pub async fn db_upsert(pool: &SqlitePool, stmt: &AmmaStatement) -> Result<(), Up
     .bind(Money(stmt.net_rent))
     .bind(Money(stmt.foreign_income))
     .bind(Money(stmt.foreign_tax_credits))
+    .bind(Money(stmt.foreign_tax_credits_capital_gains))
     .bind(Money(stmt.other_income))
     .bind(Money(stmt.cgt_discount_gains))
     .bind(Money(stmt.cgt_indexation_gains))
@@ -310,6 +364,7 @@ async fn upsert(
         net_rent: body.net_rent,
         foreign_income: body.foreign_income,
         foreign_tax_credits: body.foreign_tax_credits,
+        foreign_tax_credits_capital_gains: body.foreign_tax_credits_capital_gains,
         other_income: body.other_income,
         cgt_discount_gains: body.cgt_discount_gains,
         cgt_indexation_gains: body.cgt_indexation_gains,

@@ -700,6 +700,11 @@ pub struct AmmaStatementRow {
     pub net_rent_aud: Decimal,
     pub foreign_income_aud: Decimal,
     pub foreign_tax_credits_aud: Decimal,
+    /// Part C's foreign tax on the statement's **capital gains**, as the
+    /// trustee reports it (grossed up). The [tax summary](tax_summary)
+    /// apportions it to the assessable part before claiming it — see there —
+    /// so this is the statement's figure, not the claimable one.
+    pub foreign_tax_credits_capital_gains_aud: Decimal,
     pub other_income_aud: Decimal,
     pub cgt_discount_gains_aud: Decimal,
     pub cgt_indexation_gains_aud: Decimal,
@@ -1035,7 +1040,8 @@ async fn push_amma_rows(
     let amma_rows = sqlx::query(
         "SELECT a.id, a.listing_id, a.tax_year_end_date, a.australian_interest, \
                 a.australian_dividends_unfranked, a.franked_dividends, a.franking_credits, \
-                a.net_rent, a.foreign_income, a.foreign_tax_credits, a.other_income, \
+                a.net_rent, a.foreign_income, a.foreign_tax_credits, \
+                a.foreign_tax_credits_capital_gains, a.other_income, \
                 a.cgt_discount_gains, a.cgt_indexation_gains, a.cgt_other_gains, \
                 a.capital_losses_applied, a.tax_deferred_amount, a.tax_free_amount, \
                 a.tfn_withholding_tax, a.currency \
@@ -1092,6 +1098,7 @@ fn amma_statement_row(
         net_rent_aud: aud("net_rent")?,
         foreign_income_aud: aud("foreign_income")?,
         foreign_tax_credits_aud: aud("foreign_tax_credits")?,
+        foreign_tax_credits_capital_gains_aud: aud("foreign_tax_credits_capital_gains")?,
         other_income_aud: aud("other_income")?,
         cgt_discount_gains_aud: aud("cgt_discount_gains")?,
         cgt_indexation_gains_aud: aud("cgt_indexation_gains")?,

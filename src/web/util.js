@@ -529,7 +529,8 @@ const COLUMN_KINDS = (function () {
     // summary reports the 50% of it deductible at D8. Both are money.
     'lic_capital_gain_amount', 'lic_capital_gain_deduction',
     'australian_interest', 'australian_dividends_unfranked', 'franked_dividends', 'net_rent',
-    'foreign_income', 'foreign_tax_credits', 'other_income', 'cgt_discount_gains',
+    'foreign_income', 'foreign_tax_credits', 'foreign_tax_credits_capital_gains',
+    'other_income', 'cgt_discount_gains',
     'cgt_indexation_gains', 'cgt_other_gains', 'capital_losses_applied', 'tax_deferred_amount',
     'tax_free_amount',
     // Report AUD aggregates (portfolio, open-parcels, unrealised, realised,

@@ -622,6 +622,7 @@ pub fn amma(id: i64, listing_id: i64) -> AmmaBuilder {
             net_rent: Decimal::ZERO,
             foreign_income: Decimal::ZERO,
             foreign_tax_credits: Decimal::ZERO,
+            foreign_tax_credits_capital_gains: Decimal::ZERO,
             other_income: Decimal::ZERO,
             cgt_discount_gains: Decimal::ZERO,
             cgt_indexation_gains: Decimal::ZERO,

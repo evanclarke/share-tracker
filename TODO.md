@@ -301,19 +301,21 @@ a unitholder of a … (AMIT). In such circumstances, when calculating your FITO,
 offset applicable to discountable capital gains' shown at Part C … must be reduced for discounted
 capital gains." The AMMA guidance notes confirm the trustee reports the **gross** foreign tax and
 the reduction is the investor's job — this system's job.)
-- [ ] Reproduced: an AMMA statement with `cgt_discount_gains: 5000` and `foreign_tax_credits: 1500`
+- [x] Reproduced: an AMMA statement with `cgt_discount_gains: 5000` and `foreign_tax_credits: 1500`
   reports `foreign_tax_offsets: 1000` and `foreign_tax_offset_excess: 500`. Apportioned to the
   assessable half, the claimable figure is A$750 — so the report's A$1,000 over-claims by A$250,
   and a smaller de-minimis-covered case over-claims by the full apportionment
-- [ ] The de-minimis cap bounds the damage at A$1,000 but does not remove it, and the excess figure
+- [x] The de-minimis cap bounds the damage at A$1,000 but does not remove it, and the excess figure
   the user is told they *may* claim with their own limit calculation is overstated by the whole
   un-apportioned amount
-- [ ] The blocker is the data model: `amma_statements.foreign_tax_credits` is one field for both
+- [x] The blocker is the data model: `amma_statements.foreign_tax_credits` is one field for both
   "foreign tax on foreign income" and "foreign tax on foreign capital gains", which the AMMA's own
   Part C reports as separate lines. The apportionment applies only to the second, so it cannot be
   computed from what is stored
 - [ ] The same is true of a *direct* foreign-taxed disposal: foreign tax paid on a capital gain the
-  taxpayer realises themselves has nowhere to be recorded at all
+  taxpayer realises themselves has nowhere to be recorded at all — **left open**, and narrower than
+  it looks: a foreign country rarely taxes a non-resident's gain on listed shares, and the AMIT
+  distribution path above is where a listed-share investor actually meets a foreign-taxed gain
 **Decision (2026-08-19, Evan): option (a) — split the field and compute the apportionment.**
 
 - [x] A model decision, two options:
@@ -324,11 +326,40 @@ the reduction is the investor's job — this system's job.)
   - **(b)** Documentation only: a Known-limitations entry stating that a `foreign_tax_credits`
     figure attributable to a discountable foreign capital gain must be entered already reduced, with
     the ATO citation, and the AMMA field hint saying so
-- [ ] Mirror the ATO page into `docs/ato/` with its source URL and retrieval date and index it in
+- [x] Mirror the ATO page into `docs/ato/` with its source URL and retrieval date and index it in
   `docs/ato/OVERVIEW.md` either way — nothing there covers the FITO apportionment rule today
   (`fito-limit.md` mirrors only the offset-limit page)
-- [ ] Tests: per the option — the apportioned offset computed, or `doc_checks.rs` for the entry
-- [ ] Docs sync: `docs/SCHEMA.md` + `config.js` if (a); `docs/API.md` Known limitations either way
+- [x] Tests: per the option — the apportioned offset computed, or `doc_checks.rs` for the entry
+- [x] Docs sync: `docs/SCHEMA.md` + `config.js` if (a); `docs/API.md` Known limitations either way
+
+**Resolution (2026-08-19): the AMMA's second foreign-tax line, and the apportionment computed.**
+
+New mirror `docs/ato/fito-capital-gains-apportionment.md` (QC 104349 *When a FITO applies*, the
+section this rests on, plus Examples 11 and 12), indexed in `docs/ato/OVERVIEW.md`.
+
+Migration `0032` adds `amma_statements.foreign_tax_credits_capital_gains` — Part C's *other*
+foreign-tax line — and re-creates the statement's two `*_row_history_*` triggers with it, per the
+audited-table maintenance rule. It is **additional** to `foreign_tax_credits` and defaults to `0`,
+so every existing row reports exactly what it does today: no migration can infer the split out of a
+combined figure, and guessing at one would silently move a live tax figure. Moving a statement's
+capital-gains portion across is a deliberate edit against its own Part C detail.
+
+`reports::tax_summary::apportion_capital_gains_foreign_tax` does the member's step the trustee
+deliberately leaves undone: `claimable = tax × (discount + indexation + other) ÷ (2 × discount +
+indexation + other)` — the discount component is reported net, so it is grossed up to the amount the
+tax was actually paid on. With only discount gains this is the halving the ATO describes; with a mix
+it splits across the three methods. `foreign_tax_offsets_cgt_discount_reduction` surfaces what was
+apportioned away (a new tax-summary line and CSV column), so the statement's Part C figure and the
+report's line reconcile instead of silently disagreeing. `amma::db_upsert` refuses a capital-gains
+tax figure with **no** capital gains behind it: there would be no proportion to apportion by, so the
+whole amount would be claimed in full.
+
+Tests: `db_amma_capital_gains_foreign_tax_is_apportioned_to_the_assessable_part` (discount-only, a
+three-method mix, and foreign *income* tax left untouched) and
+`api_capital_gains_foreign_tax_needs_capital_gains`. Docs: the new mirror + OVERVIEW,
+`docs/API.md` AMMA statements (the two lines) + the FITO cap paragraph + the 422 catalogue,
+`docs/SCHEMA.md`, the AMMA form field with its hint in `config.js`, the annual tax report's AMMA
+breakdown, and `util.js`'s money-column list.
 
 ## The two documented FX simplifications are silent where their sibling is refused (SCENARIOS M-09, M-10)
 (SCENARIOS.md section M verification pass, 2026-08-19. Both simplifications are honestly documented

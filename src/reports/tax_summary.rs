@@ -90,6 +90,14 @@ pub struct TaxYearSummary {
     /// `foreign_tax_offsets`). Claimable only to the extent the taxpayer's own
     /// offset-limit calculation supports it.
     pub foreign_tax_offset_excess: Decimal,
+    /// **Informational**: how much of the year's AMMA capital-gains foreign
+    /// tax was apportioned away before the de-minimis test, because only part
+    /// of the gains it was paid on is assessable here (the Division 115
+    /// discount). Surfaced so the reduction is visible rather than showing up
+    /// only as a smaller offset — the trustee's Part C figure and this
+    /// report's line would otherwise disagree with nothing to explain it. See
+    /// `docs/ato/fito-capital-gains-apportionment.md`.
+    pub foreign_tax_offsets_cgt_discount_reduction: Decimal,
     /// Total TFN withholding tax (income + AMMA + ESS discounts).
     pub tfn_withholding_tax: Decimal,
     /// Assessable employee-share-scheme discount (Item 12 label B): the sum of
@@ -206,6 +214,7 @@ pub(crate) const CSV_HEADER: &[&str] = &[
     "franking_credits_denied",
     "foreign_tax_offsets",
     "foreign_tax_offset_excess",
+    "foreign_tax_offsets_cgt_discount_reduction",
     "tfn_withholding_tax",
     "ess_discount_assessable",
     "ess_taxed_upfront_reduction",
@@ -253,6 +262,7 @@ pub(crate) const CSV_ATO_LABELS: &[&str] = &[
     "",                        // franking_credits_denied (informational)
     "20O",                     // foreign_tax_offsets
     "",                        // foreign_tax_offset_excess (informational)
+    "",                        // foreign_tax_offsets_cgt_discount_reduction (informational)
     "10M / 11V / 13R / 12C",   // tfn_withholding_tax
     "12B",                     // ess_discount_assessable
     "",                        // ess_taxed_upfront_reduction (inside 12B vs 12D)
@@ -293,6 +303,7 @@ fn zero_summary(tax_year: i32) -> TaxYearSummary {
         franking_credits_denied: Decimal::ZERO,
         foreign_tax_offsets: Decimal::ZERO,
         foreign_tax_offset_excess: Decimal::ZERO,
+        foreign_tax_offsets_cgt_discount_reduction: Decimal::ZERO,
         tfn_withholding_tax: Decimal::ZERO,
         ess_discount_assessable: Decimal::ZERO,
         ess_taxed_upfront_reduction: Decimal::ZERO,
@@ -323,6 +334,47 @@ fn ess_reduction_cap_aud() -> Decimal {
 /// paid in a year is claimable without working out the offset limit.
 fn fito_de_minimis_aud() -> Decimal {
     Decimal::from(1000)
+}
+
+/// Apportion an AMMA statement's **capital-gains** foreign tax to the part of
+/// those gains that is assessable here, returning `(claimable, reduced_by)`.
+///
+/// "If only part of a foreign capital gain is assessable in Australia (for
+/// example, the gain is subject to the discount capital gains concessions in
+/// Division 115 …) the foreign tax paid on the gain must be apportioned
+/// accordingly" — and for an AMIT distribution specifically, the Part C figure
+/// "must be reduced for discounted capital gains"
+/// (`docs/ato/fito-capital-gains-apportionment.md`, QC 104349). The trustee
+/// reports the **grossed-up** tax deliberately (the AMMA guidance notes: FITO
+/// is not reduced for a discount applied at trust level), so the reduction is
+/// the member's step.
+///
+/// The statement reports its discount-method component **net** of the
+/// discount, so the gains the tax was paid on total `2 × discount +
+/// indexation + other` while the assessable amount is `discount + indexation +
+/// other`:
+///
+/// ```text
+/// claimable = tax × (discount + indexation + other) ÷ (2 × discount + indexation + other)
+/// ```
+///
+/// With only discount gains this is the halving the ATO describes; with a mix
+/// it splits across the three methods. Nil tax — or nil gains, which
+/// `amma::db_upsert` refuses to pair with a capital-gains tax figure — leaves
+/// nothing to apportion.
+fn apportion_capital_gains_foreign_tax(
+    foreign_tax: Decimal,
+    discount_gains: Decimal,
+    indexation_gains: Decimal,
+    other_gains: Decimal,
+) -> (Decimal, Decimal) {
+    let assessable = discount_gains + indexation_gains + other_gains;
+    let grossed_up = discount_gains * Decimal::TWO + indexation_gains + other_gains;
+    if foreign_tax.is_zero() || grossed_up.is_zero() {
+        return (foreign_tax, Decimal::ZERO);
+    }
+    let claimable = foreign_tax * assessable / grossed_up;
+    (claimable, foreign_tax - claimable)
 }
 
 /// Read a TEXT decimal column from `row` and convert it to AUD via the
@@ -461,6 +513,7 @@ pub(crate) async fn db_tax_summary_on(
     let amma_rows = sqlx::query(
         "SELECT tax_year_end_date, australian_interest, australian_dividends_unfranked, \
          franked_dividends, franking_credits, net_rent, foreign_income, foreign_tax_credits, \
+         foreign_tax_credits_capital_gains, \
          other_income, cgt_discount_gains, cgt_indexation_gains, cgt_other_gains, \
          capital_losses_applied, tfn_withholding_tax, currency \
          FROM amma_statements",
@@ -607,6 +660,8 @@ pub(crate) async fn db_tax_summary_on(
         let rent = aud_field(&fx, row, "net_rent", &currency, d)?;
         let foreign_inc = aud_field(&fx, row, "foreign_income", &currency, d)?;
         let foreign_tax = aud_field(&fx, row, "foreign_tax_credits", &currency, d)?;
+        let foreign_tax_cg =
+            aud_field(&fx, row, "foreign_tax_credits_capital_gains", &currency, d)?;
         let other = aud_field(&fx, row, "other_income", &currency, d)?;
         let cgt_disc = aud_field(&fx, row, "cgt_discount_gains", &currency, d)?;
         let cgt_idx = aud_field(&fx, row, "cgt_indexation_gains", &currency, d)?;
@@ -629,6 +684,16 @@ pub(crate) async fn db_tax_summary_on(
         s.amma_capital_losses_applied += cap_losses;
         s.franking_credits += fc;
         s.foreign_tax_offsets += foreign_tax;
+        // Foreign tax on the statement's capital gains is claimable only to
+        // the extent the gains it was paid on are assessable here — the
+        // Division 115 discount being the ordinary case
+        // (`docs/ato/fito-capital-gains-apportionment.md`, SCENARIOS M-12).
+        // The trustee reports it grossed up on purpose, so this reduction is
+        // the member's.
+        let (claimable, reduced) =
+            apportion_capital_gains_foreign_tax(foreign_tax_cg, cgt_disc, cgt_idx, cgt_other);
+        s.foreign_tax_offsets += claimable;
+        s.foreign_tax_offsets_cgt_discount_reduction += reduced;
         s.tfn_withholding_tax += tfn_wht;
         // AMMA credits count toward the small-shareholder threshold (in
         // `attached_credits_by_year`, via `db_franked_dividends`) but are
@@ -2918,6 +2983,98 @@ mod tests {
             csv,
             CSV_HEADER.join(",") + "\n" + &CSV_ATO_LABELS.join(",") + "\n"
         );
+    }
+
+    /// Foreign tax paid on a foreign **capital gain** is claimable only in
+    /// the proportion of that gain which is assessable here: the Division 115
+    /// discount halves it (`docs/ato/fito-capital-gains-apportionment.md`,
+    /// QC 104349; ATO ID 2010/175). The trustee reports the figure grossed up
+    /// on purpose — the AMMA guidance notes say FITO is not reduced for a
+    /// discount applied at trust level — so the reduction is the member's, and
+    /// before this the whole figure went to the FITO line (SCENARIOS M-12).
+    #[tokio::test]
+    async fn db_amma_capital_gains_foreign_tax_is_apportioned_to_the_assessable_part() {
+        // Only discount-method gains: the ATO's own case, and a halving.
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        let mut a = make_amma(1, 1, ymd(2024, 6, 30));
+        a.cgt_discount_gains = Decimal::from(5000);
+        a.foreign_tax_credits_capital_gains = Decimal::from(1500);
+        amma::db_upsert(&pool, &a).await.unwrap();
+
+        let year = &db_tax_summary(&pool).await.unwrap()[0];
+        // 1500 × 5000 / 10000 = 750, not 1500 — and under the de-minimis, so
+        // the cap is not what is doing the work here.
+        assert_eq!(year.foreign_tax_offsets, Decimal::from(750));
+        assert_eq!(
+            year.foreign_tax_offsets_cgt_discount_reduction,
+            Decimal::from(750)
+        );
+        assert_eq!(year.foreign_tax_offset_excess, Decimal::ZERO);
+
+        // A mix of methods apportions across all three: assessable
+        // 5000 + 1000 + 2000 = 8000 of a grossed-up 10000 + 1000 + 2000 =
+        // 13000, so 1300 × 8/13 = 800.
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        let mut a = make_amma(1, 1, ymd(2024, 6, 30));
+        a.cgt_discount_gains = Decimal::from(5000);
+        a.cgt_indexation_gains = Decimal::from(1000);
+        a.cgt_other_gains = Decimal::from(2000);
+        a.foreign_tax_credits_capital_gains = Decimal::from(1300);
+        amma::db_upsert(&pool, &a).await.unwrap();
+        let year = &db_tax_summary(&pool).await.unwrap()[0];
+        assert_eq!(year.foreign_tax_offsets, Decimal::from(800));
+        assert_eq!(
+            year.foreign_tax_offsets_cgt_discount_reduction,
+            Decimal::from(500)
+        );
+
+        // Foreign tax on foreign *income* is untouched by any of this: it is
+        // its own Part C line and is claimable in full.
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        let mut a = make_amma(1, 1, ymd(2024, 6, 30));
+        a.foreign_income = Decimal::from(3000);
+        a.foreign_tax_credits = Decimal::from(450);
+        a.cgt_discount_gains = Decimal::from(5000);
+        amma::db_upsert(&pool, &a).await.unwrap();
+        let year = &db_tax_summary(&pool).await.unwrap()[0];
+        assert_eq!(year.foreign_tax_offsets, Decimal::from(450));
+        assert_eq!(
+            year.foreign_tax_offsets_cgt_discount_reduction,
+            Decimal::ZERO
+        );
+    }
+
+    /// A capital-gains foreign tax figure with no capital gains behind it has
+    /// no proportion to be apportioned by, so it would be claimed in full —
+    /// the over-claim the split exists to fix. Refused at write time.
+    #[tokio::test]
+    async fn api_capital_gains_foreign_tax_needs_capital_gains() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        let c = ApiClient::full(&pool);
+        let body = |gains: &str| {
+            serde_json::json!({
+                "listing_id": 1,
+                "tax_year_end_date": "2024-06-30",
+                "units_held": "100",
+                "date_received": "2024-08-15",
+                "foreign_tax_credits_capital_gains": "150",
+                "cgt_discount_gains": gains,
+            })
+        };
+        let resp = c.put("/amma_statements/1", &body("0")).await;
+        let (status, detail) = resp.status_and_body();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(detail.contains("no capital gains"), "{detail}");
+        // With gains stated it goes through and is apportioned.
+        c.put("/amma_statements/1", &body("1000"))
+            .await
+            .expect_status(StatusCode::NO_CONTENT);
+        let year = &db_tax_summary(&pool).await.unwrap()[0];
+        assert_eq!(year.foreign_tax_offsets, Decimal::from(75));
     }
 
     /// A non-AUD income row whose month has no imported ATO rate blocks every
