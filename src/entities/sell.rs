@@ -157,6 +157,11 @@ pub enum SellError {
     /// the sale date.
     #[error("a core trade figure was rejected: {0}")]
     Amounts(#[source] trade::AmountsError),
+    /// The Sell's currency is not its listing's — the same rule
+    /// `trade::UpsertError::CurrencyNotListings` applies to a parcel, for the
+    /// same reason: `average_price` is the price of that listed security.
+    #[error("the Sell is in {sale} but its listing is quoted in {listing}")]
+    CurrencyNotListings { sale: String, listing: String },
     /// An allocation's `quantity_allocated` is zero or negative. A negative
     /// allocation would pass both the sum check and the per-parcel capacity
     /// check while quietly increasing another parcel's capacity (e.g. −5 on
@@ -220,6 +225,12 @@ impl From<SellError> for ApiError {
                 ApiError::unprocessable(trade::spot_fx_rate_detail(&detail))
             }
             SellError::Amounts(detail) => ApiError::unprocessable(trade::amounts_detail(&detail)),
+            SellError::CurrencyNotListings { sale, listing } => ApiError::unprocessable(format!(
+                "this Sell is recorded in {sale} but its listing is quoted in {listing} — the \
+                 price you sold at and the listed price are the same money, so enter the Sell in \
+                 {listing} (a contract note in another currency is converted before entry, or the \
+                 wrong listing was picked)"
+            )),
             SellError::AllocationNotPositive => ApiError::unprocessable(
                 "each parcel allocation must be for a positive quantity — a zero or negative \
                  allocation would quietly shift capacity between parcels",
@@ -518,7 +529,6 @@ pub(crate) async fn upsert_sell_in_tx(
     // Sell whose amounts actually convert.
     trade::validate_spot_fx_rate(&body.currency, body.spot_fx_rate)
         .map_err(SellError::SpotFxRate)?;
-
     // Upsert the Sell trade row.
     sqlx::query(
         "INSERT INTO trades \
@@ -574,6 +584,20 @@ pub(crate) async fn upsert_sell_in_tx(
     .bind(worthless_action_id)
     .execute(&mut *tx)
     .await?;
+
+    // The Sell's currency must be the listing's, exactly as a parcel's must:
+    // its `average_price` is the price of that listed security, so the
+    // proceeds and the listed price are one money (SCENARIOS M-08). Checked
+    // after the write, like the trade path's twin, so an unrecognised currency
+    // code meets its own foreign-key rejection first.
+    if let Some(listing) =
+        trade::listing_currency_mismatch(&mut *tx, body.listing_id, &body.currency).await?
+    {
+        return Err(SellError::CurrencyNotListings {
+            sale: body.currency.clone(),
+            listing,
+        });
+    }
 
     // Replace this sale's allocations wholesale.
     sqlx::query("DELETE FROM parcel_allocations WHERE sale_trade_id = ?")
@@ -1758,12 +1782,14 @@ mod tests {
     #[tokio::test]
     async fn api_sell_spot_fx_rate_persists_and_aud_is_422() {
         let pool = test_pool().await;
-        insert_listing(&pool, 1).await;
+        // A USD-quoted listing: both its parcel and its Sell are recorded in
+        // the listing's own currency (`SellError::CurrencyNotListings`).
+        test_support::listing(1)
+            .mic("XNYS")
+            .currency("USD")
+            .insert(&pool)
+            .await;
         insert_buy(&pool, 1, 1, Decimal::from(100)).await;
-        sqlx::query("UPDATE trades SET currency = 'USD' WHERE id = 1")
-            .execute(&pool)
-            .await
-            .unwrap();
         let put = |pool: SqlitePool, currency: &'static str| async move {
             let body = serde_json::json!({
                 "date": "2024-06-03",

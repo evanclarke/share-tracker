@@ -136,6 +136,16 @@ pub enum UpsertError {
     /// year — a mid-year date would silently land in the wrong FY. Mapped to `422`.
     #[error("tax_year_end_date {0} is not a 30 June date")]
     NotFinancialYearEnd(NaiveDate),
+    /// The statement's currency is not its listing's. An AMMA attributes the
+    /// income and capital gains of *that listed trust*, and the tax summary
+    /// converts every component at this currency's rate for the month of
+    /// `tax_year_end_date` — so a statement in another currency reports a
+    /// fund's year in money the fund does not pay. The rule
+    /// [`ess_statement`](crate::entities::ess_statement) applies to a
+    /// statement's per-share market value and
+    /// [`trade`](crate::entities::trade) to a parcel's price. Mapped to `422`.
+    #[error("the AMMA statement is in {statement} but its listing is quoted in {listing}")]
+    CurrencyNotListings { statement: String, listing: String },
     #[error("AMMA statement write failed: {0}")]
     Db(#[from] sqlx::Error),
 }
@@ -148,6 +158,14 @@ impl From<UpsertError> for ApiError {
                  covers the Australian financial year ending 30 June, and reports \
                  attribute it to the year of that date"
             )),
+            UpsertError::CurrencyNotListings { statement, listing } => {
+                ApiError::unprocessable(format!(
+                    "this AMMA statement is recorded in {statement} but its listing is quoted in \
+                     {listing} — the statement attributes that fund's own year, so enter it in \
+                     {listing} (a statement in another currency is converted before entry, or the \
+                     wrong listing was picked)"
+                ))
+            }
             UpsertError::Db(err) => err.into(),
         }
     }
@@ -196,6 +214,7 @@ pub async fn db_upsert(pool: &SqlitePool, stmt: &AmmaStatement) -> Result<(), Up
     if (stmt.tax_year_end_date.month(), stmt.tax_year_end_date.day()) != (6, 30) {
         return Err(UpsertError::NotFinancialYearEnd(stmt.tax_year_end_date));
     }
+    let mut tx = pool.begin().await?;
     sqlx::query(
         "INSERT INTO amma_statements \
          (id, listing_id, tax_year_end_date, units_held, date_received, \
@@ -252,8 +271,24 @@ pub async fn db_upsert(pool: &SqlitePool, stmt: &AmmaStatement) -> Result<(), Up
     .bind(Money(stmt.tfn_withholding_tax))
     .bind(&stmt.currency)
     .bind(stmt.holding_account_id)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+
+    // The statement's currency must be the listing's, as a trade's must
+    // (SCENARIOS M-08). Checked after the write, like the trade path's twin,
+    // so an unrecognised currency code meets its own foreign-key rejection
+    // first.
+    if let Some(listing) =
+        crate::entities::trade::listing_currency_mismatch(&mut tx, stmt.listing_id, &stmt.currency)
+            .await?
+    {
+        return Err(UpsertError::CurrencyNotListings {
+            statement: stmt.currency.clone(),
+            listing,
+        });
+    }
+
+    tx.commit().await?;
     Ok(())
 }
 
@@ -511,5 +546,50 @@ mod tests {
             got.cost_base_adjustment,
             "0.001234567890".parse::<Decimal>().unwrap()
         );
+    }
+
+    /// An AMMA statement is recorded in its listing's own currency (SCENARIOS
+    /// M-08): it attributes *that fund's* year, and the tax summary converts
+    /// every component at this currency's rate for the month of
+    /// `tax_year_end_date` — so a statement in another currency reports the
+    /// fund's year in money the fund does not pay. The rule the trade path
+    /// applies to a parcel's price, and the ESS path to a per-share value.
+    #[tokio::test]
+    async fn api_amma_currency_must_be_the_listings() {
+        let pool = test_pool().await;
+        test_support::listing(1)
+            .mic("XNYS")
+            .ticker("VTS")
+            .name("VTS")
+            .currency("USD")
+            .amit(true)
+            .insert(&pool)
+            .await;
+        let body = |currency: &str| {
+            serde_json::json!({
+                "listing_id": 1,
+                "tax_year_end_date": "2024-06-30",
+                "units_held": "100",
+                "date_received": "2024-08-15",
+                "currency": currency,
+            })
+        };
+        let resp = client(&pool).put("/amma_statements/1", &body("AUD")).await;
+        let (status, detail) = resp.status_and_body();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            detail.contains("recorded in AUD") && detail.contains("quoted in USD"),
+            "the refusal names both currencies: {detail}"
+        );
+        assert!(
+            db_get(&pool, 1).await.unwrap().is_none(),
+            "nothing persisted"
+        );
+
+        // In the listing's own currency it goes through.
+        client(&pool)
+            .put("/amma_statements/1", &body("USD"))
+            .await
+            .expect_status(StatusCode::NO_CONTENT);
     }
 }

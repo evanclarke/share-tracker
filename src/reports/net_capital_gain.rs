@@ -1159,6 +1159,18 @@ mod tests {
             .await;
     }
 
+    /// A USD-quoted listing: a trade and an AMMA statement are both recorded
+    /// in their listing's currency (`trade::UpsertError::CurrencyNotListings`).
+    async fn insert_usd_listing(pool: &SqlitePool, id: i64, ticker: &str) {
+        test_support::listing(id)
+            .mic("XNYS")
+            .ticker(ticker)
+            .name(ticker)
+            .currency("USD")
+            .insert(pool)
+            .await;
+    }
+
     async fn insert_trade(
         pool: &SqlitePool,
         id: i64,
@@ -1911,7 +1923,7 @@ mod tests {
         let pool = test_pool().await;
         // USD AMMA discount gain net US$50 with A$1 = 0.50 USD (Jun 2024).
         // AUD net = 100, gross ×2 = 200, NCG = 100.
-        insert_listing(&pool, 1, "VAF").await;
+        insert_usd_listing(&pool, 1, "VAF").await;
         rba_fx_rate::db_import_rate(&pool, "USD", "2024-06", "0.50".parse().unwrap())
             .await
             .unwrap();
@@ -1929,7 +1941,7 @@ mod tests {
     #[tokio::test]
     async fn db_amma_non_aud_without_rate_fails_loudly() {
         let pool = test_pool().await;
-        insert_listing(&pool, 1, "VAF").await;
+        insert_usd_listing(&pool, 1, "VAF").await;
         let mut a = make_amma(1, 1, NaiveDate::from_ymd_opt(2024, 6, 30).unwrap());
         a.currency = "USD".to_string();
         a.cgt_discount_gains = Decimal::from(50);

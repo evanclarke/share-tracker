@@ -170,6 +170,14 @@ pub enum UpsertError {
         payment_currency: String,
         parcel_currency: String,
     },
+    /// The trade's currency is not its listing's. `average_price` is the
+    /// price of that listed security, so the two are the same money — the
+    /// rule [`ess_statement`](crate::entities::ess_statement) applies to a
+    /// statement's per-share market value and the
+    /// [DRP reinvest](crate::entities::drp_reinvestment) path to a
+    /// distribution's cash. Mapped to 422.
+    #[error("the trade is in {trade} but its listing is quoted in {listing}")]
+    CurrencyNotListings { trade: String, listing: String },
     /// A degenerate core figure was rejected (see [`check_amounts`]):
     /// non-positive quantity or FX rate, negative price/brokerage/GST, a
     /// brokerage currency differing from the trade's, or a settlement before
@@ -201,6 +209,34 @@ struct ExistingTrade {
 /// edit may not shrink a Buy/DRP's quantity below what its dependants rely on
 /// — the quantity already allocated to Sells, or any linked AMIT adjustment's
 /// covered quantity.
+/// The listing's own currency when it differs from `currency`, else `None` —
+/// the shared half of the rule both write paths enforce (SCENARIOS M-08).
+///
+/// A trade's `average_price` **is** the listed security's price, so the trade
+/// and the listing are quoting the same money: a Buy of a US-quoted share
+/// recorded in AUD divides an AUD price by a USD rate in every cost-base
+/// report, and its closing prices — collected from the exchange in the
+/// listing's currency — value it against a parcel costed in another. The same
+/// argument [`ess_statement`] makes about `market_value_per_share` and the
+/// [DRP reinvest][drp] path makes about a distribution's cash.
+///
+/// An unknown `listing_id` returns `None`: it falls through to the foreign-key
+/// rejection, which names the missing row better than a currency message could.
+///
+/// [`ess_statement`]: crate::entities::ess_statement
+/// [drp]: crate::entities::drp_reinvestment
+pub(crate) async fn listing_currency_mismatch(
+    conn: &mut sqlx::SqliteConnection,
+    listing_id: i64,
+    currency: &str,
+) -> Result<Option<String>, sqlx::Error> {
+    let listing: Option<String> = sqlx::query_scalar("SELECT currency FROM listings WHERE id = ?")
+        .bind(listing_id)
+        .fetch_optional(conn)
+        .await?;
+    Ok(listing.filter(|l| l != currency))
+}
+
 pub async fn db_upsert(pool: &SqlitePool, trade: &Trade) -> Result<(), UpsertError> {
     // Degenerate figures (zero/negative quantity, negative costs, …) corrupt
     // every downstream report without failing anything — rejected before
@@ -463,6 +499,21 @@ pub async fn db_upsert(pool: &SqlitePool, trade: &Trade) -> Result<(), UpsertErr
     .execute(&mut *tx)
     .await?;
 
+    // The trade's currency must be the listing's: `average_price` is the price
+    // of that listed security, so the two are one money (SCENARIOS M-08).
+    // Checked *after* the write, like the return-of-capital rule below, so an
+    // unrecognised currency code still meets its own foreign-key rejection
+    // first — "no such currency" is the better answer to `ZZZ` than "not the
+    // listing's".
+    if let Some(listing) =
+        listing_currency_mismatch(&mut tx, trade.listing_id, &trade.currency).await?
+    {
+        return Err(UpsertError::CurrencyNotListings {
+            trade: trade.currency.clone(),
+            listing,
+        });
+    }
+
     // A return of capital on this listing reduces the parcel's cost base in
     // the *parcel's* own currency, so a Buy/DRP recorded in another one is a
     // state the cost-base reports refuse to compute over. This is the parcel
@@ -588,6 +639,14 @@ impl From<UpsertError> for ApiError {
                 ApiError::unprocessable(spot_fx_rate_detail(&detail))
             }
             UpsertError::Amounts(detail) => ApiError::unprocessable(amounts_detail(&detail)),
+            UpsertError::CurrencyNotListings { trade, listing } => {
+                ApiError::unprocessable(format!(
+                    "this trade is recorded in {trade} but its listing is quoted in {listing} — \
+                     the price you paid and the listed price are the same money, so enter the \
+                     trade in {listing} (a contract note in another currency is converted before \
+                     entry, or the wrong listing was picked)"
+                ))
+            }
             // Names the payment and both currencies, so the disagreeing row is
             // findable without opening the listing's corporate actions.
             UpsertError::PaymentCurrencyMismatch {

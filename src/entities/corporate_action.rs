@@ -2166,6 +2166,25 @@ mod tests {
         api_put_expecting(&pool, payment("AUD"), StatusCode::NO_CONTENT).await;
     }
 
+    /// Re-denominate a parcel the way a **rollover** does: a scrip-for-scrip
+    /// or demerger replacement Buy carries its consumed parcel's currency and
+    /// FX rate onto the new listing, so the carried cost base is unchanged by
+    /// the substitution (`domain::rollover::insert_replacement_buy`, which
+    /// writes the row itself). That is the one writer that can leave a parcel
+    /// in a currency other than its listing's — `trade::db_upsert` refuses the
+    /// pair (SCENARIOS M-08) — and it is exactly the state this check exists
+    /// for, so the tests reproduce it directly rather than driving a whole
+    /// exchange.
+    async fn carried_over_from_a_rollover(pool: &SqlitePool, trade_id: i64, currency: &str) {
+        sqlx::query("UPDATE trades SET currency = ?, brokerage_currency = ? WHERE id = ?")
+            .bind(currency)
+            .bind(currency)
+            .bind(trade_id)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
     /// E-39: the same trap without a typo — a scrip-for-scrip replacement
     /// parcel keeps the *original's* currency (docs/API.md), so a USD-listed
     /// security can hold AUD parcels, and recording that listing's return of
@@ -2185,9 +2204,9 @@ mod tests {
         // carried onto a USD-listed security.
         test_support::buy(1, 1)
             .date(d(2023, 1, 10))
-            .currency("AUD")
             .insert(&pool)
             .await;
+        carried_over_from_a_rollover(&pool, 1, "AUD").await;
 
         let resp = client(&pool)
             .put(
@@ -2222,9 +2241,9 @@ mod tests {
             .await;
         test_support::buy(2, 1)
             .date(d(2025, 1, 5))
-            .currency("USD")
             .insert(&pool)
             .await;
+        carried_over_from_a_rollover(&pool, 2, "USD").await;
 
         // Dated before the USD parcel was acquired: it was never entitled.
         api_put_expecting(

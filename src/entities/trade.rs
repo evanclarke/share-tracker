@@ -18,6 +18,8 @@ mod settlement;
 #[cfg(test)]
 pub use db::UpsertError;
 pub use db::{DeleteOutcome, db_delete, db_get, db_list, db_upsert};
+// The Sell path shares this DB-level rule, as it shares `check_amounts`.
+pub(crate) use db::listing_currency_mismatch;
 pub use http::router;
 pub use model::{Trade, TradeBody, TradeType};
 
@@ -55,6 +57,18 @@ mod tests {
         test_support::listing(1)
             .ticker("VAS")
             .name("Vanguard Australian Shares ETF")
+            .insert(pool)
+            .await;
+    }
+
+    /// A USD-quoted listing, for the cases about a foreign trade: a trade is
+    /// recorded in its listing's currency (`UpsertError::CurrencyNotListings`).
+    async fn insert_usd_listing(pool: &SqlitePool) {
+        test_support::listing(1)
+            .mic("XNYS")
+            .ticker("VTS")
+            .name("Vanguard US Total Market Shares Index ETF")
+            .currency("USD")
             .insert(pool)
             .await;
     }
@@ -182,8 +196,20 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("FOREIGN KEY"), "{err}");
 
-        // A seeded digital-token code (BTC) is a recognised currency and is accepted.
+        // A seeded digital-token code (BTC) is a recognised currency and is
+        // accepted — on a listing quoted in it, since a trade is recorded in
+        // its listing's currency (`UpsertError::CurrencyNotListings`). An
+        // ETH/BTC pair is the ordinary case.
+        test_support::listing(2)
+            .crypto()
+            .ticker("ETH")
+            .name("Ether")
+            .currency("BTC")
+            .insert(&pool)
+            .await;
         let mut btc = buy_trade();
+        btc.id = 2;
+        btc.listing_id = 2;
         btc.currency = "BTC".to_string();
         btc.brokerage_currency = "BTC".to_string();
         db_upsert(&pool, &btc).await.unwrap();
@@ -1590,7 +1616,7 @@ mod tests {
     #[tokio::test]
     async fn api_brokerage_in_another_currency_than_the_trade_returns_422() {
         let pool = test_pool().await;
-        insert_test_listing(&pool).await;
+        insert_usd_listing(&pool).await;
         let trade = |total: serde_json::Value| {
             serde_json::json!({
                 "trade_type": "Buy",
@@ -1646,6 +1672,13 @@ mod tests {
     /// reaches it is refused here too — otherwise the hole the
     /// corporate-action write path closes simply reopens from the parcel side,
     /// and every cost-base report of the listing dies at read time.
+    ///
+    /// The reachable ordering is the payment first: with no parcels yet there
+    /// is nothing for the corporate-action side to disagree with, so a payment
+    /// in a currency other than the listing's is accepted — and every parcel
+    /// entered afterwards is in the listing's currency
+    /// (`UpsertError::CurrencyNotListings`), so this check is what catches the
+    /// pair.
     #[tokio::test]
     async fn api_buy_in_another_currency_than_a_payment_on_its_listing_returns_422() {
         use crate::entities::corporate_action::{ActionKind, CorporateAction};
@@ -1659,7 +1692,7 @@ mod tests {
                 date: ymd(2024, 5, 1),
                 kind: ActionKind::ReturnOfCapital {
                     amount_per_unit: dec("0.50"),
-                    currency: "AUD".to_string(),
+                    currency: "USD".to_string(),
                     record_date: None,
                 },
             },
@@ -1667,41 +1700,94 @@ mod tests {
         .await
         .unwrap();
 
-        let buy = |date: &str, currency: &str| {
+        let buy = |date: &str| {
             serde_json::json!({
                 "trade_type": "Buy",
                 "date": date,
                 "listing_id": 1,
                 "average_price": "10",
                 "quantity": "100",
-                "currency": currency,
+                "currency": "AUD",
                 "brokerage": "0",
                 "gst_on_brokerage": "0",
-                "brokerage_currency": currency,
-                "fx_rate": if currency == "AUD" { "1" } else { "1.5" }
+                "brokerage_currency": "AUD",
+                "fx_rate": "1"
             })
         };
         // Acquired before the payment, so the payment reaches it: refused,
         // naming the payment and both currencies.
-        let (status, detail) = put_trade_json(&pool, 1, buy("2024-01-15", "USD")).await;
+        let (status, detail) = put_trade_json(&pool, 1, buy("2024-01-15")).await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         assert!(
-            detail.contains("held in USD")
+            detail.contains("held in AUD")
                 && detail.contains("2024-05-01")
-                && detail.contains("recorded in AUD"),
+                && detail.contains("recorded in USD"),
             "detail must name the payment and both currencies: {detail}"
         );
         assert!(
             db_get(&pool, 1).await.unwrap().is_none(),
             "nothing persisted"
         );
-        // The same parcel in the payment's currency is fine …
-        let (status, _) = put_trade_json(&pool, 1, buy("2024-01-15", "AUD")).await;
+        // A parcel acquired *after* the payment is fine: it was never entitled
+        // to it, so nothing ever nets the two currencies.
+        let (status, _) = put_trade_json(&pool, 2, buy("2024-06-01")).await;
         assert_eq!(status, StatusCode::NO_CONTENT);
-        // … and so is a USD parcel acquired *after* the payment: it was never
-        // entitled to it, so nothing ever nets the two currencies.
-        let (status, _) = put_trade_json(&pool, 2, buy("2024-06-01", "USD")).await;
+    }
+
+    /// A trade is recorded in its listing's own currency (SCENARIOS M-08).
+    /// `average_price` **is** the price of that listed security, so the two
+    /// are the same money — the rule ESS statements apply to a per-share
+    /// market value, inheritances to a parcel's cost base, and the DRP
+    /// reinvest path to a distribution's cash. Without it a US-quoted share
+    /// bought "in AUD" divides an AUD price by a USD rate in every cost-base
+    /// report, while its closing prices — collected from the exchange in the
+    /// listing's currency — value it against a parcel costed in another.
+    #[tokio::test]
+    async fn api_trade_currency_must_be_the_listings() {
+        let pool = test_pool().await;
+        insert_usd_listing(&pool).await;
+        let buy = |currency: &str| {
+            serde_json::json!({
+                "trade_type": "Buy", "date": "2024-01-15", "listing_id": 1,
+                "average_price": "100", "quantity": "10", "currency": currency,
+                "brokerage": "0", "gst_on_brokerage": "0",
+                "brokerage_currency": currency, "fx_rate": "1",
+            })
+        };
+        let (status, detail) = put_trade_json(&pool, 1, buy("AUD")).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            detail.contains("recorded in AUD") && detail.contains("quoted in USD"),
+            "the refusal names both currencies: {detail}"
+        );
+        assert!(db_get(&pool, 1).await.unwrap().is_none(), "nothing written");
+
+        // In the listing's own currency it goes through.
+        let (status, _) = put_trade_json(&pool, 1, buy("USD")).await;
         assert_eq!(status, StatusCode::NO_CONTENT);
+
+        // A Sell of the same parcel meets the same rule on its own path.
+        let sell = |currency: &str| {
+            serde_json::json!({
+                "date": "2024-06-03", "listing_id": 1, "average_price": "150",
+                "quantity": "10", "currency": currency, "brokerage": "0",
+                "gst_on_brokerage": "0", "brokerage_currency": currency,
+                "fx_rate": "1",
+                "allocations": [{ "purchase_trade_id": 1, "quantity_allocated": "10" }],
+            })
+        };
+        let full = ApiClient::full(&pool);
+        let resp = full.put("/sells/2", &sell("AUD")).await;
+        let (status, detail) = resp.status_and_body();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            detail.contains("recorded in AUD") && detail.contains("quoted in USD"),
+            "the Sell refusal names both currencies: {detail}"
+        );
+        assert!(db_get(&pool, 2).await.unwrap().is_none(), "nothing written");
+        full.put("/sells/2", &sell("USD"))
+            .await
+            .expect_status(StatusCode::NO_CONTENT);
     }
 
     /// The boolean column is CHECK-constrained to 0/1 in the database.
@@ -1722,7 +1808,7 @@ mod tests {
     #[tokio::test]
     async fn db_spot_fx_rate_round_trips_with_precision() {
         let pool = test_pool().await;
-        insert_test_listing(&pool).await;
+        insert_usd_listing(&pool).await;
         test_support::buy(1, 1)
             .currency("USD")
             .spot_fx_rate("0.643215987".parse().unwrap())
@@ -1777,7 +1863,14 @@ mod tests {
     #[tokio::test]
     async fn api_put_trade_with_spot_fx_rate_persists_and_aud_is_422() {
         let pool = test_pool().await;
-        insert_test_listing(&pool).await;
+        // One listing per currency: a trade is recorded in its listing's own
+        // currency, so the USD and AUD halves need a listing each.
+        insert_usd_listing(&pool).await;
+        test_support::listing(2)
+            .ticker("VAS")
+            .name("Vanguard Australian Shares ETF")
+            .insert(&pool)
+            .await;
         let put = |pool: SqlitePool, body: serde_json::Value| async move {
             client(&pool).put("/trades/1", &body).await
         };
@@ -1800,7 +1893,7 @@ mod tests {
         let resp = put(
             pool.clone(),
             serde_json::json!({
-                "trade_type": "Buy", "date": "2024-01-15", "listing_id": 1,
+                "trade_type": "Buy", "date": "2024-01-15", "listing_id": 2,
                 "average_price": "100", "quantity": "10", "currency": "AUD",
                 "brokerage": "0", "brokerage_currency": "AUD",
                 "fx_rate": "1", "spot_fx_rate": "0.6543",

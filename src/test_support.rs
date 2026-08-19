@@ -467,6 +467,7 @@ pub fn trade(id: i64, listing_id: i64, trade_type: trade::TradeType) -> TradeBui
 pub struct TradeBuilder {
     t: trade::Trade,
     settlement_overridden: bool,
+    currency_overridden: bool,
 }
 
 impl TradeBuilder {
@@ -505,6 +506,7 @@ impl TradeBuilder {
                 inheritance_id: None,
             },
             settlement_overridden: false,
+            currency_overridden: false,
         }
     }
 
@@ -540,6 +542,7 @@ impl TradeBuilder {
     pub fn currency(mut self, currency: &str) -> Self {
         self.t.currency = currency.to_string();
         self.t.brokerage_currency = currency.to_string();
+        self.currency_overridden = true;
         self
     }
 
@@ -580,7 +583,24 @@ impl TradeBuilder {
         self.t
     }
 
-    pub async fn insert(self, pool: &SqlitePool) {
+    /// Inserts through `trade::db_upsert`, so every write-time invariant
+    /// still applies. A test that never named a currency takes the
+    /// **listing's**, which is what `db_upsert` requires of a real trade
+    /// (SCENARIOS M-08): the default AUD would otherwise refuse every
+    /// fixture built on a foreign listing, and spelling the currency out at
+    /// each call site would only repeat what the listing already says.
+    pub async fn insert(mut self, pool: &SqlitePool) {
+        if !self.currency_overridden
+            && let Some(listing) =
+                sqlx::query_scalar::<_, String>("SELECT currency FROM listings WHERE id = ?")
+                    .bind(self.t.listing_id)
+                    .fetch_optional(pool)
+                    .await
+                    .unwrap()
+        {
+            self.t.currency = listing.clone();
+            self.t.brokerage_currency = listing;
+        }
         trade::db_upsert(pool, &self.t).await.unwrap();
     }
 }
@@ -632,6 +652,11 @@ impl AmmaBuilder {
         self
     }
 
+    pub fn currency(mut self, currency: &str) -> Self {
+        self.a.currency = currency.to_string();
+        self
+    }
+
     /// Escape hatch for fields without a dedicated setter.
     pub fn with(mut self, f: impl FnOnce(&mut amma::AmmaStatement)) -> Self {
         f(&mut self.a);
@@ -642,7 +667,24 @@ impl AmmaBuilder {
         self.a
     }
 
-    pub async fn insert(self, pool: &SqlitePool) {
+    /// Inserts through `amma::db_upsert`, so every write-time invariant still
+    /// applies. A statement still carrying the builder's default AUD takes the
+    /// **listing's** currency instead, which is what `db_upsert` requires
+    /// (SCENARIOS M-08) — the same defaulting [`TradeBuilder::insert`] does,
+    /// and for the same reason. A test that wants to *check* the refusal names
+    /// a currency explicitly (which is then left alone) or calls `db_upsert`
+    /// directly.
+    pub async fn insert(mut self, pool: &SqlitePool) {
+        if self.a.currency == "AUD"
+            && let Some(listing) =
+                sqlx::query_scalar::<_, String>("SELECT currency FROM listings WHERE id = ?")
+                    .bind(self.a.listing_id)
+                    .fetch_optional(pool)
+                    .await
+                    .unwrap()
+        {
+            self.a.currency = listing;
+        }
         amma::db_upsert(pool, &self.a).await.unwrap();
     }
 }

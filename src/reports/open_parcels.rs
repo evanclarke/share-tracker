@@ -157,6 +157,18 @@ mod tests {
             .await;
     }
 
+    /// A listing quoted in a foreign currency — its trades must be recorded in
+    /// the same one (`trade::UpsertError::CurrencyNotListings`).
+    async fn insert_listing_in(pool: &SqlitePool, id: i64, ticker: &str, currency: &str) {
+        test_support::listing(id)
+            .mic("XNYS")
+            .ticker(ticker)
+            .name(ticker)
+            .currency(currency)
+            .insert(pool)
+            .await;
+    }
+
     async fn insert_buy(
         pool: &SqlitePool,
         id: i64,
@@ -403,7 +415,7 @@ mod tests {
     async fn db_non_aud_parcel_converted_to_aud() {
         let pool = test_pool().await;
         let buy_date = NaiveDate::from_ymd_opt(2024, 1, 10).unwrap();
-        insert_listing(&pool, 1, "VTS").await;
+        insert_listing_in(&pool, 1, "VTS", "USD").await;
         // A$1 = 0.50 USD for the buy month → AUD = USD / 0.50.
         crate::entities::rba_fx_rate::db_import_rate(
             &pool,
@@ -449,7 +461,7 @@ mod tests {
     async fn db_foreign_fee_recorded_in_the_trade_currency_costs_at_its_own_scale() {
         let pool = test_pool().await;
         let buy_date = NaiveDate::from_ymd_opt(2024, 1, 10).unwrap();
-        insert_listing(&pool, 1, "VTS").await;
+        insert_listing_in(&pool, 1, "VTS", "USD").await;
         crate::entities::rba_fx_rate::db_import_rate(
             &pool,
             "USD",
@@ -482,7 +494,7 @@ mod tests {
     async fn db_spot_fx_rate_wins_over_monthly_rate() {
         let pool = test_pool().await;
         let buy_date = NaiveDate::from_ymd_opt(2024, 1, 10).unwrap();
-        insert_listing(&pool, 1, "VTS").await;
+        insert_listing_in(&pool, 1, "VTS", "USD").await;
         // A monthly rate exists (0.50), but the parcel carries a deliberate
         // transaction-date spot rate (0.40) that must win (QC 18020):
         // USD 1000 / 0.40 = AUD 2500, not / 0.50 = 2000.
@@ -909,8 +921,8 @@ mod tests {
     async fn db_scrip_replacement_parcel_reports_carried_date_and_cost_base() {
         let pool = test_pool().await;
         let buy_date = NaiveDate::from_ymd_opt(2024, 1, 10).unwrap();
-        insert_listing(&pool, 1, "OLD").await;
-        insert_listing(&pool, 2, "NEW").await;
+        insert_listing_in(&pool, 1, "OLD", "USD").await;
+        insert_listing_in(&pool, 2, "NEW", "USD").await;
         // A$1 = 0.50 USD in the buy month, 0.80 in the exchange month.
         for (month, rate) in [("2024-01", "0.50"), ("2024-07", "0.80")] {
             crate::entities::rba_fx_rate::db_import_rate(

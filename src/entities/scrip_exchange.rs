@@ -435,6 +435,18 @@ mod tests {
             .await;
     }
 
+    /// A listing quoted in a foreign currency: a trade is recorded in its
+    /// listing's own currency (`trade::UpsertError::CurrencyNotListings`).
+    async fn insert_listing_in(pool: &SqlitePool, id: i64, ticker: &str, currency: &str) {
+        test_support::listing(id)
+            .mic("XNYS")
+            .ticker(ticker)
+            .name(ticker)
+            .currency(currency)
+            .insert(pool)
+            .await;
+    }
+
     async fn insert_buy(
         pool: &SqlitePool,
         id: i64,
@@ -1126,8 +1138,8 @@ mod tests {
     #[tokio::test]
     async fn exchange_carries_spot_fx_rate_onto_replacement() {
         let pool = test_pool().await;
-        insert_listing(&pool, 1, "OLD").await;
-        insert_listing(&pool, 2, "NEW").await;
+        insert_listing_in(&pool, 1, "OLD", "USD").await;
+        insert_listing_in(&pool, 2, "NEW", "USD").await;
         test_support::buy(1, 1)
             .date(d(2020, 10, 1))
             .settlement(d(2020, 10, 1))

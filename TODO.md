@@ -179,7 +179,7 @@ not the listing's, each for the same reason: ESS statements — "the per-share m
 listed price are the same money" — inheritances, `ReturnOfCapital` corporate actions, and a DRP
 reinvestment's distribution. The trade, whose `average_price` *is* the listed price and whose
 currency drives the cost base, has no such check.)
-- [ ] Reproduced: `PUT /trades/1` with `currency: "USD"` on an AUD-quoted ASX listing → `204`. The
+- [x] Reproduced: `PUT /trades/1` with `currency: "USD"` on an AUD-quoted ASX listing → `204`. The
   parcel is then costed by dividing an AUD price by a USD rate. `PUT /income/1`, `PUT
   /amma_statements/1` and `PUT /investment_expenses/1` accept the same mismatch
 **Decision (2026-08-19, Evan): trades and AMMA statements take the rule; income and investment
@@ -195,13 +195,42 @@ expenses stay free.**
     conceivable
   - **Investment expenses** are the weakest and probably should stay free: an Australian adviser's
     AUD fee attributed to a US holding is the ordinary case
-- [ ] Note this has a data question behind it: the rule must be checked against the live database
-  before it lands, since an existing row it would now refuse cannot be edited afterwards
-- [ ] Fix: the refusal on whichever set (a) chooses, in each entity's `db_upsert`, naming both
+- [x] Note this has a data question behind it: the rule must be checked against the live database
+  before it lands, since an existing row it would now refuse cannot be edited afterwards — checked
+  read-only against `share-tracker.db`: **zero** trades, AMMA statements or income rows disagree
+  with their listing, so nothing existing is refused
+- [x] Fix: the refusal on whichever set (a) chooses, in each entity's `db_upsert`, naming both
   currencies as the ESS and inheritance refusals do
-- [ ] Tests: per entity, the mismatch refused naming both currencies; a matching currency accepted;
+- [x] Tests: per entity, the mismatch refused naming both currencies; a matching currency accepted;
   an AUD listing with an AUD row unaffected
-- [ ] Docs sync: `docs/API.md` per entity + the 422 catalogue
+- [x] Docs sync: `docs/API.md` per entity + the 422 catalogue
+
+**Resolution (2026-08-19): trades, Sells and AMMA statements must be in their listing's currency;
+income and investment expenses stay free.**
+
+`trade::db::listing_currency_mismatch` is the shared half — the listing's currency when it differs,
+else `None` — called by `trade::db_upsert`, `sell::db_upsert` and `amma::db_upsert`, each mapping it
+to its own `CurrencyNotListings` variant and a `422` naming both currencies and what to do (enter
+the contract note / statement converted, or pick the right listing). Checked **after** the write
+inside the same transaction, like the return-of-capital rule beside it, so an unrecognised currency
+code still meets its own foreign-key rejection first — "no such currency" is a better answer to
+`ZZZ` than "not the listing's".
+
+The one state that legitimately disagrees is not enterable: a rollover replacement parcel
+(scrip-for-scrip, demerger, transfer) carries its consumed parcel's currency onto the new listing so
+the carried AUD cost base survives the substitution, and `domain::rollover` writes those rows itself
+rather than through `db_upsert`. That is exactly the state the return-of-capital currency check
+exists for, so `corporate_action`'s two tests now construct it the way a rollover does.
+
+`TradeBuilder::insert` and `AmmaBuilder::insert` default an unnamed currency to the **listing's**,
+so a fixture built on a foreign listing is correct by construction rather than by repeating at each
+call site what the listing already says; twelve fixtures that had put a foreign trade on an AUD
+listing were given a listing quoted to match.
+
+Tests: `api_trade_currency_must_be_the_listings` (the trade and the Sell paths, refusal naming both
+currencies, nothing written, the matching currency accepted) and
+`api_amma_currency_must_be_the_listings`. Docs: `docs/API.md` Trades (with the rollover exception
+stated), AMMA statements, and the 422 catalogue.
 
 ## A stored RBA rate can never be corrected, and a differing feed value is silently discarded (SCENARIOS M-13)
 (SCENARIOS.md section M verification pass, 2026-08-19. `rba_fx_rates` is written only by the import,

@@ -1429,7 +1429,13 @@ mod tests {
     #[tokio::test]
     async fn db_usd_amma_converted_to_aud_via_ato_rate() {
         let pool = test_pool().await;
-        insert_listing(&pool, 1).await;
+        // A USD-quoted listing: an AMMA statement is recorded in its listing's
+        // currency (`amma::UpsertError::CurrencyNotListings`).
+        test_support::listing(1)
+            .mic("XNYS")
+            .currency("USD")
+            .insert(&pool)
+            .await;
         // Rate for the month of tax_year_end_date (June 2024).
         rba_fx_rate::db_import_rate(&pool, "USD", "2024-06", "0.50".parse().unwrap())
             .await

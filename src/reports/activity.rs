@@ -878,6 +878,18 @@ mod tests {
             .await;
     }
 
+    /// A listing quoted in a foreign currency: a trade is recorded in its
+    /// listing's own currency (`trade::UpsertError::CurrencyNotListings`).
+    async fn insert_listing_in(pool: &SqlitePool, id: i64, ticker: &str, currency: &str) {
+        test_support::listing(id)
+            .mic("XNYS")
+            .ticker(ticker)
+            .name(ticker)
+            .currency(currency)
+            .insert(pool)
+            .await;
+    }
+
     async fn events(pool: &SqlitePool, listing_id: i64) -> Vec<ActivityEvent> {
         db_activity(pool, listing_id).await.unwrap().unwrap().0
     }
@@ -1028,7 +1040,7 @@ mod tests {
     #[tokio::test]
     async fn db_non_aud_trade_amount_converted_to_aud() {
         let pool = test_pool().await;
-        insert_listing(&pool, 1, "ICE").await;
+        insert_listing_in(&pool, 1, "ICE", "USD").await;
         test_support::buy(1, 1)
             .qty(dec("10"))
             .price(dec("150"))
