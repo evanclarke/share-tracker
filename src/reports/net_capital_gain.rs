@@ -28,6 +28,11 @@
 //!  4. Net capital gain = remaining non-discountable gain + 50% of the remaining
 //!     discount-eligible gain. Any unused loss is carried forward into the next
 //!     year in the series.
+//!
+//! The series is one record per year with something to report: every year with
+//! recorded activity, plus every quiet year up to the current one that carries
+//! a capital loss forward (label 18V is reported until the loss is used, not
+//! only in years with a CGT event — see [`net_years`]).
 
 use crate::domain::cost_base::{self, ParcelRow};
 use crate::domain::tax_year::tax_year_for;
@@ -645,7 +650,7 @@ pub async fn db_net_capital_gain(
             .push(r);
     }
 
-    let mut years = net_years(buckets, opening);
+    let mut years = net_years(buckets, opening, current_tax_year());
     for year in &mut years {
         year.disposals = disposals_by_year.remove(&year.tax_year).unwrap_or_default();
     }
@@ -734,22 +739,59 @@ async fn gross_buckets(
     Ok(buckets)
 }
 
+/// The financial year in progress — [`net_years`]'s `through` bound for the
+/// two report paths (the multi-year report and the annual tax report's CGT
+/// summary). The FY bucketing is [`tax_year_for`]'s, never re-derived.
+fn current_tax_year() -> i32 {
+    tax_year_for(crate::infra::date::today())
+}
+
 /// Steps 3 and 4: walk the years in order, applying losses ATO-optimally and
 /// chaining unused net capital losses forward — a year's leftover loss
 /// becomes the next year's brought-forward balance (losses carry forward
 /// indefinitely). The chain starts from `brought_forward`, the entered
 /// opening carried-forward loss (pre-system loss years) in `cgt_settings`.
+///
+/// **A quiet year that carries a loss balance still gets a row.** Label 18V
+/// (*net capital losses carried forward to later income years*) is reported
+/// **every** year until the loss is used, not only in years with a CGT event
+/// (`docs/ato/capital-gains-question-18.md`, step 11 / Kathleen's Example 6 —
+/// the unused loss is carried forward with no gain to report it against), so
+/// a year with no activity of its own but a non-zero brought-forward balance
+/// is emitted with zero gains, zero current-year losses, and the balance on
+/// both the brought-forward and carried-forward lines. A year with neither
+/// activity nor a balance is still absent: the series stays sparse, an
+/// activity list plus the years that actually owe an 18V figure.
+///
+/// `through` is the last year such a filler row may be emitted for — the
+/// financial year *in progress* at the callers (`tax_year_for(today())`),
+/// since that is the last year for which a return could be being prepared
+/// and there is nothing beyond it to report. It bounds only the filler: a
+/// year present in `buckets` is always emitted, however it is dated. The
+/// series still *starts* at the earliest year in `buckets`, or at `through`
+/// itself when there are none — an opening loss entered in `cgt_settings` is
+/// a pre-system balance attributed to no year, so with no recorded facts at
+/// all the only year that can carry it is the current one.
 fn net_years(
-    buckets: HashMap<i32, GrossBuckets>,
+    mut buckets: HashMap<i32, GrossBuckets>,
     mut brought_forward: Decimal,
+    through: i32,
 ) -> Vec<NetCapitalGainYear> {
-    let mut years: Vec<(i32, GrossBuckets)> = buckets.into_iter().collect();
-    years.sort_by_key(|(tax_year, _)| *tax_year);
+    let first = buckets.keys().copied().min().unwrap_or(through);
+    let mut years: Vec<i32> = buckets.keys().copied().chain(first..=through).collect();
+    years.sort_unstable();
+    years.dedup();
 
     let two = Decimal::from(2);
     years
         .into_iter()
-        .map(|(tax_year, b)| {
+        .filter_map(|tax_year| {
+            let b = match buckets.remove(&tax_year) {
+                Some(b) => b,
+                // A quiet year: reported only while it carries a balance.
+                None if brought_forward != Decimal::ZERO => GrossBuckets::default(),
+                None => return None,
+            };
             // Apply losses (this year's + brought forward — both offset gains before
             // the discount) to non-discountable gains first, then to discount-eligible
             // gains (taxpayer-favourable: the discount falls on the largest remainder).
@@ -784,7 +826,7 @@ fn net_years(
                 disposals: Vec::new(),
             };
             brought_forward = carried_forward;
-            year
+            Some(year)
         })
         .collect()
 }
@@ -831,10 +873,13 @@ pub(crate) struct CgtSummaryYear {
     pub taxpayer_basis: String,
 }
 
-/// [`CgtSummaryYear`] for one tax year — `None` when the year has no
-/// recorded gain/loss activity at all (matches [`NetCapitalGainYear`]'s own
-/// behaviour of only emitting a row for years with something to report; an
-/// out-of-range or otherwise empty year has nothing to show). Runs the whole
+/// [`CgtSummaryYear`] for one tax year — `None` when the year has neither
+/// recorded gain/loss activity nor a capital loss brought forward into it
+/// (matches [`NetCapitalGainYear`]'s own behaviour of only emitting a row for
+/// years with something to report; an out-of-range or otherwise empty year
+/// has nothing to show). A *quiet* year that carries a loss balance does
+/// answer `Some`, all zeros but for the brought-forward/carried-forward pair,
+/// so the archived tax document still prints that year's label 18V. Runs the whole
 /// loss chain from the first recorded year — the carried-forward balance can
 /// only be computed by walking every prior year in order — then picks out
 /// the requested one, the same full-history computation
@@ -850,7 +895,7 @@ pub(crate) async fn db_cgt_summary_year(
         .map(|(y, b)| (*y, b.amma_discount_grossed_up))
         .collect();
     let opening = crate::entities::cgt_settings::db_opening_capital_loss(&mut *conn).await?;
-    let years = net_years(buckets, opening);
+    let years = net_years(buckets, opening, current_tax_year());
     Ok(years.into_iter().find(|y| y.tax_year == tax_year).map(|y| {
         let amma = amma_grossed_up
             .get(&tax_year)
@@ -1131,8 +1176,12 @@ async fn what_if_handler(
             .expect("the disposal year was ensured in the buckets")
     };
     let years = vec![
-        year_row(net_years(without, opening), "without"),
-        year_row(net_years(with, opening), "with"),
+        // The disposal year bounds the walk: the what-if answers for that year
+        // alone, so the series need not run past it (the quiet-year filler
+        // rows before it chain the balance through unchanged, exactly as the
+        // report's own walk does, and are then discarded).
+        year_row(net_years(without, opening, tax_year), "without"),
+        year_row(net_years(with, opening, tax_year), "with"),
     ];
 
     Ok(Json(WhatIfResponse {
@@ -1201,6 +1250,35 @@ mod tests {
         qty: Decimal,
     ) {
         test_support::amit_adjustment(pool, id, amma_id, trade_id, qty).await;
+    }
+
+    /// The tax years the report emitted, in order — the series a test asserts
+    /// the *shape* of (an activity year, plus every quiet year carrying a loss
+    /// balance through to the current financial year).
+    fn tax_years(rows: &[NetCapitalGainYear]) -> Vec<i32> {
+        rows.iter().map(|y| y.tax_year).collect()
+    }
+
+    /// The one row for `fy`, panicking with the whole series when it's absent.
+    fn row_for(rows: &[NetCapitalGainYear], fy: i32) -> &NetCapitalGainYear {
+        rows.iter()
+            .find(|y| y.tax_year == fy)
+            .unwrap_or_else(|| panic!("no FY{fy} row in {:?}", tax_years(rows)))
+    }
+
+    /// A quiet year's row: no activity of its own, the balance held on both
+    /// the brought-forward and carried-forward lines.
+    fn assert_quiet_year(row: &NetCapitalGainYear, balance: Decimal) {
+        assert_eq!(row.discount_eligible_gains, Decimal::ZERO);
+        assert_eq!(row.other_gains, Decimal::ZERO);
+        assert_eq!(row.capital_losses, Decimal::ZERO);
+        assert_eq!(row.net_discount_eligible_gain, Decimal::ZERO);
+        assert_eq!(row.net_other_gain, Decimal::ZERO);
+        assert_eq!(row.cgt_discount, Decimal::ZERO);
+        assert_eq!(row.net_capital_gain, Decimal::ZERO);
+        assert_eq!(row.capital_loss_brought_forward, balance);
+        assert_eq!(row.capital_loss_carried_forward, balance);
+        assert!(row.disposals.is_empty());
     }
 
     fn make_amma(id: i64, listing_id: i64, year_end: NaiveDate) -> amma::AmmaStatement {
@@ -1469,12 +1547,20 @@ mod tests {
         allocate(&pool, 2, 4, 3, Decimal::from(100)).await;
 
         let r = db_net_capital_gain(&pool).await.unwrap();
-        assert_eq!(r.len(), 1);
-        let y = &r[0];
+        // FY2025's activity, then a filler row per quiet year still carrying
+        // the 200 balance, through to the financial year in progress.
+        assert_eq!(
+            tax_years(&r),
+            (2025..=current_tax_year()).collect::<Vec<_>>()
+        );
+        let y = row_for(&r, 2025);
         assert_eq!(y.capital_losses, Decimal::from(700));
         assert_eq!(y.net_discount_eligible_gain, Decimal::ZERO);
         assert_eq!(y.net_capital_gain, Decimal::ZERO);
         assert_eq!(y.capital_loss_carried_forward, Decimal::from(200));
+        for quiet in r.iter().filter(|y| y.tax_year > 2025) {
+            assert_quiet_year(quiet, Decimal::from(200));
+        }
     }
 
     #[tokio::test]
@@ -1529,21 +1615,26 @@ mod tests {
         allocate(&pool, 2, 4, 3, Decimal::from(100)).await;
 
         let r = db_net_capital_gain(&pool).await.unwrap();
-        assert_eq!(r.len(), 2);
+        // FY2025 has no activity of its own, but it carries the FY2024 loss:
+        // it gets its own row between the two active years, and the series
+        // stops at FY2026, which uses the balance up.
+        assert_eq!(tax_years(&r), vec![2024, 2025, 2026]);
         // FY2024: the loss year.
-        assert_eq!(r[0].tax_year, 2024);
-        assert_eq!(r[0].capital_losses, Decimal::from(300));
-        assert_eq!(r[0].capital_loss_brought_forward, Decimal::ZERO);
-        assert_eq!(r[0].net_capital_gain, Decimal::ZERO);
-        assert_eq!(r[0].capital_loss_carried_forward, Decimal::from(300));
+        let loss_year = row_for(&r, 2024);
+        assert_eq!(loss_year.capital_losses, Decimal::from(300));
+        assert_eq!(loss_year.capital_loss_brought_forward, Decimal::ZERO);
+        assert_eq!(loss_year.net_capital_gain, Decimal::ZERO);
+        assert_eq!(loss_year.capital_loss_carried_forward, Decimal::from(300));
+        // FY2025: the quiet year, reporting the balance it holds.
+        assert_quiet_year(row_for(&r, 2025), Decimal::from(300));
         // FY2026: the chained loss offsets the gain before the discount.
-        assert_eq!(r[1].tax_year, 2026);
-        assert_eq!(r[1].capital_loss_brought_forward, Decimal::from(300));
-        assert_eq!(r[1].capital_losses, Decimal::ZERO);
-        assert_eq!(r[1].other_gains, Decimal::from(500));
-        assert_eq!(r[1].net_other_gain, Decimal::from(200));
-        assert_eq!(r[1].net_capital_gain, Decimal::from(200));
-        assert_eq!(r[1].capital_loss_carried_forward, Decimal::ZERO);
+        let gain_year = row_for(&r, 2026);
+        assert_eq!(gain_year.capital_loss_brought_forward, Decimal::from(300));
+        assert_eq!(gain_year.capital_losses, Decimal::ZERO);
+        assert_eq!(gain_year.other_gains, Decimal::from(500));
+        assert_eq!(gain_year.net_other_gain, Decimal::from(200));
+        assert_eq!(gain_year.net_capital_gain, Decimal::from(200));
+        assert_eq!(gain_year.capital_loss_carried_forward, Decimal::ZERO);
     }
 
     #[tokio::test]
@@ -1597,15 +1688,24 @@ mod tests {
         allocate(&pool, 2, 4, 3, Decimal::from(100)).await;
 
         let r = db_net_capital_gain(&pool).await.unwrap();
-        assert_eq!(r.len(), 2);
-        assert_eq!(r[0].capital_loss_carried_forward, Decimal::from(1000));
-        assert_eq!(r[1].tax_year, 2025);
-        assert_eq!(r[1].capital_loss_brought_forward, Decimal::from(1000));
-        assert_eq!(r[1].discount_eligible_gains, Decimal::from(500));
-        assert_eq!(r[1].net_discount_eligible_gain, Decimal::ZERO);
-        assert_eq!(r[1].cgt_discount, Decimal::ZERO);
-        assert_eq!(r[1].net_capital_gain, Decimal::ZERO);
-        assert_eq!(r[1].capital_loss_carried_forward, Decimal::from(500));
+        assert_eq!(
+            tax_years(&r),
+            (2024..=current_tax_year()).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            row_for(&r, 2024).capital_loss_carried_forward,
+            Decimal::from(1000)
+        );
+        let y = row_for(&r, 2025);
+        assert_eq!(y.capital_loss_brought_forward, Decimal::from(1000));
+        assert_eq!(y.discount_eligible_gains, Decimal::from(500));
+        assert_eq!(y.net_discount_eligible_gain, Decimal::ZERO);
+        assert_eq!(y.cgt_discount, Decimal::ZERO);
+        assert_eq!(y.net_capital_gain, Decimal::ZERO);
+        assert_eq!(y.capital_loss_carried_forward, Decimal::from(500));
+        for quiet in r.iter().filter(|y| y.tax_year > 2025) {
+            assert_quiet_year(quiet, Decimal::from(500));
+        }
     }
 
     #[tokio::test]
@@ -3123,6 +3223,130 @@ mod tests {
             csv,
             CSV_HEADER.join(",") + "\n" + &CSV_ATO_LABELS.join(",") + "\n"
         );
+    }
+
+    /// SCENARIOS O-03/O-04: a database whose only content is an entered
+    /// opening carried-forward loss. Nothing is bucketed — there is no
+    /// recorded fact to bucket — and yet label 18V is $12,345 and has to be
+    /// reported somewhere. The financial year in progress carries it, on both
+    /// the JSON report and the CSV export (which used to be two header rows
+    /// and nothing else).
+    #[tokio::test]
+    async fn api_an_opening_loss_alone_is_reported_in_the_current_year() {
+        let pool = test_pool().await;
+        let api = ApiClient::full(&pool);
+        api.put_ok(
+            "/cgt_settings/1",
+            &serde_json::json!({ "opening_capital_loss": "12345" }),
+        )
+        .await;
+
+        let years: Vec<NetCapitalGainYear> = api.get_json("/portfolio/net-capital-gain").await;
+        assert_eq!(tax_years(&years), vec![current_tax_year()]);
+        assert_quiet_year(&years[0], Decimal::from(12345));
+
+        let csv = api
+            .get("/portfolio/net-capital-gain/export")
+            .await
+            .expect_status(StatusCode::OK)
+            .text()
+            .to_string();
+        let mut lines = csv.lines().skip(2); // past both header rows
+        let fields: Vec<&str> = lines.next().expect("a record row").split(',').collect();
+        assert_eq!(fields.len(), CSV_HEADER.len());
+        assert_eq!(fields[0], current_tax_year().to_string()); // tax_year
+        // capital_loss_brought_forward (18V prior year) and
+        // capital_loss_carried_forward (18V) both carry the balance.
+        assert_eq!(fields[4].parse::<Decimal>().unwrap(), Decimal::from(12345));
+        assert_eq!(fields[9].parse::<Decimal>().unwrap(), Decimal::from(12345));
+        assert_eq!(lines.next(), None);
+    }
+
+    /// SCENARIOS O-03/O-04, the ordinary form: losses in FY2023–FY2025 leave
+    /// $4,000 carried forward and then nothing happens. Every quiet year from
+    /// FY2026 to the year in progress reports the $4,000 it is still carrying,
+    /// rather than the series simply stopping at the last year something
+    /// happened in.
+    #[tokio::test]
+    async fn api_quiet_years_after_the_last_activity_still_report_the_balance() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "VAS").await;
+        // Three loss years: 1,000 + 2,000 + 1,000 = 4,000, no gains anywhere.
+        for (i, (fy, loss_per_unit)) in [(2023, 10), (2024, 20), (2025, 10)].iter().enumerate() {
+            let buy = (i as i64) * 2 + 1;
+            insert_trade(
+                &pool,
+                buy,
+                trade::TradeType::Buy,
+                1,
+                NaiveDate::from_ymd_opt(fy - 1, 8, 1).unwrap(),
+                Decimal::from(100),
+                Decimal::from(*loss_per_unit + 10),
+            )
+            .await;
+            insert_trade(
+                &pool,
+                buy + 1,
+                trade::TradeType::Sell,
+                1,
+                NaiveDate::from_ymd_opt(*fy, 5, 1).unwrap(),
+                Decimal::from(100),
+                Decimal::from(10),
+            )
+            .await;
+            allocate(&pool, buy, buy + 1, buy, Decimal::from(100)).await;
+        }
+
+        let years: Vec<NetCapitalGainYear> = ApiClient::full(&pool)
+            .get_json("/portfolio/net-capital-gain")
+            .await;
+        assert_eq!(
+            tax_years(&years),
+            (2023..=current_tax_year()).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            row_for(&years, 2025).capital_loss_carried_forward,
+            Decimal::from(4000)
+        );
+        // FY2026 onwards: nothing happened, the $4,000 is still carried.
+        for quiet in years.iter().filter(|y| y.tax_year > 2025) {
+            assert_quiet_year(quiet, Decimal::from(4000));
+        }
+    }
+
+    /// The other half of the rule: a quiet year with **no** balance to carry
+    /// is still absent. The series is an activity list plus the years that owe
+    /// an 18V figure — never a row per year regardless.
+    #[tokio::test]
+    async fn db_a_quiet_year_with_no_balance_gets_no_row() {
+        let pool = test_pool().await;
+        // FY2024: a gain, fully assessable — nothing is carried out of it.
+        insert_listing(&pool, 1, "VAS").await;
+        insert_trade(
+            &pool,
+            1,
+            trade::TradeType::Buy,
+            1,
+            NaiveDate::from_ymd_opt(2023, 8, 1).unwrap(),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
+        insert_trade(
+            &pool,
+            2,
+            trade::TradeType::Sell,
+            1,
+            NaiveDate::from_ymd_opt(2024, 5, 1).unwrap(),
+            Decimal::from(100),
+            Decimal::from(15),
+        )
+        .await;
+        allocate(&pool, 1, 2, 1, Decimal::from(100)).await;
+
+        let r = db_net_capital_gain(&pool).await.unwrap();
+        assert_eq!(tax_years(&r), vec![2024]);
+        assert_eq!(r[0].net_capital_gain, Decimal::from(500));
     }
 
     /// Each exported column's tax-return label sits under its column (same

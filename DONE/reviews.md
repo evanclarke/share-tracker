@@ -3292,3 +3292,79 @@ listing's currency under a fresh id, and the listing check runs first — and th
 since reaching it means one of those assumptions has broken. Tests: one API rejection per cause
 asserting the message names it, with nothing persisted. Docs: `docs/API.md`'s `PUT /transfers/:id`
 paragraph lists the causes individually.
+
+## A carried-forward capital loss is invisible in a year with no CGT activity of its own (SCENARIOS O-03, O-04, O-12)
+(SCENARIOS.md section O verification pass, 2026-08-19. `net_capital_gain::net_years` walks only the
+years present in `gross_buckets` — a year gets a row only if something *happened* in it. A year whose
+only CGT fact is the loss it inherits from the year before has no bucket, so it has no row.)
+- [x] Reproduced (the strongest form): a database whose only content is
+  `PUT /cgt_settings/1 {"opening_capital_loss":"12345"}` — `GET /portfolio/net-capital-gain` answers
+  `[]`, the CSV export is two header rows and nothing else, and `GET /reports/tax-report/years`
+  answers `[]`. The taxpayer's label **18V** figure is on no surface the system produces
+- [x] Reproduced (the ordinary form): losses in FY2023–FY2025 leaving `capital_loss_carried_forward`
+  of `4000` on the FY2025 row, then no activity in FY2026. `POST /reports/tax-report {"tax_year":2026}`
+  returns `cgt_summary: null` — a zeroed but otherwise complete FY2026 tax document that says nothing
+  about the $4,000 the return must still carry — and FY2026 is not offered by the year picker at all
+- [x] The chain itself is **not** broken: enter activity in FY2027 and its
+  `capital_loss_brought_forward` is the correct `4000`. This is a reporting gap in the quiet year,
+  not an arithmetic one
+- [x] Why it matters: label 18V (*Net capital losses carried forward to later income years*) is
+  reported **every** year until the loss is used, not only in years with a CGT event
+  (`docs/ato/capital-gains-question-18.md`, step 11 / Kathleen Example 6, where the $500 at label V
+  is carried forward with no gain to report it against). A year in which the investor simply held
+  everything is exactly the year this figure has to come from somewhere
+- [x] **Decided 2026-08-19 (Evan): option (b)** — a row for a quiet year that carries a balance.
+- [x] A model decision, four options:
+  - **(a)** Emit a row for **every** financial year from the first recorded year through the latest
+    year carrying any recorded fact (the `GET /reports/tax-report/years` span, extended to today),
+    so a quiet year reports zero gains, its brought-forward balance and the same balance carried
+    forward. The report becomes a continuous series rather than an activity list, and
+    `db_cgt_summary_year` answers `Some` for those years, so the annual tax report prints its 18V
+  - **(b)** ← **chosen.** Narrower: emit a row only for a year that has **no** activity but a
+    non-zero brought-forward balance — the series stays sparse, and only the years that actually owe
+    an 18V figure appear. `db_cgt_summary_year` reads the same `net_years` walk, so the annual tax
+    report starts printing that year's 18V from the one change
+  - **(c)** Narrower still, and only in the archived document: leave the multi-year report alone and
+    make `db_cgt_summary_year` fall back to the chained balance for a year with no bucket, so
+    `POST /reports/tax-report` prints a CGT summary carrying the brought-forward/carried-forward pair
+    with zeros elsewhere
+  - **(d)** Documentation only: a Known limitation stating that a year with no CGT event produces no
+    net-capital-gain row, and the carry-forward must be read off the last year that has one
+- [x] Whichever is chosen, the "opening loss and nothing else" case has to answer something: today
+  every surface is empty, which reads as "no losses to carry" rather than "$12,345 to carry"
+- [x] Tests: the two reproductions above as regression tests (the opening-loss-only database, and the
+  quiet year between two active ones), plus the annual tax report's 18V for a quiet year
+- [x] Docs sync: `docs/API.md`'s [Net capital gain](docs/API.md#net-capital-gain) year-series wording
+  and the annual tax report's `cgt_summary` description; README Known limitations if (d)
+
+**Resolution (2026-08-19): a quiet year that carries a balance gets a row.**
+
+`reports::net_capital_gain::net_years` took the years to walk from `gross_buckets`' keys alone, so a
+year got a row only if something happened in it. It now takes a `through` bound and walks the union
+of the bucket years and every year from the earliest bucket year — or `through` itself when there are
+no buckets at all — up to `through`, emitting a filler row — zero gains, zero current-year losses, the balance on both the brought-forward
+and carried-forward lines — for any year in that span with no bucket but a non-zero brought-forward
+balance. A year with neither activity nor a balance is still absent, so the series stays sparse.
+
+`through` is **the financial year in progress** (`tax_year_for(infra::date::today())`, via the new
+`current_tax_year()` — the FY rule is never re-derived): it is the last year a return could be being
+prepared for and there is nothing beyond it to report, and it is the only year the opening-loss-only
+database can name at all, that balance being a pre-system figure attributed to no year. It bounds
+only the filler rows: a bucket year outside it is emitted as before. The what-if passes its own
+disposal year instead and is unchanged — it selects one bucket year out of the walk, and a filler row
+chains the balance through untouched, so both scenarios see exactly the figures they did before.
+
+`db_cgt_summary_year` reads the same walk, so the annual tax report now prints a quiet year's 18V as
+a consequence. The year picker (`GET /reports/tax-report/years`) still lists only years with a
+recorded fact — that span is option (a)'s mechanism, deliberately not taken; a quiet year is
+requested by `tax_year` directly.
+
+Tests: `api_an_opening_loss_alone_is_reported_in_the_current_year` (the strongest reproduction — the
+JSON row and the CSV export's record, which used to be two header rows and nothing else),
+`api_quiet_years_after_the_last_activity_still_report_the_balance` (the ordinary form: $4,000 left
+carried in FY2025, every quiet year after it reporting it), `db_a_quiet_year_with_no_balance_gets_no_row`
+(the other half of the rule), `tax_report::a_quiet_year_still_reports_its_carried_forward_loss` (the
+annual document's `cgt_summary`, over `db_tax_report` and `POST /reports/tax-report`), and
+`db_earlier_year_loss_reduces_later_year_gain` extended to pin the quiet year *between* two active
+ones. Docs: `docs/API.md` gains a "Which years get a record" paragraph in Net capital gain, the CSV
+export note, and the `cgt_summary` `null` wording, pinned by `doc_checks::net_capital_gain_year_series_documented`.

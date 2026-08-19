@@ -699,6 +699,35 @@ fn known_limitations_document_quarantined_collectable_losses() {
     assert!(mirror.contains("$1,260"));
 }
 
+/// Docs-sync pin for which years the net-capital-gain series covers
+/// (SCENARIOS O-03/O-04/O-12, 2026-08-19): a quiet year carrying a capital
+/// loss forward is reported — label 18V is reported every year until the loss
+/// is used, not only in years with a CGT event — through to the financial year
+/// in progress, while a year with neither activity nor a balance stays absent.
+/// The annual tax report's `cgt_summary` says the same about its own `null`.
+#[test]
+fn net_capital_gain_year_series_documented() {
+    assert!(API_MD.contains("**Which years get a record.**"));
+    assert!(API_MD.contains("plus every quiet year that still carries a capital loss forward"));
+    assert!(API_MD.contains(
+        "reported every year until the loss is used, not only in years with a CGT event"
+    ));
+    // The bound, and the opening-loss-only database it has to cover.
+    assert!(API_MD.contains("run through to the financial year **in progress**"));
+    assert!(API_MD.contains("a pre-system balance attributed to no year"));
+    // Still sparse: no row for a year with neither activity nor a balance.
+    assert!(API_MD.contains("A year with neither activity nor a balance gets no record at all"));
+    assert!(API_MD.contains("**not** a continuous year-by-year series"));
+    // The annual tax report's own `null` wording follows from the same walk.
+    assert!(API_MD.contains(
+        "`null` when the year has neither gain/loss activity recorded nor a capital loss brought forward into it"
+    ));
+    // The cited mirror carries the step the rule comes from (QC 106842).
+    let mirror = include_str!("../docs/ato/capital-gains-question-18.md");
+    assert!(mirror.contains("QC 106842"));
+    assert!(mirror.contains("**Step 11 — Capital losses carried forward**"));
+}
+
 #[test]
 fn known_limitations_document_indexation_method() {
     let limitations = known_limitations();

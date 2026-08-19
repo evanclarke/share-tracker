@@ -1759,11 +1759,18 @@ async fn crypto_chain_split_example_ming_abandoned_original() {
 
     // FY2019: a loss carries forward, never discounted.
     let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net-capital-gain").await;
-    assert_eq!(years.len(), 1);
     assert_eq!(years[0].tax_year, 2019);
     assert_eq!(years[0].capital_losses, dec("8300"));
     assert_eq!(years[0].net_capital_gain, Decimal::ZERO);
     assert_eq!(years[0].capital_loss_carried_forward, dec("8300"));
+    // Nothing happens after it — and the $8,300 is still reported at label 18V
+    // in each of those quiet years, until it is used
+    // (`reports::net_capital_gain::net_years`).
+    for later in years.iter().filter(|y| y.tax_year > 2019) {
+        assert_eq!(later.capital_losses, Decimal::ZERO);
+        assert_eq!(later.capital_loss_brought_forward, dec("8300"));
+        assert_eq!(later.capital_loss_carried_forward, dec("8300"));
+    }
 }
 
 /// `docs/ato/crypto-staking-airdrops.md` (QC 69950) — "Example: capital gain

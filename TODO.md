@@ -35,52 +35,10 @@ what-if's prior-year loss consumption differing by strategy, and the recorded sa
 exactly both ways), O-16 (the over-request boundary, exact to 0.0000001 of a unit) and O-17 (the CSV
 export matching the JSON field for field, with its ATO label row).
 
-The three findings below are what the pass raised. The next section after these are closed is
+The pass raised three findings. The first — a carried-forward capital loss invisible in a year with
+no CGT activity of its own — was closed 2026-08-19 (see [`DONE/reviews.md`](DONE/reviews.md)); the
+two below remain open. The next section after these are closed is
 **P. Tax summary, annual tax report, exports**.
-
-## A carried-forward capital loss is invisible in a year with no CGT activity of its own (SCENARIOS O-03, O-04, O-12)
-(SCENARIOS.md section O verification pass, 2026-08-19. `net_capital_gain::net_years` walks only the
-years present in `gross_buckets` — a year gets a row only if something *happened* in it. A year whose
-only CGT fact is the loss it inherits from the year before has no bucket, so it has no row.)
-- [x] Reproduced (the strongest form): a database whose only content is
-  `PUT /cgt_settings/1 {"opening_capital_loss":"12345"}` — `GET /portfolio/net-capital-gain` answers
-  `[]`, the CSV export is two header rows and nothing else, and `GET /reports/tax-report/years`
-  answers `[]`. The taxpayer's label **18V** figure is on no surface the system produces
-- [x] Reproduced (the ordinary form): losses in FY2023–FY2025 leaving `capital_loss_carried_forward`
-  of `4000` on the FY2025 row, then no activity in FY2026. `POST /reports/tax-report {"tax_year":2026}`
-  returns `cgt_summary: null` — a zeroed but otherwise complete FY2026 tax document that says nothing
-  about the $4,000 the return must still carry — and FY2026 is not offered by the year picker at all
-- [x] The chain itself is **not** broken: enter activity in FY2027 and its
-  `capital_loss_brought_forward` is the correct `4000`. This is a reporting gap in the quiet year,
-  not an arithmetic one
-- [x] Why it matters: label 18V (*Net capital losses carried forward to later income years*) is
-  reported **every** year until the loss is used, not only in years with a CGT event
-  (`docs/ato/capital-gains-question-18.md`, step 11 / Kathleen Example 6, where the $500 at label V
-  is carried forward with no gain to report it against). A year in which the investor simply held
-  everything is exactly the year this figure has to come from somewhere
-- [ ] **Decided 2026-08-19 (Evan): option (b)** — a row for a quiet year that carries a balance.
-- [ ] A model decision, four options:
-  - **(a)** Emit a row for **every** financial year from the first recorded year through the latest
-    year carrying any recorded fact (the `GET /reports/tax-report/years` span, extended to today),
-    so a quiet year reports zero gains, its brought-forward balance and the same balance carried
-    forward. The report becomes a continuous series rather than an activity list, and
-    `db_cgt_summary_year` answers `Some` for those years, so the annual tax report prints its 18V
-  - **(b)** ← **chosen.** Narrower: emit a row only for a year that has **no** activity but a
-    non-zero brought-forward balance — the series stays sparse, and only the years that actually owe
-    an 18V figure appear. `db_cgt_summary_year` reads the same `net_years` walk, so the annual tax
-    report starts printing that year's 18V from the one change
-  - **(c)** Narrower still, and only in the archived document: leave the multi-year report alone and
-    make `db_cgt_summary_year` fall back to the chained balance for a year with no bucket, so
-    `POST /reports/tax-report` prints a CGT summary carrying the brought-forward/carried-forward pair
-    with zeros elsewhere
-  - **(d)** Documentation only: a Known limitation stating that a year with no CGT event produces no
-    net-capital-gain row, and the carry-forward must be read off the last year that has one
-- [ ] Whichever is chosen, the "opening loss and nothing else" case has to answer something: today
-  every surface is empty, which reads as "no losses to carry" rather than "$12,345 to carry"
-- [ ] Tests: the two reproductions above as regression tests (the opening-loss-only database, and the
-  quiet year between two active ones), plus the annual tax report's 18V for a quiet year
-- [ ] Docs sync: `docs/API.md`'s [Net capital gain](docs/API.md#net-capital-gain) year-series wording
-  and the annual tax report's `cgt_summary` description; README Known limitations if (d)
 
 ## The pre-sale what-if and the parcel optimiser model a disposal dated before the parcels existed (SCENARIOS O-14, O-15, O-16)
 (SCENARIOS.md section O verification pass, 2026-08-19. Both endpoints read their candidates through

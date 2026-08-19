@@ -1447,6 +1447,59 @@ mod tests {
         assert!(report.completeness.complete);
     }
 
+    /// SCENARIOS O-03/O-04: a year in which nothing happened, following years
+    /// of losses. The document is otherwise zeroed, but it must still state
+    /// the loss the return carries forward at label 18V — so `cgt_summary` is
+    /// `Some`, all zeros but for the brought-forward/carried-forward pair
+    /// (`net_capital_gain::net_years` emits the quiet year's row, and this
+    /// report reads that same walk).
+    #[tokio::test]
+    async fn a_quiet_year_still_reports_its_carried_forward_loss() {
+        let pool = test_support::test_pool().await;
+        test_support::listing(1)
+            .ticker("T1")
+            .name("Test One")
+            .insert(&pool)
+            .await;
+        // FY2025: a $4,000 capital loss, nothing to offset it.
+        test_support::buy(1, 1)
+            .date(ymd(2024, 8, 1))
+            .qty(dec("100"))
+            .price(dec("50"))
+            .insert(&pool)
+            .await;
+        test_support::sell(2, 1)
+            .date(ymd(2025, 5, 1))
+            .qty(dec("100"))
+            .price(dec("10"))
+            .insert(&pool)
+            .await;
+        test_support::allocate(&pool, 1, 2, 1, dec("100")).await;
+
+        let report = db_tax_report(&pool, 2026).await.unwrap();
+        let summary = report
+            .cgt_summary
+            .expect("the quiet year still carries a loss forward");
+        assert_eq!(summary.tax_year, 2026);
+        assert_eq!(summary.short_term_gains, Decimal::ZERO);
+        assert_eq!(summary.long_term_gains, Decimal::ZERO);
+        assert_eq!(summary.capital_losses_this_year, Decimal::ZERO);
+        assert_eq!(summary.net_capital_gain, Decimal::ZERO);
+        assert_eq!(summary.capital_loss_brought_forward, dec("4000"));
+        assert_eq!(summary.capital_loss_carried_forward, dec("4000"));
+        // Over HTTP, the surface the archived document is printed from.
+        let body: serde_json::Value = crate::test_support::ApiClient::full(&pool)
+            .post_json(
+                "/reports/tax-report",
+                &serde_json::json!({"tax_year": 2026}),
+            )
+            .await;
+        assert_eq!(
+            body["cgt_summary"]["capital_loss_carried_forward"],
+            serde_json::json!("4000")
+        );
+    }
+
     /// The tax report's disposal schedule must never disagree with the
     /// realised-gains report over the same allocations — both totals and the
     /// per-parcel figures — since it's presenting the same computation, not a
