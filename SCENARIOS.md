@@ -78,7 +78,7 @@ behind or became a recorded finding.
 | L. Crypto | 15 | 2026-08-18 | 6 raised, all closed — see below |
 | M. Foreign currency and FX | 16 | 2026-08-19 | 8 raised, all closed — see below |
 | N. Holding accounts and transfers | 12 | 2026-08-19 | 5 raised, all closed — see below |
-| O. Net capital gain, losses, and carry-forward | 17 | — | — |
+| O. Net capital gain, losses, and carry-forward | 17 | 2026-08-19 (`e1f1f70`) | 3 raised, all closed — see below |
 | P. Tax summary, annual tax report, exports | 12 | — | — |
 | Q. Prices, valuation, and snapshots | 15 | — | — |
 | R. Listing identity and renames | 10 | — | — |
@@ -758,6 +758,39 @@ leaves OVERALL undistorted). All five findings are closed, each archived in
 | An AMMA statement whose units a transfer has moved can be recorded nowhere | N-06 | `cd9cfdf` |
 | The ESS 30-day-rule alert fires on a holding-account transfer, which is not a disposal | N-08 | `9dcb969` |
 | A transfer's parcel rejection lists five causes and names none of the real ones | N-04, N-12 | `00d145d` |
+
+---
+
+### Section O findings
+
+Eleven of the seventeen came back correct outright, and the netting arithmetic was right in the other
+six too — each of those surfaced one of the three findings below, all of them about what a surface
+*says* or what an input is allowed to be, none about a figure the netting walk computes. The correct
+ones include the scenarios that matter most: `O-01` and `O-13` (losses applied to non-discountable
+gains first and *before* the discount — the ATO-optimal order that turns a naive $7,500 net capital
+gain into $5,000), `O-02` (current-year plus brought-forward losses in one year), `O-05` (an
+AMMA-only year, its discount gains grossed up ×2 before the loss and halved after), `O-06` (a G1
+excess as a non-discountable gain beside a discountable parcel gain and a loss), `O-07` (an E10
+excess, discountable on the holding period as at the statement's year end — probed either side of
+the 12-month line, and again with the parcel later sold so the G1/disposal pair is counted once
+each), `O-08` (a demerger contributing nothing in its year, the deferred gain surfacing later with
+the carried acquisition date), `O-11` (a back-dated Sell restating a prior year and rechaining every
+later carry-forward) and `O-17` (the CSV export matching the JSON field for field, with its ATO
+label row). `O-09` and `O-10` land on a documented
+[Known limitation](docs/API.md#known-limitations) — the quarantined losses of collectables and
+personal-use assets, which cannot be recorded as such — and the verification is that the limitation
+is honest and names the damage: it is pinned by
+`doc_checks::known_limitations_document_quarantined_collectable_losses` against the mirrored
+[`docs/ato/capital-gains-question-18.md`](docs/ato/capital-gains-question-18.md).
+
+All three findings are closed, each archived in [`DONE/reviews.md`](DONE/reviews.md) under a heading
+naming its scenario ids:
+
+| Finding | Scenarios | Fixed by |
+| --- | --- | --- |
+| A carried-forward capital loss is invisible in a year with no CGT activity of its own | O-03, O-04, O-12 | `319b159` |
+| The pre-sale what-if and the parcel optimiser model a disposal dated before the parcels existed | O-14, O-15, O-16 | `1822ba0` |
+| The what-if's over-request refusal does not name the account it was scoped to | O-16 | `e31a2cc` |
 
 ## A. Deletion and mutation ripple effects
 

@@ -3459,3 +3459,43 @@ What-if: `api_what_if_refuses_a_parcel_acquired_after_the_disposal_date` (the re
 optimiser and Pre-sale what-if sections plus the 422 catalogue row, pinned by
 `doc_checks::presale_tools_read_candidates_as_at_the_request_date`; both `config.js` date-field hints
 now say which parcels the date selects.
+
+## The what-if's over-request refusal does not name the account it was scoped to (SCENARIOS O-16)
+(SCENARIOS.md section O verification pass, 2026-08-19. `what_if_handler`'s strategy branch formats
+*"only {open} unit(s) of {listing} are open"* without the `holding_account_id` the request scoped it
+to — while its own explicit-allocations branch, and the optimiser, both name the account.)
+- [x] Reproduced: 2,000 units of TSTG open in the default account and 5,000 in a second account.
+  `POST /portfolio/net-capital-gain/what-if` for 3,000 units with `"holding_account_id": 1` answers
+  `422 only 2000 unit(s) of TSTG are open` — a statement that is simply false of the 7,000 units
+  held. `POST /portfolio/parcel-optimiser` with the same body answers
+  `only 2000 unit(s) of TSTG are open in account 'Default'`, which is right
+- [x] The same handler's allocations branch already gets it right: it appends
+  `" in {account}"` via `reports::account_label` when the request named one
+- [x] Nothing computes wrongly — this is the refusal's wording only, and it is the message the web
+  UI shows in its toast
+- [x] Fix: reuse the allocations branch's `account_label` suffix in the strategy branch, so one
+  endpoint gives one answer. No decision needed
+- [x] Tests: the account-scoped over-request naming the account, and the unscoped one not
+- [x] Docs sync: none expected (the 422 catalogue already covers "more units than the listing's open
+  quantity"); confirm the wording quoted in `docs/API.md` still matches
+
+**Implemented 2026-08-19.** The strategy branch of `net_capital_gain::what_if_handler` now builds the
+same `in_account` suffix its own allocations branch does — `format!(" in {}", super::account_label(&pool, h))`
+when `req.holding_account_id` is `Some`, the empty string when it is `None` — and appends it to the
+over-request refusal. One endpoint, one answer: the scoped case now reads
+`only 2000 unit(s) of TSTG are open in account 'Default'`, word for word what
+`parcel_optimiser::optimiser_handler` answers for the same request, and the unscoped case (which
+really does bound by every account's parcels) still names none.
+
+Nothing else moved: the open quantity itself is unchanged, and so is what it means — the candidates
+are still the parcels open **as at the request's `date`**, per the sibling finding closed the same
+day in `1822ba0`. `docs/API.md` needed no change: the 422 catalogue's row already says "more units
+than the listing's open quantity **as at the request's sale date**", and the Pre-sale what-if section
+already states that the candidates are "restricted to `holding_account_id`'s parcels when supplied"
+— the refusal now says out loud what the documentation always did.
+
+Tests (`reports::net_capital_gain::tests`): `api_what_if_over_request_names_the_account_it_was_scoped_to`
+(the reproduction verbatim — 2,000 units in the default account, 5,000 in a second, a 3,000-unit
+strategy request scoped to account 1 — asserting the whole message, so the account half cannot be
+dropped again) and `api_what_if_unscoped_over_request_names_no_account` (the same fixture, an 8,000-unit
+unscoped request: `only 7000 unit(s) of TSTG are open`, with no account named).
