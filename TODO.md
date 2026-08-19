@@ -128,12 +128,12 @@ is old. That answers "has the import run lately", not "is every amount I have re
 `exchange_mic` once a listing has trades, income or closing prices — an identity change must go
 through `POST /listings/:id/rename` so it is recorded. `currency` is not in that list, though it is
 just as much part of the listing's identity: every stored closing price is denominated in it.)
-- [ ] Reproduced: a USD listing with a Buy, a stored price of 200 and a generated snapshot. `PUT
+- [x] Reproduced: a USD listing with a Buy, a stored price of 200 and a generated snapshot. `PUT
   /listings/1` changing `currency` to EUR → `204`. The stored snapshot still reads `current_price:
   298.51` (200 / 0.67) and — because `listings` has no snapshot-staleness trigger — is still
   `stale: false`. Regenerating the same date silently answers `333.33` (200 / 0.60). The same stored
   fact, two AUD valuations, nothing marked
-- [ ] Trades keep their own `currency`, so cost bases are unaffected; the damage is to every
+- [x] Trades keep their own `currency`, so cost bases are unaffected; the damage is to every
   price-derived figure (the overview, unrealised gains, performance, every snapshot in the series)
 **Decision (2026-08-19, Evan): refuse it once there is history — option (a) — and add the triggers.**
 
@@ -145,10 +145,33 @@ just as much part of the listing's identity: every stored closing price is denom
   - **(b)** Regardless of (a), `listings` needs snapshot-staleness triggers: a change to the row
     that a snapshot's figures depend on must stale the snapshots, which is the schema's rule for
     every other dated fact
-- [ ] Tests: whichever of (a) — the refusal, or the recorded event with prices resolved per span;
+- [x] Tests: whichever of (a) — the refusal, or the recorded event with prices resolved per span;
   and for (b) that a listing edit marks snapshots stale
-- [ ] Docs sync: `docs/SCHEMA.md` (the triggers), `docs/API.md` Listings + the 422 catalogue,
-  README/Known limitations if (a) lands as a refusal
+- [x] Docs sync: `docs/SCHEMA.md` (the triggers), `docs/API.md` Listings + the 422 catalogue
+
+**Resolution (2026-08-19): refused once there is history, and `listings` given its staleness
+trigger.**
+
+`listing::db_upsert`'s identity check now reads `currency` alongside `ticker`/`exchange_mic` and,
+where the listing has recorded trades, income or closing prices, answers
+`UpsertError::CurrencyChangeWithHistory { from, to }` → `422` naming both currencies and the way to
+record a real redenomination: a new listing in the new currency plus a transfer of the parcels,
+which keeps every stored price with the currency it was quoted in. A listing with no history yet
+stays freely editable, as it is for the ticker.
+
+Migration `0030` adds the `listings` staleness trigger the schema's own rule asks for, narrowed by
+a `WHEN` clause to the two columns that change what a *stored* snapshot's figures mean — `currency`
+(which denominates every stored price) and `security_type` (which decides the days a listing can be
+valued on). A listing edit has no date of its own, so it stales the whole series rather than a
+suffix; a `name`/`isin`/`price_symbol` edit fires nothing, since a series left permanently stale by
+a name change — beyond the daily job's 14-day catch-up window, so never cleared — would teach a
+reader to ignore the flag. No INSERT/DELETE counterpart is needed and the migration says why.
+
+Tests: `db_currency_change_refused_once_dependents_exist` (free before history, refused after,
+naming both currencies and the remedy, nothing written) and
+`a_valuation_relevant_listing_edit_stales_every_snapshot` (currency and security type stale the
+series, a name change does not). Docs: `docs/API.md` Listings + the 422 catalogue, `docs/SCHEMA.md`
+Relationships + the trigger description.
 
 ## A trade may be recorded in a currency other than its listing's (SCENARIOS M-08)
 (SCENARIOS.md section M verification pass, 2026-08-19. Four entities now refuse a currency that is

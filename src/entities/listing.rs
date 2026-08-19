@@ -130,6 +130,20 @@ pub enum UpsertError {
     /// assessed as ordinary trust income. Mapped to `422`.
     #[error("amit_from {0} is not a 1 July date")]
     AmitFromNotFinancialYearStart(NaiveDate),
+    /// A plain `PUT` tried to change `currency` on a listing that already has
+    /// dependent trades, income, or closing prices (carries the two
+    /// currencies). Every stored [closing price] is denominated in the
+    /// listing's currency, so changing it silently re-denominates the whole
+    /// price history — the same stored 200 valued at A$298.51 as USD and
+    /// A$333.33 as EUR — while each trade keeps its own currency, leaving the
+    /// cost base and the valuation reading different money (SCENARIOS M-08).
+    /// A genuine redenomination is a new listing plus a
+    /// [transfer](crate::entities::transfer), which keeps each price with the
+    /// currency it was quoted in. Mapped to `422`.
+    ///
+    /// [closing price]: crate::entities::closing_price
+    #[error("a currency change from {from} to {to} on a listing with history")]
+    CurrencyChangeWithHistory { from: String, to: String },
     /// A `Crypto` listing was marked `amit`. An AMIT is an attribution managed
     /// investment **trust**; a crypto asset is not an interest in one (it is
     /// not even currency — TD 2014/25), and the flag is not inert: it makes
@@ -168,6 +182,14 @@ impl From<UpsertError> for ApiError {
             ),
             UpsertError::CryptoWithExchange => ApiError::unprocessable(CRYPTO_WITH_EXCHANGE),
             UpsertError::ExchangeRequired => ApiError::unprocessable(EXCHANGE_REQUIRED),
+            UpsertError::CurrencyChangeWithHistory { from, to } => {
+                ApiError::unprocessable(format!(
+                    "this listing's currency cannot change from {from} to {to} once it has recorded \
+                 trades, income, or prices — every stored closing price is denominated in it, so \
+                 the change would silently re-value the whole price history. Record a \
+                 redenomination as a new listing in {to} and transfer the parcels to it"
+                ))
+            }
             UpsertError::IdentityChangeRequiresRename => ApiError::unprocessable(
                 "use POST /listings/:id/rename to record a ticker or exchange change \
                  on a listing with recorded trades, income, or prices",
@@ -238,24 +260,37 @@ pub async fn db_upsert(pool: &SqlitePool, listing: &Listing) -> Result<(), Upser
     // history must go through the rename action instead of a bare field
     // edit, so the change is recorded rather than silently lost — a
     // brand-new listing with no dependents yet stays freely editable here.
-    let current: Option<(String, Option<String>)> =
-        sqlx::query_as("SELECT ticker, exchange_mic FROM listings WHERE id = ?")
+    let current: Option<(String, Option<String>, String)> =
+        sqlx::query_as("SELECT ticker, exchange_mic, currency FROM listings WHERE id = ?")
             .bind(listing.id)
             .fetch_optional(&mut *tx)
             .await?;
-    if let Some((old_ticker, old_exchange_mic)) = current
-        && (old_ticker != listing.ticker || old_exchange_mic != listing.exchange_mic)
-    {
-        let has_dependents: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM trades WHERE listing_id = ?1) \
+    if let Some((old_ticker, old_exchange_mic, old_currency)) = current {
+        let identity_changed =
+            old_ticker != listing.ticker || old_exchange_mic != listing.exchange_mic;
+        // The quote currency is part of the identity too: every stored closing
+        // price is denominated in it (SCENARIOS M-08). Unlike the ticker it has
+        // no rename path — a redenomination is a new listing plus a transfer —
+        // so it is refused rather than redirected.
+        let currency_changed = old_currency != listing.currency;
+        if identity_changed || currency_changed {
+            let has_dependents: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM trades WHERE listing_id = ?1) \
                  OR EXISTS(SELECT 1 FROM income WHERE listing_id = ?1) \
                  OR EXISTS(SELECT 1 FROM closing_prices WHERE listing_id = ?1)",
-        )
-        .bind(listing.id)
-        .fetch_one(&mut *tx)
-        .await?;
-        if has_dependents {
-            return Err(UpsertError::IdentityChangeRequiresRename);
+            )
+            .bind(listing.id)
+            .fetch_one(&mut *tx)
+            .await?;
+            if has_dependents {
+                if currency_changed {
+                    return Err(UpsertError::CurrencyChangeWithHistory {
+                        from: old_currency,
+                        to: listing.currency.clone(),
+                    });
+                }
+                return Err(UpsertError::IdentityChangeRequiresRename);
+            }
         }
     }
 
@@ -530,6 +565,106 @@ mod tests {
         assert_eq!(db_get(&pool, 1).await.unwrap().unwrap().name, "Renamed ETF");
         // The ticker is still untouched by the refused attempts.
         assert_eq!(db_get(&pool, 1).await.unwrap().unwrap().ticker, "VAS");
+    }
+
+    /// The quote currency is part of the identity for the same reason the
+    /// ticker is, and for one more: every stored closing price is denominated
+    /// in it, so a change re-values the whole price history against trades
+    /// that keep their own currency (SCENARIOS M-08). It has no rename path —
+    /// a redenomination is a new listing plus a transfer — so it is refused
+    /// outright once there is history, and freely editable before then.
+    #[tokio::test]
+    async fn db_currency_change_refused_once_dependents_exist() {
+        let pool = test_pool().await;
+        db_upsert(&pool, &xtest()).await.unwrap();
+
+        // No history yet: still a plain field edit.
+        let mut to_usd = xtest();
+        to_usd.currency = "USD".to_string();
+        db_upsert(&pool, &to_usd).await.unwrap();
+        assert_eq!(db_get(&pool, 1).await.unwrap().unwrap().currency, "USD");
+
+        crate::test_support::buy(1, 1)
+            .currency("USD")
+            .insert(&pool)
+            .await;
+        let mut to_eur = xtest();
+        to_eur.currency = "EUR".to_string();
+        let err = db_upsert(&pool, &to_eur).await.unwrap_err();
+        assert!(
+            matches!(&err, UpsertError::CurrencyChangeWithHistory { from, to }
+                if from == "USD" && to == "EUR"),
+            "{err:?}"
+        );
+        // The refusal names both currencies and says what to do instead.
+        let (status, body) = match ApiError::from(err) {
+            ApiError::Unprocessable(body) => (422, body),
+            other => panic!("expected 422, got {other:?}"),
+        };
+        assert_eq!(status, 422);
+        assert!(body.contains("USD") && body.contains("EUR"), "{body}");
+        assert!(body.contains("transfer"), "{body}");
+
+        // Nothing was written, and a same-currency edit still goes through.
+        assert_eq!(db_get(&pool, 1).await.unwrap().unwrap().currency, "USD");
+        let mut renamed_only = to_usd;
+        renamed_only.name = "Renamed".to_string();
+        db_upsert(&pool, &renamed_only).await.unwrap();
+    }
+
+    /// A listing edit that changes what a stored snapshot's figures *mean* —
+    /// its quote currency, or the security type that decides which days it can
+    /// be valued on — marks every snapshot stale, since the change applies to
+    /// the whole price history rather than from a date (migration 0030,
+    /// SCENARIOS M-08). An edit that changes no stored figure does not: a
+    /// series left permanently stale by a name change would teach a reader to
+    /// ignore the flag.
+    #[tokio::test]
+    async fn a_valuation_relevant_listing_edit_stales_every_snapshot() {
+        let pool = test_pool().await;
+        db_upsert(&pool, &xtest()).await.unwrap();
+        let fresh = |pool: SqlitePool| async move {
+            sqlx::query("DELETE FROM report_snapshots")
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query(
+                "INSERT INTO report_snapshots \
+                 (report, snapshot_date, generated_at, rows_json, stale) \
+                 VALUES ('portfolio_overview', '2024-03-15', '2024-03-16T00:00:00Z', '[]', 0)",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+        };
+        let stale = |pool: SqlitePool| async move {
+            sqlx::query_scalar::<_, i64>("SELECT stale FROM report_snapshots")
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+                == 1
+        };
+
+        // A name-only edit changes no stored figure.
+        fresh(pool.clone()).await;
+        let mut renamed = xtest();
+        renamed.name = "Renamed ETF".to_string();
+        db_upsert(&pool, &renamed).await.unwrap();
+        assert!(!stale(pool.clone()).await);
+
+        // The currency denominates every stored price.
+        fresh(pool.clone()).await;
+        let mut recurrencied = renamed.clone();
+        recurrencied.currency = "USD".to_string();
+        db_upsert(&pool, &recurrencied).await.unwrap();
+        assert!(stale(pool.clone()).await);
+
+        // The security type decides which days it can be valued on.
+        fresh(pool.clone()).await;
+        let mut retyped = recurrencied;
+        retyped.security_type = SecurityType::Share;
+        db_upsert(&pool, &retyped).await.unwrap();
+        assert!(stale(pool.clone()).await);
     }
 
     #[tokio::test]
