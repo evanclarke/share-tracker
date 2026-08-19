@@ -77,7 +77,7 @@ behind or became a recorded finding.
 | K. Inherited parcels | 10 | 2026-08-18 | 6 raised, all closed — see below |
 | L. Crypto | 15 | 2026-08-18 | 6 raised, all closed — see below |
 | M. Foreign currency and FX | 16 | 2026-08-19 | 8 raised, all closed — see below |
-| N. Holding accounts and transfers | 12 | — | — |
+| N. Holding accounts and transfers | 12 | 2026-08-19 | 5 raised, all closed — see below |
 | O. Net capital gain, losses, and carry-forward | 17 | — | — |
 | P. Tax summary, annual tax report, exports | 12 | — | — |
 | Q. Prices, valuation, and snapshots | 15 | — | — |
@@ -739,6 +739,25 @@ refused at write time.
 | The two documented FX simplifications are silent where their sibling is refused | M-09, M-10 | fixed 2026-08-19 — both are alert kinds on `fx_coverage`; archived in [`DONE/reviews.md`](DONE/reviews.md) |
 
 ---
+
+### Section N findings
+
+Ten of the twelve came back correct, along with the standing probes on snapshot staleness, the annual
+tax report and `row_history`: `N-01` (whole, partial and three parcels in one transfer — the cost
+base pro-rated exactly, every acquisition date carried), `N-02` (the crypto network-fee disposal),
+`N-03`, `N-04` and `N-12` (refused, atomically), `N-05` (transfer → sell in the destination → delete,
+the discount clock surviving the move), `N-07` (both orderings across a split), `N-09`, `N-10`
+(per-account DRP enrolment) and `N-11` (the performance report's documented carried-cost treatment
+leaves OVERALL undistorted). All five findings are closed, each archived in
+[`DONE/reviews.md`](DONE/reviews.md) under a heading naming its scenario ids:
+
+| Finding | Scenarios | Fixed by |
+| --- | --- | --- |
+| A cost-base fact dated before a rollover, entered after it, restates only the source side | N-06, N-07 | `a79a20b` (guard + `rollover_consistency` report) |
+| A return of capital paid on the rollover date reduces the cost base twice | N-06, N-07 | `c91816a` |
+| An AMMA statement whose units a transfer has moved can be recorded nowhere | N-06 | `cd9cfdf` |
+| The ESS 30-day-rule alert fires on a holding-account transfer, which is not a disposal | N-08 | `9dcb969` |
+| A transfer's parcel rejection lists five causes and names none of the real ones | N-04, N-12 | `00d145d` |
 
 ## A. Deletion and mutation ripple effects
 
