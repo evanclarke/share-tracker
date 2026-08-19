@@ -165,12 +165,49 @@ impl From<TransferError> for ApiError {
                 "a network fee was specified without a positive per-unit market value for the \
                  fee crypto — the disposal needs its capital proceeds",
             ),
+            // The Sell core's rejections, each said in the transfer's own terms
+            // (SCENARIOS N-04, N-12): a user who typed the wrong date, or moved
+            // more units than a parcel still holds, must be told *that* — the
+            // one sentence listing every cause at once named neither, and did
+            // not even list the date one.
             TransferError::Sell(err) => {
                 tracing::warn!(error = ?err, "transfer rejected by a sell invariant");
-                ApiError::unprocessable(
-                    "the selected parcels are invalid: missing, over-allocated, not a Buy/DRP, \
-                     or held in a different account from the source",
-                )
+                match err {
+                    sell::SellError::PurchaseParcelMissing => {
+                        ApiError::unprocessable("a selected parcel does not exist")
+                    }
+                    sell::SellError::PurchaseTradeNotBuyOrDrp => ApiError::unprocessable(
+                        "a selected parcel is not a Buy or DRP trade — only a parcel of units can \
+                         be moved",
+                    ),
+                    sell::SellError::PurchaseQuantityExceeded => ApiError::unprocessable(
+                        "the units to move exceed what a selected parcel still holds — a parcel \
+                         already sold, moved, or covering a network fee cannot be moved again",
+                    ),
+                    sell::SellError::PurchaseAfterSale => ApiError::unprocessable(
+                        "a selected parcel is dated after the transfer date — units cannot be \
+                         moved before they were acquired",
+                    ),
+                    sell::SellError::PurchaseInDifferentAccount => ApiError::unprocessable(
+                        "a selected parcel is not held in the source account — move it from the \
+                         account that holds it, or fix the source account",
+                    ),
+                    sell::SellError::AllocationNotPositive => ApiError::unprocessable(
+                        "each parcel's units to move must be a positive quantity",
+                    ),
+                    // Everything else the Sell core can reject is unreachable
+                    // from a transfer, which builds the Sell itself: its
+                    // quantity is the allocations' own sum (never a mismatch),
+                    // its price is 0 with the listing's currency and a fresh id
+                    // (so no amounts, statement-total, FX or frozen-Sell
+                    // rejection), and the listing check above runs first.
+                    other => {
+                        tracing::error!(error = ?other, "unexpected sell rejection from a transfer");
+                        ApiError::unprocessable(
+                            "the selected parcels were rejected by the Sell invariants",
+                        )
+                    }
+                }
             }
             TransferError::Db(err) => err.into(),
         }
@@ -1525,5 +1562,75 @@ mod tests {
             .put("/transfers/1", &body)
             .await;
         assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    /// SCENARIOS N-04, N-12: each Sell-side rejection a transfer can reach says
+    /// what is actually wrong. They all used to answer one sentence listing
+    /// every cause at once — which named neither the date case nor the
+    /// non-positive one, and told a user with a wrong date that the parcel was
+    /// "missing, over-allocated, not a Buy/DRP, or held in a different
+    /// account", none of which was true.
+    #[tokio::test]
+    async fn each_parcel_rejection_names_its_own_cause() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "ICE").await;
+        // The vest parcel sits in account 2, dated 2023-03-01.
+        insert_vest(&pool, 1, d(2023, 3, 1), "100", "120").await;
+        let client = ApiClient::over(router().with_state(pool.clone()));
+        let attempt = async |id: i64, from: i64, to: i64, date: &str, parcel: i64, units: &str| {
+            let body = serde_json::json!({
+                "listing_id": 1,
+                "date": date,
+                "from_account_id": from,
+                "to_account_id": to,
+                "allocations": [ { "purchase_trade_id": parcel, "quantity_allocated": units } ]
+            });
+            let resp = client.put(format!("/transfers/{id}"), &body).await;
+            assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
+            resp.text().to_string()
+        };
+
+        let detail = attempt(1, 2, 1, "2022-01-01", 1, "100").await;
+        assert!(
+            detail.contains("dated after the transfer date"),
+            "detail: {detail}"
+        );
+        let detail = attempt(2, 2, 1, "2024-06-01", 1, "101").await;
+        assert!(
+            detail.contains("exceed what a selected parcel still holds"),
+            "detail: {detail}"
+        );
+        let detail = attempt(3, 2, 1, "2024-06-01", 99, "100").await;
+        assert!(detail.contains("does not exist"), "detail: {detail}");
+        let detail = attempt(4, 1, 2, "2024-06-01", 1, "100").await;
+        assert!(
+            detail.contains("not held in the source account"),
+            "detail: {detail}"
+        );
+        let detail = attempt(5, 2, 1, "2024-06-01", 1, "0").await;
+        assert!(detail.contains("positive quantity"), "detail: {detail}");
+
+        // A Sell is not a parcel: allocating one is rejected by type, not by
+        // any of the above.
+        test_support::sell(50, 1)
+            .date(d(2024, 1, 5))
+            .qty(dec("10"))
+            .account(2)
+            .with(|t| t.average_price = dec("130"))
+            .insert(&pool)
+            .await;
+        test_support::allocate(&pool, 50, 50, 1, dec("10")).await;
+        let detail = attempt(6, 2, 1, "2024-06-01", 50, "10").await;
+        assert!(
+            detail.contains("not a Buy or DRP trade"),
+            "detail: {detail}"
+        );
+
+        // Nothing persisted by any of them.
+        let transfers: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM transfers")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(transfers, 0);
     }
 }
