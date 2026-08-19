@@ -35,7 +35,7 @@ use crate::infra::http::ApiError;
 use crate::reports::realised_gains::DisposalSource;
 use crate::reports::{
     activity, amit_adjustment_cross_check, amit_cash_cross_check, e4_cross_check, franking_at_risk,
-    net_capital_gain, realised_gains, tax_summary,
+    net_capital_gain, realised_gains, rollover_consistency, tax_summary,
 };
 use axum::{
     Json, Router,
@@ -106,6 +106,13 @@ pub struct Completeness {
     /// disposal schedule's cost base — this report's central figure — so it
     /// belongs to the gate the completeness section is.
     pub amit_adjustment_alerts: Vec<amit_adjustment_cross_check::AmitAdjustmentAlert>,
+    /// Rollovers whose stored carried cost base no longer matches what the
+    /// units they consumed are worth today, for the same reason: a replacement
+    /// parcel's cost base *is* the disposal schedule's cost base for every unit
+    /// still descending from it. **Not** filtered to the year — a rollover from
+    /// an earlier year is exactly the one whose stale figure this year's
+    /// disposals are costed on (SCENARIOS N-06).
+    pub rollover_alerts: Vec<rollover_consistency::RolloverAlert>,
 }
 
 /// Every (AMIT listing, holding account) with a non-zero opening balance at
@@ -1321,16 +1328,22 @@ pub async fn db_tax_report(pool: &SqlitePool, tax_year: i32) -> Result<TaxReport
             .into_iter()
             .filter(|a| a.tax_year == tax_year)
             .collect();
+    // Unfiltered, unlike the three above: a rollover's stale carried figure is
+    // the cost base of every unit still descending from it, however many years
+    // later this report's disposals are.
+    let rollover_alerts = rollover_consistency::db_rollover_alerts(pool).await?;
 
     let completeness = Completeness {
         complete: amma_missing_alerts.is_empty()
             && amit_cash_alerts.is_empty()
             && e4_alerts.is_empty()
-            && amit_adjustment_alerts.is_empty(),
+            && amit_adjustment_alerts.is_empty()
+            && rollover_alerts.is_empty(),
         amma_missing: amma_missing_alerts,
         amit_cash_alerts,
         e4_alerts,
         amit_adjustment_alerts,
+        rollover_alerts,
     };
 
     let summary_row = all_years_summary

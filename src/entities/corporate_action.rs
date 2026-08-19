@@ -2965,6 +2965,103 @@ mod tests {
         assert_eq!(resp.status, StatusCode::NO_CONTENT);
     }
 
+    /// SCENARIOS N-06, N-07: a rollover stores the cost base and quantity its
+    /// replacement parcels carry, so an event back-dated over one restates only
+    /// the parcels it consumed. Entering the *same* return of capital before the
+    /// transfer reported a $400 cost base; entering it afterwards reported $500
+    /// — a $100 understated gain from nothing but the order of entry — and a
+    /// back-dated split left the source parcel open again beside the untouched
+    /// replacement, reporting 200 units and $750 for a $500 holding of 200. Both
+    /// are refused now, naming the operation and the delete-enter-redo recovery.
+    #[tokio::test]
+    async fn events_back_dated_over_a_rollover_are_refused_naming_it() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AAA").await;
+        crate::entities::holding_account::db_upsert(
+            &pool,
+            &crate::entities::holding_account::HoldingAccount {
+                id: 2,
+                name: "Broker".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        test_support::buy(1, 1)
+            .date(d(2023, 1, 10))
+            .qty(Decimal::from(100))
+            .price(Decimal::from(5))
+            .insert(&pool)
+            .await;
+        crate::entities::transfer::db_transfer(
+            &pool,
+            1,
+            &crate::entities::transfer::TransferBody {
+                listing_id: 1,
+                date: d(2023, 8, 1),
+                from_account_id: 1,
+                to_account_id: 2,
+                allocations: vec![AllocationInput {
+                    purchase_trade_id: 1,
+                    quantity_allocated: Decimal::from(100),
+                }],
+                fee_allocations: Vec::new(),
+                fee_market_price: None,
+                fee_fx_rate: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        // A payment before the move, a payment on the day of it, and a
+        // back-dated split — each restates parcels the transfer consumed.
+        for action in [
+            roc(10, 1, d(2023, 5, 1), "1"),
+            roc(11, 1, d(2023, 8, 1), "1"),
+            split(12, 1, d(2023, 5, 1), "2", "1"),
+            bonus(13, 1, d(2023, 5, 1), "1", "10"),
+        ] {
+            let err = db_upsert(&pool, &action).await.expect_err("refused");
+            assert!(
+                matches!(err, WriteError::BackDatedOverRollover { .. }),
+                "{action:?} → {err:?}"
+            );
+        }
+
+        // The 422 the web UI shows names the operation to redo and the recovery.
+        let resp = client(&pool)
+            .put(
+                "/corporate_actions/10",
+                &serde_json::json!({
+                    "action_type": "ReturnOfCapital",
+                    "listing_id": 1,
+                    "date": "2023-05-01",
+                    "amount_per_unit": "1",
+                    "currency": "AUD",
+                }),
+            )
+            .await;
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
+        let detail = resp.text().to_string();
+        assert!(
+            detail.contains("holding-account transfer #1 on 2023-08-01"),
+            "detail: {detail}"
+        );
+        assert!(detail.contains("Delete that operation"), "detail: {detail}");
+
+        // After the move is fine — the replacement parcel receives it — and so
+        // is a rights issue, which creates its own trades rather than restating
+        // anything.
+        db_upsert(&pool, &roc(14, 1, d(2023, 8, 2), "1"))
+            .await
+            .unwrap();
+
+        // And nothing of another listing is affected.
+        insert_listing(&pool, 2, "BBB").await;
+        db_upsert(&pool, &roc(15, 2, d(2023, 5, 1), "1"))
+            .await
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn api_get_and_delete_missing_return_404() {
         let pool = test_pool().await;

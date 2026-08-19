@@ -31,6 +31,7 @@ pub mod performance;
 pub mod period_performance;
 pub mod portfolio;
 pub mod realised_gains;
+pub mod rollover_consistency;
 pub mod row_history;
 pub mod settlement_coverage;
 pub mod snapshot;
@@ -87,6 +88,7 @@ pub fn router() -> Router<SqlitePool> {
         .merge(settlement_coverage::router())
         .merge(e4_cross_check::router())
         .merge(amit_adjustment_cross_check::router())
+        .merge(rollover_consistency::router())
         .merge(amit_cash_cross_check::router())
         .merge(wash_sales::router())
         .merge(row_history::router())

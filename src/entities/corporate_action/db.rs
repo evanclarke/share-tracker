@@ -94,6 +94,25 @@ pub enum WriteError {
         payment_currency: String,
         parcel_currency: String,
     },
+    /// A `ReturnOfCapital` / `ShareSplit` / `BonusIssue` dated on or before a
+    /// rollover of the same listing that has already run — a transfer, a
+    /// scrip-for-scrip exchange, or a demerger. Those operations **store** each
+    /// replacement parcel's carried cost base and quantity, computed from the
+    /// facts as they stood when they ran, so an event back-dated over one
+    /// restates the parcels it consumed (which the reports still walk) while the
+    /// frozen replacement figures cannot move: the cost base is silently
+    /// overstated, or — for a split — the source parcel reappears as an open
+    /// holding beside the untouched replacement (SCENARIOS N-06, N-07). The
+    /// recovery is the one `amit_adjustment`'s `UnitsCarriedIntoReplacement`
+    /// already names: delete the operation, enter the event, run it again.
+    /// Mapped to `422`.
+    #[error("this event is dated on or before a rollover of the same listing that has already run")]
+    BackDatedOverRollover {
+        /// The rollover closing Sells the event would restate behind, newest
+        /// first, as (date, what it was): named so the operation to redo is
+        /// findable without a search.
+        rollovers: Vec<(NaiveDate, String)>,
+    },
     /// A `ReturnOfCapital` on a listing flagged `amit`. An AMIT's cost-base
     /// movement is its AMMA statement's per-unit `cost_base_adjustment`,
     /// entered as AMIT adjustments (CGT event E10) — the E4 tax-deferred
@@ -132,6 +151,24 @@ impl From<WriteError> for ApiError {
                  base in the parcel's own currency, and amounts are never netted across \
                  currencies, so record it converted into {parcel_currency}"
             )),
+            // Back-dated over a rollover whose carried figures are frozen →
+            // 422 naming each operation and the delete-enter-redo recovery,
+            // the same wording `amit_adjustment` uses for the same situation.
+            WriteError::BackDatedOverRollover { rollovers } => {
+                let named = rollovers
+                    .iter()
+                    .map(|(date, what)| format!("{what} on {date}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                ApiError::Unprocessable(format!(
+                    "this event is dated on or before a rollover of the same listing that has \
+                     already run ({named}), which carried its parcels' cost base and quantity away \
+                     as stored figures — recording it now would restate the parcels the operation \
+                     consumed while leaving the replacement parcels untouched. Delete that \
+                     operation, enter this event, then run it again, so the replacement parcels \
+                     carry the restated figures forward"
+                ))
+            }
             // The AMIT's cost-base movement belongs on its AMMA statement →
             // 422 naming the field it belongs in, mirroring the income
             // path's `tax_deferred_amount` refusal.
@@ -193,6 +230,48 @@ async fn allocations_fit_parcels(
     Ok(consumed
         .values()
         .all(|&(quantity, total)| total <= quantity))
+}
+
+/// The rollover closing Sells of `listing_id` dated on or after `date` — the
+/// operations an event dated then would restate behind — newest first, each as
+/// (date, a human name for it). `exclude_action_id` drops the group the action
+/// being written created itself.
+///
+/// Read on the caller's transaction, so the check and the write see one state.
+async fn rollovers_after(
+    conn: &mut sqlx::SqliteConnection,
+    listing_id: i64,
+    date: NaiveDate,
+    exclude_action_id: i64,
+) -> Result<Vec<(NaiveDate, String)>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT s.date AS date, s.transfer_id, s.scrip_action_id, s.demerger_action_id \
+         FROM trades s \
+         WHERE s.listing_id = ?1 AND s.trade_type = 'Sell' AND s.date >= ?2 \
+           AND (s.transfer_id IS NOT NULL OR s.scrip_action_id IS NOT NULL \
+                OR s.demerger_action_id IS NOT NULL) \
+           AND COALESCE(s.scrip_action_id, s.demerger_action_id, -1) <> ?3 \
+         ORDER BY s.date DESC, s.id DESC",
+    )
+    .bind(listing_id)
+    .bind(date)
+    .bind(exclude_action_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    rows.iter()
+        .map(|row| {
+            let date: NaiveDate = row.try_get("date")?;
+            let what = if let Some(id) = row.try_get::<Option<i64>, _>("transfer_id")? {
+                format!("holding-account transfer #{id}")
+            } else if let Some(id) = row.try_get::<Option<i64>, _>("scrip_action_id")? {
+                format!("scrip-for-scrip exchange of corporate action #{id}")
+            } else {
+                let id: Option<i64> = row.try_get("demerger_action_id")?;
+                format!("demerger of corporate action #{}", id.unwrap_or_default())
+            };
+            Ok((date, what))
+        })
+        .collect()
 }
 
 pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<(), WriteError> {
@@ -354,6 +433,32 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
         });
         if amit_year {
             return Err(WriteError::ReturnOfCapitalOnAmit);
+        }
+    }
+
+    // A rollover of this listing that has already run froze the cost base and
+    // quantity its replacement parcels carry (`domain::rollover` stores both),
+    // so an event dated on or before it can no longer reach them while it does
+    // still restate the parcels the operation consumed. Refused for the three
+    // action types that retroactively restate a parcel — a return of capital
+    // reduces the cost base of parcels held at its date, and a split or bonus
+    // issue re-bases their quantities — with the rollovers named and the
+    // delete-enter-redo recovery spelled out (SCENARIOS N-06, N-07). The
+    // remaining types either create their own trades (rights, buy-back) or
+    // *are* the operation, so they have nothing to restate behind.
+    //
+    // The action's own group is excluded: a `ScripForScrip`/`Demerger` row is
+    // frozen by `ReferencedByTrade` above once executed anyway, and this must
+    // not refuse the very action that created the rollover.
+    if matches!(
+        action.kind,
+        ActionKind::ReturnOfCapital { .. }
+            | ActionKind::ShareSplit { .. }
+            | ActionKind::BonusIssue { .. }
+    ) {
+        let rollovers = rollovers_after(&mut tx, action.listing_id, action.date, action.id).await?;
+        if !rollovers.is_empty() {
+            return Err(WriteError::BackDatedOverRollover { rollovers });
         }
     }
 

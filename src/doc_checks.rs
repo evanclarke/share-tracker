@@ -185,10 +185,11 @@ fn amit_adjustment_generation_and_cross_check_documented() {
     ] {
         assert!(API_MD.contains(check), "missing cross-check bullet {check}");
     }
-    // The annual tax report's completeness gate is now four lists, and stays
-    // non-blocking.
+    // The annual tax report's completeness gate is now five lists (the fifth
+    // being the rollover-consistency one, see
+    // `rollover_consistency_cross_check_documented`), and stays non-blocking.
     assert!(API_MD.contains("`amit_adjustment_alerts`"));
-    assert!(API_MD.contains("`complete` is true only when all four are empty"));
+    assert!(API_MD.contains("`complete` is true only when all five are empty"));
     assert!(API_MD.contains("**`completeness`** — non-blocking (never rejects the request)"));
     // README: the feature line and the completeness wording.
     assert!(README_MD.contains("**AMIT adjustment generation and cross-check**"));
@@ -499,6 +500,32 @@ fn health_documents_what_counts_as_a_disposal_for_the_ess_30_day_rule() {
     assert!(
         include_str!("../docs/ato/OVERVIEW.md").contains("[`ess-takeovers-and-restructures.md`]")
     );
+}
+
+/// Doc pin (SCENARIOS N-06, N-07): the three parcel-substituting operations
+/// store the cost base their replacement parcels carry, so the docs must say
+/// what closes that at write time, what the cross-check catches instead, what it
+/// deliberately does not check (a partial-rollover scrip exchange's cash
+/// apportionment), and that the annual tax report carries the rows unfiltered by
+/// year.
+#[test]
+fn rollover_consistency_cross_check_documented() {
+    assert!(API_MD.contains("### Rollover consistency"));
+    assert!(API_MD.contains("GET /reports/rollover_consistency"));
+    // What it compares, and the one case it declines to.
+    assert!(API_MD.contains("per currency"));
+    assert!(API_MD.contains("partial-rollover scrip exchange"));
+    assert!(API_MD.contains("listed as *not checked*"));
+    // The write-time half of the answer, on the corporate-action side.
+    assert!(API_MD.contains(
+        "**Recording one of the three read-time events behind a rollover that has already run.**"
+    ));
+    assert!(API_MD.contains("delete that operation, enter this event, then run it again"));
+    // The tax report reads it unfiltered, and says why.
+    assert!(API_MD.contains("`rollover_alerts`"));
+    assert!(API_MD.contains("this year\'s disposals are costed on"));
+    // README feature line.
+    assert!(README_MD.contains("**Rollover consistency cross-check**"));
 }
 
 /// Known-limitation pin (SCENARIOS M-12, decided 2026-08-19): the FITO line

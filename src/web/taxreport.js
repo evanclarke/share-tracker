@@ -89,6 +89,13 @@ function completenessSection(c) {
       + ' parcel adjustment(s) covering ' + a.units_adjusted + ' of ' + a.units_held + ' units held): '
       + a.problems.join(' ')));
   });
+  // A rollover whose stored carried cost base has gone stale is the cost base
+  // of every unit still descending from it, so these are listed whatever year
+  // the operation itself was in.
+  (c.rollover_alerts || []).forEach(function (a) {
+    items.push(el('li', null, a.ticker + ' ' + a.kind + ' #' + a.group_id + ' (' + a.date + '): '
+      + a.problems.join(' ')));
+  });
   return el('div', { class: 'doc-section' }, [
     el('h3', null, 'Data completeness'),
     el('p', { class: 'badge warn' }, '⚠ Issues found for this year — this report may understate income or the cost base until they are resolved:'),

@@ -827,6 +827,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rollover_consistency_ui_present() {
+        let js = app_js_body().await;
+        // The cross-check screen drives GET /reports/rollover_consistency: the
+        // three parcel-substituting operations store the cost base their
+        // replacement parcels carry, so a later change behind one is only
+        // visible here (SCENARIOS N-06, N-07).
+        assert!(js.contains("/reports/rollover_consistency"));
+        assert!(js.contains("Rollover Consistency"));
+        // The screen says what the fix is, and what it does not check.
+        assert!(js.contains("delete that operation and run it again"));
+        assert!(js.contains("not checked"));
+        // The annual tax report prints the alerts as a fifth completeness
+        // bullet, whatever year the operation was in.
+        assert!(js.contains("rollover_alerts"));
+    }
+
+    #[tokio::test]
     async fn amit_cash_cross_check_ui_present() {
         let js = app_js_body().await;
         // The cross-check report screen drives GET /reports/amit_cash_cross_check
