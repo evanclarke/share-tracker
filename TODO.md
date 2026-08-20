@@ -77,49 +77,61 @@ from the start.
   with in 0021 (keeping the natural key as a `UNIQUE`), which makes this the larger of the two
   precedents, not the smaller.
 
-## A one-off `symbol` override stores another security's whole history under a listing, unguarded and undetected — and Evan's live LAC rows are the case
+## LAC's whole pre-demerger price history is LAR's series — 375 rows say so on their face, 260 say nothing, and the health check sees only the 260
 
-`POST /closing_prices/backfill`'s optional `symbol` is documented as "a one-off override for this
-fetch only ... for a provider spelling the rename chain doesn't record", and the stored rows "land
-under the listing's own `listing_id` either way, so history stays unified regardless of which symbol
-fetched it". Nothing checks that the symbol names *the same security*, and nothing afterwards
-notices that it didn't.
+Found in the deployed database (backup `share-tracker-2026-08-16-000000.db`). Listing 7 (`LAC`, held
+2021-03-25 → 2023-10-03) carries 635 price rows dated before the demerger. **Every one is
+byte-identical to listing 8 (`LAR`/`LAAC`)'s row for the same date** — 635 identical, 0 differing, 0
+missing. They split into two halves that must not be confused:
 
-Found in the deployed database (backup `share-tracker-2026-08-16-000000.db`, read-only), and it is
-not hypothetical:
+- **375 rows, 2021-03-25 → 2022-09-19, `origin: manual`.** These were a *deliberate, documented*
+  stopgap and the provenance says so in full. `sourced_from` reads "listing 8 (LAR) stored close for
+  the same date — Yahoo's demerger-adjusted old-LAC series, identical to listing 7's own rows across
+  their whole pre-demerger overlap (259/259 days)", and `reason` reads "Yahoo serves no LAC candle
+  before 2023-10-02 … leaving 2021-03-25..2022-09-19 unpriceable and 544 snapshots permanently
+  stale. Copied to unblock them. NOTE: demerger-adjusted, so about 2.46x below the actual old-LAC
+  close of the day — **this period is unblocked, not accurate**." Nothing here is a mistake: the
+  manual-price provenance mechanism did exactly its job, and it is the only reason the intent is
+  reconstructible three weeks later.
+- **260 rows, 2022-09-20 → 2023-10-02, `origin: fetched`.** These came from
+  `POST /closing_prices/backfill`'s one-off `symbol` override — Yahoo serves **no** `LAC` history
+  before 2023-10-02 (a bare backfill of 2023-09-20..29 answers HTTP 400 on every day, reproduced
+  against the live provider), so the override was used to reach them and returned the other entity's
+  series. Unlike the 375, these carry **no record of what produced them**: `source` says `yahoo`, and
+  the symbol actually used is stored nowhere.
 
-- Listing 7 (`LAC`, held 2021-03-25 → 2023-10-03) carries **634** price rows for 2021-03-25 →
-  2023-09-29, all `fetched_at` 2026-07-28.
-- Every one of those 634 rows is **byte-identical** to listing 8 (`LAR`/`LAAC`)'s row for the same
-  date — 634 identical, 0 differing, 0 missing. LAC's pre-demerger price history *is* LAR's price
-  series.
-- The cause is the override: Yahoo serves **no** `LAC` history before 2023-10-02 (a bare backfill of
-  2023-09-20..29 answers HTTP 400 on every day — reproduced on a scratch DB against the live
-  provider), so a previous session backfilled under the pre-separation symbol to unblock the dates.
-  What came back was the other entity's series.
-- Impact: **922 snapshot dates / 2,766 stored snapshot rows** value LAC at the wrong company's price.
-  At 2023-09-29 the stored `portfolio_overview` row reads `market_value` A$11,123.21 against a
-  `total_cost_base` of A$19,869.26 — a 44% unrealised loss — where old Lithium Americas closed near
-  US$16.85, i.e. roughly A$27,400. **No tax figure is affected**: closing prices feed valuation only.
-- The memory note "LAC pre-demerger prices unblocked but still ~2.46x understated" (2026-07-28) is
-  this, and the 2.46 is the LAR-vs-old-LAC ratio, not a demerger adjustment factor.
+Impact: 922 snapshot dates / 2,766 stored snapshot rows value LAC at LAR's price. At 2023-09-29 the
+stored `portfolio_overview` row reads `market_value` A$11,123.21 against `total_cost_base`
+A$19,869.26 — a 44% unrealised loss — where old Lithium Americas closed near US$16.85 (≈ A$27,400).
+**No tax figure is affected**: closing prices feed valuation only.
 
-- [ ] Nothing detects it. No cross-check asks whether two listings hold an identical price series,
-  which is the one signal this leaves — 634 consecutive byte-identical closes between two listings is
-  not something that happens to two real securities. A `reports::health` check in the
-  `duplicate_*` family is the obvious shape.
-- [ ] Nothing guards the write. Consider what is checkable at fetch time: the returned candles'
-  **currency** against the listing's, and whether the override's series is already stored in full
-  under *another* listing. Neither is conclusive, so this may be a warn-and-record rather than a
-  refusal — but the override currently records nothing at all: the stored row's `source` says
-  `yahoo` and the symbol that actually produced it is not kept anywhere, so after the fact there is
-  no way to tell an overridden fetch from an ordinary one. That is the first thing to fix, and it is
-  small: record the symbol the row was fetched under.
-- [ ] The rows cannot be removed. `DELETE /closing_prices/:listing_id/:price_date` refuses an `ok`
-  row by design, so 634 rows known to be the wrong security's are unremovable through the API;
-  `POST /closing_prices/fetch` would replace them one day at a time, but for these dates it now
-  errors, so it converts them to errored rows rather than clearing them. Whatever the repair path is,
-  it needs to exist — the one-way rule was written for *real price data*, and these are not.
+- [ ] **`reports::health`'s `demergers_missing_close` (added `16db704`) under-reports this by more
+  than half, and excludes exactly the rows documented as inaccurate.** Its query filters
+  `cp.origin = 'fetched'`, so on this data it answers `adjusted_days: 260, earliest_date:
+  2022-09-20` where the affected span is 635 rows from 2021-03-25. Excluding manual rows is right
+  for its *stated* purpose (a manual price is contemporaneous by declaration and is never re-based),
+  but that makes the count read as the size of the problem when it is not. Either the check needs a
+  second figure for manual rows in the span, or its wording must say what it is counting.
+- [ ] **The `symbol` override records nothing.** It is documented as "a one-off override for this
+  fetch only … for a provider spelling the rename chain doesn't record", and the stored rows "land
+  under the listing's own `listing_id` either way". Nothing checks that the symbol names the *same
+  security*, and — the fixable part — nothing keeps the symbol a row was fetched under, so an
+  overridden fetch is indistinguishable from an ordinary one afterwards. Recording it is small and
+  is the first thing to do; a returned-currency check against the listing's is a cheap second.
+- [ ] **Nothing detects the result.** 635 consecutive byte-identical closes across two listings is
+  not something two real securities do. A `reports::health` check in the `duplicate_*` family is the
+  obvious shape, and it is the only signal this leaves for the 260 rows that carry no provenance.
+- [ ] **The rows cannot be cleared.** `DELETE /closing_prices/:listing_id/:price_date` refuses an
+  `ok` row by design. The 375 manual ones can only be overwritten by another manual `PUT`; the 260
+  fetched ones would be replaced one day at a time by `POST /closing_prices/fetch`, which for these
+  dates now errors — converting them to errored rows rather than clearing them. The one-way rule was
+  written for real price data; there is no path for data known to be another security's.
+- [ ] **The demerger stated-close fix (`16db704`) does not repair this listing, and this corrects
+  the record.** Its factor is derived from the last pre-demerger stored row; here that row
+  (2023-10-02, 10.13) is LAC's own demerger-adjusted figure while the 635 behind it are LAR's, so one
+  factor cannot serve both. The mechanism is right and the 10.13 row is genuinely demerger-adjusted —
+  but a stated close should not be recorded against this action until the 635 are dealt with, or it
+  will scale the wrong series by a plausible-looking factor.
 
 ## There is no "unpriced *before*" counterpart to `unpriced_from`, which is the shape a spun-off entity actually has
 
@@ -133,6 +145,13 @@ answers HTTP 400 (reproduced against the live provider). The Q-02 pass already m
 it correctly rather than mis-handling it: its own note records that LAC's block "sits *before* its ok
 series begins, i.e. an unpriced-**before** hole a carry-forward cannot reach", and `unpriced_from`'s
 validation refuses to be used for it. So the system knows the shape exists and declines to answer it.
+
+**The strongest argument for the counterpart is what happened in its absence.** The 375 manual rows
+in the section above were entered because there was no way to say "unpriceable": their own `reason`
+names the pressure exactly — "leaving 2021-03-25..2022-09-19 unpriceable and 544 snapshots
+permanently stale. Copied to unblock them … this period is unblocked, not accurate." Offered a
+choice between a permanently stale run of snapshots and a knowingly wrong number, a careful operator
+took the wrong number and documented it. That is a missing feature, not a lapse.
 
 - [ ] Decide whether it deserves the counterpart. The two are not symmetric: carrying a close
   *forward* substitutes a real, once-observed price, while carrying one *backward* would invent a
