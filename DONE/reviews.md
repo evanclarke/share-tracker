@@ -3809,3 +3809,62 @@ by the audited set's own criterion — a user-entered value that changes a repor
 qualifies. Auditing it is a materially bigger change (a `row_history` rebuild to extend the
 `table_name` CHECK, a trigger pair, `reports::row_history::AUDITED_TABLES`, `config.js`'s picker),
 so it is recorded as its own finding rather than smuggled into this commit.
+
+## SCENARIOS Q-09: nothing pins the snapshot-staleness trigger set, and it has now been missed three times
+
+Q-09 asks the code-review question directly: what catches a new dated fact table added without
+staleness triggers? Nothing does. The audited-table list is pinned in three places by a test
+(`reports::row_history::AUDITED_TABLES`, the migration's CHECK + triggers, `config.js`'s picker),
+and CLAUDE.md gives the staleness rule the same weight — but there is no equivalent assertion, only
+a convention and a per-migration comment. `grep` finds `stale_snapshots` referenced in exactly three
+test contexts, all of them checking that a *table rebuild* re-created the triggers it already had,
+never that a table which needs them has them.
+
+The convention has not held: `listings` was missed until SCENARIOS M-08 (migration 0030, 2026-08-19),
+`rba_fx_rates` until M-13 (0031), and `exchange_holidays` is missed right now (finding above). Three
+in a row is the argument.
+
+- [x] Add a test in the shape of `AUDITED_TABLES`: an explicit list of the tables whose writes must
+  stale snapshots, asserted against `sqlite_master`'s trigger names, plus an explicit
+  **exempt** list carrying the reason each table is exempt (the migrations already write those
+  reasons — 0006, 0008, 0009, 0012, 0014, 0018, 0024 — so the test would collect them rather than
+  invent them). A new table appearing in neither list fails the test, which is the property the
+  convention is missing.
+
+**Closed 2026-08-20.** `reports::snapshot::tests::every_table_is_classified_for_snapshot_staleness`
+is the sibling the finding asked for, and it lives in `reports/snapshot.rs` for the same reason
+`AUDITED_TABLES` lives in `reports/row_history.rs`: the staleness triggers exist to serve *this*
+module's contract (its module doc already states the rule), so the list of tables that must carry
+them belongs beside it rather than with `infra::db`'s migration-file tests. It reads the live schema,
+not the migration text — `sqlite_master`, the way `infra::db`'s rebuild tests read theirs — so a
+later table rebuild that silently drops a trigger set along with its table fails here too, which
+reading 0001 alone could never catch.
+
+Two consts carry the classification. `STALENESS_TRIGGERED_TABLES` names the ten tables whose writes
+must stale a snapshot **with the operations each is required to carry** — the assertion is set
+equality against the trigger names on that table, so it expresses "the trigger set this table needs",
+not a blanket insert/update/delete assumption: `trades`, `parcel_allocations`, `income`,
+`amma_statements`, `amit_adjustments`, `corporate_actions` and `exchange_holidays` carry all three,
+while `closing_prices` (0020/0021), `listings` (0030) and `rba_fx_rates` (0031) carry `_update`
+alone, each with the reason its migration gives for the missing arms. `STALENESS_EXEMPT_TABLES` names
+the other nineteen, each with the reason a write to it can invalidate no stored snapshot — collected
+from the migrations that already stated them (0005, 0006, 0008, 0009, 0011, 0012, 0014, 0018, 0026,
+0027) and from `docs/SCHEMA.md` for `exchanges`, rather than invented here.
+
+The property the convention was missing is the third assertion: the test enumerates every table in
+the live schema and requires each to appear in **exactly one** list, so a new dated fact table cannot
+land without its author either giving it triggers or writing down why it needs none. The classified
+names are checked back against the schema too, so a list entry outliving its table also fails.
+
+Proven to bite, both directions, before being committed: deleting the
+`exchange_holidays_stale_snapshots_delete` trigger from 0033 failed with
+"`exchange_holidays` must carry exactly these staleness triggers" and the two sorted trigger lists
+diffed; adding a throwaway `0034` migration creating an unclassified `scratch_dated_facts` table
+failed with "`scratch_dated_facts` appears in 0 of STALENESS_TRIGGERED_TABLES /
+STALENESS_EXEMPT_TABLES, must appear in exactly one", quoting the schema rule and both ways to
+satisfy it. Both were reverted.
+
+The mechanism is documented where the rule is stated: CLAUDE.md's `src/reports/` note (which carries
+the staleness rule) now names the test and says a new table must be classified in the same task,
+`docs/SCHEMA.md`'s staleness-trigger paragraph says the same at the schema's own surface, and
+`reports::snapshot`'s module doc points at the test beside its description of the triggers.

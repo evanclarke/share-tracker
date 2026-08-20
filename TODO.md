@@ -32,7 +32,7 @@ two holdings where one listing's quote fails: the failing row is left unvalued c
 `price_unavailable` while the other still values, converts at the quote-month rate and flags
 `fx_provisional` when it falls back), and Q-15 (a rename leaves the stored `performance` snapshot's
 `ticker` label untouched and unstaled, and regeneration picks the new one up — the documented
-display-only drift). Three of those findings are open below, alongside the audit-trail question that
+display-only drift). Two of those findings are open below, alongside the audit-trail question that
 closing a fourth (Q-05/Q-08) raised.
 
 ---
@@ -137,27 +137,6 @@ from the start.
   INTEGER, so the table would need the same AUTOINCREMENT surrogate id `closing_prices` was rebuilt
   with in 0021 (keeping the natural key as a `UNIQUE`), which makes this the larger of the two
   precedents, not the smaller.
-
-## SCENARIOS Q-09: nothing pins the snapshot-staleness trigger set, and it has now been missed three times
-
-Q-09 asks the code-review question directly: what catches a new dated fact table added without
-staleness triggers? Nothing does. The audited-table list is pinned in three places by a test
-(`reports::row_history::AUDITED_TABLES`, the migration's CHECK + triggers, `config.js`'s picker),
-and CLAUDE.md gives the staleness rule the same weight — but there is no equivalent assertion, only
-a convention and a per-migration comment. `grep` finds `stale_snapshots` referenced in exactly three
-test contexts, all of them checking that a *table rebuild* re-created the triggers it already had,
-never that a table which needs them has them.
-
-The convention has not held: `listings` was missed until SCENARIOS M-08 (migration 0030, 2026-08-19),
-`rba_fx_rates` until M-13 (0031), and `exchange_holidays` is missed right now (finding above). Three
-in a row is the argument.
-
-- [ ] Add a test in the shape of `AUDITED_TABLES`: an explicit list of the tables whose writes must
-  stale snapshots, asserted against `sqlite_master`'s trigger names, plus an explicit
-  **exempt** list carrying the reason each table is exempt (the migrations already write those
-  reasons — 0006, 0008, 0009, 0012, 0014, 0018, 0024 — so the test would collect them rather than
-  invent them). A new table appearing in neither list fails the test, which is the property the
-  convention is missing.
 
 ## SCENARIOS Q-02: a still-held delisted or suspended listing blocks the whole portfolio's snapshots indefinitely, undocumented
 

@@ -19,7 +19,13 @@
 //! `*_stale_snapshots_*` triggers (0001_schema.sql), so no write path can
 //! bypass it. A stale snapshot keeps showing its stored result (flagged)
 //! until regenerated on demand via `POST /report_snapshots/generate`, which
-//! re-runs the reports with the stored prices and the *new* facts.
+//! re-runs the reports with the stored prices and the *new* facts. Which
+//! tables must carry that trigger set is pinned by this module's
+//! `every_table_is_classified_for_snapshot_staleness` test — the sibling of
+//! `reports::row_history::AUDITED_TABLES`: every table in the live schema is
+//! either listed with the staleness triggers it is required to carry, or
+//! listed exempt with the reason a write to it can invalidate no snapshot, and
+//! a table in neither list fails the test.
 //!
 //! Provisional (migration 0015, distinct from stale): a snapshot whose run
 //! converted any price at a fallback-month FX rate — the valuation month's
@@ -795,6 +801,290 @@ mod tests {
     use crate::entities::{corporate_action, listing};
     use crate::test_support::{self, ApiClient, ApiResponse, test_pool, ymd};
     use axum::http::StatusCode;
+
+    // -----------------------------------------------------------------------
+    // The staleness-trigger set, pinned against the live schema
+    //
+    // The sibling of `reports::row_history::AUDITED_TABLES`: that const pins
+    // which tables the audit trail records, this pair pins which tables stale a
+    // stored snapshot. Both carry a rule a migration can silently skip — and
+    // this one was skipped three times running (`listings` until 0030,
+    // `rba_fx_rates` until 0031, `exchange_holidays` until 0033) while it was a
+    // convention plus a per-migration comment, which is why it is asserted here
+    // (SCENARIOS Q-09).
+    // -----------------------------------------------------------------------
+
+    /// The tables whose writes must mark stored snapshots stale, each with the
+    /// trigger operations it is *required* to carry — an extra or a missing one
+    /// fails — and why that is the set.
+    const STALENESS_TRIGGERED_TABLES: [(&str, &[&str], &str); 10] = [
+        (
+            "trades",
+            &["insert", "update", "delete"],
+            "the parcels every snapshotted report values; staled from the trade `date` \
+             (an UPDATE from the earlier of the old and new dates)",
+        ),
+        (
+            "parcel_allocations",
+            &["insert", "update", "delete"],
+            "what a Sell consumed, so it decides which parcels are still open; staled from \
+             its sale trade's `date`",
+        ),
+        (
+            "income",
+            &["insert", "update", "delete"],
+            "distributions are the performance report's cash flows; staled from `date_paid`",
+        ),
+        (
+            "amma_statements",
+            &["insert", "update", "delete"],
+            "the AMIT cost-base adjustments hang off it; staled from `tax_year_end_date`",
+        ),
+        (
+            "amit_adjustments",
+            &["insert", "update", "delete"],
+            "the per-unit cost-base reduction itself (CGT event E10); staled from its \
+             statement's `tax_year_end_date`",
+        ),
+        (
+            "corporate_actions",
+            &["insert", "update", "delete"],
+            "splits, bonus issues and returns of capital re-base units and cost base; staled \
+             from the action `date`",
+        ),
+        (
+            "exchange_holidays",
+            &["insert", "update", "delete"],
+            "the trading calendar `reports::valuation::stored_valuations` reads **live** when \
+             it walks each holding back to the nearest trading day on or before the snapshot \
+             date; staled from `holiday_date` (0033_exchange_holiday_stale_snapshots.sql, \
+             SCENARIOS Q-05/Q-08)",
+        ),
+        (
+            "closing_prices",
+            &["update"],
+            "UPDATE only, and only on an ok price changing: an INSERT prices a date that was \
+             blocked for valuation and so has no snapshot to stale, and the only delete the \
+             API allows is of an errored row, whose date was never valued \
+             (0001_schema.sql; `entities::closing_price::db_delete`)",
+        ),
+        (
+            "listings",
+            &["update"],
+            "UPDATE only, narrowed to `currency`/`security_type` — the two columns that change \
+             what a *stored* figure means (the currency denominating every price, the security \
+             type deciding which days are valuable). A listing with no trades is held on no \
+             snapshot date and a delete is refused while anything references it \
+             (0030_listing_stale_snapshots.sql, SCENARIOS M-08)",
+        ),
+        (
+            "rba_fx_rates",
+            &["update"],
+            "UPDATE only: correcting a stored rate re-values every snapshot from its month on, \
+             while an INSERT filling a month that had no rate is the provisional true-up's \
+             business (regenerated, not staled — only the rate was interim), and there is no \
+             delete route (0031_audit_rba_fx_rates.sql, SCENARIOS M-13)",
+        ),
+    ];
+
+    /// Every other table in the schema, each with the reason a write to it can
+    /// invalidate no stored snapshot — the reason its own migration gives,
+    /// collected here so an exemption is a decision on the record rather than
+    /// an omission. The snapshotted reports are the price-dependent three
+    /// ([`SnapshotReport`]); a table only the live-computed CGT reports or the
+    /// (un-snapshotted) tax summary read is therefore exempt.
+    const STALENESS_EXEMPT_TABLES: [(&str, &str); 19] = [
+        (
+            "attachments",
+            "documents are provenance, not financial facts; no snapshotted report reads them \
+             (0014_attachment_owner_expansion.sql)",
+        ),
+        (
+            "cgt_settings",
+            "the opening capital loss reaches the CGT reports, which are computed live and \
+             never snapshotted",
+        ),
+        (
+            "currencies",
+            "the ISO code list every currency column is foreign-keyed to: an identity, not a \
+             figure any report computes with",
+        ),
+        (
+            "drp_enrolments",
+            "an enrolment period decides whether a distribution reinvests; the reinvestment \
+             itself is a DRP `trades` row written in the same transaction, and the trades \
+             triggers cover it",
+        ),
+        (
+            "ess_statements",
+            "no snapshotted report reads them — the ESS discount reaches the tax summary, \
+             which is not snapshotted — and the vest Buy the statement feeds is a `trades` row \
+             (0009_ess_statement_aud_overrides.sql, 0026_ess_statement_fx_rate.sql)",
+        ),
+        (
+            "exchanges",
+            "`settlement_days` is consumed when a trade is written, and `timezone`/`close_time` \
+             decide only which dates are *generable*, never what a stored snapshot says \
+             (docs/SCHEMA.md; contrast `exchange_holidays`, whose calendar valuation reads live)",
+        ),
+        (
+            "holding_accounts",
+            "identity only: an account names where a parcel sits and carries no figure a report \
+             computes with",
+        ),
+        (
+            "inheritances",
+            "provenance only — every write also writes the linked Buy in the same transaction, \
+             firing the trades triggers (0005_inheritances.sql)",
+        ),
+        (
+            "interest_income",
+            "the only report reading it is the tax summary, which is not snapshotted \
+             (0008_interest_income.sql, 0011_interest_income_foreign_source.sql)",
+        ),
+        (
+            "investment_expenses",
+            "a deduction the tax summary totals, and the tax summary is not snapshotted",
+        ),
+        (
+            "job_runs",
+            "operational metadata, not a financial fact table (0012_job_run_history.sql)",
+        ),
+        (
+            "listing_renames",
+            "a snapshot carries a ticker only as a display label over `listing_id`, never as a \
+             computed figure, so a rename is display-only drift rather than a wrong figure \
+             (0018_listing_renames.sql, SCENARIOS Q-15)",
+        ),
+        (
+            "mic_registry",
+            "the import-managed ISO 10383 validation list; no report reads it",
+        ),
+        (
+            "report_snapshots",
+            "the snapshot store itself — what the triggers write *to*, never a fact that stales \
+             one",
+        ),
+        (
+            "rights_sale_allocations",
+            "the parcels a rights sale drew on; exempt for the same reason as `rights_sales` \
+             (0006_rights_sales.sql)",
+        ),
+        (
+            "rights_sales",
+            "a rights sale changes no holding quantity and no parcel cost base, so no \
+             snapshotted report reads it — its effect is confined to the live-computed CGT \
+             reports (0006_rights_sales.sql)",
+        ),
+        (
+            "row_history",
+            "the append-only audit trail: derived state written by triggers, and its own guards \
+             abort any UPDATE or DELETE of it (0013_row_history.sql)",
+        ),
+        (
+            "tax_year_settings",
+            "a taxpayer-level ESS eligibility fact read by the tax summary, which is not \
+             snapshotted (0027_tax_year_settings.sql)",
+        ),
+        (
+            "transfers",
+            "provenance only — a transfer writes its closing Sell and the replacement Buys in \
+             the same transaction, firing the trades triggers",
+        ),
+    ];
+
+    /// Every table in the live schema is classified: it either carries exactly
+    /// the staleness triggers [`STALENESS_TRIGGERED_TABLES`] requires of it, or
+    /// it is listed in [`STALENESS_EXEMPT_TABLES`] with the reason it needs
+    /// none — and then carries none at all. A table in **neither** list fails,
+    /// which is the property the convention was missing: a new dated fact table
+    /// cannot land without its author either giving it triggers or writing down
+    /// why it has none. Modelled on
+    /// `row_history::audited_tables_match_migration_check_and_triggers`, but
+    /// asserted against `sqlite_master` rather than the migration text, so a
+    /// later rebuild that drops a trigger set with its table fails here too.
+    #[tokio::test]
+    async fn every_table_is_classified_for_snapshot_staleness() {
+        let pool = test_pool().await;
+
+        let tables: Vec<String> = sqlx::query_scalar(
+            "SELECT name FROM sqlite_master WHERE type = 'table' \
+             AND name NOT LIKE 'sqlite_%' AND name <> '_sqlx_migrations' ORDER BY name",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert!(
+            tables.len() > 20,
+            "the test pool should hold the fully migrated schema, found {tables:?}"
+        );
+
+        let triggered: Vec<&str> = STALENESS_TRIGGERED_TABLES
+            .iter()
+            .map(|(table, ..)| *table)
+            .collect();
+        let exempt: Vec<&str> = STALENESS_EXEMPT_TABLES
+            .iter()
+            .map(|(table, _)| *table)
+            .collect();
+
+        for table in &tables {
+            let listed = usize::from(triggered.contains(&table.as_str()))
+                + usize::from(exempt.contains(&table.as_str()));
+            assert_eq!(
+                listed, 1,
+                "`{table}` appears in {listed} of STALENESS_TRIGGERED_TABLES / \
+                 STALENESS_EXEMPT_TABLES, must appear in exactly one. A write to a dated fact \
+                 must mark every report snapshot on or after its date stale, in the write's own \
+                 transaction (0001_schema.sql, \"Snapshot-staleness triggers\"): either give the \
+                 table its `*_stale_snapshots_*` triggers in the migration and list it triggered \
+                 here, or list it exempt with the reason no snapshotted report's figures can go \
+                 stale from a write to it."
+            );
+        }
+        for name in triggered.iter().chain(exempt.iter()) {
+            assert!(
+                tables.iter().any(|table| table == name),
+                "`{name}` is classified here but is not a table in the schema"
+            );
+        }
+
+        for (table, ops, reason) in STALENESS_TRIGGERED_TABLES {
+            let mut expected: Vec<String> = ops
+                .iter()
+                .map(|op| format!("{table}_stale_snapshots_{op}"))
+                .collect();
+            expected.sort();
+            assert_eq!(
+                staleness_triggers(&pool, table).await,
+                expected,
+                "`{table}` must carry exactly these staleness triggers — {reason}"
+            );
+        }
+
+        for (table, reason) in STALENESS_EXEMPT_TABLES {
+            assert!(!reason.is_empty(), "`{table}` must record why it is exempt");
+            assert!(
+                staleness_triggers(&pool, table).await.is_empty(),
+                "`{table}` is listed exempt ({reason}) but carries staleness triggers — \
+                 move it to STALENESS_TRIGGERED_TABLES with the operations it needs"
+            );
+        }
+    }
+
+    /// The `*_stale_snapshots_*` trigger names the live schema carries on
+    /// `table`, sorted — read from `sqlite_master` the way `infra::db`'s
+    /// migration tests read theirs.
+    async fn staleness_triggers(pool: &SqlitePool, table: &str) -> Vec<String> {
+        sqlx::query_scalar(
+            "SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = ? \
+             AND name LIKE '%\\_stale\\_snapshots\\_%' ESCAPE '\\' ORDER BY name",
+        )
+        .bind(table)
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
 
     fn utc(y: i32, m: u32, d: u32, h: u32, min: u32) -> DateTime<Utc> {
         chrono::TimeZone::with_ymd_and_hms(&Utc, y, m, d, h, min, 0).unwrap()
