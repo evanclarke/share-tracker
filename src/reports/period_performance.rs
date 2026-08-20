@@ -129,6 +129,16 @@ pub struct PeriodPerformance {
     /// `provisional` for the same reason report snapshots keep them apart —
     /// nothing ever trues this one up.
     pub price_carried_forward: bool,
+    /// A holding at either endpoint had **no obtainable price** at that date
+    /// (`listings.unpriced_before` — the provider's series had not begun) and
+    /// was left out of that endpoint's total, so the window's figures are
+    /// missing it (migration 0037). A window that *straddles* the date the
+    /// series begins therefore books the holding's whole closing value as
+    /// capital growth: it opens at nothing and closes at a real price.
+    /// `excluded_holdings` names each one, and the flag is its own for the
+    /// same reason the snapshot's is.
+    pub holding_excluded: bool,
+    pub excluded_holdings: Vec<valuation::ExcludedHolding>,
     pub holdings: Vec<HoldingPeriod>,
     pub fx_by_currency: Vec<CurrencyFx>,
 }
@@ -190,10 +200,10 @@ async fn valuations_or_empty(
     pool: &SqlitePool,
     date: NaiveDate,
     now: DateTime<Utc>,
-) -> Result<Vec<valuation::ListingValuation>, PeriodError> {
+) -> Result<valuation::StoredValuations, PeriodError> {
     let markets = valuation::held_markets(pool, Some(date)).await?;
     if markets.is_empty() {
-        return Ok(vec![]);
+        return Ok(valuation::StoredValuations::default());
     }
     Ok(valuation::stored_valuations(pool, date, now).await?)
 }
@@ -221,8 +231,29 @@ pub async fn compute(
         )));
     }
 
-    let valuations_from = valuations_or_empty(pool, from, now).await?;
-    let valuations_to = valuations_or_empty(pool, to, now).await?;
+    let resolved_from = valuations_or_empty(pool, from, now).await?;
+    let resolved_to = valuations_or_empty(pool, to, now).await?;
+    // Every caller of an exclusion must surface it (migration 0037): the two
+    // endpoint valuations are the only thing that can leave a holding out, so
+    // the union of what they excluded is what this report's totals omit.
+    // De-duplicated by listing — a holding excluded at both ends is one
+    // absent holding, not two.
+    let mut excluded_holdings: Vec<valuation::ExcludedHolding> = Vec::new();
+    for x in resolved_from
+        .excluded
+        .iter()
+        .chain(resolved_to.excluded.iter())
+    {
+        if !excluded_holdings
+            .iter()
+            .any(|seen| seen.listing_id == x.listing_id)
+        {
+            excluded_holdings.push(x.clone());
+        }
+    }
+    let holding_excluded = !excluded_holdings.is_empty();
+    let valuations_from = resolved_from.valuations;
+    let valuations_to = resolved_to.valuations;
     let val_from_by_listing: HashMap<i64, &valuation::ListingValuation> =
         valuations_from.iter().map(|v| (v.listing_id, v)).collect();
     let val_to_by_listing: HashMap<i64, &valuation::ListingValuation> =
@@ -284,8 +315,12 @@ pub async fn compute(
     for (&(listing_id, account_id), (f, t)) in &by_key {
         // Every open (quantity > 0) holding at a date is guaranteed a price
         // by `valuations_or_empty`/`stored_valuations` (it fails loudly
-        // otherwise), so a `None` market_value here only ever means the
-        // holding was closed (quantity 0) at that date — safe to treat as 0.
+        // otherwise) *unless* it was excluded for want of any obtainable
+        // price (`listings.unpriced_before`), so a `None` market_value here
+        // means the holding was closed (quantity 0) at that date, or is one
+        // of the `excluded_holdings` the result flags. Zero is the right
+        // arithmetic for both — the excluded holding leaves the total, which
+        // is exactly what the flag says (migration 0037).
         let v0 = f.and_then(|r| r.market_value).unwrap_or(Decimal::ZERO);
         let v1 = t.and_then(|r| r.market_value).unwrap_or(Decimal::ZERO);
         let purchases =
@@ -418,6 +453,8 @@ pub async fn compute(
         realised_capital_gain,
         provisional,
         price_carried_forward,
+        holding_excluded,
+        excluded_holdings,
         holdings,
         fx_by_currency,
     })
@@ -565,6 +602,73 @@ mod tests {
         assert!(!r.provisional, "the FX flag is a different fact");
         assert_eq!(r.closing_market_value, dec("1200"), "the last stored close");
         assert_eq!(r.capital_growth, Decimal::ZERO);
+    }
+
+    /// Migration 0037, the mirror: a holding whose provider series has not
+    /// begun at the window's opening date has **no** obtainable price there,
+    /// so it is left out of that endpoint's total rather than failing the
+    /// request — and the result names it, because a window straddling the day
+    /// the series begins books the whole closing value as capital growth.
+    #[tokio::test]
+    async fn a_holding_with_no_obtainable_opening_price_is_excluded_and_named() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "ETH", "AUD").await;
+        insert_listing(&pool, 2, "BTC", "AUD").await;
+        test_support::buy(1, 1)
+            .date(ymd(2024, 1, 1))
+            .qty(dec("100"))
+            .price(dec("10"))
+            .currency("AUD")
+            .insert(&pool)
+            .await;
+        test_support::buy(2, 2)
+            .date(ymd(2024, 1, 1))
+            .qty(dec("10"))
+            .price(dec("50"))
+            .currency("AUD")
+            .insert(&pool)
+            .await;
+        let from = ymd(2026, 6, 1);
+        let to = ymd(2026, 7, 1);
+        store_price(&pool, 1, to, "12").await;
+        store_price(&pool, 2, from, "60").await;
+        store_price(&pool, 2, to, "70").await;
+
+        // Nothing stored at `from`: the whole window fails, the
+        // no-partial-result rule.
+        let err = compute(&pool, from, to, now_after(to)).await.unwrap_err();
+        assert!(
+            matches!(err, PeriodError::Unprocessable(ref msg) if msg.contains("2026-06-01")),
+            "{err}"
+        );
+
+        let marked = test_support::listing(1)
+            .ticker("ETH")
+            .name("ETH")
+            .crypto()
+            .unpriced_before(ymd(2026, 6, 15))
+            .build();
+        crate::entities::listing::db_upsert(&pool, &marked)
+            .await
+            .unwrap();
+
+        let r = compute(&pool, from, to, now_after(to)).await.unwrap();
+        assert!(r.holding_excluded);
+        assert!(!r.provisional && !r.price_carried_forward, "its own flag");
+        assert_eq!(r.excluded_holdings.len(), 1);
+        assert_eq!(r.excluded_holdings[0].ticker, "ETH");
+        assert_eq!(
+            r.opening_market_value,
+            dec("600"),
+            "BTC alone — ETH is absent from the opening total, not valued at a guess"
+        );
+        assert_eq!(r.closing_market_value, dec("1900"));
+        assert_eq!(
+            r.capital_growth,
+            dec("1300"),
+            "opening at nothing and closing at a real price books the lot as growth — which is \
+             what the flag warns the reader about"
+        );
     }
 
     /// `total_return_pct` divides by the opening balance alone, so a mid-window

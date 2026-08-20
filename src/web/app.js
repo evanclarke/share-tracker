@@ -1648,11 +1648,14 @@ async function viewSnapshots() {
       report: m.report,
       generated_at: m.generated_at,
       // Stale wins the badge: regenerating fixes it, and re-flags provisional
-      // if the real FX rate is still missing. A carried-forward price ranks
-      // last because nothing regenerates it away — it is a standing
-      // condition of the listing, not a repair to make.
+      // if the real FX rate is still missing. An excluded holding outranks a
+      // carried-forward price — it says the total is *missing* a holding,
+      // not that it rests on an interim figure — and neither is a repair to
+      // make, so both rank below the two that are.
       status: m.stale ? 'stale'
-        : (m.provisional ? 'provisional' : (m.price_carried_forward ? 'carried' : 'ok')),
+        : (m.provisional ? 'provisional'
+          : (m.holding_excluded ? 'excluded'
+            : (m.price_carried_forward ? 'carried' : 'ok'))),
     };
   });
   const table = filterableTable(rows, ['date', 'report', 'generated_at', 'status'], {
@@ -1688,6 +1691,10 @@ async function viewSnapshots() {
       + 'marked “unpriced from” a date carries a carried-forward price — its last stored close, '
       + 'flagged, so one delisted or suspended holding no longer blocks the whole portfolio; that '
       + 'one is never trued up, and clearing the marker stales those dates instead. '
+      + 'A snapshot whose date falls before a held listing’s “unpriced before” — the day its '
+      + 'price provider’s series begins — excludes that holding from the totals altogether '
+      + '(nothing there was ever quoted, so nothing is substituted) and names it; that total is '
+      + 'smaller by a real holding, and the graph steps where the listing’s own series begins. '
       + 'A day whose price fetches failed '
       + 'has no snapshot at all until the price re-run succeeds. '
       + 'The market-value graph moved to the Portfolio Overview screen.'),
@@ -1716,6 +1723,12 @@ async function viewSnapshotDetail(report, date) {
   if (snap.price_carried_forward) {
     header.appendChild(el('p', { class: 'hint warn' },
       'Carried-forward price: a held listing is marked unpriced from a date (the provider stopped quoting it), so it was valued at its last stored closing price rather than blocking this date\'s snapshot. Nothing trues this up — clear “Unpriced from” on the listing if the security is quoted again, which marks these snapshots stale so they regenerate at real prices. The rows carrying it show “Carried-forward price”.'));
+  }
+  if (snap.holding_excluded) {
+    header.appendChild(el('p', { class: 'hint warn' },
+      'Holding excluded: these totals omit a held holding — no price is obtainable for it at this date, because it falls before the listing\'s “unpriced before” (the day its price provider\'s series begins). Nothing was substituted: the holding simply left the total, so this figure is smaller than the portfolio by that holding. '
+      + (snap.excluded_holdings || []).map(function (x) { return x.reason; }).join(' ')
+      + ' Move “Unpriced before” back on the listing (and enter the price by hand) if the figure can be obtained after all — that marks these snapshots stale so they regenerate with the holding back in.'));
   }
   setMain(el('div', null, [header, await dataTable(snap.rows)]));
 }
@@ -1766,6 +1779,11 @@ async function renderPeriodSummary(r) {
   if (r.price_carried_forward) {
     headlineParts.push(el('p', { class: 'hint warn' },
       'Carried-forward price: a holding at one end of this period is marked unpriced from a date (the provider stopped quoting it) and was valued at its last stored close. Its capital growth over the window is measured against that stale price, so a window straddling the date shows the fall to the last close and nothing after it.'));
+  }
+  if (r.holding_excluded) {
+    headlineParts.push(el('p', { class: 'hint warn' },
+      'Holding excluded: a holding at one end of this period has no obtainable price there (the date falls before its listing\'s “unpriced before”), so that endpoint\'s total omits it. A window straddling the day the provider\'s series begins therefore books the holding\'s whole closing value as capital growth. '
+      + (r.excluded_holdings || []).map(function (x) { return x.reason; }).join(' ')));
   }
   // Windows over a year show the annualised money-weighted return instead of
   // the raw total_return_pct — see periodReturnPct's own comment for why.

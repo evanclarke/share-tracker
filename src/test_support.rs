@@ -298,6 +298,7 @@ pub fn listing(id: i64) -> ListingBuilder {
             amit: false,
             amit_from: None,
             unpriced_from: None,
+            unpriced_before: None,
             preference: false,
             price_symbol: None,
         },
@@ -357,6 +358,13 @@ impl ListingBuilder {
     /// (SCENARIOS Q-02).
     pub fn unpriced_from(mut self, from: NaiveDate) -> Self {
         self.l.unpriced_from = Some(from);
+        self
+    }
+
+    /// The date the price provider's series *begins* for the security —
+    /// before it nothing is obtainable at any price (migration 0037).
+    pub fn unpriced_before(mut self, before: NaiveDate) -> Self {
+        self.l.unpriced_before = Some(before);
         self
     }
 

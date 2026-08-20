@@ -62,6 +62,26 @@ pub struct Listing {
     ///
     /// [price collection]: crate::entities::closing_price::run_collection
     pub unpriced_from: Option<NaiveDate>,
+    /// The date the **price provider's series begins** for this security —
+    /// before it nothing is obtainable at any price (the mirror image of
+    /// [`Self::unpriced_from`]; a spun-off entity whose quoted history starts
+    /// at the spin-off). `None` — the ordinary case — means its history runs
+    /// as far back as the provider has it. Before this date, [price
+    /// collection] never fetches it, [health](crate::reports::health) stops
+    /// reporting its errored rows and unpriced days, and
+    /// [valuation](crate::reports::valuation) **excludes the holding** from
+    /// the date's portfolio total rather than blocking the whole date,
+    /// flagging the snapshot `holding_excluded` and naming what left it.
+    ///
+    /// Deliberately not the mirror of the carry-forward: a close carried
+    /// forward is a real, once-observed price, while nothing before the
+    /// series begins was ever observed, so no figure is invented. The marker
+    /// is a listing-level declaration and **supersedes** any stored price for
+    /// those days, whatever its origin — that is what lets a span priced from
+    /// another security's series be retired (the live LAC case). [`db_upsert`]
+    /// enforces the one pairing it depends on: strictly before
+    /// [`Self::unpriced_from`] when both are set.
+    pub unpriced_before: Option<NaiveDate>,
     /// Preference share: the franking-credit holding-period rule requires 90
     /// at-risk days instead of 45 (see `reports::franking`).
     pub preference: bool,
@@ -88,6 +108,8 @@ pub struct ListingBody {
     pub amit_from: Option<NaiveDate>,
     #[serde(default)]
     pub unpriced_from: Option<NaiveDate>,
+    #[serde(default)]
+    pub unpriced_before: Option<NaiveDate>,
     #[serde(default)]
     pub preference: bool,
     #[serde(default)]
@@ -180,6 +202,14 @@ pub enum UpsertError {
         from: NaiveDate,
         price_date: NaiveDate,
     },
+    /// `unpriced_before` and `unpriced_from` were set so that they leave no
+    /// day the provider serves (carries both dates): the first says nothing
+    /// is obtainable before it, the second that nothing is served from it on,
+    /// so equal or crossed dates say the security is quoted on no day at all.
+    /// Both set is otherwise an ordinary shape — a spun-off entity later
+    /// delisted is quoted exactly between the two. Mapped to `422`.
+    #[error("unpriced_before {before} is not before unpriced_from {from}")]
+    UnpricedWindowEmpty { before: NaiveDate, from: NaiveDate },
     /// A `Crypto` listing was marked `amit`. An AMIT is an attribution managed
     /// investment **trust**; a crypto asset is not an interest in one (it is
     /// not even currency — TD 2014/25), and the flag is not inert: it makes
@@ -254,6 +284,13 @@ impl From<UpsertError> for ApiError {
                      hand does not count: valuation prefers it to the carried-forward close)"
                 ))
             }
+            UpsertError::UnpricedWindowEmpty { before, from } => ApiError::unprocessable(format!(
+                "unpriced_before {before} and unpriced_from {from} leave no day the price \
+                     provider serves this listing — unpriced_before says nothing is obtainable \
+                     before it and unpriced_from says nothing is served from then on, so the \
+                     first must fall strictly before the second (a security quoted only between \
+                     two dates is the case they are both for)"
+            )),
             UpsertError::Db(err) => err.into(),
         }
     }
@@ -263,7 +300,7 @@ impl CrudEntity for Listing {
     type Key = i64;
     const TABLE: &'static str = "listings";
     const COLUMNS: &'static str = "id, exchange_mic, ticker, name, isin, security_type, currency, amit, \
-         amit_from, unpriced_from, preference, price_symbol";
+         amit_from, unpriced_from, unpriced_before, preference, price_symbol";
     const ORDER_BY: &'static str = "exchange_mic, ticker";
     const NOUN: &'static str = "listing";
 }
@@ -371,19 +408,37 @@ pub async fn db_upsert(pool: &SqlitePool, listing: &Listing) -> Result<(), Upser
         }
     }
 
+    // The two unpriced markers bound the span the provider serves, from
+    // opposite ends, so together they must leave a span to serve: crossed or
+    // equal dates would say the provider quotes the security on no day at
+    // all. Both set is an ordinary shape — a spun-off entity later delisted —
+    // and is why the pair is checked rather than made exclusive. Checked in
+    // the write transaction because SQLite cannot ALTER a table-level CHECK
+    // in (migration 0037).
+    if let (Some(before), Some(from)) = (listing.unpriced_before, listing.unpriced_from)
+        && before >= from
+    {
+        return Err(UpsertError::UnpricedWindowEmpty { before, from });
+    }
+
     // `unpriced_from` says the provider serves nothing from that date on
     // (SCENARIOS Q-02). Two pairings, both checked in the write transaction
     // because SQLite can neither ALTER a table-level CHECK in nor reference
     // another table from a column CHECK (migration 0035).
     if let Some(from) = listing.unpriced_from {
         // Valuation carries the last ok close forward from here, so there
-        // must be one to carry.
+        // must be one to carry — and it may only carry one from inside the
+        // served span: a row dated before `unpriced_before` is not a price
+        // for this security by the listing's own record (migration 0037), so
+        // it cannot be the figure carried forward either.
         let earlier: Option<NaiveDate> = sqlx::query_scalar(
             "SELECT MAX(price_date) FROM closing_prices \
-             WHERE listing_id = ?1 AND status = 'ok' AND price_date < ?2",
+             WHERE listing_id = ?1 AND status = 'ok' AND price_date < ?2 \
+               AND (?3 IS NULL OR price_date >= ?3)",
         )
         .bind(listing.id)
         .bind(from)
+        .bind(listing.unpriced_before)
         .fetch_one(&mut *tx)
         .await?;
         if earlier.is_none() {
@@ -436,8 +491,8 @@ pub async fn db_upsert(pool: &SqlitePool, listing: &Listing) -> Result<(), Upser
     sqlx::query(
         "INSERT INTO listings \
          (id, exchange_mic, ticker, name, isin, security_type, currency, amit, amit_from, \
-          unpriced_from, preference, price_symbol) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+          unpriced_from, unpriced_before, preference, price_symbol) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT(id) DO UPDATE SET \
              exchange_mic  = excluded.exchange_mic, \
              ticker        = excluded.ticker, \
@@ -448,6 +503,7 @@ pub async fn db_upsert(pool: &SqlitePool, listing: &Listing) -> Result<(), Upser
              amit          = excluded.amit, \
              amit_from     = excluded.amit_from, \
              unpriced_from = excluded.unpriced_from, \
+             unpriced_before = excluded.unpriced_before, \
              preference    = excluded.preference, \
              price_symbol  = excluded.price_symbol",
     )
@@ -461,6 +517,7 @@ pub async fn db_upsert(pool: &SqlitePool, listing: &Listing) -> Result<(), Upser
     .bind(listing.amit)
     .bind(listing.amit_from)
     .bind(listing.unpriced_from)
+    .bind(listing.unpriced_before)
     .bind(listing.preference)
     .bind(&listing.price_symbol)
     .execute(&mut *tx)
@@ -490,6 +547,7 @@ async fn upsert(
         amit: body.amit,
         amit_from: body.amit_from,
         unpriced_from: body.unpriced_from,
+        unpriced_before: body.unpriced_before,
         preference: body.preference,
         price_symbol: body.price_symbol,
     };
@@ -710,6 +768,133 @@ mod tests {
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         assert!(
             text.contains("a fetched price is stored for 2023-10-16"),
+            "{text}"
+        );
+    }
+
+    /// Migration 0037, the mirror of `unpriced_from`. Two rules were
+    /// deliberately **not** written, and this pins that: prices already
+    /// stored before the date neither justify a refusal nor are required.
+    /// Checked read-only against the deployed database first — listing 7
+    /// (LAC) carries 635 ok rows before the day its provider series begins,
+    /// 375 hand-entered and 260 fetched under a one-off `symbol` override —
+    /// so a "refuse if any earlier price exists" rule in either direction
+    /// would make the feature unreachable for the only case it exists for.
+    #[tokio::test]
+    async fn db_unpriced_before_is_accepted_over_prices_already_stored_before_it() {
+        let pool = test_pool().await;
+        crate::test_support::listing(1)
+            .ticker("LAC")
+            .insert(&pool)
+            .await;
+        crate::test_support::closing_price(1, ymd(2022, 9, 19))
+            .price("10.13")
+            .manual("listing 8's stored close", "copied to unblock the date")
+            .insert(&pool)
+            .await;
+        crate::test_support::closing_price(1, ymd(2023, 9, 29))
+            .price("11.02")
+            .insert(&pool)
+            .await;
+
+        let marked = crate::test_support::listing(1)
+            .ticker("LAC")
+            .unpriced_before(ymd(2023, 10, 2))
+            .build();
+        db_upsert(&pool, &marked).await.unwrap();
+        assert_eq!(
+            db_get(&pool, 1).await.unwrap().unwrap().unpriced_before,
+            Some(ymd(2023, 10, 2))
+        );
+
+        // Nor is a stored price *required* before it: nothing is carried, so
+        // nothing needs to exist (the inverse of `unpriced_from`'s rule).
+        let bare = crate::test_support::listing(2)
+            .ticker("NEW")
+            .unpriced_before(ymd(2023, 10, 2))
+            .build();
+        db_upsert(&pool, &bare).await.unwrap();
+    }
+
+    /// The one pairing that *is* refused: the two markers bound the span the
+    /// provider serves from opposite ends, so equal or crossed dates leave no
+    /// day it serves at all. Set the right way round they are an ordinary
+    /// shape — a spun-off entity later delisted is quoted exactly between
+    /// them — and the carried-forward close is then taken from inside the
+    /// span, never from a row before the series began.
+    #[tokio::test]
+    async fn db_the_two_unpriced_markers_must_leave_a_served_span() {
+        let pool = test_pool().await;
+        crate::test_support::listing(1)
+            .ticker("LAC")
+            .insert(&pool)
+            .await;
+        crate::test_support::closing_price(1, ymd(2021, 6, 30))
+            .price("9.99")
+            .manual("another listing's close", "copied to unblock the date")
+            .insert(&pool)
+            .await;
+        crate::test_support::closing_price(1, ymd(2023, 10, 2))
+            .price("24.90")
+            .insert(&pool)
+            .await;
+
+        let marked = |before: NaiveDate, from: NaiveDate| {
+            crate::test_support::listing(1)
+                .ticker("LAC")
+                .unpriced_before(before)
+                .unpriced_from(from)
+                .build()
+        };
+
+        let err = db_upsert(&pool, &marked(ymd(2023, 10, 2), ymd(2023, 10, 2)))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, UpsertError::UnpricedWindowEmpty { before, from }
+                if before == ymd(2023, 10, 2) && from == ymd(2023, 10, 2)),
+            "{err:?}"
+        );
+
+        // Quoted 2 October onwards, delisted from 4 October: the window holds
+        // the 2nd and the 3rd, and the close carried forward from the 4th is
+        // the one inside it.
+        db_upsert(&pool, &marked(ymd(2023, 10, 2), ymd(2023, 10, 4)))
+            .await
+            .unwrap();
+
+        // Move the window past the only price inside it and the
+        // carry-forward source is gone: the row before the series began is
+        // not a price for this security, so it cannot be carried either.
+        let err = db_upsert(&pool, &marked(ymd(2023, 10, 3), ymd(2023, 10, 4)))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, UpsertError::UnpricedFromWithoutEarlierPrice(d) if d == ymd(2023, 10, 4)),
+            "{err:?}"
+        );
+    }
+
+    /// The refusal as the web UI sees it: `422` with the reason, not a bare
+    /// status.
+    #[tokio::test]
+    async fn api_an_empty_unpriced_window_is_rejected_with_its_reason() {
+        let pool = test_pool().await;
+        let client = client(&pool);
+        let resp = client
+            .put(
+                "/listings/1",
+                &serde_json::json!({
+                    "ticker": "LAC", "name": "Lithium Americas", "exchange_mic": "XNYS",
+                    "security_type": "Share", "currency": "USD", "amit": false,
+                    "unpriced_before": "2023-10-05", "unpriced_from": "2023-10-02",
+                }),
+            )
+            .await;
+        let (status, text) = resp.status_and_body();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            text.contains("leave no day the price provider serves this listing"),
             "{text}"
         );
     }

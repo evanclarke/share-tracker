@@ -448,6 +448,12 @@ mod tests {
         // view names the way out (clear the listing's Unpriced from).
         assert!(js.contains("snap.price_carried_forward"));
         assert!(js.contains("Carried-forward price"));
+        // …and a snapshot whose totals *omit* a holding (migration 0037):
+        // its own badge, its own banner, and the list naming what left.
+        assert!(js.contains("m.holding_excluded ? 'excluded'"));
+        assert!(js.contains("snap.holding_excluded"));
+        assert!(js.contains("Holding excluded"));
+        assert!(js.contains("snap.excluded_holdings"));
         // Regenerate-all takes a date range, prefilled from the API's
         // default-range endpoint.
         assert!(js.contains("/report_snapshots/regenerate_range"));
@@ -464,14 +470,22 @@ mod tests {
         assert!(js.contains("unrealised_gain"));
         // The report-snapshot job is described in the Jobs view.
         assert!(js.contains("report-snapshot"));
-        // The graph marks provisional points distinctly from stale ones.
+        // The graph marks provisional points distinctly from stale ones, and
+        // a point whose totals omit a holding distinctly from both — that is
+        // where the line steps (migration 0037), so the tooltip names what
+        // the total is missing.
         assert!(js.contains("p.provisional ? ' provisional' : ''"));
+        assert!(js.contains("p.holding_excluded ? ' excluded' : ''"));
+        assert!(js.contains("' (omits '"));
+        assert!(js.contains("a total that omits a holding"));
         // The chart styles ship in the bundle too.
         let css = body_string(get("/static/style.css").await).await;
         assert!(css.contains(".series-chart"));
         assert!(css.contains(".badge.stale"));
         assert!(css.contains(".badge.provisional"));
+        assert!(css.contains(".badge.excluded"));
         assert!(css.contains("circle.provisional"));
+        assert!(css.contains("circle.excluded"));
     }
 
     #[tokio::test]
@@ -595,6 +609,11 @@ mod tests {
         assert!(js.contains("unpriced_from"));
         assert!(js.contains("Unpriced from"));
         assert!(js.contains("carries the last stored closing price forward"));
+        // …and the mirror: the date its provider series begins, before which
+        // the holding leaves the totals (migration 0037).
+        assert!(js.contains("unpriced_before"));
+        assert!(js.contains("Unpriced before"));
+        assert!(js.contains("leaves the holding out of that date\u{2019}s portfolio totals"));
     }
 
     #[tokio::test]

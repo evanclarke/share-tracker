@@ -52,9 +52,13 @@ export function seriesChart(points) {
   });
   // One line + point markers per series; a stale snapshot's point is hollow,
   // a provisional one's (valued at a fallback-month FX rate) has a dashed
-  // ring, and one valued at a carried-forward close (a listing the provider
-  // stopped quoting) is hollow-square-ish via its own class — each says why
-  // the point may not be what a live report would show.
+  // ring, one valued at a carried-forward close (a listing the provider
+  // stopped quoting) is hollow-square-ish via its own class, and one whose
+  // totals *omit* a holding (no price obtainable before the provider's
+  // series began) gets its own — each says why the point may not be what a
+  // live report would show. The excluded marker matters most: the line
+  // **steps** where that listing's series begins, and the step is a change
+  // in what is measured, not in value.
   [['market_value', 'line-mv'], ['unrealised_gain', 'line-ug']].forEach(function (s) {
     const field = s[0], klass = s[1];
     const path = points.map(function (p, i) { return x(xs[i]) + ',' + y(Number(p[field])); }).join(' ');
@@ -63,12 +67,16 @@ export function seriesChart(points) {
       const dot = svgEl('circle', {
         cx: x(xs[i]), cy: y(Number(p[field])), r: 3,
         class: klass + (p.stale ? ' stale' : '') + (p.provisional ? ' provisional' : '')
-          + (p.price_carried_forward ? ' carried' : ''),
+          + (p.price_carried_forward ? ' carried' : '')
+          + (p.holding_excluded ? ' excluded' : ''),
       });
       const tip = svgEl('title');
       tip.textContent = p.snapshot_date + ': ' + p[field]
         + (p.stale ? ' (stale)' : '') + (p.provisional ? ' (provisional)' : '')
-        + (p.price_carried_forward ? ' (carried-forward price)' : '');
+        + (p.price_carried_forward ? ' (carried-forward price)' : '')
+        + (p.holding_excluded
+          ? ' (omits ' + (p.excluded_holdings || []).map(function (x) { return x.ticker; }).join(', ') + ')'
+          : '');
       dot.appendChild(tip);
       chart.appendChild(dot);
     });
@@ -80,7 +88,7 @@ export function seriesChart(points) {
       ' ',
       el('span', { class: 'legend-ug' }, '— unrealised gain'),
       ' (AUD; hollow points are stale snapshots, dashed rings provisional FX, '
-      + 'amber rings a carried-forward price)',
+      + 'amber rings a carried-forward price, red rings a total that omits a holding)',
     ]),
   ]);
 }

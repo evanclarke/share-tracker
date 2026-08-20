@@ -103,10 +103,12 @@ pub struct FailedJob {
 /// underlying symbol issue — see `latest_error` — is fixed (e.g. set
 /// `listings.price_symbol`).
 ///
-/// Rows dated from the listing's `unpriced_from` are excluded: the provider
-/// is recorded as serving nothing there, so they are expected rather than a
-/// to-do, and valuation carries the last close forward instead of blocking
-/// (SCENARIOS Q-02).
+/// Rows outside the span the provider serves the listing — dated from its
+/// `unpriced_from`, or before its `unpriced_before` — are excluded: the
+/// provider is recorded as serving nothing there, so they are expected rather
+/// than a to-do, and valuation carries the last close forward instead of
+/// blocking (SCENARIOS Q-02) or leaves the holding out of the date's totals
+/// (migration 0037).
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct ErroredPriceListing {
     pub listing_id: i64,
@@ -134,8 +136,8 @@ pub struct ErroredPriceListing {
 /// row is errored belongs to `errored_prices` instead — the two lists
 /// partition the problem. Close it with `POST /closing_prices/backfill`, or a
 /// manual price for a day the provider can never serve. Days from the
-/// listing's `unpriced_from` are excluded for the same reason
-/// [`ErroredPriceListing`] excludes them.
+/// listing's `unpriced_from`, or before its `unpriced_before`, are excluded
+/// for the same reason [`ErroredPriceListing`] excludes them.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UnpricedListing {
     pub listing_id: i64,
@@ -743,7 +745,12 @@ async fn db_unpriced_days(
         // The write-time rule that the marker needs an earlier ok price is
         // what makes that unconditional — a marked listing always has a close
         // to carry.
+        // The mirror at the other end: a day before `unpriced_before` is
+        // never a hole either — the provider's series has not begun, so
+        // nothing can be backfilled and valuation excludes the holding from
+        // that date's totals instead (migration 0037).
         let unpriced_from = market.listing.unpriced_from;
+        let unpriced_before = market.listing.unpriced_before;
         let mut missing: BTreeSet<NaiveDate> = BTreeSet::new();
         for (from, to) in spans {
             let mut date = from;
@@ -751,6 +758,7 @@ async fn db_unpriced_days(
                 if let Some(valuation_day) = market.latest_trading_day_on_or_before(date)
                     && !stored.contains(&valuation_day)
                     && unpriced_from.is_none_or(|u| valuation_day < u)
+                    && unpriced_before.is_none_or(|u| valuation_day >= u)
                 {
                     missing.insert(valuation_day);
                 }
@@ -1549,21 +1557,25 @@ pub async fn db_health(
     )
     .fetch_all(&mut *tx)
     .await?;
-    // Errored rows dated from a listing's `unpriced_from` are expected, not a
-    // to-do: the provider serves nothing there and valuation carries the last
-    // close forward, so nagging about them would be a permanent alarm nobody
-    // can clear (SCENARIOS Q-02). Rows *before* the date are real holes and
-    // still reported — as is the whole listing while the marker is unset.
+    // Errored rows dated from a listing's `unpriced_from`, or before its
+    // `unpriced_before`, are expected rather than a to-do: outside that span
+    // the provider serves nothing and valuation carries the last close
+    // forward (SCENARIOS Q-02) or leaves the holding out of the date's totals
+    // (migration 0037), so nagging about them would be a permanent alarm
+    // nobody can clear. Rows *inside* the span are real holes and still
+    // reported — as is the whole listing while both markers are unset.
     let errored_prices = sqlx::query_as::<_, ErroredPriceListing>(
         "SELECT cp.listing_id AS listing_id, l.ticker AS ticker, \
                 COUNT(*) AS errored_days, MAX(cp.price_date) AS latest_errored_date, \
                 (SELECT cp2.error FROM closing_prices cp2 \
                  WHERE cp2.listing_id = cp.listing_id AND cp2.status = 'error' \
                    AND (l.unpriced_from IS NULL OR cp2.price_date < l.unpriced_from) \
+                   AND (l.unpriced_before IS NULL OR cp2.price_date >= l.unpriced_before) \
                  ORDER BY cp2.price_date DESC LIMIT 1) AS latest_error \
          FROM closing_prices cp JOIN listings l ON l.id = cp.listing_id \
          WHERE cp.status = 'error' \
            AND (l.unpriced_from IS NULL OR cp.price_date < l.unpriced_from) \
+           AND (l.unpriced_before IS NULL OR cp.price_date >= l.unpriced_before) \
          GROUP BY cp.listing_id \
          ORDER BY latest_errored_date DESC",
     )
@@ -1944,6 +1956,51 @@ mod tests {
             "8 July stays a hole; 13 July is inside the unpriced run"
         );
         assert_eq!(after.unpriced_days[0].earliest_date, ymd(2026, 7, 8));
+    }
+
+    /// The mirror (migration 0037): once a listing records the date its
+    /// provider series begins, both lists go quiet *before* it — nothing
+    /// there can ever be fetched, and valuation leaves the holding out of
+    /// those dates' totals instead of waiting. Holes from the date on are
+    /// real and stay reported.
+    #[tokio::test]
+    async fn a_listing_is_not_nagged_about_before_its_series_begins() {
+        let pool = test_pool().await;
+        test_support::listing(1).ticker("LAC").insert(&pool).await;
+        test_support::buy(1, 1)
+            .date(ymd(2026, 7, 6))
+            .insert(&pool)
+            .await;
+        // Errored rows on the days before the series begins, then a real hole
+        // after it (10 July is never fetched).
+        for day in ["2026-07-06", "2026-07-07"] {
+            insert_error_price(&pool, 1, day, "yahoo fetch for LAC failed: 400").await;
+        }
+        insert_ok_price(&pool, 1, "2026-07-09").await;
+
+        let before = health(&pool, ymd(2026, 7, 13)).await;
+        assert_eq!(before.errored_prices[0].errored_days, 2);
+        assert_eq!(before.unpriced_days[0].unpriced_days, 3); // 8, 10 and 13 July
+
+        let marked = test_support::listing(1)
+            .ticker("LAC")
+            .unpriced_before(ymd(2026, 7, 9))
+            .build();
+        crate::entities::listing::db_upsert(&pool, &marked)
+            .await
+            .unwrap();
+
+        let after = health(&pool, ymd(2026, 7, 13)).await;
+        assert!(
+            after.errored_prices.is_empty(),
+            "both errored rows predate the series and are expected, not a to-do: {:?}",
+            after.errored_prices
+        );
+        assert_eq!(
+            after.unpriced_days[0].unpriced_days, 2,
+            "8 July is before the series begins; 10 and 13 July are real holes"
+        );
+        assert_eq!(after.unpriced_days[0].earliest_date, ymd(2026, 7, 10));
     }
 
     /// The two lists partition the problem: a day whose fetch failed has a

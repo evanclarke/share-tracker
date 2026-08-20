@@ -684,6 +684,10 @@ const COLUMN_LABELS = {
   // quoting the security (listings.unpriced_from). The default humaniser
   // would render "Price carried forward", which reads like a question.
   price_carried_forward: 'Carried-forward price',
+  // The listing's totals-excluding marker: the date the price provider's
+  // series begins. The default humaniser would render "Unpriced before"
+  // already; pinned here so it stays in step with the listings form's.
+  unpriced_before: 'Unpriced before',
   // The date the price provider stopped quoting the security; the default
   // humaniser would render "Unpriced from" already, but the label is pinned
   // here so it stays in step with the listings form's.

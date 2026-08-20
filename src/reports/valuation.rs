@@ -12,9 +12,19 @@
 //! whose `listings.unpriced_from` has passed is valued at its last stored ok
 //! price instead of blocking the whole date, flagged
 //! `price_carried_forward` so the caller can surface it (SCENARIOS Q-02).
+//!
+//! The one *omission* it makes is the mirror of that: a listing dated before
+//! its `listings.unpriced_before` — the day the provider's series begins — is
+//! **left out** of the date's valuation entirely (migration 0037). Nothing
+//! before the series begins was ever observed, so no figure is substituted;
+//! the holding leaves the total and the caller is handed an
+//! [`ExcludedHolding`] naming it, which every surface must repeat. A date
+//! where *every* held listing is excluded is a blocker, not an empty
+//! valuation — zero of zero is not a portfolio total.
 
 use chrono::{DateTime, NaiveDate, Utc};
 use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 
 use crate::entities::closing_price::{self, Market, PriceStatus};
@@ -64,6 +74,56 @@ pub struct ListingValuation {
     pub aud_price: Decimal,
 }
 
+/// A holding left out of a date's valuation because no price is obtainable
+/// for it there: the valuation day falls before the listing's
+/// `unpriced_before`, the date the price provider's series begins (migration
+/// 0037).
+///
+/// This is deliberately richer than a boolean. `provisional` and
+/// `price_carried_forward` both say "this figure rests on an interim input";
+/// an exclusion says "this figure is **missing a holding**", and a reader
+/// cannot judge the total without knowing which one and why — so the
+/// `listing_id`, its `ticker`, and the reason travel with the result and are
+/// stored with the snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExcludedHolding {
+    pub listing_id: i64,
+    pub ticker: String,
+    /// Why the holding is absent, in the wording every surface repeats.
+    pub reason: String,
+}
+
+impl ExcludedHolding {
+    /// The one place the exclusion is worded, so the snapshot banner, the
+    /// report row's `price_unavailable`, and the blocker text cannot drift.
+    fn new(
+        listing_id: i64,
+        ticker: &str,
+        unpriced_before: NaiveDate,
+        valuation_day: NaiveDate,
+    ) -> Self {
+        ExcludedHolding {
+            listing_id,
+            ticker: ticker.to_string(),
+            reason: format!(
+                "no price is obtainable for {ticker} before {unpriced_before} (the provider's \
+                 series begins then), so its {valuation_day} value is unknown and the holding is \
+                 left out of this date's totals"
+            ),
+        }
+    }
+}
+
+/// What one date's stored-price valuation resolved: the listings it priced,
+/// and the held listings it had to leave out (see [`ExcludedHolding`]). A
+/// caller that reports a total must surface `excluded` — the total is
+/// incomplete by exactly those holdings.
+#[derive(Debug, Clone, Default)]
+pub struct StoredValuations {
+    pub valuations: Vec<ListingValuation>,
+    pub excluded: Vec<ExcludedHolding>,
+}
+
 /// The market contexts of the listings held as at `date` (live holdings when
 /// `None`).
 pub async fn held_markets(
@@ -88,16 +148,28 @@ pub async fn held_markets(
 /// valuation FX rate. Fails with the full list of blockers otherwise — a
 /// partly-priced day yields no result at all, never a partial one.
 ///
-/// The single exception is a listing the provider has stopped quoting
-/// (`listings.unpriced_from` on or before the valuation day): its last stored
-/// ok close is carried forward and the row flagged `price_carried_forward`,
-/// so one delisted or suspended holding no longer blocks the whole
-/// portfolio's date forever (SCENARIOS Q-02).
+/// Two exceptions, one at each end of the provider's series:
+///
+/// * a listing the provider has **stopped** quoting (`unpriced_from` on or
+///   before the valuation day) is valued at its last stored ok close, carried
+///   forward and flagged `price_carried_forward`, so one delisted or
+///   suspended holding no longer blocks the whole portfolio's date forever
+///   (SCENARIOS Q-02);
+/// * a listing whose provider series has not **begun** (the valuation day is
+///   before `unpriced_before`) is left out of the result altogether and
+///   returned in [`StoredValuations::excluded`] — nothing there was ever
+///   observed, so nothing is substituted (migration 0037). The marker
+///   supersedes any stored row for those days, whatever its origin: by the
+///   listing's own record such a row is not a price for this security.
+///
+/// A date on which *every* held listing is excluded is a blocker, not an
+/// empty result: a total missing every holding is zero of zero, and storing
+/// it would draw a false floor through the series.
 pub async fn stored_valuations(
     pool: &SqlitePool,
     date: NaiveDate,
     now: DateTime<Utc>,
-) -> Result<Vec<ListingValuation>, ValuationError> {
+) -> Result<StoredValuations, ValuationError> {
     let markets = held_markets(pool, Some(date)).await?;
     if markets.is_empty() {
         return Err(ValuationError::Unprocessable(format!(
@@ -106,6 +178,7 @@ pub async fn stored_valuations(
     }
 
     let mut valuations = Vec::with_capacity(markets.len());
+    let mut excluded: Vec<ExcludedHolding> = Vec::new();
     let mut blockers: Vec<String> = Vec::new();
     // every imported ATO FX rate — per-listing conversions below are map
     // lookups, not one DB round-trip each
@@ -118,6 +191,22 @@ pub async fn stored_valuations(
             ));
             continue;
         };
+        // Before the provider's series begins there is no price to wait for
+        // and none to carry back, so the holding leaves this date's totals
+        // rather than blocking them (migration 0037). Checked before the
+        // final-close and stored-price branches: neither has anything to say
+        // about a day nobody ever quoted.
+        if let Some(before) = market.listing.unpriced_before
+            && valuation_day < before
+        {
+            excluded.push(ExcludedHolding::new(
+                market.listing.id,
+                ticker,
+                before,
+                valuation_day,
+            ));
+            continue;
+        }
         let final_day = market
             .latest_complete_trading_day(now)
             .map_err(ValuationError::Db)?;
@@ -150,6 +239,7 @@ pub async fn stored_valuations(
                     pool,
                     market.listing.id,
                     valuation_day,
+                    market.listing.unpriced_before,
                 )
                 .await?
                 {
@@ -200,9 +290,24 @@ pub async fn stored_valuations(
             Err(e) => blockers.push(format!("{ticker}: {e}")),
         }
     }
-    if blockers.is_empty() {
-        Ok(valuations)
-    } else {
-        Err(ValuationError::Unprocessable(blockers.join("; ")))
+    if !blockers.is_empty() {
+        return Err(ValuationError::Unprocessable(blockers.join("; ")));
     }
+    // Every held listing excluded: the "total" would be zero market value
+    // against a real cost base, which is not a partial answer but a wrong
+    // one. The no-partial-result rule at its limit.
+    if valuations.is_empty() {
+        return Err(ValuationError::Unprocessable(format!(
+            "no held listing can be valued on {date}: {}",
+            excluded
+                .iter()
+                .map(|x| x.reason.clone())
+                .collect::<Vec<_>>()
+                .join("; ")
+        )));
+    }
+    Ok(StoredValuations {
+        valuations,
+        excluded,
+    })
 }

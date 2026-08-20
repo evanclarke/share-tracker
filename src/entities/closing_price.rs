@@ -705,8 +705,8 @@ pub async fn db_get_one(
     .await
 }
 
-/// The listing's latest **ok** stored price at or before `on_or_before`, as
-/// `(price_date, price)`.
+/// The listing's latest **ok** stored price at or before `on_or_before` and
+/// not earlier than `not_before`, as `(price_date, price)`.
 ///
 /// The carry-forward source for a listing the provider has stopped quoting
 /// (`listings.unpriced_from`, SCENARIOS Q-02): `reports::valuation` reads it
@@ -714,18 +714,26 @@ pub async fn db_get_one(
 /// so the caller can tell a genuinely contemporaneous price from a carried
 /// one. A manual price entered during the unpriced run wins over an older
 /// fetched one simply by being later.
+///
+/// `not_before` is the listing's `unpriced_before` (migration 0037), when it
+/// has one: a row dated before the provider's series begins is not a price
+/// for this security by the listing's own record, so it cannot be the figure
+/// carried forward either. `None` means no floor.
 pub async fn db_latest_ok_price_on_or_before(
     pool: &SqlitePool,
     listing_id: i64,
     on_or_before: NaiveDate,
+    not_before: Option<NaiveDate>,
 ) -> Result<Option<(NaiveDate, Decimal)>, sqlx::Error> {
     let row: Option<(NaiveDate, Money)> = sqlx::query_as(
         "SELECT price_date, price FROM closing_prices \
-         WHERE listing_id = ? AND status = 'ok' AND price_date <= ? \
+         WHERE listing_id = ?1 AND status = 'ok' AND price_date <= ?2 \
+           AND (?3 IS NULL OR price_date >= ?3) \
          ORDER BY price_date DESC LIMIT 1",
     )
     .bind(listing_id)
     .bind(on_or_before)
+    .bind(not_before)
     .fetch_optional(pool)
     .await?;
     Ok(row.map(|(date, Money(price))| (date, price)))
@@ -1535,6 +1543,14 @@ pub async fn run_collection(
             Some(from) => days.into_iter().filter(|d| *d < from).collect(),
             None => days,
         };
+        // …and the mirror at the other end: nothing is obtainable before the
+        // provider's series begins (`listings.unpriced_before`, migration
+        // 0037), so those days are not fetched either. Valuation excludes the
+        // holding on them instead of waiting for a price that cannot arrive.
+        let days: Vec<NaiveDate> = match market.listing.unpriced_before {
+            Some(before) => days.into_iter().filter(|d| *d >= before).collect(),
+            None => days,
+        };
         let (Some(&from), Some(&to)) = (days.first(), days.last()) else {
             continue;
         };
@@ -1876,16 +1892,25 @@ async fn backfill(
         reject_unpriced_date(&market, body.from)?;
         to = to.min(from.pred_opt().unwrap_or(from));
     }
+    // The mirror: a listing marked unpriced *before* a date has nothing to
+    // serve earlier than it, so the range starts at it rather than storing a
+    // run of errored rows for a series that had not begun (migration 0037).
+    // A range wholly before it is refused, naming the marker.
+    let mut from = body.from;
+    if let Some(before) = market.listing.unpriced_before {
+        reject_unpriced_date(&market, body.to)?;
+        from = from.max(before);
+    }
 
     let mut trading_days: Vec<NaiveDate> = Vec::new();
-    let mut date = body.from;
+    let mut date = from;
     while date <= to {
         if market.is_trading_day(date) {
             trading_days.push(date);
         }
         date += Duration::days(1);
     }
-    let stored_ok = db_ok_dates(&pool, body.listing_id, body.from, to)
+    let stored_ok = db_ok_dates(&pool, body.listing_id, from, to)
         .await
         .map_err(internal)?;
     let missing: Vec<NaiveDate> = trading_days
@@ -1938,11 +1963,11 @@ async fn delete_one(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// 422 when `date` falls in the listing's unpriced run
-/// (`listings.unpriced_from`): the provider serves nothing there by the
-/// listing's own record, so a fetch could only store another errored row.
-/// The refusal names the way back — clear the marker if the security is
-/// quoted again, or enter the price by hand.
+/// 422 when `date` falls outside the span the provider serves this listing —
+/// on or after `listings.unpriced_from`, or before `listings.unpriced_before`.
+/// Either way the provider serves nothing there by the listing's own record,
+/// so a fetch could only store another errored row. Each refusal names the
+/// way back: enter the price by hand, or move/clear the marker.
 fn reject_unpriced_date(market: &Market, date: NaiveDate) -> Result<(), ApiError> {
     if let Some(from) = market.listing.unpriced_from
         && date >= from
@@ -1952,6 +1977,18 @@ fn reject_unpriced_date(market: &Market, date: NaiveDate) -> Result<(), ApiError
              valuation carries its last stored close forward instead. Enter a price by hand \
              (PUT /closing_prices/:listing_id/:price_date) if you have one, or clear \
              unpriced_from on the listing if the security is quoted again",
+            market.listing.ticker
+        )));
+    }
+    if let Some(before) = market.listing.unpriced_before
+        && date < before
+    {
+        return Err(ApiError::unprocessable(format!(
+            "{} is unpriced before {before} — the provider's series for it begins then, so \
+             there is nothing to fetch earlier and valuation leaves the holding out of those \
+             dates' totals instead. Enter a price by hand \
+             (PUT /closing_prices/:listing_id/:price_date) if you have one, or move \
+             unpriced_before back on the listing if the series reaches further than it says",
             market.listing.ticker
         )));
     }
@@ -2880,9 +2917,12 @@ mod tests {
         let valuations = crate::reports::valuation::stored_valuations(&pool, ymd(2026, 6, 4), now)
             .await
             .unwrap();
-        assert_eq!(valuations.len(), 1);
-        assert_eq!(valuations[0].native_price, "62.48".parse().unwrap());
-        assert_eq!(valuations[0].aud_price, "62.48".parse().unwrap());
+        assert_eq!(valuations.valuations.len(), 1);
+        assert_eq!(
+            valuations.valuations[0].native_price,
+            "62.48".parse().unwrap()
+        );
+        assert_eq!(valuations.valuations[0].aud_price, "62.48".parse().unwrap());
     }
 
     /// Both provenance fields are required, and whitespace does not satisfy
@@ -3152,6 +3192,116 @@ mod tests {
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         assert!(
             String::from_utf8_lossy(&bytes).contains("unpriced from 2026-06-03"),
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+    }
+
+    /// Migration 0037, the mirror: a listing marked `unpriced_before` is not
+    /// fetched *earlier* than that date — the provider's series has not begun
+    /// and every call would only store an errored row. The days from it on
+    /// are still collected.
+    #[tokio::test]
+    async fn collection_skips_a_listing_before_its_unpriced_before_date() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "LAC", "XASX", "AUD").await;
+        insert_buy(&pool, 1, 1, "100").await;
+        let marked = crate::test_support::listing(1)
+            .ticker("LAC")
+            .name("LAC")
+            .mic("XASX")
+            .security_type(listing::SecurityType::Share)
+            .unpriced_before(ymd(2026, 6, 4))
+            .build();
+        listing::db_upsert(&pool, &marked).await.unwrap();
+
+        let mut stub = StubFetcher::default();
+        for &d in &asx_lookback_window() {
+            stub = stub.with_close(1, d, "24.90", "AUD");
+        }
+        run_collection(&pool, &stub, friday_evening_sydney())
+            .await
+            .unwrap();
+
+        for &d in &asx_lookback_window() {
+            let stored = db_get_one(&pool, 1, d).await.unwrap();
+            if d < ymd(2026, 6, 4) {
+                assert!(
+                    stored.is_none(),
+                    "nothing is fetched or stored before the series begins ({d})"
+                );
+            } else {
+                assert!(stored.is_some(), "the days from it on are collected ({d})");
+            }
+        }
+    }
+
+    /// The explicit paths refuse the same days: a single fetch before the
+    /// date is `422` naming the marker, and a backfill crossing it starts at
+    /// the date instead of storing a run of errored rows.
+    #[tokio::test]
+    async fn api_fetch_and_backfill_start_at_unpriced_before() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "LAC", "XASX", "AUD").await;
+        insert_buy(&pool, 1, 1, "100").await;
+        let marked = crate::test_support::listing(1)
+            .ticker("LAC")
+            .name("LAC")
+            .mic("XASX")
+            .security_type(listing::SecurityType::Share)
+            .unpriced_before(ymd(2026, 6, 4))
+            .build();
+        listing::db_upsert(&pool, &marked).await.unwrap();
+
+        let mut stub = StubFetcher::default();
+        for d in [
+            ymd(2026, 6, 2),
+            ymd(2026, 6, 3),
+            ymd(2026, 6, 4),
+            ymd(2026, 6, 5),
+        ] {
+            stub = stub.with_close(1, d, "24.90", "AUD");
+        }
+        let app = full_router(pool.clone(), stub);
+
+        let (status, bytes) = post_json(
+            &app,
+            "/closing_prices/fetch",
+            serde_json::json!({ "listing_id": 1, "price_date": "2026-06-03" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        let msg = String::from_utf8_lossy(&bytes);
+        assert!(msg.contains("unpriced before 2026-06-04"), "{msg}");
+
+        let (status, bytes) = post_json(
+            &app,
+            "/closing_prices/backfill",
+            serde_json::json!({ "listing_id": 1, "from": "2026-06-02", "to": "2026-06-05" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let summary: BackfillSummary = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(summary.trading_days, 2, "4 and 5 June, not 2 or 3");
+        assert_eq!(summary.fetched_ok, 2);
+        assert_eq!(summary.errored, 0);
+        assert!(
+            db_get_one(&pool, 1, ymd(2026, 6, 3))
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        // A range wholly before the date is refused outright.
+        let (status, bytes) = post_json(
+            &app,
+            "/closing_prices/backfill",
+            serde_json::json!({ "listing_id": 1, "from": "2026-06-01", "to": "2026-06-03" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            String::from_utf8_lossy(&bytes).contains("unpriced before 2026-06-04"),
             "{}",
             String::from_utf8_lossy(&bytes)
         );

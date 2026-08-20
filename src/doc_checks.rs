@@ -124,7 +124,8 @@ fn unpriced_listing_and_carried_forward_price_documented() {
     // The Closing prices section now states what an unbounded run costs.
     assert!(API_MD.contains("An **unbounded run** of such days"));
     // Health stops nagging about the days the provider can never serve.
-    assert!(API_MD.contains("**dated before its [`unpriced_from`](#listings)**"));
+    assert!(API_MD.contains("**inside the span its provider serves it**"));
+    assert!(API_MD.contains("dated before its [`unpriced_from`](#listings)"));
     // The 422 catalogue carries both refusals and the fetch/backfill guards.
     assert!(API_MD.contains(
         "a listing `unpriced_from` with no stored closing price before it or with a \
@@ -135,6 +136,47 @@ fn unpriced_listing_and_carried_forward_price_documented() {
     assert!(README_MD.contains("**unpriced from**"));
     assert!(README_MD.contains("carry the last stored close forward"));
     assert!(README_MD.contains("**carried-forward price** flag"));
+}
+
+/// Docs-sync pin for the mirror fact (migration 0037): a security whose
+/// provider series *begins* at a date, with everything earlier unavailable at
+/// any price. The absence of it is what produced 375 hand-entered,
+/// knowingly-wrong closing prices in the live database, so the docs must say
+/// what the column does, that nothing is substituted, and that the total is
+/// therefore incomplete.
+#[test]
+fn unpriced_before_and_excluded_holdings_documented() {
+    // SCHEMA.md: the column, the one pairing rule, and the two new snapshot
+    // columns.
+    assert!(SCHEMA_MD.contains("unpriced_before TEXT (nullable)"));
+    assert!(SCHEMA_MD.contains("holding_excluded INTEGER"));
+    assert!(SCHEMA_MD.contains("excluded_holdings TEXT"));
+    assert!(SCHEMA_MD.contains("must fall strictly **before** `unpriced_from`"));
+    // API.md: the listing field and what happens on each surface.
+    assert!(API_MD.contains("**A security whose provider series has not begun.**"));
+    assert!(API_MD.contains("**collection never fetches the listing.**"));
+    assert!(API_MD.contains("**valuation excludes the holding**"));
+    assert!(API_MD.contains("`holding_excluded`"));
+    // The decision itself: not symmetric, nothing invented, and both
+    // consequences stated rather than left for a reader to discover.
+    assert!(API_MD.contains("The two directions are deliberately **not symmetric**."));
+    assert!(API_MD.contains("**no figure is invented**"));
+    assert!(API_MD.contains("**omits a real holding**"));
+    assert!(API_MD.contains("**Excluded holdings:**"));
+    // The unbounded-true-up trap, and the all-excluded blocker.
+    assert!(API_MD.contains("an excluded holding never clears"));
+    assert!(API_MD.contains("is **blocked**, not stored empty"));
+    // The 422 catalogue carries the one refusal and the fetch/backfill guard.
+    assert!(API_MD.contains(
+        "a listing whose `unpriced_before` does not fall strictly before its `unpriced_from`"
+    ));
+    assert!(API_MD.contains("that falls before its listing's `unpriced_before`"));
+    // Health goes quiet over the span at both ends.
+    assert!(API_MD.contains("**inside the span its provider serves it**"));
+    // README: the feature, and the flag on the snapshot series.
+    assert!(README_MD.contains("**unpriced before**"));
+    assert!(README_MD.contains("**excluded** from that date's portfolio totals"));
+    assert!(README_MD.contains("**excluded holding** flag"));
 }
 
 /// Docs-sync pin for date-ranged bulk regeneration (REQUIREMENTS 2026-07-25):

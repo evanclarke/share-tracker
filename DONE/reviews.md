@@ -4279,3 +4279,134 @@ banner line). Docs: `docs/API.md` (Corporate actions' Demerger entry, the PUT ex
 paragraph and 422 catalogue, the freeze exception, Closing prices' now-conditional invariant with the
 full kind list, Health), `docs/SCHEMA.md` (the four columns + the superset statement on
 `price_as_observed`), README, and `doc_checks::demerger_price_rebasing_documented`.
+
+## There is no "unpriced *before*" counterpart to `unpriced_from`, which is the shape a spun-off entity actually has
+
+SCENARIOS Q-02 (closed `c71e1f9`) added `listings.unpriced_from`: the provider *stopped* serving a
+security from a date, so the last stored close is carried forward. The mirror image is real and
+Evan has it: a security whose provider series **begins** at a date, with everything earlier
+unavailable at any price.
+
+New Lithium Americas' Yahoo series starts **2023-10-02** — a bare backfill of any earlier range
+answers HTTP 400 (reproduced against the live provider). The Q-02 pass already met this and refused
+it correctly rather than mis-handling it: its own note records that LAC's block "sits *before* its ok
+series begins, i.e. an unpriced-**before** hole a carry-forward cannot reach", and `unpriced_from`'s
+validation refuses to be used for it. So the system knows the shape exists and declines to answer it.
+
+**The strongest argument for the counterpart is what happened in its absence.** The 375 manual rows
+in the section above were entered because there was no way to say "unpriceable": their own `reason`
+names the pressure exactly — "leaving 2021-03-25..2022-09-19 unpriceable and 544 snapshots
+permanently stale. Copied to unblock them … this period is unblocked, not accurate." Offered a
+choice between a permanently stale run of snapshots and a knowingly wrong number, a careful operator
+took the wrong number and documented it. That is a missing feature, not a lapse.
+
+- [x] **Fix — Evan chose 2026-08-20: `unpriced_before` excludes the holding and flags the snapshot**
+  (over leaving the period blocked and documenting it, and over carrying the holding at its AUD cost
+  base — a cost base is not a valuation, and it would draw a flat line through a period the price
+  actually moved). The two directions are deliberately not symmetric: carrying a close *forward*
+  substitutes a real, once-observed price, while nothing before the provider's series begins was
+  ever observed, so no figure is invented — the holding leaves the total and the total says so.
+  Accepted consequences, both visible rather than silent: the Portfolio Overview graph **steps** when
+  the listing's own series begins, and a portfolio total for the excluded span omits a real holding.
+  The flag must be its **own**, not folded into `provisional` or `price_carried_forward`: an excluded
+  holding never clears, and both of those drive true-up passes that select on them, so reusing either
+  would make that loop unbounded — the same reasoning `c71e1f9` recorded for keeping
+  `price_carried_forward` separate from `provisional`.
+- [x] Options as put: **(b)** leave the period blocked and document that it is un-snapshottable,
+  naming the bind that produced the 375 manual rows; **(c)** exclude the market price but carry the
+  holding at its AUD cost base, flagged, keeping the total complete and the graph continuous.
+- [x] Whichever way, it interacts with the section above: for LAC the *correct* answer to
+  2021-03-25 → 2023-10-01 is that no price is obtainable, and the wrong answer currently stored is
+  another company's.
+
+**Closed 2026-08-20** — `listings.unpriced_before` (migration 0037), the mirror image of 0035's
+`unpriced_from`, implemented exactly as Evan decided: **the holding leaves the date's totals and the
+totals say which holding left and why**. Nothing is substituted, because nothing before the
+provider's series begins was ever observed. The second item is `[x]` as the record of the two options
+*not* taken, and the third is answered by the feature itself.
+
+**The surfaced shape is a flag plus a list, not a flag alone.** `provisional` and
+`price_carried_forward` both say "this figure rests on an interim input"; an exclusion says "this
+figure is **missing a holding**", which a reader cannot judge without knowing which one. So
+`report_snapshots` gains **two** columns: `holding_excluded` (0/1, CHECK) and `excluded_holdings`, a
+JSON array of `{listing_id, ticker, reason}` recording what the generation run actually excluded —
+stored rather than derived, so the answer stays readable after the listing's marker moves. Both reach
+`GET /report_snapshots`, `GET /report_snapshots/:report/:date`, `GET /report_snapshots/series` (where
+the graph's step shows, with the omitted tickers in the point's tooltip), `POST
+/portfolio/period-performance`, and the web UI (its own `excluded` badge and point marker, a banner
+quoting the reasons). At row level the excluded holding is left unvalued carrying the same reason in
+the existing `price_unavailable` field — no new row field, and the same shape a failed live quote
+already produces.
+
+**Validation: one refusal, and two deliberately *not* written.** The one is
+`UpsertError::UnpricedWindowEmpty` — `unpriced_before` must fall strictly before `unpriced_from` when
+both are set, since equal or crossed dates would leave no day the provider serves at all. Both set is
+an ordinary shape (a spun-off entity later delisted), and when they are, the close `unpriced_from`
+carries forward is taken from **inside** the window: `db_upsert`'s earlier-price query and
+`closing_price::db_latest_ok_price_on_or_before` both take the floor, so a row from before the series
+began can never become the figure carried forward.
+
+The two not written are the point of the SCENARIOS M rule about checking the live database before
+adding a refusal. Checked read-only first: **listing 7 (LAC) carries 635 ok rows before 2023-10-02,
+375 `manual` and 260 `fetched`.** A literal mirror of 0035's "no *fetched* ok price on or after it"
+would have refused the marker on exactly the listing it exists for. It is also wrong on its merits:
+`POST /closing_prices/backfill` takes a one-off `symbol` override, so a fetched row before the date is
+not proof the provider serves the listing's own symbol — that override is precisely how those 260
+arrived. Nor is an earlier price *required* (0035's other rule, inverted): nothing is carried, so
+nothing need exist. So no rule looks at stored prices at all, and none of the 635 rows is stranded.
+
+**What the marker does to those rows instead is supersede them.** It is a listing-level declaration
+made later in time than any per-day row, so valuation excludes the holding for days before it **even
+where an ok price is stored**, whatever its origin. That is what makes the feature able to retire the
+375 hand-entered rows whose own `reason` text asked for it — a manual-price-wins rule (the literal
+mirror of `unpriced_from`'s precedence) would have left 2021-03-25 → 2022-09-19 valuing at the wrong
+figure, which is the larger half of the problem.
+
+**The true-up passes stay bounded**, the trap the flag exists to avoid: `regenerate_provisional`
+selects on `provisional` alone and `needs_generation` ignores both `price_carried_forward` and
+`holding_excluded`, pinned by
+`snapshot::tests::db_an_excluded_holding_is_never_retried_by_a_true_up_pass`. Nothing retries an
+excluded date; **clearing** `unpriced_before` is what brings it back — 0035's staleness trigger gains
+a third body (not a parallel mechanism, since
+`every_table_is_classified_for_snapshot_staleness` pins the exact trigger set `listings` carries),
+staling the **prefix** before the later of the old and new dates where `unpriced_from` stales the
+suffix from the earlier of them.
+
+**Nothing held at all is a blocker, not an empty snapshot.** A date on which every held listing is
+excluded would store zero market value against a real cost base — a false floor through the graph, not
+a partial answer — so `stored_valuations` fails it, naming each excluded holding. The no-partial-result
+rule at its limit.
+
+Collection, fetch and backfill mirror 0035 inverted: the `price-import` job never fetches a day before
+the marker, `/closing_prices/fetch` refuses one `422`, and `/closing_prices/backfill` clamps its
+`from` **up** to the date (refusing a range wholly before it). `reports::health` drops errored rows
+and unpriced days there, so both lists now report only holes **inside** the span the provider serves.
+
+**Verified on an upgraded scratch copy of the deployed database.** Migration 0037 applied clean.
+Before: the stored 2023-09-29 `portfolio_overview` valued LAC's 1,049 units at A$11,123.21 inside a
+A$495,429.52 total. `PUT /listings/7` with `unpriced_before: 2023-10-02` staled 1,128 snapshot dates
+(the prefix) and left 1,047 alone; regenerating 2023-09-29 gave `holding_excluded: true`,
+`excluded_holdings: [{listing_id: 7, ticker: "LAC", reason: "no price is obtainable for LAC before
+2023-10-02 …"}]`, the LAC row unvalued carrying that reason, and a total of **A$484,306.31** — smaller
+by exactly the A$11,123.21 that was another company's price. 2023-10-02 onward still values LAC
+normally, so the series steps once, where its own history begins. `/closing_prices/fetch` and
+`/backfill` over the span answered 422 naming the marker, and `GET /reports/health` no longer lists
+LAC at all.
+
+Surfaces: migration 0037; `entities::listing` (the column, `UnpricedWindowEmpty`, the floored
+carry-forward source); `entities::closing_price` (`db_latest_ok_price_on_or_before`'s `not_before`,
+the collection filter, `reject_unpriced_date`'s second arm, the backfill `from` clamp);
+`reports::valuation` (`ExcludedHolding`, `StoredValuations`, the exclusion branch, the
+all-excluded blocker); `reports::snapshot` (`ExcludedHoldings`, the two columns through
+`db_list`/`db_get`/`db_series`, `PricedListings::excluded`, the `price_unavailable` annotation, the
+staleness classification); `reports::period_performance`; `reports::health`; `test_support`'s
+builder; `src/web/{config,app,chart,util}.js` and `style.css`. Docs: `docs/API.md` (Listings, Closing
+prices, Report snapshots, Period performance, Health, the 422 catalogue), `docs/SCHEMA.md`
+(both tables + the Relationships staleness/audit paragraphs), README, and
+`doc_checks::unpriced_before_and_excluded_holdings_documented`.
+
+**Left open deliberately, in the sections above:** the 635 rows still cannot be *deleted*
+(`DELETE /closing_prices/:listing_id/:price_date` refuses every ok row) — this change makes that
+relaxation newly principled and narrow, since a date inside an `unpriced_before` span is by
+declaration not read by valuation, so deleting a price there cannot punch a hole in a valued series.
+That item, and the production cleanup runbook that depends on it, stay open.

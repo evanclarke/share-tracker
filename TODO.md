@@ -35,11 +35,20 @@ two holdings where one listing's quote fails: the failing row is left unvalued c
 display-only drift). A fourth, Q-14 — the price provider serves a split-adjusted history, so every
 valuation of a pre-split date was out by the split ratio — is closed in the archive, as is Q-02 (a
 still-held delisted or suspended listing blocked the whole portfolio's snapshots indefinitely), which
-was the last of section Q's own findings. **No section-Q scenario is open.** The pass raised two further findings
-of its own: that the contemporaneous-price invariant did not hold across a **demerger** — the cause
-of an understatement already recorded against Evan's real LAC history — which is **closed** in
-`DONE/reviews.md`, and the audit-trail question that closing a fifth finding (Q-05/Q-08) raised,
-which is the **one section left below** and is awaiting Evan's decision.
+was the last of section Q's own findings. **No section-Q scenario is open.** The pass raised three further findings
+of its own, of which two are **closed** in `DONE/reviews.md`: that the contemporaneous-price
+invariant did not hold across a **demerger** — the cause of an understatement already recorded
+against Evan's real LAC history — and that there was no "unpriced *before*" counterpart to
+`unpriced_from` for a security whose provider series *begins* at a date, closed 2026-08-20 by
+`listings.unpriced_before` (migration 0037), which excludes the holding from the date's totals and
+names what it omits.
+
+**Three sections are open below.** The audit-trail question that closing a fifth finding (Q-05/Q-08)
+raised is awaiting Evan's decision. The LAC price-history section is open on four items — the
+`symbol` override records nothing, nothing detects two listings sharing a byte-identical series, the
+borrowed `ok` rows cannot be deleted, and the demerger stated close must wait for them. And the
+production-cleanup runbook for those rows is recorded last: it is a procedure to run against the
+deployed database, not code to write here, and it names the repo work it still waits on.
 
 ---
 
@@ -151,45 +160,6 @@ A$19,869.26 — a 44% unrealised loss — where old Lithium Americas closed near
   but a stated close should not be recorded against this action until the 635 are dealt with, or it
   will scale the wrong series by a plausible-looking factor.
 
-## There is no "unpriced *before*" counterpart to `unpriced_from`, which is the shape a spun-off entity actually has
-
-SCENARIOS Q-02 (closed `c71e1f9`) added `listings.unpriced_from`: the provider *stopped* serving a
-security from a date, so the last stored close is carried forward. The mirror image is real and
-Evan has it: a security whose provider series **begins** at a date, with everything earlier
-unavailable at any price.
-
-New Lithium Americas' Yahoo series starts **2023-10-02** — a bare backfill of any earlier range
-answers HTTP 400 (reproduced against the live provider). The Q-02 pass already met this and refused
-it correctly rather than mis-handling it: its own note records that LAC's block "sits *before* its ok
-series begins, i.e. an unpriced-**before** hole a carry-forward cannot reach", and `unpriced_from`'s
-validation refuses to be used for it. So the system knows the shape exists and declines to answer it.
-
-**The strongest argument for the counterpart is what happened in its absence.** The 375 manual rows
-in the section above were entered because there was no way to say "unpriceable": their own `reason`
-names the pressure exactly — "leaving 2021-03-25..2022-09-19 unpriceable and 544 snapshots
-permanently stale. Copied to unblock them … this period is unblocked, not accurate." Offered a
-choice between a permanently stale run of snapshots and a knowingly wrong number, a careful operator
-took the wrong number and documented it. That is a missing feature, not a lapse.
-
-- [ ] **Fix — Evan chose 2026-08-20: `unpriced_before` excludes the holding and flags the snapshot**
-  (over leaving the period blocked and documenting it, and over carrying the holding at its AUD cost
-  base — a cost base is not a valuation, and it would draw a flat line through a period the price
-  actually moved). The two directions are deliberately not symmetric: carrying a close *forward*
-  substitutes a real, once-observed price, while nothing before the provider's series begins was
-  ever observed, so no figure is invented — the holding leaves the total and the total says so.
-  Accepted consequences, both visible rather than silent: the Portfolio Overview graph **steps** when
-  the listing's own series begins, and a portfolio total for the excluded span omits a real holding.
-  The flag must be its **own**, not folded into `provisional` or `price_carried_forward`: an excluded
-  holding never clears, and both of those drive true-up passes that select on them, so reusing either
-  would make that loop unbounded — the same reasoning `c71e1f9` recorded for keeping
-  `price_carried_forward` separate from `provisional`.
-- [ ] Options as put: **(b)** leave the period blocked and document that it is un-snapshottable,
-  naming the bind that produced the 375 manual rows; **(c)** exclude the market price but carry the
-  holding at its AUD cost base, flagged, keeping the total complete and the graph continuous.
-- [ ] Whichever way, it interacts with the section above: for LAC the *correct* answer to
-  2021-03-25 → 2023-10-01 is that no price is obtainable, and the wrong answer currently stored is
-  another company's.
-
 ## PRODUCTION CLEANUP (not a development task): clear LAC's 635 borrowed price rows on the deployed database
 
 **This section is an operational runbook, not code to write.** It is recorded here so the work is
@@ -218,10 +188,17 @@ A$19,869.26 — a 44% unrealised loss — where old Lithium Americas closed near
 
 ### Development prerequisites (these *are* repo work, and are not all done)
 
-- [ ] `listings.unpriced_before` — a date before which the provider has no series, excluding the
+- [x] `listings.unpriced_before` — a date before which the provider has no series, excluding the
   holding from valuation and flagging the snapshot partial. Decided 2026-08-20 and **in progress**;
   see the `## There is no "unpriced *before*" counterpart` section for the decision and its
   reasoning. Tick this only once that section is closed and archived.
+  - Done 2026-08-20 (migration 0037); the section is closed and archived in `DONE/reviews.md`. The
+    snapshot carries `holding_excluded` plus an `excluded_holdings` list naming the absent holding
+    and why, and setting it on listing 7 was rehearsed against an upgraded copy of the deployed
+    database: 2023-09-29's total drops from A$495,429.52 to A$484,306.31, LAC's row unvalued with the
+    reason. Note that the marker **supersedes** the stored rows for the span, so step 4 of the
+    procedure is no longer what makes the totals honest — it is now housekeeping on rows nothing
+    reads.
 - [ ] **An `ok` row must become deletable inside an `unpriced_before` span.** Today
   `DELETE /closing_prices/:listing_id/:price_date` refuses every `ok` row, so all 635 are
   unremovable through the API and this cleanup cannot be performed at all. The relaxation is
