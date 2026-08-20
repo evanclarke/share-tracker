@@ -76,3 +76,71 @@ from the start.
   INTEGER, so the table would need the same AUTOINCREMENT surrogate id `closing_prices` was rebuilt
   with in 0021 (keeping the natural key as a `UNIQUE`), which makes this the larger of the two
   precedents, not the smaller.
+
+## A one-off `symbol` override stores another security's whole history under a listing, unguarded and undetected — and Evan's live LAC rows are the case
+
+`POST /closing_prices/backfill`'s optional `symbol` is documented as "a one-off override for this
+fetch only ... for a provider spelling the rename chain doesn't record", and the stored rows "land
+under the listing's own `listing_id` either way, so history stays unified regardless of which symbol
+fetched it". Nothing checks that the symbol names *the same security*, and nothing afterwards
+notices that it didn't.
+
+Found in the deployed database (backup `share-tracker-2026-08-16-000000.db`, read-only), and it is
+not hypothetical:
+
+- Listing 7 (`LAC`, held 2021-03-25 → 2023-10-03) carries **634** price rows for 2021-03-25 →
+  2023-09-29, all `fetched_at` 2026-07-28.
+- Every one of those 634 rows is **byte-identical** to listing 8 (`LAR`/`LAAC`)'s row for the same
+  date — 634 identical, 0 differing, 0 missing. LAC's pre-demerger price history *is* LAR's price
+  series.
+- The cause is the override: Yahoo serves **no** `LAC` history before 2023-10-02 (a bare backfill of
+  2023-09-20..29 answers HTTP 400 on every day — reproduced on a scratch DB against the live
+  provider), so a previous session backfilled under the pre-separation symbol to unblock the dates.
+  What came back was the other entity's series.
+- Impact: **922 snapshot dates / 2,766 stored snapshot rows** value LAC at the wrong company's price.
+  At 2023-09-29 the stored `portfolio_overview` row reads `market_value` A$11,123.21 against a
+  `total_cost_base` of A$19,869.26 — a 44% unrealised loss — where old Lithium Americas closed near
+  US$16.85, i.e. roughly A$27,400. **No tax figure is affected**: closing prices feed valuation only.
+- The memory note "LAC pre-demerger prices unblocked but still ~2.46x understated" (2026-07-28) is
+  this, and the 2.46 is the LAR-vs-old-LAC ratio, not a demerger adjustment factor.
+
+- [ ] Nothing detects it. No cross-check asks whether two listings hold an identical price series,
+  which is the one signal this leaves — 634 consecutive byte-identical closes between two listings is
+  not something that happens to two real securities. A `reports::health` check in the
+  `duplicate_*` family is the obvious shape.
+- [ ] Nothing guards the write. Consider what is checkable at fetch time: the returned candles'
+  **currency** against the listing's, and whether the override's series is already stored in full
+  under *another* listing. Neither is conclusive, so this may be a warn-and-record rather than a
+  refusal — but the override currently records nothing at all: the stored row's `source` says
+  `yahoo` and the symbol that actually produced it is not kept anywhere, so after the fact there is
+  no way to tell an overridden fetch from an ordinary one. That is the first thing to fix, and it is
+  small: record the symbol the row was fetched under.
+- [ ] The rows cannot be removed. `DELETE /closing_prices/:listing_id/:price_date` refuses an `ok`
+  row by design, so 634 rows known to be the wrong security's are unremovable through the API;
+  `POST /closing_prices/fetch` would replace them one day at a time, but for these dates it now
+  errors, so it converts them to errored rows rather than clearing them. Whatever the repair path is,
+  it needs to exist — the one-way rule was written for *real price data*, and these are not.
+
+## There is no "unpriced *before*" counterpart to `unpriced_from`, which is the shape a spun-off entity actually has
+
+SCENARIOS Q-02 (closed `c71e1f9`) added `listings.unpriced_from`: the provider *stopped* serving a
+security from a date, so the last stored close is carried forward. The mirror image is real and
+Evan has it: a security whose provider series **begins** at a date, with everything earlier
+unavailable at any price.
+
+New Lithium Americas' Yahoo series starts **2023-10-02** — a bare backfill of any earlier range
+answers HTTP 400 (reproduced against the live provider). The Q-02 pass already met this and refused
+it correctly rather than mis-handling it: its own note records that LAC's block "sits *before* its ok
+series begins, i.e. an unpriced-**before** hole a carry-forward cannot reach", and `unpriced_from`'s
+validation refuses to be used for it. So the system knows the shape exists and declines to answer it.
+
+- [ ] Decide whether it deserves the counterpart. The two are not symmetric: carrying a close
+  *forward* substitutes a real, once-observed price, while carrying one *backward* would invent a
+  valuation for a period before any price existed. The honest options are probably (a) an
+  `unpriced_before` date that makes valuation **exclude** the holding and flag the snapshot (so the
+  portfolio total is explicitly partial rather than blocked or wrong), or (b) leave it blocked and
+  document that a pre-listing period is un-snapshottable, which is what happens today.
+- [ ] Whichever way, it interacts with the section above: for LAC the *correct* answer to
+  2021-03-25 → 2023-10-01 is that no price is obtainable, and the wrong answer currently stored is
+  another company's.
+
