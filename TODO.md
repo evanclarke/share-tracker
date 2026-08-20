@@ -105,13 +105,31 @@ stored `portfolio_overview` row reads `market_value` A$11,123.21 against `total_
 A$19,869.26 — a 44% unrealised loss — where old Lithium Americas closed near US$16.85 (≈ A$27,400).
 **No tax figure is affected**: closing prices feed valuation only.
 
-- [ ] **`reports::health`'s `demergers_missing_close` (added `16db704`) under-reports this by more
+- [x] **`reports::health`'s `demergers_missing_close` (added `16db704`) under-reports this by more
   than half, and excludes exactly the rows documented as inaccurate.** Its query filters
   `cp.origin = 'fetched'`, so on this data it answers `adjusted_days: 260, earliest_date:
   2022-09-20` where the affected span is 635 rows from 2021-03-25. Excluding manual rows is right
   for its *stated* purpose (a manual price is contemporaneous by declaration and is never re-based),
   but that makes the count read as the size of the problem when it is not. Either the check needs a
   second figure for manual rows in the span, or its wording must say what it is counting.
+  - Closed with the **second figure**, matching the `duplicate_*` checks (which already publish a
+    count alongside the ids): the two halves need different remedies, so hiding one serves nobody.
+    One pass over the listing's pre-demerger ok rows now splits by `FILTER` into `adjusted_days` /
+    `earliest_date` / `latest_date` (fetched, observed on or after the demerger — what a stated
+    close re-bases) and `manual_days` / `manual_earliest_date` / `manual_latest_date` (hand-entered,
+    whenever entered — what it does not). The observed-on-or-after test stays on the fetched half
+    only: a manual row's `fetched_at` records when it was typed in. The row-existence rule is
+    unchanged by a `HAVING` on the fetched count, so a demerger with only manual pre-demerger rows
+    is still not listed — the manual figure is context on this warning, not a warning of its own
+    (that is the "nothing detects the result" item below). Struct docs, `docs/API.md`'s Health
+    section and the web banner all state what is counted and what is not. Verified on the deployed
+    backup: LAC now answers `adjusted_days: 260, earliest_date: 2022-09-20` **plus**
+    `manual_days: 375, manual_earliest_date: 2021-03-25` — the full 635-row span from March 2021.
+    Tests: `health::tests::a_demerger_reports_hand_entered_prices_in_the_span_separately` (both
+    kinds in one span, over `GET /reports/health`, asserting the earlier start), the no-manual
+    assertions added to `a_demerger_with_provider_adjusted_prices_and_no_stated_close_is_reported`,
+    a manual row added to `a_demerger_with_no_adjusted_prices_is_not_reported`, and the banner
+    bundle assertions in `web.rs`.
 - [ ] **The `symbol` override records nothing.** It is documented as "a one-off override for this
   fetch only … for a provider spelling the rename chain doesn't record", and the stored rows "land
   under the listing's own `listing_id` either way". Nothing checks that the symbol names the *same

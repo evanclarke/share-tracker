@@ -168,6 +168,25 @@ pub struct UnpricedListing {
 /// Deliberately a **warning, not a constraint**: a provider that did not adjust
 /// for a particular spin-off, or a series fetched entirely before it, needs no
 /// statement at all, so the action stays enterable without one.
+///
+/// **Two figures, because the span holds two kinds of row and only one of them
+/// a stated close repairs.** `adjusted_days` counts what the re-base walk will
+/// touch (ok, `origin = 'fetched'`, observed on or after the demerger); the
+/// `manual_*` figures count the hand-entered rows sitting in the same
+/// pre-demerger span, which `db_rebase_listing_prices` skips by design — a
+/// manual price is contemporaneous by declaration, so it is never restated.
+/// Publishing only the first made the count read as the size of the problem
+/// when it is not: on Evan's LAC the fetched half is 260 rows from 2022-09-20
+/// while the affected span is 635 rows from 2021-03-25, the earlier 375 being
+/// hand-entered copies of the *demerged* entity's series whose own `reason`
+/// says they are "unblocked, not accurate". Reporting both says what a stated
+/// close fixes and what it leaves behind.
+///
+/// The manual figures are **context on this warning, not a warning of their
+/// own**: a demerger with only manual pre-demerger rows is not listed at all
+/// (nothing needs re-basing), and stating the close clears the whole row while
+/// those rows stay as entered. Judging a hand-entered price wrong is a
+/// different check from this one.
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct DemergerMissingClose {
     pub action_id: i64,
@@ -176,10 +195,25 @@ pub struct DemergerMissingClose {
     /// The demerger date — every stored price before it is suspect.
     pub demerger_date: NaiveDate,
     /// How many stored ok, provider-fetched rows dated before the demerger
-    /// were observed on or after it.
+    /// were observed on or after it: exactly the rows a stated close re-bases.
+    /// Always ≥ 1 (a demerger with none is not reported), and **not** the size
+    /// of the suspect span — hand-entered rows in it are counted separately by
+    /// `manual_days`.
     pub adjusted_days: i64,
+    /// Earliest and latest `price_date` of the `adjusted_days` rows — the
+    /// fetched half of the span only, so the span as a whole starts at
+    /// `min(earliest_date, manual_earliest_date)`.
     pub earliest_date: NaiveDate,
     pub latest_date: NaiveDate,
+    /// How many stored ok, **hand-entered** (`origin = 'manual'`) rows are
+    /// dated before the demerger, whenever they were entered — the rows in the
+    /// same suspect span that a stated close does **not** repair, because the
+    /// re-base walk skips manual rows by design. 0 when there are none.
+    pub manual_days: i64,
+    /// Earliest and latest `price_date` of the `manual_days` rows; `None`
+    /// exactly when `manual_days` is 0.
+    pub manual_earliest_date: Option<NaiveDate>,
+    pub manual_latest_date: Option<NaiveDate>,
 }
 
 /// More than one corporate action of the same type, on the same listing and
@@ -590,6 +624,8 @@ pub struct HealthReport {
     /// the provider served after the demerger, and which carries no stated
     /// pre-demerger close to re-base them from, newest demerger first. Empty
     /// when every such demerger states its close (or has no affected price).
+    /// Each row carries two figures: the fetched rows a stated close repairs,
+    /// and the hand-entered rows in the same span that it does not.
     pub demergers_missing_close: Vec<DemergerMissingClose>,
     /// Every (listing, action type, date) carrying more than one corporate
     /// action, newest first. Empty when no two actions of a type share a
@@ -753,20 +789,35 @@ async fn db_unpriced_days(
 /// timestamp, so its first ten characters are the UTC date the re-base parses
 /// out of it — compared as text here rather than through SQLite's `date()`,
 /// which does not parse the nanosecond precision the timestamps carry.
+///
+/// One pass over the listing's pre-demerger ok rows produces both figures, the
+/// two halves split by `FILTER`: the fetched rows the re-base will touch, and
+/// the hand-entered rows in the same span that it skips. That observation test
+/// is applied to the fetched half only — a manual row's `fetched_at` records
+/// when it was *typed in*, which says nothing about the basis it was stated
+/// in. `HAVING` keeps the row-existence rule the check has always had: a
+/// demerger is listed because provider-adjusted prices need re-basing, so one
+/// with only manual pre-demerger rows is not listed.
 async fn db_demergers_missing_close(
     conn: &mut sqlx::SqliteConnection,
 ) -> Result<Vec<DemergerMissingClose>, sqlx::Error> {
     sqlx::query_as::<_, DemergerMissingClose>(
         "SELECT ca.id AS action_id, ca.listing_id AS listing_id, l.ticker AS ticker, \
-                ca.date AS demerger_date, COUNT(*) AS adjusted_days, \
-                MIN(cp.price_date) AS earliest_date, MAX(cp.price_date) AS latest_date \
+                ca.date AS demerger_date, \
+                COUNT(*) FILTER (WHERE cp.origin = 'fetched') AS adjusted_days, \
+                MIN(cp.price_date) FILTER (WHERE cp.origin = 'fetched') AS earliest_date, \
+                MAX(cp.price_date) FILTER (WHERE cp.origin = 'fetched') AS latest_date, \
+                COUNT(*) FILTER (WHERE cp.origin = 'manual') AS manual_days, \
+                MIN(cp.price_date) FILTER (WHERE cp.origin = 'manual') AS manual_earliest_date, \
+                MAX(cp.price_date) FILTER (WHERE cp.origin = 'manual') AS manual_latest_date \
          FROM corporate_actions ca \
          JOIN listings l ON l.id = ca.listing_id \
          JOIN closing_prices cp ON cp.listing_id = ca.listing_id \
          WHERE ca.action_type = 'Demerger' AND ca.demerger_close_date IS NULL \
-           AND cp.status = 'ok' AND cp.origin = 'fetched' \
-           AND cp.price_date < ca.date AND substr(cp.fetched_at, 1, 10) >= ca.date \
+           AND cp.status = 'ok' AND cp.price_date < ca.date \
+           AND (cp.origin = 'manual' OR substr(cp.fetched_at, 1, 10) >= ca.date) \
          GROUP BY ca.id \
+         HAVING COUNT(*) FILTER (WHERE cp.origin = 'fetched') > 0 \
          ORDER BY ca.date DESC, ca.id DESC",
     )
     .fetch_all(conn)
@@ -2212,6 +2263,10 @@ mod tests {
         );
         assert_eq!(d.earliest_date, ymd(2023, 9, 29));
         assert_eq!(d.latest_date, ymd(2023, 10, 2));
+        // No hand-entered row in the span, so the second figure is empty.
+        assert_eq!(d.manual_days, 0);
+        assert_eq!(d.manual_earliest_date, None);
+        assert_eq!(d.manual_latest_date, None);
         // Nothing else in health notices: the rows are ok, not errored.
         assert!(h.errored_prices.is_empty());
 
@@ -2229,8 +2284,81 @@ mod tests {
         assert!(h.demergers_missing_close.is_empty());
     }
 
+    /// The real shape of Evan's LAC history: the pre-demerger span holds both
+    /// provider-fetched rows served after the demerger **and**, running back
+    /// years earlier, hand-entered rows — copies of the demerged entity's
+    /// series, entered to unblock stale snapshots, whose own `reason` says
+    /// they are "unblocked, not accurate".
+    ///
+    /// The re-base walk skips manual rows by design, so counting only the
+    /// fetched half published 260 where the affected span was 635 and made the
+    /// alarm quietest about the rows already known to be wrong — and put the
+    /// start of the exposure 18 months late. Both halves are reported, so the
+    /// banner states what a stated close repairs and what it leaves.
+    #[tokio::test]
+    async fn a_demerger_reports_hand_entered_prices_in_the_span_separately() {
+        let pool = test_pool().await;
+        test_support::listing(1).ticker("LAC").insert(&pool).await;
+        test_support::listing(2).ticker("LAR").insert(&pool).await;
+        // The hand-entered half: the demerged entity's closes, copied in years
+        // after the fact to unblock permanently stale snapshots.
+        for date in ["2021-03-25", "2022-09-19"] {
+            test_support::closing_price(1, date.parse().unwrap())
+                .price("4.12")
+                .fetched_at("2026-07-28T02:00:00Z")
+                .manual(
+                    "listing 8 (LAR) stored close for the same date",
+                    "demerger-adjusted, so this period is unblocked, not accurate",
+                )
+                .insert(&pool)
+                .await;
+        }
+        // The fetched half: what the provider served, after the demerger.
+        for date in ["2022-09-20", "2023-10-02"] {
+            test_support::closing_price(1, date.parse().unwrap())
+                .price("10.13")
+                .source("yahoo")
+                .fetched_at("2026-07-26T07:44:56Z")
+                .insert(&pool)
+                .await;
+        }
+        insert_demerger(&pool, 1, 1, 2, ymd(2023, 10, 3), None).await;
+
+        let resp = ApiClient::over(router().with_state(pool.clone()))
+            .get("/reports/health")
+            .await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let body: serde_json::Value = resp.json();
+        let d = &body["demergers_missing_close"][0];
+        // What a stated close re-bases…
+        assert_eq!(d["adjusted_days"], 2);
+        assert_eq!(d["earliest_date"], "2022-09-20");
+        assert_eq!(d["latest_date"], "2023-10-02");
+        // …and what it does not, which starts 18 months earlier: the span the
+        // operator has to deal with runs from the manual rows, not the fetched
+        // ones.
+        assert_eq!(d["manual_days"], 2);
+        assert_eq!(d["manual_earliest_date"], "2021-03-25");
+        assert_eq!(d["manual_latest_date"], "2022-09-19");
+
+        let h = health(&pool, ymd(2026, 7, 13)).await;
+        let d = &h.demergers_missing_close[0];
+        assert_eq!(
+            d.adjusted_days, 2,
+            "the fetched figure counts only what the re-base walk touches"
+        );
+        assert_eq!(d.manual_earliest_date, Some(ymd(2021, 3, 25)));
+        assert!(
+            d.manual_earliest_date.unwrap() < d.earliest_date,
+            "the suspect span starts at the earlier of the two halves"
+        );
+    }
+
     /// A demerger whose head listing has no provider-adjusted price is not a
-    /// problem: nothing needs re-basing, so no statement is asked for.
+    /// problem: nothing needs re-basing, so no statement is asked for — and a
+    /// hand-entered pre-demerger row does not make one, since a stated close
+    /// would not touch it. The manual figure is context on the warning, never
+    /// a warning of its own.
     #[tokio::test]
     async fn a_demerger_with_no_adjusted_prices_is_not_reported() {
         let pool = test_pool().await;
@@ -2240,6 +2368,12 @@ mod tests {
             .price("24.58")
             .source("yahoo")
             .fetched_at("2023-09-29T21:00:00Z")
+            .insert(&pool)
+            .await;
+        test_support::closing_price(1, "2023-09-28".parse().unwrap())
+            .price("24.10")
+            .fetched_at("2026-07-28T02:00:00Z")
+            .manual("the demerged entity's series", "no candle is served")
             .insert(&pool)
             .await;
         insert_demerger(&pool, 1, 1, 2, ymd(2023, 10, 3), None).await;

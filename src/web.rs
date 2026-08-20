@@ -416,6 +416,10 @@ mod tests {
         assert!(js.contains("demergers_missing_close"));
         assert!(js.contains("pre-demerger closing price(s) for "));
         assert!(js.contains("d.action_id"));
+        // …and states the second figure too: the hand-entered prices in the
+        // same span, which the stated close does not re-base.
+        assert!(js.contains("d.manual_days"));
+        assert!(js.contains("hand-entered price(s) ("));
     }
 
     #[tokio::test]

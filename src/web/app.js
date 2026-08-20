@@ -1060,7 +1060,9 @@ async function viewAttachments(ownerField, ownerId) {
 // Actions, where the surplus row is deleted), any demerger whose head listing
 // still holds pre-demerger prices the provider adjusted for the spin-off (also
 // linking to Corporate Actions, where the demerger's stated close re-bases
-// them), any fund-year with two AMMA
+// them — with any hand-entered prices in the same pre-demerger span named as a
+// second figure, because a stated close does not re-base those and the first
+// figure is not the size of the span), any fund-year with two AMMA
 // statements for one holding account, counted twice in the income, gains and
 // cost-base figures alike (linking to AMMA Statements), and any distribution
 // entered twice — identical amounts, same listing, account and payment date —
@@ -1108,7 +1110,15 @@ async function refreshHealthBanner() {
         + d.earliest_date + '–' + d.latest_date
         + ') were served after the ' + d.demerger_date + ' demerger, so they carry the provider’s'
         + ' spin-off adjustment — state the actual close of the last pre-demerger trading day on'
-        + ' corporate action ' + d.action_id + ' to re-base them.');
+        + ' corporate action ' + d.action_id + ' to re-base them.'
+        // The second figure, so the first is never read as the whole span: a
+        // hand-entered price is never re-based, so a stated close leaves these
+        // exactly as they are and they need checking on their own.
+        + (d.manual_days > 0
+          ? ' A further ' + d.manual_days + ' hand-entered price(s) (' + d.manual_earliest_date
+            + '–' + d.manual_latest_date + ') sit in the same pre-demerger span; the stated close'
+            + ' does not re-base those, so check them separately.'
+          : ''));
     });
     const duplicateActions = h.duplicate_actions || [];
     duplicateActions.forEach(function (d) {
