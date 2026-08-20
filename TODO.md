@@ -35,8 +35,11 @@ two holdings where one listing's quote fails: the failing row is left unvalued c
 display-only drift). A fourth, Q-14 — the price provider serves a split-adjusted history, so every
 valuation of a pre-split date was out by the split ratio — is closed in the archive, as is Q-02 (a
 still-held delisted or suspended listing blocked the whole portfolio's snapshots indefinitely), which
-was the last of section Q's own findings. **No SCENARIOS finding is open**: the one section below is
-the audit-trail question that closing a fifth (Q-05/Q-08) raised, which awaits its own decision.
+was the last of section Q's own findings. **No section-Q scenario is open**, but the pass left two
+sections below, both awaiting a decision: the audit-trail question that closing a fifth finding
+(Q-05/Q-08) raised, and — found afterwards, checking the live database against the invariant Q-14's
+fix had just established — that the same invariant does not hold across a **demerger**, which is the
+cause of an understatement already recorded against Evan's real LAC history.
 
 ---
 
@@ -73,3 +76,42 @@ from the start.
   INTEGER, so the table would need the same AUTOINCREMENT surrogate id `closing_prices` was rebuilt
   with in 0021 (keeping the natural key as a `UNIQUE`), which makes this the larger of the two
   precedents, not the smaller.
+
+## The contemporaneous-price invariant does not hold across a demerger, and Evan's live LAC history is the case
+
+Q-14 (closed 2026-08-20, `9554de5`) established that a stored closing price is *the price the
+security traded at on its own date*, and re-bases the provider's figure across every recorded
+`ShareSplit` / `BonusIssue`. A **`Demerger`** breaks the same invariant by the same mechanism and is
+**not** covered: Yahoo applies a spin-off price-adjustment factor to the whole pre-demerger series
+just as it does for a split, but a demerger changes no unit count on the original listing (it issues
+units of a *different* one), so nothing re-bases the price back.
+
+Found while checking the live database read-only after the Q-14 fix, against a note already in the
+project memory ("LAC pre-demerger prices unblocked but still ~2.46x understated", 2026-07-28) — the
+note describes exactly this and had not been connected to a cause:
+
+- `corporate_actions` holds one `Demerger`, listing 7 (`LAC`), dated 2023-10-03.
+- LAC was held 2021-03-25 → 2023-10-03 (the demerger's closing Sell), 1,049 units.
+- Its stored ok price history starts **2023-10-02** — one day before the demerger — at **10.13**,
+  `origin: fetched`, `fetched_at: 2026-07-26`, i.e. whatever Yahoo serves today. The recorded ~2.46×
+  understatement puts the contemporaneous close near US$24.9, which is the pre-demerger level.
+- The rest of the pre-demerger period is **187 errored rows** (2023-01-03..2023-09-29) and nothing at
+  all before 2023-01-03, so those dates' snapshots are currently *blocked* rather than wrong. The
+  exposure is latent: **the moment that history is backfilled, every day of it arrives adjusted**,
+  and `report_snapshots` holds 6,459 rows going back to 2020-08-31 for those dates to regenerate into.
+
+- [ ] The `price-rebase` job and `db_rebase_listing_prices` read only `ShareSplit`/`BonusIssue`
+  ratios. A demerger has no such ratio to read: the provider's factor is set by the *market values*
+  of the two entities at the spin-off, which `demerger_cost_base_pct` (an ATO cost-base
+  apportionment, not a price ratio) does not give. So this cannot be fixed by extending the existing
+  walk — it needs its own input.
+- [ ] Decide the model. Roughly: **(a)** record the demerger's price-adjustment factor as a stated
+  fact on the action (the operator reads it off the two closes either side, or off the provider's
+  own factor) and fold it into the same re-basing walk; **(b)** refuse to *fetch* a listing's
+  pre-demerger dates at all, so the series is honestly absent rather than quietly adjusted, and
+  require hand-entered prices there (which the manual-price path already treats as contemporaneous
+  by declaration); or **(c)** document it as a Known limitation beside the Q-14 invariant, so the
+  invariant's own statement is not overclaimed — it currently reads as unconditional.
+- [ ] Whichever is chosen, `docs/API.md`'s Closing prices section states the invariant without this
+  exception, and `reports::health` has no warning for a listing with stored prices before a recorded
+  demerger — the shape the Q-14 pass considered and did not need.
