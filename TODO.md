@@ -171,12 +171,21 @@ permanently stale. Copied to unblock them … this period is unblocked, not accu
 choice between a permanently stale run of snapshots and a knowingly wrong number, a careful operator
 took the wrong number and documented it. That is a missing feature, not a lapse.
 
-- [ ] Decide whether it deserves the counterpart. The two are not symmetric: carrying a close
-  *forward* substitutes a real, once-observed price, while carrying one *backward* would invent a
-  valuation for a period before any price existed. The honest options are probably (a) an
-  `unpriced_before` date that makes valuation **exclude** the holding and flag the snapshot (so the
-  portfolio total is explicitly partial rather than blocked or wrong), or (b) leave it blocked and
-  document that a pre-listing period is un-snapshottable, which is what happens today.
+- [ ] **Fix — Evan chose 2026-08-20: `unpriced_before` excludes the holding and flags the snapshot**
+  (over leaving the period blocked and documenting it, and over carrying the holding at its AUD cost
+  base — a cost base is not a valuation, and it would draw a flat line through a period the price
+  actually moved). The two directions are deliberately not symmetric: carrying a close *forward*
+  substitutes a real, once-observed price, while nothing before the provider's series begins was
+  ever observed, so no figure is invented — the holding leaves the total and the total says so.
+  Accepted consequences, both visible rather than silent: the Portfolio Overview graph **steps** when
+  the listing's own series begins, and a portfolio total for the excluded span omits a real holding.
+  The flag must be its **own**, not folded into `provisional` or `price_carried_forward`: an excluded
+  holding never clears, and both of those drive true-up passes that select on them, so reusing either
+  would make that loop unbounded — the same reasoning `c71e1f9` recorded for keeping
+  `price_carried_forward` separate from `provisional`.
+- [ ] Options as put: **(b)** leave the period blocked and document that it is un-snapshottable,
+  naming the bind that produced the 375 manual rows; **(c)** exclude the market price but carry the
+  holding at its AUD cost base, flagged, keeping the total complete and the graph continuous.
 - [ ] Whichever way, it interacts with the section above: for LAC the *correct* answer to
   2021-03-25 → 2023-10-01 is that no price is obtainable, and the wrong answer currently stored is
   another company's.
