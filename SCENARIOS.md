@@ -80,7 +80,7 @@ behind or became a recorded finding.
 | N. Holding accounts and transfers | 12 | 2026-08-19 | 5 raised, all closed — see below |
 | O. Net capital gain, losses, and carry-forward | 17 | 2026-08-19 (`e1f1f70`) | 3 raised, all closed — see below |
 | P. Tax summary, annual tax report, exports | 12 | 2026-08-20 (`cb36977`) | 5 raised, all closed — see below |
-| Q. Prices, valuation, and snapshots | 15 | — | — |
+| Q. Prices, valuation, and snapshots | 15 | 2026-08-20 (`3696ec1`) | 5 raised, all closed — see below |
 | R. Listing identity and renames | 10 | — | — |
 | S. Settlement, holidays, and dates | 10 | — | — |
 | T. Jobs, backup, and operations | 12 | — | — |
@@ -824,6 +824,45 @@ that acts on it, and one about an input nobody validated. Each is archived in
 | Every investment-expense deduction is exported at `D7 / D8`, including the ones the ATO routes elsewhere | P-08 | `9f23346` |
 | The parcel optimiser ranks strategies on the 50% discount without stating the taxpayer basis | P-12 | `8c4e681` |
 | `POST /reports/tax-report` panics on an out-of-range `tax_year` instead of refusing it | P-02 | `e684f9c` |
+
+### Section Q findings
+
+Ten of the fifteen came back correct outright, and the ones that carry the most machinery were among
+them. `Q-01` stored a provider gap on a real trading day as an errored row, blocked that date's
+snapshot with the error text quoted back, and surfaced it in `GET /reports/health`'s `errored_prices`.
+`Q-03`/`Q-04` proved the hand-entered price is one-way exactly as documented: `POST
+/closing_prices/fetch` refuses it `422` quoting the row's own `reason`, a backfill counts it
+`already_stored`, and the validation refuses a non-trading day, a close that is not final, a blank
+`sourced_from`/`reason` and a non-positive price. `Q-06` blocked a date on two missing prices,
+reported both blockers, then one, then generated — and the `report-snapshot` job's 14-day window left
+an older date alone, which `regenerate_all` reached with `regenerate_range` widening its default
+`from` to the first-ever-held date. `Q-07` back-dated a Buy, triggered no price backfill, and showed
+up as `unpriced_days`, as documented. `Q-08` found **every** fact write staling the right dates —
+trade insert, parcel allocation via a Sell, income, AMMA statement by its `tax_year_end_date`,
+corporate action, a manual price replacing another, an `rba_fx_rates` correction from the first of
+its month, and the `listings` `amit` flip — bar the one table that was missing. `Q-10`/`Q-11` refused
+`from == to` and `from > to` with the same message and named the endpoint date with no stored price.
+`Q-12`/`Q-13` valued two holdings live where one quote failed: the failing row was left unvalued
+carrying `price_unavailable` while the other still valued, converted at the quote-month rate and
+flagged `fx_provisional` when it fell back. `Q-15` left a stored `performance` snapshot's `ticker`
+label untouched and unstaled across a rename, and regeneration picked the new one up — the documented
+display-only drift.
+
+The five findings the pass raised are all closed. What they had in common is the section's own theme:
+**every one was about a fact the system knew and did not write down**. Two were writes whose effect
+on a stored figure nothing recorded (a holiday, a split), one was a convention nothing pinned, one
+was a number stated two ways in the docs, and the last was a condition of a *listing* — the provider
+having stopped quoting it — that had no field at all, so the system could only keep failing at it
+one day at a time. Each is archived in [`DONE/reviews.md`](DONE/reviews.md) under a heading naming
+its scenario ids.
+
+| Finding | Scenarios | Fixed by |
+| --- | --- | --- |
+| `docs/API.md`'s Jobs section states the wrong price-collection window | Q-01 | `f2a8dca` (documented) |
+| An exchange-holiday write silently re-values every stored snapshot on that date | Q-05, Q-08 | `5c3e6f5` |
+| Nothing pins the snapshot-staleness trigger set, and it has now been missed three times | Q-09 | `55e1355` |
+| The price provider serves split-adjusted history, so every valuation of a pre-split date is wrong by the split ratio | Q-14 | `9554de5` |
+| A still-held delisted or suspended listing blocks the whole portfolio's snapshots indefinitely | Q-02 | `c71e1f9` |
 
 ## A. Deletion and mutation ripple effects
 
