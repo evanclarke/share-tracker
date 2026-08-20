@@ -2231,6 +2231,64 @@ fn presale_tools_read_candidates_as_at_the_request_date() {
     assert!(API_MD.contains("a parcel not open as at that date (including one acquired after it"));
 }
 
+/// Docs-sync pin for the price-collection lookback window (SCENARIOS Q-01).
+/// The Jobs section stated a **7**-day window for `price-import` while the
+/// Closing prices section, the README and the code all said 14 — and 14 is
+/// not an arbitrary figure: it is *the same constant* the report-snapshot
+/// catch-up window is defined as, because a date the snapshot job keeps
+/// retrying but collection no longer refills could never unblock itself. So
+/// every place that states the window is pinned to the constant itself, along
+/// with the tie between the two windows that forces them to be one number.
+#[test]
+fn price_collection_lookback_window_documented_as_the_constant() {
+    let days = crate::entities::closing_price::COLLECTION_LOOKBACK_DAYS;
+    // One number, not two — so the docs are entitled to state one figure.
+    assert_eq!(crate::reports::snapshot::CATCHUP_LOOKBACK_DAYS, days);
+    let window = format!("last {days} calendar days");
+
+    let section = |heading: &str| -> &'static str {
+        API_MD
+            .split(heading)
+            .nth(1)
+            .unwrap_or_else(|| panic!("docs/API.md has a {heading} section"))
+            .split("\n## ")
+            .next()
+            .expect("split always yields at least one part")
+    };
+
+    // Closing prices: the window, and the reason it has to be that long.
+    let closing_prices = section("## Closing prices");
+    assert!(
+        closing_prices.contains(&format!("**{window}**")),
+        "the Closing prices section states the collection window as {days} calendar days"
+    );
+    assert!(closing_prices.contains(
+        "deliberately the same length as the [report-snapshot](#report-snapshots) catch-up window"
+    ));
+    assert!(closing_prices.contains("could never unblock itself"));
+
+    // Jobs: the same window for the same job, described a second time.
+    let jobs = section("## Jobs");
+    assert!(jobs.contains("`price-import`"));
+    assert!(
+        jobs.contains(&window),
+        "the Jobs section states the `price-import` window as {days} calendar days"
+    );
+    assert!(
+        jobs.contains(&format!("over its {days}-day window")),
+        "the Jobs section states the `report-snapshot` window as {days} days"
+    );
+
+    // README's Features list states both jobs' windows.
+    assert!(README_MD.contains(&format!("self-heals the {window}")));
+    assert!(README_MD.contains(&format!("backfills missing dates over a {days}-day window")));
+
+    // The Known limitations entry states them as the one bounded window.
+    assert!(known_limitations().contains(&format!(
+        "({days} calendar days, for prices and snapshots alike)"
+    )));
+}
+
 /// Pins for the FreeBSD packaging + versioned-release pipeline (REQUIREMENTS
 /// 2026-07-13). The release workflow and package skeleton are plain text CI
 /// consumes, so these tests keep their load-bearing pieces from silently

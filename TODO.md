@@ -31,7 +31,7 @@ two holdings where one listing's quote fails: the failing row is left unvalued c
 `price_unavailable` while the other still values, converts at the quote-month rate and flags
 `fx_provisional` when it falls back), and Q-15 (a rename leaves the stored `performance` snapshot's
 `ticker` label untouched and unstaled, and regeneration picks the new one up — the documented
-display-only drift). The five findings below are open.
+display-only drift). The four findings below are open.
 
 ---
 
@@ -190,14 +190,3 @@ listing records the date from which the provider serves nothing: collection stop
 the last stored close forward and flagging the snapshot, the way the provisional-FX fallback already
 works, so the substitution is never silent. Migration + listing field + collection/valuation/health
 branches + `docs/API.md`, `docs/SCHEMA.md` and README.
-
-## SCENARIOS Q-01: `docs/API.md`'s Jobs section states the wrong price-collection window
-
-- [ ] `docs/API.md`'s [Jobs](docs/API.md#jobs) section says `price-import` "re-attempts, per held
-  listing, every trading day in the **last 7** whose stored row is missing or errored". It is 14:
-  `closing_price::COLLECTION_LOOKBACK_DAYS = 14`, and both the [Closing prices](docs/API.md#closing-prices)
-  section and README's Features list say 14 — the Closing-prices section additionally explains *why*
-  it must be 14 ("deliberately the same length as the report-snapshot catch-up window: a date the
-  snapshot job keeps retrying but collection no longer refills could never unblock itself"). The
-  Jobs sentence contradicts the reason given two sections earlier. One-line doc fix; worth a
-  `doc_checks.rs` assertion pinning the two windows to the constant so they cannot drift apart again.

@@ -3715,3 +3715,28 @@ validates nothing, so a year `chrono` cannot represent aborts the handler:
 `ApiError::Unprocessable`, like every other rejected request field — with the range chosen so no
 representable financial year a user could legitimately want is refused. `docs/API.md`'s response-codes
 422 catalogue gains the new cause.
+
+## SCENARIOS Q-01: `docs/API.md`'s Jobs section states the wrong price-collection window
+
+- [x] `docs/API.md`'s [Jobs](docs/API.md#jobs) section says `price-import` "re-attempts, per held
+  listing, every trading day in the **last 7** whose stored row is missing or errored". It is 14:
+  `closing_price::COLLECTION_LOOKBACK_DAYS = 14`, and both the [Closing prices](docs/API.md#closing-prices)
+  section and README's Features list say 14 — the Closing-prices section additionally explains *why*
+  it must be 14 ("deliberately the same length as the report-snapshot catch-up window: a date the
+  snapshot job keeps retrying but collection no longer refills could never unblock itself"). The
+  Jobs sentence contradicts the reason given two sections earlier. One-line doc fix; worth a
+  `doc_checks.rs` assertion pinning the two windows to the constant so they cannot drift apart again.
+
+**Closed 2026-08-20.** One-line doc fix — the Jobs section's `price-import` parenthetical now reads
+"every trading day in the last 14 calendar days whose stored row is missing or errored", the same
+window (and the same calendar-days basis) the [Closing prices](docs/API.md#closing-prices) section
+states two sections earlier. A sweep of `docs/` and README found no third place stating a different
+figure; the Jobs sentence was the only one still on 7.
+
+Pinned by `doc_checks::price_collection_lookback_window_documented_as_the_constant`, which reads
+`closing_price::COLLECTION_LOOKBACK_DAYS` at runtime, asserts `snapshot::CATCHUP_LOOKBACK_DAYS`
+equals it (so the docs are entitled to state one figure for both jobs), and then requires that
+figure in all four places the window is written down: the Closing prices section (with the sentence
+giving the *reason* the two windows are one length), the Jobs section (both the `price-import` and
+the `report-snapshot` halves), README's Features list, and the Intraday-prices known limitation.
+Bumping the constant now fails the test until the prose follows.
