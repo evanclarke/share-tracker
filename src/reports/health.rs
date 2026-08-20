@@ -18,6 +18,10 @@
 //! - every listing with a held day whose price was never even attempted —
 //!   the missing-row counterpart of the errored list (see
 //!   [`UnpricedListing`]);
+//! - every pair of listings holding the *same* closing price on a long run of
+//!   consecutive trading days — one security's series stored under two
+//!   listings, which no other list here can see because every row is `ok`
+//!   (see [`DuplicatePriceSeries`]);
 //! - every (listing, action type, date) carrying more than one corporate
 //!   action — the double-entry that silently compounds (see
 //!   [`DuplicateAction`]);
@@ -59,7 +63,7 @@
 
 use crate::domain::rollover;
 use crate::domain::tax_year::tax_year_for;
-use crate::entities::closing_price::{self, HeldTimeline};
+use crate::entities::closing_price::{self, HeldTimeline, PriceOrigin};
 use crate::entities::ess_statement::{self, EssStatement};
 use crate::entities::income::Income;
 use crate::entities::inheritance::{self, Inheritance};
@@ -72,13 +76,22 @@ use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc, Weekday};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 /// Prices are stale once the latest ok closing price is more than this many
 /// business days (Mon–Fri) old. The price-import job runs every weekday, so a
 /// healthy database is at most 1–2 business days behind; 3 leaves headroom for
 /// a long exchange-holiday weekend without a false alarm.
 pub const PRICE_STALE_BUSINESS_DAYS: i64 = 3;
+
+/// How many consecutive shared trading days of *identical* closes make two
+/// listings one series stored twice — see [`DuplicatePriceSeries`]. Thirty is
+/// about six weeks of trading. Two genuinely distinct securities do coincide
+/// to the cent now and then (Evan's LAC and LAR both closed at 4.12 on
+/// 2024-02-08, four months after their series diverged), but a scattered
+/// coincidence is not a run: matching on thirty *consecutive* comparisons is
+/// not something two real securities do, and the observed incident ran to 634.
+pub const DUPLICATE_PRICE_SERIES_RUN_DAYS: i64 = 30;
 
 /// The ESS 30-day rule's window: a disposal **within 30 days after** the
 /// deferred taxing point moves the taxing point to the disposal date
@@ -216,6 +229,75 @@ pub struct DemergerMissingClose {
     /// exactly when `manual_days` is 0.
     pub manual_earliest_date: Option<NaiveDate>,
     pub manual_latest_date: Option<NaiveDate>,
+}
+
+/// Two listings whose stored closing prices are *identical* across a long run
+/// of consecutive trading days: one security's price series stored under both,
+/// which is what a series fetched or copied under the wrong symbol looks like
+/// afterwards.
+///
+/// This is the only alarm the case leaves once the fetch is over. Every row is
+/// `ok`, so `errored_prices` and `unpriced_days` both pass over them; the
+/// figures are plausible; and a row fetched under a one-off `symbol` override
+/// before migration 0038 records no symbol at all, so nothing on the row
+/// itself says where it came from. Evan's listing 7 (`LAC`) carries 634 such
+/// rows — every one equal to listing 8 (`LAR`)'s close for the same day — and
+/// 259 of them are exactly those provenance-less fetched rows.
+///
+/// **The predicate is a run, not a total.** Two distinct securities can close
+/// at the same figure on scattered days by chance (LAC and LAR did, on
+/// 2024-02-08, well after their series parted), so a count of matching days
+/// over all history would report the accident and the incident alike. A run of
+/// [`DUPLICATE_PRICE_SERIES_RUN_DAYS`] consecutive *comparisons* — days on
+/// which both listings hold an ok price — is what no pair of real securities
+/// produces. A day only one of them has a price for neither breaks nor extends
+/// the run: it is not a comparison. A run whose closes never move is not
+/// reported at all, however long: two instruments pinned to one figure (a pair
+/// of stablecoins at 1.00, two funds at a constant unit price) match forever
+/// without either series being a copy, and an alarm nobody can ever clear is
+/// worse than none.
+///
+/// The per-origin split is the same call [`DemergerMissingClose`] made, and
+/// for the same reason: the two halves need different remedies. Hand-entered
+/// rows state where they came from and why (`sourced_from`/`reason`), so the
+/// operator can read the intent off the row; fetched rows before 0038 state
+/// nothing, which is the half this check exists for.
+///
+/// **Reported, never rejected, and with no way to silence it**: the check owns
+/// no marker of its own, exactly like the rest of the `duplicate_*` family —
+/// it clears when the borrowed rows go (`DELETE
+/// /closing_prices/:listing_id/:price_date`, or the bulk
+/// `POST /closing_prices/clear_unpriced_before`) or are replaced by the
+/// listing's own series. Setting [`unpriced_before`] deliberately does *not*
+/// quiet it: that marker says the provider serves nothing before the date,
+/// which is a reason to delete the stored rows, not to accept them — unlike
+/// `errored_prices`, where the marker explains an *absence*.
+///
+/// [`unpriced_before`]: crate::entities::listing::Listing::unpriced_before
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DuplicatePriceSeries {
+    /// The pair, ordered by id, so each pair is reported once.
+    pub listing_id: i64,
+    pub ticker: String,
+    pub other_listing_id: i64,
+    pub other_ticker: String,
+    /// Length of the longest run of consecutive shared trading days on which
+    /// the two listings' stored closes are equal — always ≥
+    /// [`DUPLICATE_PRICE_SERIES_RUN_DAYS`], and **not** the number of matching
+    /// days over all history (a later coincidence is not part of it).
+    pub identical_days: i64,
+    /// First and last `price_date` of that run.
+    pub earliest_date: NaiveDate,
+    pub latest_date: NaiveDate,
+    /// How many of `listing_id`'s rows in the run were fetched from a provider
+    /// and how many were entered by hand — the two halves sum to
+    /// `identical_days`. A hand-entered row carries its own `sourced_from` /
+    /// `reason`; a fetched one may carry nothing at all.
+    pub fetched_days: i64,
+    pub manual_days: i64,
+    /// The same split for `other_listing_id`'s rows in the run.
+    pub other_fetched_days: i64,
+    pub other_manual_days: i64,
 }
 
 /// More than one corporate action of the same type, on the same listing and
@@ -629,6 +711,12 @@ pub struct HealthReport {
     /// Each row carries two figures: the fetched rows a stated close repairs,
     /// and the hand-entered rows in the same span that it does not.
     pub demergers_missing_close: Vec<DemergerMissingClose>,
+    /// Every pair of listings whose stored closing prices are identical across
+    /// a run of at least [`DUPLICATE_PRICE_SERIES_RUN_DAYS`] consecutive
+    /// shared trading days, newest run first — one security's series stored
+    /// under two listings. Empty when no two listings track each other that
+    /// closely.
+    pub duplicate_price_series: Vec<DuplicatePriceSeries>,
     /// Every (listing, action type, date) carrying more than one corporate
     /// action, newest first. Empty when no two actions of a type share a
     /// listing and date.
@@ -830,6 +918,150 @@ async fn db_demergers_missing_close(
     )
     .fetch_all(conn)
     .await
+}
+
+/// One stored ok closing price, read for [`db_duplicate_price_series`].
+#[derive(sqlx::FromRow)]
+struct StoredClose {
+    listing_id: i64,
+    price_date: NaiveDate,
+    #[sqlx(try_from = "Money")]
+    price: Decimal,
+    origin: PriceOrigin,
+}
+
+/// The longest run of identical closes between two listings, accumulated as
+/// the two date-sorted series are walked together.
+#[derive(Clone)]
+struct IdenticalRun {
+    length: i64,
+    start: NaiveDate,
+    end: NaiveDate,
+    /// The run's first close, and whether any later day of it differs — a run
+    /// that never moves is two pinned instruments, not a copied series.
+    first_price: Decimal,
+    varies: bool,
+    manual_days: i64,
+    other_manual_days: i64,
+}
+
+/// The longest run of consecutive shared trading days on which `a` and `b`
+/// hold an equal close. Both series are sorted by date, so this is one merge
+/// walk: a date only one side has is skipped without breaking the run (it is
+/// not a comparison), a date both sides have and disagree on ends it.
+///
+/// Prices are compared as `Decimal`s, not as the stored TEXT, so `"10.5"` and
+/// `"10.50"` are the same close — the same rule the rest of the `duplicate_*`
+/// family applies to its amounts.
+fn longest_identical_run(a: &[StoredClose], b: &[StoredClose]) -> Option<IdenticalRun> {
+    let (mut i, mut j) = (0, 0);
+    let mut current: Option<IdenticalRun> = None;
+    let mut best: Option<IdenticalRun> = None;
+    while i < a.len() && j < b.len() {
+        match a[i].price_date.cmp(&b[j].price_date) {
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
+            std::cmp::Ordering::Equal => {
+                if a[i].price == b[j].price {
+                    let run = current.get_or_insert(IdenticalRun {
+                        length: 0,
+                        start: a[i].price_date,
+                        end: a[i].price_date,
+                        first_price: a[i].price,
+                        varies: false,
+                        manual_days: 0,
+                        other_manual_days: 0,
+                    });
+                    run.length += 1;
+                    run.end = a[i].price_date;
+                    run.varies |= a[i].price != run.first_price;
+                    run.manual_days += i64::from(a[i].origin == PriceOrigin::Manual);
+                    run.other_manual_days += i64::from(b[j].origin == PriceOrigin::Manual);
+                    if best.as_ref().is_none_or(|b| run.length > b.length) {
+                        best = Some(run.clone());
+                    }
+                } else {
+                    current = None;
+                }
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    best
+}
+
+/// Pairs of listings holding one price series between them — see
+/// [`DuplicatePriceSeries`].
+///
+/// Read on the caller's transaction but compared in Rust, for the same reason
+/// as [`db_duplicate_income`]: the prices are the key and they are TEXT
+/// decimals, which SQL would compare as strings. The whole ok-price table is
+/// loaded in one query and grouped per listing — a personal portfolio's price
+/// history is thousands of rows, and every pair has to be walked anyway, so a
+/// per-pair round trip is not an option (the same pre-loading pattern as
+/// [`db_unpriced_days`] and `FxRates`).
+async fn db_duplicate_price_series(
+    conn: &mut sqlx::SqliteConnection,
+) -> Result<Vec<DuplicatePriceSeries>, sqlx::Error> {
+    let rows = sqlx::query_as::<_, StoredClose>(
+        "SELECT listing_id, price_date, price, origin FROM closing_prices \
+         WHERE status = 'ok' ORDER BY listing_id, price_date",
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    if rows.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut series: BTreeMap<i64, Vec<StoredClose>> = BTreeMap::new();
+    for row in rows {
+        series.entry(row.listing_id).or_default().push(row);
+    }
+    let tickers: HashMap<i64, String> =
+        sqlx::query_as::<_, (i64, String)>("SELECT id, ticker FROM listings")
+            .fetch_all(&mut *conn)
+            .await?
+            .into_iter()
+            .collect();
+    // The FK guarantees the listing exists; a row written between the two
+    // queries is the only way to miss one, and an empty ticker still names the
+    // ids to open.
+    let ticker = |id: i64| tickers.get(&id).cloned().unwrap_or_default();
+
+    let ids: Vec<i64> = series.keys().copied().collect();
+    let mut duplicates = Vec::new();
+    for (index, &listing_id) in ids.iter().enumerate() {
+        for &other_listing_id in &ids[index + 1..] {
+            let Some(run) = longest_identical_run(&series[&listing_id], &series[&other_listing_id])
+            else {
+                continue;
+            };
+            if run.length < DUPLICATE_PRICE_SERIES_RUN_DAYS || !run.varies {
+                continue;
+            }
+            duplicates.push(DuplicatePriceSeries {
+                listing_id,
+                ticker: ticker(listing_id),
+                other_listing_id,
+                other_ticker: ticker(other_listing_id),
+                identical_days: run.length,
+                earliest_date: run.start,
+                latest_date: run.end,
+                fetched_days: run.length - run.manual_days,
+                manual_days: run.manual_days,
+                other_fetched_days: run.length - run.other_manual_days,
+                other_manual_days: run.other_manual_days,
+            });
+        }
+    }
+    // Newest run first, matching the other lists here.
+    duplicates.sort_by(|a, b| {
+        b.latest_date
+            .cmp(&a.latest_date)
+            .then_with(|| a.listing_id.cmp(&b.listing_id))
+            .then_with(|| a.other_listing_id.cmp(&b.other_listing_id))
+    });
+    Ok(duplicates)
 }
 
 async fn db_duplicate_actions(
@@ -1582,6 +1814,7 @@ pub async fn db_health(
     .fetch_all(&mut *tx)
     .await?;
     let demergers_missing_close = db_demergers_missing_close(&mut tx).await?;
+    let duplicate_price_series = db_duplicate_price_series(&mut tx).await?;
     let duplicate_actions = db_duplicate_actions(&mut tx).await?;
     let duplicate_amma_statements = db_duplicate_amma_statements(&mut tx).await?;
     let duplicate_income = db_duplicate_income(&mut tx).await?;
@@ -1607,6 +1840,7 @@ pub async fn db_health(
         errored_prices,
         unpriced_days,
         demergers_missing_close,
+        duplicate_price_series,
         duplicate_actions,
         duplicate_amma_statements,
         duplicate_income,
@@ -1721,6 +1955,7 @@ mod tests {
         assert!(h.failed_jobs.is_empty());
         assert!(h.errored_prices.is_empty());
         assert!(h.unpriced_days.is_empty());
+        assert!(h.duplicate_price_series.is_empty());
         assert!(h.duplicate_actions.is_empty());
         assert!(h.duplicate_amma_statements.is_empty());
         assert!(h.duplicate_income.is_empty());
@@ -2437,6 +2672,274 @@ mod tests {
 
         let h = health(&pool, ymd(2026, 7, 13)).await;
         assert!(h.demergers_missing_close.is_empty());
+    }
+
+    /// A moving daily price series: `days` consecutive dates from `start`,
+    /// the close stepping up a cent a day from `first_cents` — a series that
+    /// *moves*, which is what the check requires before calling a run of
+    /// matches a copied series.
+    fn moving_series(start: NaiveDate, days: i64, first_cents: i64) -> Vec<(NaiveDate, String)> {
+        (0..days)
+            .map(|n| {
+                let cents = first_cents + n;
+                (
+                    start + Duration::days(n),
+                    format!("{}.{:02}", cents / 100, cents % 100),
+                )
+            })
+            .collect()
+    }
+
+    /// Evan's LAC/LAR shape in miniature: listing 1 carries listing 2's price
+    /// series, half of it hand-entered (copied, with the provenance saying so)
+    /// and half fetched under a one-off symbol override that recorded nothing.
+    /// Every row is `ok`, so no other list here sees any of it.
+    #[tokio::test]
+    async fn two_listings_holding_one_price_series_are_reported() {
+        let pool = test_pool().await;
+        test_support::listing(1).ticker("LAC").insert(&pool).await;
+        test_support::listing(2).ticker("LAR").insert(&pool).await;
+        let series = moving_series(ymd(2021, 3, 25), 40, 412);
+        for (index, (date, price)) in series.iter().enumerate() {
+            // The head listing's copy: the first 15 days typed in by hand…
+            let row = test_support::closing_price(1, *date).price(price);
+            if index < 15 {
+                row.manual(
+                    "listing 2 (LAR) stored close for the same date",
+                    "the provider serves no candle here; unblocked, not accurate",
+                )
+                .insert(&pool)
+                .await;
+            } else {
+                // …the rest fetched, with no record of the symbol used.
+                row.source("yahoo").insert(&pool).await;
+            }
+            // The other listing's own series, all fetched.
+            test_support::closing_price(2, *date)
+                .price(price)
+                .source("yahoo")
+                .insert(&pool)
+                .await;
+        }
+        // The day the two series part, and — months later — one genuine
+        // coincidence: two securities really can close at the same figure.
+        for (listing_id, price) in [(1, "20.00"), (2, "6.00")] {
+            test_support::closing_price(listing_id, ymd(2021, 6, 1))
+                .price(price)
+                .source("yahoo")
+                .insert(&pool)
+                .await;
+        }
+        for listing_id in [1, 2] {
+            test_support::closing_price(listing_id, ymd(2021, 7, 1))
+                .price("4.12")
+                .source("yahoo")
+                .insert(&pool)
+                .await;
+        }
+
+        let h = health(&pool, ymd(2026, 7, 13)).await;
+        assert_eq!(h.duplicate_price_series.len(), 1);
+        let d = &h.duplicate_price_series[0];
+        assert_eq!((d.listing_id, d.ticker.as_str()), (1, "LAC"));
+        assert_eq!((d.other_listing_id, d.other_ticker.as_str()), (2, "LAR"));
+        assert_eq!(
+            d.identical_days, 40,
+            "the run, not the total: the later coincidence is not part of it"
+        );
+        assert_eq!(d.earliest_date, ymd(2021, 3, 25));
+        assert_eq!(d.latest_date, ymd(2021, 3, 25) + Duration::days(39));
+        // The two halves, which need different remedies: the hand-entered
+        // rows say where they came from, the fetched ones say nothing.
+        assert_eq!((d.manual_days, d.fetched_days), (15, 25));
+        assert_eq!((d.other_manual_days, d.other_fetched_days), (0, 40));
+        // Nothing else in health notices: every row is ok, not errored.
+        assert!(h.errored_prices.is_empty());
+        assert!(h.unpriced_days.is_empty());
+    }
+
+    /// The near-miss that must stay quiet: two distinct securities coinciding.
+    /// Here they match on 49 days in all — more than the threshold — but never
+    /// on 30 in a row, which is the only thing that is not a coincidence.
+    #[tokio::test]
+    async fn scattered_identical_closes_and_a_short_run_are_not_reported() {
+        let pool = test_pool().await;
+        test_support::listing(1).ticker("AAA").insert(&pool).await;
+        test_support::listing(2).ticker("BBB").insert(&pool).await;
+        // A run of 29 identical days — one short of the threshold.
+        for (date, price) in moving_series(ymd(2021, 3, 25), 29, 412) {
+            for listing_id in [1, 2] {
+                test_support::closing_price(listing_id, date)
+                    .price(&price)
+                    .source("yahoo")
+                    .insert(&pool)
+                    .await;
+            }
+        }
+        // Plus 60 later days on which every third close happens to agree: 20
+        // more matches, none of them consecutive. The first of these days
+        // disagrees, which is what ends the run above — a *disagreement* ends
+        // a run, never a gap in the dates, since a day only one listing has a
+        // price for is not a comparison at all.
+        for (index, (date, price)) in moving_series(ymd(2022, 1, 1), 60, 500)
+            .into_iter()
+            .enumerate()
+        {
+            test_support::closing_price(1, date)
+                .price(&price)
+                .source("yahoo")
+                .insert(&pool)
+                .await;
+            let other = if index % 3 == 1 {
+                price
+            } else {
+                format!("9{price}")
+            };
+            test_support::closing_price(2, date)
+                .price(&other)
+                .source("yahoo")
+                .insert(&pool)
+                .await;
+        }
+
+        let h = health(&pool, ymd(2026, 7, 13)).await;
+        assert!(
+            h.duplicate_price_series.is_empty(),
+            "49 matching days that never run 30 deep are a coincidence, not one series: {:?}",
+            h.duplicate_price_series
+        );
+    }
+
+    /// A day only one listing holds a price for is not a comparison: it
+    /// neither breaks the run nor counts towards it.
+    #[tokio::test]
+    async fn a_day_only_one_listing_has_a_price_for_does_not_break_the_run() {
+        let pool = test_pool().await;
+        test_support::listing(1).ticker("LAC").insert(&pool).await;
+        test_support::listing(2).ticker("LAR").insert(&pool).await;
+        let series = moving_series(ymd(2021, 3, 25), 35, 412);
+        let gap = series[17].0;
+        for (date, price) in &series {
+            test_support::closing_price(1, *date)
+                .price(price)
+                .source("yahoo")
+                .insert(&pool)
+                .await;
+            if *date != gap {
+                test_support::closing_price(2, *date)
+                    .price(price)
+                    .source("yahoo")
+                    .insert(&pool)
+                    .await;
+            }
+        }
+
+        let h = health(&pool, ymd(2026, 7, 13)).await;
+        assert_eq!(h.duplicate_price_series.len(), 1);
+        let d = &h.duplicate_price_series[0];
+        assert_eq!(
+            d.identical_days, 34,
+            "34 comparisons, the missing day not among them"
+        );
+        assert_eq!(d.earliest_date, series[0].0);
+        assert_eq!(d.latest_date, series[34].0, "the run spans the gap");
+    }
+
+    /// Two instruments pinned to one figure — a pair of stablecoins at 1.00, two
+    /// funds at a constant unit price — match forever without either series
+    /// being a copy of the other. A run whose closes never move is not
+    /// reported, because an alarm nobody can ever clear is worse than none.
+    #[tokio::test]
+    async fn two_listings_pinned_to_one_price_are_not_reported() {
+        let pool = test_pool().await;
+        test_support::listing(1).ticker("USDT").insert(&pool).await;
+        test_support::listing(2).ticker("USDC").insert(&pool).await;
+        let dates: Vec<NaiveDate> = (0..200)
+            .map(|n| ymd(2021, 3, 25) + Duration::days(n))
+            .collect();
+        for date in &dates {
+            for listing_id in [1, 2] {
+                test_support::closing_price(listing_id, *date)
+                    .price("1.00")
+                    .source("yahoo")
+                    .insert(&pool)
+                    .await;
+            }
+        }
+        let h = health(&pool, ymd(2026, 7, 13)).await;
+        assert!(
+            h.duplicate_price_series.is_empty(),
+            "200 identical days that never move are two pinned instruments"
+        );
+
+        // The moment the shared series *moves* — and both still agree — it is
+        // a series, not a peg, and the run is reported.
+        for listing_id in [1, 2] {
+            test_support::closing_price(listing_id, dates[100])
+                .price("1.01")
+                .source("yahoo")
+                .insert(&pool)
+                .await;
+        }
+        let h = health(&pool, ymd(2026, 7, 13)).await;
+        assert_eq!(h.duplicate_price_series.len(), 1);
+        assert_eq!(h.duplicate_price_series[0].identical_days, 200);
+    }
+
+    /// The check owns no marker of its own, like the rest of the `duplicate_*`
+    /// family: `unpriced_before` does not silence it — that marker says the
+    /// provider serves nothing before the date, which is a reason to *delete*
+    /// the borrowed rows, not to accept them. Clearing them is what clears the
+    /// warning, and it is served over the endpoint the banner polls.
+    #[tokio::test]
+    async fn api_the_warning_clears_when_the_borrowed_rows_go_not_when_the_marker_is_set() {
+        let pool = test_pool().await;
+        test_support::listing(1).ticker("LAC").insert(&pool).await;
+        test_support::listing(2).ticker("LAR").insert(&pool).await;
+        for (date, price) in moving_series(ymd(2021, 3, 25), 40, 412) {
+            for listing_id in [1, 2] {
+                test_support::closing_price(listing_id, date)
+                    .price(&price)
+                    .source("yahoo")
+                    .insert(&pool)
+                    .await;
+            }
+        }
+        let client = ApiClient::over(router().with_state(pool.clone()));
+        let body: serde_json::Value = client.get("/reports/health").await.json();
+        let d = &body["duplicate_price_series"][0];
+        assert_eq!(d["ticker"], "LAC");
+        assert_eq!(d["other_ticker"], "LAR");
+        assert_eq!(d["identical_days"], 40);
+        assert_eq!(d["earliest_date"], "2021-03-25");
+        assert_eq!(d["fetched_days"], 40);
+        assert_eq!(d["manual_days"], 0);
+
+        // Declaring the span unpriceable leaves the rows — and the warning.
+        test_support::listing(1)
+            .ticker("LAC")
+            .with(|l| l.unpriced_before = Some(ymd(2021, 6, 1)))
+            .insert(&pool)
+            .await;
+        let h = health(&pool, ymd(2026, 7, 13)).await;
+        assert_eq!(
+            h.duplicate_price_series.len(),
+            1,
+            "the marker explains an absence, not a stored figure that is another security's"
+        );
+
+        // Clearing the span is what clears it.
+        assert_eq!(
+            closing_price::db_clear_unpriced_before(&pool, 1)
+                .await
+                .unwrap(),
+            closing_price::ClearOutcome::Cleared {
+                unpriced_before: ymd(2021, 6, 1),
+                deleted: 40,
+            }
+        );
+        let h = health(&pool, ymd(2026, 7, 13)).await;
+        assert!(h.duplicate_price_series.is_empty());
     }
 
     async fn insert_demerger(

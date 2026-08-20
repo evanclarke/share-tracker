@@ -44,12 +44,13 @@ against Evan's real LAC history — and that there was no "unpriced *before*" co
 names what it omits.
 
 **Three sections are open below.** The audit-trail question that closing a fifth finding (Q-05/Q-08)
-raised is awaiting Evan's decision. The LAC price-history section is open on two items — nothing
-detects two listings sharing a byte-identical series, and the demerger stated close must wait for
-the borrowed rows to be cleared on the deployed database (clearing them is now *possible*: the
-`ok`-row delete rule was relaxed inside an `unpriced_before` span 2026-08-21, with a bulk form; and
-since 2026-08-21 every fetched row records the provider symbol it was fetched under, migration
-0038, so an overridden backfill can no longer pass for an ordinary one). And the production-cleanup runbook for those rows is recorded
+raised is awaiting Evan's decision. The LAC price-history section is open on **one** item — the demerger stated
+close, which must wait for the borrowed rows to be cleared on the deployed database (clearing them
+is now *possible*: the `ok`-row delete rule was relaxed inside an `unpriced_before` span
+2026-08-21, with a bulk form; since 2026-08-21 every fetched row records the provider symbol it was
+fetched under, migration 0038, so an overridden backfill can no longer pass for an ordinary one; and
+since 2026-08-21 `GET /reports/health`'s `duplicate_price_series` detects the result itself, so the
+260 provenance-less rows are no longer invisible). And the production-cleanup runbook for those rows is recorded
 last: it is a procedure to run against the deployed database, not code to write here, and it names
 the repo work it still waits on — now only the host upgrade.
 
@@ -191,9 +192,55 @@ A$19,869.26 — a 44% unrealised loss — where old Lithium Americas closed near
     (existing rows unrecorded, the CHECK both ways, both audit triggers back with the new column, the
     staleness trigger still there), `doc_checks::fetched_symbol_provenance_documented` and
     `web::tests::closing_prices_ui_present`.
-- [ ] **Nothing detects the result.** 635 consecutive byte-identical closes across two listings is
+- [x] **Nothing detects the result.** 635 consecutive byte-identical closes across two listings is
   not something two real securities do. A `reports::health` check in the `duplicate_*` family is the
   obvious shape, and it is the only signal this leaves for the 260 rows that carry no provenance.
+  - Closed 2026-08-21 with `duplicate_price_series` on `GET /reports/health`. **The predicate is a
+    run, not a total**, and that distinction is not academic: LAC and LAR really did both close at
+    4.12 on 2024-02-08, four months after their series parted, so a count of matching days over all
+    history would report the accident and the incident in the same breath. `identical_days` is the
+    longest unbroken sequence of *comparisons* — days on which both listings hold an `ok` price —
+    and the threshold is **30** (about six weeks of trading; `DUPLICATE_PRICE_SERIES_RUN_DAYS`). Two
+    securities at a similar price level coincide to the cent on maybe one day in fifty; thirty in a
+    row is that raised to the thirtieth power, so the rule is not a judgement call about how close is
+    too close — no pair of distinct securities produces it. A day only one listing has a price for is
+    **not a comparison**: it neither breaks the run nor counts towards it (so a run's span can exceed
+    its length), while a day both hold and disagree on ends it. Prices compare as `Decimal`s, not as
+    stored text, matching the rest of the family. One deliberate exemption: **a run whose closes
+    never move is never reported**, however long — two instruments pinned to one figure (a pair of
+    stablecoins at 1.00, two funds at a constant unit price) match forever without either series
+    being a copy, and that would be a permanent alarm nobody could clear, which is the one failure
+    mode this file has repeatedly judged worse than silence.
+  - **Reported per pair with each side's rows split by origin**, the same call
+    `demergers_missing_close` made and for the same reason — the two halves need different remedies:
+    `fetched_days`/`manual_days` for the pair's lower listing id and `other_fetched_days`/
+    `other_manual_days` for the higher. A hand-entered row states where it came from and why; a
+    fetched row from before migration 0038 states nothing, and that half is what this check exists
+    for.
+  - **No suppression mechanism was invented**, consistent with the whole `duplicate_*` family: it
+    clears when the borrowed rows go (the single-date `DELETE`, or the bulk
+    `POST /closing_prices/clear_unpriced_before`) or are replaced by the listing's own series.
+    `unpriced_before` deliberately does **not** quiet it — that marker explains an *absence*, which
+    is why `errored_prices` honours it, whereas here the rows are present and are another security's,
+    so the marker is a reason to delete them rather than to accept them.
+  - Verified read-only against the deployed backup (`share-tracker-2026-08-16-000000.db`, upgraded on
+    a scratch copy, served on a throwaway port): **one** row across all 28 listing pairs — listings 7
+    (`LAC`) and 8 (`LAR`), `identical_days: 634`, 2021-03-25 → 2023-09-29, LAC `manual_days: 375` /
+    `fetched_days: 259`, LAR 634 fetched / 0 manual. Every other pair scored a longest run of **0**.
+    The 635th matching day is 2023-10-02, which is LAC's own demerger-adjusted close and differs from
+    LAR's, so 634 — not 635 — is the run; the 2024-02-08 coincidence sits outside it, as intended.
+    Rehearsed the remedy on the same copy: setting `unpriced_before = 2023-10-02` alone left the
+    warning standing, and `clear_unpriced_before` (634 rows) cleared it.
+  - Tests: `health::tests::two_listings_holding_one_price_series_are_reported` (the incident's shape,
+    mixed origins, the later coincidence excluded, and nothing else in health seeing it),
+    `…::scattered_identical_closes_and_a_short_run_are_not_reported` (the near-miss that matters: 49
+    matching days that never run 30 deep), `…::a_day_only_one_listing_has_a_price_for_does_not_break_the_run`,
+    `…::two_listings_pinned_to_one_price_are_not_reported` (both directions — silent while pinned,
+    reported the moment the shared series moves),
+    `…::api_the_warning_clears_when_the_borrowed_rows_go_not_when_the_marker_is_set` (over
+    `GET /reports/health`), the addition to `…::empty_database_reports_nothing_stale`,
+    `doc_checks::duplicate_price_series_check_documented` and the banner assertions in
+    `web::tests::health_banner_ui_present`.
 - [x] **The rows cannot be cleared.** `DELETE /closing_prices/:listing_id/:price_date` refuses an
   `ok` row by design. The 375 manual ones can only be overwritten by another manual `PUT`; the 260
   fetched ones would be replaced one day at a time by `POST /closing_prices/fetch`, which for these

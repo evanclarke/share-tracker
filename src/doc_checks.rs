@@ -179,6 +179,27 @@ fn unpriced_before_and_excluded_holdings_documented() {
     assert!(README_MD.contains("**excluded holding** flag"));
 }
 
+/// Docs-sync pin for the identical-price-series health check: the API
+/// documents the field list, the run predicate and its threshold, the two
+/// reasons a genuine pair cannot trip it, the per-origin split, and that
+/// nothing silences it but fixing the data; the README surfaces the feature.
+#[test]
+fn duplicate_price_series_check_documented() {
+    assert!(API_MD.contains("`duplicate_price_series`"));
+    assert!(API_MD.contains("\"identical_days\", \"earliest_date\", \"latest_date\", \"fetched_days\", \"manual_days\", \"other_fetched_days\", \"other_manual_days\""));
+    // The predicate: a run of comparisons, not a count of matching days.
+    assert!(API_MD.contains("**The predicate is a run, not a total**"));
+    assert!(API_MD.contains("Thirty such days (about six weeks of trading) is the threshold"));
+    assert!(API_MD.contains("it neither breaks the run nor counts towards it"));
+    // The two false-positive guards, and the figures the real data produced.
+    assert!(API_MD.contains("A run whose closes **never move** is not reported"));
+    assert!(API_MD.contains("the one day (2024-02-08) the two really did both close at 4.12"));
+    // The split, and that only fixing the data clears it.
+    assert!(API_MD.contains("`fetched_days` / `manual_days` split each side's rows in the run"));
+    assert!(API_MD.contains("**Non-blocking, and there is no way to silence it**"));
+    assert!(README_MD.contains("**one price series between them**"));
+}
+
 /// Docs-sync pin for date-ranged bulk regeneration (REQUIREMENTS 2026-07-25):
 /// the API documents the new default-range endpoint, `regenerate_all`'s
 /// range/backfill semantics and its 422, and the README surfaces that

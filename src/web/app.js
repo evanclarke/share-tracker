@@ -1062,7 +1062,11 @@ async function viewAttachments(ownerField, ownerId) {
 // linking to Corporate Actions, where the demerger's stated close re-bases
 // them — with any hand-entered prices in the same pre-demerger span named as a
 // second figure, because a stated close does not re-base those and the first
-// figure is not the size of the span), any fund-year with two AMMA
+// figure is not the size of the span), any two listings holding one price
+// series between them — the same close on a long run of consecutive trading
+// days, which is what a series fetched or copied under the wrong symbol looks
+// like afterwards (linking to Closing Prices, where the borrowed rows are
+// cleared) — any fund-year with two AMMA
 // statements for one holding account, counted twice in the income, gains and
 // cost-base figures alike (linking to AMMA Statements), and any distribution
 // entered twice — identical amounts, same listing, account and payment date —
@@ -1119,6 +1123,21 @@ async function refreshHealthBanner() {
             + '–' + d.manual_latest_date + ') sit in the same pre-demerger span; the stated close'
             + ' does not re-base those, so check them separately.'
           : ''));
+    });
+    // One security's price series stored under two listings — what a series
+    // fetched or copied under the wrong symbol looks like afterwards. Like the
+    // demerger warning above, every row is ok, so nothing else here sees it;
+    // unlike it, this is the *only* signal a fetched row that recorded no
+    // symbol leaves behind.
+    (h.duplicate_price_series || []).forEach(function (d) {
+      problems.push(d.ticker + ' and ' + d.other_ticker + ' closed at exactly the same price on '
+        + d.identical_days + ' consecutive trading day(s) (' + d.earliest_date + '–'
+        + d.latest_date + ') — that is one price series stored under two listings, not two'
+        + ' securities. On ' + d.ticker + ': ' + d.fetched_days + ' fetched, ' + d.manual_days
+        + ' hand-entered; on ' + d.other_ticker + ': ' + d.other_fetched_days + ' fetched, '
+        + d.other_manual_days + ' hand-entered. A hand-entered row states where it came from;'
+        + ' a fetched one may not. Work out which listing the run belongs to and clear the'
+        + ' borrowed rows.');
     });
     const duplicateActions = h.duplicate_actions || [];
     duplicateActions.forEach(function (d) {
@@ -1191,7 +1210,7 @@ async function refreshHealthBanner() {
     banner.innerHTML = '';
     banner.appendChild(el('span', null, '⚠ ' + problems.join(' ')));
     banner.appendChild(el('a', { href: '#/jobs' }, 'Open Jobs →'));
-    if (erroredPrices.length > 0) {
+    if (erroredPrices.length > 0 || (h.duplicate_price_series || []).length > 0) {
       banner.appendChild(el('a', { href: '#/prices' }, 'Open Closing Prices →'));
     }
     if (duplicateActions.length > 0) {

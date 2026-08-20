@@ -1648,6 +1648,18 @@ mod tests {
         assert!(js.contains("fx_stale"));
         assert!(js.contains("failed_jobs"));
         assert!(js.contains("'#/jobs'"));
+        // …plus two listings holding one price series between them — the same
+        // close on a long run of consecutive trading days, the only signal a
+        // series fetched under the wrong symbol leaves — linking to the screen
+        // the borrowed rows are cleared from…
+        assert!(js.contains("duplicate_price_series"));
+        assert!(js.contains("closed at exactly the same price on"));
+        assert!(js.contains("consecutive trading day(s)"));
+        assert!(js.contains("d.fetched_days"));
+        assert!(js.contains("d.manual_days"));
+        assert!(js.contains("d.other_fetched_days"));
+        assert!(js.contains("'#/prices'"));
+        assert!(js.contains("Open Closing Prices"));
         // …plus duplicated corporate actions (silently compounded, so the
         // strip names the type, ticker, date and ids), linking to the screen
         // the surplus row is deleted from…
