@@ -1324,6 +1324,12 @@ async function viewClosingPrices() {
   const unpricedListings = health.unpriced_days || [];
   const rows = prices.map(function (p) {
     const l = byId[p.listing_id];
+    // A date before the listing's unpriced_before is superseded by that
+    // marker: the provider's series begins later, so valuation excludes the
+    // holding from those dates rather than pricing it, and whatever is
+    // stored there is read by nothing. It is the one span in which a stored
+    // ok price may be deleted.
+    const superseded = !!(l && l.unpriced_before && p.price_date < l.unpriced_before);
     return {
       // The surrogate key, shown so a row can be looked up on the Row History
       // screen (which asks for the record's id).
@@ -1346,6 +1352,7 @@ async function viewClosingPrices() {
       error: p.error || '',
       fetched_at: p.fetched_at,
       _listing_id: p.listing_id,
+      _superseded: superseded,
     };
   });
   const cols = ['id', 'listing', 'date', 'price', 'price_as_observed', 'currency', 'source',
@@ -1357,8 +1364,9 @@ async function viewClosingPrices() {
       // provider got wrong or cannot serve, so the provider never takes the
       // day back: the server refuses a re-fetch (422) and there is nothing to
       // discard (only errored rows are deletable). It is changed by entering
-      // another manual price below.
-      if (row.origin === 'manual') {
+      // another manual price below — unless the row is superseded, in which
+      // case it is deletable like any other row in that span.
+      if (row.origin === 'manual' && !row._superseded) {
         return el('td', { class: 'actions' },
           el('span', { class: 'hint' }, 'Manual — re-enter to change'));
       }
@@ -1378,23 +1386,29 @@ async function viewClosingPrices() {
       });
       // An errored day no re-fetch can ever fix — before the security's first
       // trading day, or a permanent hole in the provider's series — is
-      // discarded so it stops being reported by the health banner. Only
-      // errored rows are deletable; an ok price is replaced by a re-fetch.
-      if (row.status !== 'ok') {
+      // discarded so it stops being reported by the health banner. So is any
+      // row a listing's "unpriced before" marker supersedes, ok or not:
+      // nothing values those days, so deleting one punches no hole. An ok
+      // price anywhere else is replaced by a re-fetch, never deleted.
+      if (row.status !== 'ok' || row._superseded) {
         const del = el('button', { class: 'small' }, 'Discard');
         del.addEventListener('click', async function () {
-          if (!confirm('Discard the errored row for ' + row.listing + ' on ' + row.date
-            + '?\n\nDo this only when no price can ever exist for that day.')) return;
+          const why = row._superseded
+            ? '?\n\nThe listing is marked unpriced before this date, so nothing values it — '
+              + 'the stored figure is read by no report. The row is kept in the audit trail.'
+            : '?\n\nDo this only when no price can ever exist for that day.';
+          if (!confirm('Discard the stored row for ' + row.listing + ' on ' + row.date + why)) return;
           del.disabled = true;
           try {
             await api('DELETE', '/closing_prices/' + row._listing_id + '/' + row.date);
-            toast('Discarded the errored row for ' + row.date + '.');
+            toast('Discarded the stored row for ' + row.date + '.');
           } catch (e) {
             toast(e.message, true);
           }
           viewClosingPrices();
         });
-        return el('td', { class: 'actions' }, [btn, del]);
+        const cell = el('td', { class: 'actions' }, row.origin === 'manual' ? [del] : [btn, del]);
+        return cell;
       }
       return el('td', { class: 'actions' }, btn);
     },
@@ -1471,6 +1485,47 @@ async function viewClosingPrices() {
       toast(e.message, true);
     }
   });
+
+  // Clear a listing's superseded price span: every stored row before its
+  // "unpriced before" marker, in one request. Only offered for listings that
+  // carry the marker — without one there is no superseded span, and the
+  // server refuses. The rows it clears are read by no report (valuation
+  // excludes the holding from those dates), and every one is kept in the
+  // audit trail, which is what makes clearing them safe.
+  const markedListings = listings.filter(function (l) { return !!l.unpriced_before; });
+  const clearForm = markedListings.length > 0 ? el('form', { class: 'card' }) : null;
+  if (clearForm) {
+    clearForm.appendChild(el('h3', null, 'Clear superseded prices'));
+    clearForm.appendChild(el('p', { class: 'hint' },
+      'Removes every stored price dated before the listing\'s "unpriced before" date — the day '
+      + 'the provider\'s series begins. Those days are excluded from valuation whatever is '
+      + 'stored for them, so the figures are read by nothing; clearing them retires rows that '
+      + 'are not this security\'s prices. Nothing is destroyed: every removed row stays in Row '
+      + 'History with its figure and provenance. Safe to run twice.'));
+    const cListingSel = el('select', null, markedListings.map(function (l) {
+      return el('option', { value: l.id },
+        l.id + ': ' + l.ticker + ' (unpriced before ' + l.unpriced_before + ')');
+    }));
+    clearForm.appendChild(el('div', { class: 'field' }, [el('label', null, 'Listing'), cListingSel]));
+    clearForm.appendChild(el('div', { class: 'form-actions' }, [
+      el('button', { type: 'submit', class: 'primary' }, 'Clear span'),
+    ]));
+    clearForm.addEventListener('submit', async function (ev) {
+      ev.preventDefault();
+      const chosen = byId[Number(cListingSel.value)];
+      if (!confirm('Clear every stored price for ' + chosen.ticker + ' dated before '
+        + chosen.unpriced_before + '?\n\nThey are excluded from valuation already, and each '
+        + 'removed row is kept in Row History.')) return;
+      try {
+        const r = await api('POST', '/closing_prices/clear_unpriced_before',
+          { listing_id: Number(cListingSel.value) });
+        toast('Cleared ' + r.deleted + ' stored price(s) dated before ' + r.unpriced_before + '.');
+        viewClosingPrices();
+      } catch (e) {
+        toast(e.message, true);
+      }
+    });
+  }
 
   // Errored-listings surface: one row per listing with any errored price,
   // its Backfill action pre-fills the form above (a generous window ending
@@ -1558,6 +1613,7 @@ async function viewClosingPrices() {
     ]) : null,
     backfillForm,
     manualForm,
+    clearForm,
     table,
   ]));
 }

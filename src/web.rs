@@ -335,9 +335,12 @@ mod tests {
         assert!(js.contains("/closing_prices/fetch"));
         assert!(js.contains("/closing_prices/backfill"));
         // An errored row no re-fetch can fix is discardable, so the health
-        // banner stops reporting it — offered only on non-ok rows.
+        // banner stops reporting it — offered on non-ok rows and on the rows
+        // a listing's `unpriced_before` marker supersedes, the one span in
+        // which a stored ok price may be deleted.
         assert!(js.contains("Discard"));
-        assert!(js.contains("row.status !== 'ok'"));
+        assert!(js.contains("row.status !== 'ok' || row._superseded"));
+        assert!(js.contains("l.unpriced_before && p.price_date < l.unpriced_before"));
         assert!(js.contains("'/closing_prices/' + row._listing_id"));
         // The price-import job is described in the Jobs view.
         assert!(js.contains("price-import"));
@@ -347,6 +350,22 @@ mod tests {
         assert!(js.contains("price_as_observed"));
         assert!(js.contains("As served by provider"));
         assert!(js.contains("price-rebase"));
+    }
+
+    /// A whole superseded span is cleared from this screen in one request:
+    /// the form drives the bulk endpoint, is offered only for listings that
+    /// carry the marker (without one the server refuses), and says what the
+    /// operation does and does not destroy.
+    #[tokio::test]
+    async fn clear_superseded_prices_ui_present() {
+        let js = app_js_body().await;
+        assert!(js.contains("Clear superseded prices"));
+        assert!(js.contains("/closing_prices/clear_unpriced_before"));
+        // Only listings declaring the marker are offered.
+        assert!(js.contains("return !!l.unpriced_before;"));
+        // The screen states the two facts that make the clear safe.
+        assert!(js.contains("excluded from valuation whatever is "));
+        assert!(js.contains("stays in Row "));
     }
 
     /// A day the provider cannot serve is priced by hand from this screen:

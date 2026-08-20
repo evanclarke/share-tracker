@@ -44,11 +44,13 @@ against Evan's real LAC history — and that there was no "unpriced *before*" co
 names what it omits.
 
 **Three sections are open below.** The audit-trail question that closing a fifth finding (Q-05/Q-08)
-raised is awaiting Evan's decision. The LAC price-history section is open on four items — the
-`symbol` override records nothing, nothing detects two listings sharing a byte-identical series, the
-borrowed `ok` rows cannot be deleted, and the demerger stated close must wait for them. And the
-production-cleanup runbook for those rows is recorded last: it is a procedure to run against the
-deployed database, not code to write here, and it names the repo work it still waits on.
+raised is awaiting Evan's decision. The LAC price-history section is open on three items — the
+`symbol` override records nothing, nothing detects two listings sharing a byte-identical series, and
+the demerger stated close must wait for the borrowed rows to be cleared on the deployed database
+(clearing them is now *possible*: the `ok`-row delete rule was relaxed inside an `unpriced_before`
+span 2026-08-21, with a bulk form). And the production-cleanup runbook for those rows is recorded
+last: it is a procedure to run against the deployed database, not code to write here, and it names
+the repo work it still waits on — now only the host upgrade.
 
 ---
 
@@ -148,11 +150,42 @@ A$19,869.26 — a 44% unrealised loss — where old Lithium Americas closed near
 - [ ] **Nothing detects the result.** 635 consecutive byte-identical closes across two listings is
   not something two real securities do. A `reports::health` check in the `duplicate_*` family is the
   obvious shape, and it is the only signal this leaves for the 260 rows that carry no provenance.
-- [ ] **The rows cannot be cleared.** `DELETE /closing_prices/:listing_id/:price_date` refuses an
+- [x] **The rows cannot be cleared.** `DELETE /closing_prices/:listing_id/:price_date` refuses an
   `ok` row by design. The 375 manual ones can only be overwritten by another manual `PUT`; the 260
   fetched ones would be replaced one day at a time by `POST /closing_prices/fetch`, which for these
   dates now errors — converting them to errored rows rather than clearing them. The one-way rule was
   written for real price data; there is no path for data known to be another security's.
+  - Closed 2026-08-21 by relaxing the refusal **inside an `unpriced_before` span only**, plus a bulk
+    form. The one-way rule exists so the endpoint can never punch a hole in a *valued* series; a date
+    before the marker is by declaration not valued — `stored_valuations` excludes the holding there
+    whatever is stored, and the `unpriced_from` carry-forward is floored at the marker — so within
+    the span the rule protects nothing and deleting is the acknowledgement that the stored figure
+    never was a valuation. Everywhere else the refusal stands word for word, and `unpriced_from` is
+    deliberately **not** relaxed: a date on or after *that* marker **is** valued, at the last stored
+    ok close carried forward, so a delete there could remove the very figure being carried (pinned by
+    `api_delete_still_rejects_an_ok_row_inside_an_unpriced_from_run`). No staleness handling was
+    needed and none was added: setting or moving the marker is itself what stales the prefix, so the
+    dates have already been regenerated without the rows by the time they go — and clearing the
+    marker later stales the prefix again, after which regeneration reports each date blocked for want
+    of a price, which is the truth once the rows are gone
+    (`snapshot::db_clearing_the_superseded_prices_changes_no_stored_snapshot`).
+    `POST /closing_prices/clear_unpriced_before` is the bulk form — 634 single-date DELETEs is not a
+    runbook — and takes **no date range**: the span is read from the listing's own marker by the
+    DELETE itself, so it cannot become a general bulk-delete of price history. One transaction, the
+    row count reported, idempotent on re-run, and audited per row (the `AFTER DELETE` trigger fires
+    once per row, so every figure and the manual half's `reason` stay in `row_history`). The Closing
+    Prices screen offers Discard on a superseded row — manual ones included — and a "Clear superseded
+    prices" card for listings carrying the marker. Rehearsed end to end on an upgraded copy of the
+    deployed backup: marker set on listing 7, **634** rows cleared (375 manual + 259 fetched), 0 on a
+    re-run, `row_history` up from 13 to 647 with the 375 rows' "unblocked, not accurate" note intact,
+    2023-09-29's total falling from A$495,429.52 to A$484,306.31 — smaller by exactly the
+    A$11,123.21 that was another company's price — with LAC named as excluded, and 2023-10-02 onward
+    valuing LAC at its own price. Tests: the six new ones in `entities::closing_price::tests`
+    (delete inside the span for both origins, refused on/after the marker, refused inside an
+    `unpriced_from` run, the audited deletion, the bulk clear's exact span + idempotence, its two
+    refusals, the per-row audit trail, the carry-forward left intact), the snapshot test above,
+    `doc_checks::clearing_superseded_closing_prices_documented` and
+    `web::tests::clear_superseded_prices_ui_present`.
 - [ ] **The demerger stated-close fix (`16db704`) does not repair this listing, and this corrects
   the record.** Its factor is derived from the last pre-demerger stored row; here that row
   (2023-10-02, 10.13) is LAC's own demerger-adjusted figure while the 635 behind it are LAR's, so one
@@ -199,13 +232,19 @@ A$19,869.26 — a 44% unrealised loss — where old Lithium Americas closed near
     reason. Note that the marker **supersedes** the stored rows for the span, so step 4 of the
     procedure is no longer what makes the totals honest — it is now housekeeping on rows nothing
     reads.
-- [ ] **An `ok` row must become deletable inside an `unpriced_before` span.** Today
+- [x] **An `ok` row must become deletable inside an `unpriced_before` span.** Today
   `DELETE /closing_prices/:listing_id/:price_date` refuses every `ok` row, so all 635 are
   unremovable through the API and this cleanup cannot be performed at all. The relaxation is
   principled and narrow rather than a general loosening: once a listing declares `unpriced_before`,
   dates in that span are *by declaration* not read by valuation, so deleting a stored price there
   cannot punch a hole in a valued series — which is the only reason the rule exists. A bulk form is
   probably wanted too; 635 single-date DELETEs is not a runbook.
+  - Done 2026-08-21; see the "The rows cannot be cleared" item in the section above for the
+    reasoning and the tests. The refusal is relaxed inside an `unpriced_before` span only (and
+    deliberately **not** inside an `unpriced_from` run, where the last stored close *is* read),
+    and `POST /closing_prices/clear_unpriced_before` is the bulk form — body `{ "listing_id": 7 }`,
+    no date range, one transaction, idempotent, reporting the row count. The whole procedure below
+    was rehearsed on an upgraded copy of the 2026-08-16 backup and its numbers are this section's.
 - [ ] The deployed host must be upgraded first. It is at **migration 21**; this repo is past 36. The
   upgrade was rehearsed clean against a copy (21 → 36, every row count preserved,
   `integrity_check` and `foreign_key_check` clean, all seven annual tax reports and every
@@ -216,11 +255,26 @@ A$19,869.26 — a 44% unrealised loss — where old Lithium Americas closed near
 1. Take a fresh backup (`POST /jobs/backup?suffix=pre-lac-cleanup`) — the deployed host's own job.
 2. Rehearse the whole sequence against a **copy** of that backup before touching the live database.
 3. `PUT /listings/7` with `unpriced_before: 2023-10-02`.
-4. Clear the 635 rows dated `< 2023-10-02` for listing 7.
-5. Regenerate the affected snapshot range (`POST /report_snapshots/regenerate_all`,
-   2021-03-25 → 2023-10-02) and confirm the totals come back flagged partial rather than blocked.
+4. Clear the superseded rows in one request: `POST /closing_prices/clear_unpriced_before` with
+   `{ "listing_id": 7 }`. It clears exactly the span the marker set in step 3 supersedes and answers
+   `{ "listing_id", "unpriced_before", "deleted" }`; on the rehearsal `deleted` was **634**, and a
+   second call reported 0. Note the count: 634, not 635 — the 635th is 2023-10-02 itself, which is
+   *not* in the span (`price_date < unpriced_before`) and is the one row that is genuinely LAC's own
+   (10.13, against listing 8's 6.453301 for the same day). That is the row a stated close would
+   re-base, and it is meant to stay.
+5. Regenerate the affected snapshots (`POST /report_snapshots/regenerate_all` with
+   `{ "to": "2023-10-02" }`) and confirm the totals come back flagged partial rather than blocked.
+   Leave `from` out rather than passing 2021-03-25: setting the marker stales the whole **prefix**
+   before its date, which reaches back past LAC's own first holding to the first-ever-held date
+   (2020-08-31 on the rehearsal — 206 dates a 2021-03-25 start would have left stale). The rehearsal
+   regenerated 1,128 dates, 0 blocked, leaving only the 3 rows already stale in the backup.
 6. Spot-check 2023-09-29: the LAC row should be absent and the total lower by A$11,123.21, with the
-   snapshot naming LAC as excluded.
+   snapshot naming LAC as excluded. On the rehearsal the stored `portfolio_overview` total went from
+   A$495,429.52 to A$484,306.31, LAC's row carrying `price_unavailable` and the snapshot
+   `holding_excluded` with `excluded_holdings` naming it; 2023-10-02 valued LAC at its own
+   A$16,744.99. `GET /reports/health`'s `demergers_missing_close` then reads `adjusted_days: 1,
+   manual_days: 0` — the single genuine row, which is what the stated-close item above is waiting
+   for.
 
 ### Things to know before running it
 

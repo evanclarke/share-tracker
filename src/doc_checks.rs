@@ -1197,6 +1197,47 @@ fn manual_closing_prices_documented() {
     assert!(README_MD.contains("**priced by hand**"));
 }
 
+/// Docs-sync pin for clearing a superseded price span (2026-08-21): the API
+/// documents the one relaxation of the ok-row delete rule and why it is
+/// narrow, the bulk clear and its listing-bounded span, and both refusals;
+/// the schema records the same two deletable kinds behind the table's single
+/// staleness trigger; the README names the span as the one place a stored
+/// price may be deleted.
+#[test]
+fn clearing_superseded_closing_prices_documented() {
+    let closing_prices = API_MD
+        .split("## Closing prices")
+        .nth(1)
+        .expect("API.md has a Closing prices section")
+        .split("\n## ")
+        .next()
+        .unwrap();
+    // The relaxation, its reason, and the asymmetry with `unpriced_from`.
+    assert!(closing_prices.contains(
+        "**The one relaxation: a date inside the listing's [`unpriced_before`](#listings) span**"
+    ));
+    assert!(closing_prices.contains("inside that span there is no valued series to hole"));
+    assert!(
+        closing_prices.contains("gets **no** such relaxation and this asymmetry is deliberate")
+    );
+    // The bulk form: bounded by the marker, idempotent, audited.
+    assert!(API_MD.contains("POST` | `/closing_prices/clear_unpriced_before"));
+    assert!(closing_prices.contains("It takes **no date range**"));
+    assert!(closing_prices.contains("a second call reports `deleted: 0`"));
+    // Both refusals reach the 422 catalogue.
+    assert!(API_MD.contains(
+        "deleting a closing price that is stored ok rather than errored and is not inside its \
+         listing's `unpriced_before` span"
+    ));
+    assert!(API_MD.contains(
+        "clearing a superseded price span on a listing that declares no `unpriced_before`"
+    ));
+    // SCHEMA.md: the two deletable kinds behind the single UPDATE trigger.
+    assert!(SCHEMA_MD.contains("the only deletable rows are ones no stored figure was valued at"));
+    // README: the span is the one place a stored price may be deleted.
+    assert!(README_MD.contains("the one span in which a stored price may be **deleted**"));
+}
+
 /// Docs-sync pin for auditing closing prices (2026-07-28): the schema records
 /// why the table joined the audited set, the surrogate key it needed, and what
 /// the old composite key became; the API documents the `id` and points a

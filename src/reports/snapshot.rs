@@ -1031,8 +1031,12 @@ mod tests {
             "closing_prices",
             &["update"],
             "UPDATE only, and only on an ok price changing: an INSERT prices a date that was \
-             blocked for valuation and so has no snapshot to stale, and the only delete the \
-             API allows is of an errored row, whose date was never valued \
+             blocked for valuation and so has no snapshot to stale, and the deletes the API \
+             allows are of rows no stored figure was valued at — an errored row, whose date \
+             valuation blocks outright, and an ok row inside the listing's `unpriced_before` \
+             span, where the marker supersedes the stored rows and the holding is excluded \
+             from the date's totals rather than priced (setting or moving that marker is \
+             itself what stales those snapshots, via `listings`) \
              (0001_schema.sql; `entities::closing_price::db_delete`)",
         ),
         (
@@ -2037,6 +2041,66 @@ mod tests {
         assert_eq!(stale_flags(&pool, ymd(2026, 6, 3)).await, vec![false; 3]);
         let series = db_series(&pool).await.unwrap();
         assert_eq!(series[0].market_value, "7493.00".parse().unwrap()); // 6248 + 50 × 24.90
+    }
+
+    /// Why deleting a superseded price needs no staleness handling of its
+    /// own. Setting the marker is what stales the prefix; regeneration then
+    /// leaves the holding out, so the rows the marker supersedes are read by
+    /// nothing and clearing them moves no stored figure and stales nothing.
+    /// The case that must not be missed is the marker being cleared
+    /// afterwards: the prefix stales again, and regeneration reports the date
+    /// blocked for want of a price — the truth once the rows are gone, and
+    /// not a silently wrong total.
+    #[tokio::test]
+    async fn db_clearing_the_superseded_prices_changes_no_stored_snapshot() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "LAC", Some("XASX"), "AUD").await;
+        insert_listing(&pool, 2, "BHP", Some("XASX"), "AUD").await;
+        insert_buy(&pool, 1, 1, ymd(2024, 1, 15), "50", "20", "AUD").await;
+        insert_buy(&pool, 2, 2, ymd(2024, 1, 15), "100", "10", "AUD").await;
+        // LAC's row for the day is another security's price — the live shape.
+        store_price(&pool, 1, ymd(2026, 6, 3), "10.13").await;
+        store_price(&pool, 2, ymd(2026, 6, 3), "62.48").await;
+        let marked = test_support::listing(1)
+            .ticker("LAC")
+            .name("LAC")
+            .unpriced_before(ymd(2026, 6, 4))
+            .build();
+        listing::db_upsert(&pool, &marked).await.unwrap();
+
+        let now = friday_evening_sydney();
+        generate(&pool, ymd(2026, 6, 3), now).await.unwrap();
+        assert_eq!(excluded_flags(&pool, ymd(2026, 6, 3)).await, vec![true; 3]);
+        let before = db_series(&pool).await.unwrap()[0].market_value;
+        assert_eq!(before, "6248.00".parse().unwrap());
+
+        let cleared = crate::entities::closing_price::db_clear_unpriced_before(&pool, 1)
+            .await
+            .unwrap();
+        assert!(matches!(
+            cleared,
+            crate::entities::closing_price::ClearOutcome::Cleared { deleted: 1, .. }
+        ));
+        assert_eq!(
+            stale_flags(&pool, ymd(2026, 6, 3)).await,
+            vec![false; 3],
+            "no stored figure was valued at the cleared row, so none is stale"
+        );
+        generate(&pool, ymd(2026, 6, 3), now).await.unwrap();
+        assert_eq!(db_series(&pool).await.unwrap()[0].market_value, before);
+        assert_eq!(excluded_flags(&pool, ymd(2026, 6, 3)).await, vec![true; 3]);
+
+        // Clearing the marker afterwards stales the prefix, and regeneration
+        // now blocks the date rather than valuing it at the rows that are gone.
+        let unmarked = test_support::listing(1).ticker("LAC").name("LAC").build();
+        listing::db_upsert(&pool, &unmarked).await.unwrap();
+        assert_eq!(stale_flags(&pool, ymd(2026, 6, 3)).await, vec![true; 3]);
+        let err = generate(&pool, ymd(2026, 6, 3), now).await.unwrap_err();
+        assert!(
+            matches!(err, GenerateError::Unprocessable(ref msg)
+                if msg.contains("no stored price for 2026-06-03")),
+            "{err}"
+        );
     }
 
     /// Zero of zero is not a portfolio total: a date on which *every* held

@@ -98,6 +98,18 @@
 //! - Only an **errored** row is deletable ([`db_delete`]): the acknowledgement
 //!   that no price will ever exist for that day. An ok row is replaced by a
 //!   re-fetch, never removed, so no valuation can lose a price it once had.
+//!   The one relaxation, and its whole justification: a date inside the
+//!   listing's `unpriced_before` span is **by declaration not valued at all**
+//!   — the marker supersedes every stored row for the span and
+//!   `reports::valuation` excludes the holding there rather than pricing it
+//!   (migration 0037), and the carry-forward query is floored at the marker
+//!   too — so there is no valued series to punch a hole in, and deleting is
+//!   the acknowledgement that the stored figure never was a valuation. The
+//!   span is the only place an ok row may be deleted, one date at a time or
+//!   all at once ([`db_clear_unpriced_before`]). Note the asymmetry with
+//!   `unpriced_from`: a date on or after **that** marker *is* valued — the
+//!   last stored ok close is carried forward into it — so nothing is relaxed
+//!   at that end.
 //! - A day the provider cannot serve at all can be priced **by hand**
 //!   (`PUT /closing_prices/{listing_id}/{price_date}`), recorded with where
 //!   the figure was sourced from and why manual entry was needed
@@ -1072,11 +1084,26 @@ pub async fn run_rebase(pool: &SqlitePool) -> Result<(), String> {
 }
 
 /// Delete one stored row, reporting whether one was there. Callers must have
-/// established that the row is errored (the handler rejects an ok row): an
-/// errored date is never valued — `reports::valuation` blocks it outright —
-/// so removing the row cannot invalidate a stored snapshot. That is what lets
-/// `closing_prices` keep its single `..._stale_snapshots_update` trigger
-/// (0001_schema.sql) with no DELETE counterpart, unlike the fact tables.
+/// established that the row is one of the two kinds no snapshot was ever
+/// valued at (the handler rejects any other):
+///
+/// * an **errored** row — `reports::valuation` blocks the date outright;
+/// * an ok row dated **before the listing's `unpriced_before`** — the marker
+///   supersedes the stored rows for that span, so valuation excludes the
+///   holding from those dates instead of pricing it, and even the
+///   `unpriced_from` carry-forward is floored at the marker
+///   ([`db_latest_ok_price_on_or_before`]).
+///
+/// Either way removing the row cannot invalidate a stored snapshot figure:
+/// no stored figure was computed from it. That is what lets `closing_prices`
+/// keep its single `..._stale_snapshots_update` trigger (0001_schema.sql)
+/// with no DELETE counterpart, unlike the fact tables. Setting or moving the
+/// marker is itself what stales the affected snapshots (0037's
+/// `listings_stale_snapshots_update` stales the prefix before the later of
+/// the old and new dates), so a span whose rows are then cleared has already
+/// been regenerated without them, and clearing or moving the marker back
+/// later stales the prefix again — regeneration then reports the dates
+/// blocked for want of a price, which is the truth once the rows are gone.
 pub async fn db_delete(
     pool: &SqlitePool,
     listing_id: i64,
@@ -1088,6 +1115,77 @@ pub async fn db_delete(
         .execute(pool)
         .await?;
     Ok(result.rows_affected() > 0)
+}
+
+/// What [`db_clear_unpriced_before`] found to do.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ClearOutcome {
+    /// No such listing.
+    NoListing,
+    /// The listing declares no `unpriced_before`, so it has no superseded
+    /// span and nothing here may be cleared in bulk.
+    NoMarker,
+    /// The span was cleared (possibly of nothing — the operation is
+    /// idempotent).
+    Cleared {
+        unpriced_before: NaiveDate,
+        deleted: u64,
+    },
+}
+
+/// Clear every stored row a listing's `unpriced_before` marker supersedes —
+/// the whole span before it, ok rows included — in one transaction.
+///
+/// The bulk form of the single-date delete, and deliberately the *only* bulk
+/// form: the span it clears is not a caller-supplied date range but the
+/// listing's own declaration, read from the `listings` row by the DELETE
+/// itself, so this can never become a general bulk-delete of price history.
+/// A listing with no marker deletes nothing ([`ClearOutcome::NoMarker`]).
+/// Re-running it is a no-op that reports `deleted: 0`.
+///
+/// Why an ok row may go: see [`db_delete`] — inside the span no stored figure
+/// is read by valuation, so none of it is a valuation to lose. Nothing is
+/// destroyed either way: `closing_prices` is audited, and the per-row `AFTER
+/// DELETE` trigger fires once per row of a multi-row DELETE, so every
+/// cleared figure and its `sourced_from`/`reason` land in `row_history`.
+///
+/// It cannot break `unpriced_from`'s write-time pairing (a stored ok price
+/// must exist *before* that marker to be carried forward), because that check
+/// only ever looks at rows on or after `unpriced_before` — exactly the ones
+/// this leaves alone.
+pub async fn db_clear_unpriced_before(
+    pool: &SqlitePool,
+    listing_id: i64,
+) -> Result<ClearOutcome, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let found: Option<(Option<NaiveDate>,)> =
+        sqlx::query_as("SELECT unpriced_before FROM listings WHERE id = ?")
+            .bind(listing_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    let Some((marker,)) = found else {
+        return Ok(ClearOutcome::NoListing);
+    };
+    let Some(unpriced_before) = marker else {
+        return Ok(ClearOutcome::NoMarker);
+    };
+    // The bound is the subquery, not the value read above: the rows deleted
+    // are exactly the ones the listing's own row calls superseded at the
+    // moment the statement runs.
+    let deleted = sqlx::query(
+        "DELETE FROM closing_prices \
+         WHERE listing_id = ?1 \
+           AND price_date < (SELECT unpriced_before FROM listings WHERE id = ?1)",
+    )
+    .bind(listing_id)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    tx.commit().await?;
+    Ok(ClearOutcome::Cleared {
+        unpriced_before,
+        deleted,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1736,6 +1834,24 @@ struct ManualPriceBody {
     reason: String,
 }
 
+/// Which listing's superseded price rows to clear. No date range: the span
+/// is the listing's own `unpriced_before` declaration and nothing else.
+#[derive(Debug, Deserialize)]
+struct ClearBody {
+    listing_id: i64,
+}
+
+/// What a clear run did, returned to the caller.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ClearSummary {
+    pub listing_id: i64,
+    /// The marker that defined the cleared span, echoed back so the caller
+    /// can see what it actually acted on.
+    pub unpriced_before: NaiveDate,
+    /// Rows removed. Zero on a re-run — the operation is idempotent.
+    pub deleted: u64,
+}
+
 /// What a backfill run did, returned to the caller.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct BackfillSummary {
@@ -1942,6 +2058,18 @@ async fn backfill(
 /// not unblock its date — valuation still refuses it, now for want of any row
 /// at all ("no stored price … backfill it") — it only clears the standing
 /// alarm.
+///
+/// The one exception is a date inside the listing's **`unpriced_before`**
+/// span, where an ok row is deletable whatever its origin. The rule protects
+/// nothing there: the marker declares that no price is obtainable for the
+/// security before that date, so valuation excludes the holding from those
+/// dates rather than pricing it and the carry-forward is floored at the
+/// marker — the stored figure is read by nothing, and deleting it is the
+/// acknowledgement that it never was a valuation (migration 0037; the live
+/// case is a span priced from another security's series). The mirror marker
+/// `unpriced_from` gets **no** such relaxation: a date on or after it *is*
+/// valued, at the last stored ok close carried forward, so a delete there
+/// could remove the very figure being carried.
 async fn delete_one(
     State(pool): State<SqlitePool>,
     Path((listing_id, price_date)): Path<(i64, NaiveDate)>,
@@ -1949,7 +2077,11 @@ async fn delete_one(
     let row = db_get_one(&pool, listing_id, price_date)
         .await?
         .ok_or_else(|| ApiError::not_found("no stored price for that listing and date"))?;
-    if row.status == PriceStatus::Ok {
+    let superseded = listing::db_get(&pool, listing_id)
+        .await?
+        .and_then(|l| l.unpriced_before)
+        .is_some_and(|before| price_date < before);
+    if row.status == PriceStatus::Ok && !superseded {
         let replacement = match row.origin {
             PriceOrigin::Manual => "enter another manual price to replace it",
             PriceOrigin::Fetched => "re-fetch it to replace it",
@@ -1961,6 +2093,57 @@ async fn delete_one(
     }
     db_delete(&pool, listing_id, price_date).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Clear a listing's whole superseded price span in one request: every row
+/// dated before its `unpriced_before`, ok rows included, in one transaction,
+/// answering how many were removed.
+///
+/// The bulk counterpart of the single-date delete above, for the case it
+/// exists for — a span of hundreds of days priced from a source the listing
+/// itself now says is not a price for this security. It takes **no date
+/// range**: the span is read from the listing's own marker, so this cannot
+/// become a general bulk-delete of price history. Safe to re-run (a second
+/// call reports `deleted: 0`), and nothing is destroyed — every removed row
+/// lands in `row_history` with its figure and provenance.
+///
+/// `404` for an unknown listing; `422` for a listing that declares no
+/// `unpriced_before`, since without one there is no superseded span at all.
+async fn clear_unpriced_before(
+    State(pool): State<SqlitePool>,
+    Json(body): Json<ClearBody>,
+) -> Result<Json<ClearSummary>, ApiError> {
+    let listing = listing::db_get(&pool, body.listing_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("no such listing"))?;
+    match db_clear_unpriced_before(&pool, body.listing_id).await? {
+        ClearOutcome::NoListing => Err(ApiError::not_found("no such listing")),
+        ClearOutcome::NoMarker => Err(ApiError::unprocessable(format!(
+            "{} has no unpriced_before, so no stored price of its is superseded — only the span \
+             before that marker can be cleared in bulk. Set unpriced_before on the listing (PUT \
+             /listings/:id) if the provider's series really does begin later than its stored \
+             prices claim; otherwise a price is replaced by a re-fetch or another manual entry, \
+             never deleted",
+            listing.ticker
+        ))),
+        ClearOutcome::Cleared {
+            unpriced_before,
+            deleted,
+        } => {
+            tracing::info!(
+                listing_id = body.listing_id,
+                ticker = %listing.ticker,
+                %unpriced_before,
+                deleted,
+                "cleared superseded closing prices"
+            );
+            Ok(Json(ClearSummary {
+                listing_id: body.listing_id,
+                unpriced_before,
+                deleted,
+            }))
+        }
+    }
 }
 
 /// 422 when `date` falls outside the span the provider serves this listing —
@@ -2026,6 +2209,10 @@ pub fn router() -> Router<SqlitePool> {
         .route("/closing_prices", get(list))
         .route("/closing_prices/fetch", post(fetch_one))
         .route("/closing_prices/backfill", post(backfill))
+        .route(
+            "/closing_prices/clear_unpriced_before",
+            post(clear_unpriced_before),
+        )
         .route(
             "/closing_prices/{listing_id}/{price_date}",
             put(put_manual).delete(delete_one),
@@ -2829,6 +3016,387 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(row.status, PriceStatus::Ok, "the price is still stored");
+    }
+
+    // --- delete inside an `unpriced_before` span (migration 0037) ---
+
+    /// Mark an already-inserted listing as unpriced before `before`: the
+    /// provider's series for it begins then, so every stored row earlier than
+    /// it is superseded by the listing's own declaration.
+    async fn mark_unpriced_before(
+        pool: &SqlitePool,
+        id: i64,
+        ticker: &str,
+        before: NaiveDate,
+    ) -> listing::Listing {
+        let marked = crate::test_support::listing(id)
+            .ticker(ticker)
+            .name(ticker)
+            .security_type(listing::SecurityType::Share)
+            .unpriced_before(before)
+            .build();
+        listing::db_upsert(pool, &marked).await.unwrap();
+        marked
+    }
+
+    /// The one relaxation of the ok-row rule, and the case it exists for: a
+    /// span the listing itself declares unpriceable, stored from another
+    /// security's series. Valuation excludes the holding from those dates
+    /// rather than pricing it, so no stored figure was ever valued at these
+    /// rows and deleting them punches no hole — whichever way they arrived.
+    #[tokio::test]
+    async fn api_delete_removes_an_ok_row_the_unpriced_before_marker_supersedes() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "LAC", "XASX", "AUD").await;
+        insert_buy(&pool, 1, 1, "100").await;
+        crate::test_support::closing_price(1, ymd(2026, 6, 2))
+            .price("10.13")
+            .insert(&pool)
+            .await;
+        seed_manual_price(&pool, 1, ymd(2026, 6, 3), "9.87").await;
+        mark_unpriced_before(&pool, 1, "LAC", ymd(2026, 6, 4)).await;
+        let app = full_router(pool.clone(), StubFetcher::default());
+
+        for date in ["2026-06-02", "2026-06-03"] {
+            let (status, bytes) = delete_req(&app, &format!("/closing_prices/1/{date}")).await;
+            assert_eq!(
+                status,
+                StatusCode::NO_CONTENT,
+                "{date}: {}",
+                String::from_utf8_lossy(&bytes)
+            );
+        }
+        assert!(
+            db_get_one(&pool, 1, ymd(2026, 6, 2))
+                .await
+                .unwrap()
+                .is_none(),
+            "the fetched row is gone"
+        );
+        assert!(
+            db_get_one(&pool, 1, ymd(2026, 6, 3))
+                .await
+                .unwrap()
+                .is_none(),
+            "the hand-entered row goes the same way — origin decides nothing here"
+        );
+    }
+
+    /// The relaxation stops exactly at the marker: a row on the day the
+    /// series begins, or after it, is an ordinary priced day again and the
+    /// original refusal stands word for word.
+    #[tokio::test]
+    async fn api_delete_still_rejects_an_ok_row_on_or_after_unpriced_before() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "LAC", "XASX", "AUD").await;
+        crate::test_support::closing_price(1, ymd(2026, 6, 4))
+            .price("10.13")
+            .insert(&pool)
+            .await;
+        crate::test_support::closing_price(1, ymd(2026, 6, 5))
+            .price("10.50")
+            .insert(&pool)
+            .await;
+        mark_unpriced_before(&pool, 1, "LAC", ymd(2026, 6, 4)).await;
+        let app = full_router(pool.clone(), StubFetcher::default());
+
+        for date in ["2026-06-04", "2026-06-05"] {
+            let (status, bytes) = delete_req(&app, &format!("/closing_prices/1/{date}")).await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{date}");
+            let msg = String::from_utf8_lossy(&bytes);
+            assert!(msg.contains("is ok, not errored"), "{date}: {msg}");
+            assert!(msg.contains("re-fetch it"), "{date}: {msg}");
+            assert!(
+                db_get_one(&pool, 1, date.parse().unwrap())
+                    .await
+                    .unwrap()
+                    .is_some(),
+                "{date} is still stored"
+            );
+        }
+    }
+
+    /// The two markers are **not** symmetric, and this is why the relaxation
+    /// is only at one end. A date on or after `unpriced_from` *is* valued —
+    /// `reports::valuation` carries the last stored ok close forward into it
+    /// — so deleting a row there could remove the very figure being carried.
+    /// The refusal stands.
+    #[tokio::test]
+    async fn api_delete_still_rejects_an_ok_row_inside_an_unpriced_from_run() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "SUSP", "XASX", "AUD").await;
+        crate::test_support::closing_price(1, ymd(2026, 6, 2))
+            .price("3.10")
+            .insert(&pool)
+            .await;
+        seed_manual_price(&pool, 1, ymd(2026, 6, 4), "2.95").await;
+        let marked = crate::test_support::listing(1)
+            .ticker("SUSP")
+            .name("SUSP")
+            .security_type(listing::SecurityType::Share)
+            .unpriced_from(ymd(2026, 6, 3))
+            .build();
+        listing::db_upsert(&pool, &marked).await.unwrap();
+        let app = full_router(pool.clone(), StubFetcher::default());
+
+        let (status, bytes) = delete_req(&app, "/closing_prices/1/2026-06-04").await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            String::from_utf8_lossy(&bytes).contains("is ok, not errored"),
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+        // …and that row really is what a valuation of the unpriced run reads.
+        assert_eq!(
+            db_latest_ok_price_on_or_before(&pool, 1, ymd(2026, 6, 10), None)
+                .await
+                .unwrap(),
+            Some((ymd(2026, 6, 4), "2.95".parse().unwrap())),
+            "the refused row is the carried-forward figure"
+        );
+    }
+
+    /// Nothing is destroyed: a superseded row's figure and the provenance
+    /// that says what it was land in the audit trail, which is the property
+    /// the whole cleanup rests on.
+    #[tokio::test]
+    async fn deleting_a_superseded_price_is_recorded_in_the_audit_trail() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "LAC", "XASX", "AUD").await;
+        seed_manual_price(&pool, 1, ymd(2026, 6, 3), "9.87").await;
+        let row = db_get_one(&pool, 1, ymd(2026, 6, 3))
+            .await
+            .unwrap()
+            .unwrap();
+        mark_unpriced_before(&pool, 1, "LAC", ymd(2026, 6, 4)).await;
+        let app = full_router(pool.clone(), StubFetcher::default());
+
+        let (status, _) = delete_req(&app, "/closing_prices/1/2026-06-03").await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        let history = crate::reports::row_history::db_row_history(&pool, "closing_prices", row.id)
+            .await
+            .unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0]["operation"], "DELETE");
+        assert_eq!(history[0]["price"], "9.87");
+        assert_eq!(history[0]["sourced_from"], "asx.com.au closing report");
+        assert_eq!(history[0]["reason"], "provider serves no candle");
+    }
+
+    // --- clearing a whole superseded span ---
+
+    /// The bulk form: hundreds of borrowed days are not a runbook one DELETE
+    /// at a time. The span is the listing's own marker — never a caller's
+    /// date range — so it clears exactly what the declaration supersedes,
+    /// leaves the priced days alone, says how many rows went, and is safe to
+    /// run again.
+    #[tokio::test]
+    async fn api_clear_unpriced_before_clears_exactly_the_superseded_span() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "LAC", "XASX", "AUD").await;
+        insert_listing(&pool, 2, "BHP", "XASX", "AUD").await;
+        insert_buy(&pool, 1, 1, "100").await;
+        // Listing 1: two borrowed ok rows and an errored one before the
+        // marker, one real row on the day the series begins.
+        crate::test_support::closing_price(1, ymd(2026, 6, 1))
+            .price("10.13")
+            .insert(&pool)
+            .await;
+        seed_manual_price(&pool, 1, ymd(2026, 6, 2), "9.87").await;
+        crate::test_support::closing_price(1, ymd(2026, 6, 3))
+            .errored("no candle")
+            .insert(&pool)
+            .await;
+        crate::test_support::closing_price(1, ymd(2026, 6, 4))
+            .price("24.90")
+            .insert(&pool)
+            .await;
+        // Another listing's row on a date inside the span stays put: the
+        // marker is listing 1's declaration and nobody else's.
+        crate::test_support::closing_price(2, ymd(2026, 6, 1))
+            .price("62.48")
+            .insert(&pool)
+            .await;
+        mark_unpriced_before(&pool, 1, "LAC", ymd(2026, 6, 4)).await;
+        let app = full_router(pool.clone(), StubFetcher::default());
+
+        let (status, bytes) = post_json(
+            &app,
+            "/closing_prices/clear_unpriced_before",
+            serde_json::json!({ "listing_id": 1 }),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let summary: ClearSummary = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(summary.listing_id, 1);
+        assert_eq!(summary.unpriced_before, ymd(2026, 6, 4));
+        assert_eq!(summary.deleted, 3, "both ok rows and the errored one");
+
+        for gone in [ymd(2026, 6, 1), ymd(2026, 6, 2), ymd(2026, 6, 3)] {
+            assert!(
+                db_get_one(&pool, 1, gone).await.unwrap().is_none(),
+                "{gone} was superseded"
+            );
+        }
+        assert!(
+            db_get_one(&pool, 1, ymd(2026, 6, 4))
+                .await
+                .unwrap()
+                .is_some(),
+            "the day the series begins is a real price"
+        );
+        assert!(
+            db_get_one(&pool, 2, ymd(2026, 6, 1))
+                .await
+                .unwrap()
+                .is_some(),
+            "another listing's prices are not in this listing's span"
+        );
+
+        // Idempotent: re-running clears nothing and says so.
+        let (status, bytes) = post_json(
+            &app,
+            "/closing_prices/clear_unpriced_before",
+            serde_json::json!({ "listing_id": 1 }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let again: ClearSummary = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(again.deleted, 0);
+    }
+
+    /// Without a marker there is no superseded span, so there is nothing this
+    /// endpoint may clear — it must never become a bulk-delete of real price
+    /// history. An unknown listing is the ordinary 404.
+    #[tokio::test]
+    async fn api_clear_unpriced_before_is_refused_without_a_marker() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
+        crate::test_support::closing_price(1, ymd(2026, 6, 2))
+            .price("62.48")
+            .insert(&pool)
+            .await;
+        let app = full_router(pool.clone(), StubFetcher::default());
+
+        let (status, bytes) = post_json(
+            &app,
+            "/closing_prices/clear_unpriced_before",
+            serde_json::json!({ "listing_id": 1 }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        let msg = String::from_utf8_lossy(&bytes);
+        assert!(msg.contains("BHP has no unpriced_before"), "{msg}");
+        assert!(
+            db_get_one(&pool, 1, ymd(2026, 6, 2))
+                .await
+                .unwrap()
+                .is_some(),
+            "nothing was cleared"
+        );
+
+        let (status, bytes) = post_json(
+            &app,
+            "/closing_prices/clear_unpriced_before",
+            serde_json::json!({ "listing_id": 99 }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(String::from_utf8_lossy(&bytes), "no such listing");
+    }
+
+    /// The audit trail is per row, not per statement: the `AFTER DELETE`
+    /// trigger fires once for each row of the multi-row DELETE, so a cleared
+    /// span leaves every figure and every `reason` recoverable — including
+    /// the note explaining what the borrowed prices were.
+    #[tokio::test]
+    async fn clearing_a_span_records_every_row_in_the_audit_trail() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "LAC", "XASX", "AUD").await;
+        crate::test_support::closing_price(1, ymd(2026, 6, 1))
+            .price("10.13")
+            .insert(&pool)
+            .await;
+        seed_manual_price(&pool, 1, ymd(2026, 6, 2), "9.87").await;
+        let fetched = db_get_one(&pool, 1, ymd(2026, 6, 1))
+            .await
+            .unwrap()
+            .unwrap();
+        let manual = db_get_one(&pool, 1, ymd(2026, 6, 2))
+            .await
+            .unwrap()
+            .unwrap();
+        mark_unpriced_before(&pool, 1, "LAC", ymd(2026, 6, 4)).await;
+
+        let cleared = db_clear_unpriced_before(&pool, 1).await.unwrap();
+        assert_eq!(
+            cleared,
+            ClearOutcome::Cleared {
+                unpriced_before: ymd(2026, 6, 4),
+                deleted: 2,
+            }
+        );
+
+        let history =
+            crate::reports::row_history::db_row_history(&pool, "closing_prices", fetched.id)
+                .await
+                .unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0]["operation"], "DELETE");
+        assert_eq!(history[0]["price"], "10.13");
+
+        let history =
+            crate::reports::row_history::db_row_history(&pool, "closing_prices", manual.id)
+                .await
+                .unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0]["operation"], "DELETE");
+        assert_eq!(history[0]["price"], "9.87");
+        assert_eq!(history[0]["reason"], "provider serves no candle");
+    }
+
+    /// Clearing the span cannot break the other marker's write-time pairing:
+    /// `unpriced_from` needs a stored ok price *before* it to carry forward,
+    /// and that check only ever looks at rows on or after `unpriced_before` —
+    /// exactly the rows the clear leaves alone.
+    #[tokio::test]
+    async fn clearing_a_span_leaves_the_carry_forward_price_and_its_rule_intact() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "LAC", "XASX", "AUD").await;
+        crate::test_support::closing_price(1, ymd(2026, 6, 1))
+            .price("10.13")
+            .insert(&pool)
+            .await;
+        crate::test_support::closing_price(1, ymd(2026, 6, 4))
+            .price("24.90")
+            .insert(&pool)
+            .await;
+        let marked = crate::test_support::listing(1)
+            .ticker("LAC")
+            .name("LAC")
+            .security_type(listing::SecurityType::Share)
+            .unpriced_before(ymd(2026, 6, 4))
+            .unpriced_from(ymd(2026, 6, 5))
+            .build();
+        listing::db_upsert(&pool, &marked).await.unwrap();
+
+        db_clear_unpriced_before(&pool, 1).await.unwrap();
+
+        assert_eq!(
+            db_latest_ok_price_on_or_before(&pool, 1, ymd(2026, 6, 9), Some(ymd(2026, 6, 4)))
+                .await
+                .unwrap(),
+            Some((ymd(2026, 6, 4), "24.90".parse().unwrap())),
+            "the figure the unpriced run carries forward is untouched"
+        );
+        // …and the pairing still accepts a re-save of the listing.
+        listing::db_upsert(&pool, &marked).await.unwrap();
     }
 
     // --- manual prices ---
