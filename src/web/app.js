@@ -1345,6 +1345,12 @@ async function viewClosingPrices() {
         ? '' : p.price_as_observed,
       currency: l ? l.currency : '',
       source: p.source,
+      // The provider symbol the row was actually fetched under (0038), so a
+      // backfill run with a one-off symbol override is distinguishable from an
+      // ordinary fetch afterwards. Blank for a hand-entered price (nothing was
+      // fetched) and for rows stored before the column existed — unrecorded,
+      // never inferred.
+      fetched_symbol: p.fetched_symbol || '',
       status: p.status,
       origin: p.origin,
       sourced_from: p.sourced_from || '',
@@ -1356,7 +1362,7 @@ async function viewClosingPrices() {
     };
   });
   const cols = ['id', 'listing', 'date', 'price', 'price_as_observed', 'currency', 'source',
-    'status', 'origin', 'sourced_from', 'reason', 'error', 'fetched_at'];
+    'fetched_symbol', 'status', 'origin', 'sourced_from', 'reason', 'error', 'fetched_at'];
   const table = filterableTable(rows, cols, {
     statusField: 'status',
     actions: function (row) {

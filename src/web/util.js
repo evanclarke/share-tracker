@@ -696,6 +696,11 @@ const COLUMN_LABELS = {
   // the price date's own unit basis (see API.md, Closing prices). The default
   // humaniser would render "Price as observed" without saying what differs.
   price_as_observed: 'As served by provider',
+  // The provider symbol a fetched row was actually fetched under (0038). The
+  // default humaniser would render "Fetched symbol", which reads as an
+  // adjective on the symbol rather than saying it is the symbol the request
+  // was made with.
+  fetched_symbol: 'Fetched under symbol',
   // The employer statement's stated AUD figure for label F (reported verbatim
   // by the tax summary); the default humaniser would render "Aud …".
   aud_deferral_discount: 'Statement AUD deferral (F)',

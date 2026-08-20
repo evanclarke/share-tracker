@@ -407,6 +407,7 @@ pub fn closing_price(listing_id: i64, price_date: NaiveDate) -> ClosingPriceBuil
             price_as_observed: Some(Decimal::from(10)),
             source: "test".to_string(),
             fetched_at: "2026-06-05T08:00:00Z".to_string(),
+            fetched_symbol: None,
             status: closing_price::PriceStatus::Ok,
             error: None,
             origin: closing_price::PriceOrigin::Fetched,
@@ -440,6 +441,14 @@ impl ClosingPriceBuilder {
         self
     }
 
+    /// The provider symbol the row was fetched under (0038). Left unrecorded
+    /// by default, which is what a row stored before that column existed
+    /// looks like.
+    pub fn fetched_symbol(mut self, symbol: &str) -> Self {
+        self.p.fetched_symbol = Some(symbol.to_string());
+        self
+    }
+
     /// A recorded fetch failure: no price, the message stored (CHECK-paired).
     pub fn errored(mut self, error: &str) -> Self {
         self.p.price = None;
@@ -454,6 +463,8 @@ impl ClosingPriceBuilder {
     pub fn manual(mut self, sourced_from: &str, reason: &str) -> Self {
         self.p.source = closing_price::MANUAL_SOURCE.to_string();
         self.p.origin = closing_price::PriceOrigin::Manual;
+        // Nothing was fetched, so no symbol was used (CHECK-paired, 0038).
+        self.p.fetched_symbol = None;
         self.p.sourced_from = Some(sourced_from.to_string());
         self.p.reason = Some(reason.to_string());
         self

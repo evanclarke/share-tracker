@@ -1013,6 +1013,103 @@ mod tests {
         );
     }
 
+    /// 0038 adds the provider symbol each fetched price was fetched under —
+    /// the provenance the `symbol`-override incident had none of. Unlike
+    /// 0020/0021/0034 this one is an `ALTER TABLE ADD COLUMN`, so what needs
+    /// pinning is different: existing rows must be left **unrecorded** (the
+    /// symbol they were fetched under is not recoverable, and a migration
+    /// that guessed it from the ticker would be inventing the fact), the
+    /// CHECK pairing the column with the origin must hold, and the audited
+    /// table's two row-history triggers must come back naming the new column
+    /// while the staleness trigger survives untouched.
+    #[tokio::test]
+    async fn migration_0038_leaves_existing_rows_unrecorded_and_pairs_the_symbol_with_the_origin() {
+        let pool = pool_migrated_below(38).await;
+        sqlx::query(
+            "INSERT INTO listings (id, exchange_mic, ticker, name, security_type, currency) \
+             VALUES (1, 'XNYS', 'LAC', 'Lithium Americas', 'Share', 'USD')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO closing_prices \
+                 (id, listing_id, price_date, price, price_as_observed, source, fetched_at, \
+                  status, error, origin, sourced_from, reason) \
+             VALUES (7, 1, '2026-06-04', '41.25', '41.25', 'manual', '2026-06-06T01:00:00Z', \
+                     'ok', NULL, 'manual', 'asx.com.au', 'delisted symbol'), \
+                    (9, 1, '2026-06-05', '62.48', '62.48', 'yahoo', '2026-06-05T08:00:00Z', \
+                     'ok', NULL, 'fetched', NULL, NULL)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        apply_migration(&pool, 38).await;
+
+        let symbols: Vec<Option<String>> =
+            sqlx::query_scalar("SELECT fetched_symbol FROM closing_prices ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            symbols,
+            [None, None],
+            "a pre-existing row's symbol is unrecorded, never invented"
+        );
+
+        // The CHECK is one-directional: manual implies no symbol.
+        let bad = sqlx::query("UPDATE closing_prices SET fetched_symbol = 'LAAC' WHERE id = 7")
+            .execute(&pool)
+            .await;
+        assert!(bad.is_err(), "a manual row cannot claim a fetched symbol");
+        sqlx::query("UPDATE closing_prices SET fetched_symbol = 'LAAC' WHERE id = 9")
+            .execute(&pool)
+            .await
+            .expect("a fetched row records the symbol it came from");
+
+        // Both audit triggers come back naming the new column — and the
+        // superseded value travels with the row.
+        let old_row: String = sqlx::query_scalar(
+            "SELECT old_row FROM row_history \
+             WHERE table_name = 'closing_prices' AND row_id = 9",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(old_row.contains("\"fetched_symbol\":null"), "{old_row}");
+        sqlx::query("DELETE FROM closing_prices WHERE id = 9")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let deleted: String = sqlx::query_scalar(
+            "SELECT old_row FROM row_history \
+             WHERE table_name = 'closing_prices' AND row_id = 9 AND operation = 'DELETE'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(deleted.contains("\"fetched_symbol\":\"LAAC\""), "{deleted}");
+
+        // ADD COLUMN leaves triggers alone, so the staleness one is still
+        // there beside the two re-created ones.
+        let triggers: Vec<String> = sqlx::query_scalar(
+            "SELECT name FROM sqlite_master WHERE type = 'trigger' \
+             AND tbl_name = 'closing_prices' ORDER BY name",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            triggers,
+            [
+                "closing_prices_row_history_delete",
+                "closing_prices_row_history_update",
+                "closing_prices_stale_snapshots_update"
+            ]
+        );
+    }
+
     /// 0025 renames `income.lic_capital_gain_deduction` to
     /// `lic_capital_gain_amount` — the LIC's advised attributable part, which
     /// the reports now halve for D8 — and so has to read existing rows forward

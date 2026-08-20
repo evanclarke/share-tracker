@@ -21,6 +21,15 @@
 //! - A stored price is in the **listing's quote currency**, never AUD-converted
 //!   (reports convert via the FX rules at read time). The provider's currency
 //!   is cross-checked against the listing's; a mismatch is an errored row.
+//! - A fetched row records the **provider symbol it was fetched under**
+//!   ([`ClosingPrice::fetched_symbol`], migration 0038) — always, not only
+//!   when it differs from the symbol the rename chain derives, so the question
+//!   "what symbol produced this row?" has one answer rather than two readings
+//!   of a null. It comes from the fetcher itself ([`PriceFetcher::symbol`]),
+//!   so it is always in the namespace of the `source` beside it. A manual row
+//!   carries none (nothing was fetched), and a row stored before 0038 carries
+//!   none either — the symbol is not recoverable after the fact, and nothing
+//!   invents one.
 //! - `price_date` is the trading day in the exchange's timezone; for
 //!   exchange-less (Crypto) listings it is the UTC date of the daily candle
 //!   completing at 00:00 UTC at the end of that date (~10–11 am Sydney the
@@ -203,6 +212,19 @@ pub struct ClosingPrice {
     /// RFC 3339 UTC timestamp of the fetch that produced the row — for a
     /// manual row, of the entry that recorded it.
     pub fetched_at: String,
+    /// The provider symbol this row was fetched under (migration 0038), in
+    /// the namespace of [`Self::source`] — recorded on every fetched row, so
+    /// a backfill made with the one-off `symbol` override is afterwards
+    /// distinguishable from an ordinary fetch. Informational: no calculation
+    /// reads it; it is provenance, served by `GET /closing_prices`, shown on
+    /// the Closing Prices screen and carried into `row_history`.
+    ///
+    /// None for a manual row (nothing was fetched — a schema CHECK pairs the
+    /// two), for a row stored before 0038 (unrecorded, and not recoverable
+    /// after the fact), and for the errored row a fetch stores when no symbol
+    /// could be resolved at all — an exchange with no provider mapping, which
+    /// the row's own `error` names.
+    pub fetched_symbol: Option<String>,
     pub status: PriceStatus,
     /// Failure detail; None exactly when the fetch succeeded.
     pub error: Option<String>,
@@ -532,6 +554,18 @@ pub trait PriceFetcher: Send + Sync {
     /// Identifier stored in each row's `source` column, e.g. "yahoo".
     fn source(&self) -> &'static str;
 
+    /// The symbol this provider is asked for when quoting `market` as at
+    /// `date` — the listing's rename chain resolved into the provider's own
+    /// spelling, or whatever override is in force. `Err` when no symbol can
+    /// be resolved at all (an exchange with no mapping), with the reason.
+    ///
+    /// The counterpart of [`Self::source`]: that names the provider, this
+    /// names what was asked of it. [`fetch_and_store`] records the answer on
+    /// every row it stores (`fetched_symbol`), which is why it is asked of
+    /// the fetcher rather than derived beside it — the two columns must
+    /// always be in the same namespace.
+    fn symbol(&self, market: &Market, date: NaiveDate) -> Result<String, String>;
+
     /// Daily closes for the listing over `from..=to` (trading-day dates in the
     /// market's timezone convention). Non-trading days in the range simply
     /// have no entry.
@@ -629,6 +663,10 @@ impl PriceFetcher for YahooFetcher {
         "yahoo"
     }
 
+    fn symbol(&self, market: &Market, date: NaiveDate) -> Result<String, String> {
+        yahoo_symbol(market, date)
+    }
+
     fn daily_closes<'a>(
         &'a self,
         market: &'a Market,
@@ -638,7 +676,7 @@ impl PriceFetcher for YahooFetcher {
         Box::pin(async move {
             // `from..=to` sits inside one identity by contract, so its symbol
             // and calendar answer for the whole call.
-            let symbol = yahoo_symbol(market, from)?;
+            let symbol = self.symbol(market, from)?;
             let tz = market.identity_at(from).tz()?;
             // Daily candles are timestamped at session start, so the UTC
             // window [from 00:00, to+1 00:00) in the market's timezone covers
@@ -665,6 +703,9 @@ impl PriceFetcher for YahooFetcher {
 
     fn latest_quote<'a>(&'a self, market: &'a Market) -> QuoteFuture<'a> {
         Box::pin(async move {
+            // "Now" by definition, so the current identity's symbol — not
+            // `symbol(market, today)`, which would resolve the same thing the
+            // long way round.
             let symbol = yahoo_symbol_now(market)?;
             let quotes = yfinance_rs::quotes(&self.client, [symbol.clone()])
                 .await
@@ -708,7 +749,7 @@ pub async fn db_get_one(
 ) -> Result<Option<ClosingPrice>, sqlx::Error> {
     sqlx::query_as(
         "SELECT id, listing_id, price_date, price, price_as_observed, source, fetched_at, \
-                status, error, origin, sourced_from, reason \
+                fetched_symbol, status, error, origin, sourced_from, reason \
          FROM closing_prices WHERE listing_id = ? AND price_date = ?",
     )
     .bind(listing_id)
@@ -760,7 +801,7 @@ pub async fn db_list(
 ) -> Result<Vec<ClosingPrice>, sqlx::Error> {
     let mut qb = QueryBuilder::new(
         "SELECT id, listing_id, price_date, price, price_as_observed, source, fetched_at, \
-                status, error, origin, sourced_from, reason \
+                fetched_symbol, status, error, origin, sourced_from, reason \
          FROM closing_prices WHERE 1=1",
     );
     if let Some(id) = listing_id {
@@ -811,14 +852,15 @@ async fn db_ok_dates(
 pub(crate) async fn db_store(pool: &SqlitePool, row: &ClosingPrice) -> Result<(), sqlx::Error> {
     sqlx::query(
         "INSERT INTO closing_prices \
-             (listing_id, price_date, price, price_as_observed, source, fetched_at, status, \
-              error, origin, sourced_from, reason) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+             (listing_id, price_date, price, price_as_observed, source, fetched_at, \
+              fetched_symbol, status, error, origin, sourced_from, reason) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT(listing_id, price_date) DO UPDATE SET \
              price = excluded.price, \
              price_as_observed = excluded.price_as_observed, \
              source = excluded.source, \
              fetched_at = excluded.fetched_at, \
+             fetched_symbol = excluded.fetched_symbol, \
              status = excluded.status, \
              error = excluded.error, \
              origin = excluded.origin, \
@@ -831,6 +873,7 @@ pub(crate) async fn db_store(pool: &SqlitePool, row: &ClosingPrice) -> Result<()
     .bind(OptMoney(row.price_as_observed))
     .bind(&row.source)
     .bind(&row.fetched_at)
+    .bind(&row.fetched_symbol)
     .bind(row.status)
     .bind(&row.error)
     .bind(row.origin)
@@ -1393,6 +1436,10 @@ pub async fn db_held_listing_ids(
 /// the old symbol before the effective date and the new one after, so a
 /// historical backfill recovers pre-rename history without the caller having
 /// to supply the old symbol by hand.
+///
+/// Every stored row records the symbol its own segment was fetched under
+/// ([`ClosingPrice::fetched_symbol`]), errored rows included — the symbol is
+/// as much of the provenance of a failure as of a price.
 async fn fetch_and_store(
     pool: &SqlitePool,
     fetcher: &dyn PriceFetcher,
@@ -1403,8 +1450,9 @@ async fn fetch_and_store(
         return Ok((0, 0));
     };
 
-    // Per requested date: the fetch outcome for the segment it falls in.
-    let mut outcome: HashMap<NaiveDate, Result<Decimal, String>> = HashMap::new();
+    // Per requested date: the symbol its segment was fetched under (None only
+    // when none could be resolved) and the segment's fetch outcome.
+    let mut outcome: HashMap<NaiveDate, (Option<String>, Result<Decimal, String>)> = HashMap::new();
     for (from, to, _identity) in market.identity_segments(overall_from, overall_to) {
         let wanted: Vec<NaiveDate> = dates
             .iter()
@@ -1414,6 +1462,12 @@ async fn fetch_and_store(
         if wanted.is_empty() {
             continue; // a segment the caller asked for no days in
         }
+        // What the provider is actually asked for over this segment —
+        // recorded on every row stored below, so a fetch made under a one-off
+        // override is afterwards distinguishable from an ordinary one. Asked
+        // of the fetcher, so it is always in the same namespace as the
+        // `source` it is stored beside.
+        let symbol = fetcher.symbol(market, from);
         let fetched = fetcher.daily_closes(market, from, to).await;
         let by_date: Result<HashMap<NaiveDate, FetchedClose>, String> =
             fetched.map(|closes| closes.into_iter().map(|c| (c.date, c)).collect());
@@ -1427,7 +1481,7 @@ async fn fetch_and_store(
         // message names the symbol that actually came back empty.
         let symbol_dead_or_wrong = matches!(&by_date, Ok(map) if map.is_empty());
         let no_candles_message = || {
-            let symbol = yahoo_symbol(market, from).unwrap_or_else(|e| e);
+            let symbol = symbol.clone().unwrap_or_else(|e| e);
             format!(
                 "provider returned no candles for {symbol} over {from}..{to} — the symbol may be \
                  wrong, renamed, or delisted; set price_symbol on the listing or backfill with an \
@@ -1450,7 +1504,7 @@ async fn fetch_and_store(
                     Some(close) => Ok(close.price),
                 },
             };
-            outcome.insert(date, result);
+            outcome.insert(date, (symbol.as_ref().ok().cloned(), result));
         }
     }
 
@@ -1467,9 +1521,9 @@ async fn fetch_and_store(
     };
     let (mut ok, mut errored) = (0, 0);
     for &date in dates {
-        let result = outcome
+        let (fetched_symbol, result) = outcome
             .remove(&date)
-            .unwrap_or_else(|| Err("no identity span covers this date".to_string()));
+            .unwrap_or_else(|| (None, Err("no identity span covers this date".to_string())));
         let row = match result {
             Ok(as_observed) => {
                 ok += 1;
@@ -1486,6 +1540,7 @@ async fn fetch_and_store(
                     price_as_observed: Some(as_observed),
                     source: fetcher.source().to_string(),
                     fetched_at: fetched_at.clone(),
+                    fetched_symbol,
                     status: PriceStatus::Ok,
                     error: None,
                     origin: PriceOrigin::Fetched,
@@ -1503,6 +1558,7 @@ async fn fetch_and_store(
                     price_as_observed: None,
                     source: fetcher.source().to_string(),
                     fetched_at: fetched_at.clone(),
+                    fetched_symbol,
                     status: PriceStatus::Error,
                     error: Some(e),
                     origin: PriceOrigin::Fetched,
@@ -1926,6 +1982,9 @@ async fn put_manual(
         price_as_observed: Some(body.price),
         source: MANUAL_SOURCE.to_string(),
         fetched_at: Utc::now().to_rfc3339(),
+        // Nothing was fetched, so there is no symbol to record (CHECK-paired
+        // with the origin, migration 0038).
+        fetched_symbol: None,
         status: PriceStatus::Ok,
         error: None,
         origin: PriceOrigin::Manual,
@@ -2296,6 +2355,12 @@ pub mod test_support {
             "stub"
         }
 
+        /// The same resolution the live fetcher does, so a stub's stored
+        /// `fetched_symbol` is the symbol a real fetch would have recorded.
+        fn symbol(&self, market: &Market, date: NaiveDate) -> Result<String, String> {
+            yahoo_symbol(market, date)
+        }
+
         fn daily_closes<'a>(
             &'a self,
             market: &'a Market,
@@ -2306,7 +2371,7 @@ pub mod test_support {
                 if let Some(msg) = &self.fail {
                     return Err(msg.clone());
                 }
-                let symbol = yahoo_symbol(market, from)?;
+                let symbol = self.symbol(market, from)?;
                 Ok(self
                     .closes
                     .get(&symbol)
@@ -2462,6 +2527,10 @@ mod tests {
             "stub"
         }
 
+        fn symbol(&self, market: &Market, date: NaiveDate) -> Result<String, String> {
+            yahoo_symbol(market, date)
+        }
+
         fn daily_closes<'a>(
             &'a self,
             market: &'a Market,
@@ -2476,7 +2545,7 @@ mod tests {
                 self.symbols
                     .lock()
                     .unwrap()
-                    .push(yahoo_symbol(market, from).unwrap_or_default());
+                    .push(self.symbol(market, from).unwrap_or_default());
                 if let Some(msg) = &self.fail {
                     return Err(msg.clone());
                 }
@@ -4227,6 +4296,232 @@ mod tests {
                 .price_symbol,
             None
         );
+    }
+
+    /// Every fetched row records the provider symbol it was fetched under —
+    /// on an ordinary fetch too, not only an overridden one, so the stored
+    /// answer to "what symbol produced this row?" is never a null that has to
+    /// be interpreted (migration 0038).
+    #[tokio::test]
+    async fn db_a_fetched_row_records_the_symbol_it_was_fetched_under() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
+        let market = load_market(&pool, 1).await.unwrap().unwrap();
+        let stub = StubFetcher::default().with_close(1, ymd(2026, 6, 4), "62.80", "AUD");
+
+        fetch_and_store(&pool, &stub, &market, &[ymd(2026, 6, 4)])
+            .await
+            .unwrap();
+
+        let row = db_get_one(&pool, 1, ymd(2026, 6, 4))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.fetched_symbol.as_deref(), Some("BHP.AX"));
+    }
+
+    /// A failed fetch records the symbol it was *attempted* under: the symbol
+    /// is as much of the provenance of a failure as of a price, and a wrong
+    /// one is the usual reason for the failure.
+    #[tokio::test]
+    async fn db_a_failed_fetch_records_the_symbol_it_was_attempted_under() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "LAAC", "XNYS", "USD").await;
+        let market = load_market(&pool, 1).await.unwrap().unwrap();
+
+        fetch_and_store(&pool, &StubFetcher::default(), &market, &[ymd(2026, 6, 4)])
+            .await
+            .unwrap();
+
+        let row = db_get_one(&pool, 1, ymd(2026, 6, 4))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.status, PriceStatus::Error);
+        assert_eq!(row.fetched_symbol.as_deref(), Some("LAAC"));
+    }
+
+    /// A range straddling a rename is fetched under one symbol per identity,
+    /// and each stored row records *its own* segment's symbol — not one
+    /// symbol for the lot.
+    #[tokio::test]
+    async fn db_each_row_records_its_own_segments_symbol_across_a_rename() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "LAAC", "XNYS", "USD").await;
+        rename_listing(&pool, 1, ymd(2026, 6, 3), "LAR", None).await;
+
+        let market = load_market(&pool, 1).await.unwrap().unwrap();
+        let days = [ymd(2026, 6, 2), ymd(2026, 6, 4)];
+        let mut stub = StubFetcher::default();
+        for &d in &days {
+            stub = stub.with_close(1, d, "2.77", "USD");
+        }
+        fetch_and_store(&pool, &stub, &market, &days).await.unwrap();
+
+        let mut symbols = Vec::new();
+        for &d in &days {
+            symbols.push(
+                db_get_one(&pool, 1, d)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .fetched_symbol,
+            );
+        }
+        assert_eq!(
+            symbols,
+            vec![Some("LAAC".to_string()), Some("LAR".to_string())]
+        );
+    }
+
+    /// The incident this column exists for (TODO "LAC's whole pre-demerger
+    /// price history is LAR's series"): a backfill run with the one-off
+    /// `symbol` override stored 260 rows of another security's series under
+    /// the listing's own id, and nothing recorded which symbol produced them.
+    /// Now every such row names it on its face — and a later re-fetch under
+    /// the ordinary symbol *replaces* the record rather than leaving the row
+    /// asserting a symbol it no longer came from.
+    #[tokio::test]
+    async fn api_backfill_records_the_overriding_symbol_on_every_stored_row() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "LAC", "XNYS", "USD").await;
+        insert_buy(&pool, 1, 1, "100").await;
+        let days = [ymd(2026, 6, 1), ymd(2026, 6, 2)];
+        let mut stub = StubFetcher::default();
+        for &d in &days {
+            stub = stub.with_close(1, d, "10", "USD");
+        }
+        let app = full_router(pool.clone(), stub);
+
+        let (status, bytes) = post_json(
+            &app,
+            "/closing_prices/backfill",
+            serde_json::json!({
+                "listing_id": 1, "from": "2026-06-01", "to": "2026-06-02",
+                "symbol": "LAAC"
+            }),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+        for &d in &days {
+            let row = db_get_one(&pool, 1, d).await.unwrap().unwrap();
+            assert_eq!(
+                row.fetched_symbol.as_deref(),
+                Some("LAAC"),
+                "the row names the symbol that produced it, not the listing's own"
+            );
+            assert_ne!(row.fetched_symbol.as_deref(), Some("LAC"));
+        }
+
+        // Re-fetching without the override moves the record with the figure:
+        // a row must never keep the symbol of a write it is no longer from.
+        let (status, bytes) = post_json(
+            &app,
+            "/closing_prices/fetch",
+            serde_json::json!({ "listing_id": 1, "price_date": "2026-06-01" }),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let row = db_get_one(&pool, 1, days[0]).await.unwrap().unwrap();
+        assert_eq!(row.fetched_symbol.as_deref(), Some("LAC"));
+    }
+
+    /// The recorded symbol is served by `GET /closing_prices` — the column is
+    /// provenance for a person to read, so it has to reach the list the
+    /// Closing Prices screen renders, not just the row.
+    #[tokio::test]
+    async fn api_list_serves_the_symbol_a_row_was_fetched_under() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "LAC", "XNYS", "USD").await;
+        crate::test_support::closing_price(1, ymd(2026, 6, 1))
+            .fetched_symbol("LAAC")
+            .insert(&pool)
+            .await;
+        let app = full_router(pool.clone(), StubFetcher::default());
+
+        let rows: Vec<serde_json::Value> = app.get_json("/closing_prices").await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["fetched_symbol"], "LAAC");
+    }
+
+    /// A hand-entered price is fetched under no symbol at all, so it records
+    /// none — the column is CHECK-paired with the origin (0038), the way
+    /// `sourced_from`/`reason` are paired the other way round.
+    #[tokio::test]
+    async fn api_a_manual_price_records_no_fetched_symbol() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
+        let app = full_router(pool.clone(), StubFetcher::default());
+
+        let resp = app
+            .put(
+                "/closing_prices/1/2026-06-04",
+                &serde_json::json!({
+                    "price": "62.48",
+                    "sourced_from": "asx.com.au closing report",
+                    "reason": "provider serves no candle for the day"
+                }),
+            )
+            .await;
+        assert_eq!(resp.status, StatusCode::NO_CONTENT);
+
+        let row = db_get_one(&pool, 1, ymd(2026, 6, 4))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.origin, PriceOrigin::Manual);
+        assert_eq!(row.fetched_symbol, None);
+    }
+
+    /// The cheap cross-check on top of recording the symbol: whatever symbol
+    /// the provider was asked for, the currency it answers in must be the
+    /// listing's. A mismatch is an errored row for the day — the same
+    /// treatment as any other provider failure, so the wrong figure is never
+    /// stored and the reason is on the record — and the row still names the
+    /// overriding symbol that produced it.
+    #[tokio::test]
+    async fn api_backfill_under_an_override_stores_a_currency_mismatch_as_an_error() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "LAC", "XNYS", "USD").await;
+        insert_buy(&pool, 1, 1, "100").await;
+        // The override reaches a security quoted in another currency — the
+        // clearest evidence a symbol names a different security altogether.
+        let stub = StubFetcher::default().with_close(1, ymd(2026, 6, 1), "10", "AUD");
+        let app = full_router(pool.clone(), stub);
+
+        let (status, bytes) = post_json(
+            &app,
+            "/closing_prices/backfill",
+            serde_json::json!({
+                "listing_id": 1, "from": "2026-06-01", "to": "2026-06-01",
+                "symbol": "LAAC.AX"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let summary: BackfillSummary = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!((summary.fetched_ok, summary.errored), (0, 1));
+
+        let row = db_get_one(&pool, 1, ymd(2026, 6, 1))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.status, PriceStatus::Error);
+        assert_eq!(row.price, None, "no figure is stored from a foreign series");
+        let msg = row.error.unwrap();
+        assert!(msg.contains("currency mismatch"), "{msg}");
+        assert!(msg.contains("AUD") && msg.contains("USD"), "{msg}");
+        assert_eq!(row.fetched_symbol.as_deref(), Some("LAAC.AX"));
     }
 
     #[tokio::test]

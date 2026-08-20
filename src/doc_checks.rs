@@ -1258,6 +1258,41 @@ fn audited_closing_prices_documented() {
     assert!(README_MD.contains("hand-entered closing prices"));
 }
 
+/// Docs-sync pin for the fetched-symbol provenance (migration 0038, the
+/// `symbol`-override incident): the API states that every fetched row records
+/// the symbol it was fetched under and why it is recorded *always* rather than
+/// only on a difference, that a manual row and a pre-0038 row carry none, and
+/// what the currency cross-check does and does not catch; the schema documents
+/// the column; and the residual gap — nothing verifies the symbol names the
+/// same security — is a stated Known limitation rather than an implied
+/// guarantee.
+#[test]
+fn fetched_symbol_provenance_documented() {
+    let closing_prices = API_MD
+        .split("## Closing prices")
+        .nth(1)
+        .expect("docs/API.md has a Closing prices section")
+        .split("\n## ")
+        .next()
+        .expect("split always yields at least one part");
+    assert!(
+        closing_prices.contains("**Every fetched row records the symbol it was fetched under**")
+    );
+    assert!(closing_prices.contains("recorded **always**, not only when it differs"));
+    assert!(closing_prices.contains(
+        "for any row stored **before** the column existed (unrecorded, and not recoverable after \
+         the fact"
+    ));
+    assert!(closing_prices.contains("stored as an **errored row** naming both currencies"));
+    assert!(closing_prices.contains(
+        "it does not catch one that reached another security quoted in the same currency"
+    ));
+    assert!(SCHEMA_MD.contains("fetched_symbol TEXT (nullable, 0038)"));
+    assert!(
+        API_MD.contains("**Nothing verifies that a fetched symbol names the *same security***")
+    );
+}
+
 /// Docs-sync pin for the contemporaneous price basis (SCENARIOS Q-14,
 /// 2026-08-20): the API states what basis a stored price is in, that it is
 /// normalised on entry and re-derived when a re-basing action is recorded,

@@ -44,11 +44,12 @@ against Evan's real LAC history — and that there was no "unpriced *before*" co
 names what it omits.
 
 **Three sections are open below.** The audit-trail question that closing a fifth finding (Q-05/Q-08)
-raised is awaiting Evan's decision. The LAC price-history section is open on three items — the
-`symbol` override records nothing, nothing detects two listings sharing a byte-identical series, and
-the demerger stated close must wait for the borrowed rows to be cleared on the deployed database
-(clearing them is now *possible*: the `ok`-row delete rule was relaxed inside an `unpriced_before`
-span 2026-08-21, with a bulk form). And the production-cleanup runbook for those rows is recorded
+raised is awaiting Evan's decision. The LAC price-history section is open on two items — nothing
+detects two listings sharing a byte-identical series, and the demerger stated close must wait for
+the borrowed rows to be cleared on the deployed database (clearing them is now *possible*: the
+`ok`-row delete rule was relaxed inside an `unpriced_before` span 2026-08-21, with a bulk form; and
+since 2026-08-21 every fetched row records the provider symbol it was fetched under, migration
+0038, so an overridden backfill can no longer pass for an ordinary one). And the production-cleanup runbook for those rows is recorded
 last: it is a procedure to run against the deployed database, not code to write here, and it names
 the repo work it still waits on — now only the host upgrade.
 
@@ -141,12 +142,55 @@ A$19,869.26 — a 44% unrealised loss — where old Lithium Americas closed near
     assertions added to `a_demerger_with_provider_adjusted_prices_and_no_stated_close_is_reported`,
     a manual row added to `a_demerger_with_no_adjusted_prices_is_not_reported`, and the banner
     bundle assertions in `web.rs`.
-- [ ] **The `symbol` override records nothing.** It is documented as "a one-off override for this
+- [x] **The `symbol` override records nothing.** It is documented as "a one-off override for this
   fetch only … for a provider spelling the rename chain doesn't record", and the stored rows "land
   under the listing's own `listing_id` either way". Nothing checks that the symbol names the *same
   security*, and — the fixable part — nothing keeps the symbol a row was fetched under, so an
   overridden fetch is indistinguishable from an ordinary one afterwards. Recording it is small and
   is the first thing to do; a returned-currency check against the listing's is a cheap second.
+  - Closed 2026-08-21 with `closing_prices.fetched_symbol` (migration **0038**), the provider symbol
+    each fetched row was actually fetched under. Two decisions worth stating. **Recorded always, not
+    only when it differs** from the symbol the rename chain derives: the only-on-a-difference design
+    makes NULL mean two things at once — "ordinary fetch" and "not recorded" — which *is* the
+    ambiguity the incident consisted of, and the derived symbol isn't a fixed predicate to compare
+    against anyway (a rename recorded later re-derives it). **Existing rows stay NULL**: the symbol
+    a stored row was fetched under is recoverable from nothing the database holds — for the 260 LAC
+    rows it is not even the listing's own ticker — so back-filling it from the rename chain would
+    have invented the very fact the column exists to record. The migration comment, `docs/SCHEMA.md`
+    and `docs/API.md` all say so. The value comes from the fetcher itself (a new
+    `PriceFetcher::symbol`, the counterpart of `source`) rather than from `yahoo_symbol` beside it,
+    so the symbol and the `source` it is stored next to are always in one namespace. Errored rows
+    carry it too — a wrong symbol is the usual *cause* of the failure — and `db_store`'s upsert
+    moves it with the figure, so a re-fetch under the right symbol cannot leave a row asserting the
+    wrong one. A manual row carries none (nothing was fetched), CHECK-paired with `origin` the way
+    0020 paired `sourced_from`/`reason` the other way round; the converse cannot be a CHECK, because
+    a fetched row is legitimately NULL both for pre-0038 rows and for a fetch whose symbol could not
+    be resolved at all. `ALTER TABLE ADD COLUMN`, not a fourth rebuild of this table (0020/0021/0034
+    each rebuilt it) — the CHECK is expressible as a column constraint — but both
+    `closing_prices_row_history_*` triggers were still dropped and re-created with the new column,
+    and the staleness trigger is untouched (ADD COLUMN leaves triggers alone; the column feeds no
+    valuation). The Closing Prices screen shows it as "Fetched under symbol".
+  - **The "cheap second" was already there, and this verified rather than built it**: `fetch_and_store`
+    has cross-checked the provider's returned currency against the listing's since the first price
+    commit (`781b8cf`), and a mismatch is an **errored row for that date**, not a 422 — the same
+    treatment as any other provider failure for a day, so the wrong figure is never stored and the
+    reason is on the record. That is the right shape and was left as is; what was missing was a test
+    on the *override* path, now added. Its limit is stated plainly in `docs/API.md`'s Known
+    limitations: the currency check catches a symbol that reached another **market**, never one that
+    reached another **security quoted in the same currency** — which is exactly the LAC/LAR case, and
+    is why the symbol is recorded rather than merely checked. Detecting *that* is the next item in
+    this section, not this one.
+  - Tests: `entities::closing_price::tests::db_a_fetched_row_records_the_symbol_it_was_fetched_under`,
+    `…::db_a_failed_fetch_records_the_symbol_it_was_attempted_under`,
+    `…::db_each_row_records_its_own_segments_symbol_across_a_rename`,
+    `…::api_backfill_records_the_overriding_symbol_on_every_stored_row` (the incident's own shape,
+    including the re-fetch that replaces the record), `…::api_list_serves_the_symbol_a_row_was_fetched_under`,
+    `…::api_a_manual_price_records_no_fetched_symbol`,
+    `…::api_backfill_under_an_override_stores_a_currency_mismatch_as_an_error`,
+    `infra::db::tests::migration_0038_leaves_existing_rows_unrecorded_and_pairs_the_symbol_with_the_origin`
+    (existing rows unrecorded, the CHECK both ways, both audit triggers back with the new column, the
+    staleness trigger still there), `doc_checks::fetched_symbol_provenance_documented` and
+    `web::tests::closing_prices_ui_present`.
 - [ ] **Nothing detects the result.** 635 consecutive byte-identical closes across two listings is
   not something two real securities do. A `reports::health` check in the `duplicate_*` family is the
   obvious shape, and it is the only signal this leaves for the 260 rows that carry no provenance.

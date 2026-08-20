@@ -350,6 +350,11 @@ mod tests {
         assert!(js.contains("price_as_observed"));
         assert!(js.contains("As served by provider"));
         assert!(js.contains("price-rebase"));
+        // Each fetched row names the provider symbol it was fetched under, so
+        // a backfill run with a one-off `symbol` override is visible on the
+        // screen rather than indistinguishable from an ordinary fetch (0038).
+        assert!(js.contains("fetched_symbol"));
+        assert!(js.contains("Fetched under symbol"));
     }
 
     /// A whole superseded span is cleared from this screen in one request:
