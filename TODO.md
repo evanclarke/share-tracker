@@ -24,14 +24,16 @@ default `from` to the first-ever-held date), Q-07 (a back-dated Buy triggers no 
 shows up as `unpriced_days` in health, as documented), Q-08 (**every** fact write stales the right
 dates — trade insert, parcel allocation via a Sell, income, AMMA statement by its
 `tax_year_end_date`, corporate action, a manual price replacing another, an
-`rba_fx_rates` correction from the first of its month, and the `listings` `amit` flip — with one
-table missing, below), Q-10/Q-11 (period performance refuses `from == to` and `from > to` with the
-same message, and names the endpoint date it has no stored price for), Q-12/Q-13 (live valuation of
+`rba_fx_rates` correction from the first of its month, and the `listings` `amit` flip — bar the one
+table that was missing, `exchange_holidays`, since given its own trigger set by migration 0033),
+Q-10/Q-11 (period performance refuses `from == to` and `from > to` with the same message, and names
+the endpoint date it has no stored price for), Q-12/Q-13 (live valuation of
 two holdings where one listing's quote fails: the failing row is left unvalued carrying
 `price_unavailable` while the other still values, converts at the quote-month rate and flags
 `fx_provisional` when it falls back), and Q-15 (a rename leaves the stored `performance` snapshot's
 `ticker` label untouched and unstaled, and regeneration picks the new one up — the documented
-display-only drift). The four findings below are open.
+display-only drift). Three of those findings are open below, alongside the audit-trail question that
+closing a fourth (Q-05/Q-08) raised.
 
 ---
 
@@ -102,40 +104,39 @@ byte-identical to the provider — both accepted.
   recorded split or bonus issue with stored prices spanning it — no re-basing, the operator prices
   the affected days by hand.
 
-## SCENARIOS Q-05/Q-08: an exchange-holiday write silently re-values every stored snapshot on that date
+## `exchange_holidays` is a user-editable table that changes a reported figure, but is not audited
 
-`reports::valuation::stored_valuations` values each listing at
-`market.latest_trading_day_on_or_before(date)`, which reads the exchange's seeded holiday calendar.
-`exchange_holidays` is the **one** table feeding a snapshotted report that carries no
-`*_stale_snapshots_*` trigger pair — every other leg of Q-08 was verified working. So adding or
-removing a holiday changes what a stored snapshot *should* say without marking it stale, and the
-daily job only regenerates stale/provisional dates in its window: the wrong figure stands
-indefinitely, flagged as current.
+Raised 2026-08-20 while closing SCENARIOS Q-05/Q-08, which falsified the ground the exclusion rested
+on. `docs/SCHEMA.md` excluded `exchanges` and `exchange_holidays` from the audit trail as "tables
+that only influence values persisted onto trades at write time". That is true of `exchanges` (its
+`settlement_days` is consumed when a trade is written; `timezone`/`close_time` decide only which
+dates are *generable*, never what a stored snapshot says) but not of the holiday calendar:
+`reports::valuation::stored_valuations` reads it **live** on every snapshot generation, which is why
+migration 0033 had to give it staleness triggers.
 
-Reproduced (two AUD/USD holdings, snapshots generated 2025-06-02..06-06 with 2025-06-05 priced
-distinctly):
+The audited set's stated criterion (scope decision 2026-07-14) is "every user-entered table whose
+values feed a calculation". `exchange_holidays` now visibly meets it, and this is the same shape as
+the two tables that already joined on a falsified premise: `closing_prices` in 0021 (once 0020 made
+a price hand-enterable) and `rba_fx_rates` in 0031 (once `PUT /rba_fx_rates/:id` made a rate
+correctable). Both were "reference data" until a write path existed; this one has had `PUT`/`DELETE`
+from the start.
 
-- `PUT /exchange_holidays/XASX/2025-06-05` → `204`. Every snapshot stays `stale: false`, and
-  `GET /report_snapshots/series` keeps reporting `2025-06-05 = A$5,073.08`.
-- A manual `POST /report_snapshots/regenerate_all` over the same range answers **A$4,443.08** — the
-  prior close, correctly — a 12.4% move on a figure nothing had flagged.
-- The reverse direction is worse in kind: deleting a seeded holiday makes that date a trading day, so
-  the stored snapshot's valuation day no longer exists as a priced day at all. Deleting
-  `XASX/2025-06-09` left the series unchanged and unstaled, while `regenerate_all` for that date
-  answers `blocked: "AAA: no stored price for 2025-06-09 — backfill it; BBB: …"`.
-
-- [ ] Add the `exchange_holidays` insert/update/delete staleness trigger set in a migration, keyed on
-  `holiday_date` (the `listings_stale_snapshots_update` precedent from 0030 stales from the date
-  rather than trying to narrow by exchange inside a trigger).
-- [ ] **The docs state the opposite, and the reasoning is what needs correcting, not just the
-  wording.** `docs/API.md`'s *A lodged financial year can be restated with nothing marking it*
-  limitation says of `DELETE /exchange_holidays/:mic/:date`: "Stored `settlement_date` values are
-  untouched, and no CGT figure reads the column (only the settlement-coverage report and the annual
-  tax report's display), so that one is a record field, not a tax figure." That is true of
-  `trades.settlement_date` but not of the calendar itself — valuation reads it live, every day.
-  `docs/SCHEMA.md` rests the same table's exclusion from the audit trail on the same claim
-  ("tables that only influence values persisted onto trades at write time (`exchanges`,
-  `exchange_holidays`)"), which is worth re-deciding in the same pass.
+- [ ] Decide whether `exchange_holidays` joins the audited set, and implement it if so. The case
+  for: it is hand-editable, there is no import to re-derive it from (the seed is a one-off in
+  0001_schema.sql), a deleted holiday is otherwise unrecoverable, and a wrong holiday silently
+  changes both recomputed settlement dates and every snapshot valuation from that date. The case
+  against: it is a published exchange calendar rather than a taxpayer fact, and the 0033 staleness
+  triggers already surface the *effect* of a change on the reports even though they do not retain
+  what was changed. `exchanges` should be decided in the same pass (probably staying out, per the
+  reasoning above).
+- [ ] If audited, it is the four-place change the rule names: a `row_history` rebuild to extend the
+  `table_name` CHECK (the rename pattern of 0018/0021/0027/0031, `PRAGMA legacy_alter_table = ON`),
+  the `exchange_holidays_row_history_update`/`_delete` trigger pair, an entry in
+  `reports::row_history::AUDITED_TABLES`, and one in `config.js`'s table picker — three of which a
+  test pins together. Note the composite `(mic, holiday_date)` key: `row_history.row_id` is an
+  INTEGER, so the table would need the same AUTOINCREMENT surrogate id `closing_prices` was rebuilt
+  with in 0021 (keeping the natural key as a `UNIQUE`), which makes this the larger of the two
+  precedents, not the smaller.
 
 ## SCENARIOS Q-09: nothing pins the snapshot-staleness trigger set, and it has now been missed three times
 

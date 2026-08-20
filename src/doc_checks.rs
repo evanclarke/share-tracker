@@ -1544,7 +1544,9 @@ fn rollover_assumed_scope_cut_documented() {
 /// this is a documentation-only requirement, pinned here: the Known
 /// limitations entry, the two properties that make it survivable (auditable
 /// via row history, snapshots don't cover tax reports), the mitigation, the
-/// A-40 exchange-holiday footnote, and the README's own scope-cuts summary.
+/// A-40 exchange-holiday footnote — including its Q-05/Q-08 correction, that
+/// the calendar is a live valuation input and a holiday write now stales the
+/// snapshots it re-values — and the README's own scope-cuts summary.
 #[test]
 fn closed_year_restatement_documented() {
     let limitations = known_limitations();
@@ -1564,6 +1566,10 @@ fn closed_year_restatement_documented() {
     assert!(limitations.contains("save the [annual tax report](#annual-tax-report) as a PDF"));
     assert!(limitations.contains("[`DELETE /exchange_holidays/:mic/:date`](#exchange-holidays)"));
     assert!(limitations.contains("a record field, not a tax figure"));
+    // …but only on the trade side: the calendar itself is read live by
+    // valuation, which the footnote used to deny (SCENARIOS Q-05/Q-08).
+    assert!(limitations.contains("it was once described here as one, wrongly"));
+    assert!(limitations.contains("marks those snapshots stale in the same transaction"));
     assert!(README_MD.contains("**no financial year is ever closed**"));
 }
 

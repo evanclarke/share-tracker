@@ -441,6 +441,84 @@ mod tests {
         assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
     }
 
+    /// A holiday write decides which day every held listing is *valued* at —
+    /// `reports::valuation::stored_valuations` reads this calendar live on
+    /// every snapshot generation — so an insert, a re-dating update and a
+    /// delete each mark the snapshots dated on or after the holiday stale
+    /// (migration 0033, SCENARIOS Q-05/Q-08). A name-only edit changes no
+    /// stored figure and deliberately fires nothing: staling years of
+    /// snapshots for a "Queen's Birthday" → "King's Birthday" correction
+    /// would teach a reader to ignore the flag.
+    #[tokio::test]
+    async fn a_holiday_write_stales_snapshots_from_its_date() {
+        let pool = test_pool().await;
+        for date in ["2026-06-03", "2026-06-05", "2026-06-09"] {
+            sqlx::query(
+                "INSERT INTO report_snapshots \
+                 (report, snapshot_date, generated_at, rows_json, stale) \
+                 VALUES ('portfolio_overview', ?, '2026-06-10T00:00:00Z', '[]', 0)",
+            )
+            .bind(date)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let unstale = |pool: SqlitePool| async move {
+            sqlx::query("UPDATE report_snapshots SET stale = 0")
+                .execute(&pool)
+                .await
+                .unwrap();
+        };
+        let stale = |pool: SqlitePool| async move {
+            sqlx::query_as::<_, (String, i64)>(
+                "SELECT snapshot_date, stale FROM report_snapshots ORDER BY snapshot_date",
+            )
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+        };
+        let flags = |d3: i64, d5: i64, d9: i64| {
+            vec![
+                ("2026-06-03".to_string(), d3),
+                ("2026-06-05".to_string(), d5),
+                ("2026-06-09".to_string(), d9),
+            ]
+        };
+
+        // INSERT: the Friday turns out to have been a full closure, so every
+        // snapshot from it on was valued on a day the market never traded.
+        let mut holiday = ExchangeHoliday {
+            mic: "XASX".to_string(),
+            holiday_date: ymd(2026, 6, 5),
+            name: "Test Closure".to_string(),
+        };
+        db_upsert(&pool, &holiday).await.unwrap();
+        assert_eq!(stale(pool.clone()).await, flags(0, 1, 1));
+
+        // A name-only edit changes no figure.
+        unstale(pool.clone()).await;
+        holiday.name = "Test Closure (renamed)".to_string();
+        db_upsert(&pool, &holiday).await.unwrap();
+        assert_eq!(stale(pool.clone()).await, flags(0, 0, 0));
+
+        // UPDATE: re-dating one in place stales from the earlier of the two
+        // dates — both days' valuations move. (Not reachable through the API,
+        // which re-dates by delete + insert; the trigger is what the schema's
+        // rule rests on.)
+        unstale(pool.clone()).await;
+        sqlx::query("UPDATE exchange_holidays SET holiday_date = '2026-06-04' WHERE mic = 'XASX' AND holiday_date = '2026-06-05'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(stale(pool.clone()).await, flags(0, 1, 1));
+
+        // DELETE: removing one makes the date a trading day again, which is
+        // just as much a re-valuation.
+        unstale(pool.clone()).await;
+        assert!(db_delete(&pool, "XASX", ymd(2026, 6, 4)).await.unwrap());
+        assert_eq!(stale(pool.clone()).await, flags(0, 1, 1));
+    }
+
     #[tokio::test]
     async fn api_delete_existing_then_404() {
         let pool = test_pool().await;

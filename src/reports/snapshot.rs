@@ -1107,6 +1107,80 @@ mod tests {
         assert_eq!(stale_flags(&pool, ymd(2026, 6, 5)).await, vec![true; 3]);
     }
 
+    /// SCENARIOS Q-05/Q-08 end to end: the exchange holiday calendar is not a
+    /// write-time input to anything — `valuation::stored_valuations` reads it
+    /// **live**, valuing each holding at its nearest trading day on or before
+    /// the snapshot date — so a holiday write re-values stored snapshots. Both
+    /// directions are covered by the 0033 triggers: seeding one moves the
+    /// valuation back to the prior close (12.4% here), and deleting a seeded
+    /// one makes the date a trading day whose price was never collected, so
+    /// the stored figure rests on a valuation day that no longer exists.
+    /// Before 0033 both stood indefinitely as `stale: false`.
+    #[tokio::test]
+    async fn db_an_exchange_holiday_write_stales_the_snapshots_it_re_values() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BHP", Some("XASX"), "AUD").await;
+        insert_buy(&pool, 1, 1, ymd(2024, 1, 15), "100", "10", "AUD").await;
+        store_price(&pool, 1, ymd(2026, 6, 4), "44.4308").await; // Thursday
+        store_price(&pool, 1, ymd(2026, 6, 5), "50.7308").await; // Friday
+        let now = friday_evening_sydney();
+        generate(&pool, ymd(2026, 6, 4), now).await.unwrap();
+        generate(&pool, ymd(2026, 6, 5), now).await.unwrap();
+        let series = db_series(&pool).await.unwrap();
+        assert_eq!(series[1].market_value, "5073.08".parse().unwrap());
+        assert!(!series[1].stale);
+
+        // The ASX turns out to have been closed that Friday.
+        ApiClient::full(&pool)
+            .put(
+                "/exchange_holidays/XASX/2026-06-05",
+                &serde_json::json!({ "name": "Test Closure" }),
+            )
+            .await
+            .expect_status(StatusCode::NO_CONTENT);
+        assert_eq!(stale_flags(&pool, ymd(2026, 6, 5)).await, vec![true; 3]);
+        assert_eq!(
+            stale_flags(&pool, ymd(2026, 6, 4)).await,
+            vec![false; 3],
+            "an earlier snapshot can never have been valued at the holiday"
+        );
+
+        // Regenerating values the Friday at Thursday's close instead.
+        generate(&pool, ymd(2026, 6, 5), now).await.unwrap();
+        let series = db_series(&pool).await.unwrap();
+        assert_eq!(series[1].market_value, "4443.08".parse().unwrap());
+        assert!(!series[1].stale);
+
+        // The other direction. The following Monday is a seeded ASX holiday
+        // (King's Birthday), so its snapshot is valued at the last open day.
+        let next_friday_evening = utc(2026, 6, 12, 8, 0);
+        generate(&pool, ymd(2026, 6, 8), next_friday_evening)
+            .await
+            .unwrap();
+        assert_eq!(
+            db_series(&pool).await.unwrap()[2].market_value,
+            "4443.08".parse::<Decimal>().unwrap()
+        );
+
+        // Removing it makes 8 June a trading day — one no price was ever
+        // collected for, so the stored figure now rests on a valuation day
+        // that does not exist. The snapshot is staled, and its regeneration
+        // is blocked until the price is backfilled.
+        ApiClient::full(&pool)
+            .delete("/exchange_holidays/XASX/2026-06-08")
+            .await
+            .expect_status(StatusCode::NO_CONTENT);
+        assert_eq!(stale_flags(&pool, ymd(2026, 6, 8)).await, vec![true; 3]);
+        let err = generate(&pool, ymd(2026, 6, 8), next_friday_evening)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, GenerateError::Unprocessable(ref msg)
+                if msg.contains("no stored price for 2026-06-08")),
+            "{err}"
+        );
+    }
+
     /// A day whose price fetch failed has no trustworthy snapshot: generation
     /// refuses (the job fails, naming the listing), nothing is stored —
     /// missing, not stale — and the day becomes generable once the price
