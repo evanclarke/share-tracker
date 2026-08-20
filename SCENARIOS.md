@@ -79,7 +79,7 @@ behind or became a recorded finding.
 | M. Foreign currency and FX | 16 | 2026-08-19 | 8 raised, all closed — see below |
 | N. Holding accounts and transfers | 12 | 2026-08-19 | 5 raised, all closed — see below |
 | O. Net capital gain, losses, and carry-forward | 17 | 2026-08-19 (`e1f1f70`) | 3 raised, all closed — see below |
-| P. Tax summary, annual tax report, exports | 12 | — | — |
+| P. Tax summary, annual tax report, exports | 12 | 2026-08-20 (`cb36977`) | 5 raised, all closed — see below |
 | Q. Prices, valuation, and snapshots | 15 | — | — |
 | R. Listing identity and renames | 10 | — | — |
 | S. Settlement, holidays, and dates | 10 | — | — |
@@ -791,6 +791,39 @@ naming its scenario ids:
 | A carried-forward capital loss is invisible in a year with no CGT activity of its own | O-03, O-04, O-12 | `319b159` |
 | The pre-sale what-if and the parcel optimiser model a disposal dated before the parcels existed | O-14, O-15, O-16 | `1822ba0` |
 | The what-if's over-request refusal does not name the account it was scoped to | O-16 | `e31a2cc` |
+
+### Section P findings
+
+Seven of the twelve came back correct outright, and the three that carry the most arithmetic were
+among them. `P-01`/`P-07` built a year holding franked + unfranked + CFI + LIC + TFN dividends, a
+trust distribution, a foreign company's dividend in USD, a full AMMA statement, Australian and
+foreign interest, an ESS statement with its $1,000 taxed-upfront reduction, and an expense — and
+every line reconciled across the three surfaces the scenario names: the tax summary's totals, the
+annual tax report's per-record income tables, and the CSV export, field for field including the
+grossed-up and apportioned figures. `P-03` put income on 30 June and 1 July and each landed in its
+own year. `P-05`'s AMIT was held only part of the year and sold out before year end and was still
+asked for its AMMA statement, while a year it was not held stayed silent. `P-06` ran a demerger, an
+off-market buy-back and a rights sale through one year: the buy-back's capital proceeds came out as
+market value less the dividend with the dividend on its own income row, the rights sale was its own
+disposal at a nil cost base, and the demerger's closing Sell was correctly *not* a disposal. `P-09`
+back-dated a return of capital after generating the document and the printed gain moved from $500 to
+$600 with the reduction itemised beneath the cost base. `P-10`'s 300-row disposal schedule returned
+all 300 rows, and the print renderer has no pager to truncate them. `P-11` resolved each ticker as at
+its own taxable event's date across a rename.
+
+The five findings the pass raised are all closed. Note what they had in common with section O's:
+**not one was an arithmetic error**. Two were about a surface that omits what it holds, one about a
+label naming the wrong question on the return, one about an assumption left unstated on the surface
+that acts on it, and one about an input nobody validated. Each is archived in
+[`DONE/reviews.md`](DONE/reviews.md) under a heading naming its scenario ids.
+
+| Finding | Scenarios | Fixed by |
+| --- | --- | --- |
+| The annual tax report's year picker omits years the report has content for | P-02, P-03, P-04 | `f6627e8` |
+| A converted fund's pre-AMIT income is totalled but has no rows behind it, and its credits are never tested | P-01, P-07 | `2b886ed` |
+| Every investment-expense deduction is exported at `D7 / D8`, including the ones the ATO routes elsewhere | P-08 | `9f23346` |
+| The parcel optimiser ranks strategies on the 50% discount without stating the taxpayer basis | P-12 | `8c4e681` |
+| `POST /reports/tax-report` panics on an out-of-range `tax_year` instead of refusing it | P-02 | `e684f9c` |
 
 ## A. Deletion and mutation ripple effects
 
