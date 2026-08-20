@@ -1631,6 +1631,60 @@ fn amit_return_of_capital_refusal_documented() {
     );
 }
 
+/// Docs-sync pin for SCENARIOS P-08: an investment-expense deduction's
+/// destination question. The wrong label was previously neither corrected nor
+/// disclosed — `13X`/`13Y` appeared nowhere in the docs at all — so this pins
+/// the corrected routing in every place a user could read it: the tax
+/// summary's deduction paragraph and CSV label table, the annual tax report's
+/// `income` bullet, the README feature, and the mirrored ATO reference that
+/// carries the instruction text behind each label.
+#[test]
+fn investment_expense_deduction_destinations_documented() {
+    const ATO_LABELS: &str = include_str!("../docs/ato/tax-return-labels-2026.md");
+    const ATO_OVERVIEW: &str = include_str!("../docs/ato/OVERVIEW.md");
+    // The rule, and each destination with its label.
+    assert!(
+        API_MD.contains("**The same deductions are also cut by the question each is claimed at**")
+    );
+    for line in [
+        "| `deductions_trust_distributions` | `13Y` |",
+        "| `deductions_foreign_income` | `20M` |",
+        "| `deductions_foreign_debt` | `D15` |",
+        "| `deductions_dividend_and_interest` | `D7 / D8` |",
+    ] {
+        assert!(API_MD.contains(line), "API.md documents {line}");
+    }
+    // What the routing reads, and the two cases it cannot decide.
+    assert!(
+        API_MD.contains(
+            "The destination is derived from the **listing the expense is attributed to**"
+        )
+    );
+    assert!(API_MD.contains("Two cases are **not decidable** from what is recorded"));
+    assert!(API_MD.contains("**portfolio-wide expense**"));
+    assert!(API_MD.contains("**AUD listing with no income recorded**"));
+    // The two cuts are of one total — no double counting.
+    assert!(API_MD.contains(
+        "`deductions_total` is the sum of the six per-type lines *or* of the four destination \
+         lines, never of both"
+    ));
+    // The annual tax report prints each row's destination.
+    assert!(API_MD.contains("`TrustDistributions`/`13Y`, `ForeignIncome`/`20M`, `ForeignDebt`/`D15`, or `DividendAndInterest`/`D7 / D8`"));
+    assert!(
+        README_MD.contains(
+            "The same total is also cut by **the question each deduction is claimed at**"
+        )
+    );
+    // The ATO instruction text each label rests on, mirrored and indexed.
+    assert!(ATO_LABELS.contains("## Where an investment-expense deduction goes"));
+    assert!(
+        ATO_LABELS.contains("Write at question 13 – label **Y** the total of other deductions")
+    );
+    assert!(ATO_LABELS.contains("**excluding any debt deductions**"));
+    assert!(ATO_LABELS.contains("D15 (label J)"));
+    assert!(ATO_OVERVIEW.contains("*Where an investment-expense deduction goes* section"));
+}
+
 /// Docs-sync pin for SCENARIOS F-23: the AMIT status is dated, so a fund that
 /// converted part-way through a holding keeps its earlier years as ordinary
 /// trust income. The Listings section states the column, its 1 July rule and

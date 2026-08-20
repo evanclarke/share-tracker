@@ -147,12 +147,12 @@ section"**:
 and `docs/ato/tax-return-labels-2026.md` closes with "Expenses of earning trust/partnership
 distributions belong at 13X/13Y, not D7/D8", carrying the 13X/13Y row in its question-13 table.
 
-- [ ] An `investment_expenses` row already carries an optional `listing_id`, so the destination
+- [x] An `investment_expenses` row already carries an optional `listing_id`, so the destination
   question is derivable: a fee on a trust or AMIT listing belongs at **13Y**, a fee on a
   foreign-currency / foreign-source-dividend holding at question **20**, everything else at D7/D8.
   Nothing anywhere says so — `docs/API.md` and `README.md` contain no occurrence of `13X` or `13Y` at
   all, so the wrong label is neither corrected nor disclosed.
-- [ ] This is Evan's live case, not a hypothetical: a management fee on **VDHG/HNDQ** (both AMITs)
+- [x] This is Evan's live case, not a hypothetical: a management fee on **VDHG/HNDQ** (both AMITs)
   exports at D8, and a fee attributable to **ICE** (USD, foreign-source) does too.
 
 The total deduction is unaffected, so nothing here is a wrong *figure* — it is a wrong destination on
@@ -165,6 +165,35 @@ derived from its listing — trust or AMIT ⇒ **13Y**, a foreign-source-dividen
 since the CSV carries one label per *column*, not per row. That reaches `TaxYearSummary`, `CSV_HEADER`
 / `CSV_ATO_LABELS`, the annual tax report (which reads the same label mapping), `docs/API.md`'s
 column table, and `config.js`.
+
+**Done 2026-08-20.** The ATO was re-checked first, and it splits the foreign case in two the
+write-up didn't: question 20's worksheet nets an expense of earning foreign income into **20M**
+(rows r − s) but *expressly excludes debt deductions*, which go to **D15** (label J) instead — while
+question 13 Part C *does* take debt deductions at X/Y, so interest on money borrowed to buy units in
+a trust follows the trust to 13Y rather than staying at D7. The instruction text for all three (and
+D15's own page) is quoted in `docs/ato/tax-return-labels-2026.md`'s new *Where an investment-expense
+deduction goes* section, indexed in `docs/ato/OVERVIEW.md`. `domain::deduction_destination` is the
+one routing rule both readers call: a listing flagged `amit` (an AMIT and the ordinary trust it was
+before its `amit_from` year both report at question 13 — read through `listing::amit_in_tax_year`,
+not a flat `l.amit`) or carrying any `trust_income` row is a trust; else any `foreign_source_income`
+row, or a non-AUD listing with no income recorded at all, is foreign; else D7/D8. A portfolio-wide
+expense and an AUD listing with no income recorded are genuinely undecidable and take the D7/D8
+default, stated in the module doc, `docs/API.md`, the report description and the printed footnote.
+`TaxYearSummary` gains four destination lines (`deductions_trust_distributions` → 13Y,
+`deductions_foreign_income` → 20M, `deductions_foreign_debt` → D15,
+`deductions_dividend_and_interest` → D7/D8) beside the six per-*kind* lines, which are a different
+cut of the same total and so lost their (wrong) `D7 / D8` label rather than being dropped;
+`deductions_total` is the sum of either group, never both. The annual tax report prints each
+deduction's `destination` + `ato_label`. Tests:
+`tax_summary::tests::db_deductions_are_cut_by_the_question_each_is_claimed_at`,
+`db_trust_loan_interest_reports_at_13y_not_d15`,
+`db_a_converted_funds_pre_amit_year_deduction_still_reports_at_13y`,
+`db_a_holding_with_no_income_recorded_routes_on_its_currency`,
+`api_export_labels_each_deduction_destination_with_its_question`,
+`tax_report::tests::deduction_rows_print_the_question_each_is_claimed_at`,
+`deduction_destination::tests::*`, and `doc_checks::investment_expense_deduction_destinations_documented`.
+No `docs/ato/` worked example became representable (the question 13/20 instructions carry no
+numbers for this), so nothing was added to `ato_examples.rs`.
 
 ## SCENARIOS P-12: the parcel optimiser ranks strategies on the 50% discount without stating the taxpayer basis
 

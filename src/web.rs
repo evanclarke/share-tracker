@@ -927,6 +927,17 @@ mod tests {
         assert!(js.contains("gross_assessable_investment_income"));
         assert!(js.contains("deductions_total"));
         assert!(js.contains("net_assessable_investment_income"));
+        // The per-destination deduction lines (SCENARIOS P-08) format as money
+        // too, and carry the question each is claimed at in the heading — the
+        // label is the whole point of the column.
+        assert!(js.contains(
+            "deductions_trust_distributions: 'Deductions, trust distributions 13Y (AUD)'"
+        ));
+        assert!(js.contains("deductions_foreign_income: 'Deductions, foreign income 20M (AUD)'"));
+        assert!(js.contains("deductions_foreign_debt: 'Deductions, foreign debt D15 (AUD)'"));
+        assert!(js.contains(
+            "deductions_dividend_and_interest: 'Deductions, dividends/interest D7-D8 (AUD)'"
+        ));
     }
 
     /// A multi-year expense has to be keyed one row per year (SCENARIOS H-08),
@@ -1308,8 +1319,16 @@ mod tests {
         // trace of the attribution, which is exactly what a rename or demerger
         // makes irrecoverable.
         assert!(js.contains(
-            "genericTable(inc.deductions, ['date_incurred', 'expense_type', 'ticker', 'amount_aud', 'description'])"
+            "genericTable(inc.deductions, ['date_incurred', 'expense_type', 'ticker', 'amount_aud', 'ato_label', 'description'])"
         ));
+        // …and where each deduction goes on the return (SCENARIOS P-08): the
+        // amount alone doesn't say which question it is claimed at, and the
+        // destinations span four of them.
+        assert!(js.contains("ato_label: 'ATO label'"));
+        assert!(js.contains("deductionDestinationFootnote(inc)"));
+        for label in ["13Y", "20M", "D15", "D7/D8"] {
+            assert!(js.contains(label), "the deductions footnote names {label}");
+        }
     }
 
     /// The AMMA component breakdown is rendered transposed (components down

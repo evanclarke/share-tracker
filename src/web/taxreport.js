@@ -305,6 +305,25 @@ function essReductionFootnote(lines) {
     + 'reported unreduced.');
 }
 
+// Where each deduction goes on the return. The deductible amount is one
+// figure, but the question it is claimed at follows the income it was earning:
+// a trust/AMIT distribution puts it at 13Y (interest on money borrowed to buy
+// the units included), foreign-source income nets it into 20M — with a debt
+// deduction moved to D15, which question 20's worksheet excludes — and
+// everything else is the ordinary D7/D8 case.
+function deductionDestinationFootnote(inc) {
+  if (!inc.deductions || inc.deductions.length === 0) return null;
+  return el('p', { class: 'hint' },
+    'The ATO label column is where each deduction is claimed: 13Y for expenses of earning a trust '
+    + 'or AMIT distribution (interest on money borrowed to buy the units included \u2014 question 13 '
+    + 'takes debt deductions too), 20M for expenses of earning foreign-source income (question 20\u2019s '
+    + 'other net foreign source income is the gross less those expenses), D15 for a debt deduction '
+    + 'against foreign income, which the question 20 worksheet excludes, and D7/D8 for the ordinary '
+    + 'Australian interest and dividend case. A portfolio-wide expense \u2014 one attributed to no '
+    + 'listing \u2014 cannot be routed from what is recorded and is reported at D7/D8; split it per '
+    + 'holding if it belongs elsewhere.');
+}
+
 function incomeSection(inc, summaryLines) {
   return el('div', { class: 'doc-section' }, [
     el('h3', null, 'Income'),
@@ -345,7 +364,8 @@ function incomeSection(inc, summaryLines) {
     genericTable(inc.ess, ['taxing_point_date', 'ticker', 'taxed_upfront_eligible_aud', 'taxed_upfront_not_eligible_aud', 'deferral_discount_aud', 'pre_2009_cessation_discount_aud']),
     essReductionFootnote(summaryLines),
     el('h4', null, 'Deductions'),
-    genericTable(inc.deductions, ['date_incurred', 'expense_type', 'ticker', 'amount_aud', 'description']),
+    genericTable(inc.deductions, ['date_incurred', 'expense_type', 'ticker', 'amount_aud', 'ato_label', 'description']),
+    deductionDestinationFootnote(inc),
   ]);
 }
 

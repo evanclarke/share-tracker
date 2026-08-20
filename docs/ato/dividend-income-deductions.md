@@ -72,3 +72,11 @@ expenses must be incurred in **earning assessable dividend income**, the deducti
 **brokerage is excluded** (it belongs to the CGT cost base). The optional `listing_id` /
 `holding_account_id` on an expense row tie a deduction to the holding it relates to; a
 portfolio-wide expense leaves both NULL.
+
+The **"Don't show at this section"** list above is what routes each deduction to its question:
+`domain::deduction_destination` derives the destination from the holding the expense is attributed
+to — a trust or AMIT holding at **13Y**, a foreign-source holding at **20M** (or **D15** for a debt
+deduction), everything else at D7/D8 — and the tax summary carries a line per destination. The
+labels and the instruction text behind them are in
+[`tax-return-labels-2026.md`](tax-return-labels-2026.md), *Where an investment-expense deduction
+goes*.

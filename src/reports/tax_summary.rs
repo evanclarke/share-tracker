@@ -1,5 +1,7 @@
+use crate::domain::deduction_destination::{DeductionDestination, DeductionRouting};
 use crate::domain::tax_year::tax_year_for;
 use crate::entities::income::{Income, IncomeType};
+use crate::entities::investment_expense::ExpenseType;
 use crate::entities::listing;
 use crate::entities::tax_year_settings;
 use crate::infra::decimal::{parse_dec, row_opt_dec};
@@ -160,14 +162,41 @@ pub struct TaxYearSummary {
     /// Deductible investment-expense total for the year, by expense type (AUD;
     /// see `entities::investment_expense`, docs/ato/investment-income-deductions.md).
     /// Each is the post-apportionment deductible amount the user recorded.
+    ///
+    /// This is the *kind* of expense, which is **not** the question it is
+    /// claimed at — a management fee can be claimed at any of the three
+    /// destinations below, depending on the income it was earning. The six
+    /// lines therefore carry no ATO label of their own; the four
+    /// destination lines below re-cut the same total by destination and
+    /// carry the labels.
     pub deductions_loan_interest: Decimal,
     pub deductions_management_fee: Decimal,
     pub deductions_advice_fee: Decimal,
     pub deductions_account_keeping_fee: Decimal,
     pub deductions_subscription: Decimal,
     pub deductions_other: Decimal,
-    /// Total deductible investment expenses for the year (sum of the per-type
-    /// lines above), in AUD.
+    /// The same deductions cut by **destination question** rather than by kind
+    /// (`domain::deduction_destination`, SCENARIOS P-08): expenses of earning
+    /// a trust or AMIT distribution, at question 13 label Y — including
+    /// interest on money borrowed to buy the units, which the question 13
+    /// instructions put there rather than at D7.
+    pub deductions_trust_distributions: Decimal,
+    /// Expenses of earning foreign-source income, netted into question 20
+    /// label M (*other net foreign source income* is the gross less the
+    /// expenses of earning it), excluding debt deductions.
+    pub deductions_foreign_income: Decimal,
+    /// **Debt** deductions (interest, borrowing costs) incurred earning
+    /// foreign income: question 20's worksheet expressly excludes them, and
+    /// they are claimed at D15 (label J) instead.
+    pub deductions_foreign_debt: Decimal,
+    /// Everything else — the expenses of earning Australian interest (D7) and
+    /// Australian dividend/distribution income (D8), plus the expenses whose
+    /// destination nothing recorded can decide (a portfolio-wide expense, and
+    /// an AUD listing with no income recorded), which take this default.
+    pub deductions_dividend_and_interest: Decimal,
+    /// Total deductible investment expenses for the year, in AUD. The per-type
+    /// and per-destination lines are two cuts of this one total, so it is the
+    /// sum of either group — never of both.
     pub deductions_total: Decimal,
     /// Net assessable investment income: `gross_assessable_investment_income −
     /// deductions_total` (AUD). The LIC capital gain deduction, franking-credit
@@ -228,6 +257,10 @@ pub(crate) const CSV_HEADER: &[&str] = &[
     "deductions_account_keeping_fee",
     "deductions_subscription",
     "deductions_other",
+    "deductions_trust_distributions",
+    "deductions_foreign_income",
+    "deductions_foreign_debt",
+    "deductions_dividend_and_interest",
     "deductions_total",
     "net_assessable_investment_income",
     "taxpayer_basis",
@@ -270,13 +303,17 @@ pub(crate) const CSV_ATO_LABELS: &[&str] = &[
     "",                        // employment_income (1/2, prefilled by the employer — informational)
     "24",                      // other_income (staking rewards / established-token airdrops)
     "",                        // gross_assessable_investment_income (derived)
-    "D7 / D8",                 // deductions_loan_interest
-    "D7 / D8",                 // deductions_management_fee
-    "D7 / D8",                 // deductions_advice_fee
-    "D7 / D8",                 // deductions_account_keeping_fee
-    "D7 / D8",                 // deductions_subscription
-    "D7 / D8",                 // deductions_other
-    "D7 / D8",                 // deductions_total
+    "",                        // deductions_loan_interest (by kind: see the destination lines)
+    "",                        // deductions_management_fee
+    "",                        // deductions_advice_fee
+    "",                        // deductions_account_keeping_fee
+    "",                        // deductions_subscription
+    "",                        // deductions_other
+    "13Y",                     // deductions_trust_distributions
+    "20M",                     // deductions_foreign_income (netted into 20M)
+    "D15",                     // deductions_foreign_debt (label J)
+    "D7 / D8",                 // deductions_dividend_and_interest
+    "",                        // deductions_total (the two cuts' shared total)
     "",                        // net_assessable_investment_income (derived)
     "",                        // taxpayer_basis
 ];
@@ -317,6 +354,10 @@ fn zero_summary(tax_year: i32) -> TaxYearSummary {
         deductions_account_keeping_fee: Decimal::ZERO,
         deductions_subscription: Decimal::ZERO,
         deductions_other: Decimal::ZERO,
+        deductions_trust_distributions: Decimal::ZERO,
+        deductions_foreign_income: Decimal::ZERO,
+        deductions_foreign_debt: Decimal::ZERO,
+        deductions_dividend_and_interest: Decimal::ZERO,
         deductions_total: Decimal::ZERO,
         net_assessable_investment_income: Decimal::ZERO,
         taxpayer_basis: crate::reports::TAXPAYER_BASIS.to_string(),
@@ -539,10 +580,15 @@ pub(crate) async fn db_tax_summary_on(
     let ess_ineligible_years = tax_year_settings::db_ineligible_tax_years(&mut *tx).await?;
 
     let expense_rows = sqlx::query(
-        "SELECT date_incurred, expense_type, amount, currency FROM investment_expenses",
+        "SELECT date_incurred, expense_type, amount, currency, listing_id FROM investment_expenses",
     )
     .fetch_all(&mut *tx)
     .await?;
+
+    // Which question each expense is claimed at, from the listing it is
+    // attributed to (`domain::deduction_destination`) — loaded on this same
+    // read transaction so the routing sees the same snapshot as the figures.
+    let routing = DeductionRouting::load(&mut *tx).await?;
 
     // every imported ATO FX rate — per-field conversions below are map
     // lookups, not one DB round-trip each
@@ -770,17 +816,14 @@ pub(crate) async fn db_tax_summary_on(
         let currency: String = row.try_get("currency")?;
         let amount = aud_field(&fx, row, "amount", &currency, date_incurred)?;
         let expense_type: String = row.try_get("expense_type")?;
-
-        let s = map
-            .entry(tax_year)
-            .or_insert_with(|| zero_summary(tax_year));
-        let line = match expense_type.as_str() {
-            "LoanInterest" => &mut s.deductions_loan_interest,
-            "ManagementFee" => &mut s.deductions_management_fee,
-            "AdviceFee" => &mut s.deductions_advice_fee,
-            "AccountKeepingFee" => &mut s.deductions_account_keeping_fee,
-            "Subscription" => &mut s.deductions_subscription,
-            "Other" => &mut s.deductions_other,
+        let listing_id: Option<i64> = row.try_get("listing_id")?;
+        let kind = match expense_type.as_str() {
+            "LoanInterest" => ExpenseType::LoanInterest,
+            "ManagementFee" => ExpenseType::ManagementFee,
+            "AdviceFee" => ExpenseType::AdviceFee,
+            "AccountKeepingFee" => ExpenseType::AccountKeepingFee,
+            "Subscription" => ExpenseType::Subscription,
+            "Other" => ExpenseType::Other,
             // The column is CHECK-constrained to the set above; an unknown value
             // means the data model was bypassed — fail loudly rather than drop it.
             other => {
@@ -789,7 +832,32 @@ pub(crate) async fn db_tax_summary_on(
                 ));
             }
         };
+        // The kind of expense and the question it is claimed at are two
+        // different cuts of the same amount (SCENARIOS P-08): a management fee
+        // on a trust holding is both a `ManagementFee` and a 13Y deduction.
+        // Each amount lands on exactly one line of each cut, so the two groups
+        // sum to `deductions_total` independently.
+        let destination = routing.destination(listing_id, kind, tax_year);
+
+        let s = map
+            .entry(tax_year)
+            .or_insert_with(|| zero_summary(tax_year));
+        let line = match kind {
+            ExpenseType::LoanInterest => &mut s.deductions_loan_interest,
+            ExpenseType::ManagementFee => &mut s.deductions_management_fee,
+            ExpenseType::AdviceFee => &mut s.deductions_advice_fee,
+            ExpenseType::AccountKeepingFee => &mut s.deductions_account_keeping_fee,
+            ExpenseType::Subscription => &mut s.deductions_subscription,
+            ExpenseType::Other => &mut s.deductions_other,
+        };
         *line += amount;
+        let destination_line = match destination {
+            DeductionDestination::TrustDistributions => &mut s.deductions_trust_distributions,
+            DeductionDestination::ForeignIncome => &mut s.deductions_foreign_income,
+            DeductionDestination::ForeignDebt => &mut s.deductions_foreign_debt,
+            DeductionDestination::DividendAndInterest => &mut s.deductions_dividend_and_interest,
+        };
+        *destination_line += amount;
         s.deductions_total += amount;
     }
 
@@ -1944,7 +2012,17 @@ mod tests {
         assert_eq!(label_of("ess_discount_assessable"), "12B");
         assert_eq!(label_of("ess_foreign_source_discount"), "12A");
         assert_eq!(label_of("lic_capital_gain_deduction"), "D8");
-        assert_eq!(label_of("deductions_total"), "D7 / D8");
+        // Deductions carry a label per *destination question*, not per kind of
+        // expense: the kind lines and the total are two cuts of one figure
+        // that span questions, so they are unlabelled (SCENARIOS P-08,
+        // docs/ato/tax-return-labels-2026.md).
+        assert_eq!(label_of("deductions_trust_distributions"), "13Y");
+        assert_eq!(label_of("deductions_foreign_income"), "20M");
+        assert_eq!(label_of("deductions_foreign_debt"), "D15");
+        assert_eq!(label_of("deductions_dividend_and_interest"), "D7 / D8");
+        assert_eq!(label_of("deductions_management_fee"), "");
+        assert_eq!(label_of("deductions_loan_interest"), "");
+        assert_eq!(label_of("deductions_total"), "");
         // Informational/derived columns report at no label.
         assert_eq!(label_of("franking_credits_denied"), "");
         assert_eq!(label_of("net_assessable_investment_income"), "");
@@ -2498,9 +2576,246 @@ mod tests {
         assert_eq!(s.deductions_subscription, Decimal::from(50));
         assert_eq!(s.deductions_other, Decimal::from(6));
         assert_eq!(s.deductions_total, Decimal::from(696));
+        // Every one of them is portfolio-wide (attributed to no listing), so
+        // the destination cut puts the lot at the D7/D8 default.
+        assert_eq!(s.deductions_dividend_and_interest, Decimal::from(696));
         // No assessable income → net is the negative of the deductions.
         assert_eq!(s.gross_assessable_investment_income, Decimal::ZERO);
         assert_eq!(s.net_assessable_investment_income, Decimal::from(-696));
+    }
+
+    /// An expense attributed to a listing, for the routing tests below.
+    fn expense_on(
+        id: i64,
+        date: NaiveDate,
+        expense_type: ExpenseType,
+        amount: Decimal,
+        listing_id: i64,
+    ) -> investment_expense::InvestmentExpense {
+        investment_expense::InvestmentExpense {
+            listing_id: Some(listing_id),
+            ..make_expense(id, date, expense_type, amount)
+        }
+    }
+
+    /// SCENARIOS P-08: the deductible amount is one figure, but the question
+    /// it is claimed at follows the income it was earning — a trust or AMIT
+    /// distribution at 13Y, foreign-source income at 20M (a debt deduction
+    /// against it at D15), everything else at D7/D8
+    /// (docs/ato/dividend-income-deductions.md "Don't show at this section",
+    /// docs/ato/tax-return-labels-2026.md). The per-type and per-destination
+    /// lines are two cuts of the same total.
+    #[tokio::test]
+    async fn db_deductions_are_cut_by_the_question_each_is_claimed_at() {
+        let pool = test_pool().await;
+        let march = NaiveDate::from_ymd_opt(2024, 3, 1).unwrap();
+        // 1: an ordinary Australian share paying a franked dividend → D7/D8.
+        test_support::listing(1).insert(&pool).await;
+        let mut div = make_income(1, 1, march);
+        div.franked_amount = Decimal::from(100);
+        income::db_upsert(&pool, &div).await.unwrap();
+        // 2: an AMIT — its assessable record is the AMMA statement, so it has
+        // no income rows at all; the flag is the only thing saying "trust".
+        test_support::listing(2).amit(true).insert(&pool).await;
+        // 3: an ordinary (non-AMIT) trust — a *property of the income row*,
+        // not of the listing.
+        test_support::listing(3).insert(&pool).await;
+        let mut dist = make_income(3, 3, march);
+        dist.trust_income = true;
+        dist.unfranked_amount = Decimal::from(50);
+        income::db_upsert(&pool, &dist).await.unwrap();
+        // 4: a USD holding paying a foreign-source dividend (Evan's ICE case).
+        rba_fx_rate::db_import_rate(&pool, "USD", "2024-03", "0.50".parse().unwrap())
+            .await
+            .unwrap();
+        insert_usd_listing(&pool, 4).await;
+        let mut foreign = make_income(4, 4, march);
+        foreign.currency = "USD".to_string();
+        foreign.foreign_source_income = Decimal::from(100);
+        income::db_upsert(&pool, &foreign).await.unwrap();
+
+        let e = |id, ty, amt, listing| expense_on(id, march, ty, Decimal::from(amt), listing);
+        for expense in [
+            e(1, ExpenseType::AdviceFee, 10, 1),
+            e(2, ExpenseType::ManagementFee, 20, 2),
+            e(3, ExpenseType::ManagementFee, 30, 3),
+            e(4, ExpenseType::ManagementFee, 40, 4),
+            // Interest on money borrowed to buy the foreign holding: question
+            // 20's worksheet excludes debt deductions, so it is claimed at D15.
+            e(5, ExpenseType::LoanInterest, 50, 4),
+        ] {
+            investment_expense::db_upsert(&pool, &expense)
+                .await
+                .unwrap();
+        }
+        // A portfolio-wide expense is attributed to no listing, so nothing
+        // recorded can route it: it takes the D7/D8 default.
+        investment_expense::db_upsert(
+            &pool,
+            &make_expense(6, march, ExpenseType::Subscription, Decimal::from(60)),
+        )
+        .await
+        .unwrap();
+
+        let result = db_tax_summary(&pool).await.unwrap();
+        assert_eq!(result.len(), 1);
+        let s = &result[0];
+        // The AMIT's fee and the ordinary trust's both report at 13Y.
+        assert_eq!(s.deductions_trust_distributions, Decimal::from(50));
+        assert_eq!(s.deductions_foreign_income, Decimal::from(40));
+        assert_eq!(s.deductions_foreign_debt, Decimal::from(50));
+        // The Australian share's advice fee + the portfolio-wide subscription.
+        assert_eq!(s.deductions_dividend_and_interest, Decimal::from(70));
+        // Two cuts of one total: neither double-counts, and the net figure is
+        // computed from the total, not from either group.
+        assert_eq!(s.deductions_total, Decimal::from(210));
+        let by_kind = s.deductions_loan_interest
+            + s.deductions_management_fee
+            + s.deductions_advice_fee
+            + s.deductions_account_keeping_fee
+            + s.deductions_subscription
+            + s.deductions_other;
+        let by_destination = s.deductions_trust_distributions
+            + s.deductions_foreign_income
+            + s.deductions_foreign_debt
+            + s.deductions_dividend_and_interest;
+        assert_eq!(by_kind, s.deductions_total);
+        assert_eq!(by_destination, s.deductions_total);
+        assert_eq!(
+            s.net_assessable_investment_income,
+            s.gross_assessable_investment_income - s.deductions_total
+        );
+    }
+
+    /// SCENARIOS P-08 (boundary): interest on money borrowed to buy units in a
+    /// *trust* follows the trust to 13Y rather than staying at D7 — question
+    /// 13's Part C takes debt deductions ("debt deductions such as interest
+    /// and borrowing costs, in deriving assessable income from a trust or
+    /// partnership"). Only a debt deduction against *foreign* income splits
+    /// off to D15.
+    #[tokio::test]
+    async fn db_trust_loan_interest_reports_at_13y_not_d15() {
+        let pool = test_pool().await;
+        let march = NaiveDate::from_ymd_opt(2024, 3, 1).unwrap();
+        test_support::listing(1).amit(true).insert(&pool).await;
+        investment_expense::db_upsert(
+            &pool,
+            &expense_on(1, march, ExpenseType::LoanInterest, Decimal::from(80), 1),
+        )
+        .await
+        .unwrap();
+
+        let s = &db_tax_summary(&pool).await.unwrap()[0];
+        assert_eq!(s.deductions_trust_distributions, Decimal::from(80));
+        assert_eq!(s.deductions_foreign_debt, Decimal::ZERO);
+        assert_eq!(s.deductions_dividend_and_interest, Decimal::ZERO);
+        // Still a loan-interest expense on the by-kind cut.
+        assert_eq!(s.deductions_loan_interest, Decimal::from(80));
+    }
+
+    /// SCENARIOS P-08 + F-23: a fund that converted part-way is a trust on
+    /// *both* sides of the conversion — an AMIT attributing on an AMMA
+    /// statement after `amit_from`, the ordinary trust it was before — and
+    /// question 13 reports both, so its deductions report at 13Y in every
+    /// year. The per-year rule (`listing::amit_in_tax_year`) says which kind
+    /// it was, not whether the deduction is a trust deduction.
+    #[tokio::test]
+    async fn db_a_converted_funds_pre_amit_year_deduction_still_reports_at_13y() {
+        let pool = test_pool().await;
+        // AMIT from FY2025; FY2024 was an ordinary trust year.
+        test_support::listing(1)
+            .amit_from(NaiveDate::from_ymd_opt(2024, 7, 1).unwrap())
+            .insert(&pool)
+            .await;
+        for (id, date) in [
+            (1, NaiveDate::from_ymd_opt(2024, 3, 1).unwrap()),
+            (2, NaiveDate::from_ymd_opt(2024, 9, 1).unwrap()),
+        ] {
+            investment_expense::db_upsert(
+                &pool,
+                &expense_on(id, date, ExpenseType::ManagementFee, Decimal::from(25), 1),
+            )
+            .await
+            .unwrap();
+        }
+
+        let result = db_tax_summary(&pool).await.unwrap();
+        assert_eq!(result.len(), 2);
+        for s in &result {
+            assert_eq!(s.deductions_trust_distributions, Decimal::from(25));
+            assert_eq!(s.deductions_dividend_and_interest, Decimal::ZERO);
+        }
+    }
+
+    /// SCENARIOS P-08 (boundary): what the routing does where the recorded
+    /// data doesn't decide. A foreign-quoted holding with nothing recorded
+    /// against it yet is treated as earning foreign income (the fallback); an
+    /// AUD one with nothing recorded takes the D7/D8 default, which is where
+    /// an ordinary share-investment expense belongs.
+    #[tokio::test]
+    async fn db_a_holding_with_no_income_recorded_routes_on_its_currency() {
+        let pool = test_pool().await;
+        let march = NaiveDate::from_ymd_opt(2024, 3, 1).unwrap();
+        insert_usd_listing(&pool, 1).await;
+        test_support::listing(2).insert(&pool).await;
+        for (id, listing) in [(1, 1), (2, 2)] {
+            investment_expense::db_upsert(
+                &pool,
+                &expense_on(
+                    id,
+                    march,
+                    ExpenseType::AdviceFee,
+                    Decimal::from(10),
+                    listing,
+                ),
+            )
+            .await
+            .unwrap();
+        }
+
+        let s = &db_tax_summary(&pool).await.unwrap()[0];
+        assert_eq!(s.deductions_foreign_income, Decimal::from(10));
+        assert_eq!(s.deductions_dividend_and_interest, Decimal::from(10));
+        assert_eq!(s.deductions_trust_distributions, Decimal::ZERO);
+    }
+
+    /// SCENARIOS P-08: the CSV carries one label per *column*, so each
+    /// destination's figure lands in the cell under its own question — the
+    /// export is the artefact the figures are copied onto the return from.
+    #[tokio::test]
+    async fn api_export_labels_each_deduction_destination_with_its_question() {
+        let pool = test_pool().await;
+        let march = NaiveDate::from_ymd_opt(2024, 3, 1).unwrap();
+        test_support::listing(1).amit(true).insert(&pool).await;
+        investment_expense::db_upsert(
+            &pool,
+            &expense_on(1, march, ExpenseType::ManagementFee, Decimal::from(35), 1),
+        )
+        .await
+        .unwrap();
+
+        let csv = client(&pool)
+            .get("/portfolio/tax-summary/export")
+            .await
+            .text()
+            .to_string();
+        let mut lines = csv.lines();
+        let header: Vec<&str> = lines.next().unwrap().split(',').collect();
+        let labels: Vec<&str> = lines.next().unwrap().split(',').collect();
+        let row: Vec<&str> = lines.next().unwrap().split(',').collect();
+        let at = |col: &str| header.iter().position(|c| *c == col).unwrap();
+        // The label sits under its column, and the figure under both.
+        assert_eq!(labels[at("deductions_trust_distributions")], "13Y");
+        assert_eq!(row[at("deductions_trust_distributions")], "35");
+        assert_eq!(labels[at("deductions_foreign_income")], "20M");
+        assert_eq!(row[at("deductions_foreign_income")], "0");
+        assert_eq!(labels[at("deductions_foreign_debt")], "D15");
+        assert_eq!(labels[at("deductions_dividend_and_interest")], "D7 / D8");
+        assert_eq!(row[at("deductions_dividend_and_interest")], "0");
+        // The by-kind line still carries the figure, with no label of its own.
+        assert_eq!(row[at("deductions_management_fee")], "35");
+        assert_eq!(labels[at("deductions_management_fee")], "");
+        assert_eq!(row[at("deductions_total")], "35");
     }
 
     /// Expenses are attributed to the financial year of the date incurred (a July

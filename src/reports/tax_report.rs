@@ -23,10 +23,12 @@
 //! fires, never a reported dollar figure.
 
 use crate::domain::cost_base::{self, CostBaseAdjustment, ParcelRow};
+use crate::domain::deduction_destination::{DeductionDestination, DeductionRouting};
 use crate::domain::listing_identity::RenameHistory;
 use crate::domain::tax_year::tax_year_for;
 use crate::entities::corporate_action::{RocEvent, SplitEvent};
 use crate::entities::income::{Income, IncomeType};
+use crate::entities::investment_expense::ExpenseType;
 use crate::entities::listing;
 use crate::entities::trade::{Trade, TradeType};
 use crate::infra::decimal::parse_dec;
@@ -872,6 +874,15 @@ pub struct DeductionRow {
     /// declaration a bare `listing_id` is the only trace of which holding
     /// the fee was for (SCENARIOS H-07).
     pub ticker: Option<String>,
+    /// Which question this deduction is claimed at, from the holding it is
+    /// attributed to (`domain::deduction_destination`, SCENARIOS P-08) — the
+    /// deductible *amount* is one figure, but a fee earning a trust
+    /// distribution or foreign income is not claimed at D7/D8. Printed so the
+    /// archived document says where each figure goes, not only what it was.
+    pub destination: DeductionDestination,
+    /// [`Self::destination`]'s label on the form year the report targets
+    /// (`docs/ato/tax-return-labels-2026.md`).
+    pub ato_label: String,
     pub description: Option<String>,
 }
 
@@ -1325,6 +1336,10 @@ async fn push_deduction_rows(
     )
     .fetch_all(&mut *conn)
     .await?;
+    // The same routing the tax summary's per-destination lines are cut by, on
+    // this report's own read transaction — so a row's printed destination and
+    // the summary line it is inside can never disagree (SCENARIOS P-08).
+    let routing = DeductionRouting::load(&mut *conn).await?;
     for row in &expense_rows {
         let date_incurred: NaiveDate = row.try_get("date_incurred")?;
         if tax_year_for(date_incurred) != tax_year {
@@ -1332,6 +1347,8 @@ async fn push_deduction_rows(
         }
         let currency: String = row.try_get("currency")?;
         let listing_id: Option<i64> = row.try_get("listing_id")?;
+        let expense_type: ExpenseType = row.try_get("expense_type")?;
+        let destination = routing.destination(listing_id, expense_type, tax_year);
         out.deductions.push(DeductionRow {
             investment_expense_id: row.try_get("id")?,
             date_incurred,
@@ -1339,6 +1356,8 @@ async fn push_deduction_rows(
             amount_aud: tax_summary::aud_field(fx, row, "amount", &currency, date_incurred)?,
             listing_id,
             ticker: listing_id.map(|id| ctx.ticker_as_at(id, date_incurred)),
+            destination,
+            ato_label: destination.ato_label().to_string(),
             description: row.try_get("description")?,
         });
     }
@@ -2414,6 +2433,143 @@ mod tests {
         assert_eq!(line("deductions_loan_interest"), "450");
         assert_eq!(line("gross_assessable_investment_income"), "0");
         assert_eq!(line("net_assessable_investment_income"), "-450");
+    }
+
+    /// SCENARIOS P-08: each printed deduction says *where the figure goes* on
+    /// the return, not only what it was for — a fee earning a trust or AMIT
+    /// distribution is claimed at 13Y, one earning foreign-source income nets
+    /// into 20M, a debt deduction against foreign income goes to D15
+    /// (question 20's worksheet excludes it), and everything else is the
+    /// ordinary D7/D8 case (docs/ato/tax-return-labels-2026.md). The printed
+    /// rows must sum to the same year's tax-summary destination lines, the
+    /// document's standing invariant.
+    #[tokio::test]
+    async fn deduction_rows_print_the_question_each_is_claimed_at() {
+        let pool = test_support::test_pool().await;
+        let march = ymd(2026, 3, 1);
+        test_support::listing(1)
+            .ticker("VDHG")
+            .amit(true)
+            .insert(&pool)
+            .await;
+        test_support::listing(2).ticker("BHP").insert(&pool).await;
+        test_support::listing(3)
+            .ticker("ICE")
+            .currency("USD")
+            .mic("XNYS")
+            .insert(&pool)
+            .await;
+        crate::entities::rba_fx_rate::db_import_rate(&pool, "USD", "2026-03", dec("0.50"))
+            .await
+            .unwrap();
+        let mut foreign = test_support::income(1, 3, march).build();
+        foreign.currency = "USD".to_string();
+        foreign.foreign_source_income = dec("100");
+        crate::entities::income::db_upsert(&pool, &foreign)
+            .await
+            .unwrap();
+
+        let expense = |id: i64, kind, amount: &str, listing_id: Option<i64>| {
+            investment_expense::InvestmentExpense {
+                id,
+                date_incurred: march,
+                expense_type: kind,
+                amount: dec(amount),
+                gross_amount: None,
+                deductible_percentage: None,
+                currency: "AUD".to_string(),
+                description: None,
+                listing_id,
+                holding_account_id: None,
+            }
+        };
+        for e in [
+            expense(
+                1,
+                investment_expense::ExpenseType::ManagementFee,
+                "20",
+                Some(1),
+            ),
+            expense(2, investment_expense::ExpenseType::AdviceFee, "30", Some(2)),
+            expense(
+                3,
+                investment_expense::ExpenseType::ManagementFee,
+                "40",
+                Some(3),
+            ),
+            expense(
+                4,
+                investment_expense::ExpenseType::LoanInterest,
+                "50",
+                Some(3),
+            ),
+            expense(5, investment_expense::ExpenseType::Subscription, "60", None),
+        ] {
+            investment_expense::db_upsert(&pool, &e).await.unwrap();
+        }
+
+        let report = db_tax_report(&pool, 2026).await.unwrap();
+        let rows = &report.income.deductions;
+        assert_eq!(rows.len(), 5);
+        let printed: Vec<(Option<&str>, &str)> = rows
+            .iter()
+            .map(|r| (r.ticker.as_deref(), r.ato_label.as_str()))
+            .collect();
+        assert_eq!(
+            printed,
+            vec![
+                (Some("VDHG"), "13Y"),
+                (Some("BHP"), "D7 / D8"),
+                (Some("ICE"), "20M"),
+                (Some("ICE"), "D15"),
+                (None, "D7 / D8"),
+            ]
+        );
+        assert_eq!(
+            rows[0].destination,
+            crate::domain::deduction_destination::DeductionDestination::TrustDistributions
+        );
+
+        // Each destination's printed rows sum to that destination's line in
+        // the same document's tax summary.
+        let line = |field: &str| {
+            report
+                .tax_summary
+                .iter()
+                .find(|l| l.field == field)
+                .unwrap_or_else(|| panic!("no {field} line"))
+                .value
+                .clone()
+        };
+        let total_at = |label: &str| -> Decimal {
+            rows.iter()
+                .filter(|r| r.ato_label == label)
+                .map(|r| r.amount_aud)
+                .sum()
+        };
+        assert_eq!(total_at("13Y"), dec("20"));
+        assert_eq!(line("deductions_trust_distributions"), "20");
+        assert_eq!(total_at("20M"), dec("40"));
+        assert_eq!(line("deductions_foreign_income"), "40");
+        assert_eq!(total_at("D15"), dec("50"));
+        assert_eq!(line("deductions_foreign_debt"), "50");
+        assert_eq!(total_at("D7 / D8"), dec("90"));
+        assert_eq!(line("deductions_dividend_and_interest"), "90");
+        assert_eq!(line("deductions_total"), "200");
+
+        // Over HTTP, the surface the archived document is printed from.
+        let body: serde_json::Value = crate::test_support::ApiClient::full(&pool)
+            .post_json(
+                "/reports/tax-report",
+                &serde_json::json!({"tax_year": 2026}),
+            )
+            .await;
+        assert_eq!(body["income"]["deductions"][0]["ato_label"], "13Y");
+        assert_eq!(
+            body["income"]["deductions"][0]["destination"],
+            "TrustDistributions"
+        );
+        assert_eq!(body["income"]["deductions"][4]["ato_label"], "D7 / D8");
     }
 
     /// SCENARIOS H-07: a deduction attributed to a listing prints which

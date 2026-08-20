@@ -568,6 +568,9 @@ const COLUMN_KINDS = (function () {
     'amount', 'gross_amount', 'gross_assessable_investment_income',
     'deductions_loan_interest', 'deductions_management_fee', 'deductions_advice_fee',
     'deductions_account_keeping_fee', 'deductions_subscription', 'deductions_other',
+    // The same deductions re-cut by the question each is claimed at.
+    'deductions_trust_distributions', 'deductions_foreign_income', 'deductions_foreign_debt',
+    'deductions_dividend_and_interest',
     'deductions_total', 'net_assessable_investment_income',
     // Period-performance report: opening/closing values and the
     // capital/FX/income breakdown, all AUD.
@@ -634,7 +637,7 @@ export function columnKinds(cols) {
 // than title-cased to "Aud"/"Fx"/"Drp". Keyed lowercase; the humaniser looks
 // each word up case-insensitively.
 const LABEL_ACRONYMS = {
-  id: 'ID', aud: 'AUD', fx: 'FX', mic: 'MIC', isin: 'ISIN', drp: 'DRP',
+  id: 'ID', aud: 'AUD', fx: 'FX', mic: 'MIC', isin: 'ISIN', drp: 'DRP', ato: 'ATO',
   cgt: 'CGT', amit: 'AMIT', amma: 'AMMA', gst: 'GST', lic: 'LIC', fito: 'FITO',
   tfn: 'TFN', lpr: 'LPR',
 };
@@ -685,6 +688,15 @@ const COLUMN_LABELS = {
   // A memo column: the CFI figure sits *inside* the unfranked amount printed
   // beside it, so the heading says so — a reader must not add the two.
   conduit_foreign_income_aud: 'CFI, within unfranked (AUD)',
+  // The tax summary's deductions cut by destination question rather than by
+  // kind of expense: the label is the whole point of the column, so it is in
+  // the heading (docs/ato/tax-return-labels-2026.md).
+  deductions_trust_distributions: 'Deductions, trust distributions 13Y (AUD)',
+  deductions_foreign_income: 'Deductions, foreign income 20M (AUD)',
+  deductions_foreign_debt: 'Deductions, foreign debt D15 (AUD)',
+  deductions_dividend_and_interest: 'Deductions, dividends/interest D7-D8 (AUD)',
+  // The annual tax report's per-deduction destination label.
+  ato_label: 'ATO label',
 };
 
 // The friendly heading for a column: an explicit override, else humanised.
