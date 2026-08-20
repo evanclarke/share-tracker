@@ -388,6 +388,7 @@ pub fn closing_price(listing_id: i64, price_date: NaiveDate) -> ClosingPriceBuil
             listing_id,
             price_date,
             price: Some(Decimal::from(10)),
+            price_as_observed: Some(Decimal::from(10)),
             source: "test".to_string(),
             fetched_at: "2026-06-05T08:00:00Z".to_string(),
             status: closing_price::PriceStatus::Ok,
@@ -404,8 +405,12 @@ pub struct ClosingPriceBuilder {
 }
 
 impl ClosingPriceBuilder {
+    /// The stored price *and* the figure it was observed as: a fixture is in
+    /// its own day's unit basis unless a test says otherwise with
+    /// [`Self::as_observed`].
     pub fn price(mut self, price: &str) -> Self {
         self.p.price = Some(dec(price));
+        self.p.price_as_observed = Some(dec(price));
         self
     }
 
@@ -422,6 +427,7 @@ impl ClosingPriceBuilder {
     /// A recorded fetch failure: no price, the message stored (CHECK-paired).
     pub fn errored(mut self, error: &str) -> Self {
         self.p.price = None;
+        self.p.price_as_observed = None;
         self.p.status = closing_price::PriceStatus::Error;
         self.p.error = Some(error.to_string());
         self

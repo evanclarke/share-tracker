@@ -2141,4 +2141,76 @@ mod tests {
             );
         }
     }
+    /// SCENARIOS Q-14, end to end: the provider serves a split-adjusted
+    /// history, so a day fetched after the split arrives in the post-split
+    /// basis while `domain::open_parcels` re-bases the units into the
+    /// snapshot date's own — and the series used to step by the split ratio
+    /// at the split date (a 10-for-1 turned a holding that was up into an
+    /// 89.5% "unrealised loss" the day before). Prices are now stored in the
+    /// price date's own basis, so the two sides line up again.
+    #[tokio::test]
+    async fn db_the_valuation_series_does_not_step_at_a_split() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "NVD", Some("XASX"), "AUD").await;
+        insert_buy(&pool, 1, 1, ymd(2026, 6, 1), "100", "115", "AUD").await;
+        corporate_action::db_upsert(
+            &pool,
+            &corporate_action::CorporateAction {
+                id: 1,
+                listing_id: 1,
+                date: ymd(2026, 6, 10),
+                kind: corporate_action::ActionKind::ShareSplit {
+                    split_new_units: "10".parse().unwrap(),
+                    split_old_units: "1".parse().unwrap(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+        // What the provider actually serves once the split has happened: the
+        // whole series restated into the post-split basis.
+        let stub = crate::entities::closing_price::test_support::QuoteStub::default()
+            .with_symbol_closes(
+                "NVD.AX",
+                "AUD",
+                &[(ymd(2026, 6, 5), "12.0888"), (ymd(2026, 6, 11), "12.10")],
+            );
+        let client = ApiClient::full_with(&pool, std::sync::Arc::new(stub));
+        for date in ["2026-06-05", "2026-06-11"] {
+            client
+                .post(
+                    "/closing_prices/fetch",
+                    &serde_json::json!({"listing_id": 1, "price_date": date}),
+                )
+                .await
+                .expect_status(StatusCode::OK);
+        }
+
+        let now = utc(2026, 6, 12, 8, 0);
+        generate(&pool, ymd(2026, 6, 5), now).await.unwrap();
+        generate(&pool, ymd(2026, 6, 11), now).await.unwrap();
+
+        let series = db_series(&pool).await.unwrap();
+        let value = |date: NaiveDate| {
+            series
+                .iter()
+                .find(|p| p.snapshot_date == date)
+                .expect("a snapshot for that date")
+                .market_value
+        };
+        // 100 units in the 5 June basis at that day's own close of 120.888;
+        // 1000 units in the 11 June basis at 12.10.
+        assert_eq!(value(ymd(2026, 6, 5)), "12088.8".parse().unwrap());
+        assert_eq!(value(ymd(2026, 6, 11)), "12100".parse().unwrap());
+
+        // And the holding reads as a gain either side, not a 90% loss on the
+        // day before the split.
+        let overview = db_get(&pool, ReportKind::PortfolioOverview, ymd(2026, 6, 5))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(overview.rows[0]["total_cost_base"], "11500");
+        assert_eq!(overview.rows[0]["market_value"], "12088.800");
+    }
 }

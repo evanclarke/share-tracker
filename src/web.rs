@@ -341,6 +341,12 @@ mod tests {
         assert!(js.contains("'/closing_prices/' + row._listing_id"));
         // The price-import job is described in the Jobs view.
         assert!(js.contains("price-import"));
+        // A price restated out of the provider's post-split basis shows both
+        // figures — the stored one and what the provider served — and the
+        // one-off repair job is described in the Jobs view.
+        assert!(js.contains("price_as_observed"));
+        assert!(js.contains("As served by provider"));
+        assert!(js.contains("price-rebase"));
     }
 
     /// A day the provider cannot serve is priced by hand from this screen:

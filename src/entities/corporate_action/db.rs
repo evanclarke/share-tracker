@@ -555,10 +555,26 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
     if let Some(previous) = previous_listing_id.filter(|p| *p != action.listing_id) {
         listings.push(previous);
     }
-    for listing_id in listings {
+    for &listing_id in &listings {
         if !allocations_fit_parcels(&mut tx, listing_id).await? {
             return Err(WriteError::AllocationsExceedParcel);
         }
+    }
+
+    // A stored closing price is in its own trading day's unit basis, derived
+    // from the figure the provider served by the re-basing actions dated
+    // between that day and the fetch (`entities::closing_price`). Recording a
+    // ShareSplit/BonusIssue — or editing its ratio or date, re-typing it into
+    // something else, or moving it to another listing — changes that
+    // derivation, so the affected listings' prices are re-derived here, inside
+    // the write's own transaction: the action and the prices it restates are
+    // committed together, and the order the two were entered in cannot matter
+    // (SCENARIOS Q-14). Run for every kind on the written listings rather than
+    // only the two re-basing ones, so a re-type *away* from a split is covered
+    // by the same call; the pass reads nothing at all for a listing with no
+    // re-basing action.
+    for &listing_id in &listings {
+        crate::entities::closing_price::db_rebase_listing_prices(&mut tx, listing_id).await?;
     }
 
     // A return of capital reduces each parcel's cost base in the *parcel's*
@@ -714,6 +730,11 @@ pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<bool, DeleteError> 
             None => Err(DeleteError::Db(err)),
         };
     }
+    // Deleting a re-basing action restates the listing's stored closing prices
+    // exactly as recording one does, so the same pass runs in the delete's own
+    // transaction — see `db_upsert` above.
+    crate::entities::closing_price::db_rebase_listing_prices(&mut tx, action.listing_id).await?;
+
     tx.commit().await?;
     Ok(true)
 }

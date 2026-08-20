@@ -321,6 +321,32 @@ pub fn split_adjusted_quantity(
     if new == old { qty } else { qty * new / old }
 }
 
+/// A per-unit *price* observed in the unit basis in force at `observed`,
+/// restated into the unit basis in force on `price_date`.
+///
+/// A re-basing event multiplies the unit count and divides the per-unit price
+/// by the same ratio (the parcel's total value is untouched — TD 2000/10), so
+/// this is [`split_adjusted_quantity`] with the factor the other way up: a
+/// figure quoted after a 10-for-1 split is a tenth of the figure the same
+/// security traded at before it, and multiplying by 10/1 recovers the earlier
+/// day's own price.
+///
+/// The window is `(price_date, observed]` — [`split_ratio`]'s own half-open
+/// convention: an event dated on `price_date` has already restated that day's
+/// close, and one dated on the observation date has already restated what was
+/// observed. So a figure observed *before* an event scales by nothing, which
+/// is what keeps a contemporaneously collected price series untouched when a
+/// later split is recorded (`entities::closing_price`).
+pub fn contemporaneous_price(
+    price: Decimal,
+    splits: &[SplitEvent],
+    price_date: NaiveDate,
+    observed: NaiveDate,
+) -> Decimal {
+    let (new, old) = split_ratio(splits, price_date, Some(observed));
+    if new == old { price } else { price * new / old }
+}
+
 /// The inverse of [`split_adjusted_quantity`]: a quantity expressed in the
 /// unit basis at `at` (e.g. a sale's allocated units) converted back to the
 /// as-acquired units of a parcel bought at `acquired`.

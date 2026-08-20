@@ -1205,6 +1205,7 @@ const JOB_DESC = {
   'mic-import': 'Fetch and refresh the ISO 10383 MIC registry.',
   'currency-import': 'Fetch ISO 4217 fiat and ISO 24165 token currencies.',
   'price-import': 'Store the closing price of every trading day in the last 7 whose row is missing or errored, for every held listing (days already stored ok are never re-fetched, so runs are idempotent and outages self-heal).',
+  'price-rebase': 'Re-derive every stored closing price from the figure the provider served, over the share splits and bonus issues recorded since \u2014 a one-off repair for prices stored before that rule existed. Recording a split already does this for its own listing, so this normally changes nothing.',
   'report-snapshot': 'Store the price-dependent reports\' results for every missing date in the last 14 days up to the latest the whole portfolio can be valued at with final prices, regenerating stale or provisional ones; a blocked date is skipped (reported) and retried next run.',
 };
 
@@ -1307,6 +1308,12 @@ async function viewClosingPrices() {
       listing: l ? ((l.exchange_mic || 'Crypto') + ':' + l.ticker) : ('listing ' + p.listing_id),
       date: p.price_date,
       price: p.price == null ? '' : p.price,
+      // The figure the provider served, kept so a price restated out of a
+      // post-split basis shows both sides (API.md, Closing prices). Blank
+      // when it is the same number, so the column only speaks up when a
+      // share split or bonus issue has actually moved the stored price.
+      price_as_observed: (p.price_as_observed == null || p.price_as_observed === p.price)
+        ? '' : p.price_as_observed,
       currency: l ? l.currency : '',
       source: p.source,
       status: p.status,
@@ -1318,8 +1325,8 @@ async function viewClosingPrices() {
       _listing_id: p.listing_id,
     };
   });
-  const cols = ['id', 'listing', 'date', 'price', 'currency', 'source', 'status', 'origin',
-    'sourced_from', 'reason', 'error', 'fetched_at'];
+  const cols = ['id', 'listing', 'date', 'price', 'price_as_observed', 'currency', 'source',
+    'status', 'origin', 'sourced_from', 'reason', 'error', 'fetched_at'];
   const table = filterableTable(rows, cols, {
     statusField: 'status',
     actions: function (row) {

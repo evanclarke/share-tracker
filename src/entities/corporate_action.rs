@@ -134,9 +134,9 @@ mod http;
 mod model;
 
 pub use adjustments::{
-    RocEvent, SplitEvent, as_acquired_quantity, db_payment_currency_conflict,
-    db_return_of_capital_events, db_share_split_events, db_splits_for_listing, per_unit_reduction,
-    sold_in_acquired_units, split_adjusted_quantity,
+    RocEvent, SplitEvent, as_acquired_quantity, contemporaneous_price,
+    db_payment_currency_conflict, db_return_of_capital_events, db_share_split_events,
+    db_splits_for_listing, per_unit_reduction, sold_in_acquired_units, split_adjusted_quantity,
 };
 pub use db::db_get_tx;
 pub use http::router;
@@ -984,6 +984,56 @@ mod tests {
         assert_eq!(
             split_ratio(&splits, d(2024, 1, 1), Some(d(2024, 12, 31))),
             (Decimal::from(2), Decimal::ONE)
+        );
+    }
+
+    /// A price scales the opposite way to a quantity: what a re-basing event
+    /// multiplies the unit count by, it divides the per-unit price by. Only
+    /// events between the price date and the observation restate the figure,
+    /// so a price observed before one is already in its own day's basis.
+    #[test]
+    fn contemporaneous_price_undoes_the_events_between_the_day_and_the_observation() {
+        let splits = vec![split_event(d(2024, 6, 10), "10", "1")];
+        let observed = |price: &str, on: NaiveDate| {
+            contemporaneous_price(price.parse().unwrap(), &splits, d(2024, 6, 7), on)
+        };
+        // Observed after the split: the provider's series is restated, so the
+        // 7 June close comes back ten times the figure served.
+        assert_eq!(
+            observed("120.888", d(2024, 6, 20)),
+            "1208.880".parse().unwrap()
+        );
+        // Observed before it: nothing to undo.
+        assert_eq!(
+            observed("1208.88", d(2024, 6, 8)),
+            "1208.88".parse().unwrap()
+        );
+        // Observed on the event date itself — already restated (the interval
+        // is closed at that end, as `split_ratio` documents).
+        assert_eq!(
+            observed("120.888", d(2024, 6, 10)),
+            "1208.880".parse().unwrap()
+        );
+        // An event on the price date has already restated that day's close.
+        assert_eq!(
+            contemporaneous_price(
+                "120.888".parse().unwrap(),
+                &splits,
+                d(2024, 6, 10),
+                d(2024, 7, 1)
+            ),
+            "120.888".parse().unwrap()
+        );
+        // A consolidation runs the other way.
+        let consol = vec![split_event(d(2024, 6, 10), "1", "10")];
+        assert_eq!(
+            contemporaneous_price(
+                "12088.8".parse().unwrap(),
+                &consol,
+                d(2024, 6, 7),
+                d(2024, 7, 1)
+            ),
+            "1208.88".parse().unwrap()
         );
     }
 

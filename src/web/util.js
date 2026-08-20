@@ -583,7 +583,7 @@ const COLUMN_KINDS = (function () {
     // the exception (see rate4 below): it's an average price, so it rounds.
     'fx_rate', 'spot_fx_rate', 'amount_per_security', 'cost_base_adjustment',
     'rate',
-    'price', 'reinvestment_price', 'exercise_price', 'amount_per_unit',
+    'price', 'price_as_observed', 'reinvestment_price', 'exercise_price', 'amount_per_unit',
     'buyback_price', 'buyback_dividend', 'buyback_franking_credit', 'buyback_market_value',
     'market_value_per_share', 'deductible_percentage', 'proceeds_per_right',
     // Period-performance report: the ATO/RBA rates used at each endpoint.
@@ -677,6 +677,10 @@ const COLUMN_LABELS = {
   amount_aud: 'Amount (AUD)',
   units_after: 'Units after',
   fx_provisional: 'Provisional FX',
+  // The closing price as the provider served it, before it was restated into
+  // the price date's own unit basis (see API.md, Closing prices). The default
+  // humaniser would render "Price as observed" without saying what differs.
+  price_as_observed: 'As served by provider',
   // The employer statement's stated AUD figure for label F (reported verbatim
   // by the tax summary); the default humaniser would render "Aud …".
   aud_deferral_discount: 'Statement AUD deferral (F)',

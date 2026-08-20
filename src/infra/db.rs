@@ -905,6 +905,114 @@ mod tests {
         );
     }
 
+    /// 0034 rebuilds `closing_prices` a third time, adding the figure each
+    /// price was *observed* as so a split recorded later can restate the
+    /// stored price from source (SCENARIOS Q-14). Rebuild number three on an
+    /// audited table, so this pins what a rebuild can silently break: rows and
+    /// their ids survive (the ids key the audit trail already recorded against
+    /// them), every existing figure is stamped as its own observation, the
+    /// errored row keeps a null in both columns, the new nullability CHECK
+    /// holds, and both row-history triggers come back naming the new column.
+    #[tokio::test]
+    async fn migration_0034_keeps_prices_and_stamps_them_as_their_own_observation() {
+        let pool = pool_migrated_below(34).await;
+        sqlx::query(
+            "INSERT INTO listings (id, exchange_mic, ticker, name, security_type, currency) \
+             VALUES (1, 'XASX', 'BHP', 'BHP Group', 'Share', 'AUD')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO closing_prices \
+                 (id, listing_id, price_date, price, source, fetched_at, status, error, \
+                  origin, sourced_from, reason) \
+             VALUES (7, 1, '2026-06-04', '41.25', 'manual', '2026-06-06T01:00:00Z', 'ok', NULL, \
+                     'manual', 'asx.com.au', 'delisted symbol'), \
+                    (9, 1, '2026-06-05', '62.4899995', 'yahoo', '2026-06-05T08:00:00Z', 'ok', \
+                     NULL, 'fetched', NULL, NULL), \
+                    (11, 1, '2026-06-08', NULL, 'yahoo', '2026-06-08T08:00:00Z', 'error', \
+                     'no candle', 'fetched', NULL, NULL)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        apply_migration(&pool, 34).await;
+
+        #[derive(sqlx::FromRow)]
+        struct Row {
+            id: i64,
+            price: Option<String>,
+            price_as_observed: Option<String>,
+        }
+        let rows: Vec<Row> =
+            sqlx::query_as("SELECT id, price, price_as_observed FROM closing_prices ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            rows.iter().map(|r| r.id).collect::<Vec<_>>(),
+            [7, 9, 11],
+            "ids are carried over, so each row keeps its audit trail"
+        );
+        for row in &rows {
+            assert_eq!(
+                row.price, row.price_as_observed,
+                "every stored figure to date *is* the raw observation"
+            );
+        }
+        assert_eq!(
+            rows[1].price.as_deref(),
+            Some("62.4899995"),
+            "value untouched"
+        );
+        assert_eq!(rows[2].price, None, "the errored row keeps its nulls");
+
+        // The new column is CHECK-paired with the status, so no ok row can
+        // exist without the observation a re-base must re-derive it from.
+        let bad = sqlx::query(
+            "INSERT INTO closing_prices \
+                 (listing_id, price_date, price, source, fetched_at, status, origin) \
+             VALUES (1, '2026-06-09', '1.00', 'yahoo', 'now', 'ok', 'fetched')",
+        )
+        .execute(&pool)
+        .await;
+        assert!(bad.is_err(), "an ok row without its observation is refused");
+
+        // Both audit triggers come back naming the new column.
+        sqlx::query("UPDATE closing_prices SET price = '42.00' WHERE id = 7")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let old_row: String = sqlx::query_scalar(
+            "SELECT old_row FROM row_history \
+             WHERE table_name = 'closing_prices' AND row_id = 7",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(
+            old_row.contains("\"price_as_observed\":\"41.25\""),
+            "{old_row}"
+        );
+        let triggers: Vec<String> = sqlx::query_scalar(
+            "SELECT name FROM sqlite_master WHERE type = 'trigger' \
+             AND tbl_name = 'closing_prices' ORDER BY name",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            triggers,
+            [
+                "closing_prices_row_history_delete",
+                "closing_prices_row_history_update",
+                "closing_prices_stale_snapshots_update"
+            ]
+        );
+    }
+
     /// 0025 renames `income.lic_capital_gain_deduction` to
     /// `lic_capital_gain_amount` — the LIC's advised attributable part, which
     /// the reports now halve for D8 — and so has to read existing rows forward

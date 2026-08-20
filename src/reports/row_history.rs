@@ -519,7 +519,7 @@ mod tests {
             (
                 "closing_prices",
                 Some(
-                    "INSERT INTO closing_prices (id, listing_id, price_date, price, source, fetched_at, status, origin) VALUES (19, 1, '2024-01-02', '10', 'yahoo', '2024-01-02T08:00:00Z', 'ok', 'fetched')",
+                    "INSERT INTO closing_prices (id, listing_id, price_date, price, price_as_observed, source, fetched_at, status, origin) VALUES (19, 1, '2024-01-02', '10', '10', 'yahoo', '2024-01-02T08:00:00Z', 'ok', 'fetched')",
                 ),
                 "id",
                 19,

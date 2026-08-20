@@ -31,6 +31,29 @@
 //!   carries float noise (`62.4799995422363`); [`clean_price`] rounds to 7
 //!   significant digits (counted from the first non-zero digit, so sub-$1
 //!   token prices keep theirs) before storing.
+//! - **A stored price is in its own trading day's unit basis** — the price the
+//!   security actually traded at on `price_date`. The provider does not serve
+//!   it that way: Yahoo restates a security's whole close series into the
+//!   *current* basis the moment it splits (`auto_adjust(false)` turns off
+//!   dividend adjustment only), so after a 10-for-1 it answers 120.888 for a
+//!   day the security closed at 1208.88. The reports go the other way —
+//!   `domain::open_parcels` re-bases parcel quantities into the snapshot
+//!   date's own basis — so an unnormalised price was multiplied by units in a
+//!   different basis and the product came out by the split ratio (SCENARIOS
+//!   Q-14). Which basis a figure arrived in is fixed by *when it was
+//!   observed*, and `fetched_at` dates that, so the row keeps the figure as
+//!   observed and derives the stored one:
+//!
+//!       price = price_as_observed × split ratio over (price_date, fetched_at]
+//!
+//!   Every restatement is therefore a recompute from the observation rather
+//!   than a delta applied to an already-adjusted number
+//!   ([`db_rebase_listing_prices`]): recording, editing or deleting a
+//!   `ShareSplit`/`BonusIssue` re-derives the same answer in any order, and a
+//!   series collected day by day *before* a split is left alone by it (its
+//!   fetches predate the event, so its ratio is 1). The recovered figure
+//!   carries only the provider's ~7 significant digits — see [`clean_price`] —
+//!   so a re-fetch is no longer byte-identical to the provider's response.
 //! - A failed fetch is stored as an errored row for that (listing, date) —
 //!   never a silent zero or a skipped row — and is replaced by a later
 //!   successful re-run.
@@ -43,7 +66,10 @@
 //!   ([`PriceOrigin::Manual`]). Valuation reads such a row exactly like a
 //!   fetched one. The provider never takes the day back: collection and
 //!   backfill skip it as an ok row, and an explicit re-fetch is refused — a
-//!   manual price is changed only by entering another one.
+//!   manual price is changed only by entering another one. It is also
+//!   contemporaneous **by declaration** — the operator states what the
+//!   security traded at that day — so it is neither normalised on entry nor
+//!   ever re-based: nothing rewrites a figure a person typed.
 
 use crate::infra::http::ApiError;
 use axum::{
@@ -65,7 +91,7 @@ use std::{
 };
 
 use crate::entities::{exchange, listing};
-use crate::infra::decimal::{OptMoney, parse_dec};
+use crate::infra::decimal::{Money, OptMoney, parse_dec};
 
 /// Whether a stored row carries a price or a fetch failure.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, sqlx::Type)]
@@ -108,10 +134,19 @@ pub struct ClosingPrice {
     pub id: i64,
     pub listing_id: i64,
     pub price_date: NaiveDate,
-    /// Closing price in the listing's quote currency; None exactly when the
-    /// fetch failed.
+    /// Closing price in the listing's quote currency, in the unit basis in
+    /// force on [`Self::price_date`]; None exactly when the fetch failed.
     #[sqlx(try_from = "OptMoney")]
     pub price: Option<Decimal>,
+    /// The figure exactly as the provider served it (or as the operator
+    /// entered it), in the unit basis in force when it was observed — which
+    /// [`Self::fetched_at`] dates. [`Self::price`] is derived from it by the
+    /// re-basing actions dated in `(price_date, fetched_at]`, so a split
+    /// recorded, edited or deleted later restates the price from here rather
+    /// than from itself (see the module docs). Equal to `price` for a manual
+    /// row, and None exactly when the fetch failed.
+    #[sqlx(try_from = "OptMoney")]
+    pub price_as_observed: Option<Decimal>,
     /// Provider that produced the row, e.g. "yahoo" — [`MANUAL_SOURCE`]
     /// exactly when `origin` is `Manual`.
     pub source: String,
@@ -622,8 +657,8 @@ pub async fn db_get_one(
     price_date: NaiveDate,
 ) -> Result<Option<ClosingPrice>, sqlx::Error> {
     sqlx::query_as(
-        "SELECT id, listing_id, price_date, price, source, fetched_at, status, error, \
-                origin, sourced_from, reason \
+        "SELECT id, listing_id, price_date, price, price_as_observed, source, fetched_at, \
+                status, error, origin, sourced_from, reason \
          FROM closing_prices WHERE listing_id = ? AND price_date = ?",
     )
     .bind(listing_id)
@@ -640,8 +675,8 @@ pub async fn db_list(
     to: Option<NaiveDate>,
 ) -> Result<Vec<ClosingPrice>, sqlx::Error> {
     let mut qb = QueryBuilder::new(
-        "SELECT id, listing_id, price_date, price, source, fetched_at, status, error, \
-                origin, sourced_from, reason \
+        "SELECT id, listing_id, price_date, price, price_as_observed, source, fetched_at, \
+                status, error, origin, sourced_from, reason \
          FROM closing_prices WHERE 1=1",
     );
     if let Some(id) = listing_id {
@@ -692,11 +727,12 @@ async fn db_ok_dates(
 pub(crate) async fn db_store(pool: &SqlitePool, row: &ClosingPrice) -> Result<(), sqlx::Error> {
     sqlx::query(
         "INSERT INTO closing_prices \
-             (listing_id, price_date, price, source, fetched_at, status, error, \
-              origin, sourced_from, reason) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+             (listing_id, price_date, price, price_as_observed, source, fetched_at, status, \
+              error, origin, sourced_from, reason) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT(listing_id, price_date) DO UPDATE SET \
              price = excluded.price, \
+             price_as_observed = excluded.price_as_observed, \
              source = excluded.source, \
              fetched_at = excluded.fetched_at, \
              status = excluded.status, \
@@ -708,6 +744,7 @@ pub(crate) async fn db_store(pool: &SqlitePool, row: &ClosingPrice) -> Result<()
     .bind(row.listing_id)
     .bind(row.price_date)
     .bind(OptMoney(row.price))
+    .bind(OptMoney(row.price_as_observed))
     .bind(&row.source)
     .bind(&row.fetched_at)
     .bind(row.status)
@@ -717,6 +754,135 @@ pub(crate) async fn db_store(pool: &SqlitePool, row: &ClosingPrice) -> Result<()
     .bind(&row.reason)
     .execute(pool)
     .await?;
+    Ok(())
+}
+
+/// A provider figure restated into its own trading day's unit basis, rounded
+/// back to the provider's precision.
+///
+/// The arithmetic is `corporate_action::contemporaneous_price` — the shared
+/// re-basing math, never re-derived here — and [`clean_price`] then holds the
+/// result to 7 significant digits: the observation only ever carried that many
+/// (Yahoo serves float32), so a ratio that does not divide out exactly must
+/// not be written down as if it recovered more.
+fn contemporaneous(
+    as_observed: Decimal,
+    splits: &[crate::entities::corporate_action::SplitEvent],
+    price_date: NaiveDate,
+    observed: NaiveDate,
+) -> Decimal {
+    clean_price(crate::entities::corporate_action::contemporaneous_price(
+        as_observed,
+        splits,
+        price_date,
+        observed,
+    ))
+}
+
+/// One stored ok, provider-fetched row, as the re-basing pass reads it.
+#[derive(sqlx::FromRow)]
+struct ObservedRow {
+    id: i64,
+    price_date: NaiveDate,
+    fetched_at: String,
+    #[sqlx(try_from = "Money")]
+    price: Decimal,
+    #[sqlx(try_from = "Money")]
+    price_as_observed: Decimal,
+}
+
+/// Re-derive every stored provider price for one listing from the figure as
+/// observed, over the listing's re-basing actions as they now stand. Returns
+/// how many rows changed.
+///
+/// This is the other half of the basis invariant (module docs): normalising on
+/// the way in fixes a price fetched *after* a split is recorded, and this fixes
+/// one fetched before it. Because each price is recomputed from
+/// `price_as_observed` rather than adjusted in place, the pass is idempotent
+/// and order-free — it is equally the answer to a split being recorded, its
+/// ratio or date being edited, its being re-typed into another kind of action,
+/// and its being deleted. `corporate_action::db_upsert`/`db_delete` run it on
+/// their own transaction so the prices and the action can never be committed
+/// out of step, and the `price-rebase` job runs it over every listing as the
+/// one-off repair of a database that predates this rule.
+///
+/// Manual rows are excluded: a hand-entered price is contemporaneous by
+/// declaration and is never rewritten (module docs). A listing with no
+/// re-basing action reads nothing at all — the pass costs one query.
+pub async fn db_rebase_listing_prices(
+    conn: &mut sqlx::SqliteConnection,
+    listing_id: i64,
+) -> Result<usize, sqlx::Error> {
+    let splits =
+        crate::entities::corporate_action::db_splits_for_listing(&mut *conn, listing_id).await?;
+    if splits.is_empty() {
+        return Ok(0);
+    }
+    let rows: Vec<ObservedRow> = sqlx::query_as(
+        "SELECT id, price_date, fetched_at, price, price_as_observed FROM closing_prices \
+         WHERE listing_id = ? AND status = 'ok' AND origin = 'fetched' ORDER BY price_date",
+    )
+    .bind(listing_id)
+    .fetch_all(&mut *conn)
+    .await?;
+
+    let mut changed = 0;
+    for row in rows {
+        let observed = DateTime::parse_from_rfc3339(&row.fetched_at)
+            .map_err(|e| {
+                sqlx::Error::Decode(
+                    format!(
+                        "closing_prices.fetched_at {:?} is not RFC 3339: {e}",
+                        row.fetched_at
+                    )
+                    .into(),
+                )
+            })?
+            .with_timezone(&Utc)
+            .date_naive();
+        let wanted = contemporaneous(row.price_as_observed, &splits, row.price_date, observed);
+        if wanted == row.price {
+            continue;
+        }
+        sqlx::query("UPDATE closing_prices SET price = ? WHERE id = ?")
+            .bind(Money(wanted))
+            .bind(row.id)
+            .execute(&mut *conn)
+            .await?;
+        changed += 1;
+    }
+    Ok(changed)
+}
+
+/// Re-base every listing that has a `ShareSplit`/`BonusIssue` recorded against
+/// it — the `price-rebase` maintenance job, and the one-off repair for a
+/// database whose prices were stored before the basis rule existed
+/// (migration 0034). One transaction, so the whole repair lands or none of it
+/// does; idempotent, so running it again is a no-op.
+///
+/// Only listings with a re-basing action can have a price to correct, so those
+/// are the only ones read.
+pub async fn run_rebase(pool: &SqlitePool) -> Result<(), String> {
+    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+    let listing_ids: Vec<i64> = sqlx::query_scalar(
+        "SELECT DISTINCT listing_id FROM corporate_actions \
+         WHERE action_type IN ('ShareSplit', 'BonusIssue') ORDER BY listing_id",
+    )
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
+    let mut changed = 0;
+    for listing_id in &listing_ids {
+        changed += db_rebase_listing_prices(&mut tx, *listing_id)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    tx.commit().await.map_err(|e| e.to_string())?;
+    tracing::info!(
+        listings = listing_ids.len(),
+        rebased = changed,
+        "closing-price re-base complete"
+    );
     Ok(())
 }
 
@@ -1005,20 +1171,31 @@ async fn fetch_and_store(
         }
     }
 
-    let fetched_at = Utc::now().to_rfc3339();
+    // The observation moment: what the row's `fetched_at` records, and what
+    // dates the unit basis the provider's figures arrived in (module docs).
+    let observed = Utc::now();
+    let fetched_at = observed.to_rfc3339();
+    let splits =
+        crate::entities::corporate_action::db_splits_for_listing(pool, market.listing.id).await?;
     let (mut ok, mut errored) = (0, 0);
     for &date in dates {
         let result = outcome
             .remove(&date)
             .unwrap_or_else(|| Err("no identity span covers this date".to_string()));
         let row = match result {
-            Ok(price) => {
+            Ok(as_observed) => {
                 ok += 1;
                 ClosingPrice {
                     id: UNASSIGNED_ID,
                     listing_id: market.listing.id,
                     price_date: date,
-                    price: Some(price),
+                    price: Some(contemporaneous(
+                        as_observed,
+                        &splits,
+                        date,
+                        observed.date_naive(),
+                    )),
+                    price_as_observed: Some(as_observed),
                     source: fetcher.source().to_string(),
                     fetched_at: fetched_at.clone(),
                     status: PriceStatus::Ok,
@@ -1035,6 +1212,7 @@ async fn fetch_and_store(
                     listing_id: market.listing.id,
                     price_date: date,
                     price: None,
+                    price_as_observed: None,
                     source: fetcher.source().to_string(),
                     fetched_at: fetched_at.clone(),
                     status: PriceStatus::Error,
@@ -1405,6 +1583,10 @@ async fn put_manual(
         listing_id,
         price_date,
         price: Some(body.price),
+        // A hand-entered figure is contemporaneous by declaration — the
+        // operator states what the security traded at that day — so it is
+        // recorded as its own observation and no re-basing ever touches it.
+        price_as_observed: Some(body.price),
         source: MANUAL_SOURCE.to_string(),
         fetched_at: Utc::now().to_rfc3339(),
         status: PriceStatus::Ok,
@@ -2796,8 +2978,9 @@ mod tests {
             async move {
                 sqlx::query(sqlx::AssertSqlSafe(format!(
                     "INSERT INTO closing_prices \
-                         (listing_id, price_date, price, fetched_at, status, error, {columns}) \
-                     VALUES (1, '2026-06-05', '1.23', 'now', 'ok', NULL, {values})"
+                         (listing_id, price_date, price, price_as_observed, fetched_at, status, \
+                          error, {columns}) \
+                     VALUES (1, '2026-06-05', '1.23', '1.23', 'now', 'ok', NULL, {values})"
                 )))
                 .execute(&pool)
                 .await
@@ -3727,6 +3910,318 @@ mod tests {
                 .await
                 .unwrap()
                 .is_empty()
+        );
+    }
+    // -----------------------------------------------------------------------
+    // The contemporaneous basis (SCENARIOS Q-14)
+    //
+    // A stored price is the price the security traded at on its own date. The
+    // provider restates its whole close series into the *current* basis the
+    // moment a security splits, so the figure has to be restated back out of
+    // whichever basis it arrived in — which is the basis in force when it was
+    // observed, i.e. at `fetched_at`. These pin both halves: normalising on
+    // the way in, and re-deriving stored rows when the action set changes.
+    // -----------------------------------------------------------------------
+
+    /// The stored price for a listing, and the figure it was observed as.
+    async fn stored(pool: &SqlitePool, date: NaiveDate) -> (String, String) {
+        let row = db_get_one(pool, 1, date).await.unwrap().unwrap();
+        (
+            row.price.unwrap().normalize().to_string(),
+            row.price_as_observed.unwrap().normalize().to_string(),
+        )
+    }
+
+    /// A pre-split day fetched *after* the split is recorded arrives in the
+    /// post-split basis (Yahoo answers 120.888 for a day NVDA closed at
+    /// 1208.88) and is stored in the day's own basis, with the provider's
+    /// figure kept beside it.
+    #[tokio::test]
+    async fn db_a_price_fetched_after_a_split_is_stored_in_its_own_days_basis() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
+        insert_share_split(&pool, 1, ymd(2026, 6, 10), "10", "1").await;
+
+        let market = load_market(&pool, 1).await.unwrap().unwrap();
+        let stub = StubFetcher::default().with_close(1, ymd(2026, 6, 5), "120.888", "AUD");
+        fetch_and_store(&pool, &stub, &market, &[ymd(2026, 6, 5)])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            stored(&pool, ymd(2026, 6, 5)).await,
+            ("1208.88".to_string(), "120.888".to_string()),
+            "the provider's post-split figure is restated into the price date's own basis"
+        );
+    }
+
+    /// The other half: a day collected *before* the split happened already
+    /// holds the contemporaneous close, and recording the split later must
+    /// leave it exactly as it is. This is the case the whole daily-collected
+    /// history sits in, so a blanket "multiply every earlier price by the
+    /// ratio" rule would corrupt years of correct prices at a stroke.
+    #[tokio::test]
+    async fn db_a_price_observed_before_the_split_is_untouched_when_it_is_recorded() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
+        crate::test_support::closing_price(1, ymd(2026, 6, 5))
+            .price("1208.88")
+            .fetched_at("2026-06-05T08:00:00Z")
+            .insert(&pool)
+            .await;
+
+        insert_share_split(&pool, 1, ymd(2026, 6, 10), "10", "1").await;
+
+        assert_eq!(
+            stored(&pool, ymd(2026, 6, 5)).await,
+            ("1208.88".to_string(), "1208.88".to_string()),
+            "the fetch predates the split, so the figure was never restated"
+        );
+    }
+
+    /// The property the whole design exists for: whichever order the split and
+    /// the fetch are entered in, the stored price is the same.
+    #[tokio::test]
+    async fn db_entry_order_of_the_split_and_the_fetch_does_not_change_the_price() {
+        async fn fetch(pool: &SqlitePool) {
+            let market = load_market(pool, 1).await.unwrap().unwrap();
+            let stub = StubFetcher::default().with_close(1, ymd(2026, 6, 5), "120.888", "AUD");
+            fetch_and_store(pool, &stub, &market, &[ymd(2026, 6, 5)])
+                .await
+                .unwrap();
+        }
+
+        // split first, then the fetch
+        let a = test_pool().await;
+        insert_listing(&a, 1, "BHP", "XASX", "AUD").await;
+        insert_share_split(&a, 1, ymd(2026, 6, 10), "10", "1").await;
+        fetch(&a).await;
+
+        // the fetch first, then the split
+        let b = test_pool().await;
+        insert_listing(&b, 1, "BHP", "XASX", "AUD").await;
+        fetch(&b).await;
+        assert_eq!(
+            stored(&b, ymd(2026, 6, 5)).await.0,
+            "120.888",
+            "with no split recorded there is nothing to restate out of"
+        );
+        insert_share_split(&b, 1, ymd(2026, 6, 10), "10", "1").await;
+
+        assert_eq!(
+            stored(&a, ymd(2026, 6, 5)).await,
+            ("1208.88".to_string(), "120.888".to_string())
+        );
+        assert_eq!(
+            stored(&b, ymd(2026, 6, 5)).await,
+            stored(&a, ymd(2026, 6, 5)).await,
+            "entry order cannot matter"
+        );
+    }
+
+    /// A bonus issue re-bases units exactly as a split does (one new share for
+    /// each held doubles the count), so it halves the per-unit price the same
+    /// way — and the provider restates for it too.
+    #[tokio::test]
+    async fn db_a_bonus_issue_rebases_stored_prices_like_a_split() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
+        let market = load_market(&pool, 1).await.unwrap().unwrap();
+        let stub = StubFetcher::default().with_close(1, ymd(2026, 6, 5), "30", "AUD");
+        fetch_and_store(&pool, &stub, &market, &[ymd(2026, 6, 5)])
+            .await
+            .unwrap();
+
+        crate::entities::corporate_action::db_upsert(
+            &pool,
+            &crate::entities::corporate_action::CorporateAction {
+                id: 950,
+                listing_id: 1,
+                date: ymd(2026, 6, 10),
+                kind: crate::entities::corporate_action::ActionKind::BonusIssue {
+                    bonus_units: Decimal::ONE,
+                    bonus_held_units: Decimal::ONE,
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            stored(&pool, ymd(2026, 6, 5)).await.0,
+            "60",
+            "one bonus share per share held doubles the unit count, so the earlier day's own \
+             price is twice the restated one"
+        );
+    }
+
+    /// A consolidation (reverse split) runs the error the other way: the
+    /// provider's restated figure is *larger* than the contemporaneous one.
+    #[tokio::test]
+    async fn db_a_consolidation_rebases_stored_prices_the_other_way() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
+        insert_share_split(&pool, 1, ymd(2026, 6, 10), "1", "10").await;
+
+        let market = load_market(&pool, 1).await.unwrap().unwrap();
+        let stub = StubFetcher::default().with_close(1, ymd(2026, 6, 5), "12088.8", "AUD");
+        fetch_and_store(&pool, &stub, &market, &[ymd(2026, 6, 5)])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            stored(&pool, ymd(2026, 6, 5)).await,
+            ("1208.88".to_string(), "12088.8".to_string()),
+            "ten old units became one, so the pre-consolidation day's price is a tenth"
+        );
+    }
+
+    /// A hand-entered price is contemporaneous by declaration: it is stored
+    /// exactly as typed even with a split already recorded after its date, and
+    /// recording another one never rewrites it.
+    #[tokio::test]
+    async fn api_a_manual_price_is_neither_normalised_on_entry_nor_rebased() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
+        insert_share_split(&pool, 1, ymd(2026, 6, 10), "10", "1").await;
+
+        let client = ApiClient::over(router().with_state(pool.clone()));
+        client
+            .put(
+                "/closing_prices/1/2026-06-05",
+                &serde_json::json!({
+                    "price": "1208.88",
+                    "sourced_from": "asx.com.au closing report",
+                    "reason": "provider serves no candle for that day",
+                }),
+            )
+            .await
+            .expect_status(StatusCode::NO_CONTENT);
+
+        assert_eq!(
+            stored(&pool, ymd(2026, 6, 5)).await,
+            ("1208.88".to_string(), "1208.88".to_string()),
+            "the operator's figure is its own observation"
+        );
+
+        insert_share_split(&pool, 1, ymd(2026, 6, 20), "2", "1").await;
+        assert_eq!(
+            stored(&pool, ymd(2026, 6, 5)).await.0,
+            "1208.88",
+            "nothing rewrites a figure a person typed"
+        );
+    }
+
+    /// Editing the action re-derives the prices from the observation, and
+    /// deleting it puts them back — neither is a delta applied to an
+    /// already-adjusted number.
+    #[tokio::test]
+    async fn api_editing_or_deleting_the_split_re_derives_the_stored_prices() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
+        insert_share_split(&pool, 1, ymd(2026, 6, 10), "10", "1").await;
+        let market = load_market(&pool, 1).await.unwrap().unwrap();
+        let stub = StubFetcher::default().with_close(1, ymd(2026, 6, 5), "120.888", "AUD");
+        fetch_and_store(&pool, &stub, &market, &[ymd(2026, 6, 5)])
+            .await
+            .unwrap();
+        assert_eq!(stored(&pool, ymd(2026, 6, 5)).await.0, "1208.88");
+
+        // A mis-keyed ratio, corrected in place.
+        insert_share_split(&pool, 1, ymd(2026, 6, 10), "2", "1").await;
+        assert_eq!(
+            stored(&pool, ymd(2026, 6, 5)).await.0,
+            "241.776",
+            "the price follows the corrected ratio, from the observation"
+        );
+
+        // Moved to a date before the price: the price date is then already in
+        // the post-split basis, so nothing is restated.
+        insert_share_split(&pool, 1, ymd(2026, 6, 1), "2", "1").await;
+        assert_eq!(
+            stored(&pool, ymd(2026, 6, 5)).await.0,
+            "120.888",
+            "a split on or before the price date has already restated that day's close"
+        );
+
+        // …and deleting it altogether leaves the provider's figure standing.
+        crate::entities::corporate_action::db_delete(&pool, 901)
+            .await
+            .unwrap();
+        assert_eq!(stored(&pool, ymd(2026, 6, 5)).await.0, "120.888");
+    }
+
+    /// The one-off repair: a database whose prices were stored before this
+    /// rule existed holds the provider's restated figure with a split already
+    /// recorded. `run_rebase` (the `price-rebase` job) re-derives them, and is
+    /// idempotent.
+    #[tokio::test]
+    async fn db_the_rebase_job_repairs_prices_stored_before_the_rule_existed() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
+        insert_share_split(&pool, 1, ymd(2026, 6, 10), "10", "1").await;
+        // Stored the way a pre-0034 row was: the provider's post-split figure,
+        // observed after the split, with nothing restated out of it.
+        crate::test_support::closing_price(1, ymd(2026, 6, 5))
+            .price("120.888")
+            .fetched_at("2026-06-15T08:00:00Z")
+            .insert(&pool)
+            .await;
+
+        run_rebase(&pool).await.unwrap();
+        assert_eq!(stored(&pool, ymd(2026, 6, 5)).await.0, "1208.88");
+
+        run_rebase(&pool).await.unwrap();
+        assert_eq!(
+            stored(&pool, ymd(2026, 6, 5)).await.0,
+            "1208.88",
+            "re-deriving from the observation is idempotent"
+        );
+    }
+
+    /// A re-base is an UPDATE of an audited table, so the superseded figure is
+    /// recoverable — and it stales the snapshots that were valued at it.
+    #[tokio::test]
+    async fn db_a_rebase_is_audited_and_stales_the_snapshots_it_moves() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
+        let market = load_market(&pool, 1).await.unwrap().unwrap();
+        let stub = StubFetcher::default().with_close(1, ymd(2026, 6, 5), "120.888", "AUD");
+        fetch_and_store(&pool, &stub, &market, &[ymd(2026, 6, 5)])
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO report_snapshots (report, snapshot_date, generated_at, stale, rows_json) \
+             VALUES ('portfolio_overview', '2026-06-05', '2026-06-06T00:00:00Z', 0, '[]')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        insert_share_split(&pool, 1, ymd(2026, 6, 10), "10", "1").await;
+
+        let old: Vec<String> = sqlx::query_scalar(
+            "SELECT json_extract(old_row, '$.price') FROM row_history \
+             WHERE table_name = 'closing_prices' ORDER BY id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            old,
+            vec!["120.888".to_string()],
+            "the superseded figure is retained"
+        );
+
+        let stale: i64 = sqlx::query_scalar(
+            "SELECT stale FROM report_snapshots WHERE snapshot_date = '2026-06-05'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            stale, 1,
+            "the valuation that used the old figure regenerates"
         );
     }
 }

@@ -3868,3 +3868,148 @@ The mechanism is documented where the rule is stated: CLAUDE.md's `src/reports/`
 the staleness rule) now names the test and says a new table must be classified in the same task,
 `docs/SCHEMA.md`'s staleness-trigger paragraph says the same at the schema's own surface, and
 `reports::snapshot`'s module doc points at the test beside its description of the triggers.
+
+## SCENARIOS Q-14: the price provider serves split-adjusted history, so every valuation of a pre-split date is wrong by the split ratio
+
+`YahooFetcher::daily_closes` asks `yfinance_rs` for `auto_adjust(false)`
+(`src/entities/closing_price.rs:566`), which turns off *dividend* adjustment only. Yahoo's `close`
+series is still **split-adjusted retroactively**: once a security splits, its whole history is
+restated into the post-split basis. The reports go the other way — `domain::open_parcels` re-bases
+each parcel's quantity into the **snapshot date's own** unit basis across any recorded `ShareSplit` /
+`BonusIssue`. So a price backfilled after a split is in the *current* basis while the units it is
+multiplied by are in the *historical* one, and the product is out by the split ratio.
+
+Reproduced end to end against the running system (throwaway DB, real provider):
+
+- Buy 100 NVDA on 2024-06-04 at US$1,150; `ShareSplit` 10-for-1 on 2024-06-10 (the real one);
+  `POST /closing_prices/backfill` over 2024-06-05..2024-06-12; snapshots generated for each day.
+- Yahoo returns **120.888** for 2024-06-07. NVDA's actual close that day was **US$1,208.88**.
+- `GET /report_snapshots/series` then reads:
+  `2024-06-07 = A$18,132.29`, `2024-06-10 = A$182,675.87` — a **tenfold step at the split date**,
+  which is precisely what Q-14 says must not happen.
+- The pre-split figure is the wrong one: the holding was worth 100 × US$1,208.88 ÷ 0.6667 =
+  **A$181,322.93** on 2024-06-07, and the stored cost base for the same date is A$172,491.38 — so
+  the `unrealised_gains` snapshot reports an **89.5% unrealised loss on a holding that was up**.
+
+- [x] Nothing about this is documented. `docs/API.md`'s [Closing prices](docs/API.md#closing-prices)
+  section describes the stored figure only as "the close of every trading day", and there is no
+  Known limitation for it — unlike the neighbouring price/valuation caveats (*Intraday prices*, *A
+  manually entered price is one-way*, *Snapshot ticker labels…*), which are all recorded.
+- [x] **The stored series is internally inconsistent, which is what makes this more than a one-line
+  fix.** A day fetched *before* the split keeps the contemporaneous (unadjusted) close forever —
+  `run_collection` and `backfill` both skip a day already stored `ok` — while a day fetched *after*
+  it holds the adjusted one. So one listing's history can hold both bases with nothing on the row
+  saying which. Two ordinary paths introduce the mix on their own: an **errored** day before a split
+  that the daily `price-import` job re-attempts after it, and `POST /closing_prices/fetch` on a
+  pre-split day (which, being an `ok`→`ok` price change, *stales* the snapshots on and after it, so
+  they regenerate at the wrong figure).
+- [x] Scope: valuation only. Closing prices feed `reports::valuation::stored_valuations` and the
+  live-quote path, so this reaches `portfolio_overview` / `unrealised_gains` / `performance` (live,
+  stored and snapshotted), `report_snapshots/series` and the Portfolio Overview graph, and
+  `period_performance`'s `capital_growth`. **No tax figure reads a closing price** — cost base and
+  proceeds come from the trades — so no CGT or income figure is affected. A consolidation (reverse
+  split) fails the same way in the opposite direction, and a `BonusIssue` too, since Yahoo restates
+  for those as well.
+
+**Fix — Evan chose 2026-08-20: option (a), the contemporaneous basis** (over storing the provider's
+current-basis figure and re-basing units forward at valuation, and over the documentation-only cut).
+A stored closing price is *the price the security traded at on its own date*, which is what a
+pre-split-fetched row already holds and what the Closing Prices screen implies. So: normalise on the
+way in, re-base already-stored earlier prices when a split or bonus issue is recorded, and leave
+`reports::valuation` alone. Existing rows need a one-off repair, and a re-fetch is no longer
+byte-identical to the provider — both accepted.
+
+**Options as put:**
+
+- **(a) Stored prices are in the price date's own contemporaneous basis** (what a pre-split-fetched
+  row already holds, and what the Closing Prices screen implies). Normalise on the way in: multiply
+  the provider's figure by the cumulative ratio of every recorded `ShareSplit`/`BonusIssue` dated
+  *after* the price date, and re-base every stored price dated before an action when that action is
+  recorded, so entry order can't matter. Valuation then multiplies as-at-date units by an
+  as-at-date price and needs no change.
+- **(b) Stored prices are in the listing's current basis** (what the provider serves, so a re-fetch
+  is always idempotent). Re-base the *stored prices before* a split when the split is recorded, and
+  change valuation to multiply the price by units re-based into the **current** basis. Smaller
+  arithmetic surface, but the Closing Prices screen then shows a figure that is not what the security
+  traded at that day.
+- **(c) Document it as a Known limitation** and add a `reports::health` warning when a listing has a
+  recorded split or bonus issue with stored prices spanning it — no re-basing, the operator prices
+  the affected days by hand.
+
+**Closed 2026-08-20.** Option (a) as decided, with one correction to the write-up's arithmetic that
+turned out to be load-bearing. "Multiply the provider's figure by the cumulative ratio of every
+re-basing action dated *after* the price date" is right only for a figure observed **after** the
+action. The provider restates its series from the ex-date onward, so which basis a figure arrived in
+is fixed by *when it was observed*, not by when it is read — and the daily `price-import` job
+collects every price contemporaneously, so the blanket rule would have multiplied years of already
+correct history by the ratio the first time a split was recorded. `fetched_at` already dates the
+observation, so the row says which basis it is in.
+
+**The invariant**, stated in `entities::closing_price`'s module doc and in `docs/API.md`'s Closing
+prices section: a stored `price` is the price the security traded at on its own `price_date`, in
+that day's unit basis, and
+
+    price = price_as_observed × the split ratio over (price_date, fetched_at]
+
+Migration `0034` rebuilds `closing_prices` (rename pattern, third time — 0020/0021 the precedents)
+to add `price_as_observed`, the figure as the provider served it or as the operator entered it,
+CHECK-paired with `status` exactly as `price` is so no ok row can exist without the observation it
+must be re-derived from. Ids are carried over explicitly, so every row keeps the audit trail already
+recorded against it, and both `*_row_history_*` triggers are re-created with the new column. Keeping
+the observation is what makes every restatement a **recompute from source** rather than a delta
+applied to an already-adjusted number: idempotent, order-free, nothing to un-apply, no division to
+lose digits to.
+
+**Where the two halves live.** The arithmetic is one function beside the quantity re-basing it is the
+dual of — `corporate_action::adjustments::contemporaneous_price`, over the existing `split_ratio`
+(a re-basing event multiplies the unit count and divides the per-unit price by the same ratio), never
+re-derived inline. Normalising on the way in sits in `closing_price::fetch_and_store`, the single
+funnel `run_collection` / `backfill` / `POST /closing_prices/fetch` all pass through, rather than at
+each call site — `db_store` would have been the wrong level, since `put_manual` shares it and must
+not normalise. Re-deriving stored rows is `closing_price::db_rebase_listing_prices`, run on the
+caller's own connection by `corporate_action::db::db_upsert` and `db_delete` inside their existing
+transactions, so the action and the prices it restates commit together. It runs for **every** action
+kind on the written listing (and, on an edit that moves the row, the listing it left) rather than
+only for the two re-basing types, so re-typing a split into something else is covered by the same
+call; a listing with no re-basing action reads nothing at all beyond the one splits query. The
+edit path is therefore covered by construction — a ratio correction, a date move, a re-type, a move
+to another listing — and so is delete, which re-derives from the action set the delete leaves behind.
+`reports::valuation` is untouched, as decided.
+
+**Manual prices are contemporaneous by declaration** — the operator states what the security traded
+at that day — so they are neither normalised on entry nor ever re-based: `price_as_observed` equals
+`price`, and the re-base pass reads only `origin = 'fetched'` rows. That is the reading consistent
+with the existing one-way rule (the provider never takes a hand-entered day back), and the safe one:
+nothing rewrites a figure a person typed. `docs/API.md` tells the operator to enter the figure as it
+stood on the day, not a split-adjusted one off a current chart.
+
+**Existing rows.** Every stored figure to date *is* the raw observation, so the migration copies
+`price` into `price_as_observed` and leaves `price` alone — already the right answer for any database
+with no `ShareSplit`/`BonusIssue` recorded, which includes the live one: checked read-only, 12,249
+stored prices and **zero** re-basing actions, so **no live row is affected**. A database that does
+have one is repaired by the `price-rebase` maintenance job (`POST /jobs/price-rebase`, registered but
+deliberately not scheduled), which re-derives every listing's prices by the same shared pass in one
+transaction. The repair is not attempted in SQL: the ratio is a product of TEXT decimals, and SQLite
+cannot multiply and divide those without going through REAL, which the project bans outright
+(`infra::db::migrations_store_decimals_as_text_never_real`).
+
+**Consequences accepted and now documented**: the restated figure carries only the provider's ~7
+significant digits (`clean_price`), so a ratio that does not divide out exactly recovers no more
+precision than that; and a re-fetch is no longer byte-identical to the provider's response. A re-base
+is an ordinary UPDATE of an audited table, so the superseded figure lands in `row_history` and the
+`closing_prices_stale_snapshots_update` trigger stales the valuations that used it — recording a
+split now regenerates the snapshots its price correction moved, for free.
+
+Tests: the reproduction as a regression at report level
+(`reports::snapshot::tests::db_the_valuation_series_does_not_step_at_a_split` — 100 units, a 10-for-1
+split, prices either side, and a series that no longer steps); the entry-order property both ways
+round (fetch-then-record and record-then-fetch reach the same stored figure, and a price observed
+*before* the split is left alone when it is recorded); a bonus issue; a consolidation, where the
+error runs the other way; the manual-price decision from both directions; the edit and delete paths
+(ratio corrected, date moved before the price, action deleted); the `price-rebase` repair and its
+idempotence; the audit + staleness side effects; `contemporaneous_price`'s own half-open interval
+unit test; and `migration_0034_keeps_prices_and_stamps_them_as_their_own_observation` pinning the
+third rebuild of an audited table (rows, ids, the new CHECK, both triggers). Docs: `docs/API.md`
+(Closing prices, the `ShareSplit`/`BonusIssue` entries, the jobs list), `docs/SCHEMA.md`, README, and
+`doc_checks::contemporaneous_price_basis_documented`. The Closing Prices screen shows the provider's
+figure beside the stored one, but only when a re-base has actually moved it.

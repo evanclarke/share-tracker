@@ -1139,6 +1139,53 @@ fn audited_closing_prices_documented() {
     assert!(README_MD.contains("hand-entered closing prices"));
 }
 
+/// Docs-sync pin for the contemporaneous price basis (SCENARIOS Q-14,
+/// 2026-08-20): the API states what basis a stored price is in, that it is
+/// normalised on entry and re-derived when a re-basing action is recorded,
+/// what a manual price does instead, and the precision that survives; the
+/// corporate-action entries say a split/bonus issue re-bases stored prices;
+/// the schema documents the column and the fetched_at-dates-the-basis rule;
+/// and the repair job is named in both the API and the README.
+#[test]
+fn contemporaneous_price_basis_documented() {
+    let closing_prices = API_MD
+        .split("## Closing prices")
+        .nth(1)
+        .expect("docs/API.md has a Closing prices section")
+        .split("\n## ")
+        .next()
+        .expect("split always yields at least one part");
+    assert!(closing_prices.contains("**A stored price is in its own trading day's unit basis**"));
+    assert!(
+        closing_prices.contains(
+            "`price = price_as_observed ×` the ratio of every [`ShareSplit`/`BonusIssue`]"
+        )
+    );
+    assert!(closing_prices.contains("in the action write's own transaction"));
+    assert!(closing_prices.contains("carries only the provider's ~7 significant digits"));
+    assert!(closing_prices.contains("no longer byte-identical to the provider's response"));
+    assert!(closing_prices.contains("contemporaneous **by declaration**"));
+    // The two re-basing action types say what they now do to stored prices.
+    assert!(API_MD.contains(
+        "re-bases the listing's stored [closing prices](#closing-prices)** — in the same \
+         transaction"
+    ));
+    assert!(API_MD.contains(
+        "It **re-bases the listing's stored [closing prices](#closing-prices)** exactly as a \
+         `ShareSplit` does."
+    ));
+    // SCHEMA.md: the column, its CHECK, and what dates the basis.
+    assert!(SCHEMA_MD.contains("price_as_observed TEXT (decimal, nullable, 0034)"));
+    assert!(SCHEMA_MD.contains("Also **dates the unit basis** price_as_observed arrived in"));
+    // The one-off repair job, in the API's job list and the README's schedule note.
+    assert!(
+        API_MD.contains(
+            "and `price-rebase` (see [Closing prices](#closing-prices); **not scheduled**"
+        )
+    );
+    assert!(README_MD.contains("`price-rebase` is deliberately one of those"));
+}
+
 /// Docs-sync pin (REQUIREMENTS 2026-07-13, lossless GST-inclusive
 /// round-trip): the Trades section states the read/write round-trip
 /// semantics explicitly — with the flag set, `brokerage` is the one

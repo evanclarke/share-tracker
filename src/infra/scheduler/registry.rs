@@ -140,6 +140,20 @@ pub fn registry(
         }
     });
 
+    // Not on the schedule: a one-off repair, not recurring work. Recording a
+    // corporate action already re-bases that listing's prices inside its own
+    // transaction, so the only database this has anything to do is one whose
+    // prices were stored before the basis rule existed (migration 0034).
+    // Idempotent — it re-derives each price from the figure as observed — so
+    // running it again changes nothing.
+    register(&mut jobs, "price-rebase", {
+        let pool = pool.clone();
+        move |_| {
+            let pool = pool.clone();
+            async move { crate::entities::closing_price::run_rebase(&pool).await }
+        }
+    });
+
     register(&mut jobs, "report-snapshot", {
         let pool = pool.clone();
         move |_| {
