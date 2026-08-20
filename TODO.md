@@ -105,13 +105,22 @@ note describes exactly this and had not been connected to a cause:
   of the two entities at the spin-off, which `demerger_cost_base_pct` (an ATO cost-base
   apportionment, not a price ratio) does not give. So this cannot be fixed by extending the existing
   walk — it needs its own input.
-- [ ] Decide the model. Roughly: **(a)** record the demerger's price-adjustment factor as a stated
-  fact on the action (the operator reads it off the two closes either side, or off the provider's
-  own factor) and fold it into the same re-basing walk; **(b)** refuse to *fetch* a listing's
-  pre-demerger dates at all, so the series is honestly absent rather than quietly adjusted, and
-  require hand-entered prices there (which the manual-price path already treats as contemporaneous
-  by declaration); or **(c)** document it as a Known limitation beside the Q-14 invariant, so the
-  invariant's own statement is not overclaimed — it currently reads as unconditional.
+- [ ] **Fix — Evan chose 2026-08-20: state the real close and re-base** (over refusing to fetch a
+  listing's pre-demerger dates and requiring ~650 hand-entered prices, and over doing both). The
+  `Demerger` action gains a stated fact — what the security **actually closed at on the last
+  pre-demerger trading day** — carrying `sourced_from`/`reason` provenance the way a manual price
+  does. The factor is *derived* from that against the provider's adjusted figure for the same day,
+  not typed as an abstract ratio, so the entry is auditable and the arithmetic is the system's.
+  It then folds into the walk Q-14 built. **Note the structural point:** the price re-basing event
+  set is a *superset* of the quantity re-basing one — a demerger restates the price series but
+  changes no unit count on the original listing, so it must NOT enter `split_ratio`, which
+  `split_adjusted_quantity` / `as_acquired_quantity` also read. `contemporaneous_price` needs its
+  own event set (splits ∪ demerger price factors).
+- [ ] Options as put: **(b)** refuse to *fetch* a listing's pre-demerger dates at all, so the series
+  is honestly absent rather than quietly adjusted, hand-entering them instead (the manual-price path
+  already treats an entered figure as contemporaneous by declaration); **(c)** refuse until the
+  demerger carries its stated close, then allow the fetch and re-base — the strictest guarantee and
+  the largest change.
 - [ ] Whichever is chosen, `docs/API.md`'s Closing prices section states the invariant without this
   exception, and `reports::health` has no warning for a listing with stored prices before a recorded
   demerger — the shape the Q-14 pass considered and did not need.
