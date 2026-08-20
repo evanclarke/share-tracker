@@ -4135,3 +4135,147 @@ using the real price; a manual price inside the run beating the carried close; h
 from the date while the hole *before* it stays reported (`reports::health`); the flag reaching
 `period_performance`; the UI bundle assertions; and the 0035 block in
 `row_history::audited_tables_match_migration_check_and_triggers` pinning the re-created trigger pair.
+
+## The contemporaneous-price invariant does not hold across a demerger, and Evan's live LAC history is the case
+
+Q-14 (closed 2026-08-20, `9554de5`) established that a stored closing price is *the price the
+security traded at on its own date*, and re-bases the provider's figure across every recorded
+`ShareSplit` / `BonusIssue`. A **`Demerger`** breaks the same invariant by the same mechanism and is
+**not** covered: Yahoo applies a spin-off price-adjustment factor to the whole pre-demerger series
+just as it does for a split, but a demerger changes no unit count on the original listing (it issues
+units of a *different* one), so nothing re-bases the price back.
+
+Found while checking the live database read-only after the Q-14 fix, against a note already in the
+project memory ("LAC pre-demerger prices unblocked but still ~2.46x understated", 2026-07-28) — the
+note describes exactly this and had not been connected to a cause:
+
+- `corporate_actions` holds one `Demerger`, listing 7 (`LAC`), dated 2023-10-03.
+- LAC was held 2021-03-25 → 2023-10-03 (the demerger's closing Sell), 1,049 units.
+- Its stored ok price history starts **2023-10-02** — one day before the demerger — at **10.13**,
+  `origin: fetched`, `fetched_at: 2026-07-26`, i.e. whatever Yahoo serves today. The recorded ~2.46×
+  understatement puts the contemporaneous close near US$24.9, which is the pre-demerger level.
+- The rest of the pre-demerger period is **187 errored rows** (2023-01-03..2023-09-29) and nothing at
+  all before 2023-01-03, so those dates' snapshots are currently *blocked* rather than wrong. The
+  exposure is latent: **the moment that history is backfilled, every day of it arrives adjusted**,
+  and `report_snapshots` holds 6,459 rows going back to 2020-08-31 for those dates to regenerate into.
+
+- [x] The `price-rebase` job and `db_rebase_listing_prices` read only `ShareSplit`/`BonusIssue`
+  ratios. A demerger has no such ratio to read: the provider's factor is set by the *market values*
+  of the two entities at the spin-off, which `demerger_cost_base_pct` (an ATO cost-base
+  apportionment, not a price ratio) does not give. So this cannot be fixed by extending the existing
+  walk — it needs its own input.
+- [x] **Fix — Evan chose 2026-08-20: state the real close and re-base** (over refusing to fetch a
+  listing's pre-demerger dates and requiring ~650 hand-entered prices, and over doing both). The
+  `Demerger` action gains a stated fact — what the security **actually closed at on the last
+  pre-demerger trading day** — carrying `sourced_from`/`reason` provenance the way a manual price
+  does. The factor is *derived* from that against the provider's adjusted figure for the same day,
+  not typed as an abstract ratio, so the entry is auditable and the arithmetic is the system's.
+  It then folds into the walk Q-14 built. **Note the structural point:** the price re-basing event
+  set is a *superset* of the quantity re-basing one — a demerger restates the price series but
+  changes no unit count on the original listing, so it must NOT enter `split_ratio`, which
+  `split_adjusted_quantity` / `as_acquired_quantity` also read. `contemporaneous_price` needs its
+  own event set (splits ∪ demerger price factors).
+- [x] Options as put: **(b)** refuse to *fetch* a listing's pre-demerger dates at all, so the series
+  is honestly absent rather than quietly adjusted, hand-entering them instead (the manual-price path
+  already treats an entered figure as contemporaneous by declaration); **(c)** refuse until the
+  demerger carries its stated close, then allow the fetch and re-base — the strictest guarantee and
+  the largest change.
+- [x] Whichever is chosen, `docs/API.md`'s Closing prices section states the invariant without this
+  exception, and `reports::health` has no warning for a listing with stored prices before a recorded
+  demerger — the shape the Q-14 pass considered and did not need.
+
+**Closed 2026-08-20** — *State the real close and re-base*, as Evan chose. Migration 0036 adds four
+optional columns to a `Demerger`: `demerger_close_date` (the last pre-demerger trading day, CHECK'd
+strictly before the action's own date), `demerger_close_price` (what the security **actually** closed
+at then, TEXT decimal in the listing's quote currency), and the
+`demerger_close_sourced_from`/`demerger_close_reason` provenance a hand-entered closing price carries
+— all four present together or all absent (0007's `scrip_cash_*` shape), and only on a Demerger row.
+`corporate_actions` is audited, so both row-history triggers are dropped and re-created with the new
+columns (0023's pattern).
+
+**Optional, not required, and the live database is why.** Read `-readonly` before the rules were
+written: `corporate_actions` holds exactly one `Demerger` — id 1, LAC (listing 7) → LAR (listing 8),
+2023-10-03, 1-for-1, 36% — entered long before this existed. A NOT NULL column would have made it
+uneditable until the close was supplied, which is the trap SCENARIOS M named. A demerger whose head
+listing has no fetched pre-demerger prices needs no statement at all.
+
+**The structural point, which is the crux, is now a type.** The price re-basing event set is a strict
+*superset* of the quantity one, so it has its own type: `corporate_action::adjustments::
+PriceBasisEvent`, with its own ratio walk (`price_basis_ratio`) and its own loader
+(`closing_price::db_price_basis_events`). `contemporaneous_price` no longer takes `&[SplitEvent]` —
+the only bridge is `impl From<&SplitEvent> for PriceBasisEvent`, and it runs one way only, so a
+demerger factor **cannot** reach `split_ratio`, which `split_adjusted_quantity`/`as_acquired_quantity`
+and through them `domain::cost_base`, `domain::open_parcels`, the AMIT re-basing and the write-time
+allocation-capacity checks all read. The statement is carried in three places a reader will meet it:
+the `adjustments` module doc, the `closing_price` module doc (with the full list of which action
+kinds restate the price series and why), and `docs/API.md`'s Closing prices section — which no longer
+states the invariant unconditionally. The negative test pins it:
+`db_a_demergers_stated_close_moves_no_quantity_cost_base_or_capacity` compares
+`domain::open_parcels::load`'s remaining units and adjusted cost base either side of recording a
+stated close, over a parcel a Sell already allocates against.
+
+**Which kinds restate the price series**, stated in the module doc so the next reader does not
+re-derive it: `ShareSplit`/`BonusIssue` (unit count moves, and each states its own ratio);
+`Demerger` (the provider's spin-off adjustment, no unit count moves — this finding); **not**
+`ScripForScrip` or `WorthlessShares`, which end the ticker so the provider stops serving a series
+rather than restating one (that is the `unpriced_from` case from `c71e1f9`); **not**
+`ReturnOfCapital`, `RightsIssue` or `BuyBack` — a distribution goes through the dividend-adjustment
+channel `auto_adjust(false)` turns off, and neither of the other two is in the provider's adjustment
+set. No further kind was found to need its own section.
+
+**The factor is derived, never typed.** `stated close ÷ the provider's own figure for that same day`,
+with both sides kept as facts and the quotient computed at re-base time. The provider side is looked
+up lazily so the close can be stated *before* any pre-demerger history is backfilled — and so a
+re-fetch re-derives it instead of leaving a stored quotient stale. The denominator is not the raw
+stored figure but what the walk *without this demerger* already makes of it, so a split between the
+close date and the observation is divided out once rather than absorbed twice; several demergers
+resolve latest-first for the same reason. Only a row observed on or after the demerger can supply the
+factor (one observed before it is already contemporaneous). Precision: the recovered figures carry
+the provider's ~7 significant digits (`clean_price`) *and* whatever the single `Decimal` division
+rounds off — documented as "as accurate as the close you state, not exact". Never `f64`, never a
+`REAL` column.
+
+**Order-freedom needed one more call.** The reference row a demerger's factor divides by is itself
+one of the rows a backfill fetches, so `fetch_and_store` re-runs `db_rebase_listing_prices` after its
+range lands; re-deriving from `price_as_observed` is idempotent, so it writes nothing (and stales no
+snapshot, and adds no audit row) whenever the first pass was already right. Both entry orders are
+pinned. Closing the same walk turned up a **latent Q-14 gap** on the way: the pass returned early on
+an empty event set, so deleting a listing's *last* re-basing action left its prices restated with
+nothing to restate them out of. The walk now always runs — over no events it re-derives
+`clean_price(price_as_observed)` — with tests for both the demerger and the split case.
+
+**Repair is the existing job, extended not duplicated**: `price-rebase` now also selects listings with
+a `Demerger` carrying a stated close, and `corporate_action::db_upsert`/`db_delete` re-run the pass on
+their own transaction for every kind, so recording, correcting, removing and deleting are one call.
+
+**One thing the write-up did not anticipate, found by rehearsing against a copy of the live database:**
+Evan's LAC demerger has already been *executed*, so `WriteError::ReferencedByTrade` froze the action
+against every edit — the fix would have been unreachable on exactly the case it was built for, short
+of deleting the demerger group and redoing it. The freeze is about *terms*: the demerge trades were
+created and validated against the entitlement ratio and the cost-base percentage, never against a
+price fact. So `stated_close_only` widens it by exactly one fact — a write that differs **only** in
+the four `demerger_close_*` fields is let through, while any other difference (and a `PUT` that
+changes nothing at all) still answers 422. Rehearsed end to end on a scratch copy of the live DB:
+migrations 22→36 applied clean, the LAC row survived with NULLs, `GET /reports/health` named it, the
+stated close of 24.90 took 2023-10-02 from 10.13 to 24.90, the warning cleared, and a re-termed PUT
+was still refused.
+
+`reports::health` gained `demergers_missing_close` — the last TODO item's open question. It names
+every demerger with no stated close whose head listing holds pre-demerger prices the provider served
+*after* it, because nothing else can see them: the rows are `ok`, not errored, so `errored_prices` and
+`unpriced_days` both pass over them and the only symptom is a valuation that looks plausible and is
+wrong. The live LAC row reports 1 adjusted day today; the 187 errored rows behind it become 187 more
+the moment they are backfilled, which is the latent exposure this finding was about.
+
+Surfaces: migration 0036; `corporate_action::adjustments` (`PriceBasisEvent`, `price_basis_ratio`,
+the retyped `contemporaneous_price`, `DemergerPriceStatement`, `db_demerger_price_statements`);
+`corporate_action::model` (the four fields, their all-or-none validation, the strictly-before-date and
+positivity and non-blank-provenance refusals); `corporate_action::db` (columns, binds,
+`stated_close_only`); `closing_price` (`db_price_basis_events`, `db_observed_figure`,
+`observation_date`, the re-base pass, `fetch_and_store`'s trailing call, `run_rebase`'s listing set,
+the module doc); `reports::health`; `src/web/config.js` (four form fields in the Demerger group + the
+type description), `src/web/util.js` (`demerger_close_price` classified), `src/web/app.js` (the health
+banner line). Docs: `docs/API.md` (Corporate actions' Demerger entry, the PUT example, the payload
+paragraph and 422 catalogue, the freeze exception, Closing prices' now-conditional invariant with the
+full kind list, Health), `docs/SCHEMA.md` (the four columns + the superset statement on
+`price_as_observed`), README, and `doc_checks::demerger_price_rebasing_documented`.

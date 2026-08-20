@@ -475,6 +475,10 @@ mod tests {
                     demerger_new_units: Decimal::ONE,
                     demerger_held_units: Decimal::ONE,
                     demerger_cost_base_pct: dec("30"),
+                    demerger_close_date: None,
+                    demerger_close_price: None,
+                    demerger_close_sourced_from: None,
+                    demerger_close_reason: None,
                 },
             },
         )

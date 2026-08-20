@@ -147,6 +147,34 @@ pub enum ActionKind {
         /// head-entity-advised step 2 percentage — e.g. 5.063 for BHP
         /// Steel). The head parcels keep the remaining `100 − pct` percent.
         demerger_cost_base_pct: Decimal,
+        /// The last **pre-demerger** trading day (strictly before the
+        /// action's own `date`), and what the security **actually closed at**
+        /// on it, in the listing's quote currency — the stated fact the
+        /// demerger's *price* factor is derived from. A demerger changes no
+        /// unit count on this listing, but the price provider restates its
+        /// whole pre-demerger series by a spin-off adjustment factor all the
+        /// same, so without this every stored pre-demerger close is the
+        /// current adjusted level (`entities::closing_price`,
+        /// [`PriceBasisEvent`](super::adjustments::PriceBasisEvent)).
+        ///
+        /// Optional: a demerger whose head listing has no fetched
+        /// pre-demerger prices needs none, and an action recorded before this
+        /// existed stays editable without one. All four fields are present
+        /// together or all absent (the all-or-none shape `scrip_cash_*`
+        /// already uses), CHECK-enforced by 0036.
+        #[serde(default)]
+        demerger_close_date: Option<NaiveDate>,
+        #[serde(default)]
+        demerger_close_price: Option<Decimal>,
+        /// Where the stated close was taken from, and why it had to be
+        /// stated — the same provenance a hand-entered closing price carries
+        /// (`PUT /closing_prices/:listing_id/:price_date`). Informational:
+        /// the arithmetic reads only the date and the close, and these are
+        /// the audit record of the entry.
+        #[serde(default)]
+        demerger_close_sourced_from: Option<String>,
+        #[serde(default)]
+        demerger_close_reason: Option<String>,
     },
     WorthlessShares {
         /// Which CGT event the loss is recognised under (see [`WorthlessEvent`]).
@@ -240,6 +268,10 @@ impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for ActionKind {
                 demerger_new_units: row_dec(row, "demerger_new_units")?,
                 demerger_held_units: row_dec(row, "demerger_held_units")?,
                 demerger_cost_base_pct: row_dec(row, "demerger_cost_base_pct")?,
+                demerger_close_date: row.try_get("demerger_close_date")?,
+                demerger_close_price: row_opt_dec(row, "demerger_close_price")?,
+                demerger_close_sourced_from: row.try_get("demerger_close_sourced_from")?,
+                demerger_close_reason: row.try_get("demerger_close_reason")?,
             }),
             "WorthlessShares" => Ok(ActionKind::WorthlessShares {
                 worthless_event: WorthlessEvent::from_str(row.try_get("worthless_event")?)?,
@@ -320,6 +352,14 @@ pub struct CorporateActionBody {
     #[serde(default)]
     demerger_cost_base_pct: Option<Decimal>,
     #[serde(default)]
+    demerger_close_date: Option<NaiveDate>,
+    #[serde(default)]
+    demerger_close_price: Option<Decimal>,
+    #[serde(default)]
+    demerger_close_sourced_from: Option<String>,
+    #[serde(default)]
+    demerger_close_reason: Option<String>,
+    #[serde(default)]
     worthless_event: Option<WorthlessEvent>,
 }
 
@@ -371,7 +411,14 @@ impl CorporateActionBody {
         let demerger = self.demerger_listing_id.is_some()
             || self.demerger_new_units.is_some()
             || self.demerger_held_units.is_some()
-            || self.demerger_cost_base_pct.is_some();
+            || self.demerger_cost_base_pct.is_some()
+            // The stated close is part of the Demerger payload, so folding it
+            // in here is what makes every *other* type's `!demerger` guard
+            // reject a stray one — no arm needs its own test.
+            || self.demerger_close_date.is_some()
+            || self.demerger_close_price.is_some()
+            || self.demerger_close_sourced_from.is_some()
+            || self.demerger_close_reason.is_some();
         let worthless = self.worthless_event.is_some();
         // Entitlement can never be fixed after the payment it entitles the
         // holder to, so a record date past the payment date is rejected rather
@@ -382,6 +429,13 @@ impl CorporateActionBody {
         };
         let record = record_date.is_some();
         let positive = |d: Option<Decimal>| d.filter(|v| *v > Decimal::ZERO);
+        // Provenance text that is present but blank records nothing, so it is
+        // refused rather than stored — the rule `PUT /closing_prices/…` already
+        // applies to a manual price's own `sourced_from`/`reason`.
+        let non_blank = |s: String| {
+            let trimmed = s.trim().to_string();
+            (!trimmed.is_empty()).then_some(trimmed)
+        };
         match self.action_type {
             ActionType::ReturnOfCapital
                 if !split && !bonus && !rights && !buyback && !scrip && !demerger && !worthless =>
@@ -496,11 +550,50 @@ impl CorporateActionBody {
                 let demerger_cost_base_pct = self
                     .demerger_cost_base_pct
                     .filter(|p| *p > Decimal::ZERO && *p < Decimal::ONE_HUNDRED)?;
+                // The stated pre-demerger close is all-or-none: the day, the
+                // close, and the provenance of where it came from and why it
+                // was needed. A partial set would leave a factor with only one
+                // side stated, or a figure with nothing recording its source —
+                // the provenance a hand-entered closing price is required to
+                // carry, for exactly the same reason (it is a figure a person
+                // asserted, not one the provider served). The day is the last
+                // *pre*-demerger trading day, so it is strictly before the
+                // demerger date: a close on or after it is already in the
+                // post-demerger basis and its factor would be meaningless.
+                let (
+                    demerger_close_date,
+                    demerger_close_price,
+                    demerger_close_sourced_from,
+                    demerger_close_reason,
+                ) = match (
+                    self.demerger_close_date,
+                    self.demerger_close_price,
+                    self.demerger_close_sourced_from,
+                    self.demerger_close_reason,
+                ) {
+                    (None, None, None, None) => (None, None, None, None),
+                    (Some(close_date), Some(price), Some(sourced_from), Some(reason)) => {
+                        if close_date >= self.date {
+                            return None;
+                        }
+                        (
+                            Some(close_date),
+                            Some(positive(Some(price))?),
+                            Some(non_blank(sourced_from)?),
+                            Some(non_blank(reason)?),
+                        )
+                    }
+                    _ => return None,
+                };
                 Some(ActionKind::Demerger {
                     demerger_listing_id,
                     demerger_new_units: positive(self.demerger_new_units)?,
                     demerger_held_units: positive(self.demerger_held_units)?,
                     demerger_cost_base_pct,
+                    demerger_close_date,
+                    demerger_close_price,
+                    demerger_close_sourced_from,
+                    demerger_close_reason,
                 })
             }
             ActionType::BuyBack

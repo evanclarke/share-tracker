@@ -44,16 +44,54 @@
 //!   observed*, and `fetched_at` dates that, so the row keeps the figure as
 //!   observed and derives the stored one:
 //!
-//!       price = price_as_observed × split ratio over (price_date, fetched_at]
+//!       price = price_as_observed × the price re-basing ratio
+//!                                   over (price_date, fetched_at]
 //!
 //!   Every restatement is therefore a recompute from the observation rather
 //!   than a delta applied to an already-adjusted number
-//!   ([`db_rebase_listing_prices`]): recording, editing or deleting a
-//!   `ShareSplit`/`BonusIssue` re-derives the same answer in any order, and a
-//!   series collected day by day *before* a split is left alone by it (its
-//!   fetches predate the event, so its ratio is 1). The recovered figure
-//!   carries only the provider's ~7 significant digits — see [`clean_price`] —
-//!   so a re-fetch is no longer byte-identical to the provider's response.
+//!   ([`db_rebase_listing_prices`]): recording, editing or deleting a price
+//!   re-basing action re-derives the same answer in any order, and a series
+//!   collected day by day *before* one is left alone by it (its fetches
+//!   predate the event, so its ratio is 1). The recovered figure carries only
+//!   the provider's ~7 significant digits — see [`clean_price`] — so a
+//!   re-fetch is no longer byte-identical to the provider's response.
+//!
+//! - **Which corporate actions restate the price series** — the set is a
+//!   strict *superset* of the actions that re-base quantities
+//!   (`corporate_action::adjustments`, whose module docs carry the same
+//!   statement from the other side, and whose separate
+//!   [`PriceBasisEvent`](crate::entities::corporate_action::PriceBasisEvent)
+//!   type keeps the two apart at every call site):
+//!
+//!   - `ShareSplit` / `BonusIssue` restate it, by the same ratio they multiply
+//!     the unit count by.
+//!   - A **`Demerger`** restates it too — the provider applies a spin-off
+//!     price-adjustment factor to the whole pre-demerger series exactly as it
+//!     does for a split — while changing **no unit count** on this listing (it
+//!     issues units of a *different* one). So there is no ratio to read: the
+//!     factor is derived from the close the operator states the security
+//!     actually traded at on the last pre-demerger trading day
+//!     (`demerger_close_date` / `demerger_close_price`) divided by the
+//!     provider's own adjusted figure for that same day
+//!     ([`db_price_basis_events`]). Both sides are kept as facts and the
+//!     quotient is computed at re-base time, so the close can be stated before
+//!     the history is backfilled and re-derives itself if it is re-fetched.
+//!     A demerger with no stated close restates nothing — its pre-demerger
+//!     prices stay as the provider served them, which `GET /reports/health`
+//!     reports as `demergers_missing_close`.
+//!   - `ScripForScrip` and `WorthlessShares` do **not**: both end the original
+//!     ticker, so the provider stops serving a series rather than restating
+//!     one (the `listings.unpriced_from` case).
+//!   - `ReturnOfCapital`, `RightsIssue` and `BuyBack` do **not**: a
+//!     distribution goes through the provider's dividend-adjustment channel,
+//!     which `auto_adjust(false)` turns off, and neither of the other two is
+//!     in the provider's adjustment set at all.
+//!
+//!   The derived demerger factor is a `Decimal` division, so the recovered
+//!   figures carry no more than the ~7 significant digits the provider gave
+//!   (see [`clean_price`], which holds them to exactly that) *and* whatever
+//!   the division itself rounds off — the price is recovered to about the
+//!   accuracy of the stated close, not exactly.
 //! - A failed fetch is stored as an errored row for that (listing, date) —
 //!   never a silent zero or a skipped row — and is replaced by a later
 //!   successful re-run.
@@ -793,16 +831,129 @@ pub(crate) async fn db_store(pool: &SqlitePool, row: &ClosingPrice) -> Result<()
 /// not be written down as if it recovered more.
 fn contemporaneous(
     as_observed: Decimal,
-    splits: &[crate::entities::corporate_action::SplitEvent],
+    events: &[crate::entities::corporate_action::PriceBasisEvent],
     price_date: NaiveDate,
     observed: NaiveDate,
 ) -> Decimal {
     clean_price(crate::entities::corporate_action::contemporaneous_price(
         as_observed,
-        splits,
+        events,
         price_date,
         observed,
     ))
+}
+
+/// One stored provider figure, as the demerger factor's denominator: the
+/// figure exactly as observed, and the UTC date it was observed on.
+struct ObservedFigure {
+    as_observed: Decimal,
+    observed: NaiveDate,
+}
+
+/// The stored provider figure for one (listing, day), or `None` when there is
+/// none to read. Manual rows are excluded: a hand-entered price is
+/// contemporaneous by declaration, so it is not a *restated* figure and
+/// dividing by it would only ever answer 1.
+async fn db_observed_figure(
+    conn: &mut sqlx::SqliteConnection,
+    listing_id: i64,
+    price_date: NaiveDate,
+) -> Result<Option<ObservedFigure>, sqlx::Error> {
+    let row: Option<(Money, String)> = sqlx::query_as(
+        "SELECT price_as_observed, fetched_at FROM closing_prices \
+         WHERE listing_id = ? AND price_date = ? AND status = 'ok' AND origin = 'fetched'",
+    )
+    .bind(listing_id)
+    .bind(price_date)
+    .fetch_optional(&mut *conn)
+    .await?;
+    row.map(|(price, fetched_at)| {
+        Ok(ObservedFigure {
+            as_observed: price.0,
+            observed: observation_date(&fetched_at)?,
+        })
+    })
+    .transpose()
+}
+
+/// The UTC date a row's `fetched_at` records — the date that fixes which unit
+/// and price basis the figure arrived in (module docs).
+fn observation_date(fetched_at: &str) -> Result<NaiveDate, sqlx::Error> {
+    Ok(DateTime::parse_from_rfc3339(fetched_at)
+        .map_err(|e| {
+            sqlx::Error::Decode(
+                format!("closing_prices.fetched_at {fetched_at:?} is not RFC 3339: {e}").into(),
+            )
+        })?
+        .with_timezone(&Utc)
+        .date_naive())
+}
+
+/// Every event that restated the provider's **price** series for one listing:
+/// its `ShareSplit`/`BonusIssue` ratios, plus a derived factor for each
+/// `Demerger` that carries a stated pre-demerger close (module docs, and
+/// `corporate_action::adjustments` for why this is a different set from the
+/// quantity one).
+///
+/// A split states its own factor. A demerger does not — the provider's
+/// spin-off factor is set by the two entities' market values, which no term of
+/// the action gives — so it is **derived**, here, from the two facts that
+/// bracket it: what the operator states the security actually closed at on the
+/// last pre-demerger trading day, over what the provider says about that same
+/// day. The provider's side is read now rather than stored, so
+///
+/// - the close can be stated before any pre-demerger history exists (the
+///   factor simply resolves to nothing until a figure is there to divide), and
+/// - re-fetching that day re-derives the factor instead of leaving a stored
+///   quotient stale.
+///
+/// The denominator is not the raw stored figure but what the walk **without
+/// this demerger** would already make of it: a split dated between the close
+/// date and the observation has restated that figure too, and the factor must
+/// not absorb it a second time. That is also why the statements are resolved
+/// latest-first — a *later* demerger restated the same figure and has to be
+/// divided out first, while an earlier one is outside the half-open window
+/// `(close_date, observed]` and cannot matter.
+///
+/// A demerger whose reference day was observed **before** it contributes
+/// nothing: that figure is already contemporaneous, so there is no factor to
+/// recover from it (and the rows it would apply to are exactly the ones the
+/// half-open window already leaves alone).
+pub async fn db_price_basis_events(
+    conn: &mut sqlx::SqliteConnection,
+    listing_id: i64,
+) -> Result<Vec<crate::entities::corporate_action::PriceBasisEvent>, sqlx::Error> {
+    use crate::entities::corporate_action::{self, PriceBasisEvent};
+
+    let splits = corporate_action::db_splits_for_listing(&mut *conn, listing_id).await?;
+    let mut events: Vec<PriceBasisEvent> = splits.iter().map(PriceBasisEvent::from).collect();
+
+    let statements = corporate_action::db_demerger_price_statements(&mut *conn, listing_id).await?;
+    for statement in statements.iter().rev() {
+        let Some(reference) =
+            db_observed_figure(&mut *conn, listing_id, statement.close_date).await?
+        else {
+            continue; // nothing of that day is stored yet
+        };
+        if reference.observed < statement.date {
+            continue; // observed before the demerger: already contemporaneous
+        }
+        let partly = corporate_action::contemporaneous_price(
+            reference.as_observed,
+            &events,
+            statement.close_date,
+            reference.observed,
+        );
+        if partly <= Decimal::ZERO {
+            continue; // no factor is recoverable from a non-positive figure
+        }
+        events.push(PriceBasisEvent {
+            date: statement.date,
+            recover_new: statement.close_price,
+            recover_old: partly,
+        });
+    }
+    Ok(events)
 }
 
 /// One stored ok, provider-fetched row, as the re-basing pass reads it.
@@ -822,28 +973,35 @@ struct ObservedRow {
 /// how many rows changed.
 ///
 /// This is the other half of the basis invariant (module docs): normalising on
-/// the way in fixes a price fetched *after* a split is recorded, and this fixes
-/// one fetched before it. Because each price is recomputed from
+/// the way in fixes a price fetched *after* an event is recorded, and this
+/// fixes one fetched before it. Because each price is recomputed from
 /// `price_as_observed` rather than adjusted in place, the pass is idempotent
-/// and order-free — it is equally the answer to a split being recorded, its
-/// ratio or date being edited, its being re-typed into another kind of action,
-/// and its being deleted. `corporate_action::db_upsert`/`db_delete` run it on
-/// their own transaction so the prices and the action can never be committed
-/// out of step, and the `price-rebase` job runs it over every listing as the
-/// one-off repair of a database that predates this rule.
+/// and order-free — it is equally the answer to a split or a demerger's stated
+/// close being recorded, a ratio, close or date being edited, an action being
+/// re-typed into another kind, and one being deleted.
+/// `corporate_action::db_upsert`/`db_delete` run it on their own transaction so
+/// the prices and the action can never be committed out of step, and the
+/// `price-rebase` job runs it over every listing as the one-off repair of a
+/// database that predates this rule.
+///
+/// The event set is [`db_price_basis_events`]', not the quantity re-basing one
+/// — a demerger belongs to it and must never reach `split_ratio`.
+///
+/// An **empty** event set is not an early exit: it is the state a listing is
+/// left in when its last re-basing action is deleted, or a demerger's stated
+/// close removed, and the prices then have to come back to the figures as
+/// observed. So the walk runs either way — over no events it re-derives each
+/// price as `clean_price(price_as_observed)`, which is what a fetch with
+/// nothing to restate would have stored, and writes nothing where that is
+/// already the stored figure.
 ///
 /// Manual rows are excluded: a hand-entered price is contemporaneous by
-/// declaration and is never rewritten (module docs). A listing with no
-/// re-basing action reads nothing at all — the pass costs one query.
+/// declaration and is never rewritten (module docs).
 pub async fn db_rebase_listing_prices(
     conn: &mut sqlx::SqliteConnection,
     listing_id: i64,
 ) -> Result<usize, sqlx::Error> {
-    let splits =
-        crate::entities::corporate_action::db_splits_for_listing(&mut *conn, listing_id).await?;
-    if splits.is_empty() {
-        return Ok(0);
-    }
+    let events = db_price_basis_events(&mut *conn, listing_id).await?;
     let rows: Vec<ObservedRow> = sqlx::query_as(
         "SELECT id, price_date, fetched_at, price, price_as_observed FROM closing_prices \
          WHERE listing_id = ? AND status = 'ok' AND origin = 'fetched' ORDER BY price_date",
@@ -854,19 +1012,8 @@ pub async fn db_rebase_listing_prices(
 
     let mut changed = 0;
     for row in rows {
-        let observed = DateTime::parse_from_rfc3339(&row.fetched_at)
-            .map_err(|e| {
-                sqlx::Error::Decode(
-                    format!(
-                        "closing_prices.fetched_at {:?} is not RFC 3339: {e}",
-                        row.fetched_at
-                    )
-                    .into(),
-                )
-            })?
-            .with_timezone(&Utc)
-            .date_naive();
-        let wanted = contemporaneous(row.price_as_observed, &splits, row.price_date, observed);
+        let observed = observation_date(&row.fetched_at)?;
+        let wanted = contemporaneous(row.price_as_observed, &events, row.price_date, observed);
         if wanted == row.price {
             continue;
         }
@@ -880,19 +1027,23 @@ pub async fn db_rebase_listing_prices(
     Ok(changed)
 }
 
-/// Re-base every listing that has a `ShareSplit`/`BonusIssue` recorded against
-/// it — the `price-rebase` maintenance job, and the one-off repair for a
-/// database whose prices were stored before the basis rule existed
-/// (migration 0034). One transaction, so the whole repair lands or none of it
-/// does; idempotent, so running it again is a no-op.
+/// Re-base every listing that has a price re-basing action recorded against
+/// it — a `ShareSplit`/`BonusIssue`, or a `Demerger` carrying a stated
+/// pre-demerger close — as the `price-rebase` maintenance job, and the one-off
+/// repair for a database whose prices were stored before the basis rule
+/// existed (migrations 0034 and 0036). One transaction, so the whole repair
+/// lands or none of it does; idempotent, so running it again is a no-op.
 ///
-/// Only listings with a re-basing action can have a price to correct, so those
-/// are the only ones read.
+/// Only listings with such an action can have a price to correct, so those are
+/// the only ones read. This stays the single repair path: a demerger's stated
+/// close was folded into the same job rather than given one of its own.
 pub async fn run_rebase(pool: &SqlitePool) -> Result<(), String> {
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
     let listing_ids: Vec<i64> = sqlx::query_scalar(
         "SELECT DISTINCT listing_id FROM corporate_actions \
-         WHERE action_type IN ('ShareSplit', 'BonusIssue') ORDER BY listing_id",
+         WHERE action_type IN ('ShareSplit', 'BonusIssue') \
+            OR (action_type = 'Demerger' AND demerger_close_date IS NOT NULL) \
+         ORDER BY listing_id",
     )
     .fetch_all(&mut *tx)
     .await
@@ -1201,8 +1352,13 @@ async fn fetch_and_store(
     // dates the unit basis the provider's figures arrived in (module docs).
     let observed = Utc::now();
     let fetched_at = observed.to_rfc3339();
-    let splits =
-        crate::entities::corporate_action::db_splits_for_listing(pool, market.listing.id).await?;
+    // Scoped so the pooled connection is released before the writes below: an
+    // in-memory pool holds a single connection, and keeping one here while
+    // `db_store` asks for another would deadlock.
+    let events = {
+        let mut conn = pool.acquire().await?;
+        db_price_basis_events(&mut conn, market.listing.id).await?
+    };
     let (mut ok, mut errored) = (0, 0);
     for &date in dates {
         let result = outcome
@@ -1217,7 +1373,7 @@ async fn fetch_and_store(
                     price_date: date,
                     price: Some(contemporaneous(
                         as_observed,
-                        &splits,
+                        &events,
                         date,
                         observed.date_naive(),
                     )),
@@ -1250,6 +1406,20 @@ async fn fetch_and_store(
             }
         };
         db_store(pool, &row).await?;
+    }
+
+    // The events were resolved from what was stored *before* this call, and a
+    // demerger's factor is derived from one of these very rows — the provider's
+    // figure for its stated close date. Backfilling a pre-demerger range
+    // therefore has to look again once the range has landed, or a run that
+    // fetched the reference day itself would store every other day of it in the
+    // provider's adjusted basis. Re-deriving from `price_as_observed` is
+    // idempotent, so this is a no-op (and writes nothing, so it stales no
+    // snapshot and adds no audit row) in every case where the first pass was
+    // already right.
+    {
+        let mut conn = pool.acquire().await?;
+        db_rebase_listing_prices(&mut conn, market.listing.id).await?;
     }
     Ok((ok, errored))
 }
@@ -4324,6 +4494,31 @@ mod tests {
         assert_eq!(stored(&pool, ymd(2026, 6, 5)).await.0, "120.888");
     }
 
+    /// Deleting the *only* re-basing action leaves the listing with an empty
+    /// event set, and the prices have to come back to the figures as observed
+    /// — the case the walk must not short-circuit past.
+    #[tokio::test]
+    async fn db_deleting_the_last_split_puts_the_prices_back_to_the_observation() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
+        insert_share_split(&pool, 1, ymd(2026, 6, 10), "10", "1").await;
+        let market = load_market(&pool, 1).await.unwrap().unwrap();
+        let stub = StubFetcher::default().with_close(1, ymd(2026, 6, 5), "120.888", "AUD");
+        fetch_and_store(&pool, &stub, &market, &[ymd(2026, 6, 5)])
+            .await
+            .unwrap();
+        assert_eq!(stored(&pool, ymd(2026, 6, 5)).await.0, "1208.88");
+
+        crate::entities::corporate_action::db_delete(&pool, 901)
+            .await
+            .unwrap();
+        assert_eq!(
+            stored(&pool, ymd(2026, 6, 5)).await,
+            ("120.888".to_string(), "120.888".to_string()),
+            "with the split gone there is nothing to restate out of any more"
+        );
+    }
+
     /// The one-off repair: a database whose prices were stored before this
     /// rule existed holds the provider's restated figure with a split already
     /// recorded. `run_rebase` (the `price-rebase` job) re-derives them, and is
@@ -4350,6 +4545,378 @@ mod tests {
             "1208.88",
             "re-deriving from the observation is idempotent"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // A demerger restates the price series too — and there is no ratio to read
+    // (it changes no unit count on this listing), so the factor is derived
+    // from the close the operator states the security actually traded at on
+    // the last pre-demerger trading day. Evan's LAC history is the live case.
+    // -----------------------------------------------------------------------
+
+    /// Record a demerger of `listing_id` into `demerged_id`, optionally
+    /// carrying the stated pre-demerger close the price factor is derived
+    /// from, through the entity's own write path.
+    async fn insert_demerger(
+        pool: &SqlitePool,
+        listing_id: i64,
+        demerged_id: i64,
+        date: NaiveDate,
+        stated_close: Option<(NaiveDate, &str)>,
+    ) {
+        crate::entities::corporate_action::db_upsert(
+            pool,
+            &crate::entities::corporate_action::CorporateAction {
+                id: 800 + listing_id,
+                listing_id,
+                date,
+                kind: crate::entities::corporate_action::ActionKind::Demerger {
+                    demerger_listing_id: demerged_id,
+                    demerger_new_units: Decimal::ONE,
+                    demerger_held_units: Decimal::ONE,
+                    demerger_cost_base_pct: Decimal::from(36),
+                    demerger_close_date: stated_close.map(|(d, _)| d),
+                    demerger_close_price: stated_close.map(|(_, p)| p.parse().unwrap()),
+                    demerger_close_sourced_from: stated_close
+                        .map(|_| "nyse.com daily close".to_string()),
+                    demerger_close_reason: stated_close
+                        .map(|_| "the provider adjusts the pre-demerger series".to_string()),
+                },
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    /// The LAC reproduction. The provider serves the whole pre-demerger series
+    /// adjusted by its spin-off factor, so the day LAC actually closed at
+    /// US$24.90 comes back as 10.13. Stating that close derives the factor and
+    /// re-bases every pre-demerger day with it — the reference day back to
+    /// exactly the stated figure, the days around it in proportion.
+    #[tokio::test]
+    async fn db_a_stated_pre_demerger_close_restates_the_whole_pre_demerger_series() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "LAC", "XNYS", "USD").await;
+        insert_listing(&pool, 2, "LAR", "XNYS", "USD").await;
+        let market = load_market(&pool, 1).await.unwrap().unwrap();
+        let stub = StubFetcher::default()
+            .with_close(1, ymd(2023, 9, 29), "10.00", "USD")
+            .with_close(1, ymd(2023, 10, 2), "10.13", "USD")
+            .with_close(1, ymd(2023, 10, 4), "11.72", "USD");
+        fetch_and_store(
+            &pool,
+            &stub,
+            &market,
+            &[ymd(2023, 9, 29), ymd(2023, 10, 2), ymd(2023, 10, 4)],
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            stored(&pool, ymd(2023, 10, 2)).await.0,
+            "10.13",
+            "with no stated close there is nothing to restate out of"
+        );
+
+        insert_demerger(
+            &pool,
+            1,
+            2,
+            ymd(2023, 10, 3),
+            Some((ymd(2023, 10, 2), "24.90")),
+        )
+        .await;
+
+        assert_eq!(
+            stored(&pool, ymd(2023, 10, 2)).await,
+            ("24.9".to_string(), "10.13".to_string()),
+            "the reference day comes back to exactly the close the operator stated"
+        );
+        assert_eq!(
+            stored(&pool, ymd(2023, 9, 29)).await.0,
+            // 10.00 × 24.90/10.13, held to the provider's 7 significant digits.
+            "24.58045",
+            "every other pre-demerger day moves by the same derived factor"
+        );
+        assert_eq!(
+            stored(&pool, ymd(2023, 10, 4)).await.0,
+            "11.72",
+            "a post-demerger day was never restated by the provider"
+        );
+    }
+
+    /// The other half, as for a split: a pre-demerger day collected *before*
+    /// the demerger already holds the contemporaneous close, and stating one
+    /// later must leave it exactly as it is.
+    #[tokio::test]
+    async fn db_a_pre_demerger_price_observed_before_the_demerger_is_untouched() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "LAC", "XNYS", "USD").await;
+        insert_listing(&pool, 2, "LAR", "XNYS", "USD").await;
+        // Observed the day it traded — before the demerger, so contemporaneous.
+        crate::test_support::closing_price(1, ymd(2023, 9, 29))
+            .price("24.58")
+            .fetched_at("2023-09-29T21:00:00Z")
+            .insert(&pool)
+            .await;
+        // …and the reference day, observed long after it, which is what the
+        // factor is derived from.
+        crate::test_support::closing_price(1, ymd(2023, 10, 2))
+            .price("10.13")
+            .fetched_at("2026-07-26T07:44:56Z")
+            .insert(&pool)
+            .await;
+
+        insert_demerger(
+            &pool,
+            1,
+            2,
+            ymd(2023, 10, 3),
+            Some((ymd(2023, 10, 2), "24.90")),
+        )
+        .await;
+
+        assert_eq!(
+            stored(&pool, ymd(2023, 9, 29)).await.0,
+            "24.58",
+            "the fetch predates the demerger, so the figure was never adjusted"
+        );
+        assert_eq!(stored(&pool, ymd(2023, 10, 2)).await.0, "24.9");
+    }
+
+    /// The entry-order property, both ways: state the close before the history
+    /// is backfilled, or backfill first and state it after. The reference row
+    /// the factor divides by is one of the rows being fetched, so the fetch
+    /// funnel re-derives once its range has landed.
+    #[tokio::test]
+    async fn db_entry_order_of_the_stated_close_and_the_backfill_does_not_change_the_price() {
+        async fn backfill(pool: &SqlitePool) {
+            let market = load_market(pool, 1).await.unwrap().unwrap();
+            let stub = StubFetcher::default()
+                .with_close(1, ymd(2023, 9, 29), "10.00", "USD")
+                .with_close(1, ymd(2023, 10, 2), "10.13", "USD");
+            fetch_and_store(pool, &stub, &market, &[ymd(2023, 9, 29), ymd(2023, 10, 2)])
+                .await
+                .unwrap();
+        }
+        async fn setup(pool: &SqlitePool) {
+            insert_listing(pool, 1, "LAC", "XNYS", "USD").await;
+            insert_listing(pool, 2, "LAR", "XNYS", "USD").await;
+        }
+
+        // The close stated first, then the history backfilled.
+        let a = test_pool().await;
+        setup(&a).await;
+        insert_demerger(
+            &a,
+            1,
+            2,
+            ymd(2023, 10, 3),
+            Some((ymd(2023, 10, 2), "24.90")),
+        )
+        .await;
+        backfill(&a).await;
+
+        // The history backfilled first, then the close stated.
+        let b = test_pool().await;
+        setup(&b).await;
+        backfill(&b).await;
+        insert_demerger(
+            &b,
+            1,
+            2,
+            ymd(2023, 10, 3),
+            Some((ymd(2023, 10, 2), "24.90")),
+        )
+        .await;
+
+        for date in [ymd(2023, 9, 29), ymd(2023, 10, 2)] {
+            assert_eq!(
+                stored(&a, date).await,
+                stored(&b, date).await,
+                "entry order cannot matter for {date}"
+            );
+        }
+        assert_eq!(stored(&a, ymd(2023, 10, 2)).await.0, "24.9");
+        assert_eq!(stored(&a, ymd(2023, 9, 29)).await.0, "24.58045");
+    }
+
+    /// A demerger and a split on the same listing compose: the split restated
+    /// the reference figure too, so the derived demerger factor must divide it
+    /// out rather than absorb it — otherwise the split would be applied twice
+    /// to every pre-demerger day.
+    #[tokio::test]
+    async fn db_a_demerger_and_a_later_split_compose_without_double_counting() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "LAC", "XNYS", "USD").await;
+        insert_listing(&pool, 2, "LAR", "XNYS", "USD").await;
+        // A 2-for-1 split after the demerger: the provider halves everything
+        // before it, on top of the spin-off adjustment.
+        insert_share_split(&pool, 1, ymd(2024, 5, 1), "2", "1").await;
+        insert_demerger(
+            &pool,
+            1,
+            2,
+            ymd(2023, 10, 3),
+            Some((ymd(2023, 10, 2), "24.90")),
+        )
+        .await;
+
+        let market = load_market(&pool, 1).await.unwrap().unwrap();
+        // What the provider serves today: 24.90 × (10.13/24.90 spin-off) × 1/2.
+        let stub = StubFetcher::default()
+            .with_close(1, ymd(2023, 10, 2), "5.065", "USD")
+            .with_close(1, ymd(2024, 6, 3), "7.50", "USD");
+        fetch_and_store(&pool, &stub, &market, &[ymd(2023, 10, 2), ymd(2024, 6, 3)])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            stored(&pool, ymd(2023, 10, 2)).await.0,
+            "24.9",
+            "the split is undone once and the spin-off once — not the split twice"
+        );
+        assert_eq!(
+            stored(&pool, ymd(2024, 6, 3)).await.0,
+            "7.5",
+            "a day after both events is served in its own basis already"
+        );
+    }
+
+    /// Editing the stated close re-derives the prices from the observation,
+    /// removing it puts them back, and deleting the whole demerger does too —
+    /// none of them a delta applied to an already-adjusted number.
+    #[tokio::test]
+    async fn db_editing_or_removing_the_stated_close_re_derives_the_prices() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "LAC", "XNYS", "USD").await;
+        insert_listing(&pool, 2, "LAR", "XNYS", "USD").await;
+        let market = load_market(&pool, 1).await.unwrap().unwrap();
+        let stub = StubFetcher::default().with_close(1, ymd(2023, 10, 2), "10.13", "USD");
+        fetch_and_store(&pool, &stub, &market, &[ymd(2023, 10, 2)])
+            .await
+            .unwrap();
+
+        insert_demerger(
+            &pool,
+            1,
+            2,
+            ymd(2023, 10, 3),
+            Some((ymd(2023, 10, 2), "24.90")),
+        )
+        .await;
+        assert_eq!(stored(&pool, ymd(2023, 10, 2)).await.0, "24.9");
+
+        // A mis-keyed close, corrected in place.
+        insert_demerger(
+            &pool,
+            1,
+            2,
+            ymd(2023, 10, 3),
+            Some((ymd(2023, 10, 2), "24.95")),
+        )
+        .await;
+        assert_eq!(stored(&pool, ymd(2023, 10, 2)).await.0, "24.95");
+
+        // Removing the statement altogether leaves the provider's figure.
+        insert_demerger(&pool, 1, 2, ymd(2023, 10, 3), None).await;
+        assert_eq!(stored(&pool, ymd(2023, 10, 2)).await.0, "10.13");
+
+        // …as does deleting the demerger, once it is stated again.
+        insert_demerger(
+            &pool,
+            1,
+            2,
+            ymd(2023, 10, 3),
+            Some((ymd(2023, 10, 2), "24.90")),
+        )
+        .await;
+        assert_eq!(stored(&pool, ymd(2023, 10, 2)).await.0, "24.9");
+        crate::entities::corporate_action::db_delete(&pool, 801)
+            .await
+            .unwrap();
+        assert_eq!(stored(&pool, ymd(2023, 10, 2)).await.0, "10.13");
+    }
+
+    /// The one-off repair path is the existing `price-rebase` job, extended
+    /// rather than duplicated: a database whose pre-demerger prices were
+    /// stored before the demerger's close was stated is repaired by it, and
+    /// running it again is a no-op.
+    #[tokio::test]
+    async fn db_the_rebase_job_repairs_prices_a_demerger_restated() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "LAC", "XNYS", "USD").await;
+        insert_listing(&pool, 2, "LAR", "XNYS", "USD").await;
+        // Stored the way the live rows are: the provider's adjusted figure,
+        // observed years after the demerger, with nothing taken out of it.
+        for (date, price) in [(ymd(2023, 9, 29), "10.00"), (ymd(2023, 10, 2), "10.13")] {
+            crate::test_support::closing_price(1, date)
+                .price(price)
+                .fetched_at("2026-07-26T07:44:56Z")
+                .insert(&pool)
+                .await;
+        }
+        // Written straight to the table, as a database predating the column
+        // would have had it re-entered afterwards.
+        sqlx::query("UPDATE closing_prices SET price = price_as_observed WHERE listing_id = 1")
+            .execute(&pool)
+            .await
+            .unwrap();
+        insert_demerger(
+            &pool,
+            1,
+            2,
+            ymd(2023, 10, 3),
+            Some((ymd(2023, 10, 2), "24.90")),
+        )
+        .await;
+
+        run_rebase(&pool).await.unwrap();
+        assert_eq!(stored(&pool, ymd(2023, 10, 2)).await.0, "24.9");
+        assert_eq!(stored(&pool, ymd(2023, 9, 29)).await.0, "24.58045");
+
+        run_rebase(&pool).await.unwrap();
+        assert_eq!(
+            stored(&pool, ymd(2023, 10, 2)).await.0,
+            "24.9",
+            "re-deriving from the observation is idempotent"
+        );
+        assert_eq!(stored(&pool, ymd(2023, 9, 29)).await.0, "24.58045");
+    }
+
+    /// A hand-entered pre-demerger price is contemporaneous by declaration, so
+    /// a stated close never rewrites it — the same one-way rule a split obeys.
+    #[tokio::test]
+    async fn api_a_manual_pre_demerger_price_is_never_rebased_by_a_stated_close() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "LAC", "XNYS", "USD").await;
+        insert_listing(&pool, 2, "LAR", "XNYS", "USD").await;
+        crate::test_support::closing_price(1, ymd(2023, 9, 29))
+            .price("24.58")
+            .fetched_at("2026-07-26T07:44:56Z")
+            .manual("nyse.com", "provider adjusts the pre-demerger series")
+            .insert(&pool)
+            .await;
+        crate::test_support::closing_price(1, ymd(2023, 10, 2))
+            .price("10.13")
+            .fetched_at("2026-07-26T07:44:56Z")
+            .insert(&pool)
+            .await;
+
+        insert_demerger(
+            &pool,
+            1,
+            2,
+            ymd(2023, 10, 3),
+            Some((ymd(2023, 10, 2), "24.90")),
+        )
+        .await;
+
+        assert_eq!(
+            stored(&pool, ymd(2023, 9, 29)).await.0,
+            "24.58",
+            "nothing rewrites a figure a person typed"
+        );
+        assert_eq!(stored(&pool, ymd(2023, 10, 2)).await.0, "24.9");
     }
 
     /// A re-base is an UPDATE of an audited table, so the superseded figure is

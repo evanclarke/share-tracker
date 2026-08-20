@@ -136,6 +136,9 @@ pub async fn db_demerge(pool: &SqlitePool, action_id: i64) -> Result<Demerge, De
         demerger_new_units: new_units,
         demerger_held_units: held_units,
         demerger_cost_base_pct: cost_base_pct,
+        // The stated pre-demerger close is a price-series fact, read only by
+        // the closing-price re-base; the demerge operation ignores it.
+        ..
     } = action.kind
     else {
         return Err(DemergeError::NotADemerger);
@@ -456,6 +459,10 @@ mod tests {
                     demerger_new_units: new.parse().unwrap(),
                     demerger_held_units: held.parse().unwrap(),
                     demerger_cost_base_pct: pct.parse().unwrap(),
+                    demerger_close_date: None,
+                    demerger_close_price: None,
+                    demerger_close_sourced_from: None,
+                    demerger_close_reason: None,
                 },
             },
         )
@@ -1163,6 +1170,85 @@ mod tests {
             Err(corporate_action::WriteError::ReferencedByTrade)
         ));
         assert!(corporate_action::db_delete(&pool, 10).await.is_err());
+    }
+
+    /// …with exactly one exception: the stated pre-demerger close. It is a
+    /// *price* fact — the demerge trades were created and validated against
+    /// the entitlement ratio and the cost-base percentage, never against this
+    /// — and without the exception the fix for the provider's spin-off price
+    /// adjustment would be unreachable on every demerger that has actually
+    /// been run, which is the only kind with prices to correct (Evan's live
+    /// LAC demerger is one).
+    #[tokio::test]
+    async fn a_referenced_demerger_still_takes_its_stated_pre_demerger_close() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "LAC").await;
+        insert_listing(&pool, 2, "LAR").await;
+        insert_buy(&pool, 1, 1, d(2020, 10, 1), "1000", "1.50").await;
+        insert_demerger(&pool, 10, d(2024, 7, 1)).await;
+        db_demerge(&pool, 10).await.unwrap();
+
+        // A pre-demerger close the provider served afterwards, so it carries
+        // the spin-off adjustment.
+        crate::test_support::closing_price(1, d(2024, 6, 28))
+            .price("10.13")
+            .fetched_at("2026-07-26T07:44:56Z")
+            .insert(&pool)
+            .await;
+
+        let mut action = corporate_action::db_get(&pool, 10).await.unwrap().unwrap();
+        let ActionKind::Demerger {
+            demerger_close_date,
+            demerger_close_price,
+            demerger_close_sourced_from,
+            demerger_close_reason,
+            ..
+        } = &mut action.kind
+        else {
+            unreachable!("the fixture records a Demerger")
+        };
+        *demerger_close_date = Some(d(2024, 6, 28));
+        *demerger_close_price = Some("24.90".parse().unwrap());
+        *demerger_close_sourced_from = Some("nyse.com daily close".to_string());
+        *demerger_close_reason = Some("the provider adjusts the series".to_string());
+        corporate_action::db_upsert(&pool, &action).await.unwrap();
+
+        let stored: String = sqlx::query_scalar(
+            "SELECT price FROM closing_prices WHERE listing_id = 1 AND price_date = '2024-06-28'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            stored, "24.9",
+            "stating the close re-bases the listing's pre-demerger prices even though the \
+             demerger has been run"
+        );
+
+        // Everything else about the action is still frozen: a re-PUT that
+        // changes nothing, and one that changes a term, both stay 422.
+        assert!(matches!(
+            corporate_action::db_upsert(&pool, &action).await,
+            Err(corporate_action::WriteError::ReferencedByTrade)
+        ));
+        let mut retermed = action.clone();
+        if let ActionKind::Demerger {
+            demerger_cost_base_pct,
+            ..
+        } = &mut retermed.kind
+        {
+            *demerger_cost_base_pct = "30".parse().unwrap();
+        }
+        assert!(matches!(
+            corporate_action::db_upsert(&pool, &retermed).await,
+            Err(corporate_action::WriteError::ReferencedByTrade)
+        ));
+        let mut moved = action.clone();
+        moved.date = d(2024, 7, 2);
+        assert!(matches!(
+            corporate_action::db_upsert(&pool, &moved).await,
+            Err(corporate_action::WriteError::ReferencedByTrade)
+        ));
     }
 
     /// The demerge spans every holding account; the head replacement and

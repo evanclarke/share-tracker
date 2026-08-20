@@ -23,7 +23,8 @@ const COLUMNS: &str = "id, action_type, listing_id, date, amount_per_unit, curre
                        scrip_old_units, scrip_cash_per_unit, scrip_market_value, \
                        scrip_cash_currency, demerger_listing_id, demerger_new_units, \
                        demerger_held_units, demerger_cost_base_pct, worthless_event, \
-                       record_date";
+                       record_date, demerger_close_date, demerger_close_price, \
+                       demerger_close_sourced_from, demerger_close_reason";
 
 impl CrudEntity for CorporateAction {
     type Key = i64;
@@ -68,6 +69,15 @@ pub enum WriteError {
     /// (`rights_sales.rights_action_id`): editing it would retroactively change
     /// the terms those rows were created and validated against. Delete the
     /// referencing rows first. Mapped to `422`.
+    ///
+    /// The **one** exception is a `Demerger`'s stated pre-demerger close
+    /// ([`stated_close_only`]): it is a *price* fact, not a term — no demerge
+    /// trade was created or validated against it, and it moves no quantity or
+    /// cost base — so adding, correcting or removing it on an
+    /// already-demerged action is allowed. Without that exception the fix for
+    /// the provider's spin-off price adjustment would be unreachable on
+    /// exactly the demergers that have been run, which is all of them that
+    /// have prices to correct.
     #[error("this corporate action is referenced by trades or rights sales and cannot be edited")]
     ReferencedByTrade,
     /// The terms as written would leave a Sell allocating more units out of a
@@ -133,7 +143,9 @@ impl From<WriteError> for ApiError {
             WriteError::ReferencedByTrade => ApiError::unprocessable(
                 "this corporate action is referenced by rights-exercise, buy-back, \
                  scrip-for-scrip, demerger, or worthless-shares trades or by rights sales \
-                 and cannot be edited — delete those rows first",
+                 and cannot be edited — delete those rows first (a demerger's stated \
+                 pre-demerger close is the one exception: it is a price fact and stays \
+                 editable, so change only those four fields)",
             ),
             // The written terms would leave an over-consumed parcel → 422.
             WriteError::AllocationsExceedParcel => ApiError::unprocessable(
@@ -274,6 +286,48 @@ async fn rollovers_after(
         .collect()
 }
 
+/// Whether `written` differs from `stored` **only** in a `Demerger`'s stated
+/// pre-demerger close — the one part of an action that a referenced (already
+/// demerged) row may still be edited on.
+///
+/// The stated close is a price fact: `entities::closing_price` derives the
+/// demerger's price re-basing factor from it, and nothing else reads it. The
+/// demerge operation's trades were created and validated against the
+/// entitlement ratio and the cost-base percentage, neither of which this can
+/// touch — the comparison below is over the whole row with just the close
+/// blanked out, so any other difference (a ratio, the percentage, the date,
+/// the listing, the action type) still meets the freeze.
+///
+/// An unchanged close is not "only the close": a write that moves nothing is
+/// refused as before, so this widens the freeze by exactly one fact and no
+/// more.
+fn stated_close_only(stored: &CorporateAction, written: &CorporateAction) -> bool {
+    let blank_close = |kind: &ActionKind| {
+        let mut kind = kind.clone();
+        if let ActionKind::Demerger {
+            demerger_close_date,
+            demerger_close_price,
+            demerger_close_sourced_from,
+            demerger_close_reason,
+            ..
+        } = &mut kind
+        {
+            *demerger_close_date = None;
+            *demerger_close_price = None;
+            *demerger_close_sourced_from = None;
+            *demerger_close_reason = None;
+        }
+        kind
+    };
+    matches!(
+        (&stored.kind, &written.kind),
+        (ActionKind::Demerger { .. }, ActionKind::Demerger { .. })
+    ) && stored.listing_id == written.listing_id
+        && stored.date == written.date
+        && stored.kind != written.kind
+        && blank_close(&stored.kind) == blank_close(&written.kind)
+}
+
 pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<(), WriteError> {
     // Spread the variant's payload over the per-type columns; the other
     // types' columns are NULL (the table CHECKs require exactly this shape).
@@ -303,6 +357,10 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
         demerger_new_units: OptMoney,
         demerger_held_units: OptMoney,
         demerger_cost_base_pct: OptMoney,
+        demerger_close_date: Option<NaiveDate>,
+        demerger_close_price: OptMoney,
+        demerger_close_sourced_from: Option<String>,
+        demerger_close_reason: Option<String>,
         worthless_event: Option<&'static str>,
     }
     let mut c = Cols::default();
@@ -374,11 +432,19 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
             demerger_new_units,
             demerger_held_units,
             demerger_cost_base_pct,
+            demerger_close_date,
+            demerger_close_price,
+            demerger_close_sourced_from,
+            demerger_close_reason,
         } => {
             c.demerger_listing_id = Some(*demerger_listing_id);
             c.demerger_new_units = OptMoney(Some(*demerger_new_units));
             c.demerger_held_units = OptMoney(Some(*demerger_held_units));
             c.demerger_cost_base_pct = OptMoney(Some(*demerger_cost_base_pct));
+            c.demerger_close_date = *demerger_close_date;
+            c.demerger_close_price = OptMoney(*demerger_close_price);
+            c.demerger_close_sourced_from = demerger_close_sourced_from.clone();
+            c.demerger_close_reason = demerger_close_reason.clone();
         }
         ActionKind::WorthlessShares { worthless_event } => {
             c.worthless_event = Some(worthless_event.as_str());
@@ -391,6 +457,11 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
     // were validated against is frozen: editing its terms (or re-typing it)
     // would invalidate the checks those trades were created under. Checked
     // and written in one transaction.
+    // Loaded once: the row as it stands decides both whether a referenced
+    // action is nonetheless writable (below) and which listing an edit is
+    // moving it off (further down).
+    let stored = db_get_tx(&mut *tx, action.id).await?;
+
     let referenced: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM trades \
                        WHERE rights_action_id = ?1 OR buyback_action_id = ?1 \
@@ -401,7 +472,16 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
     .bind(action.id)
     .fetch_one(&mut *tx)
     .await?;
-    if referenced {
+    // Frozen against its *terms* — but a Demerger's stated pre-demerger close
+    // is not one of them (see `WriteError::ReferencedByTrade`), so a write that
+    // changes nothing else is let through. `stated_close_only` requires the
+    // close to actually differ, so an otherwise identical re-`PUT` of a
+    // referenced action is refused exactly as it always was.
+    if referenced
+        && !stored
+            .as_ref()
+            .is_some_and(|stored| stated_close_only(stored, action))
+    {
         return Err(WriteError::ReferencedByTrade);
     }
 
@@ -464,11 +544,7 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
 
     // Which listing the row is leaving, when an edit moves it (the split
     // stream it is removed from has to hold up too). `None` for an insert.
-    let previous_listing_id: Option<i64> =
-        sqlx::query_scalar("SELECT listing_id FROM corporate_actions WHERE id = ?")
-            .bind(action.id)
-            .fetch_optional(&mut *tx)
-            .await?;
+    let previous_listing_id: Option<i64> = stored.as_ref().map(|stored| stored.listing_id);
 
     sqlx::query(
         "INSERT INTO corporate_actions \
@@ -479,9 +555,11 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
           scrip_listing_id, scrip_new_units, scrip_old_units, \
           scrip_cash_per_unit, scrip_market_value, scrip_cash_currency, \
           demerger_listing_id, demerger_new_units, demerger_held_units, \
-          demerger_cost_base_pct, worthless_event, record_date) \
+          demerger_cost_base_pct, worthless_event, record_date, \
+          demerger_close_date, demerger_close_price, demerger_close_sourced_from, \
+          demerger_close_reason) \
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, \
-                 ?) \
+                 ?, ?, ?, ?, ?) \
          ON CONFLICT(id) DO UPDATE SET \
              action_type       = excluded.action_type, \
              listing_id        = excluded.listing_id, \
@@ -510,7 +588,11 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
              demerger_held_units    = excluded.demerger_held_units, \
              demerger_cost_base_pct = excluded.demerger_cost_base_pct, \
              worthless_event        = excluded.worthless_event, \
-             record_date            = excluded.record_date",
+             record_date            = excluded.record_date, \
+             demerger_close_date         = excluded.demerger_close_date, \
+             demerger_close_price        = excluded.demerger_close_price, \
+             demerger_close_sourced_from = excluded.demerger_close_sourced_from, \
+             demerger_close_reason       = excluded.demerger_close_reason",
     )
     .bind(action.id)
     .bind(action.kind.type_str())
@@ -541,6 +623,10 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
     .bind(c.demerger_cost_base_pct)
     .bind(c.worthless_event)
     .bind(c.record_date)
+    .bind(c.demerger_close_date)
+    .bind(c.demerger_close_price)
+    .bind(c.demerger_close_sourced_from)
+    .bind(c.demerger_close_reason)
     .execute(&mut *tx)
     .await?;
 
@@ -562,17 +648,19 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
     }
 
     // A stored closing price is in its own trading day's unit basis, derived
-    // from the figure the provider served by the re-basing actions dated
+    // from the figure the provider served by the price re-basing events dated
     // between that day and the fetch (`entities::closing_price`). Recording a
-    // ShareSplit/BonusIssue — or editing its ratio or date, re-typing it into
-    // something else, or moving it to another listing — changes that
-    // derivation, so the affected listings' prices are re-derived here, inside
-    // the write's own transaction: the action and the prices it restates are
-    // committed together, and the order the two were entered in cannot matter
-    // (SCENARIOS Q-14). Run for every kind on the written listings rather than
-    // only the two re-basing ones, so a re-type *away* from a split is covered
-    // by the same call; the pass reads nothing at all for a listing with no
-    // re-basing action.
+    // ShareSplit/BonusIssue, or a Demerger's stated pre-demerger close — or
+    // editing a ratio, a close, or a date, re-typing the action into something
+    // else, or moving it to another listing — changes that derivation, so the
+    // affected listings' prices are re-derived here, inside the write's own
+    // transaction: the action and the prices it restates are committed
+    // together, and the order the two were entered in cannot matter (SCENARIOS
+    // Q-14, and the demerger finding that followed it). Run for every kind on
+    // the written listings rather than only the re-basing ones, so a re-type
+    // *away* from a split, or a stated close being removed, is covered by the
+    // same call; the pass reads nothing at all for a listing with no price
+    // re-basing event.
     for &listing_id in &listings {
         crate::entities::closing_price::db_rebase_listing_prices(&mut tx, listing_id).await?;
     }
@@ -730,9 +818,10 @@ pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<bool, DeleteError> 
             None => Err(DeleteError::Db(err)),
         };
     }
-    // Deleting a re-basing action restates the listing's stored closing prices
-    // exactly as recording one does, so the same pass runs in the delete's own
-    // transaction — see `db_upsert` above.
+    // Deleting a price re-basing action — a split, a bonus issue, or a
+    // demerger carrying a stated close — restates the listing's stored closing
+    // prices exactly as recording one does, so the same pass runs in the
+    // delete's own transaction; see `db_upsert` above.
     crate::entities::closing_price::db_rebase_listing_prices(&mut tx, action.listing_id).await?;
 
     tx.commit().await?;

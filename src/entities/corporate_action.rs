@@ -134,9 +134,10 @@ mod http;
 mod model;
 
 pub use adjustments::{
-    RocEvent, SplitEvent, as_acquired_quantity, contemporaneous_price,
-    db_payment_currency_conflict, db_return_of_capital_events, db_share_split_events,
-    db_splits_for_listing, per_unit_reduction, sold_in_acquired_units, split_adjusted_quantity,
+    PriceBasisEvent, RocEvent, SplitEvent, as_acquired_quantity, contemporaneous_price,
+    db_demerger_price_statements, db_payment_currency_conflict, db_return_of_capital_events,
+    db_share_split_events, db_splits_for_listing, per_unit_reduction, sold_in_acquired_units,
+    split_adjusted_quantity,
 };
 pub use db::db_get_tx;
 pub use http::router;
@@ -333,8 +334,40 @@ mod tests {
                 demerger_new_units: new.parse().unwrap(),
                 demerger_held_units: held.parse().unwrap(),
                 demerger_cost_base_pct: pct.parse().unwrap(),
+                demerger_close_date: None,
+                demerger_close_price: None,
+                demerger_close_sourced_from: None,
+                demerger_close_reason: None,
             },
         }
+    }
+
+    /// A `Demerger` carrying the stated pre-demerger close (and its
+    /// provenance) that the price re-base derives its factor from.
+    fn demerger_with_close(
+        id: i64,
+        listing_id: i64,
+        demerger_listing_id: i64,
+        date: NaiveDate,
+        close_date: NaiveDate,
+        close: &str,
+    ) -> CorporateAction {
+        let mut action = demerger(id, listing_id, demerger_listing_id, date, "1", "1", "36");
+        if let ActionKind::Demerger {
+            demerger_close_date,
+            demerger_close_price,
+            demerger_close_sourced_from,
+            demerger_close_reason,
+            ..
+        } = &mut action.kind
+        {
+            *demerger_close_date = Some(close_date);
+            *demerger_close_price = Some(close.parse().unwrap());
+            *demerger_close_sourced_from = Some("nyse.com daily close".to_string());
+            *demerger_close_reason =
+                Some("the provider adjusts the pre-demerger series".to_string());
+        }
+        action
     }
 
     fn split_event(date: NaiveDate, new: &str, old: &str) -> SplitEvent {
@@ -529,6 +562,10 @@ mod tests {
                 demerger_new_units: Decimal::ONE,
                 demerger_held_units: Decimal::from(5),
                 demerger_cost_base_pct: "5.063".parse().unwrap(),
+                demerger_close_date: None,
+                demerger_close_price: None,
+                demerger_close_sourced_from: None,
+                demerger_close_reason: None,
             }
         );
     }
@@ -551,6 +588,122 @@ mod tests {
         assert!(db_share_split_events(&pool).await.unwrap().is_empty());
         assert!(db_splits_for_listing(&pool, 1).await.unwrap().is_empty());
         assert!(db_return_of_capital_events(&pool).await.unwrap().is_empty());
+    }
+
+    /// **The structural point.** A demerger's stated close belongs to the
+    /// *price* re-basing set only. Recording one must move no quantity, no
+    /// cost base and no allocation capacity — the three things `split_ratio`
+    /// decides, and which `domain::cost_base`, `domain::open_parcels`, the
+    /// AMIT re-basing and the Sell/trade write-time checks all read. If the
+    /// factor ever leaked into the quantity set this test would fail, which is
+    /// the whole reason the two event sets are separate types.
+    #[tokio::test]
+    async fn db_a_demergers_stated_close_moves_no_quantity_cost_base_or_capacity() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "LAC").await;
+        insert_listing(&pool, 2, "LAR").await;
+        test_support::buy(10, 1)
+            .date(d(2021, 3, 25))
+            .qty(Decimal::from(1049))
+            .price(Decimal::from(20))
+            .insert(&pool)
+            .await;
+        // A sale that consumes part of the parcel: its allocation capacity is
+        // computed from the split stream at read time, so a demerger sneaking
+        // into that stream would change what still fits.
+        test_support::sell(11, 1)
+            .date(d(2023, 5, 1))
+            .qty(Decimal::from(49))
+            .price(Decimal::from(30))
+            .insert(&pool)
+            .await;
+        sqlx::query(
+            "INSERT INTO parcel_allocations (sale_trade_id, purchase_trade_id, quantity_allocated) \
+             VALUES (11, 10, '49')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        async fn open_position(pool: &SqlitePool) -> (Decimal, Decimal) {
+            let mut conn = pool.acquire().await.unwrap();
+            let parcels = crate::domain::open_parcels::load(&mut conn, None)
+                .await
+                .unwrap();
+            assert_eq!(parcels.len(), 1);
+            (parcels[0].remaining_as_of, parcels[0].cost_base.adjusted)
+        }
+
+        let before = open_position(&pool).await;
+        assert_eq!(before.0, Decimal::from(1000));
+
+        db_upsert(
+            &pool,
+            &demerger_with_close(1, 1, 2, d(2023, 10, 3), d(2023, 10, 2), "24.90"),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            open_position(&pool).await,
+            before,
+            "a demerger's stated close is a price fact — it must not restate a \
+             single unit or a single dollar of cost base"
+        );
+        assert!(
+            db_splits_for_listing(&pool, 1).await.unwrap().is_empty(),
+            "the quantity re-basing set never sees a demerger"
+        );
+        assert!(db_share_split_events(&pool).await.unwrap().is_empty());
+        assert_eq!(
+            split_adjusted_quantity(Decimal::from(1000), &[], d(2021, 3, 25), None),
+            Decimal::from(1000),
+            "and the conversion the capacity checks run is still the identity"
+        );
+
+        // The remaining 1000 units still fit a sale of exactly 1000 — the
+        // allocation-capacity invariant a corporate-action write re-checks.
+        let statements = db_demerger_price_statements(&pool, 1).await.unwrap();
+        assert_eq!(statements.len(), 1, "…while the price side does see it");
+        assert_eq!(statements[0].close_date, d(2023, 10, 2));
+        assert_eq!(statements[0].close_price, "24.90".parse().unwrap());
+    }
+
+    /// The statement loader reads only demergers that actually carry a close,
+    /// on the listing asked for, in date order.
+    #[tokio::test]
+    async fn db_demerger_price_statements_skips_a_demerger_with_no_stated_close() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "HEAD").await;
+        insert_listing(&pool, 2, "DEM").await;
+        db_upsert(
+            &pool,
+            &demerger(1, 1, 2, d(2024, 11, 30), "1", "5", "5.063"),
+        )
+        .await
+        .unwrap();
+        assert!(
+            db_demerger_price_statements(&pool, 1)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        db_upsert(
+            &pool,
+            &demerger_with_close(2, 1, 2, d(2025, 6, 2), d(2025, 5, 30), "12.5"),
+        )
+        .await
+        .unwrap();
+        let statements = db_demerger_price_statements(&pool, 1).await.unwrap();
+        assert_eq!(statements.len(), 1);
+        assert_eq!(statements[0].date, d(2025, 6, 2));
+        assert!(
+            db_demerger_price_statements(&pool, 2)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     /// The CHECK rejects a demerger of a listing into itself even on a raw
@@ -993,7 +1146,10 @@ mod tests {
     /// so a price observed before one is already in its own day's basis.
     #[test]
     fn contemporaneous_price_undoes_the_events_between_the_day_and_the_observation() {
-        let splits = vec![split_event(d(2024, 6, 10), "10", "1")];
+        let splits: Vec<PriceBasisEvent> = [split_event(d(2024, 6, 10), "10", "1")]
+            .iter()
+            .map(PriceBasisEvent::from)
+            .collect();
         let observed = |price: &str, on: NaiveDate| {
             contemporaneous_price(price.parse().unwrap(), &splits, d(2024, 6, 7), on)
         };
@@ -1025,7 +1181,10 @@ mod tests {
             "120.888".parse().unwrap()
         );
         // A consolidation runs the other way.
-        let consol = vec![split_event(d(2024, 6, 10), "1", "10")];
+        let consol: Vec<PriceBasisEvent> = [split_event(d(2024, 6, 10), "1", "10")]
+            .iter()
+            .map(PriceBasisEvent::from)
+            .collect();
         assert_eq!(
             contemporaneous_price(
                 "12088.8".parse().unwrap(),
@@ -1034,6 +1193,45 @@ mod tests {
                 d(2024, 7, 1)
             ),
             "1208.88".parse().unwrap()
+        );
+    }
+
+    /// The structural separation: the price re-basing event set is a strict
+    /// superset of the quantity one. A demerger's factor restates the price
+    /// series and composes with a split in the same walk, while the quantity
+    /// walk — which `domain::cost_base`, `domain::open_parcels`, the AMIT
+    /// re-basing and the allocation-capacity checks all read — never sees it.
+    #[test]
+    fn the_price_event_set_is_a_superset_of_the_quantity_event_set() {
+        let split = split_event(d(2024, 6, 10), "2", "1");
+        // The demerger's derived factor: the security actually closed at 24.90
+        // on the last pre-demerger day, and the provider's figure for it — once
+        // the later split has been divided out — is 10.13.
+        let demerger = PriceBasisEvent {
+            date: d(2024, 3, 1),
+            recover_new: "24.90".parse().unwrap(),
+            recover_old: "10.13".parse().unwrap(),
+        };
+        let price_events = vec![PriceBasisEvent::from(&split), demerger];
+
+        // A pre-demerger day observed after both events recovers through both:
+        // twice for the split, then 24.90/10.13 for the demerger.
+        let recovered = contemporaneous_price(
+            "5.065".parse().unwrap(),
+            &price_events,
+            d(2024, 2, 20),
+            d(2026, 7, 26),
+        );
+        assert_eq!(recovered, "24.90".parse::<Decimal>().unwrap());
+
+        // The very same demerger contributes nothing to a quantity: it is not
+        // a `SplitEvent` and has no way to become one.
+        let quantity_events = vec![split];
+        assert_eq!(
+            split_ratio(&quantity_events, d(2024, 2, 20), Some(d(2026, 7, 26))),
+            (Decimal::from(2), Decimal::ONE),
+            "only the split converts unit bases — the demerger issues units of \
+             another listing and moves no count here"
         );
     }
 
@@ -1796,6 +1994,10 @@ mod tests {
                 demerger_new_units: Decimal::ONE,
                 demerger_held_units: Decimal::from(5),
                 demerger_cost_base_pct: "5.063".parse().unwrap(),
+                demerger_close_date: None,
+                demerger_close_price: None,
+                demerger_close_sourced_from: None,
+                demerger_close_reason: None,
             }
         );
     }
@@ -1877,6 +2079,81 @@ mod tests {
                 "scrip_listing_id": 2, "scrip_new_units": "2", "scrip_old_units": "1",
                 "demerger_cost_base_pct": "5.063",
             }),
+            // A stated close on a type that has no price series to restate.
+            serde_json::json!({
+                "action_type": "ShareSplit", "listing_id": 1, "date": "2024-11-30",
+                "split_new_units": "2", "split_old_units": "1",
+                "demerger_close_date": "2024-11-29", "demerger_close_price": "24.90",
+                "demerger_close_sourced_from": "nyse.com", "demerger_close_reason": "spin-off",
+            }),
+        ] {
+            api_put_expecting(&pool, body, StatusCode::UNPROCESSABLE_ENTITY).await;
+        }
+    }
+
+    /// The stated pre-demerger close round-trips with its provenance, and the
+    /// write-time refusals around it: it is all-or-none, the day must be
+    /// strictly before the demerger, the close positive, and neither
+    /// provenance field blank — the same shape `PUT /closing_prices/…` applies
+    /// to a hand-entered price, for the same reason.
+    #[tokio::test]
+    async fn api_demerger_stated_close_round_trips_and_rejects_a_partial_one() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "LAC").await;
+        insert_listing(&pool, 2, "LAR").await;
+        let complete = serde_json::json!({
+            "action_type": "Demerger", "listing_id": 1, "date": "2023-10-03",
+            "demerger_listing_id": 2, "demerger_new_units": "1",
+            "demerger_held_units": "1", "demerger_cost_base_pct": "36",
+            "demerger_close_date": "2023-10-02", "demerger_close_price": "24.90",
+            "demerger_close_sourced_from": "  nyse.com daily close  ",
+            "demerger_close_reason": "the provider adjusts the pre-demerger series",
+        });
+        api_put_expecting(&pool, complete.clone(), StatusCode::NO_CONTENT).await;
+        assert_eq!(
+            db_get(&pool, 1).await.unwrap().unwrap().kind,
+            ActionKind::Demerger {
+                demerger_listing_id: 2,
+                demerger_new_units: Decimal::ONE,
+                demerger_held_units: Decimal::ONE,
+                demerger_cost_base_pct: Decimal::from(36),
+                demerger_close_date: Some(d(2023, 10, 2)),
+                demerger_close_price: Some("24.90".parse().unwrap()),
+                demerger_close_sourced_from: Some("nyse.com daily close".to_string()),
+                demerger_close_reason: Some(
+                    "the provider adjusts the pre-demerger series".to_string()
+                ),
+            },
+            "the provenance is stored trimmed, beside the two sides of the factor"
+        );
+
+        let without = |field: &str| {
+            let mut body = complete.clone();
+            body.as_object_mut().unwrap().remove(field);
+            body
+        };
+        let with = |field: &str, value: serde_json::Value| {
+            let mut body = complete.clone();
+            body[field] = value;
+            body
+        };
+        for body in [
+            // Each of the four missing on its own: a partial statement leaves
+            // a factor with one side, or a figure with no recorded source.
+            without("demerger_close_date"),
+            without("demerger_close_price"),
+            without("demerger_close_sourced_from"),
+            without("demerger_close_reason"),
+            // The close of the demerger date itself, or a later day, is
+            // already in the post-demerger basis.
+            with("demerger_close_date", serde_json::json!("2023-10-03")),
+            with("demerger_close_date", serde_json::json!("2023-10-04")),
+            // A non-positive close would make the factor zero or negative.
+            with("demerger_close_price", serde_json::json!("0")),
+            with("demerger_close_price", serde_json::json!("-24.90")),
+            // Provenance that records nothing.
+            with("demerger_close_sourced_from", serde_json::json!("   ")),
+            with("demerger_close_reason", serde_json::json!("")),
         ] {
             api_put_expecting(&pool, body, StatusCode::UNPROCESSABLE_ENTITY).await;
         }

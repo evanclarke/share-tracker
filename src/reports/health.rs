@@ -146,6 +146,42 @@ pub struct UnpricedListing {
     pub latest_date: NaiveDate,
 }
 
+/// A recorded `Demerger` whose head listing has stored closing prices from
+/// *before* the demerger that the provider served **after** it — figures the
+/// provider restated by its spin-off price-adjustment factor, which nothing
+/// can undo until the action carries a stated pre-demerger close.
+///
+/// The counterpart of the split case, which needs no warning because a split
+/// states its own ratio: a demerger changes no unit count on the head listing,
+/// so the factor has no term in the action to be read from and is unknowable
+/// until the operator states what the security actually closed at on the last
+/// pre-demerger trading day (`entities::closing_price` module docs). Until
+/// then those prices are silently the *current* level — Evan's LAC history was
+/// ~2.46x understated this way — and nothing else surfaces it: the rows are ok,
+/// not errored, so `errored_prices` and `unpriced_days` both pass over them and
+/// the only symptom is a valuation that looks plausible and is wrong.
+///
+/// Close it by adding `demerger_close_date` / `demerger_close_price` (and their
+/// provenance) to the action; the write re-bases the listing's prices in its own
+/// transaction.
+///
+/// Deliberately a **warning, not a constraint**: a provider that did not adjust
+/// for a particular spin-off, or a series fetched entirely before it, needs no
+/// statement at all, so the action stays enterable without one.
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
+pub struct DemergerMissingClose {
+    pub action_id: i64,
+    pub listing_id: i64,
+    pub ticker: String,
+    /// The demerger date — every stored price before it is suspect.
+    pub demerger_date: NaiveDate,
+    /// How many stored ok, provider-fetched rows dated before the demerger
+    /// were observed on or after it.
+    pub adjusted_days: i64,
+    pub earliest_date: NaiveDate,
+    pub latest_date: NaiveDate,
+}
+
 /// More than one corporate action of the same type, on the same listing and
 /// date. Two such rows are two independent events to every reader — the
 /// cost-base pipeline sums both `ReturnOfCapital` reductions and multiplies
@@ -550,6 +586,11 @@ pub struct HealthReport {
     /// hole first — the oldest is the least recoverable, since a provider
     /// stops serving history long before it stops serving last week.
     pub unpriced_days: Vec<UnpricedListing>,
+    /// Every recorded demerger whose head listing holds pre-demerger prices
+    /// the provider served after the demerger, and which carries no stated
+    /// pre-demerger close to re-base them from, newest demerger first. Empty
+    /// when every such demerger states its close (or has no affected price).
+    pub demergers_missing_close: Vec<DemergerMissingClose>,
     /// Every (listing, action type, date) carrying more than one corporate
     /// action, newest first. Empty when no two actions of a type share a
     /// listing and date.
@@ -701,6 +742,37 @@ async fn db_unpriced_days(
 /// Grouped in SQL and read on the caller's transaction: it is one small
 /// aggregate over `corporate_actions`, not a per-listing walk like
 /// [`db_unpriced_days`].
+/// Demergers carrying no stated pre-demerger close, whose head listing has
+/// stored provider prices from before the demerger that were observed on or
+/// after it — see [`DemergerMissingClose`].
+///
+/// "Observed on or after" is the same test the re-base walk applies
+/// (`entities::closing_price`, the half-open `(price_date, fetched_at]`
+/// window): a figure observed before the demerger arrived in the
+/// contemporaneous basis and is fine. `fetched_at` is written as a UTC RFC 3339
+/// timestamp, so its first ten characters are the UTC date the re-base parses
+/// out of it — compared as text here rather than through SQLite's `date()`,
+/// which does not parse the nanosecond precision the timestamps carry.
+async fn db_demergers_missing_close(
+    conn: &mut sqlx::SqliteConnection,
+) -> Result<Vec<DemergerMissingClose>, sqlx::Error> {
+    sqlx::query_as::<_, DemergerMissingClose>(
+        "SELECT ca.id AS action_id, ca.listing_id AS listing_id, l.ticker AS ticker, \
+                ca.date AS demerger_date, COUNT(*) AS adjusted_days, \
+                MIN(cp.price_date) AS earliest_date, MAX(cp.price_date) AS latest_date \
+         FROM corporate_actions ca \
+         JOIN listings l ON l.id = ca.listing_id \
+         JOIN closing_prices cp ON cp.listing_id = ca.listing_id \
+         WHERE ca.action_type = 'Demerger' AND ca.demerger_close_date IS NULL \
+           AND cp.status = 'ok' AND cp.origin = 'fetched' \
+           AND cp.price_date < ca.date AND substr(cp.fetched_at, 1, 10) >= ca.date \
+         GROUP BY ca.id \
+         ORDER BY ca.date DESC, ca.id DESC",
+    )
+    .fetch_all(conn)
+    .await
+}
+
 async fn db_duplicate_actions(
     conn: &mut sqlx::SqliteConnection,
 ) -> Result<Vec<DuplicateAction>, sqlx::Error> {
@@ -1446,6 +1518,7 @@ pub async fn db_health(
     )
     .fetch_all(&mut *tx)
     .await?;
+    let demergers_missing_close = db_demergers_missing_close(&mut tx).await?;
     let duplicate_actions = db_duplicate_actions(&mut tx).await?;
     let duplicate_amma_statements = db_duplicate_amma_statements(&mut tx).await?;
     let duplicate_income = db_duplicate_income(&mut tx).await?;
@@ -1470,6 +1543,7 @@ pub async fn db_health(
         failed_jobs,
         errored_prices,
         unpriced_days,
+        demergers_missing_close,
         duplicate_actions,
         duplicate_amma_statements,
         duplicate_income,
@@ -2085,6 +2159,121 @@ mod tests {
                 listing_id,
                 date,
                 kind,
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    /// A demerger the price provider adjusted for, with no stated close to
+    /// re-base its pre-demerger prices back: the rows are ok, so nothing else
+    /// in health sees them, and a valuation of those dates is silently the
+    /// current level (Evan's LAC history, ~2.46x understated). Adding the
+    /// stated close both fixes the prices and clears the warning.
+    #[tokio::test]
+    async fn a_demerger_with_provider_adjusted_prices_and_no_stated_close_is_reported() {
+        let pool = test_pool().await;
+        test_support::listing(1).ticker("LAC").insert(&pool).await;
+        test_support::listing(2).ticker("LAR").insert(&pool).await;
+        // Two pre-demerger days served long after the demerger…
+        for date in ["2023-09-29", "2023-10-02"] {
+            test_support::closing_price(1, date.parse().unwrap())
+                .price("10.13")
+                .source("yahoo")
+                .fetched_at("2026-07-26T07:44:56Z")
+                .insert(&pool)
+                .await;
+        }
+        // …one collected before it, which arrived contemporaneous…
+        test_support::closing_price(1, "2023-09-28".parse().unwrap())
+            .price("24.58")
+            .source("yahoo")
+            .fetched_at("2023-09-28T21:00:00Z")
+            .insert(&pool)
+            .await;
+        // …and one after it, which the provider never restated.
+        test_support::closing_price(1, "2023-10-04".parse().unwrap())
+            .price("11.72")
+            .source("yahoo")
+            .fetched_at("2026-07-26T07:44:56Z")
+            .insert(&pool)
+            .await;
+        insert_demerger(&pool, 1, 1, 2, ymd(2023, 10, 3), None).await;
+
+        let h = health(&pool, ymd(2026, 7, 13)).await;
+        assert_eq!(h.demergers_missing_close.len(), 1);
+        let d = &h.demergers_missing_close[0];
+        assert_eq!(d.action_id, 1);
+        assert_eq!(d.ticker, "LAC");
+        assert_eq!(d.demerger_date, ymd(2023, 10, 3));
+        assert_eq!(
+            d.adjusted_days, 2,
+            "only pre-demerger days observed on or after the demerger are suspect"
+        );
+        assert_eq!(d.earliest_date, ymd(2023, 9, 29));
+        assert_eq!(d.latest_date, ymd(2023, 10, 2));
+        // Nothing else in health notices: the rows are ok, not errored.
+        assert!(h.errored_prices.is_empty());
+
+        // Stating the close re-bases the prices and clears the alarm.
+        insert_demerger(
+            &pool,
+            1,
+            1,
+            2,
+            ymd(2023, 10, 3),
+            Some((ymd(2023, 10, 2), "24.90")),
+        )
+        .await;
+        let h = health(&pool, ymd(2026, 7, 13)).await;
+        assert!(h.demergers_missing_close.is_empty());
+    }
+
+    /// A demerger whose head listing has no provider-adjusted price is not a
+    /// problem: nothing needs re-basing, so no statement is asked for.
+    #[tokio::test]
+    async fn a_demerger_with_no_adjusted_prices_is_not_reported() {
+        let pool = test_pool().await;
+        test_support::listing(1).ticker("LAC").insert(&pool).await;
+        test_support::listing(2).ticker("LAR").insert(&pool).await;
+        test_support::closing_price(1, "2023-09-29".parse().unwrap())
+            .price("24.58")
+            .source("yahoo")
+            .fetched_at("2023-09-29T21:00:00Z")
+            .insert(&pool)
+            .await;
+        insert_demerger(&pool, 1, 1, 2, ymd(2023, 10, 3), None).await;
+
+        let h = health(&pool, ymd(2026, 7, 13)).await;
+        assert!(h.demergers_missing_close.is_empty());
+    }
+
+    async fn insert_demerger(
+        pool: &SqlitePool,
+        id: i64,
+        listing_id: i64,
+        demerged_id: i64,
+        date: NaiveDate,
+        stated_close: Option<(NaiveDate, &str)>,
+    ) {
+        corporate_action::db_upsert(
+            pool,
+            &corporate_action::CorporateAction {
+                id,
+                listing_id,
+                date,
+                kind: corporate_action::ActionKind::Demerger {
+                    demerger_listing_id: demerged_id,
+                    demerger_new_units: dec("1"),
+                    demerger_held_units: dec("1"),
+                    demerger_cost_base_pct: dec("36"),
+                    demerger_close_date: stated_close.map(|(d, _)| d),
+                    demerger_close_price: stated_close.map(|(_, p)| dec(p)),
+                    demerger_close_sourced_from: stated_close
+                        .map(|_| "nyse.com daily close".to_string()),
+                    demerger_close_reason: stated_close
+                        .map(|_| "the provider adjusts the pre-demerger series".to_string()),
+                },
             },
         )
         .await

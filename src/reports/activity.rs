@@ -781,6 +781,7 @@ fn describe_action(
             demerger_new_units,
             demerger_held_units,
             demerger_cost_base_pct,
+            ..
         } => (
             "Demerger".to_string(),
             format!(

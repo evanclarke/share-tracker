@@ -1222,6 +1222,68 @@ fn contemporaneous_price_basis_documented() {
     assert!(README_MD.contains("`price-rebase` is deliberately one of those"));
 }
 
+/// Docs-sync pin for the demerger price factor (2026-08-20, the finding that
+/// followed SCENARIOS Q-14): the API states that the price re-basing set is a
+/// superset of the quantity one and lists which action kinds are in it and
+/// which are not, the `Demerger` entry documents the stated close and that it
+/// moves no quantity, the 422 catalogue carries its refusals, the schema
+/// documents the four columns, health documents the warning, and the README
+/// says the same in a sentence.
+#[test]
+fn demerger_price_rebasing_documented() {
+    let closing_prices = API_MD
+        .split("## Closing prices")
+        .nth(1)
+        .expect("docs/API.md has a Closing prices section")
+        .split("\n## ")
+        .next()
+        .expect("split always yields at least one part");
+    // The invariant is no longer stated unconditionally: the exception list is
+    // there, and names both the kinds that restate the series and those that
+    // do not.
+    assert!(closing_prices.contains("**Which corporate actions restate the series.**"));
+    assert!(closing_prices.contains("a strict *superset* of the actions that re-base quantities"));
+    assert!(closing_prices.contains("changes **no unit count** on the head listing"));
+    assert!(
+        closing_prices.contains(
+            "`demerger_cost_base_pct` is an ATO cost-base apportionment, not a price ratio"
+        )
+    );
+    assert!(closing_prices.contains("`ScripForScrip` and `WorthlessShares` do **not**"));
+    assert!(closing_prices.contains("`ReturnOfCapital`, `RightsIssue` and `BuyBack` do **not**"));
+    // The precision the recovered figures actually carry.
+    assert!(closing_prices.contains("as accurate as the close you state, not exact"));
+    // The action's own entry: the fields, and that they are price-only.
+    assert!(API_MD.contains("A demerger also carries an optional **stated pre-demerger close**"));
+    assert!(API_MD.contains(
+        "It moves no quantity, no cost base and no allocation capacity — a demerger changes no \
+         unit count here."
+    ));
+    // The write-time refusals.
+    assert!(API_MD.contains("the demerger's stated close is partial"));
+    assert!(API_MD.contains("a close on or after it is already in the post-demerger basis"));
+    // Health names the listing whose prices still need it.
+    assert!(API_MD.contains("`demergers_missing_close` — every recorded"));
+    assert!(API_MD.contains("the rows are `ok`, not errored"));
+    // SCHEMA.md: the columns and the superset statement from the other side.
+    assert!(SCHEMA_MD.contains("demerger_close_date  TEXT (date, nullable, 0036)"));
+    assert!(SCHEMA_MD.contains("demerger_close_price TEXT (decimal, nullable, 0036)"));
+    assert!(SCHEMA_MD.contains("demerger_close_sourced_from TEXT (nullable, 0036)"));
+    assert!(SCHEMA_MD.contains("demerger_close_reason TEXT (nullable, 0036)"));
+    assert!(SCHEMA_MD.contains("a strict SUPERSET of the quantity re-basing one"));
+    // README: the user-visible sentence, and the repair job's widened scope.
+    assert!(README_MD.contains(
+        "A **demerger** restates the provider's series the same way while changing no unit count"
+    ));
+    assert!(README_MD.contains("or a demerger carrying a stated pre-demerger close is recorded."));
+    // The one exception to the referenced-action freeze, and its bounds.
+    assert!(API_MD.contains(
+        "The **one** exception to the `PUT` half is a [`Demerger`](#corporate-actions)'s stated \
+         pre-demerger close"
+    ));
+    assert!(API_MD.contains("as does a `PUT` that changes nothing"));
+}
+
 /// Docs-sync pin (REQUIREMENTS 2026-07-13, lossless GST-inclusive
 /// round-trip): the Trades section states the read/write round-trip
 /// semantics explicitly — with the flag set, `brokerage` is the one

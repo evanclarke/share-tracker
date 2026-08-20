@@ -393,6 +393,31 @@ mod tests {
         assert!(js.contains("toInp.value = row.latest_date"));
     }
 
+    /// The demerger's stated pre-demerger close: the four form fields in the
+    /// Demerger group, and the health banner that names a demerger whose
+    /// pre-demerger prices still carry the provider's spin-off adjustment.
+    #[tokio::test]
+    async fn demerger_stated_close_ui_present() {
+        let js = app_js_body().await;
+        for field in [
+            "demerger_close_date",
+            "demerger_close_price",
+            "demerger_close_sourced_from",
+            "demerger_close_reason",
+        ] {
+            assert!(
+                js.contains(field),
+                "{field} is not on the corporate-action form"
+            );
+        }
+        assert!(js.contains("Demerger: last pre-demerger trading day"));
+        assert!(js.contains("Demerger: actual close that day"));
+        // The health banner drives the same endpoint and names the action.
+        assert!(js.contains("demergers_missing_close"));
+        assert!(js.contains("pre-demerger closing price(s) for "));
+        assert!(js.contains("d.action_id"));
+    }
+
     #[tokio::test]
     async fn report_snapshots_ui_present() {
         let js = app_js_body().await;

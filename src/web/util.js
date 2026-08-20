@@ -585,6 +585,9 @@ const COLUMN_KINDS = (function () {
     'rate',
     'price', 'price_as_observed', 'reinvestment_price', 'exercise_price', 'amount_per_unit',
     'buyback_price', 'buyback_dividend', 'buyback_franking_credit', 'buyback_market_value',
+    // The close a demerger states the security actually traded at on the last
+    // pre-demerger day — a price entered by hand, kept verbatim like `price`.
+    'demerger_close_price',
     'market_value_per_share', 'deductible_percentage', 'proceeds_per_right',
     // Period-performance report: the ATO/RBA rates used at each endpoint.
     'rate_from', 'rate_to',

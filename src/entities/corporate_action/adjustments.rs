@@ -1,8 +1,30 @@
 //! Cost-base/quantity adjustment events derived from corporate actions:
-//! return-of-capital payments ([`RocEvent`]) and quantity re-basing events
-//! ([`SplitEvent`], covering both ShareSplit and BonusIssue). Loaded by the
-//! reports and write-time checks, which never re-derive this arithmetic
-//! inline.
+//! return-of-capital payments ([`RocEvent`]), quantity re-basing events
+//! ([`SplitEvent`], covering both ShareSplit and BonusIssue) and — a
+//! deliberately *different* set — price re-basing events
+//! ([`PriceBasisEvent`]). Loaded by the reports and write-time checks, which
+//! never re-derive this arithmetic inline.
+//!
+//! # The two event sets are not the same set
+//!
+//! **The price re-basing event set is a strict superset of the quantity
+//! re-basing one.** Every quantity re-basing event also restates the price
+//! series — the provider divides the per-unit price by the same ratio it
+//! multiplies the unit count by — but the converse fails: a **Demerger**
+//! restates the provider's whole pre-demerger series by a spin-off adjustment
+//! factor while changing no unit count on the original listing (it issues
+//! units of a *different* listing).
+//!
+//! So they are separate types, and nothing converts a [`PriceBasisEvent`]
+//! back into a [`SplitEvent`]. [`split_ratio`] and its callers
+//! ([`split_adjusted_quantity`], [`as_acquired_quantity`],
+//! [`RocEvent::per_unit_for`]) mean *unit basis conversion*, and are read by
+//! `domain::cost_base`, `domain::open_parcels`, the AMIT re-basing and the
+//! write-time allocation-capacity checks. A demerger factor entering there
+//! would silently restate quantities, cost bases and allocation capacity
+//! across the whole application — which is why the price side has its own
+//! type, its own ratio walk ([`price_basis_ratio`]) and its own loader
+//! (`entities::closing_price::db_price_basis_events`).
 
 use crate::infra::decimal::parse_dec;
 use chrono::NaiveDate;
@@ -321,32 +343,6 @@ pub fn split_adjusted_quantity(
     if new == old { qty } else { qty * new / old }
 }
 
-/// A per-unit *price* observed in the unit basis in force at `observed`,
-/// restated into the unit basis in force on `price_date`.
-///
-/// A re-basing event multiplies the unit count and divides the per-unit price
-/// by the same ratio (the parcel's total value is untouched — TD 2000/10), so
-/// this is [`split_adjusted_quantity`] with the factor the other way up: a
-/// figure quoted after a 10-for-1 split is a tenth of the figure the same
-/// security traded at before it, and multiplying by 10/1 recovers the earlier
-/// day's own price.
-///
-/// The window is `(price_date, observed]` — [`split_ratio`]'s own half-open
-/// convention: an event dated on `price_date` has already restated that day's
-/// close, and one dated on the observation date has already restated what was
-/// observed. So a figure observed *before* an event scales by nothing, which
-/// is what keeps a contemporaneously collected price series untouched when a
-/// later split is recorded (`entities::closing_price`).
-pub fn contemporaneous_price(
-    price: Decimal,
-    splits: &[SplitEvent],
-    price_date: NaiveDate,
-    observed: NaiveDate,
-) -> Decimal {
-    let (new, old) = split_ratio(splits, price_date, Some(observed));
-    if new == old { price } else { price * new / old }
-}
-
 /// The inverse of [`split_adjusted_quantity`]: a quantity expressed in the
 /// unit basis at `at` (e.g. a sale's allocated units) converted back to the
 /// as-acquired units of a parcel bought at `acquired`.
@@ -405,4 +401,176 @@ pub fn per_unit_reduction(
         }
     }
     Ok(total)
+}
+
+// ---------------------------------------------------------------------------
+// Price re-basing: the *superset* event set (see the module docs)
+// ---------------------------------------------------------------------------
+
+/// One event that restated the **price** series the provider serves for a
+/// listing: the price-side counterpart of [`SplitEvent`], and deliberately a
+/// distinct type from it (module docs — the price set is a strict superset of
+/// the quantity set, and confusing the two would restate quantities).
+///
+/// Which corporate-action kinds belong here, and why:
+///
+/// - **`ShareSplit`** and **`BonusIssue`** — the unit count changes, so the
+///   provider divides its whole earlier series by the same ratio. Converted
+///   from [`SplitEvent`] by the `From` impl below, which is the only bridge
+///   between the two sets and runs one way only.
+/// - **`Demerger`** — the provider applies a spin-off price-adjustment factor
+///   to the whole pre-demerger series exactly as it does for a split, but no
+///   unit count on the original listing moves. The factor is set by the two
+///   entities' market values at the spin-off, which the action's ATO
+///   cost-base apportionment (`demerger_cost_base_pct`) does not give, so it
+///   is derived from the close the operator *states* the security actually
+///   traded at on the last pre-demerger trading day
+///   ([`DemergerPriceStatement`]) against the provider's own adjusted figure
+///   for that same day.
+/// - **`ScripForScrip`** and **`WorthlessShares`** — *not* here. Both end the
+///   original ticker: the provider stops serving it altogether (the
+///   `listings.unpriced_from` case), so there is no continuing series to
+///   restate.
+/// - **`ReturnOfCapital`**, **`RightsIssue`** and **`BuyBack`** — *not* here.
+///   A distribution is served through the provider's dividend-adjustment
+///   channel, which `auto_adjust(false)` turns off (`entities::closing_price`
+///   module docs), and neither a rights issue nor a buy-back is in the
+///   provider's adjustment set at all.
+#[derive(Debug, Clone)]
+pub struct PriceBasisEvent {
+    /// The date the provider restated its earlier series on — a split's
+    /// conversion date, a bonus issue's issue date, or the demerger date.
+    pub date: NaiveDate,
+    /// Numerator and denominator of the factor that recovers a pre-event
+    /// day's *own* price from a figure observed after the event:
+    /// `price = observed × recover_new / recover_old`. Kept as an exact pair
+    /// rather than a quotient so a walk over several events multiplies first
+    /// and divides once, at the end ([`price_basis_ratio`]).
+    pub recover_new: Decimal,
+    pub recover_old: Decimal,
+}
+
+/// The one-way bridge from the quantity set into the price set: a re-basing
+/// event that multiplies the unit count by `new/old` divides the per-unit
+/// price by the same ratio (the parcel's total value is untouched — TD
+/// 2000/10), so recovering the earlier day's price multiplies by `new/old`.
+impl From<&SplitEvent> for PriceBasisEvent {
+    fn from(split: &SplitEvent) -> Self {
+        PriceBasisEvent {
+            date: split.date,
+            recover_new: split.new_units,
+            recover_old: split.old_units,
+        }
+    }
+}
+
+/// The stated fact a `Demerger` may carry: what the security **actually
+/// closed at** on the last pre-demerger trading day, which the demerger's
+/// price factor is derived from.
+///
+/// Both sides of the factor are kept as facts — this date and close, and (at
+/// re-base time) the provider's own stored figure for the same day — rather
+/// than the quotient, so the close can be stated before any pre-demerger
+/// history is backfilled and the factor re-derives itself if that history is
+/// re-fetched. The provenance the entry carries
+/// (`demerger_close_sourced_from` / `demerger_close_reason`) is not read by
+/// the arithmetic; it is the audit record of where the operator got the
+/// figure, as a hand-entered closing price carries.
+#[derive(Debug, Clone)]
+pub struct DemergerPriceStatement {
+    /// The demerger date — the date the provider restated the series on.
+    pub date: NaiveDate,
+    /// The last pre-demerger trading day, always strictly before [`Self::date`]
+    /// (CHECK-enforced, 0036).
+    pub close_date: NaiveDate,
+    /// What the security actually closed at on [`Self::close_date`], in the
+    /// listing's quote currency.
+    pub close_price: Decimal,
+}
+
+/// Every `Demerger` on one listing that carries a stated close, ascending by
+/// demerger date (then id) — the demerger half of the price re-basing event
+/// set. A demerger with no stated close yields nothing: its factor is
+/// unknowable, so its pre-demerger prices stay as the provider served them
+/// (surfaced by `GET /reports/health`'s `demergers_missing_close`).
+///
+/// Generic over the executor so the price re-base can run it inside the
+/// corporate-action write's own transaction.
+pub async fn db_demerger_price_statements<'e, E>(
+    executor: E,
+    listing_id: i64,
+) -> Result<Vec<DemergerPriceStatement>, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
+    let rows = sqlx::query(
+        "SELECT date, demerger_close_date, demerger_close_price FROM corporate_actions \
+         WHERE action_type = 'Demerger' AND listing_id = ? AND demerger_close_date IS NOT NULL \
+         ORDER BY date, id",
+    )
+    .bind(listing_id)
+    .fetch_all(executor)
+    .await?;
+    rows.iter()
+        .map(|row| {
+            Ok(DemergerPriceStatement {
+                date: row.try_get("date")?,
+                close_date: row.try_get("demerger_close_date")?,
+                close_price: parse_dec(
+                    "demerger_close_price",
+                    row.try_get("demerger_close_price")?,
+                )?,
+            })
+        })
+        .collect()
+}
+
+/// Cumulative price-recovery ratio `(new, old)` between price bases: the
+/// product of `recover_new`/`recover_old` over the events dated in
+/// `(from, up_to]`. A figure observed at `up_to` for the trading day `from` is
+/// `figure × new / old` in that day's own basis.
+///
+/// [`split_ratio`]'s half-open convention, for the same reason: an event dated
+/// on the price date has already restated that day's close, and one dated on
+/// the observation date has already restated what was observed. So a figure
+/// observed *before* an event scales by nothing, which is what leaves a
+/// contemporaneously collected series untouched when a later split or demerger
+/// is recorded.
+pub fn price_basis_ratio(
+    events: &[PriceBasisEvent],
+    from: NaiveDate,
+    up_to: NaiveDate,
+) -> (Decimal, Decimal) {
+    let mut new = Decimal::ONE;
+    let mut old = Decimal::ONE;
+    for e in events {
+        if e.date <= from || e.date > up_to {
+            continue;
+        }
+        new *= e.recover_new;
+        old *= e.recover_old;
+    }
+    (new, old)
+}
+
+/// A per-unit *price* observed in the basis in force at `observed`, restated
+/// into the basis in force on `price_date` — the price dual of
+/// [`split_adjusted_quantity`], over the [`PriceBasisEvent`] set rather than
+/// the [`SplitEvent`] one (module docs).
+///
+/// A figure quoted after a 10-for-1 split is a tenth of the figure the same
+/// security traded at before it, and multiplying by 10/1 recovers the earlier
+/// day's own price; a figure quoted after a demerger is the pre-demerger close
+/// times the provider's spin-off factor, and multiplying by that factor's
+/// reciprocal recovers it. Every event's factor is accumulated as an exact
+/// numerator/denominator pair, so however many events the window holds the
+/// result is one multiplication and one division — no intermediate rounding.
+pub fn contemporaneous_price(
+    price: Decimal,
+    events: &[PriceBasisEvent],
+    price_date: NaiveDate,
+    observed: NaiveDate,
+) -> Decimal {
+    let (new, old) = price_basis_ratio(events, price_date, observed);
+    if new == old { price } else { price * new / old }
 }

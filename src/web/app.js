@@ -1057,7 +1057,10 @@ async function viewAttachments(ownerField, ownerId) {
 // indirectly as a missing snapshot (linking to Closing Prices, where the
 // backfill action re-fetches once the symbol is fixed) — any duplicated
 // corporate action, whose effect is silently compounded (linking to Corporate
-// Actions, where the surplus row is deleted), any fund-year with two AMMA
+// Actions, where the surplus row is deleted), any demerger whose head listing
+// still holds pre-demerger prices the provider adjusted for the spin-off (also
+// linking to Corporate Actions, where the demerger's stated close re-bases
+// them), any fund-year with two AMMA
 // statements for one holding account, counted twice in the income, gains and
 // cost-base figures alike (linking to AMMA Statements), and any distribution
 // entered twice — identical amounts, same listing, account and payment date —
@@ -1097,6 +1100,16 @@ async function refreshHealthBanner() {
       problems.push(erroredPrices.length + ' listing(s) have errored closing prices ('
         + erroredPrices.map(function (r) { return r.ticker; }).join(', ') + ').');
     }
+    // A demerger the price provider adjusted for but nothing re-bases back:
+    // the stored pre-demerger closes are silently the current level, and no
+    // other alarm sees them (the rows are ok, not errored).
+    (h.demergers_missing_close || []).forEach(function (d) {
+      problems.push(d.adjusted_days + ' pre-demerger closing price(s) for ' + d.ticker + ' ('
+        + d.earliest_date + '–' + d.latest_date
+        + ') were served after the ' + d.demerger_date + ' demerger, so they carry the provider’s'
+        + ' spin-off adjustment — state the actual close of the last pre-demerger trading day on'
+        + ' corporate action ' + d.action_id + ' to re-base them.');
+    });
     const duplicateActions = h.duplicate_actions || [];
     duplicateActions.forEach(function (d) {
       problems.push(d.action_count + ' ' + d.action_type + ' actions on ' + d.ticker + ' dated '
