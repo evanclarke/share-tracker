@@ -17,12 +17,13 @@ use sqlx::{Row, SqlitePool};
 /// The audited tables, exactly as migration 0013 enumerates them in the
 /// `row_history.table_name` CHECK and its per-table trigger pairs — a test
 /// pins the three lists to each other, and the web UI's table picker is
-/// asserted against this list too. Four joined later: `listing_renames`
+/// asserted against this list too. Five joined later: `listing_renames`
 /// (0018), `closing_prices` (0021, once 0020 made a price hand-enterable),
-/// `tax_year_settings` (0027) and `rba_fx_rates` (0031, once a stored rate
-/// became correctable) — each migration rebuilding `row_history` to extend
-/// the CHECK.
-pub const AUDITED_TABLES: [&str; 21] = [
+/// `tax_year_settings` (0027), `rba_fx_rates` (0031, once a stored rate
+/// became correctable) and `exchange_holidays` (0039, once the calendar was
+/// shown to be read *live* by valuation rather than only consumed at trade
+/// write time) — each migration rebuilding `row_history` to extend the CHECK.
+pub const AUDITED_TABLES: [&str; 22] = [
     "trades",
     "parcel_allocations",
     "income",
@@ -44,6 +45,7 @@ pub const AUDITED_TABLES: [&str; 21] = [
     "closing_prices",
     "tax_year_settings",
     "rba_fx_rates",
+    "exchange_holidays",
 ];
 
 #[derive(Debug, Deserialize)]
@@ -546,6 +548,17 @@ mod tests {
                 "rate",
                 "'0.6512'",
             ),
+            (
+                "exchange_holidays",
+                Some(
+                    // Explicit id above the 160 seeded holidays' ids.
+                    "INSERT INTO exchange_holidays (id, mic, holiday_date, name) VALUES (901, 'XASX', '2030-04-01', 'Test Closure')",
+                ),
+                "id",
+                901,
+                "name",
+                "'Renamed Closure'",
+            ),
         ];
         assert_eq!(cases.len(), AUDITED_TABLES.len());
 
@@ -594,6 +607,7 @@ mod tests {
             ("listings", "id", 2, 2),
             ("listing_renames", "id", 18, 2),
             ("tax_year_settings", "tax_year", 2026, 2),
+            ("exchange_holidays", "id", 901, 2),
         ] {
             sqlx::query(sqlx::AssertSqlSafe(format!(
                 "DELETE FROM {table} WHERE {key_column} = {id}"
@@ -617,13 +631,16 @@ mod tests {
     #[test]
     fn audited_tables_match_migration_check_and_triggers() {
         let sql = include_str!("../../migrations/0013_row_history.sql");
-        // listing_renames (0018) and closing_prices (0021) postdate 0013, and
-        // are checked below — every other table was audited from the start.
+        // listing_renames (0018), closing_prices (0021), tax_year_settings
+        // (0027), rba_fx_rates (0031) and exchange_holidays (0039) postdate
+        // 0013, and are checked below — every other table was audited from
+        // the start.
         let tables_as_of_0013 = AUDITED_TABLES.into_iter().filter(|&t| {
             t != "listing_renames"
                 && t != "closing_prices"
                 && t != "tax_year_settings"
                 && t != "rba_fx_rates"
+                && t != "exchange_holidays"
         });
         let mut count = 0;
         for table in tables_as_of_0013 {
@@ -929,6 +946,58 @@ mod tests {
                 flat31.matches(&format!("'{col}', OLD.{col}")).count(),
                 2,
                 "both rba_fx_rates triggers must record {col}"
+            );
+        }
+
+        // 0039 added exchange_holidays (SCENARIOS Q-05/Q-08): the trading
+        // calendar is read *live* by valuation, so a hand-edited holiday
+        // changes a reported figure — the audited set's own criterion. Like
+        // 0021's closing_prices it needed a surrogate `id` for
+        // row_history.row_id to key on (the natural key is composite), which
+        // meant rebuilding the table as well as row_history, so this pins the
+        // whole shape: the CHECK, the surrogate key, the natural key kept as
+        // UNIQUE, the three 0033 staleness triggers re-created with the
+        // rebuilt table, the re-created append-only guards, and the new audit
+        // pair recording every column.
+        let sql39 = include_str!("../../migrations/0039_audit_exchange_holidays.sql");
+        assert!(
+            sql39.contains("'exchange_holidays'"),
+            "0039 must add exchange_holidays to the table_name CHECK"
+        );
+        assert!(
+            sql39.contains("id           INTEGER PRIMARY KEY AUTOINCREMENT"),
+            "the surrogate key must not reuse a deleted row's id"
+        );
+        assert!(
+            sql39.contains("UNIQUE (mic, holiday_date)"),
+            "the former primary key stays enforced as a UNIQUE constraint"
+        );
+        for op in ["update", "delete"] {
+            assert!(
+                sql39.contains(&format!(
+                    "CREATE TRIGGER exchange_holidays_row_history_{op} "
+                )),
+                "0039 must create the exchange_holidays {op} trigger"
+            );
+            assert!(
+                sql39.contains(&format!("CREATE TRIGGER row_history_append_only_{op} ")),
+                "0039 must re-create the row_history {op} guard"
+            );
+        }
+        for op in ["insert", "update", "delete"] {
+            assert!(
+                sql39.contains(&format!(
+                    "CREATE TRIGGER exchange_holidays_stale_snapshots_{op} "
+                )),
+                "0039 must re-create exchange_holidays' {op} staleness trigger"
+            );
+        }
+        let flat39 = sql39.split_whitespace().collect::<Vec<_>>().join(" ");
+        for col in ["id", "mic", "holiday_date", "name"] {
+            assert_eq!(
+                flat39.matches(&format!("'{col}', OLD.{col}")).count(),
+                2,
+                "both exchange_holidays triggers must record {col}"
             );
         }
 

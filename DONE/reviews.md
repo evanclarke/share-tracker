@@ -4410,3 +4410,110 @@ prices, Report snapshots, Period performance, Health, the 422 catalogue), `docs/
 relaxation newly principled and narrow, since a date inside an `unpriced_before` span is by
 declaration not read by valuation, so deleting a price there cannot punch a hole in a valued series.
 That item, and the production cleanup runbook that depends on it, stay open.
+
+## `exchange_holidays` is a user-editable table that changes a reported figure, but is not audited
+
+Raised 2026-08-20 while closing SCENARIOS Q-05/Q-08, which falsified the ground the exclusion rested
+on. `docs/SCHEMA.md` excluded `exchanges` and `exchange_holidays` from the audit trail as "tables
+that only influence values persisted onto trades at write time". That is true of `exchanges` (its
+`settlement_days` is consumed when a trade is written; `timezone`/`close_time` decide only which
+dates are *generable*, never what a stored snapshot says) but not of the holiday calendar:
+`reports::valuation::stored_valuations` reads it **live** on every snapshot generation, which is why
+migration 0033 had to give it staleness triggers.
+
+The audited set's stated criterion (scope decision 2026-07-14) is "every user-entered table whose
+values feed a calculation". `exchange_holidays` now visibly meets it, and this is the same shape as
+the two tables that already joined on a falsified premise: `closing_prices` in 0021 (once 0020 made
+a price hand-enterable) and `rba_fx_rates` in 0031 (once `PUT /rba_fx_rates/:id` made a rate
+correctable). Both were "reference data" until a write path existed; this one has had `PUT`/`DELETE`
+from the start.
+
+- [x] Decide whether `exchange_holidays` joins the audited set, and implement it if so. The case
+  for: it is hand-editable, there is no import to re-derive it from (the seed is a one-off in
+  0001_schema.sql), a deleted holiday is otherwise unrecoverable, and a wrong holiday silently
+  changes both recomputed settlement dates and every snapshot valuation from that date. The case
+  against: it is a published exchange calendar rather than a taxpayer fact, and the 0033 staleness
+  triggers already surface the *effect* of a change on the reports even though they do not retain
+  what was changed. `exchanges` should be decided in the same pass (probably staying out, per the
+  reasoning above).
+  - **Decided 2026-08-21 (Evan): `exchange_holidays` joins the audited set; `exchanges` stays out.**
+    The case for carried it. The calendar is hand-editable by `PUT`/`DELETE` and has been from the
+    start — unlike `closing_prices` (0020) and `rba_fx_rates` (0031), whose write paths arrived
+    later and retired their exclusions with them — there is no import to re-derive it from, so a
+    deleted holiday is unrecoverable from anything else the database holds, and a wrong holiday is
+    silent twice over: it changes every settlement date recomputed afterwards *and* every snapshot
+    valuation from that date. It meets the audited set's own stated criterion ("every user-entered
+    table whose values feed a calculation"), which Q-05/Q-08 showed it now visibly does —
+    `reports::valuation::stored_valuations` reads it **live** on every snapshot generation, which is
+    exactly why 0033 had to give it staleness triggers. The case against does not survive the
+    distinction it rests on: 0033's triggers flag the *effect* of a change (the snapshots go stale),
+    while the trail retains *what* was changed, which is the half nothing held.
+  - **`exchanges` stays out, and its half of the original sentence is still true.** Its
+    `settlement_days` is consumed when a trade is written and is persisted onto the trade;
+    `timezone`/`close_time` decide only which dates are *generable*, never what a stored snapshot
+    says. So the exclusion wording that was falsified for the holiday calendar remains correct for
+    it — `docs/SCHEMA.md` now says that for each table separately rather than for the pair.
+- [x] If audited, it is the four-place change the rule names: a `row_history` rebuild to extend the
+  `table_name` CHECK (the rename pattern of 0018/0021/0027/0031, `PRAGMA legacy_alter_table = ON`),
+  the `exchange_holidays_row_history_update`/`_delete` trigger pair, an entry in
+  `reports::row_history::AUDITED_TABLES`, and one in `config.js`'s table picker — three of which a
+  test pins together. Note the composite `(mic, holiday_date)` key: `row_history.row_id` is an
+  INTEGER, so the table would need the same AUTOINCREMENT surrogate id `closing_prices` was rebuilt
+  with in 0021 (keeping the natural key as a `UNIQUE`), which makes this the larger of the two
+  precedents, not the smaller.
+  - Built as **migration 0039_audit_exchange_holidays.sql**, 0021's two-rebuilds-in-one-migration
+    shape: the table is rebuilt with an `id INTEGER PRIMARY KEY AUTOINCREMENT` and the old primary
+    key kept as `UNIQUE (mic, holiday_date)` (so `db_upsert`'s `ON CONFLICT` target still resolves),
+    then `row_history` is rebuilt under `PRAGMA legacy_alter_table = ON` to extend the `table_name`
+    CHECK, re-creating its index and its two append-only guards. AUTOINCREMENT for 0021's reason: a
+    plain rowid key would hand a re-added holiday a deleted one's id, and with it the deleted row's
+    trail.
+  - **The surrogate id is exposed in the responses but addresses nothing.** Every route stays keyed
+    on `(mic, holiday_date)` — no path, body or status changes — and `ExchangeHoliday` gains a
+    `#[serde(default)] pub id` the upsert never binds, so `GET /exchange_holidays…` and the Exchange
+    Holidays list carry the `row_id` a history lookup needs. Hiding it would have made the table the
+    one audited table whose trail the UI cannot reach, since the Row History screen takes an integer
+    id; `closing_prices` (0021) set the precedent and the wording ("the id appears in the API only
+    so a history lookup can be keyed on it").
+  - The rebuild drops and re-creates **0033's three staleness triggers** verbatim (they move with
+    the renamed table and die with it), so `reports::snapshot`'s
+    `every_table_is_classified_for_snapshot_staleness` still finds `exchange_holidays` carrying
+    exactly `insert`/`update`/`delete` with the same `WHEN`-narrowed update arm. No index and no
+    foreign key needed touching: nothing in the schema references the table, and the `UNIQUE`
+    constraint replacing the composite primary key is backed by an index with the same leading
+    `mic` column (0019's reason for skipping it stands), so the migration needs neither
+    `PRAGMA foreign_keys = OFF` nor 0029's out-of-transaction shape.
+  - The two audit triggers record every column, `name` included — informational to the calculations,
+    but a trail that dropped it could not say which holiday a deleted date was — and neither is
+    `WHEN`-narrowed the way the staleness trigger is: staleness asks whether a stored figure moved
+    (a name correction did not), the trail asks what the row said before the write.
+  - Four places updated as the rule names: the migration's CHECK + trigger pair,
+    `reports::row_history::AUDITED_TABLES` (21 → 22 entries), `config.js`'s Row History table picker,
+    and the Exchange Holidays list's `columns`. Docs: `docs/SCHEMA.md` (the table, the Relationships
+    audit line, and the audit-trail paragraph rewritten so the falsified "only influence values
+    persisted onto trades at write time" wording now states the real reason for each table
+    separately — the calendar is audited, `exchanges` is excluded and why it genuinely still
+    qualifies; the `table_name` enum list also gained the `rba_fx_rates` 0031 had left off),
+    `docs/API.md` (the `id` and what it is for, the audited paragraph in Exchange holidays, and the
+    A-40 Known-limitation footnote — a deleted holiday is now recoverable), and README's audited-facts
+    list.
+  - Tests: `infra::db::tests::migration_0039_keeps_every_holiday_and_audits_the_calendar` (the
+    rebuild against a pre-0039 calendar: every row survives with its values, ids ascend with the
+    calendar, the natural key and the `mic` FK still bite, the five triggers come back, existing
+    audit entries survive and the trail is still append-only, and a correction + a deletion both
+    land in it); `entities::exchange_holiday::tests::correcting_a_holiday_records_the_superseded_row`
+    and `::deleting_a_holiday_keeps_it_recoverable_from_the_trail` (end to end through the full
+    router and `POST /reports/row_history`); `::a_re_added_holiday_does_not_inherit_the_deleted_one_s_trail`
+    (the AUTOINCREMENT reason); `reports::row_history::tests::every_audited_table_records_update_and_delete`
+    and `::audited_tables_match_migration_check_and_triggers` (the three-list pinning, extended with
+    a 0039 block); `web::tests::row_history_ui_present` (the picker, driven off the Rust const); and
+    `doc_checks::audited_exchange_holidays_documented`.
+  - **Verified against real data**: a scratch copy of the deployed backup
+    (`share-tracker-2026-08-16-000000.db`, at migration 21) upgraded clean to 39 — 160 holidays
+    before and after (73 XASX + 87 XNYS), every `(mic, holiday_date, name)` byte-identical, ids
+    1..160 assigned earliest-first, `row_history` 28 entries before and after, `PRAGMA
+    integrity_check` ok and `PRAGMA foreign_key_check` empty. Then end to end on that copy: a name
+    correction and a delete of the 2027-12-28 ASX Boxing Day left two entries under `row_id` 160 —
+    `UPDATE` holding "Boxing Day" and `DELETE` holding "Boxing Day (observed)" — read back through
+    `POST /reports/row_history`, with the composite-key 404 wording intact. Scratch copies deleted;
+    neither the backup nor the repo's stale `share-tracker.db` was written to.

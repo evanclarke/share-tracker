@@ -21,7 +21,7 @@ Split into topical files (mirrors the `docs/ato/` pattern of many small files
 | [`DONE/tax-domain.md`](DONE/tax-domain.md) | ATO-cited CGT/tax calculation rules — discount, cost base, corporate actions, FITO, franking | 38 |
 | [`DONE/crypto.md`](DONE/crypto.md) | Crypto-asset holdings and wallet-to-wallet transfers | 2 |
 | [`DONE/web-frontend.md`](DONE/web-frontend.md) | Web UI screens, config-driven refactors, readability/UX fixes | 14 |
-| [`DONE/reviews.md`](DONE/reviews.md) | Code/design review findings and their resolutions | 86 |
+| [`DONE/reviews.md`](DONE/reviews.md) | Code/design review findings and their resolutions | 87 |
 
 **Archiving a closed `TODO.md` section**: move it verbatim (heading + items +
 notes) into whichever file above matches its subject — usually obvious from

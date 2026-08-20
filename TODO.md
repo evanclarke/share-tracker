@@ -36,15 +36,20 @@ display-only drift). A fourth, Q-14 — the price provider serves a split-adjust
 valuation of a pre-split date was out by the split ratio — is closed in the archive, as is Q-02 (a
 still-held delisted or suspended listing blocked the whole portfolio's snapshots indefinitely), which
 was the last of section Q's own findings. **No section-Q scenario is open.** The pass raised three further findings
-of its own, of which two are **closed** in `DONE/reviews.md`: that the contemporaneous-price
+of its own, and **all three are now closed** in `DONE/reviews.md`: that the contemporaneous-price
 invariant did not hold across a **demerger** — the cause of an understatement already recorded
 against Evan's real LAC history — and that there was no "unpriced *before*" counterpart to
 `unpriced_from` for a security whose provider series *begins* at a date, closed 2026-08-20 by
 `listings.unpriced_before` (migration 0037), which excludes the holding from the date's totals and
-names what it omits.
+names what it omits; and that the hand-editable `exchange_holidays` calendar changed a reported
+figure without being audited, closed 2026-08-21 by migration 0039.
 
-**Three sections are open below.** The audit-trail question that closing a fifth finding (Q-05/Q-08)
-raised is awaiting Evan's decision. The LAC price-history section is open on **one** item — the demerger stated
+**Two sections are open below.** The audit-trail question that closing a fifth finding (Q-05/Q-08)
+raised — whether the hand-editable `exchange_holidays` calendar, which valuation reads live, belongs
+in the audit trail — was **decided and implemented 2026-08-21**: it does (migration 0039, with the
+surrogate id the composite key needed), while `exchanges` stays out because its half of the original
+exclusion wording is genuinely still true; that section is archived in `DONE/reviews.md`. The LAC
+price-history section is open on **one** item — the demerger stated
 close, which must wait for the borrowed rows to be cleared on the deployed database (clearing them
 is now *possible*: the `ok`-row delete rule was relaxed inside an `unpriced_before` span
 2026-08-21, with a bulk form; since 2026-08-21 every fetched row records the provider symbol it was
@@ -55,40 +60,6 @@ last: it is a procedure to run against the deployed database, not code to write 
 the repo work it still waits on — now only the host upgrade.
 
 ---
-
-## `exchange_holidays` is a user-editable table that changes a reported figure, but is not audited
-
-Raised 2026-08-20 while closing SCENARIOS Q-05/Q-08, which falsified the ground the exclusion rested
-on. `docs/SCHEMA.md` excluded `exchanges` and `exchange_holidays` from the audit trail as "tables
-that only influence values persisted onto trades at write time". That is true of `exchanges` (its
-`settlement_days` is consumed when a trade is written; `timezone`/`close_time` decide only which
-dates are *generable*, never what a stored snapshot says) but not of the holiday calendar:
-`reports::valuation::stored_valuations` reads it **live** on every snapshot generation, which is why
-migration 0033 had to give it staleness triggers.
-
-The audited set's stated criterion (scope decision 2026-07-14) is "every user-entered table whose
-values feed a calculation". `exchange_holidays` now visibly meets it, and this is the same shape as
-the two tables that already joined on a falsified premise: `closing_prices` in 0021 (once 0020 made
-a price hand-enterable) and `rba_fx_rates` in 0031 (once `PUT /rba_fx_rates/:id` made a rate
-correctable). Both were "reference data" until a write path existed; this one has had `PUT`/`DELETE`
-from the start.
-
-- [ ] Decide whether `exchange_holidays` joins the audited set, and implement it if so. The case
-  for: it is hand-editable, there is no import to re-derive it from (the seed is a one-off in
-  0001_schema.sql), a deleted holiday is otherwise unrecoverable, and a wrong holiday silently
-  changes both recomputed settlement dates and every snapshot valuation from that date. The case
-  against: it is a published exchange calendar rather than a taxpayer fact, and the 0033 staleness
-  triggers already surface the *effect* of a change on the reports even though they do not retain
-  what was changed. `exchanges` should be decided in the same pass (probably staying out, per the
-  reasoning above).
-- [ ] If audited, it is the four-place change the rule names: a `row_history` rebuild to extend the
-  `table_name` CHECK (the rename pattern of 0018/0021/0027/0031, `PRAGMA legacy_alter_table = ON`),
-  the `exchange_holidays_row_history_update`/`_delete` trigger pair, an entry in
-  `reports::row_history::AUDITED_TABLES`, and one in `config.js`'s table picker — three of which a
-  test pins together. Note the composite `(mic, holiday_date)` key: `row_history.row_id` is an
-  INTEGER, so the table would need the same AUTOINCREMENT surrogate id `closing_prices` was rebuilt
-  with in 0021 (keeping the natural key as a `UNIQUE`), which makes this the larger of the two
-  precedents, not the smaller.
 
 ## LAC's whole pre-demerger price history is LAR's series — 375 rows say so on their face, 260 say nothing, and the health check sees only the 260
 

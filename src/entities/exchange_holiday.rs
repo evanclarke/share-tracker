@@ -2,7 +2,8 @@
 //!
 //! Settlement-date calculation advances by *business* days, skipping weekends
 //! and the exchange's public holidays. This module owns the `exchange_holidays`
-//! table (one row per `(mic, holiday_date)`) and exposes
+//! table (one row per `(mic, holiday_date)`, with a surrogate `id` since 0039
+//! so the audit trail can key on it) and exposes
 //! [`exchange_holidays_for_listing`], which the trade/sell settlement logic uses
 //! to look up the holiday set for a listing's exchange.
 
@@ -20,6 +21,13 @@ use std::collections::HashSet;
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct ExchangeHoliday {
+    /// Server-assigned surrogate key (0039): the row's identity for the audit
+    /// trail (`row_history.row_id`, so `POST /reports/row_history` can be
+    /// keyed on it). Writes address a holiday by its `(mic, holiday_date)`
+    /// natural key, never by this — [`db_upsert`] ignores the value it is
+    /// handed and lets the database assign or preserve it.
+    #[serde(default)]
+    pub id: i64,
     pub mic: String,
     pub holiday_date: NaiveDate,
     /// Holiday name; informational only (not used by any calculation).
@@ -43,7 +51,7 @@ pub fn router() -> Router<SqlitePool> {
 
 pub async fn db_list(pool: &SqlitePool) -> Result<Vec<ExchangeHoliday>, sqlx::Error> {
     sqlx::query_as(
-        "SELECT mic, holiday_date, name FROM exchange_holidays ORDER BY mic, holiday_date",
+        "SELECT id, mic, holiday_date, name FROM exchange_holidays ORDER BY mic, holiday_date",
     )
     .fetch_all(pool)
     .await
@@ -54,7 +62,7 @@ pub async fn db_list_for_exchange(
     mic: &str,
 ) -> Result<Vec<ExchangeHoliday>, sqlx::Error> {
     sqlx::query_as(
-        "SELECT mic, holiday_date, name FROM exchange_holidays WHERE mic = ? ORDER BY holiday_date",
+        "SELECT id, mic, holiday_date, name FROM exchange_holidays WHERE mic = ? ORDER BY holiday_date",
     )
     .bind(mic)
     .fetch_all(pool)
@@ -85,7 +93,7 @@ pub async fn db_get(
     date: NaiveDate,
 ) -> Result<Option<ExchangeHoliday>, sqlx::Error> {
     sqlx::query_as(
-        "SELECT mic, holiday_date, name FROM exchange_holidays WHERE mic = ? AND holiday_date = ?",
+        "SELECT id, mic, holiday_date, name FROM exchange_holidays WHERE mic = ? AND holiday_date = ?",
     )
     .bind(mic)
     .bind(date)
@@ -206,6 +214,9 @@ async fn upsert(
         .parse()
         .map_err(|_| ApiError::bad_request("the holiday date is not a valid date"))?;
     let holiday = ExchangeHoliday {
+        // Assigned by the database on insert, preserved on update; the upsert
+        // below never binds it.
+        id: 0,
         mic,
         holiday_date,
         name: body.name,
@@ -307,6 +318,7 @@ mod tests {
     async fn db_insert_and_retrieve() {
         let pool = test_pool().await;
         let holiday = ExchangeHoliday {
+            id: 0,
             mic: "XASX".to_string(),
             holiday_date: ymd(2030, 1, 1),
             name: "New Year's Day".to_string(),
@@ -324,6 +336,7 @@ mod tests {
     async fn db_upsert_updates_existing_name() {
         let pool = test_pool().await;
         let mut holiday = ExchangeHoliday {
+            id: 0,
             mic: "XASX".to_string(),
             holiday_date: ymd(2030, 1, 1),
             name: "New Year".to_string(),
@@ -343,6 +356,7 @@ mod tests {
         // The mic FK references exchanges(mic); an unknown exchange is rejected.
         let pool = test_pool().await;
         let holiday = ExchangeHoliday {
+            id: 0,
             mic: "ZZZZ".to_string(),
             holiday_date: ymd(2030, 1, 1),
             name: "Nope".to_string(),
@@ -488,6 +502,7 @@ mod tests {
         // INSERT: the Friday turns out to have been a full closure, so every
         // snapshot from it on was valued on a day the market never traded.
         let mut holiday = ExchangeHoliday {
+            id: 0,
             mic: "XASX".to_string(),
             holiday_date: ymd(2026, 6, 5),
             name: "Test Closure".to_string(),
@@ -517,6 +532,128 @@ mod tests {
         unstale(pool.clone()).await;
         assert!(db_delete(&pool, "XASX", ymd(2026, 6, 4)).await.unwrap());
         assert_eq!(stale(pool.clone()).await, flags(0, 1, 1));
+    }
+
+    /// The calendar joined the **audit trail** in 0039 (SCENARIOS Q-05/Q-08,
+    /// decided 2026-08-21): it is hand-editable, there is no import to
+    /// re-derive it from — the seed is a one-off in 0001_schema.sql — and a
+    /// holiday changes a reported figure, since valuation reads the calendar
+    /// live. So a correction records the superseded row, readable through
+    /// `POST /reports/row_history` keyed on the surrogate `id` the rebuild
+    /// gave the table.
+    #[tokio::test]
+    async fn correcting_a_holiday_records_the_superseded_row() {
+        let pool = test_pool().await;
+        let app = ApiClient::full(&pool);
+
+        let before = db_get(&pool, "XNYS", ymd(2026, 2, 16))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(before.name, "Washington's Birthday", "seeded name");
+
+        app.put_ok(
+            "/exchange_holidays/XNYS/2026-02-16",
+            &serde_json::json!({ "name": "Presidents' Day" }),
+        )
+        .await;
+
+        let history: Vec<serde_json::Value> = app
+            .post_json(
+                "/reports/row_history",
+                &serde_json::json!({ "table": "exchange_holidays", "row_id": before.id }),
+            )
+            .await;
+        assert_eq!(history.len(), 1, "one entry for one correction");
+        assert_eq!(history[0]["operation"], "UPDATE");
+        assert_eq!(history[0]["mic"], "XNYS");
+        assert_eq!(history[0]["holiday_date"], "2026-02-16");
+        assert_eq!(
+            history[0]["name"], "Washington's Birthday",
+            "the trail holds what the row said before the write"
+        );
+        // The row itself now carries the correction, under the same id.
+        let after = db_get(&pool, "XNYS", ymd(2026, 2, 16))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.id, before.id, "the upsert preserves the row identity");
+        assert_eq!(after.name, "Presidents' Day");
+    }
+
+    /// The delete is the case the trail exists for: nothing else in the
+    /// database could say a holiday was ever there, and removing one turns
+    /// the date into a trading day that changes both recomputed settlement
+    /// dates and every snapshot valuation from it.
+    #[tokio::test]
+    async fn deleting_a_holiday_keeps_it_recoverable_from_the_trail() {
+        let pool = test_pool().await;
+        let app = ApiClient::full(&pool);
+
+        let holiday = db_get(&pool, "XASX", ymd(2026, 4, 3))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(holiday.name, "Good Friday", "seeded name");
+
+        app.delete("/exchange_holidays/XASX/2026-04-03")
+            .await
+            .expect_status(StatusCode::NO_CONTENT);
+        assert!(
+            db_get(&pool, "XASX", ymd(2026, 4, 3))
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        let history: Vec<serde_json::Value> = app
+            .post_json(
+                "/reports/row_history",
+                &serde_json::json!({ "table": "exchange_holidays", "row_id": holiday.id }),
+            )
+            .await;
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0]["operation"], "DELETE");
+        assert_eq!(history[0]["id"], holiday.id);
+        assert_eq!(history[0]["mic"], "XASX");
+        assert_eq!(history[0]["holiday_date"], "2026-04-03");
+        assert_eq!(
+            history[0]["name"], "Good Friday",
+            "every column of the deleted holiday is retained"
+        );
+    }
+
+    /// The surrogate id is server-assigned and never reused, so a trail can
+    /// only ever belong to one holiday: re-adding a deleted date gets a fresh
+    /// id rather than inheriting the deleted row's history (0039, 0021's
+    /// AUTOINCREMENT reasoning).
+    #[tokio::test]
+    async fn a_re_added_holiday_does_not_inherit_the_deleted_one_s_trail() {
+        let pool = test_pool().await;
+        let holiday = db_get(&pool, "XASX", ymd(2026, 4, 3))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(db_delete(&pool, "XASX", ymd(2026, 4, 3)).await.unwrap());
+        db_upsert(
+            &pool,
+            &ExchangeHoliday {
+                id: 0,
+                mic: "XASX".to_string(),
+                holiday_date: ymd(2026, 4, 3),
+                name: "Good Friday".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let re_added = db_get(&pool, "XASX", ymd(2026, 4, 3))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(
+            re_added.id, holiday.id,
+            "AUTOINCREMENT never hands back a deleted row's id"
+        );
     }
 
     #[tokio::test]

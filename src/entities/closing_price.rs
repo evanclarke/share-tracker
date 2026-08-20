@@ -2688,6 +2688,7 @@ mod tests {
         exchange_holiday::db_upsert(
             &pool,
             &exchange_holiday::ExchangeHoliday {
+                id: 0,
                 mic: "XASX".to_string(),
                 holiday_date: ymd(2026, 6, 5),
                 name: "Test Holiday".to_string(),
@@ -5003,6 +5004,7 @@ mod tests {
         exchange_holiday::db_upsert(
             &pool,
             &exchange_holiday::ExchangeHoliday {
+                id: 0,
                 mic: "XASX".to_string(),
                 holiday_date: ymd(2025, 1, 27),
                 name: "Australia Day".to_string(),

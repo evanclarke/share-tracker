@@ -32,10 +32,10 @@ export const ENTITIES = [
   },
   {
     slug: 'exchange_holidays', title: 'Exchange Holidays', menu: 'Reference Data', api: '/exchange_holidays',
-    desc: 'Full-closure non-trading days; settlement skips these as well as weekends.',
+    desc: 'Full-closure non-trading days; settlement skips these as well as weekends, and valuation reads the calendar live — so a change here re-values every stored snapshot from that date. Edits and deletions are recorded in Row History (the id column is the row id to look one up by).',
     keyFields: [fk('mic', 'Exchange', 'exchanges', { required: true, encode: 'string' }), dt('holiday_date', 'Date', { required: true })],
     fields: [txt('name', 'Name', { required: true })],
-    columns: ['mic', 'holiday_date', 'name'],
+    columns: ['id', 'mic', 'holiday_date', 'name'],
   },
   {
     slug: 'listings', title: 'Listings', menu: 'Reference Data', api: '/listings',
@@ -634,6 +634,7 @@ export const REPORTS = [
         'rights_sale_allocations', 'investment_expenses', 'drp_enrolments',
         'cgt_settings', 'attachments', 'listings', 'listing_renames',
         'closing_prices', 'tax_year_settings', 'rba_fx_rates',
+        'exchange_holidays',
       ], { required: true, default: 'trades' }),
       int('row_id', 'Row ID', { required: true, hint: "The record's id as shown in its entity list — for tax_year_settings, the financial year itself (e.g. 2026)." }),
     ],

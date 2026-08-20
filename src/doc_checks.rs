@@ -1279,6 +1279,42 @@ fn audited_closing_prices_documented() {
     assert!(README_MD.contains("hand-entered closing prices"));
 }
 
+/// Docs-sync pin for auditing the exchange holiday calendar (migration 0039,
+/// decided 2026-08-21): the schema records why the table joined the audited
+/// set and why `exchanges` did not, plus the surrogate key it needed and what
+/// the old composite key became; the API documents the `id`, points a history
+/// lookup at it, and states that the audit trigger is deliberately not
+/// narrowed the way the staleness one is; and the README names the calendar
+/// among the audited facts.
+#[test]
+fn audited_exchange_holidays_documented() {
+    // SCHEMA.md: the reversal, the key change, and the surviving exclusion.
+    assert!(SCHEMA_MD.contains("`exchange_holidays` joined in 0039"));
+    assert!(SCHEMA_MD.contains("kept as `UNIQUE(mic, holiday_date)`"));
+    assert!(
+        SCHEMA_MD.contains(
+            "**`exchanges` stays out, and its half of the original sentence remains true**"
+        )
+    );
+    // The criterion it meets, stated as the reason rather than implied.
+    assert!(SCHEMA_MD.contains(
+        "The staleness triggers flag the *effect* of a change; the trail is what retains *what* \
+         was changed."
+    ));
+    // API.md: the id, what it is for, and the two mechanisms' different scope.
+    assert!(API_MD.contains("`{\"table\": \"exchange_holidays\", \"row_id\": <id>}`"));
+    assert!(API_MD.contains(
+        "a name-only `PUT` stales no snapshot (no stored figure moved) but is still recorded"
+    ));
+    // The A-40 limitation footnote records that a deleted holiday survives.
+    assert!(
+        known_limitations()
+            .contains("the calendar joined the audited tables on 2026-08-21 (migration 0039)")
+    );
+    // README: the calendar is named among the audited facts.
+    assert!(README_MD.contains("the exchange holiday calendar every valuation reads"));
+}
+
 /// Docs-sync pin for the fetched-symbol provenance (migration 0038, the
 /// `symbol`-override incident): the API states that every fetched row records
 /// the symbol it was fetched under and why it is recorded *always* rather than

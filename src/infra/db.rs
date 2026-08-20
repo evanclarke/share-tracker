@@ -1110,6 +1110,176 @@ mod tests {
         );
     }
 
+    /// 0039 rebuilds `exchange_holidays` to give it the surrogate `id` the
+    /// audit trail keys on, then rebuilds `row_history` to admit the table —
+    /// 0021's two-rebuilds-in-one-migration shape, on the one table that is
+    /// pure reference data. So this pins it against a calendar that predates
+    /// it: every holiday survives with its values exactly, ids ascend with
+    /// the calendar, the natural key is still unique, the `mic` foreign key
+    /// still bites, the three 0033 staleness triggers come back with the
+    /// rebuilt table, existing audit entries survive, and a correction and a
+    /// deletion now both land in the trail.
+    #[tokio::test]
+    async fn migration_0039_keeps_every_holiday_and_audits_the_calendar() {
+        let pool = pool_migrated_below(39).await;
+        // A hand-added holiday on top of the seeded calendar, and an audit
+        // entry from a table audited before 0039.
+        sqlx::query(
+            "INSERT INTO exchange_holidays (mic, holiday_date, name) \
+             VALUES ('XASX', '2028-01-03', 'New Year''s Day')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO listings (id, exchange_mic, ticker, name, security_type, currency) \
+             VALUES (1, 'XASX', 'BHP', 'BHP Group', 'Share', 'AUD')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE listings SET name = 'BHP Group Ltd' WHERE id = 1")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let before: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT mic, holiday_date, name FROM exchange_holidays ORDER BY holiday_date, mic",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert!(before.len() > 100, "setup: the seeded calendar is there");
+
+        apply_migration(&pool, 39).await;
+
+        // Every row survives, values byte-identical, ids ascending with the
+        // calendar they describe.
+        let after: Vec<(i64, String, String, String)> =
+            sqlx::query_as("SELECT id, mic, holiday_date, name FROM exchange_holidays ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            after
+                .iter()
+                .map(|(_, m, d, n)| (m.clone(), d.clone(), n.clone()))
+                .collect::<Vec<_>>(),
+            before,
+            "no holiday is lost or altered by the rebuild"
+        );
+        assert_eq!(
+            after.first().map(|r| r.0),
+            Some(1),
+            "ids are assigned from 1, earliest holiday first"
+        );
+        assert_eq!(
+            after.last().map(|r| (r.0, r.2.as_str())),
+            Some((after.len() as i64, "2028-01-03")),
+            "the latest holiday takes the highest id"
+        );
+
+        // The former primary key is still enforced, now as a UNIQUE
+        // constraint, and the mic foreign key survives the rebuild.
+        assert!(
+            sqlx::query(
+                "INSERT INTO exchange_holidays (mic, holiday_date, name) \
+                 VALUES ('XASX', '2028-01-03', 'Duplicate')"
+            )
+            .execute(&pool)
+            .await
+            .is_err(),
+            "one holiday per (exchange, day) still holds"
+        );
+        assert!(
+            sqlx::query(
+                "INSERT INTO exchange_holidays (mic, holiday_date, name) \
+                 VALUES ('ZZZZ', '2028-01-04', 'Nowhere')"
+            )
+            .execute(&pool)
+            .await
+            .is_err(),
+            "the mic foreign key survives the rebuild"
+        );
+
+        // 0033's staleness triggers came back with the table, beside the new
+        // audit pair.
+        let triggers: Vec<String> = sqlx::query_scalar(
+            "SELECT name FROM sqlite_master WHERE type = 'trigger' \
+             AND tbl_name = 'exchange_holidays' ORDER BY name",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            triggers,
+            [
+                "exchange_holidays_row_history_delete",
+                "exchange_holidays_row_history_update",
+                "exchange_holidays_stale_snapshots_delete",
+                "exchange_holidays_stale_snapshots_insert",
+                "exchange_holidays_stale_snapshots_update",
+            ]
+        );
+
+        // Pre-existing audit entries survive the row_history rebuild, and the
+        // trail is still append-only.
+        let history_after: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM row_history WHERE table_name = 'listings'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(history_after, 1, "the audit trail is not truncated");
+        assert!(
+            sqlx::query("DELETE FROM row_history")
+                .execute(&pool)
+                .await
+                .is_err(),
+            "the append-only guards are re-created with the table"
+        );
+
+        // The calendar is audited from here on: a correction and a deletion
+        // both retain the row they replaced.
+        let id: i64 = sqlx::query_scalar(
+            "SELECT id FROM exchange_holidays WHERE mic = 'XASX' AND holiday_date = '2028-01-03'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE exchange_holidays SET name = 'New Year (observed)' WHERE id = ?")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM exchange_holidays WHERE id = ?")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let trail: Vec<(String, String)> = sqlx::query_as(
+            "SELECT operation, old_row FROM row_history \
+             WHERE table_name = 'exchange_holidays' AND row_id = ? ORDER BY id",
+        )
+        .bind(id)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(trail.len(), 2);
+        assert_eq!(trail[0].0, "UPDATE");
+        assert!(
+            trail[0].1.contains("\"name\":\"New Year's Day\""),
+            "{:?}",
+            trail[0].1
+        );
+        assert_eq!(trail[1].0, "DELETE");
+        assert!(
+            trail[1].1.contains("\"holiday_date\":\"2028-01-03\"")
+                && trail[1].1.contains("\"mic\":\"XASX\""),
+            "{:?}",
+            trail[1].1
+        );
+    }
+
     /// 0025 renames `income.lic_capital_gain_deduction` to
     /// `lic_capital_gain_amount` — the LIC's advised attributable part, which
     /// the reports now halve for D8 — and so has to read existing rows forward
