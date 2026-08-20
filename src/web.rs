@@ -403,8 +403,10 @@ mod tests {
         assert!(js.contains("/report_snapshots"));
         assert!(js.contains("/report_snapshots/generate"));
         assert!(js.contains("#/r/snapshots"));
-        // …with stale/provisional snapshots badged and regenerable per row.
-        assert!(js.contains("m.stale ? 'stale' : (m.provisional ? 'provisional' : 'ok')"));
+        // …with stale/provisional/carried-price snapshots badged and
+        // regenerable per row.
+        assert!(js.contains("m.stale ? 'stale'"));
+        assert!(js.contains("(m.price_carried_forward ? 'carried' : 'ok')"));
         assert!(js.contains("Regenerate"));
         // The bulk repair buttons drive the two regeneration endpoints, and
         // the detail view explains a provisional snapshot.
@@ -413,6 +415,10 @@ mod tests {
         assert!(js.contains("Regenerate all"));
         assert!(js.contains("Regenerate provisional"));
         assert!(js.contains("snap.provisional"));
+        // …and a carried-forward price, which nothing trues up — the detail
+        // view names the way out (clear the listing's Unpriced from).
+        assert!(js.contains("snap.price_carried_forward"));
+        assert!(js.contains("Carried-forward price"));
         // Regenerate-all takes a date range, prefilled from the API's
         // default-range endpoint.
         assert!(js.contains("/report_snapshots/regenerate_range"));
@@ -555,6 +561,11 @@ mod tests {
         // (blank for Crypto) — and crypto-aware labels never print "null".
         assert!(js.contains("'Crypto'"));
         assert!(js.contains("l.exchange_mic || 'Crypto'"));
+        // SCENARIOS Q-02: the date the price provider stopped quoting the
+        // security is enterable, and the hint says what it does.
+        assert!(js.contains("unpriced_from"));
+        assert!(js.contains("Unpriced from"));
+        assert!(js.contains("carries the last stored closing price forward"));
     }
 
     #[tokio::test]

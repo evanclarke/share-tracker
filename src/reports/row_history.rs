@@ -732,6 +732,30 @@ mod tests {
             );
         }
 
+        // 0035 added listings.unpriced_from (SCENARIOS Q-02), so the listings
+        // trigger pair was re-created again — the *live* pair now comes from
+        // 0035, and must still carry every earlier column too.
+        let sql35 = include_str!("../../migrations/0035_listing_unpriced_from.sql");
+        for op in ["update", "delete"] {
+            assert!(
+                sql35.contains(&format!("CREATE TRIGGER listings_row_history_{op}")),
+                "0035 must re-create the listings {op} trigger"
+            );
+        }
+        for col in [
+            "amit",
+            "amit_from",
+            "unpriced_from",
+            "price_symbol",
+            "preference",
+        ] {
+            assert_eq!(
+                sql35.matches(&format!("'{col}', OLD.{col}")).count(),
+                2,
+                "both re-created listings triggers must record {col}"
+            );
+        }
+
         // 0026 added ess_statements.fx_rate (SCENARIOS J-08/J-12), so that
         // table's trigger pair was re-created with it — the *live* pair now
         // comes from 0026 and must still carry every earlier column too.

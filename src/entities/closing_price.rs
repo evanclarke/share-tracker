@@ -667,6 +667,32 @@ pub async fn db_get_one(
     .await
 }
 
+/// The listing's latest **ok** stored price at or before `on_or_before`, as
+/// `(price_date, price)`.
+///
+/// The carry-forward source for a listing the provider has stopped quoting
+/// (`listings.unpriced_from`, SCENARIOS Q-02): `reports::valuation` reads it
+/// when the valuation day itself has no ok price. It returns the *date* too,
+/// so the caller can tell a genuinely contemporaneous price from a carried
+/// one. A manual price entered during the unpriced run wins over an older
+/// fetched one simply by being later.
+pub async fn db_latest_ok_price_on_or_before(
+    pool: &SqlitePool,
+    listing_id: i64,
+    on_or_before: NaiveDate,
+) -> Result<Option<(NaiveDate, Decimal)>, sqlx::Error> {
+    let row: Option<(NaiveDate, Money)> = sqlx::query_as(
+        "SELECT price_date, price FROM closing_prices \
+         WHERE listing_id = ? AND status = 'ok' AND price_date <= ? \
+         ORDER BY price_date DESC LIMIT 1",
+    )
+    .bind(listing_id)
+    .bind(on_or_before)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|(date, Money(price))| (date, price)))
+}
+
 /// Stored prices, newest first, optionally filtered by listing and date range.
 pub async fn db_list(
     pool: &SqlitePool,
@@ -1330,6 +1356,15 @@ pub async fn run_collection(
                 continue;
             }
         };
+        // A listing the provider has stopped quoting is not fetched from its
+        // `unpriced_from` date on: every call would only store another
+        // errored row, fail the job, and nag from `GET /reports/health`
+        // forever (SCENARIOS Q-02). Valuation carries its last ok close
+        // forward instead.
+        let days: Vec<NaiveDate> = match market.listing.unpriced_from {
+            Some(from) => days.into_iter().filter(|d| *d < from).collect(),
+            None => days,
+        };
         let (Some(&from), Some(&to)) = (days.first(), days.last()) else {
             continue;
         };
@@ -1617,6 +1652,7 @@ async fn fetch_one(
         .map_err(internal)?
         .ok_or_else(|| ApiError::not_found("no such listing"))?;
     validate_complete_trading_day(&market, body.price_date)?;
+    reject_unpriced_date(&market, body.price_date)?;
     if let Some(stored) = db_get_one(&pool, body.listing_id, body.price_date).await?
         && stored.origin == PriceOrigin::Manual
     {
@@ -1661,7 +1697,15 @@ async fn backfill(
         .map_err(unprocessable)?
         .filter(|latest| *latest >= body.from)
         .ok_or_else(|| ApiError::unprocessable("range contains no complete trading day"))?;
-    let to = body.to.min(latest);
+    let mut to = body.to.min(latest);
+    // …and to days the provider still quotes: a listing marked unpriced from
+    // a date has nothing to serve on or after it, so the range stops the day
+    // before rather than storing a run of errored rows (SCENARIOS Q-02). A
+    // range wholly inside the unpriced run is refused, naming the marker.
+    if let Some(from) = market.listing.unpriced_from {
+        reject_unpriced_date(&market, body.from)?;
+        to = to.min(from.pred_opt().unwrap_or(from));
+    }
 
     let mut trading_days: Vec<NaiveDate> = Vec::new();
     let mut date = body.from;
@@ -1722,6 +1766,26 @@ async fn delete_one(
     }
     db_delete(&pool, listing_id, price_date).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// 422 when `date` falls in the listing's unpriced run
+/// (`listings.unpriced_from`): the provider serves nothing there by the
+/// listing's own record, so a fetch could only store another errored row.
+/// The refusal names the way back — clear the marker if the security is
+/// quoted again, or enter the price by hand.
+fn reject_unpriced_date(market: &Market, date: NaiveDate) -> Result<(), ApiError> {
+    if let Some(from) = market.listing.unpriced_from
+        && date >= from
+    {
+        return Err(ApiError::unprocessable(format!(
+            "{} is unpriced from {from} — the provider serves nothing for it from then on, so \
+             valuation carries its last stored close forward instead. Enter a price by hand \
+             (PUT /closing_prices/:listing_id/:price_date) if you have one, or clear \
+             unpriced_from on the listing if the security is quoted again",
+            market.listing.ticker
+        )));
+    }
+    Ok(())
 }
 
 /// 422 unless `date` is a trading day whose close has passed.
@@ -2812,6 +2876,115 @@ mod tests {
             .unwrap();
         assert_eq!(row.price, Some("62.48".parse().unwrap()), "untouched");
         assert_eq!(row.origin, PriceOrigin::Manual);
+    }
+
+    /// SCENARIOS Q-02: a listing marked `unpriced_from` is not fetched from
+    /// that date on — every call would only store another errored row, fail
+    /// the job, and nag from health forever. The days *before* it are still
+    /// collected.
+    #[tokio::test]
+    async fn collection_skips_a_listing_from_its_unpriced_from_date() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "ATVI", "XASX", "AUD").await;
+        insert_buy(&pool, 1, 1, "100").await;
+        for &d in &asx_lookback_window() {
+            if d < ymd(2026, 6, 3) {
+                seed_ok_price(&pool, 1, d).await;
+            }
+        }
+        let marked = crate::test_support::listing(1)
+            .ticker("ATVI")
+            .name("ATVI")
+            .mic("XASX")
+            .security_type(listing::SecurityType::Share)
+            .unpriced_from(ymd(2026, 6, 3))
+            .build();
+        listing::db_upsert(&pool, &marked).await.unwrap();
+
+        let fetcher = StubFetcher::default();
+        run_collection(&pool, &fetcher, friday_evening_sydney())
+            .await
+            .unwrap();
+        assert!(
+            fetcher.calls().is_empty(),
+            "nothing left to fetch before the date, nothing fetched after it: {:?}",
+            fetcher.calls()
+        );
+        assert!(
+            db_get_one(&pool, 1, ymd(2026, 6, 5))
+                .await
+                .unwrap()
+                .is_none(),
+            "no errored row is stored for a day the provider cannot serve"
+        );
+    }
+
+    /// The explicit paths refuse the same dates: a single re-fetch is `422`
+    /// naming the marker, and a backfill crossing it fills the priced part
+    /// and stops.
+    #[tokio::test]
+    async fn api_fetch_and_backfill_stop_at_unpriced_from() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "ATVI", "XASX", "AUD").await;
+        insert_buy(&pool, 1, 1, "100").await;
+        seed_ok_price(&pool, 1, ymd(2026, 6, 1)).await;
+        let marked = crate::test_support::listing(1)
+            .ticker("ATVI")
+            .name("ATVI")
+            .mic("XASX")
+            .security_type(listing::SecurityType::Share)
+            .unpriced_from(ymd(2026, 6, 3))
+            .build();
+        listing::db_upsert(&pool, &marked).await.unwrap();
+
+        let mut stub = StubFetcher::default();
+        for d in [ymd(2026, 6, 2), ymd(2026, 6, 3), ymd(2026, 6, 4)] {
+            stub = stub.with_close(1, d, "94.42", "AUD");
+        }
+        let app = full_router(pool.clone(), stub);
+
+        let (status, bytes) = post_json(
+            &app,
+            "/closing_prices/fetch",
+            serde_json::json!({ "listing_id": 1, "price_date": "2026-06-04" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        let msg = String::from_utf8_lossy(&bytes);
+        assert!(msg.contains("unpriced from 2026-06-03"), "{msg}");
+
+        let (status, bytes) = post_json(
+            &app,
+            "/closing_prices/backfill",
+            serde_json::json!({ "listing_id": 1, "from": "2026-06-01", "to": "2026-06-04" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let summary: BackfillSummary = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(summary.trading_days, 2, "1 and 2 June, not 3 or 4");
+        assert_eq!(summary.already_stored, 1);
+        assert_eq!(summary.fetched_ok, 1);
+        assert_eq!(summary.errored, 0);
+        assert!(
+            db_get_one(&pool, 1, ymd(2026, 6, 3))
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        // A range wholly inside the unpriced run is refused outright.
+        let (status, bytes) = post_json(
+            &app,
+            "/closing_prices/backfill",
+            serde_json::json!({ "listing_id": 1, "from": "2026-06-03", "to": "2026-06-04" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            String::from_utf8_lossy(&bytes).contains("unpriced from 2026-06-03"),
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
     }
 
     /// Nor is a manual price deletable — it is an ok row, so the same rule

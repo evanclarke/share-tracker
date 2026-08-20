@@ -297,6 +297,7 @@ pub fn listing(id: i64) -> ListingBuilder {
             currency: "AUD".to_string(),
             amit: false,
             amit_from: None,
+            unpriced_from: None,
             preference: false,
             price_symbol: None,
         },
@@ -349,6 +350,13 @@ impl ListingBuilder {
     pub fn amit_from(mut self, from: NaiveDate) -> Self {
         self.l.amit = true;
         self.l.amit_from = Some(from);
+        self
+    }
+
+    /// The date the price provider stopped quoting the security
+    /// (SCENARIOS Q-02).
+    pub fn unpriced_from(mut self, from: NaiveDate) -> Self {
+        self.l.unpriced_from = Some(from);
         self
     }
 

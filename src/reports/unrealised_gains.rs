@@ -35,6 +35,14 @@ pub struct UnrealisedGain {
     /// (`infra::fx::resolve_valuation_rate`): the valuation is provisional.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub fx_provisional: bool,
+    /// This row's price is not its valuation day's own close: the price
+    /// provider has stopped quoting the security (`listings.unpriced_from`),
+    /// so the last stored ok close was carried forward
+    /// (`reports::valuation`, SCENARIOS Q-02). Unlike `fx_provisional` there
+    /// is no later fact that clears it — the day is never going to be quoted
+    /// — so a regeneration reproduces it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub price_carried_forward: bool,
     /// Why a live price could not be obtained: the row is left unvalued with
     /// the reason rather than silently zeroed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -126,6 +134,7 @@ pub async fn db_unrealised_gains(
                 cgt_discount_eligible_quantity: cgt_eligible,
                 price_as_of: None,
                 fx_provisional: false,
+                price_carried_forward: false,
                 price_unavailable: None,
             }
         })

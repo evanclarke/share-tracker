@@ -33,8 +33,10 @@ two holdings where one listing's quote fails: the failing row is left unvalued c
 `fx_provisional` when it falls back), and Q-15 (a rename leaves the stored `performance` snapshot's
 `ticker` label untouched and unstaled, and regeneration picks the new one up — the documented
 display-only drift). A fourth, Q-14 — the price provider serves a split-adjusted history, so every
-valuation of a pre-split date was out by the split ratio — is closed in the archive. **One** of those
-findings is open below, alongside the audit-trail question that closing a fifth (Q-05/Q-08) raised.
+valuation of a pre-split date was out by the split ratio — is closed in the archive, as is Q-02 (a
+still-held delisted or suspended listing blocked the whole portfolio's snapshots indefinitely), which
+was the last of section Q's own findings. **No SCENARIOS finding is open**: the one section below is
+the audit-trail question that closing a fifth (Q-05/Q-08) raised, which awaits its own decision.
 
 ---
 
@@ -71,36 +73,3 @@ from the start.
   INTEGER, so the table would need the same AUTOINCREMENT surrogate id `closing_prices` was rebuilt
   with in 0021 (keeping the natural key as a `UNIQUE`), which makes this the larger of the two
   precedents, not the smaller.
-
-## SCENARIOS Q-02: a still-held delisted or suspended listing blocks the whole portfolio's snapshots indefinitely, undocumented
-
-A listing whose provider serves nothing after its last trading day stores an errored row for every
-subsequent trading day, and `stored_valuations` fails the **whole** date if any held listing is
-unpriced — deliberately, the no-partial-result rule. So one suspended holding stops
-`report-snapshot` for the entire portfolio, every day, and `GET /reports/health` nags with a growing
-`errored_days` count.
-
-Reproduced: `POST /closing_prices/backfill` for a delisted US ticker (`ATVI`, 2024-06-05..07) stores
-three errored rows (`yahoo fetch for ATVI failed: Not found`), and a held listing in that state
-blocks `POST /report_snapshots/generate` for every date.
-
-The system fails safe and the way out exists — the manual price, whose own `reason` placeholder in
-`app.js` is literally "provider serves no candle since the delisting". But:
-
-- [ ] That way out is **one hand-entered price per listing per trading day, forever**, for a
-  suspension that can run for years, and nothing says so. There is no listing-level "no longer
-  priced" fact (only `WorthlessShares`, which ends the holding — wrong for a suspended-but-valuable
-  security), and `DELETE /closing_prices/:listing_id/:price_date` explicitly does *not* unblock the
-  date, only the health alarm.
-- [ ] Not in the Known limitations, and not in the [Closing prices](docs/API.md#closing-prices)
-  section, which describes hand-pricing as the answer to "a day the provider can never serve" —
-  singular — without saying what an unbounded run of such days costs.
-
-**Fix — Evan chose 2026-08-20: a per-listing dated "unpriced from" fact** (over documenting the cost
-alone, and over silently carrying the last stored close forward for *any* unpriced day, which would
-weaken the no-partial-result rule everywhere rather than at the one listing that needs it). The
-listing records the date from which the provider serves nothing: collection stops fetching it,
-`GET /reports/health` stops nagging, and valuation stops blocking the whole date on it — carrying
-the last stored close forward and flagging the snapshot, the way the provisional-FX fallback already
-works, so the substitution is never silent. Migration + listing field + collection/valuation/health
-branches + `docs/API.md`, `docs/SCHEMA.md` and README.

@@ -677,6 +677,14 @@ const COLUMN_LABELS = {
   amount_aud: 'Amount (AUD)',
   units_after: 'Units after',
   fx_provisional: 'Provisional FX',
+  // The row was valued at an earlier day's close because the provider stopped
+  // quoting the security (listings.unpriced_from). The default humaniser
+  // would render "Price carried forward", which reads like a question.
+  price_carried_forward: 'Carried-forward price',
+  // The date the price provider stopped quoting the security; the default
+  // humaniser would render "Unpriced from" already, but the label is pinned
+  // here so it stays in step with the listings form's.
+  unpriced_from: 'Unpriced from',
   // The closing price as the provider served it, before it was restated into
   // the price date's own unit basis (see API.md, Closing prices). The default
   // humaniser would render "Price as observed" without saying what differs.

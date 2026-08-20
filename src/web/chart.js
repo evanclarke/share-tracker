@@ -51,7 +51,10 @@ export function seriesChart(points) {
     chart.appendChild(label);
   });
   // One line + point markers per series; a stale snapshot's point is hollow,
-  // a provisional one's (valued at a fallback-month FX rate) has a dashed ring.
+  // a provisional one's (valued at a fallback-month FX rate) has a dashed
+  // ring, and one valued at a carried-forward close (a listing the provider
+  // stopped quoting) is hollow-square-ish via its own class — each says why
+  // the point may not be what a live report would show.
   [['market_value', 'line-mv'], ['unrealised_gain', 'line-ug']].forEach(function (s) {
     const field = s[0], klass = s[1];
     const path = points.map(function (p, i) { return x(xs[i]) + ',' + y(Number(p[field])); }).join(' ');
@@ -59,11 +62,13 @@ export function seriesChart(points) {
     points.forEach(function (p, i) {
       const dot = svgEl('circle', {
         cx: x(xs[i]), cy: y(Number(p[field])), r: 3,
-        class: klass + (p.stale ? ' stale' : '') + (p.provisional ? ' provisional' : ''),
+        class: klass + (p.stale ? ' stale' : '') + (p.provisional ? ' provisional' : '')
+          + (p.price_carried_forward ? ' carried' : ''),
       });
       const tip = svgEl('title');
       tip.textContent = p.snapshot_date + ': ' + p[field]
-        + (p.stale ? ' (stale)' : '') + (p.provisional ? ' (provisional)' : '');
+        + (p.stale ? ' (stale)' : '') + (p.provisional ? ' (provisional)' : '')
+        + (p.price_carried_forward ? ' (carried-forward price)' : '');
       dot.appendChild(tip);
       chart.appendChild(dot);
     });
@@ -74,7 +79,8 @@ export function seriesChart(points) {
       el('span', { class: 'legend-mv' }, '— market value'),
       ' ',
       el('span', { class: 'legend-ug' }, '— unrealised gain'),
-      ' (AUD; hollow points are stale snapshots, dashed rings provisional FX)',
+      ' (AUD; hollow points are stale snapshots, dashed rings provisional FX, '
+      + 'amber rings a carried-forward price)',
     ]),
   ]);
 }

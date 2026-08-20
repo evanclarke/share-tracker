@@ -268,10 +268,15 @@ input[type=checkbox] { width: auto; }
 .series-chart circle.provisional { stroke-width: 2; stroke-dasharray: 2 1.5; }
 .series-chart circle.line-mv.provisional { stroke: var(--accent); }
 .series-chart circle.line-ug.provisional { stroke: var(--ok); }
+/* Carried-forward price (a listing the provider stopped quoting): amber ring
+   — a standing condition, not a repair to make, so it reads like the stale
+   warning colour without the hollow fill. */
+.series-chart circle.carried { stroke: var(--warn); stroke-width: 2; }
 .legend-mv { color: var(--accent); }
 .legend-ug { color: var(--ok); }
 .badge.stale { background: #fdf3e0; color: var(--warn); }
 .badge.provisional { background: #e7effc; color: var(--accent); }
+.badge.carried { background: #fdf3e0; color: var(--warn); }
 .hint.warn { color: var(--warn); }
 .hint.as-at { margin: 0 0 10px; }
 .hint.as-at .warn { color: var(--warn); }

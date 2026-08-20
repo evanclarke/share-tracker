@@ -1625,8 +1625,11 @@ async function viewSnapshots() {
       report: m.report,
       generated_at: m.generated_at,
       // Stale wins the badge: regenerating fixes it, and re-flags provisional
-      // if the real FX rate is still missing.
-      status: m.stale ? 'stale' : (m.provisional ? 'provisional' : 'ok'),
+      // if the real FX rate is still missing. A carried-forward price ranks
+      // last because nothing regenerates it away — it is a standing
+      // condition of the listing, not a repair to make.
+      status: m.stale ? 'stale'
+        : (m.provisional ? 'provisional' : (m.price_carried_forward ? 'carried' : 'ok')),
     };
   });
   const table = filterableTable(rows, ['date', 'report', 'generated_at', 'status'], {
@@ -1658,7 +1661,11 @@ async function viewSnapshots() {
       + 'A back-dated fact marks every snapshot dated on or after it stale — the stored result '
       + 'keeps showing, flagged, until regenerated. A snapshot valued while the month\'s FX rate '
       + 'was unpublished is provisional (an earlier month\'s rate was used) and is finalised '
-      + 'automatically when the RBA import lands the real rate. A day whose price fetches failed '
+      + 'automatically when the RBA import lands the real rate. A snapshot valued with a listing '
+      + 'marked “unpriced from” a date carries a carried-forward price — its last stored close, '
+      + 'flagged, so one delisted or suspended holding no longer blocks the whole portfolio; that '
+      + 'one is never trued up, and clearing the marker stales those dates instead. '
+      + 'A day whose price fetches failed '
       + 'has no snapshot at all until the price re-run succeeds. '
       + 'The market-value graph moved to the Portfolio Overview screen.'),
     genForm,
@@ -1682,6 +1689,10 @@ async function viewSnapshotDetail(report, date) {
   if (snap.provisional) {
     header.appendChild(el('p', { class: 'hint warn' },
       'Provisional: the valuation month\'s FX rate was not published at generation, so an earlier month\'s rate was used. It is finalised automatically once the RBA import lands the real rate (or regenerate provisional from the Snapshots view).'));
+  }
+  if (snap.price_carried_forward) {
+    header.appendChild(el('p', { class: 'hint warn' },
+      'Carried-forward price: a held listing is marked unpriced from a date (the provider stopped quoting it), so it was valued at its last stored closing price rather than blocking this date\'s snapshot. Nothing trues this up — clear “Unpriced from” on the listing if the security is quoted again, which marks these snapshots stale so they regenerate at real prices. The rows carrying it show “Carried-forward price”.'));
   }
   setMain(el('div', null, [header, await dataTable(snap.rows)]));
 }
@@ -1728,6 +1739,10 @@ async function renderPeriodSummary(r) {
   if (r.provisional) {
     headlineParts.push(el('p', { class: 'hint warn' },
       'Provisional: a conversion at one end of this period used a fallback-month FX rate (the real month\'s rate was not published yet). Figures here will change once it lands.'));
+  }
+  if (r.price_carried_forward) {
+    headlineParts.push(el('p', { class: 'hint warn' },
+      'Carried-forward price: a holding at one end of this period is marked unpriced from a date (the provider stopped quoting it) and was valued at its last stored close. Its capital growth over the window is measured against that stale price, so a window straddling the date shows the fall to the last close and nothing after it.'));
   }
   // Windows over a year show the annualised money-weighted return instead of
   // the raw total_return_pct — see periodReturnPct's own comment for why.

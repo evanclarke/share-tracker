@@ -120,6 +120,15 @@ pub struct PeriodPerformance {
     /// (`infra::fx::resolve_valuation_rate`) — the period result is
     /// provisional, same convention as report snapshots.
     pub provisional: bool,
+    /// A holding at either endpoint was valued at a **carried-forward** close
+    /// because the price provider has stopped quoting it
+    /// (`listings.unpriced_from`): the window's capital growth on that
+    /// holding is measured against a stale native price, so a run that
+    /// straddles the date the quotes stopped shows the drop to the last
+    /// close and nothing after it (SCENARIOS Q-02). Kept separate from
+    /// `provisional` for the same reason report snapshots keep them apart —
+    /// nothing ever trues this one up.
+    pub price_carried_forward: bool,
     pub holdings: Vec<HoldingPeriod>,
     pub fx_by_currency: Vec<CurrencyFx>,
 }
@@ -228,6 +237,11 @@ pub async fn compute(
         .collect();
     let mut provisional = valuations_from.iter().any(|v| v.provisional)
         || valuations_to.iter().any(|v| v.provisional);
+    // Every caller of the valuation fallback must surface its flag
+    // (CLAUDE.md): a carried-forward close is as much a caveat on a period
+    // return as it is on a snapshot.
+    let price_carried_forward = valuations_from.iter().any(|v| v.price_carried_forward)
+        || valuations_to.iter().any(|v| v.price_carried_forward);
 
     let perf_from = performance::db_performance(pool, &prices_from, from).await?;
     let perf_to = performance::db_performance(pool, &prices_to, to).await?;
@@ -403,6 +417,7 @@ pub async fn compute(
         money_weighted_return_pct,
         realised_capital_gain,
         provisional,
+        price_carried_forward,
         holdings,
         fx_by_currency,
     })
@@ -505,6 +520,51 @@ mod tests {
             r.total_return,
             "capital + FX + income must sum exactly to the period return"
         );
+    }
+
+    /// SCENARIOS Q-02: a holding whose listing is marked `unpriced_from` is
+    /// valued at its carried-forward close at both endpoints instead of
+    /// failing the whole request — and the result says so, since the window's
+    /// capital growth on it is measured against a stale native price. Every
+    /// caller of the valuation fallback must surface its flag (CLAUDE.md).
+    #[tokio::test]
+    async fn a_carried_forward_close_is_flagged_rather_than_failing_the_window() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BTC", "AUD").await;
+        test_support::buy(1, 1)
+            .date(ymd(2024, 1, 1))
+            .qty(dec("100"))
+            .price(dec("10"))
+            .currency("AUD")
+            .insert(&pool)
+            .await;
+        let from = ymd(2026, 6, 1);
+        let to = ymd(2026, 7, 1);
+        store_price(&pool, 1, from, "12").await;
+
+        // Nothing stored at `to`: the whole window fails, the no-partial-result
+        // rule.
+        let err = compute(&pool, from, to, now_after(to)).await.unwrap_err();
+        assert!(
+            matches!(err, PeriodError::Unprocessable(ref msg) if msg.contains("2026-07-01")),
+            "{err}"
+        );
+
+        let marked = test_support::listing(1)
+            .ticker("BTC")
+            .name("BTC")
+            .crypto()
+            .unpriced_from(ymd(2026, 6, 2))
+            .build();
+        crate::entities::listing::db_upsert(&pool, &marked)
+            .await
+            .unwrap();
+
+        let r = compute(&pool, from, to, now_after(to)).await.unwrap();
+        assert!(r.price_carried_forward);
+        assert!(!r.provisional, "the FX flag is a different fact");
+        assert_eq!(r.closing_market_value, dec("1200"), "the last stored close");
+        assert_eq!(r.capital_growth, Decimal::ZERO);
     }
 
     /// `total_return_pct` divides by the opening balance alone, so a mid-window

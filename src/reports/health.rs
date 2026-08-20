@@ -102,6 +102,11 @@ pub struct FailedJob {
 /// `POST /closing_prices/backfill` (or `/fetch` for a single date) once the
 /// underlying symbol issue — see `latest_error` — is fixed (e.g. set
 /// `listings.price_symbol`).
+///
+/// Rows dated from the listing's `unpriced_from` are excluded: the provider
+/// is recorded as serving nothing there, so they are expected rather than a
+/// to-do, and valuation carries the last close forward instead of blocking
+/// (SCENARIOS Q-02).
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct ErroredPriceListing {
     pub listing_id: i64,
@@ -128,7 +133,9 @@ pub struct ErroredPriceListing {
 /// `closing_prices` row, and that day's close is already final. A day whose
 /// row is errored belongs to `errored_prices` instead — the two lists
 /// partition the problem. Close it with `POST /closing_prices/backfill`, or a
-/// manual price for a day the provider can never serve.
+/// manual price for a day the provider can never serve. Days from the
+/// listing's `unpriced_from` are excluded for the same reason
+/// [`ErroredPriceListing`] excludes them.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UnpricedListing {
     pub listing_id: i64,
@@ -652,12 +659,21 @@ async fn db_unpriced_days(
 
         // Distinct valuation days, not calendar days: a weekend and the
         // Friday it values at are one hole, not three.
+        //
+        // A day from the listing's `unpriced_from` on is never a hole: the
+        // provider serves nothing there and valuation carries the last ok
+        // close forward, so there is nothing to backfill (SCENARIOS Q-02).
+        // The write-time rule that the marker needs an earlier ok price is
+        // what makes that unconditional — a marked listing always has a close
+        // to carry.
+        let unpriced_from = market.listing.unpriced_from;
         let mut missing: BTreeSet<NaiveDate> = BTreeSet::new();
         for (from, to) in spans {
             let mut date = from;
             while date <= to {
                 if let Some(valuation_day) = market.latest_trading_day_on_or_before(date)
                     && !stored.contains(&valuation_day)
+                    && unpriced_from.is_none_or(|u| valuation_day < u)
                 {
                     missing.insert(valuation_day);
                 }
@@ -1410,14 +1426,21 @@ pub async fn db_health(
     )
     .fetch_all(&mut *tx)
     .await?;
+    // Errored rows dated from a listing's `unpriced_from` are expected, not a
+    // to-do: the provider serves nothing there and valuation carries the last
+    // close forward, so nagging about them would be a permanent alarm nobody
+    // can clear (SCENARIOS Q-02). Rows *before* the date are real holes and
+    // still reported — as is the whole listing while the marker is unset.
     let errored_prices = sqlx::query_as::<_, ErroredPriceListing>(
         "SELECT cp.listing_id AS listing_id, l.ticker AS ticker, \
                 COUNT(*) AS errored_days, MAX(cp.price_date) AS latest_errored_date, \
                 (SELECT cp2.error FROM closing_prices cp2 \
                  WHERE cp2.listing_id = cp.listing_id AND cp2.status = 'error' \
+                   AND (l.unpriced_from IS NULL OR cp2.price_date < l.unpriced_from) \
                  ORDER BY cp2.price_date DESC LIMIT 1) AS latest_error \
          FROM closing_prices cp JOIN listings l ON l.id = cp.listing_id \
          WHERE cp.status = 'error' \
+           AND (l.unpriced_from IS NULL OR cp.price_date < l.unpriced_from) \
          GROUP BY cp.listing_id \
          ORDER BY latest_errored_date DESC",
     )
@@ -1747,6 +1770,55 @@ mod tests {
         assert_eq!(row.unpriced_days, 1);
         assert_eq!(row.earliest_date, ymd(2026, 7, 8));
         assert_eq!(row.latest_date, ymd(2026, 7, 8));
+    }
+
+    /// SCENARIOS Q-02: once a listing records the date the provider stopped
+    /// quoting it, both lists go quiet from that date on — the errored rows
+    /// and the never-fetched days after it are expected, not a to-do, and
+    /// valuation carries the last close forward instead of blocking. Holes
+    /// *before* the date are real and stay reported.
+    #[tokio::test]
+    async fn an_unpriced_listing_stops_being_nagged_about_from_its_date() {
+        let pool = test_pool().await;
+        test_support::listing(1).ticker("ATVI").insert(&pool).await;
+        test_support::buy(1, 1)
+            .date(ymd(2026, 7, 6))
+            .insert(&pool)
+            .await;
+        insert_ok_price(&pool, 1, "2026-07-06").await;
+        // A real hole before the delisting, then errored rows after it, then
+        // days nothing ever fetched.
+        insert_error_price(&pool, 1, "2026-07-07", "provider down").await;
+        for day in ["2026-07-09", "2026-07-10"] {
+            insert_error_price(&pool, 1, day, "yahoo fetch for ATVI failed: Not found").await;
+        }
+
+        let before = health(&pool, ymd(2026, 7, 13)).await;
+        assert_eq!(before.errored_prices[0].errored_days, 3);
+        assert_eq!(before.unpriced_days[0].unpriced_days, 2); // 8 and 13 July
+
+        let marked = test_support::listing(1)
+            .ticker("ATVI")
+            .unpriced_from(ymd(2026, 7, 9))
+            .build();
+        crate::entities::listing::db_upsert(&pool, &marked)
+            .await
+            .unwrap();
+
+        let after = health(&pool, ymd(2026, 7, 13)).await;
+        assert_eq!(
+            after.errored_prices.len(),
+            1,
+            "the 7 July hole predates the delisting and is still real"
+        );
+        assert_eq!(after.errored_prices[0].errored_days, 1);
+        assert_eq!(after.errored_prices[0].latest_errored_date, ymd(2026, 7, 7));
+        assert_eq!(after.errored_prices[0].latest_error, "provider down");
+        assert_eq!(
+            after.unpriced_days[0].unpriced_days, 1,
+            "8 July stays a hole; 13 July is inside the unpriced run"
+        );
+        assert_eq!(after.unpriced_days[0].earliest_date, ymd(2026, 7, 8));
     }
 
     /// The two lists partition the problem: a day whose fetch failed has a

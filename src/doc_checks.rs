@@ -101,6 +101,42 @@ fn provisional_snapshots_and_catchup_documented() {
     assert!(README_MD.contains("backfills missing dates over a 14-day window"));
 }
 
+/// Docs-sync pin for the unpriced-listing fact (SCENARIOS Q-02): the cost of
+/// an *unbounded* run of days the provider can never serve — one hand-entered
+/// price per listing per trading day, forever — is what the Closing prices
+/// section used to leave unsaid, and the way out is now a documented listing
+/// field with its own flag on the way back.
+#[test]
+fn unpriced_listing_and_carried_forward_price_documented() {
+    // SCHEMA.md: the column, its two write-time pairings, and the separate
+    // snapshot flag.
+    assert!(SCHEMA_MD.contains("unpriced_from TEXT (nullable)"));
+    assert!(SCHEMA_MD.contains("price_carried_forward INTEGER"));
+    assert!(SCHEMA_MD.contains("a stored ok price must exist **before** it"));
+    // API.md: the listing field, both 422s, and what happens on each surface.
+    assert!(API_MD.contains("**A security the provider has stopped quoting.**"));
+    assert!(API_MD.contains("**collection stops fetching the listing.**"));
+    assert!(API_MD.contains("**valuation carries the last stored ok close forward**"));
+    assert!(API_MD.contains("`price_carried_forward`"));
+    // The reason it is not the `provisional` flag: the true-up stays bounded.
+    assert!(API_MD.contains("**Carried-forward prices:**"));
+    assert!(API_MD.contains("a carried-forward price never clears"));
+    // The Closing prices section now states what an unbounded run costs.
+    assert!(API_MD.contains("An **unbounded run** of such days"));
+    // Health stops nagging about the days the provider can never serve.
+    assert!(API_MD.contains("**dated before its [`unpriced_from`](#listings)**"));
+    // The 422 catalogue carries both refusals and the fetch/backfill guards.
+    assert!(API_MD.contains(
+        "a listing `unpriced_from` with no stored closing price before it or with a \
+             provider-fetched ok price on or after it"
+    ));
+    assert!(API_MD.contains("that falls on or after its listing's `unpriced_from`"));
+    // README: the feature, and the flag on the snapshot series.
+    assert!(README_MD.contains("**unpriced from**"));
+    assert!(README_MD.contains("carry the last stored close forward"));
+    assert!(README_MD.contains("**carried-forward price** flag"));
+}
+
 /// Docs-sync pin for date-ranged bulk regeneration (REQUIREMENTS 2026-07-25):
 /// the API documents the new default-range endpoint, `regenerate_all`'s
 /// range/backfill semantics and its 422, and the README surfaces that

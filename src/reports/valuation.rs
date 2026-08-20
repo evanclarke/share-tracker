@@ -7,6 +7,11 @@
 //! snapshot generation (`reports::snapshot`) and the period performance
 //! report (`reports::period_performance`) both value through it, so a
 //! valuation-day or FX-fallback rule only needs to change in one place.
+//!
+//! The one substitution it makes is the **carried-forward close**: a listing
+//! whose `listings.unpriced_from` has passed is valued at its last stored ok
+//! price instead of blocking the whole date, flagged
+//! `price_carried_forward` so the caller can surface it (SCENARIOS Q-02).
 
 use chrono::{DateTime, NaiveDate, Utc};
 use rust_decimal::Decimal;
@@ -49,6 +54,12 @@ pub struct ListingValuation {
     /// earlier month's rate was substituted
     /// (`infra::fx::resolve_valuation_rate`).
     pub provisional: bool,
+    /// `native_price` is not this valuation day's own close: the provider
+    /// stopped quoting the security (`listings.unpriced_from`), so the last
+    /// stored ok close was carried forward (SCENARIOS Q-02). Deliberately
+    /// **not** folded into `provisional` — that flag means an interim FX rate
+    /// a later import trues up, and this one never clears.
+    pub price_carried_forward: bool,
     /// `native_price` converted to AUD via `rate`.
     pub aud_price: Decimal,
 }
@@ -76,6 +87,12 @@ pub async fn held_markets(
 /// `date`, whose stored price must be ok and final, converted at the
 /// valuation FX rate. Fails with the full list of blockers otherwise — a
 /// partly-priced day yields no result at all, never a partial one.
+///
+/// The single exception is a listing the provider has stopped quoting
+/// (`listings.unpriced_from` on or before the valuation day): its last stored
+/// ok close is carried forward and the row flagged `price_carried_forward`,
+/// so one delisted or suspended holding no longer blocks the whole
+/// portfolio's date forever (SCENARIOS Q-02).
 pub async fn stored_valuations(
     pool: &SqlitePool,
     date: NaiveDate,
@@ -110,28 +127,77 @@ pub async fn stored_valuations(
             ));
             continue;
         }
-        match closing_price::db_get_one(pool, market.listing.id, valuation_day).await? {
-            Some(row) if row.status == PriceStatus::Ok => {
-                let native_price = row.price.expect("ok row carries a price (schema CHECK)");
-                match fx.resolve_valuation_rate(&market.listing.currency, valuation_day) {
-                    Ok(vr) => valuations.push(ListingValuation {
-                        listing_id: market.listing.id,
-                        currency: market.listing.currency.clone(),
-                        native_price,
-                        rate: vr.rate,
-                        provisional: vr.provisional,
-                        aud_price: crate::infra::fx::apply_rate(native_price, vr.rate),
-                    }),
-                    Err(e) => blockers.push(format!("{ticker}: {e}")),
+        // The day's own close, if there is a usable one; otherwise the
+        // carry-forward branch for a listing the provider has stopped
+        // quoting, and otherwise a blocker.
+        let stored = closing_price::db_get_one(pool, market.listing.id, valuation_day).await?;
+        let unpriced = market
+            .listing
+            .unpriced_from
+            .is_some_and(|from| valuation_day >= from);
+        let priced = match stored {
+            Some(row) if row.status == PriceStatus::Ok => Some((
+                row.price.expect("ok row carries a price (schema CHECK)"),
+                false,
+            )),
+            // From `unpriced_from` on there is no close to wait for, so the
+            // last stored ok one is carried forward rather than blocking the
+            // whole portfolio's date on a security nobody will quote again
+            // (SCENARIOS Q-02). `db_upsert` guarantees an earlier ok price
+            // exists, so the `None` arm is a safety net, not a live path.
+            _ if unpriced => {
+                match closing_price::db_latest_ok_price_on_or_before(
+                    pool,
+                    market.listing.id,
+                    valuation_day,
+                )
+                .await?
+                {
+                    Some((_, price)) => Some((price, true)),
+                    None => {
+                        blockers.push(format!(
+                            "{ticker}: no stored price at or before {valuation_day} to carry \
+                             forward — the listing is unpriced from {}; enter one price by hand",
+                            market
+                                .listing
+                                .unpriced_from
+                                .expect("unpriced implies a date")
+                        ));
+                        None
+                    }
                 }
             }
-            Some(row) => blockers.push(format!(
-                "{ticker}: the stored price for {valuation_day} is errored ({}) — re-fetch it",
-                row.error.unwrap_or_default()
-            )),
-            None => blockers.push(format!(
-                "{ticker}: no stored price for {valuation_day} — backfill it"
-            )),
+            Some(row) => {
+                blockers.push(format!(
+                    "{ticker}: the stored price for {valuation_day} is errored ({}) — re-fetch it",
+                    row.error.unwrap_or_default()
+                ));
+                None
+            }
+            None => {
+                blockers.push(format!(
+                    "{ticker}: no stored price for {valuation_day} — backfill it"
+                ));
+                None
+            }
+        };
+        let Some((native_price, price_carried_forward)) = priced else {
+            continue;
+        };
+        // The FX leg is the valuation day's own, carried-forward price or
+        // not: the AUD value of the holding at `date` converts at `date`'s
+        // rate — only the native-currency figure is stale.
+        match fx.resolve_valuation_rate(&market.listing.currency, valuation_day) {
+            Ok(vr) => valuations.push(ListingValuation {
+                listing_id: market.listing.id,
+                currency: market.listing.currency.clone(),
+                native_price,
+                rate: vr.rate,
+                provisional: vr.provisional,
+                price_carried_forward,
+                aud_price: crate::infra::fx::apply_rate(native_price, vr.rate),
+            }),
+            Err(e) => blockers.push(format!("{ticker}: {e}")),
         }
     }
     if blockers.is_empty() {

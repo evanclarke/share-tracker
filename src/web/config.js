@@ -50,9 +50,10 @@ export const ENTITIES = [
       fk('currency', 'Currency', 'currencies', { required: true, encode: 'string' }),
       bool('amit', 'AMIT', { hint: 'An attribution managed investment trust. Not available on a Crypto listing — a crypto asset is not an interest in a trust.' }),
       dt('amit_from', 'AMIT from', { optional: true, hint: 'Only for a fund that converted: the 1 July its first AMIT financial year began. Earlier years stay ordinary trust income — their distributions keep their franking credits and tax-deferred amounts, and no AMMA statement is expected for them. Leave blank for a fund that has always been an AMIT.' }),
+      dt('unpriced_from', 'Unpriced from', { optional: true, hint: 'The date the price provider stopped quoting the security — a delisting, or a suspension that can run for years. From it, collection stops fetching the listing, health stops reporting its errored/unpriced days, and valuation carries the last stored closing price forward instead of blocking the whole portfolio\u2019s snapshot for that date (the snapshot is flagged \u201ccarried price\u201d). Needs a stored closing price before it, and is refused while the provider has served one on or after it. Clear it when the security is quoted again \u2014 that marks every snapshot from the date on stale so they regenerate at real prices.' }),
       bool('preference', 'Preference share (90-day franking holding period)'),
     ],
-    columns: ['id', 'exchange_mic', 'ticker', 'name', 'isin', 'security_type', 'currency', 'amit', 'amit_from', 'preference'],
+    columns: ['id', 'exchange_mic', 'ticker', 'name', 'isin', 'security_type', 'currency', 'amit', 'amit_from', 'unpriced_from', 'preference'],
   },
   {
     slug: 'holding_accounts', title: 'Holding Accounts', menu: 'Reference Data', api: '/holding_accounts',

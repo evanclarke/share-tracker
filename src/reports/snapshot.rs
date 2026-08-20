@@ -35,6 +35,19 @@
 //! regenerate provisional snapshots, and a run whose conversions all used
 //! real-month rates clears the flag.
 //!
+//! Carried-forward price (migration 0035, distinct from both): a listing the
+//! price provider has stopped quoting (`listings.unpriced_from` — a delisting
+//! or a long suspension) is valued at its last stored ok close rather than
+//! blocking the whole portfolio's date forever, and the snapshot is stored
+//! flagged `price_carried_forward` with the affected report rows carrying the
+//! same flag. Deliberately **not** folded into `provisional`: that flag means
+//! an interim FX rate a later import trues up, and the true-up runs target
+//! provisional dates — a carried-forward price never clears, so conflating
+//! the two would turn a bounded true-up into one that regenerates the same
+//! dates forever. Nothing regenerates a carried-forward snapshot; clearing
+//! `unpriced_from` (the security relists) stales every snapshot from that
+//! date on, which is what puts the real prices back.
+//!
 //! The scheduled `report-snapshot` job catches up instead of targeting one
 //! date: each run generates every missing snapshot date in a bounded lookback
 //! window (capped at [`CATCHUP_LOOKBACK_DAYS`], never reaching before the
@@ -107,6 +120,11 @@ pub struct SnapshotMeta {
     /// valuation month's rate was not published at generation); regeneration
     /// with all real rates clears it.
     pub provisional: bool,
+    /// A held listing was valued at a **carried-forward** close because the
+    /// provider has stopped quoting it (`listings.unpriced_from`). Unlike
+    /// `provisional` no later fact clears this, so nothing retries it
+    /// (SCENARIOS Q-02).
+    pub price_carried_forward: bool,
 }
 
 /// A full snapshot: metadata plus the report's stored response rows.
@@ -117,6 +135,7 @@ pub struct Snapshot {
     pub generated_at: String,
     pub stale: bool,
     pub provisional: bool,
+    pub price_carried_forward: bool,
     /// The report's rows exactly as the live endpoint would have returned
     /// them at generation time (money values are Decimal strings).
     pub rows: serde_json::Value,
@@ -130,6 +149,7 @@ pub struct SeriesPoint {
     pub snapshot_date: NaiveDate,
     pub stale: bool,
     pub provisional: bool,
+    pub price_carried_forward: bool,
     pub market_value: Decimal,
     pub total_cost_base: Decimal,
     pub unrealised_gain: Decimal,
@@ -177,7 +197,7 @@ pub async fn db_list(
     to: Option<NaiveDate>,
 ) -> Result<Vec<SnapshotMeta>, sqlx::Error> {
     let mut qb = QueryBuilder::new(
-        "SELECT report, snapshot_date, generated_at, stale, provisional \
+        "SELECT report, snapshot_date, generated_at, stale, provisional, price_carried_forward \
          FROM report_snapshots WHERE 1=1",
     );
     if let Some(report) = report {
@@ -199,7 +219,8 @@ pub async fn db_get(
     date: NaiveDate,
 ) -> Result<Option<Snapshot>, sqlx::Error> {
     let row = sqlx::query(
-        "SELECT report, snapshot_date, generated_at, stale, provisional, rows_json \
+        "SELECT report, snapshot_date, generated_at, stale, provisional, price_carried_forward, \
+                rows_json \
          FROM report_snapshots WHERE report = ? AND snapshot_date = ?",
     )
     .bind(report)
@@ -214,6 +235,7 @@ pub async fn db_get(
             generated_at: row.try_get("generated_at")?,
             stale: row.try_get("stale")?,
             provisional: row.try_get("provisional")?,
+            price_carried_forward: row.try_get("price_carried_forward")?,
             rows: serde_json::from_str(&rows_json)
                 .map_err(|e| sqlx::Error::Decode(format!("malformed rows_json: {e}").into()))?,
         })
@@ -226,7 +248,8 @@ pub async fn db_get(
 /// so the sums cover the whole portfolio). Oldest first.
 pub async fn db_series(pool: &SqlitePool) -> Result<Vec<SeriesPoint>, sqlx::Error> {
     let rows = sqlx::query(
-        "SELECT snapshot_date, stale, provisional, rows_json FROM report_snapshots \
+        "SELECT snapshot_date, stale, provisional, price_carried_forward, rows_json \
+         FROM report_snapshots \
          WHERE report = 'unrealised_gains' ORDER BY snapshot_date",
     )
     .fetch_all(pool)
@@ -241,6 +264,7 @@ pub async fn db_series(pool: &SqlitePool) -> Result<Vec<SeriesPoint>, sqlx::Erro
             snapshot_date: row.try_get("snapshot_date")?,
             stale: row.try_get("stale")?,
             provisional: row.try_get("provisional")?,
+            price_carried_forward: row.try_get("price_carried_forward")?,
             market_value: Decimal::ZERO,
             total_cost_base: Decimal::ZERO,
             unrealised_gain: Decimal::ZERO,
@@ -329,45 +353,69 @@ pub async fn default_regenerate_range(
     Ok(RegenerateRange { from, to })
 }
 
-/// AUD price per listing held as at `date`, from `valuation::stored_valuations`.
-/// The second return value is the listings whose conversion used a
-/// fallback-month rate — non-empty makes the snapshot provisional.
+/// What one date's generation run resolved: the AUD price of every listing
+/// held as at it (from `valuation::stored_valuations`), plus the two
+/// per-listing caveats the stored snapshot and its rows must carry.
+struct PricedListings {
+    prices: HashMap<i64, Decimal>,
+    /// Listings whose AUD conversion used a fallback-month rate — non-empty
+    /// makes the snapshot `provisional`.
+    fx_provisional: HashSet<i64>,
+    /// Listings valued at a carried-forward close because the provider has
+    /// stopped quoting them — non-empty makes the snapshot
+    /// `price_carried_forward` (SCENARIOS Q-02). Kept apart from
+    /// `fx_provisional` because only that one is ever trued up.
+    carried_forward: HashSet<i64>,
+}
+
 async fn aud_prices_for(
     pool: &SqlitePool,
     date: NaiveDate,
     now: DateTime<Utc>,
-) -> Result<(HashMap<i64, Decimal>, HashSet<i64>), GenerateError> {
+) -> Result<PricedListings, GenerateError> {
     let valuations = valuation::stored_valuations(pool, date, now).await?;
-    let mut prices = HashMap::new();
-    let mut provisional: HashSet<i64> = HashSet::new();
+    let mut resolved = PricedListings {
+        prices: HashMap::new(),
+        fx_provisional: HashSet::new(),
+        carried_forward: HashSet::new(),
+    };
     for v in valuations {
-        prices.insert(v.listing_id, v.aud_price);
+        resolved.prices.insert(v.listing_id, v.aud_price);
         if v.provisional {
-            provisional.insert(v.listing_id);
+            resolved.fx_provisional.insert(v.listing_id);
+        }
+        if v.price_carried_forward {
+            resolved.carried_forward.insert(v.listing_id);
         }
     }
-    Ok((prices, provisional))
+    Ok(resolved)
 }
 
 /// Generate (or regenerate) the three snapshots for `date` and store them in
 /// one transaction, replacing any stored result and clearing its stale flag.
 /// The stored `provisional` flag is set iff any price conversion in this run
 /// used a fallback-month FX rate — so regenerating once the real rate is
-/// imported clears it.
+/// imported clears it. The stored `price_carried_forward` flag is set iff any
+/// held listing was valued at a carried-forward close (SCENARIOS Q-02);
+/// nothing trues that one up, and a regeneration reproduces it until the
+/// listing's `unpriced_from` is cleared.
 pub async fn generate(
     pool: &SqlitePool,
     date: NaiveDate,
     now: DateTime<Utc>,
 ) -> Result<Vec<SnapshotMeta>, GenerateError> {
-    let (prices, provisional_ids) = aud_prices_for(pool, date, now).await?;
-    let provisional = !provisional_ids.is_empty();
+    let resolved = aud_prices_for(pool, date, now).await?;
+    let prices = resolved.prices;
+    let provisional = !resolved.fx_provisional.is_empty();
+    let price_carried_forward = !resolved.carried_forward.is_empty();
 
     let mut overview = portfolio::db_holdings(pool, Some(date)).await?;
     for h in &mut overview {
         if let Some(&price) = prices.get(&h.listing_id) {
             h.current_price = Some(price);
             h.market_value = Some(h.quantity * price);
-            h.fx_provisional = provisional_ids.contains(&h.listing_id);
+            h.fx_provisional = resolved.fx_provisional.contains(&h.listing_id);
+            h.price_carried_forward = resolved.carried_forward.contains(&h.listing_id);
         }
     }
     let mut gains = unrealised_gains::db_unrealised_gains(pool, date).await?;
@@ -376,13 +424,15 @@ pub async fn generate(
             g.current_price = Some(price);
             g.market_value = Some(g.quantity * price);
             g.unrealised_gain_loss = Some(g.quantity * price - g.total_cost_base);
-            g.fx_provisional = provisional_ids.contains(&g.listing_id);
+            g.fx_provisional = resolved.fx_provisional.contains(&g.listing_id);
+            g.price_carried_forward = resolved.carried_forward.contains(&g.listing_id);
         }
     }
     let mut perf = performance::db_performance(pool, &prices, date).await?;
     for row in &mut perf {
         if let Some(listing_id) = row.listing_id {
-            row.fx_provisional = provisional_ids.contains(&listing_id);
+            row.fx_provisional = resolved.fx_provisional.contains(&listing_id);
+            row.price_carried_forward = resolved.carried_forward.contains(&listing_id);
         }
     }
 
@@ -405,18 +455,21 @@ pub async fn generate(
     for (kind, rows_json) in &payloads {
         sqlx::query(
             "INSERT INTO report_snapshots \
-                 (report, snapshot_date, generated_at, stale, provisional, rows_json) \
-             VALUES (?, ?, ?, 0, ?, ?) \
+                 (report, snapshot_date, generated_at, stale, provisional, \
+                  price_carried_forward, rows_json) \
+             VALUES (?, ?, ?, 0, ?, ?, ?) \
              ON CONFLICT(report, snapshot_date) DO UPDATE SET \
                  generated_at = excluded.generated_at, \
                  stale = 0, \
                  provisional = excluded.provisional, \
+                 price_carried_forward = excluded.price_carried_forward, \
                  rows_json = excluded.rows_json",
         )
         .bind(kind)
         .bind(date)
         .bind(&generated_at)
         .bind(provisional)
+        .bind(price_carried_forward)
         .bind(rows_json)
         .execute(&mut *tx)
         .await?;
@@ -431,6 +484,7 @@ pub async fn generate(
             generated_at: generated_at.clone(),
             stale: false,
             provisional,
+            price_carried_forward,
         })
         .collect())
 }
@@ -448,6 +502,12 @@ pub const CATCHUP_LOOKBACK_DAYS: i64 = closing_price::COLLECTION_LOOKBACK_DAYS;
 
 /// Whether the stored metadata for one date needs (re)generation: anything
 /// short of all three reports stored fresh and final does.
+///
+/// `price_carried_forward` is deliberately **not** in the list: unlike a
+/// provisional FX rate, no later fact turns a carried-forward close into a
+/// real one, so retrying it every run would regenerate the same figures
+/// forever. Clearing the listing's `unpriced_from` stales those dates
+/// instead, which is what brings them back through here (SCENARIOS Q-02).
 fn needs_generation(metas: &[&SnapshotMeta]) -> bool {
     metas.len() < ReportKind::ALL.len() || metas.iter().any(|m| m.stale || m.provisional)
 }
@@ -871,11 +931,15 @@ mod tests {
         (
             "listings",
             &["update"],
-            "UPDATE only, narrowed to `currency`/`security_type` — the two columns that change \
-             what a *stored* figure means (the currency denominating every price, the security \
-             type deciding which days are valuable). A listing with no trades is held on no \
-             snapshot date and a delete is refused while anything references it \
-             (0030_listing_stale_snapshots.sql, SCENARIOS M-08)",
+            "UPDATE only, narrowed to `currency`/`security_type`/`unpriced_from` — the columns \
+             that change what a *stored* figure means (the currency denominating every price, \
+             the security type deciding which days are valuable, and the date from which a \
+             holding is valued at a carried-forward close). The first two carry no date, so \
+             they stale the whole series; `unpriced_from` stales from the earlier of its old \
+             and new dates, so clearing it puts the real prices back. A listing with no trades \
+             is held on no snapshot date and a delete is refused while anything references it \
+             (0030_listing_stale_snapshots.sql, 0035_listing_unpriced_from.sql, \
+             SCENARIOS M-08, Q-02)",
         ),
         (
             "rba_fx_rates",
@@ -1507,6 +1571,175 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(db_list(&pool, None, None, None).await.unwrap().len(), 3);
+    }
+
+    async fn carried_flags(pool: &SqlitePool, date: NaiveDate) -> Vec<bool> {
+        db_list(pool, None, Some(date), Some(date))
+            .await
+            .unwrap()
+            .iter()
+            .map(|m| m.price_carried_forward)
+            .collect()
+    }
+
+    /// SCENARIOS Q-02: a still-held listing the provider has stopped quoting
+    /// used to block the **whole** portfolio's snapshot for every date after
+    /// its last quote, indefinitely. Marking it `unpriced_from` values it at
+    /// its last stored ok close instead — flagged on the snapshot and on the
+    /// rows, never silently — while the rest of the portfolio prices as
+    /// usual.
+    #[tokio::test]
+    async fn db_an_unpriced_listing_is_valued_at_its_carried_forward_close() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BHP", Some("XASX"), "AUD").await;
+        insert_listing(&pool, 2, "ATVI", Some("XASX"), "AUD").await;
+        insert_buy(&pool, 1, 1, ymd(2024, 1, 15), "100", "10", "AUD").await;
+        insert_buy(&pool, 2, 2, ymd(2024, 1, 15), "50", "20", "AUD").await;
+        store_price(&pool, 1, ymd(2026, 6, 4), "62.48").await;
+        // ATVI's last quote was two days earlier; the provider has served
+        // nothing since.
+        store_price(&pool, 2, ymd(2026, 6, 2), "94.42").await;
+        store_errored_price(
+            &pool,
+            2,
+            ymd(2026, 6, 3),
+            "yahoo fetch for ATVI failed: Not found",
+        )
+        .await;
+        store_errored_price(
+            &pool,
+            2,
+            ymd(2026, 6, 4),
+            "yahoo fetch for ATVI failed: Not found",
+        )
+        .await;
+
+        let now = friday_evening_sydney();
+        let err = generate(&pool, ymd(2026, 6, 4), now).await.unwrap_err();
+        assert!(
+            matches!(err, GenerateError::Unprocessable(ref msg) if msg.contains("ATVI")),
+            "one dead symbol blocks the whole date until it is marked: {err}"
+        );
+
+        let marked = test_support::listing(2)
+            .ticker("ATVI")
+            .name("ATVI")
+            .unpriced_from(ymd(2026, 6, 3))
+            .build();
+        listing::db_upsert(&pool, &marked).await.unwrap();
+
+        let metas = generate(&pool, ymd(2026, 6, 4), now).await.unwrap();
+        assert!(
+            metas
+                .iter()
+                .all(|m| m.price_carried_forward && !m.provisional)
+        );
+        assert_eq!(carried_flags(&pool, ymd(2026, 6, 4)).await, vec![true; 3]);
+
+        let snap = db_get(&pool, ReportKind::UnrealisedGains, ymd(2026, 6, 4))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(snap.price_carried_forward);
+        let gains: Vec<unrealised_gains::UnrealisedGain> =
+            serde_json::from_value(snap.rows).unwrap();
+        // BHP prices at the day's own close and carries no flag; ATVI at the
+        // last stored ok close (94.42, not the errored days) and does.
+        assert_eq!(gains[0].market_value, Some("6248.00".parse().unwrap()));
+        assert!(!gains[0].price_carried_forward);
+        assert_eq!(gains[1].market_value, Some("4721.00".parse().unwrap())); // 50 × 94.42
+        assert!(gains[1].price_carried_forward);
+
+        // The series point carries it too, so the graph can mark it.
+        let series = db_series(&pool).await.unwrap();
+        assert_eq!(series.len(), 1);
+        assert!(series[0].price_carried_forward);
+
+        // Nothing trues it up: the true-up run targets provisional dates, and
+        // a carried-forward price never becomes a real one.
+        let summary = regenerate_provisional(&pool, now).await.unwrap();
+        assert!(
+            summary.regenerated.is_empty() && summary.blocked.is_empty(),
+            "a carried-forward date is not a provisional one: {summary:?}"
+        );
+    }
+
+    /// The way *out*: the security is quoted again, the marker is cleared,
+    /// and every snapshot from its date on is staled — so regeneration
+    /// replaces the flat carried-forward line with the real prices.
+    #[tokio::test]
+    async fn db_clearing_unpriced_from_stales_the_carried_forward_snapshots() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "ATVI", Some("XASX"), "AUD").await;
+        insert_buy(&pool, 1, 1, ymd(2024, 1, 15), "50", "20", "AUD").await;
+        store_price(&pool, 1, ymd(2026, 6, 2), "94.42").await;
+        let marked = test_support::listing(1)
+            .ticker("ATVI")
+            .name("ATVI")
+            .unpriced_from(ymd(2026, 6, 3))
+            .build();
+        listing::db_upsert(&pool, &marked).await.unwrap();
+
+        let now = friday_evening_sydney();
+        generate(&pool, ymd(2026, 6, 4), now).await.unwrap();
+        assert_eq!(carried_flags(&pool, ymd(2026, 6, 4)).await, vec![true; 3]);
+        assert_eq!(stale_flags(&pool, ymd(2026, 6, 4)).await, vec![false; 3]);
+
+        // Quoted again: clear the marker and store the real close.
+        let cleared = test_support::listing(1).ticker("ATVI").name("ATVI").build();
+        listing::db_upsert(&pool, &cleared).await.unwrap();
+        assert_eq!(
+            stale_flags(&pool, ymd(2026, 6, 4)).await,
+            vec![true; 3],
+            "clearing the marker stales every snapshot from its date on"
+        );
+        store_price(&pool, 1, ymd(2026, 6, 4), "60.00").await;
+
+        generate(&pool, ymd(2026, 6, 4), now).await.unwrap();
+        assert_eq!(carried_flags(&pool, ymd(2026, 6, 4)).await, vec![false; 3]);
+        assert_eq!(stale_flags(&pool, ymd(2026, 6, 4)).await, vec![false; 3]);
+        let snap = db_get(&pool, ReportKind::UnrealisedGains, ymd(2026, 6, 4))
+            .await
+            .unwrap()
+            .unwrap();
+        let gains: Vec<unrealised_gains::UnrealisedGain> =
+            serde_json::from_value(snap.rows).unwrap();
+        assert_eq!(gains[0].market_value, Some("3000.00".parse().unwrap())); // 50 × 60
+        assert!(!gains[0].price_carried_forward);
+    }
+
+    /// A price entered **by hand** for a day inside the unpriced run wins
+    /// over the carried-forward close: it is the day's own price, so the row
+    /// is not flagged.
+    #[tokio::test]
+    async fn db_a_manual_price_inside_the_unpriced_run_beats_the_carried_close() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "ATVI", Some("XASX"), "AUD").await;
+        insert_buy(&pool, 1, 1, ymd(2024, 1, 15), "50", "20", "AUD").await;
+        store_price(&pool, 1, ymd(2026, 6, 2), "94.42").await;
+        test_support::closing_price(1, ymd(2026, 6, 4))
+            .price("80.00")
+            .manual("administrator valuation", "suspended, no provider candle")
+            .insert(&pool)
+            .await;
+        let marked = test_support::listing(1)
+            .ticker("ATVI")
+            .name("ATVI")
+            .unpriced_from(ymd(2026, 6, 3))
+            .build();
+        listing::db_upsert(&pool, &marked).await.unwrap();
+
+        generate(&pool, ymd(2026, 6, 4), friday_evening_sydney())
+            .await
+            .unwrap();
+        assert_eq!(carried_flags(&pool, ymd(2026, 6, 4)).await, vec![false; 3]);
+        let snap = db_get(&pool, ReportKind::UnrealisedGains, ymd(2026, 6, 4))
+            .await
+            .unwrap()
+            .unwrap();
+        let gains: Vec<unrealised_gains::UnrealisedGain> =
+            serde_json::from_value(snap.rows).unwrap();
+        assert_eq!(gains[0].market_value, Some("4000.00".parse().unwrap())); // 50 × 80
     }
 
     async fn import_rate(pool: &SqlitePool, currency: &str, month: &str, rate: &str) {

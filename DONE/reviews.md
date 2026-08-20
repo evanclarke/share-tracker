@@ -4013,3 +4013,125 @@ third rebuild of an audited table (rows, ids, the new CHECK, both triggers). Doc
 (Closing prices, the `ShareSplit`/`BonusIssue` entries, the jobs list), `docs/SCHEMA.md`, README, and
 `doc_checks::contemporaneous_price_basis_documented`. The Closing Prices screen shows the provider's
 figure beside the stored one, but only when a re-base has actually moved it.
+
+## SCENARIOS Q-02: a still-held delisted or suspended listing blocks the whole portfolio's snapshots indefinitely, undocumented
+
+A listing whose provider serves nothing after its last trading day stores an errored row for every
+subsequent trading day, and `stored_valuations` fails the **whole** date if any held listing is
+unpriced — deliberately, the no-partial-result rule. So one suspended holding stops
+`report-snapshot` for the entire portfolio, every day, and `GET /reports/health` nags with a growing
+`errored_days` count.
+
+Reproduced: `POST /closing_prices/backfill` for a delisted US ticker (`ATVI`, 2024-06-05..07) stores
+three errored rows (`yahoo fetch for ATVI failed: Not found`), and a held listing in that state
+blocks `POST /report_snapshots/generate` for every date.
+
+The system fails safe and the way out exists — the manual price, whose own `reason` placeholder in
+`app.js` is literally "provider serves no candle since the delisting". But:
+
+- [x] That way out is **one hand-entered price per listing per trading day, forever**, for a
+  suspension that can run for years, and nothing says so. There is no listing-level "no longer
+  priced" fact (only `WorthlessShares`, which ends the holding — wrong for a suspended-but-valuable
+  security), and `DELETE /closing_prices/:listing_id/:price_date` explicitly does *not* unblock the
+  date, only the health alarm.
+- [x] Not in the Known limitations, and not in the [Closing prices](docs/API.md#closing-prices)
+  section, which describes hand-pricing as the answer to "a day the provider can never serve" —
+  singular — without saying what an unbounded run of such days costs.
+
+**Fix — Evan chose 2026-08-20: a per-listing dated "unpriced from" fact** (over documenting the cost
+alone, and over silently carrying the last stored close forward for *any* unpriced day, which would
+weaken the no-partial-result rule everywhere rather than at the one listing that needs it). The
+listing records the date from which the provider serves nothing: collection stops fetching it,
+`GET /reports/health` stops nagging, and valuation stops blocking the whole date on it — carrying
+the last stored close forward and flagging the snapshot, the way the provisional-FX fallback already
+works, so the substitution is never silent. Migration + listing field + collection/valuation/health
+branches + `docs/API.md`, `docs/SCHEMA.md` and README.
+
+**Closed 2026-08-20** — implemented as decided: a per-listing dated `unpriced_from`
+(migration 0035), a carried-forward close at valuation, and a **separate** snapshot flag.
+
+**The model** follows the nearest sibling exactly: `listings.amit_from` (0024) is a dated
+per-listing fact of the same shape, so this is one nullable `TEXT` column on `listings`, not an
+entity of its own — nothing hangs off the date, and giving a listing-level fact its own table would
+have put a join between valuation and the flag it must read on every held listing, every date. The
+migration is additive (`NULL` on every existing row = today's behaviour exactly, nothing migrated),
+re-creates the two `listings_row_history_*` triggers with the new column per the audited-table rule,
+and re-creates 0030's `listings_stale_snapshots_update` with `unpriced_from` added to its narrowed
+`WHEN`. That trigger now has two bodies: `currency`/`security_type` carry no date of their own and
+stale the whole series as before, while `unpriced_from` stales the **suffix** from the earlier of its
+old and new dates (`IFNULL` both ways, so a set uses the new date and a clear uses the old). The
+suffix arm is the load-bearing half — *clearing* the marker when the security relists is what
+replaces the flat carried-forward line with the prices collected since. `reports::snapshot`'s
+`STALENESS_TRIGGERED_TABLES` entry for `listings` was updated in the same task, so
+`every_table_is_classified_for_snapshot_staleness` keeps passing on the reason text as well as the
+trigger set.
+
+**The flag is its own, not `provisional` — and that is what keeps the true-up bounded.**
+`provisional` means an interim FX rate that a later RBA import trues up, and *both* true-up runs
+(`POST /report_snapshots/regenerate_provisional` and the post-import regeneration) select on it. A
+carried-forward price never clears: the provider is never going to quote the day. Folding the two
+together would have made every true-up run pick up the same dates forever, regenerate them, and
+re-flag them — a bounded repair turned into an unbounded one that also hides the FX dates still
+genuinely waiting. So `report_snapshots` gained its own `price_carried_forward` column, `SnapshotMeta`
+/ `Snapshot` / `SeriesPoint` their own field, and the three report rows their own
+`price_carried_forward` beside `fx_provisional`. `needs_generation` deliberately does **not** list it,
+so the daily job leaves a carried-forward date alone; the only thing that brings one back is the
+staleness trigger above. `reports::period_performance` surfaces it too — CLAUDE.md requires every
+caller of the valuation fallback to surface its flag, and a window straddling the date the quotes
+stopped measures capital growth against a stale native price.
+
+**Validation** is two write-time refusals in `db_upsert`, and the second is what makes the first
+cheap everywhere else:
+
+- **no earlier stored ok price** ⇒ `422`. The carried-forward figure *is* that earlier close, so
+  without one the date stays blocked either way and the marker would only silence the health alarm
+  saying so. Because the API cannot delete an ok price, this invariant holds once set — which is why
+  `reports::health` can drop the listing's errored rows and unpriced days from that date
+  **unconditionally**, instead of re-deriving per listing whether a carry-forward is even possible.
+- **a *fetched* ok price on or after it** ⇒ `422`, naming the offending date: the provider is
+  serving exactly what the column denies. A **manual** price on or after it is deliberately fine —
+  it is the operator supplying what the provider cannot (an administrator's valuation during a
+  suspension), and valuation prefers a stored ok price for the valuation day itself to the
+  carried-forward one, so such a row is used as the day's own price and carries no flag.
+
+Neither refusal can strand an existing row: the column is `NULL` on every listing after the
+migration, and a `NULL` trips no check. **Evan's live database, read `-readonly` before the rules
+were written** (repo copy, last written 2026-07-30, at migration 0021): 8 listings, 12,249 stored
+prices, 190 errored rows across two listings. Neither is a case for this feature, which the refusals
+correctly say so about — VDHG's single errored day (2025-10-24) has ok prices on both sides, and
+LAC's 187-day block (2023-01..2023-09) sits *before* its ok series begins, so it is an unpriced-
+**before** hole a carry-forward cannot reach. Both would be refused by the second rule, which is the
+right answer: `unpriced_from` is not a way to silence an errored-price backlog. No listing in the
+live database is currently held with a stopped price series (LAC and LAR were both fully disposed of
+on 2025-01-13), so nothing there needs the marker today.
+
+**The surfaces**: `entities::listing` (field, `COLUMNS`, both refusals + their 422 bodies);
+`closing_price::run_collection` (the lookback days are filtered to before the date, so the listing is
+skipped entirely rather than storing another errored row and failing the job), `fetch_one` (`422`
+naming the marker) and `backfill` (`to` clamped to the day before it; a range wholly inside the run
+refused) via the shared `reject_unpriced_date`; `closing_price::db_latest_ok_price_on_or_before` as
+the carry-forward source; `reports::valuation::stored_valuations` (the one branch: the day's own ok
+price first, then the carry-forward, then the existing blockers — the FX leg is unchanged and still
+the valuation day's own, since only the native figure is stale); `reports::snapshot` (a
+`PricedListings` struct carrying the two per-listing caveats apart, the stored column, the flag on
+every row); `reports::health` (both lists quiet from the date); `reports::period_performance`; and
+the UI — the listings form field, the snapshots badge and detail banner, the series-chart ring and
+tooltip, and the period-performance note. Docs: `docs/API.md` (Listings, Closing prices, Report
+snapshots, Period performance, Health, and the 422 catalogue), `docs/SCHEMA.md` (both columns, the
+staleness-trigger paragraph, the audited-set reason), README's Features, and
+`doc_checks::unpriced_listing_and_carried_forward_price_documented`.
+
+The **live path deliberately unchanged**: a live quote for a delisted security still fails and the
+holding still reads `price_unavailable` on the Portfolio Overview, which is the honest answer there
+(Q-12/Q-13 pinned it) — that screen already shows a partial portfolio by design, and it was the
+*stored* valuation path that blocked.
+
+Tests: the two refusals and the manual-price exception (`entities::listing`); collection skipping the
+listing and the fetch/backfill guards (`entities::closing_price`); the finding itself as a regression
+at report level — one dead symbol blocks the whole date, marking it values the portfolio with the
+last stored ok close (94.42, not the errored days), flags snapshot, rows and series point, and
+`regenerate_provisional` does not touch it; clearing the marker staling those dates and regeneration
+using the real price; a manual price inside the run beating the carried close; health going quiet
+from the date while the hole *before* it stays reported (`reports::health`); the flag reaching
+`period_performance`; the UI bundle assertions; and the 0035 block in
+`row_history::audited_tables_match_migration_check_and_triggers` pinning the re-created trigger pair.
