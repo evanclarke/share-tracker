@@ -7,15 +7,19 @@
 //!
 //! Three callers, for two different reasons. Presentation: the Annual Tax
 //! Report (`reports::tax_report`, whose disposal/income rows are archived and
-//! reconciled against source statements) and the listing activity ledger
+//! reconciled against source statements) labels every row with
+//! [`RenameHistory::ticker_as_at`], and the listing activity ledger
 //! (`reports::activity`, a chronological record of one listing's history)
-//! label each row with [`RenameHistory::ticker_as_at`]. Correctness: closing-
-//! price collection (`entities::closing_price`) builds its `Market` identity
-//! timeline from [`RenameHistory::identities`], so the provider symbol and
-//! the exchange calendar for a historical date both resolve to the identity
-//! in force on that date rather than today's.
+//! uses it for the *other* listing a row names — the counterpart of a
+//! scrip-for-scrip takeover or a demerger — at the action's own date; the
+//! ledger has no per-row ticker column of its own, since every row belongs to
+//! the one listing it is a history of. Correctness: closing-price collection
+//! (`entities::closing_price`) builds its `Market` identity timeline from
+//! [`RenameHistory::identities`], so the provider symbol and the exchange
+//! calendar for a historical date both resolve to the identity in force on
+//! that date rather than today's.
 //!
-//! Every *report* still shows the current ticker — a rename is the same
+//! Every *other* report still shows the current ticker — a rename is the same
 //! security, which is the ATO-correct view — with the full chain discoverable
 //! via `GET /listings/:id/renames` and the Row History screen.
 

@@ -828,6 +828,26 @@ fn listing_rename_action_documented() {
     assert!(README_MD.contains("Ticker and exchange-code renames"));
 }
 
+/// What the activity ledger resolves as at a date (SCENARIOS R-07,
+/// 2026-08-21): the ledger has no per-row ticker column — it is one listing's
+/// own history — but a scrip-for-scrip/demerger row names its **counterpart**
+/// listing at the ticker that listing held on the action's own date. Both the
+/// rename section's exception sentence and the row-kind list say so, so the
+/// docs describe what `reports::activity` actually does.
+#[test]
+fn activity_ledger_resolves_counterpart_tickers_as_at_the_rows_date() {
+    assert!(
+        API_MD.contains(
+            "The [listing activity ledger](#listing-activity) has no per-row ticker column"
+        )
+    );
+    assert!(API_MD.contains("never one it was only renamed to later"));
+    assert!(
+        API_MD.contains("names its **counterpart listing** by the ticker that listing carried")
+    );
+    assert!(API_MD.contains("**as at the action's own date**"));
+}
+
 /// Docs-sync pin for the undo restoring what the rename overwrote (SCENARIOS
 /// R-04/R-08, 2026-08-21): the API states which fields come back, why
 /// `price_symbol` is among them, that "the listing had no override" is

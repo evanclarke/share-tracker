@@ -4517,3 +4517,71 @@ from the start.
     `UPDATE` holding "Boxing Day" and `DELETE` holding "Boxing Day (observed)" — read back through
     `POST /reports/row_history`, with the composite-key 404 wording intact. Scratch copies deleted;
     neither the backup nor the repo's stale `share-tracker.db` was written to.
+
+## SCENARIOS R-07: the listing activity ledger names counterpart listings at today's ticker, not the row's own date
+
+`docs/API.md` states that reports show the current ticker throughout "except the Annual Tax Report
+and the listing activity ledger, which resolve/show the ticker **as at** each row's own date", and
+`domain/listing_identity.rs`'s module doc names `reports::activity` as one of the three callers of
+`RenameHistory::ticker_as_at`. The activity ledger does not call it, and never has:
+`reports::activity` loads `tickers: HashMap<i64, String>` from `SELECT id, ticker FROM listings` and
+`describe_action` uses that map to name the scrip-exchange and demerger counterpart listings.
+`RenameHistory` is not imported by the module.
+
+Reproduced: a 2023-10-03 demerger of listing 8 into listing 9 (`SPINCO`), then a 2025-06-01 rename of
+listing 9 to `SPUN`. `POST /portfolio/activity` for listing 8 prints the 2023 row as
+`Demerger | 1 unit(s) of SPUN per 1 held; 30% of cost base` — a ticker that did not exist for
+another two years. The Annual Tax Report, checked alongside, does resolve as at the row's date.
+
+What the ledger *does* do is render each recorded rename as its own `Ticker/exchange change` row
+(`renamed OLDCO -> NEWCO`), which may be all the docs meant to claim.
+
+**Fix — decided 2026-08-21: make the ledger match the docs.** Two documents assert as-at
+resolution and `reports::tax_report` already has the pattern to copy, so the code is what is wrong.
+
+- [x] Load `RenameHistory` on the ledger's existing read transaction and resolve each counterpart
+      listing's ticker at the action's own date, mirroring `tax_report::ticker_as_at`.
+- [x] Re-read both doc claims afterwards (`docs/API.md`'s rename section, the
+      `domain/listing_identity.rs` module doc) and make them describe what the ledger then does.
+
+**Done 2026-08-21.** `Sources::load` now pre-loads `RenameHistory` on the ledger's own read
+transaction — beside `FxRates::load`, the same single-snapshot pattern — and `Sources::ticker_as_at`
+resolves a counterpart listing's ticker as at a date, falling back to the existing
+`tickers: HashMap<i64, String>` current-ticker read (which `RenameHistory::ticker_as_at` requires,
+since the resolver holds only the rename chain) and to `listing {id}` only when the listing has since
+gone. `describe_action` stopped taking the raw ticker map: it takes `ticker: impl Fn(i64) -> String`,
+and `action_rows` binds it to the action's own date (`|id| self.ticker_as_at(id, a.date)`), so the
+date can never be forgotten at one of the two call sites.
+
+- **Survey of the rest of the module** (the finding demonstrates the demerger case; the scrip case is
+  the other one): `describe_action`'s scrip-for-scrip and demerger arms are the *only* places
+  `activity.rs` prints a ticker for another listing, and both are now resolved. The
+  `Ticker/exchange change` row was already date-correct by construction — it prints the
+  `old_ticker`/`new_ticker` stored on the `listing_renames` row itself, not a lookup. Nothing else
+  in the ledger names a listing: the remaining detail texts name accounts (`Sources::account`),
+  trades by id, and amounts in their own currency. **The ledger's own listing is not labelled
+  anywhere** — the response carries `listing_id` and `holdings` (`HoldingOverview` has no ticker
+  field), and the web UI picks the listing through the report's `fk('listing_id', …)` parameter —
+  so there was no per-row ticker column to make as-at, which is why the doc wording needed
+  narrowing rather than the code needing more call sites.
+- **Docs** — both claims rewritten to describe what the ledger actually does now. `docs/API.md`'s
+  rename paragraph splits the one "resolve/show" sentence into its two different cases: the Annual
+  Tax Report prints *every row's* ticker as at that row's date, while the activity ledger has no
+  per-row ticker column (it is one listing's own history, its own renames appearing as dated
+  `Ticker/exchange change` rows) and resolves the *counterpart* listing a scrip/demerger row names.
+  The `### Listing activity` corporate-actions row-kind bullet says the same at the point of use.
+  `domain/listing_identity.rs`'s module doc no longer claims the ledger "labels each row" — it
+  states the counterpart-at-the-action's-date use, and its closing "Every *report* still shows the
+  current ticker" became "Every *other* report", which is what the two exceptions above it mean.
+- **Tests** (inline in `src/reports/activity.rs`):
+  `db_demerger_counterpart_is_named_as_at_the_actions_own_date` — the finding's own reproduction, a
+  2023-10-03 demerger of listing 8 into listing 9 (`SPINCO`) renamed to `SPUN` on 2025-06-01, whose
+  ledger row must read `1 unit(s) of SPINCO per 1 held; 30% of cost base`;
+  `db_scrip_counterpart_is_named_as_at_the_actions_own_date` — the same for a scrip-for-scrip
+  counterpart; and `db_counterpart_without_a_rename_uses_the_current_ticker` — one counterpart with
+  no rename at all (the ticker-map fallback) alongside one renamed *before* its action, which must
+  read the **new** ticker, pinning that this is a resolution rather than a blanket "print the old
+  name". `doc_checks::activity_ledger_resolves_counterpart_tickers_as_at_the_rows_date` pins the two
+  doc sentences.
+- Gates: `cargo build`, `cargo test` (1854 passed), `cargo fmt --check`, `cargo clippy --all-targets
+  -- -D warnings` all clean.

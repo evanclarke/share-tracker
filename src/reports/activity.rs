@@ -13,12 +13,19 @@
 //! unit count scales on the conversion date, before any same-dated trade,
 //! which is already in post-split units).
 //!
+//! Where a row names *another* listing — the counterpart of a scrip-for-scrip
+//! takeover or a demerger — it is named as at the row's own date
+//! (`domain::listing_identity::RenameHistory`), so a counterpart renamed since
+//! reads the way it did when the action happened rather than the way it reads
+//! today.
+//!
 //! The holding summary reuses the portfolio overview's rows (the shared
 //! adjusted-cost-base pipeline), read on this report's own transaction so the
 //! ledger and the summary come from one snapshot, then valued per the
 //! live-valuation rules (an explicit price wins; a fetch failure leaves the
 //! holding unvalued with the reason, never a silent zero).
 
+use crate::domain::listing_identity::RenameHistory;
 use crate::entities::closing_price::{self, SharedFetcher};
 use crate::entities::corporate_action::{ActionKind, CorporateAction, WorthlessEvent};
 use crate::entities::drp_enrolment::DrpEnrolment;
@@ -139,7 +146,13 @@ struct Sources {
     /// Names for the detail texts: accounts and (scrip/demerger counterpart)
     /// listings read as names/tickers, never raw foreign-key ids.
     account_names: HashMap<i64, String>,
+    /// Every listing's *current* ticker — the fallback
+    /// [`RenameHistory::ticker_as_at`] resolves back from.
     tickers: HashMap<i64, String>,
+    /// The rename chains, so a counterpart listing named in an action's
+    /// detail reads as it stood on the action's own date, not today
+    /// (`docs/API.md`, "Ticker or name changes").
+    rename_history: RenameHistory,
     /// The portfolio overview's rows for this listing, from the same snapshot.
     holdings: Vec<HoldingOverview>,
 }
@@ -244,6 +257,7 @@ impl Sources {
             .await?
             .into_iter()
             .collect();
+        let rename_history = RenameHistory::load(&mut *conn).await?;
         let holdings: Vec<HoldingOverview> = portfolio::db_holdings_on(&mut *conn, None)
             .await?
             .into_iter()
@@ -264,6 +278,7 @@ impl Sources {
             fx,
             account_names,
             tickers,
+            rename_history,
             holdings,
         }))
     }
@@ -291,11 +306,23 @@ impl Sources {
             .map_or_else(|| format!("account {id}"), |n| format!("account '{n}'"))
     }
 
+    /// A counterpart listing's ticker as it stood on `date` — the current
+    /// ticker unless renamed since, in which case the one in force then, so a
+    /// dated ledger row never prints a ticker that did not yet exist. Falls
+    /// back to the raw id only when the listing has since gone.
+    fn ticker_as_at(&self, listing_id: i64, date: NaiveDate) -> String {
+        let Some(current) = self.tickers.get(&listing_id) else {
+            return format!("listing {listing_id}");
+        };
+        self.rename_history.ticker_as_at(listing_id, date, current)
+    }
+
     fn action_rows(&self) -> Vec<Proto> {
         self.actions
             .iter()
             .map(|a| {
-                let (event, detail, rebase) = describe_action(a, &self.tickers);
+                let (event, detail, rebase) =
+                    describe_action(a, |id| self.ticker_as_at(id, a.date));
                 Proto {
                     date: a.date,
                     rank: 0,
@@ -684,18 +711,14 @@ pub(crate) fn trade_event(t: &Trade, fee_sale_ids: &HashSet<i64>) -> String {
 }
 
 /// Event label, detail text, and any unit re-basing for a corporate action.
-/// `tickers` names the scrip/demerger counterpart listing — details read as
-/// tickers, never raw foreign-key ids.
+/// `ticker` names the scrip/demerger counterpart listing — details read as
+/// tickers, never raw foreign-key ids, and the caller binds it to the
+/// action's own date (`Sources::ticker_as_at`) so a counterpart renamed since
+/// still reads the way it did when the action happened.
 fn describe_action(
     a: &CorporateAction,
-    tickers: &HashMap<i64, String>,
+    ticker: impl Fn(i64) -> String,
 ) -> (String, String, Option<(Decimal, Decimal)>) {
-    let ticker = |id: i64| {
-        tickers
-            .get(&id)
-            .cloned()
-            .unwrap_or_else(|| format!("listing {id}"))
-    };
     match &a.kind {
         ActionKind::ReturnOfCapital {
             amount_per_unit,
@@ -1460,5 +1483,176 @@ mod tests {
             .position(|e| e.starts_with("Sell"))
             .unwrap();
         assert!(buy_pos < rename_pos && rename_pos < sell_pos);
+    }
+
+    async fn rename(pool: &SqlitePool, listing_id: i64, effective_date: NaiveDate, ticker: &str) {
+        crate::entities::listing_rename::db_rename(
+            pool,
+            listing_id,
+            &crate::entities::listing_rename::RenameBody {
+                effective_date,
+                ticker: ticker.to_string(),
+                exchange_mic: None,
+                name: None,
+                price_symbol: None,
+                note: None,
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    /// SCENARIOS R-07: the demerger row names the demerged entity at the
+    /// ticker in force on the demerger date, not the one it was renamed to
+    /// two years later.
+    #[tokio::test]
+    async fn db_demerger_counterpart_is_named_as_at_the_actions_own_date() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 8, "HEAD").await;
+        insert_listing(&pool, 9, "SPINCO").await;
+        test_support::buy(1, 8)
+            .date(ymd(2023, 1, 5))
+            .insert(&pool)
+            .await;
+        corporate_action::db_upsert(
+            &pool,
+            &corporate_action::CorporateAction {
+                id: 1,
+                listing_id: 8,
+                date: ymd(2023, 10, 3),
+                kind: ActionKind::Demerger {
+                    demerger_listing_id: 9,
+                    demerger_new_units: dec("1"),
+                    demerger_held_units: dec("1"),
+                    demerger_cost_base_pct: dec("30"),
+                    demerger_close_date: None,
+                    demerger_close_price: None,
+                    demerger_close_sourced_from: None,
+                    demerger_close_reason: None,
+                },
+            },
+        )
+        .await
+        .unwrap();
+        rename(&pool, 9, ymd(2025, 6, 1), "SPUN").await;
+
+        let rows = events(&pool, 8).await;
+        let demerger = rows
+            .iter()
+            .find(|r| r.event == "Demerger")
+            .expect("demerger row present");
+        assert_eq!(
+            demerger.detail,
+            "1 unit(s) of SPINCO per 1 held; 30% of cost base"
+        );
+    }
+
+    /// The scrip-for-scrip counterpart resolves the same way.
+    #[tokio::test]
+    async fn db_scrip_counterpart_is_named_as_at_the_actions_own_date() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "OLD").await;
+        insert_listing(&pool, 2, "ACQ").await;
+        test_support::buy(1, 1)
+            .date(ymd(2023, 1, 5))
+            .insert(&pool)
+            .await;
+        corporate_action::db_upsert(
+            &pool,
+            &corporate_action::CorporateAction {
+                id: 1,
+                listing_id: 1,
+                date: ymd(2023, 10, 3),
+                kind: ActionKind::ScripForScrip {
+                    scrip_listing_id: 2,
+                    scrip_new_units: dec("2"),
+                    scrip_old_units: dec("1"),
+                    scrip_cash_per_unit: None,
+                    scrip_market_value: None,
+                    scrip_cash_currency: None,
+                },
+            },
+        )
+        .await
+        .unwrap();
+        rename(&pool, 2, ymd(2025, 6, 1), "ACQR").await;
+
+        let rows = events(&pool, 1).await;
+        let scrip = rows
+            .iter()
+            .find(|r| r.event == "Scrip-for-scrip takeover")
+            .expect("scrip row present");
+        assert_eq!(scrip.detail, "2 unit(s) of ACQ per 1 held");
+    }
+
+    /// A counterpart that was never renamed falls back to the current-ticker
+    /// map, and an action dated after a rename reads the new ticker — the
+    /// as-at resolution is a resolution, not a blanket "use the old name".
+    #[tokio::test]
+    async fn db_counterpart_without_a_rename_uses_the_current_ticker() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "OLD").await;
+        insert_listing(&pool, 2, "NEVER").await;
+        insert_listing(&pool, 3, "SPINCO").await;
+        test_support::buy(1, 1)
+            .date(ymd(2023, 1, 5))
+            .insert(&pool)
+            .await;
+        corporate_action::db_upsert(
+            &pool,
+            &corporate_action::CorporateAction {
+                id: 1,
+                listing_id: 1,
+                date: ymd(2023, 10, 3),
+                kind: ActionKind::ScripForScrip {
+                    scrip_listing_id: 2,
+                    scrip_new_units: dec("2"),
+                    scrip_old_units: dec("1"),
+                    scrip_cash_per_unit: None,
+                    scrip_market_value: None,
+                    scrip_cash_currency: None,
+                },
+            },
+        )
+        .await
+        .unwrap();
+        // Renamed *before* this demerger, so its row reads the new ticker.
+        rename(&pool, 3, ymd(2023, 6, 1), "SPUN").await;
+        corporate_action::db_upsert(
+            &pool,
+            &corporate_action::CorporateAction {
+                id: 2,
+                listing_id: 1,
+                date: ymd(2023, 10, 3),
+                kind: ActionKind::Demerger {
+                    demerger_listing_id: 3,
+                    demerger_new_units: dec("1"),
+                    demerger_held_units: dec("1"),
+                    demerger_cost_base_pct: dec("30"),
+                    demerger_close_date: None,
+                    demerger_close_price: None,
+                    demerger_close_sourced_from: None,
+                    demerger_close_reason: None,
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+        let rows = events(&pool, 1).await;
+        assert_eq!(
+            rows.iter()
+                .find(|r| r.event == "Scrip-for-scrip takeover")
+                .expect("scrip row present")
+                .detail,
+            "2 unit(s) of NEVER per 1 held"
+        );
+        assert_eq!(
+            rows.iter()
+                .find(|r| r.event == "Demerger")
+                .expect("demerger row present")
+                .detail,
+            "1 unit(s) of SPUN per 1 held; 30% of cost base"
+        );
     }
 }

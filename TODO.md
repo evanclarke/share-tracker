@@ -32,36 +32,10 @@ recorded every leg — the `listings` UPDATE behind each rename and the `listing
 each undo.
 
 **Eight findings; R-01, R-02, R-04/R-08 and R-10 are closed (all archived in
-`DONE/reference-data.md`), four remain open.** They cluster: one is about what the rename chain
-cannot express (a pre-rename provider symbol), one is a report reading today's ticker where the docs
-say it reads the row's own date, one is that the whole feature has no web UI, and one is a refusal
-message. Each is a `## ` section below, in the order I would fix them.
-
-## SCENARIOS R-07: the listing activity ledger names counterpart listings at today's ticker, not the row's own date
-
-`docs/API.md` states that reports show the current ticker throughout "except the Annual Tax Report
-and the listing activity ledger, which resolve/show the ticker **as at** each row's own date", and
-`domain/listing_identity.rs`'s module doc names `reports::activity` as one of the three callers of
-`RenameHistory::ticker_as_at`. The activity ledger does not call it, and never has:
-`reports::activity` loads `tickers: HashMap<i64, String>` from `SELECT id, ticker FROM listings` and
-`describe_action` uses that map to name the scrip-exchange and demerger counterpart listings.
-`RenameHistory` is not imported by the module.
-
-Reproduced: a 2023-10-03 demerger of listing 8 into listing 9 (`SPINCO`), then a 2025-06-01 rename of
-listing 9 to `SPUN`. `POST /portfolio/activity` for listing 8 prints the 2023 row as
-`Demerger | 1 unit(s) of SPUN per 1 held; 30% of cost base` — a ticker that did not exist for
-another two years. The Annual Tax Report, checked alongside, does resolve as at the row's date.
-
-What the ledger *does* do is render each recorded rename as its own `Ticker/exchange change` row
-(`renamed OLDCO -> NEWCO`), which may be all the docs meant to claim.
-
-**Fix — decided 2026-08-21: make the ledger match the docs.** Two documents assert as-at
-resolution and `reports::tax_report` already has the pattern to copy, so the code is what is wrong.
-
-- [ ] Load `RenameHistory` on the ledger's existing read transaction and resolve each counterpart
-      listing's ticker at the action's own date, mirroring `tax_report::ticker_as_at`.
-- [ ] Re-read both doc claims afterwards (`docs/API.md`'s rename section, the
-      `domain/listing_identity.rs` module doc) and make them describe what the ledger then does.
+`DONE/reference-data.md`) and R-07 is closed (archived in `DONE/reviews.md`), three remain open.**
+They cluster: one is about what the rename chain cannot express (a pre-rename provider symbol), one
+is that the whole feature has no web UI, and one is a refusal message. Each is a `## ` section
+below, in the order I would fix them.
 
 ## SCENARIOS R-01/R-05: the rename feature has no web UI, and the listing form sends the user to an endpoint the UI does not offer
 
