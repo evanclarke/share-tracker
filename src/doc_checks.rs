@@ -758,6 +758,54 @@ fn known_limitations_document_snapshot_ticker_labels_are_display_only() {
     assert!(limitations.contains("This is display drift only"));
 }
 
+/// Known-limitation pin (SCENARIOS R-10, 2026-08-21): a listing's ticker is
+/// unique across its whole recorded history — `UNIQUE(exchange_mic, ticker)`
+/// and the exchange-less partial index hold across all time — while the rest
+/// of the model resolves identity as at a date. So an exchange code reissued
+/// to an unrelated company cannot be entered while the first listing is on
+/// file, the fake-rename workaround is ruled out, and the entry says what to
+/// do instead.
+#[test]
+fn known_limitations_document_a_reissued_ticker_cannot_be_recorded() {
+    let limitations = known_limitations();
+    assert!(
+        limitations.contains(
+            "**A ticker an exchange reissues to a different company cannot be recorded**"
+        )
+    );
+    // The rule, and that it is the whole history rather than today's identity.
+    assert!(limitations.contains("unique across its **whole recorded history**"));
+    assert!(limitations.contains("`UNIQUE(exchange_mic, ticker)`"));
+    assert!(limitations.contains("the partial unique index over the bare ticker"));
+    assert!(
+        limitations
+            .contains("the rest of the model treats a listing's identity as **time-varying**")
+    );
+    // The refusal, and why the first listing never leaves.
+    assert!(
+        limitations.contains("UNIQUE constraint failed: listings.exchange_mic, listings.ticker")
+    );
+    assert!(
+        limitations.contains("a disposed holding's parcels, income and price history all stay")
+    );
+    assert!(limitations.contains("UNIQUE constraint failed: listings.ticker"));
+    // The fake rename is ruled out, with both of its consequences.
+    assert!(
+        limitations.contains("**Recording a rename that never happened is explicitly ruled out**")
+    );
+    assert!(limitations.contains("yahoo fetch for AAAOLD.AX failed: Not found"));
+    assert!(
+        limitations
+            .contains("prints that invented ticker on the security's disposal and income rows")
+    );
+    // What to do instead, all of it verified against the live system.
+    assert!(limitations.contains("**What to do instead**"));
+    assert!(limitations.contains("the same ticker under a different MIC is already accepted"));
+    assert!(limitations.contains("a listing with no recorded rename has a single identity span"));
+    assert!(limitations.contains("set [`unpriced_from`](#listings) at its last quoted day"));
+    assert!(limitations.contains("check `fetched_symbol` on anything backfilled across a reissue"));
+}
+
 /// Ticker/exchange renames (REQUIREMENTS "Ticker and exchange-code changes",
 /// 2026-07-26): a rename is an explicit, dated, audited event once a listing
 /// has history — the rename action, the provider-symbol override, and the

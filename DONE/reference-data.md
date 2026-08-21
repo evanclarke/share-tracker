@@ -967,3 +967,66 @@ because it is the only way to reach it on a listing that already has priced hist
 - **(c) Both**: refuse on the rename path, warn on the rest.
 - **(d) Document it** as a Known limitation — a cross-currency exchange change is not a rename; it is
   a new listing plus a transfer — and leave the write accepting it.
+
+## SCENARIOS R-10: a ticker reused by a different company cannot be recorded at all
+
+`UNIQUE(exchange_mic, ticker)` — and the partial unique index over exchange-less tickers — hold
+across **all time**, while the rest of the model treats a listing's identity as time-varying. So when
+an exchange reissues a delisted code to an unrelated company, the second company's listing is
+refused for as long as the first holding exists, which for CGT purposes is forever: a disposed
+holding's parcels, income and price history all stay.
+
+Reproduced: listing 6 `AAA` on XASX with a 2005 Buy; `PUT /listings/7` for a second `AAA` on XASX →
+`422`, "a record with these key values already exists (UNIQUE constraint failed:
+listings.exchange_mic, listings.ticker)".
+
+The only workaround available today is to record a rename that never happened — park the old listing
+under an invented ticker to free the code — and that corrupts the two surfaces the rename chain
+exists to serve. The invented ticker becomes the old listing's current identity, so its
+current-identity price fetches resolve to a symbol that does not exist; and the fabricated event
+enters the chain the Annual Tax Report reads as at each row's own date, so an archived FY document
+for any year after the park prints a ticker the security never traded under. Nothing in
+`docs/API.md`'s Known limitations says any of this.
+
+**Fix — Evan chose 2026-08-21: option (a), document it as a Known limitation.**
+
+- [x] Add a Known limitation to `docs/API.md` stating that a listing's ticker is unique across its
+      whole recorded history, so a reissued code cannot be entered while the earlier holding is on
+      file — with the consequence spelled out and the fake-rename workaround explicitly ruled out
+      (it falsifies the chain the Annual Tax Report reads and breaks the parked listing's price
+      collection). Pin it with a `doc_checks.rs` test, as doc-only requirements are.
+      Done 2026-08-21: the Known limitation *A ticker an exchange reissues to a different company
+      cannot be recorded* in `docs/API.md`. It states the rule (`UNIQUE(exchange_mic, ticker)` and
+      the exchange-less partial index hold across all time, against a model that resolves identity
+      as at a date), the refusal verbatim, why the first listing never leaves (a disposed holding's
+      parcels, income and price history all stay, and the listing cannot be deleted while they do),
+      and that crypto has no exchange dimension to escape into. The fake rename is ruled out with
+      both consequences re-verified live against a throwaway database: a listing parked as
+      `AAAOLD` answered `yahoo fetch for AAAOLD.AX failed: Not found`, and the fabricated event
+      joins the chain the annual tax report and activity ledger read as at each row's own date.
+      **What to do instead** is verified rather than invented: a non-colliding ticker spelling
+      (uniqueness is per `(exchange_mic, ticker)`, so the same ticker under a different MIC is
+      already accepted — checked), the company's real identity in `name`/`isin`, and `price_symbol`
+      set to the provider's actual symbol, which covers the whole history of a listing that has no
+      recorded rename because it has one identity span (`yahoo_symbol_for`); plus `unpriced_from`
+      on the old listing so collection stops asking for a code the provider now serves for someone
+      else. The one thing that marker does *not* bound is stated too — a backfill of the old
+      listing's earlier history still derives the reissued code: fetching a pre-park date for the
+      2005 parcel bought at A$1.00 returned a A$50.19 close for the security holding `AAA.AX`
+      today, so the entry says to check `fetched_symbol` across a reissue and cross-references
+      *Nothing verifies that a fetched symbol names the same security*. Pinned by
+      `doc_checks::known_limitations_document_a_reissued_ticker_cannot_be_recorded`.
+
+**Options as put:**
+
+- **(a) Document it as a Known limitation** — a ticker is unique across the whole recorded history,
+  so a reissued code cannot be entered while the earlier holding is on file; state the consequence
+  and explicitly rule the fake-rename workaround out. Honest and cheap; the case stays unenterable.
+- **(b) Make uniqueness time-aware** — scope it to listings whose recorded history overlaps, which
+  means an end-of-life fact on the listing (the `unpriced_from` marker is nearly it) and a
+  constraint SQLite cannot express as an index, so a write-time check plus a health check. Real
+  modelling work, and it changes what "the listing with this ticker" means for every lookup that
+  assumes one.
+- **(c) Allow the collision explicitly** — drop the unique index in favour of a write-time check that
+  can be overridden by a flag on the body, recording the reuse deliberately. Least machinery, but it
+  removes the guard that stops an ordinary duplicate-entry mistake.

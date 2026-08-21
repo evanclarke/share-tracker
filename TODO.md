@@ -31,53 +31,11 @@ moved to XNYS); and `R-10` refuses a listing whose ticker another listing alread
 recorded every leg — the `listings` UPDATE behind each rename and the `listing_renames` DELETE behind
 each undo.
 
-**Eight findings; R-01, R-02 and R-04/R-08 are closed (all archived in `DONE/reference-data.md`),
-five remain open.** They cluster: two are about what the rename chain cannot express (a ticker
-reused by another company; a pre-rename provider symbol), one is a report reading today's ticker
-where the docs say it reads the row's own date, one is that the whole feature has no web UI, and
-one is a refusal message. Each is a `## ` section below, in the order I would fix them.
-
-## SCENARIOS R-10: a ticker reused by a different company cannot be recorded at all
-
-`UNIQUE(exchange_mic, ticker)` — and the partial unique index over exchange-less tickers — hold
-across **all time**, while the rest of the model treats a listing's identity as time-varying. So when
-an exchange reissues a delisted code to an unrelated company, the second company's listing is
-refused for as long as the first holding exists, which for CGT purposes is forever: a disposed
-holding's parcels, income and price history all stay.
-
-Reproduced: listing 6 `AAA` on XASX with a 2005 Buy; `PUT /listings/7` for a second `AAA` on XASX →
-`422`, "a record with these key values already exists (UNIQUE constraint failed:
-listings.exchange_mic, listings.ticker)".
-
-The only workaround available today is to record a rename that never happened — park the old listing
-under an invented ticker to free the code — and that corrupts the two surfaces the rename chain
-exists to serve. The invented ticker becomes the old listing's current identity, so its
-current-identity price fetches resolve to a symbol that does not exist; and the fabricated event
-enters the chain the Annual Tax Report reads as at each row's own date, so an archived FY document
-for any year after the park prints a ticker the security never traded under. Nothing in
-`docs/API.md`'s Known limitations says any of this.
-
-**Fix — Evan chose 2026-08-21: option (a), document it as a Known limitation.**
-
-- [ ] Add a Known limitation to `docs/API.md` stating that a listing's ticker is unique across its
-      whole recorded history, so a reissued code cannot be entered while the earlier holding is on
-      file — with the consequence spelled out and the fake-rename workaround explicitly ruled out
-      (it falsifies the chain the Annual Tax Report reads and breaks the parked listing's price
-      collection). Pin it with a `doc_checks.rs` test, as doc-only requirements are.
-
-**Options as put:**
-
-- **(a) Document it as a Known limitation** — a ticker is unique across the whole recorded history,
-  so a reissued code cannot be entered while the earlier holding is on file; state the consequence
-  and explicitly rule the fake-rename workaround out. Honest and cheap; the case stays unenterable.
-- **(b) Make uniqueness time-aware** — scope it to listings whose recorded history overlaps, which
-  means an end-of-life fact on the listing (the `unpriced_from` marker is nearly it) and a
-  constraint SQLite cannot express as an index, so a write-time check plus a health check. Real
-  modelling work, and it changes what "the listing with this ticker" means for every lookup that
-  assumes one.
-- **(c) Allow the collision explicitly** — drop the unique index in favour of a write-time check that
-  can be overridden by a flag on the body, recording the reuse deliberately. Least machinery, but it
-  removes the guard that stops an ordinary duplicate-entry mistake.
+**Eight findings; R-01, R-02, R-04/R-08 and R-10 are closed (all archived in
+`DONE/reference-data.md`), four remain open.** They cluster: one is about what the rename chain
+cannot express (a pre-rename provider symbol), one is a report reading today's ticker where the docs
+say it reads the row's own date, one is that the whole feature has no web UI, and one is a refusal
+message. Each is a `## ` section below, in the order I would fix them.
 
 ## SCENARIOS R-07: the listing activity ledger names counterpart listings at today's ticker, not the row's own date
 
