@@ -240,3 +240,136 @@ established workflow here, since entry is batched from the statement archive.
     `{"ticker":"VAS","unpriced_days":646,"earliest_date":"2024-01-10","latest_date":"2026-07-29"}`
     in ~10 ms, and `scripts/ui-check.sh --seed demo '#/prices'` renders both rows (VAS before
     VDHG — oldest hole first) with the Backfill button pre-filling the form over exactly the hole
+
+## PRODUCTION CLEANUP (completed 2026-08-21): clear LAC's 635 borrowed price rows on the deployed database
+
+**Done 2026-08-21 — this section is the record of an operational runbook, not code that was written.** The procedure was run against the live database on 2026-08-21 and every figure it predicted came back exactly; the step-by-step outcome is in the *Development prerequisites* block below, under the host-upgrade item. The original framing follows, unchanged. It is recorded here so the work is
+not lost, but nothing in it is done by editing this repository — it is a procedure to run against
+Evan's deployed database once the prerequisites below are released. Evan asked (2026-08-20) to clear
+the rows and to resume the job another day.
+
+### What is wrong with the data
+
+Listing 7 (`LAC`, held 2021-03-25 → 2023-10-03) carries **635** price rows dated before its
+demerger, and every one is byte-identical to listing 8 (`LAR`/`LAAC`)'s row for the same date — 635
+identical, 0 differing, 0 missing. They are another security's prices. Yahoo serves no `LAC` candle
+before 2023-10-02 at all (HTTP 400 on every earlier day), so there was nothing else to reach for at
+the time. See the `## LAC's whole pre-demerger price history is LAR's series` section above for the
+full evidence; in brief:
+
+| Rows | Dates | `origin` | How they got there |
+| ---: | --- | --- | --- |
+| 375 | 2021-03-25 → 2022-09-19 | `manual` | Hand-copied from listing 8, with `sourced_from`/`reason` stating plainly that the period is "unblocked, not accurate" |
+| 260 | 2022-09-20 → 2023-10-02 | `fetched` | `POST /closing_prices/backfill`'s one-off `symbol` override, which recorded nothing about the symbol used |
+
+Effect: **922 snapshot dates / 2,766 stored snapshot rows** value LAC at LAR's price. At 2023-09-29
+the stored `portfolio_overview` row reads `market_value` A$11,123.21 against `total_cost_base`
+A$19,869.26 — a 44% unrealised loss — where old Lithium Americas closed near US$16.85 (≈ A$27,400).
+**No tax figure is affected**: closing prices feed valuation only, never cost base or proceeds.
+
+### Development prerequisites (these *are* repo work, and are not all done)
+
+- [x] `listings.unpriced_before` — a date before which the provider has no series, excluding the
+  holding from valuation and flagging the snapshot partial. Decided 2026-08-20 and **in progress**;
+  see the `## There is no "unpriced *before*" counterpart` section for the decision and its
+  reasoning. Tick this only once that section is closed and archived.
+  - Done 2026-08-20 (migration 0037); the section is closed and archived in `DONE/reviews.md`. The
+    snapshot carries `holding_excluded` plus an `excluded_holdings` list naming the absent holding
+    and why, and setting it on listing 7 was rehearsed against an upgraded copy of the deployed
+    database: 2023-09-29's total drops from A$495,429.52 to A$484,306.31, LAC's row unvalued with the
+    reason. Note that the marker **supersedes** the stored rows for the span, so step 4 of the
+    procedure is no longer what makes the totals honest — it is now housekeeping on rows nothing
+    reads.
+- [x] **An `ok` row must become deletable inside an `unpriced_before` span.** Today
+  `DELETE /closing_prices/:listing_id/:price_date` refuses every `ok` row, so all 635 are
+  unremovable through the API and this cleanup cannot be performed at all. The relaxation is
+  principled and narrow rather than a general loosening: once a listing declares `unpriced_before`,
+  dates in that span are *by declaration* not read by valuation, so deleting a stored price there
+  cannot punch a hole in a valued series — which is the only reason the rule exists. A bulk form is
+  probably wanted too; 635 single-date DELETEs is not a runbook.
+  - Done 2026-08-21; see the "The rows cannot be cleared" item in the section above for the
+    reasoning and the tests. The refusal is relaxed inside an `unpriced_before` span only (and
+    deliberately **not** inside an `unpriced_from` run, where the last stored close *is* read),
+    and `POST /closing_prices/clear_unpriced_before` is the bulk form — body `{ "listing_id": 7 }`,
+    no date range, one transaction, idempotent, reporting the row count. The whole procedure below
+    was rehearsed on an upgraded copy of the 2026-08-16 backup and its numbers are this section's.
+- [x] The deployed host must be upgraded first. It was at **migration 21**; this repo is past 36. The
+  upgrade was rehearsed clean against a copy (21 → 36, every row count preserved,
+  `integrity_check` and `foreign_key_check` clean, all seven annual tax reports and every
+  cross-check report 200) — but none of it had been released.
+  - Released 2026-08-21 as **v0.12.0** (`54f4012`), 137 commits and 18 migrations on from v0.11.0.
+    Evan upgraded the host and took the pre-upgrade backup
+    (`share-tracker-2026-08-21-102249-pre-0.12.0.db`, at migration 21 — the rollback point). The live
+    database came up at **migration 39**, and `GET /reports/health` immediately answered with the new
+    `duplicate_price_series` check firing exactly as predicted: LAC/LAR, 634 identical days,
+    375 manual + 259 fetched.
+
+**The procedure below was run against the live database on 2026-08-21 and is complete.** Every figure
+it predicted came back to the last decimal place. What was done, in the order the runbook gives:
+
+1. Pre-cleanup backup at migration 39 taken with `POST /jobs/backup?suffix=pre-lac-cleanup` →
+   `share-tracker-2026-08-21-102806-pre-lac-cleanup.db` (verified by the job: `integrity_check` plus
+   a migration match). The migration-21 pre-upgrade backup is kept alongside it.
+2. The whole sequence rehearsed first against a **copy of that backup**, served locally on a throwaway
+   port — not against the 2026-08-16 backup the earlier rehearsal used, so the rehearsal input was
+   byte-for-byte the live data.
+3. `PUT /listings/7` with `unpriced_before: 2023-10-02` → 204.
+4. `POST /closing_prices/clear_unpriced_before` `{"listing_id": 7}` → **634 deleted** (375 manual +
+   259 fetched), the 635th being 2023-10-02 itself, which is outside the span and is LAC's own row.
+   `row_history` went 28 → 663: all 634 deletions audited, and all **375** hand-entered rows' "this
+   period is unblocked, not accurate" note preserved in the trail.
+5. `POST /report_snapshots/regenerate_all` `{"to": "2023-10-02"}` → **1,128 regenerated, 0 blocked**,
+   leaving only the 3 rows that were already stale in the backup.
+6. Spot-check 2023-09-29: the stored `portfolio_overview` total fell from A$495,429.52 to
+   **A$484,306.31** — smaller by exactly **A$11,123.21**, the figure that was another company's price
+   — with LAC's row unvalued and `excluded_holdings` naming it and why. 2023-10-02 values LAC at its
+   own A$16,744.99.
+
+Health afterwards: `duplicate_price_series` **empty**, `errored_prices` empty, `failed_jobs` empty,
+and `demergers_missing_close` down to `adjusted_days: 1, manual_days: 0` — the single genuine
+2023-10-02 row, which is what the stated-close item above was waiting for.
+
+### The procedure, once the above are released
+
+1. Take a fresh backup (`POST /jobs/backup?suffix=pre-lac-cleanup`) — the deployed host's own job.
+2. Rehearse the whole sequence against a **copy** of that backup before touching the live database.
+3. `PUT /listings/7` with `unpriced_before: 2023-10-02`.
+4. Clear the superseded rows in one request: `POST /closing_prices/clear_unpriced_before` with
+   `{ "listing_id": 7 }`. It clears exactly the span the marker set in step 3 supersedes and answers
+   `{ "listing_id", "unpriced_before", "deleted" }`; on the rehearsal `deleted` was **634**, and a
+   second call reported 0. Note the count: 634, not 635 — the 635th is 2023-10-02 itself, which is
+   *not* in the span (`price_date < unpriced_before`) and is the one row that is genuinely LAC's own
+   (10.13, against listing 8's 6.453301 for the same day). That is the row a stated close would
+   re-base, and it is meant to stay.
+5. Regenerate the affected snapshots (`POST /report_snapshots/regenerate_all` with
+   `{ "to": "2023-10-02" }`) and confirm the totals come back flagged partial rather than blocked.
+   Leave `from` out rather than passing 2021-03-25: setting the marker stales the whole **prefix**
+   before its date, which reaches back past LAC's own first holding to the first-ever-held date
+   (2020-08-31 on the rehearsal — 206 dates a 2021-03-25 start would have left stale). The rehearsal
+   regenerated 1,128 dates, 0 blocked, leaving only the 3 rows already stale in the backup.
+6. Spot-check 2023-09-29: the LAC row should be absent and the total lower by A$11,123.21, with the
+   snapshot naming LAC as excluded. On the rehearsal the stored `portfolio_overview` total went from
+   A$495,429.52 to A$484,306.31, LAC's row carrying `price_unavailable` and the snapshot
+   `holding_excluded` with `excluded_holdings` naming it; 2023-10-02 valued LAC at its own
+   A$16,744.99. `GET /reports/health`'s `demergers_missing_close` then reads `adjusted_days: 1,
+   manual_days: 0` — the single genuine row, which is what the stated-close item above is waiting
+   for.
+
+### Things to know before running it
+
+- **Nothing is destroyed.** `closing_prices` is an [audited table](docs/SCHEMA.md), so every deleted
+  row lands in `row_history` with its figure and its `sourced_from`/`reason` intact. The 375 manual
+  rows' careful note about what they were survives; it just stops being read as a valuation.
+- **The trade Evan accepted**, worth re-reading before running: 922 dates currently report a
+  wrong-but-present total, and afterwards report a total that omits a holding he really owned. The
+  true figures are not obtainable — old Lithium Americas' pre-separation closes are not served by the
+  provider under any symbol. Neither state is right; the second is honest about it.
+- **Do not record a demerger stated close on action 1 until this is done.** Its factor derives from
+  the last pre-demerger stored row (2023-10-02, `10.13`), which is LAC's own demerger-adjusted figure,
+  while the 635 behind it are LAR's — one factor cannot serve both, and stating one first would scale
+  the wrong series by a plausible-looking number.
+- **Where the data is.** The deployed database is on `bigbrain.lan:3000`. The copy in this repo
+  (`share-tracker.db`) is **stale** — last written 2026-07-30, still at migration 21 — and is not the
+  live data. The backup Evan fetched on 2026-08-20 is `share-tracker-2026-08-16-000000.db`; an
+  upgraded scratch copy used for the rehearsals was at
+  `scratchpad/upgrade-rehearsal.db` (session-local, will not survive).
