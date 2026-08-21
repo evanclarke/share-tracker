@@ -1001,6 +1001,38 @@ mod tests {
             );
         }
 
+        // 0040 added listing_renames.old_name/old_price_symbol (SCENARIOS
+        // R-04/R-08 — what the rename overwrote, so its undo can put it
+        // back), so that table's trigger pair was dropped and re-created with
+        // them: the *live* pair now comes from 0040 and must still carry
+        // every earlier column too.
+        let sql40 = include_str!("../../migrations/0040_listing_rename_old_name_and_symbol.sql");
+        for op in ["update", "delete"] {
+            assert!(
+                sql40.contains(&format!("CREATE TRIGGER listing_renames_row_history_{op} ")),
+                "0040 must re-create the listing_renames {op} trigger"
+            );
+        }
+        let flat40 = sql40.split_whitespace().collect::<Vec<_>>().join(" ");
+        for col in [
+            "id",
+            "listing_id",
+            "effective_date",
+            "old_ticker",
+            "new_ticker",
+            "old_exchange_mic",
+            "new_exchange_mic",
+            "old_name",
+            "old_price_symbol",
+            "note",
+        ] {
+            assert_eq!(
+                flat40.matches(&format!("'{col}', OLD.{col}")).count(),
+                2,
+                "both re-created listing_renames triggers must record {col}"
+            );
+        }
+
         // 0029 widened income_type's CHECK for `OtherIncome` (SCENARIOS
         // L-03/L-04), which meant rebuilding income — so the *live* income
         // trigger pair comes from 0029, along with the three staleness

@@ -773,6 +773,31 @@ fn listing_rename_action_documented() {
     assert!(README_MD.contains("Ticker and exchange-code renames"));
 }
 
+/// Docs-sync pin for the undo restoring what the rename overwrote (SCENARIOS
+/// R-04/R-08, 2026-08-21): the API states which fields come back, why
+/// `price_symbol` is among them, that "the listing had no override" is
+/// restorable as such, and that a rename recorded before migration 0040
+/// recorded neither — its NULLs meaning unrecorded, not "restore to null".
+/// The schema documents both columns and the CHECK that makes the reading
+/// enforceable.
+#[test]
+fn rename_undo_restores_what_it_overwrote_documented() {
+    assert!(
+        API_MD
+            .contains("`new_exchange_mic`, `old_name`, `old_price_symbol`, `note`), newest first")
+    );
+    assert!(API_MD.contains(
+        "restoring **all four** fields a rename can change, \
+         `ticker`/`exchange_mic`/`name`/`price_symbol`, from its `old_*` columns"
+    ));
+    assert!(API_MD.contains("`price_symbol` is restored because it is not cosmetic"));
+    assert!(API_MD.contains("**A rename recorded before 0040 recorded neither**"));
+    assert!(API_MD.contains("means *unrecorded*, never \"restore to null\""));
+    assert!(SCHEMA_MD.contains("old_name         TEXT (nullable, 0040)"));
+    assert!(SCHEMA_MD.contains("old_price_symbol TEXT (nullable, 0040)"));
+    assert!(SCHEMA_MD.contains("CHECK: old_name IS NOT NULL OR old_price_symbol IS NULL"));
+}
+
 /// Resolved-limitation pin (REQUIREMENTS 2026-07-13; formerly the
 /// "Foreign broker-cash interest classification" Known limitation, 2026-06-12):
 /// interest income is classified by payer — Australian-source at question 10

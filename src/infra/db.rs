@@ -1280,6 +1280,104 @@ mod tests {
         );
     }
 
+    /// 0040 records what a rename overwrote (`old_name`/`old_price_symbol`,
+    /// SCENARIOS R-04/R-08). Like 0038 it is an `ALTER TABLE ADD COLUMN`, so
+    /// what needs pinning is the meaning it gives NULL: a rename recorded
+    /// before it kept neither value, and neither is recoverable, so its row
+    /// must be left **unrecorded** rather than back-filled from the listing's
+    /// current one — which would make an undo "restore" a listing to what it
+    /// already is. `old_name` is the marker that says a row recorded
+    /// anything at all (`listings.name` is NOT NULL, so a 0040-era row always
+    /// has one), and the CHECK is what makes that reading enforceable.
+    #[tokio::test]
+    async fn migration_0040_leaves_existing_renames_unrecorded_and_pairs_the_two_columns() {
+        let pool = pool_migrated_below(40).await;
+        sqlx::query(
+            "INSERT INTO listings (id, exchange_mic, ticker, name, security_type, currency, \
+                                   price_symbol) \
+             VALUES (1, 'XASX', 'NEWER', 'Newer Co', 'Share', 'AUD', 'NEWER.AX')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO listing_renames \
+                 (id, listing_id, effective_date, old_ticker, new_ticker, \
+                  old_exchange_mic, new_exchange_mic) \
+             VALUES (5, 1, '2024-06-01', 'OLD', 'NEWER', 'XASX', 'XASX')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        apply_migration(&pool, 40).await;
+
+        let recorded: (Option<String>, Option<String>) =
+            sqlx::query_as("SELECT old_name, old_price_symbol FROM listing_renames WHERE id = 5")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            recorded,
+            (None, None),
+            "an existing rename recorded neither, and neither is invented"
+        );
+
+        // The CHECK: no recorded name means no recorded symbol either, so a
+        // bare NULL old_price_symbol can never be read as "it was NULL".
+        let bad =
+            sqlx::query("UPDATE listing_renames SET old_price_symbol = 'OLD.AX' WHERE id = 5")
+                .execute(&pool)
+                .await;
+        assert!(
+            bad.is_err(),
+            "an unrecorded row cannot claim a recorded symbol"
+        );
+        sqlx::query(
+            "UPDATE listing_renames SET old_name = 'Old Co', old_price_symbol = 'OLD.AX' \
+             WHERE id = 5",
+        )
+        .execute(&pool)
+        .await
+        .expect("recording both together is the shape a rename writes");
+
+        // Both audit triggers come back naming the new columns, carrying the
+        // superseded version of the row with them.
+        let trail: Vec<(String,)> = sqlx::query_as(
+            "SELECT old_row FROM row_history \
+             WHERE table_name = 'listing_renames' AND row_id = 5 ORDER BY id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert!(
+            trail.last().unwrap().0.contains("\"old_name\":null")
+                && trail
+                    .last()
+                    .unwrap()
+                    .0
+                    .contains("\"old_price_symbol\":null"),
+            "{:?}",
+            trail.last()
+        );
+        sqlx::query("DELETE FROM listing_renames WHERE id = 5")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let deleted: String = sqlx::query_scalar(
+            "SELECT old_row FROM row_history \
+             WHERE table_name = 'listing_renames' AND row_id = 5 AND operation = 'DELETE'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(
+            deleted.contains("\"old_name\":\"Old Co\"")
+                && deleted.contains("\"old_price_symbol\":\"OLD.AX\""),
+            "{deleted}"
+        );
+    }
+
     /// 0025 renames `income.lic_capital_gain_deduction` to
     /// `lic_capital_gain_amount` — the LIC's advised attributable part, which
     /// the reports now halve for D8 — and so has to read existing rows forward

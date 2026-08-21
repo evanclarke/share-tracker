@@ -31,53 +31,13 @@ moved to XNYS); and `R-10` refuses a listing whose ticker another listing alread
 recorded every leg — the `listings` UPDATE behind each rename and the `listing_renames` DELETE behind
 each undo.
 
-**Eight findings; R-02 is closed (archived in `DONE/reference-data.md`), seven remain open.** They cluster: three are about the rename as a *write* (it is applied
-before it is effective, its undo is partial, and it can move a listing to an exchange whose currency
-the listing can no longer be given), two are about what the rename chain cannot express (a ticker
-reused by another company; a pre-rename provider symbol), one is a report reading today's ticker
-where the docs say it reads the row's own date, one is that the whole feature has no web UI, and one
-is a refusal message. Each is a `## ` section below, in the order I would fix them.
-
-## SCENARIOS R-04/R-08: undoing a rename leaves behind the price symbol the undone rename set
-
-`POST /listings/:id/rename` can change four fields — `ticker`, `exchange_mic`, `name` and
-`price_symbol`. `listing_rename::db_undo` restores **two**: it writes back `old_ticker` and
-`old_exchange_mic` and deletes the row. It cannot do better, because `listing_renames` has no
-`old_name`/`old_price_symbol` columns to restore from.
-
-`price_symbol` is not cosmetic. `closing_price::yahoo_symbol_for` uses it verbatim, ahead of the
-derived mapping, for any date in the listing's **current** identity — which after an undo is the
-restored, older identity. So the undone rename's symbol goes on driving every subsequent fetch of
-the listing.
-
-Reproduced: listing `OLD`/`OLD.AX` → rename to `NEWER` with `"price_symbol":"NEWER.AX"`,
-`"name":"Newer Co"` → `DELETE /listings/3/renames/6` → `204`. `GET /listings/3` answers
-`"ticker":"NEW"` with `"name":"Newer Co"` and `"price_symbol":"NEWER.AX"`, and
-`POST /closing_prices/fetch` for 2026-08-19 stored an errored row with
-`fetched_symbol: "NEWER.AX"` — "yahoo fetch for NEWER.AX failed: Not found". The undo therefore
-leaves the listing collecting prices under a symbol that exists only because of the rename that was
-undone.
-
-**Fix — Evan chose 2026-08-21: option (a), record what the rename overwrote.**
-
-- [ ] Add `old_name` and `old_price_symbol` to `listing_renames` in a migration and have the undo
-      write all four fields back. `listing_renames` is audited, so the migration must DROP and
-      re-CREATE its two `*_row_history_*` triggers with the new column list (CLAUDE.md).
-- [ ] Update `docs/SCHEMA.md` for the two columns and `docs/API.md`'s undo sentence, which today
-      says the undo restores `ticker`/`exchange_mic`.
-
-**Options as put:**
-
-- **(a) Record what the rename overwrote and restore it.** Add `old_name` and `old_price_symbol` to
-  `listing_renames` in a migration and have the undo write all four back. `listing_renames` is an
-  audited table, so the migration must DROP and re-CREATE its two `*_row_history_*` triggers with
-  the new column list (CLAUDE.md). Makes the undo a real undo.
-- **(b) Narrow the rename to the identity it tracks.** Refuse a rename body carrying `name` or
-  `price_symbol` (`422`), leaving both to `PUT /listings/:id`, which the identity freeze does not
-  block for either field. Nothing then survives an undo, because the rename never changed anything
-  else. Costs the convenience of one call for the LAAC → LAR shape.
-- **(c) Document the undo as partial** and have it say so — no code change beyond the wording, but a
-  stale `price_symbol` after an undo stays a silent, price-affecting state.
+**Eight findings; R-02 and R-04/R-08 are closed (both archived in `DONE/reference-data.md`), six
+remain open.** They cluster: one is about the rename as a *write* (it can move a listing to an
+exchange whose currency the listing can no longer be given), two are about what the rename chain
+cannot express (a ticker reused by another company; a pre-rename provider symbol), one is a report
+reading today's ticker where the docs say it reads the row's own date, one is that the whole feature
+has no web UI, and one is a refusal message. Each is a `## ` section below, in the order I would fix
+them.
 
 ## SCENARIOS R-01: a rename can move a listing to an exchange quoting another currency, and the currency can then never be fixed
 

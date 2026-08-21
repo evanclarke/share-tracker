@@ -791,3 +791,92 @@ Reproduced: listing on XNYS ticker `MSFT`, `POST /listings/10/rename {"effective
 - **(c) Document it** — say in `docs/API.md` that a rename is applied on entry whatever its date, and
   that a future-dated one renames the listing now. Cheapest, but it leaves the live-quote failure in
   place with no remedy but deleting the rename.
+
+## SCENARIOS R-04/R-08: undoing a rename leaves behind the price symbol the undone rename set
+
+`POST /listings/:id/rename` can change four fields — `ticker`, `exchange_mic`, `name` and
+`price_symbol`. `listing_rename::db_undo` restores **two**: it writes back `old_ticker` and
+`old_exchange_mic` and deletes the row. It cannot do better, because `listing_renames` has no
+`old_name`/`old_price_symbol` columns to restore from.
+
+`price_symbol` is not cosmetic. `closing_price::yahoo_symbol_for` uses it verbatim, ahead of the
+derived mapping, for any date in the listing's **current** identity — which after an undo is the
+restored, older identity. So the undone rename's symbol goes on driving every subsequent fetch of
+the listing.
+
+Reproduced: listing `OLD`/`OLD.AX` → rename to `NEWER` with `"price_symbol":"NEWER.AX"`,
+`"name":"Newer Co"` → `DELETE /listings/3/renames/6` → `204`. `GET /listings/3` answers
+`"ticker":"NEW"` with `"name":"Newer Co"` and `"price_symbol":"NEWER.AX"`, and
+`POST /closing_prices/fetch` for 2026-08-19 stored an errored row with
+`fetched_symbol: "NEWER.AX"` — "yahoo fetch for NEWER.AX failed: Not found". The undo therefore
+leaves the listing collecting prices under a symbol that exists only because of the rename that was
+undone.
+
+**Fix — Evan chose 2026-08-21: option (a), record what the rename overwrote.**
+
+- [x] Add `old_name` and `old_price_symbol` to `listing_renames` in a migration and have the undo
+      write all four fields back. `listing_renames` is audited, so the migration must DROP and
+      re-CREATE its two `*_row_history_*` triggers with the new column list (CLAUDE.md).
+      Done 2026-08-21: migration `0040_listing_rename_old_name_and_symbol.sql`, an `ALTER TABLE ADD
+      COLUMN` pair (no rebuild — the one CHECK is expressible as a column constraint). `db_rename`
+      writes both from the listing's own row at the moment of the rename, never from the request,
+      the rule `old_ticker`/`old_exchange_mic` have followed since 0018; `db_undo` reads all four
+      and restores all four. Both are served on `GET /listings/:id/renames`, so the chain now says
+      what each rename replaced as well as what it set.
+      **The three-state problem and how it is represented.** `listings.price_symbol` is itself
+      nullable, so a *new* rename has to be able to record "it was NULL before" distinctly from
+      "not recorded" — otherwise undoing a rename that introduced an override could not clear it.
+      The marker chosen is `old_name` rather than a third flag column: `listings.name` is NOT NULL
+      (0001), so a rename recorded from 0040 on always writes a non-NULL `old_name`, which leaves
+      `old_name IS NULL` meaning one thing only — the row predates the columns. `CHECK (old_name IS
+      NOT NULL OR old_price_symbol IS NULL)` makes that reading enforceable rather than
+      conventional. `db_undo` branches on it: all four fields when `old_name` is present
+      (`old_price_symbol` NULL then meaning "the listing had no override", and the undo clears the
+      one the rename set), `ticker`/`exchange_mic` only when it is absent.
+      **Existing rows stay NULL, deliberately.** Neither the name nor the symbol a pre-0040 rename
+      replaced is recoverable from anything the database holds, and back-filling from the listing's
+      *current* row would record today's values as if they were the prior ones — an undo would then
+      "restore" a listing to exactly what it already is while claiming to have reverted something.
+      So an old row is left unrecorded and its undo behaves exactly as it did before the migration.
+      Both audit triggers were dropped and re-created with the two columns in their `json_object`
+      lists. There are no `*_stale_snapshots_*` triggers on this table to handle by the same rule,
+      and 0018 already states why it has none (a ticker is a display label over `listing_id` in
+      every snapshotted report, never a computed figure).
+      Verified by `entities::listing_rename::tests::db_undo_restores_the_name_and_price_symbol_the_rename_overwrote`
+      (the reproduction above, as a regression test),
+      `..::db_undo_of_a_rename_that_set_neither_leaves_both_as_they_are`,
+      `..::db_undo_clears_a_price_symbol_the_rename_introduced` (the distinguishability point),
+      `..::db_undo_of_a_rename_recorded_before_0040_touches_neither_field` (a hand-inserted
+      unrecorded row: the migration changes no existing row's undo behaviour),
+      `..::api_list_renames_carries_what_each_rename_overwrote` (the chain response),
+      `infra::db::tests::migration_0040_leaves_existing_renames_unrecorded_and_pairs_the_two_columns`
+      (existing rows left NULL, the CHECK, and both re-created triggers carrying the new columns),
+      and the audited-table pin `reports::row_history::tests::audited_tables_match_migration_check_and_triggers`,
+      which now requires 0040's re-created pair to name every column of the table.
+- [x] Update `docs/SCHEMA.md` for the two columns and `docs/API.md`'s undo sentence, which today
+      says the undo restores `ticker`/`exchange_mic`. Done 2026-08-21: `docs/SCHEMA.md` gains both
+      columns (with what NULL means in each, and the marker role `old_name` plays), the new CHECK
+      line, and a sentence in the `row_history` narrative recording that the `listing_renames`
+      trigger pair now comes from 0040. `docs/API.md`'s rename section now says the undo restores
+      **all four** fields, lists the two columns in the `GET /listings/:id/renames` field list,
+      explains why `price_symbol` is among them (it drives price collection verbatim for the
+      current identity), and states that a rename recorded before 0040 recorded neither — its NULLs
+      meaning unrecorded, never "restore to null". The `POST /listings/:id/rename` paragraph's
+      claims about `name`/`price_symbol` needed no correction on what the rename *does* (both are
+      still optional, and omitting either still leaves it as it was), only the addition that the
+      server derives the two `old_*` values from the listing's current row like the others, so the
+      undo can put back everything the rename overwrote. Pinned by
+      `doc_checks::rename_undo_restores_what_it_overwrote_documented`.
+
+**Options as put:**
+
+- **(a) Record what the rename overwrote and restore it.** Add `old_name` and `old_price_symbol` to
+  `listing_renames` in a migration and have the undo write all four back. `listing_renames` is an
+  audited table, so the migration must DROP and re-CREATE its two `*_row_history_*` triggers with
+  the new column list (CLAUDE.md). Makes the undo a real undo.
+- **(b) Narrow the rename to the identity it tracks.** Refuse a rename body carrying `name` or
+  `price_symbol` (`422`), leaving both to `PUT /listings/:id`, which the identity freeze does not
+  block for either field. Nothing then survives an undo, because the rename never changed anything
+  else. Costs the convenience of one call for the LAAC → LAR shape.
+- **(c) Document the undo as partial** and have it say so — no code change beyond the wording, but a
+  stale `price_symbol` after an undo stays a silent, price-affecting state.

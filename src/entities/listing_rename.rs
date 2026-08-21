@@ -29,8 +29,11 @@
 //!
 //! `DELETE /listings/:id/renames/:rename_id` undoes a rename: allowed only
 //! for the *newest* rename of that listing (chain integrity — an
-//! intermediate entry can't be removed out of order), restoring
-//! `ticker`/`exchange_mic` from the row's `old_*` columns.
+//! intermediate entry can't be removed out of order), restoring all four
+//! fields the rename could change — `ticker`/`exchange_mic`/`name`/
+//! `price_symbol` — from the row's `old_*` columns (migration 0040; see
+//! [`db_undo`] for how a row recorded before those columns existed is
+//! undone).
 
 use crate::entities::listing::{self, Listing, SecurityType};
 use crate::infra::http::{ApiError, CrudEntity};
@@ -53,6 +56,13 @@ pub struct ListingRename {
     pub new_ticker: String,
     pub old_exchange_mic: Option<String>,
     pub new_exchange_mic: Option<String>,
+    /// What the rename overwrote (migration 0040), read from the listing's
+    /// own row like `old_ticker`. NULL only on a rename recorded before 0040,
+    /// which kept none of this — and since `listings.name` is NOT NULL, that
+    /// is what makes `old_price_symbol` NULL readable as "the listing had no
+    /// override" rather than "not recorded". See [`db_undo`].
+    pub old_name: Option<String>,
+    pub old_price_symbol: Option<String>,
     pub note: Option<String>,
 }
 
@@ -173,7 +183,7 @@ pub async fn db_list_for_listing(
 ) -> Result<Vec<ListingRename>, sqlx::Error> {
     sqlx::query_as(
         "SELECT id, listing_id, effective_date, old_ticker, new_ticker, \
-                old_exchange_mic, new_exchange_mic, note \
+                old_exchange_mic, new_exchange_mic, old_name, old_price_symbol, note \
          FROM listing_renames WHERE listing_id = ? ORDER BY effective_date DESC, id DESC",
     )
     .bind(listing_id)
@@ -247,11 +257,14 @@ pub async fn db_rename(
         }
     }
 
+    // `old_name`/`old_price_symbol` are what the rename is about to overwrite
+    // (0040), taken from the listing's current row exactly like `old_ticker`
+    // — never from the request — so `db_undo` can put all four fields back.
     let result = sqlx::query(
         "INSERT INTO listing_renames \
          (listing_id, effective_date, old_ticker, new_ticker, old_exchange_mic, \
-          new_exchange_mic, note) \
-         VALUES (?, ?, ?, ?, ?, ?, ?)",
+          new_exchange_mic, old_name, old_price_symbol, note) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(listing_id)
     .bind(body.effective_date)
@@ -259,6 +272,8 @@ pub async fn db_rename(
     .bind(&body.ticker)
     .bind(&current.exchange_mic)
     .bind(&new_exchange_mic)
+    .bind(&current.name)
+    .bind(&current.price_symbol)
     .bind(&body.note)
     .execute(&mut *tx)
     .await?;
@@ -286,24 +301,49 @@ pub async fn db_rename(
         new_ticker: body.ticker.clone(),
         old_exchange_mic: current.exchange_mic,
         new_exchange_mic,
+        old_name: Some(current.name),
+        old_price_symbol: current.price_symbol,
         note: body.note.clone(),
     })
 }
 
-/// Undo the newest rename for a listing: restore `ticker`/`exchange_mic`
-/// from the rename's `old_*` columns and delete the record.
+/// Undo the newest rename for a listing: restore every field the rename
+/// overwrote from the record's `old_*` columns and delete the record.
+///
+/// A rename changes four fields on the listing, and all four are put back —
+/// including `price_symbol`, which is not cosmetic: `closing_price` uses it
+/// verbatim for every date in the listing's *current* identity, so an undo
+/// that left it behind went on collecting prices under a symbol that existed
+/// only because of the undone rename (SCENARIOS R-04/R-08).
+///
+/// `old_name` doubles as the "this row recorded what it overwrote" marker:
+/// `listings.name` is NOT NULL, so a rename recorded from migration 0040 on
+/// always has one, and its absence means the row predates the columns. Such a
+/// row is undone the way it always was — ticker and exchange only, `name` and
+/// `price_symbol` left exactly as they stand — rather than being "restored"
+/// to values it never recorded. When it *is* present, a NULL
+/// `old_price_symbol` is the real prior value: the listing had no override,
+/// and the undo clears the one the rename set.
 pub async fn db_undo(pool: &SqlitePool, listing_id: i64, rename_id: i64) -> Result<(), UndoError> {
     let mut tx = pool.begin().await?;
 
-    let target: Option<(NaiveDate, String, Option<String>)> = sqlx::query_as(
-        "SELECT effective_date, old_ticker, old_exchange_mic FROM listing_renames \
-         WHERE id = ? AND listing_id = ?",
+    #[allow(clippy::type_complexity)]
+    let target: Option<(
+        NaiveDate,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    )> = sqlx::query_as(
+        "SELECT effective_date, old_ticker, old_exchange_mic, old_name, old_price_symbol \
+         FROM listing_renames WHERE id = ? AND listing_id = ?",
     )
     .bind(rename_id)
     .bind(listing_id)
     .fetch_optional(&mut *tx)
     .await?;
-    let (effective_date, old_ticker, old_exchange_mic) = target.ok_or(UndoError::RenameNotFound)?;
+    let (effective_date, old_ticker, old_exchange_mic, old_name, old_price_symbol) =
+        target.ok_or(UndoError::RenameNotFound)?;
 
     let newest: Option<NaiveDate> =
         sqlx::query_scalar("SELECT MAX(effective_date) FROM listing_renames WHERE listing_id = ?")
@@ -314,12 +354,30 @@ pub async fn db_undo(pool: &SqlitePool, listing_id: i64, rename_id: i64) -> Resu
         return Err(UndoError::NotNewest);
     }
 
-    sqlx::query("UPDATE listings SET ticker = ?, exchange_mic = ? WHERE id = ?")
-        .bind(&old_ticker)
-        .bind(&old_exchange_mic)
-        .bind(listing_id)
-        .execute(&mut *tx)
-        .await?;
+    match old_name {
+        Some(old_name) => {
+            sqlx::query(
+                "UPDATE listings SET ticker = ?, exchange_mic = ?, name = ?, price_symbol = ? \
+                 WHERE id = ?",
+            )
+            .bind(&old_ticker)
+            .bind(&old_exchange_mic)
+            .bind(&old_name)
+            .bind(&old_price_symbol)
+            .bind(listing_id)
+            .execute(&mut *tx)
+            .await?;
+        }
+        // Pre-0040: the row recorded neither, so neither is restored.
+        None => {
+            sqlx::query("UPDATE listings SET ticker = ?, exchange_mic = ? WHERE id = ?")
+                .bind(&old_ticker)
+                .bind(&old_exchange_mic)
+                .bind(listing_id)
+                .execute(&mut *tx)
+                .await?;
+        }
+    }
     sqlx::query("DELETE FROM listing_renames WHERE id = ?")
         .bind(rename_id)
         .execute(&mut *tx)
@@ -669,6 +727,139 @@ mod tests {
             .unwrap();
     }
 
+    /// SCENARIOS R-04/R-08, the regression this section exists for: the undo
+    /// puts back *every* field the rename overwrote, not just the two the
+    /// chain used to record. `price_symbol` is the one that mattered —
+    /// `closing_price` uses it verbatim for the listing's current identity,
+    /// so an undo that left it behind kept fetching prices under the undone
+    /// rename's symbol.
+    #[tokio::test]
+    async fn db_undo_restores_the_name_and_price_symbol_the_rename_overwrote() {
+        let pool = test_pool().await;
+        test_support::listing(1)
+            .ticker("OLD")
+            .name("Old Co")
+            .mic("XASX")
+            .price_symbol("OLD.AX")
+            .insert(&pool)
+            .await;
+
+        let mut renaming = body("2024-06-01", "NEWER");
+        renaming.name = Some("Newer Co".to_string());
+        renaming.price_symbol = Some("NEWER.AX".to_string());
+        let created = db_rename(&pool, 1, &renaming).await.unwrap();
+        assert_eq!(created.old_name.as_deref(), Some("Old Co"));
+        assert_eq!(created.old_price_symbol.as_deref(), Some("OLD.AX"));
+
+        let renamed = listing::db_get(&pool, 1).await.unwrap().unwrap();
+        assert_eq!(renamed.name, "Newer Co");
+        assert_eq!(renamed.price_symbol.as_deref(), Some("NEWER.AX"));
+
+        db_undo(&pool, 1, created.id).await.unwrap();
+
+        let restored = listing::db_get(&pool, 1).await.unwrap().unwrap();
+        assert_eq!(restored.ticker, "OLD");
+        assert_eq!(restored.name, "Old Co");
+        assert_eq!(
+            restored.price_symbol.as_deref(),
+            Some("OLD.AX"),
+            "the undone rename's symbol must not go on driving price collection"
+        );
+    }
+
+    /// A rename that mentions neither `name` nor `price_symbol` still records
+    /// what it left standing, so its undo writes the same values back — the
+    /// listing is left exactly as it is either way.
+    #[tokio::test]
+    async fn db_undo_of_a_rename_that_set_neither_leaves_both_as_they_are() {
+        let pool = test_pool().await;
+        test_support::listing(1)
+            .ticker("OLD")
+            .name("Old Co")
+            .price_symbol("OLD.AX")
+            .insert(&pool)
+            .await;
+
+        let created = db_rename(&pool, 1, &body("2024-06-01", "NEWER"))
+            .await
+            .unwrap();
+        db_undo(&pool, 1, created.id).await.unwrap();
+
+        let restored = listing::db_get(&pool, 1).await.unwrap().unwrap();
+        assert_eq!(restored.name, "Old Co");
+        assert_eq!(restored.price_symbol.as_deref(), Some("OLD.AX"));
+    }
+
+    /// The distinguishability point behind migration 0040: `price_symbol` is
+    /// nullable, so "the listing had none" is a real prior value the undo has
+    /// to be able to restore — and does, because `old_name` (NOT NULL on
+    /// `listings`) is what says the row recorded anything at all.
+    #[tokio::test]
+    async fn db_undo_clears_a_price_symbol_the_rename_introduced() {
+        let pool = test_pool().await;
+        test_support::listing(1).ticker("OLD").insert(&pool).await;
+        assert_eq!(
+            listing::db_get(&pool, 1)
+                .await
+                .unwrap()
+                .unwrap()
+                .price_symbol,
+            None
+        );
+
+        let mut renaming = body("2024-06-01", "NEWER");
+        renaming.price_symbol = Some("NEWER.AX".to_string());
+        let created = db_rename(&pool, 1, &renaming).await.unwrap();
+        assert_eq!(created.old_price_symbol, None);
+        assert_eq!(created.old_name.as_deref(), Some("Test 1"));
+
+        db_undo(&pool, 1, created.id).await.unwrap();
+
+        assert_eq!(
+            listing::db_get(&pool, 1)
+                .await
+                .unwrap()
+                .unwrap()
+                .price_symbol,
+            None,
+            "an override the rename introduced is cleared, not left behind"
+        );
+    }
+
+    /// A rename recorded before migration 0040 kept neither value, and NULL
+    /// there means "not recorded" — never "restore to NULL". Its undo behaves
+    /// exactly as it did before the columns existed: ticker and exchange back,
+    /// name and symbol left alone. (The migration must not retroactively
+    /// change what undoing an existing row does.)
+    #[tokio::test]
+    async fn db_undo_of_a_rename_recorded_before_0040_touches_neither_field() {
+        let pool = test_pool().await;
+        test_support::listing(1)
+            .ticker("NEWER")
+            .name("Newer Co")
+            .mic("XASX")
+            .price_symbol("NEWER.AX")
+            .insert(&pool)
+            .await;
+        // A pre-0040 row: old_name and old_price_symbol were never recorded.
+        sqlx::query(
+            "INSERT INTO listing_renames \
+             (id, listing_id, effective_date, old_ticker, new_ticker, \
+              old_exchange_mic, new_exchange_mic) \
+             VALUES (7, 1, '2024-06-01', 'OLD', 'NEWER', 'XASX', 'XASX')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        db_undo(&pool, 1, 7).await.unwrap();
+
+        let restored = listing::db_get(&pool, 1).await.unwrap().unwrap();
+        assert_eq!(restored.ticker, "OLD");
+        assert_eq!(restored.name, "Newer Co");
+        assert_eq!(restored.price_symbol.as_deref(), Some("NEWER.AX"));
+    }
+
     #[tokio::test]
     async fn db_undo_refuses_a_non_newest_rename() {
         let pool = test_pool().await;
@@ -771,6 +962,40 @@ mod tests {
         assert_eq!(chain.len(), 2);
         assert_eq!(chain[0].new_ticker, "C");
         assert_eq!(chain[1].new_ticker, "B");
+    }
+
+    /// The chain says what each rename *replaced* as well as what it set —
+    /// the two 0040 columns are on the wire, and a rename over a listing with
+    /// no override reports that as `null` rather than omitting it.
+    #[tokio::test]
+    async fn api_list_renames_carries_what_each_rename_overwrote() {
+        let pool = test_pool().await;
+        test_support::listing(1)
+            .ticker("OLD")
+            .name("Old Co")
+            .price_symbol("OLD.AX")
+            .insert(&pool)
+            .await;
+        let mut renaming = body("2024-06-01", "NEWER");
+        renaming.name = Some("Newer Co".to_string());
+        renaming.price_symbol = Some("NEWER.AX".to_string());
+        db_rename(&pool, 1, &renaming).await.unwrap();
+        // A second rename, this one over a listing whose override it clears
+        // nothing of — its own old_price_symbol is the first one's new value.
+        db_rename(&pool, 1, &body("2024-07-01", "NEWEST"))
+            .await
+            .unwrap();
+
+        let chain: Vec<ListingRename> = client(&pool).get("/listings/1/renames").await.json();
+        assert_eq!(chain[0].old_name.as_deref(), Some("Newer Co"));
+        assert_eq!(chain[0].old_price_symbol.as_deref(), Some("NEWER.AX"));
+        assert_eq!(chain[1].old_name.as_deref(), Some("Old Co"));
+        assert_eq!(chain[1].old_price_symbol.as_deref(), Some("OLD.AX"));
+
+        let resp = client(&pool).get("/listings/1/renames").await;
+        let raw = resp.text();
+        assert!(raw.contains("\"old_name\":\"Old Co\""), "{raw}");
+        assert!(raw.contains("\"old_price_symbol\":\"OLD.AX\""), "{raw}");
     }
 
     #[tokio::test]
