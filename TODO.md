@@ -108,23 +108,35 @@ loss A$2,396.29, over a combined A$19,869.26. **Nothing needed re-filing.**
 
 Two things remain, one of them needing a figure from Evan:
 
-- [ ] **The 2023-10-03 row on listing 8 is left in the wrong basis, and nothing sees it.** The
-  provider's spin-off adjustment runs through 2023-10-03 *inclusive* (its ex-date is 2023-10-04):
-  of listing 8's 654 rows dated ≤ 2023-10-03, 652 carry more than 2 dp, while all 703 rows from
-  2023-10-04 on are exactly 2 dp. But `price_basis_ratio` skips events dated `<= from`, so the
-  re-base walk covers rows *strictly before* the demerger date and leaves 2023-10-03 at its adjusted
-  `6.517713`. **Do not just apply the factor to it**: 6.517713 × 2.6111 = 17.01818 is the *combined*
-  entity's 3 October close, and the model already carries the NewCo side separately on listing 7 at
-  9.67 that day. The figure wanted is standalone Lithium Argentina's actual 3 October close —
-  roughly 17.01818 − 9.67 = **7.348**, i.e. the row currently understates listing 8 by about
-  USD 0.83/unit ≈ **A$1,373** on that single date. The only supported repair is a hand-entered
-  `PUT /closing_prices/8/2023-10-03` once the real close is known (and note a manual price is never
-  re-based or re-fetched afterwards). This is a **pre-existing** defect the re-model neither created
-  nor fixed — the 2023-10-03 portfolio total is identical before and after — but nothing surfaces it:
-  health's `adjusted_days` and the re-base walk agree with each other, so the one row in the wrong
-  basis is invisible to both. Consider whether the walk's boundary is simply off by a day for a
-  demerger (the adjustment's ex-date is the day *after* the event, unlike a split), which would make
-  this a code fix rather than a data entry.
+- [x] **The 2023-10-03 row on listing 8 is in the provider's adjusted basis — and that is correct.
+  This corrects the finding as first written, which had the arithmetic wrong.** The original claim
+  was that the re-base walk is off by a day for demergers (the provider's adjustment runs through
+  2023-10-03 inclusive, its ex-date being 2023-10-04) and that the row understates listing 8 by
+  ~A$1,373. Both halves are wrong, and extending the walk would have been a real corruption.
+  - **Un-adjusting the row yields the *combined* entity, which the model already counts twice over.**
+    6.517713 × 2.611067 = **17.01818** is what the whole undivided company closed at on 3 October —
+    NewCo included. But the demerge Buy is dated 2023-10-03, so listing 7 is *already held* that day
+    at 9.67. Extending the walk would value the holding at 17.01818 + 9.67 = **26.69/unit** against
+    the previous day's 16.85 — a 58% overnight jump, from double-counting the NewCo side. As it
+    stands the two listings sum to **16.19/unit**, a 3.9% move, which is ordinary.
+  - **The proposed repair figure was also too high.** 17.01818 − 9.67 = 7.348 assumed the when-issued
+    9.67 exactly captures NewCo's value; the market priced standalone Lithium Argentina at **6.01**
+    the next trading day and 6.09 the day after. The stored `6.517713` — Yahoo's spin-off factor
+    applied to the combined close, i.e. its own standalone-equivalent estimate — is *closer to
+    reality* than the repair. Entering 7.348 would have overstated the holding.
+  - **So the boundary is right, and for a statable reason**: the walk stops strictly before the
+    demerger date because **on that date the model already holds the demerged parcel**, so the head
+    listing's price must be the standalone stub rather than the combined entity. A split reaches the
+    same boundary by a different route (the price is already in the new basis on the effective date).
+    It is not an off-by-one, and `price_basis_ratio`'s `e.date <= from` skip should be left alone.
+  - **The residue, which is real but small and has no better answer**: on 2023-10-03 the stored price
+    is not strictly "in its own trading day's unit basis" as the documented invariant has it, because
+    standalone Lithium Argentina did not trade that day — the combined entity did, and what is stored
+    is a derived standalone-equivalent. Every alternative is worse, so this is a documented exception
+    rather than something to code around. The general shape is worth stating in `docs/API.md` beside
+    the contemporaneous-basis rule: **on a demerger's own date the head listing's stored price is the
+    provider's standalone-equivalent, not an observed close**, and that is deliberate.
+
 - [ ] **Nothing detects a demerger modelled with the new entity as head** — the mis-modelling this
   section fixed. It was invisible for three years and was only caught because the price history was
   impossible; `demergers_missing_close` reported it as a missing stated close, which is a symptom
