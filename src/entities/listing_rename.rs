@@ -27,6 +27,20 @@
 //! now while its own chain said the change had not happened yet
 //! (SCENARIOS R-02). Record an announced change on the day it takes effect.
 //!
+//! The resulting identity must be free: a ticker another listing already
+//! holds is refused by name (`RenameError::TickerCollision`) rather than by
+//! the `UNIQUE(exchange_mic, ticker)` constraint's own text, which says which
+//! columns clashed but not which listing is in the way (SCENARIOS R-03). An
+//! exchange-less (Crypto) listing is checked against the bare ticker, the
+//! `listings_crypto_ticker` partial index's basis, since NULL exchanges
+//! compare distinct under the composite constraint. Both constraints remain
+//! the invariant — the check is a better message ahead of them, not a
+//! replacement. A plain `PUT /listings/:id` keeps answering an ordinary
+//! duplicate with the shared classifier's constraint text: its write is one
+//! row the request itself describes, so the constraint's wording is already
+//! about the thing the caller sent (`docs/API.md`'s "A ticker an exchange
+//! reissues to a different company cannot be recorded" quotes it verbatim).
+//!
 //! A rename may move the listing to another exchange, but not to one quoting
 //! a **different currency** (`RenameError::ExchangeCurrencyMismatch`,
 //! SCENARIOS R-01): `listings.currency` denominates every stored closing
@@ -145,6 +159,23 @@ pub enum RenameError {
         listing_currency: String,
         exchange_currency: String,
     },
+    /// The resulting identity — `(exchange_mic, ticker)`, or the bare
+    /// ticker for an exchange-less (Crypto) listing — is already another
+    /// listing's (SCENARIOS R-03). `UNIQUE(exchange_mic, ticker)` and the
+    /// `listings_crypto_ticker` partial index remain the invariant; this is
+    /// checked first only so the refusal can name the listing standing in
+    /// the way, which the constraint's own message cannot. The listing's own
+    /// row is excluded, so a rename that keeps the ticker and moves only the
+    /// exchange never collides with itself.
+    #[error("ticker {ticker} is already held by listing {holder_id}")]
+    TickerCollision {
+        ticker: String,
+        /// The exchange the renamed listing would sit on; `None` for an
+        /// exchange-less (Crypto) listing, where the bare ticker collides.
+        mic: Option<String>,
+        holder_id: i64,
+        holder_name: String,
+    },
     #[error("listing rename write failed: {0}")]
     Db(#[from] sqlx::Error),
 }
@@ -195,6 +226,27 @@ impl From<RenameError> for ApiError {
                  trades, income, or prices can have its currency corrected with \
                  PUT /listings/:id first)"
             )),
+            RenameError::TickerCollision {
+                ticker,
+                mic,
+                holder_id,
+                holder_name,
+            } => {
+                let held = match &mic {
+                    Some(mic) => format!("on {mic}"),
+                    None => "among the exchange-less (Crypto) listings, which are unique by \
+                             ticker alone"
+                        .to_string(),
+                };
+                ApiError::unprocessable(format!(
+                    "listing {holder_id} ({holder_name}) already holds the ticker {ticker} \
+                     {held} — a ticker is unique across the whole recorded history, not just a \
+                     listing's current identity. If that listing is this same security recorded \
+                     twice, transfer its parcels here and delete it; otherwise record this \
+                     change under a ticker spelling that does not collide, and set price_symbol \
+                     so price collection still asks the provider for the real code"
+                ))
+            }
             RenameError::Db(err) => err.into(),
         }
     }
@@ -328,6 +380,50 @@ pub async fn db_rename(
         if !recognised {
             return Err(RenameError::UnrecognisedDigitalToken);
         }
+    }
+
+    // The resulting identity must be free. `UNIQUE(exchange_mic, ticker)`
+    // and, for an exchange-less listing, the `listings_crypto_ticker`
+    // partial index (NULL exchanges compare distinct, so the composite
+    // constraint cannot hold there) both still enforce this — the check
+    // ahead of them exists only so the refusal names the listing holding
+    // the ticker, which is the one fact needed to act on it, instead of
+    // quoting the constraint (SCENARIOS R-03). The lookup differs by
+    // whether the resulting listing has an exchange, matching the index
+    // that would catch it. `id <> ?` is what keeps it from being a false
+    // positive: a rename that keeps the listing's own ticker and moves only
+    // its exchange finds its own row otherwise, and a listing never
+    // collides with itself.
+    let holder: Option<(i64, String)> = match new_exchange_mic.as_deref() {
+        Some(mic) => {
+            sqlx::query_as(
+                "SELECT id, name FROM listings \
+                 WHERE exchange_mic = ? AND ticker = ? AND id <> ?",
+            )
+            .bind(mic)
+            .bind(&body.ticker)
+            .bind(listing_id)
+            .fetch_optional(&mut *tx)
+            .await?
+        }
+        None => {
+            sqlx::query_as(
+                "SELECT id, name FROM listings \
+                 WHERE exchange_mic IS NULL AND ticker = ? AND id <> ?",
+            )
+            .bind(&body.ticker)
+            .bind(listing_id)
+            .fetch_optional(&mut *tx)
+            .await?
+        }
+    };
+    if let Some((holder_id, holder_name)) = holder {
+        return Err(RenameError::TickerCollision {
+            ticker: body.ticker.clone(),
+            mic: new_exchange_mic.clone(),
+            holder_id,
+            holder_name,
+        });
     }
 
     // `old_name`/`old_price_symbol` are what the rename is about to overwrite
@@ -911,8 +1007,145 @@ mod tests {
         assert_eq!(got.exchange_mic, None);
     }
 
+    /// SCENARIOS R-03, the regression this section exists for: a rename onto
+    /// a ticker another listing on the same exchange already holds used to
+    /// fall through to `UNIQUE(exchange_mic, ticker)`, and the shared
+    /// classifier answered with the constraint's own text — which names the
+    /// columns but not the listing standing in the way, the one fact needed
+    /// to act on it.
     #[tokio::test]
-    async fn db_rename_ticker_collision_surfaces_as_422_via_shared_db_error_mapping() {
+    async fn db_rename_onto_a_ticker_another_listing_holds_names_that_listing() {
+        let pool = test_pool().await;
+        test_support::listing(1)
+            .ticker("LAAC")
+            .mic("XNYS")
+            .insert(&pool)
+            .await;
+        test_support::listing(2)
+            .ticker("LAR")
+            .name("Lithium Argentina")
+            .mic("XNYS")
+            .insert(&pool)
+            .await;
+
+        let err = db_rename(&pool, 1, &body("2024-06-01", "LAR"))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                RenameError::TickerCollision { ticker, mic, holder_id, holder_name }
+                    if ticker == "LAR" && mic.as_deref() == Some("XNYS")
+                        && *holder_id == 2 && holder_name == "Lithium Argentina"
+            ),
+            "expected a ticker collision, got: {err}"
+        );
+        // Refused before any write: neither the listing nor the chain moved.
+        let got = listing::db_get(&pool, 1).await.unwrap().unwrap();
+        assert_eq!(got.ticker, "LAAC");
+        assert!(db_list_for_listing(&pool, 1).await.unwrap().is_empty());
+        // And the listing that held the ticker is untouched too.
+        assert_eq!(
+            listing::db_get(&pool, 2).await.unwrap().unwrap().ticker,
+            "LAR"
+        );
+    }
+
+    /// The same collision on the other index: exchange-less (Crypto)
+    /// listings have NULL `exchange_mic`, which `UNIQUE(exchange_mic,
+    /// ticker)` treats as distinct, so uniqueness there is the
+    /// `listings_crypto_ticker` partial index over the bare ticker. The
+    /// check has to look the holder up the same way the index would.
+    #[tokio::test]
+    async fn db_rename_of_an_exchange_less_listing_onto_a_taken_ticker_names_the_holder() {
+        let pool = test_pool().await;
+        test_support::listing(1)
+            .crypto()
+            .ticker("BTC")
+            .insert(&pool)
+            .await;
+        test_support::listing(2)
+            .crypto()
+            .ticker("ETH")
+            .name("Ether")
+            .insert(&pool)
+            .await;
+
+        let err = db_rename(&pool, 1, &body("2024-06-01", "ETH"))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                RenameError::TickerCollision { ticker, mic, holder_id, holder_name }
+                    if ticker == "ETH" && mic.is_none()
+                        && *holder_id == 2 && holder_name == "Ether"
+            ),
+            "expected a ticker collision, got: {err}"
+        );
+        assert_eq!(
+            listing::db_get(&pool, 1).await.unwrap().unwrap().ticker,
+            "BTC"
+        );
+        assert!(db_list_for_listing(&pool, 1).await.unwrap().is_empty());
+    }
+
+    /// The boundary the check must not trip over: a listing renaming to its
+    /// *own* current ticker while moving exchange. The row the lookup finds
+    /// on the new exchange must be another listing's, never the renamed
+    /// listing's own — and here there is no other listing at all, so an
+    /// unqualified lookup would refuse a perfectly ordinary move.
+    #[tokio::test]
+    async fn db_rename_keeping_its_own_ticker_while_moving_exchange_does_not_self_collide() {
+        let pool = test_pool().await;
+        insert_aud_exchange(&pool, "CXAX").await;
+        test_support::listing(1)
+            .ticker("SAME")
+            .mic("XASX")
+            .insert(&pool)
+            .await;
+
+        let mut moved = body("2024-06-01", "SAME");
+        moved.exchange_mic = Some("CXAX".to_string());
+        let created = db_rename(&pool, 1, &moved).await.unwrap();
+        assert_eq!(created.new_ticker, "SAME");
+        assert_eq!(created.new_exchange_mic.as_deref(), Some("CXAX"));
+        let got = listing::db_get(&pool, 1).await.unwrap().unwrap();
+        assert_eq!(got.ticker, "SAME");
+        assert_eq!(got.exchange_mic.as_deref(), Some("CXAX"));
+    }
+
+    /// The same ticker on a *different* exchange is not a collision at all:
+    /// uniqueness is per `(exchange_mic, ticker)`, so a dual-listed code
+    /// stays enterable and a rename onto it must not be refused.
+    #[tokio::test]
+    async fn db_rename_onto_a_ticker_only_another_exchange_holds_is_allowed() {
+        let pool = test_pool().await;
+        test_support::listing(1)
+            .ticker("LAAC")
+            .mic("XASX")
+            .insert(&pool)
+            .await;
+        test_support::listing(2)
+            .ticker("LAR")
+            .mic("XNYS")
+            .insert(&pool)
+            .await;
+
+        db_rename(&pool, 1, &body("2024-06-01", "LAR"))
+            .await
+            .unwrap();
+        assert_eq!(
+            listing::db_get(&pool, 1).await.unwrap().unwrap().ticker,
+            "LAR"
+        );
+    }
+
+    /// The UNIQUE constraint stays the invariant: the new check is a better
+    /// message, not a replacement for it. Written straight past `db_rename`,
+    /// a colliding `listings` update is still refused by the index.
+    #[tokio::test]
+    async fn the_unique_constraint_still_backstops_the_collision_check() {
         let pool = test_pool().await;
         test_support::listing(1)
             .ticker("LAAC")
@@ -924,10 +1157,79 @@ mod tests {
             .mic("XNYS")
             .insert(&pool)
             .await;
-        let err = db_rename(&pool, 1, &body("2024-06-01", "LAR"))
+        let err = sqlx::query("UPDATE listings SET ticker = 'LAR' WHERE id = 1")
+            .execute(&pool)
             .await
             .unwrap_err();
-        assert!(matches!(err, RenameError::Db(_)));
+        assert!(
+            err.to_string().contains("UNIQUE"),
+            "expected the UNIQUE constraint, got: {err}"
+        );
+    }
+
+    /// At the HTTP surface the refusal is a 422 whose body names the listing
+    /// holding the ticker — id and name — rather than the constraint.
+    #[tokio::test]
+    async fn api_rename_onto_a_taken_ticker_is_422_naming_the_listing_that_holds_it() {
+        let pool = test_pool().await;
+        test_support::listing(1)
+            .ticker("LAAC")
+            .mic("XNYS")
+            .insert(&pool)
+            .await;
+        test_support::listing(2)
+            .ticker("LAR")
+            .name("Lithium Argentina")
+            .mic("XNYS")
+            .insert(&pool)
+            .await;
+
+        let resp = client(&pool)
+            .post(
+                "/listings/1/rename",
+                &serde_json::json!({ "effective_date": "2024-06-01", "ticker": "LAR" }),
+            )
+            .await;
+        let (status, body) = resp.status_and_body();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            body.contains("listing 2 (Lithium Argentina) already holds the ticker LAR on XNYS"),
+            "body was: {body}"
+        );
+        // The constraint is no longer what answers.
+        assert!(!body.contains("UNIQUE"), "body was: {body}");
+    }
+
+    /// The exchange-less refusal says why the bare ticker is what collided.
+    #[tokio::test]
+    async fn api_rename_of_an_exchange_less_listing_onto_a_taken_ticker_is_422() {
+        let pool = test_pool().await;
+        test_support::listing(1)
+            .crypto()
+            .ticker("BTC")
+            .insert(&pool)
+            .await;
+        test_support::listing(2)
+            .crypto()
+            .ticker("ETH")
+            .name("Ether")
+            .insert(&pool)
+            .await;
+
+        let resp = client(&pool)
+            .post(
+                "/listings/1/rename",
+                &serde_json::json!({ "effective_date": "2024-06-01", "ticker": "ETH" }),
+            )
+            .await;
+        let (status, body) = resp.status_and_body();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            body.contains("listing 2 (Ether) already holds the ticker ETH")
+                && body.contains("exchange-less (Crypto) listings, which are unique by ticker"),
+            "body was: {body}"
+        );
+        assert!(!body.contains("UNIQUE"), "body was: {body}");
     }
 
     #[tokio::test]

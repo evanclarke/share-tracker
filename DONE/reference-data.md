@@ -1094,3 +1094,66 @@ also mention.
       `db_dead_symbol_advice_names_price_symbol_for_a_current_span`,
       `db_dead_symbol_advice_for_an_earlier_span_names_the_backfill_override`, plus the two
       empty-window tests, which now pin the advice on each side of a rename.
+
+## SCENARIOS R-03: a ticker collision on rename is refused with the raw SQLite constraint text
+
+`docs/API.md` documents a colliding ticker as one of the rename's own `422` causes, alongside the
+no-op rename, the out-of-order date and the two Crypto rules — each of which has a written message
+(`RenameError`). The collision has none: it falls through to the UNIQUE constraint, and
+`infra::http`'s classifier rephrases it as "a record with these key values already exists (UNIQUE
+constraint failed: listings.exchange_mic, listings.ticker)". The exchange-less form is the same with
+`listings.ticker`. Nothing names the listing collided with, which is the one fact needed to act on
+it, and CLAUDE.md's own convention for this family of pairings is a message "rather than quoting the
+constraint behind them".
+
+Reproduced: listing 2 is `ZZZ` on XASX; `POST /listings/1/rename {"ticker":"ZZZ"}` gives the message
+above. Behaviour is otherwise correct — the transaction rolls back whole, leaving neither a rename
+row nor a changed listing, verified on both indexes.
+
+- [x] Add a `RenameError::TickerCollision` checked before the write, naming the listing that holds
+      the ticker (id and name), and cover the exchange-less case in the same check.
+      Done 2026-08-22: `db_rename` now looks the resulting identity up on its own transaction,
+      last of the sibling checks and immediately before the INSERT, and answers a 422 naming the
+      listing in the way — *listing 2 (Lithium Argentina) already holds the ticker LAR on XNYS — a
+      ticker is unique across the whole recorded history, not just a listing's current identity. If
+      that listing is this same security recorded twice, transfer its parcels here and delete it;
+      otherwise record this change under a ticker spelling that does not collide, and set
+      price_symbol so price collection still asks the provider for the real code*. The lookup
+      differs by whether the *resulting* listing has an exchange, matching the index that would
+      catch it: `exchange_mic = ? AND ticker = ?` for the composite `UNIQUE(exchange_mic, ticker)`,
+      and `exchange_mic IS NULL AND ticker = ?` for the `listings_crypto_ticker` partial index,
+      which is what keeps exchange-less tickers unique at all (NULLs compare distinct under the
+      composite constraint) — the exchange-less refusal says so, naming the bare ticker as what
+      collided. `id <> ?` is what stops the check being a false positive: a rename that keeps the
+      listing's own ticker and moves only its exchange would otherwise find its own row and refuse
+      an ordinary move. Both constraints stay in place as the invariant, pinned by a test that
+      writes straight past `db_rename`. Tests:
+      `db_rename_onto_a_ticker_another_listing_holds_names_that_listing`,
+      `db_rename_of_an_exchange_less_listing_onto_a_taken_ticker_names_the_holder`,
+      `db_rename_keeping_its_own_ticker_while_moving_exchange_does_not_self_collide`,
+      `db_rename_onto_a_ticker_only_another_exchange_holds_is_allowed`,
+      `the_unique_constraint_still_backstops_the_collision_check`,
+      `api_rename_onto_a_taken_ticker_is_422_naming_the_listing_that_holds_it`,
+      `api_rename_of_an_exchange_less_listing_onto_a_taken_ticker_is_422`. The first two also assert
+      that nothing is written when the rename is refused — no chain row, no changed listing, and the
+      listing that held the ticker untouched.
+- [x] `PUT /listings/:id` answers the same raw text for an ordinary duplicate; decide whether it
+      shares the new message or stays as it is.
+      Decided 2026-08-22: **it stays as it is.** The two paths are not the same situation. A rename
+      is a compound write — one `listing_renames` INSERT plus the `listings` UPDATE — so the
+      constraint fires mid-operation and "a record with these key values already exists" does not
+      even say which of the two rows it is about, and the row that collided appears nowhere in the
+      request; naming it is the only way the caller learns what is in the way. A `PUT /listings/:id`
+      writes one row, the very row the request describes, so the classifier's rephrased constraint
+      is already about the thing the caller sent. That is what `ApiError`'s `From<sqlx::Error>`
+      classifier exists for — a serviceable 422 for every entity without a hand-written check —
+      and `listing::db_upsert` already says in the code that "ticker uniqueness stays index-enforced
+      by the table itself" while it hand-writes the pairings SQLite cannot express. Widening it
+      would also falsify the Known limitation written the day before (*A ticker an exchange reissues
+      to a different company cannot be recorded*, SCENARIOS R-10), which quotes both constraint
+      strings verbatim as the answer a reissued code gets, and its `doc_checks` pin. `docs/API.md`
+      now states the split where that limitation quotes the text: the constraint wording is the
+      `PUT` path's answer, and a rename onto a taken ticker is refused by its own message naming the
+      listing. No code change; `db_duplicate_exchange_less_ticker_rejected` and
+      `known_limitations_document_a_reissued_ticker_cannot_be_recorded` continue to pin the
+      unchanged `PUT` behaviour.
