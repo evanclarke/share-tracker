@@ -81,7 +81,7 @@ behind or became a recorded finding.
 | O. Net capital gain, losses, and carry-forward | 17 | 2026-08-19 (`e1f1f70`) | 3 raised, all closed — see below |
 | P. Tax summary, annual tax report, exports | 12 | 2026-08-20 (`cb36977`) | 5 raised, all closed — see below |
 | Q. Prices, valuation, and snapshots | 15 | 2026-08-20 (`3696ec1`) | 5 raised, all closed — see below |
-| R. Listing identity and renames | 10 | — | — |
+| R. Listing identity and renames | 10 | 2026-08-21 (`28a7c5f`) | 8 raised, all closed — see below |
 | S. Settlement, holidays, and dates | 10 | — | — |
 | T. Jobs, backup, and operations | 12 | — | — |
 | U. Audit trail and history | 8 | — | — |
@@ -863,6 +863,45 @@ its scenario ids.
 | Nothing pins the snapshot-staleness trigger set, and it has now been missed three times | Q-09 | `55e1355` |
 | The price provider serves split-adjusted history, so every valuation of a pre-split date is wrong by the split ratio | Q-14 | `9554de5` |
 | A still-held delisted or suspended listing blocks the whole portfolio's snapshots indefinitely | Q-02 | `c71e1f9` |
+
+### Section R findings
+
+All ten scenarios behaved as designed on their own terms — the three rename shapes each taking
+`old_*` from the listing's own row rather than the request, the out-of-order date refusal, the
+collision rolling back whole on both unique indexes, the newest-only undo scoped to the listing in
+the path, the `PUT` refusal naming `/rename` while a name-only `PUT` still passes, a straddling
+backfill split at the effective date (`FB` before 2022-06-09, `META` from it) with the documented
+`symbol` override recovering the retired span, a demerger of a renamed listing splitting A$2,000
+into A$1,400 head + A$600 demerged with the chain intact, `price_symbol` applying to the current
+identity span only, the live-exchange settlement limitation reproduced to the day (2024-04-03
+recomputed to 2024-04-02 on a re-save after the exchange moved), and the timeless ticker uniqueness
+holding. Row history recorded every leg.
+
+The eight findings all came from the standing probes rather than the scenarios' own text, and they
+cluster around one thing: **the rename is a dated event everywhere except in the write that records
+it.** Three were about that write — it applied the change the moment it was recorded whatever its
+effective date, its undo restored two of the four fields it can change, and it could move a listing
+across an exchange currency boundary the `PUT` path exists to make unreachable. Two were about what
+the chain cannot express: a ticker reissued to another company, and a provider symbol for a span
+that is no longer current. One was a report reading today's ticker where two documents said it read
+the row's own date. One was that the whole feature had no screen, though the listings form's own
+`422` told the user to call it. And one was a refusal that quoted the constraint instead of naming
+what it collided with.
+
+Each is archived in [`DONE/reference-data.md`](DONE/reference-data.md) — bar the activity-ledger one
+in [`DONE/reviews.md`](DONE/reviews.md) and the web-UI one in
+[`DONE/web-frontend.md`](DONE/web-frontend.md) — under a heading naming its scenario ids.
+
+| Finding | Scenarios | Fixed by |
+| --- | --- | --- |
+| A future-dated rename takes effect the moment it is recorded | R-02 | `59bb595` |
+| Undoing a rename leaves behind the price symbol the undone rename set | R-04, R-08 | `00c09b6` |
+| A rename can move a listing to an exchange quoting another currency, and the currency can then never be fixed | R-01 | `7185f2a` |
+| A ticker reused by a different company cannot be recorded at all | R-10 | `9852fc9`, `8396e8f` (documented) |
+| The listing activity ledger names counterpart listings at today's ticker | R-07 | `e2b8da1` |
+| The rename feature has no web UI, and the listing form sends the user to an endpoint the UI does not offer | R-01, R-05 | `ee0a8f7` |
+| The diagnostic written for a renamed symbol does not fire for a renamed symbol | R-06 | `c101b2c` |
+| A ticker collision on rename is refused with the raw SQLite constraint text | R-03 | `709c4d5` |
 
 ## A. Deletion and mutation ripple effects
 
