@@ -1030,3 +1030,67 @@ for any year after the park prints a ticker the security never traded under. Not
 - **(c) Allow the collision explicitly** — drop the unique index in favour of a write-time check that
   can be overridden by a flag on the body, recording the reuse deliberately. Least machinery, but it
   removes the guard that stops an ordinary duplicate-entry mistake.
+
+## SCENARIOS R-06: the diagnostic written for a renamed symbol does not fire for a renamed symbol
+
+`closing_price`'s empty-window branch stores a message that names the symbol and points at the fix —
+"the symbol may be wrong, renamed, or delisted; set price_symbol on the listing or backfill with an
+explicit symbol" — and its comment says it is there for "the classic wrong/renamed/delisted-symbol
+case". It fires only when the provider answers **200 with zero candles**. Yahoo does not answer that
+way for a symbol it does not know: it answers HTTP 400 or "Not found", which the fetcher surfaces as
+a transport error, so those dates store the bare provider string instead.
+
+Measured against the live provider:
+
+| Case | Provider answer | Message stored |
+| --- | --- | --- |
+| `FB`, retired by the FB → META rename | `Unexpected response status: 400` | bare provider error |
+| `ZZQQNOTREAL`, no such symbol | `Not found` | bare provider error |
+| `META` over a range before its 2012 IPO | `Unexpected response status: 400` | bare provider error |
+| `CBA` on XNYS, a symbol Yahoo knows but serves nothing for | 200, zero candles | the fix-pointing message |
+
+So the renamed case — the one the message names first and the one this section is about — is the one
+that misses it. A backfill straddling a rename fills the current span and leaves the pre-rename span
+as a wall of raw HTTP errors, with nothing saying the two halves failed for different reasons.
+
+The message's advice is also half wrong for that span: `price_symbol` applies to the **current**
+identity only (`yahoo_symbol_for` checks `identity.from == market.current().from`), so setting it
+cannot fix a pre-rename date. Only the backfill `symbol` override can, which the same sentence does
+also mention.
+
+- [x] Detect the dead-symbol case on the error path too, not only the empty-candle path, so a
+      pre-rename span says why it failed. The symbol is already in hand at that point
+      (`fetched_symbol` records it on the errored row).
+      Done 2026-08-22: the fetcher trait's failure type is now `closing_price::FetchError`, a
+      two-way classification made where the provider's own error is still in hand —
+      `NoSuchSymbol` (the provider positively answering it serves no such series) or `Other`
+      (everything else). `YahooFetcher` classifies from `yfinance-rs`'s **typed** `YfError`, not
+      by matching words in a message: `YfError::NotFound` and `YfError::Status { status: 400 }`
+      are the two ways Yahoo says "no such series", and both were confirmed live. The boundary is
+      deliberately narrow — a `429`, a `5xx`, a transport failure and the rest of the 4xx range
+      (a `401`/`403` is a crumb or credential problem) stay `Other`, so a transient outage is
+      never misdiagnosed as a dead symbol; those dates still store the provider's own words
+      unembellished. `fetch_and_store` now writes the same naming-and-remedy diagnostic on the
+      `NoSuchSymbol` path as on the empty-window path, keeping the provider's text in front of it
+      as evidence. Verified live against Yahoo on a throwaway database: a listing entered as `FB`
+      with a 2022-06-09 rename to `META`, backfilled 2022-06-06..2022-06-13, stores the three
+      post-rename days ok under `META` and the pre-rename days as
+      `yahoo fetch for FB failed: Unexpected response status: 400 at https://query1.finance.yahoo.com/v8/finance/chart/FB?… — the provider serves no history for FB over 2022-06-06..2022-06-08; the symbol may be wrong, renamed, or delisted; this range predates the listing's current ticker, and price_symbol applies to that ticker only, so backfill this range with an explicit symbol`
+      (and `ZZQQNOTREAL`, on a listing with no rename, the same message from Yahoo's `Not found`
+      with the current-span advice). Tests: `db_a_no_such_symbol_failure_is_diagnosed_not_stored_bare`,
+      `db_a_transient_failure_is_never_diagnosed_as_a_dead_symbol`,
+      `yahoo_classifies_only_a_no_such_series_answer_as_a_dead_symbol`.
+- [x] Make the advice span-aware: name `price_symbol` only for a current-identity span, and the
+      backfill `symbol` override for an earlier one.
+      Done 2026-08-22: `dead_symbol_remedy(market, from)` picks the remedy per identity segment by
+      the same comparison `yahoo_symbol_for` makes (`identity.from == market.current().from`), and
+      both diagnostics — the empty-window one and the new error-path one — take their advice from
+      it. A current-identity span still reads "set price_symbol on the listing or backfill with an
+      explicit symbol"; an earlier span reads "this range predates the listing's current ticker,
+      and price_symbol applies to that ticker only, so backfill this range with an explicit
+      symbol", so the message no longer names a fix that cannot reach the fetch it is about.
+      `docs/API.md`'s Closing prices section now describes both detections and the span-aware
+      advice, and says what is *not* detected. Tests:
+      `db_dead_symbol_advice_names_price_symbol_for_a_current_span`,
+      `db_dead_symbol_advice_for_an_earlier_span_names_the_backfill_override`, plus the two
+      empty-window tests, which now pin the advice on each side of a rename.

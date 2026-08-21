@@ -31,44 +31,10 @@ moved to XNYS); and `R-10` refuses a listing whose ticker another listing alread
 recorded every leg — the `listings` UPDATE behind each rename and the `listing_renames` DELETE behind
 each undo.
 
-**Eight findings; R-01, R-02, R-04/R-08 and R-10 are closed (all archived in
+**Eight findings; R-01, R-02, R-04/R-08, R-06 and R-10 are closed (all archived in
 `DONE/reference-data.md`), R-07 is closed (archived in `DONE/reviews.md`) and R-01/R-05's web-UI gap
-is closed (archived in `DONE/web-frontend.md`), two remain open.** They cluster: one is about what
-the rename chain cannot express (a pre-rename provider symbol), and one is a refusal message. Each
-is a `## ` section below, in the order I would fix them.
-
-## SCENARIOS R-06: the diagnostic written for a renamed symbol does not fire for a renamed symbol
-
-`closing_price`'s empty-window branch stores a message that names the symbol and points at the fix —
-"the symbol may be wrong, renamed, or delisted; set price_symbol on the listing or backfill with an
-explicit symbol" — and its comment says it is there for "the classic wrong/renamed/delisted-symbol
-case". It fires only when the provider answers **200 with zero candles**. Yahoo does not answer that
-way for a symbol it does not know: it answers HTTP 400 or "Not found", which the fetcher surfaces as
-a transport error, so those dates store the bare provider string instead.
-
-Measured against the live provider:
-
-| Case | Provider answer | Message stored |
-| --- | --- | --- |
-| `FB`, retired by the FB → META rename | `Unexpected response status: 400` | bare provider error |
-| `ZZQQNOTREAL`, no such symbol | `Not found` | bare provider error |
-| `META` over a range before its 2012 IPO | `Unexpected response status: 400` | bare provider error |
-| `CBA` on XNYS, a symbol Yahoo knows but serves nothing for | 200, zero candles | the fix-pointing message |
-
-So the renamed case — the one the message names first and the one this section is about — is the one
-that misses it. A backfill straddling a rename fills the current span and leaves the pre-rename span
-as a wall of raw HTTP errors, with nothing saying the two halves failed for different reasons.
-
-The message's advice is also half wrong for that span: `price_symbol` applies to the **current**
-identity only (`yahoo_symbol_for` checks `identity.from == market.current().from`), so setting it
-cannot fix a pre-rename date. Only the backfill `symbol` override can, which the same sentence does
-also mention.
-
-- [ ] Detect the dead-symbol case on the error path too, not only the empty-candle path, so a
-      pre-rename span says why it failed. The symbol is already in hand at that point
-      (`fetched_symbol` records it on the errored row).
-- [ ] Make the advice span-aware: name `price_symbol` only for a current-identity span, and the
-      backfill `symbol` override for an earlier one.
+is closed (archived in `DONE/web-frontend.md`), one remains open** — a refusal message. It is the
+`## ` section below.
 
 ## SCENARIOS R-03: a ticker collision on rename is refused with the raw SQLite constraint text
 

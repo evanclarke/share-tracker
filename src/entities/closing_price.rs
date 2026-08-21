@@ -529,8 +529,51 @@ pub struct FetchedClose {
     pub currency: String,
 }
 
+/// Why a [`PriceFetcher::daily_closes`] call failed, in the only distinction
+/// [`fetch_and_store`] can act on: did the provider *positively answer* that
+/// it has no such series, or did the call merely not succeed?
+///
+/// Only the first is evidence about the symbol. A rate limit, a 5xx, a
+/// timeout or a connection failure says nothing about whether the symbol is
+/// right, and diagnosing one of those as a dead symbol would send the
+/// operator hunting for a rename that never happened — which is why the
+/// classification is made by the provider adapter, where the provider's own
+/// typed error is still in hand, rather than by string-matching the message
+/// afterwards.
+#[derive(thiserror::Error, Debug, Clone, PartialEq, Eq)]
+pub enum FetchError {
+    /// The provider answered that it serves no series under this symbol
+    /// (Yahoo: `404 Not found`, or the `400` its chart API returns for an
+    /// unknown/retired ticker). The classic wrong/renamed/delisted-symbol
+    /// case, arriving as an error rather than as an empty window.
+    #[error("{0}")]
+    NoSuchSymbol(String),
+    /// Anything else: an outage, a rate limit, a transport failure, or a
+    /// local failure that never reached the provider (an unresolvable symbol
+    /// or timezone). Carries no verdict on the symbol.
+    #[error("{0}")]
+    Other(String),
+}
+
+impl FetchError {
+    /// The failure text as it would be shown or stored.
+    pub fn message(&self) -> &str {
+        match self {
+            Self::NoSuchSymbol(m) | Self::Other(m) => m,
+        }
+    }
+}
+
+/// A failure raised *before* the provider was reached (symbol or timezone
+/// resolution) is never evidence about the symbol's existence.
+impl From<String> for FetchError {
+    fn from(message: String) -> Self {
+        Self::Other(message)
+    }
+}
+
 pub type FetchFuture<'a> =
-    Pin<Box<dyn Future<Output = Result<Vec<FetchedClose>, String>> + Send + 'a>>;
+    Pin<Box<dyn Future<Output = Result<Vec<FetchedClose>, FetchError>> + Send + 'a>>;
 
 /// The most recent available price for a listing, for on-demand live
 /// valuation: the price in the listing's quote currency and the provider's
@@ -575,6 +618,10 @@ pub trait PriceFetcher: Send + Sync {
     /// asked for a single symbol per call, and after a rename that symbol
     /// differs either side of the effective date. Implementations resolve the
     /// symbol at `from`.
+    ///
+    /// A failure is classified as it is raised ([`FetchError`]): an
+    /// implementation answers `NoSuchSymbol` only where the provider itself
+    /// said it has no such series, and `Other` for everything else.
     fn daily_closes<'a>(
         &'a self,
         market: &'a Market,
@@ -658,6 +705,30 @@ fn yahoo_symbol_for(market: &Market, identity: &MarketIdentity) -> Result<String
     }
 }
 
+/// Classify a `yfinance-rs` failure into the one distinction
+/// [`fetch_and_store`] acts on, from the crate's **typed** error rather than
+/// its rendered message — the status is a field on the variant, so nothing
+/// here depends on the provider's or the crate's wording.
+///
+/// Yahoo has two ways of saying "no such series": `404` (the crate's
+/// `NotFound`, rendered "Not found at …") and the `400` its chart API answers
+/// for an unknown or retired ticker (`Status { status: 400 }`, rendered
+/// "Unexpected response status: 400 at …") — measured against the live
+/// provider for `ZZQQNOTREAL` and for `FB` after the FB → META rename
+/// (SCENARIOS R-06). Everything else stays [`FetchError::Other`], deliberately
+/// including the rest of the 4xx range: a `401`/`403` is a credential or
+/// crumb problem and a `429` is a rate limit, neither of which is evidence
+/// that the symbol is wrong, and misdiagnosing an outage as a dead symbol is
+/// the failure mode this narrowness exists to prevent.
+fn classify_yahoo_failure(symbol: &str, error: yfinance_rs::YfError) -> FetchError {
+    let message = format!("yahoo fetch for {symbol} failed: {error}");
+    match error {
+        yfinance_rs::YfError::NotFound { .. }
+        | yfinance_rs::YfError::Status { status: 400, .. } => FetchError::NoSuchSymbol(message),
+        _ => FetchError::Other(message),
+    }
+}
+
 impl PriceFetcher for YahooFetcher {
     fn source(&self) -> &'static str {
         "yahoo"
@@ -689,7 +760,7 @@ impl PriceFetcher for YahooFetcher {
                 .auto_adjust(false)
                 .fetch()
                 .await
-                .map_err(|e| format!("yahoo fetch for {symbol} failed: {e}"))?;
+                .map_err(|e| classify_yahoo_failure(&symbol, e))?;
             Ok(candles
                 .into_iter()
                 .map(|c| FetchedClose {
@@ -1426,6 +1497,25 @@ pub async fn db_held_listing_ids(
 // Fetch-and-store: shared by scheduled collection, manual re-fetch and backfill
 // ---------------------------------------------------------------------------
 
+/// What to advise when a segment's symbol looks wrong — the remedy that can
+/// actually reach **that** segment.
+///
+/// `price_symbol` is consulted only for the listing's *current* identity
+/// (`yahoo_symbol_for`, so that an override matching today's ticker is never
+/// applied to a pre-rename date), which means naming it for an earlier span
+/// would be advice that cannot work: setting it would change nothing about
+/// the failing fetch. There, only the backfill `symbol` override reaches the
+/// call. Spans are unique by their start date, so that comparison identifies
+/// the current one.
+fn dead_symbol_remedy(market: &Market, from: NaiveDate) -> &'static str {
+    if market.identity_at(from).from == market.current().from {
+        "set price_symbol on the listing or backfill with an explicit symbol"
+    } else {
+        "this range predates the listing's current ticker, and price_symbol applies to that \
+         ticker only, so backfill this range with an explicit symbol"
+    }
+}
+
 /// Fetch the given trading days for a listing and store one row per requested
 /// date: an ok row for a returned candle in the listing's currency, an errored
 /// row for a fetch failure, a missing candle, or a currency mismatch. Returns
@@ -1469,29 +1559,48 @@ async fn fetch_and_store(
         // `source` it is stored beside.
         let symbol = fetcher.symbol(market, from);
         let fetched = fetcher.daily_closes(market, from, to).await;
-        let by_date: Result<HashMap<NaiveDate, FetchedClose>, String> =
+        let by_date: Result<HashMap<NaiveDate, FetchedClose>, FetchError> =
             fetched.map(|closes| closes.into_iter().map(|c| (c.date, c)).collect());
 
-        // A provider call that returns *zero* candles across the whole
-        // requested window (as opposed to a partial result with a data gap on
-        // one date) is the classic wrong/renamed/delisted-symbol case, not a
-        // transient outage — the day-by-day fallback message below is
-        // indistinguishable from one, so every date gets a message that names
-        // the symbol and points at the fix instead. Judged per segment, so the
-        // message names the symbol that actually came back empty.
+        // The provider says the symbol is wrong/renamed/delisted in two
+        // different ways, and both get a message naming the symbol and the
+        // remedy instead of a bare provider string:
+        //
+        //  - a **200 with zero candles** across the whole requested window (as
+        //    opposed to a partial result with a data gap on one date), which
+        //    would otherwise fall through to the day-by-day message below and
+        //    read exactly like a transient outage; and
+        //  - a **`NoSuchSymbol` failure** — the provider positively answering
+        //    that it has no such series (`FetchError`). Yahoo answers that way
+        //    for a ticker retired by a rename, so this is the path the
+        //    pre-rename half of a straddling backfill actually takes.
+        //
+        // Anything else that failed keeps the provider's own words: an outage
+        // is not evidence about the symbol. Judged per segment, so the message
+        // names the symbol that actually failed and advises the remedy that
+        // reaches *that* segment.
         let symbol_dead_or_wrong = matches!(&by_date, Ok(map) if map.is_empty());
+        let named_symbol = || symbol.clone().unwrap_or_else(|e| e);
+        let remedy = dead_symbol_remedy(market, from);
         let no_candles_message = || {
-            let symbol = symbol.clone().unwrap_or_else(|e| e);
             format!(
-                "provider returned no candles for {symbol} over {from}..{to} — the symbol may be \
-                 wrong, renamed, or delisted; set price_symbol on the listing or backfill with an \
-                 explicit symbol"
+                "provider returned no candles for {} over {from}..{to} — the symbol may be wrong, \
+                 renamed, or delisted; {remedy}",
+                named_symbol()
+            )
+        };
+        let dead_symbol_message = |provider_error: &str| {
+            format!(
+                "{provider_error} — the provider serves no history for {} over {from}..{to}; the \
+                 symbol may be wrong, renamed, or delisted; {remedy}",
+                named_symbol()
             )
         };
 
         for date in wanted {
             let result = match &by_date {
-                Err(e) => Err(e.clone()),
+                Err(FetchError::NoSuchSymbol(e)) => Err(dead_symbol_message(e)),
+                Err(e) => Err(e.message().to_string()),
                 Ok(_) if symbol_dead_or_wrong => Err(no_candles_message()),
                 Ok(map) => match map.get(&date) {
                     None => {
@@ -2292,7 +2401,10 @@ pub mod test_support {
         /// provider that serves a security's history only under the symbol it
         /// was quoted as at the time — the shape a rename produces.
         closes: HashMap<String, Vec<FetchedClose>>,
-        fail: Option<String>,
+        /// A blanket failure, classified the way a provider adapter classifies
+        /// its own ([`FetchError`]) — so a stub can model "the provider says
+        /// it has no such symbol" separately from "the provider is down".
+        fail: Option<FetchError>,
     }
 
     impl QuoteStub {
@@ -2339,7 +2451,7 @@ pub mod test_support {
 
         pub fn failing(msg: &str) -> Self {
             QuoteStub {
-                fail: Some(msg.to_string()),
+                fail: Some(FetchError::Other(msg.to_string())),
                 ..Default::default()
             }
         }
@@ -2368,8 +2480,8 @@ pub mod test_support {
             to: NaiveDate,
         ) -> FetchFuture<'a> {
             Box::pin(async move {
-                if let Some(msg) = &self.fail {
-                    return Err(msg.clone());
+                if let Some(failure) = &self.fail {
+                    return Err(failure.clone());
                 }
                 let symbol = self.symbol(market, from)?;
                 Ok(self
@@ -2387,8 +2499,8 @@ pub mod test_support {
 
         fn latest_quote<'a>(&'a self, market: &'a Market) -> QuoteFuture<'a> {
             Box::pin(async move {
-                if let Some(msg) = &self.fail {
-                    return Err(msg.clone());
+                if let Some(failure) = &self.fail {
+                    return Err(failure.message().to_string());
                 }
                 self.quotes
                     .get(&market.listing.id)
@@ -2467,7 +2579,7 @@ mod tests {
     struct StubFetcher {
         closes: HashMap<i64, Vec<FetchedClose>>,
         quotes: HashMap<i64, LatestQuote>,
-        fail: Option<String>,
+        fail: Option<FetchError>,
         calls: Mutex<Vec<(i64, NaiveDate, NaiveDate)>>,
         /// The resolved symbol (`yahoo_symbol`'s output) each `daily_closes`
         /// call was made with — lets a test confirm a backfill `symbol`
@@ -2506,9 +2618,21 @@ mod tests {
             self
         }
 
+        /// A blanket failure of the "not evidence about the symbol" kind —
+        /// an outage. See [`StubFetcher::failing_no_such_symbol`] for the
+        /// other kind.
         fn failing(msg: &str) -> Self {
             StubFetcher {
-                fail: Some(msg.to_string()),
+                fail: Some(FetchError::Other(msg.to_string())),
+                ..Default::default()
+            }
+        }
+
+        /// A provider that positively answers that it has no such series —
+        /// what Yahoo does for a ticker retired by a rename.
+        fn failing_no_such_symbol(msg: &str) -> Self {
+            StubFetcher {
+                fail: Some(FetchError::NoSuchSymbol(msg.to_string())),
                 ..Default::default()
             }
         }
@@ -2546,8 +2670,8 @@ mod tests {
                     .lock()
                     .unwrap()
                     .push(self.symbol(market, from).unwrap_or_default());
-                if let Some(msg) = &self.fail {
-                    return Err(msg.clone());
+                if let Some(failure) = &self.fail {
+                    return Err(failure.clone());
                 }
                 Ok(self
                     .closes
@@ -2564,8 +2688,8 @@ mod tests {
 
         fn latest_quote<'a>(&'a self, market: &'a Market) -> QuoteFuture<'a> {
             Box::pin(async move {
-                if let Some(msg) = &self.fail {
-                    return Err(msg.clone());
+                if let Some(failure) = &self.fail {
+                    return Err(failure.message().to_string());
                 }
                 self.quotes
                     .get(&market.listing.id)
@@ -4585,7 +4709,12 @@ mod tests {
             let msg = row.error.unwrap();
             assert!(msg.contains("LAAC"), "names the symbol: {msg}");
             assert!(msg.contains("renamed"), "points at the cause: {msg}");
-            assert!(msg.contains("price_symbol"), "points at the fix: {msg}");
+            // A single-identity listing, so this window *is* the current
+            // span and price_symbol is a remedy that can reach it.
+            assert!(
+                msg.contains("set price_symbol on the listing"),
+                "points at the fix: {msg}"
+            );
         }
     }
 
@@ -5133,6 +5262,173 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(good.status, PriceStatus::Ok);
+        // Advice for a pre-rename span: price_symbol cannot reach it.
+        assert!(
+            msg.contains("backfill this range with an explicit symbol"),
+            "names the remedy that applies to a pre-rename span: {msg}"
+        );
+        assert!(!msg.contains("set price_symbol"), "{msg}");
+    }
+
+    /// The dead-symbol diagnostic has to fire on the **error** path too:
+    /// Yahoo answers a retired ticker with 400/"Not found", not with an empty
+    /// 200, so the pre-rename half of a straddling backfill used to store a
+    /// bare HTTP string with nothing saying why it failed (SCENARIOS R-06).
+    #[tokio::test]
+    async fn db_a_no_such_symbol_failure_is_diagnosed_not_stored_bare() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "FB", "XNYS", "USD").await;
+        rename_listing(&pool, 1, ymd(2022, 6, 9), "META", None).await;
+
+        let market = load_market(&pool, 1).await.unwrap().unwrap();
+        let stub = StubFetcher::failing_no_such_symbol(
+            "yahoo fetch for FB failed: Unexpected response \
+                 status: 400 at https://query2.finance.yahoo.com/v8/finance/chart/FB",
+        );
+        let days = [ymd(2022, 6, 8)];
+        let (ok, errored) = fetch_and_store(&pool, &stub, &market, &days).await.unwrap();
+        assert_eq!((ok, errored), (0, 1));
+
+        let row = db_get_one(&pool, 1, ymd(2022, 6, 8))
+            .await
+            .unwrap()
+            .unwrap();
+        let msg = row.error.unwrap();
+        assert!(
+            msg.contains("status: 400"),
+            "keeps the provider's own words: {msg}"
+        );
+        assert!(msg.contains("FB"), "names the symbol that failed: {msg}");
+        assert!(
+            msg.contains("may be wrong, renamed, or delisted"),
+            "says why it may have failed: {msg}"
+        );
+        assert_eq!(row.fetched_symbol.as_deref(), Some("FB"));
+    }
+
+    /// ...and only on that path. A 5xx, a rate limit or a dropped connection
+    /// is not evidence the symbol is wrong, so the row keeps the provider's
+    /// error and gains no diagnosis it cannot support.
+    #[tokio::test]
+    async fn db_a_transient_failure_is_never_diagnosed_as_a_dead_symbol() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "FB", "XNYS", "USD").await;
+        rename_listing(&pool, 1, ymd(2022, 6, 9), "META", None).await;
+
+        let market = load_market(&pool, 1).await.unwrap().unwrap();
+        let stub = StubFetcher::failing("yahoo fetch for FB failed: Server error 503 at https://q");
+        let days = [ymd(2022, 6, 8)];
+        let (ok, errored) = fetch_and_store(&pool, &stub, &market, &days).await.unwrap();
+        assert_eq!((ok, errored), (0, 1));
+
+        let msg = db_get_one(&pool, 1, ymd(2022, 6, 8))
+            .await
+            .unwrap()
+            .unwrap()
+            .error
+            .unwrap();
+        assert_eq!(
+            msg, "yahoo fetch for FB failed: Server error 503 at https://q",
+            "the provider's error, unembellished"
+        );
+        assert!(!msg.contains("renamed"), "{msg}");
+        assert!(!msg.contains("price_symbol"), "{msg}");
+    }
+
+    /// The advice is span-aware. For a date in the listing's **current**
+    /// identity, `price_symbol` is consulted, so it is worth naming.
+    #[tokio::test]
+    async fn db_dead_symbol_advice_names_price_symbol_for_a_current_span() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "FB", "XNYS", "USD").await;
+        rename_listing(&pool, 1, ymd(2022, 6, 9), "META", None).await;
+
+        let market = load_market(&pool, 1).await.unwrap().unwrap();
+        let stub = StubFetcher::failing_no_such_symbol("yahoo fetch for META failed: Not found");
+        let days = [ymd(2026, 6, 2)];
+        fetch_and_store(&pool, &stub, &market, &days).await.unwrap();
+
+        let msg = db_get_one(&pool, 1, ymd(2026, 6, 2))
+            .await
+            .unwrap()
+            .unwrap()
+            .error
+            .unwrap();
+        assert!(msg.contains("set price_symbol on the listing"), "{msg}");
+    }
+
+    /// ...and for a **pre-rename** date it is not: `yahoo_symbol_for` applies
+    /// `price_symbol` to the current identity only, so setting it could not
+    /// fix this fetch. Only the backfill `symbol` override can.
+    #[tokio::test]
+    async fn db_dead_symbol_advice_for_an_earlier_span_names_the_backfill_override() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "FB", "XNYS", "USD").await;
+        rename_listing(&pool, 1, ymd(2022, 6, 9), "META", None).await;
+
+        let market = load_market(&pool, 1).await.unwrap().unwrap();
+        let stub = StubFetcher::failing_no_such_symbol("yahoo fetch for FB failed: Not found");
+        let days = [ymd(2022, 6, 8)];
+        fetch_and_store(&pool, &stub, &market, &days).await.unwrap();
+
+        let msg = db_get_one(&pool, 1, ymd(2022, 6, 8))
+            .await
+            .unwrap()
+            .unwrap()
+            .error
+            .unwrap();
+        assert!(
+            msg.contains("backfill this range with an explicit symbol"),
+            "{msg}"
+        );
+        assert!(
+            !msg.contains("set price_symbol"),
+            "advice that cannot reach a pre-rename span: {msg}"
+        );
+    }
+
+    /// The dead-symbol verdict is read off the provider's **typed** error, so
+    /// it cannot drift with the crate's or Yahoo's wording — and it is narrow:
+    /// only a positive "no such series" answer counts, never an outage.
+    #[test]
+    fn yahoo_classifies_only_a_no_such_series_answer_as_a_dead_symbol() {
+        let url = || "https://query2.finance.yahoo.com/v8/finance/chart/FB".to_string();
+        let dead = [
+            yfinance_rs::YfError::NotFound { url: url() },
+            yfinance_rs::YfError::Status {
+                status: 400,
+                url: url(),
+            },
+        ];
+        for error in dead {
+            assert!(
+                matches!(
+                    classify_yahoo_failure("FB", error),
+                    FetchError::NoSuchSymbol(_)
+                ),
+                "a provider answer of no-such-series"
+            );
+        }
+        let transient = [
+            yfinance_rs::YfError::ServerError {
+                status: 503,
+                url: url(),
+            },
+            yfinance_rs::YfError::RateLimited { url: url() },
+            yfinance_rs::YfError::Status {
+                status: 403,
+                url: url(),
+            },
+            yfinance_rs::YfError::Auth("no crumb".to_string()),
+        ];
+        for error in transient {
+            let classified = classify_yahoo_failure("FB", error);
+            assert!(
+                matches!(classified, FetchError::Other(_)),
+                "not evidence about the symbol: {}",
+                classified.message()
+            );
+        }
     }
 
     // --- collection's held-set and window ---
