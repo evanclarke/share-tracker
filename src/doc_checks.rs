@@ -1459,6 +1459,62 @@ fn demerger_price_rebasing_documented() {
     assert!(API_MD.contains("as does a `PUT` that changes nothing"));
 }
 
+/// Docs-sync pin for the one exception to the contemporaneous-basis invariant
+/// (TODO "The LAC demerger was modelled with the head and the new entity
+/// swapped", 2026-08-21): on a demerger's own date the head listing's stored
+/// price is the provider's standalone-equivalent rather than an observed
+/// close, because the demerged parcel is already held that day — so the walk's
+/// strictly-before boundary is deliberate, a split reaches it by the other
+/// route, and health's `adjusted_days` counts by the same boundary. The schema
+/// carries the same qualification on the `price` column, whose commentary
+/// states the invariant from the other side.
+#[test]
+fn demerger_date_price_basis_exception_documented() {
+    let closing_prices = API_MD
+        .split("## Closing prices")
+        .nth(1)
+        .expect("docs/API.md has a Closing prices section")
+        .split("\n## ")
+        .next()
+        .expect("split always yields at least one part");
+    // The exception itself, beside the invariant it qualifies.
+    assert!(
+        closing_prices.contains("**The one exception, and it is on the demerger's own date.**")
+    );
+    assert!(
+        closing_prices
+            .contains("`price_basis_ratio` skips an event dated on or before the price date")
+    );
+    assert!(closing_prices.contains("Leaving it is deliberate, not an off-by-one"));
+    assert!(
+        closing_prices
+            .contains("**on the demerger date the model already holds the demerged parcel**")
+    );
+    assert!(closing_prices.contains("un-adjusting the row would recover the **combined** entity"));
+    // The worked evidence, which is what makes it checkable.
+    assert!(closing_prices.contains("16.85 ÷ 6.453301 = `2.611067`"));
+    assert!(closing_prices.contains(
+        "value the holding at **26.69** a unit against the previous day's 16.85, a 58% overnight \
+         jump"
+    ));
+    assert!(closing_prices.contains("as stored the two sum to **16.19**, a 3.9% move"));
+    // A split reaches the same boundary by the other route.
+    assert!(
+        closing_prices
+            .contains("on a split's effective date the price is *already* in the new basis")
+    );
+    // The health check counts by the same boundary, so both agree.
+    assert!(
+        closing_prices
+            .contains("`demergers_missing_close` counts `adjusted_days` by that same boundary")
+    );
+    // SCHEMA.md carries the qualification where it asserts the invariant.
+    assert!(SCHEMA_MD.contains(
+        "The one exception is a **demerger's own date**: the re-base walk covers only the rows \
+         dated strictly before the event"
+    ));
+}
+
 /// Docs-sync pin (REQUIREMENTS 2026-07-13, lossless GST-inclusive
 /// round-trip): the Trades section states the read/write round-trip
 /// semantics explicitly — with the flag set, `brokerage` is the one

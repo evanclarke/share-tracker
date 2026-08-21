@@ -135,7 +135,15 @@ Two things remain, one of them needing a figure from Evan:
     is a derived standalone-equivalent. Every alternative is worse, so this is a documented exception
     rather than something to code around. The general shape is worth stating in `docs/API.md` beside
     the contemporaneous-basis rule: **on a demerger's own date the head listing's stored price is the
-    provider's standalone-equivalent, not an observed close**, and that is deliberate.
+    provider's standalone-equivalent, not an observed close**, and that is deliberate. **Done
+    2026-08-21**: `docs/API.md`'s Closing prices section now carries the exception as its own
+    paragraph beside the "Which corporate actions restate the series" list — the strictly-before
+    boundary, why leaving the row alone is right (the demerged parcel is already held that day, so
+    un-adjusting would recover the combined entity), the LAC worked numbers, that a split reaches the
+    same boundary by the other route, and that `demergers_missing_close` counts `adjusted_days` by
+    the same boundary so the check and the walk agree. `docs/SCHEMA.md`'s `closing_prices.price`
+    commentary, which asserts the invariant from the other side, carries the same qualification.
+    Pinned by `doc_checks::demerger_date_price_basis_exception_documented`. No code changed.
 
 - [ ] **Nothing detects a demerger modelled with the new entity as head** — the mis-modelling this
   section fixed. It was invisible for three years and was only caught because the price history was
