@@ -39,7 +39,7 @@ export const ENTITIES = [
   },
   {
     slug: 'listings', title: 'Listings', menu: 'Reference Data', api: '/listings',
-    desc: 'Securities you trade, each on a curated exchange — except Crypto listings, which have no exchange (leave it blank), settle same-day, and need a recognised digital-token ticker (e.g. BTC). Only BTC and ETH are recognised until the ISO 24165 (DTIF) registry has been imported \u2014 run the currency-import job with its DTI credentials to widen the list.',
+    desc: 'Securities you trade, each on a curated exchange — except Crypto listings, which have no exchange (leave it blank), settle same-day, and need a recognised digital-token ticker (e.g. BTC). Only BTC and ETH are recognised until the ISO 24165 (DTIF) registry has been imported \u2014 run the currency-import job with its DTI credentials to widen the list. A renamed security keeps its listing — its id is what every trade, distribution and corporate action references — so never create a second one: once anything is recorded against a listing, a ticker or exchange change goes through the row’s Rename action (a dated, audited event), which is what the form’s refusal points at. Rename history shows the recorded chain and undoes the newest entry.',
     keyFields: [int('id', 'ID', { auto: true })],
     fields: [
       fk('exchange_mic', 'Exchange', 'exchanges', { optional: true, encode: 'string', hint: 'Required except for Crypto; must be blank for Crypto.' }),
@@ -55,6 +55,17 @@ export const ENTITIES = [
       bool('preference', 'Preference share (90-day franking holding period)'),
     ],
     columns: ['id', 'exchange_mic', 'ticker', 'name', 'isin', 'security_type', 'currency', 'amit', 'amit_from', 'unpriced_from', 'unpriced_before', 'preference'],
+    // A ticker/exchange change is not a field edit: PUT refuses one on a
+    // listing with recorded trades, income or prices (422 naming
+    // POST /listings/:id/rename). Rename is that endpoint, and Rename
+    // history is the recorded chain (GET /listings/:id/renames) with the
+    // newest entry's undo.
+    rowActions: function (row) {
+      return [
+        { label: 'Rename', href: '#/rename/' + row.id },
+        { label: 'Rename history', href: '#/renames/' + row.id },
+      ];
+    },
   },
   {
     slug: 'holding_accounts', title: 'Holding Accounts', menu: 'Reference Data', api: '/holding_accounts',
@@ -642,13 +653,48 @@ export const REPORTS = [
 ];
 
 // ---- post-action configuration -----------------------------------------
-// Follow-up actions reached from an owning row (a distribution's Reinvest, a
-// corporate action's Exercise / Participate / Exchange / Demerge). Each is
-// one config entry — owner fetch, fields, optional parcel allocations, POST
-// endpoint, texts — rendered by the generic viewAction, mirroring how
-// ENTITIES drives viewEntityForm. The confirm-only actions (scrip exchange,
-// demerge) are the degenerate config with `fields: []`.
+// Follow-up actions reached from an owning row (a listing's Rename, a
+// distribution's Reinvest, a corporate action's Exercise / Participate /
+// Exchange / Demerge). Each is one config entry — owner fetch, fields,
+// optional parcel allocations, POST endpoint, texts — rendered by the
+// generic viewAction, mirroring how ENTITIES drives viewEntityForm. The
+// confirm-only actions (scrip exchange, demerge) are the degenerate config
+// with `fields: []`.
 export const ACTIONS = [
+  // Ticker / exchange change. A renamed security is the same security, so
+  // this is a dated, audited event on the listing — not a field edit: PUT
+  // refuses a ticker or exchange_mic change on a listing with any recorded
+  // trades, income or prices, and its 422 names this very endpoint. The
+  // recorded chain, and the undo, are the Rename history view
+  // (#/renames/:id) the listing row also links to.
+  {
+    slug: 'rename', nav: 'listings', ownerApi: '/listings', cancel: '#/e/listings', submit: 'Rename',
+    post: function (id) { return '/listings/' + id + '/rename'; },
+    title: function (id, owner, listing) { return 'Rename listing ' + listing(id) + ' (#' + id + ')'; },
+    desc: function (l, listing) {
+      return 'Records a dated ticker or exchange change for ' + listing(l.id) + ' \u2014 the same security keeps its id, so every trade, distribution, parcel, cost base and acquisition date stays attached. '
+        + 'The chain stores what was overwritten, read from the listing\u2019s own row, so the newest entry can be undone from Rename history. '
+        + 'The request must change the ticker or the exchange (a no-op is refused), the effective date must be after the newest recorded rename and not after today (record an announced change on the day it takes effect \u2014 there is no pending state), '
+        + 'and the new ticker must not already be held by another listing. A move to an exchange quoting a different currency is refused (a redenomination is a new listing plus a Transfer), and a Crypto listing takes no exchange and needs a recognised digital-token ticker. '
+        + 'A relisting under a new entity after a takeover is not a rename \u2014 record that as a ScripForScrip corporate action.';
+    },
+    fields: function (l) {
+      return [
+        dt('effective_date', 'Effective date', { required: true, hint: 'The day the change took effect: after the newest recorded rename and not after today. Prices before it are still collected under the old symbol.' }),
+        txt('ticker', 'New ticker', { required: true, hint: 'Currently ' + l.ticker + '. Enter it unchanged if only the exchange is moving.' }),
+        fk('exchange_mic', 'New exchange', 'exchanges', { optional: true, encode: 'string', hint: 'Blank keeps the current exchange (' + (l.exchange_mic || 'none \u2014 Crypto') + '). Must quote the listing\u2019s own currency (' + l.currency + ').' }),
+        txt('name', 'New name', { optional: true, hint: 'Blank keeps the current name (' + l.name + ').' }),
+        txt('price_symbol', 'New price symbol', { optional: true, hint: 'Blank leaves the provider-symbol override exactly as it was (' + (l.price_symbol || 'none') + ') \u2014 it is not part of the rename chain, and an override that matched the old ticker rarely matches the new one.' }),
+        txt('note', 'Note', { optional: true, hint: 'Optional: why the security was renamed (a company notice, a redomicile).' }),
+      ];
+    },
+    toast: function (r) {
+      const at = function (mic) { return mic ? mic + ':' : 'Crypto:'; };
+      return 'Recorded rename #' + r.id + ': ' + at(r.old_exchange_mic) + r.old_ticker
+        + ' \u2192 ' + at(r.new_exchange_mic) + r.new_ticker + ', effective ' + r.effective_date
+        + '. Undo it from the listing\u2019s Rename history.';
+    },
+  },
   // DRP reinvestment: creates a DRP trade and links it to the distribution.
   {
     slug: 'reinvest', nav: 'income', ownerApi: '/income', cancel: '#/e/income', submit: 'Reinvest',

@@ -2804,6 +2804,39 @@ fn price_collection_lookback_window_documented_as_the_constant() {
     )));
 }
 
+/// Docs-sync pin for the rename UI (SCENARIOS R-01/R-05). The Web frontend
+/// paragraph enumerates the UI's screens and actions, so the rename action
+/// and the chain view it is paired with belong in it: the 422 the Listings
+/// form raises names `POST /listings/:id/rename`, and this is where the docs
+/// say that endpoint is reachable from.
+#[test]
+fn listing_rename_ui_documented() {
+    let frontend = API_MD
+        .split("## Web frontend")
+        .nth(1)
+        .expect("docs/API.md has a Web frontend section")
+        .split("\n## ")
+        .next()
+        .expect("split always yields at least one part");
+    // The action, and why it exists at all (the PUT refusal it answers).
+    assert!(frontend.contains("a **Rename** action on listing rows (`POST /listings/:id/rename`"));
+    assert!(
+        frontend.contains("a `PUT` refuses on a listing with recorded trades, income, or prices")
+    );
+    // The chain view, its route, and the read behind it.
+    assert!(frontend.contains("a **Rename history** view (`#/renames/<listing>`)"));
+    assert!(frontend.contains("`GET /listings/:id/renames`"));
+    // The undo, and the newest-only rule the API enforces.
+    assert!(
+        frontend.contains(
+            "**Undo** on the newest entry only (`DELETE /listings/:id/renames/:rename_id`"
+        )
+    );
+    assert!(frontend.contains("the chain unwinds last-in-first-out"));
+    // The hash-route list carries the new route.
+    assert!(frontend.contains("`#/renames/<listing>`, `#/r/<report>`"));
+}
+
 /// Pins for the FreeBSD packaging + versioned-release pipeline (REQUIREMENTS
 /// 2026-07-13). The release workflow and package skeleton are plain text CI
 /// consumes, so these tests keep their load-bearing pieces from silently

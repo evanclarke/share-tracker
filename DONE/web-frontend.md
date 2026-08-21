@@ -198,3 +198,75 @@ last.
   'src/web/*.test.js'` (46 passed) all clean; `scripts/ui-check.sh --seed demo --screenshot '#/'`
   confirmed Manual Price Overrides and Run report now render below the holdings table
 
+
+## SCENARIOS R-01/R-05: the rename feature has no web UI, and the listing form sends the user to an endpoint the UI does not offer
+
+`POST /listings/:id/rename`, `GET /listings/:id/renames` and `DELETE /listings/:id/renames/:id` have
+no screen. `config.js` mentions `listing_renames` in exactly one place — the Row History table
+picker — and `ACTIONS` has no rename entry, so from the web UI a rename cannot be recorded, the
+chain cannot be read, and an undo cannot be run.
+
+The gap is self-announcing: editing a ticker on the Listings form for a listing with any recorded
+trade answers `422` — "use POST /listings/:id/rename to record a ticker or exchange change on a
+listing with recorded trades, income, or prices" — which the toast shows verbatim. The UI's own
+error text names an HTTP endpoint the UI never calls.
+
+Per CLAUDE.md this is the shape `ACTIONS` exists for: an owner-row action rendered by the generic
+`viewAction`, like reinvest/exercise/participate/demerge.
+
+- [x] Add a `rename` entry to `ACTIONS` in `config.js` — owner `/listings`, fields
+      `effective_date`, `ticker`, `exchange_mic`, `name`, `price_symbol`, `note` — so the refusal's
+      remedy is reachable from the screen that raises it.
+- [x] Show the chain: a rename history view over `GET /listings/:id/renames` with the newest entry
+      undoable, or the chain rendered on the listing's own row. Decide which rather than building
+      both.
+- [x] Update the `docs/API.md` Web frontend paragraph, which lists the UI's screens and actions, once
+      the entry exists.
+
+**Closed 2026-08-21.** One `ACTIONS` entry plus one owner-scoped child-collection view, no new
+generic machinery:
+
+- `config.js`: a `rename` entry in `ACTIONS` (owner `/listings`, `post` →
+  `POST /listings/:id/rename`, `cancel` `#/e/listings`, submit "Rename") with the six fields the
+  endpoint takes — `effective_date` and `ticker` required, `exchange_mic` (an `exchanges` `fk`),
+  `name`, `price_symbol` and `note` optional, each hint naming the listing's *current* value so
+  "blank keeps it" is checkable on the screen. Its `desc` states every rule the API enforces — the
+  no-op refusal, both `effective_date` bounds, the ticker collision, the exchange-currency
+  boundary, the two Crypto rules, and that a takeover relisting is a `ScripForScrip` action, not a
+  rename — so the screen promises nothing the endpoint refuses. Rendered by the generic
+  `viewAction`, which already omits blank optional fields from the body, exactly the "omitted keeps
+  it" contract the endpoint documents.
+- The Listings rows carry two link `rowActions`, **Rename** (`#/rename/:id`) and **Rename history**
+  (`#/renames/:id`), so the remedy the `PUT` refusal names is one click from the row that raises
+  it; the listings `desc` now says a rename is not a field edit and points at both.
+- **Decision on the second item — a rename-history view, not the chain on the listing's row.** The
+  chain has five before/after columns plus a note, and the undo is a per-row mutation: rendering
+  that inside a listings-table cell would need new expand/mutate machinery in `filterableTable`
+  (which no other screen has) and would still have nowhere sane to put the confirm. The app already
+  has exactly this shape — the per-record **Attachments** view: an owner-scoped child collection on
+  its own hash route, listed through the shared `filterableTable`, with the mutation the API allows
+  offered per row. `viewListingRenames` (`app.js`, `#/renames/:listing_id`) copies it: reads
+  `GET /listings/:id/renames`, renders the chain newest-first through `filterableTable`, and offers
+  **Undo** (`DELETE /listings/:id/renames/:rename_id`) on the newest entry alone — matched by row
+  *identity*, not position, so a re-sort keeps it with the right row. Offering it on every row would
+  only produce the 422 the API answers for a non-newest undo. The view also links back to
+  `#/rename/:id` ("+ Record a rename") and to Listings, and reads "No ticker or exchange changes
+  recorded." for a listing with no chain.
+- `util.js`: `old_exchange_mic`/`new_exchange_mic` added to `COLUMN_LABELS` as "Old exchange"/"New
+  exchange", keeping them in step with `exchange_mic` → "Exchange" rather than humanising to "Old
+  exchange MIC".
+- `docs/API.md`: the Web frontend paragraph now carries the Rename action (naming the `PUT` refusal
+  it answers), the Rename history view and its `GET`, and the newest-only Undo with its
+  last-in-first-out reason; `#/renames/<listing>` added to the hash-route list.
+- Tests: `web::tests::listing_rename_action_ui_present` (the action entry, its POST path, the row
+  link, all six fields with their required/optional flags, and each refusal rule stated on the
+  screen) and `web::tests::listing_rename_history_ui_present` (the view, its route, both API paths,
+  the `filterableTable` render, the chain columns, and the newest-only undo by identity), plus
+  `doc_checks::listing_rename_ui_documented` pinning the Web frontend paragraph's new text.
+- `cargo build`, `cargo test` (1857 passed), `cargo fmt --check`, `cargo clippy --all-targets -D
+  warnings` all clean; `node --test 'src/web/*.test.js'` 69 passed. End-to-end with
+  `scripts/ui-check.sh` against a temp DB seeded from the demo fixture plus two recorded renames:
+  `#/e/listings` shows Rename / Rename history on every row, `#/renames/1` renders both chain rows
+  (VAS→VASX→VASY) with the right headings and **Undo on the newest row only**, `#/renames/2` (no
+  chain) renders the empty-state line, and `#/rename/1` renders the form with all six inputs, the
+  exchange picker populated, and the hints quoting the listing's current ticker, name and exchange.

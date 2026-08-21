@@ -658,6 +658,70 @@ mod tests {
         assert!(js.contains("leaves the holding out of that date\u{2019}s portfolio totals"));
     }
 
+    // SCENARIOS R-01/R-05: the rename endpoint the Listings form's own 422
+    // names is reachable from the row it refuses on — one ACTIONS entry,
+    // rendered by the generic viewAction like reinvest/exercise/demerge.
+    #[tokio::test]
+    async fn listing_rename_action_ui_present() {
+        let js = app_js_body().await;
+        assert!(js.contains("slug: 'rename'"));
+        assert!(js.contains("'/listings/' + id + '/rename'"));
+        // Reached from the listing row itself (and from the chain view).
+        assert!(js.contains("{ label: 'Rename', href: '#/rename/' + row.id }"));
+        // Every field the endpoint takes, required ones flagged as such.
+        assert!(js.contains("dt('effective_date', 'Effective date', { required: true"));
+        assert!(js.contains("txt('ticker', 'New ticker', { required: true"));
+        assert!(js.contains("fk('exchange_mic', 'New exchange', 'exchanges', { optional: true"));
+        assert!(js.contains("txt('name', 'New name', { optional: true"));
+        assert!(js.contains("txt('price_symbol', 'New price symbol', { optional: true"));
+        assert!(js.contains("txt('note', 'Note', { optional: true"));
+        // The screen states the rules the API enforces, so it promises
+        // nothing the endpoint refuses: the no-op, the date bounds, the
+        // ticker collision, the currency boundary, and the Crypto pairing.
+        assert!(js.contains("a no-op is refused"));
+        assert!(js.contains("not after today"));
+        assert!(js.contains("must not already be held by another listing"));
+        assert!(js.contains("exchange quoting a different currency is refused"));
+        assert!(js.contains("recognised digital-token ticker"));
+        // …and that a takeover relisting is a ScripForScrip action, not this.
+        assert!(js.contains("not a rename"));
+    }
+
+    // SCENARIOS R-01/R-05: the recorded chain, with the undo the API allows.
+    #[tokio::test]
+    async fn listing_rename_history_ui_present() {
+        let js = app_js_body().await;
+        assert!(js.contains("viewListingRenames"));
+        assert!(js.contains("{ label: 'Rename history', href: '#/renames/' + row.id }"));
+        assert!(js.contains("parts[0] === 'renames'"));
+        // Reads the chain and undoes an entry through the listing's own paths.
+        assert!(js.contains("'/listings/' + pathSeg(listingId) + '/renames'"));
+        assert!(js.contains("'/listings/' + pathSeg(listingId) + '/renames/' + row.id"));
+        // Rendered through the shared table, with the before/after columns.
+        assert!(js.contains("table = filterableTable(rows, cols, {"));
+        for col in [
+            "'effective_date'",
+            "'old_ticker'",
+            "'new_ticker'",
+            "'old_exchange_mic'",
+            "'new_exchange_mic'",
+            "'old_name'",
+            "'old_price_symbol'",
+        ] {
+            assert!(js.contains(col), "{col}");
+        }
+        // Undo is newest-only (the API refuses any other, 422), so it is
+        // offered on the newest row alone — by identity, so a re-sort keeps it
+        // with the right row.
+        assert!(js.contains("const newest = rows[0];"));
+        assert!(js.contains("if (row !== newest) return td;"));
+        assert!(js.contains("'Undo'"));
+        // The before/after exchange columns read like the Exchange column
+        // everywhere else, not "Old exchange MIC".
+        assert!(js.contains("old_exchange_mic: 'Old exchange'"));
+        assert!(js.contains("new_exchange_mic: 'New exchange'"));
+    }
+
     #[tokio::test]
     async fn trade_ui_present() {
         let js = app_js_body().await;

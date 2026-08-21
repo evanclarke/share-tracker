@@ -916,6 +916,73 @@ async function viewAction(action, id) {
   ]));
 }
 
+// ---- listing rename chain ----------------------------------------------
+// One listing's recorded ticker/exchange changes (GET /listings/:id/renames,
+// newest first), reached from the Listings row's "Rename history" action —
+// the same shape as the per-record Attachments view: an owner-scoped child
+// collection through the shared filterableTable, with the mutation the API
+// allows offered per row. Here that mutation is the undo
+// (DELETE /listings/:id/renames/:rename_id), which unwinds last-in-first-out:
+// the API refuses any but the newest rename of that listing (422), so Undo is
+// offered on the newest row alone rather than on every row where it would
+// only produce a refusal. The chain is read-only otherwise — a rename is
+// recorded by the Rename action, never edited.
+async function viewListingRenames(listingId) {
+  setActiveNav('listings');
+  const rows = await api('GET', '/listings/' + pathSeg(listingId) + '/renames');
+  const listingName = await listingNamer();
+  // listing_id is the view's own subject (in the heading), so it is not a
+  // column here; old_name/old_price_symbol are what the undo would restore.
+  const cols = ['id', 'effective_date', 'old_ticker', 'new_ticker', 'old_exchange_mic',
+    'new_exchange_mic', 'old_name', 'old_price_symbol', 'note'];
+
+  let table;
+  if (rows.length === 0) {
+    table = el('div', { class: 'empty' }, 'No ticker or exchange changes recorded.');
+  } else {
+    // Identity, not position: the table can be re-sorted, and the newest
+    // entry stays the only undoable one wherever it lands.
+    const newest = rows[0];
+    table = filterableTable(rows, cols, {
+      actions: function (row) {
+        const td = el('td', { class: 'actions' });
+        if (row !== newest) return td;
+        td.appendChild(el('button', {
+          class: 'link small danger',
+          onclick: async function () {
+            if (!confirm('Undo this rename? The listing goes back to '
+              + (row.old_exchange_mic || 'Crypto') + ':' + row.old_ticker
+              + ', with the name and price symbol it had before.')) return;
+            try {
+              await api('DELETE', '/listings/' + pathSeg(listingId) + '/renames/' + row.id);
+              toast('Rename undone.');
+              viewListingRenames(listingId);
+            } catch (e) {
+              toast(e.message, true);
+            }
+          },
+        }, 'Undo'));
+        return td;
+      },
+    });
+  }
+
+  setMain(el('div', null, [
+    el('h2', null, 'Rename history — ' + listingName(listingId)),
+    el('p', { class: 'view-desc' },
+      'Every recorded ticker or exchange change for this listing, newest first. A rename is the '
+      + 'same security under a new name, so nothing moves: the id every trade, distribution and '
+      + 'parcel references is unchanged, and price collection resolves each date under the symbol '
+      + 'in force then. Undo restores the ticker, exchange, name and price symbol the rename '
+      + 'overwrote, and is offered on the newest entry only — the chain unwinds last-in-first-out.'),
+    el('div', { class: 'toolbar' }, [
+      el('a', { href: '#/rename/' + pathSeg(listingId) }, el('button', { class: 'primary' }, '+ Record a rename')),
+      el('a', { href: '#/e/listings' }, el('button', null, 'Back to Listings')),
+    ]),
+    table,
+  ]));
+}
+
 // ---- document attachments ---------------------------------------------
 // Reached from a Trade / Income / AMMA / ESS statement / Interest income
 // row's "Attachments" action. Lists the activity's attachments (metadata only
@@ -2311,6 +2378,9 @@ async function render() {
       return await viewTransfersList();
     }
     if (actionBySlug[parts[0]]) return await viewAction(actionBySlug[parts[0]], parts[1]);
+    // #/renames/:listing_id — the rename chain, distinct from the
+    // #/rename/:listing_id action that records one.
+    if (parts[0] === 'renames') return await viewListingRenames(parts[1]);
     if (parts[0] === 'attachments') return await viewAttachments(parts[1], parts[2]);
     if (parts[0] === 'jobs') return await viewJobs();
     if (parts[0] === 'prices') return await viewClosingPrices();

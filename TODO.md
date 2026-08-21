@@ -32,34 +32,10 @@ recorded every leg — the `listings` UPDATE behind each rename and the `listing
 each undo.
 
 **Eight findings; R-01, R-02, R-04/R-08 and R-10 are closed (all archived in
-`DONE/reference-data.md`) and R-07 is closed (archived in `DONE/reviews.md`), three remain open.**
-They cluster: one is about what the rename chain cannot express (a pre-rename provider symbol), one
-is that the whole feature has no web UI, and one is a refusal message. Each is a `## ` section
-below, in the order I would fix them.
-
-## SCENARIOS R-01/R-05: the rename feature has no web UI, and the listing form sends the user to an endpoint the UI does not offer
-
-`POST /listings/:id/rename`, `GET /listings/:id/renames` and `DELETE /listings/:id/renames/:id` have
-no screen. `config.js` mentions `listing_renames` in exactly one place — the Row History table
-picker — and `ACTIONS` has no rename entry, so from the web UI a rename cannot be recorded, the
-chain cannot be read, and an undo cannot be run.
-
-The gap is self-announcing: editing a ticker on the Listings form for a listing with any recorded
-trade answers `422` — "use POST /listings/:id/rename to record a ticker or exchange change on a
-listing with recorded trades, income, or prices" — which the toast shows verbatim. The UI's own
-error text names an HTTP endpoint the UI never calls.
-
-Per CLAUDE.md this is the shape `ACTIONS` exists for: an owner-row action rendered by the generic
-`viewAction`, like reinvest/exercise/participate/demerge.
-
-- [ ] Add a `rename` entry to `ACTIONS` in `config.js` — owner `/listings`, fields
-      `effective_date`, `ticker`, `exchange_mic`, `name`, `price_symbol`, `note` — so the refusal's
-      remedy is reachable from the screen that raises it.
-- [ ] Show the chain: a rename history view over `GET /listings/:id/renames` with the newest entry
-      undoable, or the chain rendered on the listing's own row. Decide which rather than building
-      both.
-- [ ] Update the `docs/API.md` Web frontend paragraph, which lists the UI's screens and actions, once
-      the entry exists.
+`DONE/reference-data.md`), R-07 is closed (archived in `DONE/reviews.md`) and R-01/R-05's web-UI gap
+is closed (archived in `DONE/web-frontend.md`), two remain open.** They cluster: one is about what
+the rename chain cannot express (a pre-rename provider symbol), and one is a refusal message. Each
+is a `## ` section below, in the order I would fix them.
 
 ## SCENARIOS R-06: the diagnostic written for a renamed symbol does not fire for a renamed symbol
 

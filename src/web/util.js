@@ -668,6 +668,10 @@ function humanizeLabel(name) {
 // qualifier, because their amounts are in the row's own currency column.
 const COLUMN_LABELS = {
   exchange_mic: 'Exchange',
+  // The rename chain's before/after exchange columns: kept in step with
+  // exchange_mic above rather than humanised to "Old exchange MIC".
+  old_exchange_mic: 'Old exchange',
+  new_exchange_mic: 'New exchange',
   holding_account_id: 'Account',
   market_value: 'Market value (AUD)',
   total_cost_base: 'Total cost base (AUD)',
