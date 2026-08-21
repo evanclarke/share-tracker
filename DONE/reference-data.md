@@ -880,3 +880,90 @@ undone.
   else. Costs the convenience of one call for the LAAC → LAR shape.
 - **(c) Document the undo as partial** and have it say so — no code change beyond the wording, but a
   stale `price_symbol` after an undo stays a silent, price-affecting state.
+
+## SCENARIOS R-01: a rename can move a listing to an exchange quoting another currency, and the currency can then never be fixed
+
+`POST /listings/:id/rename` accepts any known `exchange_mic`. Nothing compares the new exchange's
+`currency` with the listing's own, so an AUD listing can be moved to XNYS and keeps `currency: AUD`
+— which is the state the currency freeze on `PUT /listings/:id` exists to make unreachable. The
+freeze then makes it permanent: `currency` cannot change once the listing has trades, income or
+prices, and its documented remedy — "a redenomination is a new listing in the new currency plus a
+transfer of the parcels to it" — is incompatible with the rename already recorded against this one.
+
+The listing is unpriceable from that moment. Every fetch resolves the new exchange's symbol, and one
+of two things happens: the provider has no such series and the day stores an errored row, or it has
+one and the candle's currency is not the listing's, which the documented cross-check refuses — also
+an errored row. Neither is wrong on its own terms; together they leave a holding that can never be
+valued again and cannot be corrected in place.
+
+Reproduced: `CBA` on XASX in AUD, `POST /closing_prices/fetch` for 2026-08-19 → `ok`, A$160.71 under
+`CBA.AX`. `POST /listings/13/rename {"effective_date":"2026-08-20","ticker":"CBA","exchange_mic":
+"XNYS"}` → `201`. The next fetch stored an errored row under `CBA`. `PUT /listings/13` correcting
+`currency` to USD → `422`, "this listing's currency cannot change from AUD to USD once it has
+recorded trades, income, or prices … Record a redenomination as a new listing in USD and transfer
+the parcels to it".
+
+Note the general form: `PUT /listings/:id` does not check a listing's `currency` against its
+exchange's either, so a listing can be *created* in this state. The rename is where it matters
+because it is the only way to reach it on a listing that already has priced history.
+
+**Fix — Evan chose 2026-08-21: option (c), both — refuse on the rename path and warn on the rest.**
+
+- [x] Refuse a rename moving the listing to an exchange whose `currency` differs from the listing's
+      (`422` naming both currencies and pointing at the new-listing-plus-transfer path, as the
+      currency freeze already does).
+      Done 2026-08-21: `RenameError::ExchangeCurrencyMismatch`, checked inside `db_rename`'s
+      transaction before any write, beside the Crypto pairing checks. The 422 body reads as the
+      same rule as the currency freeze and ends on the same remedy — "Record a redenomination as a
+      new listing in USD and transfer the parcels to it" — adding that a listing with nothing
+      recorded against it yet can simply have its `currency` corrected with `PUT /listings/:id`
+      first. Only a **changed** exchange is tested: `exchange_mic` is optional in the body and
+      defaults to the listing's current one, so a rename that leaves the listing where it is must
+      not start failing over a mismatch it did not introduce — that boundary is the point of
+      `..::db_rename_on_an_already_mismatched_listing_is_allowed_while_it_stays_put` (exchange
+      omitted, and named-but-unchanged). An unknown MIC is left to the foreign key, which already
+      answers in its own words. Verified by
+      `entities::listing_rename::tests::db_rename_onto_an_exchange_quoting_another_currency_is_refused`
+      (the reproduction above as a regression test: CBA on XASX in AUD, moved to XNYS — refused,
+      with the listing and the chain untouched),
+      `..::api_rename_across_a_currency_boundary_is_422_naming_both_currencies` (the wire body),
+      `..::db_rename_on_an_already_mismatched_listing_is_allowed_while_it_stays_put`,
+      `..::db_rename_onto_an_exchange_quoting_the_listings_currency_is_allowed` (the move that
+      *resolves* a mismatch — the rule compares against the exchange moved **to**), and
+      `..::db_rename_can_move_exchange_and_records_it_from_the_current_row`, whose plain
+      cross-exchange move now runs between two AUD markets (the seeded XASX/XNYS pair quotes
+      different money, which is exactly what is now refused).
+- [x] Add a `reports::health` check naming every listing whose `currency` is not its exchange's, so
+      a listing created in that state by a plain `PUT` is visible too — and surface it in the UI
+      banner beside the other health warnings.
+      Done 2026-08-21: `HealthReport::exchange_currency_mismatches`
+      (`{listing_id, ticker, currency, exchange_mic, exchange_currency}`, by ticker), read by
+      `db_exchange_currency_mismatches` on the report's own transaction like the `duplicate_*`
+      family. The join to `exchanges` is what excludes exchange-less (Crypto) listings — they have
+      no exchange for their currency to disagree with. Deliberately a warning rather than a
+      `PUT`-time constraint, as the option (b) write-up argued: a real exchange can quote more than
+      one currency (LSE quotes GBp, USD and EUR) while `exchanges.currency` is a single column. The
+      banner names both currencies and the remedy, and links to Listings. Verified by
+      `reports::health::tests::a_listing_whose_currency_is_not_its_exchanges_is_reported`,
+      `..::matching_and_exchange_less_listings_are_not_reported` (a matching listing on each seeded
+      exchange, and a Crypto listing),
+      `..::api_exchange_currency_mismatch_is_served_to_the_banner` (the endpoint the banner polls),
+      and `web::tests::health_banner_ui_present` (the strip and its `#/e/listings` link in the
+      served bundle). `docs/API.md` records the rename refusal in the rename section, its 422
+      catalogue row and the currency-freeze paragraph's cross-reference, and the new field in the
+      Health field list and the banner paragraph.
+
+**Options as put:**
+
+- **(a) Refuse a rename that would move the listing to an exchange whose `currency` differs from the
+  listing's** (`422`, naming both currencies and pointing at the new-listing-plus-transfer path, the
+  way the currency freeze already does). Applies the existing rule at the one door that bypasses it.
+  Risk: an exchange that genuinely quotes more than one currency (LSE quotes GBp, USD and EUR) would
+  be refused a legitimate move, and `exchanges.currency` is a single column.
+- **(b) Warn rather than refuse** — add a `reports::health` check naming every listing whose currency
+  is not its exchange's, so the state is visible wherever it came from, including a plain `PUT`.
+  Catches the created-in-this-state case (a) does not, and cannot be wrong about a multi-currency
+  exchange.
+- **(c) Both**: refuse on the rename path, warn on the rest.
+- **(d) Document it** as a Known limitation — a cross-currency exchange change is not a rename; it is
+  a new listing plus a transfer — and leave the write accepting it.

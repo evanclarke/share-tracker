@@ -1740,6 +1740,16 @@ mod tests {
         assert!(js.contains("d.disposal_tax_year === d.statement_tax_year"));
         // The entry form says the same thing where the taxing point is typed.
         assert!(js.contains("30-day rule: if you sell within 30 days after the taxing point"));
+        // …plus a listing whose own currency is not the one its exchange quotes
+        // in (SCENARIOS R-01): unpriceable from then on, and uncorrectable in
+        // place once it has history, so the strip names both currencies and the
+        // remedy, linking to the screen the exchange is fixed on.
+        assert!(js.contains("exchange_currency_mismatches"));
+        assert!(js.contains("but trades on ' + d.exchange_mic"));
+        assert!(js.contains("which quotes in ' + d.exchange_currency"));
+        assert!(js.contains("its prices cannot be collected"));
+        assert!(js.contains("'#/e/listings'"));
+        assert!(js.contains("Open Listings"));
         // …and refreshes on every route render so it appears on the main views.
         assert!(js.contains("refreshHealthBanner(); // deliberately not awaited"));
         // The strip's host element ships in the page shell with its styles.

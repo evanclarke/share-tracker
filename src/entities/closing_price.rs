@@ -4964,7 +4964,10 @@ mod tests {
     #[tokio::test]
     async fn db_yahoo_symbol_follows_the_exchange_in_force_on_the_date() {
         let pool = test_pool().await;
-        insert_listing(&pool, 1, "OLD", "XASX", "AUD").await;
+        // Quoted in USD from the start, so the move to the NYSE crosses no
+        // currency boundary (a rename that did is refused — SCENARIOS R-01);
+        // the symbol the *date* resolves to is what this test is about.
+        insert_listing(&pool, 1, "OLD", "XASX", "USD").await;
         rename_listing(&pool, 1, ymd(2025, 3, 10), "NEW", Some("XNYS")).await;
 
         let market = load_market(&pool, 1).await.unwrap().unwrap();
@@ -5000,7 +5003,10 @@ mod tests {
     #[tokio::test]
     async fn db_trading_days_follow_the_exchange_calendar_in_force_then() {
         let pool = test_pool().await;
-        insert_listing(&pool, 1, "OLD", "XASX", "AUD").await;
+        // USD from the start, for the reason
+        // `db_yahoo_symbol_follows_the_exchange_in_force_on_the_date` gives:
+        // the calendars are what this test is about, not the currency.
+        insert_listing(&pool, 1, "OLD", "XASX", "USD").await;
         exchange_holiday::db_upsert(
             &pool,
             &exchange_holiday::ExchangeHoliday {

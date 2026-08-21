@@ -31,63 +31,11 @@ moved to XNYS); and `R-10` refuses a listing whose ticker another listing alread
 recorded every leg — the `listings` UPDATE behind each rename and the `listing_renames` DELETE behind
 each undo.
 
-**Eight findings; R-02 and R-04/R-08 are closed (both archived in `DONE/reference-data.md`), six
-remain open.** They cluster: one is about the rename as a *write* (it can move a listing to an
-exchange whose currency the listing can no longer be given), two are about what the rename chain
-cannot express (a ticker reused by another company; a pre-rename provider symbol), one is a report
-reading today's ticker where the docs say it reads the row's own date, one is that the whole feature
-has no web UI, and one is a refusal message. Each is a `## ` section below, in the order I would fix
-them.
-
-## SCENARIOS R-01: a rename can move a listing to an exchange quoting another currency, and the currency can then never be fixed
-
-`POST /listings/:id/rename` accepts any known `exchange_mic`. Nothing compares the new exchange's
-`currency` with the listing's own, so an AUD listing can be moved to XNYS and keeps `currency: AUD`
-— which is the state the currency freeze on `PUT /listings/:id` exists to make unreachable. The
-freeze then makes it permanent: `currency` cannot change once the listing has trades, income or
-prices, and its documented remedy — "a redenomination is a new listing in the new currency plus a
-transfer of the parcels to it" — is incompatible with the rename already recorded against this one.
-
-The listing is unpriceable from that moment. Every fetch resolves the new exchange's symbol, and one
-of two things happens: the provider has no such series and the day stores an errored row, or it has
-one and the candle's currency is not the listing's, which the documented cross-check refuses — also
-an errored row. Neither is wrong on its own terms; together they leave a holding that can never be
-valued again and cannot be corrected in place.
-
-Reproduced: `CBA` on XASX in AUD, `POST /closing_prices/fetch` for 2026-08-19 → `ok`, A$160.71 under
-`CBA.AX`. `POST /listings/13/rename {"effective_date":"2026-08-20","ticker":"CBA","exchange_mic":
-"XNYS"}` → `201`. The next fetch stored an errored row under `CBA`. `PUT /listings/13` correcting
-`currency` to USD → `422`, "this listing's currency cannot change from AUD to USD once it has
-recorded trades, income, or prices … Record a redenomination as a new listing in USD and transfer
-the parcels to it".
-
-Note the general form: `PUT /listings/:id` does not check a listing's `currency` against its
-exchange's either, so a listing can be *created* in this state. The rename is where it matters
-because it is the only way to reach it on a listing that already has priced history.
-
-**Fix — Evan chose 2026-08-21: option (c), both — refuse on the rename path and warn on the rest.**
-
-- [ ] Refuse a rename moving the listing to an exchange whose `currency` differs from the listing's
-      (`422` naming both currencies and pointing at the new-listing-plus-transfer path, as the
-      currency freeze already does).
-- [ ] Add a `reports::health` check naming every listing whose `currency` is not its exchange's, so
-      a listing created in that state by a plain `PUT` is visible too — and surface it in the UI
-      banner beside the other health warnings.
-
-**Options as put:**
-
-- **(a) Refuse a rename that would move the listing to an exchange whose `currency` differs from the
-  listing's** (`422`, naming both currencies and pointing at the new-listing-plus-transfer path, the
-  way the currency freeze already does). Applies the existing rule at the one door that bypasses it.
-  Risk: an exchange that genuinely quotes more than one currency (LSE quotes GBp, USD and EUR) would
-  be refused a legitimate move, and `exchanges.currency` is a single column.
-- **(b) Warn rather than refuse** — add a `reports::health` check naming every listing whose currency
-  is not its exchange's, so the state is visible wherever it came from, including a plain `PUT`.
-  Catches the created-in-this-state case (a) does not, and cannot be wrong about a multi-currency
-  exchange.
-- **(c) Both**: refuse on the rename path, warn on the rest.
-- **(d) Document it** as a Known limitation — a cross-currency exchange change is not a rename; it is
-  a new listing plus a transfer — and leave the write accepting it.
+**Eight findings; R-01, R-02 and R-04/R-08 are closed (all archived in `DONE/reference-data.md`),
+five remain open.** They cluster: two are about what the rename chain cannot express (a ticker
+reused by another company; a pre-rename provider symbol), one is a report reading today's ticker
+where the docs say it reads the row's own date, one is that the whole feature has no web UI, and
+one is a refusal message. Each is a `## ` section below, in the order I would fix them.
 
 ## SCENARIOS R-10: a ticker reused by a different company cannot be recorded at all
 

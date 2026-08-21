@@ -1087,7 +1087,11 @@ async function viewAttachments(ownerField, ownerId) {
 // shares within 30 days after the taxing point, where the ATO's 30-day rule
 // re-measures the discount at the sale proceeds, can move it into the next
 // financial year, and leaves no separate capital gain (also linking to ESS
-// Statements, where the employer's amended statement replaces the original).
+// Statements, where the employer's amended statement replaces the original),
+// and any listing whose own currency is not the one its exchange quotes in —
+// a holding whose prices can no longer be collected and whose currency the
+// freeze on PUT /listings/:id will not let you change (linking to Listings,
+// where the exchange is corrected if that is what is wrong).
 // Refreshed on every
 // route render, so fixing the cause clears it on the next navigation. A
 // failing health fetch hides the banner rather than breaking the app.
@@ -1213,6 +1217,18 @@ async function refreshHealthBanner() {
         + ') — each creates its own parcel, so the holding and its cost base are doubled until'
         + ' the surplus row is deleted.');
     });
+    // A listing quoting money its own exchange does not: unpriceable from that
+    // moment (the provider serves nothing, or serves a series in the wrong
+    // currency, which the cross-check refuses) and uncorrectable in place once
+    // it has history, since the currency freeze bites.
+    const currencyMismatches = h.exchange_currency_mismatches || [];
+    currencyMismatches.forEach(function (d) {
+      problems.push(d.ticker + ' is recorded in ' + d.currency + ' but trades on ' + d.exchange_mic
+        + ', which quotes in ' + d.exchange_currency + ' — so its prices cannot be collected, and'
+        + ' the listing’s currency cannot be changed once it has trades, income or prices. Record a'
+        + ' redenomination as a new listing in ' + d.exchange_currency + ' and transfer the parcels'
+        + ' to it, or correct the exchange.');
+    });
     const ess30Day = h.ess_30_day_rule || [];
     ess30Day.forEach(function (d) {
       problems.push('Sale of ' + d.units_sold + ' ' + d.ticker + ' ESS shares on ' + d.sale_date
@@ -1257,6 +1273,9 @@ async function refreshHealthBanner() {
     }
     if (duplicateEss.length > 0 || ess30Day.length > 0) {
       banner.appendChild(el('a', { href: '#/e/ess_statements' }, 'Open ESS Statements →'));
+    }
+    if (currencyMismatches.length > 0) {
+      banner.appendChild(el('a', { href: '#/e/listings' }, 'Open Listings →'));
     }
     banner.hidden = false;
   } catch (e) {

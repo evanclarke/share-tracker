@@ -27,6 +27,18 @@
 //! now while its own chain said the change had not happened yet
 //! (SCENARIOS R-02). Record an announced change on the day it takes effect.
 //!
+//! A rename may move the listing to another exchange, but not to one quoting
+//! a **different currency** (`RenameError::ExchangeCurrencyMismatch`,
+//! SCENARIOS R-01): `listings.currency` denominates every stored closing
+//! price and is frozen once the listing has any history, so such a move would
+//! leave a listing priced from a market quoting other money with no way to
+//! correct it in place. That is the same rule `listing::db_upsert`'s currency
+//! freeze states, applied at the one door that would otherwise bypass it —
+//! and its remedy is the same one: a new listing in the other currency plus a
+//! transfer of the parcels to it. A rename that leaves the exchange alone is
+//! never refused for a mismatch it did not introduce; those are reported by
+//! `reports::health`'s `exchange_currency_mismatches` instead.
+//!
 //! `DELETE /listings/:id/renames/:rename_id` undoes a rename: allowed only
 //! for the *newest* rename of that listing (chain integrity — an
 //! intermediate entry can't be removed out of order), restoring all four
@@ -113,6 +125,26 @@ pub enum RenameError {
     /// `exchange_mic` (SCENARIOS L-09).
     #[error("a rename gave a Crypto listing an exchange")]
     CryptoWithExchange,
+    /// The rename would move the listing to an exchange quoting a *different*
+    /// currency from the listing's own (SCENARIOS R-01). `exchanges.currency`
+    /// is the money the market quotes in; `listings.currency` denominates
+    /// every stored closing price and, once the listing has any history, can
+    /// never change again (`listing::UpsertError::CurrencyChangeWithHistory`).
+    /// So a rename across that boundary leaves a listing whose prices are
+    /// collected from a market quoting other money, with no way to correct it
+    /// in place — the same rule the currency freeze states, applied at the one
+    /// door that would otherwise bypass it. Only a *changed* exchange is
+    /// tested: a rename that leaves the listing where it is never introduces
+    /// the mismatch, so it is not refused for a pre-existing one (which
+    /// `reports::health`'s `exchange_currency_mismatches` reports instead).
+    #[error(
+        "a rename to {mic} would leave a {listing_currency} listing on a {exchange_currency} market"
+    )]
+    ExchangeCurrencyMismatch {
+        mic: String,
+        listing_currency: String,
+        exchange_currency: String,
+    },
     #[error("listing rename write failed: {0}")]
     Db(#[from] sqlx::Error),
 }
@@ -150,6 +182,19 @@ impl From<RenameError> for ApiError {
             RenameError::CryptoWithExchange => {
                 ApiError::unprocessable(listing::CRYPTO_WITH_EXCHANGE)
             }
+            RenameError::ExchangeCurrencyMismatch {
+                mic,
+                listing_currency,
+                exchange_currency,
+            } => ApiError::unprocessable(format!(
+                "this rename would move a {listing_currency} listing to {mic}, which quotes in \
+                 {exchange_currency} — and the listing's own currency cannot follow it: every \
+                 stored closing price is denominated in it, so changing it would silently \
+                 re-value the whole price history. Record a redenomination as a new listing in \
+                 {exchange_currency} and transfer the parcels to it (a listing with no recorded \
+                 trades, income, or prices can have its currency corrected with \
+                 PUT /listings/:id first)"
+            )),
             RenameError::Db(err) => err.into(),
         }
     }
@@ -242,6 +287,34 @@ pub async fn db_rename(
 
     if current.security_type == SecurityType::Crypto && new_exchange_mic.is_some() {
         return Err(RenameError::CryptoWithExchange);
+    }
+
+    // An exchange quotes in one currency (`exchanges.currency`) and the
+    // listing's own `currency` denominates every stored closing price — and
+    // once the listing has history it can never change again, so a rename onto
+    // a market quoting other money leaves a state nothing can correct in place
+    // (SCENARIOS R-01). Only a *changed* exchange is tested: a rename that
+    // leaves the listing where it is introduces no mismatch, and must not
+    // start failing over one that was already there.
+    if new_exchange_mic != current.exchange_mic
+        && let Some(mic) = new_exchange_mic.as_deref()
+    {
+        let exchange_currency: Option<String> =
+            sqlx::query_scalar("SELECT currency FROM exchanges WHERE mic = ?")
+                .bind(mic)
+                .fetch_optional(&mut *tx)
+                .await?;
+        // An unknown MIC is left to the foreign key on the UPDATE, which
+        // already says so in its own words.
+        if let Some(exchange_currency) = exchange_currency
+            && exchange_currency != current.currency
+        {
+            return Err(RenameError::ExchangeCurrencyMismatch {
+                mic: mic.to_string(),
+                listing_currency: current.currency.clone(),
+                exchange_currency,
+            });
+        }
     }
 
     if current.security_type == SecurityType::Crypto {
@@ -433,6 +506,27 @@ mod tests {
         }
     }
 
+    /// A second **AUD**-quoting exchange, so a plain cross-exchange move is
+    /// testable without crossing a currency boundary — the two seeded
+    /// exchanges quote different money (XASX in AUD, XNYS in USD), which is
+    /// exactly what `RenameError::ExchangeCurrencyMismatch` refuses.
+    async fn insert_aud_exchange(pool: &SqlitePool, mic: &str) {
+        crate::entities::exchange::db_upsert(
+            pool,
+            &crate::entities::exchange::Exchange {
+                mic: mic.to_string(),
+                name: format!("{mic} test market"),
+                country: "Australia".to_string(),
+                currency: "AUD".to_string(),
+                timezone: "Australia/Sydney".to_string(),
+                settlement_days: 2,
+                close_time: "16:00".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+    }
+
     #[tokio::test]
     async fn db_rename_updates_listing_and_records_the_chain() {
         let pool = test_pool().await;
@@ -465,14 +559,17 @@ mod tests {
     #[tokio::test]
     async fn db_rename_can_move_exchange_and_records_it_from_the_current_row() {
         let pool = test_pool().await;
+        // Both markets quote AUD: the move itself is what's under test, not
+        // the currency rule the cross-currency tests below cover.
+        insert_aud_exchange(&pool, "CXAX").await;
         test_support::listing(1).mic("XASX").insert(&pool).await;
         let mut moved = body("2024-06-01", "SAME");
         moved.ticker = "T1".to_string(); // ticker unchanged, exchange moves
-        moved.exchange_mic = Some("XNYS".to_string());
+        moved.exchange_mic = Some("CXAX".to_string());
 
         let created = db_rename(&pool, 1, &moved).await.unwrap();
         assert_eq!(created.old_exchange_mic.as_deref(), Some("XASX"));
-        assert_eq!(created.new_exchange_mic.as_deref(), Some("XNYS"));
+        assert_eq!(created.new_exchange_mic.as_deref(), Some("CXAX"));
         assert_eq!(
             listing::db_get(&pool, 1)
                 .await
@@ -480,8 +577,140 @@ mod tests {
                 .unwrap()
                 .exchange_mic
                 .as_deref(),
-            Some("XNYS")
+            Some("CXAX")
         );
+    }
+
+    /// SCENARIOS R-01: a rename accepted any known exchange, so an AUD listing
+    /// could be moved onto a USD market and keep `currency: AUD` — precisely
+    /// the state the currency freeze on `PUT /listings/:id` exists to make
+    /// unreachable, and which that same freeze then makes permanent. From the
+    /// move on the listing is unpriceable: every fetch resolves the new
+    /// exchange's symbol, and either the provider serves nothing (an errored
+    /// row) or the candle's currency isn't the listing's, which the
+    /// cross-check refuses (also an errored row).
+    #[tokio::test]
+    async fn db_rename_onto_an_exchange_quoting_another_currency_is_refused() {
+        let pool = test_pool().await;
+        test_support::listing(1)
+            .ticker("CBA")
+            .mic("XASX")
+            .currency("AUD")
+            .insert(&pool)
+            .await;
+        test_support::buy(1, 1).insert(&pool).await;
+
+        let mut moved = body("2024-06-01", "CBA");
+        moved.exchange_mic = Some("XNYS".to_string());
+        let err = db_rename(&pool, 1, &moved).await.unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                RenameError::ExchangeCurrencyMismatch { mic, listing_currency, exchange_currency }
+                    if mic == "XNYS" && listing_currency == "AUD" && exchange_currency == "USD"
+            ),
+            "expected an exchange/currency mismatch, got: {err}"
+        );
+        // Refused before any write: the listing and the chain are untouched.
+        let got = listing::db_get(&pool, 1).await.unwrap().unwrap();
+        assert_eq!(got.exchange_mic.as_deref(), Some("XASX"));
+        assert_eq!(got.currency, "AUD");
+        assert!(db_list_for_listing(&pool, 1).await.unwrap().is_empty());
+    }
+
+    /// The 422 names both currencies and points at the same remedy the
+    /// currency freeze does — the two refusals are one rule, so they read as
+    /// one.
+    #[tokio::test]
+    async fn api_rename_across_a_currency_boundary_is_422_naming_both_currencies() {
+        let pool = test_pool().await;
+        test_support::listing(1)
+            .ticker("CBA")
+            .mic("XASX")
+            .currency("AUD")
+            .insert(&pool)
+            .await;
+        let resp = client(&pool)
+            .post(
+                "/listings/1/rename",
+                &serde_json::json!({
+                    "effective_date": "2024-06-01",
+                    "ticker": "CBA",
+                    "exchange_mic": "XNYS"
+                }),
+            )
+            .await;
+        let (status, body) = resp.status_and_body();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            body.contains("would move a AUD listing to XNYS, which quotes in USD"),
+            "body was: {body}"
+        );
+        assert!(
+            body.contains(
+                "Record a redenomination as a new listing in USD and transfer the \
+                           parcels to it"
+            ),
+            "body was: {body}"
+        );
+    }
+
+    /// The boundary: the rule is about the exchange the rename *moves the
+    /// listing to*, so a rename that leaves the exchange alone — omitting it,
+    /// or naming the current one — is never refused, even on a listing that
+    /// already mismatches its exchange (a state a plain `PUT` can create, and
+    /// which `reports::health` reports instead). Otherwise fixing such a
+    /// listing's ticker would be impossible.
+    #[tokio::test]
+    async fn db_rename_on_an_already_mismatched_listing_is_allowed_while_it_stays_put() {
+        let pool = test_pool().await;
+        // A USD listing sitting on the AUD exchange: entered this way by a
+        // plain PUT, which checks no such thing.
+        test_support::listing(1)
+            .ticker("OLD")
+            .mic("XASX")
+            .currency("USD")
+            .insert(&pool)
+            .await;
+        test_support::buy(1, 1).insert(&pool).await;
+
+        // Exchange omitted.
+        db_rename(&pool, 1, &body("2024-06-01", "NEW"))
+            .await
+            .unwrap();
+        assert_eq!(
+            listing::db_get(&pool, 1).await.unwrap().unwrap().ticker,
+            "NEW"
+        );
+
+        // Exchange named, unchanged.
+        let mut same = body("2024-06-02", "NEWER");
+        same.exchange_mic = Some("XASX".to_string());
+        db_rename(&pool, 1, &same).await.unwrap();
+        let got = listing::db_get(&pool, 1).await.unwrap().unwrap();
+        assert_eq!(got.ticker, "NEWER");
+        assert_eq!(got.exchange_mic.as_deref(), Some("XASX"));
+    }
+
+    /// And the move that *resolves* a mismatch is allowed: the rule compares
+    /// the listing's currency with the exchange it is moving to, not with the
+    /// one it is leaving.
+    #[tokio::test]
+    async fn db_rename_onto_an_exchange_quoting_the_listings_currency_is_allowed() {
+        let pool = test_pool().await;
+        test_support::listing(1)
+            .ticker("LAAC")
+            .mic("XASX")
+            .currency("USD")
+            .insert(&pool)
+            .await;
+        let mut moved = body("2024-06-01", "LAR");
+        moved.exchange_mic = Some("XNYS".to_string());
+
+        db_rename(&pool, 1, &moved).await.unwrap();
+        let got = listing::db_get(&pool, 1).await.unwrap().unwrap();
+        assert_eq!(got.exchange_mic.as_deref(), Some("XNYS"));
+        assert_eq!(got.currency, "USD");
     }
 
     #[tokio::test]

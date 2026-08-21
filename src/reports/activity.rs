@@ -1388,6 +1388,23 @@ mod tests {
     #[tokio::test]
     async fn db_rename_appears_as_a_chronological_ledger_event() {
         let pool = test_pool().await;
+        // A second AUD market to move to: a rename onto an exchange quoting
+        // another currency is refused (SCENARIOS R-01), and the trades here
+        // are AUD.
+        crate::entities::exchange::db_upsert(
+            &pool,
+            &crate::entities::exchange::Exchange {
+                mic: "CXAX".to_string(),
+                name: "Second AUD market".to_string(),
+                country: "Australia".to_string(),
+                currency: "AUD".to_string(),
+                timezone: "Australia/Sydney".to_string(),
+                settlement_days: 2,
+                close_time: "16:00".to_string(),
+            },
+        )
+        .await
+        .unwrap();
         insert_listing(&pool, 1, "LAAC").await;
         test_support::buy(1, 1)
             .date(ymd(2024, 1, 1))
@@ -1399,7 +1416,7 @@ mod tests {
             &crate::entities::listing_rename::RenameBody {
                 effective_date: ymd(2024, 6, 1),
                 ticker: "LAR".to_string(),
-                exchange_mic: Some("XNYS".to_string()),
+                exchange_mic: Some("CXAX".to_string()),
                 name: None,
                 price_symbol: None,
                 note: None,
@@ -1426,7 +1443,7 @@ mod tests {
             rename_row.detail
         );
         assert!(
-            rename_row.detail.contains("XASX -> XNYS"),
+            rename_row.detail.contains("XASX -> CXAX"),
             "exchange change detail: {}",
             rename_row.detail
         );

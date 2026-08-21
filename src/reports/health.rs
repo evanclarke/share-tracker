@@ -53,10 +53,13 @@
 //! - every disposal of ESS-vested shares within 30 days after the taxing
 //!   point, where the ESS 30-day rule re-measures the discount, moves it into
 //!   the disposal's year and cancels the capital gain — the one entry here
-//!   that is wrong in two years at once (see [`EssThirtyDaySale`]).
+//!   that is wrong in two years at once (see [`EssThirtyDaySale`]);
+//! - every listing whose `currency` is not the one its own exchange quotes in
+//!   — a holding that can never be priced again and, once it has history,
+//!   cannot be corrected in place either (see [`ExchangeCurrencyMismatch`]).
 //!
-//! The last is the odd one out in kind: not a double entry but a **date
-//! pattern**, advisory in the way `reports::wash_sales` is. It lives here
+//! The ESS 30-day entry is the odd one out in kind: not a double entry but a
+//! **date pattern**, advisory in the way `reports::wash_sales` is. It lives here
 //! rather than in its own report because it needs no parameters and belongs on
 //! the same cross-view banner — the point is to catch the case at entry time
 //! rather than at return time.
@@ -678,6 +681,43 @@ pub struct DuplicateInheritance {
     pub inheritance_ids: Vec<i64>,
 }
 
+/// A listing whose `currency` is not the currency its exchange quotes in
+/// (SCENARIOS R-01) — an AUD listing sitting on a USD market, or the reverse.
+///
+/// The listing is unpriceable from that moment on: every fetch resolves the
+/// exchange's symbol, and either the provider serves no such series (an
+/// errored row) or the candle's currency is not the listing's, which
+/// `entities::closing_price`'s cross-check refuses (also an errored row). And
+/// it cannot be corrected in place, because `listings.currency` denominates
+/// every stored closing price and is frozen once the listing has any history
+/// (`entities::listing::UpsertError::CurrencyChangeWithHistory`) — the
+/// documented remedy is a new listing in the right currency plus a
+/// [transfer](crate::entities::transfer) of the parcels to it.
+///
+/// `POST /listings/:id/rename` refuses to *create* the state
+/// (`entities::listing_rename::RenameError::ExchangeCurrencyMismatch`), but a
+/// plain `PUT /listings/:id` can still enter a listing in it directly — no
+/// write path compares the two columns — so it is reported here wherever it
+/// came from. Deliberately a **warning, not a constraint** on `PUT`: a real
+/// exchange can quote more than one currency (LSE quotes GBp, USD and EUR)
+/// while `exchanges.currency` is a single column, so the pairing is a strong
+/// smell rather than a certainty.
+///
+/// Exchange-less listings — `security_type = 'Crypto'`, NULL `exchange_mic` —
+/// have no exchange to disagree with and are excluded (the SQL joins
+/// `exchanges`, so they never appear).
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
+pub struct ExchangeCurrencyMismatch {
+    pub listing_id: i64,
+    pub ticker: String,
+    /// The listing's own `currency` — what every stored closing price for it
+    /// is denominated in.
+    pub currency: String,
+    pub exchange_mic: String,
+    /// The currency that exchange quotes in (`exchanges.currency`).
+    pub exchange_currency: String,
+}
+
 /// A disposal of ESS-vested shares **within 30 days after** the statement's
 /// taxing point, where the ESS 30-day rule moves the taxing point to the
 /// disposal date (SCENARIOS J-04, `docs/ato/ess-30-day-rule.md`, QC 23058
@@ -858,6 +898,10 @@ pub struct HealthReport {
     /// inheritance of identical figures, newest death first. Empty when no
     /// inherited parcel is recorded twice.
     pub duplicate_inheritances: Vec<DuplicateInheritance>,
+    /// Every listing whose `currency` differs from its exchange's, by ticker.
+    /// Empty when every listing agrees with the market it trades on;
+    /// exchange-less (Crypto) listings never appear.
+    pub exchange_currency_mismatches: Vec<ExchangeCurrencyMismatch>,
     /// Every disposal of ESS-vested shares within 30 days after the statement's
     /// taxing point, newest sale first — where the 30-day rule re-measures the
     /// discount and cancels the capital gain. Empty when no such sale exists.
@@ -1926,6 +1970,26 @@ async fn db_ess_30_day_rule(
     Ok(alerts)
 }
 
+/// Listings whose `currency` is not their exchange's — see
+/// [`ExchangeCurrencyMismatch`].
+///
+/// One join on the caller's transaction, like the `duplicate_*` family. The
+/// join to `exchanges` is what excludes exchange-less (Crypto) listings: they
+/// have no exchange, so there is nothing for their currency to disagree with.
+async fn db_exchange_currency_mismatches(
+    conn: &mut sqlx::SqliteConnection,
+) -> Result<Vec<ExchangeCurrencyMismatch>, sqlx::Error> {
+    sqlx::query_as::<_, ExchangeCurrencyMismatch>(
+        "SELECT l.id AS listing_id, l.ticker AS ticker, l.currency AS currency, \
+                e.mic AS exchange_mic, e.currency AS exchange_currency \
+         FROM listings l JOIN exchanges e ON e.mic = l.exchange_mic \
+         WHERE l.currency <> e.currency \
+         ORDER BY l.ticker, l.id",
+    )
+    .fetch_all(&mut *conn)
+    .await
+}
+
 /// Read the freshness facts on one snapshot. `today` and `now` are parameters
 /// so tests can pin the staleness thresholds and the "close is final yet"
 /// cut-off to fixed dates.
@@ -1983,6 +2047,7 @@ pub async fn db_health(
     let duplicate_expenses = db_duplicate_expenses(&mut tx).await?;
     let duplicate_ess_statements = db_duplicate_ess_statements(&mut tx).await?;
     let duplicate_inheritances = db_duplicate_inheritances(&mut tx).await?;
+    let exchange_currency_mismatches = db_exchange_currency_mismatches(&mut tx).await?;
     let ess_30_day_rule = db_ess_30_day_rule(&mut tx).await?;
     tx.commit().await?;
     let unpriced_days = db_unpriced_days(pool, now).await?;
@@ -2010,6 +2075,7 @@ pub async fn db_health(
         duplicate_expenses,
         duplicate_ess_statements,
         duplicate_inheritances,
+        exchange_currency_mismatches,
         ess_30_day_rule,
     })
 }
@@ -2507,11 +2573,30 @@ mod tests {
 
     /// A hole spanning a ticker/exchange change is walked on the calendar
     /// that was in force at each date: the ASX's King's Birthday (Mon
-    /// 2026-06-08) is not a trading day before the move to the NYSE, whose
-    /// calendar has no such holiday, so it is not its own hole.
+    /// 2026-06-08) is not a trading day before the move, while the exchange
+    /// moved to keeps no such holiday, so it is not its own hole.
+    ///
+    /// The destination is a second **AUD** market rather than the seeded XNYS
+    /// because a rename across a currency boundary is refused
+    /// (`RenameError::ExchangeCurrencyMismatch`, SCENARIOS R-01) — the
+    /// calendar is what this test is about, not the currency.
     #[tokio::test]
     async fn a_hole_straddling_a_rename_uses_the_calendar_of_the_date() {
         let pool = test_pool().await;
+        crate::entities::exchange::db_upsert(
+            &pool,
+            &crate::entities::exchange::Exchange {
+                mic: "CXAX".to_string(),
+                name: "Second AUD market".to_string(),
+                country: "Australia".to_string(),
+                currency: "AUD".to_string(),
+                timezone: "Australia/Sydney".to_string(),
+                settlement_days: 2,
+                close_time: "16:00".to_string(),
+            },
+        )
+        .await
+        .unwrap();
         test_support::listing(1).ticker("OLD").insert(&pool).await;
         test_support::buy(1, 1)
             .date(ymd(2026, 6, 5))
@@ -2523,7 +2608,7 @@ mod tests {
             &crate::entities::listing_rename::RenameBody {
                 effective_date: ymd(2026, 6, 10),
                 ticker: "NEW".to_string(),
-                exchange_mic: Some("XNYS".to_string()),
+                exchange_mic: Some("CXAX".to_string()),
                 name: None,
                 price_symbol: None,
                 note: None,
@@ -2538,7 +2623,7 @@ mod tests {
         assert_eq!(h.unpriced_days.len(), 1);
         let row = &h.unpriced_days[0];
         assert_eq!(row.ticker, "NEW");
-        // Fri 06-05, Tue 06-09, then 06-10..06-12 under the NYSE calendar —
+        // Fri 06-05, Tue 06-09, then 06-10..06-12 under the new calendar —
         // the ASX holiday of Mon 06-08 values at Fri 06-05 and is not a sixth.
         assert_eq!(row.unpriced_days, 5);
         assert_eq!(row.earliest_date, ymd(2026, 6, 5));
@@ -4472,6 +4557,91 @@ mod tests {
             "{:?}",
             h.duplicate_inheritances
         );
+    }
+
+    /// SCENARIOS R-01: a listing whose `currency` is not the currency its own
+    /// exchange quotes in. The rename path refuses to create it, but a plain
+    /// `PUT /listings/:id` compares the two columns nowhere, so a listing can
+    /// be entered this way directly — and once it has history the freeze makes
+    /// it permanent. Health names it wherever it came from.
+    #[tokio::test]
+    async fn a_listing_whose_currency_is_not_its_exchanges_is_reported() {
+        let pool = test_pool().await;
+        // Entered by a plain PUT: an AUD-quoting market holding a USD listing.
+        test_support::listing(1)
+            .ticker("CBA")
+            .mic("XASX")
+            .currency("USD")
+            .insert(&pool)
+            .await;
+
+        let h = health(&pool, ymd(2026, 7, 13)).await;
+        assert_eq!(h.exchange_currency_mismatches.len(), 1);
+        let m = &h.exchange_currency_mismatches[0];
+        assert_eq!(m.listing_id, 1);
+        assert_eq!(m.ticker, "CBA");
+        assert_eq!(m.currency, "USD");
+        assert_eq!(m.exchange_mic, "XASX");
+        assert_eq!(m.exchange_currency, "AUD");
+    }
+
+    /// A listing quoting the money its exchange does is silent, and so is a
+    /// Crypto listing — it has no exchange for its currency to disagree with,
+    /// which is the whole point of the exchange-less shape rather than a hole
+    /// in the check.
+    #[tokio::test]
+    async fn matching_and_exchange_less_listings_are_not_reported() {
+        let pool = test_pool().await;
+        test_support::listing(1)
+            .ticker("BHP")
+            .mic("XASX")
+            .currency("AUD")
+            .insert(&pool)
+            .await;
+        test_support::listing(2)
+            .ticker("MSFT")
+            .mic("XNYS")
+            .currency("USD")
+            .insert(&pool)
+            .await;
+        // Exchange-less, and deliberately *not* denominated in the token: a
+        // crypto holding is recorded in the fiat it is priced in.
+        test_support::listing(3)
+            .ticker("BTC")
+            .security_type(crate::entities::listing::SecurityType::Crypto)
+            .currency("AUD")
+            .with(|l| l.exchange_mic = None)
+            .insert(&pool)
+            .await;
+
+        let h = health(&pool, ymd(2026, 7, 13)).await;
+        assert!(
+            h.exchange_currency_mismatches.is_empty(),
+            "{:?}",
+            h.exchange_currency_mismatches
+        );
+    }
+
+    /// Served over the endpoint the banner polls, since that is the only way
+    /// the warning reaches anyone.
+    #[tokio::test]
+    async fn api_exchange_currency_mismatch_is_served_to_the_banner() {
+        let pool = test_pool().await;
+        test_support::listing(1)
+            .ticker("CBA")
+            .mic("XNYS")
+            .currency("AUD")
+            .insert(&pool)
+            .await;
+        let body: serde_json::Value = ApiClient::over(router().with_state(pool))
+            .get("/reports/health")
+            .await
+            .json();
+        let m = &body["exchange_currency_mismatches"][0];
+        assert_eq!(m["ticker"], "CBA");
+        assert_eq!(m["currency"], "AUD");
+        assert_eq!(m["exchange_mic"], "XNYS");
+        assert_eq!(m["exchange_currency"], "USD");
     }
 
     #[tokio::test]
