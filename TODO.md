@@ -31,55 +31,12 @@ moved to XNYS); and `R-10` refuses a listing whose ticker another listing alread
 recorded every leg — the `listings` UPDATE behind each rename and the `listing_renames` DELETE behind
 each undo.
 
-**Eight findings, all open.** They cluster: three are about the rename as a *write* (it is applied
+**Eight findings; R-02 is closed (archived in `DONE/reference-data.md`), seven remain open.** They cluster: three are about the rename as a *write* (it is applied
 before it is effective, its undo is partial, and it can move a listing to an exchange whose currency
 the listing can no longer be given), two are about what the rename chain cannot express (a ticker
 reused by another company; a pre-rename provider symbol), one is a report reading today's ticker
 where the docs say it reads the row's own date, one is that the whole feature has no web UI, and one
 is a refusal message. Each is a `## ` section below, in the order I would fix them.
-
-## SCENARIOS R-02: a future-dated rename takes effect the moment it is recorded
-
-`listing_rename::db_rename` bounds `effective_date` only from below — it must be after the listing's
-most recent rename — and then updates `listings.ticker`/`exchange_mic` unconditionally. Nothing
-compares the date with today. So a rename entered ahead of time, which is how a ticker change is
-actually announced, renames the security immediately while its own chain says the change has not
-happened yet.
-
-The two halves of the system then disagree, and the disagreement is exactly what the chain exists to
-prevent:
-
-- **Every report shows the future ticker today.** `GET /reports/health` listed the holding as
-  `FUTURETICK` with the change dated 2027-01-01.
-- **Daily price collection is right and live valuation is wrong.** Collection resolves the symbol as
-  at the date being fetched, so `POST /closing_prices/fetch` for 2026-08-19 correctly fetched
-  `MSFT`. The live quote resolves `yahoo_symbol_now` from `market.current()` — the last span, the
-  future one — so `POST /portfolio/activity` returned the holding unvalued with
-  `price_unavailable: "yahoo returned no quote for FUTURETICK"`. A listing renamed ahead of time
-  cannot be valued live until the effective date arrives.
-
-Reproduced: listing on XNYS ticker `MSFT`, `POST /listings/10/rename {"effective_date":"2027-01-01",
-"ticker":"FUTURETICK"}` → `201`, `GET /listings/10` → `"ticker":"FUTURETICK"` on 2026-08-21.
-
-**Fix — Evan chose 2026-08-21: option (a), refuse a future `effective_date`.**
-
-- [ ] Refuse a rename whose `effective_date` is after today with `422` naming the rule, beside the
-      existing out-of-order refusal (`RenameError`), and say which rule applies in the API docs'
-      rename section.
-
-**Options as put:**
-
-- **(a) Refuse an `effective_date` after today** (`422`, naming the rule), the way the write already
-  refuses one on or before the newest rename. A rename is a record of what happened; an announced
-  change is entered on the day it takes effect. Smallest change, no new state, and it makes the
-  chain's last span always the one in force.
-- **(b) Accept it but do not apply it until it is effective** — leave `listings` alone and have a
-  scheduled job promote the pending rename on its date. Matches how a user would want to enter an
-  announcement, but adds a job, a "pending" state to every read of the chain, and a new way for the
-  listing row and its chain to disagree if the job does not run.
-- **(c) Document it** — say in `docs/API.md` that a rename is applied on entry whatever its date, and
-  that a future-dated one renames the listing now. Cheapest, but it leaves the live-quote failure in
-  place with no remedy but deleting the rename.
 
 ## SCENARIOS R-04/R-08: undoing a rename leaves behind the price symbol the undone rename set
 

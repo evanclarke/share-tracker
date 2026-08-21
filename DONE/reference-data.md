@@ -736,3 +736,58 @@ Two things remain, one of them needing a figure from Evan:
     it, including the honest note about what it would not have caught. SCENARIOS section R still
     owns the general lesson (nothing records *which side of a demerger is the continuing legal
     entity*); this check infers it from the price series rather than storing it.
+
+## SCENARIOS R-02: a future-dated rename takes effect the moment it is recorded
+
+`listing_rename::db_rename` bounds `effective_date` only from below — it must be after the listing's
+most recent rename — and then updates `listings.ticker`/`exchange_mic` unconditionally. Nothing
+compares the date with today. So a rename entered ahead of time, which is how a ticker change is
+actually announced, renames the security immediately while its own chain says the change has not
+happened yet.
+
+The two halves of the system then disagree, and the disagreement is exactly what the chain exists to
+prevent:
+
+- **Every report shows the future ticker today.** `GET /reports/health` listed the holding as
+  `FUTURETICK` with the change dated 2027-01-01.
+- **Daily price collection is right and live valuation is wrong.** Collection resolves the symbol as
+  at the date being fetched, so `POST /closing_prices/fetch` for 2026-08-19 correctly fetched
+  `MSFT`. The live quote resolves `yahoo_symbol_now` from `market.current()` — the last span, the
+  future one — so `POST /portfolio/activity` returned the holding unvalued with
+  `price_unavailable: "yahoo returned no quote for FUTURETICK"`. A listing renamed ahead of time
+  cannot be valued live until the effective date arrives.
+
+Reproduced: listing on XNYS ticker `MSFT`, `POST /listings/10/rename {"effective_date":"2027-01-01",
+"ticker":"FUTURETICK"}` → `201`, `GET /listings/10` → `"ticker":"FUTURETICK"` on 2026-08-21.
+
+**Fix — Evan chose 2026-08-21: option (a), refuse a future `effective_date`.**
+
+- [x] Refuse a rename whose `effective_date` is after today with `422` naming the rule, beside the
+      existing out-of-order refusal (`RenameError`), and say which rule applies in the API docs'
+      rename section. Done 2026-08-21: `RenameError::FutureDated { today }`, checked inside
+      `db_rename`'s own transaction alongside the `OutOfOrder` check and before anything is written,
+      against `infra::date::today()` — the same local-date clock every other live-view cutoff uses.
+      Today itself is accepted (a change is recorded on the day it takes effect); only a strictly
+      later date is refused, with the 422 body naming the rule and today's date, and the log wording
+      kept separate in the `#[error]` string as CLAUDE.md requires. Verified by
+      `entities::listing_rename::tests::db_rename_future_effective_date_is_rejected_and_writes_nothing`
+      (1, 30 and 365 days ahead, asserting no `listing_renames` row and an unchanged listing),
+      `..::db_rename_dated_today_is_accepted` (the boundary) and
+      `..::api_rename_dated_in_the_future_returns_422_naming_the_rule` (the HTTP surface and the
+      body's wording). `docs/API.md`'s "Ticker or name changes" section gains a paragraph on why the
+      bound is today — the rename is applied as it is recorded, there is no pending state and no job
+      that promotes one — and the rule joins the rename's other causes in the 422 catalogue.
+
+**Options as put:**
+
+- **(a) Refuse an `effective_date` after today** (`422`, naming the rule), the way the write already
+  refuses one on or before the newest rename. A rename is a record of what happened; an announced
+  change is entered on the day it takes effect. Smallest change, no new state, and it makes the
+  chain's last span always the one in force.
+- **(b) Accept it but do not apply it until it is effective** — leave `listings` alone and have a
+  scheduled job promote the pending rename on its date. Matches how a user would want to enter an
+  announcement, but adds a job, a "pending" state to every read of the chain, and a new way for the
+  listing row and its chain to disagree if the job does not run.
+- **(c) Document it** — say in `docs/API.md` that a rename is applied on entry whatever its date, and
+  that a future-dated one renames the listing now. Cheapest, but it leaves the live-quote failure in
+  place with no remedy but deleting the rename.

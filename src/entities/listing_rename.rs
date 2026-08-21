@@ -19,6 +19,14 @@
 //! rarely matches the new one, so it is not carried over automatically
 //! either; set it explicitly via `PUT /listings/:id` or the rename body).
 //!
+//! `effective_date` is bounded at both ends: after the listing's most recent
+//! rename (`RenameError::OutOfOrder`) and no later than today
+//! (`RenameError::FutureDated`). The second bound exists because the rename
+//! is applied to `listings` as it is recorded — there is no pending state —
+//! so a rename entered ahead of its announced date would rename the security
+//! now while its own chain said the change had not happened yet
+//! (SCENARIOS R-02). Record an announced change on the day it takes effect.
+//!
 //! `DELETE /listings/:id/renames/:rename_id` undoes a rename: allowed only
 //! for the *newest* rename of that listing (chain integrity — an
 //! intermediate entry can't be removed out of order), restoring
@@ -77,6 +85,15 @@ pub enum RenameError {
     /// `effective_date` is not after this listing's most recent rename.
     #[error("effective_date must be after this listing's most recent rename ({latest})")]
     OutOfOrder { latest: NaiveDate },
+    /// `effective_date` is after today. A rename is applied to the listing
+    /// the moment it is recorded — there is no pending state — so a
+    /// future-dated one would rename the security while its own chain says
+    /// the change hasn't happened yet (SCENARIOS R-02): every report would
+    /// show the future ticker today, and the live quote, which resolves the
+    /// symbol from the chain's last span, would fail until the date arrived.
+    /// A rename dated *today* is fine; only a later date is refused.
+    #[error("effective_date must not be after today ({today})")]
+    FutureDated { today: NaiveDate },
     /// A Crypto listing's new ticker is not a recognised digital-token code
     /// (the same rule `listing::db_upsert` enforces).
     #[error("a Crypto listing's ticker must be a recognised digital-token code")]
@@ -111,6 +128,11 @@ impl From<RenameError> for ApiError {
             }
             RenameError::OutOfOrder { latest } => ApiError::unprocessable(format!(
                 "effective_date must be after this listing's most recent rename ({latest})"
+            )),
+            RenameError::FutureDated { today } => ApiError::unprocessable(format!(
+                "effective_date must not be after today ({today}) — a rename is applied to the \
+                 listing as soon as it is recorded, so record an announced change on the day it \
+                 takes effect"
             )),
             RenameError::UnrecognisedDigitalToken => {
                 ApiError::unprocessable(listing::UNRECOGNISED_DIGITAL_TOKEN)
@@ -185,6 +207,16 @@ pub async fn db_rename(
 
     if body.ticker == current.ticker && new_exchange_mic == current.exchange_mic {
         return Err(RenameError::NoOp);
+    }
+
+    // Bounded from above by today as well as from below by the chain: the
+    // rename is applied to `listings` in this same transaction, so a
+    // future-dated one takes effect immediately while its own span says it
+    // has not (SCENARIOS R-02). Today itself is allowed — the change is
+    // recorded on the day it happens.
+    let today = crate::infra::date::today();
+    if body.effective_date > today {
+        return Err(RenameError::FutureDated { today });
     }
 
     let latest: Option<NaiveDate> =
@@ -496,6 +528,57 @@ mod tests {
         );
     }
 
+    /// SCENARIOS R-02. A rename is applied to the listing as it is recorded,
+    /// so one dated ahead of its announcement would rename the security now
+    /// while its own chain said the change had not happened. Refused, and
+    /// nothing is written — neither the chain row nor the listing.
+    #[tokio::test]
+    async fn db_rename_future_effective_date_is_rejected_and_writes_nothing() {
+        let pool = test_pool().await;
+        test_support::listing(1)
+            .ticker("LAAC")
+            .mic("XNYS")
+            .insert(&pool)
+            .await;
+
+        let today = crate::infra::date::today();
+        for ahead in [1, 30, 365] {
+            let date = (today + chrono::Duration::days(ahead)).to_string();
+            let err = db_rename(&pool, 1, &body(&date, "FUTURETICK"))
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, RenameError::FutureDated { today: t } if t == today),
+                "{ahead} days ahead: {err:?}"
+            );
+        }
+
+        // Nothing was written: no chain row, and the listing keeps its
+        // identity.
+        assert_eq!(db_list_for_listing(&pool, 1).await.unwrap().len(), 0);
+        let got = listing::db_get(&pool, 1).await.unwrap().unwrap();
+        assert_eq!(got.ticker, "LAAC");
+        assert_eq!(got.exchange_mic.as_deref(), Some("XNYS"));
+    }
+
+    /// The boundary: today itself is not the future — a change is recorded on
+    /// the day it takes effect.
+    #[tokio::test]
+    async fn db_rename_dated_today_is_accepted() {
+        let pool = test_pool().await;
+        test_support::listing(1).ticker("LAAC").insert(&pool).await;
+
+        let today = crate::infra::date::today();
+        let created = db_rename(&pool, 1, &body(&today.to_string(), "LAR"))
+            .await
+            .unwrap();
+        assert_eq!(created.effective_date, today);
+        assert_eq!(
+            listing::db_get(&pool, 1).await.unwrap().unwrap().ticker,
+            "LAR"
+        );
+    }
+
     #[tokio::test]
     async fn db_rename_crypto_requires_recognised_digital_token() {
         let pool = test_pool().await;
@@ -645,6 +728,34 @@ mod tests {
             )
             .await;
         assert_eq!(resp.status, StatusCode::NOT_FOUND);
+    }
+
+    /// SCENARIOS R-02, at the HTTP surface: the refusal is a 422 whose body
+    /// names the rule and today's date (it is shown verbatim in the web UI).
+    #[tokio::test]
+    async fn api_rename_dated_in_the_future_returns_422_naming_the_rule() {
+        let pool = test_pool().await;
+        test_support::listing(1).ticker("MSFT").insert(&pool).await;
+
+        let today = crate::infra::date::today();
+        let future = today + chrono::Duration::days(365);
+        let resp = client(&pool)
+            .post(
+                "/listings/1/rename",
+                &serde_json::json!({ "effective_date": future, "ticker": "FUTURETICK" }),
+            )
+            .await;
+        let (status, body) = resp.status_and_body();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            body.contains("effective_date must not be after today")
+                && body.contains(&today.to_string()),
+            "{body}"
+        );
+        assert_eq!(
+            listing::db_get(&pool, 1).await.unwrap().unwrap().ticker,
+            "MSFT"
+        );
     }
 
     #[tokio::test]
