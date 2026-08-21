@@ -804,6 +804,13 @@ fn known_limitations_document_a_reissued_ticker_cannot_be_recorded() {
     assert!(limitations.contains("a listing with no recorded rename has a single identity span"));
     assert!(limitations.contains("set [`unpriced_from`](#listings) at its last quoted day"));
     assert!(limitations.contains("check `fetched_symbol` on anything backfilled across a reissue"));
+    // The marker's bound, stated correctly: a reissued series cannot begin
+    // before the delisting that freed the code, so `unpriced_from` covers
+    // every date the new company's series can reach. The residual is a
+    // provider splicing one series per spelling, which Yahoo does not do
+    // (a 2005 backfill under a later-reissued code answers HTTP 400).
+    assert!(limitations.contains("That marker covers the whole window a reissue can contaminate"));
+    assert!(limitations.contains("one continuous series per ticker spelling"));
 }
 
 /// Ticker/exchange renames (REQUIREMENTS "Ticker and exchange-code changes",
