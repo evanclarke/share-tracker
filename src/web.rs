@@ -446,6 +446,24 @@ mod tests {
         assert!(js.contains("hand-entered price(s) ("));
     }
 
+    /// The other demerger warning: the head listing and the entity the
+    /// demerger created recorded the wrong way round, which the banner names
+    /// by both tickers, both series and the date the head parcel is held
+    /// from — linking to the screen the action is re-recorded on.
+    #[tokio::test]
+    async fn demerger_head_not_continuing_ui_present() {
+        let js = app_js_body().await;
+        assert!(js.contains("demergers_head_not_continuing"));
+        assert!(js.contains("as its head listing, but "));
+        assert!(js.contains("has no stored closing price before that date"));
+        assert!(js.contains("d.head_unpriced_before"));
+        assert!(js.contains("d.head_held_from"));
+        assert!(js.contains("d.demerged_priced_days"));
+        assert!(js.contains("d.demerger_ticker"));
+        assert!(js.contains("the head and the new entity swapped"));
+        assert!(js.contains("'#/e/corporate_actions'"));
+    }
+
     #[tokio::test]
     async fn report_snapshots_ui_present() {
         let js = app_js_body().await;

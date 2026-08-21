@@ -593,3 +593,146 @@ A$19,869.26 — a 44% unrealised loss — where old Lithium Americas closed near
     positive here.** Its rule — a pre-demerger `ok` row the provider served *after* the demerger — is
     met by that 2023-10-02 row, but the row is a new listing's first close rather than a restated
     one, and the check has no way to tell those apart. See the new section below.
+
+## The LAC demerger was modelled with the head and the new entity swapped — re-modelled 2026-08-21
+
+Established 2026-08-21 from the company's own demerger notice (see the closed stated-close item in
+`DONE/reference-data.md` for the quotations). The notice is unambiguous: the **continuing** entity is
+Lithium Americas (Argentina) Corp — listing 8, `LAAC`/`LAR` — and Lithium Americas Corp (`LAC`,
+listing 7) is **"a new corporation"** created by the Arrangement. Corporate action 1 recorded the
+opposite: listing 7 as the head, listing 8 as `demerger_listing_id`. Evan asked for it to be fixed,
+and it was, against the deployed database on 2026-08-21.
+
+**No tax figure was ever wrong, and this corrects an earlier worry that one might be.** The
+apportionment lands exactly where the notice puts it — LAC keeps 64%, LAAC receives 36%, and the
+percentages attach to the *ticker*, not to the head/demerged role, so re-modelling moved nothing.
+Both parcels inherit the 2021-03-25 acquisition date and were discount-eligible on the 2025-01-13
+disposals. Proven rather than assumed: the whole FY2025 tax document, before and after, is identical
+but for two `purchase_trade_id` values swapping roles (9073↔9074), and FY2024 is byte-identical.
+LAC cost base A$12,716.33 / proceeds A$5,309.35 / loss A$7,406.98; LAAC A$7,152.93 / A$4,756.64 /
+loss A$2,396.29, over a combined A$19,869.26. **Nothing needed re-filing.**
+
+- [x] **Re-model so listing 8 is the head.** Done 2026-08-21 on the deployed database, entirely
+  through the supported API — **no code change was needed**, and no raw SQL was used. Rehearsed first
+  on a copy of a fresh `pre-remodel` backup, which predicted every figure. The four documented
+  refusals all fire as designed and dictate the order (a Buy's listing is frozen while allocations
+  reference it; demerge-group trades cannot be edited or individually deleted; the action is frozen
+  while its trades exist; the group cannot go while its parcels are drawn on), so the sequence is:
+  save both 2025 contract-note PDFs → `DELETE /sells/9075`, `/sells/9076`, then `/sells/9072` (which
+  takes the whole demerge group) → `PUT /trades/9071` with `listing_id: 8` → `PUT
+  /corporate_actions/1` as a `Demerger` on listing 8, `demerger_listing_id: 7`,
+  `demerger_cost_base_pct: 64` → `POST /corporate_actions/1/demerge` → `PUT` both Sells back with
+  their allocations crossed over → re-upload the PDFs. Trade ids were preserved throughout (the
+  deletes returned the max id to 9071, so the rebuild reclaimed 9072–9076); the *roles* of 9073/9074
+  swap, which is the whole point.
+- [x] **Point the stated close at the series that was actually restated.** With listing 8 as head the
+  existing mechanism reaches it: `demerger_close_date 2023-10-02` / `demerger_close_price 16.85`
+  (old Lithium Americas' actual close that day, supplied by Evan and corroborated by the notice's own
+  64/36 split against the observed post-separation closes) derives a factor of
+  16.85 ÷ 6.453301 = **2.6111** and re-based **653 rows**, 2021-03-01 → 2023-10-02, in the write's own
+  transaction. The recovered series is unmistakably the real undivided company: 2021-03-25 **15.24**
+  (against Evan's own fill of 14.39 that day — a 5.9% intraday gap, where the old stored figure was
+  an absurd 5.84), 2021-11-29 peak **43.06**, 2023-06-30 **21.24**. `demergers_missing_close` clears,
+  and `GET /reports/health` is now **entirely clean**.
+- [x] **The valuation history it was all for.** `regenerate_all` rebuilt **2,181 dates, 0 blocked**.
+  Where 2,763 snapshot rows across **921 dates** (2021-03-25 → 2023-10-01) had the holding *excluded*
+  as unvaluable, there are now **zero** excluded holdings and zero stale snapshots. 2022-09-19 went
+  from a portfolio total of A$404,812.63 with LAC excluded to **A$454,637.56** with the holding
+  valued at A$49,824.93; 2023-09-29 from A$484,306.31 to **A$513,349.75**. The 2021-03-25 holding
+  values at A$21,032.06 against a cost base of A$19,869.26 — the first time the position's own
+  history has been valuable at all.
+
+Two things remain, one of them needing a figure from Evan:
+
+- [x] **The 2023-10-03 row on listing 8 is in the provider's adjusted basis — and that is correct.
+  This corrects the finding as first written, which had the arithmetic wrong.** The original claim
+  was that the re-base walk is off by a day for demergers (the provider's adjustment runs through
+  2023-10-03 inclusive, its ex-date being 2023-10-04) and that the row understates listing 8 by
+  ~A$1,373. Both halves are wrong, and extending the walk would have been a real corruption.
+  - **Un-adjusting the row yields the *combined* entity, which the model already counts twice over.**
+    6.517713 × 2.611067 = **17.01818** is what the whole undivided company closed at on 3 October —
+    NewCo included. But the demerge Buy is dated 2023-10-03, so listing 7 is *already held* that day
+    at 9.67. Extending the walk would value the holding at 17.01818 + 9.67 = **26.69/unit** against
+    the previous day's 16.85 — a 58% overnight jump, from double-counting the NewCo side. As it
+    stands the two listings sum to **16.19/unit**, a 3.9% move, which is ordinary.
+  - **The proposed repair figure was also too high.** 17.01818 − 9.67 = 7.348 assumed the when-issued
+    9.67 exactly captures NewCo's value; the market priced standalone Lithium Argentina at **6.01**
+    the next trading day and 6.09 the day after. The stored `6.517713` — Yahoo's spin-off factor
+    applied to the combined close, i.e. its own standalone-equivalent estimate — is *closer to
+    reality* than the repair. Entering 7.348 would have overstated the holding.
+  - **So the boundary is right, and for a statable reason**: the walk stops strictly before the
+    demerger date because **on that date the model already holds the demerged parcel**, so the head
+    listing's price must be the standalone stub rather than the combined entity. A split reaches the
+    same boundary by a different route (the price is already in the new basis on the effective date).
+    It is not an off-by-one, and `price_basis_ratio`'s `e.date <= from` skip should be left alone.
+  - **The residue, which is real but small and has no better answer**: on 2023-10-03 the stored price
+    is not strictly "in its own trading day's unit basis" as the documented invariant has it, because
+    standalone Lithium Argentina did not trade that day — the combined entity did, and what is stored
+    is a derived standalone-equivalent. Every alternative is worse, so this is a documented exception
+    rather than something to code around. The general shape is worth stating in `docs/API.md` beside
+    the contemporaneous-basis rule: **on a demerger's own date the head listing's stored price is the
+    provider's standalone-equivalent, not an observed close**, and that is deliberate. **Done
+    2026-08-21**: `docs/API.md`'s Closing prices section now carries the exception as its own
+    paragraph beside the "Which corporate actions restate the series" list — the strictly-before
+    boundary, why leaving the row alone is right (the demerged parcel is already held that day, so
+    un-adjusting would recover the combined entity), the LAC worked numbers, that a split reaches the
+    same boundary by the other route, and that `demergers_missing_close` counts `adjusted_days` by
+    the same boundary so the check and the walk agree. `docs/SCHEMA.md`'s `closing_prices.price`
+    commentary, which asserts the invariant from the other side, carries the same qualification.
+    Pinned by `doc_checks::demerger_date_price_basis_exception_documented`. No code changed.
+
+- [x] **Nothing detects a demerger modelled with the new entity as head** — the mis-modelling this
+  section fixed. It was invisible for three years and was only caught because the price history was
+  impossible; `demergers_missing_close` reported it as a missing stated close, which is a symptom
+  rather than the defect. The signature is cheap to test for: the head listing has **no provider
+  series before the demerger date**, which is what a newly created entity looks like and what
+  `unpriced_before` now records explicitly. A health check in that shape would have named this
+  directly. Note the general lesson for SCENARIOS section R (listing identity and renames): a
+  demerger where the *new* entity keeps the original ticker breaks the "ticker continuity = entity
+  continuity" assumption, and nothing in the model records which side of a demerger is the continuing
+  legal entity. **Done 2026-08-21**: `GET /reports/health` gained
+  `demergers_head_not_continuing`, built to `demergers_missing_close`'s shape (same query style on
+  the report's own read transaction, newest demerger first, same banner + docs register).
+  - **The predicate is an asymmetry, not an absence**, and all three clauses are load-bearing: (1)
+    the head listing holds **no `ok` closing price of any origin** dated before the demerger — its
+    series does not reach back past the event, which is what a newly created entity looks like; (2)
+    the **demerged** listing holds ≥ 1 `ok`, provider-**fetched** price dated before it — the entity
+    supposedly created by the demerger has a provider series predating its own creation, which only
+    the continuing entity can have; (3) the head listing was **acquired before** the demerger (a
+    Buy/DRP dated earlier), so the model really does claim a security on days its own provider says
+    it did not exist. It reports `action_id`, both listings and tickers, `demerger_date`,
+    `head_unpriced_before` (the marker corroborates, it is not required), `head_first_price_date`,
+    `head_held_from`, and `demerged_priced_days` / `demerged_earliest_date` /
+    `demerged_latest_date`.
+  - **The false positives each clause kills.** Without (2) a fresh database where nothing has been
+    collected lights up on every demerger it holds — the evidence has to come from the provider, on
+    the *other* side, and fetched rather than hand-entered, since a hand-entered row is the
+    operator's own assertion and this check exists to question the operator's model. Without (3) a
+    demerger whose head history was simply never backfilled reads as a defect. **A legitimate
+    demerger of this shape was looked for and not found**: the continuing entity traded before the
+    event by definition and the demerged one is created by it, so both halves of the inversion are
+    already odd; the one case where a demerged listing genuinely predates the event — an in-specie
+    distribution of an already-listed holding — has the parent trading throughout, so clause (1)
+    fails and nothing is reported.
+  - **What it would *not* have caught, stated rather than overclaimed.** On the live data as it
+    stood before the 2026-08-21 cleanup this check would have been **silent**: listing 7 did hold
+    635 pre-demerger prices, borrowed from listing 8, so clause (1) failed. `duplicate_price_series`
+    is what names the borrowed rows while they are there; this names the modelling error underneath
+    once they are cleared. The two are **complements**, and between them the incident is visible at
+    both stages — pinned by a test that clears the borrowed rows and watches the finding hand over.
+  - **Verified** by seven tests in `reports::health`, the negatives outnumbering the positive:
+    `a_demerger_recorded_with_the_created_entity_as_head_is_reported` (the incident reconstructed —
+    2021 parcel, head series beginning at the demerger, `unpriced_before` set, continuing entity's
+    series running back years — and cleared by re-recording the sides the right way round),
+    `an_inverted_demerger_is_reported_over_http` (the same over `GET /reports/health`),
+    `an_uncollected_database_reports_no_inverted_demerger`,
+    `a_correctly_modelled_demerger_is_not_reported`,
+    `a_demerger_whose_history_was_never_backfilled_is_not_reported`,
+    `a_head_listing_not_held_before_the_demerger_is_not_reported`, and
+    `borrowed_pre_demerger_prices_are_left_to_the_duplicate_series_check`. Plus
+    `web::tests::demerger_head_not_continuing_ui_present` and
+    `doc_checks::demerger_head_not_continuing_check_documented`. **Pure query over existing tables —
+    no migration, no new column.** `docs/API.md`'s Health section and the README feature list carry
+    it, including the honest note about what it would not have caught. SCENARIOS section R still
+    owns the general lesson (nothing records *which side of a demerger is the continuing legal
+    entity*); this check infers it from the price series rather than storing it.

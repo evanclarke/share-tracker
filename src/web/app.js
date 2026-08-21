@@ -1062,7 +1062,13 @@ async function viewAttachments(ownerField, ownerId) {
 // linking to Corporate Actions, where the demerger's stated close re-bases
 // them — with any hand-entered prices in the same pre-demerger span named as a
 // second figure, because a stated close does not re-base those and the first
-// figure is not the size of the span), any two listings holding one price
+// figure is not the size of the span), any demerger recorded with the entity it
+// *created* as its head listing instead of the one that continued — the head's
+// own price series begins at the demerger while the listing it demerged has one
+// running back years before it, an inversion no correctly recorded demerger
+// produces and that no tax figure or write-time check can see (also linking to
+// Corporate Actions, where the action is re-recorded the right way round), any
+// two listings holding one price
 // series between them — the same close on a long run of consecutive trading
 // days, which is what a series fetched or copied under the wrong symbol looks
 // like afterwards (linking to Closing Prices, where the borrowed rows are
@@ -1123,6 +1129,23 @@ async function refreshHealthBanner() {
             + '–' + d.manual_latest_date + ') sit in the same pre-demerger span; the stated close'
             + ' does not re-base those, so check them separately.'
           : ''));
+    });
+    // A demerger whose two sides are the wrong way round: the head listing is
+    // the entity the demerger *created*, not the one that continued. No tax
+    // figure moves and no write-time check can see it — the only trace is the
+    // price series, where the head's own history begins at the demerger while
+    // the listing it supposedly created has one running back before it.
+    const demergerHeads = h.demergers_head_not_continuing || [];
+    demergerHeads.forEach(function (d) {
+      problems.push('Demerger ' + d.action_id + ' (' + d.demerger_date + ') has ' + d.ticker
+        + ' as its head listing, but ' + d.ticker + ' has no stored closing price before that date'
+        + (d.head_unpriced_before ? ' (its series begins ' + d.head_unpriced_before + ')' : '')
+        + ' while ' + d.demerger_ticker + ', the listing it demerged, has ' + d.demerged_priced_days
+        + ' (' + d.demerged_earliest_date + '–' + d.demerged_latest_date + ') — and the '
+        + d.ticker + ' parcel is held from ' + d.head_held_from + '. The continuing entity is the'
+        + ' one with the earlier series, so this looks like the head and the new entity swapped.'
+        + ' Check the company’s demerger notice; if they are the wrong way round, re-record the'
+        + ' action with ' + d.demerger_ticker + ' as the head listing.');
     });
     // One security's price series stored under two listings — what a series
     // fetched or copied under the wrong symbol looks like afterwards. Like the
@@ -1213,7 +1236,8 @@ async function refreshHealthBanner() {
     if (erroredPrices.length > 0 || (h.duplicate_price_series || []).length > 0) {
       banner.appendChild(el('a', { href: '#/prices' }, 'Open Closing Prices →'));
     }
-    if (duplicateActions.length > 0) {
+    if (duplicateActions.length > 0 || demergerHeads.length > 0
+        || (h.demergers_missing_close || []).length > 0) {
       banner.appendChild(el('a', { href: '#/e/corporate_actions' }, 'Open Corporate Actions →'));
     }
     if (duplicateAmma.length > 0) {

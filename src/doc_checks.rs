@@ -179,6 +179,39 @@ fn unpriced_before_and_excluded_holdings_documented() {
     assert!(README_MD.contains("**excluded holding** flag"));
 }
 
+/// Docs-sync pin for the swapped-demerger health check: the API documents the
+/// field list, all three clauses of the predicate and what each rules out, the
+/// legitimate-shape question, and — honestly — that it would have been silent
+/// on the live data before the borrowed prices were cleared; the README
+/// surfaces the feature.
+#[test]
+fn demerger_head_not_continuing_check_documented() {
+    assert!(API_MD.contains("`demergers_head_not_continuing` — every recorded"));
+    assert!(
+        API_MD.contains(r#""head_unpriced_before", "head_first_price_date", "head_held_from""#)
+    );
+    assert!(
+        API_MD.contains(
+            r#""demerged_priced_days", "demerged_earliest_date", "demerged_latest_date""#
+        )
+    );
+    // The predicate, and that an absence alone is not it.
+    assert!(API_MD.contains("**The predicate is an asymmetry, not an absence**"));
+    assert!(API_MD.contains("holds **no `ok` closing price of any origin** dated before"));
+    assert!(API_MD.contains("`ok`, provider-**fetched** prices dated *before* it"));
+    assert!(API_MD.contains("was **acquired before** the demerger"));
+    // The false positives each clause rules out, and the legitimate-shape
+    // question asked and answered.
+    assert!(API_MD.contains("a database where nothing has been collected lights up"));
+    assert!(API_MD.contains("simply never backfilled reads as a defect"));
+    assert!(API_MD.contains("**Is there a legitimate demerger of this shape?**"));
+    assert!(API_MD.contains("an in-specie distribution of an already-listed holding"));
+    // What it would not have caught, stated rather than overclaimed.
+    assert!(API_MD.contains("this check would have stayed **silent**"));
+    assert!(API_MD.contains("the two are **complements**"));
+    assert!(README_MD.contains("**demerger recorded the wrong way round**"));
+}
+
 /// Docs-sync pin for the identical-price-series health check: the API
 /// documents the field list, the run predicate and its threshold, the two
 /// reasons a genuine pair cannot trip it, the per-origin split, and that

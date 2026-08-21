@@ -18,6 +18,11 @@
 //! - every listing with a held day whose price was never even attempted —
 //!   the missing-row counterpart of the errored list (see
 //!   [`UnpricedListing`]);
+//! - every recorded demerger whose **head listing looks like the entity the
+//!   demerger created** rather than the one that continued — the two sides
+//!   entered the wrong way round, which no tax figure and no write-time check
+//!   can see, but which leaves the head parcel on a listing whose price series
+//!   begins after it was bought (see [`DemergerHeadNotContinuing`]);
 //! - every pair of listings holding the *same* closing price on a long run of
 //!   consecutive trading days — one security's series stored under two
 //!   listings, which no other list here can see because every row is `ok`
@@ -229,6 +234,110 @@ pub struct DemergerMissingClose {
     /// exactly when `manual_days` is 0.
     pub manual_earliest_date: Option<NaiveDate>,
     pub manual_latest_date: Option<NaiveDate>,
+}
+
+/// A recorded `Demerger` whose **head listing looks like the entity the
+/// demerger created**, not the one that continued — the two sides recorded the
+/// wrong way round.
+///
+/// A demerger has a continuing entity (the head, `listing_id`, which traded
+/// before the event and goes on trading after it) and one it *creates*
+/// (`demerger_listing_id`, whose first trading day is the demerger). Nothing in
+/// the model records which side is which beyond the two columns themselves, so
+/// entering them swapped is accepted in full: the apportionment percentages
+/// attach to the tickers rather than to the roles, so no tax figure moves and
+/// no write-time check can see it. What breaks is the *price* side — the head
+/// parcel then sits on a listing that did not exist when it was bought, so the
+/// provider serves no history for it and every valuation before the demerger
+/// is unvaluable (Evan's LAC, invisible for three years: 921 snapshot dates
+/// could not value the holding, and 635 prices were borrowed from the other
+/// listing to paper over the gap).
+///
+/// **The predicate is an asymmetry, not an absence.** A head listing with no
+/// prices before the demerger proves nothing on its own — a series nobody ever
+/// collected looks exactly the same. What no correctly recorded demerger
+/// produces is the *inversion*:
+///
+/// 1. the head listing holds **no ok closing price at all** dated before the
+///    demerger — its series does not reach back past the event, which is what
+///    a newly created entity looks like (and what [`unpriced_before`] records
+///    explicitly once the operator has established it);
+/// 2. the **demerged** listing holds provider-**fetched** ok prices dated
+///    before it — the entity supposedly created by the demerger has a provider
+///    series predating its own creation, which only the continuing entity has;
+/// 3. the head listing was **acquired before** the demerger (a Buy or DRP
+///    dated earlier), so the model really does claim to have held a security
+///    on days its own provider says it did not exist.
+///
+/// Each clause kills a class of false positive. Without (2) a fresh database
+/// where nothing has been collected lights up every demerger it holds; (2)
+/// requires evidence from the provider on the *other* side, which an
+/// uncollected database cannot produce, and requires it fetched rather than
+/// hand-entered, since a hand-entered row is the operator's own assertion and
+/// this check exists to question the operator's model. Without (3) a demerger
+/// whose head history was simply never backfilled reads as a defect; (3) is
+/// what makes the missing series a contradiction rather than a gap.
+///
+/// **Is there a legitimate demerger of this shape?** The continuing entity
+/// traded before the event by definition, so a head with no earlier series is
+/// already odd; and the demerged entity is created by it, so an earlier series
+/// on *that* side is odder still. The one case where a demerged listing
+/// genuinely predates the event is an in-specie distribution of an
+/// already-listed holding — and there the parent kept trading throughout, so
+/// clause (1) fails and nothing is reported. No arrangement was found in which
+/// the continuing entity has no pre-event series while the entity it spun off
+/// does; the shape is either a swap or a collection accident, and (3) rules the
+/// accident out.
+///
+/// **What it does not catch, honestly.** It names the condition only once the
+/// borrowed rows are gone (or were never added). On the live data as it stood
+/// *before* the 2026-08-21 cleanup this check would have stayed silent: listing
+/// 7 held 635 pre-demerger prices copied from listing 8, so clause (1) failed.
+/// [`DuplicatePriceSeries`] is what names the borrowed rows while they are
+/// there, and this check is what names the modelling error once they are
+/// cleared — the two are complements, not alternatives, and between them the
+/// incident is visible at both stages.
+///
+/// **Reported, never rejected**, the same call as the rest of this list: the
+/// remedy is to re-record the action with the sides swapped (and to move the
+/// parcel's Buy to the continuing listing), which is a data correction only the
+/// operator can judge against the company's own demerger notice. It clears as
+/// soon as the head listing is the one with the earlier series.
+///
+/// [`unpriced_before`]: crate::entities::listing::Listing::unpriced_before
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
+pub struct DemergerHeadNotContinuing {
+    pub action_id: i64,
+    /// The head listing — the one recorded as continuing, which the price
+    /// series says was created by the demerger.
+    pub listing_id: i64,
+    pub ticker: String,
+    pub demerger_date: NaiveDate,
+    /// The head listing's `unpriced_before`, when it carries one: the explicit
+    /// record that the provider's series *begins* there, which is the modern
+    /// statement of exactly what this check infers. `None` when unset — the
+    /// marker corroborates the finding, it is not required for it.
+    pub head_unpriced_before: Option<NaiveDate>,
+    /// Earliest ok closing price stored for the head listing, of any origin —
+    /// where its series actually begins. Always on or after `demerger_date`
+    /// (the check requires nothing earlier), and `None` when it has no ok
+    /// price at all.
+    pub head_first_price_date: Option<NaiveDate>,
+    /// Earliest Buy/DRP on the head listing dated before the demerger: the day
+    /// the model starts claiming to hold a security whose own series had not
+    /// begun.
+    pub head_held_from: NaiveDate,
+    /// The demerged listing — the one recorded as created, which the price
+    /// series says was trading all along.
+    pub demerger_listing_id: i64,
+    pub demerger_ticker: String,
+    /// How many ok, provider-fetched prices the demerged listing holds from
+    /// before the demerger — the evidence that it, not the head, is the
+    /// continuing entity. Always ≥ 1.
+    pub demerged_priced_days: i64,
+    /// Earliest and latest `price_date` of those rows.
+    pub demerged_earliest_date: NaiveDate,
+    pub demerged_latest_date: NaiveDate,
 }
 
 /// Two listings whose stored closing prices are *identical* across a long run
@@ -711,6 +820,12 @@ pub struct HealthReport {
     /// Each row carries two figures: the fetched rows a stated close repairs,
     /// and the hand-entered rows in the same span that it does not.
     pub demergers_missing_close: Vec<DemergerMissingClose>,
+    /// Every recorded demerger whose head listing looks like the entity the
+    /// demerger *created* rather than the one that continued — no stored
+    /// pre-demerger price of its own, a parcel held before that date, and a
+    /// demerged listing carrying the provider series the head lacks. Newest
+    /// demerger first; empty when no demerger's two sides are inverted.
+    pub demergers_head_not_continuing: Vec<DemergerHeadNotContinuing>,
     /// Every pair of listings whose stored closing prices are identical across
     /// a run of at least [`DUPLICATE_PRICE_SERIES_RUN_DAYS`] consecutive
     /// shared trading days, newest run first — one security's series stored
@@ -914,6 +1029,51 @@ async fn db_demergers_missing_close(
            AND (cp.origin = 'manual' OR substr(cp.fetched_at, 1, 10) >= ca.date) \
          GROUP BY ca.id \
          HAVING COUNT(*) FILTER (WHERE cp.origin = 'fetched') > 0 \
+         ORDER BY ca.date DESC, ca.id DESC",
+    )
+    .fetch_all(conn)
+    .await
+}
+
+/// Demergers recorded with the created entity as the head listing — see
+/// [`DemergerHeadNotContinuing`] for the predicate and what each clause of it
+/// rules out.
+///
+/// One aggregate on the caller's transaction. The `JOIN` onto the demerged
+/// listing's pre-demerger fetched rows *is* clause (2) — no such row, no
+/// group, so an uncollected database produces nothing — while the two
+/// `NOT EXISTS`/`EXISTS` clauses are (1) and (3). Dates are TEXT and compare
+/// lexicographically, which is the ordering they are stored in.
+async fn db_demergers_head_not_continuing(
+    conn: &mut sqlx::SqliteConnection,
+) -> Result<Vec<DemergerHeadNotContinuing>, sqlx::Error> {
+    sqlx::query_as::<_, DemergerHeadNotContinuing>(
+        "SELECT ca.id AS action_id, ca.listing_id AS listing_id, l.ticker AS ticker, \
+                ca.date AS demerger_date, \
+                l.unpriced_before AS head_unpriced_before, \
+                (SELECT MIN(hp.price_date) FROM closing_prices hp \
+                  WHERE hp.listing_id = ca.listing_id AND hp.status = 'ok') \
+                    AS head_first_price_date, \
+                (SELECT MIN(t.date) FROM trades t \
+                  WHERE t.listing_id = ca.listing_id AND t.trade_type IN ('Buy', 'DRP') \
+                    AND t.date < ca.date) AS head_held_from, \
+                ca.demerger_listing_id AS demerger_listing_id, dl.ticker AS demerger_ticker, \
+                COUNT(*) AS demerged_priced_days, \
+                MIN(dp.price_date) AS demerged_earliest_date, \
+                MAX(dp.price_date) AS demerged_latest_date \
+         FROM corporate_actions ca \
+         JOIN listings l ON l.id = ca.listing_id \
+         JOIN listings dl ON dl.id = ca.demerger_listing_id \
+         JOIN closing_prices dp ON dp.listing_id = ca.demerger_listing_id \
+              AND dp.status = 'ok' AND dp.origin = 'fetched' AND dp.price_date < ca.date \
+         WHERE ca.action_type = 'Demerger' \
+           AND NOT EXISTS (SELECT 1 FROM closing_prices hp \
+                            WHERE hp.listing_id = ca.listing_id AND hp.status = 'ok' \
+                              AND hp.price_date < ca.date) \
+           AND EXISTS (SELECT 1 FROM trades t \
+                        WHERE t.listing_id = ca.listing_id AND t.trade_type IN ('Buy', 'DRP') \
+                          AND t.date < ca.date) \
+         GROUP BY ca.id \
          ORDER BY ca.date DESC, ca.id DESC",
     )
     .fetch_all(conn)
@@ -1814,6 +1974,7 @@ pub async fn db_health(
     .fetch_all(&mut *tx)
     .await?;
     let demergers_missing_close = db_demergers_missing_close(&mut tx).await?;
+    let demergers_head_not_continuing = db_demergers_head_not_continuing(&mut tx).await?;
     let duplicate_price_series = db_duplicate_price_series(&mut tx).await?;
     let duplicate_actions = db_duplicate_actions(&mut tx).await?;
     let duplicate_amma_statements = db_duplicate_amma_statements(&mut tx).await?;
@@ -1840,6 +2001,7 @@ pub async fn db_health(
         errored_prices,
         unpriced_days,
         demergers_missing_close,
+        demergers_head_not_continuing,
         duplicate_price_series,
         duplicate_actions,
         duplicate_amma_statements,
@@ -2672,6 +2834,266 @@ mod tests {
 
         let h = health(&pool, ymd(2026, 7, 13)).await;
         assert!(h.demergers_missing_close.is_empty());
+    }
+
+    /// A price the *demerged* listing was served by the provider, dated
+    /// `date` — the evidence that it, not the head, traded before the
+    /// demerger.
+    async fn insert_fetched_price(pool: &SqlitePool, listing_id: i64, date: &str, price: &str) {
+        test_support::closing_price(listing_id, date.parse().unwrap())
+            .price(price)
+            .source("yahoo")
+            .fetched_at("2026-07-26T07:44:56Z")
+            .insert(pool)
+            .await;
+    }
+
+    /// Evan's LAC demerger as it was recorded for three years, reconstructed
+    /// as it looks once the borrowed prices are cleared: the head listing is
+    /// the entity the Arrangement **created** (a new corporation that took the
+    /// original ticker) and the entity that actually **continued** is recorded
+    /// as the one demerged from it.
+    ///
+    /// Nothing else can see this. No tax figure moves — the apportionment
+    /// percentages attach to the tickers, not to the roles — and no write-time
+    /// check has anything to test. The only trace is in the price series: the
+    /// head parcel is held from 2021 on a listing whose provider series begins
+    /// at the demerger, while the listing it supposedly created has history
+    /// running back years before it. That inversion is the predicate.
+    #[tokio::test]
+    async fn a_demerger_recorded_with_the_created_entity_as_head_is_reported() {
+        let pool = test_pool().await;
+        // Listing 1 stands for LAC, the new corporation recorded as the head…
+        test_support::listing(1)
+            .ticker("LAC")
+            .unpriced_before(ymd(2023, 10, 3))
+            .insert(&pool)
+            .await;
+        // …listing 2 for the continuing entity, recorded as the demerged one.
+        test_support::listing(2).ticker("LAR").insert(&pool).await;
+        // The 2021 parcel, sitting on a listing that did not exist in 2021.
+        test_support::buy(1, 1)
+            .date(ymd(2021, 3, 25))
+            .insert(&pool)
+            .await;
+        // The head's own series begins at the demerger, and not before it.
+        insert_fetched_price(&pool, 1, "2023-10-03", "9.67").await;
+        // The continuing entity's series runs back years before the event.
+        for date in ["2021-03-25", "2022-09-19", "2023-10-02"] {
+            insert_fetched_price(&pool, 2, date, "16.85").await;
+        }
+        insert_demerger(&pool, 1, 1, 2, ymd(2023, 10, 3), None).await;
+
+        let h = health(&pool, ymd(2026, 7, 13)).await;
+        assert_eq!(h.demergers_head_not_continuing.len(), 1);
+        let d = &h.demergers_head_not_continuing[0];
+        assert_eq!(d.action_id, 1);
+        assert_eq!(d.listing_id, 1);
+        assert_eq!(d.ticker, "LAC");
+        assert_eq!(d.demerger_date, ymd(2023, 10, 3));
+        assert_eq!(
+            d.head_unpriced_before,
+            Some(ymd(2023, 10, 3)),
+            "the marker corroborates what the check infers"
+        );
+        assert_eq!(d.head_first_price_date, Some(ymd(2023, 10, 3)));
+        assert_eq!(
+            d.head_held_from,
+            ymd(2021, 3, 25),
+            "the day the model starts claiming a security its own series has not reached"
+        );
+        assert_eq!(d.demerger_listing_id, 2);
+        assert_eq!(d.demerger_ticker, "LAR");
+        assert_eq!(d.demerged_priced_days, 3);
+        assert_eq!(d.demerged_earliest_date, ymd(2021, 3, 25));
+        assert_eq!(d.demerged_latest_date, ymd(2023, 10, 2));
+
+        // Re-modelled with the continuing entity as the head, the inversion is
+        // gone: the head now holds the earlier series.
+        insert_demerger(&pool, 1, 2, 1, ymd(2023, 10, 3), None).await;
+        let h = health(&pool, ymd(2026, 7, 13)).await;
+        assert!(h.demergers_head_not_continuing.is_empty());
+    }
+
+    /// The same finding over the HTTP surface the banner reads.
+    #[tokio::test]
+    async fn an_inverted_demerger_is_reported_over_http() {
+        let pool = test_pool().await;
+        test_support::listing(1).ticker("LAC").insert(&pool).await;
+        test_support::listing(2).ticker("LAR").insert(&pool).await;
+        test_support::buy(1, 1)
+            .date(ymd(2021, 3, 25))
+            .insert(&pool)
+            .await;
+        insert_fetched_price(&pool, 2, "2021-03-25", "16.85").await;
+        insert_demerger(&pool, 1, 1, 2, ymd(2023, 10, 3), None).await;
+
+        let body: serde_json::Value = ApiClient::over(router().with_state(pool.clone()))
+            .get_json("/reports/health")
+            .await;
+        let d = &body["demergers_head_not_continuing"][0];
+        assert_eq!(d["action_id"], 1);
+        assert_eq!(d["ticker"], "LAC");
+        assert_eq!(d["demerger_date"], "2023-10-03");
+        assert_eq!(d["demerger_ticker"], "LAR");
+        assert_eq!(d["demerged_priced_days"], 1);
+        assert_eq!(d["head_held_from"], "2021-03-25");
+        // No marker recorded, and no price of its own at all: both are
+        // reported as absent rather than the row being withheld.
+        assert_eq!(d["head_unpriced_before"], serde_json::Value::Null);
+        assert_eq!(d["head_first_price_date"], serde_json::Value::Null);
+    }
+
+    /// The first false positive the predicate has to survive: a database where
+    /// **no prices have been collected for anything**. Every head listing has
+    /// no pre-demerger series there, so an absence-only check would light up
+    /// on a fresh install. The demerged side's provider evidence is what stops
+    /// it — nothing collected, nothing reported.
+    #[tokio::test]
+    async fn an_uncollected_database_reports_no_inverted_demerger() {
+        let pool = test_pool().await;
+        test_support::listing(1).ticker("LAC").insert(&pool).await;
+        test_support::listing(2).ticker("LAR").insert(&pool).await;
+        test_support::buy(1, 1)
+            .date(ymd(2021, 3, 25))
+            .insert(&pool)
+            .await;
+        insert_demerger(&pool, 1, 1, 2, ymd(2023, 10, 3), None).await;
+
+        let h = health(&pool, ymd(2026, 7, 13)).await;
+        assert!(h.demergers_head_not_continuing.is_empty());
+    }
+
+    /// A demerger recorded the right way round: the head is the entity that
+    /// traded before the event, the demerged listing's series begins at it.
+    /// This is the shape every correct demerger has, and it must never be
+    /// reported.
+    #[tokio::test]
+    async fn a_correctly_modelled_demerger_is_not_reported() {
+        let pool = test_pool().await;
+        test_support::listing(1).ticker("LAR").insert(&pool).await;
+        test_support::listing(2)
+            .ticker("LAC")
+            .unpriced_before(ymd(2023, 10, 3))
+            .insert(&pool)
+            .await;
+        test_support::buy(1, 1)
+            .date(ymd(2021, 3, 25))
+            .insert(&pool)
+            .await;
+        for date in ["2021-03-25", "2023-10-02", "2023-10-03"] {
+            insert_fetched_price(&pool, 1, date, "16.85").await;
+        }
+        insert_fetched_price(&pool, 2, "2023-10-03", "9.67").await;
+        insert_demerger(&pool, 1, 1, 2, ymd(2023, 10, 3), None).await;
+
+        let h = health(&pool, ymd(2026, 7, 13)).await;
+        assert!(h.demergers_head_not_continuing.is_empty());
+    }
+
+    /// The second false positive: a demerger of a security whose pre-demerger
+    /// history genuinely was **never backfilled**. Both listings' series begin
+    /// at the demerger — an ordinary state, not a defect — so there is no
+    /// asymmetry to report, however long the head has been held.
+    #[tokio::test]
+    async fn a_demerger_whose_history_was_never_backfilled_is_not_reported() {
+        let pool = test_pool().await;
+        test_support::listing(1).ticker("LAC").insert(&pool).await;
+        test_support::listing(2).ticker("LAR").insert(&pool).await;
+        test_support::buy(1, 1)
+            .date(ymd(2021, 3, 25))
+            .insert(&pool)
+            .await;
+        insert_fetched_price(&pool, 1, "2023-10-04", "9.67").await;
+        insert_fetched_price(&pool, 2, "2023-10-04", "6.01").await;
+        insert_demerger(&pool, 1, 1, 2, ymd(2023, 10, 3), None).await;
+
+        let h = health(&pool, ymd(2026, 7, 13)).await;
+        assert!(h.demergers_head_not_continuing.is_empty());
+    }
+
+    /// The third clause: a head listing with no pre-demerger series that was
+    /// **not held** before the demerger either. Nothing is contradicted — the
+    /// portfolio never claimed to own the security back there — so a listing
+    /// whose history simply has not been collected is left alone.
+    #[tokio::test]
+    async fn a_head_listing_not_held_before_the_demerger_is_not_reported() {
+        let pool = test_pool().await;
+        test_support::listing(1).ticker("LAC").insert(&pool).await;
+        test_support::listing(2).ticker("LAR").insert(&pool).await;
+        // Acquired on the demerger date, not before it.
+        test_support::buy(1, 1)
+            .date(ymd(2023, 10, 3))
+            .insert(&pool)
+            .await;
+        insert_fetched_price(&pool, 2, "2021-03-25", "16.85").await;
+        insert_demerger(&pool, 1, 1, 2, ymd(2023, 10, 3), None).await;
+
+        let h = health(&pool, ymd(2026, 7, 13)).await;
+        assert!(h.demergers_head_not_continuing.is_empty());
+    }
+
+    /// The live data as it stood **before** the 2026-08-21 cleanup: the head
+    /// listing's pre-demerger gap had been papered over with prices copied
+    /// from the other listing. This check is silent there, and says so — a
+    /// stored ok price before the demerger, however it got there, is an
+    /// assertion that the security traded then.
+    ///
+    /// The two checks are complements, not alternatives, and this pins the
+    /// hand-off: while the borrowed rows are there `duplicate_price_series`
+    /// names them; once they are cleared this check names the modelling error
+    /// underneath. Between them the incident is visible at both stages.
+    #[tokio::test]
+    async fn borrowed_pre_demerger_prices_are_left_to_the_duplicate_series_check() {
+        let pool = test_pool().await;
+        test_support::listing(1).ticker("LAC").insert(&pool).await;
+        test_support::listing(2).ticker("LAR").insert(&pool).await;
+        test_support::buy(1, 1)
+            .date(ymd(2021, 3, 25))
+            .insert(&pool)
+            .await;
+        // Thirty consecutive days of the continuing entity's series, fetched
+        // under listing 2 and copied by hand onto listing 1 to unblock the
+        // snapshots — exactly what was found on the live database.
+        for (date, price) in moving_series(ymd(2023, 8, 1), 30, 1685) {
+            test_support::closing_price(2, date)
+                .price(&price)
+                .source("yahoo")
+                .fetched_at("2026-07-26T07:44:56Z")
+                .insert(&pool)
+                .await;
+            test_support::closing_price(1, date)
+                .price(&price)
+                .fetched_at("2026-07-28T02:00:00Z")
+                .manual(
+                    "listing 2 (LAR) stored close for the same date",
+                    "demerger-adjusted, so this period is unblocked, not accurate",
+                )
+                .insert(&pool)
+                .await;
+        }
+        insert_demerger(&pool, 1, 1, 2, ymd(2023, 10, 3), None).await;
+
+        let h = health(&pool, ymd(2026, 7, 13)).await;
+        assert!(
+            h.demergers_head_not_continuing.is_empty(),
+            "a stored pre-demerger price, even a borrowed one, is an assertion the head traded then"
+        );
+        assert_eq!(
+            h.duplicate_price_series.len(),
+            1,
+            "the borrowed rows are what the other check names while they are there"
+        );
+
+        // Clearing them — the runbook's own step — hands the incident over.
+        sqlx::query("DELETE FROM closing_prices WHERE listing_id = 1")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let h = health(&pool, ymd(2026, 7, 13)).await;
+        assert!(h.duplicate_price_series.is_empty());
+        assert_eq!(h.demergers_head_not_continuing.len(), 1);
+        assert_eq!(h.demergers_head_not_continuing[0].ticker, "LAC");
     }
 
     /// A moving daily price series: `days` consecutive dates from `start`,
