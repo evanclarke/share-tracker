@@ -61,8 +61,11 @@ prevent:
 Reproduced: listing on XNYS ticker `MSFT`, `POST /listings/10/rename {"effective_date":"2027-01-01",
 "ticker":"FUTURETICK"}` → `201`, `GET /listings/10` → `"ticker":"FUTURETICK"` on 2026-08-21.
 
-- [ ] Decide between the options below and implement it, with the API docs' rename section saying
-      which rule applies.
+**Fix — Evan chose 2026-08-21: option (a), refuse a future `effective_date`.**
+
+- [ ] Refuse a rename whose `effective_date` is after today with `422` naming the rule, beside the
+      existing out-of-order refusal (`RenameError`), and say which rule applies in the API docs'
+      rename section.
 
 **Options as put:**
 
@@ -98,9 +101,13 @@ Reproduced: listing `OLD`/`OLD.AX` → rename to `NEWER` with `"price_symbol":"N
 leaves the listing collecting prices under a symbol that exists only because of the rename that was
 undone.
 
-- [ ] Decide between the options below and implement it; the docs currently describe the undo as
-      "restoring `ticker`/`exchange_mic` from its `old_*` columns", which is accurate about what it
-      does and silent about what it leaves.
+**Fix — Evan chose 2026-08-21: option (a), record what the rename overwrote.**
+
+- [ ] Add `old_name` and `old_price_symbol` to `listing_renames` in a migration and have the undo
+      write all four fields back. `listing_renames` is audited, so the migration must DROP and
+      re-CREATE its two `*_row_history_*` triggers with the new column list (CLAUDE.md).
+- [ ] Update `docs/SCHEMA.md` for the two columns and `docs/API.md`'s undo sentence, which today
+      says the undo restores `ticker`/`exchange_mic`.
 
 **Options as put:**
 
@@ -141,7 +148,14 @@ Note the general form: `PUT /listings/:id` does not check a listing's `currency`
 exchange's either, so a listing can be *created* in this state. The rename is where it matters
 because it is the only way to reach it on a listing that already has priced history.
 
-- [ ] Decide between the options below and implement it.
+**Fix — Evan chose 2026-08-21: option (c), both — refuse on the rename path and warn on the rest.**
+
+- [ ] Refuse a rename moving the listing to an exchange whose `currency` differs from the listing's
+      (`422` naming both currencies and pointing at the new-listing-plus-transfer path, as the
+      currency freeze already does).
+- [ ] Add a `reports::health` check naming every listing whose `currency` is not its exchange's, so
+      a listing created in that state by a plain `PUT` is visible too — and surface it in the UI
+      banner beside the other health warnings.
 
 **Options as put:**
 
@@ -178,7 +192,13 @@ enters the chain the Annual Tax Report reads as at each row's own date, so an ar
 for any year after the park prints a ticker the security never traded under. Nothing in
 `docs/API.md`'s Known limitations says any of this.
 
-- [ ] Decide between the options below and implement it.
+**Fix — Evan chose 2026-08-21: option (a), document it as a Known limitation.**
+
+- [ ] Add a Known limitation to `docs/API.md` stating that a listing's ticker is unique across its
+      whole recorded history, so a reissued code cannot be entered while the earlier holding is on
+      file — with the consequence spelled out and the fake-rename workaround explicitly ruled out
+      (it falsifies the chain the Annual Tax Report reads and breaks the parked listing's price
+      collection). Pin it with a `doc_checks.rs` test, as doc-only requirements are.
 
 **Options as put:**
 
@@ -212,10 +232,13 @@ another two years. The Annual Tax Report, checked alongside, does resolve as at 
 What the ledger *does* do is render each recorded rename as its own `Ticker/exchange change` row
 (`renamed OLDCO -> NEWCO`), which may be all the docs meant to claim.
 
-- [ ] Decide whether the ledger should resolve as-at (load `RenameHistory` and resolve the
-      counterpart ticker at the action's date, mirroring `tax_report`) or whether the two docs should
-      be corrected to say the ledger shows the rename events themselves and current tickers
-      elsewhere. Either way both `docs/API.md` and the `listing_identity` module doc change.
+**Fix — decided 2026-08-21: make the ledger match the docs.** Two documents assert as-at
+resolution and `reports::tax_report` already has the pattern to copy, so the code is what is wrong.
+
+- [ ] Load `RenameHistory` on the ledger's existing read transaction and resolve each counterpart
+      listing's ticker at the action's own date, mirroring `tax_report::ticker_as_at`.
+- [ ] Re-read both doc claims afterwards (`docs/API.md`'s rename section, the
+      `domain/listing_identity.rs` module doc) and make them describe what the ledger then does.
 
 ## SCENARIOS R-01/R-05: the rename feature has no web UI, and the listing form sends the user to an endpoint the UI does not offer
 
