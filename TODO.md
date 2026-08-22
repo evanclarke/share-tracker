@@ -125,12 +125,36 @@ and INSERTs record nothing to mark the boundary.
 **Decision (Evan, 2026-08-22): (b), both halves.** Rejected: marking the boundary alone, and
 refusing the reuse.
 
+**Revision (2026-08-22), after the fix's premise was re-derived and found false.** `AUTOINCREMENT`
+governs only the ids **SQLite** picks, when an INSERT omits the id column. It would **not** have
+prevented the headline case. Nine call sites in `src/entities/` assign ids themselves —
+`SELECT COALESCE(MAX(id), 0) + 1 FROM <table>`, seven for `trades` (`demerger`, `transfer`,
+`scrip_exchange`, `worthless`, `ess_vest`, `inheritance`, `buyback_participation`), one for `income`
+and one for `amit_adjustments` — and bind the result explicitly, so the column definition never gets
+a say. The live sequence confirms it: 9072 was the highest trade id, deleting it made `MAX(id)` 9071,
+`POST /corporate_actions/1/demerge` computed 9071 + 1 and took 9072 back, and the re-entered 2025 sale
+became 9075.
+
+The migration is still worth doing — the *other* live reuse, `parcel_allocations` #61, came from an
+id-less INSERT where SQLite reused the freed rowid, which is exactly what `AUTOINCREMENT` prevents,
+and both flavours of INSERT are common across the audited tables. But it is only half the prevention.
+Dropping the nine `MAX(id) + 1` queries is worth doing on its own account too: computing an id by
+reading the table's maximum is a race between concurrent operations, independent of the audit trail.
+
+**Revised decision (Evan, 2026-08-22): the full fix — boundary marking, `AUTOINCREMENT`, *and*
+the nine call sites reworked to let the database assign the id.** Rejected: allocating above the
+trail's high-water mark instead of migrating (leaves SQLite's own rowid reuse unfixed), and boundary
+marking alone.
+
 - [ ] The row-history report marks a trail that crosses a `DELETE` on a row that still exists: the
       entries at or before that `DELETE` belonged to a previous occupant of the id, and are labelled
       as such rather than presented as this row's own history
 - [ ] The Row History screen surfaces that boundary (not a bare extra column — the reader must not
       have to infer it), and `docs/API.md`'s Row history section states the rule
-- [ ] The 20 audited tables that reuse ids are rebuilt with `AUTOINCREMENT` ids by the rename pattern
+- [ ] The nine `SELECT COALESCE(MAX(id), 0) + 1` call sites stop assigning ids: the INSERT omits the
+      id and the server reads `last_insert_rowid()`, so a never-reused id comes from the database
+      (this, not the migration, is what fixes the trade 9072 case)
+- [ ] The audited tables that reuse ids are rebuilt with `AUTOINCREMENT` ids by the rename pattern
       0021/0039 established — every FK re-pointed, every `*_row_history_*` and `*_stale_snapshots_*`
       trigger set dropped and re-created, no row dropped or re-scaled (see the 0029 FK-rewrite
       gotcha and `infra::db`'s `migrations_store_decimals_as_text` guard)
