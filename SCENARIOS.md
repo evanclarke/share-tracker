@@ -1010,9 +1010,14 @@ demerger's server-created closing Sell was handed the id of a real 2025 sale del
 whose history it now displays as its own. Migrations 0021 and 0039 had identified exactly this hazard
 and fixed it with `AUTOINCREMENT` for two tables; the other 20 were never revisited. The second
 finding is the mirror of the first: the trail records a multi-row operation completely — a demerger
-group delete wrote four entries across two tables under one shared `changed_at` — but it can only be
-read one row at a time, by ids the user never saw, because the rows a demerge or a cascade destroys
-appear in no list afterwards. The third is a missing guard rather than a defect: the "re-create both
+group delete wrote four entries across two tables — but it can only be read one row at a time, by ids
+the user never saw, because the rows a demerge or a cascade destroys appear in no list afterwards.
+The pass's own write-up got one fact wrong here and the fix caught it: `changed_at` is **not** a
+transaction stamp. SQLite holds `'now'` constant for one *statement*, not one transaction, so a
+multi-statement operation writes several timestamps — measured 260 ms apart inside one transaction,
+and visible in the live database, where the 2026-07-26 group delete stamped `parcel_allocations` #61
+at `.210` and `trades` 9072 at `.222`. `changed_at` is therefore neither unique nor a total order,
+which is what makes the trail's own `id` the only sound thing to order or page on. The third is a missing guard rather than a defect: the "re-create both
 triggers when you add a column" rule is stated in three places and enforced only by hand-written
 per-migration assertions, so the migration that forgets it would break no test.
 

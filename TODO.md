@@ -151,9 +151,8 @@ already knowing the numeric id of the row you lost. That is exactly what a user 
 rows the system created or destroyed on their behalf.
 
 Driven concretely: `DELETE /sells/3` on a demerger's closing Sell removed the whole group and wrote
-**four entries across two tables** — `trades` 3, 4 and 5 and `parcel_allocations` 1 — all sharing one
-`changed_at` (`'now'` is constant across the transaction, so the operation *is* correlatable in the
-data). Only trade 3's id was ever named by the user: trades 4 and 5 and the allocation were created
+**four entries across two tables** — `trades` 3, 4 and 5 and `parcel_allocations` 1. Only trade 3's
+id was ever named by the user: trades 4 and 5 and the allocation were created
 by `POST /corporate_actions/7/demerge` and are now gone from every list endpoint. The same shape is
 in the live database at `2026-07-26T07:39:44.222Z`, spanning `trades`, `attachments` and
 `parcel_allocations`. The cascade case (U-04) is identical — deleting a trade takes its attachments
