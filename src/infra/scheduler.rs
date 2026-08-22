@@ -342,6 +342,21 @@ mod tests {
         );
     }
 
+    /// Polls `cond` until it holds, up to a generous deadline, so a test can
+    /// wait on something a spawned task does without guessing how long the
+    /// executor needs. Panics rather than hanging if it never holds, so a real
+    /// regression is a failure with a name rather than a stuck suite.
+    async fn wait_until(mut cond: impl FnMut() -> bool, what: &str) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !cond() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "waited 30s for {what} and it never happened"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+    }
+
     #[tracing_test::traced_test]
     #[tokio::test]
     async fn next_run_log_shows_timezone() {
@@ -349,12 +364,15 @@ mod tests {
         spawn(reg, pool, "0 0 * * *   Pacific/Auckland   backup\n")
             .await
             .unwrap();
-        // The spawned task logs its first "next run scheduled" before any
-        // await; yield so it gets to run.
-        for _ in 0..50 {
-            tokio::task::yield_now().await;
-        }
-        assert!(logs_contain("next run scheduled"));
+        // Wait for the line itself, not for a guessed number of yields. A
+        // fixed `yield_now()` count bounds how many times *this* task defers,
+        // not whether the spawned one has been polled far enough to log, so
+        // under CPU contention the assertion reads an empty buffer and the
+        // test fails for reasons unrelated to the behaviour under test — it
+        // went red in CI on 2026-08-22 at 1953 passed / 1 failed, on a run
+        // whose suite took 140s. Waiting on the condition is also faster in
+        // the common case: it returns on the first poll that sees the line.
+        wait_until(|| logs_contain("next run scheduled"), "next run scheduled").await;
         assert!(
             logs_contain("NZST") || logs_contain("NZDT"),
             "the next-run log line must carry the entry timezone's %Z name"

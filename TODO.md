@@ -103,6 +103,21 @@ A flaky test in a suite that gates every commit is worse than a missing one: it 
 re-run rather than read. Worth fixing properly (wait on a signal the logging path actually sets,
 rather than counting yields), not by raising the yield count.
 
-- [ ] `next_run_log_shows_timezone` waits on something deterministic instead of a bounded `yield_now`
+- [x] `next_run_log_shows_timezone` waits on something deterministic instead of a bounded `yield_now`
       spin, and no longer fails under CPU contention
-- [ ] A note in the test says why it cannot go back to counting yields
+- [x] A note in the test says why it cannot go back to counting yields
+
+Done 2026-08-22. It went red in CI first — on the `v0.13.0` release push, at 1953 passed / 1 failed,
+in a run whose suite took 140s against ~4s locally, which is exactly the contention the yield count
+could not survive. The fixed spin is replaced by `wait_until(cond, what)`, a bounded poll on the
+condition itself: it returns on the first poll that sees the line (so it is *faster* in the common
+case, not slower), and panics naming what it waited for rather than hanging, so a real regression is
+still a failure with a name. Verified by running the test **25 times under full CPU saturation** —
+every core pinned by spinners, the condition that produced the CI failure — with 0 failures.
+The comment records why counting yields cannot work: a `yield_now()` count bounds how many times
+*this* task defers, not whether the spawned task has been polled far enough to log.
+
+The other `yield_now` loop in this file (the in-flight-run wait in the `POST /jobs` tests) is left
+alone deliberately: it already spins on the real condition rather than a fixed count. It has no
+deadline, which is a smaller wart — a broken condition hangs rather than failing by name — and is
+worth tidying only if it ever bites.
