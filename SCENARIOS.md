@@ -84,7 +84,7 @@ behind or became a recorded finding.
 | R. Listing identity and renames | 10 | 2026-08-21 (`28a7c5f`) | 8 raised, all closed — see below |
 | S. Settlement, holidays, and dates | 10 | 2026-08-22 (`d501408`) | 4 raised, all closed — see below |
 | T. Jobs, backup, and operations | 12 | 2026-08-22 (`db877cb`) | 6 raised, 6 closed — see below |
-| U. Audit trail and history | 8 | — | — |
+| U. Audit trail and history | 8 | 2026-08-22 | 3 raised, open — see below |
 | V. Back-dated and out-of-order entry | 10 | — | — |
 | W. Precision, rounding, and scale | 8 | — | — |
 | X. Transactional integrity and concurrency | 8 | — | — |
@@ -982,6 +982,45 @@ All six are archived in [`DONE/infra.md`](DONE/infra.md) under headings naming t
 | A run interrupted by a restart leaves no record, and an unverified file that looks like a good backup | T-11 | `7557e97` |
 | Nothing notices a job that has stopped running | T-11, T-02, T-12 | `6ac3ffe` |
 | A currency-import that skipped the whole ISO 24165 half reports unqualified success | T-09 | `edb3413` |
+
+### Section U findings
+
+All eight scenarios were driven on 2026-08-22 against a throwaway database, with
+`share-tracker-2026-08-16-000000.db` read read-only to test each finding against real data.
+**The trail's machinery came back correct throughout.** Every one of the 22 audited tables' triggers
+records every column of the live schema (U-01) — checked by diffing `PRAGMA table_info` against each
+trigger's `json_object` keys, which is a stronger question than the name-list pin the tests carry, and
+`attachments.content` is the single documented exclusion. `row_history` is append-only, no
+`REPLACE INTO` path exists anywhere in the tree, and migration 0025 — the one migration that rewrites
+an audited table's data in place — deliberately drops the triggers first, so no migration forges an
+entry (U-02). A cascade-deleted attachment is recorded like a directly deleted row, BLOB excluded
+(U-04). A superseded manual closing price's `sourced_from`, `reason` and `origin` are fully
+recoverable, exactly as `docs/API.md` claims (U-06). A non-audited table is refused 422 naming the
+audited list (U-07). And the report is unbounded by design, which is the safe direction for an audit
+trail — truncating one would be the defect: 10,000 entries served in 0.42 s, against a live maximum of
+2 entries on any single row (U-08).
+
+**The three findings are all about the trail's *identity* and *reach*, not its contents.** The
+sharpest was not one of the eight scenarios at all — it fell out of the standing probes' "what else
+moved that shouldn't have" applied to U-01 and U-04. A trail is keyed on `(table_name, row_id)` and
+nothing binds an `id` to one row for the life of the database, so a reused id inherits the previous
+occupant's history. It has already fired twice in the live database, and not through a mistyped id:
+`trades.id` is a plain `INTEGER PRIMARY KEY`, so SQLite reuses the largest freed rowid, and the LAC
+demerger's server-created closing Sell was handed the id of a real 2025 sale deleted minutes earlier —
+whose history it now displays as its own. Migrations 0021 and 0039 had identified exactly this hazard
+and fixed it with `AUTOINCREMENT` for two tables; the other 20 were never revisited. The second
+finding is the mirror of the first: the trail records a multi-row operation completely — a demerger
+group delete wrote four entries across two tables under one shared `changed_at` — but it can only be
+read one row at a time, by ids the user never saw, because the rows a demerge or a cascade destroys
+appear in no list afterwards. The third is a missing guard rather than a defect: the "re-create both
+triggers when you add a column" rule is stated in three places and enforced only by hand-written
+per-migration assertions, so the migration that forgets it would break no test.
+
+| Finding | Scenarios | Fixed by |
+| --- | --- | --- |
+| A reused id inherits the deleted row's audit trail | U-01, U-04 | open |
+| A multi-row operation's trail is only readable one row at a time, by ids you never saw | U-04, U-05 | open |
+| Nothing pins an audited table's trigger column list against the live schema | U-03 | open |
 
 
 ## A. Deletion and mutation ripple effects
