@@ -82,7 +82,7 @@ behind or became a recorded finding.
 | P. Tax summary, annual tax report, exports | 12 | 2026-08-20 (`cb36977`) | 5 raised, all closed — see below |
 | Q. Prices, valuation, and snapshots | 15 | 2026-08-20 (`3696ec1`) | 5 raised, all closed — see below |
 | R. Listing identity and renames | 10 | 2026-08-21 (`28a7c5f`) | 8 raised, all closed — see below |
-| S. Settlement, holidays, and dates | 10 | — | — |
+| S. Settlement, holidays, and dates | 10 | 2026-08-22 (`d501408`) | 4 raised, all closed — see below |
 | T. Jobs, backup, and operations | 12 | — | — |
 | U. Audit trail and history | 8 | — | — |
 | V. Back-dated and out-of-order entry | 10 | — | — |
@@ -902,6 +902,43 @@ in [`DONE/reviews.md`](DONE/reviews.md) and the web-UI one in
 | The rename feature has no web UI, and the listing form sends the user to an endpoint the UI does not offer | R-01, R-05 | `ee0a8f7` |
 | The diagnostic written for a renamed symbol does not fire for a renamed symbol | R-06 | `c101b2c` |
 | A ticker collision on rename is refused with the raw SQLite constraint text | R-03 | `709c4d5` |
+
+### Section S findings
+
+All ten scenarios were driven on 2026-08-22 against a throwaway database, and **the T+n arithmetic
+itself was right in every one**: the Thursday before Good Friday on the ASX skipping Good Friday,
+the weekend *and* Easter Monday (2026-04-02 → 2026-04-08); Christmas and the observed Boxing Day
+(2026-12-24 → 2026-12-30) and the year boundary (2026-12-31 → 2027-01-05); Thanksgiving and
+Juneteenth on the NYSE; a Crypto trade settling same-day with no calendar and no coverage warning;
+an explicit `settlement_date` before the trade date refused; the pre-CGT boundary exact to the day
+on both write paths; and the exchange-change calendar drift reproduced to the day on a re-save,
+which is the [documented live-exchange limitation](docs/API.md#known-limitations). The coverage
+machinery worked on its own terms too — the out-of-range `WARN`, the `outside_holiday_coverage` and
+`no_holiday_coverage` statuses, a window that *starts* inside coverage and settles outside it, and
+the `exchange_holidays` audit trail on a delete.
+
+**Every finding was about a date the system accepts, never about the arithmetic it then does**, and
+they fall either side of the trade: two about what may be entered, two about what settlement is
+stored. A trade could be dated in the future (offering a financial year that has not begun on the
+annual tax report's year picker) or on a day its own exchange was shut — a weekend or a seeded
+holiday — though the trade date is the CGT event date and the calendar answering it was already
+enforced one entity away on closing prices. On the settlement side, a stored date was never put to
+the trading calendar at all, and the live database had one on a Saturday (trade 9071); and the
+settlement-holiday-coverage report's contract inverted the moment the user did what the report
+exists to prompt — seeding the missing calendar cleared the alert without correcting the dates
+computed while it was missing. The last of those turned out to rest on a distinction the schema
+could not make (`trades.settlement_date` is one column written by two paths), so it took a
+provenance column before the repair job could know which dates were its to rewrite.
+
+Each is archived in [`DONE/trades-income.md`](DONE/trades-income.md) under a heading naming its
+scenario id.
+
+| Finding | Scenarios | Fixed by |
+| --- | --- | --- |
+| A trade may be dated in the future, and the tax report offers a year that has not happened | S-10 | `67c3096` |
+| A trade may be dated on a day its exchange did not trade, and nothing refuses or flags it | S-08 | `30d0e96` |
+| A stored settlement date is never checked against the trading calendar, and the live database has one on a Saturday | S-05 | `4a7ef1a` |
+| Seeding the calendar the coverage report asks for silences it without correcting the settlement dates it flagged | S-04 | `e453f21` |
 
 ## A. Deletion and mutation ripple effects
 
