@@ -1380,8 +1380,8 @@ const JOB_DESC = {
 async function viewJobs() {
   setActiveNav('jobs');
   // GET /jobs returns each registered job with how it is triggered
-  // ('scheduled' / 'manual_only') and its last run (started/finished
-  // timestamps, success flag, error text), or nulls if it has never run.
+  // ('scheduled' / 'manual_only') and its last run (started timestamp, finish
+  // timestamp once it has one, status, error text), or nulls if it has never run.
   const jobs = await api('GET', '/jobs');
   const rows = jobs.map(function (j) {
     return {
@@ -1390,8 +1390,13 @@ async function viewJobs() {
       // A manual-only job is a one-off repair with no schedule line at all, so
       // 'never' in the status column is expected rather than a missed run.
       trigger: j.trigger === 'manual_only' ? 'manual only' : 'scheduled',
+      // Blank while the newest run is still open — it has no finish time yet.
       last_run: j.last_finished_at || '',
-      status: j.last_started_at == null ? 'never' : (j.last_success ? 'ok' : 'failed'),
+      // The server's own three-valued run status ('running' / 'ok' / 'failed'),
+      // shown as it stands: a run that started and has not finished — one in
+      // flight, or one a restart interrupted — is neither a success nor a
+      // failure, and 'never' still means the job has no recorded run at all.
+      status: j.last_status == null ? 'never' : j.last_status,
       error: j.last_error || '',
       _runs: j.runs || [],
     };
@@ -1407,8 +1412,10 @@ async function viewJobs() {
       const runs = row._runs.map(function (r) {
         return {
           started_at: r.started_at,
-          finished_at: r.finished_at,
-          status: r.success ? 'ok' : 'failed',
+          // Null for a run that started and never finished; the status column
+          // beside it is what says so.
+          finished_at: r.finished_at || '',
+          status: r.status,
           error: r.error || '',
         };
       });

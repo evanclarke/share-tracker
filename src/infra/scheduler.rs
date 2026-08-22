@@ -34,7 +34,9 @@ pub use schedule::spawn;
 #[cfg(test)]
 pub use db::JOB_RUN_HISTORY_LIMIT;
 #[cfg(test)]
-use db::{db_record_run, db_run_histories};
+pub use db::JobRunStatus;
+#[cfg(test)]
+use db::{db_record_run, db_run_histories, db_start_run};
 #[cfg(test)]
 pub use http::JobStatus;
 #[cfg(test)]
@@ -275,7 +277,19 @@ mod tests {
         // The pool is created before pausing the clock: under the paused clock
         // tokio auto-advances past sqlx's acquire timeout while the sqlite
         // worker thread is still opening the database, failing pool init.
+        //
+        // …and closed again before the loop starts, which this test needs and
+        // nothing else does. `run_job` records the run's *start* before calling
+        // the job (SCENARIOS T-11), and awaiting that write parks the runtime
+        // on sqlx's sqlite worker thread; with the clock paused, tokio treats an
+        // idle runtime as licence to jump to the next timer — sqlx's own 600s
+        // pool maintenance tick — so the fake wall clock advanced ten minutes
+        // between the timer firing and the job body reading it. A closed pool
+        // fails that write without awaiting anything (`run_job` logs it and
+        // carries on), which is fine here: what is under test is *when the timer
+        // fires*, not what it records.
         let pool = db::init(":memory:").await.unwrap();
+        pool.close().await;
         tokio::time::pause();
         let t0 = Utc.with_ymd_and_hms(2026, 6, 1, 0, 0, 0).unwrap();
         let start = tokio::time::Instant::now();
@@ -839,7 +853,7 @@ mod tests {
         // A job that has never run reports no last-run details.
         let backup = statuses.iter().find(|s| s.name == "backup").unwrap();
         assert!(backup.last_started_at.is_none());
-        assert!(backup.last_success.is_none());
+        assert!(backup.last_status.is_none());
     }
 
     #[tokio::test]
@@ -859,13 +873,13 @@ mod tests {
         let backup = statuses.iter().find(|s| s.name == "backup").unwrap();
         assert!(backup.last_started_at.is_some());
         assert!(backup.last_finished_at.is_some());
-        assert_eq!(backup.last_success, Some(true));
+        assert_eq!(backup.last_status, Some(JobRunStatus::Ok));
         assert!(backup.last_error.is_none());
     }
 
     #[tokio::test]
     async fn record_run_keeps_history_latest_first() {
-        // A failed run stores success = 0 and the error text; a later success
+        // A failed run stores status 'failed' and the error text; a later success
         // for the same job becomes the latest run while the failure stays in
         // the history (an intermittent failure leaves a trace).
         let (_reg, pool, _dir, _path) = test_registry().await;
@@ -893,10 +907,10 @@ mod tests {
         let histories = db_run_histories(&pool).await.unwrap();
         let runs = histories.get("backup").unwrap();
         assert_eq!(runs.len(), 2);
-        assert!(runs[0].success);
+        assert_eq!(runs[0].status, JobRunStatus::Ok);
         assert!(runs[0].error.is_none());
         assert_eq!(runs[0].started_at, "2026-06-02T00:00:00Z");
-        assert!(!runs[1].success);
+        assert_eq!(runs[1].status, JobRunStatus::Failed);
         assert_eq!(runs[1].error.as_deref(), Some("boom"));
     }
 
@@ -940,6 +954,177 @@ mod tests {
         assert_eq!(histories.get("other").unwrap().len(), 1);
     }
 
+    /// SCENARIOS T-11: the run row is written when the job **starts**, not when
+    /// it returns. Driven with a job that parks until this test lets it go, so
+    /// the assertions happen while the run really is in flight: `GET /jobs`
+    /// must already show it, as `running` — not as the previous run's result,
+    /// which is all it showed before, and not as a success or a failure.
+    #[tokio::test]
+    async fn a_run_is_visible_from_the_moment_it_starts() {
+        let (reg, pool, _dir, _path) = test_registry().await;
+        // An earlier, successful run: the thing `GET /jobs` used to keep
+        // showing while a later run was in flight (or had been interrupted).
+        db_record_run(
+            &pool,
+            "backup",
+            "2026-06-01T00:00:00Z",
+            "2026-06-01T00:00:01Z",
+            true,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let (release, parked) = tokio::sync::oneshot::channel::<()>();
+        let parked = Arc::new(tokio::sync::Mutex::new(Some(parked)));
+        let job = Arc::new(RegisteredJob::from_fn(JobTrigger::Scheduled, move |_| {
+            let parked = parked.clone();
+            async move {
+                let rx = parked.lock().await.take().expect("the job runs once");
+                rx.await.expect("released");
+                Ok(())
+            }
+        }));
+
+        let running = tokio::spawn({
+            let pool = pool.clone();
+            let job = job.clone();
+            async move { run_job(&pool, "backup", &job, JobParams::default()).await }
+        });
+
+        let app = ApiClient::over(router().with_state(pool.clone()).layer(Extension(reg)));
+        // Wait for the in-flight row rather than sleeping a guessed interval.
+        let in_flight = loop {
+            let statuses: Vec<JobStatus> = app.get("/jobs").await.json();
+            let backup = statuses
+                .into_iter()
+                .find(|s| s.name == "backup")
+                .expect("the job is registered");
+            if backup.last_status == Some(JobRunStatus::Running) {
+                break backup;
+            }
+            tokio::task::yield_now().await;
+        };
+        assert!(
+            in_flight.last_finished_at.is_none(),
+            "a run in flight has not finished"
+        );
+        assert!(in_flight.last_error.is_none(), "and has not failed");
+        assert_eq!(
+            in_flight.runs.len(),
+            2,
+            "the in-flight run is a history entry of its own, above the previous run"
+        );
+        assert_eq!(in_flight.runs[1].status, JobRunStatus::Ok);
+        assert_eq!(
+            in_flight.runs[1].finished_at.as_deref(),
+            Some("2026-06-01T00:00:01Z"),
+            "the previous run is still there, unchanged"
+        );
+
+        release.send(()).expect("the job is still parked");
+        running.await.unwrap().unwrap();
+
+        let statuses: Vec<JobStatus> = app.get("/jobs").await.json();
+        let done = statuses
+            .iter()
+            .find(|s| s.name == "backup")
+            .expect("the job is registered");
+        assert_eq!(done.last_status, Some(JobRunStatus::Ok));
+        assert!(done.last_finished_at.is_some());
+        assert_eq!(
+            done.runs.len(),
+            2,
+            "finishing updates the row the start opened; it does not append a second"
+        );
+    }
+
+    /// The other half of SCENARIOS T-11: what a run the process did not survive
+    /// leaves behind. The interruption itself is a `SIGTERM`/`SIGKILL`/power cut
+    /// mid-run, which no in-process test can stage — but its *record* is exactly
+    /// a started row that was never updated, which this stages directly. It must
+    /// read as a run that started and never finished: not as a success, not as a
+    /// failure, and — the actual defect — not as the previous run's result.
+    #[tokio::test]
+    async fn an_interrupted_run_reads_as_started_and_never_finished() {
+        let (reg, pool, _dir, _path) = test_registry().await;
+        db_record_run(
+            &pool,
+            "backup",
+            "2026-06-01T00:00:00Z",
+            "2026-06-01T00:00:01Z",
+            true,
+            None,
+        )
+        .await
+        .unwrap();
+        db_start_run(&pool, "backup", "2026-06-08T00:00:00Z")
+            .await
+            .unwrap();
+
+        let app = ApiClient::over(router().with_state(pool.clone()).layer(Extension(reg)));
+        let statuses: Vec<JobStatus> = app.get("/jobs").await.json();
+        let backup = statuses
+            .iter()
+            .find(|s| s.name == "backup")
+            .expect("the job is registered");
+        assert_eq!(backup.last_status, Some(JobRunStatus::Running));
+        assert_eq!(
+            backup.last_started_at.as_deref(),
+            Some("2026-06-08T00:00:00Z"),
+            "the newest run is the interrupted one, not the week-old success"
+        );
+        assert!(backup.last_finished_at.is_none());
+
+        // And the health report does not call it a failure: nothing failed.
+        let health = crate::reports::health::db_health(
+            &pool,
+            chrono::NaiveDate::from_ymd_opt(2026, 6, 8).unwrap(),
+            chrono::Utc::now(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            health.failed_jobs.is_empty(),
+            "an unfinished run is not a failed one: {:?}",
+            health.failed_jobs
+        );
+    }
+
+    /// The history bound still holds when the row is written at the start — and
+    /// the prune that enforces it can never take the row the in-flight run is
+    /// about to update, because that row is the newest of its job and the
+    /// per-job lock keeps any other run of it from inserting meanwhile.
+    #[tokio::test]
+    async fn starting_a_run_prunes_the_history_and_never_the_in_flight_row() {
+        let (_reg, pool, _dir, _path) = test_registry().await;
+        for i in 0..(JOB_RUN_HISTORY_LIMIT + 5) {
+            let started = format!("2026-06-01T00:{i:02}:00Z");
+            let finished = format!("2026-06-01T00:{i:02}:01Z");
+            db_record_run(&pool, "backup", &started, &finished, true, None)
+                .await
+                .unwrap();
+        }
+
+        let id = db_start_run(&pool, "backup", "2026-06-02T00:00:00Z")
+            .await
+            .unwrap();
+
+        let runs = db_run_histories(&pool).await.unwrap();
+        let runs = runs.get("backup").unwrap();
+        assert_eq!(runs.len(), JOB_RUN_HISTORY_LIMIT as usize);
+        assert_eq!(runs[0].started_at, "2026-06-02T00:00:00Z");
+        assert_eq!(runs[0].status, JobRunStatus::Running);
+
+        // The row the start opened is still there to be completed.
+        let still_there: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM job_runs WHERE id = ?")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(still_there.0, 1);
+    }
+
     #[tokio::test]
     async fn list_jobs_exposes_run_history() {
         // GET /jobs carries each job's stored history (most recent first) in
@@ -972,9 +1157,9 @@ mod tests {
         let statuses: Vec<JobStatus> = resp.json();
         let backup = statuses.iter().find(|s| s.name == "backup").unwrap();
         assert_eq!(backup.runs.len(), 2);
-        assert!(backup.runs[0].success);
+        assert_eq!(backup.runs[0].status, JobRunStatus::Ok);
         assert_eq!(backup.runs[1].error.as_deref(), Some("boom"));
-        assert_eq!(backup.last_success, Some(true));
+        assert_eq!(backup.last_status, Some(JobRunStatus::Ok));
         assert_eq!(
             backup.last_started_at.as_deref(),
             Some("2026-06-02T00:00:00Z")
@@ -1030,6 +1215,95 @@ mod tests {
         );
         assert_eq!(rows[1].0, "price-import");
         assert!(rows[1].2);
+    }
+
+    #[tokio::test]
+    async fn migration_0042_carries_every_run_forward_as_ok_or_failed() {
+        // 0042 relaxed finished_at to nullable and replaced the success boolean
+        // with the three-valued status enum, which SQLite can only do by
+        // rebuilding the table. Every recorded run must survive the rebuild with
+        // its id, name, timestamps and error text intact and its success flag
+        // translated — recreate the 0012 shape, apply the migration file, and
+        // check nothing was dropped.
+        use sqlx::Connection;
+        let mut conn = sqlx::SqliteConnection::connect(":memory:").await.unwrap();
+        sqlx::raw_sql(
+            "CREATE TABLE job_runs (
+                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                 name        TEXT    NOT NULL,
+                 started_at  TEXT    NOT NULL,
+                 finished_at TEXT    NOT NULL,
+                 success     INTEGER NOT NULL,
+                 error       TEXT
+             );
+             CREATE INDEX job_runs_name_id ON job_runs (name, id);
+             INSERT INTO job_runs (id, name, started_at, finished_at, success, error) VALUES
+                 (7, 'backup', '2026-06-01T00:00:00Z', '2026-06-01T00:00:01Z', 0, 'boom'),
+                 (9, 'price-import', '2026-06-02T00:00:00Z', '2026-06-02T00:00:01Z', 1, NULL);",
+        )
+        .execute(&mut conn)
+        .await
+        .unwrap();
+
+        sqlx::raw_sql(include_str!("../../migrations/0042_job_run_status.sql"))
+            .execute(&mut conn)
+            .await
+            .unwrap();
+
+        /// One migrated row, as the assertion below reads it.
+        type MigratedRun = (i64, String, String, Option<String>, String, Option<String>);
+        let rows: Vec<MigratedRun> = sqlx::query_as(
+            "SELECT id, name, started_at, finished_at, status, error \
+             FROM job_runs ORDER BY id",
+        )
+        .fetch_all(&mut conn)
+        .await
+        .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    7,
+                    "backup".to_string(),
+                    "2026-06-01T00:00:00Z".to_string(),
+                    Some("2026-06-01T00:00:01Z".to_string()),
+                    "failed".to_string(),
+                    Some("boom".to_string()),
+                ),
+                (
+                    9,
+                    "price-import".to_string(),
+                    "2026-06-02T00:00:00Z".to_string(),
+                    Some("2026-06-02T00:00:01Z".to_string()),
+                    "ok".to_string(),
+                    None,
+                ),
+            ],
+            "every run survives the rebuild, ids and all"
+        );
+
+        // The new shape accepts an unfinished run and refuses the two ways of
+        // describing one incoherently.
+        sqlx::query(
+            "INSERT INTO job_runs (name, started_at, finished_at, status, error) \
+             VALUES ('backup', '2026-06-08T00:00:00Z', NULL, 'running', NULL)",
+        )
+        .execute(&mut conn)
+        .await
+        .expect("an in-flight run has no finish time");
+        for bad in [
+            "INSERT INTO job_runs (name, started_at, finished_at, status) \
+             VALUES ('backup', 'x', '2026-06-08T00:00:01Z', 'running')",
+            "INSERT INTO job_runs (name, started_at, finished_at, status) \
+             VALUES ('backup', 'x', NULL, 'ok')",
+            "INSERT INTO job_runs (name, started_at, finished_at, status) \
+             VALUES ('backup', 'x', '2026-06-08T00:00:01Z', 'maybe')",
+        ] {
+            sqlx::query(bad)
+                .execute(&mut conn)
+                .await
+                .expect_err("the CHECKs hold status and finished_at in step");
+        }
     }
 
     /// SCENARIOS T-06: three registry entries recorded `format!("{e:?}")`, so
@@ -1091,7 +1365,7 @@ mod tests {
             .iter()
             .find(|s| s.name == "rba-fx-import")
             .expect("the job is registered");
-        assert_eq!(job.last_success, Some(false));
+        assert_eq!(job.last_status, Some(JobRunStatus::Failed));
         let recorded = job.last_error.clone().expect("a failed run records why");
 
         assert_eq!(

@@ -2993,6 +2993,40 @@ fn listing_rename_ui_documented() {
     assert!(frontend.contains("`#/renames/<listing>`, `#/r/<report>`"));
 }
 
+/// Docs-sync pin for SCENARIOS T-11: the run record now opens when a run
+/// *starts*, and a backup is written under a staging name and renamed into
+/// place only once it verifies. Both are operational promises an operator reads
+/// before they ever read the code — what `GET /jobs` says about a run that
+/// never finished, and what is safe to restore from the backup directory — so
+/// each has to be stated where it is looked for.
+#[test]
+fn interrupted_runs_and_staged_backups_documented() {
+    // API.md: the response shape's new field, the three run states, and the
+    // meaning of a row left `running`.
+    assert!(API_MD.contains(r#""last_finished_at", "last_status", "last_error""#));
+    assert!(API_MD.contains(r#"`status` is one of `"running"`, `"ok"` or `"failed"`"#));
+    assert!(API_MD.contains("appends a `job_runs` row **when it starts**"));
+    assert!(
+        API_MD.contains("which is what distinguishes an interrupted run from one that never began")
+    );
+    // API.md: the backup job's own paragraph — staging, the order, the bound.
+    assert!(API_MD.contains("staging name** (`<name>.db.partial`)"));
+    assert!(API_MD.contains("write, verify, rename, in that order"));
+    assert!(API_MD.contains("bounded to the newest 3"));
+    // SCHEMA.md: the columns the migration changed.
+    assert!(SCHEMA_MD.contains("running | ok | failed (CHECK, 0042)"));
+    assert!(SCHEMA_MD.contains("NULL while status = 'running' (0042)"));
+    // README, Scheduled maintenance: the staging file, the startup sweep, and
+    // the `.bad` bound that replaced "never touched".
+    assert!(README_MD.contains("`<stem>-YYYY-MM-DD-HHMMSS.db.partial`"));
+    assert!(README_MD.contains("Startup sweeps leftover `.partial` files of this database"));
+    assert!(README_MD.contains("bounded to the **newest 3**"));
+    assert!(
+        !README_MD.contains("quarantined `.bad` files, and anything else are never touched"),
+        "the old promise that `.bad` files are never pruned must not survive alongside the bound"
+    );
+}
+
 /// Docs-sync pin for manual-only jobs (SCENARIOS T-09/schedule). The startup
 /// "no schedule entry" WARN now fires only for a job that expects a schedule,
 /// because the registry records the intent (`register_manual`); both documents

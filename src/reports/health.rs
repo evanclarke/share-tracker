@@ -120,7 +120,10 @@ pub const DUPLICATE_PRICE_SERIES_RUN_DAYS: i64 = 30;
 /// so it is a constant rather than a request parameter.
 pub const ESS_THIRTY_DAY_WINDOW: i64 = 30;
 
-/// A job whose most recent recorded run failed.
+/// A job whose most recent recorded run failed. A run still in flight — or one
+/// a restart interrupted, which `job_runs` now records as started and never
+/// finished (SCENARIOS T-11) — is deliberately not a failure and does not
+/// appear here.
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct FailedJob {
     pub name: String,
@@ -2139,7 +2142,8 @@ pub async fn db_health(
         .await?;
     let failed_jobs = sqlx::query_as::<_, FailedJob>(
         "SELECT name, finished_at, error FROM job_runs r \
-         WHERE id = (SELECT MAX(id) FROM job_runs WHERE name = r.name) AND success = 0 \
+         WHERE id = (SELECT MAX(id) FROM job_runs WHERE name = r.name) \
+           AND status = 'failed' \
          ORDER BY name",
     )
     .fetch_all(&mut *tx)
@@ -2273,13 +2277,13 @@ mod tests {
 
     async fn insert_job_run(pool: &SqlitePool, name: &str, finished_at: &str, error: Option<&str>) {
         sqlx::query(
-            "INSERT INTO job_runs (name, started_at, finished_at, success, error) \
+            "INSERT INTO job_runs (name, started_at, finished_at, status, error) \
              VALUES (?, ?, ?, ?, ?)",
         )
         .bind(name)
         .bind(finished_at)
         .bind(finished_at)
-        .bind(error.is_none())
+        .bind(if error.is_none() { "ok" } else { "failed" })
         .bind(error)
         .execute(pool)
         .await

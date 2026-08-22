@@ -426,3 +426,148 @@ Consequences found while implementing:
 - The only caller passing a query parameter is `pkg/freebsd/update.sh`
   (`POST /jobs/backup?suffix=pre-<version>`, mirrored by `smoke-test.sh`); both spell `suffix`
   correctly, so `deny_unknown_fields` breaks nothing.
+
+---
+
+## SCENARIOS T-11: a run interrupted by a restart leaves no record, and an unverified file that looks like a good backup
+
+`run_job` records the run **after** the work returns, and `main`'s graceful shutdown waits only for
+in-flight *HTTP requests* — a scheduled job runs in a spawned task the process does not wait for.
+Reproduced on 2026-08-22 against a 265 MB throwaway database, with a schedule entry firing at a known
+second and a `SIGTERM` 0.6 s into it:
+
+```
+16:51:00.301  INFO job started job=backup
+16:51:00.302  INFO starting backup path=".../big/t-2026-08-22-165100.db"
+16:51:00.649  INFO shutting down
+```
+
+and on disk afterwards, `t-2026-08-22-165100.db` — 265,175,040 bytes against the live database's
+265,199,616. What that leaves behind:
+
+- **No `job_runs` row at all.** `GET /jobs` still shows the *previous* run's result; there is no
+  "started but never finished" record, so nothing distinguishes an interrupted run from one that
+  never began.
+- **A file that was never verified.** `verify_or_quarantine` runs after `VACUUM INTO` returns, in the
+  process that just died. The file matches the backup naming pattern exactly, so it is counted by
+  retention pruning, can become a first-of-month keeper, and is a restore candidate indistinguishable
+  from a verified one. (This particular truncation happened to open and pass `integrity_check` —
+  which is the point: whether an interrupted copy is restorable is luck, and nothing checks.)
+- Nothing ever re-verifies an existing backup, so the only verification a file gets is the one it
+  missed.
+
+The plain operational trigger is `service share-tracker restart` (or a host reboot, or a `pkg`
+upgrade) landing on Sunday 00:00 — the weekly backup's own slot.
+
+Related, same directory: a quarantined `<name>.db.bad` is deliberately never pruned ("kept for
+diagnosis"), so a failing disk — the likely cause of a verification failure — leaves a full-size copy
+per weekly run until the volume fills. Worth settling with whatever this finding takes.
+
+**Question for Evan — which half to fix, and how?**
+
+- **(a) Both: record the start, and never leave an unverified file looking good.** `run_job` inserts
+  the `job_runs` row when the job *starts* (finished_at/success NULL) and updates it on completion,
+  so an interrupted run is visible as one that started and never finished; and the backup writes to a
+  temporary name (`<name>.db.partial`) that is renamed into place only after verification passes, so
+  an interrupted copy can never be mistaken for a backup. Startup could additionally sweep leftover
+  `.partial` files.
+- **(b) The file only.** Write-then-rename as above; leave run recording as it is.
+- **(c) The record only.** Start/finish rows as above; leave the file naming as it is (an
+  unverified leftover keeps a backup's name).
+- **(d) Wait for the job instead.** Hold shutdown until in-flight jobs finish, bounded by a timeout.
+  Fixes the common case but not a `SIGKILL`, a power cut, or a timeout expiring.
+
+**Decision (Evan, 2026-08-22): (a), both halves.** Rejected: fixing only the file, only the record,
+and waiting for the job on shutdown (it cannot cover `SIGKILL`, a power cut, or the timeout expiring).
+The quarantined-file question was settled alongside: **bound the `.bad` files** to the newest few
+rather than leaving them unbounded or only documenting them.
+
+- [x] `run_job` inserts the `job_runs` row when the job **starts** (`finished_at`/`success` NULL) and
+      updates that row on completion — an interrupted run is then visible as one that started and
+      never finished. Needs a migration relaxing `job_runs.finished_at`/`success` to nullable, and
+      `JobStatus`/`JobRunRecord` to carry the in-flight state honestly
+- [x] `GET /jobs` and the Jobs screen show an unfinished run as such (not as a success, not as a
+      failure), and the history pruning still bounds the table
+- [x] The backup writes to a staging name (`<name>.db.partial`) and renames it into place **only
+      after verification passes**, so an interrupted copy can never carry a backup's name, be counted
+      by pruning, or be picked for a restore
+- [x] Startup sweeps leftover `.partial` files for this database (an interrupted run's debris), and
+      pruning bounds quarantined `<name>.db.bad` files to the newest few
+- [x] `docs/API.md` (`GET /jobs` shape and the in-flight state, the backup job's paragraph),
+      `docs/SCHEMA.md` (`job_runs` columns), README "Scheduled maintenance" (staging + `.bad` bound)
+- [x] Regression tests: a run recorded at start is visible before it finishes; a verification failure
+      leaves no file under the backup name (the `.partial` is quarantined instead); a leftover
+      `.partial` is swept at startup and never counted by pruning; `.bad` files are bounded
+
+
+Tests: `scheduler::tests::a_run_is_visible_from_the_moment_it_starts` (a job parked mid-run shows on
+`GET /jobs` as `running`, with the previous run untouched beneath it, and finishing updates that row
+rather than appending a second), `an_interrupted_run_reads_as_started_and_never_finished` (and the
+health report does not call it a failure), `starting_a_run_prunes_the_history_and_never_the_in_flight_row`,
+`migration_0042_carries_every_run_forward_as_ok_or_failed` (ids, timestamps and error text intact,
+plus the two CHECKs); `db::tests::a_backup_is_written_under_a_staging_name_and_renamed_only_once_verified`,
+`an_unverified_copy_never_carries_a_backup_name` (does not parse as a backup, never pruned, never
+takes a real first-of-month keeper's slot, swept at startup),
+`the_startup_sweep_only_removes_this_database_s_staging_files`,
+`quarantined_files_are_bounded_to_the_newest_few`, `verification_quarantines_corrupt_file` (extended:
+the staging file is moved aside and the backup name never appears), `prune_never_touches_non_matching_files`
+(extended with a `.partial` bystander); `web::tests::jobs_ui_present` and
+`doc_checks::interrupted_runs_and_staged_backups_documented`.
+
+Consequences found while implementing:
+
+- **The three-state run needed an enum, not a nullable boolean.** The finding's own wording says
+  "`finished_at`/`success` NULL", but a nullable `success` cannot say *running* without being read by
+  inference — `NULL` would have meant "unfinished" in `job_runs` while `last_success: null` already
+  means "never run" in `GET /jobs`, two different nothings in the same field. Migration **0042**
+  therefore replaces the boolean with a CHECK-constrained
+  `status TEXT ('running' | 'ok' | 'failed')` — the codebase's rule for a limited set of values — and
+  relaxes `finished_at` to nullable, with a second CHECK holding the two in step (`'running'` exactly
+  while there is no finish time). `GET /jobs`' `last_success` became `last_status` carrying the same
+  three values, and the Jobs screen shows the run's state as it stands rather than folding it into
+  ok/failed. SQLite can relax neither a NOT NULL nor a table-level CHECK in place, so it is the
+  rename-and-rebuild pattern: every existing row is carried forward id-for-id with `success = 1` →
+  `'ok'` and `0` → `'failed'`, and 0012's index has to be dropped **before** the rename or the new
+  table cannot claim its name (index names are global, and a renamed table keeps its own).
+- **`job_runs` is neither audited nor snapshot-triggered**, so the rebuild re-created no triggers —
+  checked rather than assumed. It is out of scope for `row_history` (derived state, scope decision
+  2026-07-14) and already classified *exempt* in `reports::snapshot`, so
+  `every_table_is_classified_for_snapshot_staleness` stayed green with no edit.
+- **Splitting the write in two had to keep the prune bounded and non-destructive.** The insert still
+  prunes to `JOB_RUN_HISTORY_LIMIT` in its own transaction — after the insert, never before, or the
+  bound would be the limit *plus* the fresh row — and the prune can never take the row the in-flight
+  run is about to update, because that row is the newest of its job and the per-job lock keeps any
+  other run of the same job from inserting meanwhile. `db_record_run` survives as the fallback for a
+  run whose opening row never landed: the run is over by then, so the whole of it is recorded in one
+  write rather than lost.
+- **A test with nothing to do with this broke, and was right to.** `run_job` now awaits a database
+  write *before* calling the job, and `capped_sleep_reanchors_after_wall_clock_shift` runs under
+  `tokio::time::pause()`, where an idle runtime is licence to jump to the next timer — sqlx's own
+  600 s pool-maintenance tick. The fake wall clock advanced ten minutes between the timer firing and
+  the job body reading it. Fixed in the test (the pool is closed before the loop starts, so the write
+  fails without awaiting anything), not by moving the recording: what that test pins is *when the
+  timer fires*, not what it records.
+- **The `.partial` suffix is invisible to the pruner for free — but only because the parser demands a
+  trailing `.db`.** Reasoned through rather than assumed: `backup_timestamp` strips `.db` from the
+  end, so `<stem>-YYYY-MM-DD-HHMMSS.db.partial` fails to parse and can never be a pruning candidate,
+  a monthly keeper, or a restore option. The startup sweep and the `.bad` bound therefore match by
+  the artefact's *own* suffix over an otherwise well-formed backup name
+  (`backup_artefact_timestamp`), which keeps both as narrow as pruning is.
+- **The quarantine name is the backup's, not the staging file's.** Verification now runs on
+  `<name>.db.partial`, but a failure still quarantines it as `<name>.db.bad` — naming the artefact
+  after the staging path would have read as a different thing to an operator and broken the
+  documented name. `KEEP_BAD = 3` bounds them, which contradicts the README's old promise that
+  quarantined files are "never touched"; the doc-check asserts that sentence is *gone*, rather than
+  leaving it sitting beside the new bound.
+- **Re-driven end to end on a 247 MB throwaway database**, the way the finding was found: a
+  once-a-minute `backup` entry and a `SIGTERM` 0.15 s into the run — 0.6 s was too late, the copy
+  finishing in ~0.37 s on this disk. What it leaves now is `t-2026-08-22-183600.db.partial` and a
+  `job_runs` row `status = running` with no `finished_at`; nothing carries a backup's name. On
+  restart the server logged `removed an unfinished backup left by an interrupted run` and swept it,
+  and `GET /jobs` — and the Jobs screen, checked in headless Chrome — showed the interrupted run as
+  **running** above the previous run's `ok`, rather than as that previous run's result.
+- **Not in scope, and worth knowing for the section queued next:** an interrupted run and a run
+  genuinely in flight now look identical (`running`, no finish time). Telling them apart needs a
+  notion of *overdue*, which is what `SCENARIOS T-11/T-02/T-12` is about; the row this leaves behind
+  is the fact that section can build on. The health report deliberately does not treat an unfinished
+  run as a failure — nothing failed — and a test pins that.

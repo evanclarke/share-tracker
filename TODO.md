@@ -22,11 +22,13 @@ its findings went; that table is the record of what has been looked at.
 
 Section **T. Jobs, backup, and operations** (12 scenarios) was driven on **2026-08-22** against
 throwaway databases (a small one for the HTTP surface, a 265 MB one to catch a backup mid-write) and
-raised **six findings**. Three are closed — the three jobs that recorded their failure as a Rust
+raised **six findings**. Four are closed — the three jobs that recorded their failure as a Rust
 `Debug` string (T-06), the startup "no schedule entry" warning that cried wolf on the two
-deliberately-manual jobs (T-09/schedule), and `POST /jobs/:name`'s bare-status-code failures, now
-bodied 404/500 replies with an unknown query parameter refused rather than ignored (T-10) — all
-three archived in [`DONE/infra.md`](DONE/infra.md); the other three are open below.
+deliberately-manual jobs (T-09/schedule), `POST /jobs/:name`'s bare-status-code failures, now
+bodied 404/500 replies with an unknown query parameter refused rather than ignored (T-10), and the
+run interrupted by a restart that left no record and an unverified file wearing a backup's name
+(T-11), now a run row opened at the start and a backup staged under `.partial` until it verifies —
+all four archived in [`DONE/infra.md`](DONE/infra.md); the other two are open below.
 Everything else in the section came back correct: the
 per-job lock serialises overlapping triggers (T-01), the run history bounds itself at 20 while
 keeping a fail-then-succeed sequence readable (T-02), a corrupt backup is quarantined (T-03),
@@ -125,78 +127,6 @@ age, a `backup_stale` flag alone, and documentation only.
 - [ ] Regression tests: a schedule with no future occurrence leaves a stored instant that goes stale
       and health reports the job overdue; a job that ran on time is not overdue; the grace margin's
       boundary
-
----
-
-## SCENARIOS T-11: a run interrupted by a restart leaves no record, and an unverified file that looks like a good backup
-
-`run_job` records the run **after** the work returns, and `main`'s graceful shutdown waits only for
-in-flight *HTTP requests* — a scheduled job runs in a spawned task the process does not wait for.
-Reproduced on 2026-08-22 against a 265 MB throwaway database, with a schedule entry firing at a known
-second and a `SIGTERM` 0.6 s into it:
-
-```
-16:51:00.301  INFO job started job=backup
-16:51:00.302  INFO starting backup path=".../big/t-2026-08-22-165100.db"
-16:51:00.649  INFO shutting down
-```
-
-and on disk afterwards, `t-2026-08-22-165100.db` — 265,175,040 bytes against the live database's
-265,199,616. What that leaves behind:
-
-- **No `job_runs` row at all.** `GET /jobs` still shows the *previous* run's result; there is no
-  "started but never finished" record, so nothing distinguishes an interrupted run from one that
-  never began.
-- **A file that was never verified.** `verify_or_quarantine` runs after `VACUUM INTO` returns, in the
-  process that just died. The file matches the backup naming pattern exactly, so it is counted by
-  retention pruning, can become a first-of-month keeper, and is a restore candidate indistinguishable
-  from a verified one. (This particular truncation happened to open and pass `integrity_check` —
-  which is the point: whether an interrupted copy is restorable is luck, and nothing checks.)
-- Nothing ever re-verifies an existing backup, so the only verification a file gets is the one it
-  missed.
-
-The plain operational trigger is `service share-tracker restart` (or a host reboot, or a `pkg`
-upgrade) landing on Sunday 00:00 — the weekly backup's own slot.
-
-Related, same directory: a quarantined `<name>.db.bad` is deliberately never pruned ("kept for
-diagnosis"), so a failing disk — the likely cause of a verification failure — leaves a full-size copy
-per weekly run until the volume fills. Worth settling with whatever this finding takes.
-
-**Question for Evan — which half to fix, and how?**
-
-- **(a) Both: record the start, and never leave an unverified file looking good.** `run_job` inserts
-  the `job_runs` row when the job *starts* (finished_at/success NULL) and updates it on completion,
-  so an interrupted run is visible as one that started and never finished; and the backup writes to a
-  temporary name (`<name>.db.partial`) that is renamed into place only after verification passes, so
-  an interrupted copy can never be mistaken for a backup. Startup could additionally sweep leftover
-  `.partial` files.
-- **(b) The file only.** Write-then-rename as above; leave run recording as it is.
-- **(c) The record only.** Start/finish rows as above; leave the file naming as it is (an
-  unverified leftover keeps a backup's name).
-- **(d) Wait for the job instead.** Hold shutdown until in-flight jobs finish, bounded by a timeout.
-  Fixes the common case but not a `SIGKILL`, a power cut, or a timeout expiring.
-
-**Decision (Evan, 2026-08-22): (a), both halves.** Rejected: fixing only the file, only the record,
-and waiting for the job on shutdown (it cannot cover `SIGKILL`, a power cut, or the timeout expiring).
-The quarantined-file question was settled alongside: **bound the `.bad` files** to the newest few
-rather than leaving them unbounded or only documenting them.
-
-- [ ] `run_job` inserts the `job_runs` row when the job **starts** (`finished_at`/`success` NULL) and
-      updates that row on completion — an interrupted run is then visible as one that started and
-      never finished. Needs a migration relaxing `job_runs.finished_at`/`success` to nullable, and
-      `JobStatus`/`JobRunRecord` to carry the in-flight state honestly
-- [ ] `GET /jobs` and the Jobs screen show an unfinished run as such (not as a success, not as a
-      failure), and the history pruning still bounds the table
-- [ ] The backup writes to a staging name (`<name>.db.partial`) and renames it into place **only
-      after verification passes**, so an interrupted copy can never carry a backup's name, be counted
-      by pruning, or be picked for a restore
-- [ ] Startup sweeps leftover `.partial` files for this database (an interrupted run's debris), and
-      pruning bounds quarantined `<name>.db.bad` files to the newest few
-- [ ] `docs/API.md` (`GET /jobs` shape and the in-flight state, the backup job's paragraph),
-      `docs/SCHEMA.md` (`job_runs` columns), README "Scheduled maintenance" (staging + `.bad` bound)
-- [ ] Regression tests: a run recorded at start is visible before it finishes; a verification failure
-      leaves no file under the backup name (the `.partial` is quarantined instead); a leftover
-      `.partial` is swept at startup and never counted by pruning; `.bad` files are bounded
 
 ---
 

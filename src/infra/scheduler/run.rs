@@ -2,7 +2,7 @@
 //! that both the scheduled loop and the manual trigger go through, plus the
 //! per-entry timer loop (`run_entry`) that decides when to call it.
 
-use super::db::db_record_run;
+use super::db::{db_finish_run, db_record_run, db_start_run};
 use super::registry::{JobParams, RegisteredJob};
 use chrono::{DateTime, TimeZone};
 use croner::Cron;
@@ -13,9 +13,18 @@ use std::{sync::Arc, time::Duration};
 /// INFO `job finished` line (the latter carries `ok` = whether it succeeded).
 /// Both the scheduled loop and the manual trigger go through here so every job
 /// logs start and finish uniformly, regardless of any per-job logging it does,
-/// and so every run persists its last-run record (timestamps, success, error)
-/// to `job_runs` for the Jobs UI. A failure to record the run is logged but does
+/// and so every run persists its record (timestamps, status, error) to
+/// `job_runs` for the Jobs UI. A failure to record the run is logged but does
 /// not change the job's own result.
+///
+/// The row is written **when the run starts** (`status = 'running'`,
+/// `finished_at` NULL) and updated when the work returns. A run the process
+/// does not survive — a restart landing on the weekly backup's own slot, a
+/// `SIGKILL`, a power cut — therefore leaves a row that started and never
+/// finished, instead of the nothing it used to leave, which was
+/// indistinguishable from a run that never began (SCENARIOS T-11). Waiting for
+/// the job on shutdown was considered and rejected: it covers none of those
+/// three.
 ///
 /// The per-job lock is held for the whole run, serialising executions of the
 /// same job: a manual trigger overlapping the scheduled run (or another
@@ -29,14 +38,25 @@ pub(super) async fn run_job(
     let _running = job.lock.lock().await;
     let started_at = chrono::Utc::now().to_rfc3339();
     tracing::info!(job = %name, "job started");
+    let run_id = match db_start_run(pool, name, &started_at).await {
+        Ok(id) => Some(id),
+        Err(e) => {
+            tracing::warn!(job = %name, "failed to record the start of the job run: {e}");
+            None
+        }
+    };
     let result = (job.work)(params).await;
     let finished_at = chrono::Utc::now().to_rfc3339();
     tracing::info!(job = %name, ok = result.is_ok(), "job finished");
 
     let error = result.as_ref().err().map(String::as_str);
-    if let Err(e) =
-        db_record_run(pool, name, &started_at, &finished_at, result.is_ok(), error).await
-    {
+    let recorded = match run_id {
+        Some(id) => db_finish_run(pool, id, &finished_at, result.is_ok(), error).await,
+        // No opening row to complete, so record the whole run in one write
+        // rather than losing it.
+        None => db_record_run(pool, name, &started_at, &finished_at, result.is_ok(), error).await,
+    };
+    if let Err(e) = recorded {
         tracing::warn!(job = %name, "failed to record job run: {e}");
     }
     result

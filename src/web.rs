@@ -1725,12 +1725,22 @@ mod tests {
         // It also surfaces each job's last run (success/error) from the GET /jobs
         // fields, rendered through the shared filterable table.
         assert!(js.contains("last_finished_at"));
-        assert!(js.contains("last_success"));
         assert!(js.contains("last_error"));
         // Each job row expands to its stored run history (GET /jobs `runs`),
         // so a flapping job's intermittent failures are diagnosable in the UI.
         assert!(js.contains("j.runs"));
-        assert!(js.contains("r.success ? 'ok' : 'failed'"));
+        // The run status is the server's own three-valued field, shown as it
+        // stands rather than folded into a success boolean: a run that started
+        // and never finished (one in flight, or one a restart interrupted)
+        // shows as `running`, not as `ok` and not as `failed`, and `never`
+        // still means the job has no recorded run (SCENARIOS T-11).
+        assert!(js.contains("j.last_status == null ? 'never' : j.last_status"));
+        assert!(js.contains("status: r.status"));
+        let css = super::STYLE_CSS;
+        assert!(
+            css.contains(".badge.running"),
+            "the in-flight run status needs its own badge, neither ok nor failed"
+        );
         // A deliberately schedule-less job is labelled from GET /jobs' own
         // `trigger` flag, so its `never` status reads as expected rather than
         // as an overdue run (SCENARIOS T-09/schedule).

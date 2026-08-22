@@ -1,7 +1,7 @@
 //! Routes for inspecting (`GET /jobs`) and manually triggering
 //! (`POST /jobs/{name}`) maintenance jobs.
 
-use super::db::{JobRunRecord, db_run_histories};
+use super::db::{JobRunRecord, JobRunStatus, db_run_histories};
 use super::registry::{JobParams, JobRegistry, JobTrigger};
 use super::run::run_job;
 use axum::{
@@ -19,6 +19,13 @@ use sqlx::SqlitePool;
 /// most recent first, bounded to [`super::db::JOB_RUN_HISTORY_LIMIT`] entries —
 /// the `last_*` fields duplicate `runs[0]` for at-a-glance reading.
 ///
+/// `last_status` is a three-valued [`JobRunStatus`] rather than a success
+/// boolean: a run that started and has not finished — one in flight, or one a
+/// restart interrupted — is neither a success nor a failure, and `None` already
+/// means *never run*, so it could not be reused to say so (SCENARIOS T-11).
+/// `last_finished_at` is `None` for such a run too, which is why the status is
+/// what distinguishes it from a job that has never run at all.
+///
 /// `trigger` is the registry's own record of whether the job belongs on the
 /// schedule ([`JobTrigger`]), so a job that has never run and never will run on
 /// a timer reads as *manual only* rather than as one that is somehow overdue.
@@ -28,7 +35,7 @@ pub struct JobStatus {
     pub trigger: JobTrigger,
     pub last_started_at: Option<String>,
     pub last_finished_at: Option<String>,
-    pub last_success: Option<bool>,
+    pub last_status: Option<JobRunStatus>,
     pub last_error: Option<String>,
     pub runs: Vec<JobRunRecord>,
 }
@@ -54,8 +61,8 @@ async fn list(
                 name,
                 trigger,
                 last_started_at: last.map(|r| r.started_at.clone()),
-                last_finished_at: last.map(|r| r.finished_at.clone()),
-                last_success: last.map(|r| r.success),
+                last_finished_at: last.and_then(|r| r.finished_at.clone()),
+                last_status: last.map(|r| r.status),
                 last_error: last.and_then(|r| r.error.clone()),
                 runs,
             }

@@ -53,6 +53,22 @@ async fn main() {
         .await
         .expect("failed to open database");
 
+    // A backup is written under a staging name and renamed into place only
+    // once it verifies, so a file still carrying that name is the debris of a
+    // run this process did not survive — and a restart is exactly when that
+    // has just happened. Swept here rather than left to accumulate; a failure
+    // to sweep is logged, never fatal (the server must still start).
+    match db::sweep_partial_backups(&settings.db, settings.backup_dir.as_deref()) {
+        Ok(swept) if !swept.is_empty() => {
+            tracing::info!(
+                swept = swept.len(),
+                "removed unfinished backups left by an interrupted run"
+            );
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!("could not sweep unfinished backups: {e}"),
+    }
+
     // Recurring maintenance jobs are scheduled from a cron file (see `schedule.cron`),
     // not hard-coded durations. The built-in default is overridable with --schedule.
     let schedule = match &settings.schedule {

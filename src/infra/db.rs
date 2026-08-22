@@ -192,23 +192,54 @@ pub async fn backup(
     command_result
 }
 
+/// Suffix of the staging file every backup is written to. A file under this
+/// name is a copy in progress: it does not match the backup naming pattern, so
+/// pruning never counts it, it can never become a monthly keeper, and nothing
+/// can pick it for a restore.
+const STAGING_SUFFIX: &str = ".partial";
+
+/// Suffix a file that failed verification is quarantined under (see
+/// [`verify_or_quarantine`]). Also outside the backup naming pattern.
+const QUARANTINE_SUFFIX: &str = ".bad";
+
 /// Write a backup to a specific destination, skipping if it already exists. With
 /// a per-second timestamped name a collision only happens for two runs in the
-/// same second, so in practice each weekly run writes a fresh file. A freshly
-/// written file is verified before the backup counts as complete. Returns
+/// same second, so in practice each weekly run writes a fresh file. Returns
 /// whether a fresh file was written (`false` when skipped because one already
 /// existed).
+///
+/// The copy is written to `<dest>.partial` and moved onto `dest` only once it
+/// has **verified** — write, verify, rename, in that order and never any other.
+/// A rename within a directory is atomic, so `dest` either does not exist or is
+/// a file that passed verification in this process; a run the process does not
+/// survive (a restart landing on the weekly backup's own slot, a `SIGKILL`, a
+/// power cut) leaves its half-written copy under the staging name, where nothing
+/// mistakes it for a backup (SCENARIOS T-11). Before this, the copy was written
+/// straight to `dest` and verified afterwards, so an interrupted run left an
+/// unverified file carrying a backup's exact name — counted by pruning, able to
+/// become a first-of-month keeper, and indistinguishable at restore time from a
+/// verified one. Whether such a file is restorable is luck; nothing checked.
 async fn backup_to(pool: &SqlitePool, dest: &str) -> Result<bool, BackupError> {
     if Path::new(dest).exists() {
         tracing::debug!(path = dest, "backup already exists, skipping");
         return Ok(false);
     }
-    tracing::info!(path = dest, "starting backup");
+    let staging = format!("{dest}{STAGING_SUFFIX}");
+    // `VACUUM INTO` refuses an existing target, so a leftover from an
+    // interrupted run in this same second would otherwise fail every retry.
+    // Startup sweeps these too (`sweep_partial_backups`); this covers a
+    // long-running process that has not restarted since.
+    if Path::new(&staging).exists() {
+        tracing::info!(path = staging, "removing a leftover partial backup");
+        std::fs::remove_file(&staging)?;
+    }
+    tracing::info!(path = staging, backup = dest, "starting backup");
     sqlx::query("VACUUM INTO ?")
-        .bind(dest)
+        .bind(&staging)
         .execute(pool)
         .await?;
-    verify_or_quarantine(pool, dest).await?;
+    verify_or_quarantine(pool, &staging, dest).await?;
+    std::fs::rename(&staging, dest)?;
     tracing::info!(path = dest, "backup complete and verified");
     Ok(true)
 }
@@ -292,16 +323,25 @@ async fn verify_backup(pool: &SqlitePool, dest: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Verify `dest`; on failure quarantine it by renaming to `<dest>.bad` — kept
-/// for diagnosis but no longer matching the backup naming pattern, so it can
-/// neither be restored by mistake nor counted by pruning — log at ERROR, and
-/// fail the backup.
-async fn verify_or_quarantine(pool: &SqlitePool, dest: &str) -> Result<(), BackupError> {
-    let Err(reason) = verify_backup(pool, dest).await else {
+/// Verify the file at `produced`; on failure quarantine it by renaming to
+/// `<dest>.bad` — kept for diagnosis (bounded by [`KEEP_BAD`]) but never
+/// matching the backup naming pattern, so it can neither be restored by mistake
+/// nor counted by pruning — log at ERROR, and fail the backup.
+///
+/// `produced` is the staging file the copy was written to and `dest` the
+/// backup name it would have been renamed onto: the quarantined file is named
+/// after the *backup*, not after the staging path, so `<name>.db.bad` reads the
+/// same as it always has and says which backup failed.
+async fn verify_or_quarantine(
+    pool: &SqlitePool,
+    produced: &str,
+    dest: &str,
+) -> Result<(), BackupError> {
+    let Err(reason) = verify_backup(pool, produced).await else {
         return Ok(());
     };
-    let quarantined = format!("{dest}.bad");
-    match std::fs::rename(dest, &quarantined) {
+    let quarantined = format!("{dest}{QUARANTINE_SUFFIX}");
+    match std::fs::rename(produced, &quarantined) {
         Ok(()) => tracing::error!(
             path = dest,
             quarantined,
@@ -328,6 +368,16 @@ async fn verify_or_quarantine(pool: &SqlitePool, dest: &str) -> Result<(), Backu
 const KEEP_RECENT: usize = 8;
 const KEEP_MONTHLY: usize = 12;
 
+/// How many quarantined `<name>.db.bad` files survive pruning, newest first.
+/// A quarantined file is kept for diagnosis, but the likely cause of a
+/// verification failure is a failing disk — and a failing disk fails every
+/// weekly run, so an unbounded set left one full-size copy of the database per
+/// week until the volume filled, which is the same failure the backups exist to
+/// survive (SCENARIOS T-11). Three is enough to see whether the failure is
+/// intermittent or permanent, and to compare two bad copies; a fourth adds
+/// nothing a third has not already shown.
+const KEEP_BAD: usize = 3;
+
 /// Fixed width of the `YYYY-MM-DD-HHMMSS` timestamp component embedded in a
 /// backup filename.
 const BACKUP_TIMESTAMP_LEN: usize = 17;
@@ -338,6 +388,11 @@ const BACKUP_TIMESTAMP_LEN: usize = 17;
 /// Pruning candidates are selected by this — anything else is never touched.
 /// A suffixed backup is treated as an ordinary pruning candidate: it competes
 /// in the same retention policy as any other backup of this database.
+///
+/// The trailing `.db` is required, so a staging (`.db.partial`) or quarantined
+/// (`.db.bad`) file never matches: neither is a backup, and neither may be
+/// counted by retention or picked for a restore. `backup_artefact_timestamp`
+/// is how those two are matched, on purpose and by their own suffix.
 fn backup_timestamp(name: &str, stem: &str) -> Option<NaiveDateTime> {
     let rest = name
         .strip_prefix(stem)?
@@ -353,26 +408,93 @@ fn backup_timestamp(name: &str, stem: &str) -> Option<NaiveDateTime> {
     NaiveDateTime::parse_from_str(ts, "%Y-%m-%d-%H%M%S").ok()
 }
 
-/// Delete backups of this database that fall outside the retention policy
-/// (see `KEEP_RECENT` / `KEEP_MONTHLY`), returning the deleted paths. Only
-/// regular files matching the backup naming pattern in the backup destination
-/// are candidates: the live database, its WAL sidecars, quarantined `.bad`
-/// files, and any other file are never deleted.
-fn prune_backups(db_path: &str, backup_dir: Option<&str>) -> Result<Vec<PathBuf>, std::io::Error> {
-    let stem_path = db_path.strip_suffix(".db").unwrap_or(db_path);
-    let stem = Path::new(stem_path)
-        .file_name()
-        .map(|f| f.to_string_lossy().into_owned())
-        .unwrap_or_else(|| stem_path.to_string());
-    let dir = match backup_dir {
+/// The timestamp embedded in the name of a backup *artefact* — a staging
+/// (`<backup>.partial`) or quarantined (`<backup>.bad`) file — if `name` is
+/// one of this database's, carrying `suffix` over an otherwise well-formed
+/// backup name. Matching by the artefact's own suffix keeps the sweep and the
+/// `.bad` bound as narrow as pruning is: nothing else in the directory can be
+/// mistaken for one.
+fn backup_artefact_timestamp(name: &str, stem: &str, suffix: &str) -> Option<NaiveDateTime> {
+    backup_timestamp(name.strip_suffix(suffix)?, stem)
+}
+
+/// The directory backups of `db_path` are written to: `backup_dir` when
+/// configured, otherwise the database file's own directory.
+fn backup_destination(db_path: &str, backup_dir: Option<&str>) -> PathBuf {
+    match backup_dir {
         Some(dir) => PathBuf::from(dir),
         None => match Path::new(db_path).parent() {
             Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
             _ => PathBuf::from("."),
         },
-    };
+    }
+}
+
+/// The backup filename stem for `db_path` — the filename with any `.db`
+/// suffix removed, which every backup name of this database starts with.
+fn backup_stem(db_path: &str) -> String {
+    let stem_path = db_path.strip_suffix(".db").unwrap_or(db_path);
+    Path::new(stem_path)
+        .file_name()
+        .map(|f| f.to_string_lossy().into_owned())
+        .unwrap_or_else(|| stem_path.to_string())
+}
+
+/// Delete leftover staging files (`<backup>.partial`) of this database,
+/// returning the deleted paths. A backup is written to a staging name and
+/// renamed into place only after it verifies, so a file still under that name
+/// is the debris of a run the process did not survive — the copy was never
+/// finished and never verified, and nothing will ever complete it. Called at
+/// startup, which is exactly when the interrupting restart has just happened.
+///
+/// Only this database's staging files are candidates: the live database, its
+/// sidecars, the backups themselves, quarantined `.bad` files, another
+/// database's anything, and any file whose name does not parse as
+/// `<stem>-YYYY-MM-DD-HHMMSS[-suffix].db.partial` are never touched.
+pub fn sweep_partial_backups(
+    db_path: &str,
+    backup_dir: Option<&str>,
+) -> Result<Vec<PathBuf>, std::io::Error> {
+    let stem = backup_stem(db_path);
+    let dir = backup_destination(db_path, backup_dir);
+    if !dir.is_dir() {
+        // A configured backup dir the first run has not created yet.
+        return Ok(Vec::new());
+    }
+    let mut deleted = Vec::new();
+    for entry in std::fs::read_dir(&dir)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if backup_artefact_timestamp(&name, &stem, STAGING_SUFFIX).is_none() {
+            continue;
+        }
+        let path = entry.path();
+        std::fs::remove_file(&path)?;
+        tracing::info!(
+            path = %path.display(),
+            "removed an unfinished backup left by an interrupted run"
+        );
+        deleted.push(path);
+    }
+    Ok(deleted)
+}
+
+/// Delete backups of this database that fall outside the retention policy
+/// (see `KEEP_RECENT` / `KEEP_MONTHLY`), and quarantined `.bad` files beyond
+/// the newest [`KEEP_BAD`], returning the deleted paths. Only regular files
+/// matching this database's backup naming pattern — or that pattern plus the
+/// `.bad` suffix — in the backup destination are candidates: the live database,
+/// its WAL sidecars, staging `.partial` files (swept at startup instead), and
+/// any other file are never deleted.
+fn prune_backups(db_path: &str, backup_dir: Option<&str>) -> Result<Vec<PathBuf>, std::io::Error> {
+    let stem = backup_stem(db_path);
+    let dir = backup_destination(db_path, backup_dir);
 
     let mut backups: Vec<(NaiveDateTime, PathBuf)> = Vec::new();
+    let mut quarantined: Vec<(NaiveDateTime, PathBuf)> = Vec::new();
     for entry in std::fs::read_dir(&dir)? {
         let entry = entry?;
         if !entry.file_type()?.is_file() {
@@ -381,9 +503,12 @@ fn prune_backups(db_path: &str, backup_dir: Option<&str>) -> Result<Vec<PathBuf>
         let name = entry.file_name().to_string_lossy().into_owned();
         if let Some(ts) = backup_timestamp(&name, &stem) {
             backups.push((ts, entry.path()));
+        } else if let Some(ts) = backup_artefact_timestamp(&name, &stem, QUARANTINE_SUFFIX) {
+            quarantined.push((ts, entry.path()));
         }
     }
     backups.sort_by_key(|(ts, _)| std::cmp::Reverse(*ts)); // newest first
+    quarantined.sort_by_key(|(ts, _)| std::cmp::Reverse(*ts)); // newest first
 
     let mut keep: HashSet<&Path> = backups
         .iter()
@@ -417,6 +542,14 @@ fn prune_backups(db_path: &str, backup_dir: Option<&str>) -> Result<Vec<PathBuf>
         }
         std::fs::remove_file(path)?;
         tracing::info!(path = %path.display(), "pruned backup outside retention policy");
+        deleted.push(path.clone());
+    }
+    // The quarantined set has its own, much smaller bound (see `KEEP_BAD`):
+    // these are not backups and never age into a monthly keeper, so newest-few
+    // is the whole policy.
+    for (_, path) in quarantined.iter().skip(KEEP_BAD) {
+        std::fs::remove_file(path)?;
+        tracing::info!(path = %path.display(), "pruned quarantined backup beyond the newest few");
         deleted.push(path.clone());
     }
     Ok(deleted)
@@ -1598,7 +1731,8 @@ mod tests {
         // A produced file that is not a database (as a torn write / full disk
         // could leave) must fail the backup loudly and be renamed `<name>.bad`
         // so nothing — a human restore or the pruner — mistakes it for a good
-        // backup.
+        // backup. The copy verified is the staging file; what it is quarantined
+        // as is named after the backup it would have become.
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db").to_string_lossy().to_string();
         let pool = init(&db_path).await.unwrap();
@@ -1608,9 +1742,12 @@ mod tests {
             .join("test-2026-01-04-000000.db")
             .to_string_lossy()
             .to_string();
-        std::fs::write(&dest, b"this is not a sqlite database at all").unwrap();
+        let staging = format!("{dest}{STAGING_SUFFIX}");
+        std::fs::write(&staging, b"this is not a sqlite database at all").unwrap();
 
-        let err = verify_or_quarantine(&pool, &dest).await.unwrap_err();
+        let err = verify_or_quarantine(&pool, &staging, &dest)
+            .await
+            .unwrap_err();
         assert!(
             matches!(err, BackupError::Verification { .. }),
             "expected a Verification error, got {err:?}"
@@ -1618,6 +1755,10 @@ mod tests {
         assert!(
             !Path::new(&dest).exists(),
             "the bad file must not keep its backup name"
+        );
+        assert!(
+            !Path::new(&staging).exists(),
+            "the staging file is moved aside, not left behind"
         );
         assert!(
             Path::new(&format!("{dest}.bad")).exists(),
@@ -1649,6 +1790,159 @@ mod tests {
             reason.contains("migrations"),
             "reason must name the migrations check: {reason}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_backup_is_written_under_a_staging_name_and_renamed_only_once_verified() {
+        // SCENARIOS T-11. The happy path leaves exactly one file — the verified
+        // backup — and no staging debris; and a leftover `.partial` from an
+        // earlier interrupted run in the same second is replaced rather than
+        // failing the run (`VACUUM INTO` refuses an existing target).
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db").to_string_lossy().to_string();
+        let pool = init(&db_path).await.unwrap();
+
+        let dest = dir
+            .path()
+            .join("test-2026-01-04-000000.db")
+            .to_string_lossy()
+            .to_string();
+        let staging = format!("{dest}{STAGING_SUFFIX}");
+        std::fs::write(&staging, b"debris of an interrupted run").unwrap();
+
+        assert!(backup_to(&pool, &dest).await.unwrap());
+
+        assert!(Path::new(&dest).exists(), "the verified backup is in place");
+        assert!(
+            !Path::new(&staging).exists(),
+            "nothing is left under the staging name"
+        );
+        assert!(!Path::new(&format!("{dest}.bad")).exists());
+        verify_backup(&pool, &dest).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_unverified_copy_never_carries_a_backup_name() {
+        // The file an interrupted run leaves behind is the one under the
+        // staging name, and nothing treats it as a backup: it does not parse as
+        // one, pruning neither deletes it nor counts it against the retention
+        // policy (so it can never displace a real first-of-month keeper), and
+        // the startup sweep removes it. Before SCENARIOS T-11 the same
+        // interruption left that copy under the backup name itself — unverified,
+        // counted, and a restore candidate indistinguishable from a good one.
+        let dir = tempfile::tempdir().unwrap();
+        // One backup a month for 14 months, each on the 15th — old enough that
+        // the middle ones survive only as their month's first-of-month keeper.
+        for i in 0..14 {
+            let month = format!("{}-{:02}", 2025 + (i / 12), 1 + (i % 12));
+            fake_backup(dir.path(), &format!("{month}-15-000000"));
+        }
+        // Dated earlier in a month whose real backup is a keeper: if the
+        // staging file were counted at all it would take that month's keeper
+        // slot, and the real backup — outside the newest 8 — would be pruned.
+        let partial = dir.path().join("test-2025-06-01-000000.db.partial");
+        std::fs::write(&partial, b"half a database").unwrap();
+        let keeper = dir.path().join("test-2025-06-15-000000.db");
+
+        assert!(
+            backup_timestamp("test-2025-06-01-000000.db.partial", "test").is_none(),
+            "a staging file must not parse as a backup of this database"
+        );
+
+        let dir_str = dir.path().to_string_lossy().to_string();
+        let deleted = prune_backups("test.db", Some(&dir_str)).unwrap();
+        assert!(!deleted.contains(&partial), "pruning never touches it");
+        assert!(partial.exists());
+        assert!(
+            keeper.exists(),
+            "the real first backup of the month is still its keeper"
+        );
+
+        let swept = sweep_partial_backups("test.db", Some(&dir_str)).unwrap();
+        assert_eq!(swept, vec![partial.clone()]);
+        assert!(!partial.exists());
+        assert!(keeper.exists(), "the sweep touches nothing else");
+    }
+
+    #[test]
+    fn the_startup_sweep_only_removes_this_database_s_staging_files() {
+        // The sweep runs at startup and deletes files, so its match is as narrow
+        // as pruning's: this database's `<stem>-YYYY-MM-DD-HHMMSS[-suffix].db`
+        // plus the staging suffix, nothing else in the directory.
+        let dir = tempfile::tempdir().unwrap();
+        let swept_names = [
+            "test-2026-01-04-000000.db.partial",
+            "test-2026-01-11-000000-pre-0.5.1.db.partial",
+        ];
+        let bystanders = [
+            "test.db",
+            "test.db-wal",
+            "test.db-shm",
+            "test-2026-01-04-000000.db",
+            "test-2026-01-04-000000.db.bad",
+            "other-2026-01-04-000000.db.partial",
+            "test-garbage.db.partial",
+            "test-2026-13-40-000000.db.partial", // month 13, day 40: not a timestamp
+            "test.db.partial",
+            "some-notes.partial",
+        ];
+        for name in swept_names.iter().chain(bystanders.iter()) {
+            std::fs::write(dir.path().join(name), b"").unwrap();
+        }
+
+        let dir_str = dir.path().to_string_lossy().to_string();
+        let mut swept = sweep_partial_backups("test.db", Some(&dir_str)).unwrap();
+        swept.sort();
+
+        let mut expected: Vec<PathBuf> = swept_names.iter().map(|n| dir.path().join(n)).collect();
+        expected.sort();
+        assert_eq!(swept, expected);
+        for name in bystanders {
+            assert!(dir.path().join(name).exists(), "{name} must never be swept");
+        }
+    }
+
+    #[test]
+    fn quarantined_files_are_bounded_to_the_newest_few() {
+        // A quarantined `.bad` file is kept for diagnosis, but the likely cause
+        // of a verification failure is a failing disk — which fails every weekly
+        // run — so an unbounded set fills the volume with full-size copies
+        // (SCENARIOS T-11). The newest KEEP_BAD survive; older ones are pruned,
+        // and only this database's.
+        let dir = tempfile::tempdir().unwrap();
+        let bad: Vec<PathBuf> = (1..=6)
+            .map(|week| {
+                let path = dir
+                    .path()
+                    .join(format!("test-2026-01-{:02}-000000.db.bad", week * 4));
+                std::fs::write(&path, b"").unwrap();
+                path
+            })
+            .collect();
+        let others = ["other-2026-01-04-000000.db.bad", "test-notes.db.bad"];
+        for name in others {
+            std::fs::write(dir.path().join(name), b"").unwrap();
+        }
+        // A live backup set alongside, so this is the pruner's ordinary run.
+        fake_backup(dir.path(), "2026-02-01-000000");
+
+        let dir_str = dir.path().to_string_lossy().to_string();
+        let deleted = prune_backups("test.db", Some(&dir_str)).unwrap();
+
+        for path in bad.iter().rev().take(KEEP_BAD) {
+            assert!(path.exists(), "{} is one of the newest few", path.display());
+            assert!(!deleted.contains(path));
+        }
+        for path in bad.iter().take(bad.len() - KEEP_BAD) {
+            assert!(!path.exists(), "{} is beyond the bound", path.display());
+            assert!(deleted.contains(path));
+        }
+        for name in others {
+            assert!(
+                dir.path().join(name).exists(),
+                "{name} is not a quarantined backup of this database"
+            );
+        }
     }
 
     /// Touch an empty file named as a backup of `test.db` taken at `ts`.
@@ -1750,6 +2044,10 @@ mod tests {
             "test.db-shm",
             "other-2025-01-01-000000.db",
             "test-2025-01-01-000000.db.bad",
+            // The staging name a copy in progress is written under: never a
+            // backup, never a pruning candidate, and never a monthly keeper
+            // (SCENARIOS T-11). Startup sweeps these, not the pruner.
+            "test-2025-01-01-000000.db.partial",
             "test-garbage.db",
             "test-2025-13-40-000000.db", // month 13, day 40: not a timestamp
         ];
