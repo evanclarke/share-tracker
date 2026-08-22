@@ -1,3 +1,4 @@
+use crate::infra::fetch::cause_chain;
 use crate::infra::http::{self, ApiError, CrudEntity};
 use axum::{
     Json, Router,
@@ -369,12 +370,12 @@ pub async fn run_import(pool: &SqlitePool) -> Result<ImportSummary, ImportError>
 async fn fetch_rates(url: &str) -> Result<String, ImportError> {
     let resp = reqwest::get(url)
         .await
-        .map_err(|e| ImportError::Fetch(e.to_string()))?
+        .map_err(|e| ImportError::Fetch(cause_chain(&e)))?
         .error_for_status()
-        .map_err(|e| ImportError::Fetch(e.to_string()))?;
+        .map_err(|e| ImportError::Fetch(cause_chain(&e)))?;
     resp.text()
         .await
-        .map_err(|e| ImportError::Fetch(e.to_string()))
+        .map_err(|e| ImportError::Fetch(cause_chain(&e)))
 }
 
 /// Manually trigger the import. With a non-empty request body, imports that body
@@ -859,5 +860,32 @@ mod tests {
             .post_raw("/rba_fx_rates/import", "Title,A$1=USD\n29-Jan-2010,oops\n")
             .await;
         assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    /// SCENARIOS T-06: what an unreachable feed leaves behind has to say what
+    /// failed *and* why. The registry entry records this error's `Display`, so
+    /// it must open with the variant's own `#[error]` wording and carry the
+    /// transport cause that `reqwest`'s own `Display` hides one layer down —
+    /// never the derived `Debug` form (`Fetch("…")`), which is neither.
+    #[tokio::test]
+    async fn an_unreachable_feed_reports_the_feed_and_the_reason() {
+        let url = crate::test_support::unreachable_url("f11-data.csv");
+        let error = fetch_rates(&url).await.expect_err("nothing is listening");
+        let recorded = error.to_string();
+
+        assert!(
+            recorded.starts_with("could not fetch the RBA FX rate feed: "),
+            "the variant's own message is missing: {recorded}"
+        );
+        assert!(recorded.contains(&url), "the feed is not named: {recorded}");
+        assert!(
+            recorded.to_lowercase().contains("connect"),
+            "the underlying cause is missing: {recorded}"
+        );
+        assert!(
+            !recorded.starts_with("Fetch("),
+            "recorded as a Rust Debug string: {recorded}"
+        );
+        assert_ne!(recorded, format!("{error:?}"));
     }
 }

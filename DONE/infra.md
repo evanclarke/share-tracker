@@ -190,3 +190,71 @@ localhost practical.
 - [x] Tests: `infra::auth` unit tests (password accept/reject, cookie mint→verify round-trip, tampered/forged/expired/garbage cookie rejection, password-change invalidates sessions, bearer accept/reject, logout-doesn't-revoke) and API-level tests (401 vs 303 branching by `Accept`, `/login`+`/static/style.css` reachable unauthenticated, wrong password sets no cookie, a valid cookie unlocks GET/PUT/DELETE, logout clears the cookie client-side, bearer token unlocks a route and a wrong one doesn't); `app.rs` tests (`auth: None` leaves every route open with no `/login` at all — pinned both directly and via the pre-existing base-path test reusing `ApiClient::full`, the layer gates one route from each merged router, base-path + auth combine correctly with the redirect `Location` and cookie `Path` both scoped to the prefix); `config.rs`/`args.rs` parsing tests (the `[auth]` table resolves, an unparseable hash fails naming the field, the subcommands parse); `web.rs` Rust tests plus `util.test.js`/Node tests for the auth meta tag and the logout UI; `test_support::ApiClient` gained `with_header` (a persistent per-client header, the single choke point being `send`) for the cookie/bearer-token test traffic
 - [x] Docs: README Features bullet + a new "Authentication" section (the `[auth]` config example, the two CLI helper subcommands, the revocation/CSRF caveats) + the two rewritten "no authentication" notes (`--host` table note, "Behind a reverse proxy" opener); `docs/API.md` gained an "Authentication" section (endpoints, cookie/token mechanics), a preamble line beside "Base path.", `401`/`303` rows in Response codes, and a Known limitations entry for the two accepted gaps — `doc_checks::authentication_documented`
 
+
+## SCENARIOS T-06: three jobs record their failure as a Rust `Debug` string, losing both the message and the cause
+
+`registry()` wraps `rba-fx-import`, `mic-import` and `currency-import` with `format!("{e:?}")`. Driven
+on 2026-08-22 with the three feeds made unreachable (a dead HTTP proxy), this is verbatim what lands
+in `job_runs.error`, the Jobs table's Error column and the health banner:
+
+```
+Fetch("error sending request for url (https://www.rba.gov.au/statistics/tables/csv/f11-data.csv)")
+```
+
+Two things are lost. The variant's own `#[error("could not fetch the RBA FX rate feed: {0}")]` — which
+CLAUDE.md makes *the* log wording for every error enum in the tree — is discarded in favour of the
+derived `Debug`; and the underlying cause is discarded too, because `fetch_rates` maps the
+`reqwest::Error` with `e.to_string()`, whose top-level `Display` says only "error sending request for
+url" and never the `tcp connect error: Connection refused` in its `source()` chain. So the operator
+is told neither what failed nor why, in Rust syntax. The `backup` job, which uses `e.to_string()`, gets
+this right.
+
+Both halves are small and independent; the fix is `{e}` in the three registry entries plus walking the
+`source()` chain where a `reqwest::Error` is stringified (all four import paths do the same thing).
+
+**Decision (Evan, 2026-08-22): fix both halves.** Rejected: correcting the `Debug` string but
+leaving the cause chain, which would name the feed and still not why it failed.
+
+- [x] `{e}` instead of `{e:?}` in the `rba-fx-import`, `mic-import` and `currency-import` registry
+      entries, so the variant's `#[error]` wording is what is recorded (the `backup` job's
+      `e.to_string()` is the model) — all three now `.map_err(|e| e.to_string())`, and
+      `scheduler::tests::no_registered_job_records_its_failure_as_a_debug_string` scans
+      `registry.rs` to keep the `Debug` form out (the way `infra::decimal` pins stringified
+      decimal binds out of the writes)
+- [x] Walk the `source()` chain where a `reqwest::Error` is stringified — all four import fetch paths
+      do the same thing — so `tcp connect error: Connection refused` reaches the recorded error —
+      `infra::fetch::cause_chain`, a new module whose doc comment carries the reason (a
+      `reqwest::Error`'s own `Display` is only its outermost layer); called from all nine
+      `ImportError::Fetch` sites across the three feeds (RBA F11, ISO MIC, ISO 4217/24165).
+      There are three such paths, not four — see the consequences note
+- [x] Regression tests: an unreachable feed's recorded `job_runs.error` carries the enum's own
+      message and the underlying cause, and no longer matches Rust `Debug` syntax —
+      `scheduler::tests::a_failed_job_records_its_message_and_its_cause` (end to end through
+      `run_job` → `job_runs` → `GET /jobs`), the three
+      `an_unreachable_feed_reports_the_feed_and_the_reason` tests
+      (`rba_fx_rate`/`mic_registry`/`currencies`), and `infra::fetch`'s own unit tests
+      (chain rendering, no-source, wrapper de-duplication, depth bound, and the real
+      `reqwest` error whose `Display` hides the cause). Every one drives a refused **loopback**
+      connection via `test_support::unreachable_url` — a free port bound and dropped — so no test
+      reaches the network
+- [x] Docs: `docs/API.md`'s `GET /jobs` paragraph now states what the recorded error text is, with
+      the real fetch-failure string as the example
+
+Consequences found while implementing, all settled in the same commit:
+
+- The finding says "all four import fetch paths"; there are **three**. Grepping `reqwest` across
+  `src/` finds exactly `rba_fx_rate::fetch_rates`, `mic_registry::fetch_registry` and
+  `currencies::fetch`. The fourth candidate, the price import, never sees a `reqwest::Error`: it
+  stringifies a `yfinance_rs::YfError`, and that crate wraps the transport failure in its own
+  `RedactedHttpError`, which stores only the *rendered* message (auth query params redacted) and
+  implements no `source()`. The cause is discarded inside the dependency before this code can see
+  it, so walking the chain there would recover nothing — `closing_price.rs` is deliberately left
+  alone. (`e.to_string()` on a `YfError` is already its `Display`, not `Debug`, so it never had the
+  first half of the bug either.)
+- `cause_chain` skips a layer whose own message merely re-renders what it wraps: several wrapper
+  error types (yfinance-rs's among them) delegate `Display` straight to their source, and appending
+  it would double the text. Pinned by `a_wrapper_that_only_re_renders_its_source_is_not_repeated`.
+- The 502 bodies are unchanged in meaning: `ImportError::Fetch`'s message is the `source` of
+  `ApiError::BadGateway`, which is logged rather than returned — so the richer text improves the
+  server log, and the short user-facing body ("could not fetch the RBA FX rate feed from its
+  source") stays as it was.

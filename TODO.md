@@ -22,7 +22,9 @@ its findings went; that table is the record of what has been looked at.
 
 Section **T. Jobs, backup, and operations** (12 scenarios) was driven on **2026-08-22** against
 throwaway databases (a small one for the HTTP surface, a 265 MB one to catch a backup mid-write) and
-raised **six findings**, all open below. Everything else in the section came back correct: the
+raised **six findings**. One is closed — the three jobs that recorded their failure as a Rust
+`Debug` string (T-06), archived in [`DONE/infra.md`](DONE/infra.md); the other five are open below.
+Everything else in the section came back correct: the
 per-job lock serialises overlapping triggers (T-01), the run history bounds itself at 20 while
 keeping a fail-then-succeed sequence readable (T-02), a corrupt backup is quarantined (T-03),
 retention pruning over 20 backups spanning 18 months keeps exactly the newest 8 plus the first of
@@ -187,40 +189,6 @@ rather than leaving them unbounded or only documenting them.
 - [ ] Regression tests: a run recorded at start is visible before it finishes; a verification failure
       leaves no file under the backup name (the `.partial` is quarantined instead); a leftover
       `.partial` is swept at startup and never counted by pruning; `.bad` files are bounded
-
----
-
-## SCENARIOS T-06: three jobs record their failure as a Rust `Debug` string, losing both the message and the cause
-
-`registry()` wraps `rba-fx-import`, `mic-import` and `currency-import` with `format!("{e:?}")`. Driven
-on 2026-08-22 with the three feeds made unreachable (a dead HTTP proxy), this is verbatim what lands
-in `job_runs.error`, the Jobs table's Error column and the health banner:
-
-```
-Fetch("error sending request for url (https://www.rba.gov.au/statistics/tables/csv/f11-data.csv)")
-```
-
-Two things are lost. The variant's own `#[error("could not fetch the RBA FX rate feed: {0}")]` — which
-CLAUDE.md makes *the* log wording for every error enum in the tree — is discarded in favour of the
-derived `Debug`; and the underlying cause is discarded too, because `fetch_rates` maps the
-`reqwest::Error` with `e.to_string()`, whose top-level `Display` says only "error sending request for
-url" and never the `tcp connect error: Connection refused` in its `source()` chain. So the operator
-is told neither what failed nor why, in Rust syntax. The `backup` job, which uses `e.to_string()`, gets
-this right.
-
-Both halves are small and independent; the fix is `{e}` in the three registry entries plus walking the
-`source()` chain where a `reqwest::Error` is stringified (all four import paths do the same thing).
-
-**Decision (Evan, 2026-08-22): fix both halves.** Rejected: correcting the `Debug` string but
-leaving the cause chain, which would name the feed and still not why it failed.
-
-- [ ] `{e}` instead of `{e:?}` in the `rba-fx-import`, `mic-import` and `currency-import` registry
-      entries, so the variant's `#[error]` wording is what is recorded (the `backup` job's
-      `e.to_string()` is the model)
-- [ ] Walk the `source()` chain where a `reqwest::Error` is stringified — all four import fetch paths
-      do the same thing — so `tcp connect error: Connection refused` reaches the recorded error
-- [ ] Regression tests: an unreachable feed's recorded `job_runs.error` carries the enum's own
-      message and the underlying cause, and no longer matches Rust `Debug` syntax
 
 ---
 

@@ -7,6 +7,7 @@ pub mod config;
 pub mod date;
 pub mod db;
 pub mod decimal;
+pub mod fetch;
 pub mod fx;
 pub mod http;
 pub mod logging;

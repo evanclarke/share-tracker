@@ -284,6 +284,22 @@ pub fn dec(s: &str) -> Decimal {
     s.parse().unwrap()
 }
 
+/// A URL nothing is listening on, for driving a feed fetch's failure path: an
+/// ephemeral loopback port is bound to learn a free number and dropped again,
+/// so connecting to it is refused at once.
+///
+/// Loopback only — no test reaches the network (see CLAUDE.md's test
+/// conventions). Used by the import tests that pin what an unreachable feed
+/// records (SCENARIOS T-06).
+pub fn unreachable_url(path: &str) -> String {
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("an ephemeral loopback port should bind")
+        .local_addr()
+        .expect("a bound listener should have an address")
+        .port();
+    format!("http://127.0.0.1:{port}/{path}")
+}
+
 /// Listing fixture: ASX-listed AUD ETF `T{id}` named `Test {id}`.
 pub fn listing(id: i64) -> ListingBuilder {
     ListingBuilder {

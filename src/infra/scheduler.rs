@@ -835,4 +835,84 @@ mod tests {
         assert_eq!(rows[1].0, "price-import");
         assert!(rows[1].2);
     }
+
+    /// SCENARIOS T-06: three registry entries recorded `format!("{e:?}")`, so
+    /// what reached `job_runs.error` (and from there the Jobs table's Error
+    /// column and the health banner) was Rust `Debug` syntax — `Fetch("…")` —
+    /// with the enum's own `#[error]` wording thrown away. A job body reports
+    /// its failure through `Display`; this pins the `Debug` form out of the
+    /// registry the way `infra::decimal` pins stringified decimal binds out of
+    /// the writes.
+    #[test]
+    fn no_registered_job_records_its_failure_as_a_debug_string() {
+        // Assembled rather than written out, so this test and the doc comment
+        // above it are not themselves matches.
+        let debug_format = format!("{{{}:?}}", "e");
+        let offenders: Vec<String> = include_str!("scheduler/registry.rs")
+            .lines()
+            .enumerate()
+            .filter(|(_, line)| {
+                !line.trim_start().starts_with("//") && line.contains(&debug_format)
+            })
+            .map(|(n, line)| format!("registry.rs:{}: {}", n + 1, line.trim()))
+            .collect();
+        assert!(
+            offenders.is_empty(),
+            "a job body must record its failure as the error's Display \
+             (`e.to_string()`), which is its `#[error]` wording, not the \
+             derived Debug:\n{}",
+            offenders.join("\n")
+        );
+    }
+
+    /// The other half of SCENARIOS T-06, end to end: what a failed job leaves
+    /// in `job_runs.error` for the Jobs screen must name the failure *and* the
+    /// cause under it. Driven with a real transport error — a refused loopback
+    /// connection, no network — wrapped exactly as the `rba-fx-import` entry
+    /// wraps the one it gets.
+    #[tokio::test]
+    async fn a_failed_job_records_its_message_and_its_cause() {
+        let (reg, pool, _dir, _path) = test_registry().await;
+        let transport = reqwest::get(crate::test_support::unreachable_url("f11-data.csv"))
+            .await
+            .expect_err("nothing is listening on that port");
+        let import_error = crate::entities::rba_fx_rate::ImportError::Fetch(
+            crate::infra::fetch::cause_chain(&transport),
+        );
+        let message = import_error.to_string();
+        let failing = RegisteredJob::from_fn(move |_| {
+            let message = message.clone();
+            async move { Err(message) }
+        });
+
+        let returned = run_job(&pool, "rba-fx-import", &failing, JobParams::default())
+            .await
+            .expect_err("the job fails");
+
+        let app = ApiClient::over(router().with_state(pool).layer(Extension(reg)));
+        let statuses: Vec<JobStatus> = app.get("/jobs").await.json();
+        let job = statuses
+            .iter()
+            .find(|s| s.name == "rba-fx-import")
+            .expect("the job is registered");
+        assert_eq!(job.last_success, Some(false));
+        let recorded = job.last_error.clone().expect("a failed run records why");
+
+        assert_eq!(
+            recorded, returned,
+            "job_runs.error is what the job returned"
+        );
+        assert!(
+            recorded.starts_with("could not fetch the RBA FX rate feed: "),
+            "the enum's own message is missing: {recorded}"
+        );
+        assert!(
+            recorded.to_lowercase().contains("connect"),
+            "the underlying cause is missing: {recorded}"
+        );
+        assert!(
+            !recorded.starts_with("Fetch("),
+            "recorded as a Rust Debug string: {recorded}"
+        );
+    }
 }

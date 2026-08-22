@@ -11,6 +11,7 @@
 //! `minor_units` is informational only: stored monetary amounts remain
 //! arbitrary-precision Decimal and are never rounded to a currency's minor unit.
 
+use crate::infra::fetch::cause_chain;
 use crate::infra::http::{self, ApiError, CrudEntity};
 use axum::{
     Json, Router,
@@ -390,12 +391,12 @@ async fn fetch(url: &str, basic_auth: Option<(&str, &str)>) -> Result<String, Im
     let resp = req
         .send()
         .await
-        .map_err(|e| ImportError::Fetch(e.to_string()))?
+        .map_err(|e| ImportError::Fetch(cause_chain(&e)))?
         .error_for_status()
-        .map_err(|e| ImportError::Fetch(e.to_string()))?;
+        .map_err(|e| ImportError::Fetch(cause_chain(&e)))?;
     resp.text()
         .await
-        .map_err(|e| ImportError::Fetch(e.to_string()))
+        .map_err(|e| ImportError::Fetch(cause_chain(&e)))
 }
 
 /// Manually trigger the import. With a non-empty request body, imports that body
@@ -769,5 +770,28 @@ mod tests {
             .post_raw("/currencies/import", "not a currency feed")
             .await;
         assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    /// SCENARIOS T-06, as for the RBA feed: the recorded string opens with the
+    /// variant's own `#[error]` wording and carries the transport cause.
+    #[tokio::test]
+    async fn an_unreachable_feed_reports_the_feed_and_the_reason() {
+        let url = crate::test_support::unreachable_url("list-one.xml");
+        let error = fetch(&url, None).await.expect_err("nothing is listening");
+        let recorded = error.to_string();
+
+        assert!(
+            recorded.starts_with("could not fetch the currency feed: "),
+            "the variant's own message is missing: {recorded}"
+        );
+        assert!(recorded.contains(&url), "the feed is not named: {recorded}");
+        assert!(
+            recorded.to_lowercase().contains("connect"),
+            "the underlying cause is missing: {recorded}"
+        );
+        assert!(
+            !recorded.starts_with("Fetch("),
+            "recorded as a Rust Debug string: {recorded}"
+        );
     }
 }

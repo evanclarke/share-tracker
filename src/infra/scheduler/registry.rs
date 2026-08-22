@@ -4,6 +4,14 @@
 //! wraps it into the boxed-future shape the scheduler stores and pairs it with
 //! its serialising lock, so each entry in [`registry`] is just a name and a
 //! body.
+//!
+//! A body reports a failure as its error's **`Display`** (`e.to_string()`),
+//! never the derived `Debug` (`{e:?}`). That string is the whole of what the
+//! operator ever sees — `job_runs.error`, the Jobs table's Error column, the
+//! health banner — and every error enum in the tree carries an `#[error("…")]`
+//! written to be exactly that, which the `Debug` form discards in favour of
+//! Rust syntax (SCENARIOS T-06). `scheduler::tests::
+//! no_registered_job_records_its_failure_as_a_debug_string` pins it.
 
 use serde::Deserialize;
 use sqlx::SqlitePool;
@@ -104,7 +112,7 @@ pub fn registry(
             async move {
                 let summary = crate::entities::mic_registry::run_import(&pool)
                     .await
-                    .map_err(|e| format!("{e:?}"))?;
+                    .map_err(|e| e.to_string())?;
                 tracing::info!(imported = summary.imported, "MIC registry import complete");
                 Ok(())
             }
@@ -118,7 +126,7 @@ pub fn registry(
             async move {
                 let summary = crate::entities::currencies::run_import(&pool)
                     .await
-                    .map_err(|e| format!("{e:?}"))?;
+                    .map_err(|e| e.to_string())?;
                 tracing::info!(imported = summary.imported, "currency import complete");
                 Ok(())
             }
@@ -184,7 +192,7 @@ pub fn registry(
         async move {
             let summary = crate::entities::rba_fx_rate::run_import(&pool)
                 .await
-                .map_err(|e| format!("{e:?}"))?;
+                .map_err(|e| e.to_string())?;
             tracing::info!(
                 inserted = summary.inserted,
                 skipped = summary.skipped,
