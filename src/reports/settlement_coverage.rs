@@ -141,13 +141,17 @@ mod tests {
         assert!(db_coverage_alerts(&pool).await.unwrap().is_empty());
     }
 
-    /// A trade dated beyond the seeded holiday range (2019–2027) is flagged,
-    /// rather than the incomplete calendar being used silently.
+    /// A settlement window running beyond the seeded holiday range
+    /// (2019–2027) is flagged, rather than the incomplete calendar being used
+    /// silently. The *trade* can no longer be dated past the range at all
+    /// (SCENARIOS S-10 refuses a trade dated after today), so the window
+    /// reaches past it the way a real one does: a hand-entered settlement,
+    /// which is exactly what this report exists to catch.
     #[tokio::test]
     async fn db_trade_beyond_seeded_holiday_range_is_flagged() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "XASX").await;
-        insert_buy(&pool, 1, 1, ymd(2030, 6, 3), ymd(2030, 6, 5)).await;
+        insert_buy(&pool, 1, 1, ymd(2026, 8, 3), ymd(2028, 1, 4)).await;
         let alerts = db_coverage_alerts(&pool).await.unwrap();
         assert_eq!(alerts.len(), 1);
         let a = &alerts[0];
@@ -170,14 +174,17 @@ mod tests {
         assert_eq!(alerts[0].coverage_status, "outside_holiday_coverage");
     }
 
-    /// A settlement window straddling the end of coverage is flagged even
-    /// though the trade date itself is covered: the uncovered tail is where a
-    /// missed holiday would shift the settlement.
+    /// A settlement window straddling the *start* of coverage is flagged even
+    /// though the settlement itself lands inside it: the uncovered head is
+    /// where a missed holiday would have shifted the settlement. (The
+    /// end-of-coverage straddle is the case above; it can only be reached
+    /// through a hand-entered settlement now that a trade cannot be dated
+    /// after today — SCENARIOS S-10.)
     #[tokio::test]
-    async fn db_window_straddling_coverage_end_is_flagged() {
+    async fn db_window_straddling_coverage_start_is_flagged() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "XASX").await;
-        insert_buy(&pool, 1, 1, ymd(2027, 12, 30), ymd(2028, 1, 4)).await;
+        insert_buy(&pool, 1, 1, ymd(2018, 12, 28), ymd(2019, 1, 3)).await;
         let alerts = db_coverage_alerts(&pool).await.unwrap();
         assert_eq!(alerts.len(), 1);
         assert_eq!(alerts[0].coverage_status, "outside_holiday_coverage");
@@ -214,7 +221,7 @@ mod tests {
 
     /// An exchange-less (Crypto) listing settles same-day with no holiday
     /// calendar at all, so its trades are never flagged — even dated far
-    /// outside every seeded calendar.
+    /// outside every seeded calendar (2019–2027 for XASX).
     #[tokio::test]
     async fn db_crypto_trades_are_not_flagged() {
         let pool = test_pool().await;
@@ -224,7 +231,7 @@ mod tests {
             .name("Bitcoin")
             .insert(&pool)
             .await;
-        insert_buy(&pool, 1, 1, ymd(2030, 6, 3), ymd(2030, 6, 3)).await;
+        insert_buy(&pool, 1, 1, ymd(2018, 6, 4), ymd(2018, 6, 4)).await;
         assert!(db_coverage_alerts(&pool).await.unwrap().is_empty());
     }
 
@@ -232,7 +239,7 @@ mod tests {
     async fn api_get_settlement_holiday_coverage() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "XASX").await;
-        insert_buy(&pool, 1, 1, ymd(2030, 6, 3), ymd(2030, 6, 5)).await;
+        insert_buy(&pool, 1, 1, ymd(2018, 3, 6), ymd(2018, 3, 8)).await;
         let resp = ApiClient::over(router().with_state(pool))
             .get("/reports/settlement_holiday_coverage")
             .await;

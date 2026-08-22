@@ -1,7 +1,8 @@
 //! Write-time invariant checks shared by the trade and Sell write paths
 //! (so the two can never drift): the GST-inclusive brokerage split, the
-//! spot-rate override, the core-figures check (incl. the pre-CGT cutoff),
-//! and the statement-total cross-check — each with its 422 detail text.
+//! spot-rate override, the core-figures check (incl. the pre-CGT floor and
+//! the today ceiling on the trade date), and the statement-total
+//! cross-check — each with its 422 detail text.
 
 use super::model::TradeType;
 use chrono::NaiveDate;
@@ -88,10 +89,10 @@ pub(crate) const CGT_START: NaiveDate = match NaiveDate::from_ymd_opt(1985, 9, 2
 
 /// Why a trade's core figures were rejected (all map to 422): a degenerate
 /// value — zero/negative quantity, a negative price or cost, a non-positive
-/// FX rate, a settlement before the trade date, or a pre-CGT trade date —
-/// corrupts every downstream report without failing anything, so it is
-/// rejected at write time. Shared by the trade and Sell write paths so the
-/// two can't drift.
+/// FX rate, a settlement before the trade date, or a trade date outside the
+/// [`CGT_START`]..=today window — corrupts every downstream report without
+/// failing anything, so it is rejected at write time. Shared by the trade and
+/// Sell write paths so the two can't drift.
 #[derive(thiserror::Error, Debug, PartialEq)]
 pub(crate) enum AmountsError {
     /// Zero or negative quantity: a trade of nothing (or of negative units)
@@ -130,6 +131,22 @@ pub(crate) enum AmountsError {
     /// a capital gain or loss on it (see [`CGT_START`]).
     #[error("the trade date is before the start of CGT (20 September 1985)")]
     PreCgtDate,
+    /// Dated after today — [`PreCgtDate`](AmountsError::PreCgtDate)'s natural
+    /// twin, one bounding the trade date below and this one above (SCENARIOS
+    /// S-10). A trade records a transaction that has already happened, so a
+    /// future date is a typo (a 2027-for-2026 slip on a July trade is exactly
+    /// the shape this catches), and it puts a financial year that has not
+    /// begun on the annual tax report's year picker
+    /// (`GET /reports/tax-report/years`). The rest of the system already
+    /// bounds its dated facts this way: a listing rename
+    /// (`listing_rename::RenameError::FutureDated`), a closing price whose
+    /// close is not final yet, and the net-capital-gain report's
+    /// quiet-carry-forward year.
+    ///
+    /// `settlement_date` is deliberately **not** bounded: a T+2 settlement of
+    /// a trade dated today is legitimately in the future.
+    #[error("the trade date is after today")]
+    FutureDate,
 }
 
 /// The core figures every trade/Sell write must satisfy, gathered for
@@ -152,9 +169,16 @@ pub(crate) struct AmountsCheck<'a> {
 
 /// Validate a trade's core figures: quantity > 0, price ≥ 0, brokerage and
 /// GST ≥ 0, brokerage billed in the trade's own currency, fx_rate > 0,
-/// settlement on or after the trade date. Brokerage is checked post-GST-split
-/// (see [`resolve_brokerage`]), so a negative GST-inclusive entry is caught
+/// settlement on or after the trade date, and the trade date itself inside
+/// [`CGT_START`]..=today. Brokerage is checked post-GST-split (see
+/// [`resolve_brokerage`]), so a negative GST-inclusive entry is caught
 /// through its negative parts.
+///
+/// The upper date bound reads the clock (`infra::date::today`) rather than
+/// taking "now" as an argument, exactly as `listing_rename`'s future-dated
+/// refusal does: both call sites mean the server's today and nothing else,
+/// and a parameter would only offer a way for the two write paths to disagree
+/// about it.
 pub(crate) fn check_amounts(c: &AmountsCheck<'_>) -> Result<(), AmountsError> {
     if c.quantity <= Decimal::ZERO {
         return Err(AmountsError::QuantityNotPositive);
@@ -180,6 +204,9 @@ pub(crate) fn check_amounts(c: &AmountsCheck<'_>) -> Result<(), AmountsError> {
     if c.date < CGT_START {
         return Err(AmountsError::PreCgtDate);
     }
+    if c.date > crate::infra::date::today() {
+        return Err(AmountsError::FutureDate);
+    }
     Ok(())
 }
 
@@ -202,6 +229,11 @@ pub(crate) fn amounts_detail(e: &AmountsError) -> &'static str {
         AmountsError::PreCgtDate => {
             "the trade is dated before 20 September 1985 — a pre-CGT holding is outside CGT \
              and not modelled, so recording it would wrongly compute a capital gain or loss"
+        }
+        AmountsError::FutureDate => {
+            "the trade is dated after today — a trade records a transaction that has already \
+             happened, and a future date would offer a financial year that has not begun on \
+             the annual tax report; the settlement date may still be in the future"
         }
     }
 }

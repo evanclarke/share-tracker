@@ -68,6 +68,9 @@
 //!   itself (an estate transmission is not market-settled).
 //! - `PreCgtDate` — [`UpsertError::DeathPreCgt`], refused on the date of death,
 //!   which is what the Buy is dated.
+//! - `FutureDate` — [`UpsertError::DeathInFuture`], the same bound at the other
+//!   end and refused in the same place (SCENARIOS S-10): a death is an
+//!   already-happened fact, and the Buy is dated it.
 //!
 //! `trade::db_upsert` also cross-checks the written parcel against the
 //! return-of-capital payments on its listing, since a payment reduces a cost
@@ -218,6 +221,13 @@ pub enum UpsertError {
     /// modelled.
     #[error("the date of death is before 20 September 1985, so the parcel is pre-CGT")]
     DeathPreCgt,
+    /// A death after today. The parcel Buy is dated the date of death, and
+    /// `trade::check_amounts` refuses a trade dated after today
+    /// (`AmountsError::FutureDate`, SCENARIOS S-10); a death is an
+    /// already-happened fact, so — as with [`DeathPreCgt`](UpsertError::DeathPreCgt)
+    /// — the bound is applied here, on the date the user actually typed.
+    #[error("the date of death is after today")]
+    DeathInFuture,
     /// The deceased cannot have acquired the asset after they died.
     #[error("the deceased's acquisition date cannot be after the date of death")]
     DeceasedAcquisitionAfterDeath,
@@ -311,6 +321,10 @@ impl From<UpsertError> for ApiError {
             UpsertError::DeathPreCgt => ApiError::unprocessable(
                 "the date of death is before 20 September 1985 — the inherited parcel is \
                  pre-CGT in the beneficiary's own hands, which is outside CGT and not modelled",
+            ),
+            UpsertError::DeathInFuture => ApiError::unprocessable(
+                "the date of death is after today — the inherited parcel is dated the death, \
+                 and a trade dated in the future is refused, so check the date for a typo",
             ),
             UpsertError::LprExpenditureDateMismatch => ApiError::unprocessable(
                 "a non-zero LPR expenditure needs the date the LPR incurred it (and a date \
@@ -490,6 +504,11 @@ fn validate(inh: &Inheritance) -> Result<(), UpsertError> {
     // this message (not misdirected advice to switch cost-base rules).
     if inh.date_of_death < CGT_START {
         return Err(UpsertError::DeathPreCgt);
+    }
+    // And bounded above the same way: the parcel Buy is dated the death, and
+    // a trade dated after today is refused (SCENARIOS S-10).
+    if inh.date_of_death > crate::infra::date::today() {
+        return Err(UpsertError::DeathInFuture);
     }
     match (inh.cost_base_rule, inh.deceased_acquisition_date) {
         (CostBaseRule::DeceasedCostBase, Some(acquired)) => {
@@ -999,6 +1018,17 @@ mod tests {
         assert!(matches!(
             db_upsert(&pool, &inh).await,
             Err(UpsertError::LprExpenditureBeforeDeath)
+        ));
+
+        // SCENARIOS S-10: a death dated after today — the parcel Buy is dated
+        // the death, and a trade dated in the future is refused, so the bound
+        // is applied here on the date the user typed.
+        let mut inh = post_cgt(1);
+        inh.date_of_death = crate::infra::date::today() + chrono::Days::new(1);
+        inh.lpr_expenditure_date = Some(inh.date_of_death);
+        assert!(matches!(
+            db_upsert(&pool, &inh).await,
+            Err(UpsertError::DeathInFuture)
         ));
 
         let inheritances: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM inheritances")
@@ -1661,5 +1691,29 @@ mod tests {
         assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
         let detail = resp.text().to_string();
         assert!(detail.contains("acquisition date"), "detail: {detail}");
+    }
+
+    /// SCENARIOS S-10: a date of death after today reaches the API as a 422
+    /// whose body says why — the parcel Buy would be dated the death, and a
+    /// trade dated after today is refused.
+    #[tokio::test]
+    async fn api_future_date_of_death_returns_422_with_reason() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AUD").await;
+
+        let body = serde_json::json!({
+            "listing_id": 1,
+            "quantity": "100",
+            "date_of_death": (crate::infra::date::today() + chrono::Days::new(1)).to_string(),
+            "cost_base_rule": "MarketValueAtDeath",
+            "cost_base": "3000"
+        });
+        let resp = ApiClient::over(router().with_state(pool.clone()))
+            .put("/inheritances/1", &body)
+            .await;
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
+        let detail = resp.text().to_string();
+        assert!(detail.contains("after today"), "detail: {detail}");
+        assert!(db_get(&pool, 1).await.unwrap().is_none());
     }
 }

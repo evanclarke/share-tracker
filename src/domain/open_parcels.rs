@@ -399,6 +399,12 @@ mod tests {
     /// a future-dated Buy is not held yet, and a future-dated Sell has not
     /// consumed its parcel yet (both nearly always typos, and both surface on
     /// their own date).
+    ///
+    /// The write path now refuses a future-dated trade outright
+    /// (`trade::AmountsError::FutureDate`, SCENARIOS S-10), so the two rows
+    /// are dated forward with SQL afterwards: this loader's `as_of` filter is
+    /// an independent invariant, and it still has to hold for a row that
+    /// predates the refusal.
     #[tokio::test]
     async fn the_live_view_ignores_a_future_dated_trade() {
         let pool = test_pool().await;
@@ -411,18 +417,27 @@ mod tests {
             .insert(&pool)
             .await;
         test_support::buy(2, 1)
-            .date(future)
+            .date(ymd(2023, 1, 20))
             .qty(dec("50"))
             .price(dec("11"))
             .insert(&pool)
             .await;
         test_support::sell(3, 1)
-            .date(future)
+            .date(ymd(2023, 2, 1))
             .qty(dec("60"))
             .price(dec("12"))
             .insert(&pool)
             .await;
         allocate(&pool, 1, 3, 1, dec("60")).await;
+        for id in [2, 3] {
+            sqlx::query("UPDATE trades SET date = ?, settlement_date = ? WHERE id = ?")
+                .bind(future)
+                .bind(future)
+                .bind(id)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
 
         let open = load_all(&pool, None).await;
         assert_eq!(open.len(), 1, "the future-dated buy is not held yet");

@@ -91,7 +91,7 @@ transfers                    Moves of a listing between two holding accounts of 
 trades
 ├── id                INTEGER PK
 ├── trade_type        TEXT         Buy | Sell | DRP
-├── date              DATE   Indexed — every as-of report (open holdings, unrealised gains, performance) filters trades by date <= as_of
+├── date              DATE   Indexed — every as-of report (open holdings, unrealised gains, performance) filters trades by date <= as_of. Must fall between 20 September 1985 and today inclusive (422 otherwise): below is a pre-CGT holding, which is not modelled; above is a transaction that has not happened (settlement_date is deliberately not bounded above — a T+2 settlement of a trade dated today is legitimately in the future)
 ├── settlement_date   DATE
 ├── listing_id        INTEGER FK→listings.id
 ├── average_price     TEXT (decimal)
@@ -124,7 +124,7 @@ inheritances                 Inherited share parcels from a deceased estate — 
 ├── listing_id                INTEGER FK→listings.id
 ├── holding_account_id        INTEGER FK→holding_accounts.id  Defaults to the seeded default account
 ├── quantity                  TEXT (decimal)  Units inherited, in date-of-death terms (> 0, validated at write time)
-├── date_of_death             TEXT          The linked Buy is dated (and settled) on it — an estate transmission is not market-settled
+├── date_of_death             TEXT          The linked Buy is dated (and settled) on it — an estate transmission is not market-settled. Must be ≥ 20 Sep 1985 and not after today (422 otherwise), the bounds the Buy's own date carries
 ├── cost_base_rule            TEXT          DeceasedCostBase | MarketValueAtDeath (CHECK) — which QC 66053 rule produced the first-element figure: the deceased's cost base at death (asset acquired by the deceased on/after 20 Sep 1985) or the market value at death (pre-CGT asset; the user supplies the valuation)
 ├── cost_base                 TEXT (decimal)  The whole-parcel first-element cost base per that rule, in `currency`
 ├── lpr_expenditure           TEXT (decimal)  LPR expenditure the beneficiary may include (conveyancing on transfer, legal costs of proving the will) — added to the linked Buy's cost base. Only recordable where `currency` is AUD: the parcel converts at one rate, its (deemed) acquisition month's, while the LPR incurs this after the death — validated at write time
@@ -231,7 +231,7 @@ ess_statements               Employee share scheme statements — the income sid
 ├── id                          INTEGER PK
 ├── listing_id                  INTEGER FK→listings.id
 ├── holding_account_id          INTEGER FK→holding_accounts.id  The account the interests vest into (defaults to the seeded default account)
-├── taxing_point_date           DATE   The taxing point: sets the assessable financial year and the vest Buy's acquisition/settlement date. Must be on or after 20 September 1985 (422 otherwise) — the vest Buy is dated here, and `PUT /trades` refuses a pre-CGT trade for the same reason
+├── taxing_point_date           DATE   The taxing point: sets the assessable financial year and the vest Buy's acquisition/settlement date. Must be on or after 20 September 1985 and not after today (422 otherwise) — the vest Buy is dated here, and `PUT /trades` refuses a pre-CGT trade, or one dated in the future, for the same reasons
 ├── quantity                    TEXT (decimal)  Shares that vest — the vest Buy's quantity. Non-negative (422 otherwise); zero is an income-only statement (a discount with no vest recorded)
 ├── market_value_per_share      TEXT (decimal)  Market value per share at the taxing point — the vest Buy's price (the reset cost base). Non-negative, and with a positive quantity `quantity × this` caps the discount labels D+E+F+G (the discount is market value less what the employee paid, so at most it equals the market value — 422 above it, cent-rounded either side)
 ├── taxed_upfront_eligible      TEXT (decimal)  Item 12 label D: taxed-upfront discount eligible for the $1,000 reduction

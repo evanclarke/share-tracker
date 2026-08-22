@@ -256,6 +256,16 @@ pub enum UpsertError {
     /// its predecessor from 1995), so this is a typo guard. Mapped to 422.
     #[error("the taxing point is before the start of CGT (20 September 1985)")]
     PreCgtTaxingPoint,
+    /// The taxing point is after today. The vest Buy this statement creates is
+    /// dated the taxing point, and `trade::check_amounts` refuses a trade
+    /// dated after today (`AmountsError::FutureDate`, SCENARIOS S-10) — so,
+    /// exactly as with [`PreCgtTaxingPoint`](UpsertError::PreCgtTaxingPoint),
+    /// the bound is applied at the earlier and better place: the taxing point
+    /// is what the user typed. A taxing point is an already-happened fact —
+    /// the employer's statement reports it after the event — so a future one
+    /// is a typo. Mapped to 422.
+    #[error("the taxing point is after today")]
+    FutureTaxingPoint,
     /// The foreign-source memo (label A) exceeds the discount labels it is a
     /// memo *of* (D + E + F + G — see [`EssStatement::foreign_source_discount`]),
     /// so it claims more foreign-source income than there is assessable
@@ -371,6 +381,13 @@ fn validate(s: &EssStatement) -> Result<(), UpsertError> {
     // statement is the one door a parcel can enter below the CGT floor by.
     if s.taxing_point_date < crate::entities::trade::CGT_START {
         return Err(UpsertError::PreCgtTaxingPoint);
+    }
+
+    // And bounded above the same way, for the same reason: the vest Buy is
+    // dated the taxing point and `trade::check_amounts` refuses a trade dated
+    // after today (SCENARIOS S-10).
+    if s.taxing_point_date > crate::infra::date::today() {
+        return Err(UpsertError::FutureTaxingPoint);
     }
 
     // Label A is a memo *within* the discount labels, not an amount of its own
@@ -686,6 +703,11 @@ impl From<UpsertError> for ApiError {
                  be refused for the same reason; no ESS interest can predate CGT in any case \
                  (Division 83A dates from 2009 and its predecessor from 1995), so check the \
                  date for a typo",
+            ),
+            UpsertError::FutureTaxingPoint => ApiError::unprocessable(
+                "the taxing point is dated after today — an employer's statement reports a \
+                 taxing point that has already happened, and the vest Buy this statement \
+                 creates would be refused for the same reason, so check the date for a typo",
             ),
             UpsertError::ForeignSourceExceedsDiscounts {
                 label,
@@ -1086,6 +1108,53 @@ mod tests {
         assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
         let text = resp.text().to_string();
         assert!(text.contains("20 September 1985"), "{text}");
+        assert!(db_get(&pool, 1).await.unwrap().is_none());
+    }
+
+    /// SCENARIOS S-10: the taxing point is bounded above as well — the vest
+    /// writes its Buy with a raw INSERT dated the taxing point, and
+    /// `trade::check_amounts` refuses a trade dated after today, so the
+    /// statement is refused at the earlier, better place. An employer's
+    /// statement reports a taxing point that has already happened; today
+    /// itself is the boundary and stays accepted.
+    #[tokio::test]
+    async fn db_a_future_taxing_point_is_refused_and_today_accepted() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        let today = crate::infra::date::today();
+
+        let mut s = sample(1);
+        s.taxing_point_date = today + chrono::Days::new(1);
+        assert!(matches!(
+            db_upsert(&pool, &s).await,
+            Err(UpsertError::FutureTaxingPoint)
+        ));
+        assert!(db_get(&pool, 1).await.unwrap().is_none());
+
+        s.taxing_point_date = today;
+        db_upsert(&pool, &s).await.unwrap();
+        assert_eq!(
+            db_get(&pool, 1).await.unwrap().unwrap().taxing_point_date,
+            today
+        );
+    }
+
+    /// And it reaches the API as a 422 whose body says why.
+    #[tokio::test]
+    async fn api_future_taxing_point_rejected_422() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        let body = serde_json::json!({
+            "listing_id": 1,
+            "taxing_point_date": (crate::infra::date::today() + chrono::Days::new(1)).to_string(),
+            "quantity": "100",
+            "market_value_per_share": "10",
+            "deferral_discount": "1000",
+        });
+        let resp = client(&pool).put("/ess_statements/1", &body).await;
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
+        let text = resp.text().to_string();
+        assert!(text.contains("dated after today"), "{text}");
         assert!(db_get(&pool, 1).await.unwrap().is_none());
     }
 

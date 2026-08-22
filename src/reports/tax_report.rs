@@ -1524,6 +1524,18 @@ async fn tax_report_handler(
 /// Bounded to [`MIN_TAX_YEAR`]..=[`MAX_TAX_YEAR`] so the list and
 /// [`TaxYear::new`] agree: the list never offers a year `POST
 /// /reports/tax-report` would refuse `422`.
+///
+/// And bounded above at the financial year *in progress*
+/// (`tax_year_for(today())`) — the last year a return could be being prepared
+/// for, and the same bound `net_capital_gain` puts on its quiet-carry-forward
+/// filler years (SCENARIOS S-10). A trade can no longer be dated in the future
+/// (`trade::AmountsError::FutureDate`), but this list is a union over every
+/// dated fact — an interest payment, an AMMA or ESS statement, an investment
+/// expense, a distribution, and the CGT walk's own buckets, which `net_years`
+/// emits "however dated" — so the picker keeps its own ceiling rather than
+/// inheriting one write path's. A year past it has not begun: offering it
+/// would render an annual tax document for a financial year that does not
+/// exist yet.
 async fn db_tax_report_years(pool: &SqlitePool) -> Result<Vec<i32>, sqlx::Error> {
     // One read transaction over every input, per the house rule for
     // multi-query reports: an interleaved write can't land a fact between the
@@ -1544,12 +1556,13 @@ async fn db_tax_report_years(pool: &SqlitePool) -> Result<Vec<i32>, sqlx::Error>
     let cgt_years = net_capital_gain::db_cgt_years(&mut tx).await?;
     tx.commit().await?;
 
+    let current = tax_year_for(crate::infra::date::today());
     let mut years: Vec<i32> = dates
         .into_iter()
         .chain(income_rows.iter().map(Income::assessment_date))
         .map(tax_year_for)
         .chain(cgt_years)
-        .filter(|y| (MIN_TAX_YEAR..=MAX_TAX_YEAR).contains(y))
+        .filter(|y| (MIN_TAX_YEAR..=MAX_TAX_YEAR).contains(y) && *y <= current)
         .collect();
     years.sort_unstable();
     years.dedup();
@@ -2766,6 +2779,67 @@ mod tests {
         // after them.
         assert_eq!(db_tax_report_years(&pool).await.unwrap(), vec![2023, 2024]);
         assert_eq!(listed_years(&pool).await, vec![2023, 2024]);
+    }
+
+    /// SCENARIOS S-10: the picker never offers a financial year beyond the one
+    /// in progress. A trade can no longer be dated in the future
+    /// (`trade::AmountsError::FutureDate`), but the list unions every dated
+    /// fact, and the other write paths are not bounded that way — an interest
+    /// payment dated two years out used to put a financial year that has not
+    /// begun on the closed `<select>`, and `POST /reports/tax-report` would
+    /// then render an annual document for it.
+    #[tokio::test]
+    async fn the_year_list_never_offers_a_year_beyond_the_one_in_progress() {
+        let pool = test_support::test_pool().await;
+        let current = tax_year_for(crate::infra::date::today());
+        let beyond = crate::infra::date::today() + chrono::Duration::days(2 * 365);
+        interest_income::db_upsert(
+            &pool,
+            &interest_income::InterestIncome {
+                id: 1,
+                date_paid: beyond,
+                amount: dec("20"),
+                tfn_withholding_tax: Decimal::ZERO,
+                foreign_source: false,
+                foreign_tax_paid: Decimal::ZERO,
+                currency: "AUD".to_string(),
+                source: None,
+                holding_account_id: None,
+            },
+        )
+        .await
+        .unwrap();
+        // …and a second one in a year that has actually happened, so the
+        // ceiling is shown to remove only what is past it.
+        interest_income::db_upsert(
+            &pool,
+            &interest_income::InterestIncome {
+                id: 2,
+                date_paid: ymd(2024, 2, 1),
+                amount: dec("20"),
+                tfn_withholding_tax: Decimal::ZERO,
+                foreign_source: false,
+                foreign_tax_paid: Decimal::ZERO,
+                currency: "AUD".to_string(),
+                source: None,
+                holding_account_id: None,
+            },
+        )
+        .await
+        .unwrap();
+        // The future fact is recorded, and its own year is past the bound.
+        assert!(tax_year_for(beyond) > current);
+
+        for years in [
+            db_tax_report_years(&pool).await.unwrap(),
+            listed_years(&pool).await,
+        ] {
+            assert_eq!(
+                years,
+                vec![2024],
+                "the FY2024 interest is offered and nothing past {current} is"
+            );
+        }
     }
 
     /// SCENARIOS P-04: a trust distribution with a 30 June entitlement date

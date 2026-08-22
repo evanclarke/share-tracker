@@ -1776,6 +1776,42 @@ mod tests {
         assert!(detail.contains("quantity must be positive"), "{detail}");
     }
 
+    /// SCENARIOS S-10: a Sell dated after today is refused through the same
+    /// shared `trade::check_amounts` bound as a Buy, and today itself — the
+    /// boundary — is accepted (with its settlement date left free to fall
+    /// after it, as a T+2 settlement legitimately does).
+    #[tokio::test]
+    async fn api_future_dated_sell_rejected_422_and_today_accepted() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
+        let today = crate::infra::date::today();
+        let base = serde_json::json!({
+            "date": (today + chrono::Days::new(1)).to_string(),
+            "listing_id": 1,
+            "average_price": "15",
+            "quantity": "100",
+            "currency": "AUD",
+            "brokerage": "0",
+            "gst_on_brokerage": "0",
+            "brokerage_currency": "AUD",
+            "fx_rate": "1",
+            "allocations": [ { "purchase_trade_id": 1, "quantity_allocated": "100" } ]
+        });
+        let (status, detail) = put_sell_json(&pool, 2, base.clone()).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(detail.contains("dated after today"), "detail: {detail}");
+        assert!(!trade_exists(&pool, 2).await, "nothing is persisted");
+
+        let mut boundary = base;
+        boundary["date"] = today.to_string().into();
+        let (status, detail) = put_sell_json(&pool, 2, boundary).await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "detail: {detail}");
+        let sell = trade::db_get(&pool, 2).await.unwrap().unwrap();
+        assert_eq!(sell.date, today);
+        assert!(sell.settlement_date > today);
+    }
+
     // Spot-rate override (QC 18020): the Sell write path shares
     // trade::validate_spot_fx_rate, and a valid override persists.
 

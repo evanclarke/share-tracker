@@ -41,7 +41,10 @@ pub fn today() -> NaiveDate {
 /// capital to today's holdings while the as-of-dated reports correctly ignore
 /// it — two reports, one database, one day, two answers. Trades are bounded
 /// the same way rather than carved out: a future-dated trade is nearly always
-/// a typo, and it surfaces on its own date either way.
+/// a typo, and it surfaces on its own date either way. The write path now
+/// refuses one outright (`trade::AmountsError::FutureDate`, SCENARIOS S-10),
+/// so the trade half of this bound is defence in depth — it still has to hold
+/// for a row entered before that rule.
 pub fn as_of_or_today(as_of: Option<NaiveDate>) -> NaiveDate {
     as_of.unwrap_or_else(today)
 }

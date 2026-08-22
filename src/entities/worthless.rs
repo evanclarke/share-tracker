@@ -84,8 +84,9 @@ pub enum RecogniseError {
     /// does not trade on after the event) — fix the data first.
     #[error("the listing has a trade dated on or after the event date")]
     TradedOnOrAfterEventDate,
-    /// The Sell-side invariants failed (defensive: the recognise constructs its
-    /// allocations to satisfy them).
+    /// The Sell-side invariants failed — defensive as to the allocations,
+    /// which the recognise constructs to satisfy them; the reachable case is
+    /// an event dated after today (SCENARIOS S-10), which the 422 names.
     #[error("the recognise's closing Sell was rejected: {0}")]
     Sell(#[source] sell::SellError),
 }
@@ -286,7 +287,21 @@ impl From<RecogniseError> for ApiError {
                     error = ?err,
                     "worthless-shares recognise rejected by a sell invariant"
                 );
-                ApiError::unprocessable("the recognise's parcel allocations are invalid")
+                // A future-dated event is the one Sell rejection a user can
+                // actually cause (SCENARIOS S-10): the declaration may be
+                // recorded ahead of its date, but the closing Sell would be
+                // dated then too.
+                if matches!(
+                    err,
+                    sell::SellError::Amounts(trade::AmountsError::FutureDate)
+                ) {
+                    ApiError::unprocessable(
+                        "the worthless-shares event is dated after today — record the action now \
+                         and recognise the loss on its date",
+                    )
+                } else {
+                    ApiError::unprocessable("the recognise's parcel allocations are invalid")
+                }
             }
             RecogniseError::Db(err) => err.into(),
         }
@@ -807,5 +822,36 @@ mod tests {
             .post_empty("/corporate_actions/10/recognise")
             .await;
         assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    /// SCENARIOS S-10: the action may be *recorded* ahead of its date, but
+    /// recognising it then would date the closing Sell in the future — which
+    /// `trade::check_amounts` refuses through the shared Sell core. The 422
+    /// names that, rather than blaming the allocations the recognise built
+    /// itself.
+    #[tokio::test]
+    async fn api_recognising_a_future_dated_event_is_refused_naming_the_date() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "DEAD").await;
+        insert_buy(&pool, 1, 1, d(2020, 10, 1), "1000", "1.50").await;
+        let future = crate::infra::date::today() + chrono::Days::new(1);
+        insert_worthless(&pool, 10, 1, future, WorthlessEvent::G3Declaration).await;
+
+        let resp = client(&pool)
+            .post_empty("/corporate_actions/10/recognise")
+            .await;
+        let (status, body) = resp.status_and_body();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(body.contains("dated after today"), "body: {body}");
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM trades WHERE worthless_action_id IS NOT NULL"
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+            0,
+            "nothing persisted"
+        );
     }
 }

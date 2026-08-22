@@ -131,7 +131,8 @@ pub enum TransferError {
     #[error("a network fee was specified without a positive per-unit market value")]
     FeeMarketPriceMissing,
     /// The Sell-side invariants failed: missing/over-allocated parcel, a
-    /// non-Buy/DRP parcel, or a parcel outside the source account.
+    /// non-Buy/DRP parcel, a parcel outside the source account, or a transfer
+    /// dated after today (SCENARIOS S-10).
     #[error("the transfer-out Sell was rejected: {0}")]
     Sell(#[source] sell::SellError),
 }
@@ -195,12 +196,22 @@ impl From<TransferError> for ApiError {
                     sell::SellError::AllocationNotPositive => ApiError::unprocessable(
                         "each parcel's units to move must be a positive quantity",
                     ),
+                    // The one amounts rejection a transfer can reach
+                    // (SCENARIOS S-10): its date is the user's own, and the
+                    // parcels it creates are dated by it.
+                    sell::SellError::Amounts(trade::AmountsError::FutureDate) => {
+                        ApiError::unprocessable(
+                            "the transfer is dated after today — units cannot be moved before \
+                             the move happens",
+                        )
+                    }
                     // Everything else the Sell core can reject is unreachable
                     // from a transfer, which builds the Sell itself: its
                     // quantity is the allocations' own sum (never a mismatch),
                     // its price is 0 with the listing's currency and a fresh id
-                    // (so no amounts, statement-total, FX or frozen-Sell
-                    // rejection), and the listing check above runs first.
+                    // (so no statement-total, FX or frozen-Sell rejection, and
+                    // the only amounts rejection left is the date bound handled
+                    // above), and the listing check above runs first.
                     other => {
                         tracing::error!(error = ?other, "unexpected sell rejection from a transfer");
                         ApiError::unprocessable(
@@ -1662,6 +1673,17 @@ mod tests {
         let detail = attempt(1, 2, 1, "2022-01-01", 1, "100").await;
         assert!(
             detail.contains("dated after the transfer date"),
+            "detail: {detail}"
+        );
+        // SCENARIOS S-10: and a transfer dated after today — the parcels it
+        // creates would be dated then too, and would not be held today. The
+        // shared `trade::check_amounts` bound reaches every operation that
+        // writes its Sell through the Sell core; a transfer's date is the
+        // user's own, so it is the one that says so in its own terms.
+        let tomorrow = (crate::infra::date::today() + chrono::Days::new(1)).to_string();
+        let detail = attempt(3, 2, 1, &tomorrow, 1, "100").await;
+        assert!(
+            detail.contains("transfer is dated after today"),
             "detail: {detail}"
         );
         let detail = attempt(2, 2, 1, "2024-06-01", 1, "101").await;

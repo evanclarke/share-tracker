@@ -101,8 +101,9 @@ pub enum DemergeError {
     /// later-dated activity must be entered after demerging, not before.
     #[error("the head listing has a trade dated on or after the demerger date")]
     TradedOnOrAfterDemergerDate,
-    /// The Sell-side invariants failed (defensive: the demerge constructs
-    /// its allocations to satisfy them).
+    /// The Sell-side invariants failed — defensive as to the allocations,
+    /// which the demerge constructs to satisfy them; the reachable case is a
+    /// demerger dated after today (SCENARIOS S-10), which the 422 names.
     #[error("the demerger's closing Sell was rejected: {0}")]
     Sell(#[source] sell::SellError),
 }
@@ -363,7 +364,21 @@ impl From<DemergeError> for ApiError {
             ),
             DemergeError::Sell(err) => {
                 tracing::warn!(error = ?err, "demerge rejected by a sell invariant");
-                ApiError::unprocessable("the demerger's parcel allocations are invalid")
+                // A future-dated demerger is the one Sell rejection a user can
+                // actually cause (SCENARIOS S-10): the demerger may be recorded
+                // ahead of its date, but the parcels it creates would be dated
+                // then too, and would not be held today.
+                if matches!(
+                    err,
+                    sell::SellError::Amounts(trade::AmountsError::FutureDate)
+                ) {
+                    ApiError::unprocessable(
+                        "the demerger is dated after today — record the action now and demerge \
+                         on its effective date",
+                    )
+                } else {
+                    ApiError::unprocessable("the demerger's parcel allocations are invalid")
+                }
             }
             DemergeError::Db(err) => err.into(),
         }

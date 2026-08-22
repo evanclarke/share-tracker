@@ -4120,7 +4120,7 @@ mod tests {
             .insert(&pool)
             .await;
         // Same listing, account and figures, different taxing point.
-        insert_ess(&pool, 4, 1, ymd(2026, 9, 10), "100", "10").await;
+        insert_ess(&pool, 4, 1, ymd(2026, 1, 10), "100", "10").await;
         // Same listing, account and taxing point, different quantity: a second
         // tranche vesting the same day.
         insert_ess(&pool, 5, 1, ymd(2026, 3, 10), "40", "10").await;

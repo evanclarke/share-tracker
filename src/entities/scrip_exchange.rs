@@ -98,8 +98,9 @@ pub enum ExchangeError {
     /// fix the data before exchanging.
     #[error("the original listing has a trade dated on or after the exchange date")]
     TradedOnOrAfterExchangeDate,
-    /// The Sell-side invariants failed (defensive: the exchange constructs
-    /// its allocations to satisfy them).
+    /// The Sell-side invariants failed — defensive as to the allocations,
+    /// which the exchange constructs to satisfy them; the reachable case is an
+    /// exchange dated after today (SCENARIOS S-10), which the 422 names.
     #[error("the exchange's closing Sell was rejected: {0}")]
     Sell(#[source] sell::SellError),
 }
@@ -398,7 +399,21 @@ impl From<ExchangeError> for ApiError {
                     error = ?err,
                     "scrip-for-scrip exchange rejected by a sell invariant"
                 );
-                ApiError::unprocessable("the exchange's parcel allocations are invalid")
+                // A future-dated exchange is the one Sell rejection a user can
+                // actually cause (SCENARIOS S-10): the takeover may be recorded
+                // ahead of its date, but the replacement parcels would be dated
+                // then too, and would not be held today.
+                if matches!(
+                    err,
+                    sell::SellError::Amounts(trade::AmountsError::FutureDate)
+                ) {
+                    ApiError::unprocessable(
+                        "the exchange is dated after today — record the action now and exchange \
+                         on its effective date",
+                    )
+                } else {
+                    ApiError::unprocessable("the exchange's parcel allocations are invalid")
+                }
             }
             ExchangeError::Db(err) => err.into(),
         }

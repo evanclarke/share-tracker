@@ -115,19 +115,37 @@ write-time refusal would leave every existing row editable.
 **Decision (Evan, 2026-08-22): refuse it.** Rejected: a health alert alone, and capping the year
 picker while still accepting the trade.
 
-- [ ] Refuse a `date` after the server's current date on `PUT /trades/:id` and `PUT /sells/:id`,
+- [x] Refuse a `date` after the server's current date on `PUT /trades/:id` and `PUT /sells/:id`,
       via `check_amounts` (a new `FutureDate` variant beside `PreCgtDate`, its natural twin — one
       bounds the date below, the other above)
-- [ ] Settle the two direct-INSERT paths the way `PreCgtDate` was settled (refused on the *statement*
+- [x] Settle the two direct-INSERT paths the way `PreCgtDate` was settled (refused on the *statement*
       in `ess_vest`, the earlier and better place): an ESS taxing point and a date of death are both
       already-happened facts, so the same argument holds, but each module-doc list needs its line
-- [ ] `settlement_date` is **not** in scope — a T+2 settlement of a trade dated today is legitimately
-      in the future
-- [ ] `docs/API.md` 422 catalogue + the trades/sells sections; `docs/SCHEMA.md` if the column comment
-      needs it
-- [ ] Regression tests: tomorrow refused on `PUT /trades/:id` and `PUT /sells/:id`, today accepted
+      — done: neither `ess_statement::db_upsert` nor `inheritance::db_upsert` bounded its date above,
+      so each got the bound (`UpsertError::FutureTaxingPoint` / `UpsertError::DeathInFuture`) beside
+      its pre-CGT twin, and both module-doc lists carry the `FutureDate` line
+- [x] `settlement_date` is **not** in scope — a T+2 settlement of a trade dated today is legitimately
+      in the future (pinned: the boundary tests assert the accepted trade dated *today* stores a
+      settlement date after today)
+- [x] `docs/API.md` 422 catalogue + the trades/sells sections; `docs/SCHEMA.md` if the column comment
+      needs it — also the ESS-statement and inheritance sections, the `tax-report/years` paragraph,
+      and the `trades.date` / `taxing_point_date` / `date_of_death` column comments
+- [x] Regression tests: tomorrow refused on `PUT /trades/:id` and `PUT /sells/:id`, today accepted
       (the boundary), and `GET /reports/tax-report/years` never offering a year beyond
       `tax_year_for(today())`
+
+Consequences found while implementing, all settled in the same commit:
+
+- `check_amounts` is shared with `sell::upsert_sell_in_tx`, which every parcel-substituting
+  operation writes its closing Sell through — so a scrip exchange, demerger, transfer, buy-back
+  participation or worthless-shares recognise **performed before its own date** is now refused too.
+  That is the right answer (its replacement parcels would be dated in the future and so absent from
+  the live view), but three of those five answered a generic "the … parcel allocations are invalid"
+  and `transfer`'s catch-all logged `tracing::error!` "unexpected sell rejection" — each now names
+  the future date instead.
+- The year picker needed its **own** bound: `db_tax_report_years` unions every dated fact, and
+  interest income / AMMA / ESS / investment expenses are not date-bounded, so it filters at
+  `tax_year_for(today())` rather than inheriting the trade write path's ceiling.
 
 ---
 

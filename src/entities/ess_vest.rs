@@ -46,6 +46,12 @@
 //!   since the date comes from the statement. It is refused on the statement
 //!   instead (`ess_statement::UpsertError::PreCgtTaxingPoint`), the earlier and
 //!   better place: the taxing point is what the user typed.
+//! - `FutureDate` — the same shape as `PreCgtDate` and settled the same way
+//!   (SCENARIOS S-10): the Buy's date is the statement's taxing point, so the
+//!   bound is applied on the statement
+//!   (`ess_statement::UpsertError::FutureTaxingPoint`). An employer's statement
+//!   reports a taxing point that has already happened, so a future one is a
+//!   typo, and refusing it there names the field the user typed.
 //!
 //! A new check added to `trade::check_amounts` therefore needs a line here, and
 //! either an argument that the vest satisfies it or a guard that makes it so.

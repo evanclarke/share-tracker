@@ -800,10 +800,13 @@ mod tests {
             .name("Bitcoin")
             .insert(&pool)
             .await;
-        // 2030-06-07 is a Friday, far outside every seeded holiday calendar.
+        // 2024-06-07 is a Friday: on a T+2 exchange listing this would settle
+        // the following Wednesday (the weekend, then the King's Birthday
+        // Monday), so a same-day settlement can only come from the
+        // exchange-less path.
         let body = serde_json::json!({
             "trade_type": "Buy",
-            "date": "2030-06-07",
+            "date": "2024-06-07",
             "listing_id": 1,
             "average_price": "65000",
             "quantity": "0.12345678",
@@ -818,7 +821,7 @@ mod tests {
         let trade = db_get(&pool, 1).await.unwrap().unwrap();
         assert_eq!(
             trade.settlement_date,
-            NaiveDate::from_ymd_opt(2030, 6, 7).unwrap()
+            NaiveDate::from_ymd_opt(2024, 6, 7).unwrap()
         );
         assert!(!logs_contain(
             "settlement window outside seeded exchange-holiday coverage"
@@ -830,12 +833,14 @@ mod tests {
     async fn api_settlement_beyond_holiday_coverage_logs_warning() {
         let pool = test_pool().await;
         insert_test_listing(&pool).await;
-        // XASX holidays are seeded 2019–2027 only: a 2030 trade's settlement is
+        // XASX holidays are seeded 2019–2027 only: a 2018 trade's settlement is
         // computed skipping weekends only, so the auto-population warns rather
-        // than silently using the incomplete calendar.
+        // than silently using the incomplete calendar. (The gap is probed
+        // below the seeded span rather than above it because a trade dated
+        // after today is refused outright — SCENARIOS S-10.)
         let body = serde_json::json!({
             "trade_type": "Buy",
-            "date": "2030-06-03",
+            "date": "2018-06-04",
             "listing_id": 1,
             "average_price": 100.0,
             "quantity": 10.0,
@@ -1325,6 +1330,54 @@ mod tests {
         first_cgt_day["settlement_date"] = "1985-09-20".into();
         let (status, _) = put_trade_json(&pool, 1, first_cgt_day).await;
         assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+
+    /// SCENARIOS S-10: a trade dated after the server's current date is
+    /// rejected 422 — the upper twin of the pre-CGT floor. A trade records a
+    /// transaction that has already happened, so a future date is a typo (a
+    /// 2027-for-2026 slip on a July trade), and it put a financial year that
+    /// has not begun on the annual tax report's year picker. Today itself is
+    /// the boundary and stays accepted — with its *settlement* landing in the
+    /// future, which is deliberately not bounded (a T+2 settlement of a trade
+    /// dated today has not happened yet).
+    #[tokio::test]
+    async fn api_future_dated_trade_rejected_422_and_today_accepted() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        let today = crate::infra::date::today();
+        let base = serde_json::json!({
+            "trade_type": "Buy",
+            "date": (today + chrono::Days::new(1)).to_string(),
+            "listing_id": 1,
+            "average_price": "100",
+            "quantity": "10",
+            "currency": "AUD",
+            "brokerage": "0",
+            "gst_on_brokerage": "0",
+            "brokerage_currency": "AUD",
+            "fx_rate": "1"
+        });
+        let (status, detail) = put_trade_json(&pool, 1, base.clone()).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            detail.contains("dated after today"),
+            "detail must explain the rule, got: {detail}"
+        );
+        assert!(db_get(&pool, 1).await.unwrap().is_none());
+
+        // Today — the last day inside the window — is accepted, and the
+        // auto-populated settlement date is allowed past it.
+        let mut boundary = base;
+        boundary["date"] = today.to_string().into();
+        let (status, _) = put_trade_json(&pool, 1, boundary).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let stored = db_get(&pool, 1).await.unwrap().unwrap();
+        assert_eq!(stored.date, today);
+        assert!(
+            stored.settlement_date > today,
+            "T+2 settlement of a trade dated today is legitimately in the future, got {}",
+            stored.settlement_date
+        );
     }
 
     #[test]
