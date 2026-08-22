@@ -70,6 +70,7 @@ use crate::entities::{
     income::{Income, IncomeType},
     trade::{self, Trade},
 };
+use crate::infra::db::write_tx;
 use crate::infra::decimal::{Money, parse_dec};
 use crate::infra::http::ApiError;
 use axum::{
@@ -245,7 +246,7 @@ pub async fn db_reinvest(
         return Err(ReinvestError::NonPositiveUnits);
     }
 
-    let mut tx = pool.begin().await?;
+    let mut tx = write_tx(pool).await?;
 
     // Load the distribution and its cash components.
     let income: Option<Income> = sqlx::query_as("SELECT * FROM income WHERE id = ?")
@@ -482,7 +483,7 @@ pub async fn db_reinvest(
 /// link, atomically. The inverse of [`db_reinvest`] — after it the
 /// distribution can be reinvested again.
 pub async fn db_unreinvest(pool: &SqlitePool, income_id: i64) -> Result<(), ReinvestError> {
-    let mut tx = pool.begin().await?;
+    let mut tx = write_tx(pool).await?;
 
     let link: Option<Option<i64>> =
         sqlx::query_scalar("SELECT reinvestment_trade_id FROM income WHERE id = ?")

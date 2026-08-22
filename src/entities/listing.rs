@@ -1,4 +1,5 @@
 use crate::domain::tax_year::tax_year_for;
+use crate::infra::db::write_tx;
 use crate::infra::http::{self, ApiError, CrudEntity};
 use axum::{
     Json, Router,
@@ -350,7 +351,7 @@ where
 }
 
 pub async fn db_upsert(pool: &SqlitePool, listing: &Listing) -> Result<(), UpsertError> {
-    let mut tx = pool.begin().await?;
+    let mut tx = write_tx(pool).await?;
 
     // An identity change (ticker or exchange) on a listing that already has
     // history must go through the rename action instead of a bare field

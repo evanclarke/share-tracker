@@ -33,6 +33,7 @@ use crate::entities::corporate_action::{
     self, ActionKind, SplitEvent, as_acquired_quantity, split_adjusted_quantity,
 };
 use crate::entities::trade::{self, Trade, TradeType};
+use crate::infra::db::write_tx;
 use crate::infra::decimal::{Money, parse_dec};
 use crate::infra::http::ApiError;
 use axum::{
@@ -214,7 +215,7 @@ pub async fn db_exercise(
         return Err(ExerciseError::NegativeRightsCost);
     }
 
-    let mut tx = pool.begin().await?;
+    let mut tx = write_tx(pool).await?;
 
     let action = match corporate_action::db_get_tx(&mut *tx, action_id).await? {
         Some(a) => a,

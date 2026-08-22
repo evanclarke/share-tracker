@@ -11,6 +11,10 @@
 # src/web.rs cannot catch. No dependencies beyond ui-check.sh's (Chrome,
 # python3, curl, the built server binary); CI runs it on the runner's
 # preinstalled Chrome. Run it locally the same way: scripts/ui-smoke.sh
+#
+# A failure while *seeding* the fixture prints the server log (ui-check.sh
+# does it): the seed drives the real API, and an internal error answers with an
+# empty body by design, so the log is the only place the cause exists.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"

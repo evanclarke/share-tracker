@@ -8,6 +8,7 @@ use super::checks::{
     statement_total_detail, validate_spot_fx_rate,
 };
 use super::model::Trade;
+use crate::infra::db::write_tx;
 use crate::infra::decimal::{Money, OptMoney, parse_dec};
 use crate::infra::http::{self, ApiError, CrudEntity};
 use rust_decimal::Decimal;
@@ -296,7 +297,7 @@ pub async fn db_upsert(pool: &SqlitePool, trade: &Trade) -> Result<(), UpsertErr
     // trade whose amounts actually convert.
     validate_spot_fx_rate(&trade.currency, trade.spot_fx_rate).map_err(UpsertError::SpotFxRate)?;
 
-    let mut tx = pool.begin().await?;
+    let mut tx = write_tx(pool).await?;
 
     // A rights-exercise, buy-back participation, scrip-for-scrip exchange,
     // or demerger trade is immutable here: it was created against its
@@ -617,7 +618,7 @@ struct DeleteGuard {
 }
 
 pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<DeleteOutcome, sqlx::Error> {
-    let mut tx = pool.begin().await?;
+    let mut tx = write_tx(pool).await?;
 
     let guard: Option<DeleteGuard> = sqlx::query_as(
         "SELECT scrip_action_id, demerger_action_id, transfer_id, ess_statement_id, \

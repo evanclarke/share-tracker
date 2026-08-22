@@ -11,6 +11,7 @@
 //! `minor_units` is informational only: stored monetary amounts remain
 //! arbitrary-precision Decimal and are never rounded to a currency's minor unit.
 
+use crate::infra::db::write_tx;
 use crate::infra::fetch::cause_chain;
 use crate::infra::http::{self, ApiError, CrudEntity};
 use axum::{
@@ -427,7 +428,7 @@ pub async fn import_from_content(
         ));
     };
 
-    let mut tx = pool.begin().await?;
+    let mut tx = write_tx(pool).await?;
     for currency in &currencies {
         db_upsert(&mut *tx, currency).await?;
     }

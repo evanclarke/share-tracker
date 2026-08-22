@@ -1,6 +1,6 @@
 use chrono::{DateTime, Local, NaiveDateTime};
 use sqlx::{
-    Connection, SqlitePool,
+    Connection, Sqlite, SqlitePool, Transaction,
     sqlite::{SqliteConnectOptions, SqliteConnection, SqliteJournalMode},
 };
 use std::{
@@ -39,6 +39,41 @@ fn connect_options(db_path: &str) -> Result<SqliteConnectOptions, sqlx::Error> {
 #[cfg(test)]
 pub async fn unmigrated_pool(db_path: &str) -> Result<SqlitePool, sqlx::Error> {
     SqlitePool::connect_with(connect_options(db_path)?).await
+}
+
+/// Begin a transaction that is going to **write**: `BEGIN IMMEDIATE`, which
+/// takes SQLite's write lock at the `BEGIN` instead of at the first write.
+///
+/// Every write path starts here, and none of them may use `pool.begin()`.
+/// `pool.begin()` issues a *deferred* `BEGIN`: the transaction starts as a
+/// reader and tries to upgrade when it first writes. If another connection has
+/// written in the meantime the upgrade fails **immediately** — `SQLITE_BUSY`
+/// (5) against a held write lock, or `SQLITE_BUSY_SNAPSHOT` (517) when that
+/// other connection has already committed past our read snapshot — and
+/// `sqlite3_busy_timeout()` deliberately retries neither (waiting on an
+/// upgrade could deadlock two readers that both want to write). So sqlx's
+/// 5-second busy timeout does not cover it, and the request dies at once with
+/// "database is locked": a 500 with an empty body, which the web UI can only
+/// show as `HTTP 500`. That is what a `PUT` issued while the scheduler was
+/// writing its startup `job_schedule` rows hit — 2 failures in 160 startups,
+/// measured, and how CI first found it (a `ui-smoke.sh` fixture seed).
+///
+/// `BEGIN IMMEDIATE` puts the transaction in the writer queue from the start,
+/// where the busy timeout *does* apply, so a concurrent writer waits its turn
+/// rather than failing. The cost is that write transactions serialise against
+/// each other, which they already did — SQLite has one writer at a time.
+///
+/// Read-only transactions stay on `pool.begin()` deliberately: they never
+/// upgrade, so they cannot hit either error, and making them immediate would
+/// serialise every report against every other for no reason. The split is
+/// pinned by [`tests::write_side_modules_never_begin_a_deferred_transaction`],
+/// whose allowlist names the read-only report files one by one.
+///
+/// Top level only. sqlx issues a `SAVEPOINT` for a nested transaction and
+/// rejects a custom `BEGIN` statement there (`Error::InvalidSavePointStatement`),
+/// so a transaction opened on an existing `&mut *tx` keeps using `.begin()`.
+pub async fn write_tx(pool: &SqlitePool) -> Result<Transaction<'static, Sqlite>, sqlx::Error> {
+    pool.begin_with("BEGIN IMMEDIATE").await
 }
 
 pub async fn init(db_path: &str) -> Result<SqlitePool, sqlx::Error> {
@@ -576,6 +611,236 @@ fn prune_backups(db_path: &str, backup_dir: Option<&str>) -> Result<Vec<PathBuf>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Files that may begin a **deferred** transaction (`pool.begin()`).
+    /// Everything else under `src` must go through [`write_tx`], which begins
+    /// `IMMEDIATE` — see its docs for why a deferred write transaction can fail
+    /// outright with "database is locked".
+    ///
+    /// The read-only reports are the bulk of the list: a report reads all its
+    /// inputs on one transaction for a consistent snapshot and never writes, so
+    /// it can never hit the failed upgrade `write_tx` exists to avoid, and
+    /// taking the write lock up front would serialise every report against
+    /// every other for nothing. They are listed one file at a time, not as
+    /// `src/reports/`, so that a *new* report is an offender until someone
+    /// decides which side of the split it is on: `reports/snapshot.rs` is the
+    /// one report that **writes** (it persists the price-dependent reports to
+    /// `report_snapshots`) and is deliberately not here.
+    const DEFERRED_BEGIN_ALLOWED: &[&str] = &[
+        // This module's own tests drive a deferred BEGIN deliberately, to pin
+        // the failure `write_tx` exists to avoid.
+        "infra/db.rs",
+        // Read-only reports, one transaction each, no writes.
+        "reports/activity.rs",
+        "reports/amit_adjustment_cross_check.rs",
+        "reports/amit_cash_cross_check.rs",
+        "reports/e4_cross_check.rs",
+        "reports/franking.rs",
+        "reports/franking_at_risk.rs",
+        "reports/fx_coverage.rs",
+        "reports/health.rs",
+        "reports/net_capital_gain.rs",
+        "reports/open_parcels.rs",
+        "reports/parcel_optimiser.rs",
+        "reports/performance.rs",
+        "reports/portfolio.rs",
+        "reports/realised_gains.rs",
+        "reports/rollover_consistency.rs",
+        "reports/row_history.rs",
+        "reports/settlement_coverage.rs",
+        "reports/tax_report.rs",
+        "reports/tax_summary.rs",
+        "reports/unrealised_gains.rs",
+    ];
+
+    /// Every `.rs` file under `src`, with its path relative to `src` using `/`
+    /// separators — the form [`DEFERRED_BEGIN_ALLOWED`] is written in.
+    fn source_files() -> Vec<(String, String)> {
+        let src = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut found = Vec::new();
+        let mut walk = vec![src.clone()];
+        while let Some(dir) = walk.pop() {
+            for entry in std::fs::read_dir(&dir)
+                .expect("src should be readable")
+                .flatten()
+            {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk.push(path);
+                } else if path.extension().is_some_and(|x| x == "rs") {
+                    let rel = path
+                        .strip_prefix(&src)
+                        .expect("under src")
+                        .components()
+                        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                        .collect::<Vec<_>>()
+                        .join("/");
+                    let body = std::fs::read_to_string(&path).expect("source should be readable");
+                    found.push((rel, body));
+                }
+            }
+        }
+        found.sort();
+        found
+    }
+
+    /// The convention `write_tx` exists to hold: no write path may begin a
+    /// deferred transaction, because a deferred `BEGIN` that upgrades to a
+    /// write after another connection has written fails immediately with
+    /// "database is locked" — a 500 the busy timeout cannot prevent. Nothing in
+    /// the type system stops a new entity from typing `pool.begin()`, so this
+    /// scans for it, exactly as `decimal`'s scan pins `.bind(x.to_string())`
+    /// out of the tree.
+    #[test]
+    fn write_side_modules_never_begin_a_deferred_transaction() {
+        // Assembled so this test's own scan line is not itself a match.
+        let deferred = format!(".{}()", "begin");
+        let mut offenders = Vec::new();
+        let mut seen_in_allowed: Vec<&str> = Vec::new();
+        for (rel, body) in source_files() {
+            let allowed = DEFERRED_BEGIN_ALLOWED.contains(&rel.as_str());
+            for (n, line) in body.lines().enumerate() {
+                let code = line.trim_start();
+                if code.starts_with("//") || !code.contains(&deferred) {
+                    continue;
+                }
+                if allowed {
+                    seen_in_allowed.push(
+                        DEFERRED_BEGIN_ALLOWED
+                            .iter()
+                            .find(|a| **a == rel)
+                            .expect("just matched"),
+                    );
+                } else {
+                    offenders.push(format!("{rel}:{}: {code}", n + 1));
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "a write transaction must be begun with infra::db::write_tx(pool) — a deferred \
+             BEGIN fails with \"database is locked\" when another connection writes first. \
+             If this is a read-only report, add it to DEFERRED_BEGIN_ALLOWED:\n{}",
+            offenders.join("\n")
+        );
+        // …and the allowlist may not rot: an entry that no longer begins a
+        // deferred transaction (or no longer exists) has to go, or the list
+        // stops meaning anything.
+        let stale: Vec<&&str> = DEFERRED_BEGIN_ALLOWED
+            .iter()
+            .filter(|a| !seen_in_allowed.contains(*a))
+            .collect();
+        assert!(
+            stale.is_empty(),
+            "DEFERRED_BEGIN_ALLOWED names files that no longer begin a deferred \
+             transaction — drop them: {stale:?}"
+        );
+    }
+
+    /// The premise `write_tx` rests on, as an executable fact rather than a
+    /// citation: a **deferred** transaction that reads and then writes fails
+    /// outright when another connection has written in between. sqlx's default
+    /// 5-second `busy_timeout` does not cover it — SQLite will not retry an
+    /// upgrade (two readers both waiting to write would deadlock), so the error
+    /// comes back at once. This is the 500 the ui-smoke fixture seed hit.
+    #[tokio::test]
+    async fn a_deferred_transaction_cannot_upgrade_after_a_concurrent_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("deferred.db").to_string_lossy().to_string();
+        let pool = init(&path).await.unwrap();
+
+        // Deferred: this begins as a reader, and the read fixes its snapshot.
+        let mut deferred = pool.begin().await.unwrap();
+        let _: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM holding_accounts")
+            .fetch_one(&mut *deferred)
+            .await
+            .unwrap();
+
+        // Another connection writes and commits past that snapshot.
+        sqlx::query("UPDATE holding_accounts SET name = 'Elsewhere' WHERE id = 1")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // The upgrade. Bounded so a version of SQLite that *did* wait would
+        // fail this test loudly rather than hanging it for the busy timeout.
+        let attempt = sqlx::query("UPDATE holding_accounts SET name = 'Here' WHERE id = 1")
+            .execute(&mut *deferred);
+        let err = tokio::time::timeout(std::time::Duration::from_secs(2), attempt)
+            .await
+            .expect("the failed upgrade is immediate, not after the busy timeout")
+            .expect_err("a deferred transaction cannot upgrade past another connection's write");
+
+        let msg = err.to_string();
+        // 5 is SQLITE_BUSY against the held write lock, 517 SQLITE_BUSY_SNAPSHOT
+        // when the other connection has already committed; both are this race,
+        // and both are what `write_tx` avoids.
+        assert!(
+            msg.contains("(code: 5)") || msg.contains("(code: 517)"),
+            "expected a busy/snapshot failure, got: {msg}"
+        );
+        assert!(msg.contains("database is locked"), "{msg}");
+    }
+
+    /// The fix, from the other side: a transaction begun with [`write_tx`]
+    /// holds the write lock from the `BEGIN`, so a concurrent writer **waits**
+    /// (sqlx's busy timeout covers a queued writer) and this transaction's own
+    /// write goes through instead of failing.
+    ///
+    /// Non-vacuous by construction: the assertion that the other writer is
+    /// still blocked is exactly what a deferred `BEGIN` would fail — with one,
+    /// it would sail past and this transaction's write below would be the one
+    /// that returned "database is locked" (see the test above).
+    #[tokio::test]
+    async fn write_tx_holds_off_a_concurrent_writer_instead_of_failing_to_upgrade() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir
+            .path()
+            .join("immediate.db")
+            .to_string_lossy()
+            .to_string();
+        let pool = init(&path).await.unwrap();
+
+        // The shape every write path has: begin, read, decide, write, commit.
+        let mut tx = write_tx(&pool).await.unwrap();
+        let _: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM holding_accounts")
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+
+        let other = pool.clone();
+        let mut concurrent = tokio::spawn(async move {
+            sqlx::query("UPDATE holding_accounts SET name = 'Elsewhere' WHERE id = 1")
+                .execute(&other)
+                .await
+        });
+
+        let ran_anyway =
+            tokio::time::timeout(std::time::Duration::from_millis(500), &mut concurrent).await;
+        assert!(
+            ran_anyway.is_err(),
+            "the concurrent writer was not held off — this transaction did not take the \
+             write lock at its BEGIN, so its own write is about to fail"
+        );
+
+        sqlx::query("UPDATE holding_accounts SET name = 'Here' WHERE id = 1")
+            .execute(&mut *tx)
+            .await
+            .expect("the write transaction owns the write lock");
+        tx.commit().await.unwrap();
+
+        // Released: the writer that waited now goes through, rather than either
+        // side having failed.
+        concurrent
+            .await
+            .expect("the concurrent writer task")
+            .expect("a queued writer waits out the busy timeout and then writes");
+        let name: String = sqlx::query_scalar("SELECT name FROM holding_accounts WHERE id = 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(name, "Elsewhere", "both writes landed, the queued one last");
+    }
 
     #[tokio::test]
     async fn init_memory_pool() {

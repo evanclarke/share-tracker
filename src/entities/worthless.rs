@@ -39,6 +39,7 @@ use crate::entities::corporate_action::{
 };
 use crate::entities::sell::{self, AllocationInput, SellBody};
 use crate::entities::trade::{self, Trade};
+use crate::infra::db::write_tx;
 use crate::infra::decimal::parse_dec;
 use crate::infra::http::ApiError;
 use axum::{
@@ -108,7 +109,7 @@ pub fn router() -> Router<SqlitePool> {
 /// proceeds, recognising the capital loss, atomically. The recognise takes no
 /// parameters: the action and the holdings at its date determine everything.
 pub async fn db_recognise(pool: &SqlitePool, action_id: i64) -> Result<Recognise, RecogniseError> {
-    let mut tx = pool.begin().await?;
+    let mut tx = write_tx(pool).await?;
 
     let action = match corporate_action::db_get_tx(&mut *tx, action_id).await? {
         Some(a) => a,

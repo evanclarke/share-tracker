@@ -13,6 +13,7 @@
 //! every holding account belongs to the same taxpayer, so taxpayer-level
 //! reports (tax summary, net capital gain) aggregate across all of them.
 
+use crate::infra::db::write_tx;
 use crate::infra::http::{self, ApiError, CrudEntity};
 use axum::{
     Json, Router,
@@ -100,7 +101,7 @@ pub enum DeleteOutcome {
 }
 
 pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<DeleteOutcome, sqlx::Error> {
-    let mut tx = pool.begin().await?;
+    let mut tx = write_tx(pool).await?;
 
     let exists: bool =
         sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM holding_accounts WHERE id = ?)")

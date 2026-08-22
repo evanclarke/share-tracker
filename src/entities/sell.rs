@@ -11,6 +11,7 @@
 //! its parcel allocations with the submitted set.
 
 use crate::entities::trade::{self, TradeType};
+use crate::infra::db::write_tx;
 use crate::infra::decimal::{Money, OptMoney};
 use crate::infra::http::ApiError;
 use axum::{
@@ -328,7 +329,7 @@ async fn is_transfer_fee_sale(
 /// as a whole — unless a replacement Buy is itself consumed by later
 /// allocations or AMIT adjustments (refused; remove those dependants first).
 pub async fn db_delete_sell(pool: &SqlitePool, id: i64) -> Result<DeleteOutcome, sqlx::Error> {
-    let mut tx = pool.begin().await?;
+    let mut tx = write_tx(pool).await?;
 
     let row: Option<SellDeleteRow> = sqlx::query_as(
         "SELECT trade_type, scrip_action_id, demerger_action_id, transfer_id \
@@ -417,7 +418,7 @@ pub async fn db_upsert_sell(pool: &SqlitePool, id: i64, body: &SellBody) -> Resu
         trade::Settlement::resolve(pool, id, body.listing_id, body.date, body.settlement_date)
             .await?;
 
-    let mut tx = pool.begin().await?;
+    let mut tx = write_tx(pool).await?;
 
     // A buy-back participation, scrip-for-scrip exchange, or demerger Sell is
     // immutable here: its figures derive from its action's terms (and it

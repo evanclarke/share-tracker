@@ -34,6 +34,7 @@
 //! ends.
 
 use crate::entities::income::Income;
+use crate::infra::db::write_tx;
 use crate::infra::decimal::{Money, parse_dec};
 use crate::infra::http::{self, ApiError, CrudEntity};
 use axum::{
@@ -171,7 +172,7 @@ pub async fn db_upsert(pool: &SqlitePool, period: &DrpEnrolment) -> Result<(), U
         return Err(UpsertError::EmptyPeriod);
     }
 
-    let mut tx = pool.begin().await?;
+    let mut tx = write_tx(pool).await?;
 
     // Half-open [start, end) overlap test against the (listing, holding
     // account)'s other periods — the same listing's periods in *another*
@@ -333,7 +334,7 @@ impl From<DeleteError> for ApiError {
 /// date at read time), so the check is made here, in the delete's own
 /// transaction.
 pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<bool, DeleteError> {
-    let mut tx = pool.begin().await?;
+    let mut tx = write_tx(pool).await?;
     let Some(period): Option<DrpEnrolment> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {} FROM drp_enrolments WHERE id = ?",
         <DrpEnrolment as CrudEntity>::COLUMNS

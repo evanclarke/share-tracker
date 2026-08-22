@@ -8,6 +8,7 @@
 //! were computed against is completed (SCENARIOS S-04).
 
 use super::model::SettlementDateSource;
+use crate::infra::db::write_tx;
 use chrono::{Datelike, NaiveDate};
 use sqlx::SqlitePool;
 use std::collections::HashSet;
@@ -241,7 +242,7 @@ struct StoredSettlement {
 /// ordinary writes of an audited table, so each superseded date stays
 /// recoverable in `row_history`.
 pub async fn run_recompute(pool: &SqlitePool) -> Result<(), String> {
-    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+    let mut tx = write_tx(pool).await.map_err(|e| e.to_string())?;
     let stored: Vec<StoredSettlement> = sqlx::query_as(
         "SELECT id, listing_id, date, settlement_date, settlement_date_source \
          FROM trades ORDER BY id",

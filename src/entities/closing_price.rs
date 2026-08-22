@@ -130,6 +130,7 @@
 //!   security traded at that day — so it is neither normalised on entry nor
 //!   ever re-based: nothing rewrites a figure a person typed.
 
+use crate::infra::db::write_tx;
 use crate::infra::http::ApiError;
 use axum::{
     Extension, Json, Router,
@@ -1266,7 +1267,7 @@ pub async fn db_rebase_listing_prices(
 /// the only ones read. This stays the single repair path: a demerger's stated
 /// close was folded into the same job rather than given one of its own.
 pub async fn run_rebase(pool: &SqlitePool) -> Result<(), String> {
-    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+    let mut tx = write_tx(pool).await.map_err(|e| e.to_string())?;
     let listing_ids: Vec<i64> = sqlx::query_scalar(
         "SELECT DISTINCT listing_id FROM corporate_actions \
          WHERE action_type IN ('ShareSplit', 'BonusIssue') \
@@ -1365,7 +1366,7 @@ pub async fn db_clear_unpriced_before(
     pool: &SqlitePool,
     listing_id: i64,
 ) -> Result<ClearOutcome, sqlx::Error> {
-    let mut tx = pool.begin().await?;
+    let mut tx = write_tx(pool).await?;
     let found: Option<(Option<NaiveDate>,)> =
         sqlx::query_as("SELECT unpriced_before FROM listings WHERE id = ?")
             .bind(listing_id)

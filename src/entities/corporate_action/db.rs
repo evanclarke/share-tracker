@@ -8,6 +8,7 @@ use super::adjustments::{
     as_acquired_quantity, db_payment_currency_conflict, db_splits_for_listing,
 };
 use super::model::{ActionKind, CorporateAction};
+use crate::infra::db::write_tx;
 use crate::infra::decimal::{OptMoney, parse_dec};
 use crate::infra::http::{self, ApiError, CrudEntity};
 use chrono::NaiveDate;
@@ -451,7 +452,7 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
         }
     }
 
-    let mut tx = pool.begin().await?;
+    let mut tx = write_tx(pool).await?;
 
     // An action that exercise, participation, exchange, or demerge trades
     // were validated against is frozen: editing its terms (or re-typing it)
@@ -747,7 +748,7 @@ impl From<DeleteError> for ApiError {
 /// dependants are checked here, in the delete's own transaction (see
 /// [`DeleteError`]).
 pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<bool, DeleteError> {
-    let mut tx = pool.begin().await?;
+    let mut tx = write_tx(pool).await?;
     let Some(action) = db_get_tx(&mut *tx, id).await? else {
         return Ok(false);
     };

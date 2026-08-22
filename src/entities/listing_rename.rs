@@ -62,6 +62,7 @@
 //! undone).
 
 use crate::entities::listing::{self, Listing, SecurityType};
+use crate::infra::db::write_tx;
 use crate::infra::http::{ApiError, CrudEntity};
 use axum::{
     Json, Router,
@@ -294,7 +295,7 @@ pub async fn db_rename(
     listing_id: i64,
     body: &RenameBody,
 ) -> Result<ListingRename, RenameError> {
-    let mut tx = pool.begin().await?;
+    let mut tx = write_tx(pool).await?;
 
     // The column list is the entity's own (`CrudEntity::COLUMNS`), so a new
     // listing column can never be forgotten here — spelling it out by hand is
@@ -494,7 +495,7 @@ pub async fn db_rename(
 /// `old_price_symbol` is the real prior value: the listing had no override,
 /// and the undo clears the one the rename set.
 pub async fn db_undo(pool: &SqlitePool, listing_id: i64, rename_id: i64) -> Result<(), UndoError> {
-    let mut tx = pool.begin().await?;
+    let mut tx = write_tx(pool).await?;
 
     #[allow(clippy::type_complexity)]
     let target: Option<(

@@ -89,6 +89,7 @@
 //! parcel dated on a closed day is surfaced instead, non-blockingly, by
 //! `reports::health`'s `non_trading_day_trades`.
 
+use crate::infra::db::write_tx;
 use crate::infra::decimal::Money;
 use crate::infra::http::ApiError;
 use axum::{
@@ -559,7 +560,7 @@ fn validate(inh: &Inheritance) -> Result<(), UpsertError> {
 pub async fn db_upsert(pool: &SqlitePool, inh: &Inheritance) -> Result<(), UpsertError> {
     validate(inh)?;
 
-    let mut tx = pool.begin().await?;
+    let mut tx = write_tx(pool).await?;
 
     check_listing_currency(&mut tx, inh).await?;
     check_convertible(&mut tx, inh).await?;
@@ -686,7 +687,7 @@ pub enum DeleteOutcome {
 
 /// Delete an inheritance and its linked Buy together, in one transaction.
 pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<DeleteOutcome, sqlx::Error> {
-    let mut tx = pool.begin().await?;
+    let mut tx = write_tx(pool).await?;
 
     let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM inheritances WHERE id = ?)")
         .bind(id)

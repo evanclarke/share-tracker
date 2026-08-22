@@ -66,6 +66,7 @@
 //! `reports::health`'s `non_trading_day_trades`.
 
 use crate::entities::trade::{self, Trade};
+use crate::infra::db::write_tx;
 use crate::infra::decimal::Money;
 use crate::infra::http::ApiError;
 use axum::{
@@ -105,7 +106,7 @@ pub fn router() -> Router<SqlitePool> {
 
 /// Create the statement's cost-base-reset Buy and link it, atomically.
 pub async fn db_vest(pool: &SqlitePool, statement_id: i64) -> Result<Trade, VestError> {
-    let mut tx = pool.begin().await?;
+    let mut tx = write_tx(pool).await?;
 
     let row = sqlx::query(
         "SELECT listing_id, holding_account_id, taxing_point_date, quantity, \

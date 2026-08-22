@@ -111,7 +111,8 @@ done
 if [ -n "$seed" ]; then
   fixture="$root/scripts/fixtures/$seed.json"
   [ -f "$fixture" ] || { echo "ui-check: no fixture at $fixture" >&2; exit 1; }
-  python3 - "$base" "$fixture" >&2 <<'PY'
+  seed_rc=0
+  python3 - "$base" "$fixture" >&2 <<'PY' || seed_rc=$?
 import json, sys, urllib.request, urllib.error
 base, path = sys.argv[1], sys.argv[2]
 for r in json.load(open(path)):
@@ -129,6 +130,17 @@ for r in json.load(open(path)):
         print(f"seed {method} {p} -> {e.code}: {e.read().decode()[:300]}")
         sys.exit(1)
 PY
+  # A failed seed request reached a *running* server, so the reason is in the
+  # server log and often nowhere else: a 500 answers with an empty body by
+  # design (infra::http::ApiError::Internal logs the cause rather than leaking
+  # it to the client), so throwing the log away leaves nothing to diagnose.
+  # That is exactly what a startup write race cost once — CI reported only
+  # `seed PUT /listings/2 -> 500:` and the cause was in the log it discarded.
+  if [ "$seed_rc" != 0 ]; then
+    echo "ui-check: seeding failed; server log:" >&2
+    cat "$work/server.log" >&2
+    exit 1
+  fi
 fi
 
 # --- render each route -------------------------------------------------------

@@ -9,6 +9,7 @@
 //! and rewrites it every iteration, so a task that has died leaves a row that
 //! ages (SCENARIOS T-11/T-02/T-12).
 
+use crate::infra::db::write_tx;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use std::collections::HashMap;
@@ -92,7 +93,7 @@ pub(super) async fn db_start_run(
     name: &str,
     started_at: &str,
 ) -> Result<i64, sqlx::Error> {
-    let mut tx = pool.begin().await?;
+    let mut tx = write_tx(pool).await?;
     let id: i64 = sqlx::query_scalar(
         "INSERT INTO job_runs (name, started_at, finished_at, status, error) \
          VALUES (?, ?, NULL, 'running', NULL) RETURNING id",
@@ -150,7 +151,7 @@ pub(super) async fn db_record_run(
     error: Option<&str>,
     note: Option<&str>,
 ) -> Result<(), sqlx::Error> {
-    let mut tx = pool.begin().await?;
+    let mut tx = write_tx(pool).await?;
     sqlx::query(
         "INSERT INTO job_runs (name, started_at, finished_at, status, error, note) \
          VALUES (?, ?, ?, ?, ?, ?)",

@@ -581,6 +581,84 @@ mod tests {
         assert!(health.overdue_jobs.is_empty());
     }
 
+    /// A request arriving while the scheduler is still storing its startup
+    /// schedule rows must be **served**, not answered `500 database is locked`.
+    /// Every spawned entry claims its `job_schedule` row the instant it starts,
+    /// so a `PUT` landing in that window is one writer racing another — which
+    /// is what a deferred `BEGIN` cannot survive (it fails the upgrade outright,
+    /// and SQLite's busy timeout does not retry that), and what
+    /// `infra::db::write_tx`'s `BEGIN IMMEDIATE` exists to hold off.
+    ///
+    /// Deliberately amplified on both sides, because the live failure rate is
+    /// far too low for one attempt to catch a regression (2 startups in 160
+    /// measured): the real `schedule.cron` is repeated so ~64 entry tasks claim
+    /// rows at once rather than production's eight, the writes racing them are
+    /// issued concurrently rather than one at a time, and the startup is
+    /// repeated. Measured against a build with `write_tx` reverted to a
+    /// deferred `BEGIN`, this shape catches the regression **29 times in 30**
+    /// (`PUT /listings/… -> 500`), and passes 30 in 30 with the fix in place.
+    ///
+    /// It is still a race rather than a scripted interleaving. `infra::db`'s
+    /// `write_tx_holds_off_a_concurrent_writer_instead_of_failing_to_upgrade`
+    /// is the deterministic half of the pair.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_write_arriving_during_scheduler_startup_is_served_not_locked_out() {
+        let (reg, pool, _dir, _path) = test_registry().await;
+        let schedule = include_str!("../../schedule.cron").repeat(8);
+        let entries = parse(&schedule).unwrap().len();
+        let app = ApiClient::full(&pool);
+
+        // Five startups, because the window is narrow: the entry tasks claim
+        // their rows within milliseconds, so only writes issued right behind
+        // them are truly concurrent. A second `spawn` in the same process is a
+        // supported path (it clears the table and the fresh tasks re-claim),
+        // which is what makes repeating the startup honest here.
+        for round in 0..5 {
+            spawn(reg.clone(), pool.clone(), &schedule).await.unwrap();
+
+            // No waiting, and all at once: the entry tasks are claiming their
+            // rows right now, and requests overlap each other as they do on a
+            // real server, so every write is racing writers on both sides.
+            let mut writes = Vec::new();
+            for id in 1..=15 {
+                let app = app.clone();
+                writes.push(tokio::spawn(async move {
+                    let body = serde_json::json!({
+                        "ticker": format!("RACE{id}"),
+                        "name": format!("Race {id} Ltd, round {round}"),
+                        "exchange_mic": "XASX",
+                        "currency": "AUD",
+                        "security_type": "Share",
+                        "amit": false,
+                        "preference": false,
+                    });
+                    let resp = app.put(format!("/listings/{id}"), &body).await;
+                    (id, resp.status, resp.text().to_string())
+                }));
+            }
+            for write in writes {
+                let (id, status, body) = write.await.expect("the request task");
+                assert_eq!(
+                    status,
+                    StatusCode::NO_CONTENT,
+                    "PUT /listings/{id} during scheduler startup: {body}"
+                );
+            }
+        }
+
+        // …and the other side of the race really did write: every entry of the
+        // last startup stored its row, so this was a concurrent-writer test and
+        // not a vacuous one. At least, rather than exactly: a task from an
+        // earlier round whose second write lands after a later round cleared
+        // the table claims a fresh row, which is the documented behaviour of a
+        // second `spawn` in one process, not a fault.
+        let rows = wait_for_schedule(&pool, entries).await;
+        assert!(
+            rows.len() >= entries,
+            "every schedule entry stores a row while the writes race it"
+        );
+    }
+
     #[tokio::test]
     async fn list_jobs_reports_how_each_job_is_triggered() {
         // `GET /jobs` carries the registry's intent, so the Jobs screen can say

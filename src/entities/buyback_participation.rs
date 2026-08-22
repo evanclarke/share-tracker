@@ -33,6 +33,7 @@ use crate::entities::corporate_action::{self, ActionKind};
 use crate::entities::income::{self, Income};
 use crate::entities::sell::{self, AllocationInput, SellBody};
 use crate::entities::trade::{self, Trade};
+use crate::infra::db::write_tx;
 use crate::infra::decimal::Money;
 use crate::infra::http::ApiError;
 use axum::{
@@ -175,7 +176,7 @@ pub async fn db_participate(
         return Err(ParticipationError::NonPositiveUnits);
     }
 
-    let mut tx = pool.begin().await?;
+    let mut tx = write_tx(pool).await?;
 
     let action = match corporate_action::db_get_tx(&mut *tx, action_id).await? {
         Some(a) => a,

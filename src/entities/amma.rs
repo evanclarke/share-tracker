@@ -1,3 +1,4 @@
+use crate::infra::db::write_tx;
 use crate::infra::decimal::Money;
 use crate::infra::http::{self, ApiError, CrudEntity};
 use axum::{
@@ -265,7 +266,7 @@ pub async fn db_upsert(pool: &SqlitePool, stmt: &AmmaStatement) -> Result<(), Up
             stmt.foreign_tax_credits_capital_gains,
         ));
     }
-    let mut tx = pool.begin().await?;
+    let mut tx = write_tx(pool).await?;
     sqlx::query(
         "INSERT INTO amma_statements \
          (id, listing_id, tax_year_end_date, units_held, date_received, \

@@ -38,6 +38,7 @@ use crate::domain::rollover;
 use crate::entities::corporate_action::as_acquired_quantity;
 use crate::entities::sell::{self, AllocationInput};
 use crate::entities::trade::{self, Trade};
+use crate::infra::db::write_tx;
 use crate::infra::http::{self, ApiError, CrudEntity};
 use axum::{
     Json, Router,
@@ -265,7 +266,7 @@ pub async fn db_transfer(
         return Err(TransferError::NothingToTransfer);
     }
 
-    let mut tx = pool.begin().await?;
+    let mut tx = write_tx(pool).await?;
 
     let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM transfers WHERE id = ?)")
         .bind(id)
@@ -541,7 +542,7 @@ pub enum DeleteOutcome {
 /// allocations, every transfer-in Buy, and the network-fee disposal Sell if
 /// any) in one transaction, restoring the pre-transfer holding.
 pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<DeleteOutcome, sqlx::Error> {
-    let mut tx = pool.begin().await?;
+    let mut tx = write_tx(pool).await?;
 
     let fee_sale_id: Option<Option<i64>> =
         sqlx::query_scalar("SELECT fee_sale_trade_id FROM transfers WHERE id = ?")

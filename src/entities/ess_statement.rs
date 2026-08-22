@@ -31,6 +31,7 @@
 //! transaction — **refused** (422) while that Buy is drawn on by a Sell
 //! allocation or AMIT adjustment.
 
+use crate::infra::db::write_tx;
 use crate::infra::decimal::{Money, OptMoney};
 use crate::infra::http::{self, ApiError, CrudEntity};
 use axum::{
@@ -457,7 +458,7 @@ pub async fn db_upsert(pool: &SqlitePool, s: &EssStatement) -> Result<(), Upsert
         }
     }
 
-    let mut tx = pool.begin().await?;
+    let mut tx = write_tx(pool).await?;
 
     // The statement's currency must be the listing's: `market_value_per_share`
     // is the market value of *that listed share*, so the price and the listed
@@ -585,7 +586,7 @@ pub enum DeleteOutcome {
 /// Delete the statement and, if it was vested, its cost-base-reset Buy — in one
 /// transaction. Refused while the vest Buy is drawn on.
 pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<DeleteOutcome, sqlx::Error> {
-    let mut tx = pool.begin().await?;
+    let mut tx = write_tx(pool).await?;
 
     let exists: bool =
         sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM ess_statements WHERE id = ?)")

@@ -56,6 +56,7 @@ use crate::domain::rollover;
 use crate::entities::corporate_action::{self, ActionKind};
 use crate::entities::sell::{self, AllocationInput};
 use crate::entities::trade::{self, Trade};
+use crate::infra::db::write_tx;
 use crate::infra::http::ApiError;
 use axum::{
     Json, Router,
@@ -126,7 +127,7 @@ pub fn router() -> Router<SqlitePool> {
 /// parameters: the action's terms and the holdings at its date determine
 /// everything.
 pub async fn db_demerge(pool: &SqlitePool, action_id: i64) -> Result<Demerge, DemergeError> {
-    let mut tx = pool.begin().await?;
+    let mut tx = write_tx(pool).await?;
 
     let action = match corporate_action::db_get_tx(&mut *tx, action_id).await? {
         Some(a) => a,

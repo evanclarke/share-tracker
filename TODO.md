@@ -170,9 +170,59 @@ concurrent writer, which for a single-user tool means startup or a job running a
   `POST /jobs/{name}` while you are entering a trade collides just the same).
 - **(d) Accept it** — a rare startup-only 500, already atomic, and document it.
 
-- [ ] Decision recorded and implemented
-- [ ] `scripts/ui-smoke.sh` dumps the server log when a **seed** request fails, not only when the
+**Decision (Evan, 2026-08-22): (a)**, write transactions take the lock up front. Rejected: retrying
+on 517 (b), narrowing the scheduler's startup writes (c), and accepting it (d).
+
+- [x] Decision recorded and implemented
+
+      Done 2026-08-23. `infra::db::write_tx(pool)` is the one way a write transaction is begun —
+      `pool.begin_with("BEGIN IMMEDIATE")`, with the reasoning in its doc comment — and all 39
+      write-side `pool.begin()` sites across 27 files now go through it: every file under
+      `src/entities/`, `src/infra/scheduler/db.rs`, and **`src/reports/snapshot.rs`**, the one
+      report that writes (it persists the price-dependent reports to `report_snapshots`; a
+      reports-are-readers split would have missed it). The other 20 report files stay deferred:
+      they never upgrade, so they cannot hit this, and taking the write lock up front would
+      serialise every report against every other for nothing. `src/domain/` turned out to begin no
+      transactions at all — it composes onto the caller's connection — so it needed no change.
+
+      `StoredSchedule::record` (`infra/scheduler/run.rs`), the `job_schedule` write that triggered
+      the bug, needed no change either: it writes through `db_insert_schedule`/`db_update_schedule`,
+      single statements executed straight on the pool. A lone statement is its own implicit
+      transaction, which takes the write lock immediately and gets plain `SQLITE_BUSY` — the one
+      the 5-second `busy_timeout` *does* retry. It was only ever the other side of the race.
+
+      Pinned by `infra::db::tests::write_side_modules_never_begin_a_deferred_transaction`, a source
+      scan in the spirit of the `.bind(x.to_string())` one: a deferred `BEGIN` anywhere under `src`
+      fails the test unless the file is named in `DEFERRED_BEGIN_ALLOWED`, which lists the 20
+      read-only report files one at a time (not `src/reports/`, so a *new* report is an offender
+      until someone decides which side it is on) and rejects an entry that has gone stale.
+
+      Measured on the reproduction from the diagnosis above — fresh server on a temp DB with the
+      real `schedule.cron`, poll until it answers, then immediately `PUT /listings/2`: **2 failures
+      in 160 runs before** (one `(code: 517)`, one `(code: 5)` — the same failed upgrade surfaces
+      as either), **0 in 200 after**.
+- [x] `scripts/ui-smoke.sh` dumps the server log when a **seed** request fails, not only when the
       server fails to start — the cause was logged and CI threw it away, which is what made this a
       half-hour diagnosis instead of a one-line one
-- [ ] A regression test: a write arriving concurrently with the scheduler's startup writes succeeds
+
+      Done 2026-08-23, in `scripts/ui-check.sh`, which is where ui-smoke's seeding happens: the
+      seed step's exit status is captured and a non-zero one prints the server log before exiting.
+      A failed seed reached a *running* server, so a 500's cause is in the log and nowhere else —
+      `ApiError::Internal` answers with an empty body by design. Verified by seeding a deliberately
+      invalid fixture: the run exits 1 and the log is printed.
+- [x] A regression test: a write arriving concurrently with the scheduler's startup writes succeeds
       rather than answering 500
+
+      Done 2026-08-23, as a pair. `infra::scheduler::tests::
+      a_write_arriving_during_scheduler_startup_is_served_not_locked_out` is the end-to-end one:
+      `spawn` over the real `schedule.cron` (repeated, so ~64 entry tasks claim `job_schedule` rows
+      at once), 15 concurrent `PUT /listings/…` fired immediately behind it, five startups, every
+      request required to answer 204. It is a race, not a scripted interleaving, so its power is
+      measured rather than assumed: against a build with `write_tx` reverted to a deferred `BEGIN`
+      it caught the regression **29 times in 30** (`PUT … -> 500`), and passed **30 in 30** with
+      the fix. The deterministic half is in `infra::db`:
+      `a_deferred_transaction_cannot_upgrade_after_a_concurrent_write` pins the failure itself
+      (immediate, not after the busy timeout), and
+      `write_tx_holds_off_a_concurrent_writer_instead_of_failing_to_upgrade` pins the fix — the
+      concurrent writer must still be blocked while the transaction holds the lock, which is
+      exactly what a deferred `BEGIN` cannot do, so it fails 100% of the time on a regressed build.

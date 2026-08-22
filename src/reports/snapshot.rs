@@ -73,6 +73,7 @@
 //! in bulk via `POST /report_snapshots/regenerate_all` /
 //! `POST /report_snapshots/regenerate_provisional`.
 
+use crate::infra::db::write_tx;
 use crate::infra::http::ApiError;
 use axum::{
     Json, Router,
@@ -544,7 +545,7 @@ pub async fn generate(
     let generated_at = Utc::now().to_rfc3339();
     let excluded_json =
         serde_json::to_string(&excluded_holdings).map_err(|e| GenerateError::Db(e.to_string()))?;
-    let mut tx = pool.begin().await?;
+    let mut tx = write_tx(pool).await?;
     for (kind, rows_json) in &payloads {
         sqlx::query(
             "INSERT INTO report_snapshots \

@@ -1,3 +1,4 @@
+use crate::infra::db::write_tx;
 use crate::infra::fetch::cause_chain;
 use crate::infra::http::{self, ApiError, CrudEntity};
 use axum::{
@@ -191,7 +192,7 @@ pub async fn import_from_content(
     content: &str,
 ) -> Result<ImportSummary, ImportError> {
     let entries = parse_registry(content)?;
-    let mut tx = pool.begin().await?;
+    let mut tx = write_tx(pool).await?;
     for entry in &entries {
         db_upsert(&mut *tx, entry).await?;
     }

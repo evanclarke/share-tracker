@@ -28,6 +28,7 @@
 use crate::domain::open_parcels;
 use crate::entities::amit_adjustment::{self, AmitAdjustment, AmitAdjustmentBody};
 use crate::entities::corporate_action;
+use crate::infra::db::write_tx;
 use crate::infra::decimal::row_dec;
 use crate::infra::http::ApiError;
 use axum::{
@@ -258,7 +259,7 @@ pub async fn db_generate(
     statement_id: i64,
     body: &GenerateBody,
 ) -> Result<GeneratedAdjustments, GenerateError> {
-    let mut tx = pool.begin().await?;
+    let mut tx = write_tx(pool).await?;
 
     let row = sqlx::query(
         "SELECT listing_id, holding_account_id, tax_year_end_date, units_held \

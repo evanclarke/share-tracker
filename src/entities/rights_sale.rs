@@ -42,6 +42,7 @@ use crate::entities::corporate_action::{
 };
 use crate::entities::rights_exercise::{db_held_at_record_date, db_rights_used, entitled_units};
 use crate::entities::trade::TradeType;
+use crate::infra::db::write_tx;
 use crate::infra::decimal::{Money, parse_dec, row_dec};
 use crate::infra::http::{self, ApiError};
 use axum::{
@@ -238,7 +239,7 @@ pub async fn db_sell_rights(
         return Err(SellRightsError::AllocationsDontSum);
     }
 
-    let mut tx = pool.begin().await?;
+    let mut tx = write_tx(pool).await?;
 
     let action = match corporate_action::db_get_tx(&mut *tx, action_id).await? {
         Some(a) => a,

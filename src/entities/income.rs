@@ -1,3 +1,4 @@
+use crate::infra::db::write_tx;
 use crate::infra::decimal::{Money, OptMoney};
 use crate::infra::http::{self, ApiError, CrudEntity};
 use axum::{
@@ -703,7 +704,7 @@ pub async fn db_upsert(pool: &SqlitePool, income: &Income) -> Result<(), UpsertE
         }
     }
 
-    let mut tx = pool.begin().await?;
+    let mut tx = write_tx(pool).await?;
 
     let existing: Option<Income> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {} FROM income WHERE id = ?",
@@ -939,7 +940,7 @@ pub enum DeleteOutcome {
 }
 
 pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<DeleteOutcome, sqlx::Error> {
-    let mut tx = pool.begin().await?;
+    let mut tx = write_tx(pool).await?;
 
     let links: Option<(Option<i64>, Option<i64>)> =
         sqlx::query_as("SELECT buyback_trade_id, reinvestment_trade_id FROM income WHERE id = ?")
