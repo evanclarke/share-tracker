@@ -19,11 +19,152 @@ use chrono::NaiveDate;
 use http_body_util::BodyExt;
 use rust_decimal::Decimal;
 use sqlx::SqlitePool;
+use std::sync::Arc;
 use tower::ServiceExt;
 
 /// Fresh in-memory database with migrations and seed data applied.
+///
+/// The 45 migration files are replayed **once** per test process, into a
+/// template database that is then dumped to a single SQL script (see
+/// [`schema_template`]); every call after the first builds its database from
+/// that script instead. Applying the migrations costs ~89 ms against the
+/// script's ~4 ms, and the suite calls this ~1500 times — over three
+/// CPU-minutes spent re-deriving one fixed schema, which the test parallelism
+/// was merely hiding (23 s wall clock over 267 s of CPU).
+///
+/// The script is the *whole* database, not just its DDL: seed rows,
+/// `_sqlx_migrations` (`infra::db`'s backup verification compares it against a
+/// backup's), and `sqlite_sequence` (migration 0045 seeds it for the audited
+/// `AUTOINCREMENT` tables, so a server-assigned id never reuses a deleted
+/// row's). `cached_schema_matches_the_migrated_schema` pins the two databases
+/// against each other, object by object and row by row.
 pub async fn test_pool() -> SqlitePool {
-    db::init(":memory:").await.unwrap()
+    let pool = db::unmigrated_pool(":memory:").await.unwrap();
+    sqlx::raw_sql(sqlx::AssertSqlSafe(schema_template().await))
+        .execute(&pool)
+        .await
+        .expect("the captured schema replays");
+    pool
+}
+
+/// The captured schema script, built on first use and shared by every later
+/// [`test_pool`] call in this process.
+///
+/// Held as an `Arc<str>` because that is the one shape `sqlx::AssertSqlSafe`
+/// takes without copying the whole script on every call.
+static SCHEMA_TEMPLATE: tokio::sync::OnceCell<Arc<str>> = tokio::sync::OnceCell::const_new();
+
+async fn schema_template() -> Arc<str> {
+    SCHEMA_TEMPLATE
+        .get_or_init(|| async {
+            let pool = db::init(":memory:").await.unwrap();
+            let script: Arc<str> = dump_database(&pool).await.into();
+            pool.close().await;
+            script
+        })
+        .await
+        .clone()
+}
+
+/// Dump a whole SQLite database — schema *and* contents — as a replayable SQL
+/// script, in the order `sqlite3 .dump` uses: every table's definition, then
+/// every table's rows, then the indexes, triggers and views.
+///
+/// Creating the triggers only after the data is loaded is deliberate: the
+/// audit-trail and snapshot-staleness triggers must not fire while the seed
+/// rows are being replayed, or the rebuilt database would differ from the
+/// migrated one it is standing in for.
+///
+/// `quote()` renders each value as the SQL literal that reads back identically
+/// — NULLs, text needing escaping, and `_sqlx_migrations`' checksum blobs
+/// included — so the script is exact rather than a formatted approximation.
+async fn dump_database(pool: &SqlitePool) -> String {
+    let mut out = String::new();
+
+    let tables: Vec<(String, String)> = sqlx::query_as(
+        "SELECT name, sql FROM sqlite_master \
+         WHERE type = 'table' AND sql IS NOT NULL ORDER BY rowid",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap();
+
+    for (name, sql) in &tables {
+        // SQLite creates and owns this one; it appears the moment the first
+        // AUTOINCREMENT table does, so replaying its CREATE would fail.
+        if name != SEQUENCE_TABLE {
+            out.push_str(sql);
+            out.push_str(";\n");
+        }
+    }
+
+    for (name, _) in tables.iter().filter(|(n, _)| n != SEQUENCE_TABLE) {
+        push_rows(pool, name, &mut out).await;
+    }
+    // Last: loading the seed rows above bumps the sequence counters of the
+    // AUTOINCREMENT tables among them, so the captured values are restored
+    // over the top rather than beside them.
+    if tables.iter().any(|(n, _)| n == SEQUENCE_TABLE) {
+        out.push_str("DELETE FROM sqlite_sequence;\n");
+        push_rows(pool, SEQUENCE_TABLE, &mut out).await;
+    }
+
+    let rest: Vec<String> = sqlx::query_scalar(
+        "SELECT sql FROM sqlite_master \
+         WHERE type IN ('index', 'trigger', 'view') AND sql IS NOT NULL ORDER BY rowid",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap();
+    for sql in &rest {
+        out.push_str(sql);
+        out.push_str(";\n");
+    }
+
+    out
+}
+
+/// SQLite's own AUTOINCREMENT bookkeeping table.
+const SEQUENCE_TABLE: &str = "sqlite_sequence";
+
+/// Append `table`'s rows as `INSERT` statements, batched so a 160-row seed
+/// calendar costs a handful of statements rather than 160.
+async fn push_rows(pool: &SqlitePool, table: &str, out: &mut String) {
+    let columns: Vec<String> = sqlx::query_scalar("SELECT name FROM pragma_table_info(?)")
+        .bind(table)
+        .fetch_all(pool)
+        .await
+        .unwrap();
+    let quoted: Vec<String> = columns.iter().map(|c| quote_ident(c)).collect();
+    let tuple = quoted
+        .iter()
+        .map(|c| format!("quote({c})"))
+        .collect::<Vec<_>>()
+        .join(" || ',' || ");
+    // Row order is preserved (`rowid` ascending), so the rebuilt table lays its
+    // rows out exactly as the migrated one did.
+    let rows: Vec<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT '(' || {tuple} || ')' FROM {table} ORDER BY rowid",
+        table = quote_ident(table)
+    )))
+    .fetch_all(pool)
+    .await
+    .unwrap();
+
+    const ROWS_PER_STATEMENT: usize = 128;
+    for chunk in rows.chunks(ROWS_PER_STATEMENT) {
+        out.push_str(&format!(
+            "INSERT INTO {} ({}) VALUES {};\n",
+            quote_ident(table),
+            quoted.join(","),
+            chunk.join(",")
+        ));
+    }
+}
+
+/// A SQLite identifier as a double-quoted literal.
+fn quote_ident(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
 }
 
 /// One request's outcome: the status and the raw body, kept together so a
@@ -922,6 +1063,160 @@ mod tests {
     use super::*;
     use crate::entities::exchange::Exchange;
     use serde_json::json;
+
+    /// The cached schema `test_pool` builds every database from must be the
+    /// database the 45 migrations produce — not approximately, exactly.
+    ///
+    /// So this builds one of each and compares the **whole** of `sqlite_master`:
+    /// every table, index, trigger and view, by name and by definition
+    /// (normalised for comments and whitespace). Object type matters as much as
+    /// object count here — this schema's correctness leans on its triggers (the
+    /// `row_history` audit pair on every audited table, and the
+    /// `*_stale_snapshots_*` sets), and a caching scheme that quietly dropped a
+    /// trigger would switch the audit trail off in every test while the suite
+    /// stayed green.
+    ///
+    /// Then it compares the two databases' full contents, which is what pins
+    /// the parts of the seed a schema comparison cannot see: the seeded
+    /// exchanges, holding accounts, currencies and exchange holidays,
+    /// `_sqlx_migrations` (`infra::db`'s backup verification compares a
+    /// backup's against the live database's), and `sqlite_sequence` (0045 seeds
+    /// it so a server-assigned id never reuses a deleted row's).
+    #[tokio::test]
+    async fn cached_schema_matches_the_migrated_schema() {
+        let cached = test_pool().await;
+        let migrated = db::init(":memory:").await.unwrap();
+
+        let cached_objects = schema_objects(&cached).await;
+        let migrated_objects = schema_objects(&migrated).await;
+
+        // Floors, so a comparison of two empty — or trigger-less — sets can
+        // never pass by vacuity. Deliberately well under the real counts
+        // (~40 tables, ~50 indexes, ~75 triggers as of migration 0045): the
+        // schema only ever grows, and this is a guard, not an inventory.
+        for (kind, least) in [("table", 30), ("index", 30), ("trigger", 50)] {
+            let found = migrated_objects.iter().filter(|o| o.0 == kind).count();
+            assert!(
+                found >= least,
+                "expected at least {least} {kind}s, got {found}"
+            );
+        }
+
+        let missing: Vec<_> = migrated_objects
+            .iter()
+            .filter(|o| !cached_objects.contains(o))
+            .collect();
+        let extra: Vec<_> = cached_objects
+            .iter()
+            .filter(|o| !migrated_objects.contains(o))
+            .collect();
+        assert!(
+            missing.is_empty() && extra.is_empty(),
+            "cached schema differs from the migrated one\nmissing: {missing:#?}\nextra: {extra:#?}"
+        );
+        assert_eq!(
+            cached_objects.len(),
+            migrated_objects.len(),
+            "same number of schema objects"
+        );
+
+        // …and the contents, row for row, table by table.
+        let tables: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+                .fetch_all(&migrated)
+                .await
+                .unwrap();
+        assert!(tables.contains(&"exchange_holidays".to_string()));
+        for table in &tables {
+            // `_sqlx_migrations` is compared below on the columns that are not
+            // per-run measurements.
+            if table == "_sqlx_migrations" {
+                continue;
+            }
+            let mut from_cache = String::new();
+            let mut from_migrations = String::new();
+            push_rows(&cached, table, &mut from_cache).await;
+            push_rows(&migrated, table, &mut from_migrations).await;
+            assert_eq!(
+                from_cache, from_migrations,
+                "table {table} differs between the cached and the migrated database"
+            );
+        }
+
+        // The migrations sqlx recorded must read back the same — same versions,
+        // same descriptions, same checksums, all successful. `installed_on` and
+        // `execution_time` are excluded on purpose: they are measurements of the
+        // run that applied them, and the cached database faithfully carries the
+        // template run's rather than inventing new ones.
+        let recorded = "SELECT version, description, success, hex(checksum) \
+                        FROM _sqlx_migrations ORDER BY version";
+        let from_cache: Vec<(i64, String, bool, String)> =
+            sqlx::query_as(recorded).fetch_all(&cached).await.unwrap();
+        let from_migrations: Vec<(i64, String, bool, String)> =
+            sqlx::query_as(recorded).fetch_all(&migrated).await.unwrap();
+        assert_eq!(from_cache, from_migrations, "_sqlx_migrations differs");
+        assert_eq!(from_cache.len(), 45, "every migration is recorded");
+
+        // Spelled out separately because it is the one piece of state a
+        // schema-only cache would silently lose, and two tests in
+        // `reports::row_history` depend on it.
+        let sequences: Vec<(String, i64)> =
+            sqlx::query_as("SELECT name, seq FROM sqlite_sequence ORDER BY name")
+                .fetch_all(&cached)
+                .await
+                .unwrap();
+        assert!(
+            sequences.len() >= 17,
+            "0045 seeds sqlite_sequence for the audited tables, got {sequences:?}"
+        );
+    }
+
+    /// Every row of `sqlite_master` as `(type, name, tbl_name, normalised sql)`,
+    /// sorted so the two databases can be compared as sets. `rootpage` is left
+    /// out — it is a physical page number, not part of the schema. Entries with
+    /// no `sql` (SQLite's own `sqlite_autoindex_*` behind a UNIQUE/PRIMARY KEY)
+    /// are kept: losing a uniqueness constraint would show up here and nowhere
+    /// else.
+    async fn schema_objects(pool: &SqlitePool) -> Vec<(String, String, String, String)> {
+        let rows: Vec<(String, String, String, Option<String>)> =
+            sqlx::query_as("SELECT type, name, tbl_name, sql FROM sqlite_master")
+                .fetch_all(pool)
+                .await
+                .unwrap();
+        let mut objects: Vec<(String, String, String, String)> = rows
+            .into_iter()
+            .map(|(t, n, tbl, sql)| {
+                (
+                    t,
+                    n,
+                    tbl,
+                    sql.as_deref().map(normalise_sql).unwrap_or_default(),
+                )
+            })
+            .collect();
+        objects.sort();
+        objects
+    }
+
+    /// A DDL statement with its comments removed and its whitespace collapsed,
+    /// so two spellings of the same definition compare equal. (String literals
+    /// containing `--` would be mangled too, but identically on both sides, so
+    /// the comparison stays sound.)
+    fn normalise_sql(sql: &str) -> String {
+        let mut out = String::with_capacity(sql.len());
+        let mut rest = sql;
+        while let Some(cut) = rest.find("--").or_else(|| rest.find("/*")) {
+            out.push_str(&rest[..cut]);
+            out.push(' ');
+            rest = if rest[cut..].starts_with("--") {
+                rest[cut..].find('\n').map_or("", |e| &rest[cut + e..])
+            } else {
+                rest[cut..].find("*/").map_or("", |e| &rest[cut + e + 2..])
+            };
+        }
+        out.push_str(rest);
+        out.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
 
     fn xtes() -> serde_json::Value {
         json!({

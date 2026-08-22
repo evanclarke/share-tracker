@@ -9,7 +9,12 @@ use std::{
     str::FromStr,
 };
 
-pub async fn init(db_path: &str) -> Result<SqlitePool, sqlx::Error> {
+/// How every pool in this application connects: create-if-missing, foreign keys
+/// enforced, and WAL for a file database (an in-memory one has no journal to
+/// configure). Factored out of [`init`] only so the test harness's cached-schema
+/// pool (`test_support::test_pool`) can open a database on *exactly* these
+/// options and differ from production in nothing but how the schema gets there.
+fn connect_options(db_path: &str) -> Result<SqliteConnectOptions, sqlx::Error> {
     let url = if db_path == ":memory:" {
         "sqlite::memory:".to_string()
     } else {
@@ -23,8 +28,21 @@ pub async fn init(db_path: &str) -> Result<SqlitePool, sqlx::Error> {
     if db_path != ":memory:" {
         opts = opts.journal_mode(SqliteJournalMode::Wal);
     }
+    Ok(opts)
+}
 
-    let pool = SqlitePool::connect_with(opts).await?;
+/// A pool on `db_path` with **no migrations run** — the connection half of
+/// [`init`] on its own. Test-only: it exists for `test_support::test_pool`,
+/// which replays a captured schema instead of the 45 migration files. Nothing
+/// on the production path may use it; [`init`] is the only way a real database
+/// is opened, and it always migrates.
+#[cfg(test)]
+pub async fn unmigrated_pool(db_path: &str) -> Result<SqlitePool, sqlx::Error> {
+    SqlitePool::connect_with(connect_options(db_path)?).await
+}
+
+pub async fn init(db_path: &str) -> Result<SqlitePool, sqlx::Error> {
+    let pool = SqlitePool::connect_with(connect_options(db_path)?).await?;
 
     let applied_before: Vec<i64> =
         sqlx::query_scalar("SELECT version FROM _sqlx_migrations WHERE success = TRUE")
