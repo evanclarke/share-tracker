@@ -343,7 +343,11 @@ async function dataTable(rows, columns, statusField, expandCfg, context, rowActi
   const labels = await columnLabelMaps(cols.concat(expandColumns(expandCfg)));
   const opts = { statusField: statusField, labels: labels };
   if (expandCfg) opts.expand = buildExpand(expandCfg, labels, context);
-  if (rowActions) {
+  // The Actions column appears only where some row actually has an action:
+  // a report answering rows of more than one shape (Row History, whose browse
+  // entries link into a row's own trail while that trail's own rows do not)
+  // would otherwise carry a permanently empty column.
+  if (rowActions && rows.some(function (r) { return rowActions(r).length > 0; })) {
     opts.actions = function (row) {
       return el('td', { class: 'actions' }, rowActions(row).map(rowActionLink));
     };
@@ -2219,7 +2223,11 @@ async function performancePanel() {
   return panel;
 }
 
-async function viewReport(report) {
+// `args` are the extra hash path segments (`#/r/<slug>/a/b`): a deep link
+// into a parameterised report, positionally prefilling its `params` and
+// running it on load. The Row History browse table links to itself this
+// way, to drill from a trail entry into that row's own history.
+async function viewReport(report, args) {
   setActiveNav('r:' + report.slug);
   const header = el('div', null, [
     el('h2', null, report.title),
@@ -2292,6 +2300,28 @@ async function viewReport(report) {
     return el('p', { class: 'hint' }, 'Figures assume ' + basis + '.');
   }
 
+  // The params form, once built — held here so a paged response can re-run it
+  // with the next cursor (see `pageNote`).
+  let paramsForm = null;
+
+  // A cursor-paged response says for itself whether more remains:
+  // `next_before_id` is non-null exactly when there are older entries (Row
+  // History's browse form). Field-driven, not slug-driven, like the basis
+  // note above; the button fills the report's `before_id` param and re-runs
+  // it, so continuing is a click rather than copying an id into the form.
+  function pageNote(rows) {
+    const cursor = rows && !Array.isArray(rows) && typeof rows === 'object' ? rows.next_before_id : null;
+    if (cursor == null) return null;
+    const btn = el('button', { type: 'button', class: 'link small' }, 'Load older \u2192');
+    btn.addEventListener('click', function () {
+      const inp = paramsForm && paramsForm.querySelector('[name="before_id"]');
+      if (!inp) return;
+      inp.value = String(cursor);
+      paramsForm.requestSubmit();
+    });
+    return el('p', { class: 'hint' }, ['Older entries remain beyond this page.', ' ', btn]);
+  }
+
   async function render(rows) {
     result.innerHTML = '';
     const asAt = asAtSummary(Array.isArray(rows) ? rows : [rows]);
@@ -2299,8 +2329,13 @@ async function viewReport(report) {
     const basis = basisNote(rows);
     if (basis) result.appendChild(basis);
     // Reports with `tables` return one object whose listed keys each render
-    // as a titled table (a non-array value renders as a one-row table).
-    if (report.tables) {
+    // as a titled table (a non-array value renders as a one-row table). The
+    // array check is what lets one report answer both shapes: Row History's
+    // browse form returns { entries, next_before_id }, while its single-row
+    // form returns the flat array of prior versions and falls through to the
+    // plain table below.
+    const more = pageNote(rows);
+    if (report.tables && !Array.isArray(rows)) {
       for (const t of report.tables) {
         const v = rows[t.key];
         const arr = Array.isArray(v) ? v : (v == null ? [] : [v]);
@@ -2313,11 +2348,13 @@ async function viewReport(report) {
         // (the what-if's `years` rows flatten in `NetCapitalGainYear`'s
         // `disposals`, always empty here since the drilldown belongs to the
         // main report, not the hypothetical dry-run).
-        result.appendChild(await dataTable(arr, t.columns || null, report.statusField, t.expand, rows));
+        result.appendChild(await dataTable(arr, t.columns || null, report.statusField, t.expand, rows, report.rowActions));
       }
+      if (more) result.appendChild(more);
       return;
     }
     result.appendChild(await dataTable(rows, report.columns || null, report.statusField, report.expand, null, report.rowActions));
+    if (more) result.appendChild(more);
   }
 
   if (report.method === 'GET') {
@@ -2328,14 +2365,28 @@ async function viewReport(report) {
 
   // Parameterised POST reports (the parcel optimiser, the pre-sale what-if):
   // the body comes from the configured `params` fields — the same field
-  // constructors the entity forms use — and the report runs on submit only
-  // (no auto-run: the inputs are required).
+  // constructors the entity forms use — and the report runs on submit only,
+  // since the inputs are required. Two exceptions run it for you: a deep link
+  // that carries the values in the hash, and a report declaring `autoRun`
+  // because every one of its fields is optional (Row History's browse page).
   if (report.params) {
     const form = el('form', { class: 'card' });
+    paramsForm = form;
     for (const f of report.params) form.appendChild(await buildFieldInput(f));
     form.appendChild(el('div', { class: 'form-actions' }, [
       el('button', { type: 'submit', class: 'primary' }, 'Run report'),
     ]));
+    // A deep link (`#/r/<slug>/a/b`) prefills the params positionally and
+    // runs the report on load — how a Row History browse entry drills into
+    // that row's own trail.
+    const deepLink = (args || []).length > 0;
+    if (deepLink) {
+      report.params.forEach(function (f, i) {
+        if (args[i] == null || args[i] === '') return;
+        const inp = form.querySelector('[name="' + f.name + '"]');
+        if (inp) inp.value = decodeURIComponent(args[i]);
+      });
+    }
     form.addEventListener('submit', async function (ev) {
       ev.preventDefault();
       const body = {};
@@ -2350,6 +2401,10 @@ async function viewReport(report) {
       }
     });
     setMain(el('div', null, [header, shortcuts, panel, form, result]));
+    // `autoRun` (config.js) is for a params report whose fields are *all*
+    // optional — Row History, which opens on the browse page and narrows from
+    // there. A report with a required input still waits for the form.
+    if (deepLink || report.autoRun) form.requestSubmit();
     return;
   }
 
@@ -2455,7 +2510,7 @@ async function render() {
         return await viewSnapshots();
       }
       if (report.custom === 'tax-report') return await viewTaxReport();
-      return await viewReport(report);
+      return await viewReport(report, parts.slice(2));
     }
     throw new Error('Not found');
   } catch (e) {

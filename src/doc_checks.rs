@@ -38,7 +38,20 @@ fn row_history_audit_trail_documented() {
     assert!(API_MD.contains("### Row history"));
     assert!(API_MD.contains("POST /reports/row_history"));
     assert!(API_MD.contains("a row-history request naming a table that is not audited"));
-    // README: the feature line and the ATO citation.
+    // The browse form (SCENARIOS U-b): both request shapes, the uniform
+    // entry, the cursor, the bounded page, and the ordering rule that makes
+    // paging safe.
+    assert!(API_MD.contains("**Recent changes (browse).**"));
+    assert!(
+        API_MD.contains("`{\"entries\": […], \"page_size\": n, \"next_before_id\": id | null}`")
+    );
+    assert!(API_MD.contains("**uniform across tables**"));
+    assert!(API_MD.contains("page size, `1`–`1000`, default `100`"));
+    assert!(API_MD.contains("the **cursor**: return only entries older than this trail id"));
+    assert!(API_MD.contains("newest first by the trail's own `id`**, never by `changed_at`"));
+    assert!(API_MD.contains("`null` **exactly when the page reached the end of the trail**"));
+    // README: the feature line, the browse mode, and the ATO citation.
+    assert!(README_MD.contains("**browses the recent changes across every audited table**"));
     assert!(README_MD.contains("**Append-only audit trail**"));
     assert!(README_MD.contains("docs/ato/cgt-keeping-records-shares.md"));
     assert!(

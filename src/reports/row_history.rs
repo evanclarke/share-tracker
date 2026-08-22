@@ -3,14 +3,26 @@
 //! guidance mirrored in `docs/ato/cgt-keeping-records-shares.md`).
 //!
 //! Database triggers record the prior row on every UPDATE and DELETE of an
-//! audited table into `row_history`; this report returns one row's entries so
-//! an accidental edit to a historical fact can be noticed and reconstructed.
+//! audited table into `row_history`; this report reads it back two ways:
+//!
+//! - **one row's trail** (`{table, row_id}`) — every prior version of one
+//!   record, so an accidental edit to a historical fact can be noticed and
+//!   reconstructed;
+//! - **recent changes** (no `row_id`) — the newest entries across every
+//!   audited table, cursor-paged. A multi-row operation writes entries for
+//!   rows the user never named — a demerger's replacement Buys, a cascade's
+//!   attachments, the price rows a bulk clear removes — and those ids appear
+//!   in no list endpoint afterwards, so the single-row form alone can only be
+//!   asked about a row you already know the id of (SCENARIOS U-b). Browsing
+//!   by *when it happened* is the way in: find the operation, then drill into
+//!   the row's own trail with the `table_name`/`row_id` the entry carries.
+//!
 //! Read-only — the trail itself is written by the triggers alone and is
 //! append-only (enforced in the schema), so there is nothing here to write.
 
 use crate::infra::http::ApiError;
 use axum::{Json, Router, extract::State, routing::post};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sqlx::{Row, SqlitePool};
 
@@ -48,18 +60,80 @@ pub const AUDITED_TABLES: [&str; 22] = [
     "exchange_holidays",
 ];
 
+/// Browse page size when the request names none.
+pub const DEFAULT_BROWSE_LIMIT: i64 = 100;
+/// The largest page the browse form will answer: past this the response is a
+/// refusal naming the cap, never a silently truncated page.
+pub const MAX_BROWSE_LIMIT: i64 = 1000;
+
 #[derive(Debug, Deserialize)]
 pub struct RowHistoryRequest {
-    /// One of [`AUDITED_TABLES`]; anything else is rejected 422.
-    pub table: String,
+    /// One of [`AUDITED_TABLES`]; anything else is rejected 422. Required
+    /// alongside `row_id` (a row id means nothing without the table it is an
+    /// id in); optional on its own, where it filters the browse page to one
+    /// table. Omitted entirely, the browse page spans every audited table.
+    #[serde(default)]
+    pub table: Option<String>,
     /// The audited row's `id` — for `tax_year_settings`, whose identity *is*
     /// the financial year, that year. A row with no recorded history (never
     /// updated or deleted since the trail began) returns an empty array.
-    pub row_id: i64,
+    /// Omitted, the request is the browse form.
+    #[serde(default)]
+    pub row_id: Option<i64>,
+    /// Browse cursor: return the entries **older** than this trail id (the
+    /// `next_before_id` of the page before). A cursor rather than an offset
+    /// because the trail is append-only — new entries land at the top, which
+    /// would shift an offset page under a concurrent write.
+    #[serde(default)]
+    pub before_id: Option<i64>,
+    /// Browse page size: 1..=[`MAX_BROWSE_LIMIT`], default
+    /// [`DEFAULT_BROWSE_LIMIT`].
+    #[serde(default)]
+    pub limit: Option<i64>,
 }
 
 pub fn router() -> Router<SqlitePool> {
     Router::new().route("/reports/row_history", post(report))
+}
+
+/// One browse entry: the trail's own uniform columns, and nothing else.
+///
+/// Deliberately *not* the single-row form's flattened old row: entries from
+/// different tables have different columns, and every data table in the web
+/// UI is one `filterableTable` with one column set. `old_row` is not
+/// summarised either — a summary would have to choose what to show and could
+/// misrepresent what changed — so the prior values stay one drill-down away,
+/// through the single-row form this entry names in full (`table_name` +
+/// `row_id`).
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct BrowseEntry {
+    #[sqlx(rename = "id")]
+    pub history_id: i64,
+    pub table_name: String,
+    pub row_id: i64,
+    pub operation: String,
+    pub changed_at: String,
+}
+
+/// A browse page: the entries plus what it took to get them and how to
+/// continue. `next_before_id` is `None` exactly when the page reached the end
+/// of the trail, so "there is more" is a stated fact rather than something
+/// the caller has to infer from a full-looking page.
+#[derive(Debug, Serialize)]
+pub struct RowHistoryPage {
+    pub entries: Vec<BrowseEntry>,
+    pub page_size: i64,
+    pub next_before_id: Option<i64>,
+}
+
+/// The two response shapes of the one endpoint, untagged so each serialises
+/// as itself: the single-row trail is the flat array it has always been, and
+/// the browse page is an object (it carries the cursor as well as the rows).
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+pub enum RowHistoryResponse {
+    Row(Vec<Map<String, Value>>),
+    Page(RowHistoryPage),
 }
 
 /// One (table, row)'s audit entries, newest first. Each entry flattens the
@@ -105,27 +179,101 @@ pub async fn db_row_history(
         .collect()
 }
 
+/// One page of the trail, newest first, across every audited table (or one,
+/// when `table` is given). Ordered by the trail's own `id`, never
+/// `changed_at`: every row a single statement changes carries the same
+/// timestamp to the millisecond (SQLite's `'now'` is fixed for the duration
+/// of one statement), so a multi-row operation's entries tie — and paging a
+/// non-total order silently skips or repeats rows. Nor is the converse safe:
+/// `'now'` is *not* fixed across a transaction, so two statements of one
+/// operation can land on different milliseconds (measured 2026-08-22:
+/// 227 ms apart inside one transaction). The id is the only total,
+/// write-order key the trail has. One query, so no read transaction is
+/// needed to see a consistent snapshot.
+pub async fn db_browse_row_history(
+    pool: &SqlitePool,
+    table: Option<&str>,
+    before_id: Option<i64>,
+    limit: i64,
+) -> Result<RowHistoryPage, sqlx::Error> {
+    // One row beyond the page: its presence is what says more entries exist,
+    // and it is dropped before answering.
+    let mut entries = sqlx::query_as::<_, BrowseEntry>(
+        "SELECT id, table_name, row_id, operation, changed_at FROM row_history \
+         WHERE (? IS NULL OR table_name = ?) AND (? IS NULL OR id < ?) \
+         ORDER BY id DESC LIMIT ?",
+    )
+    .bind(table)
+    .bind(table)
+    .bind(before_id)
+    .bind(before_id)
+    .bind(limit + 1)
+    .fetch_all(pool)
+    .await?;
+
+    let next_before_id = if entries.len() as i64 > limit {
+        entries.truncate(limit as usize);
+        entries.last().map(|e| e.history_id)
+    } else {
+        None
+    };
+    Ok(RowHistoryPage {
+        entries,
+        page_size: limit,
+        next_before_id,
+    })
+}
+
 async fn report(
     State(pool): State<SqlitePool>,
     Json(req): Json<RowHistoryRequest>,
-) -> Result<Json<Vec<Map<String, Value>>>, ApiError> {
-    if !AUDITED_TABLES.contains(&req.table.as_str()) {
+) -> Result<Json<RowHistoryResponse>, ApiError> {
+    if let Some(table) = &req.table
+        && !AUDITED_TABLES.contains(&table.as_str())
+    {
         return Err(ApiError::Unprocessable(format!(
             "'{}' is not an audited table (one of: {})",
-            req.table,
+            table,
             AUDITED_TABLES.join(", ")
         )));
     }
-    db_row_history(&pool, &req.table, req.row_id)
+
+    if let Some(row_id) = req.row_id {
+        let Some(table) = req.table.as_deref() else {
+            return Err(ApiError::Unprocessable(
+                "'row_id' needs the 'table' it is an id in; omit both to browse the recent changes across every audited table".into(),
+            ));
+        };
+        // Browse-only parameters, refused rather than ignored: one row's
+        // trail is returned whole, so a cursor or a page size asked for here
+        // would be a request the answer does not honour.
+        if req.before_id.is_some() || req.limit.is_some() {
+            return Err(ApiError::Unprocessable(
+                "'before_id' and 'limit' page the browse form; one row's trail is returned in full, so omit 'row_id' to use them".into(),
+            ));
+        }
+        return db_row_history(&pool, table, row_id)
+            .await
+            .map(|entries| Json(RowHistoryResponse::Row(entries)))
+            .map_err(ApiError::from);
+    }
+
+    let limit = req.limit.unwrap_or(DEFAULT_BROWSE_LIMIT);
+    if !(1..=MAX_BROWSE_LIMIT).contains(&limit) {
+        return Err(ApiError::Unprocessable(format!(
+            "'limit' must be between 1 and {MAX_BROWSE_LIMIT} (default {DEFAULT_BROWSE_LIMIT}); got {limit}"
+        )));
+    }
+    db_browse_row_history(&pool, req.table.as_deref(), req.before_id, limit)
         .await
-        .map(Json)
+        .map(|page| Json(RowHistoryResponse::Page(page)))
         .map_err(ApiError::from)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::entities::{sell, trade};
+    use crate::entities::{listing, sell, trade};
     use crate::test_support::{self, ApiClient, allocate, test_pool, ymd};
     use axum::http::StatusCode;
     use rust_decimal::Decimal;
@@ -345,6 +493,340 @@ mod tests {
         assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
         let msg = resp.text();
         assert!(msg.contains("not an audited table"), "{msg}");
+    }
+
+    // ---- browse form (SCENARIOS U-b) ------------------------------------
+    //
+    // The single-row form can only be asked about a row whose id you already
+    // know. A multi-row operation writes entries for rows the user never
+    // named — a demerger's replacement Buys, a cascade's attachments — and
+    // those ids are in no list endpoint afterwards, so the way in is *when it
+    // happened*: the newest entries across every audited table, cursor-paged.
+
+    /// Set up a trail spanning three tables in a known order: a trade edit,
+    /// a listing edit, then a Sell delete (which takes its allocation with
+    /// it, so that one operation writes two entries sharing a `changed_at`).
+    async fn seed_mixed_trail(pool: &SqlitePool) {
+        test_support::listing(1).insert(pool).await;
+        test_support::buy(1, 1)
+            .qty(Decimal::from(100))
+            .insert(pool)
+            .await;
+        test_support::sell(2, 1)
+            .qty(Decimal::from(40))
+            .insert(pool)
+            .await;
+        allocate(pool, 1, 2, 1, Decimal::from(40)).await;
+
+        let mut edited = trade::db_get(pool, 1).await.unwrap().unwrap();
+        edited.quantity = Decimal::from(150);
+        trade::db_upsert(pool, &edited).await.unwrap();
+
+        let mut listing = listing::db_get(pool, 1).await.unwrap().unwrap();
+        listing.name = "Renamed".into();
+        listing::db_upsert(pool, &listing).await.unwrap();
+
+        sell::db_delete_sell(pool, 2).await.unwrap();
+    }
+
+    fn page(resp: &crate::test_support::ApiResponse) -> Value {
+        assert_eq!(resp.status, StatusCode::OK);
+        resp.json()
+    }
+
+    #[tokio::test]
+    async fn browse_returns_entries_across_tables_newest_first() {
+        let pool = test_pool().await;
+        seed_mixed_trail(&pool).await;
+
+        let client = ApiClient::over(router().with_state(pool.clone()));
+        let body = page(&client.post_raw("/reports/row_history", "{}").await);
+        let entries = body["entries"].as_array().unwrap();
+
+        // Four entries over three tables: the Sell delete's pair, then the
+        // listing edit, then the trade edit.
+        assert_eq!(entries.len(), 4, "{entries:#?}");
+        let tables: Vec<&str> = entries
+            .iter()
+            .map(|e| e["table_name"].as_str().unwrap())
+            .collect();
+        assert_eq!(tables[2], "listings");
+        assert_eq!(tables[3], "trades");
+        let mut newest_two = [tables[0], tables[1]];
+        newest_two.sort_unstable();
+        assert_eq!(
+            newest_two,
+            ["parcel_allocations", "trades"],
+            "the Sell delete's own two entries are the newest"
+        );
+
+        // Uniform across tables: the trail's own columns and nothing else, so
+        // one table renders them all. The prior values stay one drill-down
+        // away, through the (table_name, row_id) each entry names.
+        for e in entries {
+            let keys: Vec<&String> = e.as_object().unwrap().keys().collect();
+            assert_eq!(
+                keys,
+                [
+                    "history_id",
+                    "table_name",
+                    "row_id",
+                    "operation",
+                    "changed_at"
+                ],
+                "browse entries carry no flattened old row: {e:#?}"
+            );
+        }
+
+        // Ordered on the trail's own id — total and deterministic. Ordering
+        // on `changed_at` would not be: every row one statement deletes
+        // carries the same timestamp to the millisecond (see the demerger
+        // test below), a tie the database could break either way.
+        let ids: Vec<i64> = entries
+            .iter()
+            .map(|e| e["history_id"].as_i64().unwrap())
+            .collect();
+        let mut descending = ids.clone();
+        descending.sort_unstable_by(|a, b| b.cmp(a));
+        assert_eq!(ids, descending, "newest first, by trail id");
+
+        // Nothing more to fetch: the whole trail fitted on the page.
+        assert_eq!(body["next_before_id"], Value::Null);
+        assert_eq!(body["page_size"], DEFAULT_BROWSE_LIMIT);
+    }
+
+    #[tokio::test]
+    async fn browse_pages_by_cursor_and_says_when_more_remain() {
+        let pool = test_pool().await;
+        seed_mixed_trail(&pool).await;
+        let client = ApiClient::over(router().with_state(pool.clone()));
+
+        let first = page(
+            &client
+                .post_raw("/reports/row_history", r#"{"limit": 2}"#)
+                .await,
+        );
+        let ids = |body: &Value| -> Vec<i64> {
+            body["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|e| e["history_id"].as_i64().unwrap())
+                .collect()
+        };
+        let first_ids = ids(&first);
+        assert_eq!(first_ids.len(), 2);
+        assert_eq!(first["page_size"], 2);
+        // More entries exist, and the response says so rather than just
+        // stopping — the cursor to continue with is the last id on the page.
+        assert_eq!(first["next_before_id"], first_ids[1]);
+
+        let cursor = first_ids[1];
+        let second = page(
+            &client
+                .post_raw(
+                    "/reports/row_history",
+                    &format!(r#"{{"limit": 2, "before_id": {cursor}}}"#),
+                )
+                .await,
+        );
+        let second_ids = ids(&second);
+        assert_eq!(second_ids.len(), 2);
+        assert!(
+            second_ids.iter().all(|id| *id < cursor),
+            "a cursor page is strictly older: {second_ids:?}"
+        );
+        assert_eq!(
+            second["next_before_id"],
+            Value::Null,
+            "the trail ended on this page"
+        );
+
+        let mut all = first_ids;
+        all.extend(second_ids);
+        all.sort_unstable();
+        all.dedup();
+        assert_eq!(all.len(), 4, "the pages partition the trail, no repeats");
+    }
+
+    #[tokio::test]
+    async fn browse_filters_to_one_table_and_refuses_a_bad_request() {
+        let pool = test_pool().await;
+        seed_mixed_trail(&pool).await;
+        let client = ApiClient::over(router().with_state(pool.clone()));
+
+        // `table` without `row_id` is a filter, not a lookup.
+        let body = page(
+            &client
+                .post_raw("/reports/row_history", r#"{"table": "trades"}"#)
+                .await,
+        );
+        let entries = body["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().all(|e| e["table_name"] == "trades"));
+
+        // The audited-table check still applies to the filter.
+        let resp = client
+            .post_raw("/reports/row_history", r#"{"table": "sqlite_master"}"#)
+            .await;
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(resp.text().contains("not an audited table"));
+
+        // A row id means nothing without the table it is an id in.
+        let resp = client
+            .post_raw("/reports/row_history", r#"{"row_id": 1}"#)
+            .await;
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(resp.text().contains("needs the 'table'"), "{}", resp.text());
+
+        // Browse-only parameters are refused on the single-row form rather
+        // than silently ignored.
+        let resp = client
+            .post_raw(
+                "/reports/row_history",
+                r#"{"table": "trades", "row_id": 1, "limit": 5}"#,
+            )
+            .await;
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            resp.text().contains("page the browse form"),
+            "{}",
+            resp.text()
+        );
+
+        // The page size is bounded, and out-of-range is a refusal naming the
+        // cap — never a silently truncated page.
+        for limit in [0, MAX_BROWSE_LIMIT + 1] {
+            let resp = client
+                .post_raw("/reports/row_history", &format!(r#"{{"limit": {limit}}}"#))
+                .await;
+            assert_eq!(
+                resp.status,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "limit {limit}"
+            );
+            assert!(
+                resp.text().contains(&MAX_BROWSE_LIMIT.to_string()),
+                "{}",
+                resp.text()
+            );
+        }
+    }
+
+    /// The case that raised this (SCENARIOS U-b): deleting a demerger's
+    /// closing Sell removes the whole group — including the replacement Buys
+    /// the demerge itself created and the allocation it wrote, rows whose ids
+    /// the user never saw and which are in no list endpoint afterwards. The
+    /// browse form finds them from *when it happened* alone, and each entry
+    /// names the (table, row_id) that drills into its own trail.
+    #[tokio::test]
+    async fn a_demerger_group_delete_is_findable_without_knowing_any_ids() {
+        let pool = test_pool().await;
+        test_support::listing(1).insert(&pool).await;
+        test_support::listing(2).ticker("DMG").insert(&pool).await;
+        test_support::buy(1, 1)
+            .date(ymd(2024, 1, 10))
+            .settlement(ymd(2024, 1, 10))
+            .qty(Decimal::from(100))
+            .insert(&pool)
+            .await;
+
+        let client = ApiClient::full(&pool);
+        client
+            .put_ok(
+                "/corporate_actions/7",
+                &serde_json::json!({
+                    "listing_id": 1, "date": ymd(2024, 6, 1), "action_type": "Demerger",
+                    "demerger_listing_id": 2, "demerger_new_units": "1",
+                    "demerger_held_units": "5", "demerger_cost_base_pct": "20",
+                }),
+            )
+            .await;
+        let resp = client
+            .post("/corporate_actions/7/demerge", &serde_json::json!({}))
+            .await;
+        assert_eq!(resp.status, StatusCode::CREATED);
+        let demerge: Value = resp.json();
+        // The only id the user ever names: the closing Sell, which is the one
+        // row of the group any list endpoint shows.
+        let sell_id = demerge["sell"]["id"].as_i64().unwrap();
+        let created: Vec<i64> = demerge["head_replacements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .chain(demerge["demerged_replacements"].as_array().unwrap())
+            .map(|t| t["id"].as_i64().unwrap())
+            .collect();
+        assert_eq!(created.len(), 2, "one head + one demerged replacement Buy");
+
+        assert_eq!(
+            client.delete(&format!("/sells/{sell_id}")).await.status,
+            StatusCode::NO_CONTENT
+        );
+        // The created rows really are gone from every list endpoint: only
+        // the original Buy is left, so nothing names the ids the demerge
+        // minted.
+        let listed: Vec<i64> = client
+            .get_json::<Vec<Value>>("/trades")
+            .await
+            .iter()
+            .map(|t| t["id"].as_i64().unwrap())
+            .collect();
+        assert_eq!(listed, vec![1], "the whole group went with the Sell");
+
+        // Browse: no ids, no table — just what changed most recently. The
+        // demerge itself only INSERTed (INSERTs are not audited), so the
+        // whole trail is the one delete: four entries over two tables.
+        let body: Value = client
+            .post_json("/reports/row_history", &serde_json::json!({}))
+            .await;
+        let entries = body["entries"].as_array().unwrap();
+        assert_eq!(
+            entries.len(),
+            4,
+            "one delete, four rows recorded: {entries:#?}"
+        );
+        let found: Vec<i64> = entries
+            .iter()
+            .filter(|e| e["table_name"] == "trades")
+            .map(|e| e["row_id"].as_i64().unwrap())
+            .collect();
+        for id in created.iter().chain(std::iter::once(&sell_id)) {
+            assert!(
+                found.contains(id),
+                "the demerge-created trade {id} is reachable from the browse page: {found:?}"
+            );
+        }
+        assert!(
+            entries
+                .iter()
+                .any(|e| e["table_name"] == "parcel_allocations"),
+            "the allocation the demerge wrote is on the page too: {entries:#?}"
+        );
+        // Why the ordering is on the trail's own id: the two replacement Buys
+        // go in one DELETE statement, so their entries carry the same
+        // `changed_at` to the millisecond — a total order needs the id.
+        let stamps: Vec<&str> = entries
+            .iter()
+            .filter(|e| created.contains(&e["row_id"].as_i64().unwrap()))
+            .map(|e| e["changed_at"].as_str().unwrap())
+            .collect();
+        assert_eq!(stamps.len(), 2);
+        assert_eq!(stamps[0], stamps[1], "one statement, one timestamp");
+
+        // Drill in with what the entry itself carries: the prior row comes
+        // back from the single-row form, ids and all.
+        let unknown = created[0];
+        let trail: Vec<Map<String, Value>> = client
+            .post_json(
+                "/reports/row_history",
+                &serde_json::json!({ "table": "trades", "row_id": unknown }),
+            )
+            .await;
+        assert_eq!(trail.len(), 1);
+        assert_eq!(trail[0]["operation"], "DELETE");
+        assert_eq!(trail[0]["id"], unknown);
+        assert_eq!(trail[0]["trade_type"], "Buy");
     }
 
     /// Every audited table is wired end to end: an UPDATE and a DELETE on a

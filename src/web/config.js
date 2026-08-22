@@ -634,10 +634,26 @@ export const REPORTS = [
   {
     slug: 'row-history', title: 'Row History', api: '/reports/row_history', method: 'POST',
     menu: 'Jobs',
-    desc: 'The append-only audit trail: every past version of one record, newest first. Database triggers capture the prior values whenever an audited row is edited or deleted, so an accidental change to a historical fact can be noticed and reconstructed; entries are kept forever and nothing can rewrite them. No entries = the row has never been changed since the trail began.',
+    desc: 'The append-only audit trail: every past version of a record, newest first. Database triggers capture the prior values whenever an audited row is edited or deleted, so an accidental change to a historical fact can be noticed and reconstructed; entries are kept forever and nothing can rewrite them. Run it with no Row ID to browse the recent changes across every audited table \u2014 the way to find an operation that changed rows you never named (a demerger group, a cascade, a bulk price clear), whose ids appear in no list afterwards; each entry then links through to that row\u2019s own trail. With a Row ID, no entries = the row has never been changed since the trail began.',
+    // The browse form answers an object ({ entries, page_size,
+    // next_before_id }), rendered by `tables`; the single-row form answers a
+    // flat array of prior versions and falls through to the plain report
+    // table (viewReport applies `tables` to object responses only).
+    tables: [{ key: 'entries', title: 'Recent changes' }],
+    // Every param is optional, so the screen opens on the browse page — the
+    // form is there to narrow it (one table) or to look one row up.
+    autoRun: true,
+    // A browse row names the (table, row_id) that drills into its own trail:
+    // the deep link prefills this same screen's params and runs it.
+    rowActions: function (row) {
+      if (row.table_name == null) return []; // a single row's trail: no drill-in
+      return [{ label: 'Trail', href: '#/r/row-history/' + encodeURIComponent(row.table_name) + '/' + encodeURIComponent(row.row_id) }];
+    },
     params: [
       // Must list exactly the audited tables (reports::row_history::AUDITED_TABLES;
-      // a web.rs test pins this select's options to that const).
+      // a web.rs test pins this select's options to that const). Optional:
+      // blank browses every audited table, and it is a filter rather than a
+      // lookup key unless a Row ID is given too.
       sel('table', 'Table', [
         'trades', 'parcel_allocations', 'income', 'interest_income',
         'amma_statements', 'amit_adjustments', 'ess_statements', 'transfers',
@@ -646,8 +662,9 @@ export const REPORTS = [
         'cgt_settings', 'attachments', 'listings', 'listing_renames',
         'closing_prices', 'tax_year_settings', 'rba_fx_rates',
         'exchange_holidays',
-      ], { required: true, default: 'trades' }),
-      int('row_id', 'Row ID', { required: true, hint: "The record's id as shown in its entity list — for tax_year_settings, the financial year itself (e.g. 2026)." }),
+      ], { optional: true, hint: 'Blank browses every audited table. With a Row ID, the table that id belongs to.' }),
+      int('row_id', 'Row ID', { hint: 'Blank to browse recent changes across the whole trail \u2014 the only way in for a row created and destroyed by an operation, which no list shows. Otherwise the audited row\u2019s own id: the id column of its entity list while it exists, or the Row ID an entry here carries once it is gone \u2014 for tax_year_settings, the financial year itself (e.g. 2026).' }),
+      int('before_id', 'Older than (history id)', { hint: 'Browse cursor: show the entries older than this trail entry. The \u201cLoad older\u201d button below the table fills it in.' }),
     ],
   },
 ];

@@ -586,6 +586,19 @@ mod tests {
                 "table picker missing {table}"
             );
         }
+        // …and the same screen browses the trail with no row id at all
+        // (SCENARIOS U-b): the cursor param, the paged response's own
+        // continuation field, and the drill-in deep link a browse entry
+        // carries back into this screen.
+        assert!(js.contains("'before_id'"));
+        assert!(js.contains("next_before_id"));
+        assert!(js.contains("'#/r/row-history/'"));
+        // The row-id hint no longer sends the user to a list the row it is
+        // about is not in — a deleted row has no entity-list entry.
+        assert!(
+            !js.contains("as shown in its entity list"),
+            "the Row ID hint still points at the entity list"
+        );
     }
 
     #[tokio::test]

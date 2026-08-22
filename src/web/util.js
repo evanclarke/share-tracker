@@ -668,6 +668,14 @@ function humanizeLabel(name) {
 // qualifier, because their amounts are in the row's own currency column.
 const COLUMN_LABELS = {
   exchange_mic: 'Exchange',
+  // Row history's own three identity columns. The default humaniser drops a
+  // trailing "_id" (right for a foreign key, whose cell shows the referenced
+  // row's *name*) — but these cells show the raw ids themselves, and they are
+  // what the Row History form is filled in with, so they read as the form's
+  // own field labels: "History ID", "Table", "Row ID".
+  history_id: 'History ID',
+  table_name: 'Table',
+  row_id: 'Row ID',
   // The rename chain's before/after exchange columns: kept in step with
   // exchange_mic above rather than humanised to "Old exchange MIC".
   old_exchange_mic: 'Old exchange',

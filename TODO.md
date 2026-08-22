@@ -180,15 +180,74 @@ user never saw.
 **Decision (Evan, 2026-08-22): (a), the browse mode.** Rejected: timestamp grouping (it needs a
 foothold the user does not have), both, and documenting it.
 
-- [ ] `POST /reports/row_history` returns a newest-first page of entries across every audited table
+- [x] `POST /reports/row_history` returns a newest-first page of entries across every audited table
       when no `row_id` is given, keeping the existing single-row behaviour unchanged when one is
       — paged, so a large trail stays bounded on this path
-- [ ] The Row History screen reaches it without a row id, and the `row_id` field's hint stops
+- [x] The Row History screen reaches it without a row id, and the `row_id` field's hint stops
       implying the entity list is the only way in
-- [ ] `docs/API.md`'s Row history section documents the browse form and its paging
-- [ ] Regression tests: the browse form returns entries across tables newest-first and pages; a
+- [x] `docs/API.md`'s Row history section documents the browse form and its paging
+- [x] Regression tests: the browse form returns entries across tables newest-first and pages; a
       multi-row operation (a demerger group delete) is findable through it without knowing any of
       the created rows' ids
+
+Done 2026-08-22. `POST /reports/row_history` now answers two shapes, chosen by whether the body
+names a `row_id`:
+
+- **One row's trail** — unchanged, byte for byte: the same flat array of prior versions, each
+  flattening the audited table's own columns behind `history_id`/`operation`/`changed_at`. `table`
+  is still required alongside a `row_id` (a row id means nothing without the table it is an id in),
+  and the existing tests were not touched.
+- **Recent changes** (`{}`) — an object, `{entries, page_size, next_before_id}`, whose entries are
+  **uniform across tables**: `history_id`, `table_name`, `row_id`, `operation`, `changed_at`, and
+  nothing else. The flat shape could not be reused — rows of `trades` and `parcel_allocations` have
+  different columns and the UI renders every data table through one `filterableTable` with one
+  column set — and `old_row` is deliberately neither flattened nor summarised: a summary would have
+  to choose what to show, and could misrepresent what changed. The prior values stay one drill-down
+  away, through the `(table_name, row_id)` each entry names in full.
+
+Paging is a **cursor**, not an offset: `before_id` returns the entries older than that trail id,
+`limit` defaults to 100 and is bounded at 1000 (outside that is a 422 naming the cap, never a
+silently truncated page), and `next_before_id` is null *exactly* when the page reached the end of
+the trail — so "more remains" is stated, not inferred from a full-looking page. The trail is
+append-only, so new entries land at the top and an offset page would shift under a concurrent
+write. `table` without a `row_id` filters the page to one audited table (still 422 if it is not
+one); `before_id`/`limit` alongside a `row_id` are refused rather than ignored (one row's trail is
+returned whole).
+
+UI: the same screen, still one config-driven `REPORTS` entry. Both params became optional, a
+`before_id` param joined them, and the screen `autoRun`s — every field is optional, so it opens on
+the browse page and the form narrows it. The browse object renders through the existing `tables`
+mechanism (`viewReport` now applies `tables` to object responses only, so the single-row array
+falls through to the plain table as before), each browse row carries a **Trail** link to
+`#/r/row-history/<table>/<row_id>` (report hash routes now take extra path segments that prefill a
+params form positionally and run it), and a paged response renders a "Load older →" button that
+fills `before_id` and re-runs — field-driven on `next_before_id`, like the existing taxpayer-basis
+note. `dataTable` grew one guard: the Actions column appears only where some row has an action, so
+the single-row trail (whose rows have no `table_name`) does not carry an empty column. The Row ID
+hint no longer says "as shown in its entity list" — the wording the finding called out, since a
+deleted row is not in one; it now names the browse form as the way in for a row no list shows.
+
+Tests: `reports::row_history::tests::browse_returns_entries_across_tables_newest_first`,
+`browse_pages_by_cursor_and_says_when_more_remain`,
+`browse_filters_to_one_table_and_refuses_a_bad_request`, and
+`a_demerger_group_delete_is_findable_without_knowing_any_ids` — which drives the finding's own
+case: demerge, delete the group's closing Sell, then find the two demerge-created Buys and the
+allocation from the browse page alone and drill into one of them by the `row_id` its entry carries.
+Plus `web::tests::row_history_ui_present` (the cursor param, the drill-in link, and the absence of
+the old hint) and `doc_checks::row_history_audit_trail_documented` (the browse section, the response
+shape, the cursor, the bound, the ordering rule). Rendered end to end with
+`scripts/ui-check.sh --seed … '#/r/row-history'`: the browse table, the Trail links, and — over 100
+entries — the "Load older" affordance.
+
+**A claim in the finding is wrong, and it mattered.** "`'now'` is constant across a transaction in
+SQLite" is not so: it is fixed for one *statement*. Measured (2026-08-22): two `strftime('now')`
+reads in one transaction, a long query between them, came back 227 ms apart — and a first draft of
+the demerger test, which grouped the operation's entries by shared `changed_at`, failed
+intermittently because the delete's four rows span three statements. So the timestamps of one
+operation *tie* where a single statement wrote them and *differ* where it did not: `changed_at` is
+neither unique nor a total order, and ordering/paging on it would skip or repeat rows. Ordering is
+on the trail's own `id` throughout, which is what the decision asked for. It also retires option (b)
+(group by `changed_at`) as more than merely needing a foothold: it would have been unreliable.
 
 ---
 
