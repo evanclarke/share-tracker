@@ -50,8 +50,20 @@ fn row_history_audit_trail_documented() {
     assert!(API_MD.contains("the **cursor**: return only entries older than this trail id"));
     assert!(API_MD.contains("newest first by the trail's own `id`**, never by `changed_at`"));
     assert!(API_MD.contains("`null` **exactly when the page reached the end of the trail**"));
+    // The occupant marking (SCENARIOS U-a): the rule that finds the boundary,
+    // both entry fields, what the trail cannot know, and the one audited
+    // table whose key is a natural one and so has no boundary to find.
+    assert!(API_MD.contains("**Whose history is this?**"));
+    assert!(API_MD.contains("the `DELETE` and every older entry belong to an earlier occupant**"));
+    assert!(API_MD.contains("`occupant` — `1` is the id's most recent occupant"));
+    assert!(API_MD.contains(
+        "`current_occupant` — `true` when the entry belongs to the record that holds the id **now**"
+    ));
+    assert!(API_MD.contains("cannot say is *when* the id was taken again"));
+    assert!(API_MD.contains("`tax_year_settings` is the one audited table exempt"));
     // README: the feature line, the browse mode, and the ATO citation.
     assert!(README_MD.contains("**browses the recent changes across every audited table**"));
+    assert!(README_MD.contains("which record's history each entry actually is"));
     assert!(README_MD.contains("**Append-only audit trail**"));
     assert!(README_MD.contains("docs/ato/cgt-keeping-records-shares.md"));
     assert!(

@@ -384,3 +384,17 @@ input[type=checkbox] { width: auto; }
   .tax-report-doc { font-size: 7pt; }
   .tax-report-doc table.doc-table th, .tax-report-doc table.doc-table td { padding: 2px 3px; }
 }
+
+/* A `sections` response's notice (app.js): the one thing on the screen the
+   reader must not miss — Row History's warning that the id below has been
+   held by more than one record, so part of the trail is somebody else's
+   history. A boxed callout rather than a `.hint`, which is quiet by design. */
+.section-notice {
+  padding: 10px 12px;
+  margin: 12px 0;
+  background: #fdf3d7;
+  color: var(--warn);
+  border: 1px solid var(--warn);
+  border-radius: 4px;
+  font-size: 13px;
+}

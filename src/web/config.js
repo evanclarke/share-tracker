@@ -6,7 +6,7 @@
 // list/form/report/action code does the rest. Adding or changing an entity,
 // report, or action means editing the matching entry here, not adding views.
 //
-import { describeTrade, tradeOrigin, apiUrl, confirmGeneratedAdjustments } from './util.js';
+import { describeTrade, tradeOrigin, apiUrl, confirmGeneratedAdjustments, fmtLocalTimestamp } from './util.js';
 import { txt, dec, int, dt, bool, sel, fk, wireGstBrokerage, wireIncomeEntry, wireAmmaEntry } from './forms.js';
 
 // Top menu bar order (nav.js's navModel groups ENTITIES/REPORTS by their
@@ -643,6 +643,69 @@ export const REPORTS = [
     // Every param is optional, so the screen opens on the browse page — the
     // form is there to narrow it (one table) or to look one row up.
     autoRun: true,
+    // The single-row trail, split into the successive *occupants* of the id.
+    // A trail is keyed on (table, row_id) and nothing binds an id to one row
+    // for life, so a re-used id inherits the previous occupant's entries —
+    // live, a 2025 share sale reads as the past of a 2023 demerger row
+    // (SCENARIOS U-a). The endpoint marks each entry with the occupant it
+    // belongs to; this turns that marking into what the reader sees — a
+    // headed section per occupant plus a notice — rather than a column they
+    // would have to notice and reason about. One occupant renders exactly as
+    // before: one plain table, no heading, no notice.
+    sections: function (rows) {
+      if (!rows.length || rows[0].occupant == null) return null;
+      // The marking fields *are* the split; inside a section they would be a
+      // constant column repeating its own heading.
+      const columns = Object.keys(rows[0]).filter(function (c) { return c !== 'occupant' && c !== 'current_occupant'; });
+      // Entries arrive newest first and an occupant's are contiguous, so a
+      // run of equal `occupant` is one occupant's history.
+      const groups = [];
+      rows.forEach(function (r) {
+        const open = groups[groups.length - 1];
+        if (open && open.occupant === r.occupant) open.rows.push(r);
+        else groups.push({ occupant: r.occupant, current: r.current_occupant === true, rows: [r] });
+      });
+      if (groups.length === 1 && groups[0].occupant === 1) {
+        return { notice: null, groups: [{ title: null, rows: rows, columns: columns }] };
+      }
+      const out = [];
+      // Occupant 1 with no entries of its own: the record holding the id now
+      // has never been edited or deleted, so every entry below is somebody
+      // else's. Said outright — an absent section would read as an omission.
+      if (!groups.some(function (g) { return g.occupant === 1; })) {
+        out.push({
+          title: 'This record’s own history',
+          desc: 'Nothing recorded: the record holding this id now has not been edited or deleted since it took the id.',
+          rows: [], columns: columns,
+        });
+      }
+      const previousCount = groups.filter(function (g) { return g.occupant > 1; }).length;
+      groups.forEach(function (g) {
+        if (g.occupant === 1) {
+          out.push({
+            title: g.current ? 'This record’s own history' : 'The record that last held this id — since deleted',
+            desc: g.current ? 'These entries belong to the record that holds this id now.' : null,
+            rows: g.rows, columns: columns,
+          });
+          return;
+        }
+        // A previous occupant's newest entry is the DELETE that ended it —
+        // which is when *it* went, not when the id was handed out again. The
+        // trail cannot say that: inserts are not recorded.
+        const ended = g.rows[0] && g.rows[0].operation === 'DELETE' ? g.rows[0].changed_at : null;
+        out.push({
+          title: (previousCount > 1 ? 'Previous occupant ' + (g.occupant - 1) : 'Previous occupant') + ' of this id'
+            + (ended ? ' — deleted ' + fmtLocalTimestamp(ended) : ''),
+          desc: 'A different record held this id and was deleted. These entries are its history, not this record’s.',
+          rows: g.rows, columns: columns,
+        });
+      });
+      return {
+        notice: '⚠ This id has been held by more than one record. Entries at or before a DELETE belonged to an earlier occupant of the id — they are not this record’s history. '
+          + 'When the id was taken again cannot be known: the trail records edits and deletions, never inserts.',
+        groups: out,
+      };
+    },
     // A browse row names the (table, row_id) that drills into its own trail:
     // the deep link prefills this same screen's params and runs it.
     rowActions: function (row) {

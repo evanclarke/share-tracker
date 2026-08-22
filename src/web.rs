@@ -599,6 +599,14 @@ mod tests {
             !js.contains("as shown in its entity list"),
             "the Row ID hint still points at the entity list"
         );
+        // A re-used id makes one trail more than one record's history
+        // (SCENARIOS U-a). The screen splits it on the marking the endpoint
+        // answers, heads each occupant's section and warns above them — the
+        // boundary is shown, not left to a column the reader must spot.
+        assert!(js.contains("sections:"));
+        assert!(js.contains("r.current_occupant"));
+        assert!(js.contains("Previous occupant"));
+        assert!(js.contains("section-notice"));
     }
 
     #[tokio::test]

@@ -2335,6 +2335,24 @@ async function viewReport(report, args) {
     // form returns the flat array of prior versions and falls through to the
     // plain table below.
     const more = pageNote(rows);
+    // `sections` (config.js) splits one *array* response into headed tables —
+    // for an array whose rows are not all one thing. Row History's single-row
+    // trail is the case: a re-used id makes the trail more than one record's
+    // history, and the boundary has to be stated, not left to a column the
+    // reader would have to notice (SCENARIOS U-a). A section with a null
+    // title renders bare, so the ordinary one-section response looks exactly
+    // as it did; returning null falls through to the plain table below.
+    const sections = report.sections && Array.isArray(rows) ? report.sections(rows) : null;
+    if (sections) {
+      if (sections.notice) result.appendChild(el('p', { class: 'section-notice' }, sections.notice));
+      for (const s of sections.groups) {
+        if (s.title) result.appendChild(el('h3', null, s.title));
+        if (s.desc) result.appendChild(el('p', { class: 'hint' }, s.desc));
+        result.appendChild(await dataTable(s.rows, s.columns || null, report.statusField, null, null, report.rowActions));
+      }
+      if (more) result.appendChild(more);
+      return;
+    }
     if (report.tables && !Array.isArray(rows)) {
       for (const t of report.tables) {
         const v = rows[t.key];

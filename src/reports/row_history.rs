@@ -17,6 +17,11 @@
 //!   by *when it happened* is the way in: find the operation, then drill into
 //!   the row's own trail with the `table_name`/`row_id` the entry carries.
 //!
+//! A trail is keyed on `(table_name, row_id)`, and nothing binds an id to one
+//! row for the life of the database — so the single-row form additionally
+//! segments a trail into the successive **occupants** of the id, and says
+//! which entries are the asked-for record's own (see [`Occupants`]).
+//!
 //! Read-only — the trail itself is written by the triggers alone and is
 //! append-only (enforced in the schema), so there is nothing here to write.
 
@@ -59,6 +64,114 @@ pub const AUDITED_TABLES: [&str; 22] = [
     "rba_fx_rates",
     "exchange_holidays",
 ];
+
+/// One audited table, resolved from a requested name: how `row_history`
+/// keys its rows, and whether that key can ever be handed to a *different*
+/// record.
+///
+/// Every audited table keys the trail on its surrogate `id` — a value SQLite
+/// or the server picks, freed for re-use the moment the row is deleted — with
+/// one exception. `tax_year_settings`'s `row_id` is the financial year
+/// itself, and migration 0027 says why that is not the same thing:
+/// *"`tax_year` is already a meaningful integer, and it is never reused for a
+/// different fact. Deleting FY2026's settings and entering them again is the
+/// **same** taxpayer-year fact, so inheriting that year's own history is right
+/// rather than a leak."* A natural key names one fact forever, so its trail is
+/// always a single occupant however often the row is re-entered.
+#[derive(Clone, Copy, Debug)]
+struct AuditedTable {
+    /// The table's own name — always one of the [`AUDITED_TABLES`] constants,
+    /// never request text, because it is interpolated into the occupancy
+    /// check's SQL (an identifier cannot be bound as a parameter).
+    name: &'static str,
+    /// The column the trail's `row_id` holds for this table.
+    key_column: &'static str,
+    /// Whether a *different* record can later hold the same key.
+    key_is_reusable: bool,
+}
+
+impl AuditedTable {
+    /// Resolve a requested table name against [`AUDITED_TABLES`]. `None` for
+    /// anything else — which [`report`] rejects `422` before it ever reaches
+    /// here, and which `row_history.table_name`'s CHECK constraint guarantees
+    /// has no entries in the trail either way.
+    fn parse(name: &str) -> Option<Self> {
+        let name = *AUDITED_TABLES.iter().find(|t| **t == name)?;
+        Some(match name {
+            "tax_year_settings" => Self {
+                name,
+                key_column: "tax_year",
+                key_is_reusable: false,
+            },
+            _ => Self {
+                name,
+                key_column: "id",
+                key_is_reusable: true,
+            },
+        })
+    }
+}
+
+/// Walks one row's trail **newest first**, handing each entry the occupant of
+/// the id it belongs to: `1` is the id's most recent occupant, `2` the record
+/// that held it before that, and so on.
+///
+/// Why a trail needs segmenting at all: nothing binds an id to one row for the
+/// life of the database. Delete a row and the id can be handed out again — by
+/// hand (`PUT /trades/9072` after deleting trade 9072) or by the server, which
+/// is how it happened live (`POST /corporate_actions/1/demerge` computed its
+/// closing Sell's id as `MAX(id) + 1` and took the just-deleted trade 9072's
+/// id back, SCENARIOS U-a). The new occupant then inherits every entry the
+/// previous one left, and the trail presents a 2025 share sale as the past of
+/// a 2023 demerger row.
+///
+/// The trail already holds the evidence, because INSERTs are not recorded: a
+/// `DELETE` entry can only mean the record it describes ended there, so a
+/// `DELETE` on an id that **still holds a row** can only mean the id was
+/// handed out again afterwards. Every `DELETE` therefore closes an occupancy,
+/// and the entries at or before it belong to an earlier occupant. The one
+/// exception is the newest entry of a trail whose id holds no row now: that
+/// `DELETE` is the current occupant's own death — an ordinary deleted row, one
+/// occupant, not a re-use.
+///
+/// What this cannot know is *when* the id was taken again, because the
+/// re-insert recorded nothing; only that it was. Nor can it know whether the
+/// new occupant is a re-entry of the same record (deleting a mis-keyed row and
+/// re-entering it under the same id reads as two occupants, which is all the
+/// trail can honestly say).
+struct Occupants {
+    /// The occupant the walk is currently inside.
+    occupant: i64,
+    /// Whether the id holds a row *now* — read from the same snapshot as the
+    /// trail, and the whole basis for telling a re-used id from a deleted one.
+    occupied: bool,
+    /// [`AuditedTable::key_is_reusable`]: false pins every entry to occupant 1.
+    reusable: bool,
+    /// Whether any entry has been walked yet (the newest entry is the only one
+    /// that can be the current occupant's own `DELETE`).
+    seen_any: bool,
+}
+
+impl Occupants {
+    fn new(occupied: bool, reusable: bool) -> Self {
+        Self {
+            occupant: 1,
+            occupied,
+            reusable,
+            seen_any: false,
+        }
+    }
+
+    /// The occupant the next (older) entry belongs to, and whether that
+    /// occupant is the record holding the id now.
+    fn next(&mut self, operation: &str) -> (i64, bool) {
+        if self.reusable && operation == "DELETE" && (self.seen_any || self.occupied) {
+            self.occupant += 1;
+        }
+        self.seen_any = true;
+        (self.occupant, self.occupant == 1 && self.occupied)
+    }
+}
 
 /// Browse page size when the request names none.
 pub const DEFAULT_BROWSE_LIMIT: i64 = 100;
@@ -137,36 +250,65 @@ pub enum RowHistoryResponse {
 }
 
 /// One (table, row)'s audit entries, newest first. Each entry flattens the
-/// stored old-row JSON behind its own three fields (`history_id`,
-/// `operation`, `changed_at`), so a set of entries renders as one table
-/// whose remaining columns are the audited table's own — including `id`,
-/// which is the audited row's id (= the request's `row_id`).
+/// stored old-row JSON behind its own five fields (`history_id`,
+/// `operation`, `changed_at`, `occupant`, `current_occupant`), so a set of
+/// entries renders as one table whose remaining columns are the audited
+/// table's own — including `id`, which is the audited row's id (= the
+/// request's `row_id`).
+///
+/// `occupant` and `current_occupant` say which record's history an entry
+/// actually is: an id can be handed to a second record after the first is
+/// deleted, and the trail is then two records' pasts under one key. See
+/// [`Occupants`] for how the boundary is found and what it cannot know.
 pub async fn db_row_history(
     pool: &SqlitePool,
     table: &str,
     row_id: i64,
 ) -> Result<Vec<Map<String, Value>>, sqlx::Error> {
+    let audited = AuditedTable::parse(table);
+    // Both reads on one transaction: whether the id still holds a row is what
+    // separates a re-used id from a plainly deleted one, so it has to come
+    // from the same snapshot as the trail — a delete landing between the two
+    // would label the boundary against a row that had just gone.
+    let mut tx = pool.begin().await?;
+    let occupied = match audited {
+        Some(t) => {
+            sqlx::query_scalar::<_, bool>(sqlx::AssertSqlSafe(format!(
+                "SELECT EXISTS (SELECT 1 FROM {} WHERE {} = ?)",
+                t.name, t.key_column
+            )))
+            .bind(row_id)
+            .fetch_one(&mut *tx)
+            .await?
+        }
+        // Not an audited table: the CHECK on `row_history.table_name` means
+        // the trail below is empty, so there is nothing to segment.
+        None => false,
+    };
     let rows = sqlx::query(
         "SELECT id, operation, changed_at, old_row FROM row_history \
          WHERE table_name = ? AND row_id = ? ORDER BY id DESC",
     )
     .bind(table)
     .bind(row_id)
-    .fetch_all(pool)
+    .fetch_all(&mut *tx)
     .await?;
+    tx.commit().await?;
 
+    let mut occupants = Occupants::new(occupied, audited.is_some_and(|t| t.key_is_reusable));
     rows.iter()
         .map(|row| {
             let mut entry = Map::new();
             entry.insert("history_id".into(), row.try_get::<i64, _>("id")?.into());
-            entry.insert(
-                "operation".into(),
-                row.try_get::<String, _>("operation")?.into(),
-            );
+            let operation: String = row.try_get("operation")?;
+            let (occupant, current_occupant) = occupants.next(&operation);
+            entry.insert("operation".into(), operation.into());
             entry.insert(
                 "changed_at".into(),
                 row.try_get::<String, _>("changed_at")?.into(),
             );
+            entry.insert("occupant".into(), occupant.into());
+            entry.insert("current_occupant".into(), current_occupant.into());
             let old_row: String = row.try_get("old_row")?;
             // Propagate a malformed stored JSON loudly (the same contract as
             // the TEXT decimal columns) — a silently dropped audit entry
@@ -493,6 +635,320 @@ mod tests {
         assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
         let msg = resp.text();
         assert!(msg.contains("not an audited table"), "{msg}");
+    }
+
+    // ---- id re-use: whose history is this? (SCENARIOS U-a) --------------
+    //
+    // A trail is keyed on (table, row_id), and nothing binds an id to one row
+    // for the life of the database — so a re-used id inherits every entry the
+    // previous occupant left. Each entry says which occupant it belongs to
+    // (`occupant`) and whether that occupant is the record holding the id now
+    // (`current_occupant`), so the boundary is stated rather than inferred.
+
+    /// A trail's occupant marking, newest first: `(occupant, current_occupant)`.
+    fn occupants(entries: &[Map<String, Value>]) -> Vec<(i64, bool)> {
+        entries
+            .iter()
+            .map(|e| {
+                (
+                    e["occupant"].as_i64().unwrap(),
+                    e["current_occupant"].as_bool().unwrap(),
+                )
+            })
+            .collect()
+    }
+
+    async fn edit_trade_qty(pool: &SqlitePool, id: i64, qty: i64) {
+        let mut edited = trade::db_get(pool, id).await.unwrap().unwrap();
+        edited.quantity = Decimal::from(qty);
+        trade::db_upsert(pool, &edited).await.unwrap();
+    }
+
+    /// The ordinary case: a row that has only ever been edited is one
+    /// occupant, and it is the record you asked about.
+    #[tokio::test]
+    async fn an_edited_row_that_still_exists_is_one_occupant() {
+        let pool = test_pool().await;
+        test_support::listing(1).insert(&pool).await;
+        test_support::buy(1, 1)
+            .qty(Decimal::from(100))
+            .insert(&pool)
+            .await;
+        edit_trade_qty(&pool, 1, 150).await;
+        edit_trade_qty(&pool, 1, 200).await;
+
+        let entries = db_row_history(&pool, "trades", 1).await.unwrap();
+        assert_eq!(occupants(&entries), vec![(1, true), (1, true)]);
+    }
+
+    /// The other ordinary case, and the one a naive "a DELETE means the id was
+    /// re-used" rule would get wrong: a trail whose newest entry is a DELETE
+    /// on an id holding **no** row is simply a deleted record — one occupant,
+    /// its own whole history, no re-use.
+    #[tokio::test]
+    async fn a_deleted_row_is_one_occupant_not_a_reuse() {
+        let pool = test_pool().await;
+        test_support::listing(1).insert(&pool).await;
+        test_support::buy(1, 1)
+            .qty(Decimal::from(100))
+            .insert(&pool)
+            .await;
+        edit_trade_qty(&pool, 1, 150).await;
+        trade::db_delete(&pool, 1).await.unwrap();
+
+        let entries = db_row_history(&pool, "trades", 1).await.unwrap();
+        assert_eq!(entries[0]["operation"], "DELETE");
+        assert_eq!(
+            occupants(&entries),
+            vec![(1, false), (1, false)],
+            "one occupant, deleted — nothing here belongs to anyone else"
+        );
+    }
+
+    /// Delete a row, put a different record under the same id, edit that: the
+    /// trail holds two records' pasts, and says where one ends.
+    #[tokio::test]
+    async fn a_reused_id_splits_into_two_occupants() {
+        let pool = test_pool().await;
+        test_support::listing(1).insert(&pool).await;
+        test_support::buy(1, 1)
+            .date(ymd(2024, 1, 10))
+            .qty(Decimal::from(100))
+            .insert(&pool)
+            .await;
+        edit_trade_qty(&pool, 1, 150).await;
+        trade::db_delete(&pool, 1).await.unwrap();
+
+        // A different trade takes the freed id (the hand-entered flavour:
+        // `PUT /trades/1` after deleting trade 1).
+        test_support::buy(1, 1)
+            .date(ymd(2025, 3, 4))
+            .qty(Decimal::from(7))
+            .insert(&pool)
+            .await;
+        edit_trade_qty(&pool, 1, 9).await;
+
+        let entries = db_row_history(&pool, "trades", 1).await.unwrap();
+        assert_eq!(
+            occupants(&entries),
+            vec![(1, true), (2, false), (2, false)],
+            "the DELETE and everything older belong to the previous occupant"
+        );
+        assert_eq!(entries[0]["quantity"], "7", "the current record's own edit");
+        assert_eq!(entries[1]["operation"], "DELETE");
+        assert_eq!(
+            entries[1]["date"],
+            ymd(2024, 1, 10).to_string(),
+            "the boundary DELETE is the previous occupant's, not this row's"
+        );
+    }
+
+    /// The live shape: the record now holding the id has never been edited, so
+    /// **every** entry belongs to an earlier occupant and the trail's newest
+    /// entry is a DELETE on a row that exists. Nothing here is this record's
+    /// own history, and no entry claims to be.
+    #[tokio::test]
+    async fn a_reused_ids_new_occupant_may_have_no_history_of_its_own() {
+        let pool = test_pool().await;
+        test_support::listing(1).insert(&pool).await;
+        test_support::buy(1, 1)
+            .qty(Decimal::from(100))
+            .insert(&pool)
+            .await;
+        trade::db_delete(&pool, 1).await.unwrap();
+        test_support::buy(1, 1)
+            .qty(Decimal::from(7))
+            .insert(&pool)
+            .await;
+
+        let entries = db_row_history(&pool, "trades", 1).await.unwrap();
+        assert_eq!(occupants(&entries), vec![(2, false)]);
+        assert!(
+            !entries.iter().any(|e| e["occupant"] == 1),
+            "the record holding the id now has left no entries at all"
+        );
+    }
+
+    /// Delete, recreate, delete, recreate: the trail is segmented into
+    /// occupants, not split once at "the" boundary.
+    #[tokio::test]
+    async fn an_id_reused_twice_segments_into_three_occupants() {
+        let pool = test_pool().await;
+        test_support::listing(1).insert(&pool).await;
+        for qty in [100i64, 200] {
+            test_support::buy(1, 1)
+                .qty(Decimal::from(qty))
+                .insert(&pool)
+                .await;
+            edit_trade_qty(&pool, 1, qty + 1).await;
+            trade::db_delete(&pool, 1).await.unwrap();
+        }
+        test_support::buy(1, 1)
+            .qty(Decimal::from(300))
+            .insert(&pool)
+            .await;
+        edit_trade_qty(&pool, 1, 301).await;
+
+        let entries = db_row_history(&pool, "trades", 1).await.unwrap();
+        assert_eq!(
+            occupants(&entries),
+            vec![
+                (1, true),  // UPDATE 300 → 301, the record holding the id now
+                (2, false), // DELETE of the second occupant
+                (2, false), // UPDATE 200 → 201
+                (3, false), // DELETE of the first occupant
+                (3, false), // UPDATE 100 → 101
+            ]
+        );
+    }
+
+    /// The case that raised this (SCENARIOS U-a), reproduced end to end: no
+    /// user chose the id at all. The demerge assigns its closing Sell
+    /// `MAX(id) + 1`, so deleting the highest trade hands the freed id
+    /// straight to a server-created row — exactly how live trade 9072, a 2025
+    /// share sale, became the LAC demerger's 2023 closing Sell.
+    #[tokio::test]
+    async fn a_server_assigned_id_taking_a_deleted_trades_place_is_marked() {
+        let pool = test_pool().await;
+        test_support::listing(1).insert(&pool).await;
+        test_support::listing(2).ticker("DMG").insert(&pool).await;
+        test_support::buy(1, 1)
+            .date(ymd(2024, 1, 10))
+            .settlement(ymd(2024, 1, 10))
+            .qty(Decimal::from(100))
+            .insert(&pool)
+            .await;
+        // The highest trade id, deleted — so `MAX(id) + 1` points back at it.
+        test_support::buy(2, 1)
+            .date(ymd(2024, 2, 20))
+            .qty(Decimal::from(50))
+            .insert(&pool)
+            .await;
+
+        let client = ApiClient::full(&pool);
+        assert_eq!(
+            client.delete("/trades/2").await.status,
+            StatusCode::NO_CONTENT
+        );
+        client
+            .put_ok(
+                "/corporate_actions/7",
+                &serde_json::json!({
+                    "listing_id": 1, "date": ymd(2024, 6, 1), "action_type": "Demerger",
+                    "demerger_listing_id": 2, "demerger_new_units": "1",
+                    "demerger_held_units": "5", "demerger_cost_base_pct": "20",
+                }),
+            )
+            .await;
+        let resp = client
+            .post("/corporate_actions/7/demerge", &serde_json::json!({}))
+            .await;
+        assert_eq!(resp.status, StatusCode::CREATED);
+        let demerge: Value = resp.json();
+        let sell_id = demerge["sell"]["id"].as_i64().unwrap();
+        assert_eq!(sell_id, 2, "the demerge took the deleted trade's id back");
+
+        let entries = db_row_history(&pool, "trades", sell_id).await.unwrap();
+        assert_eq!(
+            occupants(&entries),
+            vec![(2, false)],
+            "the deleted Buy's entry is not the demerger Sell's history"
+        );
+        assert_eq!(entries[0]["operation"], "DELETE");
+        assert_eq!(
+            entries[0]["quantity"], "50",
+            "the deleted Buy, not the Sell"
+        );
+    }
+
+    /// `tax_year_settings` is keyed on the financial year itself, which names
+    /// one taxpayer-year fact forever — migration 0027 says deleting FY2026's
+    /// settings and entering them again is the *same* fact, so that year's own
+    /// history is inherited rightly. A natural key is never re-used by a
+    /// different record, so its trail stays one occupant across a
+    /// delete-and-re-enter.
+    #[tokio::test]
+    async fn a_natural_key_re_entered_is_still_one_occupant() {
+        let pool = test_pool().await;
+        let client = ApiClient::full(&pool);
+        let path = "/tax_year_settings/2026";
+        client
+            .put_ok(
+                path,
+                &serde_json::json!({ "ess_taxed_upfront_reduction_eligible": false }),
+            )
+            .await;
+        client
+            .put_ok(
+                path,
+                &serde_json::json!({ "ess_taxed_upfront_reduction_eligible": true }),
+            )
+            .await;
+        assert_eq!(client.delete(path).await.status, StatusCode::NO_CONTENT);
+        client
+            .put_ok(
+                path,
+                &serde_json::json!({ "ess_taxed_upfront_reduction_eligible": false }),
+            )
+            .await;
+
+        let entries = db_row_history(&pool, "tax_year_settings", 2026)
+            .await
+            .unwrap();
+        assert_eq!(entries[0]["operation"], "DELETE");
+        assert_eq!(
+            occupants(&entries),
+            vec![(1, true), (1, true)],
+            "the same taxpayer-year fact throughout"
+        );
+    }
+
+    /// The API answers the marking, so the reader of the endpoint (and the
+    /// Row History screen over it) never has to infer the boundary.
+    #[tokio::test]
+    async fn api_entries_carry_the_occupant_they_belong_to() {
+        let pool = test_pool().await;
+        test_support::listing(1).insert(&pool).await;
+        test_support::buy(1, 1)
+            .qty(Decimal::from(100))
+            .insert(&pool)
+            .await;
+        trade::db_delete(&pool, 1).await.unwrap();
+        test_support::buy(1, 1)
+            .qty(Decimal::from(7))
+            .insert(&pool)
+            .await;
+        edit_trade_qty(&pool, 1, 9).await;
+
+        let entries: Vec<Map<String, Value>> = ApiClient::over(router().with_state(pool.clone()))
+            .post_json(
+                "/reports/row_history",
+                &serde_json::json!({ "table": "trades", "row_id": 1 }),
+            )
+            .await;
+        assert_eq!(occupants(&entries), vec![(1, true), (2, false)]);
+    }
+
+    /// The browse form deliberately carries no occupant marking: it lists the
+    /// trail in write order, where no entry is presented as any row's own
+    /// history, and its columns are the ones every audited table shares. The
+    /// question "whose history is this?" is asked of one row's trail, which is
+    /// exactly where the drill-through link lands.
+    #[tokio::test]
+    async fn browse_entries_carry_no_occupant_marking() {
+        let pool = test_pool().await;
+        test_support::listing(1).insert(&pool).await;
+        test_support::buy(1, 1).insert(&pool).await;
+        trade::db_delete(&pool, 1).await.unwrap();
+        test_support::buy(1, 1).insert(&pool).await;
+
+        let page: Value = ApiClient::over(router().with_state(pool.clone()))
+            .post_json("/reports/row_history", &serde_json::json!({}))
+            .await;
+        let entry = &page["entries"][0];
+        assert_eq!(entry["row_id"], 1);
+        assert!(entry.get("occupant").is_none(), "{entry:#?}");
+        assert!(entry.get("current_occupant").is_none(), "{entry:#?}");
     }
 
     // ---- browse form (SCENARIOS U-b) ------------------------------------

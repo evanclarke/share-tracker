@@ -146,10 +146,10 @@ the nine call sites reworked to let the database assign the id.** Rejected: allo
 trail's high-water mark instead of migrating (leaves SQLite's own rowid reuse unfixed), and boundary
 marking alone.
 
-- [ ] The row-history report marks a trail that crosses a `DELETE` on a row that still exists: the
+- [x] The row-history report marks a trail that crosses a `DELETE` on a row that still exists: the
       entries at or before that `DELETE` belonged to a previous occupant of the id, and are labelled
       as such rather than presented as this row's own history
-- [ ] The Row History screen surfaces that boundary (not a bare extra column — the reader must not
+- [x] The Row History screen surfaces that boundary (not a bare extra column — the reader must not
       have to infer it), and `docs/API.md`'s Row history section states the rule
 - [ ] The nine `SELECT COALESCE(MAX(id), 0) + 1` call sites stop assigning ids: the INSERT omits the
       id and the server reads `last_insert_rowid()`, so a never-reused id comes from the database
@@ -163,6 +163,48 @@ marking alone.
       history; a server-assigned insert after a delete never reuses the freed id; a test pinning
       that every audited table's id column is `AUTOINCREMENT` (so a new audited table cannot be
       added without it)
+
+**Boundary marking done 2026-08-22** (the first two items; the id-assignment rework, the
+`AUTOINCREMENT` migration, the SCHEMA.md note and the AUTOINCREMENT pin test are still open).
+
+The single-row form now segments a trail into the successive **occupants** of the id and says which
+is which, because the trail already holds the evidence: INSERTs are not recorded, so a `DELETE` on an
+id that **still holds a row** can only mean the id was handed out again. Every `DELETE` therefore
+closes an occupancy — the `DELETE` and everything older belong to an earlier occupant — with one
+exception: the newest entry of a trail whose id holds no row now is that occupant's own death, an
+ordinary deleted row. Segmenting rather than splitting once was deliberate: delete/recreate twice
+reads as three occupants. Each entry carries `occupant` (`1` = the id's most recent occupant) and
+`current_occupant` (`true` when it belongs to the record holding the id now); both are additive, so
+no existing field changed meaning. "Does the id hold a row?" is read on the **same transaction** as
+the trail, or a concurrent delete would label the boundary against a row that had just gone.
+
+It is honest about the two things it cannot know, both stated in `docs/API.md` and on screen: *when*
+the id was taken again (the re-insert recorded nothing), and whether the new occupant is a re-entry
+of the same record. `tax_year_settings` is exempt — its `row_id` is the financial year itself, and
+0027 already decided that re-entering a year's settings is the *same* taxpayer-year fact, so it stays
+one occupant.
+
+The screen (`sections`, a new generic `viewReport` hook for an array response whose rows are not all
+one thing) renders a headed section per occupant — a previous occupant's named with the timestamp of
+the `DELETE` that ended it — under a boxed `.section-notice` warning; the record holding the id with
+no entries of its own gets an explicit empty section rather than silently missing one. A trail with
+one occupant renders exactly as before: one plain table, no heading, no notice, and neither marking
+field as a column. The browse form deliberately carries no marking (it lists the trail in write
+order, where no entry is presented as any row's own history; the drill-through link lands on the
+single-row form, which does).
+
+Tests: `reports::row_history::tests::a_reused_id_splits_into_two_occupants`,
+`a_reused_ids_new_occupant_may_have_no_history_of_its_own`,
+`an_id_reused_twice_segments_into_three_occupants`,
+`a_server_assigned_id_taking_a_deleted_trades_place_is_marked` (the live shape reproduced end to end
+— deleting the highest trade id then demerging, whose `MAX(id) + 1` hands the freed id straight to a
+server-created Sell, exactly as trade 9072 became the LAC demerger's closing Sell), the two
+non-reuse cases (`an_edited_row_that_still_exists_is_one_occupant`,
+`a_deleted_row_is_one_occupant_not_a_reuse`), `a_natural_key_re_entered_is_still_one_occupant`,
+`api_entries_carry_the_occupant_they_belong_to`, `browse_entries_carry_no_occupant_marking`,
+`web::tests::row_history_ui_present` and `doc_checks::row_history_audit_trail_documented`. Rendering
+verified with `scripts/ui-check.sh` over all three shapes (re-use, re-use with no own history, plain
+trail).
 
 ---
 
