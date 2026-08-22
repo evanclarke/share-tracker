@@ -154,7 +154,7 @@ marking alone.
 - [ ] The nine `SELECT COALESCE(MAX(id), 0) + 1` call sites stop assigning ids: the INSERT omits the
       id and the server reads `last_insert_rowid()`, so a never-reused id comes from the database
       (this, not the migration, is what fixes the trade 9072 case)
-- [ ] The audited tables that reuse ids are rebuilt with `AUTOINCREMENT` ids by the rename pattern
+- [x] The audited tables that reuse ids are rebuilt with `AUTOINCREMENT` ids by the rename pattern
       0021/0039 established — every FK re-pointed, every `*_row_history_*` and `*_stale_snapshots_*`
       trigger set dropped and re-created, no row dropped or re-scaled (see the 0029 FK-rewrite
       gotcha and `infra::db`'s `migrations_store_decimals_as_text` guard)
@@ -166,6 +166,60 @@ marking alone.
 
 **Boundary marking done 2026-08-22** (the first two items; the id-assignment rework, the
 `AUTOINCREMENT` migration, the SCHEMA.md note and the AUTOINCREMENT pin test are still open).
+
+**`AUTOINCREMENT` migration done 2026-08-22** (`0045_autoincrement_audited_ids.sql`). Still open:
+the nine `SELECT COALESCE(MAX(id), 0) + 1` call sites, `docs/SCHEMA.md`'s statement of the
+*requirement* and why, and the regression tests — including the pin that every audited table's id
+column is `AUTOINCREMENT`, so a new audited table cannot be added without it.
+
+Exactly **17** of the 22 audited tables reused ids and are rebuilt: `trades`, `parcel_allocations`,
+`income`, `interest_income`, `amma_statements`, `amit_adjustments`, `ess_statements`, `transfers`,
+`corporate_actions`, `inheritances`, `rights_sales`, `rights_sale_allocations`,
+`investment_expenses`, `drp_enrolments`, `attachments`, `listings`, `listing_renames`. Five are
+deliberately left alone, and the migration header says why: `closing_prices` (0021),
+`rba_fx_rates` (0031) and `exchange_holidays` (0039) are already `AUTOINCREMENT`;
+`tax_year_settings` is keyed on the financial year itself, with no surrogate id to make one (0027,
+and the boundary marking exempts it for the same reason); and `cgt_settings` is
+`id INTEGER PRIMARY KEY CHECK (id = 1)`, a singleton whose CHECK pins the id, so re-creating its one
+row is re-entry of the same fact, not reuse.
+
+The shape is 0029's, because most of these tables are referenced by another — `attachments` alone
+has six `ON DELETE CASCADE` parents among them, and a rename that repointed it at `<parent>_old`
+would have cascaded every attachment away when that table was dropped. `-- no-transaction` with the
+migration's own `BEGIN`/`COMMIT` around `PRAGMA foreign_keys = OFF` (a no-op inside a transaction),
+plus `legacy_alter_table` per rename so no trigger body is rewritten either. Per table: both trigger
+sets dropped, rename, re-create with `id INTEGER PRIMARY KEY AUTOINCREMENT` and every other column,
+constraint and index unchanged, copy `ORDER BY id`, drop the old table, re-create the indexes and
+then the triggers — the staleness triggers last, so the migration's own copy does not stale every
+stored snapshot. Each table's definition and both triggers are reproduced from the **live** schema
+rather than from the migration that first created them, since several had been re-created since
+(`trades`' pair comes from 0041, not 0013).
+
+**Seeding `sqlite_sequence` is load-bearing, not defensive.** `AUTOINCREMENT` never issues an id at
+or below the table's stored sequence, and a plain copy sets that to the largest *live* id — leaving
+an id freed before the migration still issuable. In the live database `parcel_allocations` holds 33
+rows with a maximum id of **63**, while its trail's highest `row_id` is **65**: a plain copy would
+have handed the next two allocations 64 and 65, and 65 already has an audit trail — the bug would
+have reproduced on the first write after the migration. So each table's sequence is seeded to
+`MAX(largest live id, largest row_id that table has ever recorded in row_history)`, the trail being
+the only surviving record of an id that no longer holds a row (append-only and keep-forever, 0013,
+so the mark cannot recede). `attachments` is the mirror case (live 140, trail 136) and takes 140; an
+empty table with no trail seeds to 0, which is what an untouched `AUTOINCREMENT` table means anyway.
+
+Acceptance-tested against a copy of the live database (`share-tracker-2026-08-22-205530.db`, 45 MB,
+1,329 trail entries, migrated to head): for all 30 tables the row count, the full id set and an
+all-columns checksum are **byte-identical** before and after — `PRAGMA integrity_check` `ok`,
+`PRAGMA foreign_key_check` empty. All 155 schema objects compare equal after comment/whitespace
+normalisation *modulo* the 17 `AUTOINCREMENT` keywords, and a DB built from the migrations from
+scratch produces the same schema. Post-migration sequences: `trades` 9076, `parcel_allocations`
+**65** (not 63), `attachments` 140, `income` 47, `amit_adjustments` 149, `interest_income` 25,
+`transfers` 10, `amma_statements`/`listings` 8, `ess_statements` 5, `drp_enrolments` 3,
+`corporate_actions`/`listing_renames` 1, the four empty tables 0. Behaviourally, two inserts into
+the migrated copy take ids **66 and 67** — not the freed 64 and 65 — and a new trade takes 9077.
+
+The reuse this fixes is measurable in that database: the trail carries ten `DELETE` entries on ids
+that hold a row again, across eight distinct ids (`trades` 9072-9076, `parcel_allocations` 61-63,
+two of them reused twice).
 
 The single-row form now segments a trail into the successive **occupants** of the id and says which
 is which, because the trail already holds the evidence: INSERTs are not recorded, so a `DELETE` on an

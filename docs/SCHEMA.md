@@ -19,7 +19,7 @@ exchange_holidays             Full-closure non-trading days per exchange (settle
 └── name         TEXT             Holiday name (informational to the calculations; retained by the audit trail so a deleted holiday can be named)
 
 listings
-├── id           INTEGER PK
+├── id           INTEGER PK  AUTOINCREMENT (0045) — never reused, so an audit trail belongs to one row
 ├── exchange_mic TEXT FK→exchanges.mic (nullable)  NULL exactly when security_type = Crypto (CHECK); exchange-less listings are unique by ticker (partial unique index), the rest by UNIQUE(exchange_mic, ticker)
 ├── ticker       TEXT             For Crypto: must be a recognised digital-token code in currencies (kind DigitalToken), validated at write time
 ├── name         TEXT
@@ -34,7 +34,7 @@ listings
 └── price_symbol TEXT (nullable)  Provider-symbol override (0018): used verbatim by closing_price::yahoo_symbol ahead of its derived ticker/exchange mapping, for a symbol the provider spells differently or an exchange with no mapping
 
 listing_renames               A ticker or exchange-code rename, as a dated event (0018; see API.md Ticker or name changes)
-├── id               INTEGER PK
+├── id               INTEGER PK  AUTOINCREMENT (0045) — never reused, so an audit trail belongs to one row
 ├── listing_id       INTEGER FK→listings.id
 ├── effective_date   TEXT             'YYYY-MM-DD' — first trading day under the new identity; UNIQUE with listing_id
 ├── old_ticker       TEXT             Written from the listing's row at the moment of the rename, never trusted from the request
@@ -80,7 +80,7 @@ holding_accounts             Custody/location accounts within the one taxpayer (
 └── name         TEXT UNIQUE
 
 transfers                    Moves of a listing between two holding accounts of the same owner (not a CGT event)
-├── id              INTEGER PK
+├── id              INTEGER PK  AUTOINCREMENT (0045) — never reused, so an audit trail belongs to one row
 ├── listing_id      INTEGER FK→listings.id
 ├── date            TEXT          The transfer-out Sell and transfer-in Buys are dated on it
 ├── from_account_id INTEGER FK→holding_accounts.id
@@ -89,7 +89,7 @@ transfers                    Moves of a listing between two holding accounts of 
                     The per-parcel quantities live on the transfer-out Sell's parcel_allocations rows
 
 trades
-├── id                INTEGER PK
+├── id                INTEGER PK  AUTOINCREMENT (0045) — never reused, so an audit trail belongs to one row
 ├── trade_type        TEXT         Buy | Sell | DRP
 ├── date              DATE   Indexed — every as-of report (open holdings, unrealised gains, performance) filters trades by date <= as_of. Must fall between 20 September 1985 and today inclusive (422 otherwise): below is a pre-CGT holding, which is not modelled; above is a transaction that has not happened (settlement_date is deliberately not bounded above — a T+2 settlement of a trade dated today is legitimately in the future). It must also be a day the listing's own exchange traded — not a weekend or a seeded exchange_holidays date on the calendar in force then (422 from PUT /trades/:id and PUT /sells/:id; exchange-less Crypto listings trade every day). The derived write paths — ESS vest, inherited parcel, DRP reinvestment, rights exercise, and every parcel-substituting operation — INSERT their rows directly and are exempt (a taxing point, a date of death and a corporate action's date need not be market days); reports::health's non_trading_day_trades surfaces those instead
 ├── settlement_date   DATE   Not bounded above (a T+2 settlement of a trade dated today is legitimately in the future) and not required to be a trading day: omitted, it is computed T+n business days from date over the exchange's calendar (same-day for an exchange-less Crypto listing); supplied, it is stored as given and need only not precede date (422 otherwise), because an explicit value is a deliberate override. GET /reports/settlement_holiday_coverage flags a stored date that is not a trading day on the listing's calendar, and a window computed outside the seeded calendar's years
@@ -121,7 +121,7 @@ trades
 └── inheritance_id    INTEGER FK→inheritances.id (nullable)  Inherited-parcel Buys only: the inheritance that created them, set by PUT /inheritances/:id. The Buy carries the inheritance's cost base (on the brokerage column, price 0) and s 115-30 discount clock (deemed_acquisition_date), so it is immutable via PUT/DELETE /trades — it is edited and deleted through its inheritance, both refused while a Sell allocation or AMIT adjustment draws on it
 
 inheritances                 Inherited share parcels from a deceased estate — not a CGT event on transfer (docs/ato/inherited-assets-cost-base.md QC 66053, docs/ato/inherited-assets-cgt-discount.md QC 69713 / s 115-30)
-├── id                        INTEGER PK
+├── id                        INTEGER PK  AUTOINCREMENT (0045) — never reused, so an audit trail belongs to one row
 ├── listing_id                INTEGER FK→listings.id
 ├── holding_account_id        INTEGER FK→holding_accounts.id  Defaults to the seeded default account
 ├── quantity                  TEXT (decimal)  Units inherited, in date-of-death terms (> 0, validated at write time)
@@ -136,7 +136,7 @@ inheritances                 Inherited share parcels from a deceased estate — 
                     The entry path (PUT /inheritances/:id) upserts this row and its linked Buy atomically; like transfers, no report reads this table directly — the parcel side lives on the Buy
 
 income
-├── id                        INTEGER PK
+├── id                        INTEGER PK  AUTOINCREMENT (0045) — never reused, so an audit trail belongs to one row
 ├── listing_id                INTEGER FK→listings.id
 ├── date_paid                 DATE   Indexed — every as-of report filters income by date_paid <= as_of
 ├── ex_date                   DATE (nullable)
@@ -160,7 +160,7 @@ income
 └── income_type               TEXT   Dividend | EmploymentIncome | OtherIncome (CHECK-enforced enum, 0028; OtherIncome added by 0029, which rebuilt the table since SQLite cannot ALTER a CHECK; default Dividend, which every pre-0028 row is). What kind of payment the row records — orthogonal to trust_income, which distinguishes two kinds of *investment* income. EmploymentIncome is a dividend equivalent paid on unvested RSUs: ordinary income as remuneration under s 6-5, "not a dividend in the employee's hands" (TD 2017/26, docs/ato/ess-dividend-equivalents.md). Such a row carries the cash in unfranked_amount and **nothing else** — franking, foreign-source, LIC, CFI, tax-deferred, ex/entitlement dates, the per-share pair and trust_income are all rejected 422 — is not reinvestable (422), and reports on the tax summary's informational employment_income line (item 1/2, normally prefilled from the employer's STP reporting) rather than in any dividend or investment-income total. OtherIncome is ordinary income the holding produced but did not distribute — a crypto staking reward or an established-token airdrop, at the tokens' receipt-date market value (QC 69950, docs/ato/crypto-staking-airdrops.md): the same cash-only rule and the same reinvestment refusal, but it reports at ATO label 24 (which nothing prefills) and so counts in gross assessable investment income
 
 interest_income              Interest income — bank, term-deposit, or broker-cash interest (no listing, so not an income row). The tax summary reports an Australian-source row's gross as its interest_income line (question 10 label L, TFN withholding joining the combined withholding line, label M) and a foreign-source row's gross as its foreign_interest_income line (question 20 label E — assessable foreign source income, its foreign tax withheld joining the FITO line); both count in gross assessable investment income
-├── id                    INTEGER PK
+├── id                    INTEGER PK  AUTOINCREMENT (0045) — never reused, so an audit trail belongs to one row
 ├── date_paid             DATE   The date the interest was **credited** — the day it was credited, received, or applied or dealt with on the holder's behalf or as they direct (docs/ato/investment-income-timing.md, QC 72101), which for a term deposit run to maturity is the maturity date. Never the date the funds became reachable: a 30 June credit withdrawable on 2 July is FY2026 interest. Its month sets the ATO FX conversion month and the Australian financial year the interest is assessed in (a July date belongs to the next FY)
 ├── amount                TEXT (decimal)  Gross interest including any amount withheld (the gross figure is declared)
 ├── tfn_withholding_tax   TEXT (decimal)  TFN amount withheld from the gross interest; joins the tax summary's withholding line. Australian-source rows only (TFN amounts are withheld by Australian investment bodies; a foreign-source write with one is rejected 422)
@@ -171,7 +171,7 @@ interest_income              Interest income — bank, term-deposit, or broker-c
 └── holding_account_id    INTEGER FK→holding_accounts.id (nullable)  The holding account the interest was paid on (e.g. a broker cash account); NULL for interest from outside the portfolio's accounts; informational only
 
 investment_expenses          Deductible investment expenses — the cost of earning assessable investment income (interest on borrowed money, management/adviser fees, account-keeping fees, subscriptions). The tax summary nets these against gross assessable investment income per financial year
-├── id                    INTEGER PK
+├── id                    INTEGER PK  AUTOINCREMENT (0045) — never reused, so an audit trail belongs to one row
 ├── date_incurred         DATE   Its month sets the ATO FX conversion month and the Australian financial year the deduction falls in (a July date belongs to the next FY). One row is one year: an expense apportioned across years (borrowing expenses over 5 years or the loan term; a prepayment failing the 12-month rule, split by days) is entered as one row per financial year carrying that year's share — docs/ato/expense-time-apportionment.md, a documented Known limitation rather than a modelled split
 ├── expense_type          TEXT   LoanInterest | ManagementFee | AdviceFee | AccountKeepingFee | Subscription | Other (CHECK-enforced enum)
 ├── amount                TEXT (decimal)  The deductible amount — post-apportionment, the figure that goes on the return and the value the tax summary totals; never negative (write-time 422)
@@ -184,7 +184,7 @@ investment_expenses          Deductible investment expenses — the cost of earn
                           Brokerage is not recorded here (it forms a trade's CGT cost base); the LIC capital gain deduction comes from the income row's own lic_capital_gain_amount field
 
 amma_statements              Annual AMIT Member Annual (AMMA) statements
-├── id                              INTEGER PK
+├── id                              INTEGER PK  AUTOINCREMENT (0045) — never reused, so an audit trail belongs to one row
 ├── listing_id                      INTEGER FK→listings.id
 ├── tax_year_end_date               DATE         Always a 30 June date (write-time 422 otherwise) — e.g. 2024-06-30 for FY2024; reports bucket by its calendar year
 ├── units_held                      TEXT (decimal)
@@ -217,7 +217,7 @@ amma_statements              Annual AMIT Member Annual (AMMA) statements
 └── holding_account_id              INTEGER FK→holding_accounts.id  The account the statement covers — a registry issues one AMMA statement per holder account (defaults to the seeded default account)
 
 amit_adjustments             Links a purchase parcel to an AMMA statement
-├── id                   INTEGER PK
+├── id                   INTEGER PK  AUTOINCREMENT (0045) — never reused, so an audit trail belongs to one row
 ├── amma_statement_id    INTEGER FK→amma_statements.id
 ├── trade_id             INTEGER FK→trades.id  Must be Buy or DRP
 └── quantity             TEXT (decimal)       Units of the parcel covered by the adjustment, in the parcel's as-acquired units (the basis trades.quantity caps).
@@ -229,7 +229,7 @@ UNIQUE (amma_statement_id, trade_id)  One adjustment per statement per parcel: t
                                       E10's nil floor turns an over-reduction into a capital gain never made
 
 ess_statements               Employee share scheme statements — the income side of an ESS interest (Item 12 discount, declared in the year of the taxing point)
-├── id                          INTEGER PK
+├── id                          INTEGER PK  AUTOINCREMENT (0045) — never reused, so an audit trail belongs to one row
 ├── listing_id                  INTEGER FK→listings.id
 ├── holding_account_id          INTEGER FK→holding_accounts.id  The account the interests vest into (defaults to the seeded default account)
 ├── taxing_point_date           DATE   The taxing point: sets the assessable financial year and the vest Buy's acquisition/settlement date. Must be on or after 20 September 1985 and not after today (422 otherwise) — the vest Buy is dated here, and `PUT /trades` refuses a pre-CGT trade, or one dated in the future, for the same reasons
@@ -251,13 +251,13 @@ ess_statements               Employee share scheme statements — the income sid
                              The assessable discount (D+E+F+G − the applied $1,000 reduction) reaches the tax summary; the vest Buy is created by POST /ess_statements/:id/vest (entities::ess_vest), carrying the statement's fx_rate — or, absent one, the taxing-point month's ATO rate — as the Buy's own `trades.fx_rate`. While the vest Buy exists, the fields it was created from (listing, account, taxing point, quantity, market value, currency, fx_rate) are frozen — the income-side fields (discount labels, TFN withheld, statement-AUD overrides) stay editable, since the employer's annual ESS statement arrives after the vest
 
 parcel_allocations           Links sell parcels to the purchase parcels they consume
-├── id                   INTEGER PK
+├── id                   INTEGER PK  AUTOINCREMENT (0045) — never reused, so an audit trail belongs to one row
 ├── sale_trade_id        INTEGER FK→trades.id  Must be Sell
 ├── purchase_trade_id    INTEGER FK→trades.id  Must be Buy or DRP
 └── quantity_allocated   TEXT (decimal)
 
 drp_enrolments               Dated DRP enrolment periods per (listing, holding account) — a holding can enrol, unenrol, and re-enrol, and the same listing may be enrolled in one account and not another
-├── id                   INTEGER PK
+├── id                   INTEGER PK  AUTOINCREMENT (0045) — never reused, so an audit trail belongs to one row
 ├── listing_id           INTEGER FK→listings.id
 ├── holding_account_id   INTEGER FK→holding_accounts.id  The account the enrolment applies to (defaults to the seeded default account)
 ├── enrolment_date       TEXT   First day of the period (inclusive)
@@ -275,7 +275,7 @@ tax_year_settings            Per-financial-year taxpayer settings (0027) — fac
 └── ess_taxed_upfront_reduction_eligible INTEGER  1 | 0 (CHECK-enforced), default 1. Whether the year's adjusted taxable income was within A$180,000, the condition on the $1,000 taxed-upfront ESS reduction (docs/ato/employee-share-schemes.md) — a test over income this system does not hold, so it is recorded rather than computed. 0 makes the tax summary report that year's taxed-upfront discount unreduced
 
 corporate_actions            Corporate actions per listing (company returns of capital — CGT event G1 — share splits/consolidations — TD 2000/10 — non-assessable bonus issues, rights issues, off-market buy-backs, scrip-for-scrip takeovers, demergers, and worthless/delisted shares — CGT events G3/C2)
-├── id                INTEGER PK
+├── id                INTEGER PK  AUTOINCREMENT (0045) — never reused, so an audit trail belongs to one row
 ├── action_type       TEXT   ReturnOfCapital | ShareSplit | BonusIssue | RightsIssue | BuyBack | ScripForScrip | Demerger | WorthlessShares (CHECK-enforced enum; the extension point for future actions). Per-type CHECKs tie each payload below to its type
 ├── listing_id        INTEGER FK→listings.id
 ├── date              TEXT   ReturnOfCapital: payment date — parcels still held then and entitled to the payment (see record_date) are affected; with no record_date, entitlement falls back to "acquired on/before this date". ShareSplit: conversion date — parcels acquired before it are converted (a trade dated on it is already in post-split units). BonusIssue: issue date — parcels acquired before it receive bonus units (a trade dated on it is ex-bonus). RightsIssue: record date — units held before it earn the entitlement (a trade dated on it is ex-rights). BuyBack: the buy-back date — participations are dated on/after it. ScripForScrip: the exchange date — every parcel still open on it is exchanged; the closing Sell and replacement Buys are dated on it. Demerger: the demerger date — every head parcel still open on it participates; the closing Sell and the head/demerged Buys are dated on it. WorthlessShares: the declaration date (G3) or deregistration/cancellation date (C2) — every parcel still open on it is closed at nil proceeds by the recognise operation
@@ -310,7 +310,7 @@ corporate_actions            Corporate actions per listing (company returns of c
 └── worthless_event   TEXT (nullable)  WorthlessShares only: which CGT event the loss is recognised under — G3Declaration (s 104-145, liquidator/administrator declaration) or C2Cancellation (s 104-25, deregistration); CHECK-enforced enum. Both close every open parcel at nil proceeds (the recognise operation); the discriminator records the legal basis
 
 rights_sales                 Disposals of renounceable rights — sold on-market, lapsed, or compensated by a retail premium (TR 2017/4) — recorded by POST /corporate_actions/:id/sell_rights against a RightsIssue action. A CGT event on the rights themselves: the share holding is untouched, and the realised-gains report surfaces each row as a source = RightsSale disposal
-├── id                 INTEGER PK
+├── id                 INTEGER PK  AUTOINCREMENT (0045) — never reused, so an audit trail belongs to one row
 ├── rights_action_id   INTEGER FK→corporate_actions.id   The RightsIssue disposed against; the action is frozen (no edit/delete) while rows reference it. Cumulative units — together with exercise trades — are capped at the record-date entitlement (write-time check shared with the exercise operation)
 ├── date               TEXT   Sale (or lapse/expiry) date; never before the issue's record date (write-time check)
 ├── units              TEXT (decimal)  Rights disposed of, in record-date (as-issued) rights units (positive)
@@ -321,13 +321,13 @@ rights_sales                 Disposals of renounceable rights — sold on-market
                        Rows are immutable (no PUT) — delete and re-enter to amend; deleting frees the entitlement
 
 rights_sale_allocations      Which original parcels the sold rights are anchored to: free rights are deemed acquired with the original shares, so each allocation's 12-month discount clock runs from its parcel's (possibly deemed) acquisition date. Unlike parcel_allocations these consume no parcel units — the shares are still held
-├── id                INTEGER PK
+├── id                INTEGER PK  AUTOINCREMENT (0045) — never reused, so an audit trail belongs to one row
 ├── rights_sale_id    INTEGER FK→rights_sales.id (ON DELETE CASCADE)
 ├── purchase_trade_id INTEGER FK→trades.id   A Buy/DRP of the issue's listing dated before the record date; the parcel is frozen against PUT/DELETE /trades while referenced. Cumulative rights anchored to a parcel (across the action's sales) are capped at the entitlement its record-date units earned
 └── units             TEXT (decimal)  Rights anchored to this parcel (positive); a sale's allocations sum exactly to its units
 
 attachments                  Supporting documents for an activity; bytes stored in the DB (captured by the weekly backup)
-├── id                 INTEGER PK
+├── id                 INTEGER PK  AUTOINCREMENT (0045) — never reused, so an audit trail belongs to one row
 ├── trade_id           INTEGER FK→trades.id (nullable, ON DELETE CASCADE)            Owner (exactly one of the six is set)
 ├── income_id          INTEGER FK→income.id (nullable, ON DELETE CASCADE)            Owner (exactly one of the six is set)
 ├── amma_statement_id  INTEGER FK→amma_statements.id (nullable, ON DELETE CASCADE)   Owner (exactly one of the six is set)
