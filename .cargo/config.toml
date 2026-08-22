@@ -1,0 +1,16 @@
+# SQLite is compiled from source by libsqlite3-sys (via sqlx). Its default
+# build keeps allocation statistics (`sqlite3_status`), which costs one
+# *process-wide* mutex on every malloc/free inside SQLite. The server never
+# reads those statistics, but the test suite — ~1900 tests, each building a
+# fresh in-memory database — turns that mutex into a global serialisation
+# point: the suite got *slower* with more test threads (658s wall, 1030s of
+# it system time spent contending). Turning the statistics off is SQLite's
+# own recommendation for maximum performance; it alone takes the suite
+# from 658s to ~33s, and with the dev-profile dependency optimisation in
+# Cargo.toml to ~14s. Nothing here reads sqlite3_status(), so the only thing
+# lost is a statistic the project never asked for.
+#
+# CI needs no change of its own: it runs cargo from the repo root, so this
+# file applies there too.
+[env]
+LIBSQLITE3_FLAGS = "SQLITE_DEFAULT_MEMSTATUS=0"

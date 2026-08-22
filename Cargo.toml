@@ -57,3 +57,9 @@ tempfile = "3"
 tokio = { version = "1", features = ["test-util"] }
 tower = { version = "0.5", features = ["util"] }
 tracing-test = "0.2"
+
+# Dependencies are built once and cached; the crate's own code stays at
+# opt-level 0 so incremental rebuilds stay fast. This is mostly about the
+# SQLite C library, which every test exercises heavily.
+[profile.dev.package."*"]
+opt-level = 2
