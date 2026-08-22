@@ -83,7 +83,7 @@ behind or became a recorded finding.
 | Q. Prices, valuation, and snapshots | 15 | 2026-08-20 (`3696ec1`) | 5 raised, all closed — see below |
 | R. Listing identity and renames | 10 | 2026-08-21 (`28a7c5f`) | 8 raised, all closed — see below |
 | S. Settlement, holidays, and dates | 10 | 2026-08-22 (`d501408`) | 4 raised, all closed — see below |
-| T. Jobs, backup, and operations | 12 | 2026-08-22 (`db877cb`) | 6 raised, 5 closed, 1 open — see below |
+| T. Jobs, backup, and operations | 12 | 2026-08-22 (`db877cb`) | 6 raised, 6 closed — see below |
 | U. Audit trail and history | 8 | — | — |
 | V. Back-dated and out-of-order entry | 10 | — | — |
 | W. Precision, rounding, and scale | 8 | — | — |
@@ -962,7 +962,7 @@ their failure as a Rust `Debug` string, so the message and its cause were replac
 (T-06); `POST /jobs/:name` answering bare status codes, leaving the Jobs screen to show "HTTP 500"
 with the reason nowhere in the response, and silently ignoring a misspelt `?suffix=` (T-10); and a
 currency import that skips the whole ISO 24165 half without credentials and still reports unqualified
-success (T-09, still open). Two were about a job's *absence* of evidence rather than its output: a
+success (T-09). Two were about a job's *absence* of evidence rather than its output: a
 run the process did not survive left no `job_runs` row at all, so `GET /jobs` went on showing the
 previous run's result while an unverified copy sat on disk wearing a backup's name (T-11); and a job
 that has stopped running records nothing, so nothing in the system noticed — the last successful run
@@ -972,8 +972,7 @@ that had lost its meaning through crying wolf — the startup "no schedule entry
 boot for the two deliberately manual jobs, which is precisely what would have buried a genuinely lost
 line (T-09/schedule).
 
-Five are archived in [`DONE/infra.md`](DONE/infra.md) under headings naming their scenario ids; the
-sixth (T-09, the half-import) is still open in [TODO.md](TODO.md).
+All six are archived in [`DONE/infra.md`](DONE/infra.md) under headings naming their scenario ids.
 
 | Finding | Scenarios | Fixed by |
 | --- | --- | --- |
@@ -982,7 +981,7 @@ sixth (T-09, the half-import) is still open in [TODO.md](TODO.md).
 | `POST /jobs/:name` answers bare status codes with no body | T-10 | `18b0a03` |
 | A run interrupted by a restart leaves no record, and an unverified file that looks like a good backup | T-11 | `7557e97` |
 | Nothing notices a job that has stopped running | T-11, T-02, T-12 | `6ac3ffe` |
-| A currency-import that skipped the whole ISO 24165 half reports unqualified success | T-09 | open |
+| A currency-import that skipped the whole ISO 24165 half reports unqualified success | T-09 | `edb3413` |
 
 
 ## A. Deletion and mutation ripple effects
