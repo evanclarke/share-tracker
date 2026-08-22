@@ -121,3 +121,58 @@ The other `yield_now` loop in this file (the in-flight-run wait in the `POST /jo
 alone deliberately: it already spins on the real condition rather than a fixed count. It has no
 deadline, which is a smaller wart — a broken condition hangs rather than failing by name — and is
 worth tidying only if it ever bites.
+
+---
+
+## A request arriving during startup answers 500 "database is locked"
+
+Found 2026-08-22 by CI going red on the `v0.13.0` push — not on the test suite this time but on
+`scripts/ui-smoke.sh`, whose fixture seeding got `PUT /listings/2 -> 500` with an empty body.
+
+Reproduced locally by starting a fresh server and issuing one `PUT` as soon as it answers: **2 in 40
+runs** fail with `error returned from database: (code: 517) database is locked`. The server log puts
+the error in the middle of the scheduler's startup `next run scheduled` lines, and an **empty
+`schedule.cron` makes it vanish (0 in 40)** — so the collision is with the per-entry `job_schedule`
+writes that `spawn` performs at startup, concurrently with the server already serving requests.
+
+**It is not migration 0045.** Checked rather than assumed, because the migration had just been
+deployed: a build of `7b915cf` (the commit before 0045) fails the same way **8 times in 60**, a
+higher rate than the 2 in 40 measured after it. The race arrived with the `job_schedule` table
+(migration 0043, SCENARIOS T-11/T-02/T-12) — the first thing in this system to write to the database
+from a background task while requests are being served.
+
+**Why `busy_timeout` does not already cover it.** sqlx sets a 5-second `busy_timeout` by default, so
+plain `SQLITE_BUSY` waits. But code 517 is `SQLITE_BUSY_SNAPSHOT`, which `sqlite3_busy_timeout()`
+deliberately does **not** retry: it is returned when a transaction that began deferred — as a reader
+— tries to upgrade to a writer after another connection has committed since its read snapshot was
+taken. SQLite returns it immediately and expects the application to roll back and retry, or to have
+taken the write lock up front. `pool.begin()` issues a deferred `BEGIN`, so every write transaction
+in the tree is exposed; there are 26 files beginning transactions on the write side and 21 on the
+read-only report side.
+
+The impact is small but real and user-visible: a 500 with an empty body, which the web UI can only
+show as `HTTP 500` — the same complaint SCENARIOS T-10 raised about the jobs endpoint. It is not a
+correctness risk (the transaction fails atomically; nothing partial is written), and it needs a
+concurrent writer, which for a single-user tool means startup or a job running as you click.
+
+**Question for Evan — how to fix it?**
+
+- **(a) Write transactions take the lock up front** — `pool.begin_with("BEGIN IMMEDIATE")` on the
+  write paths, leaving the read-only report snapshots deferred. This is what SQLite documents for
+  exactly this error, and it makes the existing 5-second `busy_timeout` effective: a concurrent
+  writer waits instead of failing. Touches the write-side `begin()` sites and needs a shared helper
+  so a new write path cannot quietly go back to a deferred `BEGIN`.
+- **(b) Retry the transaction on 517** in a wrapper, leaving the `BEGIN`s deferred. Keeps the
+  transaction shapes but puts retry logic on every write path, and a retried financial write must
+  re-run the whole transaction, not resume it.
+- **(c) Keep the scheduler off the database while the server is starting** — write `job_schedule`
+  before binding, or serialise it. Narrows this trigger but leaves the general race live (a manual
+  `POST /jobs/{name}` while you are entering a trade collides just the same).
+- **(d) Accept it** — a rare startup-only 500, already atomic, and document it.
+
+- [ ] Decision recorded and implemented
+- [ ] `scripts/ui-smoke.sh` dumps the server log when a **seed** request fails, not only when the
+      server fails to start — the cause was logged and CI threw it away, which is what made this a
+      half-hour diagnosis instead of a one-line one
+- [ ] A regression test: a write arriving concurrently with the scheduler's startup writes succeeds
+      rather than answering 500
