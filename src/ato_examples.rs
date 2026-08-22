@@ -687,9 +687,10 @@ async fn you_and_your_shares_examples_1_2_john_assessable_dividend_income() {
 async fn you_and_your_shares_example_6_matthew_holding_period_rule() {
     let pool = test_pool().await;
     put_listing(&pool, 1, "MTHW").await;
-    // Acquired 1 March 2025; ex-dividend in March; sold 10 April 2025 — held
-    // at risk well under the required 45 days.
-    put_buy(&pool, 1, 1, "2025-03-01", "1000", "50", "0").await;
+    // Acquired 3 March 2025 (the example's 1 March is a Saturday);
+    // ex-dividend in March; sold 10 April 2025 — held at risk well under the
+    // required 45 days.
+    put_buy(&pool, 1, 1, "2025-03-03", "1000", "50", "0").await;
     api_put(
         &pool,
         "/income/1",
@@ -860,7 +861,7 @@ async fn td_2000_10_example_1_john_share_split() {
     let pool = test_pool().await;
     put_listing(&pool, 1, "XYZ").await;
     put_buy(&pool, 1, 1, "1985-09-20", "2000", "1", "0").await;
-    put_buy(&pool, 2, 1, "1988-04-30", "3000", "1", "0").await;
+    put_buy(&pool, 2, 1, "1988-04-29", "3000", "1", "0").await;
     // The 2-for-1 conversion (100,000 → 200,000 shares), as a corporate action.
     api_put(
         &pool,
@@ -882,9 +883,10 @@ async fn td_2000_10_example_1_john_share_split() {
     // (the stand-in for the determination's September 1984 date).
     assert_eq!(parcels[0].remaining_quantity, dec("4000"));
     assert_eq!(parcels[0].acquisition_date.to_string(), "1985-09-20");
-    // 3,000 → 6,000 shares with a cost base of $0.50 each, still 30 April 1988.
+    // 3,000 → 6,000 shares with a cost base of $0.50 each, still 29 April 1988
+    // (the example's 30 April is a Saturday, so the parcel is dated the Friday).
     assert_eq!(parcels[1].remaining_quantity, dec("6000"));
-    assert_eq!(parcels[1].acquisition_date.to_string(), "1988-04-30");
+    assert_eq!(parcels[1].acquisition_date.to_string(), "1988-04-29");
     assert_eq!(
         parcels[1].remaining_cost_base,
         dec("3000"),
@@ -913,7 +915,7 @@ async fn td_2000_10_example_2_john_share_consolidation() {
     let pool = test_pool().await;
     put_listing(&pool, 1, "XYZ").await;
     put_buy(&pool, 1, 1, "1985-09-20", "2000", "1", "0").await;
-    put_buy(&pool, 2, 1, "1988-04-30", "3000", "1", "0").await;
+    put_buy(&pool, 2, 1, "1988-04-29", "3000", "1", "0").await;
     // The 1-for-2 consolidation (100,000 → 50,000 shares).
     api_put(
         &pool,
@@ -1038,7 +1040,7 @@ async fn bonus_shares_example_35_chris_fully_paid_bonus_shares() {
 async fn rights_issues_example_39_shanti_sale_of_rights() {
     let pool = test_pool().await;
     put_listing(&pool, 1, "ZAC").await;
-    put_buy(&pool, 1, 1, "1996-12-01", "1000", "2", "0").await;
+    put_buy(&pool, 1, 1, "1996-12-02", "1000", "2", "0").await;
     // One right per four shares owned, exercise price $1.80, record 1 July 1998.
     api_put(
         &pool,
@@ -1117,7 +1119,7 @@ async fn rights_issues_example_39_shanti_sale_of_rights() {
 async fn rights_issues_example_40_shanti_rights_exercised() {
     let pool = test_pool().await;
     put_listing(&pool, 1, "ZAC").await;
-    put_buy(&pool, 1, 1, "1996-12-01", "1000", "2", "0").await;
+    put_buy(&pool, 1, 1, "1996-12-02", "1000", "2", "0").await;
     // One right per four shares owned, exercise price $1.80, record 1 July 1998.
     api_put(
         &pool,
@@ -1409,7 +1411,7 @@ async fn demergers_examples_30_32_anita_bhp_billiton_demerger() {
     // Example 32: dispose of the BHP Steel shares after 15 August 2002 —
     // under 12 months after the demerger but over 12 months after the BHP
     // Billiton shares were acquired — and the discount method applies.
-    put_sell(&pool, 100, 2, "2002-09-01", "56", "5", "0", demerged_buy_id).await;
+    put_sell(&pool, 100, 2, "2002-09-02", "56", "5", "0", demerged_buy_id).await;
     let gains: Vec<RealisedGainLoss> = api_get(&pool, "/portfolio/realised-gains").await;
     assert_eq!(gains.len(), 1);
     // 56 × $5 = $280 proceeds − $126.575 cost base = $153.425, all
@@ -1442,7 +1444,7 @@ async fn takeovers_example_27_gunther_partial_scrip_for_scrip_rollover() {
     put_listing(&pool, 1, "WDR").await;
     put_listing(&pool, 2, "RGL").await;
     // 100 Windsor shares, $9 cost base each = $900.
-    put_buy(&pool, 1, 1, "2023-01-15", "100", "9", "0").await;
+    put_buy(&pool, 1, 1, "2023-01-17", "100", "9", "0").await;
     api_put(
         &pool,
         "/corporate_actions/1",
@@ -1484,7 +1486,7 @@ async fn takeovers_example_27_gunther_partial_scrip_for_scrip_rollover() {
     assert_eq!(parcels[0].ticker, "RGL");
     assert_eq!(parcels[0].remaining_quantity, dec("100"));
     assert_eq!(parcels[0].remaining_cost_base, dec("600"), "ATO: $6 each");
-    assert_eq!(parcels[0].acquisition_date.to_string(), "2023-01-15");
+    assert_eq!(parcels[0].acquisition_date.to_string(), "2023-01-17");
 
     // FY2025's net capital gain: the $700 discount-eligible gain halves.
     let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net-capital-gain").await;
@@ -1925,7 +1927,7 @@ async fn ess_30_day_rule_example_11_wyatt_amended_statement() {
         "/ess_statements/1",
         json!({
             "listing_id": 1,
-            "taxing_point_date": "2019-07-20",
+            "taxing_point_date": "2019-07-22",
             "quantity": "400",
             "market_value_per_share": "3.795",
             "deferral_discount": "1518", // label F
@@ -1940,11 +1942,11 @@ async fn ess_30_day_rule_example_11_wyatt_amended_statement() {
         StatusCode::CREATED,
     )
     .await;
-    assert_eq!(vest.date, "2019-07-20".parse().unwrap());
+    assert_eq!(vest.date, "2019-07-22".parse().unwrap());
     assert_eq!(vest.quantity, dec("400"));
 
     // The sale, the same day, for the $1,518 that fixed the discount.
-    put_sell(&pool, 50, 1, "2019-07-20", "400", "3.795", "0", vest.id).await;
+    put_sell(&pool, 50, 1, "2019-07-22", "400", "3.795", "0", vest.id).await;
 
     // "$1,518 at F item 12 … he also writes $1,518 at B item 12" — in FY2020
     // (a July date is the next financial year), and in no other year.
@@ -2108,7 +2110,7 @@ async fn inherited_assets_example_maria_antonio_lpr_expenditure() {
 async fn cgt_event_timing_example_sue_contract_date_not_settlement() {
     let pool = test_pool().await;
     put_listing(&pool, 1, "LND").await;
-    put_buy(&pool, 1, 1, "2022-05-01", "1", "1000", "0").await;
+    put_buy(&pool, 1, 1, "2022-05-02", "1", "1000", "0").await;
 
     // Contracted June 2024, settled October 2024.
     api_put(
@@ -2382,7 +2384,7 @@ async fn ess_30_day_rule_example_wyatt_taxing_point_moves_to_the_sale() {
         "/ess_statements/1",
         json!({
             "listing_id": 1,
-            "taxing_point_date": "2019-07-20",
+            "taxing_point_date": "2019-07-22",
             "quantity": "400",
             "market_value_per_share": "3.795",
             "deferral_discount": "1518",
@@ -2399,11 +2401,11 @@ async fn ess_30_day_rule_example_wyatt_taxing_point_moves_to_the_sale() {
         StatusCode::CREATED,
     )
     .await;
-    assert_eq!(vest.date, "2019-07-20".parse().unwrap());
+    assert_eq!(vest.date, "2019-07-22".parse().unwrap());
     assert_eq!(vest.average_price, dec("3.795"));
 
     // The on-market sale the same day, for the same $1,518.
-    put_sell(&pool, 100, 1, "2019-07-20", "400", "3.795", "0", vest.id).await;
+    put_sell(&pool, 100, 1, "2019-07-22", "400", "3.795", "0", vest.id).await;
 
     // The discount lands in FY2019–20 (Wyatt's 2020 return), label F, with
     // no taxed-upfront reduction.
@@ -2443,7 +2445,7 @@ async fn pig_managed_funds_example_26_bob_fund_gains_and_tax_deferred() {
     let pool = test_pool().await;
     put_listing(&pool, 1, "OZI").await;
     // Bob's unit holding, entered as one unit carrying the $1,200 cost base.
-    put_buy(&pool, 1, 1, "2023-10-01", "1", "1200", "0").await;
+    put_buy(&pool, 1, 1, "2023-10-02", "1", "1200", "0").await;
     // The fund's statement for 2024–25.
     api_put(
         &pool,
@@ -2540,7 +2542,7 @@ async fn pig_managed_funds_example_27_ilena_own_loss_against_fund_gains() {
     .await;
     // Ilena's own $100 capital loss on some shares sold during the year.
     put_buy(&pool, 1, 2, "2024-08-01", "100", "6", "0").await;
-    put_sell(&pool, 2, 2, "2025-03-01", "100", "5", "0", 1).await;
+    put_sell(&pool, 2, 2, "2025-03-03", "100", "5", "0", 1).await;
 
     let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net-capital-gain").await;
     assert_eq!(years.len(), 1);
@@ -2865,7 +2867,7 @@ async fn takeovers_example_26_desiree_takeover_without_rollover() {
     put_listing(&pool, 1, "DEF").await;
     put_listing(&pool, 2, "XYZ").await;
     // 500 DEF shares bought October 2000 with a $1.50 cost base each.
-    put_buy(&pool, 1, 1, "2000-10-15", "500", "1.50", "0").await;
+    put_buy(&pool, 1, 1, "2000-10-16", "500", "1.50", "0").await;
     // The takeover: disposal at $2 per share (a $1.25 XYZ share + 75c cash)…
     put_sell(&pool, 10, 1, "2002-03-15", "500", "2", "0", 1).await;
     // …and the new XYZ parcel at its $1.25 market value.

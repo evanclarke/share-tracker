@@ -968,7 +968,7 @@ mod tests {
             .insert(&pool)
             .await;
         test_support::sell(2, 1)
-            .date(ymd(2024, 6, 1))
+            .date(ymd(2024, 6, 3))
             .qty(dec("80"))
             .price(dec("6"))
             .insert(&pool)
@@ -978,7 +978,7 @@ mod tests {
         let (events, holdings) = db_activity(&pool, 1).await.unwrap().unwrap();
         let order: Vec<&str> = events.iter().map(|e| e.event.as_str()).collect();
         assert_eq!(order, vec!["Buy", "Share split", "Dividend", "Sell"]);
-        assert_eq!(events[0].date, ymd(2024, 1, 1));
+        assert_eq!(events[0].date, ymd(2024, 1, 2));
         assert_eq!(events[0].quantity, Some(dec("100")));
         assert_eq!(events[0].units_after, dec("100"));
         // Buy amount: 10 × 100 + 9.95 + 0.995.
@@ -1102,7 +1102,7 @@ mod tests {
         // Sell: 40 × 12 − 9.95 − 0.995 = 469.055 receivable.
         let sell_total = dec("469.055");
         test_support::sell(2, 1)
-            .date(ymd(2024, 6, 1))
+            .date(ymd(2024, 6, 3))
             .qty(dec("40"))
             .price(dec("12"))
             .brokerage(dec("9.95"))
@@ -1430,7 +1430,7 @@ mod tests {
         .unwrap();
         insert_listing(&pool, 1, "LAAC").await;
         test_support::buy(1, 1)
-            .date(ymd(2024, 1, 1))
+            .date(ymd(2024, 1, 2))
             .insert(&pool)
             .await;
         crate::entities::listing_rename::db_rename(
@@ -1448,7 +1448,7 @@ mod tests {
         .await
         .unwrap();
         test_support::sell(2, 1)
-            .date(ymd(2024, 9, 1))
+            .date(ymd(2024, 9, 3))
             .qty(dec("10"))
             .insert(&pool)
             .await;

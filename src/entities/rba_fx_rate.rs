@@ -795,7 +795,7 @@ mod tests {
             .insert(&pool)
             .await;
         crate::test_support::buy(1, 1)
-            .date(chrono::NaiveDate::from_ymd_opt(2024, 1, 15).unwrap())
+            .date(chrono::NaiveDate::from_ymd_opt(2024, 1, 16).unwrap())
             .settlement(chrono::NaiveDate::from_ymd_opt(2024, 1, 17).unwrap())
             .qty("10".parse().unwrap())
             .price("100".parse().unwrap())

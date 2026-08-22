@@ -212,10 +212,16 @@ pub async fn crud_list<E: CrudEntity>(pool: &SqlitePool) -> Result<Vec<E>, sqlx:
 }
 
 /// One row of `E`'s table by primary key, or `None`.
-pub async fn crud_get<E: CrudEntity>(
-    pool: &SqlitePool,
-    key: E::Key,
-) -> Result<Option<E>, sqlx::Error> {
+///
+/// Executor-generic so the same read composes onto a caller's transaction:
+/// a write-time invariant that has to see the row inside its own transaction
+/// (`closing_price::load_market_on`, reached from the trade write path)
+/// cannot go to the pool for it.
+pub async fn crud_get<'e, E, X>(executor: X, key: E::Key) -> Result<Option<E>, sqlx::Error>
+where
+    E: CrudEntity,
+    X: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
     sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {} FROM {} WHERE {} = ?",
         E::COLUMNS,
@@ -223,7 +229,7 @@ pub async fn crud_get<E: CrudEntity>(
         E::KEY_COLUMN
     )))
     .bind(key)
-    .fetch_optional(pool)
+    .fetch_optional(executor)
     .await
 }
 
@@ -259,7 +265,7 @@ pub async fn get_handler<E: CrudEntity>(
     State(pool): State<SqlitePool>,
     Path(key): Path<E::Key>,
 ) -> Result<Json<E>, ApiError> {
-    crud_get::<E>(&pool, key)
+    crud_get::<E, _>(&pool, key)
         .await
         .map_err(ApiError::from)?
         .map(Json)

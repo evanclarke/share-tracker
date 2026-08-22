@@ -339,8 +339,14 @@ pub fn router() -> Router<SqlitePool> {
         )
 }
 
-pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<Listing>, sqlx::Error> {
-    http::crud_get(pool, id).await
+/// Executor-generic so the row can be read on a caller's transaction as well
+/// as from the pool — `closing_price::load_market_on` needs it inside the
+/// trade write path's own transaction.
+pub async fn db_get<'e, X>(executor: X, id: i64) -> Result<Option<Listing>, sqlx::Error>
+where
+    X: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
+    http::crud_get(executor, id).await
 }
 
 pub async fn db_upsert(pool: &SqlitePool, listing: &Listing) -> Result<(), UpsertError> {

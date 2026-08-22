@@ -1308,6 +1308,18 @@ async function refreshHealthBanner() {
         + ', and there is no separate capital gain. Enter the employer’s amended statement over the'
         + ' original.');
     });
+    // A trade dated on a day its exchange was shut. `PUT /trades/:id` and
+    // `PUT /sells/:id` refuse one outright, so anything listed here came from
+    // a derived path (a vest, an inheritance, a DRP, a corporate action) or
+    // predates the rule — non-blocking, and fixed at the fact behind it.
+    const nonTradingDays = h.non_trading_day_trades || [];
+    nonTradingDays.forEach(function (d) {
+      problems.push(d.trade_type + ' ' + d.trade_id + ' on ' + d.ticker + ' is dated ' + d.date
+        + ', ' + (d.reason === 'weekend' ? 'a weekend' : 'a public holiday') + ' on '
+        + d.exchange_mic + ' — the market was shut (' + d.source + '). The trade date is the CGT'
+        + ' event date, so it sets the discount clock, the financial year and the settlement'
+        + ' count; correct it to the day the trade actually executed.');
+    });
     if (problems.length === 0) {
       banner.hidden = true;
       banner.innerHTML = '';
@@ -1343,6 +1355,9 @@ async function refreshHealthBanner() {
     }
     if (currencyMismatches.length > 0) {
       banner.appendChild(el('a', { href: '#/e/listings' }, 'Open Listings →'));
+    }
+    if (nonTradingDays.length > 0) {
+      banner.appendChild(el('a', { href: '#/e/trades' }, 'Open Trades →'));
     }
     banner.hidden = false;
   } catch (e) {

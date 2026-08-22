@@ -441,8 +441,8 @@ mod tests {
                 brokerage_includes_gst: false,
                 statement_total: None,
                 holding_account_id: 1,
-                date: d(2022, 5, 1),
-                settlement_date: Some(d(2022, 5, 1)),
+                date: d(2022, 5, 2),
+                settlement_date: Some(d(2022, 5, 2)),
                 listing_id: 1,
                 average_price: dec("2.00"),
                 quantity: dec("400"),
@@ -482,7 +482,7 @@ mod tests {
     async fn recognised_loss_feeds_the_net_capital_gain_loss_pool() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "DEAD").await;
-        insert_buy(&pool, 1, 1, d(2023, 7, 1), "1000", "2.00").await; // $2,000
+        insert_buy(&pool, 1, 1, d(2023, 7, 3), "1000", "2.00").await; // $2,000
         insert_worthless(&pool, 10, 1, d(2025, 3, 31), WorthlessEvent::G3Declaration).await;
         db_recognise(&pool, 10).await.unwrap();
 
@@ -509,14 +509,14 @@ mod tests {
         insert_worthless(&pool, 10, 1, d(2023, 6, 1), WorthlessEvent::G3Declaration).await;
         db_recognise(&pool, 10).await.unwrap();
 
-        insert_buy(&pool, 50, 1, d(2024, 9, 1), "100", "0.50").await;
+        insert_buy(&pool, 50, 1, d(2024, 9, 3), "100", "0.50").await;
 
         let parcels = crate::reports::open_parcels::db_open_parcels(&pool)
             .await
             .unwrap();
         assert_eq!(parcels.len(), 1);
         assert_eq!(parcels[0].trade_id, 50);
-        assert_eq!(parcels[0].acquisition_date, d(2024, 9, 1));
+        assert_eq!(parcels[0].acquisition_date, d(2024, 9, 3));
         assert_eq!(parcels[0].remaining_cost_base, dec("50.00"));
 
         let gains = crate::reports::realised_gains::db_realised_gains(&pool)

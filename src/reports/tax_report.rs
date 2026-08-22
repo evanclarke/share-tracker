@@ -1670,7 +1670,7 @@ mod tests {
             .insert(&pool)
             .await;
         test_support::buy(1, 1)
-            .date(ymd(2023, 1, 1))
+            .date(ymd(2023, 1, 3))
             .qty(dec("100"))
             .price(dec("10"))
             .insert(&pool)
@@ -1725,7 +1725,7 @@ mod tests {
             .insert(&pool)
             .await;
         test_support::buy(1, 1)
-            .date(ymd(2023, 1, 1))
+            .date(ymd(2023, 1, 3))
             .qty(dec("100"))
             .price(dec("10"))
             .insert(&pool)
@@ -1782,7 +1782,7 @@ mod tests {
             .insert(&pool)
             .await;
         test_support::buy(1, 1)
-            .date(ymd(2023, 1, 1))
+            .date(ymd(2023, 1, 3))
             .qty(dec("100"))
             .price(dec("10"))
             .insert(&pool)
@@ -2090,7 +2090,7 @@ mod tests {
         let pool = test_support::test_pool().await;
         listing_amit(&pool, 1, "AMT").await;
         test_support::buy(1, 1)
-            .date(ymd(2023, 1, 1))
+            .date(ymd(2023, 1, 3))
             .qty(dec("100"))
             .price(dec("10"))
             .insert(&pool)
@@ -2177,7 +2177,7 @@ mod tests {
         .await
         .unwrap();
         test_support::buy(1, 1)
-            .date(ymd(2023, 1, 1))
+            .date(ymd(2023, 1, 3))
             .qty(dec("100"))
             .price(dec("10"))
             .insert(&pool)
@@ -2236,7 +2236,7 @@ mod tests {
             .insert(&pool)
             .await;
         test_support::buy(1, 1)
-            .date(ymd(2023, 1, 1))
+            .date(ymd(2023, 1, 3))
             .qty(dec("100"))
             .price(dec("10"))
             .insert(&pool)
@@ -2269,13 +2269,13 @@ mod tests {
             .await;
         listing_amit(&pool, 2, "AMT").await;
         test_support::buy(1, 1)
-            .date(ymd(2023, 1, 1))
+            .date(ymd(2023, 1, 3))
             .qty(dec("100"))
             .price(dec("10"))
             .insert(&pool)
             .await;
         test_support::buy(2, 2)
-            .date(ymd(2023, 1, 1))
+            .date(ymd(2023, 1, 3))
             .qty(dec("100"))
             .price(dec("10"))
             .insert(&pool)
@@ -2378,13 +2378,13 @@ mod tests {
         let pool = test_support::test_pool().await;
         listing_amit(&pool, 1, "AMT").await;
         test_support::buy(1, 1)
-            .date(ymd(2021, 1, 1))
+            .date(ymd(2021, 1, 4))
             .qty(dec("100"))
             .price(dec("10"))
             .insert(&pool)
             .await;
         test_support::sell(2, 1)
-            .date(ymd(2022, 1, 1))
+            .date(ymd(2022, 1, 4))
             .qty(dec("100"))
             .price(dec("12"))
             .insert(&pool)

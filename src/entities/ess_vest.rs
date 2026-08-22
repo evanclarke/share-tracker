@@ -55,6 +55,15 @@
 //!
 //! A new check added to `trade::check_amounts` therefore needs a line here, and
 //! either an argument that the vest satisfies it or a guard that makes it so.
+//!
+//! One write-time rule deliberately stops **outside** that list: the trading-day
+//! check `trade::db_upsert` and `sell::db_upsert_sell` apply to the date
+//! (`trade::UpsertError::NonTradingDay`, SCENARIOS S-08). It is not in
+//! `check_amounts` — it needs a database read — and it does not reach the vest
+//! by any other route either, on purpose: a deferred taxing point is a date the
+//! *scheme* sets, and nothing obliges it to fall on a day the exchange traded.
+//! A vest so dated is surfaced instead, non-blockingly, by
+//! `reports::health`'s `non_trading_day_trades`.
 
 use crate::entities::trade::{self, Trade};
 use crate::infra::decimal::Money;
@@ -297,7 +306,7 @@ mod tests {
                 brokerage_includes_gst: false,
                 statement_total: None,
                 holding_account_id: parcel.holding_account_id,
-                date: ymd(2025, 3, 1),
+                date: ymd(2025, 3, 3),
                 settlement_date: Some(ymd(2025, 3, 3)),
                 listing_id: 1,
                 average_price: Decimal::from(10),

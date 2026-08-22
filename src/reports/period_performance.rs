@@ -528,7 +528,7 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "BTC", "AUD").await;
         test_support::buy(1, 1)
-            .date(ymd(2024, 1, 1))
+            .date(ymd(2024, 1, 2))
             .qty(dec("100"))
             .price(dec("10"))
             .currency("AUD")
@@ -569,7 +569,7 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "BTC", "AUD").await;
         test_support::buy(1, 1)
-            .date(ymd(2024, 1, 1))
+            .date(ymd(2024, 1, 2))
             .qty(dec("100"))
             .price(dec("10"))
             .currency("AUD")
@@ -615,14 +615,14 @@ mod tests {
         insert_listing(&pool, 1, "ETH", "AUD").await;
         insert_listing(&pool, 2, "BTC", "AUD").await;
         test_support::buy(1, 1)
-            .date(ymd(2024, 1, 1))
+            .date(ymd(2024, 1, 2))
             .qty(dec("100"))
             .price(dec("10"))
             .currency("AUD")
             .insert(&pool)
             .await;
         test_support::buy(2, 2)
-            .date(ymd(2024, 1, 1))
+            .date(ymd(2024, 1, 2))
             .qty(dec("10"))
             .price(dec("50"))
             .currency("AUD")
@@ -685,7 +685,7 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "BTC", "AUD").await;
         test_support::buy(1, 1)
-            .date(ymd(2020, 1, 1))
+            .date(ymd(2020, 1, 2))
             .qty(dec("100"))
             .price(dec("10"))
             .currency("AUD")
@@ -726,7 +726,7 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "BTC", "USD").await;
         test_support::buy(1, 1)
-            .date(ymd(2024, 1, 1))
+            .date(ymd(2024, 1, 2))
             .qty(dec("10"))
             .price(dec("100"))
             .currency("USD")
@@ -780,7 +780,7 @@ mod tests {
         // Closed mid-window: bought before `from`, fully sold 2026-06-15.
         insert_listing(&pool, 11, "ETH", "AUD").await;
         test_support::buy(11, 11)
-            .date(ymd(2024, 1, 1))
+            .date(ymd(2024, 1, 2))
             .qty(dec("30"))
             .price(dec("10"))
             .currency("AUD")
@@ -868,7 +868,7 @@ mod tests {
         let to = ymd(2026, 7, 1);
         insert_listing(&pool, 1, "BTC", "AUD").await;
         test_support::buy(1, 1)
-            .date(ymd(2024, 1, 1))
+            .date(ymd(2024, 1, 2))
             .qty(dec("100"))
             .price(dec("10"))
             .currency("AUD")
@@ -895,7 +895,7 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "BTC", "USD").await;
         test_support::buy(1, 1)
-            .date(ymd(2024, 1, 1))
+            .date(ymd(2024, 1, 2))
             .qty(dec("10"))
             .price(dec("100"))
             .currency("USD")
@@ -945,7 +945,7 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "BTC", "AUD").await;
         test_support::buy(1, 1)
-            .date(ymd(2024, 1, 1))
+            .date(ymd(2024, 1, 2))
             .qty(dec("100"))
             .price(dec("10"))
             .currency("AUD")
@@ -967,7 +967,7 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "BTC", "AUD").await;
         test_support::buy(1, 1)
-            .date(ymd(2024, 1, 1))
+            .date(ymd(2024, 1, 2))
             .qty(dec("100"))
             .price(dec("10"))
             .currency("AUD")

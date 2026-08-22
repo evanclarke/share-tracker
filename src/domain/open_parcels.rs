@@ -287,13 +287,13 @@ mod tests {
             .insert(&pool)
             .await;
         test_support::buy(2, 1)
-            .date(ymd(2024, 2, 10))
+            .date(ymd(2024, 2, 12))
             .qty(dec("40"))
             .price(dec("11"))
             .insert(&pool)
             .await;
         test_support::sell(3, 1)
-            .date(ymd(2024, 3, 10))
+            .date(ymd(2024, 3, 11))
             .qty(dec("100"))
             .price(dec("12"))
             .insert(&pool)
@@ -319,7 +319,7 @@ mod tests {
             .insert(&pool)
             .await;
         test_support::buy(2, 1)
-            .date(ymd(2024, 8, 10))
+            .date(ymd(2024, 8, 12))
             .qty(dec("50"))
             .price(dec("11"))
             .insert(&pool)
@@ -470,7 +470,7 @@ mod tests {
             .await;
         split(&pool, 1, 1, ymd(2024, 3, 1), "2").await;
         test_support::sell(2, 1)
-            .date(ymd(2024, 4, 1))
+            .date(ymd(2024, 4, 2))
             .qty(dec("60"))
             .price(dec("6"))
             .insert(&pool)
@@ -720,7 +720,7 @@ mod tests {
             .insert(&pool)
             .await;
         test_support::sell(3, 1)
-            .date(ymd(2024, 9, 1))
+            .date(ymd(2024, 9, 3))
             .qty(dec("20"))
             .price(dec("13"))
             .insert(&pool)
@@ -734,7 +734,7 @@ mod tests {
             sold.get(&1),
             Some(&vec![
                 (ymd(2024, 5, 1), dec("30")),
-                (ymd(2024, 9, 1), dec("20"))
+                (ymd(2024, 9, 3), dec("20"))
             ])
         );
 

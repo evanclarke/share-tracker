@@ -91,7 +91,7 @@ transfers                    Moves of a listing between two holding accounts of 
 trades
 ├── id                INTEGER PK
 ├── trade_type        TEXT         Buy | Sell | DRP
-├── date              DATE   Indexed — every as-of report (open holdings, unrealised gains, performance) filters trades by date <= as_of. Must fall between 20 September 1985 and today inclusive (422 otherwise): below is a pre-CGT holding, which is not modelled; above is a transaction that has not happened (settlement_date is deliberately not bounded above — a T+2 settlement of a trade dated today is legitimately in the future)
+├── date              DATE   Indexed — every as-of report (open holdings, unrealised gains, performance) filters trades by date <= as_of. Must fall between 20 September 1985 and today inclusive (422 otherwise): below is a pre-CGT holding, which is not modelled; above is a transaction that has not happened (settlement_date is deliberately not bounded above — a T+2 settlement of a trade dated today is legitimately in the future). It must also be a day the listing's own exchange traded — not a weekend or a seeded exchange_holidays date on the calendar in force then (422 from PUT /trades/:id and PUT /sells/:id; exchange-less Crypto listings trade every day). The derived write paths — ESS vest, inherited parcel, DRP reinvestment, rights exercise, and every parcel-substituting operation — INSERT their rows directly and are exempt (a taxing point, a date of death and a corporate action's date need not be market days); reports::health's non_trading_day_trades surfaces those instead
 ├── settlement_date   DATE
 ├── listing_id        INTEGER FK→listings.id
 ├── average_price     TEXT (decimal)

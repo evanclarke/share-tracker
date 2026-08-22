@@ -205,10 +205,12 @@ mod tests {
     #[tokio::test]
     async fn db_loss_sell_with_repurchase_inside_window_is_flagged() {
         let pool = test_pool().await;
-        loss_sale_fixture(&pool, ymd(2025, 6, 10)).await;
+        // Sold on the Wednesday so the re-buy 5 days later lands on a Monday:
+        // a trade can only be dated on a day the exchange traded (S-08).
+        loss_sale_fixture(&pool, ymd(2025, 6, 11)).await;
         // Re-buy the same listing 5 days later.
         test_support::buy(3, 1)
-            .date(ymd(2025, 6, 15))
+            .date(ymd(2025, 6, 16))
             .qty(Decimal::from(100))
             .price(Decimal::from(10))
             .insert(&pool)
@@ -226,16 +228,24 @@ mod tests {
 
     /// Window edges, both sides: a Buy exactly `window` days away (before or
     /// after) is flagged; one day further is not.
+    ///
+    /// The sale date differs between the two sides because both trades have to
+    /// fall on a day the exchange traded (SCENARIOS S-08), and no single sale
+    /// date has all four of ±30 and ±31 on a weekday: 30 and 31 days shift the
+    /// weekday by 2 and 3, so a sale early in the week clears the *after* pair
+    /// and one late in the week the *before* pair, never both. Monday
+    /// 2025-06-16 (+30 Wed, +31 Thu) and Thursday 2025-06-12 (−30 Tue, −31
+    /// Mon) are the two used.
     #[tokio::test]
     async fn db_window_edges_inclusive_either_side() {
-        for (buy_date, expect) in [
-            (ymd(2025, 7, 10), true),  // +30 days
-            (ymd(2025, 7, 11), false), // +31 days
-            (ymd(2025, 5, 11), true),  // −30 days
-            (ymd(2025, 5, 10), false), // −31 days
+        for (sell_date, buy_date, expect) in [
+            (ymd(2025, 6, 16), ymd(2025, 7, 16), true),  // +30 days
+            (ymd(2025, 6, 16), ymd(2025, 7, 17), false), // +31 days
+            (ymd(2025, 6, 12), ymd(2025, 5, 13), true),  // −30 days
+            (ymd(2025, 6, 12), ymd(2025, 5, 12), false), // −31 days
         ] {
             let pool = test_pool().await;
-            loss_sale_fixture(&pool, ymd(2025, 6, 10)).await;
+            loss_sale_fixture(&pool, sell_date).await;
             test_support::buy(3, 1)
                 .date(buy_date)
                 .qty(Decimal::from(50))
@@ -246,7 +256,7 @@ mod tests {
             assert_eq!(
                 alerts.iter().any(|a| a.buy_trade_id == 3),
                 expect,
-                "buy on {buy_date} within ±30 days of 2025-06-10 should flag={expect}"
+                "buy on {buy_date} within ±30 days of {sell_date} should flag={expect}"
             );
         }
     }
@@ -283,7 +293,7 @@ mod tests {
         .await
         .unwrap();
         test_support::buy(3, 1)
-            .date(ymd(2025, 6, 15))
+            .date(ymd(2025, 6, 16))
             .account(2)
             .qty(Decimal::from(100))
             .price(Decimal::from(10))
@@ -379,7 +389,7 @@ mod tests {
         loss_sale_fixture(&pool, ymd(2025, 6, 10)).await;
         insert_listing(&pool, 2, "OTHER").await;
         test_support::buy(3, 2)
-            .date(ymd(2025, 6, 15))
+            .date(ymd(2025, 6, 16))
             .qty(Decimal::from(100))
             .price(Decimal::from(10))
             .insert(&pool)
@@ -424,7 +434,7 @@ mod tests {
             1,
             &crate::entities::transfer::TransferBody {
                 listing_id: 1,
-                date: ymd(2025, 6, 15),
+                date: ymd(2025, 6, 16),
                 from_account_id: 1,
                 to_account_id: 2,
                 allocations: vec![crate::entities::sell::AllocationInput {
@@ -499,7 +509,7 @@ mod tests {
         let fee_sale_id = group.fee_sale.expect("a fee Sell was created").id;
         // A re-buy of the listing inside the window of both loss Sells.
         test_support::buy(100, 1)
-            .date(ymd(2025, 6, 15))
+            .date(ymd(2025, 6, 16))
             .qty(Decimal::from(100))
             .price(Decimal::from(10))
             .insert(&pool)

@@ -1814,6 +1814,16 @@ mod tests {
         assert!(js.contains("its prices cannot be collected"));
         assert!(js.contains("'#/e/listings'"));
         assert!(js.contains("Open Listings"));
+        // …plus a trade dated on a day its own exchange was shut (SCENARIOS
+        // S-08): the two hand-entry routes refuse one outright, so the strip
+        // exists for the rows a derived path wrote, and names the reason, the
+        // exchange and which path it came from.
+        assert!(js.contains("non_trading_day_trades"));
+        assert!(js.contains("d.reason === 'weekend' ? 'a weekend' : 'a public holiday'"));
+        assert!(js.contains("the market was shut"));
+        assert!(js.contains("correct it to the day the trade actually executed"));
+        assert!(js.contains("'#/e/trades'"));
+        assert!(js.contains("Open Trades"));
         // …and refreshes on every route render so it appears on the main views.
         assert!(js.contains("refreshHealthBanner(); // deliberately not awaited"));
         // The strip's host element ships in the page shell with its styles.

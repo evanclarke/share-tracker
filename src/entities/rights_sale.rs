@@ -570,7 +570,7 @@ mod tests {
     async fn a_lapse_realises_nothing_while_a_retail_premium_is_a_capital_gain() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        insert_buy(&pool, 1, d(2023, 1, 15), "1000").await;
+        insert_buy(&pool, 1, d(2023, 1, 17), "1000").await;
         insert_rights_issue(&pool, 10, d(2024, 7, 1)).await; // entitled to 250
 
         // 100 rights lapse (nil proceeds), 150 attract a $0.55 premium.
@@ -687,8 +687,8 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
         // Two parcels: 800 units (entitled 200) and 200 units (entitled 50).
-        insert_buy(&pool, 1, d(2023, 1, 15), "800").await;
-        insert_buy(&pool, 2, d(2024, 6, 1), "200").await;
+        insert_buy(&pool, 1, d(2023, 1, 17), "800").await;
+        insert_buy(&pool, 2, d(2024, 6, 3), "200").await;
         insert_rights_issue(&pool, 10, d(2024, 7, 1)).await;
 
         // Anchoring 201 rights to the old parcel (to borrow its >12-month

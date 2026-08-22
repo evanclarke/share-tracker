@@ -210,7 +210,7 @@ mod tests {
 
     async fn insert_sell(pool: &SqlitePool, id: i64, listing_id: i64, qty: Decimal) {
         test_support::sell(id, listing_id)
-            .date(ymd(2025, 6, 1))
+            .date(ymd(2025, 6, 2))
             .qty(qty)
             .price(Decimal::from(120))
             .brokerage(dec("9.95"))
@@ -249,7 +249,7 @@ mod tests {
     #[tokio::test]
     async fn db_open_parcel_listed_with_original_figures() {
         let pool = test_pool().await;
-        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
         insert_listing(&pool, 1, "VAS").await;
         insert_buy(&pool, 1, 1, buy_date, Decimal::from(100), Decimal::from(10)).await;
 
@@ -278,7 +278,7 @@ mod tests {
     #[tokio::test]
     async fn db_ticker_rename_keeps_parcels_attached_to_the_listing() {
         let pool = test_pool().await;
-        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
         insert_listing(&pool, 1, "OLD").await;
         insert_buy(&pool, 1, 1, buy_date, Decimal::from(100), Decimal::from(10)).await;
 
@@ -316,7 +316,7 @@ mod tests {
     #[tokio::test]
     async fn db_partial_sell_pro_rates_remaining_cost_base() {
         let pool = test_pool().await;
-        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
         insert_listing(&pool, 1, "VAS").await;
         insert_buy(&pool, 1, 1, buy_date, Decimal::from(100), Decimal::from(10)).await;
         insert_sell(&pool, 2, 1, Decimal::from(40)).await;
@@ -336,7 +336,7 @@ mod tests {
     #[tokio::test]
     async fn db_fully_sold_parcel_excluded() {
         let pool = test_pool().await;
-        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
         insert_listing(&pool, 1, "VAS").await;
         insert_buy(&pool, 1, 1, buy_date, Decimal::from(100), Decimal::from(10)).await;
         insert_buy(&pool, 2, 1, buy_date, Decimal::from(50), Decimal::from(11)).await;
@@ -352,7 +352,7 @@ mod tests {
     #[tokio::test]
     async fn db_amit_reduction_reported_and_netted_off() {
         let pool = test_pool().await;
-        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
         insert_listing(&pool, 1, "VAF").await;
         insert_buy(&pool, 1, 1, buy_date, Decimal::from(100), Decimal::from(10)).await;
         // The statement covers the whole parcel at 5c/unit — 5.00 across 100
@@ -379,7 +379,7 @@ mod tests {
     #[tokio::test]
     async fn db_e10_floors_remaining_cost_base_at_nil() {
         let pool = test_pool().await;
-        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
         insert_listing(&pool, 1, "VAF").await;
         insert_buy(&pool, 1, 1, buy_date, Decimal::from(100), Decimal::from(10)).await;
         // Reduction 100 * 11 = 1100 exceeds the 1010.945 cost base → E10 floor.
@@ -403,7 +403,7 @@ mod tests {
     #[tokio::test]
     async fn db_a_negative_per_unit_figure_increases_the_cost_base() {
         let pool = test_pool().await;
-        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
         insert_listing(&pool, 1, "VDHG").await;
         insert_buy(&pool, 1, 1, buy_date, Decimal::from(100), Decimal::from(10)).await;
         apply_amit(&pool, 1, 1, 1, Decimal::from(100), "-0.30".parse().unwrap()).await;
@@ -538,7 +538,7 @@ mod tests {
         insert_listing(&pool, 1, "VAS").await;
         insert_listing(&pool, 2, "VGS").await;
         let d1 = NaiveDate::from_ymd_opt(2023, 5, 1).unwrap();
-        let d2 = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let d2 = NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
         insert_buy(&pool, 1, 2, d1, Decimal::from(10), Decimal::from(10)).await;
         insert_buy(&pool, 2, 1, d2, Decimal::from(10), Decimal::from(10)).await;
         insert_buy(&pool, 3, 1, d1, Decimal::from(10), Decimal::from(10)).await;
@@ -645,7 +645,7 @@ mod tests {
             &pool,
             1,
             1,
-            ymd(2024, 1, 1),
+            ymd(2024, 1, 2),
             Decimal::from(105),
             Decimal::from(10),
         )
@@ -671,7 +671,7 @@ mod tests {
     #[tokio::test]
     async fn db_share_split_rebases_remaining_quantity_and_preserves_cost_base() {
         let pool = test_pool().await;
-        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
         insert_listing(&pool, 1, "SPL").await;
         insert_buy(&pool, 1, 1, buy_date, Decimal::from(100), Decimal::from(10)).await;
         apply_split(
@@ -704,7 +704,7 @@ mod tests {
     #[tokio::test]
     async fn db_consolidation_rebases_remaining_quantity() {
         let pool = test_pool().await;
-        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
         insert_listing(&pool, 1, "CON").await;
         insert_buy(&pool, 1, 1, buy_date, Decimal::from(150), Decimal::from(10)).await;
         // 1-for-10 consolidation → 15 units.
@@ -736,7 +736,7 @@ mod tests {
     #[tokio::test]
     async fn db_a_chain_of_rebasing_actions_composes_and_preserves_the_cost_base() {
         let pool = test_pool().await;
-        let buy_date = ymd(2024, 1, 1);
+        let buy_date = ymd(2024, 1, 2);
         insert_listing(&pool, 1, "CHN").await;
         insert_buy(&pool, 1, 1, buy_date, Decimal::from(100), Decimal::from(10)).await;
         // 2-for-1 split → 200 units.
@@ -783,7 +783,7 @@ mod tests {
             &pool,
             1,
             1,
-            ymd(2024, 1, 1),
+            ymd(2024, 1, 2),
             Decimal::from(33),
             Decimal::from(10),
         )
@@ -805,7 +805,7 @@ mod tests {
     #[tokio::test]
     async fn db_return_of_capital_reduction_reported_and_netted_off() {
         let pool = test_pool().await;
-        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
         insert_listing(&pool, 1, "RAP").await;
         insert_buy(&pool, 1, 1, buy_date, Decimal::from(100), Decimal::from(10)).await;
         // Sell 40 first, then a 50c/unit payment on the 60 still held.
@@ -840,8 +840,8 @@ mod tests {
     async fn db_return_of_capital_skips_parcels_bought_after_the_record_date() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "RAP").await;
-        let cum = NaiveDate::from_ymd_opt(2025, 2, 1).unwrap();
-        let ex = NaiveDate::from_ymd_opt(2025, 2, 15).unwrap();
+        let cum = NaiveDate::from_ymd_opt(2025, 2, 3).unwrap();
+        let ex = NaiveDate::from_ymd_opt(2025, 2, 18).unwrap();
         let record = NaiveDate::from_ymd_opt(2025, 2, 10).unwrap();
         let paid = NaiveDate::from_ymd_opt(2025, 3, 1).unwrap();
         insert_buy(&pool, 1, 1, cum, Decimal::from(100), Decimal::from(10)).await;
@@ -874,7 +874,7 @@ mod tests {
     #[tokio::test]
     async fn db_return_of_capital_floors_remaining_cost_base_at_nil() {
         let pool = test_pool().await;
-        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
         insert_listing(&pool, 1, "RAP").await;
         insert_buy(&pool, 1, 1, buy_date, Decimal::from(100), Decimal::from(10)).await;
         // $11/unit × 100 = 1100 exceeds the 1010.945 cost base.
@@ -900,7 +900,7 @@ mod tests {
     #[tokio::test]
     async fn api_get_open_parcels() {
         let pool = test_pool().await;
-        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
         insert_listing(&pool, 1, "VAS").await;
         insert_buy(&pool, 1, 1, buy_date, Decimal::from(100), Decimal::from(10)).await;
         insert_sell(&pool, 2, 1, Decimal::from(40)).await;

@@ -499,7 +499,7 @@ mod tests {
         insert_listing(&pool, 1, false).await;
         // Matthew (Example 6) shape: acquired 1 Mar, sold 10 Apr — 39 at-risk
         // days (both end days excluded), under 45.
-        insert_trade(&pool, 1, 1, trade::TradeType::Buy, d("2025-03-01"), 1000).await;
+        insert_trade(&pool, 1, 1, trade::TradeType::Buy, d("2025-03-03"), 1000).await;
         insert_trade(&pool, 2, 1, trade::TradeType::Sell, d("2025-04-10"), 1000).await;
         let t = walks(&pool).await.test(1, d("2025-03-14"));
         assert_eq!(t.entitled_units, Decimal::from(1000));
@@ -511,16 +511,19 @@ mod tests {
     async fn db_at_risk_days_exclude_acquisition_and_disposal_days() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, false).await;
-        // Bought 1 Mar. Sold 46 days later (16 Apr): exactly 45 at-risk days → qualifies.
-        insert_trade(&pool, 1, 1, trade::TradeType::Buy, d("2025-03-01"), 100).await;
-        insert_trade(&pool, 2, 1, trade::TradeType::Sell, d("2025-04-16"), 100).await;
+        // Bought Fri 28 Feb. Sold 46 days later (15 Apr): exactly 45 at-risk
+        // days → qualifies. (The buy is the Friday before the ex-date rather
+        // than 1 March, which is a Saturday and so not a day the exchange
+        // traded — SCENARIOS S-08.)
+        insert_trade(&pool, 1, 1, trade::TradeType::Buy, d("2025-02-28"), 100).await;
+        insert_trade(&pool, 2, 1, trade::TradeType::Sell, d("2025-04-15"), 100).await;
         let t = walks(&pool).await.test(1, d("2025-03-02"));
         assert_eq!(t.disqualified_units, Decimal::ZERO);
 
         // Same shape sold one day earlier (44 at-risk days) → disqualified.
         insert_listing(&pool, 2, false).await;
-        insert_trade(&pool, 3, 2, trade::TradeType::Buy, d("2025-03-01"), 100).await;
-        insert_trade(&pool, 4, 2, trade::TradeType::Sell, d("2025-04-15"), 100).await;
+        insert_trade(&pool, 3, 2, trade::TradeType::Buy, d("2025-02-28"), 100).await;
+        insert_trade(&pool, 4, 2, trade::TradeType::Sell, d("2025-04-14"), 100).await;
         let t = walks(&pool).await.test(2, d("2025-03-02"));
         assert_eq!(t.disqualified_units, Decimal::from(100));
     }
@@ -664,7 +667,7 @@ mod tests {
         // The 50 bought and re-sold before the ex-date never carry the
         // entitlement; the long-held 100 remain entitled and qualified.
         insert_trade(&pool, 1, 1, trade::TradeType::Buy, d("2024-01-10"), 100).await;
-        insert_trade(&pool, 2, 1, trade::TradeType::Buy, d("2025-03-09"), 50).await;
+        insert_trade(&pool, 2, 1, trade::TradeType::Buy, d("2025-03-10"), 50).await;
         insert_trade(&pool, 3, 1, trade::TradeType::Sell, d("2025-03-12"), 50).await;
         let t = walks(&pool).await.test(1, d("2025-03-14"));
         assert_eq!(t.entitled_units, Decimal::from(100));
@@ -712,7 +715,7 @@ mod tests {
         insert_listing(&pool, 2, false).await;
         // Bought 1 Mar, ex-dividend 14 Mar, demerger 1 Apr — inside the
         // qualification window with only 30 at-risk days at the demerge.
-        insert_trade(&pool, 1, 1, trade::TradeType::Buy, d("2025-03-01"), 1000).await;
+        insert_trade(&pool, 1, 1, trade::TradeType::Buy, d("2025-03-03"), 1000).await;
         crate::entities::corporate_action::db_upsert(
             &pool,
             &crate::entities::corporate_action::CorporateAction {
@@ -760,7 +763,7 @@ mod tests {
         insert_listing(&pool, 1, false).await;
         // Bought 1 Jan, ex-dividend 10 Feb (40 days later), sold 20 Feb (10
         // days after the ex-date) — inside the window, 49 at-risk days.
-        insert_trade(&pool, 1, 1, trade::TradeType::Buy, d("2025-01-01"), 1000).await;
+        insert_trade(&pool, 1, 1, trade::TradeType::Buy, d("2025-01-02"), 1000).await;
         insert_trade(&pool, 2, 1, trade::TradeType::Sell, d("2025-02-20"), 1000).await;
         let t = walks(&pool).await.test(1, d("2025-02-10"));
         assert_eq!(t.entitled_units, Decimal::from(1000));
@@ -782,7 +785,7 @@ mod tests {
     async fn db_holding_account_transfer_inside_the_window_keeps_the_clock_running() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, false).await;
-        insert_trade(&pool, 1, 1, trade::TradeType::Buy, d("2025-03-01"), 1000).await;
+        insert_trade(&pool, 1, 1, trade::TradeType::Buy, d("2025-03-03"), 1000).await;
         crate::entities::holding_account::db_upsert(
             &pool,
             &crate::entities::holding_account::HoldingAccount {

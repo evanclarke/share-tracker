@@ -169,6 +169,19 @@ pub enum SellError {
     /// one is a no-op row.
     #[error("each parcel allocation must be for a positive quantity")]
     AllocationNotPositive,
+    /// The Sell is dated on a day its exchange did not trade — a weekend, or
+    /// a seeded public holiday on the calendar in force then (SCENARIOS S-08).
+    /// The disposal date is the CGT event date, so it decides the financial
+    /// year the gain falls in and whether the 12-month discount was earned; a
+    /// day the market was shut is a data-entry error by construction. Same
+    /// rule, same calendar and same helper as
+    /// `trade::UpsertError::NonTradingDay` — see it for why this lives here
+    /// rather than in the shared `check_amounts` (which
+    /// [`upsert_sell_in_tx`] runs for every parcel-substituting operation,
+    /// whose closing Sell may legitimately fall on a corporate action's
+    /// non-trading date).
+    #[error("the Sell is dated on a non-trading day: {0}")]
+    NonTradingDay(String),
 }
 
 impl From<SellError> for ApiError {
@@ -235,6 +248,11 @@ impl From<SellError> for ApiError {
                 "each parcel allocation must be for a positive quantity — a zero or negative \
                  allocation would quietly shift capacity between parcels",
             ),
+            SellError::NonTradingDay(what) => ApiError::unprocessable(format!(
+                "the Sell is dated on a day its exchange did not trade — {what}. The disposal \
+                 date is the CGT event date, so it sets the financial year and the discount \
+                 clock; enter the day the sale actually executed"
+            )),
             SellError::Db(err) => err.into(),
         }
     }
@@ -447,6 +465,21 @@ pub async fn db_upsert_sell(pool: &SqlitePool, id: i64, body: &SellBody) -> Resu
         None,
     )
     .await?;
+
+    // The sale date must be a day the listing's own market actually traded
+    // (SCENARIOS S-08). Checked here rather than inside `upsert_sell_in_tx`,
+    // which the parcel-substituting operations share: a scrip exchange,
+    // demerger, transfer, buy-back participation or worthless-shares
+    // recognise takes its own action's date, which is legitimately not a
+    // trading day. Run after the write on the same transaction, so an unknown
+    // `listing_id` meets its foreign-key rejection first — the same ordering
+    // `trade::db_upsert` uses.
+    if let Some(shut) =
+        crate::entities::closing_price::db_non_trading_day(&mut tx, body.listing_id, body.date)
+            .await?
+    {
+        return Err(SellError::NonTradingDay(shut.describe(body.date)));
+    }
 
     tx.commit().await?;
     Ok(())
@@ -1780,11 +1813,30 @@ mod tests {
     /// shared `trade::check_amounts` bound as a Buy, and today itself — the
     /// boundary — is accepted (with its settlement date left free to fall
     /// after it, as a T+2 settlement legitimately does).
+    ///
+    /// The accepted half runs on an exchange-less (Crypto) listing, which
+    /// trades every day: on a listed security the trading-day rule (SCENARIOS
+    /// S-08) refuses a Sell dated today whenever the suite runs on a weekend
+    /// or an exchange holiday, which would make the answer depend on the day
+    /// of the week rather than on the bound under test. Crypto settles
+    /// same-day, so "not bounded above" is asserted as `>= today` here; the
+    /// listed T+2 case is pinned on the trade path
+    /// (`trade::tests::api_future_dated_trade_rejected_422_and_today_accepted`).
     #[tokio::test]
     async fn api_future_dated_sell_rejected_422_and_today_accepted() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
         insert_buy(&pool, 1, 1, Decimal::from(100)).await;
+        test_support::listing(2)
+            .crypto()
+            .ticker("ETH")
+            .name("Ether")
+            .insert(&pool)
+            .await;
+        test_support::buy(3, 2)
+            .qty(Decimal::from(100))
+            .insert(&pool)
+            .await;
         let today = crate::infra::date::today();
         let base = serde_json::json!({
             "date": (today + chrono::Days::new(1)).to_string(),
@@ -1805,11 +1857,99 @@ mod tests {
 
         let mut boundary = base;
         boundary["date"] = today.to_string().into();
+        boundary["listing_id"] = 2.into();
+        boundary["allocations"] =
+            serde_json::json!([ { "purchase_trade_id": 3, "quantity_allocated": "100" } ]);
         let (status, detail) = put_sell_json(&pool, 2, boundary).await;
         assert_eq!(status, StatusCode::NO_CONTENT, "detail: {detail}");
         let sell = trade::db_get(&pool, 2).await.unwrap().unwrap();
         assert_eq!(sell.date, today);
-        assert!(sell.settlement_date > today);
+        assert!(sell.settlement_date >= today);
+    }
+
+    /// SCENARIOS S-08: a Sell dated on a day its exchange did not trade — a
+    /// Saturday, or a seeded `exchange_holidays` date — is refused 422 naming
+    /// the day and the exchange, and nothing is persisted (the allocations
+    /// least of all). The disposal date is the CGT event date, so it decides
+    /// the financial year the gain falls in and whether the 12-month discount
+    /// was earned.
+    #[tokio::test]
+    async fn api_sell_on_a_non_trading_day_rejected_422() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
+        let base = serde_json::json!({
+            "date": "2024-06-03",
+            "listing_id": 1,
+            "average_price": "15",
+            "quantity": "100",
+            "currency": "AUD",
+            "brokerage": "0",
+            "gst_on_brokerage": "0",
+            "brokerage_currency": "AUD",
+            "fx_rate": "1",
+            "allocations": [ { "purchase_trade_id": 1, "quantity_allocated": "100" } ]
+        });
+
+        // Saturday 2024-06-01.
+        let mut saturday = base.clone();
+        saturday["date"] = "2024-06-01".into();
+        let (status, detail) = put_sell_json(&pool, 2, saturday).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            detail.contains("did not trade")
+                && detail.contains("Saturday")
+                && detail.contains("XASX"),
+            "the refusal must name the day and the exchange, got: {detail}"
+        );
+        assert!(!trade_exists(&pool, 2).await, "nothing is persisted");
+        assert_eq!(count_allocations(&pool, 2).await, 0);
+
+        // Anzac Day 2024-04-25 — a Thursday, and a seeded XASX holiday.
+        let mut holiday = base.clone();
+        holiday["date"] = "2024-04-25".into();
+        let (status, detail) = put_sell_json(&pool, 2, holiday).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            detail.contains("public holiday") && detail.contains("XASX"),
+            "the refusal must name the holiday and the exchange, got: {detail}"
+        );
+        assert!(!trade_exists(&pool, 2).await);
+
+        // The ordinary Monday the fixtures use is accepted.
+        let (status, detail) = put_sell_json(&pool, 2, base).await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "detail: {detail}");
+        assert_eq!(count_allocations(&pool, 2).await, 1);
+    }
+
+    /// SCENARIOS S-08: the same Saturday is accepted for an exchange-less
+    /// (Crypto) listing, which trades every day (the `L-15` shape).
+    #[tokio::test]
+    async fn api_crypto_sell_on_a_saturday_is_accepted() {
+        let pool = test_pool().await;
+        test_support::listing(1)
+            .crypto()
+            .ticker("ETH")
+            .name("Ether")
+            .insert(&pool)
+            .await;
+        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
+        let body = serde_json::json!({
+            "date": "2024-06-01",
+            "listing_id": 1,
+            "average_price": "15",
+            "quantity": "100",
+            "currency": "AUD",
+            "brokerage": "0",
+            "gst_on_brokerage": "0",
+            "brokerage_currency": "AUD",
+            "fx_rate": "1",
+            "allocations": [ { "purchase_trade_id": 1, "quantity_allocated": "100" } ]
+        });
+        let (status, detail) = put_sell_json(&pool, 2, body).await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "detail: {detail}");
+        let sell = trade::db_get(&pool, 2).await.unwrap().unwrap();
+        assert_eq!(sell.date, NaiveDate::from_ymd_opt(2024, 6, 1).unwrap());
     }
 
     // Spot-rate override (QC 18020): the Sell write path shares
@@ -1927,7 +2067,16 @@ mod tests {
     #[tokio::test]
     async fn a_two_hundred_row_allocation_set_is_written_whole() {
         let pool = test_pool().await;
-        insert_listing(&pool, 1).await;
+        // An exchange-less (Crypto) listing, so the 200 parcels can sit on 200
+        // *consecutive* days: a listed security does not trade on a weekend,
+        // and a trade dated on one is refused (SCENARIOS S-08). What is under
+        // test is the size of the allocation set, not the calendar.
+        test_support::listing(1)
+            .crypto()
+            .ticker("ETH")
+            .name("Ether")
+            .insert(&pool)
+            .await;
         let mut allocations = Vec::new();
         for id in 1..=200i64 {
             test_support::drp(id, 1)

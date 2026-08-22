@@ -335,7 +335,7 @@ mod tests {
     async fn db_denied_dividend_lists_failing_window_and_amounts() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "TLS").await;
-        insert_buy(&pool, 1, 1, ymd(2025, 3, 1), 1000).await;
+        insert_buy(&pool, 1, 1, ymd(2025, 3, 3), 1000).await;
         insert_sell(&pool, 2, 1, ymd(2025, 4, 10), 1000).await;
         insert_dividend(&pool, 1, 1, ymd(2025, 3, 28), ymd(2025, 3, 14), 5600).await;
 
@@ -388,7 +388,7 @@ mod tests {
                 &CorporateAction {
                     id: 10,
                     listing_id: 1,
-                    date: ymd(2025, 6, 1),
+                    date: ymd(2025, 6, 2),
                     kind: ActionKind::BuyBack {
                         buyback_price: Decimal::from(10),
                         buyback_dividend: Decimal::ONE,
@@ -430,7 +430,7 @@ mod tests {
         // Bought a fortnight before tendering: the whole holding fails the
         // 45-day test, and above the exemption the credits are denied.
         let pool = test_pool().await;
-        let alerts = buy_back(&pool, ymd(2025, 6, 1)).await;
+        let alerts = buy_back(&pool, ymd(2025, 6, 2)).await;
         assert_eq!(alerts.len(), 1);
         assert_eq!(alerts[0].disqualified_units, Decimal::from(20000));
         assert_eq!(alerts[0].credits_denied, Decimal::from(8600));
@@ -446,7 +446,7 @@ mod tests {
     async fn db_small_shareholder_exemption_flagged_but_not_denied() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "TLS").await;
-        insert_buy(&pool, 1, 1, ymd(2025, 3, 1), 1000).await;
+        insert_buy(&pool, 1, 1, ymd(2025, 3, 3), 1000).await;
         insert_sell(&pool, 2, 1, ymd(2025, 4, 10), 1000).await;
         insert_dividend(&pool, 1, 1, ymd(2025, 3, 28), ymd(2025, 3, 14), 4990).await;
 
@@ -663,7 +663,7 @@ mod tests {
     async fn db_what_if_predicts_what_the_recorded_sale_actually_denies() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "AAA").await;
-        insert_buy(&pool, 1, 1, ymd(2025, 1, 1), 1000).await;
+        insert_buy(&pool, 1, 1, ymd(2025, 1, 2), 1000).await;
         // Ex 10 Jan, paid 10 Feb: 400 of the 1,000 entitled units sold on
         // 20 Jan, 19 at-risk days into a 45-day requirement.
         insert_dividend(&pool, 1, 1, ymd(2025, 2, 10), ymd(2025, 1, 10), 6000).await;
@@ -701,9 +701,9 @@ mod tests {
     async fn db_a_trust_rows_entitlement_date_anchors_the_holding_period_walk() {
         async fn credits_denied(pool: &SqlitePool, ex_date: Option<NaiveDate>) -> Decimal {
             insert_listing(pool, 1, "TRU").await;
-            insert_buy(pool, 1, 1, ymd(2025, 6, 1), 1000).await;
+            insert_buy(pool, 1, 1, ymd(2025, 6, 2), 1000).await;
             // Entitled at 30 June, sold 5 July (33 at-risk days), paid 20 July.
-            insert_sell(pool, 2, 1, ymd(2025, 7, 5), 1000).await;
+            insert_sell(pool, 2, 1, ymd(2025, 7, 7), 1000).await;
             test_support::income(1, 1, ymd(2025, 7, 20))
                 .with(|i| {
                     i.trust_income = true;
@@ -748,7 +748,7 @@ mod tests {
     async fn db_a_dividend_with_no_ex_date_is_reported_as_untested() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "AAA").await;
-        insert_buy(&pool, 1, 1, ymd(2025, 1, 1), 1000).await;
+        insert_buy(&pool, 1, 1, ymd(2025, 1, 2), 1000).await;
         insert_sell(&pool, 2, 1, ymd(2025, 1, 20), 400).await; // 19 at-risk days
         test_support::income(1, 1, ymd(2025, 2, 10))
             .with(|i| {
@@ -791,7 +791,7 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "AAA").await;
         insert_buy(&pool, 1, 1, ymd(2025, 4, 1), 1000).await;
-        insert_sell(&pool, 2, 1, ymd(2025, 4, 20), 1000).await;
+        insert_sell(&pool, 2, 1, ymd(2025, 4, 22), 1000).await;
         test_support::income(1, 1, ymd(2025, 4, 8))
             .fully_franked_credits(Decimal::from(6000))
             .insert(&pool)
@@ -811,7 +811,7 @@ mod tests {
     async fn db_rename_between_ex_date_and_payment_keeps_one_walk() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "OLD").await;
-        insert_buy(&pool, 1, 1, ymd(2025, 1, 1), 1000).await;
+        insert_buy(&pool, 1, 1, ymd(2025, 1, 2), 1000).await;
         insert_sell(&pool, 2, 1, ymd(2025, 1, 20), 400).await;
         insert_dividend(&pool, 1, 1, ymd(2025, 2, 10), ymd(2025, 1, 10), 6000).await;
         ApiClient::full(&pool)
@@ -833,7 +833,7 @@ mod tests {
     async fn api_get_franking_at_risk() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "TLS").await;
-        insert_buy(&pool, 1, 1, ymd(2025, 3, 1), 1000).await;
+        insert_buy(&pool, 1, 1, ymd(2025, 3, 3), 1000).await;
         insert_sell(&pool, 2, 1, ymd(2025, 4, 10), 1000).await;
         insert_dividend(&pool, 1, 1, ymd(2025, 3, 28), ymd(2025, 3, 14), 5600).await;
 

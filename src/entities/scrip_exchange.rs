@@ -638,7 +638,7 @@ mod tests {
             .brokerage(dec("50"))
             .insert(&pool)
             .await;
-        sell_units(&pool, 2, 1, d(2022, 5, 1), "400").await;
+        sell_units(&pool, 2, 1, d(2022, 5, 2), "400").await;
         insert_scrip(&pool, 10, d(2024, 7, 1)).await;
 
         let ex = db_exchange(&pool, 10).await.unwrap();

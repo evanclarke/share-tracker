@@ -608,12 +608,57 @@ fn known_limitations_document_the_ess_30_day_rule() {
     assert!(limitations.contains("enter the amended statement **over** the original"));
     // The detection half: the health list is documented as a field of the report.
     assert!(API_MD.contains("`ess_30_day_rule` — every disposal of ESS-vested shares"));
-    assert!(API_MD.contains("\"ess_30_day_rule\" }`"));
+    // (Named in the report's JSON field list; the list itself keeps growing,
+    // so the comma rather than the closing brace is what pins it.)
+    assert!(API_MD.contains("\"ess_30_day_rule\","));
     // Cites the mirrored ATO guidance, which carries its QC header.
     assert!(limitations.contains("docs/ato/ess-30-day-rule.md"));
     assert!(include_str!("../docs/ato/ess-30-day-rule.md").contains("QC 23058"));
     // Surfaced in the README's health-monitoring feature line.
     assert!(README_MD.contains("**ESS sale inside the 30-day rule's window**"));
+}
+
+/// Doc pin (SCENARIOS S-08): a trade dated on a day its exchange did not
+/// trade is refused, and the derived write paths that are exempt are named
+/// where a reader would look — the 422 catalogue, the Trades and Sells
+/// sections, the health report's field, and the schema's `trades.date`
+/// comment. The exemption is the part that most needs writing down: it is
+/// deliberate, not an oversight, and the health alert is the only thing
+/// that covers those rows.
+#[test]
+fn trading_day_rule_and_its_exemptions_are_documented() {
+    // The refusal, in the response-code catalogue beside its date twins.
+    assert!(API_MD.contains("a trade or Sell dated on a day its exchange did not trade"));
+    // The Trades and Sells sections state the rule in their own terms.
+    assert!(API_MD.contains("**A trade's `date` must be a day its exchange actually traded.**"));
+    assert!(
+        API_MD.contains(
+            "A Sell's `date`, like a trade's, must be a day its exchange actually traded"
+        )
+    );
+    // Crypto and an unseeded year are exempt, and say so.
+    assert!(
+        API_MD.contains(
+            "listings trade every day and are exempt; so is a year with no seeded holidays"
+        )
+    );
+    // The derived paths are exempt on purpose, and covered by the alert.
+    assert!(API_MD.contains(
+        "The **derived** paths that write trade rows directly are deliberately **not** covered"
+    ));
+    assert!(API_MD.contains(
+        "`non_trading_day_trades` — every trade dated on a day its own exchange did not trade"
+    ));
+    assert!(API_MD.contains("\"non_trading_day_trades\" }`"));
+    // The one place the as-at calendar and the live-exchange settlement
+    // calculation disagree is written down where the limitation lives.
+    assert!(known_limitations().contains(
+        "the calendar a trade is *judged* against and the calendar its settlement is *counted* on can be two different exchanges'"
+    ));
+    // The column comment carries the same rule.
+    assert!(SCHEMA_MD.contains("It must also be a day the listing's own exchange traded"));
+    // Surfaced in the README's health-monitoring feature line.
+    assert!(README_MD.contains("**trade dated on a day its exchange was shut**"));
 }
 
 /// Doc pin (SCENARIOS N-08): the 30-day rule turns on a **disposal**, so the

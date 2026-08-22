@@ -536,7 +536,7 @@ mod tests {
 
     async fn insert_buy_trade(pool: &SqlitePool, id: i64, listing_id: i64, quantity: Decimal) {
         test_support::buy(id, listing_id)
-            .date(ymd(2024, 1, 15))
+            .date(ymd(2024, 1, 16))
             .qty(quantity)
             .price(Decimal::from(100))
             .brokerage(dec("9.95"))
@@ -547,7 +547,7 @@ mod tests {
 
     async fn insert_sell_trade(pool: &SqlitePool, id: i64, listing_id: i64, quantity: Decimal) {
         test_support::sell(id, listing_id)
-            .date(ymd(2024, 6, 1))
+            .date(ymd(2024, 6, 3))
             .qty(quantity)
             .price(Decimal::from(120))
             .brokerage(dec("9.95"))

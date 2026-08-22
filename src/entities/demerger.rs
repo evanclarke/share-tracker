@@ -750,7 +750,7 @@ mod tests {
             .brokerage(dec("50"))
             .insert(&pool)
             .await;
-        sell_units(&pool, 2, 1, d(2022, 5, 1), "400").await;
+        sell_units(&pool, 2, 1, d(2022, 5, 2), "400").await;
         insert_demerger(&pool, 10, d(2024, 7, 1)).await;
 
         let dm = db_demerge(&pool, 10).await.unwrap();
@@ -868,7 +868,7 @@ mod tests {
         insert_listing(&pool, 1, "HEAD").await;
         insert_listing(&pool, 2, "DEM").await;
         // 1,000 @ $1.50 = $1,500, held from 2019.
-        insert_buy(&pool, 1, 1, d(2019, 6, 1), "1000", "1.50").await;
+        insert_buy(&pool, 1, 1, d(2019, 6, 3), "1000", "1.50").await;
         insert_demerger(&pool, 10, d(2024, 7, 1)).await;
         let dm = db_demerge(&pool, 10).await.unwrap();
 
@@ -877,9 +877,9 @@ mod tests {
         assert_eq!(demerged.quantity, dec("200"));
         assert_eq!(demerged.brokerage, dec("300"));
         assert_eq!(demerged.date, d(2024, 7, 1));
-        assert_eq!(demerged.deemed_acquisition_date, Some(d(2019, 6, 1)));
+        assert_eq!(demerged.deemed_acquisition_date, Some(d(2019, 6, 3)));
 
-        sell_listing(&pool, 20, 2, demerged.id, d(2025, 1, 5), "200", "5").await;
+        sell_listing(&pool, 20, 2, demerged.id, d(2025, 1, 6), "200", "5").await;
 
         let realised = crate::reports::realised_gains::db_realised_gains(&pool)
             .await
@@ -892,7 +892,7 @@ mod tests {
         assert_eq!(g.capital_gain_loss, dec("700"));
         assert_eq!(g.discount_eligible_gain, dec("700"));
         assert_eq!(g.non_discountable_gain, Decimal::ZERO);
-        assert_eq!(g.parcels[0].acquisition_date, d(2019, 6, 1));
+        assert_eq!(g.parcels[0].acquisition_date, d(2019, 6, 3));
     }
 
     /// A deemed acquisition date and a split have to survive *each other*:
@@ -907,7 +907,7 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "HEAD").await;
         insert_listing(&pool, 2, "DEM").await;
-        insert_buy(&pool, 1, 1, d(2019, 6, 1), "1000", "1.50").await;
+        insert_buy(&pool, 1, 1, d(2019, 6, 3), "1000", "1.50").await;
         // A 2-for-1 split on the *head* listing before the demerger: the
         // parcel is 2,000 units at the demerger, so 1-for-5 gives 400
         // demerged units.
@@ -930,7 +930,7 @@ mod tests {
         let demerged = &dm.demerged_replacements[0];
         assert_eq!(demerged.quantity, dec("400"));
         assert_eq!(demerged.brokerage, dec("300"));
-        assert_eq!(demerged.deemed_acquisition_date, Some(d(2019, 6, 1)));
+        assert_eq!(demerged.deemed_acquisition_date, Some(d(2019, 6, 3)));
 
         // A 3-for-1 split on the *demerged* listing after the demerger:
         // 400 → 1,200 units.
@@ -948,7 +948,7 @@ mod tests {
         )
         .await
         .unwrap();
-        sell_listing(&pool, 20, 2, demerged.id, d(2025, 1, 5), "1200", "1").await;
+        sell_listing(&pool, 20, 2, demerged.id, d(2025, 1, 6), "1200", "1").await;
 
         let realised = crate::reports::realised_gains::db_realised_gains(&pool)
             .await
@@ -961,7 +961,7 @@ mod tests {
         assert_eq!(g.proceeds, dec("1200"));
         assert_eq!(g.capital_gain_loss, dec("900"));
         assert_eq!(g.discount_eligible_gain, dec("900"));
-        assert_eq!(g.parcels[0].acquisition_date, d(2019, 6, 1));
+        assert_eq!(g.parcels[0].acquisition_date, d(2019, 6, 3));
     }
 
     #[tokio::test]

@@ -411,7 +411,7 @@ mod tests {
 
         // A trade in the hole rests on its own fx_rate, silently.
         test_support::buy(1, 1)
-            .date(ymd(2024, 2, 10))
+            .date(ymd(2024, 2, 12))
             .fx_rate(dec("0.99"))
             .insert(&pool)
             .await;
@@ -429,7 +429,7 @@ mod tests {
             .await;
         // A trade in an imported month is not mentioned.
         test_support::buy(3, 1)
-            .date(ymd(2024, 1, 15))
+            .date(ymd(2024, 1, 16))
             .insert(&pool)
             .await;
 
@@ -596,7 +596,7 @@ mod tests {
             .await;
         // A parcel acquired after the payment is never reached by it.
         test_support::buy(2, 1)
-            .date(ymd(2024, 6, 10))
+            .date(ymd(2024, 6, 11))
             .insert(&pool)
             .await;
         corporate_action::db_upsert(
@@ -631,7 +631,7 @@ mod tests {
         let pool = test_pool().await;
         usd_listing(&pool, 1, "AAPL").await;
         test_support::buy(1, 1)
-            .date(ymd(2024, 2, 10))
+            .date(ymd(2024, 2, 12))
             .insert(&pool)
             .await;
         let alerts: Vec<FxCoverageAlert> = ApiClient::over(router().with_state(pool.clone()))

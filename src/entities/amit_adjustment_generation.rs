@@ -1083,13 +1083,17 @@ mod tests {
     async fn db_a_parcel_acquired_on_the_year_end_itself_is_covered() {
         let pool = test_pool().await;
         amit_listing(&pool, 1, "HNDQ").await;
+        // FY2025, whose 30 June is a Monday: the parcel has to be acquired on
+        // the year end *itself*, and a trade can only be dated on a day the
+        // exchange traded (SCENARIOS S-08), so the year is picked to make the
+        // two coincide.
         test_support::buy(1, 1)
-            .date(ymd(2024, 6, 30))
+            .date(ymd(2025, 6, 30))
             .qty(dec("100"))
             .price(dec("10"))
             .insert(&pool)
             .await;
-        amma(&pool, 6, 1, ymd(2024, 6, 30), "100").await;
+        amma(&pool, 6, 1, ymd(2025, 6, 30), "100").await;
 
         let result = db_generate(&pool, 6, &GenerateBody::default())
             .await

@@ -832,7 +832,7 @@ mod tests {
                 brokerage_includes_gst: false,
                 statement_total: None,
                 holding_account_id: 1,
-                date: d(2024, 9, 1),
+                date: d(2024, 9, 3),
                 settlement_date: Some(d(2024, 9, 3)),
                 listing_id: 1,
                 average_price: dec("15"),

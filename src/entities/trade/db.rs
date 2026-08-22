@@ -184,6 +184,36 @@ pub enum UpsertError {
     /// the trade date.
     #[error("a core trade figure was rejected: {0}")]
     Amounts(#[source] AmountsError),
+    /// The trade is dated on a day its exchange did not trade — a weekend, or
+    /// a seeded public holiday on the calendar that was in force then
+    /// (SCENARIOS S-08). The trade date is the CGT event date, so it sets the
+    /// 12-month discount clock, the financial year the gain falls in and the
+    /// day the T+n settlement count starts from; a day the market was shut is
+    /// a data-entry error by construction. The same calendar already refuses
+    /// a closing price on such a day
+    /// (`closing_price::validate_complete_trading_day`), and it is read here
+    /// through the very same helper, resolved **as at the trade date** so a
+    /// listing that has since changed exchange is judged on the market it
+    /// actually traded on. Exchange-less (Crypto) listings trade every day and
+    /// never reach this.
+    ///
+    /// That as-at resolution is deliberately *not* shared with the settlement
+    /// calculation on the next line, which joins the listing's **live**
+    /// `exchange_mic` (`exchange_holiday::exchange_holidays_for_listing`) — the
+    /// documented live-exchange limitation, docs/API.md Known limitations. On a
+    /// listing that changed exchange the two can therefore read different
+    /// calendars for one trade. Correct on both counts: "was this security's
+    /// market open that day" can only be answered by the calendar in force
+    /// then, and the settlement half is a stated scope cut with its own test
+    /// (`doc_checks::known_limitations_document_exchange_change_recomputation`).
+    ///
+    /// Deliberately **not** in [`check_amounts`]: that check is shared with
+    /// `sell::upsert_sell_in_tx`, which every parcel-substituting operation
+    /// writes its closing Sell through, and a corporate action's own date is
+    /// legitimately not a trading day. The derived paths are covered instead
+    /// by `reports::health`'s non-blocking `non_trading_day_trades` alert.
+    #[error("the trade is dated on a non-trading day: {0}")]
+    NonTradingDay(String),
 }
 
 /// The stored row an edit is checked against: the three fields whose *change*
@@ -514,6 +544,18 @@ pub async fn db_upsert(pool: &SqlitePool, trade: &Trade) -> Result<(), UpsertErr
         });
     }
 
+    // The trade date must be a day the listing's own market actually traded
+    // (SCENARIOS S-08). Read on this transaction — the calendar is a DB read,
+    // so it can't live in the pure `check_amounts` — and, like the currency
+    // rule above, after the write so an unknown `listing_id` still meets its
+    // foreign-key rejection first.
+    if let Some(shut) =
+        crate::entities::closing_price::db_non_trading_day(&mut tx, trade.listing_id, trade.date)
+            .await?
+    {
+        return Err(UpsertError::NonTradingDay(shut.describe(trade.date)));
+    }
+
     // A return of capital on this listing reduces the parcel's cost base in
     // the *parcel's* own currency, so a Buy/DRP recorded in another one is a
     // state the cost-base reports refuse to compute over. This is the parcel
@@ -639,6 +681,11 @@ impl From<UpsertError> for ApiError {
                 ApiError::unprocessable(spot_fx_rate_detail(&detail))
             }
             UpsertError::Amounts(detail) => ApiError::unprocessable(amounts_detail(&detail)),
+            UpsertError::NonTradingDay(what) => ApiError::unprocessable(format!(
+                "the trade is dated on a day its exchange did not trade — {what}. The trade date \
+                 is the CGT event date, so it sets the discount clock, the financial year and the \
+                 settlement count; enter the day the trade actually executed"
+            )),
             UpsertError::CurrencyNotListings { trade, listing } => {
                 ApiError::unprocessable(format!(
                     "this trade is recorded in {trade} but its listing is quoted in {listing} — \

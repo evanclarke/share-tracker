@@ -80,6 +80,14 @@
 //! A new check added to `trade::check_amounts` therefore needs a line here, and
 //! either an argument that the inheritance satisfies it or a guard that makes
 //! it so.
+//!
+//! The trading-day rule the two hand-entry routes apply to a trade's date
+//! (`trade::UpsertError::NonTradingDay`, SCENARIOS S-08) is deliberately
+//! **not** among them, here or in the write path: it needs a database read, so
+//! it could not live in `check_amounts`, and a date of death is not a market
+//! transaction — nobody dies on a schedule the exchange keeps. An inherited
+//! parcel dated on a closed day is surfaced instead, non-blockingly, by
+//! `reports::health`'s `non_trading_day_trades`.
 
 use crate::infra::decimal::Money;
 use crate::infra::http::ApiError;
@@ -1078,7 +1086,7 @@ mod tests {
         db_upsert(&pool, &post_cgt(1)).await.unwrap();
         let buy = linked_buy(&pool, 1).await;
 
-        sell::db_upsert_sell(&pool, 50, &sell_body(buy.id, ymd(2025, 6, 1), "30", "40"))
+        sell::db_upsert_sell(&pool, 50, &sell_body(buy.id, ymd(2025, 6, 2), "30", "40"))
             .await
             .unwrap();
 
@@ -1182,7 +1190,7 @@ mod tests {
         // 2025-06-01: under 5 months after the 2025-01-10 death, over 5 years
         // after the deceased's 2020-02-01 acquisition. 100 × $40 = $4,000
         // proceeds against the $3,200 inherited cost base.
-        sell::db_upsert_sell(&pool, 50, &sell_body(buy.id, ymd(2025, 6, 1), "100", "40"))
+        sell::db_upsert_sell(&pool, 50, &sell_body(buy.id, ymd(2025, 6, 2), "100", "40"))
             .await
             .unwrap();
 
@@ -1210,11 +1218,11 @@ mod tests {
         // $5,000 market value at death over 100 units = $50/unit cost base.
         // 30 units at $60 on 2025-06-01 (< 12 months after the 2025-01-10
         // death): $300 gain, non-discountable.
-        sell::db_upsert_sell(&pool, 50, &sell_body(buy.id, ymd(2025, 6, 1), "30", "60"))
+        sell::db_upsert_sell(&pool, 50, &sell_body(buy.id, ymd(2025, 6, 2), "30", "60"))
             .await
             .unwrap();
         // 30 more on 2026-02-01 (> 12 months after the death): discountable.
-        sell::db_upsert_sell(&pool, 51, &sell_body(buy.id, ymd(2026, 2, 1), "30", "60"))
+        sell::db_upsert_sell(&pool, 51, &sell_body(buy.id, ymd(2026, 2, 2), "30", "60"))
             .await
             .unwrap();
 

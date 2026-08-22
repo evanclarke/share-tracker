@@ -489,10 +489,10 @@ mod tests {
     async fn strategy_fixture(pool: &SqlitePool) {
         insert_listing(pool, 1, "OPT").await;
         for (id, date, price) in [
-            (1, ymd(2023, 1, 1), "5"),
-            (2, ymd(2024, 1, 1), "12"),
-            (3, ymd(2025, 1, 1), "8"),
-            (4, ymd(2026, 3, 1), "4"),
+            (1, ymd(2023, 1, 3), "5"),
+            (2, ymd(2024, 1, 2), "12"),
+            (3, ymd(2025, 1, 2), "8"),
+            (4, ymd(2026, 3, 2), "4"),
         ] {
             insert_buy(pool, id, 1, date, Decimal::from(100), dec(price)).await;
         }
@@ -620,8 +620,8 @@ mod tests {
             remaining_cost_base: Decimal::from(100),
         };
         let parcels = vec![
-            parcel(1, ymd(2023, 1, 1)), // well over 12 months
-            parcel(2, ymd(2026, 3, 1)), // under 12 months
+            parcel(1, ymd(2023, 1, 3)), // well over 12 months
+            parcel(2, ymd(2026, 3, 2)), // under 12 months
         ];
         let picks = vec![(1, Decimal::from(30)), (2, Decimal::from(20))];
         let (allocs, totals) = disposal_figures(
@@ -652,7 +652,7 @@ mod tests {
             .map(|id| CandidateParcel {
                 trade_id: id,
                 holding_account_id: 1,
-                acquisition_date: ymd(2023, 1, 1),
+                acquisition_date: ymd(2023, 1, 3),
                 remaining_quantity: Decimal::ONE,
                 remaining_cost_base: Decimal::from(100),
             })
@@ -673,12 +673,12 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "AAA").await;
         insert_listing(&pool, 2, "BBB").await;
-        insert_buy(&pool, 1, 1, ymd(2024, 1, 1), Decimal::from(100), dec("5")).await;
-        insert_buy(&pool, 2, 2, ymd(2024, 1, 1), Decimal::from(100), dec("5")).await;
+        insert_buy(&pool, 1, 1, ymd(2024, 1, 2), Decimal::from(100), dec("5")).await;
+        insert_buy(&pool, 2, 2, ymd(2024, 1, 2), Decimal::from(100), dec("5")).await;
         // Fully sell parcel 1's sibling parcel 3 so it drops out.
         insert_buy(&pool, 3, 1, ymd(2024, 2, 1), Decimal::from(40), dec("5")).await;
         test_support::sell(4, 1)
-            .date(ymd(2025, 6, 1))
+            .date(ymd(2025, 6, 2))
             .qty(Decimal::from(40))
             .price(Decimal::from(6))
             .insert(&pool)
@@ -704,10 +704,10 @@ mod tests {
     async fn as_at_fixture(pool: &SqlitePool) {
         insert_listing(pool, 1, "AST").await;
         for (id, date, price) in [
-            (1, ymd(2020, 1, 1), "12"),
-            (2, ymd(2021, 1, 1), "5"),
-            (3, ymd(2023, 1, 1), "4"),
-            (4, ymd(2025, 1, 1), "8"),
+            (1, ymd(2020, 1, 2), "12"),
+            (2, ymd(2021, 1, 4), "5"),
+            (3, ymd(2023, 1, 3), "4"),
+            (4, ymd(2025, 1, 2), "8"),
         ] {
             insert_buy(pool, id, 1, date, Decimal::from(100), dec(price)).await;
         }
@@ -847,7 +847,7 @@ mod tests {
             None,
             serde_json::json!({
                 "listing_id": 1, "holding_account_id": 1, "units": "400",
-                "sale_date": "2025-01-01", "price": "10"
+                "sale_date": "2025-01-02", "price": "10"
             }),
         )
         .await;
@@ -908,13 +908,13 @@ mod tests {
     async fn api_past_dated_candidates_are_in_that_dates_unit_basis() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "SPL").await;
-        insert_buy(&pool, 1, 1, ymd(2020, 1, 1), Decimal::from(100), dec("5")).await;
+        insert_buy(&pool, 1, 1, ymd(2020, 1, 2), Decimal::from(100), dec("5")).await;
         crate::entities::corporate_action::db_upsert(
             &pool,
             &crate::entities::corporate_action::CorporateAction {
                 id: 1,
                 listing_id: 1,
-                date: ymd(2025, 1, 1),
+                date: ymd(2025, 1, 2),
                 kind: crate::entities::corporate_action::ActionKind::ShareSplit {
                     split_new_units: Decimal::from(2),
                     split_old_units: Decimal::ONE,

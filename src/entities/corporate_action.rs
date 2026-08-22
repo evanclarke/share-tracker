@@ -2588,7 +2588,7 @@ mod tests {
             .insert(&pool)
             .await;
         test_support::buy(2, 1)
-            .date(d(2025, 1, 5))
+            .date(d(2025, 1, 6))
             .insert(&pool)
             .await;
         carried_over_from_a_rollover(&pool, 2, "USD").await;
@@ -2619,19 +2619,19 @@ mod tests {
             })
         };
         let resp = client(&pool)
-            .put("/corporate_actions/2", &payment("2025-01-05"))
+            .put("/corporate_actions/2", &payment("2025-01-06"))
             .await;
         assert_eq!(resp.status, StatusCode::NO_CONTENT);
         // … while one acquired the day before it is not, and the same edit is
         // refused — the check runs over the state the write would leave.
         let resp = client(&pool)
-            .put("/corporate_actions/2", &payment("2025-01-06"))
+            .put("/corporate_actions/2", &payment("2025-01-07"))
             .await;
         assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
         let stored = db_get(&pool, 2).await.unwrap().unwrap();
         assert_eq!(
             stored.kind,
-            roc_with_record(2, 1, d(2025, 6, 1), "0.50", d(2025, 1, 5)).kind,
+            roc_with_record(2, 1, d(2025, 6, 1), "0.50", d(2025, 1, 6)).kind,
             "the refused edit left the stored terms untouched"
         );
     }
@@ -2906,7 +2906,7 @@ mod tests {
             "42.857142857142857142857142857".parse::<Decimal>().unwrap()
         );
 
-        insert_sell(&pool, d(2024, 4, 1), &remaining.to_string())
+        insert_sell(&pool, d(2024, 4, 2), &remaining.to_string())
             .await
             .unwrap();
         assert!(

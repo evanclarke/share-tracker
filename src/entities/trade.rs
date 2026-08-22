@@ -95,7 +95,7 @@ mod tests {
                 brokerage_includes_gst: false,
                 statement_total: None,
                 holding_account_id: 1,
-                date: NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(),
+                date: NaiveDate::from_ymd_opt(2024, 6, 3).unwrap(),
                 settlement_date: Some(NaiveDate::from_ymd_opt(2024, 6, 3).unwrap()),
                 listing_id: 1,
                 average_price: Decimal::from(120),
@@ -220,7 +220,7 @@ mod tests {
         let pool = test_pool().await;
         insert_test_listing(&pool).await;
         let trade = test_support::sell(2, 1)
-            .date(ymd(2024, 6, 1))
+            .date(ymd(2024, 6, 3))
             .qty(Decimal::from(5))
             .price(Decimal::from(120))
             .brokerage(dec("9.95"))
@@ -607,12 +607,12 @@ mod tests {
         // Up to the sale date itself is fine (a same-day parcel is a valid
         // allocation on the Sell side too), as is moving earlier.
         let mut same_day = buy_trade();
-        same_day.date = ymd(2024, 6, 1);
+        same_day.date = ymd(2024, 6, 3);
         same_day.settlement_date = ymd(2024, 6, 3);
         db_upsert(&pool, &same_day).await.unwrap();
         assert_eq!(
             db_get(&pool, 1).await.unwrap().unwrap().date,
-            ymd(2024, 6, 1)
+            ymd(2024, 6, 3)
         );
     }
 
@@ -1340,10 +1340,24 @@ mod tests {
     /// the boundary and stays accepted — with its *settlement* landing in the
     /// future, which is deliberately not bounded (a T+2 settlement of a trade
     /// dated today has not happened yet).
+    ///
+    /// The boundary is checked on an exchange-less (Crypto) listing, which
+    /// trades every day: on a listed security the trading-day rule (SCENARIOS
+    /// S-08) refuses a trade dated today whenever the suite runs on a weekend
+    /// or an exchange holiday, and that would make this test's answer depend
+    /// on the day of the week. The settlement half is asserted separately, on
+    /// the listed security, from the most recent day its market was open —
+    /// T+2 business days from any such day is always after today.
     #[tokio::test]
     async fn api_future_dated_trade_rejected_422_and_today_accepted() {
         let pool = test_pool().await;
         insert_test_listing(&pool).await;
+        test_support::listing(2)
+            .crypto()
+            .ticker("ETH")
+            .name("Ether")
+            .insert(&pool)
+            .await;
         let today = crate::infra::date::today();
         let base = serde_json::json!({
             "trade_type": "Buy",
@@ -1365,19 +1379,156 @@ mod tests {
         );
         assert!(db_get(&pool, 1).await.unwrap().is_none());
 
-        // Today — the last day inside the window — is accepted, and the
-        // auto-populated settlement date is allowed past it.
-        let mut boundary = base;
+        // Today — the last day inside the window — is accepted.
+        let mut boundary = base.clone();
         boundary["date"] = today.to_string().into();
-        let (status, _) = put_trade_json(&pool, 1, boundary).await;
-        assert_eq!(status, StatusCode::NO_CONTENT);
+        boundary["listing_id"] = 2.into();
+        let (status, detail) = put_trade_json(&pool, 1, boundary).await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "detail: {detail}");
         let stored = db_get(&pool, 1).await.unwrap().unwrap();
         assert_eq!(stored.date, today);
+
+        // And the settlement date is allowed past it: a T+2 settlement of a
+        // trade dated the market's most recent open day always falls after
+        // today, whichever day of the week the suite runs on.
+        let market = crate::entities::closing_price::load_market(&pool, 1)
+            .await
+            .unwrap()
+            .unwrap();
+        let last_open = market
+            .latest_trading_day_on_or_before(today)
+            .expect("XASX has an open day in the past year");
+        let mut settled = base;
+        settled["date"] = last_open.to_string().into();
+        let (status, detail) = put_trade_json(&pool, 2, settled).await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "detail: {detail}");
+        let stored = db_get(&pool, 2).await.unwrap().unwrap();
         assert!(
             stored.settlement_date > today,
-            "T+2 settlement of a trade dated today is legitimately in the future, got {}",
+            "T+2 settlement of a trade dated {last_open} is legitimately in the future, got {}",
             stored.settlement_date
         );
+    }
+
+    /// SCENARIOS S-08: a trade dated on a day its exchange did not trade —
+    /// a Saturday, or a seeded `exchange_holidays` date — is rejected 422
+    /// naming the day and the exchange. The trade date is the CGT event date,
+    /// so it sets the 12-month discount clock, the financial year the gain
+    /// falls in and the day the T+n count starts from; a day the market was
+    /// shut is a data-entry error by construction. The calendar is the one
+    /// `PUT /closing_prices` already refuses a non-trading day on.
+    #[tokio::test]
+    async fn api_trade_on_a_non_trading_day_rejected_422() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        let base = serde_json::json!({
+            "trade_type": "Buy",
+            "date": "2024-01-15",
+            "listing_id": 1,
+            "average_price": "100",
+            "quantity": "10",
+            "currency": "AUD",
+            "brokerage": "0",
+            "gst_on_brokerage": "0",
+            "brokerage_currency": "AUD",
+            "fx_rate": "1"
+        });
+
+        // Saturday 2024-01-13.
+        let mut saturday = base.clone();
+        saturday["date"] = "2024-01-13".into();
+        let (status, detail) = put_trade_json(&pool, 1, saturday).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            detail.contains("did not trade") && detail.contains("Saturday"),
+            "the refusal must name the day, got: {detail}"
+        );
+        assert!(
+            detail.contains("XASX"),
+            "the refusal must name the exchange, got: {detail}"
+        );
+        assert!(db_get(&pool, 1).await.unwrap().is_none());
+
+        // Australia Day 2024-01-26 — a Friday, and a seeded XASX holiday.
+        let mut holiday = base.clone();
+        holiday["date"] = "2024-01-26".into();
+        let (status, detail) = put_trade_json(&pool, 1, holiday).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            detail.contains("public holiday") && detail.contains("XASX"),
+            "the refusal must name the holiday and the exchange, got: {detail}"
+        );
+        assert!(db_get(&pool, 1).await.unwrap().is_none());
+
+        // The Monday between them is an ordinary trading day.
+        let (status, _) = put_trade_json(&pool, 1, base).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+
+    /// SCENARIOS S-08: the same Saturday is accepted for an exchange-less
+    /// (Crypto) listing — a crypto asset trades every day, which is why it
+    /// also settles same-day (the `L-15` shape). The calendar rule must never
+    /// reach it.
+    #[tokio::test]
+    async fn api_crypto_trade_on_a_saturday_is_accepted() {
+        let pool = test_pool().await;
+        test_support::listing(1)
+            .crypto()
+            .ticker("ETH")
+            .name("Ether")
+            .insert(&pool)
+            .await;
+        let body = serde_json::json!({
+            "trade_type": "Buy",
+            "date": "2024-01-13",
+            "listing_id": 1,
+            "average_price": "100",
+            "quantity": "10",
+            "currency": "AUD",
+            "brokerage": "0",
+            "gst_on_brokerage": "0",
+            "brokerage_currency": "AUD",
+            "fx_rate": "1"
+        });
+        let (status, detail) = put_trade_json(&pool, 1, body).await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{detail}");
+        let stored = db_get(&pool, 1).await.unwrap().unwrap();
+        assert_eq!(stored.date, ymd(2024, 1, 13));
+        // Same-day settlement, unchanged by this rule.
+        assert_eq!(stored.settlement_date, ymd(2024, 1, 13));
+    }
+
+    /// SCENARIOS S-08: `exchange_holidays` is seeded for 2019–2027 only, so a
+    /// year outside it has no holiday rows at all. A weekday there must stay
+    /// recordable — an unseeded year cannot become unenterable — while its
+    /// weekends are still refused, since a weekend needs no calendar.
+    #[tokio::test]
+    async fn api_trade_in_a_year_with_no_seeded_calendar_is_accepted_on_a_weekday() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        let base = serde_json::json!({
+            "trade_type": "Buy",
+            // Christmas Day 2018 — a Tuesday, and a real ASX holiday, but the
+            // seeded calendar does not reach 2018, so nothing here knows that.
+            "date": "2018-12-25",
+            "listing_id": 1,
+            "average_price": "100",
+            "quantity": "10",
+            "currency": "AUD",
+            "brokerage": "0",
+            "gst_on_brokerage": "0",
+            "brokerage_currency": "AUD",
+            "fx_rate": "1"
+        });
+        let (status, detail) = put_trade_json(&pool, 1, base.clone()).await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{detail}");
+
+        // The weekend either side of it still is: Saturday 2018-12-22.
+        let mut saturday = base;
+        saturday["date"] = "2018-12-22".into();
+        let (status, detail) = put_trade_json(&pool, 2, saturday).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(detail.contains("Saturday"), "got: {detail}");
     }
 
     #[test]
@@ -1673,7 +1824,7 @@ mod tests {
         let trade = |total: serde_json::Value| {
             serde_json::json!({
                 "trade_type": "Buy",
-                "date": "2024-01-15",
+                "date": "2024-01-16",
                 "listing_id": 1,
                 "average_price": "100",
                 "quantity": "10",
@@ -1704,7 +1855,7 @@ mod tests {
             3,
             serde_json::json!({
                 "trade_type": "Buy",
-                "date": "2024-01-15",
+                "date": "2024-01-16",
                 "listing_id": 1,
                 "average_price": "100",
                 "quantity": "10",
@@ -1783,7 +1934,7 @@ mod tests {
         );
         // A parcel acquired *after* the payment is fine: it was never entitled
         // to it, so nothing ever nets the two currencies.
-        let (status, _) = put_trade_json(&pool, 2, buy("2024-06-01")).await;
+        let (status, _) = put_trade_json(&pool, 2, buy("2024-06-03")).await;
         assert_eq!(status, StatusCode::NO_CONTENT);
     }
 
@@ -1801,7 +1952,7 @@ mod tests {
         insert_usd_listing(&pool).await;
         let buy = |currency: &str| {
             serde_json::json!({
-                "trade_type": "Buy", "date": "2024-01-15", "listing_id": 1,
+                "trade_type": "Buy", "date": "2024-01-16", "listing_id": 1,
                 "average_price": "100", "quantity": "10", "currency": currency,
                 "brokerage": "0", "gst_on_brokerage": "0",
                 "brokerage_currency": currency, "fx_rate": "1",
@@ -1931,7 +2082,7 @@ mod tests {
         let resp = put(
             pool.clone(),
             serde_json::json!({
-                "trade_type": "Buy", "date": "2024-01-15", "listing_id": 1,
+                "trade_type": "Buy", "date": "2024-01-16", "listing_id": 1,
                 "average_price": "100", "quantity": "10", "currency": "USD",
                 "brokerage": "0", "brokerage_currency": "USD",
                 "fx_rate": "0.70", "spot_fx_rate": "0.6543",
@@ -1946,7 +2097,7 @@ mod tests {
         let resp = put(
             pool.clone(),
             serde_json::json!({
-                "trade_type": "Buy", "date": "2024-01-15", "listing_id": 2,
+                "trade_type": "Buy", "date": "2024-01-16", "listing_id": 2,
                 "average_price": "100", "quantity": "10", "currency": "AUD",
                 "brokerage": "0", "brokerage_currency": "AUD",
                 "fx_rate": "1", "spot_fx_rate": "0.6543",

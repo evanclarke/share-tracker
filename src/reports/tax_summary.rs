@@ -1501,7 +1501,7 @@ mod tests {
             1,
             2,
             trade::TradeType::Buy,
-            NaiveDate::from_ymd_opt(2025, 3, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2025, 3, 3).unwrap(),
             1000,
         )
         .await;
@@ -1615,7 +1615,7 @@ mod tests {
             1,
             1,
             trade::TradeType::Buy,
-            NaiveDate::from_ymd_opt(2025, 3, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2025, 3, 3).unwrap(),
             1000,
         )
         .await;
@@ -1689,7 +1689,7 @@ mod tests {
             1,
             1,
             trade::TradeType::Buy,
-            NaiveDate::from_ymd_opt(2025, 3, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2025, 3, 3).unwrap(),
             1000,
         )
         .await;
@@ -1724,7 +1724,7 @@ mod tests {
             1,
             1,
             trade::TradeType::Buy,
-            NaiveDate::from_ymd_opt(2025, 3, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2025, 3, 3).unwrap(),
             1000,
         )
         .await;
@@ -1760,7 +1760,7 @@ mod tests {
             1,
             1,
             trade::TradeType::Buy,
-            NaiveDate::from_ymd_opt(2025, 3, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2025, 3, 3).unwrap(),
             1000,
         )
         .await;
@@ -1810,7 +1810,7 @@ mod tests {
             2,
             1,
             trade::TradeType::Sell,
-            NaiveDate::from_ymd_opt(2025, 4, 20).unwrap(),
+            NaiveDate::from_ymd_opt(2025, 4, 22).unwrap(),
             1000,
         )
         .await;

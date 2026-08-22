@@ -56,7 +56,19 @@
 //!   that is wrong in two years at once (see [`EssThirtyDaySale`]);
 //! - every listing whose `currency` is not the one its own exchange quotes in
 //!   — a holding that can never be priced again and, once it has history,
-//!   cannot be corrected in place either (see [`ExchangeCurrencyMismatch`]).
+//!   cannot be corrected in place either (see [`ExchangeCurrencyMismatch`]);
+//! - every trade dated on a day its own exchange did not trade — the CGT
+//!   event date on a day the market was shut (see [`NonTradingDayTrade`]).
+//!
+//! The non-trading-day entry is the safety net under a write-time rule rather
+//! than a check of its own: `PUT /trades/:id` and `PUT /sells/:id` **refuse**
+//! such a date outright (SCENARIOS S-08), but the derived write paths — an ESS
+//! vest, an inherited parcel, a DRP reinvestment, a rights exercise, and every
+//! parcel-substituting operation — insert their trade rows without that check,
+//! deliberately, because a taxing point, a date of death or a corporate
+//! action's own date is legitimately not a market day. So the alert reads
+//! *every* trade, not only the ones the refusal would have caught, and stays
+//! non-blocking.
 //!
 //! The ESS 30-day entry is the odd one out in kind: not a double entry but a
 //! **date pattern**, advisory in the way `reports::wash_sales` is. It lives here
@@ -71,7 +83,7 @@
 
 use crate::domain::rollover;
 use crate::domain::tax_year::tax_year_for;
-use crate::entities::closing_price::{self, HeldTimeline, PriceOrigin};
+use crate::entities::closing_price::{self, HeldTimeline, NonTradingReason, PriceOrigin};
 use crate::entities::ess_statement::{self, EssStatement};
 use crate::entities::income::Income;
 use crate::entities::inheritance::{self, Inheritance};
@@ -718,6 +730,57 @@ pub struct ExchangeCurrencyMismatch {
     pub exchange_currency: String,
 }
 
+/// A trade dated on a day its own exchange did not trade — a weekend, or a
+/// seeded public holiday on the calendar that was in force **on that date**
+/// (SCENARIOS S-08). Exchange-less (Crypto) listings trade every day and never
+/// appear.
+///
+/// The trade date is the CGT event date: it sets the 12-month discount clock,
+/// the financial year the gain falls in, and the day the T+n settlement count
+/// starts from. A day the market was shut is a data-entry error by
+/// construction — which is why `PUT /trades/:id` and `PUT /sells/:id` now
+/// refuse one (`trade::UpsertError::NonTradingDay`,
+/// `sell::SellError::NonTradingDay`) over the very same calendar helper
+/// (`closing_price::non_trading_day`).
+///
+/// This list exists for the rows those two routes never see: an ESS vest, an
+/// inherited parcel, a DRP reinvestment, a rights exercise and every
+/// parcel-substituting operation write their trade rows directly, and are
+/// exempt from the refusal on purpose — an ESS taxing point, a date of death
+/// and a corporate action's effective date are all dated by facts that do not
+/// have to fall on a market day. Non-blocking, and nothing is rewritten:
+/// `source` says which path wrote the row, so it is clear whether to correct
+/// the trade or the fact behind it. Rows entered before the refusal existed
+/// surface here too.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct NonTradingDayTrade {
+    pub trade_id: i64,
+    /// `Buy`, `Sell` or `DRP`.
+    pub trade_type: String,
+    pub listing_id: i64,
+    pub ticker: String,
+    pub date: NaiveDate,
+    /// The MIC whose calendar was in force on `date` — not necessarily the
+    /// listing's exchange today, if it has since changed exchange.
+    pub exchange_mic: String,
+    pub reason: NonTradingReason,
+    /// The write path the row came from, e.g. `an ESS vest`, `a demerger`,
+    /// `entered directly` — plain English, for the banner sentence.
+    pub source: String,
+}
+
+/// The joined row behind [`NonTradingDayTrade`], before its date is put to the
+/// listing's calendar. Mapped by column name via `FromRow`.
+#[derive(sqlx::FromRow)]
+struct NonTradingDayCandidate {
+    trade_id: i64,
+    trade_type: String,
+    listing_id: i64,
+    ticker: String,
+    date: NaiveDate,
+    source: String,
+}
+
 /// A disposal of ESS-vested shares **within 30 days after** the statement's
 /// taxing point, where the ESS 30-day rule moves the taxing point to the
 /// disposal date (SCENARIOS J-04, `docs/ato/ess-30-day-rule.md`, QC 23058
@@ -906,6 +969,10 @@ pub struct HealthReport {
     /// taxing point, newest sale first — where the 30-day rule re-measures the
     /// discount and cancels the capital gain. Empty when no such sale exists.
     pub ess_30_day_rule: Vec<EssThirtyDaySale>,
+    /// Every trade dated on a day its own exchange did not trade, newest
+    /// first. Empty when every trade falls on a market day (which the trade
+    /// and Sell write paths now enforce for the rows they see).
+    pub non_trading_day_trades: Vec<NonTradingDayTrade>,
 }
 
 /// Business days (Mon–Fri) strictly after `from`, up to and including `today`.
@@ -1990,6 +2057,70 @@ async fn db_exchange_currency_mismatches(
     .await
 }
 
+/// Every trade whose date is not a trading day on its listing's own calendar
+/// (see [`NonTradingDayTrade`]).
+///
+/// Reads every trade — not only the ones the write-time refusal covers — and
+/// puts each date to `closing_price::non_trading_day`, the same helper the
+/// refusal and the closing-price write path use, so there is exactly one
+/// definition of "the market was shut". The calendar is resolved **as at the
+/// trade date**, so a listing that has changed exchange is judged on the
+/// market it actually traded on then.
+async fn db_non_trading_day_trades(
+    conn: &mut sqlx::SqliteConnection,
+) -> Result<Vec<NonTradingDayTrade>, sqlx::Error> {
+    let candidates: Vec<NonTradingDayCandidate> = sqlx::query_as(
+        "SELECT t.id AS trade_id, t.trade_type AS trade_type, t.listing_id AS listing_id, \
+                l.ticker AS ticker, t.date AS date, \
+                CASE WHEN t.ess_statement_id     IS NOT NULL THEN 'an ESS vest' \
+                     WHEN t.inheritance_id       IS NOT NULL THEN 'an inherited parcel' \
+                     WHEN t.rights_action_id     IS NOT NULL THEN 'a rights exercise' \
+                     WHEN t.buyback_action_id    IS NOT NULL THEN 'a buy-back participation' \
+                     WHEN t.scrip_action_id      IS NOT NULL THEN 'a scrip-for-scrip exchange' \
+                     WHEN t.demerger_action_id   IS NOT NULL THEN 'a demerger' \
+                     WHEN t.transfer_id          IS NOT NULL THEN 'a holding-account transfer' \
+                     WHEN t.worthless_action_id  IS NOT NULL THEN 'a worthless-shares recognise' \
+                     WHEN t.trade_type = 'DRP'                THEN 'a DRP reinvestment' \
+                     ELSE 'entered directly' END AS source \
+         FROM trades t JOIN listings l ON l.id = t.listing_id \
+         ORDER BY t.date DESC, t.id DESC",
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+
+    // Every calendar first, one load per listing that has trades — not one per
+    // trade: the `Market` behind it is four queries, and a listing with six
+    // years of history has hundreds of rows.
+    let listing_ids: HashSet<i64> = candidates.iter().map(|c| c.listing_id).collect();
+    let mut markets: HashMap<i64, closing_price::Market> = HashMap::new();
+    for listing_id in listing_ids {
+        if let Some(market) = closing_price::load_market_on(&mut *conn, listing_id).await? {
+            markets.insert(listing_id, market);
+        }
+    }
+
+    let mut alerts = Vec::new();
+    for c in candidates {
+        let Some(market) = markets.get(&c.listing_id) else {
+            continue;
+        };
+        let Some(shut) = closing_price::non_trading_day(market, c.date) else {
+            continue;
+        };
+        alerts.push(NonTradingDayTrade {
+            trade_id: c.trade_id,
+            trade_type: c.trade_type,
+            listing_id: c.listing_id,
+            ticker: c.ticker,
+            date: c.date,
+            exchange_mic: shut.exchange_mic,
+            reason: shut.reason,
+            source: c.source,
+        });
+    }
+    Ok(alerts)
+}
+
 /// Read the freshness facts on one snapshot. `today` and `now` are parameters
 /// so tests can pin the staleness thresholds and the "close is final yet"
 /// cut-off to fixed dates.
@@ -2049,6 +2180,7 @@ pub async fn db_health(
     let duplicate_inheritances = db_duplicate_inheritances(&mut tx).await?;
     let exchange_currency_mismatches = db_exchange_currency_mismatches(&mut tx).await?;
     let ess_30_day_rule = db_ess_30_day_rule(&mut tx).await?;
+    let non_trading_day_trades = db_non_trading_day_trades(&mut tx).await?;
     tx.commit().await?;
     let unpriced_days = db_unpriced_days(pool, now).await?;
 
@@ -2077,6 +2209,7 @@ pub async fn db_health(
         duplicate_inheritances,
         exchange_currency_mismatches,
         ess_30_day_rule,
+        non_trading_day_trades,
     })
 }
 
@@ -2191,6 +2324,7 @@ mod tests {
         assert!(h.duplicate_expenses.is_empty());
         assert!(h.duplicate_ess_statements.is_empty());
         assert!(h.ess_30_day_rule.is_empty());
+        assert!(h.non_trading_day_trades.is_empty());
     }
 
     #[tokio::test]
@@ -4244,7 +4378,8 @@ mod tests {
     }
 
     /// Example 11 itself, entered the way a user naturally would — the
-    /// employer's *original* statement, then the sale 27 days later. Both the
+    /// employer's *original* statement, then the sale 29 days later (the ATO's
+    /// 20 July is a Saturday, so the sale sits on the Monday). Both the
     /// discount and its year are wrong, and a phantom capital gain appears;
     /// the alert names the sale, the statement it draws on, and the two years
     /// involved.
@@ -4253,18 +4388,18 @@ mod tests {
         let pool = test_pool().await;
         test_support::listing(1).ticker("PEPP").insert(&pool).await;
         let vest = ess_vest(&pool, 1, 1, ymd(2019, 6, 23)).await;
-        sell_vest_parcel(&pool, 101, 1, vest, ymd(2019, 7, 20), dec("400")).await;
+        sell_vest_parcel(&pool, 101, 1, vest, ymd(2019, 7, 22), dec("400")).await;
 
         let h = health(&pool, ymd(2019, 8, 1)).await;
         assert_eq!(h.ess_30_day_rule.len(), 1);
         let alert = &h.ess_30_day_rule[0];
         assert_eq!(alert.sale_trade_id, 101);
         assert_eq!(alert.ticker, "PEPP");
-        assert_eq!(alert.sale_date, ymd(2019, 7, 20));
+        assert_eq!(alert.sale_date, ymd(2019, 7, 22));
         assert_eq!(alert.units_sold, dec("400"));
         assert_eq!(alert.ess_statement_id, 1);
         assert_eq!(alert.taxing_point_date, ymd(2019, 6, 23));
-        assert_eq!(alert.days_after, 27);
+        assert_eq!(alert.days_after, 29);
         assert_eq!(alert.currency, "AUD");
         assert_eq!(alert.statement_discount, dec("1400"));
         // The whole point of the rule: the discount is assessed in FY2019 as
@@ -4308,16 +4443,16 @@ mod tests {
         test_support::listing(1).ticker("PEPP").insert(&pool).await;
         test_support::listing(2).ticker("ORD").insert(&pool).await;
         // The amended statement: taxing point *is* the disposal date.
-        let vest = ess_vest(&pool, 1, 1, ymd(2019, 7, 20)).await;
-        sell_vest_parcel(&pool, 101, 1, vest, ymd(2019, 7, 20), dec("400")).await;
+        let vest = ess_vest(&pool, 1, 1, ymd(2019, 7, 22)).await;
+        sell_vest_parcel(&pool, 101, 1, vest, ymd(2019, 7, 22), dec("400")).await;
         // An ordinary Buy sold the next day — no ESS statement behind it.
         test_support::buy(50, 2)
-            .date(ymd(2019, 7, 20))
+            .date(ymd(2019, 7, 22))
             .qty(dec("400"))
             .insert(&pool)
             .await;
         test_support::sell(51, 2)
-            .date(ymd(2019, 7, 21))
+            .date(ymd(2019, 7, 23))
             .qty(dec("400"))
             .insert(&pool)
             .await;
@@ -4642,6 +4777,85 @@ mod tests {
         assert_eq!(m["currency"], "AUD");
         assert_eq!(m["exchange_mic"], "XNYS");
         assert_eq!(m["exchange_currency"], "USD");
+    }
+
+    // Trades dated on a day the exchange was shut (SCENARIOS S-08).
+
+    /// SCENARIOS S-08: a derived write path is exempt from the write-time
+    /// refusal `PUT /trades/:id` and `PUT /sells/:id` apply — an ESS vest is
+    /// dated its statement's taxing point, which the scheme sets and which
+    /// need not be a market day — so the row *is* written, and this alert is
+    /// what surfaces it. The Saturday vest Buy is listed with its reason, its
+    /// exchange, and the path that wrote it; the ordinary Buy on the Monday
+    /// after is not.
+    #[tokio::test]
+    async fn a_vest_dated_on_a_saturday_is_written_and_then_flagged() {
+        let pool = test_pool().await;
+        test_support::listing(1).ticker("PEPP").insert(&pool).await;
+        // Saturday 2026-03-14 — refused on `PUT /trades/:id`, but the vest
+        // INSERTs its Buy directly and is accepted.
+        let vest = ess_vest(&pool, 1, 1, ymd(2026, 3, 14)).await;
+        // Monday 2026-03-16 on a second listing: an ordinary trading day.
+        test_support::listing(2).ticker("ORD").insert(&pool).await;
+        test_support::buy(50, 2)
+            .date(ymd(2026, 3, 16))
+            .insert(&pool)
+            .await;
+
+        let h = health(&pool, ymd(2026, 4, 1)).await;
+        assert_eq!(h.non_trading_day_trades.len(), 1);
+        let alert = &h.non_trading_day_trades[0];
+        assert_eq!(alert.trade_id, vest);
+        assert_eq!(alert.trade_type, "Buy");
+        assert_eq!(alert.ticker, "PEPP");
+        assert_eq!(alert.date, ymd(2026, 3, 14));
+        assert_eq!(alert.exchange_mic, "XASX");
+        assert_eq!(alert.reason, NonTradingReason::Weekend);
+        assert_eq!(alert.source, "an ESS vest");
+    }
+
+    /// A seeded exchange holiday reads as a holiday rather than a weekend, an
+    /// exchange-less (Crypto) listing is never flagged at all — it trades
+    /// every day — and a listing whose calendar has no seeded holidays in the
+    /// year is judged on weekends alone.
+    #[tokio::test]
+    async fn a_holiday_a_crypto_saturday_and_an_unseeded_year_are_told_apart() {
+        let pool = test_pool().await;
+        test_support::listing(1).ticker("PEPP").insert(&pool).await;
+        test_support::listing(2)
+            .crypto()
+            .ticker("ETH")
+            .name("Ether")
+            .insert(&pool)
+            .await;
+        // Good Friday 2026-04-03, a seeded XASX holiday, reached through the
+        // vest's exempt INSERT.
+        let vest = ess_vest(&pool, 1, 1, ymd(2026, 4, 3)).await;
+        // The same Saturday on a crypto listing: `PUT /trades/:id` accepts it,
+        // and so does the alert.
+        test_support::buy(60, 2)
+            .date(ymd(2026, 3, 14))
+            .insert(&pool)
+            .await;
+        // 2018 has no seeded calendar at all: a weekday there is clean.
+        test_support::buy(61, 1)
+            .date(ymd(2018, 12, 25))
+            .insert(&pool)
+            .await;
+
+        let h = health(&pool, ymd(2026, 5, 1)).await;
+        assert_eq!(
+            h.non_trading_day_trades
+                .iter()
+                .map(|a| a.trade_id)
+                .collect::<Vec<_>>(),
+            vec![vest],
+            "only the seeded-holiday vest is flagged"
+        );
+        assert_eq!(
+            h.non_trading_day_trades[0].reason,
+            NonTradingReason::Holiday
+        );
     }
 
     #[tokio::test]

@@ -75,14 +75,21 @@ pub async fn db_list_for_exchange(
 /// before and after the move, so its `Market` holds one holiday set per
 /// identity — the listing-joined `exchange_holidays_for_listing` can only
 /// ever answer for the exchange the listing records today.
-pub(crate) async fn db_holiday_dates_for(
-    pool: &SqlitePool,
+///
+/// Executor-generic so the calendar can be read on a caller's transaction:
+/// the trade write path's non-trading-day refusal loads its `Market` inside
+/// its own transaction.
+pub(crate) async fn db_holiday_dates_for<'e, X>(
+    executor: X,
     mic: &str,
-) -> Result<HashSet<NaiveDate>, sqlx::Error> {
+) -> Result<HashSet<NaiveDate>, sqlx::Error>
+where
+    X: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
     let dates: Vec<NaiveDate> =
         sqlx::query_scalar("SELECT holiday_date FROM exchange_holidays WHERE mic = ?")
             .bind(mic)
-            .fetch_all(pool)
+            .fetch_all(executor)
             .await?;
     Ok(dates.into_iter().collect())
 }

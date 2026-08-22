@@ -784,7 +784,7 @@ mod tests {
     async fn db_open_holding_reports_value_return_and_yield() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "VAS", "XASX", "AUD").await;
-        buy(&pool, 1, 1, d(2024, 1, 1), 100, 10).await; // invested 1,000
+        buy(&pool, 1, 1, d(2024, 1, 2), 100, 10).await; // invested 1,000
         insert_income(&pool, 1, 1, d(2024, 6, 30), 50).await;
 
         let rows = db_performance(&pool, &price_map(1, "12"), d(2024, 12, 31))
@@ -822,9 +822,9 @@ mod tests {
     async fn db_money_weighted_return_of_a_one_year_gain_is_exact() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "VAS", "XASX", "AUD").await;
-        buy(&pool, 1, 1, d(2023, 1, 1), 100, 10).await;
+        buy(&pool, 1, 1, d(2023, 1, 3), 100, 10).await;
 
-        let rows = db_performance(&pool, &price_map(1, "11"), d(2024, 1, 1))
+        let rows = db_performance(&pool, &price_map(1, "11"), d(2024, 1, 3))
             .await
             .unwrap();
         assert_eq!(rows[0].money_weighted_return_pct, Some(Decimal::from(10)));
@@ -871,7 +871,7 @@ mod tests {
     /// annualised rate, not just re-deriving whatever the code returns.
     #[test]
     fn money_weighted_return_of_a_fractional_year_gap_matches_hand_calc() {
-        let start = d(2023, 1, 1);
+        let start = d(2023, 1, 3);
         let end = start + chrono::Duration::days(200);
         let r = money_weighted_annual_return(&[
             (start, Decimal::from(-10_000)),
@@ -906,8 +906,8 @@ mod tests {
     async fn db_closed_holding_reports_realised_performance_without_prices() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "VAS", "XASX", "AUD").await;
-        buy(&pool, 1, 1, d(2023, 1, 1), 100, 10).await;
-        sell(&pool, 2, 1, d(2024, 1, 1), 100, 11).await;
+        buy(&pool, 1, 1, d(2023, 1, 3), 100, 10).await;
+        sell(&pool, 2, 1, d(2024, 1, 3), 100, 11).await;
         allocate(&pool, 1, 2, 1, 100).await;
 
         let rows = db_performance(&pool, &HashMap::new(), d(2024, 6, 30))
@@ -931,7 +931,7 @@ mod tests {
     async fn db_open_holding_without_price_has_unknown_market_metrics() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "VAS", "XASX", "AUD").await;
-        buy(&pool, 1, 1, d(2024, 1, 1), 100, 10).await;
+        buy(&pool, 1, 1, d(2024, 1, 2), 100, 10).await;
 
         let rows = db_performance(&pool, &HashMap::new(), d(2024, 12, 31))
             .await
@@ -952,7 +952,7 @@ mod tests {
     async fn db_trailing_yield_counts_only_the_last_years_income() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "VAS", "XASX", "AUD").await;
-        buy(&pool, 1, 1, d(2022, 1, 1), 100, 10).await;
+        buy(&pool, 1, 1, d(2022, 1, 4), 100, 10).await;
         insert_income(&pool, 1, 1, d(2022, 6, 30), 40).await; // outside the window
         insert_income(&pool, 2, 1, d(2024, 6, 30), 60).await; // inside
 
@@ -983,7 +983,7 @@ mod tests {
         )
         .await
         .unwrap();
-        buy(&pool, 1, 1, d(2023, 1, 1), 100, 10).await; // 1,000 into account 1
+        buy(&pool, 1, 1, d(2023, 1, 3), 100, 10).await; // 1,000 into account 1
         transfer::db_transfer(
             &pool,
             1,
@@ -1004,7 +1004,7 @@ mod tests {
         .await
         .unwrap();
 
-        let rows = db_performance(&pool, &price_map(1, "15"), d(2024, 1, 1))
+        let rows = db_performance(&pool, &price_map(1, "15"), d(2024, 1, 2))
             .await
             .unwrap();
         assert_eq!(rows.len(), 3);
@@ -1045,7 +1045,7 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "OLD", "XASX", "AUD").await;
         insert_listing(&pool, 2, "NEW", "XASX", "AUD").await;
-        buy(&pool, 1, 1, d(2023, 1, 1), 100, 10).await; // invested 1,000
+        buy(&pool, 1, 1, d(2023, 1, 3), 100, 10).await; // invested 1,000
         // 1-for-1 with $2 cash per old unit; new shares worth $18 → the cash
         // side takes 2/20 = $100 of the cost base, $900 rolls over; $200
         // cash is received.
@@ -1069,7 +1069,7 @@ mod tests {
         .unwrap();
         scrip_exchange::db_exchange(&pool, 10).await.unwrap();
 
-        let rows = db_performance(&pool, &price_map(2, "12"), d(2024, 1, 1))
+        let rows = db_performance(&pool, &price_map(2, "12"), d(2024, 1, 2))
             .await
             .unwrap();
         assert_eq!(rows.len(), 3);
@@ -1109,7 +1109,7 @@ mod tests {
             trade::TradeType::Buy,
             1,
             1,
-            d(2024, 1, 1),
+            d(2024, 1, 2),
             Decimal::from(100),
             Decimal::from(10),
             "USD",
@@ -1133,8 +1133,8 @@ mod tests {
     async fn db_flows_after_as_of_are_excluded() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "VAS", "XASX", "AUD").await;
-        buy(&pool, 1, 1, d(2024, 1, 1), 100, 10).await;
-        sell(&pool, 2, 1, d(2024, 6, 1), 100, 15).await;
+        buy(&pool, 1, 1, d(2024, 1, 2), 100, 10).await;
+        sell(&pool, 2, 1, d(2024, 6, 3), 100, 15).await;
         allocate(&pool, 1, 2, 1, 100).await;
         insert_income(&pool, 1, 1, d(2024, 5, 1), 50).await;
 
@@ -1156,7 +1156,7 @@ mod tests {
     async fn api_performance_with_prices_and_as_of_date() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "VAS", "XASX", "AUD").await;
-        buy(&pool, 1, 1, d(2024, 1, 1), 100, 10).await;
+        buy(&pool, 1, 1, d(2024, 1, 2), 100, 10).await;
 
         let body = serde_json::json!({
             "prices": { "1": "12" },
@@ -1185,9 +1185,9 @@ mod tests {
         insert_listing(&pool, 1, "VAS", "XASX", "AUD").await; // live-valued
         insert_listing(&pool, 2, "VAF", "XASX", "AUD").await; // explicit override
         insert_listing(&pool, 3, "VGS", "XASX", "AUD").await; // live fetch fails
-        buy(&pool, 1, 1, d(2024, 1, 1), 100, 10).await; // invested 1,000
-        buy(&pool, 2, 2, d(2024, 1, 1), 50, 12).await;
-        buy(&pool, 3, 3, d(2024, 1, 1), 10, 5).await;
+        buy(&pool, 1, 1, d(2024, 1, 2), 100, 10).await; // invested 1,000
+        buy(&pool, 2, 2, d(2024, 1, 2), 50, 12).await;
+        buy(&pool, 3, 3, d(2024, 1, 2), 10, 5).await;
         let as_of =
             chrono::TimeZone::with_ymd_and_hms(&chrono::Utc, 2024, 12, 31, 6, 30, 0).unwrap();
         let fetcher = QuoteStub::default()
@@ -1227,7 +1227,7 @@ mod tests {
     async fn api_performance_without_body_defaults_to_today() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "VAS", "XASX", "AUD").await;
-        buy(&pool, 1, 1, d(2024, 1, 1), 100, 10).await;
+        buy(&pool, 1, 1, d(2024, 1, 2), 100, 10).await;
 
         let resp = ApiClient::over(router().with_state(pool))
             .post_empty("/portfolio/performance")

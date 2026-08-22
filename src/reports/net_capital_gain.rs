@@ -1350,7 +1350,7 @@ mod tests {
             1,
             trade::TradeType::Buy,
             1,
-            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
         )
@@ -1360,7 +1360,7 @@ mod tests {
             2,
             trade::TradeType::Sell,
             1,
-            NaiveDate::from_ymd_opt(2025, 6, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2025, 6, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(15),
         )
@@ -1391,7 +1391,7 @@ mod tests {
             1,
             trade::TradeType::Buy,
             1,
-            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
         )
@@ -1401,7 +1401,7 @@ mod tests {
             2,
             trade::TradeType::Sell,
             1,
-            NaiveDate::from_ymd_opt(2025, 6, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2025, 6, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(15),
         )
@@ -1427,7 +1427,7 @@ mod tests {
             1,
             trade::TradeType::Buy,
             1,
-            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
         )
@@ -1437,7 +1437,7 @@ mod tests {
             2,
             trade::TradeType::Sell,
             1,
-            NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 6, 3).unwrap(),
             Decimal::from(100),
             Decimal::from(15),
         )
@@ -1465,7 +1465,7 @@ mod tests {
             1,
             trade::TradeType::Buy,
             1,
-            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
         )
@@ -1475,7 +1475,7 @@ mod tests {
             2,
             trade::TradeType::Sell,
             1,
-            NaiveDate::from_ymd_opt(2025, 6, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2025, 6, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(15),
         )
@@ -1487,7 +1487,7 @@ mod tests {
             3,
             trade::TradeType::Buy,
             1,
-            NaiveDate::from_ymd_opt(2025, 3, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2025, 3, 3).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
         )
@@ -1509,7 +1509,7 @@ mod tests {
             5,
             trade::TradeType::Buy,
             1,
-            NaiveDate::from_ymd_opt(2025, 3, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2025, 3, 3).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
         )
@@ -1551,7 +1551,7 @@ mod tests {
             1,
             trade::TradeType::Buy,
             1,
-            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
         )
@@ -1561,7 +1561,7 @@ mod tests {
             2,
             trade::TradeType::Sell,
             1,
-            NaiveDate::from_ymd_opt(2025, 6, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2025, 6, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(15),
         )
@@ -1573,7 +1573,7 @@ mod tests {
             3,
             trade::TradeType::Buy,
             1,
-            NaiveDate::from_ymd_opt(2025, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2025, 1, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(17),
         )
@@ -1619,7 +1619,7 @@ mod tests {
             1,
             trade::TradeType::Buy,
             1,
-            NaiveDate::from_ymd_opt(2023, 7, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2023, 7, 3).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
         )
@@ -1629,7 +1629,7 @@ mod tests {
             2,
             trade::TradeType::Sell,
             1,
-            NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 6, 3).unwrap(),
             Decimal::from(100),
             Decimal::from(7),
         )
@@ -1641,7 +1641,7 @@ mod tests {
             3,
             trade::TradeType::Buy,
             1,
-            NaiveDate::from_ymd_opt(2026, 3, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2026, 3, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
         )
@@ -1692,7 +1692,7 @@ mod tests {
             1,
             trade::TradeType::Buy,
             1,
-            NaiveDate::from_ymd_opt(2023, 7, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2023, 7, 3).unwrap(),
             Decimal::from(100),
             Decimal::from(20),
         )
@@ -1702,7 +1702,7 @@ mod tests {
             2,
             trade::TradeType::Sell,
             1,
-            NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 6, 3).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
         )
@@ -1714,7 +1714,7 @@ mod tests {
             3,
             trade::TradeType::Buy,
             1,
-            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
         )
@@ -1724,7 +1724,7 @@ mod tests {
             4,
             trade::TradeType::Sell,
             1,
-            NaiveDate::from_ymd_opt(2025, 6, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2025, 6, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(15),
         )
@@ -1772,7 +1772,7 @@ mod tests {
             1,
             trade::TradeType::Buy,
             1,
-            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
         )
@@ -1782,7 +1782,7 @@ mod tests {
             2,
             trade::TradeType::Sell,
             1,
-            NaiveDate::from_ymd_opt(2025, 6, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2025, 6, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(15),
         )
@@ -1821,7 +1821,7 @@ mod tests {
             1,
             trade::TradeType::Buy,
             1,
-            NaiveDate::from_ymd_opt(2023, 7, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2023, 7, 3).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
         )
@@ -1831,7 +1831,7 @@ mod tests {
             2,
             trade::TradeType::Sell,
             1,
-            NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 6, 3).unwrap(),
             Decimal::from(100),
             Decimal::from(7),
         )
@@ -1843,7 +1843,7 @@ mod tests {
             3,
             trade::TradeType::Buy,
             1,
-            NaiveDate::from_ymd_opt(2025, 3, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2025, 3, 3).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
         )
@@ -1853,7 +1853,7 @@ mod tests {
             4,
             trade::TradeType::Sell,
             1,
-            NaiveDate::from_ymd_opt(2025, 6, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2025, 6, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(15),
         )
@@ -1928,7 +1928,7 @@ mod tests {
             1,
             trade::TradeType::Buy,
             1,
-            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
         )
@@ -1965,7 +1965,7 @@ mod tests {
             1,
             trade::TradeType::Buy,
             1,
-            NaiveDate::from_ymd_opt(2023, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2023, 1, 3).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
         )
@@ -2019,7 +2019,7 @@ mod tests {
             1,
             trade::TradeType::Buy,
             1,
-            NaiveDate::from_ymd_opt(2023, 1, 15).unwrap(),
+            NaiveDate::from_ymd_opt(2023, 1, 17).unwrap(),
             Decimal::from(1000),
             Decimal::from(2),
         )
@@ -2167,7 +2167,7 @@ mod tests {
             1,
             trade::TradeType::Buy,
             1,
-            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(1),
         )
@@ -2256,7 +2256,7 @@ mod tests {
             1,
             trade::TradeType::Buy,
             1,
-            NaiveDate::from_ymd_opt(2023, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2023, 1, 3).unwrap(),
             Decimal::from(100),
             Decimal::from(1),
         )
@@ -2286,7 +2286,7 @@ mod tests {
             1,
             trade::TradeType::Buy,
             1,
-            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(1),
         )
@@ -2437,7 +2437,7 @@ mod tests {
             1,
             trade::TradeType::Buy,
             1,
-            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(1),
         )
@@ -2482,7 +2482,7 @@ mod tests {
             1,
             trade::TradeType::Buy,
             1,
-            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(1),
         )
@@ -2516,8 +2516,8 @@ mod tests {
         insert_listing(&pool, 1, "RAP").await;
         // Two identical $100 parcels; only the first is held at the record date.
         for (id, date) in [
-            (1, NaiveDate::from_ymd_opt(2025, 2, 1).unwrap()),
-            (2, NaiveDate::from_ymd_opt(2025, 2, 15).unwrap()),
+            (1, NaiveDate::from_ymd_opt(2025, 2, 3).unwrap()),
+            (2, NaiveDate::from_ymd_opt(2025, 2, 18).unwrap()),
         ] {
             insert_trade(
                 &pool,
@@ -2535,7 +2535,7 @@ mod tests {
             &pool,
             1,
             1,
-            NaiveDate::from_ymd_opt(2025, 3, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2025, 3, 3).unwrap(),
             "1.50",
             Some(NaiveDate::from_ymd_opt(2025, 2, 10).unwrap()),
         )
@@ -2556,7 +2556,7 @@ mod tests {
             &pool,
             1,
             1,
-            NaiveDate::from_ymd_opt(2025, 3, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2025, 3, 3).unwrap(),
             "1.50",
             None,
         )
@@ -2813,7 +2813,7 @@ mod tests {
             1,
             trade::TradeType::Buy,
             1,
-            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
             Decimal::from(1500),
             Decimal::from(5),
         )
@@ -2846,7 +2846,7 @@ mod tests {
             1,
             trade::TradeType::Buy,
             1,
-            NaiveDate::from_ymd_opt(2023, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2023, 1, 3).unwrap(),
             Decimal::from(100),
             Decimal::from(1),
         )
@@ -2880,7 +2880,7 @@ mod tests {
             1,
             trade::TradeType::Buy,
             1,
-            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(1),
         )
@@ -2899,7 +2899,7 @@ mod tests {
             &pool,
             2,
             1,
-            NaiveDate::from_ymd_opt(2025, 6, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2025, 6, 2).unwrap(),
             "0.70",
         )
         .await;
@@ -2927,7 +2927,7 @@ mod tests {
             1,
             trade::TradeType::Buy,
             1,
-            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(1),
         )
@@ -3130,7 +3130,7 @@ mod tests {
             1,
             trade::TradeType::Buy,
             1,
-            NaiveDate::from_ymd_opt(2023, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2023, 1, 3).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
         )
@@ -3172,7 +3172,7 @@ mod tests {
             1,
             trade::TradeType::Buy,
             1,
-            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
         )
@@ -3182,7 +3182,7 @@ mod tests {
             2,
             trade::TradeType::Sell,
             1,
-            NaiveDate::from_ymd_opt(2025, 6, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2025, 6, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(15),
         )
@@ -3206,7 +3206,7 @@ mod tests {
             1,
             trade::TradeType::Buy,
             1,
-            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
         )
@@ -3216,7 +3216,7 @@ mod tests {
             2,
             trade::TradeType::Sell,
             1,
-            NaiveDate::from_ymd_opt(2025, 6, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2025, 6, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(15),
         )
@@ -3608,7 +3608,7 @@ mod tests {
             1,
             trade::TradeType::Buy,
             1,
-            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
             Decimal::from(200),
             Decimal::from(10),
         )
@@ -3619,7 +3619,7 @@ mod tests {
             2,
             trade::TradeType::Buy,
             1,
-            NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2026, 1, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
         )
@@ -3696,7 +3696,7 @@ mod tests {
             1,
             trade::TradeType::Buy,
             1,
-            NaiveDate::from_ymd_opt(2023, 7, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2023, 7, 3).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
         )
@@ -3706,7 +3706,7 @@ mod tests {
             2,
             trade::TradeType::Sell,
             1,
-            NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 6, 3).unwrap(),
             Decimal::from(100),
             Decimal::from(7),
         )
@@ -3718,7 +3718,7 @@ mod tests {
             3,
             trade::TradeType::Buy,
             1,
-            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
         )
@@ -3768,7 +3768,7 @@ mod tests {
             1,
             trade::TradeType::Buy,
             1,
-            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
         )
@@ -3870,7 +3870,7 @@ mod tests {
         for (id, account, qty) in [(1, 1, 2000), (2, 2, 5000)] {
             test_support::buy(id, 1)
                 .account(account)
-                .date(NaiveDate::from_ymd_opt(2020, 1, 1).unwrap())
+                .date(NaiveDate::from_ymd_opt(2020, 1, 2).unwrap())
                 .qty(Decimal::from(qty))
                 .price(Decimal::from(10))
                 .insert(pool)
@@ -3939,7 +3939,7 @@ mod tests {
             1,
             trade::TradeType::Buy,
             1,
-            NaiveDate::from_ymd_opt(2022, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2022, 1, 4).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
         )
@@ -3971,7 +3971,7 @@ mod tests {
             1,
             trade::TradeType::Buy,
             1,
-            NaiveDate::from_ymd_opt(2022, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2022, 1, 4).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
         )
@@ -3981,7 +3981,7 @@ mod tests {
             pool,
             serde_json::json!({
                 "listing_id": 1, "units": "100", "proceeds": "2000",
-                "date": "2022-01-01",
+                "date": "2022-01-04",
                 "allocations": [ { "purchase_trade_id": 1, "units": "100" } ]
             }),
         )
@@ -4001,13 +4001,19 @@ mod tests {
     async fn api_what_if_strategy_ignores_parcels_acquired_after_the_disposal_date() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "VAS").await;
-        for (id, year) in [(1, 2020), (2, 2022)] {
+        // Each year's first trading day: 1 January is New Year's Day on the
+        // seeded ASX calendar and a trade cannot be dated on a day the
+        // exchange was shut (SCENARIOS S-08), so 2022's falls on the 4th.
+        for (id, date) in [
+            (1, NaiveDate::from_ymd_opt(2020, 1, 2).unwrap()),
+            (2, NaiveDate::from_ymd_opt(2022, 1, 4).unwrap()),
+        ] {
             insert_trade(
                 &pool,
                 id,
                 trade::TradeType::Buy,
                 1,
-                NaiveDate::from_ymd_opt(year, 1, 1).unwrap(),
+                date,
                 Decimal::from(100),
                 Decimal::from(10),
             )
@@ -4059,7 +4065,7 @@ mod tests {
             1,
             trade::TradeType::Buy,
             1,
-            NaiveDate::from_ymd_opt(2020, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2020, 1, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
         )
@@ -4102,7 +4108,7 @@ mod tests {
             1,
             trade::TradeType::Buy,
             1,
-            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
         )
@@ -4136,7 +4142,7 @@ mod tests {
             1,
             trade::TradeType::Buy,
             1,
-            NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2026, 1, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
         )
@@ -4158,7 +4164,7 @@ mod tests {
             3,
             trade::TradeType::Buy,
             1,
-            NaiveDate::from_ymd_opt(2025, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2025, 1, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
         )

@@ -230,7 +230,7 @@ mod tests {
 
     async fn insert_sell(pool: &SqlitePool, id: i64, listing_id: i64, qty: Decimal) {
         test_support::sell(id, listing_id)
-            .date(ymd(2025, 6, 1))
+            .date(ymd(2025, 5, 30))
             .qty(qty)
             .price(Decimal::from(120))
             .brokerage(dec("9.95"))
@@ -252,7 +252,7 @@ mod tests {
     #[tokio::test]
     async fn db_gain_loss_and_cost_base_correct() {
         let pool = test_pool().await;
-        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
         let as_of = NaiveDate::from_ymd_opt(2025, 6, 1).unwrap();
         insert_listing(&pool, 1, "VAS").await;
         insert_buy(&pool, 1, 1, buy_date, Decimal::from(100), Decimal::from(10)).await;
@@ -273,17 +273,17 @@ mod tests {
     #[tokio::test]
     async fn db_cgt_discount_eligible_after_12_months() {
         let pool = test_pool().await;
-        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
         insert_listing(&pool, 1, "VAS").await;
         insert_buy(&pool, 1, 1, buy_date, Decimal::from(100), Decimal::from(10)).await;
 
         // exactly 12 months later — NOT eligible (need strictly more than 12 months)
-        let as_of_exact = NaiveDate::from_ymd_opt(2025, 1, 1).unwrap();
+        let as_of_exact = NaiveDate::from_ymd_opt(2025, 1, 2).unwrap();
         let gains = db_unrealised_gains(&pool, as_of_exact).await.unwrap();
         assert_eq!(gains[0].cgt_discount_eligible_quantity, Decimal::ZERO);
 
         // one day past 12 months — eligible
-        let as_of_eligible = NaiveDate::from_ymd_opt(2025, 1, 2).unwrap();
+        let as_of_eligible = NaiveDate::from_ymd_opt(2025, 1, 3).unwrap();
         let gains = db_unrealised_gains(&pool, as_of_eligible).await.unwrap();
         assert_eq!(gains[0].cgt_discount_eligible_quantity, Decimal::from(100));
     }
@@ -291,7 +291,7 @@ mod tests {
     #[tokio::test]
     async fn db_partial_sell_reduces_holding_and_eligible_qty() {
         let pool = test_pool().await;
-        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
         let as_of = NaiveDate::from_ymd_opt(2025, 6, 1).unwrap();
         insert_listing(&pool, 1, "VAS").await;
         insert_buy(&pool, 1, 1, buy_date, Decimal::from(100), Decimal::from(10)).await;
@@ -313,8 +313,8 @@ mod tests {
     #[tokio::test]
     async fn db_mixed_parcel_ages_eligible_qty_correct() {
         let pool = test_pool().await;
-        let old_date = NaiveDate::from_ymd_opt(2023, 1, 1).unwrap();
-        let new_date = NaiveDate::from_ymd_opt(2025, 1, 1).unwrap();
+        let old_date = NaiveDate::from_ymd_opt(2023, 1, 3).unwrap();
+        let new_date = NaiveDate::from_ymd_opt(2025, 1, 2).unwrap();
         // as_of is 2025-06-01: old parcel is >12mo, new parcel is <6mo
         let as_of = NaiveDate::from_ymd_opt(2025, 6, 1).unwrap();
         insert_listing(&pool, 1, "VAS").await;
@@ -330,7 +330,7 @@ mod tests {
     #[tokio::test]
     async fn db_amit_reduces_cost_base() {
         let pool = test_pool().await;
-        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
         let as_of = NaiveDate::from_ymd_opt(2025, 6, 1).unwrap();
         insert_listing(&pool, 1, "VAF").await;
         insert_buy(&pool, 1, 1, buy_date, Decimal::from(100), Decimal::from(10)).await;
@@ -362,7 +362,7 @@ mod tests {
             &pool,
             1,
             1,
-            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
         )
@@ -402,7 +402,7 @@ mod tests {
     async fn db_share_split_adjusts_quantity_and_keeps_acquisition_date() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "SPL").await;
-        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
         insert_buy(&pool, 1, 1, buy_date, Decimal::from(100), Decimal::from(10)).await;
         // 2-for-1 split six months in — within the 12-month window.
         corporate_action::db_upsert(
@@ -444,7 +444,7 @@ mod tests {
     #[tokio::test]
     async fn api_without_prices_returns_no_gain() {
         let pool = test_pool().await;
-        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
         insert_listing(&pool, 1, "VAS").await;
         insert_buy(&pool, 1, 1, buy_date, Decimal::from(100), Decimal::from(10)).await;
 
@@ -462,7 +462,7 @@ mod tests {
     #[tokio::test]
     async fn api_with_prices_computes_gain_and_loss() {
         let pool = test_pool().await;
-        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
         insert_listing(&pool, 1, "VAS").await;
         // cost base = 10 * 100 + 9.95 + 0.995 = 1010.945
         insert_buy(&pool, 1, 1, buy_date, Decimal::from(100), Decimal::from(10)).await;
@@ -490,20 +490,20 @@ mod tests {
     #[tokio::test]
     async fn api_gain_loss_discount_eligibility() {
         let pool = test_pool().await;
-        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
         insert_listing(&pool, 1, "VAS").await;
         insert_buy(&pool, 1, 1, buy_date, Decimal::from(100), Decimal::from(10)).await;
 
-        // as_of = 2025-01-01: exactly 12 months, NOT eligible
-        let body = serde_json::json!({ "as_of_date": "2025-01-01" });
+        // as_of = 2025-01-02: exactly 12 months, NOT eligible
+        let body = serde_json::json!({ "as_of_date": "2025-01-02" });
         let resp = client(&pool)
             .post("/portfolio/unrealised-gains", &body)
             .await;
         let gains: Vec<UnrealisedGain> = resp.json();
         assert_eq!(gains[0].cgt_discount_eligible_quantity, Decimal::ZERO);
 
-        // as_of = 2025-01-02: one day past 12 months — eligible
-        let body = serde_json::json!({ "as_of_date": "2025-01-02" });
+        // as_of = 2025-01-03: one day past 12 months — eligible
+        let body = serde_json::json!({ "as_of_date": "2025-01-03" });
         let resp = client(&pool)
             .post("/portfolio/unrealised-gains", &body)
             .await;
@@ -518,7 +518,7 @@ mod tests {
     async fn api_live_fetch_values_holding_with_as_of() {
         use crate::entities::closing_price::test_support::QuoteStub;
         let pool = test_pool().await;
-        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
         insert_listing(&pool, 1, "VAS").await;
         // cost base = 10 × 100 + 9.95 + 0.995 = 1010.945
         insert_buy(&pool, 1, 1, buy_date, Decimal::from(100), Decimal::from(10)).await;
@@ -550,7 +550,7 @@ mod tests {
     async fn api_live_fetch_failure_degrades_gracefully() {
         use crate::entities::closing_price::test_support::QuoteStub;
         let pool = test_pool().await;
-        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
         insert_listing(&pool, 1, "VAS").await;
         insert_buy(&pool, 1, 1, buy_date, Decimal::from(100), Decimal::from(10)).await;
         let fetcher = QuoteStub::failing("provider down").shared();
@@ -585,7 +585,7 @@ mod tests {
             &pool,
             1,
             1,
-            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
         )
@@ -627,7 +627,7 @@ mod tests {
     #[tokio::test]
     async fn db_scrip_replacement_discount_counts_the_combined_period() {
         let pool = test_pool().await;
-        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
         insert_listing(&pool, 1, "OLD").await;
         insert_listing(&pool, 2, "NEW").await;
         insert_buy(&pool, 1, 1, buy_date, Decimal::from(100), Decimal::from(10)).await;

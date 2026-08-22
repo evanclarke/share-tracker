@@ -475,8 +475,13 @@ impl ClosingPriceBuilder {
     }
 }
 
-/// Buy fixture: 100 units @ 10 AUD on 2024-01-01 (T+2), no brokerage,
+/// Buy fixture: 100 units @ 10 AUD on 2024-01-02 (T+2), no brokerage,
 /// default holding account.
+///
+/// The date is a Tuesday and not a seeded exchange holiday: since SCENARIOS
+/// S-08 the write path refuses a trade dated on a day its exchange was shut,
+/// and 2024-01-01 — the old default — is New Year's Day on both seeded
+/// calendars.
 pub fn buy(id: i64, listing_id: i64) -> TradeBuilder {
     TradeBuilder::new(id, listing_id, trade::TradeType::Buy)
 }
@@ -505,7 +510,7 @@ pub struct TradeBuilder {
 
 impl TradeBuilder {
     fn new(id: i64, listing_id: i64, trade_type: trade::TradeType) -> Self {
-        let date = ymd(2024, 1, 1);
+        let date = ymd(2024, 1, 2);
         TradeBuilder {
             t: trade::Trade {
                 id,

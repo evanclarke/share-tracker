@@ -742,9 +742,9 @@ mod tests {
         // Old parcel (>12mo, gain 500), new parcel (≤12mo, gain 250) — same
         // facts as `db_two_parcels_mixed_eligibility`, straight from memory.
         let data = ReportData {
-            sells: [(3, mem_sell(3, d(2025, 6, 1), 150, 15, "AUD"))].into(),
+            sells: [(3, mem_sell(3, d(2025, 6, 2), 150, 15, "AUD"))].into(),
             buys: [
-                (1, mem_buy(1, d(2023, 1, 1), 100, 10, "AUD")),
+                (1, mem_buy(1, d(2023, 1, 3), 100, 10, "AUD")),
                 (2, mem_buy(2, d(2025, 1, 1), 50, 10, "AUD")),
             ]
             .into(),
@@ -773,7 +773,7 @@ mod tests {
         // USD buy at 0.50 (cost 1000 USD → 2000 AUD), USD sell at 0.60
         // (proceeds 1500 USD → 2500 AUD): gain 500 AUD, from the map alone.
         let data = ReportData {
-            sells: [(2, mem_sell(2, d(2025, 6, 1), 100, 15, "USD"))].into(),
+            sells: [(2, mem_sell(2, d(2025, 6, 2), 100, 15, "USD"))].into(),
             buys: [(1, mem_buy(1, d(2024, 1, 15), 100, 10, "USD"))].into(),
             allocations: vec![mem_alloc(2, 1, 100)],
             fx: crate::infra::fx::FxRates::from_rates([
@@ -797,7 +797,7 @@ mod tests {
         // to their trade's manual fx_rate (never an unconverted or zeroed
         // figure — the missing-rate-and-no-override case errors, asserted in
         // `infra::fx`'s tests).
-        let mut sell = mem_sell(2, d(2025, 6, 1), 100, 15, "USD");
+        let mut sell = mem_sell(2, d(2025, 6, 2), 100, 15, "USD");
         sell.fx_rate = "0.60".parse().unwrap();
         let mut buy = mem_buy(1, d(2024, 1, 15), 100, 10, "USD");
         buy.fx_rate = "0.50".parse().unwrap();
@@ -819,7 +819,7 @@ mod tests {
         // Both legs carry deliberate spot rates (QC 18020); the loaded
         // monthly rates would give different figures and must lose: cost
         // 1000 USD / 0.40 = 2500 AUD, proceeds 1500 USD / 0.75 = 2000 AUD.
-        let mut sell = mem_sell(2, d(2025, 6, 1), 100, 15, "USD");
+        let mut sell = mem_sell(2, d(2025, 6, 2), 100, 15, "USD");
         sell.spot_fx_rate = Some("0.75".parse().unwrap());
         let mut buy = mem_buy(1, d(2024, 1, 15), 100, 10, "USD");
         buy.spot_fx_rate = Some("0.40".parse().unwrap());
@@ -851,7 +851,7 @@ mod tests {
         // `price × qty − share` subtraction inside Decimal's 28-digit
         // mantissa; a larger price would re-round there and mask what this
         // test asserts — the shares themselves summing exactly.)
-        let mut sell = mem_sell(4, d(2025, 6, 1), 3, 4, "AUD");
+        let mut sell = mem_sell(4, d(2025, 6, 2), 3, 4, "AUD");
         sell.brokerage = Decimal::from(10);
         let data = ReportData {
             sells: [(4, sell)].into(),
@@ -887,8 +887,8 @@ mod tests {
     #[tokio::test]
     async fn db_sell_without_allocations_returns_empty() {
         let pool = test_pool().await;
-        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
-        let sell_date = NaiveDate::from_ymd_opt(2025, 3, 1).unwrap();
+        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
+        let sell_date = NaiveDate::from_ymd_opt(2025, 3, 3).unwrap();
         insert_listing(&pool, 1, "VAS").await;
         insert_buy(&pool, 1, 1, buy_date, Decimal::from(100), Decimal::from(10)).await;
         insert_sell(
@@ -909,8 +909,8 @@ mod tests {
     async fn db_basic_gain() {
         let pool = test_pool().await;
         // buy 100 @ $10, sell 100 @ $15 — zero brokerage
-        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
-        let sell_date = NaiveDate::from_ymd_opt(2024, 6, 1).unwrap();
+        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
+        let sell_date = NaiveDate::from_ymd_opt(2024, 6, 3).unwrap();
         insert_listing(&pool, 1, "VAS").await;
         insert_buy(&pool, 1, 1, buy_date, Decimal::from(100), Decimal::from(10)).await;
         insert_sell(
@@ -939,8 +939,8 @@ mod tests {
     async fn db_basic_loss() {
         let pool = test_pool().await;
         // buy 100 @ $15, sell 100 @ $10 — zero brokerage → loss of 500
-        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
-        let sell_date = NaiveDate::from_ymd_opt(2024, 6, 1).unwrap();
+        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
+        let sell_date = NaiveDate::from_ymd_opt(2024, 6, 3).unwrap();
         insert_listing(&pool, 1, "VAS").await;
         insert_buy(&pool, 1, 1, buy_date, Decimal::from(100), Decimal::from(15)).await;
         insert_sell(
@@ -970,8 +970,8 @@ mod tests {
         // sell 100 @ $15, brokerage $9.95 + gst $0.995
         //   proceeds = 1500 - 10.945 = 1489.055
         //   gain = 1489.055 - 1010.945 = 478.110
-        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
-        let sell_date = NaiveDate::from_ymd_opt(2024, 6, 1).unwrap();
+        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
+        let sell_date = NaiveDate::from_ymd_opt(2024, 6, 3).unwrap();
         insert_listing(&pool, 1, "VAS").await;
         test_support::buy(1, 1)
             .date(buy_date)
@@ -1005,8 +1005,8 @@ mod tests {
     #[tokio::test]
     async fn db_cgt_discount_eligible_after_12_months() {
         let pool = test_pool().await;
-        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
-        let sell_date = NaiveDate::from_ymd_opt(2025, 1, 2).unwrap(); // strictly > 12 months
+        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
+        let sell_date = NaiveDate::from_ymd_opt(2025, 1, 3).unwrap(); // strictly > 12 months
         insert_listing(&pool, 1, "VAS").await;
         insert_buy(&pool, 1, 1, buy_date, Decimal::from(100), Decimal::from(10)).await;
         insert_sell(
@@ -1033,8 +1033,8 @@ mod tests {
     #[tokio::test]
     async fn db_sale_after_ticker_rename_keeps_cost_base_and_discount_clock() {
         let pool = test_pool().await;
-        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
-        let sell_date = NaiveDate::from_ymd_opt(2025, 1, 2).unwrap(); // strictly > 12 months
+        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
+        let sell_date = NaiveDate::from_ymd_opt(2025, 1, 3).unwrap(); // strictly > 12 months
         insert_listing(&pool, 1, "OLD").await;
         insert_buy(&pool, 1, 1, buy_date, Decimal::from(100), Decimal::from(10)).await;
         // The security is renamed before the sale: same listing id, new
@@ -1045,7 +1045,7 @@ mod tests {
             &pool,
             1,
             &crate::entities::listing_rename::RenameBody {
-                effective_date: NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(),
+                effective_date: NaiveDate::from_ymd_opt(2024, 6, 3).unwrap(),
                 ticker: "NEW".to_string(),
                 exchange_mic: None,
                 name: Some("NEW".to_string()),
@@ -1091,7 +1091,7 @@ mod tests {
             .insert(&pool)
             .await;
         let buy_date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
-        let sell_date = NaiveDate::from_ymd_opt(2025, 1, 2).unwrap(); // strictly > 12 months
+        let sell_date = NaiveDate::from_ymd_opt(2025, 1, 3).unwrap(); // strictly > 12 months
         let qty: Decimal = "0.12345678".parse().unwrap();
         insert_buy(&pool, 1, 1, buy_date, qty, Decimal::from(60000)).await;
         insert_sell(&pool, 2, 1, sell_date, qty, Decimal::from(100000)).await;
@@ -1122,8 +1122,8 @@ mod tests {
     #[tokio::test]
     async fn db_cgt_not_eligible_exactly_12_months() {
         let pool = test_pool().await;
-        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
-        let sell_date = NaiveDate::from_ymd_opt(2025, 1, 1).unwrap(); // exactly 12 months — not eligible
+        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
+        let sell_date = NaiveDate::from_ymd_opt(2025, 1, 2).unwrap(); // exactly 12 months — not eligible
         insert_listing(&pool, 1, "VAS").await;
         insert_buy(&pool, 1, 1, buy_date, Decimal::from(100), Decimal::from(10)).await;
         insert_sell(
@@ -1169,7 +1169,7 @@ mod tests {
             &pool,
             4,
             1,
-            NaiveDate::from_ymd_opt(2025, 3, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2025, 3, 3).unwrap(),
             Decimal::from(100),
             Decimal::from(15),
         )
@@ -1205,7 +1205,7 @@ mod tests {
         insert_listing(&pool, 1, "VAS").await;
         // Contracted 2024-01-01, settled T+2.
         test_support::buy(1, 1)
-            .date(NaiveDate::from_ymd_opt(2024, 1, 1).unwrap())
+            .date(NaiveDate::from_ymd_opt(2024, 1, 2).unwrap())
             .settlement(NaiveDate::from_ymd_opt(2024, 1, 3).unwrap())
             .qty(Decimal::from(100))
             .price(Decimal::from(10))
@@ -1215,7 +1215,7 @@ mod tests {
         // later, which is past the line on any settlement-based reading
         // (settlement-to-settlement: 2024-01-03 → 2025-01-06).
         test_support::sell(2, 1)
-            .date(NaiveDate::from_ymd_opt(2025, 1, 1).unwrap())
+            .date(NaiveDate::from_ymd_opt(2025, 1, 2).unwrap())
             .settlement(NaiveDate::from_ymd_opt(2025, 1, 6).unwrap())
             .qty(Decimal::from(100))
             .price(Decimal::from(15))
@@ -1231,7 +1231,7 @@ mod tests {
         // The per-allocation row anchors on the parcel's contract date too.
         assert_eq!(
             result[0].parcels[0].acquisition_date,
-            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap()
+            NaiveDate::from_ymd_opt(2024, 1, 2).unwrap()
         );
         assert!(!result[0].parcels[0].discount_eligible);
     }
@@ -1281,8 +1281,8 @@ mod tests {
     async fn db_loss_not_included_in_discount_eligible() {
         let pool = test_pool().await;
         // parcel held > 12 months but sold at a loss → discount_eligible_gain stays 0
-        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
-        let sell_date = NaiveDate::from_ymd_opt(2025, 6, 1).unwrap();
+        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
+        let sell_date = NaiveDate::from_ymd_opt(2025, 6, 2).unwrap();
         insert_listing(&pool, 1, "VAS").await;
         insert_buy(&pool, 1, 1, buy_date, Decimal::from(100), Decimal::from(15)).await;
         insert_sell(
@@ -1309,9 +1309,9 @@ mod tests {
         // sell 150 units @ $15 on 2025-06-01
         // gain per unit = 5, total gain = 750
         // only old parcel (100 units) is discount eligible → discount_eligible_gain = 500
-        let old_date = NaiveDate::from_ymd_opt(2023, 1, 1).unwrap();
-        let new_date = NaiveDate::from_ymd_opt(2025, 1, 1).unwrap();
-        let sell_date = NaiveDate::from_ymd_opt(2025, 6, 1).unwrap();
+        let old_date = NaiveDate::from_ymd_opt(2023, 1, 3).unwrap();
+        let new_date = NaiveDate::from_ymd_opt(2025, 1, 2).unwrap();
+        let sell_date = NaiveDate::from_ymd_opt(2025, 6, 2).unwrap();
         insert_listing(&pool, 1, "VAS").await;
         insert_buy(&pool, 1, 1, old_date, Decimal::from(100), Decimal::from(10)).await;
         insert_buy(&pool, 2, 1, new_date, Decimal::from(50), Decimal::from(10)).await;
@@ -1382,8 +1382,8 @@ mod tests {
         let pool = test_pool().await;
         // buy 100 @ $10 → cost = 1000, sell 100 @ $15 → proceeds = 1500
         // AMIT reduces cost by 100 * $0.05 = $5 → cost_base = 995, gain = 505
-        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
-        let sell_date = NaiveDate::from_ymd_opt(2025, 6, 1).unwrap();
+        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
+        let sell_date = NaiveDate::from_ymd_opt(2025, 6, 2).unwrap();
         insert_listing(&pool, 1, "VAF").await;
         insert_buy(&pool, 1, 1, buy_date, Decimal::from(100), Decimal::from(10)).await;
         insert_sell(
@@ -1422,7 +1422,7 @@ mod tests {
             &pool,
             1,
             1,
-            d(2023, 1, 1),
+            d(2023, 1, 3),
             Decimal::from(100),
             Decimal::from(10),
         )
@@ -1431,7 +1431,7 @@ mod tests {
             &pool,
             2,
             1,
-            d(2023, 1, 1),
+            d(2023, 1, 3),
             Decimal::from(100),
             Decimal::from(10),
         )
@@ -1441,7 +1441,7 @@ mod tests {
             &pool,
             3,
             1,
-            d(2024, 6, 1),
+            d(2024, 6, 3),
             Decimal::from(50),
             Decimal::from(15),
         )
@@ -1470,8 +1470,8 @@ mod tests {
     #[tokio::test]
     async fn api_realised_gains_returns_json() {
         let pool = test_pool().await;
-        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
-        let sell_date = NaiveDate::from_ymd_opt(2025, 6, 1).unwrap();
+        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
+        let sell_date = NaiveDate::from_ymd_opt(2025, 6, 2).unwrap();
         insert_listing(&pool, 1, "VAS").await;
         insert_buy(&pool, 1, 1, buy_date, Decimal::from(100), Decimal::from(10)).await;
         insert_sell(
@@ -1503,8 +1503,8 @@ mod tests {
     #[tokio::test]
     async fn api_realised_gains_states_the_taxpayer_basis() {
         let pool = test_pool().await;
-        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
-        let sell_date = NaiveDate::from_ymd_opt(2025, 6, 1).unwrap();
+        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
+        let sell_date = NaiveDate::from_ymd_opt(2025, 6, 2).unwrap();
         insert_listing(&pool, 1, "VAS").await;
         insert_buy(&pool, 1, 1, buy_date, Decimal::from(100), Decimal::from(10)).await;
         insert_sell(
@@ -1596,7 +1596,7 @@ mod tests {
             &pool,
             1,
             1,
-            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
         )
@@ -1615,7 +1615,7 @@ mod tests {
             &pool,
             2,
             1,
-            NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 6, 3).unwrap(),
             Decimal::from(200),
             Decimal::from(6),
         )
@@ -1639,7 +1639,7 @@ mod tests {
             &pool,
             1,
             1,
-            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
         )
@@ -1657,7 +1657,7 @@ mod tests {
             &pool,
             2,
             1,
-            NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 6, 3).unwrap(),
             Decimal::from(80),
             Decimal::from(6),
         )
@@ -1685,7 +1685,7 @@ mod tests {
             &pool,
             1,
             1,
-            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
         )
@@ -1741,7 +1741,7 @@ mod tests {
             &pool,
             1,
             1,
-            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
         )
@@ -1785,7 +1785,7 @@ mod tests {
             &pool,
             1,
             1,
-            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
         )
@@ -1812,7 +1812,7 @@ mod tests {
             &pool,
             2,
             1,
-            NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 6, 3).unwrap(),
             Decimal::from(200),
             Decimal::from(6),
         )
@@ -1839,7 +1839,7 @@ mod tests {
             &pool,
             1,
             1,
-            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
         )
@@ -1856,7 +1856,7 @@ mod tests {
             &pool,
             2,
             1,
-            NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 6, 3).unwrap(),
             Decimal::from(100),
             Decimal::from(12),
         )
@@ -1881,7 +1881,7 @@ mod tests {
             &pool,
             1,
             1,
-            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
         )
@@ -1890,7 +1890,7 @@ mod tests {
             &pool,
             2,
             1,
-            NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 6, 3).unwrap(),
             Decimal::from(100),
             Decimal::from(12),
         )
@@ -1928,7 +1928,7 @@ mod tests {
             &pool,
             1,
             1,
-            NaiveDate::from_ymd_opt(2025, 2, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2025, 2, 3).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
         )
@@ -1949,7 +1949,7 @@ mod tests {
             &pool,
             3,
             1,
-            NaiveDate::from_ymd_opt(2025, 2, 15).unwrap(),
+            NaiveDate::from_ymd_opt(2025, 2, 18).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
         )
@@ -1958,7 +1958,7 @@ mod tests {
             &pool,
             4,
             1,
-            NaiveDate::from_ymd_opt(2025, 6, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2025, 6, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(12),
         )
@@ -2017,8 +2017,8 @@ mod tests {
     #[tokio::test]
     async fn db_usd_buy_sell_produces_aud_cost_base_and_gain_via_ato_rate() {
         let pool = test_pool().await;
-        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
-        let sell_date = NaiveDate::from_ymd_opt(2025, 6, 1).unwrap();
+        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 16).unwrap();
+        let sell_date = NaiveDate::from_ymd_opt(2025, 6, 2).unwrap();
         insert_usd_listing(&pool, 1, "AAPL").await;
         // ATO RBA rates (foreign-per-AUD): A$1 = 0.50 USD in Jan-2024, 0.60 in Jun-2025.
         rba_fx_rate::db_import_rate(&pool, "USD", "2024-01", "0.50".parse().unwrap())
@@ -2064,8 +2064,8 @@ mod tests {
     #[tokio::test]
     async fn db_usd_falls_back_to_manual_fx_rate_when_no_ato_rate() {
         let pool = test_pool().await;
-        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
-        let sell_date = NaiveDate::from_ymd_opt(2025, 6, 1).unwrap();
+        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 16).unwrap();
+        let sell_date = NaiveDate::from_ymd_opt(2025, 6, 2).unwrap();
         insert_usd_listing(&pool, 1, "AAPL").await;
         // No ATO rates imported → both trades fall back to their 0.99 manual override.
         insert_usd_trade(
@@ -2124,7 +2124,7 @@ mod tests {
             &pool,
             1,
             trade::TradeType::Buy,
-            NaiveDate::from_ymd_opt(2024, 1, 15).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 1, 16).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
         )
@@ -2226,7 +2226,7 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "WDR").await;
         insert_listing(&pool, 2, "RGL").await;
-        let buy_date = NaiveDate::from_ymd_opt(2023, 1, 15).unwrap();
+        let buy_date = NaiveDate::from_ymd_opt(2023, 1, 17).unwrap();
         // Gunther: 100 shares, $9 cost base each = $900.
         insert_buy(&pool, 1, 1, buy_date, Decimal::from(100), Decimal::from(9)).await;
         // 1-for-1 plus $10 cash per old share; new shares worth $20.
@@ -2347,7 +2347,7 @@ mod tests {
     async fn db_replacement_sale_within_combined_12_months_is_not_discounted() {
         let pool = test_pool().await;
         let buy_date = NaiveDate::from_ymd_opt(2024, 2, 1).unwrap();
-        let sell_date = NaiveDate::from_ymd_opt(2024, 12, 1).unwrap();
+        let sell_date = NaiveDate::from_ymd_opt(2024, 12, 2).unwrap();
         insert_listing(&pool, 1, "OLD").await;
         insert_listing(&pool, 2, "NEW").await;
         insert_buy(
@@ -2383,8 +2383,8 @@ mod tests {
     #[tokio::test]
     async fn db_usd_replacement_cost_base_converts_at_the_original_buy_month() {
         let pool = test_pool().await;
-        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
-        let sell_date = NaiveDate::from_ymd_opt(2025, 6, 1).unwrap();
+        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 16).unwrap();
+        let sell_date = NaiveDate::from_ymd_opt(2025, 6, 2).unwrap();
         insert_usd_listing(&pool, 1, "OLDQ").await;
         insert_usd_listing(&pool, 2, "NEWQ").await;
         // US$0.50/A$ in the buy month, 0.80 at the exchange, 0.60 at the sale.
@@ -2628,7 +2628,7 @@ mod tests {
         let d = |y, m, day| NaiveDate::from_ymd_opt(y, m, day).unwrap();
         let data = ReportData {
             buys: [
-                (1, mem_buy(1, d(2023, 1, 1), 1000, 2, "AUD")), // > 12 months
+                (1, mem_buy(1, d(2023, 1, 3), 1000, 2, "AUD")), // > 12 months
                 (2, mem_buy(2, d(2025, 3, 1), 200, 2, "AUD")),  // ≤ 12 months
             ]
             .into(),
@@ -2702,7 +2702,7 @@ mod tests {
             &pool,
             1,
             1,
-            NaiveDate::from_ymd_opt(2023, 1, 15).unwrap(),
+            NaiveDate::from_ymd_opt(2023, 1, 17).unwrap(),
             Decimal::from(1000),
             Decimal::from(2),
         )
@@ -2773,7 +2773,7 @@ mod tests {
         assert_eq!(rights.parcels[0].purchase_trade_id, 1);
         assert_eq!(
             rights.parcels[0].acquisition_date,
-            NaiveDate::from_ymd_opt(2023, 1, 15).unwrap()
+            NaiveDate::from_ymd_opt(2023, 1, 17).unwrap()
         );
         assert_eq!(rights.parcels[0].units, Decimal::from(250));
         assert_eq!(rights.parcels[0].proceeds, Decimal::from(50));
@@ -2881,7 +2881,7 @@ mod tests {
             &pool,
             1,
             1,
-            NaiveDate::from_ymd_opt(2020, 8, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2020, 8, 3).unwrap(),
             Decimal::from(1000),
             Decimal::from(50),
         )

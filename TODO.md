@@ -64,17 +64,35 @@ starts from. A date the market was shut is a data-entry error by construction.
 **Live database: zero rows disagree** — no trade in Evan's 113 is dated on a weekend or on a seeded
 holiday for its exchange, so a write-time refusal would leave every existing row editable.
 
-- [ ] Decide the shape (see the two options below) and implement it
-- [ ] The derived Buy paths must be settled either way: `ess_vest` and `inheritance` **INSERT their
+- [x] Decide the shape (see the two options below) and implement it — (c) both. The refusal lives in
+      `trade::db_upsert` and `sell::db_upsert_sell`, on the transaction each already opens (the
+      calendar is a DB read, so it cannot go in the pure `check_amounts`), over the *existing*
+      `closing_price` machinery: a new `non_trading_day(&Market, date)` beside
+      `validate_complete_trading_day`, resolving the calendar as at the date through the rename
+      chain and exempting exchange-less (Crypto) listings. `load_market` gained a
+      `load_market_on(conn, …)` twin so the write path can read it inside its own transaction
+      (`http::crud_get`, `listing::db_get`, `exchange::db_get` and `db_holiday_dates_for` are
+      executor-generic for it). Deliberately **not** in `check_amounts` and **not** in
+      `upsert_sell_in_tx`: a corporate action's own date may legitimately fall on a closed day
+- [x] The derived Buy paths must be settled either way: `ess_vest` and `inheritance` **INSERT their
       Buy directly** rather than through `trade::db_upsert`, each carrying a module-doc list of
       "which `check_amounts` rejection is satisfied where" and an explicit instruction that *a new
       check added to `trade::check_amounts` needs a line here*. Both are dated by facts that are
       routinely **not** trading days — an ESS taxing point, and a date of death — so a check added to
       `check_amounts` must exempt them (and say why in those lists), or live outside it
-- [ ] `docs/API.md` — the 422 catalogue row and the trades/sells sections, or the health section
-- [ ] Regression tests: weekend and seeded-holiday dates on `PUT /trades/:id` and `PUT /sells/:id`,
+      — done the second way: the check lives outside `check_amounts` entirely, and both module-doc
+      lists carry a paragraph saying so and why (a taxing point is set by the scheme, a death keeps
+      no exchange's hours), pointing at the health alert that covers them instead
+- [x] `docs/API.md` — the 422 catalogue row and the trades/sells sections, or the health section
+      — all of them: the catalogue row beside the pre-CGT/future-date bounds, a Trades paragraph
+      (with the derived-path exemption), a Sells paragraph, and the `non_trading_day_trades` health
+      entry; plus `docs/SCHEMA.md`'s `trades.date` comment and the README health bullet
+- [x] Regression tests: weekend and seeded-holiday dates on `PUT /trades/:id` and `PUT /sells/:id`,
       the same Saturday accepted for a Crypto listing (the `L-15` shape), and a date in a year with
       no seeded calendar still accepted
+- [x] The non-blocking half: `reports::health`'s `non_trading_day_trades`, over *every* trade rather
+      than only the ones the refusal sees, naming the reason (weekend / holiday), the exchange whose
+      calendar was in force on the date, and the write path that created the row
 
 **Decision (Evan, 2026-08-22): (c) both.** Refuse on `PUT /trades/:id` and `PUT /sells/:id`
 (Crypto and the derived ESS-vest / inheritance paths exempt), **and** carry a non-blocking

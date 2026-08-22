@@ -61,8 +61,15 @@ pub fn router() -> Router<SqlitePool> {
         )
 }
 
-pub async fn db_get(pool: &SqlitePool, mic: &str) -> Result<Option<Exchange>, sqlx::Error> {
-    http::crud_get(pool, mic.to_string()).await
+/// Executor-generic for the same reason [`listing::db_get`] is: the trading
+/// calendar has to be readable on a write path's own transaction.
+///
+/// [`listing::db_get`]: crate::entities::listing::db_get
+pub async fn db_get<'e, X>(executor: X, mic: &str) -> Result<Option<Exchange>, sqlx::Error>
+where
+    X: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
+    http::crud_get(executor, mic.to_string()).await
 }
 
 pub async fn db_upsert(pool: &SqlitePool, exchange: &Exchange) -> Result<(), sqlx::Error> {

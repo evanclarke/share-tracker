@@ -461,12 +461,22 @@ pub async fn load_market(
     pool: &SqlitePool,
     listing_id: i64,
 ) -> Result<Option<Market>, sqlx::Error> {
-    let Some(listing) = listing::db_get(pool, listing_id).await? else {
+    let mut conn = pool.acquire().await?;
+    load_market_on(&mut conn, listing_id).await
+}
+
+/// [`load_market`] on a caller's own connection, so a write path can read the
+/// calendar **inside its own transaction** — the trade and Sell write paths'
+/// non-trading-day refusal ([`db_non_trading_day`]) does exactly that, the way
+/// `trade::db::listing_currency_mismatch` reads the listing's currency there.
+pub(crate) async fn load_market_on(
+    conn: &mut sqlx::SqliteConnection,
+    listing_id: i64,
+) -> Result<Option<Market>, sqlx::Error> {
+    let Some(listing) = listing::db_get(&mut *conn, listing_id).await? else {
         return Ok(None);
     };
-    let mut conn = pool.acquire().await?;
-    let renames = crate::domain::listing_identity::RenameHistory::load(&mut conn).await?;
-    drop(conn);
+    let renames = crate::domain::listing_identity::RenameHistory::load(&mut *conn).await?;
     let spans = renames.identities(
         listing_id,
         crate::domain::listing_identity::Identity {
@@ -487,10 +497,11 @@ pub async fn load_market(
             None => (None, HashSet::new()),
             Some(mic) => {
                 if !exchanges.contains_key(mic) {
-                    exchanges.insert(mic.clone(), exchange::db_get(pool, mic).await?);
+                    exchanges.insert(mic.clone(), exchange::db_get(&mut *conn, mic).await?);
                     holidays.insert(
                         mic.clone(),
-                        crate::entities::exchange_holiday::db_holiday_dates_for(pool, mic).await?,
+                        crate::entities::exchange_holiday::db_holiday_dates_for(&mut *conn, mic)
+                            .await?,
                     );
                 }
                 (
@@ -513,6 +524,89 @@ pub async fn load_market(
         identities,
         symbol_override: None,
     }))
+}
+
+/// Why a date is not on a listing's trading calendar — the only two ways
+/// `MarketIdentity::is_trading_day` can answer no.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NonTradingReason {
+    /// A Saturday or a Sunday.
+    Weekend,
+    /// A weekday seeded in `exchange_holidays` for the exchange in force then.
+    Holiday,
+}
+
+impl NonTradingReason {
+    /// The reason as it reads in a rejection or an alert, e.g. "a Saturday"
+    /// or "a public holiday".
+    pub(crate) fn describe(self, date: NaiveDate) -> String {
+        match self {
+            NonTradingReason::Weekend => format!("a {}", date.format("%A")),
+            NonTradingReason::Holiday => "a public holiday".to_string(),
+        }
+    }
+}
+
+/// A date that falls outside a listing's own trading calendar, as the calendar
+/// stood **on that date** (so a listing that changed exchange is judged on the
+/// market it actually traded on then, not today's).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NonTradingDay {
+    /// The MIC whose calendar was in force on the date.
+    pub exchange_mic: String,
+    pub reason: NonTradingReason,
+}
+
+impl NonTradingDay {
+    /// The whole fact as one clause: `2026-05-16 is a Saturday on XASX`.
+    pub(crate) fn describe(&self, date: NaiveDate) -> String {
+        format!(
+            "{date} is {} on {}",
+            self.reason.describe(date),
+            self.exchange_mic
+        )
+    }
+}
+
+/// Whether `date` was a trading day for `market`, and if not, why. `None`
+/// means it was — including for an exchange-less (Crypto) listing, which
+/// trades every day, and for a listing whose `exchanges` row is missing (the
+/// calendar is unknown, so nothing can be asserted about it).
+///
+/// One question, one implementation: the closing-price write path
+/// ([`validate_complete_trading_day`]), the trade and Sell write paths'
+/// refusal, and `reports::health`'s alert all read this same calendar rather
+/// than each re-deriving weekends and holidays.
+pub(crate) fn non_trading_day(market: &Market, date: NaiveDate) -> Option<NonTradingDay> {
+    let identity = market.identity_at(date);
+    let exchange = identity.exchange.as_ref()?;
+    if identity.is_trading_day(date) {
+        return None;
+    }
+    let reason = match date.weekday() {
+        chrono::Weekday::Sat | chrono::Weekday::Sun => NonTradingReason::Weekend,
+        _ => NonTradingReason::Holiday,
+    };
+    Some(NonTradingDay {
+        exchange_mic: exchange.mic.clone(),
+        reason,
+    })
+}
+
+/// [`non_trading_day`] for one listing, on the caller's own transaction.
+/// `None` for a listing that doesn't exist — the write path that asks is
+/// about to meet (or has just met) the foreign-key rejection, which names the
+/// missing listing better than a calendar message could.
+pub(crate) async fn db_non_trading_day(
+    conn: &mut sqlx::SqliteConnection,
+    listing_id: i64,
+    date: NaiveDate,
+) -> Result<Option<NonTradingDay>, sqlx::Error> {
+    let Some(market) = load_market_on(conn, listing_id).await? else {
+        return Ok(None);
+    };
+    Ok(non_trading_day(&market, date))
 }
 
 // ---------------------------------------------------------------------------
@@ -2549,7 +2643,7 @@ mod tests {
 
     async fn insert_buy(pool: &SqlitePool, id: i64, listing_id: i64, qty: &str) {
         crate::test_support::buy(id, listing_id)
-            .date(ymd(2024, 1, 15))
+            .date(ymd(2024, 1, 16))
             .qty(qty.parse().unwrap())
             .price(Decimal::from(10))
             .insert(pool)
@@ -5442,7 +5536,7 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
         crate::test_support::buy(1, 1)
-            .date(ymd(2024, 1, 15))
+            .date(ymd(2024, 1, 16))
             .qty(Decimal::from(100))
             .price(Decimal::from(10))
             .insert(&pool)
@@ -5517,14 +5611,14 @@ mod tests {
         insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
         // Buy 100, 2:1 split to 200 units, sell 150 of them.
         crate::test_support::buy(1, 1)
-            .date(ymd(2024, 1, 15))
+            .date(ymd(2024, 1, 16))
             .qty(Decimal::from(100))
             .price(Decimal::from(10))
             .insert(&pool)
             .await;
         insert_share_split(&pool, 1, ymd(2024, 3, 1), "2", "1").await;
         crate::test_support::sell(2, 1)
-            .date(ymd(2024, 6, 1))
+            .date(ymd(2024, 6, 3))
             .qty(Decimal::from(150))
             .price(Decimal::from(8))
             .insert(&pool)
@@ -5548,14 +5642,14 @@ mod tests {
         insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
         // Buy 1000, 1:10 consolidation to 100 units, sell all 100.
         crate::test_support::buy(1, 1)
-            .date(ymd(2024, 1, 15))
+            .date(ymd(2024, 1, 16))
             .qty(Decimal::from(1000))
             .price(Decimal::from(1))
             .insert(&pool)
             .await;
         insert_share_split(&pool, 1, ymd(2024, 3, 1), "1", "10").await;
         crate::test_support::sell(2, 1)
-            .date(ymd(2024, 6, 1))
+            .date(ymd(2024, 6, 3))
             .qty(Decimal::from(100))
             .price(Decimal::from(12))
             .insert(&pool)

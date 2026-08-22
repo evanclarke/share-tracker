@@ -227,7 +227,7 @@ mod tests {
 
     async fn insert_sell(pool: &SqlitePool, id: i64, listing_id: i64, qty: Decimal) {
         test_support::sell(id, listing_id)
-            .date(ymd(2024, 6, 1))
+            .date(ymd(2024, 6, 3))
             .qty(qty)
             .price(Decimal::from(120))
             .brokerage(dec("9.95"))
@@ -661,7 +661,7 @@ mod tests {
             &pool,
             2,
             1,
-            NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 6, 3).unwrap(),
             "0.25",
         )
         .await;
