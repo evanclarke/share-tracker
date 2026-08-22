@@ -688,6 +688,10 @@ const COLUMN_LABELS = {
   // holiday), blank when it is one. The default humaniser would render
   // "Settlement non trading reason", which reads as three nouns in a row.
   settlement_non_trading_reason: 'Settlement non-trading day',
+  // Where a trade's settlement date came from (computed / stated /
+  // unrecorded): "Settlement date source" reads as a field name rather than a
+  // column heading.
+  settlement_date_source: 'Settlement source',
   // The row was valued at an earlier day's close because the provider stopped
   // quoting the security (listings.unpriced_from). The default humaniser
   // would render "Price carried forward", which reads like a question.

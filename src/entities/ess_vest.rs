@@ -175,10 +175,11 @@ pub async fn db_vest(pool: &SqlitePool, statement_id: i64) -> Result<Trade, Vest
         .await?;
     sqlx::query(
         "INSERT INTO trades \
-         (id, trade_type, date, settlement_date, listing_id, average_price, quantity, \
+         (id, trade_type, date, settlement_date, settlement_date_source, listing_id, \
+          average_price, quantity, \
           currency, brokerage, gst_on_brokerage, brokerage_currency, fx_rate, \
           holding_account_id, ess_statement_id) \
-         VALUES (?, 'Buy', ?, ?, ?, ?, ?, ?, '0', '0', ?, ?, ?, ?)",
+         VALUES (?, 'Buy', ?, ?, 'stated', ?, ?, ?, ?, '0', '0', ?, ?, ?, ?)",
     )
     .bind(new_id)
     .bind(taxing_point_date)

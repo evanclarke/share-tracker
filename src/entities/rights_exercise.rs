@@ -254,11 +254,12 @@ pub async fn db_exercise(
     let fx_rate = body.fx_rate.unwrap_or(Decimal::ONE);
     let result = sqlx::query(
         "INSERT INTO trades \
-         (trade_type, date, settlement_date, listing_id, average_price, quantity, currency, \
+         (trade_type, date, settlement_date, settlement_date_source, listing_id, \
+          average_price, quantity, currency, \
           brokerage, gst_on_brokerage, brokerage_currency, fx_rate, contract_note_ref, \
           residual_brought_forward, residual_carried_forward, residual_paid_out, \
           rights_action_id, holding_account_id) \
-         VALUES ('Buy', ?, ?, ?, ?, ?, ?, ?, '0', ?, ?, NULL, '0', '0', '0', ?, ?)",
+         VALUES ('Buy', ?, ?, 'stated', ?, ?, ?, ?, ?, '0', ?, ?, NULL, '0', '0', '0', ?, ?)",
     )
     .bind(body.date)
     .bind(body.date)

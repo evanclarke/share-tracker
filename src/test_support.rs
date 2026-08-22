@@ -517,6 +517,12 @@ impl TradeBuilder {
                 trade_type,
                 date,
                 settlement_date: date + chrono::Duration::days(2),
+                // A fixture spells its settlement date out, so it is a stated
+                // one — and stated dates are what the `settlement-recompute`
+                // job leaves alone, so no unrelated fixture can be rewritten
+                // by a job run under test. Use [`TradeBuilder::settlement_source`]
+                // for the cases that are about the provenance itself.
+                settlement_date_source: trade::SettlementDateSource::Stated,
                 listing_id,
                 average_price: Decimal::from(10),
                 quantity: Decimal::from(100),
@@ -561,6 +567,15 @@ impl TradeBuilder {
     pub fn settlement(mut self, date: NaiveDate) -> Self {
         self.t.settlement_date = date;
         self.settlement_overridden = true;
+        self
+    }
+
+    /// Sets how the settlement date came to be (default: `Stated`) — for the
+    /// tests about the `settlement-recompute` job, which rewrites only
+    /// `Computed` ones, and for pinning what a pre-0041 row (`Unrecorded`)
+    /// does.
+    pub fn settlement_source(mut self, source: trade::SettlementDateSource) -> Self {
+        self.t.settlement_date_source = source;
         self
     }
 

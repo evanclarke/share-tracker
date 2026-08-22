@@ -622,13 +622,15 @@ pub async fn db_upsert(pool: &SqlitePool, inh: &Inheritance) -> Result<(), Upser
     };
     sqlx::query(
         "INSERT INTO trades \
-         (id, trade_type, date, settlement_date, listing_id, average_price, quantity, \
+         (id, trade_type, date, settlement_date, settlement_date_source, listing_id, \
+          average_price, quantity, \
           currency, brokerage, gst_on_brokerage, brokerage_currency, fx_rate, \
           holding_account_id, inheritance_id, deemed_acquisition_date) \
-         VALUES (?, 'Buy', ?, ?, ?, '0', ?, ?, ?, '0', ?, ?, ?, ?, ?) \
+         VALUES (?, 'Buy', ?, ?, 'stated', ?, '0', ?, ?, ?, '0', ?, ?, ?, ?, ?) \
          ON CONFLICT(id) DO UPDATE SET \
              date                    = excluded.date, \
              settlement_date         = excluded.settlement_date, \
+             settlement_date_source  = excluded.settlement_date_source, \
              listing_id              = excluded.listing_id, \
              quantity                = excluded.quantity, \
              currency                = excluded.currency, \

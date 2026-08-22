@@ -1373,6 +1373,7 @@ const JOB_DESC = {
   'currency-import': 'Fetch ISO 4217 fiat and ISO 24165 token currencies.',
   'price-import': 'Store the closing price of every trading day in the last 7 whose row is missing or errored, for every held listing (days already stored ok are never re-fetched, so runs are idempotent and outages self-heal).',
   'price-rebase': 'Re-derive every stored closing price from the figure the provider served, over the share splits and bonus issues recorded since \u2014 a one-off repair for prices stored before that rule existed. Recording a split already does this for its own listing, so this normally changes nothing.',
+  'settlement-recompute': 'Re-derive every auto-calculated settlement date from the exchange holiday calendar as it now stands \u2014 run it after seeding a missing holiday year, which otherwise clears the settlement holiday-coverage report without correcting the dates it flagged. A settlement date you entered yourself is never touched, and the job is idempotent.',
   'report-snapshot': 'Store the price-dependent reports\' results for every missing date in the last 14 days up to the latest the whole portfolio can be valued at with final prices, regenerating stale or provisional ones; a blocked date is skipped (reported) and retried next run.',
 };
 

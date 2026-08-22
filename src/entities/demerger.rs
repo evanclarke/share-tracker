@@ -215,7 +215,7 @@ pub async fn db_demerge(pool: &SqlitePool, action_id: i64) -> Result<Demerge, De
         &mut tx,
         sell_id,
         &sell_body,
-        action.date,
+        trade::Settlement::stated(action.date),
         None,
         None,
         Some(action_id),

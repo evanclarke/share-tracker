@@ -21,6 +21,12 @@ pub use db::{DeleteOutcome, db_delete, db_get, db_list, db_upsert};
 // The Sell path shares this DB-level rule, as it shares `check_amounts`.
 pub(crate) use db::listing_currency_mismatch;
 pub use http::router;
+/// The provenance of a stored `settlement_date`. Named outside this module
+/// only by tests (the write paths set it through [`Settlement`], and the
+/// non-test build reaches the type through `Trade`'s own field), so the
+/// re-export is test-gated to keep the non-test build warning-free.
+#[cfg(test)]
+pub use model::SettlementDateSource;
 pub use model::{Trade, TradeBody, TradeType};
 
 pub(crate) use checks::{
@@ -28,7 +34,15 @@ pub(crate) use checks::{
     StatementTotalError, TradeAmounts, amounts_detail, check_amounts, check_statement_total,
     resolve_brokerage, spot_fx_rate_detail, statement_total_detail, validate_spot_fx_rate,
 };
+pub(crate) use settlement::Settlement;
+/// Reached by name only from tests — the write paths go through
+/// [`Settlement::resolve`], which is where the omitted-means-computed rule
+/// lives — so the re-export is test-gated.
+#[cfg(test)]
 pub(crate) use settlement::auto_settlement_date;
+/// The `settlement-recompute` maintenance job (SCENARIOS S-04), registered in
+/// `infra::scheduler::registry` and deliberately unscheduled.
+pub use settlement::run_recompute;
 
 #[cfg(test)]
 use axum::http::StatusCode;
@@ -1038,6 +1052,268 @@ mod tests {
         }
         // Not a vacuous pass: two exchanges' worth of trading days.
         assert!(checked > 4000, "only {checked} settlements were checked");
+    }
+
+    /// A Buy body with `settlement_date` omitted, so the server computes it —
+    /// the only way a trade's settlement date is recorded as `computed`, and
+    /// so the only shape the `settlement-recompute` job will ever rewrite.
+    fn auto_settled_buy(date: NaiveDate) -> serde_json::Value {
+        serde_json::json!({
+            "trade_type": "Buy",
+            "date": date,
+            "listing_id": 1,
+            "average_price": 100.0,
+            "quantity": 10.0,
+            "currency": "AUD",
+            "brokerage": 0,
+            "gst_on_brokerage": 0,
+            "brokerage_currency": "AUD",
+            "fx_rate": 1.0
+        })
+    }
+
+    async fn seed_holiday(app: &ApiClient, date: NaiveDate, name: &str) {
+        app.put_ok(
+            format!("/exchange_holidays/XASX/{date}"),
+            &serde_json::json!({ "name": name }),
+        )
+        .await;
+    }
+
+    /// SCENARIOS S-04's four-step reproduction, end to end through the API.
+    ///
+    /// Transposed to the 2018 Easter, because the reproduction as driven
+    /// (2028) can no longer be entered: S-10 refuses a trade dated after
+    /// today. The shape is identical — a Thursday before a Good Friday in a
+    /// year with no seeded `exchange_holidays` rows — and 2018 sits before the
+    /// seeded 2019–2027 span, so the calendar is missing at the same end of it.
+    ///
+    /// 1. The Buy auto-computes T+2 skipping weekends only and lands on the
+    ///    Easter Monday nobody has entered; the coverage report says so.
+    /// 2. The user seeds the year the report asked for.
+    /// 3. The window is now inside coverage — the report's first question goes
+    ///    quiet (here its second one still catches the row, because this
+    ///    settlement happens to land on the seeded holiday itself; the
+    ///    following test is the case where it does not).
+    /// 4. The stored settlement date is still the Easter Monday until the
+    ///    `settlement-recompute` job re-derives it, and then the report is
+    ///    empty because the date is right rather than because it is hidden.
+    #[tokio::test]
+    async fn seeding_a_missing_calendar_and_recomputing_corrects_the_settlement_it_left_wrong() {
+        let pool = test_pool().await;
+        test_support::listing(1).mic("XASX").insert(&pool).await;
+        let app = ApiClient::full(&pool);
+
+        // 1. Thursday 2018-03-29, T+2 over an empty 2018 calendar.
+        app.put_ok("/trades/1", &auto_settled_buy(ymd(2018, 3, 29)))
+            .await;
+        let trade: Trade = app.get_json("/trades/1").await;
+        assert_eq!(trade.settlement_date, ymd(2018, 4, 2)); // Easter Monday
+        assert_eq!(trade.settlement_date_source, SettlementDateSource::Computed);
+        let alerts: Vec<serde_json::Value> =
+            app.get_json("/reports/settlement_holiday_coverage").await;
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0]["coverage_status"], "outside_holiday_coverage");
+
+        // 2. The user seeds the 2018 calendar the report asked for.
+        seed_holiday(&app, ymd(2018, 3, 30), "Good Friday").await;
+        seed_holiday(&app, ymd(2018, 4, 2), "Easter Monday").await;
+
+        // 3. The window is inside coverage now; only the trading-day question
+        //    still holds the row — and 4. the stored date has not moved.
+        let alerts: Vec<serde_json::Value> =
+            app.get_json("/reports/settlement_holiday_coverage").await;
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0]["coverage_status"], "inside_holiday_coverage");
+        assert_eq!(alerts[0]["settlement_non_trading_reason"], "holiday");
+        let trade: Trade = app.get_json("/trades/1").await;
+        assert_eq!(trade.settlement_date, ymd(2018, 4, 2));
+
+        // The job is what repairs it: T+2 over the completed calendar skips
+        // Good Friday, the weekend and Easter Monday.
+        app.post_empty("/jobs/settlement-recompute")
+            .await
+            .expect_status(StatusCode::NO_CONTENT);
+        let trade: Trade = app.get_json("/trades/1").await;
+        assert_eq!(trade.settlement_date, ymd(2018, 4, 4));
+        assert_eq!(
+            trade.settlement_date_source,
+            SettlementDateSource::Computed,
+            "a recomputed date is still a computed one"
+        );
+        let alerts: Vec<serde_json::Value> =
+            app.get_json("/reports/settlement_holiday_coverage").await;
+        assert!(alerts.is_empty(), "still flagged: {alerts:?}");
+
+        // trades is audited, and the job writes through the same triggers as
+        // any other update: the superseded date is recoverable.
+        let history: Vec<serde_json::Value> = app
+            .post_json(
+                "/reports/row_history",
+                &serde_json::json!({ "table": "trades", "row_id": 1 }),
+            )
+            .await;
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0]["operation"], "UPDATE");
+        assert_eq!(history[0]["settlement_date"], "2018-04-02");
+    }
+
+    /// SCENARIOS S-04's general case — the one the S-05 trading-day check
+    /// cannot see. Only the holiday *inside* the window is missing, so the
+    /// settlement lands one business day early on a perfectly good trading
+    /// day: seeding the calendar silences the coverage report completely, and
+    /// nothing but the recompute job would ever correct the stored date.
+    #[tokio::test]
+    async fn recompute_corrects_a_settlement_left_a_day_early_by_a_missing_holiday() {
+        let pool = test_pool().await;
+        test_support::listing(1).mic("XASX").insert(&pool).await;
+        let app = ApiClient::full(&pool);
+
+        app.put_ok("/trades/1", &auto_settled_buy(ymd(2018, 3, 29)))
+            .await;
+        // Good Friday alone: the settlement stays on Monday 2018-04-02, which
+        // is an ordinary trading day while Easter Monday is unseeded.
+        seed_holiday(&app, ymd(2018, 3, 30), "Good Friday").await;
+        let alerts: Vec<serde_json::Value> =
+            app.get_json("/reports/settlement_holiday_coverage").await;
+        assert!(
+            alerts.is_empty(),
+            "the report has gone quiet, which is the finding: {alerts:?}"
+        );
+        let trade: Trade = app.get_json("/trades/1").await;
+        assert_eq!(trade.settlement_date, ymd(2018, 4, 2));
+
+        app.post_empty("/jobs/settlement-recompute")
+            .await
+            .expect_status(StatusCode::NO_CONTENT);
+        let trade: Trade = app.get_json("/trades/1").await;
+        assert_eq!(trade.settlement_date, ymd(2018, 4, 3));
+    }
+
+    /// SCENARIOS S-04: a stored settlement that already matches what the
+    /// current calendar computes is left exactly as it is — no write, so no
+    /// audit entry and no snapshot staled. That is also what makes the job
+    /// idempotent: the second run of the test above would do this.
+    #[tokio::test]
+    async fn recompute_leaves_a_settlement_that_already_matches_the_calendar_untouched() {
+        let pool = test_pool().await;
+        test_support::listing(1).mic("XASX").insert(&pool).await;
+        let app = ApiClient::full(&pool);
+
+        // 2024 is inside the seeded calendar: Monday 2024-01-15 settles T+2 on
+        // the Wednesday, with nothing missing to correct.
+        app.put_ok("/trades/1", &auto_settled_buy(ymd(2024, 1, 15)))
+            .await;
+        let before: Trade = app.get_json("/trades/1").await;
+        assert_eq!(before.settlement_date, ymd(2024, 1, 17));
+
+        app.post_empty("/jobs/settlement-recompute")
+            .await
+            .expect_status(StatusCode::NO_CONTENT);
+        let after: Trade = app.get_json("/trades/1").await;
+        assert_eq!(after.settlement_date, before.settlement_date);
+        let history: Vec<serde_json::Value> = app
+            .post_json(
+                "/reports/row_history",
+                &serde_json::json!({ "table": "trades", "row_id": 1 }),
+            )
+            .await;
+        assert!(history.is_empty(), "nothing should have been written");
+    }
+
+    /// SCENARIOS S-04/S-05: a **hand-supplied** settlement date is the
+    /// taxpayer's own assertion and the job never touches it — reproducing the
+    /// live database's trade 9071 (LAC on XNYS, dated 2021-03-25 with an
+    /// explicit `settlement_date` of 2021-05-29, a Saturday two months later).
+    /// It stays exactly as entered, still flagged by the coverage report, and
+    /// re-saving it through the API (which sends the date back verbatim) does
+    /// not turn it into a computed one either.
+    #[tokio::test]
+    async fn recompute_leaves_a_hand_supplied_settlement_untouched() {
+        let pool = test_pool().await;
+        test_support::listing(1)
+            .mic("XNYS")
+            .ticker("LAC")
+            .currency("USD")
+            .insert(&pool)
+            .await;
+        let app = ApiClient::full(&pool);
+        let mut body = auto_settled_buy(ymd(2021, 3, 25));
+        body["currency"] = "USD".into();
+        body["brokerage_currency"] = "USD".into();
+        body["settlement_date"] = "2021-05-29".into();
+        app.put_ok("/trades/9071", &body).await;
+        let stored: Trade = app.get_json("/trades/9071").await;
+        assert_eq!(stored.settlement_date, ymd(2021, 5, 29));
+        assert_eq!(stored.settlement_date_source, SettlementDateSource::Stated);
+
+        app.post_empty("/jobs/settlement-recompute")
+            .await
+            .expect_status(StatusCode::NO_CONTENT);
+        let after: Trade = app.get_json("/trades/9071").await;
+        assert_eq!(after.settlement_date, ymd(2021, 5, 29));
+        assert_eq!(after.settlement_date_source, SettlementDateSource::Stated);
+        let alerts: Vec<serde_json::Value> =
+            app.get_json("/reports/settlement_holiday_coverage").await;
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0]["trade_id"], 9071);
+        assert_eq!(alerts[0]["settlement_non_trading_reason"], "weekend");
+        let history: Vec<serde_json::Value> = app
+            .post_json(
+                "/reports/row_history",
+                &serde_json::json!({ "table": "trades", "row_id": 9071 }),
+            )
+            .await;
+        assert!(
+            history.is_empty(),
+            "the assertion was rewritten: {history:?}"
+        );
+    }
+
+    /// SCENARIOS S-04: a row written before the provenance column existed
+    /// (migration 0041's default, which every row in the live database takes)
+    /// records nothing about how its settlement date was arrived at, so the
+    /// job leaves it alone rather than guessing — it might be an assertion
+    /// like trade 9071's. A re-save through the API keeps it that way while
+    /// the date is unchanged; entering a different one is what makes it a
+    /// statement.
+    #[tokio::test]
+    async fn recompute_leaves_a_row_from_before_the_provenance_column_untouched() {
+        let pool = test_pool().await;
+        test_support::listing(1).mic("XASX").insert(&pool).await;
+        test_support::buy(1, 1)
+            .date(ymd(2024, 1, 15))
+            .settlement(ymd(2024, 1, 18)) // a day later than T+2 computes
+            .settlement_source(SettlementDateSource::Unrecorded)
+            .insert(&pool)
+            .await;
+        let app = ApiClient::full(&pool);
+
+        app.post_empty("/jobs/settlement-recompute")
+            .await
+            .expect_status(StatusCode::NO_CONTENT);
+        let after: Trade = app.get_json("/trades/1").await;
+        assert_eq!(after.settlement_date, ymd(2024, 1, 18));
+        assert_eq!(
+            after.settlement_date_source,
+            SettlementDateSource::Unrecorded
+        );
+
+        // Re-saving the row verbatim is not an assertion about the date.
+        let mut body = auto_settled_buy(ymd(2024, 1, 15));
+        body["settlement_date"] = "2024-01-18".into();
+        app.put_ok("/trades/1", &body).await;
+        let after: Trade = app.get_json("/trades/1").await;
+        assert_eq!(
+            after.settlement_date_source,
+            SettlementDateSource::Unrecorded
+        );
+
+        // Entering a different date is.
+        body["settlement_date"] = "2024-01-19".into();
+        app.put_ok("/trades/1", &body).await;
+        let after: Trade = app.get_json("/trades/1").await;
+        assert_eq!(after.settlement_date_source, SettlementDateSource::Stated);
     }
 
     #[tokio::test]

@@ -409,10 +409,13 @@ pub async fn db_delete_sell(pool: &SqlitePool, id: i64) -> Result<DeleteOutcome,
 pub async fn db_upsert_sell(pool: &SqlitePool, id: i64, body: &SellBody) -> Result<(), SellError> {
     // Reference data (exchanges/listings) is not touched here, so resolving the
     // settlement date outside the write transaction is a consistent read.
-    let settlement_date = match body.settlement_date {
-        Some(d) => d,
-        None => trade::auto_settlement_date(pool, id, body.listing_id, body.date).await?,
-    };
+    // Recorded with the date, as on the trade path: a supplied value is the
+    // taxpayer's assertion and is never rewritten; a computed one is
+    // re-derived by the `settlement-recompute` job once the calendar it was
+    // computed against is completed (SCENARIOS S-04/S-05).
+    let settlement =
+        trade::Settlement::resolve(pool, id, body.listing_id, body.date, body.settlement_date)
+            .await?;
 
     let mut tx = pool.begin().await?;
 
@@ -453,18 +456,7 @@ pub async fn db_upsert_sell(pool: &SqlitePool, id: i64, body: &SellBody) -> Resu
         return Err(SellError::TransferSell);
     }
 
-    upsert_sell_in_tx(
-        &mut tx,
-        id,
-        body,
-        settlement_date,
-        None,
-        None,
-        None,
-        None,
-        None,
-    )
-    .await?;
+    upsert_sell_in_tx(&mut tx, id, body, settlement, None, None, None, None, None).await?;
 
     // The sale date must be a day the listing's own market actually traded
     // (SCENARIOS S-08). Checked here rather than inside `upsert_sell_in_tx`,
@@ -501,7 +493,7 @@ pub(crate) async fn upsert_sell_in_tx(
     tx: &mut sqlx::SqliteConnection,
     id: i64,
     body: &SellBody,
-    settlement_date: NaiveDate,
+    settlement: trade::Settlement,
     buyback_action_id: Option<i64>,
     scrip_action_id: Option<i64>,
     demerger_action_id: Option<i64>,
@@ -542,7 +534,7 @@ pub(crate) async fn upsert_sell_in_tx(
         gst_on_brokerage,
         fx_rate: body.fx_rate,
         date: body.date,
-        settlement_date,
+        settlement_date: settlement.date,
         currency: &body.currency,
         brokerage_currency: &body.brokerage_currency,
     })
@@ -565,16 +557,18 @@ pub(crate) async fn upsert_sell_in_tx(
     // Upsert the Sell trade row.
     sqlx::query(
         "INSERT INTO trades \
-         (id, trade_type, date, settlement_date, listing_id, average_price, quantity, \
+         (id, trade_type, date, settlement_date, settlement_date_source, listing_id, \
+          average_price, quantity, \
           currency, brokerage, gst_on_brokerage, brokerage_includes_gst, brokerage_currency, \
           fx_rate, spot_fx_rate, contract_note_ref, statement_total, \
           buyback_action_id, scrip_action_id, demerger_action_id, holding_account_id, transfer_id, \
           worthless_action_id) \
-         VALUES (?, 'Sell', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+         VALUES (?, 'Sell', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT(id) DO UPDATE SET \
              trade_type             = 'Sell', \
              date                   = excluded.date, \
              settlement_date        = excluded.settlement_date, \
+             settlement_date_source = excluded.settlement_date_source, \
              listing_id             = excluded.listing_id, \
              average_price          = excluded.average_price, \
              quantity               = excluded.quantity, \
@@ -596,7 +590,8 @@ pub(crate) async fn upsert_sell_in_tx(
     )
     .bind(id)
     .bind(body.date)
-    .bind(settlement_date)
+    .bind(settlement.date)
+    .bind(settlement.source)
     .bind(body.listing_id)
     .bind(Money(body.average_price))
     .bind(Money(body.quantity))

@@ -272,11 +272,66 @@ The S-05 trading-day check above catches this particular instance (2028-04-17 is
 but not the general one: a settlement computed one day early because the window contained a holiday
 that is not the settlement day itself lands on a perfectly good trading day and stays wrong.
 
-- [ ] Decide the shape (see the options below) and implement it
-- [ ] `docs/API.md` — the coverage-report contract sentence is currently false and must be corrected
-      whichever option is taken
-- [ ] Regression tests: the four-step reproduction above, and a trade whose stored settlement still
-      matches a recomputation staying silent
+- [x] Decide the shape (see the options below) and implement it — the `settlement-recompute` job
+      (`POST /jobs/settlement-recompute`, registered in `infra::scheduler::registry`, deliberately
+      absent from `schedule.cron`, the `price-rebase` shape). It re-derives each settlement date
+      through `auto_settlement_date` itself — the write path's own function, over the listing's
+      **live** `exchange_mic` — so the job's answer is exactly where a re-save would put the date
+      and the two can never disagree; that inherits the documented live-exchange limitation
+      deliberately rather than quietly resolving the calendar differently. One transaction,
+      idempotent, and the UPDATEs go through the ordinary audited-table triggers, so each
+      superseded date stays in `row_history`.
+
+      **What the finding's write-up does not say, and is the whole of the work:** "rewrite the
+      auto-computed ones and leave the stated ones alone" was *not answerable from the schema*.
+      `trades.settlement_date` is one plain column written by both paths and nothing recorded
+      which, and no heuristic recovers it (a supplied date that happens to equal T+2 is
+      indistinguishable from a computed one). So migration **0041** adds
+      `trades.settlement_date_source` — `computed` / `stated` / `unrecorded`, CHECK-constrained,
+      the project's provenance-column idiom (`price_as_observed`, `domain::rollover::Provenance`).
+      Three values because there are three states: every **existing** row takes `unrecorded` from
+      the ADD COLUMN default (no UPDATE, so the migration writes no audit rows and stales no
+      snapshots), and the job never rewrites `stated` or `unrecorded` — guessing could overwrite an
+      assertion like trade 9071's. The default is the never-rewritten value, so a write path that
+      forgets the column can only under-claim. The derived paths (ESS vest, inherited parcel, DRP
+      reinvestment, rights exercise, every rollover trade) name `'stated'` in their INSERT: their
+      same-day settlement is asserted by construction. One qualification keeps the provenance
+      meaningful: **re-supplying the date already stored keeps the recorded source**, because a GET
+      body PUT back verbatim is what the web UI's edit form sends, and treating that as an
+      assertion would opt every edited trade out of the repair (pinned by
+      `entities::tests::what_a_get_returns_can_be_put_back_unchanged`, which caught it).
+
+      Cost on the live database: nil and provable. All 113 rows become `unrecorded`, and none of
+      them needs recomputing anyway — every settlement window is inside the seeded 2019–2027
+      coverage. Run against a copy of `share-tracker-2026-08-16-000000.db`: migration 0041 applies,
+      the job answers `204` logging `trades=113 candidates=0 recomputed=0`, and every settlement
+      date, every `row_history` row and every snapshot's `stale` flag is byte-identical to the
+      original — trade 9071 included
+- [x] `docs/API.md` — the coverage-report contract sentence is currently false and must be corrected
+      whichever option is taken — it now names the repair ("**Run the `settlement-recompute` job**
+      after seeding a calendar"), the Jobs list documents the job as unscheduled and says what it
+      will not rewrite, the Trades section documents the read-only `settlement_date_source` field
+      and the re-supply rule, and the live-exchange Known-limitation says the job inherits it.
+      Plus `docs/SCHEMA.md`'s new column line, the README feature line and its unscheduled-job
+      paragraph, the Jobs-screen description and the Trades screen (the new column, its
+      `COLUMN_LABELS` heading, and the settlement-date field hint). Pinned by
+      `doc_checks::settlement_recompute_job_documented`
+- [x] Regression tests: the four-step reproduction above, and a trade whose stored settlement still
+      matches a recomputation staying silent — five, in `entities::trade::tests`:
+      `seeding_a_missing_calendar_and_recomputing_corrects_the_settlement_it_left_wrong` is the
+      four-step reproduction end to end through the API (transposed to the 2018 Easter, because
+      S-10 now refuses a trade dated 2028 — same shape, missing calendar at the other end of the
+      seeded span: settles on the unseeded Easter Monday, the year is seeded, the stored date does
+      not move, the job re-derives it to 2018-04-04, the report empties, and the superseded date is
+      in `row_history`); `recompute_corrects_a_settlement_left_a_day_early_by_a_missing_holiday` is
+      the *general* case S-05 cannot catch (only the in-window holiday missing, so the stored date
+      is a perfectly good trading day and the report is silent);
+      `recompute_leaves_a_settlement_that_already_matches_the_calendar_untouched` (no write at all,
+      so no audit row — which is also what makes the job idempotent);
+      `recompute_leaves_a_hand_supplied_settlement_untouched` reproduces trade 9071's shape (LAC on
+      XNYS, 2021-03-25 → 2021-05-29) and asserts it survives the job, still flagged, unaudited; and
+      `recompute_leaves_a_row_from_before_the_provenance_column_untouched` pins the `unrecorded`
+      default, including that a verbatim re-save keeps it and entering a different date does not
 
 **Decision (Evan, 2026-08-22): (b) a `settlement-recompute` job** — registered in
 `infra::scheduler::registry` and deliberately **unscheduled** (the `price-rebase` shape from Q-14),

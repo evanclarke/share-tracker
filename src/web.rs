@@ -1387,6 +1387,13 @@ mod tests {
         // listed for the settlement-day question, not for its coverage.
         let css = body_string(get("/static/style.css").await).await;
         assert!(css.contains(".badge.inside_holiday_coverage"));
+        // SCENARIOS S-04: the repair the report points at — the unscheduled
+        // recompute job, described in the Jobs view — and, on the Trades
+        // screen, which dates it may rewrite (the provenance column and the
+        // settlement-date field's hint saying an entered value is kept).
+        assert!(js.contains("settlement-recompute"));
+        assert!(js.contains("settlement_date_source"));
+        assert!(js.contains("a date you enter is kept exactly as given"));
     }
 
     #[tokio::test]

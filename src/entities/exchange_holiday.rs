@@ -169,8 +169,10 @@ pub(crate) fn window_outside_coverage(
 
 /// The set of public-holiday dates for the exchange a listing trades on. Used by
 /// settlement-date calculation so a settlement never lands on a non-trading day.
+/// Takes the caller's own connection, so the `settlement-recompute` job can
+/// load a calendar on the transaction it rewrites settlement dates in.
 pub(crate) async fn exchange_holidays_for_listing(
-    pool: &SqlitePool,
+    conn: &mut sqlx::SqliteConnection,
     listing_id: i64,
 ) -> Result<HashSet<NaiveDate>, sqlx::Error> {
     let dates: Vec<NaiveDate> = sqlx::query_scalar(
@@ -179,7 +181,7 @@ pub(crate) async fn exchange_holidays_for_listing(
          WHERE l.id = ?",
     )
     .bind(listing_id)
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await?;
     Ok(dates.into_iter().collect())
 }
@@ -415,12 +417,13 @@ mod tests {
     async fn db_holidays_for_listing_returns_its_exchange_set() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "XASX").await;
-        let asx = exchange_holidays_for_listing(&pool, 1).await.unwrap();
+        insert_listing(&pool, 2, "XNYS").await;
+        let mut conn = pool.acquire().await.unwrap();
+        let asx = exchange_holidays_for_listing(&mut conn, 1).await.unwrap();
         assert!(asx.contains(&ymd(2024, 4, 25))); // Anzac Day (ASX)
         assert!(!asx.contains(&ymd(2024, 11, 28))); // Thanksgiving (NYSE only)
 
-        insert_listing(&pool, 2, "XNYS").await;
-        let nyse = exchange_holidays_for_listing(&pool, 2).await.unwrap();
+        let nyse = exchange_holidays_for_listing(&mut conn, 2).await.unwrap();
         assert!(nyse.contains(&ymd(2024, 11, 28)));
         assert!(!nyse.contains(&ymd(2024, 4, 25)));
     }

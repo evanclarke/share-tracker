@@ -705,6 +705,43 @@ fn settlement_coverage_documents_both_questions_it_answers() {
     );
 }
 
+/// Docs-sync pin (SCENARIOS S-04): the settlement holiday-coverage report's
+/// contract sentence was true only while a calendar was *incomplete* — seeding
+/// the year it asks for cleared the alert without correcting the settlement
+/// dates computed while the year was missing. The repair is the unscheduled
+/// `settlement-recompute` job, so the sentence now names it, the job list
+/// describes it and says what it will not rewrite, and the schema and the
+/// Trades section document the provenance column that makes "what the server
+/// computed" answerable at all.
+#[test]
+fn settlement_recompute_job_documented() {
+    // The coverage report's contract sentence points at the repair.
+    assert!(
+        API_MD.contains("**Run the [`settlement-recompute` job](#jobs) after seeding a calendar**")
+    );
+    // The job list: registered, unscheduled, and what it leaves alone.
+    assert!(API_MD.contains("and `settlement-recompute` (**not scheduled** either"));
+    assert!(API_MD.contains(
+        "a `settlement_date` supplied on the write is the taxpayer's own assertion and is never \
+         rewritten"
+    ));
+    // The provenance column, in the API's Trades section and the schema.
+    assert!(API_MD.contains("the read-only `settlement_date_source` field"));
+    assert!(API_MD.contains(
+        "Re-supplying the date **already stored** — which is what a `GET` body PUT back verbatim \
+         does"
+    ));
+    assert!(
+        SCHEMA_MD.contains("settlement_date_source TEXT (0041)  computed | stated | unrecorded")
+    );
+    // The README says the same in its feature line and its schedule note.
+    assert!(README_MD.contains(
+        "the unscheduled `settlement-recompute` job re-derives the settlement dates that were \
+         computed while it was missing"
+    ));
+    assert!(README_MD.contains("So is `settlement-recompute`"));
+}
+
 /// Doc pin (SCENARIOS N-08): the 30-day rule turns on a **disposal**, so the
 /// health alert's documented scope must say which Sells are one. A
 /// holding-account transfer is not (the same owner holds the same interests),
@@ -1611,10 +1648,10 @@ fn contemporaneous_price_basis_documented() {
     assert!(SCHEMA_MD.contains("price_as_observed TEXT (decimal, nullable, 0034)"));
     assert!(SCHEMA_MD.contains("Also **dates the unit basis** price_as_observed arrived in"));
     // The one-off repair job, in the API's job list and the README's schedule note.
+    // (The list gained a second unscheduled job after this one, so the
+    // conjunction moved off `price-rebase` — see `settlement_recompute_job_documented`.)
     assert!(
-        API_MD.contains(
-            "and `price-rebase` (see [Closing prices](#closing-prices); **not scheduled**"
-        )
+        API_MD.contains("`price-rebase` (see [Closing prices](#closing-prices); **not scheduled**")
     );
     assert!(README_MD.contains("`price-rebase` is deliberately one of those"));
 }

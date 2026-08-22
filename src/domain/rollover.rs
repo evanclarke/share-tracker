@@ -429,10 +429,11 @@ pub async fn insert_replacement_buy(
 ) -> Result<(), sqlx::Error> {
     sqlx::query(sqlx::AssertSqlSafe(format!(
         "INSERT INTO trades \
-         (id, trade_type, date, settlement_date, listing_id, average_price, quantity, \
+         (id, trade_type, date, settlement_date, settlement_date_source, listing_id, \
+          average_price, quantity, \
           currency, brokerage, gst_on_brokerage, brokerage_currency, fx_rate, \
           spot_fx_rate, deemed_acquisition_date, holding_account_id, {}) \
-         VALUES (?, 'Buy', ?, ?, ?, '0', ?, ?, ?, '0', ?, ?, ?, ?, ?, ?)",
+         VALUES (?, 'Buy', ?, ?, 'stated', ?, '0', ?, ?, ?, '0', ?, ?, ?, ?, ?, ?)",
         provenance.column()
     )))
     .bind(buy.id)

@@ -421,11 +421,12 @@ pub async fn db_reinvest(
 
     let result = sqlx::query(
         "INSERT INTO trades \
-         (trade_type, date, settlement_date, listing_id, average_price, quantity, currency, \
+         (trade_type, date, settlement_date, settlement_date_source, listing_id, \
+          average_price, quantity, currency, \
           brokerage, gst_on_brokerage, brokerage_currency, fx_rate, contract_note_ref, \
           residual_brought_forward, residual_carried_forward, residual_paid_out, \
           holding_account_id) \
-         VALUES ('DRP', ?, ?, ?, ?, ?, ?, '0', '0', ?, ?, NULL, ?, ?, ?, ?)",
+         VALUES ('DRP', ?, ?, 'stated', ?, ?, ?, ?, '0', '0', ?, ?, NULL, ?, ?, ?, ?)",
     )
     .bind(date)
     .bind(date)

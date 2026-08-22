@@ -154,6 +154,23 @@ pub fn registry(
         }
     });
 
+    // Not on the schedule either, and for the same reason: a repair run after
+    // the user does something, not recurring work. `exchange_holidays` is
+    // seeded per published calendar year, so a settlement window running past
+    // the last seeded year is computed skipping weekends only; seeding that
+    // year makes `GET /reports/settlement_holiday_coverage` go quiet without
+    // correcting the dates it flagged (SCENARIOS S-04). This re-derives them.
+    // Only the dates the server computed itself are rewritten — a supplied
+    // `settlement_date` is the taxpayer's own assertion (S-05) — and it is
+    // idempotent, so running it again changes nothing.
+    register(&mut jobs, "settlement-recompute", {
+        let pool = pool.clone();
+        move |_| {
+            let pool = pool.clone();
+            async move { crate::entities::trade::run_recompute(&pool).await }
+        }
+    });
+
     register(&mut jobs, "report-snapshot", {
         let pool = pool.clone();
         move |_| {

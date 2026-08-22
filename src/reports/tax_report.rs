@@ -393,15 +393,13 @@ async fn load_disposal_inputs(
     .fetch_all(&mut *conn)
     .await?;
 
-    let all_trades: Vec<Trade> = sqlx::query_as(
-        "SELECT id, trade_type, date, settlement_date, listing_id, average_price, quantity, \
-         currency, brokerage, gst_on_brokerage, brokerage_includes_gst, brokerage_currency, \
-         fx_rate, spot_fx_rate, contract_note_ref, statement_total, \
-         residual_brought_forward, residual_carried_forward, residual_paid_out, rights_action_id, \
-         buyback_action_id, scrip_action_id, demerger_action_id, deemed_acquisition_date, \
-         holding_account_id, transfer_id, ess_statement_id, worthless_action_id, inheritance_id \
-         FROM trades",
-    )
+    // The entity's own column list (`CrudEntity::COLUMNS`), not a copy of it:
+    // a new trade column belongs in one place, and a stale copy here fails at
+    // runtime with a missing column rather than at compile time.
+    let all_trades: Vec<Trade> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT {} FROM trades",
+        <Trade as crate::infra::http::CrudEntity>::COLUMNS
+    )))
     .fetch_all(&mut *conn)
     .await?;
 

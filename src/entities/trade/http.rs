@@ -4,8 +4,8 @@
 //! invariants (allocations, residual chain) always hold.
 
 use super::{
-    DeleteOutcome, Trade, TradeBody, TradeType, auto_settlement_date, db_delete, db_get, db_list,
-    db_upsert, resolve_brokerage,
+    DeleteOutcome, Settlement, Trade, TradeBody, TradeType, db_delete, db_get, db_list, db_upsert,
+    resolve_brokerage,
 };
 use crate::infra::http::ApiError;
 use axum::{
@@ -62,10 +62,12 @@ async fn upsert(
              distribution and residual chain",
         ));
     }
-    let settlement_date = match body.settlement_date {
-        Some(d) => d,
-        None => auto_settlement_date(&pool, id, body.listing_id, body.date).await?,
-    };
+    // Which of the two wrote the stored settlement date is recorded with it:
+    // a supplied value is the taxpayer's own assertion and is never rewritten,
+    // a computed one is re-derived by the `settlement-recompute` job once the
+    // calendar it was computed against is completed (SCENARIOS S-04/S-05).
+    let settlement =
+        Settlement::resolve(&pool, id, body.listing_id, body.date, body.settlement_date).await?;
     // A GST-inclusive brokerage entry is split here, at the API boundary, so
     // the stored columns (and `Trade` itself) are always ex-GST + GST.
     let (brokerage, gst_on_brokerage) = resolve_brokerage(
@@ -77,7 +79,8 @@ async fn upsert(
         id,
         trade_type: body.trade_type,
         date: body.date,
-        settlement_date,
+        settlement_date: settlement.date,
+        settlement_date_source: settlement.source,
         listing_id: body.listing_id,
         average_price: body.average_price,
         quantity: body.quantity,

@@ -20,7 +20,8 @@ use sqlx::{Row, SqlitePool};
 impl CrudEntity for Trade {
     type Key = i64;
     const TABLE: &'static str = "trades";
-    const COLUMNS: &'static str = "id, trade_type, date, settlement_date, listing_id, average_price, quantity, \
+    const COLUMNS: &'static str = "id, trade_type, date, settlement_date, settlement_date_source, \
+         listing_id, average_price, quantity, \
          currency, brokerage, gst_on_brokerage, brokerage_includes_gst, brokerage_currency, \
          fx_rate, spot_fx_rate, contract_note_ref, statement_total, \
          residual_brought_forward, residual_carried_forward, residual_paid_out, rights_action_id, \
@@ -479,16 +480,18 @@ pub async fn db_upsert(pool: &SqlitePool, trade: &Trade) -> Result<(), UpsertErr
 
     sqlx::query(
         "INSERT INTO trades \
-         (id, trade_type, date, settlement_date, listing_id, average_price, quantity, \
+         (id, trade_type, date, settlement_date, settlement_date_source, listing_id, \
+          average_price, quantity, \
           currency, brokerage, gst_on_brokerage, brokerage_includes_gst, brokerage_currency, \
           fx_rate, spot_fx_rate, contract_note_ref, statement_total, \
           residual_brought_forward, residual_carried_forward, residual_paid_out, \
           holding_account_id) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT(id) DO UPDATE SET \
              trade_type               = excluded.trade_type, \
              date                     = excluded.date, \
              settlement_date          = excluded.settlement_date, \
+             settlement_date_source   = excluded.settlement_date_source, \
              listing_id               = excluded.listing_id, \
              average_price            = excluded.average_price, \
              quantity                 = excluded.quantity, \
@@ -510,6 +513,7 @@ pub async fn db_upsert(pool: &SqlitePool, trade: &Trade) -> Result<(), UpsertErr
     .bind(trade.trade_type)
     .bind(trade.date)
     .bind(trade.settlement_date)
+    .bind(trade.settlement_date_source)
     .bind(trade.listing_id)
     .bind(Money(trade.average_price))
     .bind(Money(trade.quantity))

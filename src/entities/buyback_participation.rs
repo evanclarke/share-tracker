@@ -259,7 +259,7 @@ pub async fn db_participate(
         &mut tx,
         sell_id,
         &sell_body,
-        body.date,
+        trade::Settlement::stated(body.date),
         Some(action_id),
         None,
         None,

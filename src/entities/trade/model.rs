@@ -35,12 +35,53 @@ impl TradeType {
     }
 }
 
+/// How a stored `settlement_date` came to be — the provenance the
+/// `settlement-recompute` job needs to know which dates it may re-derive
+/// (SCENARIOS S-04, migration 0041). One column cannot say it: the same
+/// `trades.settlement_date` is written both by [`auto_settlement_date`] (when
+/// the PUT body omits it) and by the body itself, and an explicit value is the
+/// taxpayer's own assertion that must never be rewritten (S-05).
+///
+/// [`auto_settlement_date`]: super::settlement::auto_settlement_date
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[sqlx(rename_all = "lowercase")]
+#[serde(rename_all = "lowercase")]
+pub enum SettlementDateSource {
+    /// Derived from the exchange's calendar at write time. The only dates the
+    /// `settlement-recompute` job rewrites.
+    Computed,
+    /// Asserted rather than derived: supplied in a `PUT /trades/:id` or
+    /// `PUT /sells/:id` body, or written by a derived path that settles
+    /// same-day by construction (an ESS vest, an inherited parcel, a DRP
+    /// reinvestment, a rights exercise, a rollover trade). Never rewritten.
+    Stated,
+    /// The row predates the column (migration 0041), so which path wrote its
+    /// settlement date is not knowable. Never rewritten either — guessing
+    /// could overwrite an assertion. A row leaves this state at its next
+    /// write through the trade or Sell endpoint.
+    Unrecorded,
+}
+
+impl SettlementDateSource {
+    /// Whether the `settlement-recompute` job may re-derive this date. Only a
+    /// date the server computed itself: a stated one is the user's assertion,
+    /// and an unrecorded one might be.
+    pub(crate) fn is_recomputable(self) -> bool {
+        matches!(self, SettlementDateSource::Computed)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Trade {
     pub id: i64,
     pub trade_type: TradeType,
     pub date: NaiveDate,
     pub settlement_date: NaiveDate,
+    /// How `settlement_date` came to be — computed from the exchange calendar,
+    /// stated by whoever wrote the trade, or unrecorded on a row that predates
+    /// migration 0041. Read by the `settlement-recompute` job, which rewrites
+    /// only the computed ones; informational on the wire.
+    pub settlement_date_source: SettlementDateSource,
     pub listing_id: i64,
     #[sqlx(try_from = "Money")]
     pub average_price: Decimal,

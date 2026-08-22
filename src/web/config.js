@@ -104,7 +104,7 @@ export const ENTITIES = [
     fields: [
       sel('trade_type', 'Type', ['Buy'], { required: true }),
       dt('date', 'Trade date', { required: true }),
-      dt('settlement_date', 'Settlement date', { optional: true, hint: 'Leave blank to auto-calculate (T+N business days, skipping weekends and holidays).' }),
+      dt('settlement_date', 'Settlement date', { optional: true, hint: 'Leave blank to auto-calculate (T+N business days, skipping weekends and holidays). An auto-calculated date is re-derived by the settlement-recompute job after you seed a missing holiday year; a date you enter is kept exactly as given.' }),
       fk('listing_id', 'Listing', 'listings', { required: true }),
       dec('average_price', 'Average price', { required: true, default: '' }),
       dec('quantity', 'Quantity', { required: true, default: '' }),
@@ -119,7 +119,7 @@ export const ENTITIES = [
       dec('statement_total', 'Statement total', { optional: true, default: '', hint: 'Optional cross-check in the brokerage currency: quantity × price + brokerage + GST. Rejected if it does not reconcile.' }),
       fk('holding_account_id', 'Holding account', 'holdingAccounts', { required: true, default: '1' }),
     ],
-    columns: ['id', 'trade_type', 'origin', 'date', 'settlement_date', 'listing_id', 'average_price', 'quantity', 'currency', 'brokerage', 'statement_total', 'fx_rate', 'spot_fx_rate', 'holding_account_id'],
+    columns: ['id', 'trade_type', 'origin', 'date', 'settlement_date', 'settlement_date_source', 'listing_id', 'average_price', 'quantity', 'currency', 'brokerage', 'statement_total', 'fx_rate', 'spot_fx_rate', 'holding_account_id'],
     listFilter: function (row) { return row.trade_type !== 'Sell'; },
     // Origin labels the operation that created the row (transfer-in, scrip
     // exchange, …) so a rollover Buy's cost-base-carrying brokerage figure
