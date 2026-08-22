@@ -84,7 +84,7 @@ behind or became a recorded finding.
 | R. Listing identity and renames | 10 | 2026-08-21 (`28a7c5f`) | 8 raised, all closed — see below |
 | S. Settlement, holidays, and dates | 10 | 2026-08-22 (`d501408`) | 4 raised, all closed — see below |
 | T. Jobs, backup, and operations | 12 | 2026-08-22 (`db877cb`) | 6 raised, 6 closed — see below |
-| U. Audit trail and history | 8 | 2026-08-22 | 3 raised, open — see below |
+| U. Audit trail and history | 8 | 2026-08-22 (`1a0f821`) | 3 raised, all closed — see below |
 | V. Back-dated and out-of-order entry | 10 | — | — |
 | W. Precision, rounding, and scale | 8 | — | — |
 | X. Transactional integrity and concurrency | 8 | — | — |
@@ -1023,9 +1023,21 @@ per-migration assertions, so the migration that forgets it would break no test.
 
 | Finding | Scenarios | Fixed by |
 | --- | --- | --- |
-| A reused id inherits the deleted row's audit trail | U-01, U-04 | open |
-| A multi-row operation's trail is only readable one row at a time, by ids you never saw | U-04, U-05 | open |
-| Nothing pins an audited table's trigger column list against the live schema | U-03 | open |
+| A reused id inherits the deleted row's audit trail | U-01, U-04 | `7b915cf`, `4a3a257`, `1a0f821` |
+| A multi-row operation's trail is only readable one row at a time, by ids you never saw | U-04, U-05 | `be64d3d` |
+| Nothing pins an audited table's trigger column list against the live schema | U-03 | `57502eb` |
+
+U-a took three commits because its chosen fix turned out to rest on a false premise, caught by
+re-deriving the mechanism before building on it. `AUTOINCREMENT` governs only the ids **SQLite**
+picks when an INSERT omits the id column; nine call sites computed `SELECT COALESCE(MAX(id), 0) + 1`
+and bound the result explicitly, which is precisely how 9072 was re-taken — deleting it made
+`MAX(id)` 9071, and the demerge asked for 9071 + 1. A seventeen-table migration would have left the
+headline case live. The closed fix is therefore all three: the report says whose history a trail is
+(`7b915cf`), migration 0045 gives the seventeen audited tables that lacked it an `AUTOINCREMENT` id
+seeded past every id the trail has ever seen (`4a3a257`) — `parcel_allocations` proved that seeding
+load-bearing, its live maximum being 63 while the trail had already recorded 65 — and every
+server-created id now comes from the database via `last_insert_rowid()`, which also retired a tenth
+site that numbered a demerger's replacement Buys `sell_id + 1 + i` (`1a0f821`).
 
 
 ## A. Deletion and mutation ripple effects
