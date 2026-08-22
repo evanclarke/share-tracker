@@ -1350,6 +1350,34 @@ fn backup_suffix_param_documented() {
     assert!(README_MD.contains("never exempt from pruning"));
 }
 
+/// SCENARIOS T-10. `POST /jobs/:name`'s two failures used to be bare status
+/// codes, which the Jobs screen could only toast as "HTTP 404" / "HTTP 500".
+/// The docs pin the bodies they now carry — including that this is the one
+/// `500` in the API with a body, and why — and that an unrecognised query
+/// parameter is refused rather than silently ignored.
+#[test]
+fn job_trigger_failure_bodies_documented() {
+    assert!(API_MD.contains("Neither failure is a bare status code"));
+    assert!(API_MD.contains("no job named 'nope'; registered jobs are"));
+    assert!(API_MD.contains(
+        "the `500` body carries the job's own error text \u{2014} the same string `job_runs.error` records"
+    ));
+    assert!(API_MD.contains("This is the one `500` in the API with a body"));
+    assert!(API_MD.contains(
+        "An unrecognised query parameter is refused `422 Unprocessable Entity` naming it"
+    ));
+    // The Response codes table says the same in its 404, 422 and 500 rows.
+    assert!(
+        API_MD.contains("`no job named 'nope'; registered jobs are \u{2026}` (`POST /jobs/:name`)")
+    );
+    assert!(API_MD.contains(
+        "a misspelt `?sufix=` is refused, not ignored: it would otherwise take an unlabelled backup"
+    ));
+    assert!(API_MD.contains(
+        "the one `500` that *does* carry a body: the job's own error text, so the UI toast says why"
+    ));
+}
+
 /// SCENARIOS L-04/L-05/L-06/L-14. The crypto Known-limitations entry names an
 /// entry path for every crypto event the ATO taxes, instead of calling three of
 /// them "not modelled": the swap (wrapping included), the chain split's

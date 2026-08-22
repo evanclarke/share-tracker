@@ -49,6 +49,19 @@ pub enum ApiError {
     /// 413 — an upload exceeds the size ceiling.
     #[error("{0}")]
     PayloadTooLarge(String),
+    /// 500 whose body carries the failure text — the manual job trigger
+    /// (`POST /jobs/{name}`) alone.
+    ///
+    /// Deliberately unlike [`ApiError::Internal`], whose 500 is empty because
+    /// an unexpected internal fault must not leak implementation detail: a
+    /// job's failure is the *operator's own diagnostic*, the very string
+    /// `job_runs.error` keeps and the Jobs screen's Error column already
+    /// shows. Withholding it only meant the toast the operator reads first
+    /// said "HTTP 500" while the reason sat one reload away (SCENARIOS T-10).
+    /// The reason is logged with its job name when the response is built, so
+    /// nothing is swallowed.
+    #[error("{reason}")]
+    JobFailed { job: String, reason: String },
     /// 404, empty body — entity GETs, where the URL itself names what is
     /// missing.
     #[error("not found")]
@@ -89,6 +102,15 @@ impl ApiError {
         ApiError::BadGateway {
             body: body.into(),
             source: source.into(),
+        }
+    }
+
+    /// A 500 whose body carries a failed job's own error text (see
+    /// [`ApiError::JobFailed`]).
+    pub fn job_failed(job: impl Into<String>, reason: impl Into<String>) -> Self {
+        ApiError::JobFailed {
+            job: job.into(),
+            reason: reason.into(),
         }
     }
 
@@ -138,6 +160,12 @@ impl IntoResponse for ApiError {
             ApiError::BadGateway { body, source } => {
                 tracing::error!(error = %source, "upstream feed fetch failed");
                 (StatusCode::BAD_GATEWAY, body).into_response()
+            }
+            ApiError::JobFailed { job, reason } => {
+                // Same wording the trigger handler used to log itself, kept
+                // here so constructing the error is enough to log it.
+                tracing::warn!(job = %job, "manual job trigger failed: {reason}");
+                (StatusCode::INTERNAL_SERVER_ERROR, reason).into_response()
             }
             ApiError::NotFound => StatusCode::NOT_FOUND.into_response(),
             ApiError::NotFoundWithReason(body) => (StatusCode::NOT_FOUND, body).into_response(),

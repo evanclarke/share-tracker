@@ -343,3 +343,86 @@ Consequences found while implementing:
 - `doc_checks::contemporaneous_price_basis_documented` pinned the old README sentence
   ("`price-rebase` is deliberately one of those"), which this rewrote — the assertion moved with the
   wording, with a comment saying why.
+
+---
+
+## SCENARIOS T-10: `POST /jobs/:name` answers bare status codes with no body
+
+Driven on 2026-08-22:
+
+- `POST /jobs/nope` → **404 with an empty body**. The Jobs screen's `api()` helper turns that into the
+  toast `HTTP 404`. CLAUDE.md's own rule for the delete routes — "never a bare `StatusCode::NOT_FOUND`,
+  which the web UI can only show as 'HTTP 404'" — is the same rule, and `deleted(found, noun)` exists
+  to satisfy it.
+- A job that fails → **500 with an empty body**, toasted as `HTTP 500`, even though `run_job` has just
+  returned the reason as a `String`. It is recoverable — `viewJobs()` reloads and the row's Error
+  column then shows it — but the toast the user reads first says nothing.
+
+The suffix validation, by contrast, is exemplary: `?suffix=../../etc/x`, a leading `-`, an empty value
+and a 41-character value each answer **422 with a plain-text reason**, and are rejected *before* the
+registry lookup so a malformed request never records a run.
+
+One inconsistency found alongside: an unknown query parameter is silently ignored (`?sufix=pre-0.5.1`
+answers 204 and takes an **unlabelled** backup), because `JobParams` derives `Deserialize` without
+`deny_unknown_fields`.
+
+**Question for Evan — how far to take it?**
+
+- **(a) Both bodies, and reject unknown query params.** 404 names the job and lists the registered
+  names; 500 carries `run_job`'s error text; `JobParams` gets `#[serde(deny_unknown_fields)]` so a
+  typo'd `suffix` is a 422 rather than a silently unlabelled backup.
+- **(b) Both bodies only** — leave the typo'd parameter silently ignored.
+- **(c) The 404 only** — a failed run's reason is already one reload away in the table.
+
+**Decision (Evan, 2026-08-22): (a), all three.** Rejected: the two bodies alone, and the 404 alone.
+
+- [x] `POST /jobs/:name` for an unknown name answers 404 with a plain-text body naming the job and
+      the registered names (the `deleted(found, noun)` convention, one endpoint over)
+- [x] A failed run answers 500 carrying `run_job`'s error text, so the toast the user reads first
+      says what went wrong
+- [x] `JobParams` gets `#[serde(deny_unknown_fields)]`, so `?sufix=pre-0.5.1` is a 422 rather than a
+      204 taking a silently unlabelled backup
+- [x] `docs/API.md` Jobs section + the Response codes table
+- [x] Regression tests: the 404 body names the job; a failing job's 500 carries its reason; a
+      misspelt query parameter is refused rather than ignored
+
+Done 2026-08-22. `trigger` (`src/infra/scheduler/http.rs`) now answers every failure with a
+plain-text body:
+
+- `POST /jobs/nope` → `404` `no job named 'nope'; registered jobs are backup, currency-import,
+  mic-import, price-import, price-rebase, rba-fx-import, report-snapshot, settlement-recompute`
+  (the registry's own keys, sorted — `GET /jobs` is the discovery surface, but a toast that lists
+  them costs nothing).
+- A failed run → `500` carrying `run_job`'s error text verbatim — the same string `job_runs.error`
+  records and the Jobs table's Error column shows. Driven live against a server with
+  `--backup-dir /nope/nowhere`: `backup failed: Read-only file system (os error 30)`.
+- `POST /jobs/backup?sufix=pre-0.5.1` → `422` ``cannot read the query string: sufix: unknown field
+  `sufix`, expected `suffix` ``, rejected before the registry lookup, so no run is recorded and no
+  unlabelled backup is taken.
+
+Tests: `scheduler::tests::trigger_unknown_job_404_names_the_job_and_the_registered_names`,
+`a_failing_job_answers_500_carrying_its_reason` (body, `job_runs.error` agreement, and the WARN
+still logged), `trigger_with_a_misspelt_query_parameter_is_refused_not_ignored` (no backup file, no
+recorded run), and `doc_checks::job_trigger_failure_bodies_documented`.
+
+Consequences found while implementing:
+
+- **The 500-with-a-body is a new `ApiError` variant, not a hand-rolled response.** `ApiError::Internal`
+  responds 500 with an *empty* body by contract (internal detail must not leak), so carrying the
+  reason needed its own variant rather than a departure inside one handler:
+  `ApiError::JobFailed { job, reason }` logs the old `manual job trigger failed` WARN with its job
+  field when the response is built and puts `reason` in the body. Handlers still return
+  `Result<_, ApiError>`; the endpoint is documented as the one `500` in the API with a body, and why
+  (a job's failure is the operator's own diagnostic, already on display one screen away).
+- **`deny_unknown_fields` alone would have answered `400` in axum's wording**, not the `422` with a
+  reason every other rejected write uses — the `Query` extractor answers its own rejection. The
+  handler takes `Result<Query<JobParams>, QueryRejection>` and converts it, using the rejection's
+  *source* (serde's ``unknown field `sufix`, expected `suffix` ``) rather than `body_text()`, whose
+  "Failed to deserialize query string:" prefix is framework jargon in a one-line toast.
+- No UI change was needed: `util.js`'s `api()` already appends a non-empty error body to the thrown
+  message, so `viewJobs()`'s `toast(e.message, true)` now reads `HTTP 404: no job named 'nope'; …`.
+  Confirmed against a live server (all three responses driven with curl), not only through
+  `ApiClient`.
+- The only caller passing a query parameter is `pkg/freebsd/update.sh`
+  (`POST /jobs/backup?suffix=pre-<version>`, mirrored by `smoke-test.sh`); both spell `suffix`
+  correctly, so `deny_unknown_fields` breaks nothing.

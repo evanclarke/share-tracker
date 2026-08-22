@@ -28,7 +28,14 @@ type Job = Arc<dyn Fn(JobParams) -> JobFuture + Send + Sync>;
 /// ignores it. The scheduled loop always passes [`JobParams::default`] — a
 /// suffix only makes sense for a deliberately-labelled one-off backup, not
 /// the weekly scheduled run.
+///
+/// `deny_unknown_fields` makes a misspelt parameter a rejection rather than a
+/// silent no-op: without it `POST /jobs/backup?sufix=pre-0.5.1` answered `204`
+/// and took an *unlabelled* backup, so the operator's one-off label was lost
+/// with nothing said (SCENARIOS T-10). The rejection is turned into a `422`
+/// with the reason by [`super::http`]'s trigger handler.
 #[derive(Debug, Default, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct JobParams {
     pub suffix: Option<String>,
 }

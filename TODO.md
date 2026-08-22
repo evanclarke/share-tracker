@@ -22,10 +22,11 @@ its findings went; that table is the record of what has been looked at.
 
 Section **T. Jobs, backup, and operations** (12 scenarios) was driven on **2026-08-22** against
 throwaway databases (a small one for the HTTP surface, a 265 MB one to catch a backup mid-write) and
-raised **six findings**. Two are closed — the three jobs that recorded their failure as a Rust
-`Debug` string (T-06), and the startup "no schedule entry" warning that cried wolf on the two
-deliberately-manual jobs (T-09/schedule) — both archived in [`DONE/infra.md`](DONE/infra.md); the
-other four are open below.
+raised **six findings**. Three are closed — the three jobs that recorded their failure as a Rust
+`Debug` string (T-06), the startup "no schedule entry" warning that cried wolf on the two
+deliberately-manual jobs (T-09/schedule), and `POST /jobs/:name`'s bare-status-code failures, now
+bodied 404/500 replies with an unknown query parameter refused rather than ignored (T-10) — all
+three archived in [`DONE/infra.md`](DONE/infra.md); the other three are open below.
 Everything else in the section came back correct: the
 per-job lock serialises overlapping triggers (T-01), the run history bounds itself at 20 while
 keeping a fail-then-succeed sequence readable (T-02), a corrupt backup is quarantined (T-03),
@@ -196,48 +197,6 @@ rather than leaving them unbounded or only documenting them.
 - [ ] Regression tests: a run recorded at start is visible before it finishes; a verification failure
       leaves no file under the backup name (the `.partial` is quarantined instead); a leftover
       `.partial` is swept at startup and never counted by pruning; `.bad` files are bounded
-
----
-
-## SCENARIOS T-10: `POST /jobs/:name` answers bare status codes with no body
-
-Driven on 2026-08-22:
-
-- `POST /jobs/nope` → **404 with an empty body**. The Jobs screen's `api()` helper turns that into the
-  toast `HTTP 404`. CLAUDE.md's own rule for the delete routes — "never a bare `StatusCode::NOT_FOUND`,
-  which the web UI can only show as 'HTTP 404'" — is the same rule, and `deleted(found, noun)` exists
-  to satisfy it.
-- A job that fails → **500 with an empty body**, toasted as `HTTP 500`, even though `run_job` has just
-  returned the reason as a `String`. It is recoverable — `viewJobs()` reloads and the row's Error
-  column then shows it — but the toast the user reads first says nothing.
-
-The suffix validation, by contrast, is exemplary: `?suffix=../../etc/x`, a leading `-`, an empty value
-and a 41-character value each answer **422 with a plain-text reason**, and are rejected *before* the
-registry lookup so a malformed request never records a run.
-
-One inconsistency found alongside: an unknown query parameter is silently ignored (`?sufix=pre-0.5.1`
-answers 204 and takes an **unlabelled** backup), because `JobParams` derives `Deserialize` without
-`deny_unknown_fields`.
-
-**Question for Evan — how far to take it?**
-
-- **(a) Both bodies, and reject unknown query params.** 404 names the job and lists the registered
-  names; 500 carries `run_job`'s error text; `JobParams` gets `#[serde(deny_unknown_fields)]` so a
-  typo'd `suffix` is a 422 rather than a silently unlabelled backup.
-- **(b) Both bodies only** — leave the typo'd parameter silently ignored.
-- **(c) The 404 only** — a failed run's reason is already one reload away in the table.
-
-**Decision (Evan, 2026-08-22): (a), all three.** Rejected: the two bodies alone, and the 404 alone.
-
-- [ ] `POST /jobs/:name` for an unknown name answers 404 with a plain-text body naming the job and
-      the registered names (the `deleted(found, noun)` convention, one endpoint over)
-- [ ] A failed run answers 500 carrying `run_job`'s error text, so the toast the user reads first
-      says what went wrong
-- [ ] `JobParams` gets `#[serde(deny_unknown_fields)]`, so `?sufix=pre-0.5.1` is a 422 rather than a
-      204 taking a silently unlabelled backup
-- [ ] `docs/API.md` Jobs section + the Response codes table
-- [ ] Regression tests: the 404 body names the job; a failing job's 500 carries its reason; a
-      misspelt query parameter is refused rather than ignored
 
 ---
 
