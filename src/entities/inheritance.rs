@@ -612,14 +612,11 @@ pub async fn db_upsert(pool: &SqlitePool, inh: &Inheritance) -> Result<(), Upser
     // acquisition under DeceasedCostBase, none (the death date itself) under
     // MarketValueAtDeath.
     let total_cost_base = inh.cost_base + inh.lpr_expenditure;
-    let buy_id = match existing_buy {
-        Some(id) => id,
-        None => {
-            sqlx::query_scalar("SELECT COALESCE(MAX(id), 0) + 1 FROM trades")
-                .fetch_one(&mut *tx)
-                .await?
-        }
-    };
+    // An edit keeps the linked Buy's id (the ON CONFLICT arm below rewrites
+    // that row); a first entry binds NULL, which for an INTEGER PRIMARY KEY
+    // AUTOINCREMENT column is exactly omitting it — the database assigns an id
+    // it has never issued, so this parcel cannot inherit a deleted trade's
+    // row_history trail (SCENARIOS U-a).
     sqlx::query(
         "INSERT INTO trades \
          (id, trade_type, date, settlement_date, settlement_date_source, listing_id, \
@@ -640,7 +637,7 @@ pub async fn db_upsert(pool: &SqlitePool, inh: &Inheritance) -> Result<(), Upser
              holding_account_id      = excluded.holding_account_id, \
              deemed_acquisition_date = excluded.deemed_acquisition_date",
     )
-    .bind(buy_id)
+    .bind(existing_buy)
     .bind(inh.date_of_death)
     .bind(inh.date_of_death)
     .bind(inh.listing_id)

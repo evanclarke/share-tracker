@@ -400,9 +400,9 @@ pub async fn replacement_descendants(
 }
 
 /// A replacement Buy to write: the substituted parcel's units and the cost
-/// base they carry forward.
+/// base they carry forward. It carries no id — the database assigns one (see
+/// [`insert_replacement_buy`]).
 pub struct ReplacementBuy<'a> {
-    pub id: i64,
     pub date: NaiveDate,
     pub listing_id: i64,
     pub quantity: Decimal,
@@ -418,25 +418,33 @@ pub struct ReplacementBuy<'a> {
     pub holding_account_id: i64,
 }
 
-/// Writes one replacement Buy. The carried cost base goes on the `brokerage`
-/// column with a zero price — numerically part of the one cost base
-/// everywhere, with no division — and the row carries `provenance` so it can
-/// be recognised as part of the operation's group.
+/// Writes one replacement Buy and answers the id the database gave it. The
+/// carried cost base goes on the `brokerage` column with a zero price —
+/// numerically part of the one cost base everywhere, with no division — and
+/// the row carries `provenance` so it can be recognised as part of the
+/// operation's group.
+///
+/// The id column is **omitted**, so SQLite assigns the next id its
+/// `AUTOINCREMENT` sequence has never issued. The operations used to compute
+/// `MAX(id) + 1` themselves, which after a delete re-issues the freed id and
+/// hands the new parcel the deleted trade's `row_history` trail (SCENARIOS
+/// U-a) — and races any concurrent write besides. A caller writing several
+/// rows must therefore take each id from this call, never by adding to the
+/// previous one.
 pub async fn insert_replacement_buy(
     conn: &mut sqlx::SqliteConnection,
     buy: &ReplacementBuy<'_>,
     provenance: Provenance,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(sqlx::AssertSqlSafe(format!(
+) -> Result<i64, sqlx::Error> {
+    let result = sqlx::query(sqlx::AssertSqlSafe(format!(
         "INSERT INTO trades \
-         (id, trade_type, date, settlement_date, settlement_date_source, listing_id, \
+         (trade_type, date, settlement_date, settlement_date_source, listing_id, \
           average_price, quantity, \
           currency, brokerage, gst_on_brokerage, brokerage_currency, fx_rate, \
           spot_fx_rate, deemed_acquisition_date, holding_account_id, {}) \
-         VALUES (?, 'Buy', ?, ?, 'stated', ?, '0', ?, ?, ?, '0', ?, ?, ?, ?, ?, ?)",
+         VALUES ('Buy', ?, ?, 'stated', ?, '0', ?, ?, ?, '0', ?, ?, ?, ?, ?, ?)",
         provenance.column()
     )))
-    .bind(buy.id)
     .bind(buy.date)
     .bind(buy.date)
     .bind(buy.listing_id)
@@ -451,7 +459,7 @@ pub async fn insert_replacement_buy(
     .bind(provenance.id())
     .execute(&mut *conn)
     .await?;
-    Ok(())
+    Ok(result.last_insert_rowid())
 }
 
 /// Reads freshly created trades back, in the order written, so an operation's

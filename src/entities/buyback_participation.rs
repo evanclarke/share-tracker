@@ -227,9 +227,6 @@ pub async fn db_participate(
     // invariant (allocations sum to the quantity; parcels are valid,
     // not-over-allocated Buy/DRPs) holds here too. Proceeds are paid by the
     // company, not market-settled: settlement is the participation date.
-    let sell_id: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(id), 0) + 1 FROM trades")
-        .fetch_one(&mut *tx)
-        .await?;
     let sell_body = SellBody {
         brokerage_includes_gst: false,
         statement_total: None,
@@ -255,9 +252,12 @@ pub async fn db_participate(
             })
             .collect(),
     };
-    sell::upsert_sell_in_tx(
+    // No id of our own: the database assigns one its AUTOINCREMENT sequence
+    // has never issued, so this Sell can never land on a deleted trade's id
+    // (SCENARIOS U-a).
+    let sell_id = sell::upsert_sell_in_tx(
         &mut tx,
-        sell_id,
+        None,
         &sell_body,
         trade::Settlement::stated(body.date),
         Some(action_id),
@@ -271,16 +271,15 @@ pub async fn db_participate(
     // The dividend component: assessable franked income on the participation
     // date, linked to the Sell so the two sides stay consistent.
     let income_id = if dividend > Decimal::ZERO {
-        let id: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(id), 0) + 1 FROM income")
-            .fetch_one(&mut *tx)
-            .await?;
-        sqlx::query(
+        // The id column is omitted here too: `income` is audited, and a
+        // computed `MAX(id) + 1` would hand this row a deleted income row's
+        // trail (SCENARIOS U-a).
+        let result = sqlx::query(
             "INSERT INTO income \
-             (id, listing_id, date_paid, franked_amount, franking_credits, currency, \
+             (listing_id, date_paid, franked_amount, franking_credits, currency, \
               buyback_trade_id, holding_account_id) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
-        .bind(id)
         .bind(action.listing_id)
         .bind(body.date)
         .bind(Money(dividend * body.units))
@@ -290,7 +289,7 @@ pub async fn db_participate(
         .bind(body.holding_account_id)
         .execute(&mut *tx)
         .await?;
-        Some(id)
+        Some(result.last_insert_rowid())
     } else {
         None
     };

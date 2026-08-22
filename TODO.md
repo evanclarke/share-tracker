@@ -151,15 +151,15 @@ marking alone.
       as such rather than presented as this row's own history
 - [x] The Row History screen surfaces that boundary (not a bare extra column — the reader must not
       have to infer it), and `docs/API.md`'s Row history section states the rule
-- [ ] The nine `SELECT COALESCE(MAX(id), 0) + 1` call sites stop assigning ids: the INSERT omits the
+- [x] The nine `SELECT COALESCE(MAX(id), 0) + 1` call sites stop assigning ids: the INSERT omits the
       id and the server reads `last_insert_rowid()`, so a never-reused id comes from the database
       (this, not the migration, is what fixes the trade 9072 case)
 - [x] The audited tables that reuse ids are rebuilt with `AUTOINCREMENT` ids by the rename pattern
       0021/0039 established — every FK re-pointed, every `*_row_history_*` and `*_stale_snapshots_*`
       trigger set dropped and re-created, no row dropped or re-scaled (see the 0029 FK-rewrite
       gotcha and `infra::db`'s `migrations_store_decimals_as_text` guard)
-- [ ] `docs/SCHEMA.md` records the `AUTOINCREMENT` requirement for an audited table and why
-- [ ] Regression tests: a delete-then-recreate on the same id reads back as two occupants, not one
+- [x] `docs/SCHEMA.md` records the `AUTOINCREMENT` requirement for an audited table and why
+- [x] Regression tests: a delete-then-recreate on the same id reads back as two occupants, not one
       history; a server-assigned insert after a delete never reuses the freed id; a test pinning
       that every audited table's id column is `AUTOINCREMENT` (so a new audited table cannot be
       added without it)
@@ -171,6 +171,38 @@ marking alone.
 the nine `SELECT COALESCE(MAX(id), 0) + 1` call sites, `docs/SCHEMA.md`'s statement of the
 *requirement* and why, and the regression tests — including the pin that every audited table's id
 column is `AUTOINCREMENT`, so a new audited table cannot be added without it.
+
+**Id assignment reworked, and the section closed — done 2026-08-22.** All nine
+`SELECT COALESCE(MAX(id), 0) + 1` queries are gone: every server-created row now omits the id
+column (or binds NULL, which for an `INTEGER PRIMARY KEY AUTOINCREMENT` column is the same thing)
+and reads back what the database assigned. One shared write core covers five of the nine sites:
+`sell::upsert_sell_in_tx`, whose `id` is now `Option<i64>` — `Some` only on the client-supplied-id
+path `PUT /sells/{id}`, which stays an upsert — and which answers the id written, for the
+scrip-exchange, demerger, transfer (and its network-fee), worthless and buy-back closing Sells. The
+other four are the ESS vest parcel, the inherited parcel (NULL on first entry; an edit still keeps
+the linked Buy's id through the `ON CONFLICT` arm), the buy-back's dividend `income` row, and the
+generated AMIT adjustments — `amit_adjustment` gained `db_insert_on` over the same validation core
+as `db_upsert_on`, and its duplicate-parcel check now reads `id IS NOT ?` so a NULL id excludes
+nothing. Alongside the nine, `rollover::insert_replacement_buy` (no `id` field on `ReplacementBuy`
+any more, answers `last_insert_rowid()`) was the same bug in another shape: the demerger, transfer
+and scrip exchange numbered their replacement Buys `sell_id + 1 + i`. Each Buy now takes the id its
+own INSERT was given. A *preview* generation writes nothing, so its rows
+carry no id at all (`UNASSIGNED_ID` = 0) rather than a prediction; `docs/API.md` says so.
+
+Proved behaviourally: `reports::row_history`'s
+`a_server_assigned_insert_never_takes_a_deleted_trades_id` (the old
+`a_server_assigned_id_taking_a_deleted_trades_place_is_marked`, inverted) deletes the highest-id
+trade and drives a real `POST /corporate_actions/{id}/demerge` — the closing Sell and both
+replacement Buys take three fresh ids, none of them the freed one, each with an empty trail, while
+the deleted Buy's own trail still reads as one occupant and its id holds no row.
+`amit_adjustment_generation`'s `db_generation_never_reuses_a_deleted_adjustments_id` does the same
+for the adjustments table and checks each reported id is the row really stored. The
+`AUTOINCREMENT` pin is `every_audited_tables_id_is_autoincrement`: derived from the live schema and
+`AUDITED_TABLES`, so a new audited table cannot be added without it (verified non-vacuous — adding
+a plain-PK table to the loop fails it). Its two exemptions are *checked*, not skipped —
+`tax_year_settings` must still have no `id` column, `cgt_settings` must still carry
+`CHECK (id = 1)`. On a copy of the live database, deleting the highest trade (9076) and inserting
+an id-less trade takes **9077**, not the freed id.
 
 Exactly **17** of the 22 audited tables reused ids and are rebuilt: `trades`, `parcel_allocations`,
 `income`, `interest_income`, `amma_statements`, `amit_adjustments`, `ess_statements`, `transfers`,

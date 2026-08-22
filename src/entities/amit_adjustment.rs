@@ -121,6 +121,40 @@ pub async fn db_upsert_on(
     conn: &mut sqlx::SqliteConnection,
     adj: &AmitAdjustment,
 ) -> Result<(), UpsertError> {
+    db_write_on(
+        conn,
+        Some(adj.id),
+        &AmitAdjustmentBody {
+            amma_statement_id: adj.amma_statement_id,
+            trade_id: adj.trade_id,
+            quantity: adj.quantity,
+        },
+    )
+    .await?;
+    Ok(())
+}
+
+/// Write a *new* adjustment, letting the database assign its id, and answer
+/// it. Same invariants and same audit trail as [`db_upsert_on`] — only the id
+/// differs: the generator used to compute `SELECT MAX(id) + 1` and bind it,
+/// which after a delete re-issues the freed id and hands the new row the
+/// deleted one's `row_history` trail (SCENARIOS U-a). An `AUTOINCREMENT`
+/// column only ever decides that when the INSERT leaves the id out.
+pub async fn db_insert_on(
+    conn: &mut sqlx::SqliteConnection,
+    body: &AmitAdjustmentBody,
+) -> Result<i64, UpsertError> {
+    db_write_on(conn, None, body).await
+}
+
+/// The shared write core of both: `id` is `Some` on the client-supplied-id
+/// upsert path (`PUT /amit_adjustments/{id}`) and `None` where the database
+/// assigns it. Answers the id written.
+async fn db_write_on(
+    conn: &mut sqlx::SqliteConnection,
+    id: Option<i64>,
+    adj: &AmitAdjustmentBody,
+) -> Result<i64, UpsertError> {
     use crate::entities::trade::TradeType;
 
     let trade_type: TradeType = sqlx::query_scalar("SELECT trade_type FROM trades WHERE id = ?")
@@ -265,20 +299,25 @@ pub async fn db_upsert_on(
     // parcel would apply the statement's per-unit figure to it twice. Checked
     // here so the rejection carries this module's own wording; the UNIQUE
     // index behind it (migration 0022) is the backstop for any other writer.
+    // `IS NOT` rather than `!=` so a NULL id (the database-assigned insert)
+    // excludes nothing: every existing row of the pair is a duplicate of a row
+    // that does not exist yet.
     let duplicate: Option<i64> = sqlx::query_scalar(
         "SELECT id FROM amit_adjustments \
-         WHERE amma_statement_id = ? AND trade_id = ? AND id != ?",
+         WHERE amma_statement_id = ? AND trade_id = ? AND id IS NOT ?",
     )
     .bind(adj.amma_statement_id)
     .bind(adj.trade_id)
-    .bind(adj.id)
+    .bind(id)
     .fetch_optional(&mut *conn)
     .await?;
     if duplicate.is_some() {
         return Err(UpsertError::DuplicateParcel);
     }
 
-    sqlx::query(
+    // A NULL id is an omitted one: SQLite assigns the next id the
+    // AUTOINCREMENT column has never issued.
+    let result = sqlx::query(
         "INSERT INTO amit_adjustments (id, amma_statement_id, trade_id, quantity) \
          VALUES (?, ?, ?, ?) \
          ON CONFLICT(id) DO UPDATE SET \
@@ -286,13 +325,13 @@ pub async fn db_upsert_on(
              trade_id          = excluded.trade_id, \
              quantity          = excluded.quantity",
     )
-    .bind(adj.id)
+    .bind(id)
     .bind(adj.amma_statement_id)
     .bind(adj.trade_id)
     .bind(Money(adj.quantity))
     .execute(&mut *conn)
     .await?;
-    Ok(())
+    Ok(id.unwrap_or_else(|| result.last_insert_rowid()))
 }
 
 pub async fn db_upsert(pool: &SqlitePool, adj: &AmitAdjustment) -> Result<(), UpsertError> {

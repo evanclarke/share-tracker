@@ -73,6 +73,40 @@ fn row_history_audit_trail_documented() {
     );
 }
 
+/// Docs-sync pin for the id rule the trail rests on (SCENARIOS U-a): an
+/// audited table's id must be `AUTOINCREMENT` **and** the server must let the
+/// database assign it, since `AUTOINCREMENT` governs only the ids SQLite picks
+/// when an INSERT omits the column. `reports::row_history`'s
+/// `every_audited_tables_id_is_autoincrement` enforces the first half against
+/// the live schema; this pins that SCHEMA.md states the requirement and the
+/// reason, names both exemptions, and that API.md tells the reader which reuse
+/// is now impossible and which is still deliberately allowed.
+#[test]
+fn audited_ids_are_never_reused_documented() {
+    // SCHEMA.md: the requirement, the two exemptions, and the server half.
+    assert!(SCHEMA_MD.contains(
+        "**An audited table's `id` must be `INTEGER PRIMARY KEY AUTOINCREMENT`, \
+         and a server-created row must let the database assign it.**"
+    ));
+    assert!(SCHEMA_MD.contains("an id handed out twice makes one trail out of two records"));
+    assert!(SCHEMA_MD.contains("`every_audited_tables_id_is_autoincrement`"));
+    assert!(SCHEMA_MD.contains("`tax_year_settings` is keyed on the financial year itself"));
+    assert!(SCHEMA_MD.contains("a singleton whose CHECK pins the only id it can have"));
+    assert!(SCHEMA_MD.contains(
+        "a write path that computes `SELECT COALESCE(MAX(id), 0) + 1` and binds it \
+         defeats the column entirely"
+    ));
+    // API.md: the reuse the server can no longer make, and the one a user can.
+    assert!(API_MD.contains("**The server no longer does it.**"));
+    assert!(API_MD.contains(
+        "now leaves the id to the database, whose `AUTOINCREMENT` columns never \
+         re-issue a freed one"
+    ));
+    assert!(API_MD.contains("A `PUT` on an explicit id remains an upsert"));
+    // API.md: a preview carries no id, because none has been assigned.
+    assert!(API_MD.contains("Their `id` is **`0`**: a preview writes nothing"));
+}
+
 /// Docs-sync pin for linked attachments on provenance-created trades
 /// (REQUIREMENTS 2026-07-15): the Attachments section documents the
 /// `include_linked` list option, enumerates the three traversed provenance

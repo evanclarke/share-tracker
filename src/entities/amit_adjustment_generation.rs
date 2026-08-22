@@ -13,7 +13,7 @@
 //! The parcels come from [`crate::domain::open_parcels::load`] as at that
 //! date, so the "what was held?" question is answered by the same loader
 //! every open-holdings report uses rather than a second walk. Each row is
-//! written **through [`amit_adjustment::db_upsert_on`]** inside one
+//! written **through [`amit_adjustment::db_insert_on`]** inside one
 //! transaction, so the generated rows pass exactly the per-row invariants a
 //! typed row does and land in the `row_history` audit trail the same way; a
 //! partial set can never persist.
@@ -26,7 +26,7 @@
 //! flagged until it is resolved.
 
 use crate::domain::open_parcels;
-use crate::entities::amit_adjustment::{self, AmitAdjustment};
+use crate::entities::amit_adjustment::{self, AmitAdjustment, AmitAdjustmentBody};
 use crate::entities::corporate_action;
 use crate::infra::decimal::row_dec;
 use crate::infra::http::ApiError;
@@ -60,7 +60,9 @@ pub struct GenerateBody {
 #[derive(Debug, Serialize)]
 pub struct GeneratedAdjustments {
     /// The adjustment rows created — or, for a preview, the rows that would
-    /// be, carrying the ids they would take.
+    /// be. A preview writes nothing, so its rows carry no id yet
+    /// ([`UNASSIGNED_ID`]): ids come from the database when the rows are
+    /// really written, and are not predicted (SCENARIOS U-a).
     pub created: Vec<AmitAdjustment>,
     /// Σ of the generated quantities re-based into the statement year's unit
     /// basis, so it is comparable with `units_held` (the stored quantities
@@ -220,6 +222,36 @@ async fn db_rollovers_of(
     Ok(out)
 }
 
+/// The `id` a previewed row carries. A preview writes nothing, so no id has
+/// been assigned to it: the database hands one out when the row is really
+/// written. (Before SCENARIOS U-a the generator computed
+/// `SELECT MAX(id) + 1` and numbered the previewed rows from it — a
+/// prediction, and one that after a delete named an id whose `row_history`
+/// trail belonged to another record.) Zero is unmistakable: no
+/// `AUTOINCREMENT` id is ever 0.
+pub const UNASSIGNED_ID: i64 = 0;
+
+/// One generated row: written through the ordinary AMIT-adjustment write path
+/// — same per-row invariants, same audit trail — with the database assigning
+/// its id, or, in a preview, computed and counted without being written.
+async fn write_or_preview(
+    conn: &mut sqlx::SqliteConnection,
+    preview: bool,
+    fields: AmitAdjustmentBody,
+) -> Result<AmitAdjustment, amit_adjustment::UpsertError> {
+    let id = if preview {
+        UNASSIGNED_ID
+    } else {
+        amit_adjustment::db_insert_on(&mut *conn, &fields).await?
+    };
+    Ok(AmitAdjustment {
+        id,
+        amma_statement_id: fields.amma_statement_id,
+        trade_id: fields.trade_id,
+        quantity: fields.quantity,
+    })
+}
+
 /// Generate (or preview) the statement's per-parcel adjustment set.
 pub async fn db_generate(
     pool: &SqlitePool,
@@ -283,10 +315,6 @@ pub async fn db_generate(
             .await?;
     }
 
-    let mut next_id: i64 =
-        sqlx::query_scalar("SELECT COALESCE(MAX(id), 0) + 1 FROM amit_adjustments")
-            .fetch_one(&mut *tx)
-            .await?;
     let mut created = Vec::with_capacity(parcels.len());
     let mut units_adjusted = Decimal::ZERO;
     let mut unattributed = Vec::new();
@@ -328,17 +356,17 @@ pub async fn db_generate(
             // reported for hand entry rather than attributed by inference.
             match movement.matching_replacement(parcel.parcel.acquired(), movement.units) {
                 Some(replacement) => {
-                    let adjustment = AmitAdjustment {
-                        id: next_id,
-                        amma_statement_id: statement_id,
-                        trade_id: replacement,
-                        // Both figures are in the operation date's basis.
-                        quantity: movement.units,
-                    };
-                    if !body.preview {
-                        amit_adjustment::db_upsert_on(&mut tx, &adjustment).await?;
-                    }
-                    next_id += 1;
+                    let adjustment = write_or_preview(
+                        &mut tx,
+                        body.preview,
+                        AmitAdjustmentBody {
+                            amma_statement_id: statement_id,
+                            trade_id: replacement,
+                            // Both figures are in the operation date's basis.
+                            quantity: movement.units,
+                        },
+                    )
+                    .await?;
                     units_adjusted += corporate_action::split_adjusted_quantity(
                         from_this_statement,
                         &splits,
@@ -355,16 +383,16 @@ pub async fn db_generate(
             }
         }
         if source_quantity > Decimal::ZERO {
-            let adjustment = AmitAdjustment {
-                id: next_id,
-                amma_statement_id: statement_id,
-                trade_id: parcel.parcel.id,
-                quantity: source_quantity,
-            };
-            if !body.preview {
-                amit_adjustment::db_upsert_on(&mut tx, &adjustment).await?;
-            }
-            next_id += 1;
+            let adjustment = write_or_preview(
+                &mut tx,
+                body.preview,
+                AmitAdjustmentBody {
+                    amma_statement_id: statement_id,
+                    trade_id: parcel.parcel.id,
+                    quantity: source_quantity,
+                },
+            )
+            .await?;
             units_adjusted += corporate_action::split_adjusted_quantity(
                 source_quantity,
                 &splits,
@@ -563,6 +591,51 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(stored, 0);
+        // Nothing was written, so nothing was assigned an id: the database
+        // hands one out only on the real write (SCENARIOS U-a — the generator
+        // no longer predicts ids from `MAX(id) + 1`).
+        assert!(preview.created.iter().all(|a| a.id == UNASSIGNED_ID));
+    }
+
+    /// Generated rows take ids the database assigns, so deleting the newest
+    /// adjustment and generating another set never re-issues its id — which
+    /// would hand the new row the deleted one's `row_history` trail
+    /// (SCENARIOS U-a). The ids reported back are the ones actually stored.
+    #[tokio::test]
+    async fn db_generation_never_reuses_a_deleted_adjustments_id() {
+        let pool = test_pool().await;
+        hndq_parcels(&pool).await;
+        amma(&pool, 6, 1, ymd(2024, 6, 30), "1811").await;
+        amma(&pool, 7, 1, ymd(2025, 6, 30), "2620").await;
+
+        let fy24 = db_generate(&pool, 6, &GenerateBody::default())
+            .await
+            .unwrap();
+        let freed: Vec<i64> = fy24.created.iter().map(|a| a.id).collect();
+        assert_eq!(freed.len(), 2);
+        for id in &freed {
+            crate::infra::http::crud_delete::<AmitAdjustment>(&pool, *id)
+                .await
+                .unwrap();
+        }
+
+        let fy25 = db_generate(&pool, 7, &GenerateBody::default())
+            .await
+            .unwrap();
+        for adjustment in &fy25.created {
+            assert!(
+                !freed.contains(&adjustment.id),
+                "adjustment {} took a deleted row's id back",
+                adjustment.id
+            );
+            // And the reported id is the row that was really written.
+            let stored = amit_adjustment::db_get(&pool, adjustment.id)
+                .await
+                .unwrap()
+                .expect("the reported id is not in the table");
+            assert_eq!(stored.trade_id, adjustment.trade_id);
+            assert_eq!(stored.quantity, adjustment.quantity);
+        }
     }
 
     /// A mismatch against `units_held` is surfaced, not blocked — a statement

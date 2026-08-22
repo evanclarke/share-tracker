@@ -456,7 +456,18 @@ pub async fn db_upsert_sell(pool: &SqlitePool, id: i64, body: &SellBody) -> Resu
         return Err(SellError::TransferSell);
     }
 
-    upsert_sell_in_tx(&mut tx, id, body, settlement, None, None, None, None, None).await?;
+    upsert_sell_in_tx(
+        &mut tx,
+        Some(id),
+        body,
+        settlement,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await?;
 
     // The sale date must be a day the listing's own market actually traded
     // (SCENARIOS S-08). Checked here rather than inside `upsert_sell_in_tx`,
@@ -488,10 +499,20 @@ pub async fn db_upsert_sell(pool: &SqlitePool, id: i64, body: &SellBody) -> Resu
 /// closing Sell with `demerger_action_id`, and the holding-account transfer
 /// (`entities::transfer`), which stamps its transfer-out Sell with
 /// `transfer_id`.
+///
+/// `id` is `Some` only on the client-supplied-id path (`PUT /sells/{id}`,
+/// deliberately still an upsert). Every server-created Sell passes `None`, so
+/// the **database** assigns the id: an `AUTOINCREMENT` column never re-issues
+/// a freed one, whereas the `MAX(id) + 1` these operations used to compute
+/// handed a server-created row the id of a just-deleted trade — and with it
+/// that trade's `row_history` trail (SCENARIOS U-a: live trade 9072, a 2025
+/// share sale, became the LAC demerger's 2023 closing Sell). Binding NULL to
+/// an `INTEGER PRIMARY KEY AUTOINCREMENT` column is exactly omitting it, so
+/// one statement serves both paths; the id actually written is returned.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn upsert_sell_in_tx(
     tx: &mut sqlx::SqliteConnection,
-    id: i64,
+    id: Option<i64>,
     body: &SellBody,
     settlement: trade::Settlement,
     buyback_action_id: Option<i64>,
@@ -499,7 +520,7 @@ pub(crate) async fn upsert_sell_in_tx(
     demerger_action_id: Option<i64>,
     transfer_id: Option<i64>,
     worthless_action_id: Option<i64>,
-) -> Result<(), SellError> {
+) -> Result<i64, SellError> {
     // Every allocation must be a positive draw on its parcel — a negative one
     // would pass the sum and capacity checks while quietly shifting capacity
     // between parcels — and together they must account for the whole sale,
@@ -554,8 +575,10 @@ pub(crate) async fn upsert_sell_in_tx(
     // Sell whose amounts actually convert.
     trade::validate_spot_fx_rate(&body.currency, body.spot_fx_rate)
         .map_err(SellError::SpotFxRate)?;
-    // Upsert the Sell trade row.
-    sqlx::query(
+    // Upsert the Sell trade row. A NULL id (every server-created Sell) is an
+    // omitted one: SQLite assigns the next id the AUTOINCREMENT column has
+    // never issued, so the row cannot land on a deleted trade's id.
+    let result = sqlx::query(
         "INSERT INTO trades \
          (id, trade_type, date, settlement_date, settlement_date_source, listing_id, \
           average_price, quantity, \
@@ -612,6 +635,10 @@ pub(crate) async fn upsert_sell_in_tx(
     .bind(worthless_action_id)
     .execute(&mut *tx)
     .await?;
+    // Read straight off the statement that wrote the row, on this very
+    // connection — every child row below (and the caller's response) must use
+    // the id the database just assigned, not a stale one.
+    let id = id.unwrap_or_else(|| result.last_insert_rowid());
 
     // The Sell's currency must be the listing's, exactly as a parcel's must:
     // its `average_price` is the price of that listed security, so the
@@ -728,7 +755,7 @@ pub(crate) async fn upsert_sell_in_tx(
         }
     }
 
-    Ok(())
+    Ok(id)
 }
 
 async fn upsert(

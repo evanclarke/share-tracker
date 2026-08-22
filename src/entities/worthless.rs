@@ -212,9 +212,6 @@ pub async fn db_recognise(pool: &SqlitePool, action_id: i64) -> Result<Recognise
         .bind(action.listing_id)
         .fetch_one(&mut *tx)
         .await?;
-    let sell_id: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(id), 0) + 1 FROM trades")
-        .fetch_one(&mut *tx)
-        .await?;
     let sell_body = SellBody {
         brokerage_includes_gst: false,
         statement_total: None,
@@ -233,9 +230,12 @@ pub async fn db_recognise(pool: &SqlitePool, action_id: i64) -> Result<Recognise
         contract_note_ref: None,
         allocations,
     };
-    sell::upsert_sell_in_tx(
+    // No id of our own: the database assigns one its AUTOINCREMENT sequence
+    // has never issued, so this Sell can never land on a deleted trade's id
+    // (SCENARIOS U-a).
+    let sell_id = sell::upsert_sell_in_tx(
         &mut tx,
-        sell_id,
+        None,
         &sell_body,
         trade::Settlement::stated(action.date),
         None,

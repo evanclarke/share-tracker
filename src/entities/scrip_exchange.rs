@@ -160,9 +160,6 @@ pub async fn db_exchange(pool: &SqlitePool, action_id: i64) -> Result<Exchange, 
         Some((cash_per_unit, _, currency)) => (*cash_per_unit, currency.clone()),
         None => (Decimal::ZERO, listing_currency),
     };
-    let sell_id: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(id), 0) + 1 FROM trades")
-        .fetch_one(&mut *tx)
-        .await?;
     let sell_body = rollover::closing_sell_body(
         action.date,
         action.listing_id,
@@ -178,9 +175,12 @@ pub async fn db_exchange(pool: &SqlitePool, action_id: i64) -> Result<Exchange, 
             })
             .collect(),
     );
-    sell::upsert_sell_in_tx(
+    // No id of our own: the database assigns one its AUTOINCREMENT sequence
+    // has never issued, so this Sell can never land on a deleted trade's id
+    // (SCENARIOS U-a).
+    let sell_id = sell::upsert_sell_in_tx(
         &mut tx,
-        sell_id,
+        None,
         &sell_body,
         trade::Settlement::stated(action.date),
         None,
@@ -195,12 +195,11 @@ pub async fn db_exchange(pool: &SqlitePool, action_id: i64) -> Result<Exchange, 
     // carrying the parcel's cost base (on the brokerage column, price 0) and
     // acquisition date.
     let mut replacement_ids = Vec::with_capacity(replacements.len());
-    for (i, r) in replacements.iter().enumerate() {
-        let buy_id = sell_id + 1 + i as i64;
-        rollover::insert_replacement_buy(
+    for r in &replacements {
+        // Each Buy takes the id its own INSERT was given.
+        let buy_id = rollover::insert_replacement_buy(
             &mut tx,
             &rollover::ReplacementBuy {
-                id: buy_id,
                 date: action.date,
                 listing_id: terms.scrip_listing_id,
                 quantity: r.new_quantity,

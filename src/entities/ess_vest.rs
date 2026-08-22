@@ -170,18 +170,18 @@ pub async fn db_vest(pool: &SqlitePool, statement_id: i64) -> Result<Trade, Vest
     // The cost-base-reset Buy: market value at the taxing point, dated and
     // settled on that date, in the statement's currency. ESS-vested units are
     // issued by the plan, not market-settled, so settlement is the trade date.
-    let new_id: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(id), 0) + 1 FROM trades")
-        .fetch_one(&mut *tx)
-        .await?;
-    sqlx::query(
+    // The id column is omitted, so the database assigns one its AUTOINCREMENT
+    // sequence has never issued: a computed `MAX(id) + 1` would hand this
+    // parcel a just-deleted trade's id, and with it that trade's row_history
+    // trail (SCENARIOS U-a).
+    let result = sqlx::query(
         "INSERT INTO trades \
-         (id, trade_type, date, settlement_date, settlement_date_source, listing_id, \
+         (trade_type, date, settlement_date, settlement_date_source, listing_id, \
           average_price, quantity, \
           currency, brokerage, gst_on_brokerage, brokerage_currency, fx_rate, \
           holding_account_id, ess_statement_id) \
-         VALUES (?, 'Buy', ?, ?, 'stated', ?, ?, ?, ?, '0', '0', ?, ?, ?, ?)",
+         VALUES ('Buy', ?, ?, 'stated', ?, ?, ?, ?, '0', '0', ?, ?, ?, ?)",
     )
-    .bind(new_id)
     .bind(taxing_point_date)
     .bind(taxing_point_date)
     .bind(listing_id)
@@ -194,6 +194,7 @@ pub async fn db_vest(pool: &SqlitePool, statement_id: i64) -> Result<Trade, Vest
     .bind(statement_id)
     .execute(&mut *tx)
     .await?;
+    let new_id = result.last_insert_rowid();
 
     tx.commit().await?;
 

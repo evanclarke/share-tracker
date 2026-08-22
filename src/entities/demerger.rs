@@ -193,9 +193,6 @@ pub async fn db_demerge(pool: &SqlitePool, action_id: i64) -> Result<Demerge, De
         .bind(action.listing_id)
         .fetch_one(&mut *tx)
         .await?;
-    let sell_id: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(id), 0) + 1 FROM trades")
-        .fetch_one(&mut *tx)
-        .await?;
     let sell_body = rollover::closing_sell_body(
         action.date,
         action.listing_id,
@@ -211,9 +208,13 @@ pub async fn db_demerge(pool: &SqlitePool, action_id: i64) -> Result<Demerge, De
             })
             .collect(),
     );
-    sell::upsert_sell_in_tx(
+    // No id of our own: the database assigns one its AUTOINCREMENT sequence
+    // has never issued, so this Sell can never land on a deleted trade's id
+    // (SCENARIOS U-a — that is exactly how live trade 9072's audit trail
+    // became this operation's closing Sell's).
+    let sell_id = sell::upsert_sell_in_tx(
         &mut tx,
-        sell_id,
+        None,
         &sell_body,
         trade::Settlement::stated(action.date),
         None,
@@ -230,27 +231,26 @@ pub async fn db_demerge(pool: &SqlitePool, action_id: i64) -> Result<Demerge, De
     // demerger date and carrying the parcel's acquisition date.
     let mut head_ids = Vec::with_capacity(replacements.len());
     let mut demerged_ids = Vec::with_capacity(replacements.len());
-    for (i, r) in replacements.iter().enumerate() {
-        let head_id = sell_id + 1 + (2 * i) as i64;
-        let demerged_id = head_id + 1;
-        for (buy_id, listing_id, quantity, cost_base) in [
+    for r in &replacements {
+        // Each Buy takes the id its own INSERT was given — never the previous
+        // one plus one, which would be the same guess `MAX(id) + 1` was.
+        for (into, listing_id, quantity, cost_base) in [
             (
-                head_id,
+                &mut head_ids,
                 action.listing_id,
                 r.at_date_units,
                 r.head_cost_base,
             ),
             (
-                demerged_id,
+                &mut demerged_ids,
                 demerger_listing_id,
                 r.demerged_quantity,
                 r.demerged_cost_base,
             ),
         ] {
-            rollover::insert_replacement_buy(
+            let buy_id = rollover::insert_replacement_buy(
                 &mut tx,
                 &rollover::ReplacementBuy {
-                    id: buy_id,
                     date: action.date,
                     listing_id,
                     quantity,
@@ -264,9 +264,8 @@ pub async fn db_demerge(pool: &SqlitePool, action_id: i64) -> Result<Demerge, De
                 rollover::Provenance::DemergerAction(action_id),
             )
             .await?;
+            into.push(buy_id);
         }
-        head_ids.push(head_id);
-        demerged_ids.push(demerged_id);
     }
 
     tx.commit().await?;

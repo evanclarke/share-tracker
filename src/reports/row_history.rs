@@ -118,12 +118,19 @@ impl AuditedTable {
 ///
 /// Why a trail needs segmenting at all: nothing binds an id to one row for the
 /// life of the database. Delete a row and the id can be handed out again — by
-/// hand (`PUT /trades/9072` after deleting trade 9072) or by the server, which
-/// is how it happened live (`POST /corporate_actions/1/demerge` computed its
+/// hand (`PUT /trades/9072` after deleting trade 9072), or, as it happened
+/// live, by the server (`POST /corporate_actions/1/demerge` computed its
 /// closing Sell's id as `MAX(id) + 1` and took the just-deleted trade 9072's
 /// id back, SCENARIOS U-a). The new occupant then inherits every entry the
 /// previous one left, and the trail presents a 2025 share sale as the past of
 /// a 2023 demerger row.
+///
+/// The server half is now closed at the source: every audited table's id is
+/// `AUTOINCREMENT` (0021/0039/0045) and no write path computes an id of its
+/// own, so a server-created row can never take a freed one. The hand-entered
+/// half stays open on purpose — re-entering a mis-keyed row under its old id
+/// is a legitimate workflow — which is what this marking is for, along with
+/// every trail already carrying a reuse from before the fix.
 ///
 /// The trail already holds the evidence, because INSERTs are not recorded: a
 /// `DELETE` entry can only mean the record it describes ended there, so a
@@ -802,13 +809,21 @@ mod tests {
         );
     }
 
-    /// The case that raised this (SCENARIOS U-a), reproduced end to end: no
-    /// user chose the id at all. The demerge assigns its closing Sell
-    /// `MAX(id) + 1`, so deleting the highest trade hands the freed id
-    /// straight to a server-created row — exactly how live trade 9072, a 2025
-    /// share sale, became the LAC demerger's 2023 closing Sell.
+    /// The case that raised this (SCENARIOS U-a), reproduced end to end and
+    /// now **prevented**: no user chose the id at all. The demerge used to
+    /// assign its closing Sell `MAX(id) + 1`, so deleting the highest trade
+    /// handed the freed id straight to a server-created row — exactly how
+    /// live trade 9072, a 2025 share sale, became the LAC demerger's 2023
+    /// closing Sell, inheriting its audit trail. Every server-created row now
+    /// leaves the id to the database, whose `AUTOINCREMENT` sequence never
+    /// re-issues one, so the freed id stays free and the new rows carry no
+    /// history at all.
+    ///
+    /// The boundary marking above still covers the reuse a *user* can still
+    /// make (`PUT /trades/9072` after deleting trade 9072), which is
+    /// deliberately allowed.
     #[tokio::test]
-    async fn a_server_assigned_id_taking_a_deleted_trades_place_is_marked() {
+    async fn a_server_assigned_insert_never_takes_a_deleted_trades_id() {
         let pool = test_pool().await;
         test_support::listing(1).insert(&pool).await;
         test_support::listing(2).ticker("DMG").insert(&pool).await;
@@ -846,19 +861,45 @@ mod tests {
         assert_eq!(resp.status, StatusCode::CREATED);
         let demerge: Value = resp.json();
         let sell_id = demerge["sell"]["id"].as_i64().unwrap();
-        assert_eq!(sell_id, 2, "the demerge took the deleted trade's id back");
-
-        let entries = db_row_history(&pool, "trades", sell_id).await.unwrap();
+        // Every id the operation wrote — the closing Sell and both
+        // replacement Buys — must be new. Each takes the id its own INSERT
+        // was given, so none of them may be the freed 2 either.
+        let mut created = vec![sell_id];
+        for side in ["head_replacements", "demerged_replacements"] {
+            for row in demerge[side].as_array().unwrap() {
+                created.push(row["id"].as_i64().unwrap());
+            }
+        }
+        assert_eq!(created.len(), 3, "a closing Sell and two replacement Buys");
+        for id in &created {
+            assert_ne!(*id, 2, "a server-created row took the deleted trade's id");
+            assert!(
+                db_row_history(&pool, "trades", *id)
+                    .await
+                    .unwrap()
+                    .is_empty(),
+                "trade {id} inherited a trail it never wrote"
+            );
+        }
         assert_eq!(
-            occupants(&entries),
-            vec![(2, false)],
-            "the deleted Buy's entry is not the demerger Sell's history"
+            created
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            3,
+            "each row took its own freshly assigned id"
         );
+        // The deleted Buy's own trail still stands under its own id, and no
+        // row occupies it — one occupant, an ordinary deletion.
+        let entries = db_row_history(&pool, "trades", 2).await.unwrap();
+        assert_eq!(occupants(&entries), vec![(1, false)]);
         assert_eq!(entries[0]["operation"], "DELETE");
-        assert_eq!(
-            entries[0]["quantity"], "50",
-            "the deleted Buy, not the Sell"
-        );
+        assert_eq!(entries[0]["quantity"], "50", "the deleted Buy");
+        let still_free: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM trades WHERE id = 2")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(still_free, 0, "the freed id was handed out again");
     }
 
     /// `tax_year_settings` is keyed on the financial year itself, which names
@@ -2142,6 +2183,97 @@ mod tests {
                          {table}_row_history_* triggers with the new column list"
                     );
                 }
+            }
+        }
+    }
+
+    /// The live schema with `--` comments stripped and whitespace collapsed,
+    /// so a column definition can be matched as one string however the DDL
+    /// lays it out (several tables carry a comment above their `id`).
+    fn table_ddl(sql: &str) -> String {
+        sql.lines()
+            .map(|line| match line.find("--") {
+                Some(at) => &line[..at],
+                None => line,
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// Every audited table's surrogate key must be `AUTOINCREMENT`, so the
+    /// database never re-issues the id of a deleted row: `row_history` keys a
+    /// trail on `(table_name, row_id)`, and a re-issued id hands the new
+    /// occupant every entry the previous one left (SCENARIOS U-a — live trade
+    /// 9072, a 2025 share sale, became the LAC demerger's 2023 closing Sell).
+    /// A plain `INTEGER PRIMARY KEY` is an alias for the rowid, which SQLite
+    /// re-uses from the largest freed one.
+    ///
+    /// Derived from the live schema and [`AUDITED_TABLES`], so a **new**
+    /// audited table cannot be added without it: the migration must declare
+    /// `id INTEGER PRIMARY KEY AUTOINCREMENT` (0021, 0031, 0039 and 0045 did
+    /// it for the 20 that came before), or the table must earn one of the two
+    /// exemptions below, each of which is checked here rather than skipped.
+    #[tokio::test]
+    async fn every_audited_tables_id_is_autoincrement() {
+        /// The two audited tables with no server-assigned surrogate id, and
+        /// what makes each safe. Both are checked, not waved through: a table
+        /// that stops satisfying its reason fails here.
+        enum Exempt {
+            /// `tax_year_settings` is keyed on the financial year itself
+            /// (migration 0027) — a natural key naming one taxpayer-year fact
+            /// forever, so re-entering it after a delete is the *same* fact
+            /// and rightly inherits that year's trail. There is no surrogate
+            /// id to make `AUTOINCREMENT`, which is also why
+            /// `AuditedTable::key_is_reusable` is false for it.
+            NaturalKey,
+            /// `cgt_settings` is `id INTEGER PRIMARY KEY CHECK (id = 1)`: a
+            /// singleton whose CHECK pins the only id there can be, so
+            /// re-creating its row is re-entry of the same fact, not reuse.
+            Singleton,
+        }
+        const EXEMPT: [(&str, Exempt); 2] = [
+            ("tax_year_settings", Exempt::NaturalKey),
+            ("cgt_settings", Exempt::Singleton),
+        ];
+
+        let pool = test_pool().await;
+        for table in AUDITED_TABLES {
+            let sql: String = sqlx::query_scalar(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+            )
+            .bind(table)
+            .fetch_one(&pool)
+            .await
+            .unwrap_or_else(|_| panic!("{table} is not in the live schema"));
+            let ddl = table_ddl(&sql);
+            match EXEMPT.iter().find(|(name, _)| *name == table) {
+                Some((_, Exempt::NaturalKey)) => {
+                    let columns: Vec<String> =
+                        sqlx::query_scalar("SELECT name FROM pragma_table_info(?)")
+                            .bind(table)
+                            .fetch_all(&pool)
+                            .await
+                            .unwrap();
+                    assert!(
+                        !columns.iter().any(|c| c == "id"),
+                        "{table} is exempt because it has no surrogate id, but it has one now — \
+                         make it AUTOINCREMENT or drop the exemption"
+                    );
+                }
+                Some((_, Exempt::Singleton)) => assert!(
+                    ddl.contains("id INTEGER PRIMARY KEY CHECK (id = 1)"),
+                    "{table} is exempt because a CHECK pins it to the single id 1, and it no \
+                     longer does: {ddl}"
+                ),
+                None => assert!(
+                    ddl.contains("id INTEGER PRIMARY KEY AUTOINCREMENT"),
+                    "{table} is audited, so its id must be INTEGER PRIMARY KEY AUTOINCREMENT — a \
+                     plain INTEGER PRIMARY KEY re-uses the largest freed rowid, handing the new \
+                     row the deleted one\u{2019}s row_history trail: {ddl}"
+                ),
             }
         }
     }

@@ -301,9 +301,6 @@ pub async fn db_transfer(
         .bind(body.listing_id)
         .fetch_one(&mut *tx)
         .await?;
-    let sell_id: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(id), 0) + 1 FROM trades")
-        .fetch_one(&mut *tx)
-        .await?;
     let sell_body = rollover::closing_sell_body(
         body.date,
         body.listing_id,
@@ -319,9 +316,12 @@ pub async fn db_transfer(
             })
             .collect(),
     );
-    sell::upsert_sell_in_tx(
+    // No id of our own: the database assigns one its AUTOINCREMENT sequence
+    // has never issued, so this Sell can never land on a deleted trade's id
+    // (SCENARIOS U-a).
+    let sell_id = sell::upsert_sell_in_tx(
         &mut tx,
-        sell_id,
+        None,
         &sell_body,
         trade::Settlement::stated(body.date),
         None,
@@ -336,12 +336,11 @@ pub async fn db_transfer(
     // in the destination account, carrying the moved units' cost base (on the
     // brokerage column, price 0) and acquisition date.
     let mut transfer_in_ids = Vec::with_capacity(transfer_ins.len());
-    for (i, t) in transfer_ins.iter().enumerate() {
-        let buy_id = sell_id + 1 + i as i64;
-        rollover::insert_replacement_buy(
+    for t in &transfer_ins {
+        // Each Buy takes the id its own INSERT was given.
+        let buy_id = rollover::insert_replacement_buy(
             &mut tx,
             &rollover::ReplacementBuy {
-                id: buy_id,
                 date: body.date,
                 listing_id: body.listing_id,
                 quantity: t.quantity,
@@ -367,14 +366,7 @@ pub async fn db_transfer(
     // via `transfers.fee_sale_trade_id` so the two are created and deleted
     // together. Its parcels' over-allocation is checked against the source
     // holding net of the transfer-out Sell above (both share the same tx).
-    let fee_sale_id = write_fee_sale(
-        &mut tx,
-        id,
-        body,
-        sell_id + 1 + transfer_ins.len() as i64,
-        listing_currency,
-    )
-    .await?;
+    let fee_sale_id = write_fee_sale(&mut tx, id, body, listing_currency).await?;
 
     tx.commit().await?;
 
@@ -472,7 +464,6 @@ async fn write_fee_sale(
     conn: &mut sqlx::SqliteConnection,
     transfer_id: i64,
     body: &TransferBody,
-    fee_sale_id: i64,
     listing_currency: String,
 ) -> Result<Option<i64>, TransferError> {
     if body.fee_allocations.is_empty() {
@@ -514,9 +505,10 @@ async fn write_fee_sale(
             })
             .collect(),
     );
-    sell::upsert_sell_in_tx(
+    // As for the transfer-out Sell above: the database assigns the id.
+    let fee_sale_id = sell::upsert_sell_in_tx(
         &mut *conn,
-        fee_sale_id,
+        None,
         &fee_body,
         trade::Settlement::stated(body.date),
         None,
