@@ -215,9 +215,29 @@ healthy. The check that catches it is about twenty lines and derives everything 
 
 **Decision (Evan, 2026-08-22): (a).**
 
-- [ ] A test walks every table in `AUDITED_TABLES`, reads its columns from the live schema and both
+- [x] A test walks every table in `AUDITED_TABLES`, reads its columns from the live schema and both
       its triggers' `json_object` keys, and fails on any column the trail would drop — with
       `attachments.content` allowlisted as the documented BLOB exclusion, and a missing trigger
       reported as a failure rather than a skip
-- [ ] The comment says it supersedes the bespoke per-migration column assertions for future
+- [x] The comment says it supersedes the bespoke per-migration column assertions for future
       migrations, so the next one is not written by hand
+
+Done 2026-08-22. `reports::row_history::tests::every_audited_column_is_recorded_by_both_triggers`
+walks all 22 `AUDITED_TABLES` over a `test_pool()` (every migration applied), reads each table's
+columns from `pragma_table_info` and each of its two `*_row_history_*` triggers' recorded keys from
+`sqlite_master`, and asserts no column is missing from either. A trigger that is absent panics
+naming it rather than being skipped, so an audited table with no pair fails just as loudly as one
+with a dropped column. `attachments.content` is the single allowlisted exclusion, carrying 0013's
+reason (a BLOB is not something a `json_object` can hold).
+
+The key list is parsed by a `json_object_keys` helper that scans only the text between the
+`json_object(` call's own parentheses — the enclosing `INSERT INTO row_history ... VALUES
+('<table>', OLD.id, ...)` has a quoted-string/`OLD.`-value pair of its own that a whole-body regex
+reads as a column — and takes every quoted string in it, so identifiers with digits
+(`pre_2009_cessation_discount`) are matched whole. No new dependency: plain string scanning, since
+`regex` is not in the tree. All 22 tables pass on `main` as it stands; deleting the allowlist makes
+it fail on `attachments.content`, which is how the check was confirmed to have teeth.
+
+The doc comment says it supersedes the per-migration column assertions in
+`audited_tables_match_migration_check_and_triggers` for *future* migrations — the existing ones stay,
+because they pin something derived checking cannot: which migration the live trigger pair came from.

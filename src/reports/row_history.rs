@@ -1111,6 +1111,103 @@ mod tests {
         assert!(sql29.contains("BEGIN;") && sql29.contains("COMMIT;"));
     }
 
+    /// The `json_object(...)` key list of one trigger's SQL: its keys are
+    /// the quoted strings inside that call, each paired with an `OLD.<col>`
+    /// value. Only the text between the call's own parentheses is scanned —
+    /// the `INSERT INTO row_history ... VALUES ('<table>', OLD.id, ...)`
+    /// wrapped around it carries a quoted-string/`OLD.`-value pair of its
+    /// own, and that one is the table name, not a column.
+    fn json_object_keys(sql: &str) -> Vec<String> {
+        let open = sql
+            .find("json_object(")
+            .expect("a row-history trigger builds its snapshot with json_object(")
+            + "json_object(".len();
+        let mut depth = 1usize;
+        let mut close = None;
+        for (i, c) in sql[open..].char_indices() {
+            match c {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        close = Some(open + i);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut args = &sql[open..close.expect("unbalanced json_object( in trigger body")];
+        let mut keys = Vec::new();
+        while let Some(quote) = args.find('\'') {
+            let after = &args[quote + 1..];
+            let end = after
+                .find('\'')
+                .expect("unterminated quoted json_object key");
+            keys.push(after[..end].to_string());
+            args = &after[end + 1..];
+        }
+        keys
+    }
+
+    /// Every column of every audited table must be recorded by *both* of that
+    /// table's `*_row_history_*` triggers: a column the trail drops is a
+    /// version that cannot be reconstructed, and the drop is silent — the
+    /// trail keeps looking healthy while the column's prior values are simply
+    /// never written.
+    ///
+    /// Everything here is derived from the live schema (`PRAGMA table_info`
+    /// against the triggers' own `json_object` keys), so this **supersedes
+    /// the bespoke per-migration column assertions in
+    /// `audited_tables_match_migration_check_and_triggers` for future
+    /// migrations**: an `ALTER TABLE ... ADD COLUMN` on an audited table that
+    /// forgets to DROP and re-CREATE that table's trigger pair fails here,
+    /// and the next migration's author does not need to hand-write another
+    /// assertion of their own. (The ones already written stay — they pin
+    /// something this cannot: *which* migration the live pair came from.)
+    #[tokio::test]
+    async fn every_audited_column_is_recorded_by_both_triggers() {
+        // The one documented exclusion: `attachments.content` is a BLOB, and
+        // a json_object cannot hold one (migration 0013's header says so).
+        const EXCLUDED: [(&str, &str); 1] = [("attachments", "content")];
+
+        let pool = test_pool().await;
+        for table in AUDITED_TABLES {
+            let columns: Vec<String> = sqlx::query_scalar("SELECT name FROM pragma_table_info(?)")
+                .bind(table)
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+            assert!(!columns.is_empty(), "{table} is not in the live schema");
+
+            for op in ["update", "delete"] {
+                let trigger = format!("{table}_row_history_{op}");
+                let sql: Option<String> = sqlx::query_scalar(
+                    "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?",
+                )
+                .bind(&trigger)
+                .fetch_optional(&pool)
+                .await
+                .unwrap();
+                // A missing trigger is a failure, not a table to skip over:
+                // an unaudited audited table records nothing at all.
+                let sql = sql.unwrap_or_else(|| panic!("the live schema has no {trigger} trigger"));
+                let keys = json_object_keys(&sql);
+                for column in &columns {
+                    if EXCLUDED.contains(&(table, column.as_str())) {
+                        continue;
+                    }
+                    assert!(
+                        keys.contains(column),
+                        "{trigger} does not record {table}.{column} — the migration \
+                         that added the column must DROP and re-CREATE both \
+                         {table}_row_history_* triggers with the new column list"
+                    );
+                }
+            }
+        }
+    }
+
     /// The migration is purely additive: it creates the trail and its
     /// triggers but touches no existing row — line-level pin that no
     /// statement alters, drops, updates, deletes, or inserts into anything
